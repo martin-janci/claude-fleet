@@ -29,6 +29,11 @@
   // Whether we currently own the global PTY write sink. Set on first PTY open,
   // cleared on closeTerm.
   let sinkAttached = false;
+  // Diagnostic counters surfaced in the status footer next to the size badge.
+  let sinkCalls = $state(0);
+  let sinkBytes = $state(0);
+  let writeErrors = $state(0);
+  let lastWriteError: string | null = $state(null);
 
   $effect(() => {
     const sess = $selectedSession;
@@ -141,7 +146,17 @@
     // listener (registered at App boot). No async timing race possible —
     // the listener has been alive since startup.
     setPtyWriteSink((chunk) => {
-      term?.write(chunk);
+      sinkCalls += 1;
+      sinkBytes += chunk.length;
+      if (!term) return;
+      try {
+        term.write(chunk);
+      } catch (e) {
+        writeErrors += 1;
+        lastWriteError = String(e);
+        // eslint-disable-next-line no-console
+        console.error('xterm write failed:', e, 'chunk len=', chunk.length);
+      }
     });
     sinkAttached = true;
 
@@ -193,6 +208,10 @@
     lastRows = 0;
     displayCols = 0;
     displayRows = 0;
+    sinkCalls = 0;
+    sinkBytes = 0;
+    writeErrors = 0;
+    lastWriteError = null;
     if (ptyOpen) {
       ptyOpen = false;
       try {
@@ -232,6 +251,22 @@
       <span class="size" data-testid="terminal-size">
         {#if displayCols > 0}{displayCols}×{displayRows}{:else}measuring…{/if}
       </span>
+      <span class="counters" data-testid="terminal-counters">
+        sink: {sinkCalls} · {sinkBytes}B{#if writeErrors > 0} · err {writeErrors}{/if}
+      </span>
+      <button
+        class="reconnect"
+        onclick={() => {
+          // Test: write a known string directly to xterm. If THIS doesn't
+          // appear in the pane, xterm itself is broken; if it does, the
+          // chain from sink → term.write is OK and the bug is elsewhere.
+          term?.write('\r\n\x1b[93m[test write] hello from JS @ ' + new Date().toISOString() + '\x1b[0m\r\n');
+        }}
+        title="Write a synthetic line directly to xterm"
+        data-testid="terminal-test-write"
+      >
+        ✎ test
+      </button>
       <button
         class="reconnect"
         onclick={() => $selectedSession && void openTerm($selectedSession.tmux_name)}
@@ -286,6 +321,14 @@
   .host { color: var(--fg-muted); font-size: 0.75rem; }
   .size {
     margin-left: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.7rem;
+    color: var(--fg-muted);
+    padding: 0.1rem 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+  .counters {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.7rem;
     color: var(--fg-muted);
