@@ -2,7 +2,7 @@
 
 A native cross-platform desktop app for managing long-lived [Claude Code](https://claude.com/claude-code) sessions running in tmux across multiple machines (mac, mefistos, hetzner). Built with Rust + Tauri 2 + Svelte.
 
-> Status: Phase 1 (bootstrap & UI shell). See [docs/specs](docs/specs/2026-05-19-claude-fleet-design.md) for the full design and [docs/plans](docs/plans/) for the per-phase implementation plans.
+> Status: Phase 2 (local discovery & project tree). See [docs/specs](docs/specs/2026-05-19-claude-fleet-design.md) for the full design and [docs/plans](docs/plans/) for the per-phase implementation plans.
 
 ## Requirements
 

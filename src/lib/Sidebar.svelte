@@ -148,9 +148,11 @@
   {/if}
 </div>
 
+<svelte:window onkeydown={(e) => dialogProject && e.key === 'Escape' && onCancel()} />
+
 {#if dialogProject}
   <div class="modal-backdrop" onclick={onCancel} role="presentation">
-    <div onclick={(e: MouseEvent) => e.stopPropagation()} role="presentation">
+    <div onclick={(e) => e.stopPropagation()} role="presentation">
       <NewSessionDialog project={dialogProject} onCreate={onCreated} {onCancel} />
     </div>
   </div>

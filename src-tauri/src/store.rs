@@ -172,6 +172,18 @@ impl Store {
         self.conn.execute(&sql, params.as_slice())
     }
 
+    pub fn touch_project_last_session_at(
+        &self,
+        project_id: i64,
+        ts: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE projects SET last_session_at = MAX(COALESCE(last_session_at, 0), ?1) WHERE id = ?2",
+            rusqlite::params![ts, project_id],
+        )?;
+        Ok(())
+    }
+
     pub fn conn_ref(&self) -> &rusqlite::Connection {
         &self.conn
     }
@@ -368,6 +380,24 @@ mod tests {
         let rows = s.list_sessions_for_host("local").unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].last_activity_at, 3000);
+    }
+
+    #[test]
+    fn touch_project_last_session_at_takes_max() {
+        let s = Store::open_in_memory().unwrap();
+        let pid = s.upsert_project("o", "r", "/tmp/r").unwrap();
+        // First write
+        s.touch_project_last_session_at(pid, 1000).unwrap();
+        let rows = s.list_projects().unwrap();
+        assert_eq!(rows[0].last_session_at, Some(1000));
+        // Earlier timestamp shouldn't go backward
+        s.touch_project_last_session_at(pid, 500).unwrap();
+        let rows = s.list_projects().unwrap();
+        assert_eq!(rows[0].last_session_at, Some(1000));
+        // Later timestamp wins
+        s.touch_project_last_session_at(pid, 2000).unwrap();
+        let rows = s.list_projects().unwrap();
+        assert_eq!(rows[0].last_session_at, Some(2000));
     }
 
     #[test]
