@@ -1,6 +1,6 @@
-// NOTE: Phase 2 will wrap Store in `Mutex<Store>` and register it via
-// `tauri::Manager::manage()` so commands can share a single connection.
-// `rusqlite::Connection` is not Send+Sync, so the Mutex is required.
+// Store owns the SQLite connection. It is wrapped in `Mutex<Store>` and
+// registered via `tauri::Manager::manage()` because `rusqlite::Connection`
+// is not Send+Sync. Commands access it via `State<'_, Mutex<Store>>`.
 
 use rusqlite::{Connection, Result};
 
@@ -9,7 +9,6 @@ pub struct Store {
 }
 
 impl Store {
-    #[allow(dead_code)] // wired up in Task 6 (file-backed open is unused in tests).
     pub fn open(path: &std::path::Path) -> Result<Self> {
         let conn = Connection::open(path)?;
         let store = Self { conn };
@@ -17,6 +16,7 @@ impl Store {
         Ok(store)
     }
 
+    #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         let store = Self { conn };
@@ -31,7 +31,7 @@ impl Store {
         Ok(())
     }
 
-    #[allow(dead_code)] // used by tests; clippy --all-targets sees it as unused in lib.
+    #[cfg(test)]
     pub fn has_table(&self, name: &str) -> Result<bool> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
@@ -41,7 +41,6 @@ impl Store {
         Ok(count == 1)
     }
 
-    #[allow(dead_code)] // used by tests; clippy --all-targets sees it as unused in lib.
     pub fn schema_version(&self) -> Result<i64> {
         self.conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |row| {

@@ -42,7 +42,7 @@
   {#if healthError}
     <span class="err">ipc error: {healthError}</span>
   {:else if health}
-    <span>v{health.version} · db: {health.db_ready ? 'ok' : 'fail'}</span>
+    <span>v{health.version} · db: {health.db_ready ? 'ok' : 'fail'} · schema {health.schema_version}</span>
   {:else}
     <span class="muted">connecting…</span>
   {/if}
