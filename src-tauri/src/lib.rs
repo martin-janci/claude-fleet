@@ -1,10 +1,12 @@
 mod commands;
 mod ipc_error;
 mod projects;
+mod pty;
 mod store;
 mod tmux;
 
 use directories::ProjectDirs;
+use pty::PtyState;
 use std::sync::Mutex;
 use store::Store;
 
@@ -70,6 +72,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(Mutex::new(store))
+        .manage(Mutex::new(PtyState::new()))
         .invoke_handler(tauri::generate_handler![
             commands::health::health_check,
             commands::projects::list_projects,
@@ -77,6 +80,10 @@ pub fn run() {
             commands::sessions::list_sessions,
             commands::sessions::new_session,
             commands::sessions::kill_session,
+            pty::pty_open,
+            pty::pty_write,
+            pty::pty_resize,
+            pty::pty_close,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

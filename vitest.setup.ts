@@ -13,6 +13,26 @@ vi.mock('@tauri-apps/api/core', () => ({
     if (cmd === 'list_sessions') return [];
     if (cmd === 'kill_session') return null;
     if (cmd === 'new_session') return null;
+    if (cmd === 'pty_open') return null;
+    if (cmd === 'pty_write') return null;
+    if (cmd === 'pty_resize') return null;
+    if (cmd === 'pty_close') return null;
     return null;
   }),
+  // Minimal Channel stub so TerminalView can `new Channel<string>()` in tests
+  // without crashing. Backend never invokes onmessage in tests.
+  Channel: class {
+    onmessage: ((data: unknown) => void) | null = null;
+  },
 }));
+
+// xterm.js relies on DOM measurement APIs that jsdom doesn't implement.
+// Stub them as no-ops so components that mount xterm don't blow up tests.
+if (typeof globalThis !== 'undefined') {
+  // @ts-expect-error: jsdom stub
+  globalThis.ResizeObserver ??= class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}

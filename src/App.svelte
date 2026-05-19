@@ -6,6 +6,7 @@
   import { healthCheck, type Health } from './lib/ipc';
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
+  import TerminalView from './lib/TerminalView.svelte';
   import { loadProjects } from './lib/projects';
   import { loadSessions } from './lib/sessions';
 
@@ -59,7 +60,11 @@
     {/snippet}
   </Pane>
   <Resizer id="center" onresize={onResizeCenter} />
-  <Pane id="terminal" empty="No terminal attached" />
+  <Pane id="terminal">
+    {#snippet children()}
+      <TerminalView />
+    {/snippet}
+  </Pane>
 </main>
 
 <footer class="status">
