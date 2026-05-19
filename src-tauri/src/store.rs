@@ -4,7 +4,6 @@
 
 use rusqlite::{Connection, Result};
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProjectRow {
     pub id: i64,
@@ -14,7 +13,6 @@ pub struct ProjectRow {
     pub last_session_at: Option<i64>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WorktreeRow {
     pub id: i64,
@@ -68,7 +66,6 @@ impl Store {
             })
     }
 
-    #[allow(dead_code)]
     pub fn upsert_project(
         &self,
         owner: &str,
@@ -87,7 +84,6 @@ impl Store {
         )
     }
 
-    #[allow(dead_code)]
     pub fn list_projects(&self) -> Result<Vec<ProjectRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, owner, repo, base_path, last_session_at FROM projects ORDER BY owner, repo",
@@ -104,7 +100,6 @@ impl Store {
         rows.collect()
     }
 
-    #[allow(dead_code)]
     pub fn upsert_worktree(
         &self,
         project_id: i64,
@@ -124,7 +119,6 @@ impl Store {
         )
     }
 
-    #[allow(dead_code)]
     pub fn list_worktrees_for_project(
         &self,
         project_id: i64,
@@ -144,7 +138,6 @@ impl Store {
         rows.collect()
     }
 
-    #[allow(dead_code)]
     pub fn delete_worktrees_not_in(
         &self,
         project_id: i64,

@@ -3,7 +3,6 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DiscoveredProject {
     pub owner: String,
@@ -11,7 +10,6 @@ pub struct DiscoveredProject {
     pub base_path: PathBuf,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DiscoveredWorktree {
     pub name: String,
@@ -21,7 +19,6 @@ pub struct DiscoveredWorktree {
 
 /// Walks `base/<owner>/<repo>` two levels deep and returns every directory
 /// that contains a `.git` entry (regular dir or worktree gitfile).
-#[allow(dead_code)]
 pub fn scan_projects(base: &Path) -> Result<Vec<DiscoveredProject>, IpcError> {
     let mut out = Vec::new();
     if !base.exists() {
@@ -63,7 +60,6 @@ pub fn scan_projects(base: &Path) -> Result<Vec<DiscoveredProject>, IpcError> {
 
 /// Runs `git worktree list --porcelain` in `repo_path` and parses the result.
 /// The main checkout is normalized to `name = "main"`; extras use the dir name.
-#[allow(dead_code)]
 pub fn list_worktrees(repo_path: &Path) -> Result<Vec<DiscoveredWorktree>, IpcError> {
     let output = Command::new("git")
         .arg("-C")

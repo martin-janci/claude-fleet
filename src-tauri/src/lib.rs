@@ -23,7 +23,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(Mutex::new(store))
-        .invoke_handler(tauri::generate_handler![commands::health::health_check])
+        .invoke_handler(tauri::generate_handler![
+            commands::health::health_check,
+            commands::projects::list_projects,
+            commands::projects::refresh_projects,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
