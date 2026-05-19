@@ -5,6 +5,7 @@
   import { theme, cycleTheme } from './lib/theme';
   import { healthCheck, type Health } from './lib/ipc';
   import Sidebar from './lib/Sidebar.svelte';
+  import ProjectDetails from './lib/ProjectDetails.svelte';
   import { loadProjects } from './lib/projects';
   import { loadSessions } from './lib/sessions';
 
@@ -52,7 +53,11 @@
     {/snippet}
   </Pane>
   <Resizer id="sidebar" onresize={onResizeSidebar} />
-  <Pane id="center" empty="Pick a session to see details" />
+  <Pane id="center">
+    {#snippet children()}
+      <ProjectDetails />
+    {/snippet}
+  </Pane>
   <Resizer id="center" onresize={onResizeCenter} />
   <Pane id="terminal" empty="No terminal attached" />
 </main>

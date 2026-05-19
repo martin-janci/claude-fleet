@@ -22,9 +22,11 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
+import { get } from 'svelte/store';
 import Sidebar from './Sidebar.svelte';
 import { projects } from './projects';
 import { sessions } from './sessions';
+import { selectedProject, selectProject } from './selection';
 
 const defaultInvoke = async (cmd: string) => {
   if (cmd === 'list_projects') return fake;
@@ -35,6 +37,7 @@ const defaultInvoke = async (cmd: string) => {
 beforeEach(() => {
   projects.set([]);
   sessions.set([]);
+  selectProject(null);
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
   (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(defaultInvoke);
 });
@@ -114,5 +117,99 @@ describe('Sidebar', () => {
     expect(rows.length).toBeGreaterThan(0);
     const section = await screen.findByTestId('orphan-sessions');
     expect(section).toBeInTheDocument();
+  });
+
+  it('hides the owner when repo name is unique (just shows repo)', async () => {
+    render(Sidebar);
+    await tick(); await tick();
+    const rows = await screen.findAllByTestId('proj-row');
+    // No repo collides in `fake`, so all rows show repo without owner prefix.
+    for (const row of rows) {
+      expect(row).not.toHaveTextContent('martin-janci/');
+      expect(row).not.toHaveTextContent('papayapos/');
+    }
+    // Repo names still visible.
+    expect(rows.some((r) => r.textContent?.includes('claude-fleet'))).toBe(true);
+    expect(rows.some((r) => r.textContent?.includes('phone-manager'))).toBe(true);
+    expect(rows.some((r) => r.textContent?.includes('pos-frontend'))).toBe(true);
+  });
+
+  it('shows the owner prefix when two repos share a name', async () => {
+    const colliding = [
+      ...fake,
+      {
+        project: { id: 4, owner: 'otherperson', repo: 'claude-fleet', base_path: '/x/cf', last_session_at: null },
+        worktrees: [{ id: 41, project_id: 4, name: 'main', path: '/x/cf', branch: 'main' }],
+      },
+    ];
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_projects') return colliding;
+      if (cmd === 'list_sessions') return [];
+      return null;
+    });
+    render(Sidebar);
+    await tick(); await tick();
+    const rows = await screen.findAllByTestId('proj-row');
+    // Both claude-fleet rows now display the owner prefix.
+    const claudeFleetRows = rows.filter((r) => r.textContent?.includes('claude-fleet'));
+    expect(claudeFleetRows).toHaveLength(2);
+    expect(claudeFleetRows.some((r) => r.textContent?.includes('martin-janci/'))).toBe(true);
+    expect(claudeFleetRows.some((r) => r.textContent?.includes('otherperson/'))).toBe(true);
+    // A non-colliding repo (phone-manager) does NOT get the owner prefix.
+    const phoneRow = rows.find((r) => r.textContent?.includes('phone-manager'));
+    expect(phoneRow?.textContent).not.toContain('martin-janci/phone-manager');
+  });
+
+  it('clicking a project row selects it; clicking again deselects', async () => {
+    render(Sidebar);
+    await tick(); await tick();
+    const rows = await screen.findAllByTestId('proj-row');
+    expect(get(selectedProject)).toBeNull();
+    await fireEvent.click(rows[0]);
+    expect(get(selectedProject)?.project.id).toBe(1);
+    expect(rows[0].className).toContain('selected');
+    await fireEvent.click(rows[0]);
+    expect(get(selectedProject)).toBeNull();
+  });
+
+  it('hides the worktrees list when the project has only main', async () => {
+    render(Sidebar);
+    await tick(); await tick();
+    await screen.findAllByTestId('proj-row');
+    // All fixture projects have only `main`, so no wt-row should render.
+    const wtRows = screen.queryAllByTestId('wt-row');
+    expect(wtRows).toHaveLength(0);
+  });
+
+  it('shows the worktrees list when there are non-main worktrees', async () => {
+    const withWorktrees = [
+      {
+        project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: null },
+        worktrees: [
+          { id: 11, project_id: 1, name: 'main', path: '/r/cf', branch: 'main' },
+          { id: 12, project_id: 1, name: 'feature-x', path: '/r/cf/.worktrees/feature-x', branch: 'feature-x' },
+        ],
+      },
+    ];
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_projects') return withWorktrees;
+      if (cmd === 'list_sessions') return [];
+      return null;
+    });
+    render(Sidebar);
+    await tick(); await tick();
+    const wtRows = await screen.findAllByTestId('wt-row');
+    expect(wtRows.length).toBe(2);
+  });
+
+  it('clicking the + button selects nothing (does not also select the row)', async () => {
+    render(Sidebar);
+    await tick(); await tick();
+    await screen.findAllByTestId('proj-row');
+    const addButtons = screen.getAllByLabelText('New session');
+    expect(get(selectedProject)).toBeNull();
+    await fireEvent.click(addButtons[0]);
+    // The dialog opens but the project should NOT be selected via the row click.
+    expect(get(selectedProject)).toBeNull();
   });
 });

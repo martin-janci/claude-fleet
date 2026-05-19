@@ -14,16 +14,10 @@ fn reconcile_local_sessions(s: &Store) -> Result<Vec<SessionRow>, IpcError> {
     let live = list_local_sessions()?;
     s.upsert_host(LOCAL_HOST)?;
     let mut keep = Vec::with_capacity(live.len());
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
     for sess in &live {
         keep.push(sess.name.clone());
         // Best-effort project mapping: find a project whose base_path is a prefix
-        // of the session's working directory. Currently None until Phase 3 wires
-        // attach-with-project; touch_project_last_session_at runs only when the
-        // mapping is known.
+        // of the session's working directory.
         let project_id = find_project_id_for_path(s, &sess.path);
         s.upsert_session(
             &sess.name,
@@ -34,8 +28,12 @@ fn reconcile_local_sessions(s: &Store) -> Result<Vec<SessionRow>, IpcError> {
             sess.last_activity,
             "running",
         )?;
+        // last_session_at reflects the tmux-reported activity, not the wall-clock
+        // time of this scan. That way the recency filter survives across app
+        // restarts: a session that was last active 2 hours ago stays at that
+        // timestamp even if we rescan now.
         if let Some(pid) = project_id {
-            s.touch_project_last_session_at(pid, now)?;
+            s.touch_project_last_session_at(pid, sess.last_activity)?;
         }
     }
     s.delete_sessions_not_in(LOCAL_HOST, &keep)?;
