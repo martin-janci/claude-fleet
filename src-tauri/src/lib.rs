@@ -40,6 +40,33 @@ fn compute_backfilled_path(
     Some(new_parts.join(":"))
 }
 
+/// Run the user's login shell with `-l -c 'printf $PATH'` and adopt the result
+/// as the process PATH. This catches everything the user has added in their
+/// shell init files (Homebrew, dotfiles bin/, fnm/nvm/asdf/mise, custom
+/// per-user wrappers like `cl`) — paths a Finder-launched GUI app does not
+/// inherit by default. Best-effort: returns false if `$SHELL` is unset, the
+/// shell exits non-zero, or the captured PATH is empty.
+fn import_login_shell_path() -> bool {
+    let Ok(shell) = std::env::var("SHELL") else {
+        return false;
+    };
+    let Ok(output) = std::process::Command::new(&shell)
+        .args(["-l", "-c", "printf '%s' \"$PATH\""])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let imported = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if imported.is_empty() {
+        return false;
+    }
+    std::env::set_var("PATH", imported);
+    true
+}
+
 /// When launched from Finder (Spotlight, Dock, double-click), macOS hands the
 /// app a minimal PATH that does NOT include Homebrew (`/opt/homebrew/bin` on
 /// Apple Silicon, `/usr/local/bin` on Intel). Without this fix, every shelled
@@ -64,6 +91,12 @@ fn backfill_path_for_gui_launch() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Layered PATH recovery for Finder-launched apps:
+    //   1. Try to import the user's full login-shell PATH (Homebrew, dotfiles
+    //      bin/, fnm, mise, etc.). This is where `cl` lives.
+    //   2. Belt-and-suspenders backfill ensures the standard macOS bin dirs
+    //      are present even if step 1 failed or returned a stunted PATH.
+    import_login_shell_path();
     backfill_path_for_gui_launch();
 
     let db_path = appdata_db_path();
