@@ -22,6 +22,9 @@
   // don't rerun effects on every resize.
   let lastCols = 0;
   let lastRows = 0;
+  // Reactive copies for the status badge in the header.
+  let displayCols = $state(0);
+  let displayRows = $state(0);
 
   $effect(() => {
     const sess = $selectedSession;
@@ -70,7 +73,6 @@
       const t = term;
       const fa = fitAddon;
       if (!t || !fa) return;
-      // Skip until the container actually has nonzero area.
       const entry = entries[0];
       if (entry && (entry.contentRect.width < 4 || entry.contentRect.height < 4)) {
         return;
@@ -80,6 +82,9 @@
       } catch {
         return;
       }
+      if (t.cols < 2 || t.rows < 2) return;
+      displayCols = t.cols;
+      displayRows = t.rows;
       if (t.cols === lastCols && t.rows === lastRows && ptyOpen) return;
       lastCols = t.cols;
       lastRows = t.rows;
@@ -93,17 +98,29 @@
     });
     resizeObserver.observe(container);
 
-    // Fast-path: ResizeObserver fires after the next paint, but the flex
-    // layout has usually settled by the next animation frame. rAF runs
-    // AFTER layout-style recalc and BEFORE paint, so dimensions are real.
+    // Fast-path with retries. rAF fires after layout in most cases, but
+    // when the flex pane is still measuring (Tauri webview on first paint
+    // can be sluggish) the first frame may still report 0×0. Retry up to
+    // 8 frames before giving up and letting ResizeObserver take over.
+    tryFitAndOpen(sessionName, 0);
+  }
+
+  function tryFitAndOpen(sessionName: string, attempt: number) {
     requestAnimationFrame(() => {
       if (!term || !fitAddon || !container) return;
       try {
         fitAddon.fit();
       } catch {
+        if (attempt < 8) tryFitAndOpen(sessionName, attempt + 1);
         return;
       }
-      if (!ptyOpen && term.cols > 0 && term.rows > 0) {
+      if (term.cols < 2 || term.rows < 2) {
+        if (attempt < 8) tryFitAndOpen(sessionName, attempt + 1);
+        return;
+      }
+      displayCols = term.cols;
+      displayRows = term.rows;
+      if (!ptyOpen) {
         lastCols = term.cols;
         lastRows = term.rows;
         void firstOpen(sessionName);
@@ -162,6 +179,8 @@
     fitAddon = null;
     lastCols = 0;
     lastRows = 0;
+    displayCols = 0;
+    displayRows = 0;
     if (ptyOpen) {
       ptyOpen = false;
       try {
@@ -198,6 +217,17 @@
     <div class="header" data-testid="terminal-header">
       <span class="name">{$selectedSession.tmux_name}</span>
       <span class="host">on {$selectedSession.host_alias}</span>
+      <span class="size" data-testid="terminal-size">
+        {#if displayCols > 0}{displayCols}×{displayRows}{:else}measuring…{/if}
+      </span>
+      <button
+        class="reconnect"
+        onclick={() => $selectedSession && void openTerm($selectedSession.tmux_name)}
+        title="Detach and re-attach"
+        data-testid="terminal-reconnect"
+      >
+        ↻ reconnect
+      </button>
     </div>
     <div class="xterm-host" bind:this={container} data-testid="terminal-host"></div>
     {#if openError}
@@ -232,6 +262,25 @@
     font-weight: 600;
   }
   .host { color: var(--fg-muted); font-size: 0.75rem; }
+  .size {
+    margin-left: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.7rem;
+    color: var(--fg-muted);
+    padding: 0.1rem 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+  .reconnect {
+    font-size: 0.75rem;
+    padding: 0.2rem 0.5rem;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--fg-muted);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .reconnect:hover { color: var(--fg); border-color: var(--accent); }
   .xterm-host {
     flex: 1 1 auto;
     min-height: 0;
