@@ -1,7 +1,17 @@
 <script lang="ts">
-  export let id: 'sidebar' | 'center' | 'terminal';
-  export let title: string = '';
-  export let empty: string = '';
+  import type { Snippet } from 'svelte';
+
+  let {
+    id,
+    title = '',
+    empty = '',
+    children,
+  }: {
+    id: 'sidebar' | 'center' | 'terminal';
+    title?: string;
+    empty?: string;
+    children?: Snippet;
+  } = $props();
 </script>
 
 <section data-testid="pane-{id}" class="pane pane-{id}">
@@ -9,11 +19,11 @@
     <header class="pane-header">{title}</header>
   {/if}
   <div class="pane-body">
-    <slot>
-      {#if empty}
-        <p class="empty">{empty}</p>
-      {/if}
-    </slot>
+    {#if children}
+      {@render children()}
+    {:else if empty}
+      <p class="empty">{empty}</p>
+    {/if}
   </div>
 </section>
 

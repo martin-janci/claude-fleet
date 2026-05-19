@@ -27,10 +27,12 @@
 </script>
 
 <main class="layout" style="grid-template-columns: {sidebarPx}px 4px {centerPx}px 4px 1fr;">
-  <Pane id="sidebar" title="claude-fleet" empty="No projects yet">
-    <button class="theme-toggle" onclick={cycleTheme} title="Theme: {$theme}">
-      theme: {$theme}
-    </button>
+  <Pane id="sidebar" title="claude-fleet">
+    {#snippet children()}
+      <button class="theme-toggle" onclick={cycleTheme} title="Theme: {$theme}">
+        theme: {$theme}
+      </button>
+    {/snippet}
   </Pane>
   <Resizer id="sidebar" onresize={onResizeSidebar} />
   <Pane id="center" empty="Pick a session to see details" />
