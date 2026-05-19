@@ -53,11 +53,16 @@
       cursorBlink: true,
       allowProposedApi: true,
       scrollback: 5000,
+      convertEol: true,
       theme: readThemeFromCss(),
     });
     fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(container);
+
+    // Diagnostic: if you ever see a blank pane, this line confirms xterm
+    // itself is rendering. Cleared by tmux's first refresh.
+    term.writeln(`\x1b[90m[claude-fleet] attaching to ${sessionName}…\x1b[0m`);
 
     // Drive both the initial open AND every subsequent resize from a single
     // ResizeObserver, so we never hand pty_open a 0x0 measurement.
@@ -88,11 +93,10 @@
     });
     resizeObserver.observe(container);
 
-    // Also kick a synchronous first measurement: ResizeObserver fires
-    // asynchronously, but the container often has size immediately (the
-    // pane uses flex). A microtask-deferred fit catches that case so we
-    // don't wait for a second paint.
-    queueMicrotask(() => {
+    // Fast-path: ResizeObserver fires after the next paint, but the flex
+    // layout has usually settled by the next animation frame. rAF runs
+    // AFTER layout-style recalc and BEFORE paint, so dimensions are real.
+    requestAnimationFrame(() => {
       if (!term || !fitAddon || !container) return;
       try {
         fitAddon.fit();
@@ -137,6 +141,17 @@
     term.onData((data) => {
       void invoke('pty_write', { args: { data } }).catch(() => {});
     });
+
+    // tmux may have decided its window-size based on whatever client
+    // attached first, or may not yet have drawn for our just-set
+    // geometry. A redundant pty_resize triggers SIGWINCH on the child,
+    // which makes tmux force a full redraw at the correct dimensions.
+    setTimeout(() => {
+      if (!term || !ptyOpen) return;
+      void invoke('pty_resize', {
+        args: { cols: term.cols, rows: term.rows },
+      }).catch(() => {});
+    }, 150);
   }
 
   async function closeTerm() {
