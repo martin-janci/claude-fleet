@@ -9,7 +9,7 @@ fn appdata_db_path() -> std::path::PathBuf {
     let dirs = ProjectDirs::from("sk", "rlt", "claude-fleet")
         .expect("could not resolve platform appdata dir");
     let dir = dirs.data_dir();
-    std::fs::create_dir_all(dir).expect("create appdata dir");
+    std::fs::create_dir_all(dir).unwrap_or_else(|e| panic!("create appdata dir {dir:?}: {e}"));
     dir.join("state.db")
 }
 
