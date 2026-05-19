@@ -251,7 +251,7 @@
       <span class="size" data-testid="terminal-size">
         {#if displayCols > 0}{displayCols}×{displayRows}{:else}measuring…{/if}
       </span>
-      <span class="counters" data-testid="terminal-counters">
+      <span class="counters" data-testid="terminal-counters" title={lastWriteError ?? ''}>
         sink: {sinkCalls} · {sinkBytes}B{#if writeErrors > 0} · err {writeErrors}{/if}
       </span>
       <button
