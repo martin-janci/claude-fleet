@@ -2,6 +2,7 @@ mod commands;
 mod ipc_error;
 mod projects;
 mod store;
+mod tmux;
 
 use directories::ProjectDirs;
 use std::sync::Mutex;
@@ -27,6 +28,9 @@ pub fn run() {
             commands::health::health_check,
             commands::projects::list_projects,
             commands::projects::refresh_projects,
+            commands::sessions::list_sessions,
+            commands::sessions::new_session,
+            commands::sessions::kill_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
