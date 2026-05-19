@@ -62,7 +62,10 @@
     try {
       await invoke('pty_open', {
         args: {
-          sessionName,
+          // Tauri camelCase→snake_case conversion only applies to top-level
+          // command parameter names, not to fields inside argument objects.
+          // The Rust struct field is `session_name`, so keep it that way here.
+          session_name: sessionName,
           cols: term.cols,
           rows: term.rows,
         },
