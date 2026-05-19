@@ -1,5 +1,6 @@
 mod commands;
 mod ipc_error;
+mod projects;
 mod store;
 
 use directories::ProjectDirs;
