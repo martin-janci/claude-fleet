@@ -60,7 +60,7 @@
     {/snippet}
   </Pane>
   <Resizer id="center" onresize={onResizeCenter} />
-  <Pane id="terminal">
+  <Pane id="terminal" fullBleed>
     {#snippet children()}
       <TerminalView />
     {/snippet}

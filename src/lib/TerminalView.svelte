@@ -10,23 +10,32 @@
   let term: Terminal | null = null;
   let fitAddon: FitAddon | null = null;
   let resizeObserver: ResizeObserver | null = null;
+  // Tracks the session that is currently OPEN on the PTY backend. Used to
+  // detect when we need to swap, and to gate input-forwarding wiring until
+  // the PTY is actually live.
   let currentSession: string | null = $state(null);
   let openError: string | null = $state(null);
+  // Set inside the resize observer once the container has a real size and
+  // the PTY has been successfully opened.
+  let ptyOpen = false;
+  // Latest layout (used by pty_resize) — held outside reactive state so we
+  // don't rerun effects on every resize.
+  let lastCols = 0;
+  let lastRows = 0;
 
-  // Drive PTY lifecycle from the selected session in the store. Effects in
-  // Svelte 5 re-run whenever any rune they read changes.
   $effect(() => {
     const sess = $selectedSession;
     if (!sess) {
-      closeTerm();
+      void closeTerm();
       return;
     }
     if (sess.tmux_name === currentSession) return;
     void openTerm(sess.tmux_name);
   });
 
-  // The container ref isn't ready until after the {#if} block mounts the div.
-  // Watch for its arrival and re-trigger open if a session is already selected.
+  // The container <div> arrives after the {#if $selectedSession} block
+  // mounts. When it does, openTerm() may have been short-circuited (no
+  // container yet) — retry once container is bound.
   $effect(() => {
     if (container && $selectedSession && currentSession !== $selectedSession.tmux_name) {
       void openTerm($selectedSession.tmux_name);
@@ -43,16 +52,65 @@
       fontSize: 13,
       cursorBlink: true,
       allowProposedApi: true,
+      scrollback: 5000,
       theme: readThemeFromCss(),
     });
     fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(container);
-    try {
-      fitAddon.fit();
-    } catch {
-      /* fit can throw on zero-size containers; ignore, ResizeObserver will retry */
-    }
+
+    // Drive both the initial open AND every subsequent resize from a single
+    // ResizeObserver, so we never hand pty_open a 0x0 measurement.
+    resizeObserver = new ResizeObserver((entries) => {
+      const t = term;
+      const fa = fitAddon;
+      if (!t || !fa) return;
+      // Skip until the container actually has nonzero area.
+      const entry = entries[0];
+      if (entry && (entry.contentRect.width < 4 || entry.contentRect.height < 4)) {
+        return;
+      }
+      try {
+        fa.fit();
+      } catch {
+        return;
+      }
+      if (t.cols === lastCols && t.rows === lastRows && ptyOpen) return;
+      lastCols = t.cols;
+      lastRows = t.rows;
+      if (!ptyOpen) {
+        void firstOpen(sessionName);
+      } else {
+        void invoke('pty_resize', {
+          args: { cols: t.cols, rows: t.rows },
+        }).catch(() => {});
+      }
+    });
+    resizeObserver.observe(container);
+
+    // Also kick a synchronous first measurement: ResizeObserver fires
+    // asynchronously, but the container often has size immediately (the
+    // pane uses flex). A microtask-deferred fit catches that case so we
+    // don't wait for a second paint.
+    queueMicrotask(() => {
+      if (!term || !fitAddon || !container) return;
+      try {
+        fitAddon.fit();
+      } catch {
+        return;
+      }
+      if (!ptyOpen && term.cols > 0 && term.rows > 0) {
+        lastCols = term.cols;
+        lastRows = term.rows;
+        void firstOpen(sessionName);
+      }
+    });
+  }
+
+  async function firstOpen(sessionName: string) {
+    if (ptyOpen) return;
+    if (!term) return;
+    ptyOpen = true; // optimistic: prevents races; we revert on failure
 
     const onData = new Channel<string>();
     onData.onmessage = (chunk: string) => {
@@ -62,12 +120,9 @@
     try {
       await invoke('pty_open', {
         args: {
-          // Tauri camelCase→snake_case conversion only applies to top-level
-          // command parameter names, not to fields inside argument objects.
-          // The Rust struct field is `session_name`, so keep it that way here.
           session_name: sessionName,
-          cols: term.cols,
-          rows: term.rows,
+          cols: lastCols,
+          rows: lastRows,
         },
         onData,
       });
@@ -75,25 +130,13 @@
     } catch (e) {
       openError = describeError(e);
       term?.writeln(`\r\n\x1b[31mPTY open failed: ${openError}\x1b[0m\r\n`);
+      ptyOpen = false;
       return;
     }
 
     term.onData((data) => {
       void invoke('pty_write', { args: { data } }).catch(() => {});
     });
-
-    resizeObserver = new ResizeObserver(() => {
-      if (!term || !fitAddon) return;
-      try {
-        fitAddon.fit();
-      } catch {
-        return;
-      }
-      void invoke('pty_resize', {
-        args: { cols: term.cols, rows: term.rows },
-      }).catch(() => {});
-    });
-    resizeObserver.observe(container);
   }
 
   async function closeTerm() {
@@ -102,14 +145,17 @@
     term?.dispose();
     term = null;
     fitAddon = null;
-    if (currentSession) {
+    lastCols = 0;
+    lastRows = 0;
+    if (ptyOpen) {
+      ptyOpen = false;
       try {
         await invoke('pty_close');
       } catch {
         /* nothing to undo */
       }
-      currentSession = null;
     }
+    currentSession = null;
   }
 
   function describeError(e: unknown): string {
@@ -153,8 +199,10 @@
     flex-direction: column;
     height: 100%;
     width: 100%;
+    min-height: 0;
   }
   .header {
+    flex: 0 0 auto;
     display: flex;
     gap: 0.4rem;
     align-items: baseline;
@@ -170,14 +218,27 @@
   }
   .host { color: var(--fg-muted); font-size: 0.75rem; }
   .xterm-host {
-    flex: 1;
+    flex: 1 1 auto;
     min-height: 0;
+    min-width: 0;
     background: var(--bg);
-    padding: 0.25rem;
     overflow: hidden;
+    position: relative;
+  }
+  /* xterm.js inserts its own .xterm root inside .xterm-host. Force it to
+     fill the available area so FitAddon measures the right rect. */
+  .xterm-host :global(.xterm) {
+    height: 100%;
+    width: 100%;
+    padding: 4px;
+    box-sizing: border-box;
+  }
+  .xterm-host :global(.xterm-viewport) {
+    background-color: transparent !important;
   }
   .empty { color: var(--fg-muted); font-size: 0.9rem; padding: 0.75rem; }
   .err {
+    flex: 0 0 auto;
     color: #e64a4a;
     font-size: 0.8rem;
     padding: 0.3rem 0.6rem;
