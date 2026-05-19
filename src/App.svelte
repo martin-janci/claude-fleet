@@ -1,10 +1,22 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import Pane from './lib/Pane.svelte';
   import Resizer from './lib/Resizer.svelte';
   import { theme, cycleTheme } from './lib/theme';
+  import { healthCheck, type Health } from './lib/ipc';
 
   let sidebarPx = $state(280);
   let centerPx = $state(360);
+  let health = $state<Health | null>(null);
+  let healthError = $state<string | null>(null);
+
+  onMount(async () => {
+    try {
+      health = await healthCheck();
+    } catch (e) {
+      healthError = String(e);
+    }
+  });
 
   function onResizeSidebar(delta: number) {
     sidebarPx = Math.max(180, Math.min(640, sidebarPx + delta));
@@ -26,13 +38,33 @@
   <Pane id="terminal" empty="No terminal attached" />
 </main>
 
+<footer class="status">
+  {#if healthError}
+    <span class="err">ipc error: {healthError}</span>
+  {:else if health}
+    <span>v{health.version} · db: {health.db_ready ? 'ok' : 'fail'}</span>
+  {:else}
+    <span class="muted">connecting…</span>
+  {/if}
+</footer>
+
 <style>
   .layout {
     display: grid;
-    height: 100vh;
+    height: calc(100vh - 24px);
     width: 100vw;
     background: var(--bg);
   }
+  .status {
+    height: 24px;
+    line-height: 24px;
+    padding: 0 0.75rem;
+    background: var(--bg-pane);
+    border-top: 1px solid var(--border);
+    font-size: 0.75rem;
+    color: var(--fg-muted);
+  }
+  .status .err { color: #e64a4a; }
   .theme-toggle {
     border: 1px solid var(--border);
     background: transparent;

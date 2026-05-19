@@ -16,7 +16,6 @@ impl Store {
         Ok(store)
     }
 
-    #[allow(dead_code)] // used by tests; clippy --all-targets sees it as unused in lib.
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         let store = Self { conn };
