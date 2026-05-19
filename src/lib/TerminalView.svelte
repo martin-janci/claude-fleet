@@ -2,7 +2,8 @@
   import { onDestroy } from 'svelte';
   import { Terminal } from '@xterm/xterm';
   import { FitAddon } from '@xterm/addon-fit';
-  import { Channel, invoke } from '@tauri-apps/api/core';
+  import { invoke } from '@tauri-apps/api/core';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { selectedSession } from './selection';
   import '@xterm/xterm/css/xterm.css';
 
@@ -25,6 +26,8 @@
   // Reactive copies for the status badge in the header.
   let displayCols = $state(0);
   let displayRows = $state(0);
+  // Tauri event listener handle for `pty-data`.
+  let unlistenPtyData: UnlistenFn | null = null;
 
   $effect(() => {
     const sess = $selectedSession;
@@ -133,10 +136,19 @@
     if (!term) return;
     ptyOpen = true; // optimistic: prevents races; we revert on failure
 
-    const onData = new Channel<string>();
-    onData.onmessage = (chunk: string) => {
-      term?.write(chunk);
-    };
+    // Subscribe to the global pty-data event BEFORE pty_open spawns the
+    // reader thread. Setting up the listener up-front means we don't lose
+    // the initial output burst from tmux's attach refresh.
+    try {
+      unlistenPtyData = await listen<string>('pty-data', (event) => {
+        term?.write(event.payload);
+      });
+    } catch (e) {
+      openError = `failed to subscribe to pty-data: ${describeError(e)}`;
+      term?.writeln(`\r\n\x1b[31m${openError}\x1b[0m\r\n`);
+      ptyOpen = false;
+      return;
+    }
 
     try {
       await invoke('pty_open', {
@@ -145,13 +157,14 @@
           cols: lastCols,
           rows: lastRows,
         },
-        onData,
       });
       currentSession = sessionName;
     } catch (e) {
       openError = describeError(e);
       term?.writeln(`\r\n\x1b[31mPTY open failed: ${openError}\x1b[0m\r\n`);
       ptyOpen = false;
+      unlistenPtyData?.();
+      unlistenPtyData = null;
       return;
     }
 
@@ -174,6 +187,10 @@
   async function closeTerm() {
     resizeObserver?.disconnect();
     resizeObserver = null;
+    if (unlistenPtyData) {
+      unlistenPtyData();
+      unlistenPtyData = null;
+    }
     term?.dispose();
     term = null;
     fitAddon = null;

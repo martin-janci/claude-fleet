@@ -3,8 +3,7 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::Deserialize;
 use std::io::{Read, Write};
 use std::sync::Mutex;
-use tauri::ipc::Channel;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 /// One active PTY at a time (we render a single terminal pane). Opening a new
 /// PTY closes the previous one. Holds the master (for resize), a writer (for
@@ -46,11 +45,15 @@ pub struct PtyOpenArgs {
     pub rows: u16,
 }
 
+/// Single global event name for streaming PTY bytes to whichever window
+/// is rendering the terminal. The frontend subscribes via `listen('pty-data', …)`.
+const PTY_DATA_EVENT: &str = "pty-data";
+
 #[tauri::command]
 pub fn pty_open(
     args: PtyOpenArgs,
-    on_data: Channel<String>,
     state: State<'_, Mutex<PtyState>>,
+    app: AppHandle,
 ) -> Result<(), IpcError> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -71,10 +74,14 @@ pub fn pty_open(
     }
     cmd.env("TERM", "xterm-256color");
 
-    // Channel handshake check: visible in xterm immediately if the IPC path
-    // works at all. If you never see this line, the Channel<String> on the
-    // JS side never got attached.
-    let _ = on_data.send("\x1b[90m[cf] channel ready, spawning tmux…\x1b[0m\r\n".to_string());
+    // Diagnostic markers via app.emit (the older, more battle-tested IPC path).
+    // Channel<T> in Tauri 2 silently dropped these in our setup — verified by
+    // an isolated portable-pty test that received 928 bytes in 2.5s while the
+    // Channel version reached zero data to xterm.
+    let _ = app.emit(
+        PTY_DATA_EVENT,
+        "\x1b[90m[cf] open: spawning tmux…\x1b[0m\r\n".to_string(),
+    );
 
     let child = pair
         .slave
@@ -90,40 +97,50 @@ pub fn pty_open(
         .take_writer()
         .map_err(|e| IpcError::new("E_PTY", format!("take writer: {e}")))?;
 
-    let _ = on_data.send(format!(
-        "\x1b[90m[cf] spawned tmux attach -t {}\x1b[0m\r\n",
-        args.session_name
-    ));
+    let _ = app.emit(
+        PTY_DATA_EVENT,
+        format!(
+            "\x1b[90m[cf] spawned tmux attach -t {}\x1b[0m\r\n",
+            args.session_name
+        ),
+    );
 
-    // Move reader into a dedicated thread that pumps PTY output through the
-    // Tauri channel as UTF-8 lossy strings. xterm.js can ingest these directly.
-    // The thread also emits diagnostic markers on entry, EOF, and error so any
-    // pipeline break is immediately visible in the terminal pane.
-    let reader_channel = on_data.clone();
+    // Move reader into a dedicated thread that pumps PTY output to all
+    // listeners of `pty-data` as UTF-8 lossy strings. Diagnostic markers
+    // at entry, EOF, and error make pipeline breaks visible.
+    let app_for_thread = app.clone();
     std::thread::spawn(move || {
-        let _ = reader_channel.send("\x1b[90m[cf] reader thread up\x1b[0m\r\n".to_string());
+        let _ = app_for_thread.emit(
+            PTY_DATA_EVENT,
+            "\x1b[90m[cf] reader thread up\x1b[0m\r\n".to_string(),
+        );
         let mut buf = [0u8; 4096];
         let mut total = 0usize;
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
-                    let _ = reader_channel.send(format!(
-                        "\r\n\x1b[33m[cf] PTY EOF after {total} bytes (tmux attach exited)\x1b[0m\r\n"
-                    ));
+                    let _ = app_for_thread.emit(
+                        PTY_DATA_EVENT,
+                        format!(
+                            "\r\n\x1b[33m[cf] PTY EOF after {total} bytes (tmux attach exited)\x1b[0m\r\n"
+                        ),
+                    );
                     break;
                 }
                 Ok(n) => {
                     total += n;
                     let chunk = String::from_utf8_lossy(&buf[..n]).into_owned();
-                    if reader_channel.send(chunk).is_err() {
-                        // Frontend dropped the channel (component unmounted).
+                    if app_for_thread.emit(PTY_DATA_EVENT, chunk).is_err() {
                         break;
                     }
                 }
                 Err(e) => {
-                    let _ = reader_channel.send(format!(
-                        "\r\n\x1b[31m[cf] reader error after {total} bytes: {e}\x1b[0m\r\n"
-                    ));
+                    let _ = app_for_thread.emit(
+                        PTY_DATA_EVENT,
+                        format!(
+                            "\r\n\x1b[31m[cf] reader error after {total} bytes: {e}\x1b[0m\r\n"
+                        ),
+                    );
                     break;
                 }
             }

@@ -19,11 +19,18 @@ vi.mock('@tauri-apps/api/core', () => ({
     if (cmd === 'pty_close') return null;
     return null;
   }),
-  // Minimal Channel stub so TerminalView can `new Channel<string>()` in tests
-  // without crashing. Backend never invokes onmessage in tests.
+  // Minimal Channel stub kept for backward-compat with any test that still
+  // touches the older code path; current TerminalView uses listen() instead.
   Channel: class {
     onmessage: ((data: unknown) => void) | null = null;
   },
+}));
+
+// pty-data and other Tauri events: listen returns an unlisten fn that does
+// nothing. Tests don't drive PTY events.
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(async () => () => {}),
+  emit: vi.fn(async () => {}),
 }));
 
 // xterm.js relies on DOM measurement APIs that jsdom doesn't implement.
