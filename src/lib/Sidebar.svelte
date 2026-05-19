@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { projects, loadProjects, refreshProjects, type ProjectTreeRow } from './projects';
+  import { sessions, loadSessions, killSession, type SessionRow } from './sessions';
 
   type Recency = 'all' | 'today' | '7d' | '30d';
 
@@ -10,8 +11,10 @@
   let search = $state('');
 
   onMount(async () => {
-    const r = await loadProjects();
-    if (!r.ok) loadError = r.error.message;
+    const pr = await loadProjects();
+    if (!pr.ok) loadError = pr.error.message;
+    const sr = await loadSessions();
+    if (!sr.ok) loadError = sr.error.message;
   });
 
   async function onRefresh() {
@@ -52,6 +55,16 @@
   const filtered = $derived(
     $projects.filter((p) => matchesRecency(p, recency) && matchesSearch(p, search)),
   );
+
+  async function onKill(name: string) {
+    if (!confirm(`Kill tmux session ${name}?`)) return;
+    const r = await killSession(name);
+    if (!r.ok) loadError = r.error.message;
+  }
+
+  function sessionsForProject(projectId: number): SessionRow[] {
+    return $sessions.filter((s) => s.project_id === projectId);
+  }
 </script>
 
 <div class="sidebar" data-testid="sidebar-tree">
@@ -107,6 +120,12 @@
               {/each}
             </ul>
           {/if}
+          {#each sessionsForProject(row.project.id) as sess (sess.id)}
+            <div class="sess-row" data-testid="sess-row">
+              <span class="sess-name">{sess.tmux_name}</span>
+              <button class="kill" onclick={() => onKill(sess.tmux_name)} title="Kill session">×</button>
+            </div>
+          {/each}
         </li>
       {/each}
     </ul>
@@ -159,4 +178,15 @@
   .wt-branch { font-style: italic; }
   .err { color: #e64a4a; font-size: 0.85rem; padding: 0.25rem 0; }
   .empty { color: var(--fg-muted); font-size: 0.85rem; }
+  .sess-row { display: flex; gap: 0.3rem; font-size: 0.8rem; padding: 0.1rem 0 0.1rem 0.6rem; color: var(--fg); }
+  .sess-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .kill {
+    margin-left: auto;
+    background: transparent;
+    border: none;
+    color: var(--fg-muted);
+    cursor: pointer;
+    padding: 0 0.3rem;
+  }
+  .kill:hover { color: #e64a4a; }
 </style>

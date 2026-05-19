@@ -18,7 +18,11 @@ const fake = [
 ];
 
 vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn(async (cmd: string) => (cmd === 'list_projects' ? fake : [])),
+  invoke: vi.fn(async (cmd: string) => {
+    if (cmd === 'list_projects') return fake;
+    if (cmd === 'list_sessions') return [];
+    return null;
+  }),
 }));
 
 import Sidebar from './Sidebar.svelte';
