@@ -1,42 +1,42 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
+  import { onDestroy } from 'svelte';
 
-  export let id: string;
+  let { id, onresize }: { id: string; onresize: (delta: number) => void } = $props();
 
-  const dispatch = createEventDispatcher<{ resize: number }>();
-
-  let startX = 0;
+  let lastX = 0;
   let dragging = false;
-  let element: HTMLDivElement;
 
   function onPointerDown(e: PointerEvent) {
     dragging = true;
-    startX = e.clientX;
+    lastX = e.clientX;
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp, { once: true });
   }
 
   function onPointerMove(e: PointerEvent) {
     if (!dragging) return;
-    const delta = e.clientX - startX;
-    dispatch('resize', delta);
-    // Also dispatch a bubbling DOM event so test containers can listen
-    element.dispatchEvent(new CustomEvent('resize', { detail: delta, bubbles: true }));
+    const delta = e.clientX - lastX;
+    lastX = e.clientX;
+    onresize(delta);
   }
 
   function onPointerUp() {
     dragging = false;
     window.removeEventListener('pointermove', onPointerMove);
   }
+
+  onDestroy(() => {
+    window.removeEventListener('pointermove', onPointerMove);
+    window.removeEventListener('pointerup', onPointerUp);
+  });
 </script>
 
 <div
-  bind:this={element}
   data-testid="resizer-{id}"
   class="resizer"
   role="separator"
   aria-orientation="vertical"
-  on:pointerdown={onPointerDown}
+  onpointerdown={onPointerDown}
 ></div>
 
 <style>
