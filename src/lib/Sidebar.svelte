@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { projects, loadProjects, refreshProjects, type ProjectTreeRow } from './projects';
   import { sessions, loadSessions, killSession, type SessionRow } from './sessions';
+  import NewSessionDialog from './NewSessionDialog.svelte';
 
   type Recency = 'all' | 'today' | '7d' | '30d';
 
@@ -65,6 +66,20 @@
   function sessionsForProject(projectId: number): SessionRow[] {
     return $sessions.filter((s) => s.project_id === projectId);
   }
+
+  let dialogProject: ProjectTreeRow | null = $state(null);
+
+  function openNew(p: ProjectTreeRow) {
+    dialogProject = p;
+  }
+
+  function onCreated(_s: SessionRow) {
+    dialogProject = null;
+  }
+
+  function onCancel() {
+    dialogProject = null;
+  }
 </script>
 
 <div class="sidebar" data-testid="sidebar-tree">
@@ -106,6 +121,7 @@
         <li class="proj">
           <div class="proj-row" data-testid="proj-row" title={row.project.base_path}>
             <span class="owner">{row.project.owner}/</span><span class="repo">{row.project.repo}</span>
+            <button class="add-session" onclick={() => openNew(row)} title="New session">+</button>
           </div>
           {#if row.worktrees.length > 0}
             <ul class="worktrees">
@@ -131,6 +147,14 @@
     </ul>
   {/if}
 </div>
+
+{#if dialogProject}
+  <div class="modal-backdrop" onclick={onCancel} role="presentation">
+    <div onclick={(e: MouseEvent) => e.stopPropagation()} role="presentation">
+      <NewSessionDialog project={dialogProject} onCreate={onCreated} {onCancel} />
+    </div>
+  </div>
+{/if}
 
 <style>
   .sidebar { display: flex; flex-direction: column; height: 100%; gap: 0.4rem; }
@@ -189,4 +213,21 @@
     padding: 0 0.3rem;
   }
   .kill:hover { color: #e64a4a; }
+  .proj-row { display: flex; align-items: center; }
+  .add-session {
+    margin-left: auto;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--fg-muted);
+    padding: 0 0.4rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+  .add-session:hover { color: var(--fg); border-color: var(--accent); }
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 10;
+  }
 </style>

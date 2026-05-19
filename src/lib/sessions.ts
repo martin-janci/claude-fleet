@@ -26,3 +26,15 @@ export async function killSession(name: string): Promise<Result<void>> {
   if (r.ok) await loadSessions();
   return r;
 }
+
+export interface NewSessionArgs {
+  project_id: number;
+  worktree_id: number | null;
+  name: string;
+}
+
+export async function newSession(args: NewSessionArgs): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('new_session', { args });
+  if (r.ok) void loadSessions();
+  return r;
+}
