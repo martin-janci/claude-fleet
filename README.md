@@ -23,6 +23,7 @@ pnpm tauri build    # release bundle in src-tauri/target/release/bundle/
 
 ```bash
 pnpm test                      # frontend (Vitest)
+pnpm check                     # frontend Svelte/TS type-check
 cd src-tauri && cargo test     # backend (rusqlite + commands)
 cd src-tauri && cargo clippy --all-targets -- -D warnings
 cd src-tauri && cargo fmt --check

@@ -1,5 +1,6 @@
-// NOTE: Task 6 wraps Store in `Mutex<Store>` for `tauri::State`,
-// since `rusqlite::Connection` is not Send+Sync.
+// NOTE: Phase 2 will wrap Store in `Mutex<Store>` and register it via
+// `tauri::Manager::manage()` so commands can share a single connection.
+// `rusqlite::Connection` is not Send+Sync, so the Mutex is required.
 
 use rusqlite::{Connection, Result};
 
