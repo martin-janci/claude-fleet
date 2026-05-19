@@ -29,7 +29,7 @@ pub fn list_local_sessions() -> Result<Vec<TmuxSession>, IpcError> {
         }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-            if stderr.contains("no server running") {
+            if is_no_server_running(&stderr) {
                 Ok(Vec::new())
             } else {
                 Err(IpcError::new("E_TMUX", stderr.trim()))
@@ -40,6 +40,19 @@ pub fn list_local_sessions() -> Result<Vec<TmuxSession>, IpcError> {
         }
         Err(e) => Err(IpcError::new("E_TMUX", format!("spawn tmux failed: {e}"))),
     }
+}
+
+/// True for any tmux stderr that means "no server is running on this socket"
+/// — i.e. an empty `list_local_sessions()` return rather than an error.
+///
+/// Variants observed:
+/// - "no server running on /tmp/tmux-501/default"  (server was started then exited)
+/// - "error connecting to /private/tmp/tmux-501/default (No such file or directory)"
+///   (no server has ever been started — the socket file doesn't exist)
+fn is_no_server_running(stderr: &str) -> bool {
+    let s = stderr.to_lowercase();
+    s.contains("no server running")
+        || (s.contains("error connecting to") && s.contains("no such file or directory"))
 }
 
 fn parse_sessions(input: &str) -> Vec<TmuxSession> {
@@ -125,5 +138,35 @@ mod tests {
     #[test]
     fn parse_empty_input() {
         assert!(parse_sessions("").is_empty());
+    }
+
+    #[test]
+    fn detects_no_server_running_classic() {
+        assert!(is_no_server_running(
+            "no server running on /tmp/tmux-501/default\n"
+        ));
+    }
+
+    #[test]
+    fn detects_socket_file_missing_macos() {
+        // What `tmux list-sessions` actually prints on macOS when no server
+        // was ever started — the user-reported bug.
+        assert!(is_no_server_running(
+            "error connecting to /private/tmp/tmux-501/default (No such file or directory)\n"
+        ));
+    }
+
+    #[test]
+    fn detects_socket_file_missing_case_insensitive() {
+        assert!(is_no_server_running(
+            "Error connecting to /tmp/tmux-501/default (No such file or directory)"
+        ));
+    }
+
+    #[test]
+    fn does_not_swallow_unrelated_errors() {
+        assert!(!is_no_server_running("can't find session: dev-foo"));
+        assert!(!is_no_server_running("ambiguous option"));
+        assert!(!is_no_server_running(""));
     }
 }
