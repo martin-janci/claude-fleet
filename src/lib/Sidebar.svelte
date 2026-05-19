@@ -1,9 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { projects, loadProjects, refreshProjects } from './projects';
+  import { projects, loadProjects, refreshProjects, type ProjectTreeRow } from './projects';
+
+  type Recency = 'all' | 'today' | '7d' | '30d';
 
   let loadError: string | null = $state(null);
   let loading = $state(false);
+  let recency: Recency = $state('all');
+  let search = $state('');
 
   onMount(async () => {
     const r = await loadProjects();
@@ -17,22 +21,75 @@
     loading = false;
     if (!r.ok) loadError = r.error.message;
   }
+
+  const RECENCY_WINDOW: Record<Recency, number | null> = {
+    all: null,
+    today: 60 * 60 * 24,
+    '7d': 60 * 60 * 24 * 7,
+    '30d': 60 * 60 * 24 * 30,
+  };
+
+  function matchesRecency(p: ProjectTreeRow, r: Recency): boolean {
+    const window = RECENCY_WINDOW[r];
+    if (window === null) return true;
+    if (p.project.last_session_at === null) return false;
+    const ageSec = Math.floor(Date.now() / 1000) - p.project.last_session_at;
+    return ageSec >= 0 && ageSec <= window;
+  }
+
+  function matchesSearch(p: ProjectTreeRow, q: string): boolean {
+    if (!q) return true;
+    const needle = q.toLowerCase();
+    if (p.project.owner.toLowerCase().includes(needle)) return true;
+    if (p.project.repo.toLowerCase().includes(needle)) return true;
+    return p.worktrees.some(
+      (w) =>
+        w.name.toLowerCase().includes(needle) ||
+        (w.branch?.toLowerCase().includes(needle) ?? false),
+    );
+  }
+
+  const filtered = $derived(
+    $projects.filter((p) => matchesRecency(p, recency) && matchesSearch(p, search)),
+  );
 </script>
 
 <div class="sidebar" data-testid="sidebar-tree">
   <header class="sidebar-header">
+    <input
+      class="search"
+      placeholder="Search projects, branches…"
+      bind:value={search}
+      data-testid="sidebar-search"
+    />
     <button class="refresh" onclick={onRefresh} disabled={loading} data-testid="sidebar-refresh">
       {loading ? 'refreshing…' : 'refresh'}
     </button>
   </header>
 
+  <nav class="recency" aria-label="recency filter">
+    {#each ['all', 'today', '7d', '30d'] as opt (opt)}
+      <button
+        class="pill"
+        class:active={recency === opt}
+        onclick={() => (recency = opt as Recency)}
+      >
+        {opt}
+      </button>
+    {/each}
+  </nav>
+
   {#if loadError}
     <p class="err">{loadError}</p>
-  {:else if $projects.length === 0}
-    <p class="empty">No projects yet — click refresh to scan ~/projects/github.com.</p>
+  {:else if filtered.length === 0}
+    <p class="empty">
+      {$projects.length === 0
+        ? 'No projects yet — click refresh to scan ~/projects/github.com.'
+        : 'No projects match the current filter.'}
+    </p>
   {:else}
     <ul class="tree">
-      {#each $projects as row (row.project.id)}
+      {#each filtered as row (row.project.id)}
         <li class="proj">
           <div class="proj-row" data-testid="proj-row" title={row.project.base_path}>
             <span class="owner">{row.project.owner}/</span><span class="repo">{row.project.repo}</span>
@@ -57,8 +114,18 @@
 </div>
 
 <style>
-  .sidebar { display: flex; flex-direction: column; height: 100%; }
-  .sidebar-header { display: flex; justify-content: flex-end; padding: 0.25rem 0; }
+  .sidebar { display: flex; flex-direction: column; height: 100%; gap: 0.4rem; }
+  .sidebar-header { display: flex; gap: 0.3rem; align-items: center; padding: 0.25rem 0; }
+  .search {
+    flex: 1;
+    font-size: 0.8rem;
+    padding: 0.2rem 0.4rem;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    border-radius: 4px;
+  }
+  .search::placeholder { color: var(--fg-muted); }
   .refresh {
     font-size: 0.75rem;
     padding: 0.2rem 0.5rem;
@@ -70,7 +137,18 @@
   }
   .refresh:hover:not(:disabled) { color: var(--fg); border-color: var(--accent); }
   .refresh:disabled { opacity: 0.6; cursor: progress; }
-  .tree { list-style: none; margin: 0; padding: 0; }
+  .recency { display: flex; gap: 0.25rem; }
+  .pill {
+    font-size: 0.7rem;
+    padding: 0.15rem 0.5rem;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--fg-muted);
+    border-radius: 999px;
+    cursor: pointer;
+  }
+  .pill.active { color: var(--fg); border-color: var(--accent); }
+  .tree { list-style: none; margin: 0; padding: 0; flex: 1; overflow: auto; }
   .proj { margin-bottom: 0.4rem; }
   .proj-row { font-weight: 500; padding: 0.15rem 0; }
   .owner { color: var(--fg-muted); }
