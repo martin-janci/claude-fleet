@@ -4,6 +4,7 @@
   import Resizer from './lib/Resizer.svelte';
   import { theme, cycleTheme } from './lib/theme';
   import { healthCheck, type Health } from './lib/ipc';
+  import Sidebar from './lib/Sidebar.svelte';
 
   let sidebarPx = $state(280);
   let centerPx = $state(360);
@@ -29,6 +30,7 @@
 <main class="layout" style="grid-template-columns: {sidebarPx}px 4px {centerPx}px 4px 1fr;">
   <Pane id="sidebar" title="claude-fleet">
     {#snippet children()}
+      <Sidebar />
       <button class="theme-toggle" onclick={cycleTheme} title="Theme: {$theme}">
         theme: {$theme}
       </button>

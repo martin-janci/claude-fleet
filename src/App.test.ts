@@ -1,4 +1,4 @@
-import { render } from '@testing-library/svelte';
+import { findByTestId, render } from '@testing-library/svelte';
 import { describe, it, expect } from 'vitest';
 import App from './App.svelte';
 
@@ -16,5 +16,11 @@ describe('App layout', () => {
     expect(layout).not.toBeNull();
     const panes = layout.querySelectorAll('[data-testid^="pane-"]');
     expect(panes).toHaveLength(3);
+  });
+
+  it('mounts the sidebar tree inside the sidebar pane', async () => {
+    const { container } = render(App);
+    const sidebarTree = await findByTestId(container, 'sidebar-tree');
+    expect(sidebarTree).toBeInTheDocument();
   });
 });
