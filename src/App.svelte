@@ -1,10 +1,12 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import Pane from './lib/Pane.svelte';
   import Resizer from './lib/Resizer.svelte';
   import { theme, cycleTheme } from './lib/theme';
   import { healthCheck, type Health } from './lib/ipc';
   import Sidebar from './lib/Sidebar.svelte';
+  import { loadProjects } from './lib/projects';
+  import { loadSessions } from './lib/sessions';
 
   let sidebarPx = $state(280);
   let centerPx = $state(360);
@@ -17,6 +19,19 @@
     } catch (e) {
       healthError = String(e);
     }
+  });
+
+  function onFocus() {
+    void loadProjects();
+    void loadSessions();
+  }
+
+  onMount(() => {
+    window.addEventListener('focus', onFocus);
+  });
+
+  onDestroy(() => {
+    window.removeEventListener('focus', onFocus);
   });
 
   function onResizeSidebar(delta: number) {
