@@ -3,8 +3,8 @@
   import { Terminal } from '@xterm/xterm';
   import { FitAddon } from '@xterm/addon-fit';
   import { invoke } from '@tauri-apps/api/core';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { selectedSession } from './selection';
+  import { setPtyWriteSink, ptyDebug } from './pty-stream';
   import '@xterm/xterm/css/xterm.css';
 
   let container: HTMLDivElement | undefined = $state(undefined);
@@ -26,8 +26,9 @@
   // Reactive copies for the status badge in the header.
   let displayCols = $state(0);
   let displayRows = $state(0);
-  // Tauri event listener handle for `pty-data`.
-  let unlistenPtyData: UnlistenFn | null = null;
+  // Whether we currently own the global PTY write sink. Set on first PTY open,
+  // cleared on closeTerm.
+  let sinkAttached = false;
 
   $effect(() => {
     const sess = $selectedSession;
@@ -136,19 +137,13 @@
     if (!term) return;
     ptyOpen = true; // optimistic: prevents races; we revert on failure
 
-    // Subscribe to the global pty-data event BEFORE pty_open spawns the
-    // reader thread. Setting up the listener up-front means we don't lose
-    // the initial output burst from tmux's attach refresh.
-    try {
-      unlistenPtyData = await listen<string>('pty-data', (event) => {
-        term?.write(event.payload);
-      });
-    } catch (e) {
-      openError = `failed to subscribe to pty-data: ${describeError(e)}`;
-      term?.writeln(`\r\n\x1b[31m${openError}\x1b[0m\r\n`);
-      ptyOpen = false;
-      return;
-    }
+    // Install our xterm as the write sink for the GLOBAL pty-data
+    // listener (registered at App boot). No async timing race possible —
+    // the listener has been alive since startup.
+    setPtyWriteSink((chunk) => {
+      term?.write(chunk);
+    });
+    sinkAttached = true;
 
     try {
       await invoke('pty_open', {
@@ -163,8 +158,8 @@
       openError = describeError(e);
       term?.writeln(`\r\n\x1b[31mPTY open failed: ${openError}\x1b[0m\r\n`);
       ptyOpen = false;
-      unlistenPtyData?.();
-      unlistenPtyData = null;
+      setPtyWriteSink(null);
+      sinkAttached = false;
       return;
     }
 
@@ -187,9 +182,9 @@
   async function closeTerm() {
     resizeObserver?.disconnect();
     resizeObserver = null;
-    if (unlistenPtyData) {
-      unlistenPtyData();
-      unlistenPtyData = null;
+    if (sinkAttached) {
+      setPtyWriteSink(null);
+      sinkAttached = false;
     }
     term?.dispose();
     term = null;
@@ -249,6 +244,16 @@
     <div class="xterm-host" bind:this={container} data-testid="terminal-host"></div>
     {#if openError}
       <div class="err">PTY error: {openError}</div>
+    {/if}
+    {#if $ptyDebug.length > 0}
+      <details class="debug">
+        <summary>pty-data events ({$ptyDebug.length}) — click to expand</summary>
+        <ul>
+          {#each $ptyDebug.slice(-10).reverse() as e (e.ts)}
+            <li><code>{e.bytes}B · {e.preview}</code></li>
+          {/each}
+        </ul>
+      </details>
     {/if}
   </div>
 {:else}
@@ -325,4 +330,17 @@
     padding: 0.3rem 0.6rem;
     border-top: 1px solid #e64a4a;
   }
+  .debug {
+    flex: 0 0 auto;
+    font-size: 0.7rem;
+    padding: 0.3rem 0.6rem;
+    border-top: 1px solid var(--border);
+    background: var(--bg-pane);
+    color: var(--fg-muted);
+    max-height: 30%;
+    overflow-y: auto;
+  }
+  .debug summary { cursor: pointer; }
+  .debug ul { list-style: none; margin: 0.3rem 0 0 0; padding: 0; }
+  .debug li { padding: 0.1rem 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 </style>
