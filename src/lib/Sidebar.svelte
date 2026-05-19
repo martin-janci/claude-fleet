@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { projects, loadProjects, refreshProjects, type ProjectTreeRow } from './projects';
   import { sessions, loadSessions, killSession, type SessionRow } from './sessions';
-  import { selectedProject, selectProject } from './selection';
+  import { selectedProject, selectedSession, selectProject, selectSession } from './selection';
   import NewSessionDialog from './NewSessionDialog.svelte';
 
   type Recency = 'all' | 'today' | '7d' | '30d';
@@ -121,6 +121,27 @@
       onSelectRow(row);
     }
   }
+
+  function onSelectSession(sess: SessionRow) {
+    const cur = $selectedSession;
+    if (cur && cur.id === sess.id) {
+      selectSession(null);
+    } else {
+      selectSession(sess);
+    }
+  }
+
+  function onKeySession(e: KeyboardEvent, sess: SessionRow) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      onSelectSession(sess);
+    }
+  }
+
+  function onKillButton(name: string, e: Event) {
+    e.stopPropagation();
+    onKill(name);
+  }
 </script>
 
 <div class="sidebar" data-testid="sidebar-tree">
@@ -197,9 +218,22 @@
           {/if}
 
           {#each sessionsForProject(row.project.id) as sess (sess.id)}
-            <div class="sess-row" data-testid="sess-row">
+            {@const sessSelected = $selectedSession?.id === sess.id}
+            <div
+              class="sess-row"
+              class:selected={sessSelected}
+              data-testid="sess-row"
+              role="button"
+              tabindex="0"
+              onclick={() => onSelectSession(sess)}
+              onkeydown={(e) => onKeySession(e, sess)}
+            >
               <span class="sess-name">{sess.tmux_name}</span>
-              <button class="kill" onclick={() => onKill(sess.tmux_name)} title="Kill session" aria-label="Kill session">×</button>
+              <button
+                class="kill"
+                onclick={(e) => onKillButton(sess.tmux_name, e)}
+                title="Kill session"
+                aria-label="Kill session">×</button>
             </div>
           {/each}
         </li>
@@ -217,9 +251,22 @@
     <div class="orphan-section" data-testid="orphan-sessions">
       <div class="section-header">Other sessions ({orphanSessions.length})</div>
       {#each orphanSessions as sess (sess.id)}
-        <div class="sess-row" data-testid="sess-row">
+        {@const sessSelected = $selectedSession?.id === sess.id}
+        <div
+          class="sess-row"
+          class:selected={sessSelected}
+          data-testid="sess-row"
+          role="button"
+          tabindex="0"
+          onclick={() => onSelectSession(sess)}
+          onkeydown={(e) => onKeySession(e, sess)}
+        >
           <span class="sess-name">{sess.tmux_name}</span>
-          <button class="kill" onclick={() => onKill(sess.tmux_name)} title="Kill session" aria-label="Kill session">×</button>
+          <button
+            class="kill"
+            onclick={(e) => onKillButton(sess.tmux_name, e)}
+            title="Kill session"
+            aria-label="Kill session">×</button>
         </div>
       {/each}
     </div>
@@ -325,8 +372,11 @@
     padding: 0.25rem 0.5rem 0.25rem 0.9rem;
     color: var(--fg);
     border-radius: 5px;
+    cursor: pointer;
+    user-select: none;
   }
-  .sess-row:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .sess-row:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  .sess-row.selected { background: color-mix(in srgb, var(--accent) 22%, transparent); }
   .sess-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .kill {
     background: transparent;

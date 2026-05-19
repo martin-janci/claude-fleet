@@ -26,7 +26,7 @@ import { get } from 'svelte/store';
 import Sidebar from './Sidebar.svelte';
 import { projects } from './projects';
 import { sessions } from './sessions';
-import { selectedProject, selectProject } from './selection';
+import { selectedProject, selectedSession, selectProject, selectSession } from './selection';
 
 const defaultInvoke = async (cmd: string) => {
   if (cmd === 'list_projects') return fake;
@@ -38,6 +38,7 @@ beforeEach(() => {
   projects.set([]);
   sessions.set([]);
   selectProject(null);
+  selectSession(null);
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
   (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(defaultInvoke);
 });
@@ -211,5 +212,117 @@ describe('Sidebar', () => {
     await fireEvent.click(addButtons[0]);
     // The dialog opens but the project should NOT be selected via the row click.
     expect(get(selectedProject)).toBeNull();
+  });
+
+  it('clicking a session row selects the session in the store', async () => {
+    const sess = {
+      id: 99,
+      tmux_name: 'dev-foo',
+      host_alias: 'local',
+      project_id: 1,
+      worktree_id: null,
+      created_at: 1,
+      last_activity_at: 1,
+      status: 'running',
+      notes: null,
+    };
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_projects') return fake;
+      if (cmd === 'list_sessions') return [sess];
+      return null;
+    });
+    render(Sidebar);
+    await tick(); await tick();
+    const sessRows = await screen.findAllByTestId('sess-row');
+    expect(get(selectedSession)).toBeNull();
+    await fireEvent.click(sessRows[0]);
+    expect(get(selectedSession)?.id).toBe(99);
+    expect(sessRows[0].className).toContain('selected');
+  });
+
+  it('clicking the same session again deselects it', async () => {
+    const sess = {
+      id: 99,
+      tmux_name: 'dev-foo',
+      host_alias: 'local',
+      project_id: 1,
+      worktree_id: null,
+      created_at: 1,
+      last_activity_at: 1,
+      status: 'running',
+      notes: null,
+    };
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_projects') return fake;
+      if (cmd === 'list_sessions') return [sess];
+      return null;
+    });
+    render(Sidebar);
+    await tick(); await tick();
+    const sessRows = await screen.findAllByTestId('sess-row');
+    await fireEvent.click(sessRows[0]);
+    await fireEvent.click(sessRows[0]);
+    expect(get(selectedSession)).toBeNull();
+  });
+
+  it('selecting a session clears any project selection', async () => {
+    const sess = {
+      id: 99,
+      tmux_name: 'dev-foo',
+      host_alias: 'local',
+      project_id: 1,
+      worktree_id: null,
+      created_at: 1,
+      last_activity_at: 1,
+      status: 'running',
+      notes: null,
+    };
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_projects') return fake;
+      if (cmd === 'list_sessions') return [sess];
+      return null;
+    });
+    render(Sidebar);
+    await tick(); await tick();
+    const projRows = await screen.findAllByTestId('proj-row');
+    await fireEvent.click(projRows[0]);
+    expect(get(selectedProject)?.project.id).toBe(1);
+
+    const sessRows = await screen.findAllByTestId('sess-row');
+    await fireEvent.click(sessRows[0]);
+    expect(get(selectedSession)?.id).toBe(99);
+    expect(get(selectedProject)).toBeNull();
+  });
+
+  it('clicking × on a session does not also select the session', async () => {
+    const sess = {
+      id: 99,
+      tmux_name: 'dev-foo',
+      host_alias: 'local',
+      project_id: 1,
+      worktree_id: null,
+      created_at: 1,
+      last_activity_at: 1,
+      status: 'running',
+      notes: null,
+    };
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_projects') return fake;
+      if (cmd === 'list_sessions') return [sess];
+      if (cmd === 'kill_session') return null;
+      return null;
+    });
+    // Stub confirm() to true so kill proceeds without UI.
+    const origConfirm = window.confirm;
+    window.confirm = () => true;
+    render(Sidebar);
+    await tick(); await tick();
+    const sessRows = await screen.findAllByTestId('sess-row');
+    const killBtn = sessRows[0].querySelector('.kill') as HTMLButtonElement;
+    expect(get(selectedSession)).toBeNull();
+    await fireEvent.click(killBtn);
+    // Kill triggers but session was NOT selected via the row.
+    expect(get(selectedSession)).toBeNull();
+    window.confirm = origConfirm;
   });
 });
