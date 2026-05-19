@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import type { ProjectTreeRow, WorktreeRow } from './projects';
   import { newSession, type SessionRow } from './sessions';
 
@@ -12,26 +13,20 @@
     onCancel: () => void;
   } = $props();
 
-  const owner = project.project.owner;
-  const repo = project.project.repo;
-  const projectId = project.project.id;
-  const worktrees = project.worktrees;
-
   function defaultName(wt: WorktreeRow | null): string {
-    const base = `dev-${owner}-${repo}`;
+    const base = `dev-${project.project.owner}-${project.project.repo}`;
     if (!wt || wt.name === 'main') return base;
     return `${base}--${wt.name}`;
   }
 
-  const initialWorktree = worktrees[0] ?? null;
-  let chosenWorktreeId = $state<number | null>(initialWorktree?.id ?? null);
-  let name = $state(defaultName(initialWorktree));
+  let chosenWorktreeId = $state<number | null>(untrack(() => project.worktrees[0]?.id ?? null));
+  let name = $state(untrack(() => defaultName(project.worktrees[0] ?? null)));
   let busy = $state(false);
   let error: string | null = $state(null);
 
   function onPickWorktree(id: number) {
     chosenWorktreeId = id;
-    const wt = worktrees.find((w) => w.id === id) ?? null;
+    const wt = project.worktrees.find((w) => w.id === id) ?? null;
     name = defaultName(wt);
   }
 
@@ -43,7 +38,7 @@
     busy = true;
     error = null;
     const r = await newSession({
-      project_id: projectId,
+      project_id: project.project.id,
       worktree_id: chosenWorktreeId,
       name: name.trim(),
     });
@@ -57,12 +52,12 @@
 </script>
 
 <div class="dialog" role="dialog" aria-label="New session">
-  <h3>New session — {owner}/{repo}</h3>
+  <h3>New session — {project.project.owner}/{project.project.repo}</h3>
 
-  {#if worktrees.length > 1}
+  {#if project.worktrees.length > 1}
     <label for="wt-picker">Worktree</label>
     <div class="worktree-row" id="wt-picker" role="group">
-      {#each worktrees as wt (wt.id)}
+      {#each project.worktrees as wt (wt.id)}
         <button
           class="wt-pick"
           class:active={chosenWorktreeId === wt.id}
