@@ -5,9 +5,6 @@
   --fg-muted: #6b6b6b;
   --border: #e5e5e5;
   --accent: #2563eb;
-
-  --sidebar-w: 25%;
-  --center-w: 30%;
 }
 
 @media (prefers-color-scheme: dark) {

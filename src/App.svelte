@@ -11,7 +11,7 @@
 <style>
   .layout {
     display: grid;
-    grid-template-columns: var(--sidebar-w) var(--center-w) 1fr;
+    grid-template-columns: 25% 30% 1fr;
     height: 100vh;
     width: 100vw;
     background: var(--bg);

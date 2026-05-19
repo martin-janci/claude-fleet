@@ -10,12 +10,11 @@ describe('App layout', () => {
     expect(getByTestId('pane-terminal')).toBeInTheDocument();
   });
 
-  it('arranges panes left-to-right via CSS grid', () => {
+  it('contains all three panes inside the layout container', () => {
     const { container } = render(App);
     const layout = container.querySelector('.layout') as HTMLElement;
     expect(layout).not.toBeNull();
-    // jsdom does not apply scoped Svelte CSS, so we verify the class is present
-    // (the display:grid rule lives in App.svelte's <style> block)
-    expect(layout.classList.contains('layout')).toBe(true);
+    const panes = layout.querySelectorAll('[data-testid^="pane-"]');
+    expect(panes).toHaveLength(3);
   });
 });
