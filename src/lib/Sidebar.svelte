@@ -21,9 +21,11 @@
   async function onRefresh() {
     loading = true;
     loadError = null;
-    const r = await refreshProjects();
+    const pr = await refreshProjects();
+    const sr = await loadSessions();
     loading = false;
-    if (!r.ok) loadError = r.error.message;
+    if (!pr.ok) loadError = pr.error.message;
+    else if (!sr.ok) loadError = sr.error.message;
   }
 
   const RECENCY_WINDOW: Record<Recency, number | null> = {
@@ -67,6 +69,11 @@
     return $sessions.filter((s) => s.project_id === projectId);
   }
 
+  // Sessions whose tmux working directory didn't map to any known project
+  // (created outside ~/projects/github.com/, or before the user clicked
+  // refresh). Render them in a dedicated section so they aren't invisible.
+  const orphanSessions = $derived($sessions.filter((s) => s.project_id === null));
+
   let dialogProject: ProjectTreeRow | null = $state(null);
 
   function openNew(p: ProjectTreeRow) {
@@ -109,13 +116,9 @@
 
   {#if loadError}
     <p class="err">{loadError}</p>
-  {:else if filtered.length === 0}
-    <p class="empty">
-      {$projects.length === 0
-        ? 'No projects yet — click refresh to scan ~/projects/github.com.'
-        : 'No projects match the current filter.'}
-    </p>
-  {:else}
+  {/if}
+
+  {#if filtered.length > 0}
     <ul class="tree">
       {#each filtered as row (row.project.id)}
         <li class="proj">
@@ -145,6 +148,24 @@
         </li>
       {/each}
     </ul>
+  {:else if !loadError && orphanSessions.length === 0}
+    <p class="empty">
+      {$projects.length === 0
+        ? 'No projects yet — click refresh to scan ~/projects/github.com.'
+        : 'No projects match the current filter.'}
+    </p>
+  {/if}
+
+  {#if orphanSessions.length > 0}
+    <div class="orphan-section" data-testid="orphan-sessions">
+      <div class="section-header">Other sessions ({orphanSessions.length})</div>
+      {#each orphanSessions as sess (sess.id)}
+        <div class="sess-row" data-testid="sess-row">
+          <span class="sess-name">{sess.tmux_name}</span>
+          <button class="kill" onclick={() => onKill(sess.tmux_name)} title="Kill session">×</button>
+        </div>
+      {/each}
+    </div>
   {/if}
 </div>
 
@@ -231,5 +252,17 @@
     position: fixed; inset: 0; background: rgba(0,0,0,0.4);
     display: flex; align-items: center; justify-content: center;
     z-index: 10;
+  }
+  .orphan-section {
+    border-top: 1px solid var(--border);
+    padding-top: 0.4rem;
+    margin-top: 0.4rem;
+  }
+  .section-header {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--fg-muted);
+    padding: 0 0 0.2rem 0;
   }
 </style>
