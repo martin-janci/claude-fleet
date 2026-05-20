@@ -82,9 +82,10 @@
     return a.seat_tier ? `${email} (${a.seat_tier})` : email;
   }
 
-  const hasChecked = $derived(
-    Object.entries(checked).some(([_, v]) => v),
-  );
+  // Read from displayTargets — not the raw `checked` map — so stale entries
+  // from a prior "Show all fleet" toggle can't keep Send enabled when none of
+  // the currently-displayed rows are checked.
+  const hasChecked = $derived(displayTargets.some((t) => checked[t.id]));
   const canSend = $derived(prompt.trim().length > 0 && hasChecked && !sending);
 
   async function send() {
