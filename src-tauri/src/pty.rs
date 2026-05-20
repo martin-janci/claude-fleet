@@ -78,6 +78,20 @@ pub fn pty_open(args: PtyOpenArgs, state: State<'_, Mutex<PtyState>>) -> Result<
         cmd.env("PATH", path);
     }
     cmd.env("TERM", "xterm-256color");
+    // Inherit locale env (lib.rs imports/backfills these at startup so they're
+    // populated even when launched from Finder). Without UTF-8 locale, claude
+    // and other modern TUIs detect a degraded terminal and render ASCII
+    // fallbacks (`_` instead of `└` / `↑` / `█` block glyphs).
+    for var in ["LANG", "LC_ALL", "LC_CTYPE"] {
+        if let Ok(val) = std::env::var(var) {
+            if !val.is_empty() {
+                cmd.env(var, val);
+            }
+        }
+    }
+    // COLORTERM=truecolor signals to apps (claude, vim, etc.) that they can
+    // emit 24-bit SGR sequences. Our renderer supports them already.
+    cmd.env("COLORTERM", "truecolor");
 
     let child = pair
         .slave

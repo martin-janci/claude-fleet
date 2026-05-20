@@ -1,8 +1,9 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import type { SessionRow } from './sessions';
-  import { killSession } from './sessions';
+  import { killSession, renameSession, restartSession } from './sessions';
   import { projects } from './projects';
-  import { clearSelection } from './selection';
+  import { selectSession, clearSelection } from './selection';
 
   let { session }: { session: SessionRow } = $props();
 
@@ -27,33 +28,105 @@
   }
 
   let copied = $state(false);
-  let copyError: string | null = $state(null);
+  let actionError: string | null = $state(null);
+
+  // Title rename state — same UX as the sidebar's inline rename.
+  let renaming = $state(false);
+  let renameValue = $state('');
 
   async function onCopy() {
-    copyError = null;
+    actionError = null;
     try {
       await navigator.clipboard.writeText(attachCommand);
       copied = true;
       setTimeout(() => (copied = false), 1500);
     } catch (e) {
-      copyError = String(e);
+      actionError = String(e);
     }
   }
 
-  async function onKill() {
-    if (!confirm(`Kill tmux session ${session.tmux_name}?`)) return;
+  async function beginRename() {
+    renaming = true;
+    renameValue = session.tmux_name;
+    actionError = null;
+    await tick();
+    const input = document.querySelector<HTMLInputElement>('[data-testid="details-rename"]');
+    input?.focus();
+    input?.select();
+  }
+
+  async function commitRename() {
+    if (!renaming) return;
+    const next = renameValue.trim();
+    if (!next || next === session.tmux_name) {
+      renaming = false;
+      return;
+    }
+    const r = await renameSession(session.tmux_name, next);
+    if (!r.ok) {
+      actionError = r.error.message;
+      return;
+    }
+    selectSession(r.value);
+    renaming = false;
+  }
+
+  function cancelRename() {
+    renaming = false;
+  }
+
+  function onRenameKey(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void commitRename();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelRename();
+    }
+  }
+
+  async function onRestart() {
+    actionError = null;
+    const r = await restartSession(session.tmux_name);
+    if (!r.ok) actionError = r.error.message;
+  }
+
+  let confirmingKill = $state(false);
+  function askKill() {
+    confirmingKill = true;
+    actionError = null;
+  }
+  function cancelKill() {
+    confirmingKill = false;
+  }
+  async function doKill() {
+    confirmingKill = false;
     const r = await killSession(session.tmux_name);
     if (r.ok) {
       clearSelection();
     } else {
-      copyError = r.error.message;
+      actionError = r.error.message;
     }
   }
 </script>
 
 <article class="details" data-testid="session-details">
   <header class="header">
-    <h2 class="title">{session.tmux_name}</h2>
+    {#if renaming}
+      <input
+        class="title-input"
+        data-testid="details-rename"
+        bind:value={renameValue}
+        onkeydown={onRenameKey}
+        onblur={commitRename}
+      />
+    {:else}
+      <h2
+        class="title"
+        ondblclick={beginRename}
+        title="Double-click to rename"
+      >{session.tmux_name}</h2>
+    {/if}
     <div class="sub">
       <span class="host">{session.host_alias}</span>
       <span class="status status-{session.status}">{session.status}</span>
@@ -78,27 +151,44 @@
   </dl>
 
   <section class="block">
-    <h3>Attach</h3>
-    <p class="hint">
-      Phase 3 will embed a terminal in this pane. For now, run this in your terminal:
-    </p>
+    <h3>Attach from another terminal</h3>
     <div class="cmd-row">
       <code class="cmd" data-testid="attach-command">{attachCommand}</code>
       <button class="copy" onclick={onCopy} data-testid="copy-attach">
         {copied ? '✓ copied' : 'copy'}
       </button>
     </div>
-    {#if copyError}
-      <p class="err">copy failed: {copyError}</p>
-    {/if}
   </section>
 
+  {#if actionError}
+    <p class="err">{actionError}</p>
+  {/if}
+
   <section class="block actions">
-    <button class="danger" onclick={onKill} data-testid="kill-from-details">
+    <button class="ghost" onclick={beginRename} data-testid="rename-from-details">
+      ✎ Rename
+    </button>
+    <button class="ghost" onclick={onRestart} data-testid="restart-from-details">
+      ↻ Restart
+    </button>
+    <button class="danger" onclick={askKill} data-testid="kill-from-details">
       Kill session
     </button>
   </section>
 </article>
+
+{#if confirmingKill}
+  <div class="modal-backdrop" onclick={cancelKill} role="presentation">
+    <div class="confirm" onclick={(e) => e.stopPropagation()} role="presentation">
+      <h3>Kill session?</h3>
+      <p>This will kill the tmux session <code>{session.tmux_name}</code> and lose any running claude state inside it. Continue?</p>
+      <div class="confirm-actions">
+        <button onclick={cancelKill}>Cancel</button>
+        <button class="danger" onclick={doKill} data-testid="confirm-kill-details">Kill</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   .details {
@@ -113,6 +203,21 @@
     font-size: 1.1rem;
     font-weight: 600;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    cursor: text;
+    padding: 0.05rem 0;
+    border-radius: 3px;
+  }
+  .title:hover { background: var(--bg-pane); }
+  .title-input {
+    font-size: 1.1rem;
+    font-weight: 600;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    padding: 0.1rem 0.3rem;
+    border: 1px solid var(--accent);
+    background: var(--bg);
+    color: var(--fg);
+    border-radius: 4px;
+    outline: none;
   }
   .sub { display: flex; gap: 0.5rem; align-items: center; font-size: 0.75rem; }
   .host {
@@ -154,7 +259,6 @@
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
-  .hint { margin: 0 0 0.5rem 0; color: var(--fg-muted); font-size: 0.85rem; }
 
   .cmd-row {
     display: flex;
@@ -185,10 +289,20 @@
   }
   .copy:hover { border-color: var(--accent); }
 
-  .actions { display: flex; gap: 0.5rem; }
+  .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  .ghost {
+    font-size: 0.85rem;
+    padding: 0.35rem 0.8rem;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--fg);
+    border-radius: 5px;
+    cursor: pointer;
+  }
+  .ghost:hover { border-color: var(--accent); }
   .danger {
     font-size: 0.85rem;
-    padding: 0.4rem 0.9rem;
+    padding: 0.35rem 0.8rem;
     border: 1px solid #e64a4a;
     background: transparent;
     color: #e64a4a;
@@ -197,5 +311,46 @@
   }
   .danger:hover { background: rgba(230, 74, 74, 0.1); }
 
-  .err { color: #e64a4a; font-size: 0.8rem; margin: 0.4rem 0 0 0; }
+  .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
+
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 10;
+  }
+  .confirm {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1rem;
+    width: 360px;
+    color: var(--fg);
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .confirm h3 { margin: 0; font-size: 0.95rem; }
+  .confirm p { margin: 0; font-size: 0.85rem; color: var(--fg-muted); line-height: 1.4; }
+  .confirm code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--bg-pane);
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    color: var(--fg);
+  }
+  .confirm-actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
+  .confirm-actions button {
+    font-size: 0.85rem;
+    padding: 0.3rem 0.8rem;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--fg);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .confirm-actions button.danger {
+    color: #e64a4a;
+    border-color: #e64a4a;
+  }
+  .confirm-actions button.danger:hover { background: rgba(230, 74, 74, 0.12); }
 </style>

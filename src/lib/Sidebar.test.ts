@@ -2,7 +2,9 @@ import { fireEvent, render, screen } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { tick } from 'svelte';
 
-const fake = [
+// Three sample projects. Sessions are attached per-test so we can verify
+// the new "hide projects without sessions" behavior.
+const fakeProjects = [
   {
     project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: Math.floor(Date.now() / 1000) - 60 },
     worktrees: [{ id: 11, project_id: 1, name: 'main', path: '/r/cf', branch: 'main' }],
@@ -17,6 +19,21 @@ const fake = [
   },
 ];
 
+let nextSessionId = 1000;
+function sessionFor(projectId: number | null, name = `dev-${projectId ?? 'orphan'}`) {
+  return {
+    id: nextSessionId++,
+    tmux_name: name,
+    host_alias: 'local',
+    project_id: projectId,
+    worktree_id: null,
+    created_at: 1,
+    last_activity_at: 1,
+    status: 'running',
+    notes: null,
+  };
+}
+
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
 }));
@@ -26,68 +43,85 @@ import { get } from 'svelte/store';
 import Sidebar from './Sidebar.svelte';
 import { projects } from './projects';
 import { sessions } from './sessions';
-import { selectedProject, selectedSession, selectProject, selectSession } from './selection';
+import { selectedSession, selectSession } from './selection';
 
-const defaultInvoke = async (cmd: string) => {
-  if (cmd === 'list_projects') return fake;
-  if (cmd === 'list_sessions') return [];
-  return null;
-};
+function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof sessionFor>[]) {
+  (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+    if (cmd === 'list_projects') return projs;
+    if (cmd === 'list_sessions') return sess;
+    return null;
+  });
+}
 
 beforeEach(() => {
   projects.set([]);
   sessions.set([]);
-  selectProject(null);
   selectSession(null);
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
-  (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(defaultInvoke);
+  // Wipe persisted prefs so one test's recency choice doesn't leak into
+  // the next test's mount-time hydration.
+  localStorage.clear();
 });
 
-describe('Sidebar', () => {
-  it('renders all projects by default', async () => {
+describe('Sidebar (sessions-grouped view)', () => {
+  it('hides projects that have no active sessions', async () => {
+    // No sessions at all — main tree should show nothing.
+    mockBackend(fakeProjects, []);
     render(Sidebar);
     await tick(); await tick();
-    const rows = await screen.findAllByTestId('proj-row');
-    expect(rows).toHaveLength(3);
+    const rows = screen.queryAllByTestId('proj-row');
+    expect(rows).toHaveLength(0);
   });
 
-  it('filters by 7d recency', async () => {
+  it('shows a project once it has at least one session', async () => {
+    mockBackend(fakeProjects, [sessionFor(1)]);
     render(Sidebar);
     await tick(); await tick();
-    await screen.findAllByTestId('proj-row');
-    await fireEvent.click(screen.getByText('7d'));
-    const rows = await screen.findAllByTestId('proj-row');
-    expect(rows).toHaveLength(1); // only claude-fleet (1 minute old) matches "7d"
-  });
-
-  it('filters by search query', async () => {
-    render(Sidebar);
-    await tick(); await tick();
-    await screen.findAllByTestId('proj-row');
-    const search = screen.getByTestId('sidebar-search') as HTMLInputElement;
-    await fireEvent.input(search, { target: { value: 'phone' } });
     const rows = await screen.findAllByTestId('proj-row');
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toHaveTextContent('phone-manager');
+    expect(rows[0]).toHaveTextContent('claude-fleet');
   });
 
-  it('renders orphan sessions (project_id null) in a dedicated section', async () => {
-    const orphan = {
-      id: 1,
-      tmux_name: 'dev-stray',
-      host_alias: 'local',
-      project_id: null,
-      worktree_id: null,
-      created_at: 1,
-      last_activity_at: 1,
-      status: 'running',
-      notes: null,
-    };
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
-      if (cmd === 'list_projects') return fake;
-      if (cmd === 'list_sessions') return [orphan];
-      return null;
-    });
+  it('groups multiple sessions under their project', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a'), sessionFor(1, 'dev-b'), sessionFor(2, 'dev-c')]);
+    render(Sidebar);
+    await tick(); await tick();
+    const projRows = await screen.findAllByTestId('proj-row');
+    expect(projRows).toHaveLength(2);
+    const sessRows = await screen.findAllByTestId('sess-row');
+    expect(sessRows).toHaveLength(3);
+  });
+
+  it('does not render any worktree rows', async () => {
+    // Even if a project has multiple worktrees, the sidebar must not show them.
+    const multi = [
+      {
+        project: { id: 1, owner: 'o', repo: 'r', base_path: '/x', last_session_at: 0 },
+        worktrees: [
+          { id: 11, project_id: 1, name: 'main', path: '/x', branch: 'main' },
+          { id: 12, project_id: 1, name: 'feature-x', path: '/x/.worktrees/feature-x', branch: 'feature-x' },
+          { id: 13, project_id: 1, name: 'bugfix', path: '/x/.worktrees/bugfix', branch: 'bugfix' },
+        ],
+      },
+    ];
+    mockBackend(multi, [sessionFor(1)]);
+    render(Sidebar);
+    await tick(); await tick();
+    await screen.findAllByTestId('proj-row');
+    expect(screen.queryAllByTestId('wt-row')).toHaveLength(0);
+  });
+
+  it('shows a session count badge per project', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a'), sessionFor(1, 'dev-b')]);
+    render(Sidebar);
+    await tick(); await tick();
+    const row = await screen.findByTestId('proj-row');
+    // Count "2" should appear in the project row.
+    expect(row.textContent).toContain('2');
+  });
+
+  it('renders orphan sessions in a separate section', async () => {
+    mockBackend(fakeProjects, [sessionFor(null, 'dev-stray')]);
     render(Sidebar);
     await tick(); await tick();
     const section = await screen.findByTestId('orphan-sessions');
@@ -95,234 +129,217 @@ describe('Sidebar', () => {
     expect(section).toHaveTextContent('dev-stray');
   });
 
-  it('shows orphan section alongside matched projects, not instead of', async () => {
-    const orphan = {
-      id: 1,
-      tmux_name: 'dev-stray',
-      host_alias: 'local',
-      project_id: null,
-      worktree_id: null,
-      created_at: 1,
-      last_activity_at: 1,
-      status: 'running',
-      notes: null,
-    };
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
-      if (cmd === 'list_projects') return fake;
-      if (cmd === 'list_sessions') return [orphan];
-      return null;
-    });
+  it('clicking project row toggles collapse (sessions show/hide)', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a')]);
     render(Sidebar);
     await tick(); await tick();
-    const rows = await screen.findAllByTestId('proj-row');
-    expect(rows.length).toBeGreaterThan(0);
-    const section = await screen.findByTestId('orphan-sessions');
-    expect(section).toBeInTheDocument();
+    const projRow = await screen.findByTestId('proj-row');
+    expect(screen.queryAllByTestId('sess-row')).toHaveLength(1);
+    await fireEvent.click(projRow);
+    await tick();
+    expect(screen.queryAllByTestId('sess-row')).toHaveLength(0);
+    await fireEvent.click(projRow);
+    await tick();
+    expect(screen.queryAllByTestId('sess-row')).toHaveLength(1);
   });
 
-  it('hides the owner when repo name is unique (just shows repo)', async () => {
+  it('clicking a session row selects it in the store', async () => {
+    const sess = sessionFor(1, 'dev-foo');
+    mockBackend(fakeProjects, [sess]);
+    render(Sidebar);
+    await tick(); await tick();
+    const sessRows = await screen.findAllByTestId('sess-row');
+    expect(get(selectedSession)).toBeNull();
+    await fireEvent.click(sessRows[0]);
+    expect(get(selectedSession)?.id).toBe(sess.id);
+    expect(sessRows[0].className).toContain('selected');
+  });
+
+  it('clicking the same session again deselects it', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-foo')]);
+    render(Sidebar);
+    await tick(); await tick();
+    const sessRows = await screen.findAllByTestId('sess-row');
+    await fireEvent.click(sessRows[0]);
+    await fireEvent.click(sessRows[0]);
+    expect(get(selectedSession)).toBeNull();
+  });
+
+  it('kill button opens an in-app confirm dialog (no window.confirm)', async () => {
+    const sess = sessionFor(1, 'dev-foo');
+    mockBackend(fakeProjects, [sess]);
+    render(Sidebar);
+    await tick(); await tick();
+    const sessRow = await screen.findByTestId('sess-row');
+    const killBtn = sessRow.querySelector('button[aria-label="Kill"]') as HTMLButtonElement;
+    await fireEvent.click(killBtn);
+    // Confirm dialog appears.
+    const confirmBtn = await screen.findByTestId('confirm-kill');
+    expect(confirmBtn).toBeInTheDocument();
+  });
+
+  it('confirming a kill actually invokes kill_session', async () => {
+    const sess = sessionFor(1, 'dev-foo');
+    mockBackend(fakeProjects, [sess]);
+    render(Sidebar);
+    await tick(); await tick();
+    const sessRow = await screen.findByTestId('sess-row');
+    const killBtn = sessRow.querySelector('button[aria-label="Kill"]') as HTMLButtonElement;
+    await fireEvent.click(killBtn);
+    const confirmBtn = await screen.findByTestId('confirm-kill');
+    await fireEvent.click(confirmBtn);
+    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.some((c) => c[0] === 'kill_session')).toBe(true);
+  });
+
+  it('double-click on a session enters rename mode', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-foo')]);
+    render(Sidebar);
+    await tick(); await tick();
+    const sessRow = await screen.findByTestId('sess-row');
+    await fireEvent.dblClick(sessRow);
+    const input = await screen.findByTestId('rename-input');
+    expect((input as HTMLInputElement).value).toBe('dev-foo');
+  });
+
+  it('pressing Escape in rename mode cancels without calling backend', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-foo')]);
+    render(Sidebar);
+    await tick(); await tick();
+    const sessRow = await screen.findByTestId('sess-row');
+    await fireEvent.dblClick(sessRow);
+    const input = await screen.findByTestId('rename-input');
+    await fireEvent.keyDown(input, { key: 'Escape' });
+    expect(screen.queryByTestId('rename-input')).toBeNull();
+    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.some((c) => c[0] === 'rename_session')).toBe(false);
+  });
+
+  it('restart button invokes restart_session', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-foo')]);
+    render(Sidebar);
+    await tick(); await tick();
+    const sessRow = await screen.findByTestId('sess-row');
+    const restartBtn = sessRow.querySelector('button[aria-label="Restart"]') as HTMLButtonElement;
+    await fireEvent.click(restartBtn);
+    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.some((c) => c[0] === 'restart_session')).toBe(true);
+  });
+
+  it('hides the owner when repo name is unique', async () => {
+    mockBackend(fakeProjects, [sessionFor(1), sessionFor(2), sessionFor(3)]);
     render(Sidebar);
     await tick(); await tick();
     const rows = await screen.findAllByTestId('proj-row');
-    // No repo collides in `fake`, so all rows show repo without owner prefix.
     for (const row of rows) {
       expect(row).not.toHaveTextContent('martin-janci/');
       expect(row).not.toHaveTextContent('papayapos/');
     }
-    // Repo names still visible.
-    expect(rows.some((r) => r.textContent?.includes('claude-fleet'))).toBe(true);
-    expect(rows.some((r) => r.textContent?.includes('phone-manager'))).toBe(true);
-    expect(rows.some((r) => r.textContent?.includes('pos-frontend'))).toBe(true);
   });
 
   it('shows the owner prefix when two repos share a name', async () => {
     const colliding = [
-      ...fake,
+      ...fakeProjects,
       {
         project: { id: 4, owner: 'otherperson', repo: 'claude-fleet', base_path: '/x/cf', last_session_at: null },
         worktrees: [{ id: 41, project_id: 4, name: 'main', path: '/x/cf', branch: 'main' }],
       },
     ];
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
-      if (cmd === 'list_projects') return colliding;
-      if (cmd === 'list_sessions') return [];
-      return null;
-    });
+    mockBackend(colliding, [sessionFor(1, 'dev-a'), sessionFor(4, 'dev-b')]);
     render(Sidebar);
     await tick(); await tick();
     const rows = await screen.findAllByTestId('proj-row');
-    // Both claude-fleet rows now display the owner prefix.
-    const claudeFleetRows = rows.filter((r) => r.textContent?.includes('claude-fleet'));
-    expect(claudeFleetRows).toHaveLength(2);
-    expect(claudeFleetRows.some((r) => r.textContent?.includes('martin-janci/'))).toBe(true);
-    expect(claudeFleetRows.some((r) => r.textContent?.includes('otherperson/'))).toBe(true);
-    // A non-colliding repo (phone-manager) does NOT get the owner prefix.
-    const phoneRow = rows.find((r) => r.textContent?.includes('phone-manager'));
-    expect(phoneRow?.textContent).not.toContain('martin-janci/phone-manager');
+    const cfRows = rows.filter((r) => r.textContent?.includes('claude-fleet'));
+    expect(cfRows).toHaveLength(2);
+    expect(cfRows.some((r) => r.textContent?.includes('martin-janci/'))).toBe(true);
+    expect(cfRows.some((r) => r.textContent?.includes('otherperson/'))).toBe(true);
   });
 
-  it('clicking a project row selects it; clicking again deselects', async () => {
+  it('footer "+ New session" button opens project picker', async () => {
+    mockBackend(fakeProjects, []);
     render(Sidebar);
     await tick(); await tick();
-    const rows = await screen.findAllByTestId('proj-row');
-    expect(get(selectedProject)).toBeNull();
-    await fireEvent.click(rows[0]);
-    expect(get(selectedProject)?.project.id).toBe(1);
-    expect(rows[0].className).toContain('selected');
-    await fireEvent.click(rows[0]);
-    expect(get(selectedProject)).toBeNull();
+    const newBtn = screen.getByTestId('new-session-footer');
+    await fireEvent.click(newBtn);
+    // Picker now lists all known projects, even those without sessions.
+    await tick();
+    expect(screen.getByRole('listbox')).toBeInTheDocument();
   });
 
-  it('hides the worktrees list when the project has only main', async () => {
+  it('project picker shows ALL projects regardless of recency/search filter', async () => {
+    // Filter to "1d" so only the freshest project (claude-fleet, 60s ago)
+    // would be in the main tree. The picker must still list everything.
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a')]);
     render(Sidebar);
     await tick(); await tick();
-    await screen.findAllByTestId('proj-row');
-    // All fixture projects have only `main`, so no wt-row should render.
-    const wtRows = screen.queryAllByTestId('wt-row');
-    expect(wtRows).toHaveLength(0);
+    // Apply a restrictive filter.
+    await fireEvent.click(screen.getByText('1d'));
+    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'phone' } });
+    await tick();
+    // Open the picker.
+    await fireEvent.click(screen.getByTestId('new-session-footer'));
+    await tick();
+    const listbox = screen.getByRole('listbox');
+    // All three fixture projects should be in the picker, including
+    // pos-frontend (14 days old, would be filtered by "1d") and
+    // phone-manager (no last_session_at at all).
+    expect(listbox.textContent).toContain('claude-fleet');
+    expect(listbox.textContent).toContain('pos-frontend');
+    expect(listbox.textContent).toContain('phone-manager');
   });
 
-  it('shows the worktrees list when there are non-main worktrees', async () => {
-    const withWorktrees = [
-      {
-        project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: null },
-        worktrees: [
-          { id: 11, project_id: 1, name: 'main', path: '/r/cf', branch: 'main' },
-          { id: 12, project_id: 1, name: 'feature-x', path: '/r/cf/.worktrees/feature-x', branch: 'feature-x' },
-        ],
-      },
-    ];
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
-      if (cmd === 'list_projects') return withWorktrees;
-      if (cmd === 'list_sessions') return [];
-      return null;
-    });
+  it('exposes a "1d" recency pill (replaces older "today")', async () => {
+    mockBackend(fakeProjects, []);
     render(Sidebar);
     await tick(); await tick();
-    const wtRows = await screen.findAllByTestId('wt-row');
-    expect(wtRows.length).toBe(2);
+    expect(screen.queryByText('today')).toBeNull();
+    expect(screen.getByText('1d')).toBeInTheDocument();
   });
 
-  it('clicking the + button selects nothing (does not also select the row)', async () => {
+  it('persists the chosen recency to localStorage', async () => {
+    mockBackend(fakeProjects, []);
     render(Sidebar);
     await tick(); await tick();
-    await screen.findAllByTestId('proj-row');
-    const addButtons = screen.getAllByLabelText('New session');
-    expect(get(selectedProject)).toBeNull();
-    await fireEvent.click(addButtons[0]);
-    // The dialog opens but the project should NOT be selected via the row click.
-    expect(get(selectedProject)).toBeNull();
+    await fireEvent.click(screen.getByText('7d'));
+    await tick();
+    expect(localStorage.getItem('cf:pref:recency')).toBe('"7d"');
   });
 
-  it('clicking a session row selects the session in the store', async () => {
-    const sess = {
-      id: 99,
-      tmux_name: 'dev-foo',
-      host_alias: 'local',
-      project_id: 1,
-      worktree_id: null,
-      created_at: 1,
-      last_activity_at: 1,
-      status: 'running',
-      notes: null,
-    };
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
-      if (cmd === 'list_projects') return fake;
-      if (cmd === 'list_sessions') return [sess];
-      return null;
-    });
+  it('hydrates recency from localStorage on mount', async () => {
+    localStorage.setItem('cf:pref:recency', '"30d"');
+    mockBackend(fakeProjects, []);
     render(Sidebar);
     await tick(); await tick();
-    const sessRows = await screen.findAllByTestId('sess-row');
-    expect(get(selectedSession)).toBeNull();
-    await fireEvent.click(sessRows[0]);
-    expect(get(selectedSession)?.id).toBe(99);
-    expect(sessRows[0].className).toContain('selected');
+    const activePill = document.querySelector('.pill.active');
+    expect(activePill?.textContent?.trim()).toBe('30d');
   });
 
-  it('clicking the same session again deselects it', async () => {
-    const sess = {
-      id: 99,
-      tmux_name: 'dev-foo',
-      host_alias: 'local',
-      project_id: 1,
-      worktree_id: null,
-      created_at: 1,
-      last_activity_at: 1,
-      status: 'running',
-      notes: null,
-    };
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
-      if (cmd === 'list_projects') return fake;
-      if (cmd === 'list_sessions') return [sess];
-      return null;
-    });
-    render(Sidebar);
+  it('shows collapse button when onCollapse prop is provided', async () => {
+    mockBackend(fakeProjects, []);
+    let collapsed = false;
+    render(Sidebar, { props: { onCollapse: () => { collapsed = true; } } });
     await tick(); await tick();
-    const sessRows = await screen.findAllByTestId('sess-row');
-    await fireEvent.click(sessRows[0]);
-    await fireEvent.click(sessRows[0]);
-    expect(get(selectedSession)).toBeNull();
+    const btn = screen.getByTestId('sidebar-collapse');
+    expect(btn).toBeInTheDocument();
+    await fireEvent.click(btn);
+    expect(collapsed).toBe(true);
   });
 
-  it('selecting a session clears any project selection', async () => {
-    const sess = {
-      id: 99,
-      tmux_name: 'dev-foo',
-      host_alias: 'local',
-      project_id: 1,
-      worktree_id: null,
-      created_at: 1,
-      last_activity_at: 1,
-      status: 'running',
-      notes: null,
-    };
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
-      if (cmd === 'list_projects') return fake;
-      if (cmd === 'list_sessions') return [sess];
-      return null;
-    });
+  it('omits collapse button when onCollapse is not passed', async () => {
+    mockBackend(fakeProjects, []);
     render(Sidebar);
     await tick(); await tick();
-    const projRows = await screen.findAllByTestId('proj-row');
-    await fireEvent.click(projRows[0]);
-    expect(get(selectedProject)?.project.id).toBe(1);
-
-    const sessRows = await screen.findAllByTestId('sess-row');
-    await fireEvent.click(sessRows[0]);
-    expect(get(selectedSession)?.id).toBe(99);
-    expect(get(selectedProject)).toBeNull();
+    expect(screen.queryByTestId('sidebar-collapse')).toBeNull();
   });
 
-  it('clicking × on a session does not also select the session', async () => {
-    const sess = {
-      id: 99,
-      tmux_name: 'dev-foo',
-      host_alias: 'local',
-      project_id: 1,
-      worktree_id: null,
-      created_at: 1,
-      last_activity_at: 1,
-      status: 'running',
-      notes: null,
-    };
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
-      if (cmd === 'list_projects') return fake;
-      if (cmd === 'list_sessions') return [sess];
-      if (cmd === 'kill_session') return null;
-      return null;
-    });
-    // Stub confirm() to true so kill proceeds without UI.
-    const origConfirm = window.confirm;
-    window.confirm = () => true;
+  it('header (search + filter) and footer (theme + new) stay rendered even with no projects', async () => {
+    mockBackend([], []);
     render(Sidebar);
     await tick(); await tick();
-    const sessRows = await screen.findAllByTestId('sess-row');
-    const killBtn = sessRows[0].querySelector('.kill') as HTMLButtonElement;
-    expect(get(selectedSession)).toBeNull();
-    await fireEvent.click(killBtn);
-    // Kill triggers but session was NOT selected via the row.
-    expect(get(selectedSession)).toBeNull();
-    window.confirm = origConfirm;
+    expect(screen.getByTestId('sidebar-chrome-top')).toBeInTheDocument();
+    expect(screen.getByTestId('sidebar-chrome-bottom')).toBeInTheDocument();
+    expect(screen.getByTestId('sidebar-search')).toBeInTheDocument();
+    expect(screen.getByTestId('theme-toggle')).toBeInTheDocument();
+    expect(screen.getByTestId('new-session-footer')).toBeInTheDocument();
   });
 });

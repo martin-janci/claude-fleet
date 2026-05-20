@@ -77,17 +77,80 @@ fn parse_sessions(input: &str) -> Vec<TmuxSession> {
         .collect()
 }
 
+/// Command tmux runs as the pane's initial process. We use `cl --continue || cl`
+/// to resume the user's last claude conversation if any, otherwise start fresh.
+/// CRUCIAL: after claude exits we `exec $SHELL -l` so the tmux pane stays
+/// alive as a normal interactive shell. Without that, claude returning 0
+/// would close the pane and the whole session would disappear — the user
+/// would lose the ability to "restart" or even attach to it.
+pub fn pane_command() -> String {
+    "cl --continue || cl; exec ${SHELL:-/bin/zsh} -l".to_string()
+}
+
 pub fn new_session(name: &str, working_dir: &std::path::Path) -> Result<(), IpcError> {
+    // Push env into the session explicitly via `-e KEY=VAL`. This matters
+    // because the tmux SERVER may already be running with stale env (e.g.
+    // started before claude-fleet imported the user's locale from their
+    // login shell). `-e` overrides the server env for processes started
+    // in this session, so the spawned `cl`/`bash` reliably sees UTF-8.
+    let mut cmd = Command::new("tmux");
+    cmd.args(["new-session", "-d", "-s", name, "-c", &working_dir.to_string_lossy()]);
+    for var in ["LANG", "LC_ALL", "LC_CTYPE", "PATH"] {
+        if let Ok(val) = std::env::var(var) {
+            if !val.is_empty() {
+                cmd.args(["-e", &format!("{var}={val}")]);
+            }
+        }
+    }
+    cmd.args(["-e", "COLORTERM=truecolor", "-e", "TERM=xterm-256color"]);
+    cmd.arg(pane_command());
+    let output = cmd
+        .output()
+        .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Err(IpcError::new("E_TMUX", stderr.trim()))
+    }
+}
+
+/// Rename an existing tmux session. New name must follow tmux's naming rules
+/// (no `.`, `:`, or whitespace; non-empty). Validation here keeps the caller
+/// from getting a cryptic tmux error.
+pub fn rename_session(old: &str, new: &str) -> Result<(), IpcError> {
+    let trimmed = new.trim();
+    if trimmed.is_empty() {
+        return Err(IpcError::new("E_TMUX", "new session name must not be empty"));
+    }
+    if trimmed.contains(|c: char| c.is_whitespace() || c == '.' || c == ':') {
+        return Err(IpcError::new(
+            "E_TMUX",
+            "tmux session name must not contain whitespace, `.`, or `:`",
+        ));
+    }
+    if trimmed == old {
+        return Ok(()); // no-op
+    }
     let output = Command::new("tmux")
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            name,
-            "-c",
-            &working_dir.to_string_lossy(),
-            "cl --continue || cl || bash",
-        ])
+        .args(["rename-session", "-t", old, trimmed])
+        .output()
+        .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Err(IpcError::new("E_TMUX", stderr.trim()))
+    }
+}
+
+/// Restart the pane's process by killing claude (or whatever's running) and
+/// respawning with the same command the session was created with. Uses
+/// `respawn-pane -k` so we don't need to know if claude is currently running
+/// or already dropped to shell.
+pub fn restart_session(name: &str) -> Result<(), IpcError> {
+    let output = Command::new("tmux")
+        .args(["respawn-pane", "-k", "-t", &format!("{name}:"), &pane_command()])
         .output()
         .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
     if output.status.success() {
@@ -168,5 +231,28 @@ mod tests {
         assert!(!is_no_server_running("can't find session: dev-foo"));
         assert!(!is_no_server_running("ambiguous option"));
         assert!(!is_no_server_running(""));
+    }
+
+    #[test]
+    fn pane_command_falls_back_to_shell_after_claude_exits() {
+        let cmd = pane_command();
+        // The semicolon (NOT `||`) after the second `cl` is the whole point:
+        // it makes the shell always continue to the exec regardless of `cl`'s
+        // exit status. Regression test that the next person who edits this
+        // doesn't accidentally use `||` and resurrect the "session dies on
+        // /exit" bug.
+        assert!(cmd.contains("cl --continue || cl;"), "got: {cmd}");
+        assert!(cmd.contains("exec ${SHELL:-/bin/zsh}"), "got: {cmd}");
+    }
+
+    #[test]
+    fn rename_rejects_whitespace_dots_colons_and_empty() {
+        // Can't actually run tmux in unit tests; just exercise the validation
+        // path. tmux command is never reached.
+        assert!(rename_session("a", "").is_err());
+        assert!(rename_session("a", "   ").is_err());
+        assert!(rename_session("a", "has space").is_err());
+        assert!(rename_session("a", "has.dot").is_err());
+        assert!(rename_session("a", "has:colon").is_err());
     }
 }

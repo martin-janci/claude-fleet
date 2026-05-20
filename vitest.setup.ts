@@ -13,6 +13,8 @@ vi.mock('@tauri-apps/api/core', () => ({
     if (cmd === 'list_sessions') return [];
     if (cmd === 'kill_session') return null;
     if (cmd === 'new_session') return null;
+    if (cmd === 'rename_session') return null;
+    if (cmd === 'restart_session') return null;
     if (cmd === 'pty_open') return null;
     if (cmd === 'pty_write') return null;
     if (cmd === 'pty_resize') return null;

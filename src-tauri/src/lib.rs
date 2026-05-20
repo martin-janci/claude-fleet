@@ -40,31 +40,48 @@ fn compute_backfilled_path(
     Some(new_parts.join(":"))
 }
 
-/// Run the user's login shell with `-l -c 'printf $PATH'` and adopt the result
-/// as the process PATH. This catches everything the user has added in their
-/// shell init files (Homebrew, dotfiles bin/, fnm/nvm/asdf/mise, custom
-/// per-user wrappers like `cl`) — paths a Finder-launched GUI app does not
-/// inherit by default. Best-effort: returns false if `$SHELL` is unset, the
-/// shell exits non-zero, or the captured PATH is empty.
-fn import_login_shell_path() -> bool {
+/// Run the user's login shell once and adopt several env vars that a
+/// Finder-launched GUI app does not inherit by default:
+///
+///   - PATH    — catches Homebrew, dotfiles bin/, fnm/nvm/asdf/mise, and
+///               custom per-user wrappers like `cl`.
+///   - LANG / LC_ALL / LC_CTYPE — locale. Without these, claude and other
+///               TUIs detect a non-UTF-8 terminal and render ASCII fallbacks
+///               (`_` instead of `└` / `↑` / `█` etc.).
+///
+/// One shell invocation prints the values delimited by `\x1f` (US sep) and
+/// terminated by `\x1e` (RS) per variable. We parse and call set_var on each
+/// non-empty value. Best-effort: any failure leaves the var unchanged.
+fn import_login_shell_env() -> bool {
     let Ok(shell) = std::env::var("SHELL") else {
         return false;
     };
-    let Ok(output) = std::process::Command::new(&shell)
-        .args(["-l", "-c", "printf '%s' \"$PATH\""])
-        .output()
-    else {
+    // Order MUST match VARS below.
+    const VARS: &[&str] = &["PATH", "LANG", "LC_ALL", "LC_CTYPE"];
+    let script = VARS
+        .iter()
+        .map(|v| format!("printf '%s\\x1e' \"${v}\""))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let Ok(output) = std::process::Command::new(&shell).args(["-l", "-c", &script]).output() else {
         return false;
     };
     if !output.status.success() {
         return false;
     }
-    let imported = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if imported.is_empty() {
-        return false;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut parts = stdout.split('\x1e');
+    let mut any_set = false;
+    for var in VARS {
+        let Some(val) = parts.next() else { break };
+        let trimmed = val.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        std::env::set_var(var, trimmed);
+        any_set = true;
     }
-    std::env::set_var("PATH", imported);
-    true
+    any_set
 }
 
 /// When launched from Finder (Spotlight, Dock, double-click), macOS hands the
@@ -74,6 +91,22 @@ fn import_login_shell_path() -> bool {
 ///
 /// Backfill the common locations once at startup. We append (not prepend) so
 /// anything the user has explicitly set wins for ambiguous cases.
+/// Ensure LANG points at a UTF-8 locale so spawned PTYs (and the shell-detection
+/// inside claude/tmux) treat the terminal as Unicode-capable. macOS ships
+/// en_US.UTF-8; we use C.UTF-8 as a portable fallback. Only writes if no UTF-8
+/// locale is already present in any of LC_ALL / LANG / LC_CTYPE — we never
+/// override an explicit user choice.
+fn backfill_locale_for_gui_launch() {
+    let has_utf8 = ["LC_ALL", "LANG", "LC_CTYPE"]
+        .iter()
+        .filter_map(|v| std::env::var(v).ok())
+        .any(|v| v.to_ascii_uppercase().contains("UTF-8") || v.to_ascii_uppercase().contains("UTF8"));
+    if has_utf8 {
+        return;
+    }
+    std::env::set_var("LANG", "en_US.UTF-8");
+}
+
 fn backfill_path_for_gui_launch() {
     const COMMON_BIN_DIRS: &[&str] = &[
         "/opt/homebrew/bin", // Apple Silicon Homebrew
@@ -91,13 +124,19 @@ fn backfill_path_for_gui_launch() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Layered PATH recovery for Finder-launched apps:
-    //   1. Try to import the user's full login-shell PATH (Homebrew, dotfiles
-    //      bin/, fnm, mise, etc.). This is where `cl` lives.
-    //   2. Belt-and-suspenders backfill ensures the standard macOS bin dirs
-    //      are present even if step 1 failed or returned a stunted PATH.
-    import_login_shell_path();
+    // Layered env recovery for Finder-launched apps:
+    //   1. Import the user's full login-shell env (PATH + locale). PATH
+    //      catches Homebrew/dotfiles/etc.; LANG/LC_ALL/LC_CTYPE prevent
+    //      claude and other TUIs from rendering ASCII fallbacks because
+    //      they think the terminal is non-UTF-8.
+    //   2. Belt-and-suspenders PATH backfill ensures the standard macOS
+    //      bin dirs are present even if step 1 failed or returned a
+    //      stunted PATH.
+    //   3. Force LANG to a sensible UTF-8 default if both step 1 and the
+    //      OS env left it empty.
+    import_login_shell_env();
     backfill_path_for_gui_launch();
+    backfill_locale_for_gui_launch();
 
     let db_path = appdata_db_path();
     let store = Store::open(&db_path).expect("open store");
@@ -113,6 +152,8 @@ pub fn run() {
             commands::sessions::list_sessions,
             commands::sessions::new_session,
             commands::sessions::kill_session,
+            commands::sessions::rename_session,
+            commands::sessions::restart_session,
             pty::pty_open,
             pty::pty_write,
             pty::pty_resize,
@@ -163,5 +204,38 @@ mod path_backfill_tests {
         let result =
             compute_backfilled_path("", &["/opt/homebrew/bin", "/usr/bin"], |_| true).unwrap();
         assert_eq!(result, "/opt/homebrew/bin:/usr/bin");
+    }
+
+    /// Pure helper for the locale-backfill decision used by
+    /// `backfill_locale_for_gui_launch`. Lifted out for testability —
+    /// the real fn touches std::env which makes parallel tests racy.
+    fn needs_locale_backfill(lc_all: &str, lang: &str, lc_ctype: &str) -> bool {
+        ![lc_all, lang, lc_ctype]
+            .iter()
+            .any(|v| v.to_ascii_uppercase().contains("UTF-8") || v.to_ascii_uppercase().contains("UTF8"))
+    }
+
+    #[test]
+    fn locale_backfill_triggers_when_all_empty() {
+        assert!(needs_locale_backfill("", "", ""));
+    }
+
+    #[test]
+    fn locale_backfill_skipped_when_lang_is_utf8() {
+        assert!(!needs_locale_backfill("", "en_US.UTF-8", ""));
+        assert!(!needs_locale_backfill("", "C.UTF-8", ""));
+        assert!(!needs_locale_backfill("", "sk_SK.utf8", "")); // case-insensitive
+    }
+
+    #[test]
+    fn locale_backfill_skipped_when_lc_all_is_utf8() {
+        assert!(!needs_locale_backfill("en_US.UTF-8", "C", ""));
+    }
+
+    #[test]
+    fn locale_backfill_triggers_when_only_C() {
+        // Plain POSIX C locale isn't UTF-8 — we should still backfill.
+        assert!(needs_locale_backfill("C", "C", "C"));
+        assert!(needs_locale_backfill("POSIX", "POSIX", ""));
     }
 }

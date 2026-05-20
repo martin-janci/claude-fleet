@@ -234,6 +234,92 @@ describe('ansi.Screen — robustness', () => {
   });
 });
 
+describe('ansi.Screen — DEC Special Graphics charset', () => {
+  it('ESC ( 0 switches G0 to graphics; printable bytes translate to box-drawing', () => {
+    // tmux draws a horizontal line as ESC ( 0  qqqq  ESC ( B
+    const s = new Screen(1, 6);
+    s.write('\x1b(0qqqq\x1b(B');
+    expect(rowText(s, 0).slice(0, 4)).toBe('────');
+  });
+
+  it('ESC ( 0 maps x → │ and j/k/l/m → corners', () => {
+    const s = new Screen(2, 8);
+    s.write('\x1b(0lqqk\r\nx  x\x1b(B');
+    expect(rowText(s, 0).slice(0, 4)).toBe('┌──┐');
+    expect(rowText(s, 1).slice(0, 4)).toBe('│  │');
+  });
+
+  it('ESC ( B switches G0 back to ASCII so letters render literally', () => {
+    const s = new Screen(1, 6);
+    s.write('\x1b(0qq\x1b(Bqq');
+    // first two q's translate to ─, next two are literal q
+    expect(rowText(s, 0).slice(0, 4)).toBe('──qq');
+  });
+
+  it('SO (0x0E) shifts active charset to G1, SI (0x0F) shifts back to G0', () => {
+    const s = new Screen(1, 6);
+    // G0=ASCII (default), G1=graphics. SO selects G1, SI selects G0.
+    s.write('\x1b)0\x0eqq\x0fqq');
+    expect(rowText(s, 0).slice(0, 4)).toBe('──qq');
+  });
+
+  it('ESC ( 0 leaves chars outside the graphics range alone (digits, A-Z)', () => {
+    const s = new Screen(1, 6);
+    s.write('\x1b(0AB12\x1b(B');
+    expect(rowText(s, 0).slice(0, 4)).toBe('AB12');
+  });
+});
+
+describe('ansi.Screen — alt screen buffer (DECSET 1049)', () => {
+  it('ESC[?1049h switches to a cleared alt buffer; primary content is hidden', () => {
+    const s = new Screen(3, 5);
+    s.write('hello\r\nworld');
+    s.write('\x1b[?1049h');
+    // After the switch the buffer is empty — visible cells are all spaces.
+    expect(rowText(s, 0)).toBe('     ');
+    expect(rowText(s, 1)).toBe('     ');
+  });
+
+  it('ESC[?1049l returns to the saved primary buffer with content + cursor', () => {
+    const s = new Screen(3, 5);
+    s.write('hello\r\nworld');
+    // Cursor is at row 1, col 5 (after "world").
+    s.write('\x1b[?1049h');
+    s.write('\x1b[2;1HALT'); // type into alt buffer at row 2, col 1
+    s.write('\x1b[?1049l');
+    // Back on primary: content intact, cursor restored.
+    expect(rowText(s, 0)).toBe('hello');
+    expect(rowText(s, 1)).toBe('world');
+    expect(s.cursorRow).toBe(1);
+    expect(s.cursorCol).toBe(5);
+  });
+
+  it('SGR state set in alt buffer does not leak back to primary on leave', () => {
+    const s = new Screen(2, 4);
+    s.write('A');
+    s.write('\x1b[?1049h\x1b[31mB');
+    s.write('\x1b[?1049l');
+    // The primary's "A" was written with default fg before the switch.
+    expect(s.cells[0][0].fg).toBe(COLOR_DEFAULT);
+    // Subsequent writes use the SGR state from BEFORE entering alt.
+    s.write('C');
+    expect(s.cells[0][1].fg).toBe(COLOR_DEFAULT);
+  });
+
+  it('ESC[?1049l without a matching enter is a safe no-op', () => {
+    const s = new Screen(2, 4);
+    s.write('hi\x1b[?1049lX');
+    // We just kept printing; current row should now read "hiX ".
+    expect(rowText(s, 0).slice(0, 3)).toBe('hiX');
+  });
+
+  it('ESC[?47h / ?47l also swap buffers (legacy)', () => {
+    const s = new Screen(2, 4);
+    s.write('top\x1b[?47h\x1b[2J\x1b[Hnew\x1b[?47l');
+    expect(rowText(s, 0).slice(0, 3)).toBe('top');
+  });
+});
+
 describe('ansi.rowToRuns', () => {
   it('groups adjacent cells with identical style into one run', () => {
     const s = new Screen(1, 6);

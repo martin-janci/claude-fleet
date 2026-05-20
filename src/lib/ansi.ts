@@ -76,8 +76,72 @@ const BASIC_16 = [
   '#3b8eea', '#d670d6', '#29b8db', '#ffffff',
 ];
 
+/**
+ * DEC Special Graphics character set translation table (VT100 / xterm).
+ *
+ * When tmux draws box borders it does:
+ *   ESC ( 0    — designate G0 as DEC Special Graphics
+ *   q q q q    — these now render as ── (horizontal box-drawing line)
+ *   ESC ( B    — designate G0 back to US ASCII
+ *
+ * Without this mapping the `q`, `x`, `l`, `m`, `j`, `k`, `t`, `u`, `v`, `w`,
+ * `n` characters that tmux uses for borders show up as literal letters,
+ * which makes claude/tmux UIs look like garbled walls of `xxxx` and `qqqq`.
+ *
+ * Range: 0x5f..0x7e. Anything outside this range falls through unchanged.
+ */
+const DEC_SPECIAL_GRAPHICS: { [k: string]: string } = {
+  '_': ' ',  // NBSP in spec; plain space renders the same in our DOM
+  '`': '◆',
+  'a': '▒',
+  'b': '\t',
+  'c': '\f',
+  'd': '\r',
+  'e': '\n',
+  'f': '°',
+  'g': '±',
+  'h': '␤',
+  'i': '␋',
+  'j': '┘',
+  'k': '┐',
+  'l': '┌',
+  'm': '└',
+  'n': '┼',
+  'o': '⎺',
+  'p': '⎻',
+  'q': '─',
+  'r': '⎼',
+  's': '⎽',
+  't': '├',
+  'u': '┤',
+  'v': '┴',
+  'w': '┬',
+  'x': '│',
+  'y': '≤',
+  'z': '≥',
+  '{': 'π',
+  '|': '≠',
+  '}': '£',
+  '~': '·',
+};
+
 function emptyCell(): Cell {
   return { ch: ' ', fg: COLOR_DEFAULT, bg: COLOR_DEFAULT, attrs: 0 };
+}
+
+/** Snapshot of the primary buffer kept while the alt screen is active. */
+interface SavedScreenState {
+  cells: Cell[][];
+  cursorRow: number;
+  cursorCol: number;
+  curFg: number;
+  curBg: number;
+  curAttrs: number;
+  savedRow: number;
+  savedCol: number;
+  g0Graphics: boolean;
+  g1Graphics: boolean;
+  useG1: boolean;
 }
 
 /**
@@ -102,6 +166,18 @@ export class Screen {
   /** Saved cursor (ESC 7 / DECSC). */
   private savedRow = 0;
   private savedCol = 0;
+  /** Whether G0 / G1 are currently designated as DEC Special Graphics.
+   *  Default: both ASCII. tmux flips G0 around box drawing. */
+  private g0Graphics = false;
+  private g1Graphics = false;
+  /** Active charset selector: false = G0 (default), true = G1.
+   *  SO (0x0E) selects G1, SI (0x0F) selects G0. */
+  private useG1 = false;
+  /** Saved-screen slot for the DEC alt-screen toggle (?1049 / ?47 / ?1047).
+   *  Null while on the primary buffer; populated when the alt buffer is
+   *  active so a `?...l` can restore exactly. We only support one level —
+   *  nesting another ?1049h while already in alt is a no-op. */
+  private savedScreen: SavedScreenState | null = null;
 
   constructor(rows: number, cols: number) {
     this.rows = Math.max(1, rows);
@@ -110,20 +186,20 @@ export class Screen {
   }
 
   /** Resize the buffer. Existing content is preserved by clamping or
-   *  padding rows/cols; cursor is clamped to the new dimensions. */
+   *  padding rows/cols; cursor is clamped to the new dimensions. If we're
+   *  on the alt screen, the saved primary buffer is resized too so a
+   *  later restore doesn't end up at the old dimensions. */
   resize(rows: number, cols: number): void {
     rows = Math.max(1, rows);
     cols = Math.max(1, cols);
     if (rows === this.rows && cols === this.cols) return;
-    const next = makeGrid(rows, cols);
-    const rMin = Math.min(rows, this.rows);
-    const cMin = Math.min(cols, this.cols);
-    for (let r = 0; r < rMin; r++) {
-      for (let c = 0; c < cMin; c++) {
-        next[r][c] = this.cells[r][c];
-      }
+    this.cells = resizeGrid(this.cells, this.rows, this.cols, rows, cols);
+    if (this.savedScreen !== null) {
+      const saved = this.savedScreen;
+      saved.cells = resizeGrid(saved.cells, this.rows, this.cols, rows, cols);
+      if (saved.cursorRow >= rows) saved.cursorRow = rows - 1;
+      if (saved.cursorCol >= cols) saved.cursorCol = cols - 1;
     }
-    this.cells = next;
     this.rows = rows;
     this.cols = cols;
     if (this.cursorRow >= rows) this.cursorRow = rows - 1;
@@ -173,6 +249,16 @@ export class Screen {
         i++;
         continue;
       }
+      if (code === 0x0e /* SO — shift out: select G1 */) {
+        this.useG1 = true;
+        i++;
+        continue;
+      }
+      if (code === 0x0f /* SI — shift in: select G0 */) {
+        this.useG1 = false;
+        i++;
+        continue;
+      }
       if (code < 0x20) {
         // Unknown control byte — drop.
         i++;
@@ -184,14 +270,19 @@ export class Screen {
     }
   }
 
-  /** Apply current SGR state to a cell and write a character at cursor. */
+  /** Apply current SGR state to a cell and write a character at cursor.
+   *  If the active charset (G0/G1) is currently DEC Special Graphics, the
+   *  char is run through `DEC_SPECIAL_GRAPHICS` first; otherwise it goes
+   *  in literally. */
   private putChar(ch: string): void {
     if (this.cursorCol >= this.cols) {
       this.cursorCol = 0;
       this.lineFeed();
     }
+    const graphics = this.useG1 ? this.g1Graphics : this.g0Graphics;
+    const mapped = graphics ? (DEC_SPECIAL_GRAPHICS[ch] ?? ch) : ch;
     const cell = this.cells[this.cursorRow][this.cursorCol];
-    cell.ch = ch;
+    cell.ch = mapped;
     cell.fg = this.curFg;
     cell.bg = this.curBg;
     cell.attrs = this.curAttrs;
@@ -256,8 +347,16 @@ export class Screen {
       return -1; // incomplete OSC
     }
     if (intro === '(' || intro === ')') {
-      // SCS (charset designation) — ignore designator byte.
+      // SCS — designate a charset into G0 (intro='(') or G1 (intro=')'):
+      //   ESC ( 0   → G0 = DEC Special Graphics  (box drawing)
+      //   ESC ( B   → G0 = US ASCII              (default)
+      //   anything else: treat as ASCII (best effort; we don't model
+      //   UK, Dutch, etc.).
       if (start + 2 >= s.length) return -1;
+      const designator = s.charAt(start + 2);
+      const isGraphics = designator === '0';
+      if (intro === '(') this.g0Graphics = isGraphics;
+      else this.g1Graphics = isGraphics;
       return 3;
     }
     if (intro === '=' || intro === '>') {
@@ -275,6 +374,12 @@ export class Screen {
     this.curFg = COLOR_DEFAULT;
     this.curBg = COLOR_DEFAULT;
     this.curAttrs = 0;
+    this.g0Graphics = false;
+    this.g1Graphics = false;
+    this.useG1 = false;
+    // ESC c is a full power-on reset — drop any alt-screen snapshot so
+    // we don't pop back into stale content the next time we leave alt.
+    this.savedScreen = null;
   }
 
   private applyCsi(body: string, final: string): void {
@@ -354,10 +459,94 @@ export class Screen {
       case 'm': // SGR - select graphic rendition
         this.applySgr(params);
         return;
+      case 'h':
+      case 'l':
+        if (isPrivate) this.applyDecPrivate(params, final === 'h');
+        return;
       default:
         // Unknown CSI — silently drop.
         return;
     }
+  }
+
+  /** Apply a private-mode set/reset (DECSET / DECRST). We implement the
+   *  alt-screen flavors used by tmux/vim/htop. Everything else is dropped
+   *  silently so unknown modes don't corrupt state. */
+  private applyDecPrivate(params: number[], set: boolean): void {
+    for (const p of params) {
+      if (p === 1049 || p === 47 || p === 1047) {
+        // Buffer swap. 1049 is the modern combined form (save cursor +
+        // switch + clear / restore on exit). 47 and 1047 are the legacy
+        // variants used by older curses apps; we treat them the same as
+        // 1049 here — close enough in practice and avoids subtle bugs
+        // where an app's `?47` save gets lost during a `?1049` round trip.
+        if (set) this.enterAltScreen();
+        else this.leaveAltScreen();
+      } else if (p === 1048) {
+        // DECSC-only — save / restore the cursor without buffer swap.
+        if (set) {
+          this.savedRow = this.cursorRow;
+          this.savedCol = this.cursorCol;
+        } else {
+          this.cursorRow = this.savedRow;
+          this.cursorCol = this.savedCol;
+        }
+      }
+      // Other private modes (?25 cursor visibility, ?1000 mouse, etc.)
+      // are intentionally ignored.
+    }
+  }
+
+  /** Swap to the alt buffer. Snapshots the primary so a later leave can
+   *  restore it. Nested entry (already on alt) is a no-op so tmux's own
+   *  pane re-entry sequences don't double-save. */
+  private enterAltScreen(): void {
+    if (this.savedScreen !== null) return;
+    this.savedScreen = {
+      cells: this.cells,
+      cursorRow: this.cursorRow,
+      cursorCol: this.cursorCol,
+      curFg: this.curFg,
+      curBg: this.curBg,
+      curAttrs: this.curAttrs,
+      savedRow: this.savedRow,
+      savedCol: this.savedCol,
+      g0Graphics: this.g0Graphics,
+      g1Graphics: this.g1Graphics,
+      useG1: this.useG1,
+    };
+    // Hand the alt buffer a clean slate and reset transient state. Per
+    // xterm: the alt screen starts blank with cursor at home.
+    this.cells = makeGrid(this.rows, this.cols);
+    this.cursorRow = 0;
+    this.cursorCol = 0;
+    this.curFg = COLOR_DEFAULT;
+    this.curBg = COLOR_DEFAULT;
+    this.curAttrs = 0;
+    this.savedRow = 0;
+    this.savedCol = 0;
+    this.g0Graphics = false;
+    this.g1Graphics = false;
+    this.useG1 = false;
+  }
+
+  /** Swap back to the primary buffer. No-op if we weren't on alt — guards
+   *  against apps that emit a stray ?1049l on startup. */
+  private leaveAltScreen(): void {
+    const saved = this.savedScreen;
+    if (saved === null) return;
+    this.cells = saved.cells;
+    this.cursorRow = saved.cursorRow;
+    this.cursorCol = saved.cursorCol;
+    this.curFg = saved.curFg;
+    this.curBg = saved.curBg;
+    this.curAttrs = saved.curAttrs;
+    this.savedRow = saved.savedRow;
+    this.savedCol = saved.savedCol;
+    this.g0Graphics = saved.g0Graphics;
+    this.g1Graphics = saved.g1Graphics;
+    this.useG1 = saved.useG1;
+    this.savedScreen = null;
   }
 
   private eraseInDisplay(mode: number): void {
@@ -511,6 +700,27 @@ function makeGrid(rows: number, cols: number): Cell[][] {
   const g: Cell[][] = new Array(rows);
   for (let r = 0; r < rows; r++) g[r] = makeRow(cols);
   return g;
+}
+
+/** Resize a grid by allocating a fresh row-major buffer and copying the
+ *  intersecting region. Anything outside the new bounds is dropped;
+ *  anything new is filled with empty cells. */
+function resizeGrid(
+  src: Cell[][],
+  oldRows: number,
+  oldCols: number,
+  newRows: number,
+  newCols: number,
+): Cell[][] {
+  const next = makeGrid(newRows, newCols);
+  const rMin = Math.min(newRows, oldRows);
+  const cMin = Math.min(newCols, oldCols);
+  for (let r = 0; r < rMin; r++) {
+    for (let c = 0; c < cMin; c++) {
+      next[r][c] = src[r][c];
+    }
+  }
+  return next;
 }
 
 function clamp(n: number, lo: number, hi: number): number {

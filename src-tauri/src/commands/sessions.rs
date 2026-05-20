@@ -2,6 +2,7 @@ use crate::ipc_error::IpcError;
 use crate::store::{SessionRow, Store};
 use crate::tmux::{
     kill_session as tmux_kill_session, list_local_sessions, new_session as tmux_new_session,
+    rename_session as tmux_rename_session, restart_session as tmux_restart_session,
 };
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -118,4 +119,55 @@ pub fn kill_session(args: KillSessionArgs, store: State<'_, Mutex<Store>>) -> Re
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
     reconcile_local_sessions(&s)?;
     Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct RenameSessionArgs {
+    pub old_name: String,
+    pub new_name: String,
+}
+
+#[tauri::command]
+pub fn rename_session(
+    args: RenameSessionArgs,
+    store: State<'_, Mutex<Store>>,
+) -> Result<SessionRow, IpcError> {
+    tmux_rename_session(&args.old_name, &args.new_name)?;
+    let s = store
+        .lock()
+        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let rows = reconcile_local_sessions(&s)?;
+    rows.into_iter()
+        .find(|r| r.tmux_name == args.new_name.trim())
+        .ok_or_else(|| {
+            IpcError::new(
+                "E_NOTFOUND",
+                format!("renamed session {} did not appear in list", args.new_name),
+            )
+        })
+}
+
+#[derive(Deserialize)]
+pub struct RestartSessionArgs {
+    pub name: String,
+}
+
+#[tauri::command]
+pub fn restart_session(
+    args: RestartSessionArgs,
+    store: State<'_, Mutex<Store>>,
+) -> Result<SessionRow, IpcError> {
+    tmux_restart_session(&args.name)?;
+    let s = store
+        .lock()
+        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let rows = reconcile_local_sessions(&s)?;
+    rows.into_iter()
+        .find(|r| r.tmux_name == args.name)
+        .ok_or_else(|| {
+            IpcError::new(
+                "E_NOTFOUND",
+                format!("restarted session {} did not appear in list", args.name),
+            )
+        })
 }
