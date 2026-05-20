@@ -205,14 +205,6 @@
     return String(e);
   }
 
-  function readThemeFromCss(): { background: string; foreground: string } {
-    if (typeof window === 'undefined') return { background: '#0f0f0f', foreground: '#ededed' };
-    const cs = getComputedStyle(document.documentElement);
-    const bg = cs.getPropertyValue('--bg').trim() || '#0f0f0f';
-    const fg = cs.getPropertyValue('--fg').trim() || '#ededed';
-    return { background: bg, foreground: fg };
-  }
-
   onDestroy(() => {
     void closeTerm();
   });
