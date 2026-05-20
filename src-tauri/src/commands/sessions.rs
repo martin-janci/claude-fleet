@@ -156,6 +156,22 @@ pub fn list_sessions(
 }
 
 #[derive(Deserialize)]
+pub struct RelatedSessionsArgs {
+    pub session_id: i64,
+}
+
+#[tauri::command]
+pub fn related_sessions(
+    args: RelatedSessionsArgs,
+    store: State<'_, Mutex<Store>>,
+) -> Result<Vec<SessionRow>, IpcError> {
+    let s = store
+        .lock()
+        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    s.list_related_sessions(args.session_id).map_err(IpcError::from)
+}
+
+#[derive(Deserialize)]
 pub struct NewSessionArgs {
     pub host_alias: String,
     pub project_id: i64,

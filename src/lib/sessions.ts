@@ -11,6 +11,7 @@ export interface SessionRow {
   last_activity_at: number;
   status: string;
   notes: string | null;
+  account_uuid: string | null;
 }
 
 export const sessions = writable<SessionRow[]>([]);
@@ -60,4 +61,8 @@ export async function newSession(args: NewSessionArgs): Promise<Result<SessionRo
   const r = await invokeCmd<SessionRow>('new_session', { args });
   if (r.ok) void loadSessions();
   return r;
+}
+
+export async function relatedSessions(sessionId: number): Promise<Result<SessionRow[]>> {
+  return invokeCmd<SessionRow[]>('related_sessions', { args: { session_id: sessionId } });
 }

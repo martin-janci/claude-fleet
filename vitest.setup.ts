@@ -42,6 +42,7 @@ vi.mock('@tauri-apps/api/core', () => ({
       tmux_version: '3.6a',
       account: null,
     };
+    if (cmd === 'related_sessions') return [];
     return null;
   }),
 }));

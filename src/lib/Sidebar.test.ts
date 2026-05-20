@@ -31,6 +31,7 @@ function sessionFor(projectId: number | null, name = `dev-${projectId ?? 'orphan
     last_activity_at: 1,
     status: 'running',
     notes: null,
+    account_uuid: null,
   };
 }
 

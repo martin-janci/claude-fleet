@@ -481,6 +481,46 @@ impl Store {
         rows.collect()
     }
 
+    pub fn list_related_sessions(
+        &self,
+        session_id: i64,
+    ) -> Result<Vec<SessionRow>, rusqlite::Error> {
+        // Look up source's (project_id, worktree_id) first.
+        let (proj, wt): (Option<i64>, Option<i64>) = self.conn.query_row(
+            "SELECT project_id, worktree_id FROM sessions WHERE id=?1",
+            rusqlite::params![session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        // Orphans (project_id=NULL) have no relateds — they share no identity.
+        let Some(project_id) = proj else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
+                    last_activity_at, status, notes, account_uuid
+             FROM sessions
+             WHERE project_id=?1
+               AND ((?2 IS NULL AND worktree_id IS NULL) OR worktree_id=?2)
+               AND id<>?3
+             ORDER BY host_alias ASC, tmux_name ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![project_id, wt, session_id], |row| {
+            Ok(SessionRow {
+                id: row.get(0)?,
+                tmux_name: row.get(1)?,
+                host_alias: row.get(2)?,
+                project_id: row.get(3)?,
+                worktree_id: row.get(4)?,
+                created_at: row.get(5)?,
+                last_activity_at: row.get(6)?,
+                status: row.get(7)?,
+                notes: row.get(8)?,
+                account_uuid: row.get(9)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     pub fn delete_sessions_not_in(
         &self,
         host_alias: &str,
@@ -896,5 +936,45 @@ mod tests {
         s.upsert_session("dev-foo", "h", None, None, 1, 1, "running", Some("u1"))
             .unwrap();
         assert_eq!(s.get_session_account("h", "dev-foo").unwrap().as_deref(), Some("u1"));
+    }
+
+    #[test]
+    fn list_related_sessions_returns_siblings_with_same_project_and_worktree() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_host("mefistos").unwrap();
+        let pid = s.upsert_project("o", "r", "/tmp/r").unwrap();
+        let wt1 = s.upsert_worktree(pid, "main", "/tmp/r", Some("main")).unwrap();
+        let wt2 = s.upsert_worktree(pid, "feature-x", "/tmp/r/.wt/x", Some("feature-x")).unwrap();
+        let a = s.upsert_session("dev-a", "local", Some(pid), Some(wt1), 1, 1, "running", None).unwrap();
+        let _b = s.upsert_session("dev-b", "mefistos", Some(pid), Some(wt1), 1, 1, "running", None).unwrap();
+        let _c = s.upsert_session("dev-c", "local", Some(pid), Some(wt2), 1, 1, "running", None).unwrap();
+        let related = s.list_related_sessions(a).unwrap();
+        assert_eq!(related.len(), 1, "expected only dev-b as related; got: {:?}", related.iter().map(|r| &r.tmux_name).collect::<Vec<_>>());
+        assert_eq!(related[0].tmux_name, "dev-b");
+    }
+
+    #[test]
+    fn list_related_sessions_matches_null_worktree() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let pid = s.upsert_project("o", "r", "/tmp/r").unwrap();
+        let wt = s.upsert_worktree(pid, "main", "/tmp/r", Some("main")).unwrap();
+        let a = s.upsert_session("dev-a", "h", Some(pid), None, 1, 1, "running", None).unwrap();
+        let _b = s.upsert_session("dev-b", "h", Some(pid), None, 1, 1, "running", None).unwrap();
+        let _c = s.upsert_session("dev-c", "h", Some(pid), Some(wt), 1, 1, "running", None).unwrap();
+        let related = s.list_related_sessions(a).unwrap();
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0].tmux_name, "dev-b");
+    }
+
+    #[test]
+    fn list_related_sessions_excludes_orphans() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let a = s.upsert_session("dev-a", "h", None, None, 1, 1, "running", None).unwrap();
+        let _b = s.upsert_session("dev-b", "h", None, None, 1, 1, "running", None).unwrap();
+        let related = s.list_related_sessions(a).unwrap();
+        assert!(related.is_empty(), "orphans should not match each other; got: {:?}", related.iter().map(|r| &r.tmux_name).collect::<Vec<_>>());
     }
 }

@@ -156,6 +156,7 @@ pub fn run() {
             commands::projects::list_projects,
             commands::projects::refresh_projects,
             commands::sessions::list_sessions,
+            commands::sessions::related_sessions,
             commands::sessions::new_session,
             commands::sessions::kill_session,
             commands::sessions::rename_session,
