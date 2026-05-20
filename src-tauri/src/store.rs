@@ -521,6 +521,32 @@ impl Store {
         rows.collect()
     }
 
+    /// Run `f` under the implicit lock and return its result.
+    ///
+    /// The helper exists for documentation: at call sites,
+    /// `let data = { let s = store.lock().unwrap(); s.with_snapshot(|s| s.list_hosts()) };`
+    /// makes it visible that the lock is held only for the duration of the closure
+    /// — and downstream readers can see the I/O happens after the lock drops.
+    pub fn with_snapshot<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&Store) -> R,
+    {
+        f(self)
+    }
+
+    /// Run `f` inside a single `conn.transaction()`. Used by reconcile paths
+    /// that batch many upserts/deletes after a fan-out of off-lock probes —
+    /// one fsync per batch instead of one per row.
+    pub fn with_transaction<F, R>(&mut self, f: F) -> rusqlite::Result<R>
+    where
+        F: FnOnce(&rusqlite::Transaction) -> rusqlite::Result<R>,
+    {
+        let tx = self.conn.transaction()?;
+        let r = f(&tx)?;
+        tx.commit()?;
+        Ok(r)
+    }
+
     pub fn delete_sessions_not_in(
         &self,
         host_alias: &str,
@@ -966,6 +992,46 @@ mod tests {
         let related = s.list_related_sessions(a).unwrap();
         assert_eq!(related.len(), 1);
         assert_eq!(related[0].tmux_name, "dev-b");
+    }
+
+    #[test]
+    fn with_snapshot_returns_owned_data_for_off_lock_use() {
+        let store = Store::open_in_memory().expect("in-memory store");
+        store.insert_host("alpha", Some("alpha-ssh")).expect("insert");
+        let hosts = store.with_snapshot(|s| s.list_hosts().expect("list"));
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].alias, "alpha");
+    }
+
+    #[test]
+    fn with_transaction_commits_on_ok() {
+        let mut store = Store::open_in_memory().expect("in-memory store");
+        let r: rusqlite::Result<()> = store.with_transaction(|tx| {
+            tx.execute(
+                "INSERT INTO hosts (alias, ssh_alias, hidden) VALUES (?1, ?2, 0)",
+                rusqlite::params!["foo", "foo-ssh"],
+            )?;
+            Ok(())
+        });
+        assert!(r.is_ok());
+        let hosts = store.list_hosts().expect("list");
+        assert!(hosts.iter().any(|h| h.alias == "foo"));
+    }
+
+    #[test]
+    fn with_transaction_rolls_back_on_err() {
+        let mut store = Store::open_in_memory().expect("in-memory store");
+        let r: rusqlite::Result<()> = store.with_transaction(|tx| {
+            tx.execute(
+                "INSERT INTO hosts (alias, ssh_alias, hidden) VALUES (?1, ?2, 0)",
+                rusqlite::params!["bar", "bar-ssh"],
+            )?;
+            // Trigger an error to force rollback.
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        });
+        assert!(r.is_err());
+        let hosts = store.list_hosts().expect("list");
+        assert!(!hosts.iter().any(|h| h.alias == "bar"), "rollback should have removed the bar row");
     }
 
     #[test]
