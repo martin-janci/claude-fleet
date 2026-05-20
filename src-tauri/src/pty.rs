@@ -53,6 +53,7 @@ impl PtyState {
 #[derive(Deserialize)]
 pub struct PtyOpenArgs {
     pub session_name: String,
+    pub host_alias: String,
     /// Initial PTY size from the frontend's xterm.js fit().
     pub cols: u16,
     pub rows: u16,
@@ -70,8 +71,40 @@ pub fn pty_open(args: PtyOpenArgs, state: State<'_, Mutex<PtyState>>) -> Result<
         })
         .map_err(|e| IpcError::new("E_PTY", format!("openpty: {e}")))?;
 
-    let mut cmd = CommandBuilder::new("tmux");
-    cmd.args(["attach", "-t", &args.session_name]);
+    let mut cmd = if args.host_alias == "local" {
+        let mut c = CommandBuilder::new("tmux");
+        c.args(["attach", "-t", &args.session_name]);
+        c
+    } else {
+        // Build the ControlPath the same way SshClient does so we share
+        // the established master. We don't need to import SshClient just
+        // to format a path — the format is stable.
+        let cm = {
+            let home = std::env::var("HOME").unwrap_or_default();
+            format!("{home}/.cache/claude-fleet/cm-{}.sock", args.host_alias)
+        };
+        let mut c = CommandBuilder::new("ssh");
+        c.args([
+            "-tt",
+            "-o",
+            &format!("ControlPath={}", cm),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=5",
+            &args.host_alias,
+            "bash",
+            "-lc",
+            // We re-export LANG/LC_ALL/COLORTERM/TERM inside the remote
+            // shell so the embedded TUI gets proper Unicode glyph
+            // rendering even if the remote sshd has AcceptEnv disabled.
+            &format!(
+                "LANG=${{LANG:-en_US.UTF-8}} LC_ALL=${{LC_ALL:-en_US.UTF-8}} COLORTERM=truecolor TERM=xterm-256color tmux attach -t {}",
+                shell_escape(&args.session_name)
+            ),
+        ]);
+        c
+    };
     // Inherit PATH that lib.rs already backfilled at startup so /opt/homebrew/bin
     // is visible to the spawned tmux.
     if let Ok(path) = std::env::var("PATH") {
@@ -131,8 +164,8 @@ pub fn pty_open(args: PtyOpenArgs, state: State<'_, Mutex<PtyState>>) -> Result<
     if let Ok(mut b) = buffer_for_thread.lock() {
         b.extend_from_slice(
             format!(
-                "\x1b[90m[cf] attached to {} via polling buffer\x1b[0m\r\n",
-                args.session_name
+                "\x1b[90m[cf] attached to {}@{} via polling buffer\x1b[0m\r\n",
+                args.session_name, args.host_alias
             )
             .as_bytes(),
         );
@@ -267,4 +300,18 @@ pub fn pty_close(state: State<'_, Mutex<PtyState>>) -> Result<(), IpcError> {
         .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
     s.close();
     Ok(())
+}
+
+fn shell_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
 }
