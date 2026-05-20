@@ -143,10 +143,14 @@ pub fn run() {
     let db_path = appdata_db_path();
     let store = Store::open(&db_path).expect("open store");
 
+    let ssh_client = std::sync::Arc::new(ssh::SshClient::new());
+    let ssh_client_for_exit = std::sync::Arc::clone(&ssh_client);
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(Mutex::new(store))
         .manage(Mutex::new(PtyState::new()))
+        .manage(ssh_client)
         .invoke_handler(tauri::generate_handler![
             commands::health::health_check,
             commands::projects::list_projects,
@@ -156,12 +160,25 @@ pub fn run() {
             commands::sessions::kill_session,
             commands::sessions::rename_session,
             commands::sessions::restart_session,
+            commands::hosts::discover_hosts,
+            commands::hosts::list_hosts,
+            commands::hosts::add_host,
+            commands::hosts::probe_host,
+            commands::hosts::remove_host,
+            commands::hosts::hide_host,
             pty::pty_open,
             pty::pty_write,
             pty::pty_resize,
             pty::pty_close,
             pty::pty_drain,
         ])
+        .on_window_event(move |_window, event| {
+            // Close ssh masters when the app is about to exit so we don't
+            // leak background ssh processes after quit.
+            if let tauri::WindowEvent::Destroyed = event {
+                ssh_client_for_exit.shutdown_all();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
