@@ -1,3 +1,4 @@
+mod cancel;
 mod commands;
 mod events;
 mod ipc_error;
@@ -127,6 +128,15 @@ fn backfill_path_for_gui_launch() {
     }
 }
 
+#[tauri::command]
+async fn cancel_command(
+    call_id: u64,
+    reg: tauri::State<'_, std::sync::Arc<cancel::CancellationRegistry>>,
+) -> Result<(), crate::ipc_error::IpcError> {
+    reg.cancel(call_id);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Layered env recovery for Finder-launched apps:
@@ -145,6 +155,7 @@ pub fn run() {
 
     let ssh_client = std::sync::Arc::new(ssh::SshClient::new());
     let ssh_client_for_exit = std::sync::Arc::clone(&ssh_client);
+    let reg = cancel::CancellationRegistry::new();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -159,6 +170,7 @@ pub fn run() {
         })
         .manage(Mutex::new(PtyState::new()))
         .manage(ssh_client)
+        .manage(reg)
         .invoke_handler(tauri::generate_handler![
             commands::health::health_check,
             commands::projects::list_projects,
@@ -183,6 +195,7 @@ pub fn run() {
             pty::pty_resize,
             pty::pty_close,
             pty::pty_drain,
+            cancel_command,
         ])
         .on_window_event(move |_window, event| {
             // Close ssh masters when the app is about to exit so we don't
