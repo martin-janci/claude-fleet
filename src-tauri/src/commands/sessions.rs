@@ -33,6 +33,11 @@ async fn reconcile_sessions(
     //    Hidden hosts are skipped here — their last-known sessions are
     //    fetched in the write phase without probing.
     //    Each task receives owned data so it satisfies 'static + Send.
+    //
+    //    TODO(iter4a-M4): `JoinSet::drop` aborts the futures but does NOT
+    //    kill the spawned ssh/tmux child processes; on early return/panic
+    //    those orphan. Will be addressed by the CancellationToken plumbing
+    //    in M4 (Tasks 16–18).
     let mut set = tokio::task::JoinSet::new();
     for host in hosts.into_iter().filter(|h| !h.hidden) {
         let ssh_arc = Arc::clone(ssh);
@@ -54,6 +59,13 @@ async fn reconcile_sessions(
     }
 
     // 3. Apply all writes in a single short lock window.
+    //
+    //    TODO(iter4a-M3): wrap the body of this block in
+    //    `s.with_transaction(|tx| { … _in_tx variants … })` so the whole
+    //    reconcile commits with one fsync instead of one per upsert. The
+    //    `_in_tx` Store variants are added when M3 wires the EventBus into
+    //    Store mutations (Task 8/9), so the transaction wrap lands cleanly
+    //    at the same time.
     let mut all_rows: Vec<SessionRow> = Vec::new();
     {
         let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
