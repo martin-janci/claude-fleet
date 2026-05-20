@@ -14,13 +14,9 @@
   import { readPref, writePref } from './prefs';
   import { theme, cycleTheme } from './theme';
   import NewSessionDialog from './NewSessionDialog.svelte';
+  import SettingsDialog from './SettingsDialog.svelte';
   import { hosts, loadHosts, hostFilter } from './hosts';
 
-  // SettingsDialog wiring is completed in Task 13 — for now we just expose
-  // the trigger button so the ⚙ icon renders, but clicking it is a no-op
-  // until SettingsDialog.svelte exists. Task 13 will replace this with a
-  // real `{#if showSettings}<SettingsDialog .../>{/if}` block, so we still
-  // need the state variable now.
   let showSettings = $state(false);
 
   // Optional collapse handler injected by the parent (App.svelte). When
@@ -577,6 +573,10 @@
       </div>
     </div>
   </div>
+{/if}
+
+{#if showSettings}
+  <SettingsDialog onClose={() => (showSettings = false)} />
 {/if}
 
 <style>
