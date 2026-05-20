@@ -89,7 +89,16 @@
     });
   });
 
+  // Catch-up net for missed Tauri events (e.g. sleep/wake, dropped events).
+  // With M3 events flowing, the store stays fresh by itself most of the time —
+  // throttle the focus-driven re-fetch to 30s so alt-tabbing doesn't hammer
+  // the backend with a full list_projects + list_sessions on every focus.
+  let lastFocusFetch = 0;
+  const FOCUS_FETCH_INTERVAL_MS = 30_000;
   function onFocus() {
+    const now = Date.now();
+    if (now - lastFocusFetch < FOCUS_FETCH_INTERVAL_MS) return;
+    lastFocusFetch = now;
     void loadProjects();
     void loadSessions();
   }
