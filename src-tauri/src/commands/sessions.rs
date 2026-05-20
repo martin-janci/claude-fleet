@@ -207,11 +207,12 @@ fn fetch_worktree(s: &Store, worktree_id: i64) -> Result<(String, Option<String>
 /// rather than guessing — calling `new_session` for an unreachable host
 /// should fail loudly.
 fn remote_home(ssh: &Arc<SshClient>, host: &str) -> Result<String, IpcError> {
-    let out = ssh.run(
+    // TODO(iter4a-task5): remove block_on shim — convert to async
+    let out = tauri::async_runtime::block_on(ssh.run(
         host,
         &["printenv", "HOME"],
         std::time::Duration::from_secs(5),
-    )?;
+    ))?;
     if !out.status.success() {
         return Err(IpcError::new(
             "E_SSH",
@@ -314,11 +315,12 @@ fn ensure_remote_project(
     // Wrap in bash -lc so $PATH (git on Homebrew/Linuxbrew) is sourced. Use
     // the same single-quote-the-whole-script trick as RemoteTmux::remote_bash
     // to avoid the ssh argv-joining bug.
-    let out = ssh.run(
+    // TODO(iter4a-task5): remove block_on shim — convert to async
+    let out = tauri::async_runtime::block_on(ssh.run(
         host,
         &["bash", "-lc", &script],
         std::time::Duration::from_secs(120),
-    )?;
+    ))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -555,11 +557,12 @@ pub fn send_prompt(
     } else {
         for cmd in &cmds {
             let quoted = shell_quote_str(cmd);
-            let out = ssh.run(
+            // TODO(iter4a-task5): remove block_on shim — convert to async
+            let out = tauri::async_runtime::block_on(ssh.run(
                 &args.host_alias,
                 &["bash", "-lc", &quoted],
                 std::time::Duration::from_secs(10),
-            )?;
+            ))?;
             if !out.status.success() {
                 return Err(IpcError::new(
                     "E_TMUX",

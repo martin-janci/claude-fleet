@@ -8,24 +8,32 @@
 //!
 //! Socket path: ~/.cache/claude-fleet/cm-<host>.sock — dedicated to this app
 //! so we never collide with a user's global ssh ControlPath setting.
+//!
+//! ## Concurrency model (iter 4a)
+//!
+//! `masters` is a `DashMap<String, Arc<OnceCell<()>>>`. The `OnceCell` for
+//! each host guarantees that concurrent first-touches share exactly one master
+//! spawn: `get_or_try_init` blocks all waiters until the winner's future
+//! resolves, then returns the cached `Ok(())` to every other caller.
 
 use crate::ipc_error::IpcError;
+use dashmap::DashMap;
 use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
-use std::sync::Mutex;
+use std::process::Output;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::OnceCell;
 
 pub struct SshClient {
-    // Set of hosts for which we've already spawned a master process.
-    // Backed by a Mutex<HashSet<String>> so concurrent ensure_master calls
-    // serialize and a second call is a cheap no-op.
-    started: Mutex<std::collections::HashSet<String>>,
+    /// Per-host OnceCell. The cell's init future runs the master-spawn exactly
+    /// once; subsequent callers receive the cached result immediately.
+    masters: DashMap<String, Arc<OnceCell<()>>>,
 }
 
 impl SshClient {
     pub fn new() -> Self {
         Self {
-            started: Mutex::new(std::collections::HashSet::new()),
+            masters: DashMap::new(),
         }
     }
 
@@ -40,73 +48,86 @@ impl SshClient {
         dir.join(format!("cm-{host}.sock"))
     }
 
-    /// Spawn a background master if we haven't already. Idempotent.
-    pub fn ensure_master(&self, host: &str) -> Result<(), IpcError> {
-        {
-            let started = self
-                .started
-                .lock()
-                .map_err(|_| IpcError::new("E_LOCK", "ssh master mutex poisoned"))?;
-            if started.contains(host) {
-                return Ok(());
+    /// Spawn a background master if we haven't already for this host.
+    ///
+    /// Concurrent calls for the same host share a single `OnceCell`: exactly
+    /// one task runs the spawn future; all others await and reuse the result.
+    pub async fn ensure_master(&self, host: &str) -> Result<(), IpcError> {
+        let cell = self
+            .masters
+            .entry(host.to_string())
+            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .clone();
+
+        cell.get_or_try_init(|| async {
+            let path = self.control_path(host);
+
+            // If a stale socket exists, ask any orphan master to exit. Errors
+            // are non-fatal — `-O exit` returns 255 if no master is listening.
+            let _ = tokio::process::Command::new("ssh")
+                .args([
+                    "-o",
+                    &format!("ControlPath={}", path.display()),
+                    "-O",
+                    "exit",
+                    host,
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await;
+
+            // Spawn the master. -f makes ssh fork into the background after
+            // authenticating. -N requests no remote command. ControlPersist
+            // keeps the master idle for 10 minutes before self-closing.
+            let status = tokio::process::Command::new("ssh")
+                .args([
+                    "-fN",
+                    "-o",
+                    "ControlMaster=yes",
+                    "-o",
+                    &format!("ControlPath={}", path.display()),
+                    "-o",
+                    "ControlPersist=10m",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=5",
+                    host,
+                ])
+                .status()
+                .await
+                .map_err(|e| IpcError::new("E_SSH", format!("spawn ssh master: {e}")))?;
+
+            if !status.success() {
+                return Err(IpcError::new(
+                    "E_SSH",
+                    format!("ssh master to {host} failed (status: {status:?})"),
+                ));
             }
-        }
-        let path = self.control_path(host);
-        // If a stale socket exists, ask any orphan master to exit. Errors
-        // are non-fatal — `-O exit` returns 255 if no master is listening.
-        let _ = Command::new("ssh")
-            .args([
-                "-o",
-                &format!("ControlPath={}", path.display()),
-                "-O",
-                "exit",
-                host,
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        // Spawn the master. -f makes ssh fork into the background after
-        // authenticating. -N requests no remote command. ControlPersist
-        // keeps the master idle for 10 minutes before self-closing.
-        let status = Command::new("ssh")
-            .args([
-                "-fN",
-                "-o",
-                "ControlMaster=yes",
-                "-o",
-                &format!("ControlPath={}", path.display()),
-                "-o",
-                "ControlPersist=10m",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=5",
-                host,
-            ])
-            .status()
-            .map_err(|e| IpcError::new("E_SSH", format!("spawn ssh master: {e}")))?;
-        if !status.success() {
-            return Err(IpcError::new(
-                "E_SSH",
-                format!("ssh master to {host} failed (status: {status:?})"),
-            ));
-        }
-        let mut started = self
-            .started
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "ssh master mutex poisoned"))?;
-        started.insert(host.to_string());
-        Ok(())
+            Ok(())
+        })
+        .await
+        .map(|_| ())
     }
 
     /// Run a command on `host`, multiplexing through the established master.
     /// `timeout` is enforced via `-o ConnectTimeout` (handshake only); the
     /// command itself runs to completion — we trust tmux invocations to be
     /// fast. Returns the full Output for callers to inspect stdout/stderr.
-    pub fn run(&self, host: &str, args: &[&str], timeout: Duration) -> Result<Output, IpcError> {
-        self.ensure_master(host)?;
+    ///
+    /// NOTE: callers are converted to async in iter 4a Task 5; until then
+    /// this method is async and call sites that haven't been migrated yet
+    /// will fail to compile (expected — Task 5 fixes them).
+    pub async fn run(
+        &self,
+        host: &str,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<Output, IpcError> {
+        self.ensure_master(host).await?;
         let path = self.control_path(host);
-        let mut cmd = Command::new("ssh");
+        let mut cmd = tokio::process::Command::new("ssh");
         cmd.args([
             "-o",
             &format!("ControlPath={}", path.display()),
@@ -117,29 +138,35 @@ impl SshClient {
             host,
         ]);
         cmd.args(args);
+        // tokio::process::Command::output() returns tokio's Output which is
+        // std::process::Output re-exported — same type as before.
         cmd.output()
+            .await
             .map_err(|e| IpcError::new("E_SSH", format!("ssh {host}: {e}")))
     }
 
     /// Tell every known master to exit. Called from Tauri on_exit so we
     /// don't leak persistent ssh processes after the app closes.
+    ///
+    /// This is intentionally synchronous (blocking) because it is called from
+    /// a sync on_exit hook. It spawns a blocking task on the tokio runtime so
+    /// the async ssh commands can complete.
     pub fn shutdown_all(&self) {
-        let started = match self.started.lock() {
-            Ok(s) => s.clone(),
-            Err(_) => return,
-        };
-        for host in started.iter() {
-            let path = self.control_path(host);
-            let _ = Command::new("ssh")
+        let hosts: Vec<String> = self.masters.iter().map(|e| e.key().clone()).collect();
+        for host in hosts {
+            let path = self.control_path(&host);
+            // Fire-and-forget via std::process::Command — shutdown_all is
+            // called from a sync context and we just want best-effort cleanup.
+            let _ = std::process::Command::new("ssh")
                 .args([
                     "-o",
                     &format!("ControlPath={}", path.display()),
                     "-O",
                     "exit",
-                    host,
+                    &host,
                 ])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .status();
         }
     }
@@ -177,6 +204,23 @@ mod tests {
     #[test]
     fn shutdown_when_no_masters_is_noop() {
         let c = SshClient::new();
-        c.shutdown_all(); // must not panic when started set is empty
+        c.shutdown_all(); // must not panic when masters map is empty
+    }
+
+    #[tokio::test]
+    async fn ensure_master_idempotent_across_concurrent_calls() {
+        // Two concurrent ensure_master() for the same alias should resolve in ≤ 1
+        // master spawn. The actual ssh call will fail (alias doesn't exist), but
+        // OnceCell semantics still apply: both calls share the same cell.
+        let client = SshClient::new();
+        let alias = "nonexistent-test-host-for-iter4a";
+        let (a, b) = tokio::join!(
+            client.ensure_master(alias),
+            client.ensure_master(alias),
+        );
+        // Either both Ok (somehow worked) or both Err (the expected case); both
+        // must agree — single OnceCell guarantees that.
+        assert_eq!(a.is_ok(), b.is_ok(), "concurrent ensure_master must agree");
+        assert_eq!(client.masters.len(), 1, "exactly one cell registered");
     }
 }

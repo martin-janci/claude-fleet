@@ -57,7 +57,10 @@ impl RemoteTmux {
     /// per-arg quoting inside `script`.
     fn remote_bash(&self, script: &str) -> Result<std::process::Output, IpcError> {
         let quoted = shell_quote(script);
-        self.client.run(&self.host, &["bash", "-lc", &quoted], std::time::Duration::from_secs(10))
+        // TODO(iter4a-task5): remove block_on shim — convert to async
+        tauri::async_runtime::block_on(
+            self.client.run(&self.host, &["bash", "-lc", &quoted], std::time::Duration::from_secs(10))
+        )
     }
 }
 

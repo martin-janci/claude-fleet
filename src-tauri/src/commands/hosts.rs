@@ -207,9 +207,11 @@ echo ---
 ( cat "$HOME/.claude.json" 2>/dev/null | jq -c .oauthAccount 2>/dev/null \
   || python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d.get("oauthAccount") or {}))' "$HOME/.claude.json" 2>/dev/null \
   || true )"#;
-    let out = ssh
-        .run(host, &["bash", "-lc", script], Duration::from_secs(5))
-        .map_err(|e| IpcError::new("E_PROBE", format!("ssh {host}: {}", e.message)))?;
+    // TODO(iter4a-task5): remove block_on shim — convert to async
+    let out = tauri::async_runtime::block_on(
+        ssh.run(host, &["bash", "-lc", script], Duration::from_secs(5))
+    )
+    .map_err(|e| IpcError::new("E_PROBE", format!("ssh {host}: {}", e.message)))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(IpcError::new(
