@@ -37,12 +37,19 @@ pub fn add_host(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<HostRow, IpcError> {
     // Probe first; we don't want to persist a host we can't talk to.
-    let (reachable, claude_ver, tmux_ver) = probe(&ssh, &args.ssh_alias)?;
+    let (reachable, claude_ver, tmux_ver, account) = probe(&ssh, &args.ssh_alias)?;
     {
         let s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
         s.insert_host(&args.alias, Some(&args.ssh_alias))?;
+        // Link account if probe found one
+        if let Some(acc) = account.as_ref().and_then(|a| account_row_from(a, now_unix())) {
+            s.upsert_account(&acc)?;
+            s.set_host_account(&args.alias, Some(&acc.uuid))?;
+        } else {
+            s.set_host_account(&args.alias, None)?;
+        }
         s.update_host_probe(
             &args.alias,
             reachable,
@@ -79,7 +86,7 @@ pub fn probe_host(
     // For remote hosts we use the lenient probe so a Re-probe of an
     // unreachable host updates `reachable=false` instead of returning an
     // error to the UI.
-    let (reachable, claude_ver, tmux_ver) = if args.alias == "local" {
+    let (reachable, claude_ver, tmux_ver, account) = if args.alias == "local" {
         probe_local()
     } else {
         probe_lenient(&ssh, target)
@@ -88,6 +95,12 @@ pub fn probe_host(
         let s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        if let Some(acc) = account.as_ref().and_then(|a| account_row_from(a, now_unix())) {
+            s.upsert_account(&acc)?;
+            s.set_host_account(&args.alias, Some(&acc.uuid))?;
+        } else {
+            s.set_host_account(&args.alias, None)?;
+        }
         s.update_host_probe(
             &args.alias,
             reachable,
@@ -142,17 +155,20 @@ fn list_one(
         .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("host {alias} not found")))
 }
 
-/// Strict probe — returns `Err(E_PROBE)` if the SSH round trip fails or the
-/// remote shell exits non-zero. Used by `add_host` so we refuse to persist
-/// a host we can't reach. `probe_host` uses [`probe_lenient`] instead, which
-/// turns failures into a `(false, None, None)` outcome the caller can record.
+/// Strict probe — returns Err(E_PROBE) if the SSH round trip fails. Used by
+/// add_host. Reads tmux + claude versions AND the oauthAccount in a single
+/// round trip (sections separated by literal `---`).
 fn probe(
     ssh: &Arc<SshClient>,
     host: &str,
-) -> Result<(bool, Option<String>, Option<String>), IpcError> {
-    // Single round trip: print both versions, semicolon-separated, so a
-    // missing claude doesn't drop the tmux probe.
-    let script = "tmux -V 2>/dev/null || true; echo ---; claude --version 2>/dev/null || true";
+) -> Result<(bool, Option<String>, Option<String>, Option<OauthAccount>), IpcError> {
+    let script = r#"tmux -V 2>/dev/null || true
+echo ---
+claude --version 2>/dev/null || true
+echo ---
+( cat "$HOME/.claude.json" 2>/dev/null | jq -c .oauthAccount 2>/dev/null \
+  || python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d.get("oauthAccount") or {}))' "$HOME/.claude.json" 2>/dev/null \
+  || true )"#;
     let out = ssh
         .run(host, &["bash", "-lc", script], Duration::from_secs(5))
         .map_err(|e| IpcError::new("E_PROBE", format!("ssh {host}: {}", e.message)))?;
@@ -167,10 +183,12 @@ fn probe(
     let mut parts = stdout.split("---");
     let tmux_line = parts.next().unwrap_or("").trim().to_string();
     let claude_line = parts.next().unwrap_or("").trim().to_string();
+    let oauth_line = parts.next().unwrap_or("").trim().to_string();
     Ok((
         true,
         parse_claude_version(&claude_line),
         parse_tmux_version(&tmux_line),
+        parse_oauth_account(&oauth_line),
     ))
 }
 
@@ -180,14 +198,14 @@ fn probe(
 fn probe_lenient(
     ssh: &Arc<SshClient>,
     host: &str,
-) -> (bool, Option<String>, Option<String>) {
+) -> (bool, Option<String>, Option<String>, Option<OauthAccount>) {
     match probe(ssh, host) {
         Ok(v) => v,
-        Err(_) => (false, None, None),
+        Err(_) => (false, None, None, None),
     }
 }
 
-fn probe_local() -> (bool, Option<String>, Option<String>) {
+fn probe_local() -> (bool, Option<String>, Option<String>, Option<OauthAccount>) {
     let tmux = std::process::Command::new("tmux")
         .arg("-V")
         .output()
@@ -210,10 +228,21 @@ fn probe_local() -> (bool, Option<String>, Option<String>) {
                 None
             }
         });
+    // Read local ~/.claude.json directly — no subprocess needed.
+    let account = std::env::var("HOME").ok().and_then(|home| {
+        let path = std::path::Path::new(&home).join(".claude.json");
+        let contents = std::fs::read_to_string(path).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&contents).ok()?;
+        let oa = v.get("oauthAccount")?;
+        serde_json::from_value::<OauthAccount>(oa.clone())
+            .ok()
+            .filter(|a| a.uuid.is_some())
+    });
     (
         true,
         parse_claude_version(claude.as_deref().unwrap_or("")),
         parse_tmux_version(tmux.as_deref().unwrap_or("")),
+        account,
     )
 }
 
@@ -228,6 +257,52 @@ fn parse_claude_version(line: &str) -> Option<String> {
     // `2.1.144 (Claude Code)` → "2.1.144"
     line.split_whitespace().next().map(|v| v.to_string())
         .filter(|v| !v.is_empty())
+}
+
+/// Subset of `~/.claude.json`'s `oauthAccount` we care about. All fields
+/// optional so a partial JSON shape (e.g., older claude versions, missing
+/// org fields) still parses cleanly.
+#[derive(serde::Deserialize, Default, Debug, Clone)]
+pub struct OauthAccount {
+    #[serde(rename = "accountUuid")]
+    pub uuid: Option<String>,
+    #[serde(rename = "emailAddress")]
+    pub email: Option<String>,
+    #[serde(rename = "displayName")]
+    pub display_name: Option<String>,
+    #[serde(rename = "organizationName")]
+    pub organization_name: Option<String>,
+    #[serde(rename = "organizationUuid")]
+    pub organization_uuid: Option<String>,
+    #[serde(rename = "seatTier")]
+    pub seat_tier: Option<String>,
+}
+
+/// Parse the third probe section. Empty / "null" / "{}" → None.
+/// Treats account-without-uuid as None (we use uuid as PK).
+fn parse_oauth_account(line: &str) -> Option<OauthAccount> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed == "{}" || trimmed == "null" {
+        return None;
+    }
+    serde_json::from_str::<OauthAccount>(trimmed)
+        .ok()
+        .filter(|a| a.uuid.is_some())
+}
+
+/// Convert a probed `OauthAccount` into a storable `AccountRow`, dropping
+/// records without a uuid (can't be primary-keyed).
+fn account_row_from(a: &OauthAccount, now: i64) -> Option<crate::store::AccountRow> {
+    let uuid = a.uuid.clone()?;
+    Some(crate::store::AccountRow {
+        uuid,
+        email: a.email.clone(),
+        display_name: a.display_name.clone(),
+        organization_name: a.organization_name.clone(),
+        organization_uuid: a.organization_uuid.clone(),
+        seat_tier: a.seat_tier.clone(),
+        last_seen_at: Some(now),
+    })
 }
 
 fn now_unix() -> i64 {
@@ -254,5 +329,48 @@ mod tests {
         assert_eq!(parse_claude_version("2.1.144 (Claude Code)").as_deref(), Some("2.1.144"));
         assert_eq!(parse_claude_version("  2.1.12  "), Some("2.1.12".into()));
         assert_eq!(parse_claude_version(""), None);
+    }
+
+    #[test]
+    fn parse_oauth_account_handles_full_json() {
+        let line = r#"{"accountUuid":"abc","emailAddress":"a@b.com","displayName":"A B","organizationName":"32bit","organizationUuid":"org-1","seatTier":"max"}"#;
+        let a = parse_oauth_account(line).unwrap();
+        assert_eq!(a.uuid.as_deref(), Some("abc"));
+        assert_eq!(a.email.as_deref(), Some("a@b.com"));
+        assert_eq!(a.display_name.as_deref(), Some("A B"));
+        assert_eq!(a.organization_name.as_deref(), Some("32bit"));
+        assert_eq!(a.organization_uuid.as_deref(), Some("org-1"));
+        assert_eq!(a.seat_tier.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn parse_oauth_account_tolerates_missing_optional_fields() {
+        let line = r#"{"accountUuid":"abc","emailAddress":"a@b.com"}"#;
+        let a = parse_oauth_account(line).unwrap();
+        assert_eq!(a.uuid.as_deref(), Some("abc"));
+        assert_eq!(a.email.as_deref(), Some("a@b.com"));
+        assert!(a.display_name.is_none());
+        assert!(a.organization_name.is_none());
+        assert!(a.seat_tier.is_none());
+    }
+
+    #[test]
+    fn parse_oauth_account_returns_none_for_empty_or_null_or_empty_obj() {
+        assert!(parse_oauth_account("").is_none());
+        assert!(parse_oauth_account("   ").is_none());
+        assert!(parse_oauth_account("{}").is_none());
+        assert!(parse_oauth_account("null").is_none());
+    }
+
+    #[test]
+    fn parse_oauth_account_returns_none_when_uuid_missing() {
+        let line = r#"{"emailAddress":"a@b.com","seatTier":"max"}"#;
+        assert!(parse_oauth_account(line).is_none());
+    }
+
+    #[test]
+    fn parse_oauth_account_returns_none_for_malformed_json() {
+        assert!(parse_oauth_account("{not-json").is_none());
+        assert!(parse_oauth_account("not even an object").is_none());
     }
 }
