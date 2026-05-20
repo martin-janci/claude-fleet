@@ -1,5 +1,6 @@
 <script lang="ts">
   import { hosts, probeHost, removeHost, hideHost } from './hosts';
+  import { accounts, type AccountRow } from './accounts';
   import AddHostPicker from './AddHostPicker.svelte';
 
   let { onClose }: { onClose: () => void } = $props();
@@ -7,6 +8,18 @@
   let showAddPicker = $state(false);
   let busy: string | null = $state(null);
   let error: string | null = $state(null);
+
+  const accountByUuid = $derived(
+    new Map<string, AccountRow>($accounts.map((a) => [a.uuid, a])),
+  );
+
+  function accountCell(h: { account_uuid: string | null }): string {
+    if (!h.account_uuid) return '—';
+    const acc = accountByUuid.get(h.account_uuid);
+    if (!acc) return h.account_uuid;
+    const email = acc.email ?? acc.uuid;
+    return acc.seat_tier ? `${email} (${acc.seat_tier})` : email;
+  }
 
   async function onProbe(alias: string) {
     busy = alias;
@@ -54,6 +67,7 @@
             <th>Alias</th>
             <th>tmux</th>
             <th>claude</th>
+            <th>Account</th>
             <th>Status</th>
             <th></th>
           </tr>
@@ -64,6 +78,7 @@
               <td class="alias">{h.alias}{#if h.ssh_alias && h.ssh_alias !== h.alias}<span class="muted"> ({h.ssh_alias})</span>{/if}</td>
               <td>{h.tmux_version ?? '—'}</td>
               <td>{h.claude_version ?? '—'}</td>
+              <td class="account" data-testid="account-cell">{accountCell(h)}</td>
               <td>
                 <span class="status status-{h.reachable ? 'on' : 'off'}">
                   {h.reachable ? 'online' : 'offline'}
@@ -175,6 +190,15 @@
   .hosts-table tr.hidden-row td { opacity: 0.55; }
   .alias { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .muted { color: var(--fg-muted); }
+
+  .hosts-table td.account {
+    font-size: 0.8rem;
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--fg);
+  }
 
   .status {
     font-size: 0.7rem;
