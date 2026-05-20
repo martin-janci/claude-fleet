@@ -164,11 +164,14 @@ impl SshClient {
     }
 
     /// Same as `run` but races the SSH child against a `CancellationToken`.
-    /// When the token fires before the command finishes, the child is killed
-    /// (SIGKILL on Unix) and `Err(E_CANCELLED)` is returned. The child is
-    /// orphaned after the kill — the OS reaps it when it actually exits; we
-    /// don't await it because we want to return the cancellation error
-    /// immediately without blocking.
+    /// When the token fires before the command finishes, the child is sent
+    /// SIGKILL via `start_kill` and explicitly `wait`ed so the OS reaps the
+    /// process (no zombie left behind). Returns `Err(E_CANCELLED)`.
+    ///
+    /// We do NOT rely on `kill_on_drop` alone because tokio's drop guard
+    /// only sends the signal — it doesn't await the wait — so the child
+    /// would linger as a zombie until init reaps it (or never, if the
+    /// runtime keeps running). Explicit kill+wait fixes that.
     pub async fn run_cancellable(
         &self,
         host: &str,
@@ -191,29 +194,46 @@ impl SshClient {
             .args(args)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            // Belt-and-suspenders: if the cancel arm panics before reaping
+            // we still want the OS to clean up the child eventually.
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| IpcError::new("E_SSH", format!("ssh spawn {host}: {e}")))?;
 
-        // wait_with_output() takes ownership of `child`, so we can't reference
-        // `child` in the cancel arm after it is moved. Instead we pin the
-        // wait-with-output future and use an async block that borrows `child`
-        // only after the select resolves — by using a flag approach: poll
-        // `wait_with_output` in one arm while keeping `start_kill` available
-        // via a separate step. We use a Box::pin to hold the future.
-        let wait_future = child.wait_with_output();
-        tokio::pin!(wait_future);
+        // Take stdout/stderr handles BEFORE moving `child` into the wait —
+        // we'll spawn read tasks so the child's pipes don't block when full.
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let stdout_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut s) = stdout {
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut s, &mut buf).await;
+            }
+            buf
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut s) = stderr {
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut s, &mut buf).await;
+            }
+            buf
+        });
 
         tokio::select! {
             _ = token.cancelled() => {
-                // The child is now owned by `wait_future`. We can't kill it
-                // through `child` anymore (moved into the future). Instead,
-                // drop the future — tokio::process::Child sends SIGKILL on
-                // drop, which terminates the child. The OS reaps it.
-                drop(wait_future);
+                // Send SIGKILL, then wait so the OS reaps the process
+                // (otherwise the child becomes a zombie until the runtime
+                // exits).
+                let _ = child.start_kill();
+                let _ = child.wait().await;
                 Err(IpcError::new("E_CANCELLED", format!("ssh {host} cancelled")))
             }
-            output = &mut wait_future => {
-                output.map_err(|e| IpcError::new("E_SSH", format!("ssh wait {host}: {e}")))
+            status = child.wait() => {
+                let status = status
+                    .map_err(|e| IpcError::new("E_SSH", format!("ssh wait {host}: {e}")))?;
+                let stdout = stdout_task.await.unwrap_or_default();
+                let stderr = stderr_task.await.unwrap_or_default();
+                Ok(Output { status, stdout, stderr })
             }
         }
     }
@@ -282,24 +302,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_cancellable_returns_e_cancelled_when_token_fires() {
-        // No real SSH needed: we verify the select! pattern itself by racing
-        // a long-sleeping future against an immediately-cancelled token.
+    async fn cancel_arm_kills_and_reaps_child() {
+        // Replicates the cancel-arm pattern from `run_cancellable`: spawn a
+        // long-running child, race a CancellationToken against `child.wait`,
+        // and on cancel explicitly `start_kill` + `wait` to reap. After cancel
+        // the OS must no longer report the PID as a live process.
         let token = CancellationToken::new();
-        let work = async {
-            tokio::time::sleep(Duration::from_secs(10)).await;
-            "done"
-        };
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id().expect("child has pid");
+
         let token2 = token.clone();
-        let race = async move {
-            tokio::select! {
-                _ = token2.cancelled() => "cancelled",
-                r = work => r,
+        tokio::spawn(async move { token2.cancel(); });
+
+        let result: &str = tokio::select! {
+            _ = token.cancelled() => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                "cancelled"
             }
+            _ = child.wait() => "completed-naturally",
         };
-        tokio::spawn(async move { token.cancel(); });
-        let result = race.await;
         assert_eq!(result, "cancelled");
+
+        // PID must now be gone (we waited, so no zombie). On Unix, `kill -0
+        // <pid>` exits non-zero when the process no longer exists.
+        for _ in 0..50 {
+            let alive = std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !alive {
+                return; // success
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("child pid {pid} still alive 1s after cancel — kill+wait failed to reap");
     }
 
     #[tokio::test]
