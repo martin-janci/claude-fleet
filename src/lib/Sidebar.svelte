@@ -16,6 +16,7 @@
   import NewSessionDialog from './NewSessionDialog.svelte';
   import SettingsDialog from './SettingsDialog.svelte';
   import { hosts, loadHosts, hostFilter } from './hosts';
+  import { accounts, loadAccounts, type AccountRow } from './accounts';
 
   let showSettings = $state(false);
 
@@ -61,6 +62,8 @@
     if (!sr.ok) loadError = sr.error.message;
     const hr = await loadHosts();
     if (!hr.ok) loadError = hr.error.message;
+    const ar = await loadAccounts();
+    if (!ar.ok) loadError = ar.error.message;
   });
 
   async function onRefresh() {
@@ -125,6 +128,19 @@
     }
     return new Set(Array.from(counts.entries()).filter(([, c]) => c > 1).map(([n]) => n));
   });
+
+  // Lookup map for tooltips + components that resolve a host's account.
+  const accountByUuid = $derived(
+    new Map<string, AccountRow>($accounts.map((a) => [a.uuid, a])),
+  );
+
+  function accountLabel(host: { account_uuid: string | null }): string {
+    if (!host.account_uuid) return '';
+    const acc = accountByUuid.get(host.account_uuid);
+    if (!acc) return `\n${host.account_uuid}`;
+    const email = acc.email ?? acc.uuid;
+    return acc.seat_tier ? `\n${email} (${acc.seat_tier})` : `\n${email}`;
+  }
 
   function sessionsForProject(projectId: number): SessionRow[] {
     return $sessions.filter(
@@ -330,7 +346,7 @@
           class="pill"
           class:active={$hostFilter === h.alias}
           onclick={() => hostFilter.set(h.alias)}
-          title="{h.alias}{h.tmux_version ? ` · tmux ${h.tmux_version}` : ''}{h.claude_version ? ` · claude ${h.claude_version}` : ''}"
+          title={`${h.alias}${h.tmux_version ? ` · tmux ${h.tmux_version}` : ''}${h.claude_version ? ` · claude ${h.claude_version}` : ''}${accountLabel(h)}`}
         >
           <span class="host-dot status-{h.reachable ? 'on' : 'off'}"></span>
           {h.alias}

@@ -45,6 +45,7 @@ import { projects } from './projects';
 import { sessions } from './sessions';
 import { selectedSession, selectSession } from './selection';
 import { hosts, hostFilter } from './hosts';
+import { accounts } from './accounts';
 
 function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof sessionFor>[]) {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
@@ -53,6 +54,7 @@ function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof session
     // Existing tests don't care about hosts — return empty so $hosts is a
     // valid array (never null) when Sidebar.svelte does `$hosts.filter(...)`.
     if (cmd === 'list_hosts') return [];
+    if (cmd === 'list_accounts') return [];
     return null;
   });
 }
@@ -61,6 +63,7 @@ beforeEach(() => {
   projects.set([]);
   sessions.set([]);
   hosts.set([]);
+  accounts.set([]);
   hostFilter.set('all');
   selectSession(null);
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
@@ -407,5 +410,72 @@ describe('Sidebar (sessions-grouped view)', () => {
     const badges = screen.queryAllByTestId('host-badge');
     expect(badges).toHaveLength(1);
     expect(badges[0].textContent).toBe('[local]');
+  });
+
+  it('host pill tooltip includes account info when present', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_projects') return fakeProjects;
+      if (cmd === 'list_sessions') return [];
+      if (cmd === 'list_hosts') return [
+        {
+          alias: 'mefistos',
+          ssh_alias: 'mefistos',
+          reachable: true,
+          claude_version: '2.1.144',
+          tmux_version: '3.6a',
+          hidden: false,
+          last_pinged_at: 1,
+          account_uuid: 'u1',
+        },
+      ];
+      if (cmd === 'list_accounts') return [
+        {
+          uuid: 'u1',
+          email: 'm.janci@32bit.sk',
+          display_name: 'Martin Janci',
+          organization_name: '32bit',
+          organization_uuid: 'org-1',
+          seat_tier: 'max',
+          last_seen_at: 1,
+        },
+      ];
+      return null;
+    });
+    render(Sidebar);
+    for (let i = 0; i < 8; i++) await tick();
+    const pills = document.querySelectorAll('.hosts .pill');
+    const mef = Array.from(pills).find((p) => p.textContent?.includes('mefistos'));
+    expect(mef).toBeDefined();
+    expect(mef!.getAttribute('title')).toContain('m.janci@32bit.sk');
+    expect(mef!.getAttribute('title')).toContain('max');
+  });
+
+  it('host pill tooltip omits account info when host has no account', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_projects') return fakeProjects;
+      if (cmd === 'list_sessions') return [];
+      if (cmd === 'list_hosts') return [
+        {
+          alias: 'noaccount',
+          ssh_alias: 'noaccount',
+          reachable: true,
+          claude_version: '2.1.144',
+          tmux_version: '3.6a',
+          hidden: false,
+          last_pinged_at: 1,
+          account_uuid: null,
+        },
+      ];
+      if (cmd === 'list_accounts') return [];
+      return null;
+    });
+    render(Sidebar);
+    for (let i = 0; i < 8; i++) await tick();
+    const pills = document.querySelectorAll('.hosts .pill');
+    const noaccount = Array.from(pills).find((p) => p.textContent?.includes('noaccount'));
+    expect(noaccount).toBeDefined();
+    const title = noaccount!.getAttribute('title') ?? '';
+    expect(title).not.toContain('@');
+    expect(title).not.toContain('(max)');
   });
 });
