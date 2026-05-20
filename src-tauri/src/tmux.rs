@@ -46,8 +46,18 @@ impl RemoteTmux {
     /// remote user's login env (PATH, LANG, etc.) is sourced. sshd may have
     /// `AcceptEnv` disabled which would silently drop SendEnv vars; the
     /// login shell route is portable.
+    ///
+    /// CRITICAL: `ssh <host> bash -lc <script>` joins ALL trailing argv with
+    /// spaces before sending to the remote sshd. The remote shell then re-
+    /// tokenizes, so any spaces in `<script>` would break `bash -c` (it
+    /// would get just the first token as the script and everything else as
+    /// positional args). We therefore single-quote the WHOLE script via
+    /// `shell_quote` so it crosses the ssh boundary as one shell word.
+    /// `shell_quote` already escapes the embedded `'` characters used by
+    /// per-arg quoting inside `script`.
     fn remote_bash(&self, script: &str) -> Result<std::process::Output, IpcError> {
-        self.client.run(&self.host, &["bash", "-lc", script], std::time::Duration::from_secs(10))
+        let quoted = shell_quote(script);
+        self.client.run(&self.host, &["bash", "-lc", &quoted], std::time::Duration::from_secs(10))
     }
 }
 
