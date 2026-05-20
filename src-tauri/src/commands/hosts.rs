@@ -24,6 +24,14 @@ pub fn list_hosts(store: State<'_, Mutex<Store>>) -> Result<Vec<HostRow>, IpcErr
     s.list_hosts().map_err(IpcError::from)
 }
 
+#[tauri::command]
+pub fn list_accounts(store: State<'_, Mutex<Store>>) -> Result<Vec<crate::store::AccountRow>, IpcError> {
+    let s = store
+        .lock()
+        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    s.list_accounts().map_err(IpcError::from)
+}
+
 #[derive(Deserialize)]
 pub struct AddHostArgs {
     pub alias: String,
@@ -59,6 +67,36 @@ pub fn add_host(
         )?;
     }
     list_one(&store, &args.alias)
+}
+
+/// Preview-only probe used by AddHostPicker before the user confirms `Add`.
+/// Does NOT persist anything; just runs the strict probe and returns versions
+/// + the detected account so the picker can show it for confirmation.
+#[derive(serde::Serialize)]
+pub struct ProbePreview {
+    pub reachable: bool,
+    pub claude_version: Option<String>,
+    pub tmux_version: Option<String>,
+    pub account: Option<OauthAccount>,
+}
+
+#[derive(Deserialize)]
+pub struct ProbeSshAliasArgs {
+    pub ssh_alias: String,
+}
+
+#[tauri::command]
+pub fn probe_ssh_alias(
+    args: ProbeSshAliasArgs,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<ProbePreview, IpcError> {
+    let (reachable, claude_version, tmux_version, account) = probe(&ssh, &args.ssh_alias)?;
+    Ok(ProbePreview {
+        reachable,
+        claude_version,
+        tmux_version,
+        account,
+    })
 }
 
 #[derive(Deserialize)]
@@ -262,7 +300,7 @@ fn parse_claude_version(line: &str) -> Option<String> {
 /// Subset of `~/.claude.json`'s `oauthAccount` we care about. All fields
 /// optional so a partial JSON shape (e.g., older claude versions, missing
 /// org fields) still parses cleanly.
-#[derive(serde::Deserialize, Default, Debug, Clone)]
+#[derive(serde::Deserialize, serde::Serialize, Default, Debug, Clone)]
 pub struct OauthAccount {
     #[serde(rename = "accountUuid")]
     pub uuid: Option<String>,
