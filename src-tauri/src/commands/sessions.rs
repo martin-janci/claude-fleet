@@ -131,6 +131,71 @@ async fn reconcile_sessions(
     Ok(all_rows)
 }
 
+async fn reconcile_one_host(
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    alias: &str,
+) -> Result<(), IpcError> {
+    // 1. Snapshot the host under lock (brief).
+    let host = {
+        let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        s.list_hosts()?
+            .into_iter()
+            .find(|h| h.alias == alias)
+            .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("host {alias} not found")))?
+    };
+
+    // 2. Probe off-lock.
+    let tmux = exec_for(&host.alias, ssh);
+    let result = tmux.list_sessions().await;
+
+    // 3. Apply writes under one brief lock.
+    let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    match result {
+        Ok(live) => {
+            let _ = s.update_host_probe(
+                &host.alias,
+                true,
+                host.claude_version.as_deref(),
+                host.tmux_version.as_deref(),
+                now_unix(),
+            );
+            let mut keep: Vec<String> = Vec::with_capacity(live.len());
+            for sess in &live {
+                keep.push(sess.name.clone());
+                let project_id = find_project_id_for_path(&s, &host.alias, &sess.path);
+                let account_uuid = s
+                    .get_session_account(&host.alias, &sess.name)?
+                    .or_else(|| host.account_uuid.clone());
+                s.upsert_session(
+                    &sess.name,
+                    &host.alias,
+                    project_id,
+                    None,
+                    sess.created,
+                    sess.last_activity,
+                    "running",
+                    account_uuid.as_deref(),
+                )?;
+                if let Some(pid) = project_id {
+                    s.touch_project_last_session_at(pid, sess.last_activity)?;
+                }
+            }
+            s.delete_sessions_not_in(&host.alias, &keep)?;
+        }
+        Err(_e) => {
+            let _ = s.update_host_probe(
+                &host.alias,
+                false,
+                host.claude_version.as_deref(),
+                host.tmux_version.as_deref(),
+                now_unix(),
+            );
+        }
+    }
+    Ok(())
+}
+
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -431,14 +496,16 @@ pub async fn new_session(
     let tmux = exec_for(&args.host_alias, &ssh);
     tmux.new_session(&args.name, &path).await?;
 
-    let rows = reconcile_sessions(&store, &ssh).await?;
-    rows.into_iter()
-        .find(|r| r.tmux_name == args.name && r.host_alias == args.host_alias)
+    reconcile_one_host(&store, &ssh, &args.host_alias).await?;
+    let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    s.list_sessions_for_host(&args.host_alias)?
+        .into_iter()
+        .find(|r| r.tmux_name == args.name)
         .ok_or_else(|| {
             IpcError::new(
-                "E_NOTFOUND",
+                "E_INTERNAL",
                 format!(
-                    "session {} on {} did not appear in list",
+                    "session {} on {} vanished after creation",
                     args.name, args.host_alias
                 ),
             )
@@ -456,11 +523,20 @@ pub async fn kill_session(
     args: KillSessionArgs,
     store: State<'_, Mutex<Store>>,
     ssh: State<'_, Arc<SshClient>>,
-) -> Result<(), IpcError> {
+) -> Result<i64, IpcError> {
+    // Look up id BEFORE killing so we can return it after.
+    let id = {
+        let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        s.list_sessions_for_host(&args.host_alias)?
+            .into_iter()
+            .find(|r| r.tmux_name == args.name)
+            .map(|r| r.id)
+            .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("session {} not found", args.name)))?
+    };
     let tmux = exec_for(&args.host_alias, &ssh);
     tmux.kill_session(&args.name).await?;
-    reconcile_sessions(&store, &ssh).await?;
-    Ok(())
+    reconcile_one_host(&store, &ssh, &args.host_alias).await?;
+    Ok(id)
 }
 
 #[derive(Deserialize)]
@@ -478,9 +554,11 @@ pub async fn rename_session(
 ) -> Result<SessionRow, IpcError> {
     let tmux = exec_for(&args.host_alias, &ssh);
     tmux.rename_session(&args.old_name, &args.new_name).await?;
-    let rows = reconcile_sessions(&store, &ssh).await?;
-    rows.into_iter()
-        .find(|r| r.tmux_name == args.new_name.trim() && r.host_alias == args.host_alias)
+    reconcile_one_host(&store, &ssh, &args.host_alias).await?;
+    let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    s.list_sessions_for_host(&args.host_alias)?
+        .into_iter()
+        .find(|r| r.tmux_name == args.new_name.trim())
         .ok_or_else(|| {
             IpcError::new(
                 "E_NOTFOUND",
@@ -506,9 +584,11 @@ pub async fn restart_session(
 ) -> Result<SessionRow, IpcError> {
     let tmux = exec_for(&args.host_alias, &ssh);
     tmux.restart_session(&args.name).await?;
-    let rows = reconcile_sessions(&store, &ssh).await?;
-    rows.into_iter()
-        .find(|r| r.tmux_name == args.name && r.host_alias == args.host_alias)
+    reconcile_one_host(&store, &ssh, &args.host_alias).await?;
+    let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    s.list_sessions_for_host(&args.host_alias)?
+        .into_iter()
+        .find(|r| r.tmux_name == args.name)
         .ok_or_else(|| {
             IpcError::new(
                 "E_NOTFOUND",
@@ -748,6 +828,32 @@ mod tests {
             elapsed < Duration::from_millis(700),
             "parallel reconcile took {elapsed:?}, expected ≈max not sum",
         );
+    }
+
+    #[tokio::test]
+    async fn reconcile_one_host_does_not_touch_other_hosts() {
+        // Exercises the Store-level invariant: a write burst targeting host
+        // 'alpha' must leave host 'beta's session rows untouched.
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("alpha").unwrap();
+            s.upsert_host("beta").unwrap();
+            s.upsert_session("alpha-s", "alpha", None, None, 1, 1, "running", None).unwrap();
+            s.upsert_session("beta-s", "beta", None, None, 1, 1, "running", None).unwrap();
+        }
+        // Simulate "alpha was probed and has zero sessions" — directly call the
+        // delete helper that reconcile_one_host uses internally.
+        {
+            let s = store.lock().unwrap();
+            s.delete_sessions_not_in("alpha", &[]).unwrap();
+        }
+        let s = store.lock().unwrap();
+        let alpha = s.list_sessions_for_host("alpha").unwrap();
+        let beta = s.list_sessions_for_host("beta").unwrap();
+        assert!(alpha.is_empty(), "alpha cleared");
+        assert_eq!(beta.len(), 1, "beta untouched");
+        assert_eq!(beta[0].tmux_name, "beta-s");
     }
 
     #[test]

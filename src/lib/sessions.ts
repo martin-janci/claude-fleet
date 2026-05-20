@@ -22,8 +22,8 @@ export async function loadSessions(): Promise<Result<SessionRow[]>> {
   return r;
 }
 
-export async function killSession(hostAlias: string, name: string): Promise<Result<void>> {
-  const r = await invokeCmd<void>('kill_session', {
+export async function killSession(hostAlias: string, name: string): Promise<Result<number>> {
+  const r = await invokeCmd<number>('kill_session', {
     args: { host_alias: hostAlias, name },
   });
   if (r.ok) await loadSessions();

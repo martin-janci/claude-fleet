@@ -25,11 +25,12 @@ describe('sessions store', () => {
     expect(get(sessions)).toHaveLength(1);
   });
 
-  it('killSession returns Ok and reloads', async () => {
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null); // kill_session
+  it('killSession returns Ok with deleted id and reloads', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(1); // kill_session returns id
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]); // list_sessions
     const r = await killSession('local', 'dev-foo');
     expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value).toBe(1);
     expect(get(sessions)).toHaveLength(0);
   });
 
