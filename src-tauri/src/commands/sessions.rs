@@ -1,3 +1,4 @@
+use crate::cancel::CancellationRegistry;
 use crate::ipc_error::IpcError;
 use crate::ssh::SshClient;
 use crate::store::{HostRow, SessionRow, Store};
@@ -6,6 +7,7 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::State;
+use tokio_util::sync::CancellationToken;
 
 fn exec_for(host: &str, ssh: &Arc<SshClient>) -> Box<dyn TmuxExec> {
     if host == "local" {
@@ -275,6 +277,7 @@ pub struct NewSessionArgs {
     pub project_id: i64,
     pub worktree_id: Option<i64>,
     pub name: String,
+    pub call_id: Option<u64>,
 }
 
 /// Look up `(owner, repo)` for a given project id.
@@ -374,6 +377,11 @@ fn shq(s: &str) -> String {
 /// SSH (`git@github.com:<owner>/<repo>.git`), assuming the remote has SSH
 /// github access (the common case for dev machines).
 ///
+/// The `token` parameter allows the caller to cancel the (potentially long-
+/// running) `git clone` step. On cancellation the child is killed and
+/// `Err(E_CANCELLED)` is returned. Partial clone dirs are NOT cleaned up
+/// on cancel — that's a follow-up task.
+///
 /// Returns Ok(()) on success. Failure surfaces stderr in the IpcError so the
 /// user can diagnose (missing SSH key, private-repo auth, etc.).
 async fn ensure_remote_project(
@@ -383,6 +391,7 @@ async fn ensure_remote_project(
     repo: &str,
     project_root: &str,
     worktree: Option<(&str, Option<&str>)>, // (name, branch)
+    token: CancellationToken,
 ) -> Result<(), IpcError> {
     let clone_url = format!("git@github.com:{owner}/{repo}.git");
     // Build a single bash script that:
@@ -412,10 +421,11 @@ async fn ensure_remote_project(
     // Wrap in bash -lc so $PATH (git on Homebrew/Linuxbrew) is sourced. Use
     // the same single-quote-the-whole-script trick as RemoteTmux::remote_bash
     // to avoid the ssh argv-joining bug.
-    let out = ssh.run(
+    let out = ssh.run_cancellable(
         host,
         &["bash", "-lc", &script],
         std::time::Duration::from_secs(120),
+        token,
     ).await?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -440,6 +450,38 @@ pub async fn new_session(
     args: NewSessionArgs,
     store: State<'_, Mutex<Store>>,
     ssh: State<'_, Arc<SshClient>>,
+    reg: State<'_, Arc<CancellationRegistry>>,
+) -> Result<SessionRow, IpcError> {
+    // Mint / bind a cancellation token for the duration of this command.
+    // If a call_id was provided by the frontend, bind under that id so the
+    // frontend can cancel via cancel_command(call_id). Otherwise use an
+    // anonymous id (internal callers, tests, local sessions).
+    let (cancel_id, token) = match args.call_id {
+        Some(id) => {
+            let token = CancellationToken::new();
+            reg.bind(id, token.clone());
+            (Some(id), token)
+        }
+        None => {
+            let (id, token) = reg.register_anonymous();
+            (Some(id), token)
+        }
+    };
+
+    let result = new_session_inner(args, &store, &ssh, token).await;
+
+    if let Some(id) = cancel_id {
+        reg.unregister(id);
+    }
+
+    result
+}
+
+async fn new_session_inner(
+    args: NewSessionArgs,
+    store: &State<'_, Mutex<Store>>,
+    ssh: &State<'_, Arc<SshClient>>,
+    token: CancellationToken,
 ) -> Result<SessionRow, IpcError> {
     // Resolve the cwd that tmux will spawn the pane in. For LOCAL the path
     // comes straight from the DB (it was discovered by scanning ~/projects).
@@ -477,26 +519,27 @@ pub async fn new_session(
             };
             (owner, repo, wt)
         };
-        let home = remote_home(&ssh, &args.host_alias).await?;
+        let home = remote_home(ssh, &args.host_alias).await?;
         let wt_name_str = wt_info.as_ref().map(|(name, _)| name.as_str());
         let (project_root, cwd) = remote_project_path(&home, &owner, &repo, wt_name_str);
         let worktree_for_clone = wt_info
             .as_ref()
             .map(|(name, branch)| (name.as_str(), branch.as_deref()));
         ensure_remote_project(
-            &ssh,
+            ssh,
             &args.host_alias,
             &owner,
             &repo,
             &project_root,
             worktree_for_clone,
+            token,
         ).await?;
         PathBuf::from(cwd)
     };
-    let tmux = exec_for(&args.host_alias, &ssh);
+    let tmux = exec_for(&args.host_alias, ssh);
     tmux.new_session(&args.name, &path).await?;
 
-    reconcile_one_host(&store, &ssh, &args.host_alias).await?;
+    reconcile_one_host(store, ssh, &args.host_alias).await?;
     let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
     s.list_sessions_for_host(&args.host_alias)?
         .into_iter()

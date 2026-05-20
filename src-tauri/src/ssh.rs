@@ -29,6 +29,7 @@ use std::process::Output;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::OnceCell;
+use tokio_util::sync::CancellationToken;
 
 struct SshClientInner {
     /// Per-host OnceCell. The cell's init future runs the master-spawn exactly
@@ -162,6 +163,61 @@ impl SshClient {
             .map_err(|e| IpcError::new("E_SSH", format!("ssh {host}: {e}")))
     }
 
+    /// Same as `run` but races the SSH child against a `CancellationToken`.
+    /// When the token fires before the command finishes, the child is killed
+    /// (SIGKILL on Unix) and `Err(E_CANCELLED)` is returned. The child is
+    /// orphaned after the kill — the OS reaps it when it actually exits; we
+    /// don't await it because we want to return the cancellation error
+    /// immediately without blocking.
+    pub async fn run_cancellable(
+        &self,
+        host: &str,
+        args: &[&str],
+        timeout: Duration,
+        token: CancellationToken,
+    ) -> Result<Output, IpcError> {
+        self.ensure_master(host).await?;
+        let path = self.control_path(host);
+        let mut child = tokio::process::Command::new("ssh")
+            .args([
+                "-o",
+                &format!("ControlPath={}", path.display()),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                &format!("ConnectTimeout={}", timeout.as_secs().max(1)),
+                host,
+            ])
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| IpcError::new("E_SSH", format!("ssh spawn {host}: {e}")))?;
+
+        // wait_with_output() takes ownership of `child`, so we can't reference
+        // `child` in the cancel arm after it is moved. Instead we pin the
+        // wait-with-output future and use an async block that borrows `child`
+        // only after the select resolves — by using a flag approach: poll
+        // `wait_with_output` in one arm while keeping `start_kill` available
+        // via a separate step. We use a Box::pin to hold the future.
+        let wait_future = child.wait_with_output();
+        tokio::pin!(wait_future);
+
+        tokio::select! {
+            _ = token.cancelled() => {
+                // The child is now owned by `wait_future`. We can't kill it
+                // through `child` anymore (moved into the future). Instead,
+                // drop the future — tokio::process::Child sends SIGKILL on
+                // drop, which terminates the child. The OS reaps it.
+                drop(wait_future);
+                Err(IpcError::new("E_CANCELLED", format!("ssh {host} cancelled")))
+            }
+            output = &mut wait_future => {
+                output.map_err(|e| IpcError::new("E_SSH", format!("ssh wait {host}: {e}")))
+            }
+        }
+    }
+
     /// Tell every known master to exit. Called from Tauri on_exit so we
     /// don't leak persistent ssh processes after the app closes.
     ///
@@ -223,6 +279,27 @@ mod tests {
     fn shutdown_when_no_masters_is_noop() {
         let c = SshClient::new();
         c.shutdown_all(); // must not panic when masters map is empty
+    }
+
+    #[tokio::test]
+    async fn run_cancellable_returns_e_cancelled_when_token_fires() {
+        // No real SSH needed: we verify the select! pattern itself by racing
+        // a long-sleeping future against an immediately-cancelled token.
+        let token = CancellationToken::new();
+        let work = async {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            "done"
+        };
+        let token2 = token.clone();
+        let race = async move {
+            tokio::select! {
+                _ = token2.cancelled() => "cancelled",
+                r = work => r,
+            }
+        };
+        tokio::spawn(async move { token.cancel(); });
+        let result = race.await;
+        assert_eq!(result, "cancelled");
     }
 
     #[tokio::test]

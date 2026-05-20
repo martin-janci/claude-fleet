@@ -2,6 +2,7 @@
 //! around `store.rs` helpers plus `ssh_config.rs` (for discovery) and
 //! `ssh::SshClient` (for probing).
 
+use crate::cancel::CancellationRegistry;
 use crate::ipc_error::IpcError;
 use crate::ssh::SshClient;
 use crate::ssh_config::{self, SshHost};
@@ -10,6 +11,7 @@ use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::State;
+use tokio_util::sync::CancellationToken;
 
 #[tauri::command]
 pub fn discover_hosts() -> Result<Vec<SshHost>, IpcError> {
@@ -83,14 +85,34 @@ pub struct ProbePreview {
 #[derive(Deserialize)]
 pub struct ProbeSshAliasArgs {
     pub ssh_alias: String,
+    pub call_id: Option<u64>,
 }
 
 #[tauri::command]
 pub async fn probe_ssh_alias(
     args: ProbeSshAliasArgs,
     ssh: State<'_, Arc<SshClient>>,
+    reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<ProbePreview, IpcError> {
-    let (reachable, claude_version, tmux_version, account) = probe(&ssh, &args.ssh_alias).await?;
+    let (cancel_id, token) = match args.call_id {
+        Some(id) => {
+            let token = CancellationToken::new();
+            reg.bind(id, token.clone());
+            (Some(id), token)
+        }
+        None => {
+            let (id, token) = reg.register_anonymous();
+            (Some(id), token)
+        }
+    };
+
+    let result = probe_with_token(&ssh, &args.ssh_alias, token).await;
+
+    if let Some(id) = cancel_id {
+        reg.unregister(id);
+    }
+
+    let (reachable, claude_version, tmux_version, account) = result?;
     Ok(ProbePreview {
         reachable,
         claude_version,
@@ -109,6 +131,7 @@ pub async fn probe_host(
     args: HostAliasArgs,
     store: State<'_, Mutex<Store>>,
     ssh: State<'_, Arc<SshClient>>,
+    reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<HostRow, IpcError> {
     let ssh_alias = {
         let s = store
@@ -127,7 +150,12 @@ pub async fn probe_host(
     let (reachable, claude_ver, tmux_ver, account) = if args.alias == "local" {
         probe_local()
     } else {
-        probe_lenient(&ssh, target).await
+        // Anonymous token — probe_host is user-triggered re-probe; we give it
+        // a token so it can be cancelled if needed, but no frontend call_id.
+        let (_id, token) = reg.register_anonymous();
+        let result = probe_lenient_with_token(&ssh, target, token.clone()).await;
+        reg.unregister(_id);
+        result
     };
     {
         let s = store
@@ -205,6 +233,17 @@ async fn probe(
     ssh: &Arc<SshClient>,
     host: &str,
 ) -> Result<(bool, Option<String>, Option<String>, Option<OauthAccount>), IpcError> {
+    let token = CancellationToken::new();
+    probe_with_token(ssh, host, token).await
+}
+
+/// Like `probe` but uses the provided `CancellationToken` so the caller can
+/// cancel the SSH round trip.
+async fn probe_with_token(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    token: CancellationToken,
+) -> Result<(bool, Option<String>, Option<String>, Option<OauthAccount>), IpcError> {
     let script = r#"tmux -V 2>/dev/null || true
 echo ---
 claude --version 2>/dev/null || true
@@ -212,7 +251,7 @@ echo ---
 ( cat "$HOME/.claude.json" 2>/dev/null | jq -c .oauthAccount 2>/dev/null \
   || python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d.get("oauthAccount") or {}))' "$HOME/.claude.json" 2>/dev/null \
   || true )"#;
-    let out = ssh.run(host, &["bash", "-lc", script], Duration::from_secs(5))
+    let out = ssh.run_cancellable(host, &["bash", "-lc", script], Duration::from_secs(5), token)
         .await
         .map_err(|e| IpcError::new("E_PROBE", format!("ssh {host}: {}", e.message)))?;
     if !out.status.success() {
@@ -235,14 +274,24 @@ echo ---
     ))
 }
 
-/// Lenient probe — never errors. Used by `probe_host` (the user-triggered
-/// Re-probe in Settings) and by background reconcile, where a failed probe
-/// should just bump `reachable=false` rather than break the caller.
+/// Lenient probe — never errors. Used by `add_host` internally.
 async fn probe_lenient(
     ssh: &Arc<SshClient>,
     host: &str,
 ) -> (bool, Option<String>, Option<String>, Option<OauthAccount>) {
     match probe(ssh, host).await {
+        Ok(v) => v,
+        Err(_) => (false, None, None, None),
+    }
+}
+
+/// Lenient probe with an explicit cancellation token. Used by `probe_host`.
+async fn probe_lenient_with_token(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    token: CancellationToken,
+) -> (bool, Option<String>, Option<String>, Option<OauthAccount>) {
+    match probe_with_token(ssh, host, token).await {
         Ok(v) => v,
         Err(_) => (false, None, None, None),
     }
