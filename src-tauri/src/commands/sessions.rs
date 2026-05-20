@@ -41,6 +41,23 @@ fn reconcile_local_sessions(s: &Store) -> Result<Vec<SessionRow>, IpcError> {
     s.list_sessions_for_host(LOCAL_HOST).map_err(IpcError::from)
 }
 
+/// Extract `(owner, repo)` from a path that follows the conventional
+/// `.../projects/github.com/<owner>/<repo>/...` layout (the same layout
+/// `proj-clean` enforces on disk). Remote hosts often store repos under
+/// a different prefix (e.g. `/home/mjanci/...` instead of `/Users/...`),
+/// but the GitHub portion is stable — so we match into the repo cell
+/// regardless of where the path starts.
+fn extract_owner_repo(path: &str) -> Option<(String, String)> {
+    static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"/projects/github\.com/([^/]+)/([^/]+)").expect("static regex")
+    });
+    let caps = RE.captures(path)?;
+    Some((
+        caps.get(1)?.as_str().to_string(),
+        caps.get(2)?.as_str().to_string(),
+    ))
+}
+
 fn find_project_id_for_path(s: &Store, path: &std::path::Path) -> Option<i64> {
     let path_str = path.to_string_lossy();
     let projects = s.list_projects().ok()?;
@@ -170,4 +187,33 @@ pub fn restart_session(
                 format!("restarted session {} did not appear in list", args.name),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_owner_repo_from_macos_path() {
+        let r = extract_owner_repo("/Users/martinjanci/projects/github.com/martin-janci/claude-fleet/.claude/worktrees/x");
+        assert_eq!(r, Some(("martin-janci".into(), "claude-fleet".into())));
+    }
+
+    #[test]
+    fn extracts_owner_repo_from_linux_path() {
+        let r = extract_owner_repo("/home/mjanci/projects/github.com/martin-janci/sales-twins-app");
+        assert_eq!(r, Some(("martin-janci".into(), "sales-twins-app".into())));
+    }
+
+    #[test]
+    fn extracts_owner_repo_when_followed_by_subdir() {
+        let r = extract_owner_repo("/anywhere/projects/github.com/papayapos/pos-frontend/src/lib");
+        assert_eq!(r, Some(("papayapos".into(), "pos-frontend".into())));
+    }
+
+    #[test]
+    fn returns_none_when_not_github_com_layout() {
+        assert_eq!(extract_owner_repo("/tmp/random/repo"), None);
+        assert_eq!(extract_owner_repo("/home/x/projects/gitlab.com/a/b"), None);
+    }
 }
