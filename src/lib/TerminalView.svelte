@@ -42,6 +42,7 @@
    *  the geometry calc would yield NaN and the view would never size. */
   let cellWidth = 0;
   let cellHeight = 0;
+  let disconnected = $state(false);
 
   $effect(() => {
     const sess = $selectedSession;
@@ -50,7 +51,7 @@
       return;
     }
     if (sess.tmux_name === currentSession) return;
-    void openTerm(sess.tmux_name);
+    void openTerm();
   });
 
   // When the container element first appears after a selection (Svelte 5
@@ -59,14 +60,17 @@
   // <div bind:this> has populated `container`.
   $effect(() => {
     if (container && $selectedSession && currentSession !== $selectedSession.tmux_name) {
-      void openTerm($selectedSession.tmux_name);
+      void openTerm();
     }
   });
 
-  async function openTerm(sessionName: string) {
+  async function openTerm() {
+    const sess = $selectedSession;
+    if (!sess) return;
     if (!container) return;
     await closeTerm();
     openError = null;
+    disconnected = false;
     await tick();
 
     measureCellSize();
@@ -93,12 +97,13 @@
     try {
       await invoke('pty_open', {
         args: {
-          session_name: sessionName,
+          session_name: sess.tmux_name,
+          host_alias: sess.host_alias,
           cols: dim.cols,
           rows: dim.rows,
         },
       });
-      currentSession = sessionName;
+      currentSession = sess.tmux_name;
       ptyOpen = true;
     } catch (e) {
       openError = describeError(e);
@@ -154,6 +159,18 @@
     totalBytes += result.bytes;
     screen.write(result.data);
     renderVersion++;
+    // Markers injected by the Rust reader thread when the PTY closes (e.g.
+    // the SSH child to a remote host died). Surface a reconnect banner so
+    // the user has a one-click recovery path.
+    if (result.data.includes('[cf] PTY EOF') || result.data.includes('[cf] reader error')) {
+      disconnected = true;
+    }
+  }
+
+  async function reconnect() {
+    disconnected = false;
+    await closeTerm();
+    await openTerm();
   }
 
   async function closeTerm() {
@@ -265,6 +282,12 @@
 
 {#if $selectedSession}
   <div class="wrap">
+    {#if disconnected}
+      <div class="reconnect-banner" data-testid="terminal-reconnect-banner">
+        Connection lost.
+        <button onclick={reconnect}>Reconnect</button>
+      </div>
+    {/if}
     <div class="header" data-testid="terminal-header">
       <span class="name">{$selectedSession.tmux_name}</span>
       <span class="host">on {$selectedSession.host_alias}</span>
@@ -276,7 +299,7 @@
       </span>
       <button
         class="reconnect"
-        onclick={() => $selectedSession && void openTerm($selectedSession.tmux_name)}
+        onclick={() => void openTerm()}
         title="Detach and re-attach"
         data-testid="terminal-reconnect"
       >
@@ -317,11 +340,37 @@
 
 <style>
   .wrap {
+    position: relative;
     display: flex;
     flex-direction: column;
     height: 100%;
     width: 100%;
     min-height: 0;
+  }
+  .reconnect-banner {
+    position: absolute;
+    top: 0.4rem;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(180, 100, 100, 0.18);
+    color: rgb(220, 130, 130);
+    padding: 0.35rem 0.7rem;
+    border: 1px solid rgba(220, 130, 130, 0.3);
+    border-radius: 5px;
+    font-size: 0.8rem;
+    z-index: 5;
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  .reconnect-banner button {
+    font-size: 0.75rem;
+    padding: 0.15rem 0.5rem;
+    background: transparent;
+    border: 1px solid currentColor;
+    color: inherit;
+    border-radius: 4px;
+    cursor: pointer;
   }
   .header {
     flex: 0 0 auto;
