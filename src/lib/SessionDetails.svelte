@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import type { SessionRow } from './sessions';
+  import { sessions, type SessionRow } from './sessions';
   import { killSession, renameSession, restartSession } from './sessions';
   import { projects } from './projects';
   import { selectSession, clearSelection } from './selection';
@@ -27,6 +27,21 @@
     const email = a.email ?? a.uuid;
     return a.seat_tier ? `${email} (${a.seat_tier})` : email;
   }
+
+  function accountForRow(s: SessionRow): AccountRow | null {
+    if (!s.account_uuid) return null;
+    return $accounts.find((a) => a.uuid === s.account_uuid) ?? null;
+  }
+
+  const related = $derived.by(() => {
+    if (session.project_id === null) return [];
+    return $sessions.filter(
+      (s) =>
+        s.id !== session.id &&
+        s.project_id === session.project_id &&
+        s.worktree_id === session.worktree_id,
+    );
+  });
 
   // Local-only for v0.2 (Phase 4 will branch on host_alias for remote attach).
   const attachCommand = $derived(`tmux attach -t ${session.tmux_name}`);
@@ -169,6 +184,29 @@
     <dt>Last activity</dt>
     <dd>{formatRelative(session.last_activity_at)}</dd>
   </dl>
+
+  {#if related.length > 0}
+    <section class="related" data-testid="related-sessions">
+      <h3>Related sessions ({related.length})</h3>
+      <ul class="related-list">
+        {#each related as r (r.id)}
+          <li>
+            <button
+              class="related-row"
+              data-testid="related-row"
+              onclick={() => selectSession(r)}
+            >
+              <span class="host-badge">[{r.host_alias}]</span>
+              <span class="account">{accountText(accountForRow(r))}</span>
+              <span class="status-dot status-{r.status}" title={r.status}></span>
+              <span class="sess-name">{r.tmux_name}</span>
+              <span class="age">{formatRelative(r.last_activity_at)}</span>
+            </button>
+          </li>
+        {/each}
+      </ul>
+    </section>
+  {/if}
 
   <section class="block">
     <h3>Attach from another terminal</h3>
@@ -373,4 +411,68 @@
     border-color: #e64a4a;
   }
   .confirm-actions button.danger:hover { background: rgba(230, 74, 74, 0.12); }
+
+  .related {
+    border-top: 1px solid var(--border);
+    padding-top: 0.6rem;
+    margin-top: 0.6rem;
+  }
+  .related h3 {
+    font-size: 0.7rem;
+    color: var(--fg-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: 0 0 0.4rem 0;
+  }
+  .related-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+  .related-row {
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.35rem 0.5rem;
+    color: var(--fg);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.82rem;
+  }
+  .related-row:hover {
+    border-color: var(--accent);
+    background: var(--bg-pane);
+  }
+  .related .host-badge {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.7rem;
+    color: var(--fg-muted);
+    border: 1px solid var(--border);
+    padding: 0.05rem 0.3rem;
+    border-radius: 3px;
+  }
+  .related .account {
+    color: var(--fg-muted);
+    font-size: 0.75rem;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .related .sess-name {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.78rem;
+  }
+  .related .age {
+    color: var(--fg-muted);
+    font-size: 0.7rem;
+  }
 </style>

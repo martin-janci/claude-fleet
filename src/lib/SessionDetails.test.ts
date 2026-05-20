@@ -10,6 +10,7 @@ import SessionDetails from './SessionDetails.svelte';
 import { hosts } from './hosts';
 import { accounts } from './accounts';
 import { projects } from './projects';
+import { sessions } from './sessions';
 
 const sampleSession = {
   id: 1,
@@ -28,6 +29,7 @@ beforeEach(() => {
   hosts.set([]);
   accounts.set([]);
   projects.set([]);
+  sessions.set([]);
 });
 
 describe('SessionDetails', () => {
@@ -62,5 +64,37 @@ describe('SessionDetails', () => {
     render(SessionDetails, { props: { session: sampleSession } });
     await tick();
     expect((await screen.findByTestId('session-account')).textContent?.trim()).toBe('—');
+  });
+
+  it('shows Related sessions panel when siblings exist', async () => {
+    const source = { ...sampleSession, id: 1, project_id: 1, worktree_id: 10 };
+    const sibling = { ...sampleSession, id: 2, tmux_name: 'dev-sib', host_alias: 'mefistos', project_id: 1, worktree_id: 10 };
+    hosts.set([
+      { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null },
+    ]);
+    accounts.set([]);
+    sessions.set([source, sibling]);
+    render(SessionDetails, { props: { session: source } });
+    await tick();
+    const rows = await screen.findAllByTestId('related-row');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].textContent).toContain('dev-sib');
+  });
+
+  it('hides Related panel when session has no siblings', async () => {
+    const lone = { ...sampleSession, id: 1, project_id: 1, worktree_id: 10 };
+    sessions.set([lone]);
+    render(SessionDetails, { props: { session: lone } });
+    await tick();
+    expect(screen.queryByTestId('related-sessions')).toBeNull();
+  });
+
+  it('hides Related panel for orphan sessions (project_id=null)', async () => {
+    const orphan = { ...sampleSession, id: 1, project_id: null, worktree_id: null };
+    const otherOrphan = { ...sampleSession, id: 2, tmux_name: 'dev-other', project_id: null, worktree_id: null };
+    sessions.set([orphan, otherOrphan]);
+    render(SessionDetails, { props: { session: orphan } });
+    await tick();
+    expect(screen.queryByTestId('related-sessions')).toBeNull();
   });
 });
