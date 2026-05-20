@@ -18,13 +18,17 @@ fn exec_for(host: &str, ssh: &Arc<SshClient>) -> Box<dyn TmuxExec> {
     }
 }
 
-fn reconcile_sessions(
-    s: &Store,
+async fn reconcile_sessions(
+    store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<Vec<SessionRow>, IpcError> {
     // Ensure the local host always exists (it's the bootstrap default).
-    s.upsert_host("local")?;
-    let hosts = s.list_hosts()?;
+    // Lock only for sync DB operations; release before each .await.
+    let hosts = {
+        let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        s.upsert_host("local")?;
+        s.list_hosts()?
+    };
     let mut all_rows: Vec<SessionRow> = Vec::new();
 
     for host in hosts {
@@ -33,12 +37,13 @@ fn reconcile_sessions(
         // — matches the spec's "hidden host's sessions are still listed"
         // semantic. We don't update reachable here.
         if host.hidden {
+            let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
             all_rows.extend(s.list_sessions_for_host(&host.alias)?);
             continue;
         }
         let tmux = exec_for(&host.alias, ssh);
-        // TODO(iter4a-task5): remove block_on shim — convert reconcile_sessions to async
-        let live = match tauri::async_runtime::block_on(tmux.list_sessions()) {
+        // Lock is released before .await so the future remains Send.
+        let live = match tmux.list_sessions().await {
             Ok(v) => v,
             Err(_e) => {
                 // Mark host unreachable but don't fail the whole reconcile;
@@ -47,6 +52,7 @@ fn reconcile_sessions(
                 // and surface them so the UI can render them dimmed/red —
                 // a transient network drop shouldn't make the user lose
                 // sight of their sessions.
+                let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
                 let _ = s.update_host_probe(
                     &host.alias,
                     false,
@@ -58,7 +64,8 @@ fn reconcile_sessions(
                 continue;
             }
         };
-        // Successful list = reachable. Bump the timestamp.
+        // Successful list = reachable. Lock for all remaining sync writes.
+        let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
         let _ = s.update_host_probe(
             &host.alias,
             true,
@@ -69,7 +76,7 @@ fn reconcile_sessions(
         let mut keep = Vec::with_capacity(live.len());
         for sess in &live {
             keep.push(sess.name.clone());
-            let project_id = find_project_id_for_path(s, &host.alias, &sess.path);
+            let project_id = find_project_id_for_path(&s, &host.alias, &sess.path);
             // Preservation invariant: if the session already has an
             // account_uuid in the DB, keep it; only capture the host's
             // current account for newly-discovered sessions.
@@ -146,14 +153,11 @@ fn find_project_id_for_path(
 }
 
 #[tauri::command]
-pub fn list_sessions(
+pub async fn list_sessions(
     store: State<'_, Mutex<Store>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<Vec<SessionRow>, IpcError> {
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    reconcile_sessions(&s, &ssh)
+    reconcile_sessions(&store, &ssh).await
 }
 
 #[derive(Deserialize)]
@@ -207,13 +211,12 @@ fn fetch_worktree(s: &Store, worktree_id: i64) -> Result<(String, Option<String>
 /// master). If the SSH session is unreachable, this propagates an error
 /// rather than guessing — calling `new_session` for an unreachable host
 /// should fail loudly.
-fn remote_home(ssh: &Arc<SshClient>, host: &str) -> Result<String, IpcError> {
-    // TODO(iter4a-task5): remove block_on shim — convert to async
-    let out = tauri::async_runtime::block_on(ssh.run(
+async fn remote_home(ssh: &Arc<SshClient>, host: &str) -> Result<String, IpcError> {
+    let out = ssh.run(
         host,
         &["printenv", "HOME"],
         std::time::Duration::from_secs(5),
-    ))?;
+    ).await?;
     if !out.status.success() {
         return Err(IpcError::new(
             "E_SSH",
@@ -280,7 +283,7 @@ fn shq(s: &str) -> String {
 ///
 /// Returns Ok(()) on success. Failure surfaces stderr in the IpcError so the
 /// user can diagnose (missing SSH key, private-repo auth, etc.).
-fn ensure_remote_project(
+async fn ensure_remote_project(
     ssh: &Arc<SshClient>,
     host: &str,
     owner: &str,
@@ -316,12 +319,11 @@ fn ensure_remote_project(
     // Wrap in bash -lc so $PATH (git on Homebrew/Linuxbrew) is sourced. Use
     // the same single-quote-the-whole-script trick as RemoteTmux::remote_bash
     // to avoid the ssh argv-joining bug.
-    // TODO(iter4a-task5): remove block_on shim — convert to async
-    let out = tauri::async_runtime::block_on(ssh.run(
+    let out = ssh.run(
         host,
         &["bash", "-lc", &script],
         std::time::Duration::from_secs(120),
-    ))?;
+    ).await?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -341,7 +343,7 @@ fn ensure_remote_project(
 }
 
 #[tauri::command]
-pub fn new_session(
+pub async fn new_session(
     args: NewSessionArgs,
     store: State<'_, Mutex<Store>>,
     ssh: State<'_, Arc<SshClient>>,
@@ -382,7 +384,7 @@ pub fn new_session(
             };
             (owner, repo, wt)
         };
-        let home = remote_home(&ssh, &args.host_alias)?;
+        let home = remote_home(&ssh, &args.host_alias).await?;
         let wt_name_str = wt_info.as_ref().map(|(name, _)| name.as_str());
         let (project_root, cwd) = remote_project_path(&home, &owner, &repo, wt_name_str);
         let worktree_for_clone = wt_info
@@ -395,17 +397,13 @@ pub fn new_session(
             &repo,
             &project_root,
             worktree_for_clone,
-        )?;
+        ).await?;
         PathBuf::from(cwd)
     };
     let tmux = exec_for(&args.host_alias, &ssh);
-    // TODO(iter4a-task5): remove block_on shim — convert new_session command to async
-    tauri::async_runtime::block_on(tmux.new_session(&args.name, &path))?;
+    tmux.new_session(&args.name, &path).await?;
 
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    let rows = reconcile_sessions(&s, &ssh)?;
+    let rows = reconcile_sessions(&store, &ssh).await?;
     rows.into_iter()
         .find(|r| r.tmux_name == args.name && r.host_alias == args.host_alias)
         .ok_or_else(|| {
@@ -426,18 +424,14 @@ pub struct KillSessionArgs {
 }
 
 #[tauri::command]
-pub fn kill_session(
+pub async fn kill_session(
     args: KillSessionArgs,
     store: State<'_, Mutex<Store>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
     let tmux = exec_for(&args.host_alias, &ssh);
-    // TODO(iter4a-task5): remove block_on shim — convert kill_session command to async
-    tauri::async_runtime::block_on(tmux.kill_session(&args.name))?;
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    reconcile_sessions(&s, &ssh)?;
+    tmux.kill_session(&args.name).await?;
+    reconcile_sessions(&store, &ssh).await?;
     Ok(())
 }
 
@@ -449,18 +443,14 @@ pub struct RenameSessionArgs {
 }
 
 #[tauri::command]
-pub fn rename_session(
+pub async fn rename_session(
     args: RenameSessionArgs,
     store: State<'_, Mutex<Store>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SessionRow, IpcError> {
     let tmux = exec_for(&args.host_alias, &ssh);
-    // TODO(iter4a-task5): remove block_on shim — convert rename_session command to async
-    tauri::async_runtime::block_on(tmux.rename_session(&args.old_name, &args.new_name))?;
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    let rows = reconcile_sessions(&s, &ssh)?;
+    tmux.rename_session(&args.old_name, &args.new_name).await?;
+    let rows = reconcile_sessions(&store, &ssh).await?;
     rows.into_iter()
         .find(|r| r.tmux_name == args.new_name.trim() && r.host_alias == args.host_alias)
         .ok_or_else(|| {
@@ -481,18 +471,14 @@ pub struct RestartSessionArgs {
 }
 
 #[tauri::command]
-pub fn restart_session(
+pub async fn restart_session(
     args: RestartSessionArgs,
     store: State<'_, Mutex<Store>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SessionRow, IpcError> {
     let tmux = exec_for(&args.host_alias, &ssh);
-    // TODO(iter4a-task5): remove block_on shim — convert restart_session command to async
-    tauri::async_runtime::block_on(tmux.restart_session(&args.name))?;
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    let rows = reconcile_sessions(&s, &ssh)?;
+    tmux.restart_session(&args.name).await?;
+    let rows = reconcile_sessions(&store, &ssh).await?;
     rows.into_iter()
         .find(|r| r.tmux_name == args.name && r.host_alias == args.host_alias)
         .ok_or_else(|| {
@@ -541,7 +527,7 @@ pub struct SendPromptArgs {
 }
 
 #[tauri::command]
-pub fn send_prompt(
+pub async fn send_prompt(
     args: SendPromptArgs,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
@@ -562,12 +548,11 @@ pub fn send_prompt(
     } else {
         for cmd in &cmds {
             let quoted = shell_quote_str(cmd);
-            // TODO(iter4a-task5): remove block_on shim — convert to async
-            let out = tauri::async_runtime::block_on(ssh.run(
+            let out = ssh.run(
                 &args.host_alias,
                 &["bash", "-lc", &quoted],
                 std::time::Duration::from_secs(10),
-            ))?;
+            ).await?;
             if !out.status.success() {
                 return Err(IpcError::new(
                     "E_TMUX",

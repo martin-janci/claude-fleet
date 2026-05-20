@@ -39,13 +39,13 @@ pub struct AddHostArgs {
 }
 
 #[tauri::command]
-pub fn add_host(
+pub async fn add_host(
     args: AddHostArgs,
     store: State<'_, Mutex<Store>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<HostRow, IpcError> {
     // Probe first; we don't want to persist a host we can't talk to.
-    let (reachable, claude_ver, tmux_ver, account) = probe(&ssh, &args.ssh_alias)?;
+    let (reachable, claude_ver, tmux_ver, account) = probe(&ssh, &args.ssh_alias).await?;
     {
         let s = store
             .lock()
@@ -86,11 +86,11 @@ pub struct ProbeSshAliasArgs {
 }
 
 #[tauri::command]
-pub fn probe_ssh_alias(
+pub async fn probe_ssh_alias(
     args: ProbeSshAliasArgs,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<ProbePreview, IpcError> {
-    let (reachable, claude_version, tmux_version, account) = probe(&ssh, &args.ssh_alias)?;
+    let (reachable, claude_version, tmux_version, account) = probe(&ssh, &args.ssh_alias).await?;
     Ok(ProbePreview {
         reachable,
         claude_version,
@@ -105,7 +105,7 @@ pub struct HostAliasArgs {
 }
 
 #[tauri::command]
-pub fn probe_host(
+pub async fn probe_host(
     args: HostAliasArgs,
     store: State<'_, Mutex<Store>>,
     ssh: State<'_, Arc<SshClient>>,
@@ -127,7 +127,7 @@ pub fn probe_host(
     let (reachable, claude_ver, tmux_ver, account) = if args.alias == "local" {
         probe_local()
     } else {
-        probe_lenient(&ssh, target)
+        probe_lenient(&ssh, target).await
     };
     {
         let s = store
@@ -196,7 +196,7 @@ fn list_one(
 /// Strict probe — returns Err(E_PROBE) if the SSH round trip fails. Used by
 /// add_host. Reads tmux + claude versions AND the oauthAccount in a single
 /// round trip (sections separated by literal `---`).
-fn probe(
+async fn probe(
     ssh: &Arc<SshClient>,
     host: &str,
 ) -> Result<(bool, Option<String>, Option<String>, Option<OauthAccount>), IpcError> {
@@ -207,11 +207,9 @@ echo ---
 ( cat "$HOME/.claude.json" 2>/dev/null | jq -c .oauthAccount 2>/dev/null \
   || python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d.get("oauthAccount") or {}))' "$HOME/.claude.json" 2>/dev/null \
   || true )"#;
-    // TODO(iter4a-task5): remove block_on shim — convert to async
-    let out = tauri::async_runtime::block_on(
-        ssh.run(host, &["bash", "-lc", script], Duration::from_secs(5))
-    )
-    .map_err(|e| IpcError::new("E_PROBE", format!("ssh {host}: {}", e.message)))?;
+    let out = ssh.run(host, &["bash", "-lc", script], Duration::from_secs(5))
+        .await
+        .map_err(|e| IpcError::new("E_PROBE", format!("ssh {host}: {}", e.message)))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(IpcError::new(
@@ -235,11 +233,11 @@ echo ---
 /// Lenient probe — never errors. Used by `probe_host` (the user-triggered
 /// Re-probe in Settings) and by background reconcile, where a failed probe
 /// should just bump `reachable=false` rather than break the caller.
-fn probe_lenient(
+async fn probe_lenient(
     ssh: &Arc<SshClient>,
     host: &str,
 ) -> (bool, Option<String>, Option<String>, Option<OauthAccount>) {
-    match probe(ssh, host) {
+    match probe(ssh, host).await {
         Ok(v) => v,
         Err(_) => (false, None, None, None),
     }
