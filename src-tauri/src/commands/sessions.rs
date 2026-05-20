@@ -28,7 +28,12 @@ fn reconcile_sessions(
     let mut all_rows: Vec<SessionRow> = Vec::new();
 
     for host in hosts {
+        // Hidden hosts: don't probe (network noise), but DO surface their
+        // last-known sessions so they appear in the "Other sessions" group
+        // — matches the spec's "hidden host's sessions are still listed"
+        // semantic. We don't update reachable here.
         if host.hidden {
+            all_rows.extend(s.list_sessions_for_host(&host.alias)?);
             continue;
         }
         let tmux = exec_for(&host.alias, ssh);
@@ -36,7 +41,11 @@ fn reconcile_sessions(
             Ok(v) => v,
             Err(_e) => {
                 // Mark host unreachable but don't fail the whole reconcile;
-                // other hosts can still list their sessions.
+                // other hosts can still list their sessions. We KEEP the
+                // last-known sessions in the DB (no delete_sessions_not_in)
+                // and surface them so the UI can render them dimmed/red —
+                // a transient network drop shouldn't make the user lose
+                // sight of their sessions.
                 let _ = s.update_host_probe(
                     &host.alias,
                     false,
@@ -44,6 +53,7 @@ fn reconcile_sessions(
                     host.tmux_version.as_deref(),
                     now_unix(),
                 );
+                all_rows.extend(s.list_sessions_for_host(&host.alias)?);
                 continue;
             }
         };

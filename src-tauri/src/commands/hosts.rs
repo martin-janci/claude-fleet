@@ -76,10 +76,13 @@ pub fn probe_host(
     };
     let target = ssh_alias.as_deref().unwrap_or(&args.alias);
     // The `local` host has no ssh_alias; probe is best-effort via local shell.
+    // For remote hosts we use the lenient probe so a Re-probe of an
+    // unreachable host updates `reachable=false` instead of returning an
+    // error to the UI.
     let (reachable, claude_ver, tmux_ver) = if args.alias == "local" {
         probe_local()
     } else {
-        probe(&ssh, target)?
+        probe_lenient(&ssh, target)
     };
     {
         let s = store
@@ -139,6 +142,10 @@ fn list_one(
         .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("host {alias} not found")))
 }
 
+/// Strict probe — returns `Err(E_PROBE)` if the SSH round trip fails or the
+/// remote shell exits non-zero. Used by `add_host` so we refuse to persist
+/// a host we can't reach. `probe_host` uses [`probe_lenient`] instead, which
+/// turns failures into a `(false, None, None)` outcome the caller can record.
 fn probe(
     ssh: &Arc<SshClient>,
     host: &str,
@@ -146,13 +153,15 @@ fn probe(
     // Single round trip: print both versions, semicolon-separated, so a
     // missing claude doesn't drop the tmux probe.
     let script = "tmux -V 2>/dev/null || true; echo ---; claude --version 2>/dev/null || true";
-    let out = ssh.run(host, &["bash", "-lc", script], Duration::from_secs(5));
-    let out = match out {
-        Ok(o) => o,
-        Err(_) => return Ok((false, None, None)),
-    };
+    let out = ssh
+        .run(host, &["bash", "-lc", script], Duration::from_secs(5))
+        .map_err(|e| IpcError::new("E_PROBE", format!("ssh {host}: {}", e.message)))?;
     if !out.status.success() {
-        return Ok((false, None, None));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(IpcError::new(
+            "E_PROBE",
+            format!("ssh {host} exited {:?}: {}", out.status.code(), stderr.trim()),
+        ));
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
     let mut parts = stdout.split("---");
@@ -163,6 +172,19 @@ fn probe(
         parse_claude_version(&claude_line),
         parse_tmux_version(&tmux_line),
     ))
+}
+
+/// Lenient probe — never errors. Used by `probe_host` (the user-triggered
+/// Re-probe in Settings) and by background reconcile, where a failed probe
+/// should just bump `reachable=false` rather than break the caller.
+fn probe_lenient(
+    ssh: &Arc<SshClient>,
+    host: &str,
+) -> (bool, Option<String>, Option<String>) {
+    match probe(ssh, host) {
+        Ok(v) => v,
+        Err(_) => (false, None, None),
+    }
 }
 
 fn probe_local() -> (bool, Option<String>, Option<String>) {
