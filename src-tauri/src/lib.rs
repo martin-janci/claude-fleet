@@ -1,4 +1,5 @@
 mod commands;
+mod events;
 mod ipc_error;
 mod projects;
 mod pty;
@@ -6,6 +7,8 @@ mod ssh;
 mod ssh_config;
 mod store;
 mod tmux;
+
+pub use events::{EventBus, NoopEventBus};
 
 use directories::ProjectDirs;
 use pty::PtyState;

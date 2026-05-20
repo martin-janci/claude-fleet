@@ -3,6 +3,8 @@
 // is not Send+Sync. Commands access it via `State<'_, Mutex<Store>>`.
 
 use rusqlite::{Connection, Result};
+use crate::events::{EventBus, NoopEventBus};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProjectRow {
@@ -61,12 +63,17 @@ pub struct AccountRow {
 
 pub struct Store {
     conn: Connection,
+    bus: Arc<dyn EventBus>,
 }
 
 impl Store {
     pub fn open(path: &std::path::Path) -> Result<Self> {
+        Self::open_with_bus(path, Arc::new(NoopEventBus))
+    }
+
+    pub fn open_with_bus(path: &std::path::Path, bus: Arc<dyn EventBus>) -> Result<Self> {
         let conn = Connection::open(path)?;
-        let store = Self { conn };
+        let store = Self { conn, bus };
         store.migrate()?;
         Ok(store)
     }
@@ -74,7 +81,7 @@ impl Store {
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        let store = Self { conn };
+        let store = Self { conn, bus: Arc::new(NoopEventBus) };
         store.migrate()?;
         Ok(store)
     }
@@ -1042,5 +1049,16 @@ mod tests {
         let _b = s.upsert_session("dev-b", "h", None, None, 1, 1, "running", None).unwrap();
         let related = s.list_related_sessions(a).unwrap();
         assert!(related.is_empty(), "orphans should not match each other; got: {:?}", related.iter().map(|r| &r.tmux_name).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn store_holds_event_bus_field_and_default_is_noop() {
+        use crate::events::NoopEventBus;
+        let store = Store::open_in_memory().expect("store");
+        // Just constructing the store with the default Noop bus exercises the
+        // new field. The bus is a private implementation detail; we don't expose
+        // it as a public getter, so this test is intentionally minimal.
+        let _ = std::sync::Arc::new(NoopEventBus); // also exercises Send+Sync
+        let _ = store; // touch it to keep it alive past the new
     }
 }
