@@ -1,39 +1,25 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { Terminal } from '@xterm/xterm';
-  import { FitAddon } from '@xterm/addon-fit';
+  import { Terminal } from 'xterm';
+  import { FitAddon } from 'xterm-addon-fit';
   import { invoke } from '@tauri-apps/api/core';
   import { selectedSession } from './selection';
-  import { setPtyWriteSink, ptyDebug } from './pty-stream';
-  import '@xterm/xterm/css/xterm.css';
+  import 'xterm/css/xterm.css';
 
   let container: HTMLDivElement | undefined = $state(undefined);
   let term: Terminal | null = null;
   let fitAddon: FitAddon | null = null;
   let resizeObserver: ResizeObserver | null = null;
-  // Tracks the session that is currently OPEN on the PTY backend. Used to
-  // detect when we need to swap, and to gate input-forwarding wiring until
-  // the PTY is actually live.
+  let drainTimer: ReturnType<typeof setInterval> | null = null;
   let currentSession: string | null = $state(null);
   let openError: string | null = $state(null);
-  // Set inside the resize observer once the container has a real size and
-  // the PTY has been successfully opened.
   let ptyOpen = false;
-  // Latest layout (used by pty_resize) — held outside reactive state so we
-  // don't rerun effects on every resize.
   let lastCols = 0;
   let lastRows = 0;
-  // Reactive copies for the status badge in the header.
   let displayCols = $state(0);
   let displayRows = $state(0);
-  // Whether we currently own the global PTY write sink. Set on first PTY open,
-  // cleared on closeTerm.
-  let sinkAttached = false;
-  // Diagnostic counters surfaced in the status footer next to the size badge.
-  let sinkCalls = $state(0);
-  let sinkBytes = $state(0);
-  let writeErrors = $state(0);
-  let lastWriteError: string | null = $state(null);
+  let totalBytes = $state(0);
+  let drainTicks = $state(0);
 
   $effect(() => {
     const sess = $selectedSession;
@@ -45,9 +31,6 @@
     void openTerm(sess.tmux_name);
   });
 
-  // The container <div> arrives after the {#if $selectedSession} block
-  // mounts. When it does, openTerm() may have been short-circuited (no
-  // container yet) — retry once container is bound.
   $effect(() => {
     if (container && $selectedSession && currentSession !== $selectedSession.tmux_name) {
       void openTerm($selectedSession.tmux_name);
@@ -63,29 +46,19 @@
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
       fontSize: 13,
       cursorBlink: true,
-      allowProposedApi: true,
       scrollback: 5000,
-      convertEol: true,
       theme: readThemeFromCss(),
     });
     fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(container);
 
-    // Diagnostic: if you ever see a blank pane, this line confirms xterm
-    // itself is rendering. Cleared by tmux's first refresh.
-    term.writeln(`\x1b[90m[claude-fleet] attaching to ${sessionName}…\x1b[0m`);
-
-    // Drive both the initial open AND every subsequent resize from a single
-    // ResizeObserver, so we never hand pty_open a 0x0 measurement.
     resizeObserver = new ResizeObserver((entries) => {
       const t = term;
       const fa = fitAddon;
       if (!t || !fa) return;
       const entry = entries[0];
-      if (entry && (entry.contentRect.width < 4 || entry.contentRect.height < 4)) {
-        return;
-      }
+      if (entry && (entry.contentRect.width < 4 || entry.contentRect.height < 4)) return;
       try {
         fa.fit();
       } catch {
@@ -100,17 +73,11 @@
       if (!ptyOpen) {
         void firstOpen(sessionName);
       } else {
-        void invoke('pty_resize', {
-          args: { cols: t.cols, rows: t.rows },
-        }).catch(() => {});
+        void invoke('pty_resize', { args: { cols: t.cols, rows: t.rows } }).catch(() => {});
       }
     });
     resizeObserver.observe(container);
 
-    // Fast-path with retries. rAF fires after layout in most cases, but
-    // when the flex pane is still measuring (Tauri webview on first paint
-    // can be sluggish) the first frame may still report 0×0. Retry up to
-    // 8 frames before giving up and letting ResizeObserver take over.
     tryFitAndOpen(sessionName, 0);
   }
 
@@ -140,36 +107,7 @@
   async function firstOpen(sessionName: string) {
     if (ptyOpen) return;
     if (!term) return;
-    ptyOpen = true; // optimistic: prevents races; we revert on failure
-
-    // Install our xterm as the write sink for the GLOBAL pty-data
-    // listener (registered at App boot). The diagnostic writeln() of
-    // a "[sink #N] NB" tick line for each chunk is intentional — even if
-    // the binary write(chunk) doesn't render, the tick lines (plain text)
-    // will, so we can SEE in xterm whether the callback is even running.
-    setPtyWriteSink((chunk) => {
-      sinkCalls += 1;
-      sinkBytes += chunk.length;
-      const n = sinkCalls;
-      const len = chunk.length;
-      if (!term) {
-        // eslint-disable-next-line no-console
-        console.warn(`[sink #${n}] ${len}B — but term is null`);
-        return;
-      }
-      try {
-        term.writeln(`\x1b[90m[sink #${n}] ${len}B\x1b[0m`);
-        term.write(chunk);
-      } catch (e) {
-        writeErrors += 1;
-        lastWriteError = String(e);
-        // eslint-disable-next-line no-console
-        console.error('xterm write failed:', e, 'chunk len=', len);
-      }
-    });
-    sinkAttached = true;
-    // eslint-disable-next-line no-console
-    console.log(`[firstOpen] sink installed for ${sessionName}, cols=${lastCols} rows=${lastRows}`);
+    ptyOpen = true;
 
     try {
       await invoke('pty_open', {
@@ -184,8 +122,6 @@
       openError = describeError(e);
       term?.writeln(`\r\n\x1b[31mPTY open failed: ${openError}\x1b[0m\r\n`);
       ptyOpen = false;
-      setPtyWriteSink(null);
-      sinkAttached = false;
       return;
     }
 
@@ -193,25 +129,43 @@
       void invoke('pty_write', { args: { data } }).catch(() => {});
     });
 
-    // tmux may have decided its window-size based on whatever client
-    // attached first, or may not yet have drawn for our just-set
-    // geometry. A redundant pty_resize triggers SIGWINCH on the child,
-    // which makes tmux force a full redraw at the correct dimensions.
+    // Start the drain loop. 30 ms = ~33 Hz, fast enough for interactive
+    // terminals without burning CPU. The kernel issues SIGWINCH at our
+    // next resize anyway, so tmux re-renders correctly.
+    drainTimer = setInterval(drainOnce, 30);
+
     setTimeout(() => {
       if (!term || !ptyOpen) return;
-      void invoke('pty_resize', {
-        args: { cols: term.cols, rows: term.rows },
-      }).catch(() => {});
+      void invoke('pty_resize', { args: { cols: term.cols, rows: term.rows } }).catch(() => {});
     }, 150);
   }
 
+  async function drainOnce() {
+    if (!term || !ptyOpen) return;
+    let result: { data: string; bytes: number };
+    try {
+      result = await invoke<{ data: string; bytes: number }>('pty_drain');
+    } catch {
+      return;
+    }
+    drainTicks += 1;
+    if (result.bytes === 0) return;
+    totalBytes += result.bytes;
+    try {
+      term.write(result.data);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('xterm write failed:', e);
+    }
+  }
+
   async function closeTerm() {
+    if (drainTimer) {
+      clearInterval(drainTimer);
+      drainTimer = null;
+    }
     resizeObserver?.disconnect();
     resizeObserver = null;
-    if (sinkAttached) {
-      setPtyWriteSink(null);
-      sinkAttached = false;
-    }
     term?.dispose();
     term = null;
     fitAddon = null;
@@ -219,10 +173,8 @@
     lastRows = 0;
     displayCols = 0;
     displayRows = 0;
-    sinkCalls = 0;
-    sinkBytes = 0;
-    writeErrors = 0;
-    lastWriteError = null;
+    totalBytes = 0;
+    drainTicks = 0;
     if (ptyOpen) {
       ptyOpen = false;
       try {
@@ -262,22 +214,9 @@
       <span class="size" data-testid="terminal-size">
         {#if displayCols > 0}{displayCols}×{displayRows}{:else}measuring…{/if}
       </span>
-      <span class="counters" data-testid="terminal-counters" title={lastWriteError ?? ''}>
-        sink: {sinkCalls} · {sinkBytes}B{#if writeErrors > 0} · err {writeErrors}{/if}
+      <span class="counters" data-testid="terminal-counters">
+        ticks: {drainTicks} · {totalBytes}B
       </span>
-      <button
-        class="reconnect"
-        onclick={() => {
-          // Test: write a known string directly to xterm. If THIS doesn't
-          // appear in the pane, xterm itself is broken; if it does, the
-          // chain from sink → term.write is OK and the bug is elsewhere.
-          term?.write('\r\n\x1b[93m[test write] hello from JS @ ' + new Date().toISOString() + '\x1b[0m\r\n');
-        }}
-        title="Write a synthetic line directly to xterm"
-        data-testid="terminal-test-write"
-      >
-        ✎ test
-      </button>
       <button
         class="reconnect"
         onclick={() => $selectedSession && void openTerm($selectedSession.tmux_name)}
@@ -290,16 +229,6 @@
     <div class="xterm-host" bind:this={container} data-testid="terminal-host"></div>
     {#if openError}
       <div class="err">PTY error: {openError}</div>
-    {/if}
-    {#if $ptyDebug.length > 0}
-      <details class="debug">
-        <summary>pty-data events ({$ptyDebug.length}) — click to expand</summary>
-        <ul>
-          {#each $ptyDebug.slice(-10).reverse() as e (e.ts)}
-            <li><code>{e.bytes}B · {e.preview}</code></li>
-          {/each}
-        </ul>
-      </details>
     {/if}
   </div>
 {:else}
@@ -365,8 +294,6 @@
     overflow: hidden;
     position: relative;
   }
-  /* xterm.js inserts its own .xterm root inside .xterm-host. Force it to
-     fill the available area so FitAddon measures the right rect. */
   .xterm-host :global(.xterm) {
     height: 100%;
     width: 100%;
@@ -384,17 +311,4 @@
     padding: 0.3rem 0.6rem;
     border-top: 1px solid #e64a4a;
   }
-  .debug {
-    flex: 0 0 auto;
-    font-size: 0.7rem;
-    padding: 0.3rem 0.6rem;
-    border-top: 1px solid var(--border);
-    background: var(--bg-pane);
-    color: var(--fg-muted);
-    max-height: 30%;
-    overflow-y: auto;
-  }
-  .debug summary { cursor: pointer; }
-  .debug ul { list-style: none; margin: 0.3rem 0 0 0; padding: 0; }
-  .debug li { padding: 0.1rem 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 </style>

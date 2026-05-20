@@ -1,19 +1,27 @@
 use crate::ipc_error::IpcError;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
-use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, State};
+use std::sync::{Arc, Mutex};
+use tauri::State;
 
 /// One active PTY at a time (we render a single terminal pane). Opening a new
 /// PTY closes the previous one. Holds the master (for resize), a writer (for
 /// input forwarding), and the child handle (for kill on close). The reader is
 /// moved into a background thread that emits chunks via the Tauri Channel
 /// supplied at open time.
+/// Polling-based PTY transport. The reader thread appends bytes to `buffer`;
+/// the frontend calls `pty_drain` on a short interval (e.g. 30 ms) to swap
+/// the buffer with an empty Vec and consume the bytes. This avoids the Tauri
+/// 2 `emit`/`Channel` from-thread reliability issues observed empirically:
+/// emits from the reader thread sometimes silently never reach JS, while
+/// emits from the command's main runtime thread always do. Polling has the
+/// same on-screen latency (~one frame) and no missing-event class of bugs.
 pub struct PtyState {
     master: Option<Box<dyn MasterPty + Send>>,
     writer: Option<Box<dyn Write + Send>>,
     child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    buffer: Arc<Mutex<Vec<u8>>>,
 }
 
 impl PtyState {
@@ -22,17 +30,22 @@ impl PtyState {
             master: None,
             writer: None,
             child: None,
+            buffer: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn close(&mut self) {
         // Drop writer first so the slave EOFs; then kill child to make sure
-        // the reader thread terminates.
+        // the reader thread terminates. Clear the buffer so a subsequent open
+        // doesn't deliver stale bytes from the previous session.
         self.writer.take();
         self.master.take();
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
+        }
+        if let Ok(mut b) = self.buffer.lock() {
+            b.clear();
         }
     }
 }
@@ -45,16 +58,8 @@ pub struct PtyOpenArgs {
     pub rows: u16,
 }
 
-/// Single global event name for streaming PTY bytes to whichever window
-/// is rendering the terminal. The frontend subscribes via `listen('pty-data', …)`.
-const PTY_DATA_EVENT: &str = "pty-data";
-
 #[tauri::command]
-pub fn pty_open(
-    args: PtyOpenArgs,
-    state: State<'_, Mutex<PtyState>>,
-    app: AppHandle,
-) -> Result<(), IpcError> {
+pub fn pty_open(args: PtyOpenArgs, state: State<'_, Mutex<PtyState>>) -> Result<(), IpcError> {
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -74,15 +79,6 @@ pub fn pty_open(
     }
     cmd.env("TERM", "xterm-256color");
 
-    // Diagnostic markers via app.emit (the older, more battle-tested IPC path).
-    // Channel<T> in Tauri 2 silently dropped these in our setup — verified by
-    // an isolated portable-pty test that received 928 bytes in 2.5s while the
-    // Channel version reached zero data to xterm.
-    let _ = app.emit(
-        PTY_DATA_EVENT,
-        "\x1b[90m[cf] open: spawning tmux…\x1b[0m\r\n".to_string(),
-    );
-
     let child = pair
         .slave
         .spawn_command(cmd)
@@ -97,64 +93,108 @@ pub fn pty_open(
         .take_writer()
         .map_err(|e| IpcError::new("E_PTY", format!("take writer: {e}")))?;
 
-    let _ = app.emit(
-        PTY_DATA_EVENT,
-        format!(
-            "\x1b[90m[cf] spawned tmux attach -t {}\x1b[0m\r\n",
-            args.session_name
-        ),
-    );
+    // Acquire the shared buffer up-front so the reader thread can use it
+    // without re-locking the PtyState. The buffer is an Arc<Mutex<Vec<u8>>>
+    // so handles can be cloned cheaply across threads.
+    let buffer_for_thread = {
+        let s = state
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
+        Arc::clone(&s.buffer)
+    };
+    {
+        let mut s = state
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
+        s.close();
+        s.master = Some(pair.master);
+        s.writer = Some(writer);
+        s.child = Some(child);
+        s.buffer = buffer_for_thread.clone();
+    }
 
-    // Move reader into a dedicated thread that pumps PTY output to all
-    // listeners of `pty-data` as UTF-8 lossy strings. Diagnostic markers
-    // at entry, EOF, and error make pipeline breaks visible.
-    let app_for_thread = app.clone();
-    std::thread::spawn(move || {
-        let _ = app_for_thread.emit(
-            PTY_DATA_EVENT,
-            "\x1b[90m[cf] reader thread up\x1b[0m\r\n".to_string(),
+    // Append a marker so the user can see in xterm that the channel is up.
+    if let Ok(mut b) = buffer_for_thread.lock() {
+        b.extend_from_slice(
+            format!(
+                "\x1b[90m[cf] attached to {} via polling buffer\x1b[0m\r\n",
+                args.session_name
+            )
+            .as_bytes(),
         );
+    }
+
+    // Reader thread: append bytes directly to the buffer the JS side drains.
+    // No Tauri events involved — pure shared-state pattern.
+    std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         let mut total = 0usize;
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
-                    let _ = app_for_thread.emit(
-                        PTY_DATA_EVENT,
-                        format!(
-                            "\r\n\x1b[33m[cf] PTY EOF after {total} bytes (tmux attach exited)\x1b[0m\r\n"
-                        ),
-                    );
+                    if let Ok(mut b) = buffer_for_thread.lock() {
+                        b.extend_from_slice(
+                            format!(
+                                "\r\n\x1b[33m[cf] PTY EOF after {total} bytes (tmux attach exited)\x1b[0m\r\n"
+                            )
+                            .as_bytes(),
+                        );
+                    }
                     break;
                 }
                 Ok(n) => {
                     total += n;
-                    let chunk = String::from_utf8_lossy(&buf[..n]).into_owned();
-                    if app_for_thread.emit(PTY_DATA_EVENT, chunk).is_err() {
+                    if let Ok(mut b) = buffer_for_thread.lock() {
+                        b.extend_from_slice(&buf[..n]);
+                    } else {
                         break;
                     }
                 }
                 Err(e) => {
-                    let _ = app_for_thread.emit(
-                        PTY_DATA_EVENT,
-                        format!(
-                            "\r\n\x1b[31m[cf] reader error after {total} bytes: {e}\x1b[0m\r\n"
-                        ),
-                    );
+                    if let Ok(mut b) = buffer_for_thread.lock() {
+                        b.extend_from_slice(
+                            format!(
+                                "\r\n\x1b[31m[cf] reader error after {total} bytes: {e}\x1b[0m\r\n"
+                            )
+                            .as_bytes(),
+                        );
+                    }
                     break;
                 }
             }
         }
     });
 
-    let mut s = state
+    Ok(())
+}
+
+#[derive(Serialize)]
+pub struct PtyDrainResult {
+    /// UTF-8 lossy view of any bytes accumulated since the last drain.
+    pub data: String,
+    /// How many raw bytes were drained.
+    pub bytes: usize,
+}
+
+#[tauri::command]
+pub fn pty_drain(state: State<'_, Mutex<PtyState>>) -> Result<PtyDrainResult, IpcError> {
+    let s = state
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
-    s.close();
-    s.master = Some(pair.master);
-    s.writer = Some(writer);
-    s.child = Some(child);
-    Ok(())
+    let mut buf = s
+        .buffer
+        .lock()
+        .map_err(|_| IpcError::new("E_LOCK", "pty buffer poisoned"))?;
+    if buf.is_empty() {
+        return Ok(PtyDrainResult {
+            data: String::new(),
+            bytes: 0,
+        });
+    }
+    let bytes = buf.len();
+    let data = String::from_utf8_lossy(&buf).into_owned();
+    buf.clear();
+    Ok(PtyDrainResult { data, bytes })
 }
 
 #[derive(Deserialize)]

@@ -9,7 +9,6 @@
   import TerminalView from './lib/TerminalView.svelte';
   import { loadProjects } from './lib/projects';
   import { loadSessions } from './lib/sessions';
-  import { initPtyStream, ptyEventCount } from './lib/pty-stream';
 
   let sidebarPx = $state(280);
   let centerPx = $state(360);
@@ -17,10 +16,6 @@
   let healthError = $state<string | null>(null);
 
   onMount(async () => {
-    // Register the global pty-data listener at boot, well before any
-    // session is clicked. Eliminates any timing race between Rust
-    // emitting and JS registering a handler.
-    void initPtyStream();
     try {
       health = await healthCheck();
     } catch (e) {
@@ -76,7 +71,7 @@
   {#if healthError}
     <span class="err">ipc error: {healthError}</span>
   {:else if health}
-    <span>v{health.version} · db: {health.db_ready ? 'ok' : 'fail'} · schema {health.schema_version} · pty events: {$ptyEventCount}</span>
+    <span>v{health.version} · db: {health.db_ready ? 'ok' : 'fail'} · schema {health.schema_version}</span>
   {:else}
     <span class="muted">connecting…</span>
   {/if}
