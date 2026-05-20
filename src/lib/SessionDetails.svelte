@@ -6,6 +6,7 @@
   import { selectSession, clearSelection } from './selection';
   import { hosts } from './hosts';
   import { accounts, type AccountRow } from './accounts';
+  import PromptComposer from './PromptComposer.svelte';
 
   let { session }: { session: SessionRow } = $props();
 
@@ -120,6 +121,11 @@
     if (!r.ok) actionError = r.error.message;
   }
 
+  let composerOpen = $state(false);
+  function openComposer() {
+    composerOpen = true;
+  }
+
   let confirmingKill = $state(false);
   function askKill() {
     confirmingKill = true;
@@ -229,11 +235,18 @@
     <button class="ghost" onclick={onRestart} data-testid="restart-from-details">
       ↻ Restart
     </button>
+    <button class="ghost" onclick={openComposer} data-testid="send-prompt-from-details">
+      → Send prompt
+    </button>
     <button class="danger" onclick={askKill} data-testid="kill-from-details">
       Kill session
     </button>
   </section>
 </article>
+
+{#if composerOpen}
+  <PromptComposer source={session} onClose={() => (composerOpen = false)} />
+{/if}
 
 {#if confirmingKill}
   <div class="modal-backdrop" onclick={cancelKill} role="presentation">

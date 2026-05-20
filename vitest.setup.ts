@@ -43,6 +43,7 @@ vi.mock('@tauri-apps/api/core', () => ({
       account: null,
     };
     if (cmd === 'related_sessions') return [];
+    if (cmd === 'send_prompt') return null;
     return null;
   }),
 }));

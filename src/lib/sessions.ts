@@ -66,3 +66,13 @@ export async function newSession(args: NewSessionArgs): Promise<Result<SessionRo
 export async function relatedSessions(sessionId: number): Promise<Result<SessionRow[]>> {
   return invokeCmd<SessionRow[]>('related_sessions', { args: { session_id: sessionId } });
 }
+
+export async function sendPrompt(
+  hostAlias: string,
+  tmuxName: string,
+  prompt: string,
+): Promise<Result<void>> {
+  return invokeCmd<void>('send_prompt', {
+    args: { host_alias: hostAlias, tmux_name: tmuxName, prompt },
+  });
+}
