@@ -4,6 +4,8 @@
   import { killSession, renameSession, restartSession } from './sessions';
   import { projects } from './projects';
   import { selectSession, clearSelection } from './selection';
+  import { hosts } from './hosts';
+  import { accounts, type AccountRow } from './accounts';
 
   let { session }: { session: SessionRow } = $props();
 
@@ -13,6 +15,18 @@
       ? null
       : ($projects.find((p) => p.project.id === session.project_id) ?? null),
   );
+
+  const hostRow = $derived(
+    $hosts.find((h) => h.alias === session.host_alias) ?? null,
+  );
+  const accountRow = $derived(
+    hostRow?.account_uuid ? $accounts.find((a) => a.uuid === hostRow.account_uuid) ?? null : null,
+  );
+  function accountText(a: AccountRow | null): string {
+    if (!a) return '—';
+    const email = a.email ?? a.uuid;
+    return a.seat_tier ? `${email} (${a.seat_tier})` : email;
+  }
 
   // Local-only for v0.2 (Phase 4 will branch on host_alias for remote attach).
   const attachCommand = $derived(`tmux attach -t ${session.tmux_name}`);
@@ -134,6 +148,12 @@
   </header>
 
   <dl class="meta">
+    <dt>Host</dt>
+    <dd data-testid="session-host">{session.host_alias}</dd>
+
+    <dt>Account</dt>
+    <dd data-testid="session-account">{accountText(accountRow)}</dd>
+
     <dt>Project</dt>
     <dd>
       {#if parentProject}
