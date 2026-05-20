@@ -154,11 +154,13 @@ pub async fn probe_host(
 pub fn remove_host(
     args: HostAliasArgs,
     store: State<'_, Mutex<Store>>,
-) -> Result<(), IpcError> {
+) -> Result<HostRow, IpcError> {
+    let row = list_one(&store, &args.alias)?;
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    s.delete_host(&args.alias).map_err(IpcError::from)
+    s.delete_host(&args.alias).map_err(IpcError::from)?;
+    Ok(row)
 }
 
 #[derive(Deserialize)]
@@ -171,11 +173,14 @@ pub struct HideHostArgs {
 pub fn hide_host(
     args: HideHostArgs,
     store: State<'_, Mutex<Store>>,
-) -> Result<(), IpcError> {
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    s.set_host_hidden(&args.alias, args.hidden).map_err(IpcError::from)
+) -> Result<HostRow, IpcError> {
+    {
+        let s = store
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        s.set_host_hidden(&args.alias, args.hidden).map_err(IpcError::from)?;
+    }
+    list_one(&store, &args.alias)
 }
 
 // --- helpers ---

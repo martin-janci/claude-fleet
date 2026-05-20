@@ -25,19 +25,19 @@ describe('sessions store', () => {
     expect(get(sessions)).toHaveLength(1);
   });
 
-  it('killSession returns Ok with deleted id and reloads', async () => {
+  it('killSession returns Ok with deleted id and removes from store', async () => {
+    sessions.set(sample);
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(1); // kill_session returns id
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]); // list_sessions
     const r = await killSession('local', 'dev-foo');
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.value).toBe(1);
     expect(get(sessions)).toHaveLength(0);
   });
 
-  it('renameSession passes old/new and reloads', async () => {
+  it('renameSession passes old/new and merges into store', async () => {
     const renamed = { ...sample[0], tmux_name: 'dev-bar' };
+    sessions.set(sample);
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(renamed); // rename_session
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce([renamed]); // list_sessions
     const r = await renameSession('local', 'dev-foo', 'dev-bar');
     expect(r.ok).toBe(true);
     expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
@@ -47,9 +47,8 @@ describe('sessions store', () => {
     expect(get(sessions)[0].tmux_name).toBe('dev-bar');
   });
 
-  it('restartSession returns Ok and reloads', async () => {
+  it('restartSession returns Ok and merges into store', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sample[0]); // restart_session
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sample); // list_sessions
     const r = await restartSession('local', 'dev-foo');
     expect(r.ok).toBe(true);
     expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([

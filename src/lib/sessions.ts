@@ -26,7 +26,7 @@ export async function killSession(hostAlias: string, name: string): Promise<Resu
   const r = await invokeCmd<number>('kill_session', {
     args: { host_alias: hostAlias, name },
   });
-  if (r.ok) await loadSessions();
+  if (r.ok) removeSession(r.value);
   return r;
 }
 
@@ -38,7 +38,7 @@ export async function renameSession(
   const r = await invokeCmd<SessionRow>('rename_session', {
     args: { host_alias: hostAlias, old_name: oldName, new_name: newName },
   });
-  if (r.ok) await loadSessions();
+  if (r.ok) mergeSession(r.value);
   return r;
 }
 
@@ -46,7 +46,7 @@ export async function restartSession(hostAlias: string, name: string): Promise<R
   const r = await invokeCmd<SessionRow>('restart_session', {
     args: { host_alias: hostAlias, name },
   });
-  if (r.ok) await loadSessions();
+  if (r.ok) mergeSession(r.value);
   return r;
 }
 
@@ -59,7 +59,7 @@ export interface NewSessionArgs {
 
 export async function newSession(args: NewSessionArgs): Promise<Result<SessionRow>> {
   const r = await invokeCmd<SessionRow>('new_session', { args });
-  if (r.ok) void loadSessions();
+  if (r.ok) mergeSession(r.value);
   return r;
 }
 

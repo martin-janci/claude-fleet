@@ -16,6 +16,7 @@ const sampleLocal = {
   tmux_version: '3.5a',
   hidden: false,
   last_pinged_at: 1,
+  account_uuid: null,
 };
 
 beforeEach(() => {
@@ -33,10 +34,10 @@ describe('hosts store', () => {
     expect(get(hosts)[0].alias).toBe('local');
   });
 
-  it('addHost passes alias + ssh_alias and reloads', async () => {
+  it('addHost passes alias + ssh_alias and merges into store', async () => {
     const added = { ...sampleLocal, alias: 'mefistos', ssh_alias: 'mefistos' };
+    hosts.set([sampleLocal]);
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(added);
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce([sampleLocal, added]);
     const r = await addHost('mefistos', 'mefistos');
     expect(r.ok).toBe(true);
     expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
@@ -46,28 +47,35 @@ describe('hosts store', () => {
     expect(get(hosts)).toHaveLength(2);
   });
 
-  it('probeHost re-fetches the list', async () => {
+  it('probeHost merges result into store', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sampleLocal);
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce([sampleLocal]);
     const r = await probeHost('local');
     expect(r.ok).toBe(true);
+    expect(get(hosts)).toHaveLength(1);
+    expect(get(hosts)[0].alias).toBe('local');
   });
 
-  it('deleteHost calls remove_host and reloads', async () => {
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce([sampleLocal]);
+  it('deleteHost calls remove_host and removes from store', async () => {
+    const mefistos = { ...sampleLocal, alias: 'mefistos', ssh_alias: 'mefistos' };
+    hosts.set([sampleLocal, mefistos]);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(mefistos);
     const r = await deleteHost('mefistos');
     expect(r.ok).toBe(true);
+    expect(get(hosts)).toHaveLength(1);
+    expect(get(hosts)[0].alias).toBe('local');
   });
 
-  it('hideHost passes the hidden flag', async () => {
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce([sampleLocal]);
+  it('hideHost passes the hidden flag and merges into store', async () => {
+    const mefistos = { ...sampleLocal, alias: 'mefistos', ssh_alias: 'mefistos', hidden: false };
+    const mefistosHidden = { ...mefistos, hidden: true };
+    hosts.set([mefistos]);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(mefistosHidden);
     const r = await hideHost('mefistos', true);
     expect(r.ok).toBe(true);
     expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
       'hide_host',
       { args: { alias: 'mefistos', hidden: true } },
     ]);
+    expect(get(hosts)[0].hidden).toBe(true);
   });
 });

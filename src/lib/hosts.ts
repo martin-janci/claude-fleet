@@ -45,28 +45,28 @@ export async function addHost(
   const r = await invokeCmd<HostRow>('add_host', {
     args: { alias, ssh_alias: sshAlias },
   });
-  if (r.ok) await loadHosts();
+  if (r.ok) mergeHost(r.value);
   return r;
 }
 
 export async function probeHost(alias: string): Promise<Result<HostRow>> {
   const r = await invokeCmd<HostRow>('probe_host', { args: { alias } });
-  if (r.ok) await loadHosts();
+  if (r.ok) mergeHost(r.value);
   return r;
 }
 
-export async function deleteHost(alias: string): Promise<Result<void>> {
-  const r = await invokeCmd<void>('remove_host', { args: { alias } });
-  if (r.ok) await loadHosts();
+export async function deleteHost(alias: string): Promise<Result<HostRow>> {
+  const r = await invokeCmd<HostRow>('remove_host', { args: { alias } });
+  if (r.ok) removeHost(r.value.alias);
   return r;
 }
 
 export async function hideHost(
   alias: string,
   hidden: boolean,
-): Promise<Result<void>> {
-  const r = await invokeCmd<void>('hide_host', { args: { alias, hidden } });
-  if (r.ok) await loadHosts();
+): Promise<Result<HostRow>> {
+  const r = await invokeCmd<HostRow>('hide_host', { args: { alias, hidden } });
+  if (r.ok) mergeHost(r.value);
   return r;
 }
 
