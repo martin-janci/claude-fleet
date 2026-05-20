@@ -77,6 +77,7 @@ fn reconcile_sessions(
                 sess.created,
                 sess.last_activity,
                 "running",
+                None,
             )?;
             if let Some(pid) = project_id {
                 s.touch_project_last_session_at(pid, sess.last_activity)?;

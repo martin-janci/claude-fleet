@@ -33,6 +33,7 @@ pub struct SessionRow {
     pub last_activity_at: i64,
     pub status: String,
     pub notes: Option<String>,
+    pub account_uuid: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -95,6 +96,10 @@ impl Store {
         if v < 3 {
             self.conn
                 .execute_batch(include_str!("../migrations/003_accounts.sql"))?;
+        }
+        if v < 4 {
+            self.conn
+                .execute_batch(include_str!("../migrations/004_session_account.sql"))?;
         }
         Ok(())
     }
@@ -410,16 +415,20 @@ impl Store {
         created_at: i64,
         last_activity_at: i64,
         status: &str,
+        account_uuid: Option<&str>,
     ) -> Result<i64, rusqlite::Error> {
         self.conn.execute(
-            "INSERT INTO sessions (tmux_name, host_alias, project_id, worktree_id, created_at, last_activity_at, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO sessions (tmux_name, host_alias, project_id, worktree_id,
+                                   created_at, last_activity_at, status, account_uuid)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(host_alias, tmux_name) DO UPDATE SET
                project_id=excluded.project_id,
                worktree_id=excluded.worktree_id,
                last_activity_at=excluded.last_activity_at,
-               status=excluded.status",
-            rusqlite::params![tmux_name, host_alias, project_id, worktree_id, created_at, last_activity_at, status],
+               status=excluded.status,
+               account_uuid=excluded.account_uuid",
+            rusqlite::params![tmux_name, host_alias, project_id, worktree_id,
+                              created_at, last_activity_at, status, account_uuid],
         )?;
         self.conn.query_row(
             "SELECT id FROM sessions WHERE host_alias=?1 AND tmux_name=?2",
@@ -434,7 +443,7 @@ impl Store {
     ) -> Result<Vec<SessionRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
-                    last_activity_at, status, notes
+                    last_activity_at, status, notes, account_uuid
              FROM sessions WHERE host_alias=?1 ORDER BY last_activity_at DESC",
         )?;
         let rows = stmt.query_map(rusqlite::params![host_alias], |row| {
@@ -448,6 +457,7 @@ impl Store {
                 last_activity_at: row.get(6)?,
                 status: row.get(7)?,
                 notes: row.get(8)?,
+                account_uuid: row.get(9)?,
             })
         })?;
         rows.collect()
@@ -502,7 +512,7 @@ mod tests {
     fn migrate_is_idempotent() {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
-        assert_eq!(store.schema_version().expect("version"), 3);
+        assert_eq!(store.schema_version().expect("version"), 4);
     }
 
     #[test]
@@ -567,11 +577,11 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("local").unwrap();
         let id = s
-            .upsert_session("dev-foo", "local", None, None, 1000, 2000, "running")
+            .upsert_session("dev-foo", "local", None, None, 1000, 2000, "running", None)
             .unwrap();
         assert!(id > 0);
         let id2 = s
-            .upsert_session("dev-foo", "local", None, None, 1000, 3000, "running")
+            .upsert_session("dev-foo", "local", None, None, 1000, 3000, "running", None)
             .unwrap();
         assert_eq!(id, id2);
         let rows = s.list_sessions_for_host("local").unwrap();
@@ -601,11 +611,11 @@ mod tests {
     fn sessions_prune_removes_stale_rows() {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("local").unwrap();
-        s.upsert_session("dev-a", "local", None, None, 1, 1, "running")
+        s.upsert_session("dev-a", "local", None, None, 1, 1, "running", None)
             .unwrap();
-        s.upsert_session("dev-b", "local", None, None, 1, 1, "running")
+        s.upsert_session("dev-b", "local", None, None, 1, 1, "running", None)
             .unwrap();
-        s.upsert_session("dev-c", "local", None, None, 1, 1, "running")
+        s.upsert_session("dev-c", "local", None, None, 1, 1, "running", None)
             .unwrap();
         let removed = s
             .delete_sessions_not_in("local", &["dev-a".to_string()])
@@ -634,9 +644,27 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_three_after_migration() {
+    fn schema_version_is_four_after_migration() {
         let s = Store::open_in_memory().expect("open");
-        assert_eq!(s.schema_version().expect("version"), 3);
+        assert_eq!(s.schema_version().expect("version"), 4);
+    }
+
+    #[test]
+    fn migration_004_adds_account_uuid_column_to_sessions() {
+        let s = Store::open_in_memory().expect("open");
+        let mut stmt = s
+            .conn
+            .prepare("SELECT name FROM pragma_table_info('sessions')")
+            .unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(
+            cols.iter().any(|c| c == "account_uuid"),
+            "expected `account_uuid` column on sessions; got: {cols:?}"
+        );
     }
 
     #[test]
@@ -705,7 +733,7 @@ mod tests {
     fn delete_host_removes_host_and_its_sessions() {
         let s = Store::open_in_memory().unwrap();
         s.insert_host("h", Some("h")).unwrap();
-        s.upsert_session("dev-a", "h", None, None, 1, 1, "running")
+        s.upsert_session("dev-a", "h", None, None, 1, 1, "running", None)
             .unwrap();
         assert_eq!(s.list_sessions_for_host("h").unwrap().len(), 1);
         s.delete_host("h").unwrap();
