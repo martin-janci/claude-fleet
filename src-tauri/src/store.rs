@@ -523,12 +523,18 @@ impl Store {
     }
 
     pub fn delete_host(&self, alias: &str) -> Result<(), rusqlite::Error> {
-        // Sessions are pruned naturally when reconcile_sessions runs against
-        // an empty hosts set; we don't cascade here. The `local` host is
-        // never removed.
+        // The `local` host is never removed.
         if alias == "local" {
             return Ok(());
         }
+        // Collect orphaned session ids first so we can emit a `session_killed`
+        // event per row — otherwise frontend stores subscribed to session events
+        // would carry stale rows that point to a host that no longer exists.
+        let orphan_ids: Vec<i64> = self
+            .conn
+            .prepare("SELECT id FROM sessions WHERE host_alias=?1")?
+            .query_map(rusqlite::params![alias], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
         self.conn.execute(
             "DELETE FROM sessions WHERE host_alias=?1",
             rusqlite::params![alias],
@@ -537,6 +543,9 @@ impl Store {
             "DELETE FROM hosts WHERE alias=?1",
             rusqlite::params![alias],
         )?;
+        for id in &orphan_ids {
+            self.bus.session_killed(*id);
+        }
         self.bus.host_removed(alias);
         Ok(())
     }
@@ -1290,5 +1299,21 @@ mod tests {
         let evts = bus.take();
         assert_eq!(evts.len(), 2, "expected 2 killed (s1, s3), got {evts:?}");
         assert!(evts.iter().all(|e| e.starts_with("session:killed:")));
+    }
+
+    #[test]
+    fn delete_host_emits_session_killed_per_orphaned_session() {
+        let (store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        store.upsert_session("s1", "alpha", None, None, 1, 1, "running", None).unwrap();
+        store.upsert_session("s2", "alpha", None, None, 1, 1, "running", None).unwrap();
+        bus.take(); // drain host:added + 2x session:created
+        store.delete_host("alpha").unwrap();
+        let evts = bus.take();
+        // Expected order: 2x session:killed (one per orphan), then host:removed.
+        assert_eq!(evts.len(), 3, "expected 2 session:killed + 1 host:removed, got {evts:?}");
+        assert!(evts[0].starts_with("session:killed:"), "got: {}", evts[0]);
+        assert!(evts[1].starts_with("session:killed:"), "got: {}", evts[1]);
+        assert_eq!(evts[2], "host:removed:alpha");
     }
 }
