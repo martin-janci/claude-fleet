@@ -15,6 +15,12 @@
 //! each host guarantees that concurrent first-touches share exactly one master
 //! spawn: `get_or_try_init` blocks all waiters until the winner's future
 //! resolves, then returns the cached `Ok(())` to every other caller.
+//!
+//! Error semantics: `tokio::sync::OnceCell::get_or_try_init` does NOT cache
+//! `Err`. If the init future fails, the cell stays empty and the next call
+//! retries — this is intentional, so a transient ssh failure (e.g. host
+//! briefly unreachable) doesn't poison the host's master slot for the lifetime
+//! of the process.
 
 use crate::ipc_error::IpcError;
 use dashmap::DashMap;
@@ -149,8 +155,9 @@ impl SshClient {
     /// don't leak persistent ssh processes after the app closes.
     ///
     /// This is intentionally synchronous (blocking) because it is called from
-    /// a sync on_exit hook. It spawns a blocking task on the tokio runtime so
-    /// the async ssh commands can complete.
+    /// a sync on_exit hook. It uses `std::process::Command` directly (NOT
+    /// tokio) so it works without a running runtime — best-effort fire-and-
+    /// forget cleanup.
     pub fn shutdown_all(&self) {
         let hosts: Vec<String> = self.masters.iter().map(|e| e.key().clone()).collect();
         for host in hosts {
