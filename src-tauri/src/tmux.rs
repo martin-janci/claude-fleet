@@ -1,38 +1,40 @@
+use async_trait::async_trait;
 use crate::ipc_error::IpcError;
 use serde::Serialize;
 use std::path::PathBuf;
-use std::process::Command;
 
 use crate::ssh::SshClient;
 use std::sync::Arc;
 
 /// Backend-agnostic tmux operations. Implementations differ only in how
 /// the `tmux` binary is invoked: locally or wrapped in `ssh <host>`.
+#[async_trait]
 pub trait TmuxExec: Send + Sync {
-    fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError>;
-    fn new_session(&self, name: &str, working_dir: &std::path::Path) -> Result<(), IpcError>;
-    fn kill_session(&self, name: &str) -> Result<(), IpcError>;
-    fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError>;
-    fn restart_session(&self, name: &str) -> Result<(), IpcError>;
+    async fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError>;
+    async fn new_session(&self, name: &str, working_dir: &std::path::Path) -> Result<(), IpcError>;
+    async fn kill_session(&self, name: &str) -> Result<(), IpcError>;
+    async fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError>;
+    async fn restart_session(&self, name: &str) -> Result<(), IpcError>;
 }
 
 pub struct LocalTmux;
 
+#[async_trait]
 impl TmuxExec for LocalTmux {
-    fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError> {
-        list_local_sessions()
+    async fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError> {
+        list_local_sessions().await
     }
-    fn new_session(&self, name: &str, cwd: &std::path::Path) -> Result<(), IpcError> {
-        new_session(name, cwd)
+    async fn new_session(&self, name: &str, cwd: &std::path::Path) -> Result<(), IpcError> {
+        new_session(name, cwd).await
     }
-    fn kill_session(&self, name: &str) -> Result<(), IpcError> {
-        kill_session(name)
+    async fn kill_session(&self, name: &str) -> Result<(), IpcError> {
+        kill_session(name).await
     }
-    fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError> {
-        rename_session(old, new)
+    async fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError> {
+        rename_session(old, new).await
     }
-    fn restart_session(&self, name: &str) -> Result<(), IpcError> {
-        restart_session(name)
+    async fn restart_session(&self, name: &str) -> Result<(), IpcError> {
+        restart_session(name).await
     }
 }
 
@@ -55,19 +57,17 @@ impl RemoteTmux {
     /// `shell_quote` so it crosses the ssh boundary as one shell word.
     /// `shell_quote` already escapes the embedded `'` characters used by
     /// per-arg quoting inside `script`.
-    fn remote_bash(&self, script: &str) -> Result<std::process::Output, IpcError> {
+    async fn remote_bash(&self, script: &str) -> Result<std::process::Output, IpcError> {
         let quoted = shell_quote(script);
-        // TODO(iter4a-task5): remove block_on shim — convert to async
-        tauri::async_runtime::block_on(
-            self.client.run(&self.host, &["bash", "-lc", &quoted], std::time::Duration::from_secs(10))
-        )
+        self.client.run(&self.host, &["bash", "-lc", &quoted], std::time::Duration::from_secs(10)).await
     }
 }
 
+#[async_trait]
 impl TmuxExec for RemoteTmux {
-    fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError> {
+    async fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError> {
         let script = "tmux list-sessions -F '#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}' 2>&1";
-        let output = self.remote_bash(script)?;
+        let output = self.remote_bash(script).await?;
         let combined = String::from_utf8_lossy(&output.stdout).into_owned();
         if output.status.success() {
             return Ok(parse_sessions(&combined));
@@ -78,7 +78,7 @@ impl TmuxExec for RemoteTmux {
         Err(IpcError::new("E_TMUX", combined.trim()))
     }
 
-    fn new_session(&self, name: &str, cwd: &std::path::Path) -> Result<(), IpcError> {
+    async fn new_session(&self, name: &str, cwd: &std::path::Path) -> Result<(), IpcError> {
         // Build the `tmux new-session` command identically to LocalTmux but
         // shell-escape arguments since we're sending a single script string.
         let mut script = String::from("tmux new-session -d");
@@ -89,7 +89,7 @@ impl TmuxExec for RemoteTmux {
         script.push_str(&format!(" -e LANG={}", shell_quote(&std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".into()))));
         script.push(' ');
         script.push_str(&shell_quote(&pane_command()));
-        let output = self.remote_bash(&script)?;
+        let output = self.remote_bash(&script).await?;
         if output.status.success() {
             Ok(())
         } else {
@@ -100,9 +100,9 @@ impl TmuxExec for RemoteTmux {
         }
     }
 
-    fn kill_session(&self, name: &str) -> Result<(), IpcError> {
+    async fn kill_session(&self, name: &str) -> Result<(), IpcError> {
         let script = format!("tmux kill-session -t {}", shell_quote(name));
-        let output = self.remote_bash(&script)?;
+        let output = self.remote_bash(&script).await?;
         if output.status.success() {
             Ok(())
         } else {
@@ -113,7 +113,7 @@ impl TmuxExec for RemoteTmux {
         }
     }
 
-    fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError> {
+    async fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError> {
         let trimmed = new.trim();
         if trimmed.is_empty() {
             return Err(IpcError::new("E_TMUX", "new session name must not be empty"));
@@ -132,7 +132,7 @@ impl TmuxExec for RemoteTmux {
             shell_quote(old),
             shell_quote(trimmed)
         );
-        let output = self.remote_bash(&script)?;
+        let output = self.remote_bash(&script).await?;
         if output.status.success() {
             Ok(())
         } else {
@@ -143,13 +143,13 @@ impl TmuxExec for RemoteTmux {
         }
     }
 
-    fn restart_session(&self, name: &str) -> Result<(), IpcError> {
+    async fn restart_session(&self, name: &str) -> Result<(), IpcError> {
         let script = format!(
             "tmux respawn-pane -k -t {}: {}",
             shell_quote(name),
             shell_quote(&pane_command())
         );
-        let output = self.remote_bash(&script)?;
+        let output = self.remote_bash(&script).await?;
         if output.status.success() {
             Ok(())
         } else {
@@ -189,14 +189,15 @@ pub struct TmuxSession {
 
 /// Lists tmux sessions on the local host. Returns an empty Vec (not an error)
 /// when the tmux server isn't running.
-pub fn list_local_sessions() -> Result<Vec<TmuxSession>, IpcError> {
-    let output = Command::new("tmux")
+pub async fn list_local_sessions() -> Result<Vec<TmuxSession>, IpcError> {
+    let output = tokio::process::Command::new("tmux")
         .args([
             "list-sessions",
             "-F",
             "#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}",
         ])
-        .output();
+        .output()
+        .await;
     match output {
         Ok(o) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout).into_owned();
@@ -262,13 +263,13 @@ pub fn pane_command() -> String {
     "cl --continue || cl; exec ${SHELL:-/bin/zsh} -l".to_string()
 }
 
-pub fn new_session(name: &str, working_dir: &std::path::Path) -> Result<(), IpcError> {
+pub async fn new_session(name: &str, working_dir: &std::path::Path) -> Result<(), IpcError> {
     // Push env into the session explicitly via `-e KEY=VAL`. This matters
     // because the tmux SERVER may already be running with stale env (e.g.
     // started before claude-fleet imported the user's locale from their
     // login shell). `-e` overrides the server env for processes started
     // in this session, so the spawned `cl`/`bash` reliably sees UTF-8.
-    let mut cmd = Command::new("tmux");
+    let mut cmd = tokio::process::Command::new("tmux");
     cmd.args(["new-session", "-d", "-s", name, "-c", &working_dir.to_string_lossy()]);
     for var in ["LANG", "LC_ALL", "LC_CTYPE", "PATH"] {
         if let Ok(val) = std::env::var(var) {
@@ -281,6 +282,7 @@ pub fn new_session(name: &str, working_dir: &std::path::Path) -> Result<(), IpcE
     cmd.arg(pane_command());
     let output = cmd
         .output()
+        .await
         .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
     if output.status.success() {
         Ok(())
@@ -293,7 +295,7 @@ pub fn new_session(name: &str, working_dir: &std::path::Path) -> Result<(), IpcE
 /// Rename an existing tmux session. New name must follow tmux's naming rules
 /// (no `.`, `:`, or whitespace; non-empty). Validation here keeps the caller
 /// from getting a cryptic tmux error.
-pub fn rename_session(old: &str, new: &str) -> Result<(), IpcError> {
+pub async fn rename_session(old: &str, new: &str) -> Result<(), IpcError> {
     let trimmed = new.trim();
     if trimmed.is_empty() {
         return Err(IpcError::new("E_TMUX", "new session name must not be empty"));
@@ -307,9 +309,10 @@ pub fn rename_session(old: &str, new: &str) -> Result<(), IpcError> {
     if trimmed == old {
         return Ok(()); // no-op
     }
-    let output = Command::new("tmux")
+    let output = tokio::process::Command::new("tmux")
         .args(["rename-session", "-t", old, trimmed])
         .output()
+        .await
         .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
     if output.status.success() {
         Ok(())
@@ -323,10 +326,11 @@ pub fn rename_session(old: &str, new: &str) -> Result<(), IpcError> {
 /// respawning with the same command the session was created with. Uses
 /// `respawn-pane -k` so we don't need to know if claude is currently running
 /// or already dropped to shell.
-pub fn restart_session(name: &str) -> Result<(), IpcError> {
-    let output = Command::new("tmux")
+pub async fn restart_session(name: &str) -> Result<(), IpcError> {
+    let output = tokio::process::Command::new("tmux")
         .args(["respawn-pane", "-k", "-t", &format!("{name}:"), &pane_command()])
         .output()
+        .await
         .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
     if output.status.success() {
         Ok(())
@@ -336,10 +340,11 @@ pub fn restart_session(name: &str) -> Result<(), IpcError> {
     }
 }
 
-pub fn kill_session(name: &str) -> Result<(), IpcError> {
-    let output = Command::new("tmux")
+pub async fn kill_session(name: &str) -> Result<(), IpcError> {
+    let output = tokio::process::Command::new("tmux")
         .args(["kill-session", "-t", name])
         .output()
+        .await
         .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
     if output.status.success() {
         Ok(())
@@ -420,15 +425,15 @@ mod tests {
         assert!(cmd.contains("exec ${SHELL:-/bin/zsh}"), "got: {cmd}");
     }
 
-    #[test]
-    fn rename_rejects_whitespace_dots_colons_and_empty() {
+    #[tokio::test]
+    async fn rename_rejects_whitespace_dots_colons_and_empty() {
         // Can't actually run tmux in unit tests; just exercise the validation
         // path. tmux command is never reached.
-        assert!(rename_session("a", "").is_err());
-        assert!(rename_session("a", "   ").is_err());
-        assert!(rename_session("a", "has space").is_err());
-        assert!(rename_session("a", "has.dot").is_err());
-        assert!(rename_session("a", "has:colon").is_err());
+        assert!(rename_session("a", "").await.is_err());
+        assert!(rename_session("a", "   ").await.is_err());
+        assert!(rename_session("a", "has space").await.is_err());
+        assert!(rename_session("a", "has.dot").await.is_err());
+        assert!(rename_session("a", "has:colon").await.is_err());
     }
 
     #[test]

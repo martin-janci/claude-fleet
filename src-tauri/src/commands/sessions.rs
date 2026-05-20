@@ -37,7 +37,8 @@ fn reconcile_sessions(
             continue;
         }
         let tmux = exec_for(&host.alias, ssh);
-        let live = match tmux.list_sessions() {
+        // TODO(iter4a-task5): remove block_on shim — convert reconcile_sessions to async
+        let live = match tauri::async_runtime::block_on(tmux.list_sessions()) {
             Ok(v) => v,
             Err(_e) => {
                 // Mark host unreachable but don't fail the whole reconcile;
@@ -398,7 +399,8 @@ pub fn new_session(
         PathBuf::from(cwd)
     };
     let tmux = exec_for(&args.host_alias, &ssh);
-    tmux.new_session(&args.name, &path)?;
+    // TODO(iter4a-task5): remove block_on shim — convert new_session command to async
+    tauri::async_runtime::block_on(tmux.new_session(&args.name, &path))?;
 
     let s = store
         .lock()
@@ -430,7 +432,8 @@ pub fn kill_session(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
     let tmux = exec_for(&args.host_alias, &ssh);
-    tmux.kill_session(&args.name)?;
+    // TODO(iter4a-task5): remove block_on shim — convert kill_session command to async
+    tauri::async_runtime::block_on(tmux.kill_session(&args.name))?;
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
@@ -452,7 +455,8 @@ pub fn rename_session(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SessionRow, IpcError> {
     let tmux = exec_for(&args.host_alias, &ssh);
-    tmux.rename_session(&args.old_name, &args.new_name)?;
+    // TODO(iter4a-task5): remove block_on shim — convert rename_session command to async
+    tauri::async_runtime::block_on(tmux.rename_session(&args.old_name, &args.new_name))?;
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
@@ -483,7 +487,8 @@ pub fn restart_session(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SessionRow, IpcError> {
     let tmux = exec_for(&args.host_alias, &ssh);
-    tmux.restart_session(&args.name)?;
+    // TODO(iter4a-task5): remove block_on shim — convert restart_session command to async
+    tauri::async_runtime::block_on(tmux.restart_session(&args.name))?;
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
