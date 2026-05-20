@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { discoverHosts, addHost, type SshHost } from './hosts';
-  import { probeSshAlias, type ProbePreview } from './accounts';
+  import { probeSshAliasAbortable, type ProbePreview } from './accounts';
 
   let { onClose }: { onClose: () => void } = $props();
 
@@ -12,6 +12,7 @@
   // null = no row clicked yet; { host, preview: null } = probing; { host, preview: ProbePreview } = ready to confirm.
   let previewing = $state<{ host: SshHost; preview: ProbePreview | null } | null>(null);
   let adding = $state(false);
+  let probeController: AbortController | null = null;
 
   onMount(async () => {
     const r = await discoverHosts();
@@ -26,17 +27,25 @@
   async function pick(host: SshHost) {
     previewing = { host, preview: null };
     error = null;
-    const r = await probeSshAlias(host.alias);
+    probeController = new AbortController();
+    const r = await probeSshAliasAbortable(host.alias, probeController.signal);
+    probeController = null;
     if (!previewing || previewing.host.alias !== host.alias) {
       // User clicked Cancel during the probe — discard
       return;
     }
     if (!r.ok) {
-      error = r.error.message;
+      if (r.error.code !== 'E_CANCELLED') {
+        error = r.error.message;
+      }
       previewing = null;
       return;
     }
     previewing = { host, preview: r.value };
+  }
+
+  function cancelProbe() {
+    probeController?.abort();
   }
 
   async function confirmAdd() {
@@ -105,6 +114,9 @@
       <h3>Add host: {previewing.host.alias}</h3>
       {#if !previewing.preview}
         <p class="muted" data-testid="preview-probing">Probing…</p>
+        <div class="actions">
+          <button type="button" data-testid="cancel-probe" onclick={cancelProbe}>Cancel probe</button>
+        </div>
       {:else}
         <dl class="preview" data-testid="preview-result">
           <dt>Hostname</dt><dd>{previewing.host.hostname ?? '—'}</dd>

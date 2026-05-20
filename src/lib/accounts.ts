@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import { invokeCmd, type Result } from './result';
+import { invokeCmd, invokeCmdAbortable, type Result } from './result';
 
 export interface AccountRow {
   uuid: string;
@@ -53,4 +53,15 @@ export interface ProbePreview {
 
 export async function probeSshAlias(sshAlias: string): Promise<Result<ProbePreview>> {
   return invokeCmd<ProbePreview>('probe_ssh_alias', { args: { ssh_alias: sshAlias } });
+}
+
+export async function probeSshAliasAbortable(
+  sshAlias: string,
+  signal?: AbortSignal,
+): Promise<Result<ProbePreview>> {
+  return invokeCmdAbortable<ProbePreview>(
+    'probe_ssh_alias',
+    { args: { ssh_alias: sshAlias } },
+    signal,
+  );
 }

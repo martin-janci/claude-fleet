@@ -6,7 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { accounts, loadAccounts, probeSshAlias } from './accounts';
+import { accounts, loadAccounts, probeSshAlias, probeSshAliasAbortable } from './accounts';
 
 const sample = {
   uuid: 'u1',
@@ -67,5 +67,33 @@ describe('accounts store', () => {
 
   it('store is empty after reset (beforeEach hygiene)', () => {
     expect(get(accounts)).toHaveLength(0);
+  });
+
+  it('probeSshAliasAbortable fires cancel_command on abort', async () => {
+    let resolveInvoke: (v: unknown) => void = () => {};
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation((cmd: string) => {
+      if (cmd === 'cancel_command') return Promise.resolve(null);
+      return new Promise((res) => {
+        resolveInvoke = res;
+      });
+    });
+    const ac = new AbortController();
+    const p = probeSshAliasAbortable('test-alias', ac.signal);
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 0));
+    const sawCancel = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.some(
+      (c) => c[0] === 'cancel_command',
+    );
+    expect(sawCancel).toBe(true);
+    resolveInvoke(null);
+    await p;
+  });
+
+  it('probeSshAliasAbortable returns E_CANCELLED if signal already aborted', async () => {
+    const ac = new AbortController();
+    ac.abort();
+    const r = await probeSshAliasAbortable('test-alias', ac.signal);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe('E_CANCELLED');
   });
 });

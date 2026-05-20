@@ -6,7 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { sessions, loadSessions, killSession, renameSession, restartSession } from './sessions';
+import { sessions, loadSessions, killSession, renameSession, restartSession, newSessionAbortable } from './sessions';
 
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
@@ -55,5 +55,39 @@ describe('sessions store', () => {
       'restart_session',
       { args: { host_alias: 'local', name: 'dev-foo' } },
     ]);
+  });
+
+  it('newSessionAbortable fires cancel_command on abort', async () => {
+    let resolveInvoke: (v: unknown) => void = () => {};
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation((cmd: string) => {
+      if (cmd === 'cancel_command') return Promise.resolve(null);
+      return new Promise((res) => {
+        resolveInvoke = res;
+      });
+    });
+    const ac = new AbortController();
+    const p = newSessionAbortable(
+      { host_alias: 'local', project_id: 1, worktree_id: null, name: 'dev-test' },
+      ac.signal,
+    );
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 0));
+    const sawCancel = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.some(
+      (c) => c[0] === 'cancel_command',
+    );
+    expect(sawCancel).toBe(true);
+    resolveInvoke(null);
+    await p;
+  });
+
+  it('newSessionAbortable returns E_CANCELLED if signal already aborted', async () => {
+    const ac = new AbortController();
+    ac.abort();
+    const r = await newSessionAbortable(
+      { host_alias: 'local', project_id: 1, worktree_id: null, name: 'dev-test' },
+      ac.signal,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe('E_CANCELLED');
   });
 });

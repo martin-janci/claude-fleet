@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import type { ProjectTreeRow, WorktreeRow } from './projects';
-  import { newSession, type SessionRow } from './sessions';
+  import { newSessionAbortable, type SessionRow } from './sessions';
   import { hosts } from './hosts';
   import { readPref, writePref } from './prefs';
 
@@ -33,6 +33,7 @@
   let name = $state(untrack(() => defaultName(project.worktrees[0] ?? null)));
   let busy = $state(false);
   let error: string | null = $state(null);
+  let createController: AbortController | null = null;
 
   function onPickWorktree(id: number) {
     chosenWorktreeId = id;
@@ -47,18 +48,29 @@
     }
     busy = true;
     error = null;
-    const r = await newSession({
-      host_alias: chosenHost,
-      project_id: project.project.id,
-      worktree_id: chosenWorktreeId,
-      name: name.trim(),
-    });
+    createController = new AbortController();
+    const r = await newSessionAbortable(
+      {
+        host_alias: chosenHost,
+        project_id: project.project.id,
+        worktree_id: chosenWorktreeId,
+        name: name.trim(),
+      },
+      createController.signal,
+    );
+    createController = null;
     busy = false;
     if (!r.ok) {
-      error = r.error.message;
+      if (r.error.code !== 'E_CANCELLED') {
+        error = r.error.message;
+      }
       return;
     }
     onCreate(r.value);
+  }
+
+  function cancelCreate() {
+    createController?.abort();
   }
 </script>
 
@@ -103,7 +115,11 @@
 
   <div class="actions">
     <button onclick={onCancel} disabled={busy}>Cancel</button>
-    <button onclick={submit} disabled={busy || !name.trim()}>Create</button>
+    {#if busy}
+      <button type="button" data-testid="cancel-create" onclick={cancelCreate}>Cancel creation</button>
+    {:else}
+      <button onclick={submit} disabled={!name.trim()}>Create</button>
+    {/if}
   </div>
 </div>
 

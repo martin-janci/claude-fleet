@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import { invokeCmd, type Result } from './result';
+import { invokeCmd, invokeCmdAbortable, type Result } from './result';
 
 export interface SessionRow {
   id: number;
@@ -59,6 +59,15 @@ export interface NewSessionArgs {
 
 export async function newSession(args: NewSessionArgs): Promise<Result<SessionRow>> {
   const r = await invokeCmd<SessionRow>('new_session', { args });
+  if (r.ok) mergeSession(r.value);
+  return r;
+}
+
+export async function newSessionAbortable(
+  args: NewSessionArgs,
+  signal?: AbortSignal,
+): Promise<Result<SessionRow>> {
+  const r = await invokeCmdAbortable<SessionRow>('new_session', { args }, signal);
   if (r.ok) mergeSession(r.value);
   return r;
 }
