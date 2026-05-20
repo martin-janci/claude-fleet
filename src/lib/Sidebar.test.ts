@@ -479,4 +479,26 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(title).not.toContain('@');
     expect(title).not.toContain('(max)');
   });
+
+  it('renders 🔗N badge for sessions with related siblings', async () => {
+    const a = sessionFor(1, 'dev-a');
+    a.worktree_id = 10;
+    const b = sessionFor(1, 'dev-b');
+    b.worktree_id = 10;
+    mockBackend(fakeProjects, [a, b]);
+    render(Sidebar);
+    for (let i = 0; i < 8; i++) await tick();
+    const badges = screen.queryAllByTestId('related-badge');
+    expect(badges).toHaveLength(2); // each session sees one sibling
+    expect(badges[0].textContent).toContain('1');
+  });
+
+  it('omits 🔗 badge for solo sessions', async () => {
+    const solo = sessionFor(1, 'dev-solo');
+    solo.worktree_id = 10;
+    mockBackend(fakeProjects, [solo]);
+    render(Sidebar);
+    for (let i = 0; i < 8; i++) await tick();
+    expect(screen.queryAllByTestId('related-badge')).toHaveLength(0);
+  });
 });

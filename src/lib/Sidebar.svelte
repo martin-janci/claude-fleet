@@ -150,6 +150,16 @@
     );
   }
 
+  function relatedCountFor(sess: SessionRow): number {
+    if (sess.project_id === null) return 0;
+    return $sessions.filter(
+      (s) =>
+        s.id !== sess.id &&
+        s.project_id === sess.project_id &&
+        s.worktree_id === sess.worktree_id,
+    ).length;
+  }
+
   // Sessions whose tmux working directory didn't map to any known project.
   const orphanSessions = $derived(
     $sessions.filter(
@@ -444,6 +454,13 @@
                       title={sess.status}
                       aria-hidden="true"
                     ></span>
+                    {#if relatedCountFor(sess) > 0}
+                      <span
+                        class="related-badge"
+                        data-testid="related-badge"
+                        title="{relatedCountFor(sess)} related session(s)"
+                      >🔗{relatedCountFor(sess)}</span>
+                    {/if}
                     <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
                     <span class="sess-name">{sess.tmux_name}</span>
                     <div class="row-actions">
@@ -515,6 +532,13 @@
                 title={sess.status}
                 aria-hidden="true"
               ></span>
+              {#if relatedCountFor(sess) > 0}
+                <span
+                  class="related-badge"
+                  data-testid="related-badge"
+                  title="{relatedCountFor(sess)} related session(s)"
+                >🔗{relatedCountFor(sess)}</span>
+              {/if}
               <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
               <span class="sess-name">{sess.tmux_name}</span>
               <div class="row-actions">
@@ -689,6 +713,15 @@
     font-size: 0.7rem;
     color: var(--fg-muted);
     border: 1px solid var(--border);
+    padding: 0.05rem 0.3rem;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+
+  .related-badge {
+    font-size: 0.65rem;
+    color: var(--fg-muted);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
     padding: 0.05rem 0.3rem;
     border-radius: 3px;
     flex-shrink: 0;
