@@ -6,7 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { hosts, loadHosts, addHost, probeHost, removeHost, hideHost } from './hosts';
+import { hosts, loadHosts, addHost, probeHost, deleteHost, hideHost } from './hosts';
 
 const sampleLocal = {
   alias: 'local',
@@ -53,10 +53,10 @@ describe('hosts store', () => {
     expect(r.ok).toBe(true);
   });
 
-  it('removeHost calls remove_host and reloads', async () => {
+  it('deleteHost calls remove_host and reloads', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce([sampleLocal]);
-    const r = await removeHost('mefistos');
+    const r = await deleteHost('mefistos');
     expect(r.ok).toBe(true);
   });
 

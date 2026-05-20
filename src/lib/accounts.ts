@@ -19,6 +19,23 @@ export async function loadAccounts(): Promise<Result<AccountRow[]>> {
   return r;
 }
 
+export async function bootstrapAccounts(): Promise<void> {
+  const r = await invokeCmd<AccountRow[]>('list_accounts');
+  if (r.ok) accounts.set(r.value);
+}
+
+export function mergeAccount(row: AccountRow): void {
+  accounts.update((arr) => {
+    const i = arr.findIndex((a) => a.uuid === row.uuid);
+    if (i === -1) return [...arr, row];
+    const next = arr.slice();
+    next[i] = row;
+    return next;
+  });
+}
+
+// No removeAccount — backend never deletes accounts in iter 4a.
+
 // Used by AddHostPicker to preview probe results without persisting.
 export interface ProbePreview {
   reachable: boolean;

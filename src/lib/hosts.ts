@@ -55,7 +55,7 @@ export async function probeHost(alias: string): Promise<Result<HostRow>> {
   return r;
 }
 
-export async function removeHost(alias: string): Promise<Result<void>> {
+export async function deleteHost(alias: string): Promise<Result<void>> {
   const r = await invokeCmd<void>('remove_host', { args: { alias } });
   if (r.ok) await loadHosts();
   return r;
@@ -68,4 +68,23 @@ export async function hideHost(
   const r = await invokeCmd<void>('hide_host', { args: { alias, hidden } });
   if (r.ok) await loadHosts();
   return r;
+}
+
+export async function bootstrapHosts(): Promise<void> {
+  const r = await invokeCmd<HostRow[]>('list_hosts');
+  if (r.ok) hosts.set(r.value);
+}
+
+export function mergeHost(row: HostRow): void {
+  hosts.update((arr) => {
+    const i = arr.findIndex((h) => h.alias === row.alias);
+    if (i === -1) return [...arr, row];
+    const next = arr.slice();
+    next[i] = row;
+    return next;
+  });
+}
+
+export function removeHost(alias: string): void {
+  hosts.update((arr) => arr.filter((h) => h.alias !== alias));
 }

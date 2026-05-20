@@ -63,6 +63,25 @@ export async function newSession(args: NewSessionArgs): Promise<Result<SessionRo
   return r;
 }
 
+export async function bootstrapSessions(): Promise<void> {
+  const r = await invokeCmd<SessionRow[]>('list_sessions');
+  if (r.ok) sessions.set(r.value);
+}
+
+export function mergeSession(row: SessionRow): void {
+  sessions.update((arr) => {
+    const i = arr.findIndex((s) => s.id === row.id);
+    if (i === -1) return [...arr, row];
+    const next = arr.slice();
+    next[i] = row;
+    return next;
+  });
+}
+
+export function removeSession(id: number): void {
+  sessions.update((arr) => arr.filter((s) => s.id !== id));
+}
+
 export async function relatedSessions(sessionId: number): Promise<Result<SessionRow[]>> {
   return invokeCmd<SessionRow[]>('related_sessions', { args: { session_id: sessionId } });
 }

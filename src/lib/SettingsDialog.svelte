@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { hosts, probeHost, removeHost, hideHost } from './hosts';
+  import { hosts, probeHost, deleteHost, hideHost } from './hosts';
   import { accounts, type AccountRow } from './accounts';
   import AddHostPicker from './AddHostPicker.svelte';
 
@@ -33,7 +33,7 @@
     if (alias === 'local') return;
     busy = alias;
     error = null;
-    const r = await removeHost(alias);
+    const r = await deleteHost(alias);
     busy = null;
     if (!r.ok) error = r.error.message;
   }
