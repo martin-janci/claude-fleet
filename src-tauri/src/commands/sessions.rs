@@ -1,6 +1,6 @@
 use crate::ipc_error::IpcError;
 use crate::ssh::SshClient;
-use crate::store::{SessionRow, Store};
+use crate::store::{HostRow, SessionRow, Store};
 use crate::tmux::{LocalTmux, RemoteTmux, TmuxExec};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -22,83 +22,99 @@ async fn reconcile_sessions(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<Vec<SessionRow>, IpcError> {
-    // Ensure the local host always exists (it's the bootstrap default).
-    // Lock only for sync DB operations; release before each .await.
+    // 1. Snapshot under lock (brief). Ensure local host exists first.
     let hosts = {
         let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
         s.upsert_host("local")?;
         s.list_hosts()?
     };
-    let mut all_rows: Vec<SessionRow> = Vec::new();
 
-    for host in hosts {
-        // Hidden hosts: don't probe (network noise), but DO surface their
-        // last-known sessions so they appear in the "Other sessions" group
-        // — matches the spec's "hidden host's sessions are still listed"
-        // semantic. We don't update reachable here.
-        if host.hidden {
-            let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-            all_rows.extend(s.list_sessions_for_host(&host.alias)?);
-            continue;
+    // 2. Fan out probes (off-lock) via JoinSet for parallel execution.
+    //    Hidden hosts are skipped here — their last-known sessions are
+    //    fetched in the write phase without probing.
+    //    Each task receives owned data so it satisfies 'static + Send.
+    let mut set = tokio::task::JoinSet::new();
+    for host in hosts.into_iter().filter(|h| !h.hidden) {
+        let ssh_arc = Arc::clone(ssh);
+        set.spawn(async move {
+            let tmux = exec_for(&host.alias, &ssh_arc);
+            let result = tmux.list_sessions().await;
+            (host, result)
+        });
+    }
+
+    // Collect per-host probe results. Join errors (task panics) are logged
+    // and skipped — they don't abort the rest of reconcile.
+    let mut probed: Vec<(HostRow, Result<Vec<crate::tmux::TmuxSession>, IpcError>)> = Vec::new();
+    while let Some(join) = set.join_next().await {
+        match join {
+            Ok((host, res)) => probed.push((host, res)),
+            Err(e) => eprintln!("reconcile join error: {e}"),
         }
-        let tmux = exec_for(&host.alias, ssh);
-        // Lock is released before .await so the future remains Send.
-        let live = match tmux.list_sessions().await {
-            Ok(v) => v,
-            Err(_e) => {
-                // Mark host unreachable but don't fail the whole reconcile;
-                // other hosts can still list their sessions. We KEEP the
-                // last-known sessions in the DB (no delete_sessions_not_in)
-                // and surface them so the UI can render them dimmed/red —
-                // a transient network drop shouldn't make the user lose
-                // sight of their sessions.
-                let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-                let _ = s.update_host_probe(
-                    &host.alias,
-                    false,
-                    host.claude_version.as_deref(),
-                    host.tmux_version.as_deref(),
-                    now_unix(),
-                );
-                all_rows.extend(s.list_sessions_for_host(&host.alias)?);
-                continue;
-            }
-        };
-        // Successful list = reachable. Lock for all remaining sync writes.
+    }
+
+    // 3. Apply all writes in a single short lock window.
+    let mut all_rows: Vec<SessionRow> = Vec::new();
+    {
         let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-        let _ = s.update_host_probe(
-            &host.alias,
-            true,
-            host.claude_version.as_deref(),
-            host.tmux_version.as_deref(),
-            now_unix(),
-        );
-        let mut keep = Vec::with_capacity(live.len());
-        for sess in &live {
-            keep.push(sess.name.clone());
-            let project_id = find_project_id_for_path(&s, &host.alias, &sess.path);
-            // Preservation invariant: if the session already has an
-            // account_uuid in the DB, keep it; only capture the host's
-            // current account for newly-discovered sessions.
-            let account_uuid = s
-                .get_session_account(&host.alias, &sess.name)?
-                .or_else(|| host.account_uuid.clone());
-            s.upsert_session(
-                &sess.name,
-                &host.alias,
-                project_id,
-                None,
-                sess.created,
-                sess.last_activity,
-                "running",
-                account_uuid.as_deref(),
-            )?;
-            if let Some(pid) = project_id {
-                s.touch_project_last_session_at(pid, sess.last_activity)?;
+
+        for (host, res) in &probed {
+            match res {
+                Ok(live) => {
+                    let _ = s.update_host_probe(
+                        &host.alias,
+                        true,
+                        host.claude_version.as_deref(),
+                        host.tmux_version.as_deref(),
+                        now_unix(),
+                    );
+                    let mut keep: Vec<String> = Vec::with_capacity(live.len());
+                    for sess in live {
+                        keep.push(sess.name.clone());
+                        let project_id = find_project_id_for_path(&s, &host.alias, &sess.path);
+                        // Preservation invariant: if the session already has an
+                        // account_uuid in the DB, keep it; only capture the host's
+                        // current account for newly-discovered sessions.
+                        let account_uuid = s
+                            .get_session_account(&host.alias, &sess.name)?
+                            .or_else(|| host.account_uuid.clone());
+                        s.upsert_session(
+                            &sess.name,
+                            &host.alias,
+                            project_id,
+                            None,
+                            sess.created,
+                            sess.last_activity,
+                            "running",
+                            account_uuid.as_deref(),
+                        )?;
+                        if let Some(pid) = project_id {
+                            s.touch_project_last_session_at(pid, sess.last_activity)?;
+                        }
+                    }
+                    s.delete_sessions_not_in(&host.alias, &keep)?;
+                    all_rows.extend(s.list_sessions_for_host(&host.alias)?);
+                }
+                Err(_e) => {
+                    // Mark host unreachable; surface last-known sessions so the
+                    // UI can render them dimmed/red. We KEEP them (no delete).
+                    let _ = s.update_host_probe(
+                        &host.alias,
+                        false,
+                        host.claude_version.as_deref(),
+                        host.tmux_version.as_deref(),
+                        now_unix(),
+                    );
+                    all_rows.extend(s.list_sessions_for_host(&host.alias)?);
+                }
             }
         }
-        s.delete_sessions_not_in(&host.alias, &keep)?;
-        all_rows.extend(s.list_sessions_for_host(&host.alias)?);
+
+        // Hidden hosts: don't probe but DO surface their last-known sessions.
+        let all_hosts = s.list_hosts()?;
+        for host in all_hosts.iter().filter(|h| h.hidden) {
+            all_rows.extend(s.list_sessions_for_host(&host.alias)?);
+        }
     }
     Ok(all_rows)
 }
@@ -681,6 +697,45 @@ mod tests {
     fn build_send_commands_quotes_session_name_with_dashes() {
         let cmds = build_send_commands("dev-with-dashes", "x");
         assert!(cmds[0].contains("'dev-with-dashes'"));
+    }
+
+    #[tokio::test]
+    async fn parallel_reconcile_does_not_serialise_on_slow_host() {
+        use std::time::Duration;
+        use async_trait::async_trait;
+        use crate::tmux::TmuxSession;
+
+        struct SleepyTmux { sleep_ms: u64 }
+
+        #[async_trait]
+        impl TmuxExec for SleepyTmux {
+            async fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError> {
+                tokio::time::sleep(Duration::from_millis(self.sleep_ms)).await;
+                Ok(Vec::new())
+            }
+            async fn new_session(&self, _name: &str, _cwd: &std::path::Path) -> Result<(), IpcError> {
+                Ok(())
+            }
+            async fn kill_session(&self, _name: &str) -> Result<(), IpcError> { Ok(()) }
+            async fn rename_session(&self, _old: &str, _new: &str) -> Result<(), IpcError> { Ok(()) }
+            async fn restart_session(&self, _name: &str) -> Result<(), IpcError> { Ok(()) }
+        }
+
+        // Spawn 3 tasks with sleeps 50ms, 500ms, 50ms.
+        // Sequential sum ≈ 600ms; parallel max ≈ 500ms.
+        let mut set = tokio::task::JoinSet::new();
+        let start = std::time::Instant::now();
+        for ms in [50u64, 500, 50] {
+            set.spawn(async move {
+                SleepyTmux { sleep_ms: ms }.list_sessions().await
+            });
+        }
+        while set.join_next().await.is_some() {}
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(700),
+            "parallel reconcile took {elapsed:?}, expected ≈max not sum",
+        );
     }
 
     #[test]

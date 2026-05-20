@@ -30,16 +30,26 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::OnceCell;
 
-pub struct SshClient {
+struct SshClientInner {
     /// Per-host OnceCell. The cell's init future runs the master-spawn exactly
     /// once; subsequent callers receive the cached result immediately.
     masters: DashMap<String, Arc<OnceCell<()>>>,
 }
 
+/// Cheaply cloneable SSH client. Each clone shares the same underlying
+/// `DashMap` of ControlMaster cells via `Arc`, so the master is only
+/// ever spawned once per host even across concurrent clones.
+#[derive(Clone)]
+pub struct SshClient {
+    inner: Arc<SshClientInner>,
+}
+
 impl SshClient {
     pub fn new() -> Self {
         Self {
-            masters: DashMap::new(),
+            inner: Arc::new(SshClientInner {
+                masters: DashMap::new(),
+            }),
         }
     }
 
@@ -60,6 +70,7 @@ impl SshClient {
     /// one task runs the spawn future; all others await and reuse the result.
     pub async fn ensure_master(&self, host: &str) -> Result<(), IpcError> {
         let cell = self
+            .inner
             .masters
             .entry(host.to_string())
             .or_insert_with(|| Arc::new(OnceCell::new()))
@@ -159,7 +170,7 @@ impl SshClient {
     /// tokio) so it works without a running runtime — best-effort fire-and-
     /// forget cleanup.
     pub fn shutdown_all(&self) {
-        let hosts: Vec<String> = self.masters.iter().map(|e| e.key().clone()).collect();
+        let hosts: Vec<String> = self.inner.masters.iter().map(|e| e.key().clone()).collect();
         for host in hosts {
             let path = self.control_path(&host);
             // Fire-and-forget via std::process::Command — shutdown_all is
@@ -228,6 +239,6 @@ mod tests {
         // Either both Ok (somehow worked) or both Err (the expected case); both
         // must agree — single OnceCell guarantees that.
         assert_eq!(a.is_ok(), b.is_ok(), "concurrent ensure_master must agree");
-        assert_eq!(client.masters.len(), 1, "exactly one cell registered");
+        assert_eq!(client.inner.masters.len(), 1, "exactly one cell registered");
     }
 }
