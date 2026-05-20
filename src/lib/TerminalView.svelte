@@ -143,22 +143,33 @@
     ptyOpen = true; // optimistic: prevents races; we revert on failure
 
     // Install our xterm as the write sink for the GLOBAL pty-data
-    // listener (registered at App boot). No async timing race possible —
-    // the listener has been alive since startup.
+    // listener (registered at App boot). The diagnostic writeln() of
+    // a "[sink #N] NB" tick line for each chunk is intentional — even if
+    // the binary write(chunk) doesn't render, the tick lines (plain text)
+    // will, so we can SEE in xterm whether the callback is even running.
     setPtyWriteSink((chunk) => {
       sinkCalls += 1;
       sinkBytes += chunk.length;
-      if (!term) return;
+      const n = sinkCalls;
+      const len = chunk.length;
+      if (!term) {
+        // eslint-disable-next-line no-console
+        console.warn(`[sink #${n}] ${len}B — but term is null`);
+        return;
+      }
       try {
+        term.writeln(`\x1b[90m[sink #${n}] ${len}B\x1b[0m`);
         term.write(chunk);
       } catch (e) {
         writeErrors += 1;
         lastWriteError = String(e);
         // eslint-disable-next-line no-console
-        console.error('xterm write failed:', e, 'chunk len=', chunk.length);
+        console.error('xterm write failed:', e, 'chunk len=', len);
       }
     });
     sinkAttached = true;
+    // eslint-disable-next-line no-console
+    console.log(`[firstOpen] sink installed for ${sessionName}, cols=${lastCols} rows=${lastRows}`);
 
     try {
       await invoke('pty_open', {
