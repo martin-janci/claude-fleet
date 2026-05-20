@@ -98,10 +98,20 @@ pub fn pty_open(args: PtyOpenArgs, state: State<'_, Mutex<PtyState>>) -> Result<
             // We re-export LANG/LC_ALL/COLORTERM/TERM inside the remote
             // shell so the embedded TUI gets proper Unicode glyph
             // rendering even if the remote sshd has AcceptEnv disabled.
-            &format!(
+            //
+            // CRITICAL: `ssh <host> bash -lc <script>` joins all trailing argv
+            // with spaces before sending to the remote sshd, which then
+            // re-tokenizes. We MUST single-quote the whole script so it
+            // crosses the ssh boundary as a single shell word; otherwise the
+            // remote bash receives `LANG=...` as its -c argument and never
+            // runs tmux attach. (Same fix shape as RemoteTmux::remote_bash
+            // in tmux.rs.) `shell_escape(&session_name)` keeps its inner
+            // quoting; the outer wrap escapes those single quotes via the
+            // canonical `'\''` dance.
+            &shell_escape(&format!(
                 "LANG=${{LANG:-en_US.UTF-8}} LC_ALL=${{LC_ALL:-en_US.UTF-8}} COLORTERM=truecolor TERM=xterm-256color tmux attach -t {}",
                 shell_escape(&args.session_name)
-            ),
+            )),
         ]);
         c
     };
