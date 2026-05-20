@@ -3,6 +3,7 @@
   import { projects, refreshProjects, bootstrapProjects, type ProjectTreeRow } from './projects';
   import {
     sessions,
+    loadSessions,
     killSession,
     renameSession,
     restartSession,
