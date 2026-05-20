@@ -46,6 +46,54 @@ impl EventBus for NoopEventBus {
     fn worktree_updated(&self, _: &WorktreeRow) {}
 }
 
+/// Production event bus: forwards every event to the Tauri frontend via
+/// `AppHandle::emit`. Errors are intentionally swallowed — if the webview
+/// isn't ready the Store mutation has already committed and we don't want
+/// to roll it back.
+pub struct AppHandleEventBus {
+    handle: tauri::AppHandle,
+}
+
+impl AppHandleEventBus {
+    pub fn new(handle: tauri::AppHandle) -> Self {
+        Self { handle }
+    }
+}
+
+impl EventBus for AppHandleEventBus {
+    fn session_created(&self, row: &SessionRow) {
+        let _ = tauri::Emitter::emit(&self.handle, "session:created", row);
+    }
+    fn session_updated(&self, row: &SessionRow) {
+        let _ = tauri::Emitter::emit(&self.handle, "session:updated", row);
+    }
+    fn session_killed(&self, id: i64) {
+        let _ = tauri::Emitter::emit(&self.handle, "session:killed", SessionKilledPayload { id });
+    }
+    fn host_added(&self, row: &HostRow) {
+        let _ = tauri::Emitter::emit(&self.handle, "host:added", row);
+    }
+    fn host_probed(&self, row: &HostRow) {
+        let _ = tauri::Emitter::emit(&self.handle, "host:probed", row);
+    }
+    fn host_removed(&self, alias: &str) {
+        let _ = tauri::Emitter::emit(
+            &self.handle,
+            "host:removed",
+            HostRemovedPayload { alias: alias.to_string() },
+        );
+    }
+    fn account_upserted(&self, row: &AccountRow) {
+        let _ = tauri::Emitter::emit(&self.handle, "account:upserted", row);
+    }
+    fn project_updated(&self, row: &ProjectRow) {
+        let _ = tauri::Emitter::emit(&self.handle, "project:updated", row);
+    }
+    fn worktree_updated(&self, row: &WorktreeRow) {
+        let _ = tauri::Emitter::emit(&self.handle, "worktree:updated", row);
+    }
+}
+
 /// Records every event in order. Used in unit tests to assert that a Store
 /// mutation produced the expected events.
 #[cfg(test)]

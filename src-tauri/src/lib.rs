@@ -8,7 +8,7 @@ mod ssh_config;
 mod store;
 mod tmux;
 
-pub use events::{EventBus, NoopEventBus};
+pub use events::{AppHandleEventBus, EventBus, NoopEventBus};
 
 use directories::ProjectDirs;
 use pty::PtyState;
@@ -143,15 +143,20 @@ pub fn run() {
     backfill_path_for_gui_launch();
     backfill_locale_for_gui_launch();
 
-    let db_path = appdata_db_path();
-    let store = Store::open(&db_path).expect("open store");
-
     let ssh_client = std::sync::Arc::new(ssh::SshClient::new());
     let ssh_client_for_exit = std::sync::Arc::clone(&ssh_client);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(Mutex::new(store))
+        .setup(|app| {
+            use tauri::Manager;
+            let handle = app.handle().clone();
+            let bus: std::sync::Arc<dyn crate::events::EventBus> =
+                std::sync::Arc::new(crate::events::AppHandleEventBus::new(handle));
+            let store = Store::open_with_bus(&appdata_db_path(), bus).expect("open store");
+            app.manage(Mutex::new(store));
+            Ok(())
+        })
         .manage(Mutex::new(PtyState::new()))
         .manage(ssh_client)
         .invoke_handler(tauri::generate_handler![
