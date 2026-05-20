@@ -6,4 +6,4 @@
 
 ALTER TABLE hosts ADD COLUMN ssh_alias TEXT;
 
-INSERT INTO schema_version (version) VALUES (2);
+INSERT OR IGNORE INTO schema_version (version) VALUES (2);
