@@ -6,8 +6,12 @@
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
   import TerminalView from './lib/TerminalView.svelte';
-  import { loadProjects } from './lib/projects';
-  import { loadSessions } from './lib/sessions';
+  import { loadProjects, bootstrapProjects, mergeProject, mergeWorktree } from './lib/projects';
+  import { loadSessions, bootstrapSessions, mergeSession, removeSession } from './lib/sessions';
+  import { bootstrapHosts, mergeHost, removeHost } from './lib/hosts';
+  import { bootstrapAccounts, mergeAccount } from './lib/accounts';
+  import { subscribeToRowEvents } from './lib/events';
+  import type { UnlistenFn } from '@tauri-apps/api/event';
   import { selectedSession } from './lib/selection';
   import { loadSessionUi, saveSessionUi, DEFAULT_UI } from './lib/session_ui';
   import { readPref, writePref } from './lib/prefs';
@@ -58,6 +62,7 @@
 
   let health = $state<Health | null>(null);
   let healthError = $state<string | null>(null);
+  let unlistenEvents: UnlistenFn | null = null;
 
   onMount(async () => {
     try {
@@ -65,6 +70,23 @@
     } catch (e) {
       healthError = String(e);
     }
+    await Promise.all([
+      bootstrapProjects(),
+      bootstrapSessions(),
+      bootstrapHosts(),
+      bootstrapAccounts(),
+    ]);
+    unlistenEvents = await subscribeToRowEvents({
+      onSessionCreated: mergeSession,
+      onSessionUpdated: mergeSession,
+      onSessionKilled: (p) => removeSession(p.id),
+      onHostAdded: mergeHost,
+      onHostProbed: mergeHost,
+      onHostRemoved: (p) => removeHost(p.alias),
+      onAccountUpserted: mergeAccount,
+      onProjectUpdated: mergeProject,
+      onWorktreeUpdated: mergeWorktree,
+    });
   });
 
   function onFocus() {
@@ -78,6 +100,7 @@
 
   onDestroy(() => {
     window.removeEventListener('focus', onFocus);
+    unlistenEvents?.();
   });
 
   function onResizeSidebar(delta: number) {

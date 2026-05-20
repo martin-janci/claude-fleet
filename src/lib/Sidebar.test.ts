@@ -20,7 +20,7 @@ const fakeProjects = [
 ];
 
 let nextSessionId = 1000;
-function sessionFor(projectId: number | null, name = `dev-${projectId ?? 'orphan'}`) {
+function sessionFor(projectId: number | null, name = `dev-${projectId ?? 'orphan'}`): SessionRow {
   return {
     id: nextSessionId++,
     tmux_name: name,
@@ -43,7 +43,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import { get } from 'svelte/store';
 import Sidebar from './Sidebar.svelte';
 import { projects } from './projects';
-import { sessions } from './sessions';
+import { sessions, type SessionRow } from './sessions';
 import { selectedSession, selectSession } from './selection';
 import { hosts, hostFilter } from './hosts';
 import { accounts } from './accounts';

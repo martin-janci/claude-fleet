@@ -1,12 +1,13 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { projects, loadProjects, refreshProjects, type ProjectTreeRow } from './projects';
+  import { projects, loadProjects, refreshProjects, bootstrapProjects, type ProjectTreeRow } from './projects';
   import {
     sessions,
     loadSessions,
     killSession,
     renameSession,
     restartSession,
+    bootstrapSessions,
     type SessionRow,
   } from './sessions';
   import { selectedSession, selectSession } from './selection';
@@ -15,8 +16,8 @@
   import { theme, cycleTheme } from './theme';
   import NewSessionDialog from './NewSessionDialog.svelte';
   import SettingsDialog from './SettingsDialog.svelte';
-  import { hosts, loadHosts, hostFilter } from './hosts';
-  import { accounts, loadAccounts, type AccountRow } from './accounts';
+  import { hosts, loadHosts, bootstrapHosts, hostFilter } from './hosts';
+  import { accounts, loadAccounts, bootstrapAccounts, type AccountRow } from './accounts';
 
   let showSettings = $state(false);
 
@@ -56,14 +57,12 @@
   let actionError: string | null = $state(null);
 
   onMount(async () => {
-    const pr = await loadProjects();
-    if (!pr.ok) loadError = pr.error.message;
-    const sr = await loadSessions();
-    if (!sr.ok) loadError = sr.error.message;
-    const hr = await loadHosts();
-    if (!hr.ok) loadError = hr.error.message;
-    const ar = await loadAccounts();
-    if (!ar.ok) loadError = ar.error.message;
+    await Promise.all([
+      bootstrapProjects(),
+      bootstrapSessions(),
+      bootstrapHosts(),
+      bootstrapAccounts(),
+    ]);
   });
 
   async function onRefresh() {
