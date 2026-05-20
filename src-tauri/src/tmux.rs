@@ -3,6 +3,168 @@ use serde::Serialize;
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::ssh::SshClient;
+use std::sync::Arc;
+
+/// Backend-agnostic tmux operations. Implementations differ only in how
+/// the `tmux` binary is invoked: locally or wrapped in `ssh <host>`.
+pub trait TmuxExec: Send + Sync {
+    fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError>;
+    fn new_session(&self, name: &str, working_dir: &std::path::Path) -> Result<(), IpcError>;
+    fn kill_session(&self, name: &str) -> Result<(), IpcError>;
+    fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError>;
+    fn restart_session(&self, name: &str) -> Result<(), IpcError>;
+}
+
+pub struct LocalTmux;
+
+impl TmuxExec for LocalTmux {
+    fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError> {
+        list_local_sessions()
+    }
+    fn new_session(&self, name: &str, cwd: &std::path::Path) -> Result<(), IpcError> {
+        new_session(name, cwd)
+    }
+    fn kill_session(&self, name: &str) -> Result<(), IpcError> {
+        kill_session(name)
+    }
+    fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError> {
+        rename_session(old, new)
+    }
+    fn restart_session(&self, name: &str) -> Result<(), IpcError> {
+        restart_session(name)
+    }
+}
+
+pub struct RemoteTmux {
+    pub client: Arc<SshClient>,
+    pub host: String,
+}
+
+impl RemoteTmux {
+    /// We always wrap remote tmux invocations in `bash -lc '…'` so the
+    /// remote user's login env (PATH, LANG, etc.) is sourced. sshd may have
+    /// `AcceptEnv` disabled which would silently drop SendEnv vars; the
+    /// login shell route is portable.
+    fn remote_bash(&self, script: &str) -> Result<std::process::Output, IpcError> {
+        self.client.run(&self.host, &["bash", "-lc", script], std::time::Duration::from_secs(10))
+    }
+}
+
+impl TmuxExec for RemoteTmux {
+    fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError> {
+        let script = "tmux list-sessions -F '#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}' 2>&1";
+        let output = self.remote_bash(script)?;
+        let combined = String::from_utf8_lossy(&output.stdout).into_owned();
+        if output.status.success() {
+            return Ok(parse_sessions(&combined));
+        }
+        if is_no_server_running(&combined) {
+            return Ok(Vec::new());
+        }
+        Err(IpcError::new("E_TMUX", combined.trim()))
+    }
+
+    fn new_session(&self, name: &str, cwd: &std::path::Path) -> Result<(), IpcError> {
+        // Build the `tmux new-session` command identically to LocalTmux but
+        // shell-escape arguments since we're sending a single script string.
+        let mut script = String::from("tmux new-session -d");
+        script.push_str(&format!(" -s {}", shell_quote(name)));
+        script.push_str(&format!(" -c {}", shell_quote(&cwd.to_string_lossy())));
+        // Forward env explicitly — remote sshd typically doesn't pass LANG.
+        script.push_str(" -e COLORTERM=truecolor -e TERM=xterm-256color");
+        script.push_str(&format!(" -e LANG={}", shell_quote(&std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".into()))));
+        script.push(' ');
+        script.push_str(&shell_quote(&pane_command()));
+        let output = self.remote_bash(&script)?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(IpcError::new(
+                "E_TMUX",
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ))
+        }
+    }
+
+    fn kill_session(&self, name: &str) -> Result<(), IpcError> {
+        let script = format!("tmux kill-session -t {}", shell_quote(name));
+        let output = self.remote_bash(&script)?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(IpcError::new(
+                "E_TMUX",
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ))
+        }
+    }
+
+    fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError> {
+        let trimmed = new.trim();
+        if trimmed.is_empty() {
+            return Err(IpcError::new("E_TMUX", "new session name must not be empty"));
+        }
+        if trimmed.contains(|c: char| c.is_whitespace() || c == '.' || c == ':') {
+            return Err(IpcError::new(
+                "E_TMUX",
+                "tmux session name must not contain whitespace, `.`, or `:`",
+            ));
+        }
+        if trimmed == old {
+            return Ok(());
+        }
+        let script = format!(
+            "tmux rename-session -t {} {}",
+            shell_quote(old),
+            shell_quote(trimmed)
+        );
+        let output = self.remote_bash(&script)?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(IpcError::new(
+                "E_TMUX",
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ))
+        }
+    }
+
+    fn restart_session(&self, name: &str) -> Result<(), IpcError> {
+        let script = format!(
+            "tmux respawn-pane -k -t {}: {}",
+            shell_quote(name),
+            shell_quote(&pane_command())
+        );
+        let output = self.remote_bash(&script)?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(IpcError::new(
+                "E_TMUX",
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ))
+        }
+    }
+}
+
+/// Conservative single-quote shell escape: wraps in `'...'` and replaces
+/// embedded single quotes with the canonical `'\''` dance. Avoids depending
+/// on a crate for a small, well-tested operation.
+fn shell_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TmuxSession {
     pub name: String,
@@ -254,5 +416,21 @@ mod tests {
         assert!(rename_session("a", "has space").is_err());
         assert!(rename_session("a", "has.dot").is_err());
         assert!(rename_session("a", "has:colon").is_err());
+    }
+
+    #[test]
+    fn shell_quote_wraps_basic_strings_in_single_quotes() {
+        assert_eq!(shell_quote("foo"), "'foo'");
+        assert_eq!(shell_quote("dev-foo"), "'dev-foo'");
+    }
+
+    #[test]
+    fn shell_quote_escapes_embedded_single_quotes() {
+        assert_eq!(shell_quote("don't"), "'don'\\''t'");
+    }
+
+    #[test]
+    fn shell_quote_handles_paths_with_spaces() {
+        assert_eq!(shell_quote("/tmp/with space"), "'/tmp/with space'");
     }
 }
