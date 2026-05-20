@@ -20,6 +20,20 @@ vi.mock('@tauri-apps/api/core', () => ({
     if (cmd === 'pty_resize') return null;
     if (cmd === 'pty_close') return null;
     if (cmd === 'pty_drain') return { data: '', bytes: 0 };
+    if (cmd === 'list_hosts') return [{
+      alias: 'local',
+      ssh_alias: null,
+      reachable: true,
+      claude_version: '2.1.145',
+      tmux_version: '3.5a',
+      hidden: false,
+      last_pinged_at: 1,
+    }];
+    if (cmd === 'discover_hosts') return [];
+    if (cmd === 'add_host') return null;
+    if (cmd === 'probe_host') return null;
+    if (cmd === 'remove_host') return null;
+    if (cmd === 'hide_host') return null;
     return null;
   }),
 }));
