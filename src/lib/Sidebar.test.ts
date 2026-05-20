@@ -44,11 +44,15 @@ import Sidebar from './Sidebar.svelte';
 import { projects } from './projects';
 import { sessions } from './sessions';
 import { selectedSession, selectSession } from './selection';
+import { hosts, hostFilter } from './hosts';
 
 function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof sessionFor>[]) {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
     if (cmd === 'list_projects') return projs;
     if (cmd === 'list_sessions') return sess;
+    // Existing tests don't care about hosts — return empty so $hosts is a
+    // valid array (never null) when Sidebar.svelte does `$hosts.filter(...)`.
+    if (cmd === 'list_hosts') return [];
     return null;
   });
 }
@@ -56,6 +60,8 @@ function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof session
 beforeEach(() => {
   projects.set([]);
   sessions.set([]);
+  hosts.set([]);
+  hostFilter.set('all');
   selectSession(null);
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
   // Wipe persisted prefs so one test's recency choice doesn't leak into
@@ -310,7 +316,8 @@ describe('Sidebar (sessions-grouped view)', () => {
     mockBackend(fakeProjects, []);
     render(Sidebar);
     await tick(); await tick();
-    const activePill = document.querySelector('.pill.active');
+    // Scope to recency pills — host filter has its own active "all" pill.
+    const activePill = document.querySelector('.recency .pill.active');
     expect(activePill?.textContent?.trim()).toBe('30d');
   });
 
@@ -341,5 +348,64 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(screen.getByTestId('sidebar-search')).toBeInTheDocument();
     expect(screen.getByTestId('theme-toggle')).toBeInTheDocument();
     expect(screen.getByTestId('new-session-footer')).toBeInTheDocument();
+  });
+
+  it('renders a host pill for each non-hidden host plus "all"', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_projects') return fakeProjects;
+      if (cmd === 'list_sessions') return [];
+      if (cmd === 'list_hosts') return [
+        { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null },
+        { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1 },
+        { alias: 'old', ssh_alias: 'old', reachable: false, claude_version: null, tmux_version: null, hidden: true, last_pinged_at: 1 },
+      ];
+      return null;
+    });
+    render(Sidebar);
+    for (let i = 0; i < 8; i++) await tick();
+    const hostsBar = document.querySelector('.hosts');
+    expect(hostsBar?.textContent).toContain('all');
+    expect(hostsBar?.textContent).toContain('local');
+    expect(hostsBar?.textContent).toContain('mefistos');
+    expect(hostsBar?.textContent).not.toContain('old');
+  });
+
+  it('host filter narrows displayed sessions', async () => {
+    const local = sessionFor(1, 'dev-local');
+    const remote = { ...sessionFor(1, 'dev-remote'), host_alias: 'mefistos' };
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_projects') return fakeProjects;
+      if (cmd === 'list_sessions') return [local, remote];
+      if (cmd === 'list_hosts') return [
+        { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null },
+        { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1 },
+      ];
+      return null;
+    });
+    render(Sidebar);
+    for (let i = 0; i < 8; i++) await tick();
+    expect(screen.queryAllByTestId('sess-row')).toHaveLength(2);
+    const pills = document.querySelectorAll('.hosts .pill');
+    // [all, local, mefistos] → click "mefistos"
+    const mefistos = Array.from(pills).find((p) => p.textContent?.includes('mefistos'))!;
+    await fireEvent.click(mefistos);
+    await tick();
+    expect(screen.queryAllByTestId('sess-row')).toHaveLength(1);
+  });
+
+  it('shows host badge before each session name', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_projects') return fakeProjects;
+      if (cmd === 'list_sessions') return [sessionFor(1, 'dev-foo')];
+      if (cmd === 'list_hosts') return [
+        { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null },
+      ];
+      return null;
+    });
+    render(Sidebar);
+    for (let i = 0; i < 8; i++) await tick();
+    const badges = screen.queryAllByTestId('host-badge');
+    expect(badges).toHaveLength(1);
+    expect(badges[0].textContent).toBe('[local]');
   });
 });

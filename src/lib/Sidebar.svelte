@@ -14,6 +14,14 @@
   import { readPref, writePref } from './prefs';
   import { theme, cycleTheme } from './theme';
   import NewSessionDialog from './NewSessionDialog.svelte';
+  import { hosts, loadHosts, hostFilter } from './hosts';
+
+  // SettingsDialog wiring is completed in Task 13 — for now we just expose
+  // the trigger button so the ⚙ icon renders, but clicking it is a no-op
+  // until SettingsDialog.svelte exists. Task 13 will replace this with a
+  // real `{#if showSettings}<SettingsDialog .../>{/if}` block, so we still
+  // need the state variable now.
+  let showSettings = $state(false);
 
   // Optional collapse handler injected by the parent (App.svelte). When
   // present, a ‹ button appears in the sidebar header so the user can
@@ -55,6 +63,8 @@
     if (!pr.ok) loadError = pr.error.message;
     const sr = await loadSessions();
     if (!sr.ok) loadError = sr.error.message;
+    const hr = await loadHosts();
+    if (!hr.ok) loadError = hr.error.message;
   });
 
   async function onRefresh() {
@@ -91,8 +101,10 @@
     const needle = q.toLowerCase();
     if (p.project.owner.toLowerCase().includes(needle)) return true;
     if (p.project.repo.toLowerCase().includes(needle)) return true;
-    return sessionsForProject(p.project.id).some((s) =>
-      s.tmux_name.toLowerCase().includes(needle),
+    return sessionsForProject(p.project.id).some(
+      (s) =>
+        s.tmux_name.toLowerCase().includes(needle) ||
+        s.host_alias.toLowerCase().includes(needle),
     );
   }
 
@@ -119,11 +131,21 @@
   });
 
   function sessionsForProject(projectId: number): SessionRow[] {
-    return $sessions.filter((s) => s.project_id === projectId);
+    return $sessions.filter(
+      (s) =>
+        s.project_id === projectId &&
+        ($hostFilter === 'all' || s.host_alias === $hostFilter),
+    );
   }
 
   // Sessions whose tmux working directory didn't map to any known project.
-  const orphanSessions = $derived($sessions.filter((s) => s.project_id === null));
+  const orphanSessions = $derived(
+    $sessions.filter(
+      (s) =>
+        s.project_id === null &&
+        ($hostFilter === 'all' || s.host_alias === $hostFilter),
+    ),
+  );
 
   // Picker for the footer "+ New session" — shows ALL projects regardless
   // of the recency filter or search query. The filter is for the live-
@@ -299,6 +321,33 @@
       {/if}
     </div>
 
+    <nav class="hosts" aria-label="host filter">
+      <button
+        class="pill"
+        class:active={$hostFilter === 'all'}
+        onclick={() => hostFilter.set('all')}
+      >all</button>
+      {#each $hosts.filter((h) => !h.hidden) as h (h.alias)}
+        <button
+          class="pill"
+          class:active={$hostFilter === h.alias}
+          onclick={() => hostFilter.set(h.alias)}
+          title="{h.alias}{h.tmux_version ? ` · tmux ${h.tmux_version}` : ''}{h.claude_version ? ` · claude ${h.claude_version}` : ''}"
+        >
+          <span class="host-dot status-{h.reachable ? 'on' : 'off'}"></span>
+          {h.alias}
+        </button>
+      {/each}
+      <button
+        class="icon-btn"
+        onclick={() => (showSettings = true)}
+        title="Settings"
+        aria-label="Settings"
+        aria-expanded={showSettings}
+        data-testid="settings-open"
+      >⚙</button>
+    </nav>
+
     <nav class="recency" aria-label="recency filter">
       {#each RECENCY_VALUES as opt (opt)}
         <button
@@ -381,6 +430,7 @@
                       title={sess.status}
                       aria-hidden="true"
                     ></span>
+                    <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
                     <span class="sess-name">{sess.tmux_name}</span>
                     <div class="row-actions">
                       <button
@@ -451,6 +501,7 @@
                 title={sess.status}
                 aria-hidden="true"
               ></span>
+              <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
               <span class="sess-name">{sess.tmux_name}</span>
               <div class="row-actions">
                 <button class="icon-btn small" onclick={(e) => doRestart(sess, e)} title="Restart">↻</button>
@@ -602,6 +653,28 @@
     cursor: pointer;
   }
   .pill.active { color: var(--fg); border-color: var(--accent); }
+
+  .hosts { display: flex; flex-wrap: wrap; gap: 0.25rem; align-items: center; }
+  .host-dot {
+    display: inline-block;
+    width: 0.4rem;
+    height: 0.4rem;
+    border-radius: 50%;
+    margin-right: 0.3rem;
+    vertical-align: middle;
+  }
+  .host-dot.status-on { background: rgb(80, 200, 110); }
+  .host-dot.status-off { background: rgb(220, 130, 130); }
+
+  .host-badge {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.7rem;
+    color: var(--fg-muted);
+    border: 1px solid var(--border);
+    padding: 0.05rem 0.3rem;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
 
   .scroller {
     flex: 1 1 auto;
