@@ -2,7 +2,7 @@
 // registered via `tauri::Manager::manage()` because `rusqlite::Connection`
 // is not Send+Sync. Commands access it via `State<'_, Mutex<Store>>`.
 
-use rusqlite::{Connection, Result};
+use rusqlite::{Connection, OptionalExtension, Result};
 use crate::events::{EventBus, NoopEventBus};
 use std::sync::Arc;
 
@@ -86,6 +86,14 @@ impl Store {
         Ok(store)
     }
 
+    #[cfg(test)]
+    pub fn open_with_bus_in_memory(bus: Arc<dyn EventBus>) -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        let store = Self { conn, bus };
+        store.migrate()?;
+        Ok(store)
+    }
+
     fn migrate(&self) -> Result<()> {
         self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         self.conn
@@ -128,6 +136,102 @@ impl Store {
             })
     }
 
+    // ---- Private fetch helpers used after writes to produce emit payloads ----
+
+    fn get_session(
+        &self,
+        tmux_name: &str,
+        host_alias: &str,
+    ) -> Result<Option<SessionRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
+                    last_activity_at, status, notes, account_uuid
+             FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![tmux_name, host_alias], |row| {
+            Ok(SessionRow {
+                id: row.get(0)?,
+                tmux_name: row.get(1)?,
+                host_alias: row.get(2)?,
+                project_id: row.get(3)?,
+                worktree_id: row.get(4)?,
+                created_at: row.get(5)?,
+                last_activity_at: row.get(6)?,
+                status: row.get(7)?,
+                notes: row.get(8)?,
+                account_uuid: row.get(9)?,
+            })
+        })?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    fn get_host(&self, alias: &str) -> Result<Option<HostRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT alias, ssh_alias, reachable, claude_version, tmux_version, hidden,
+                    last_pinged_at, account_uuid
+             FROM hosts WHERE alias=?1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![alias], |row| {
+            Ok(HostRow {
+                alias: row.get(0)?,
+                ssh_alias: row.get(1)?,
+                reachable: row.get::<_, i64>(2)? != 0,
+                claude_version: row.get(3)?,
+                tmux_version: row.get(4)?,
+                hidden: row.get::<_, i64>(5)? != 0,
+                last_pinged_at: row.get(6)?,
+                account_uuid: row.get(7)?,
+            })
+        })?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    fn get_project(&self, id: i64) -> Result<Option<ProjectRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, owner, repo, base_path, last_session_at FROM projects WHERE id=?1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![id], |row| {
+            Ok(ProjectRow {
+                id: row.get(0)?,
+                owner: row.get(1)?,
+                repo: row.get(2)?,
+                base_path: row.get(3)?,
+                last_session_at: row.get(4)?,
+            })
+        })?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    fn get_worktree(&self, id: i64) -> Result<Option<WorktreeRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, project_id, name, path, branch FROM worktrees WHERE id=?1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![id], |row| {
+            Ok(WorktreeRow {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                name: row.get(2)?,
+                path: row.get(3)?,
+                branch: row.get(4)?,
+            })
+        })?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    // ---- Public mutation methods ----
+
     pub fn upsert_project(
         &self,
         owner: &str,
@@ -139,11 +243,15 @@ impl Store {
              ON CONFLICT(owner, repo) DO UPDATE SET base_path=excluded.base_path",
             rusqlite::params![owner, repo, base_path],
         )?;
-        self.conn.query_row(
+        let id: i64 = self.conn.query_row(
             "SELECT id FROM projects WHERE owner=?1 AND repo=?2",
             rusqlite::params![owner, repo],
             |row| row.get(0),
-        )
+        )?;
+        if let Some(row) = self.get_project(id)? {
+            self.bus.project_updated(&row);
+        }
+        Ok(id)
     }
 
     pub fn list_projects(&self) -> Result<Vec<ProjectRow>, rusqlite::Error> {
@@ -174,11 +282,15 @@ impl Store {
              ON CONFLICT(project_id, name) DO UPDATE SET path=excluded.path, branch=excluded.branch",
             rusqlite::params![project_id, name, path, branch],
         )?;
-        self.conn.query_row(
+        let id: i64 = self.conn.query_row(
             "SELECT id FROM worktrees WHERE project_id=?1 AND name=?2",
             rusqlite::params![project_id, name],
             |row| row.get(0),
-        )
+        )?;
+        if let Some(row) = self.get_worktree(id)? {
+            self.bus.worktree_updated(&row);
+        }
+        Ok(id)
     }
 
     pub fn list_worktrees_for_project(
@@ -230,6 +342,9 @@ impl Store {
             "UPDATE projects SET last_session_at = MAX(COALESCE(last_session_at, 0), ?1) WHERE id = ?2",
             rusqlite::params![ts, project_id],
         )?;
+        if let Some(row) = self.get_project(project_id)? {
+            self.bus.project_updated(&row);
+        }
         Ok(())
     }
 
@@ -243,6 +358,9 @@ impl Store {
              ON CONFLICT(alias) DO UPDATE SET reachable=1",
             rusqlite::params![alias],
         )?;
+        if let Some(row) = self.get_host(alias)? {
+            self.bus.host_added(&row);
+        }
         Ok(())
     }
 
@@ -278,6 +396,9 @@ impl Store {
              ON CONFLICT(alias) DO UPDATE SET ssh_alias=excluded.ssh_alias",
             rusqlite::params![alias, ssh_alias],
         )?;
+        if let Some(row) = self.get_host(alias)? {
+            self.bus.host_added(&row);
+        }
         Ok(())
     }
 
@@ -299,6 +420,9 @@ impl Store {
                 alias
             ],
         )?;
+        if let Some(row) = self.get_host(alias)? {
+            self.bus.host_probed(&row);
+        }
         Ok(())
     }
 
@@ -353,6 +477,7 @@ impl Store {
                 a.last_seen_at
             ],
         )?;
+        self.bus.account_upserted(a);
         Ok(())
     }
 
@@ -391,6 +516,9 @@ impl Store {
             "UPDATE hosts SET account_uuid=?1 WHERE alias=?2",
             rusqlite::params![account_uuid, alias],
         )?;
+        if let Some(row) = self.get_host(alias)? {
+            self.bus.host_probed(&row);
+        }
         Ok(())
     }
 
@@ -409,6 +537,7 @@ impl Store {
             "DELETE FROM hosts WHERE alias=?1",
             rusqlite::params![alias],
         )?;
+        self.bus.host_removed(alias);
         Ok(())
     }
 
@@ -424,6 +553,13 @@ impl Store {
         status: &str,
         account_uuid: Option<&str>,
     ) -> Result<i64, rusqlite::Error> {
+        // Check existence before the write so we can distinguish created vs updated.
+        let existing_id: Option<i64> = self.conn.query_row(
+            "SELECT id FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
+            rusqlite::params![tmux_name, host_alias],
+            |row| row.get(0),
+        ).optional()?;
+
         self.conn.execute(
             "INSERT INTO sessions (tmux_name, host_alias, project_id, worktree_id,
                                    created_at, last_activity_at, status, account_uuid)
@@ -437,11 +573,19 @@ impl Store {
             rusqlite::params![tmux_name, host_alias, project_id, worktree_id,
                               created_at, last_activity_at, status, account_uuid],
         )?;
-        self.conn.query_row(
+        let id: i64 = self.conn.query_row(
             "SELECT id FROM sessions WHERE host_alias=?1 AND tmux_name=?2",
             rusqlite::params![host_alias, tmux_name],
             |row| row.get(0),
-        )
+        )?;
+        if let Some(row) = self.get_session(tmux_name, host_alias)? {
+            if existing_id.is_none() {
+                self.bus.session_created(&row);
+            } else {
+                self.bus.session_updated(&row);
+            }
+        }
+        Ok(id)
     }
 
     pub fn get_session_account(
@@ -554,26 +698,64 @@ impl Store {
         Ok(r)
     }
 
+    pub fn delete_session(&self, id: i64) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "DELETE FROM sessions WHERE id=?1",
+            rusqlite::params![id],
+        )?;
+        self.bus.session_killed(id);
+        Ok(())
+    }
+
     pub fn delete_sessions_not_in(
         &self,
         host_alias: &str,
         keep_names: &[String],
     ) -> Result<usize, rusqlite::Error> {
-        if keep_names.is_empty() {
-            return self.conn.execute(
+        // Collect ids to delete before the DELETE so we can emit one event per row.
+        let ids_to_delete: Vec<i64> = if keep_names.is_empty() {
+            let mut stmt = self.conn.prepare(
+                "SELECT id FROM sessions WHERE host_alias=?1",
+            )?;
+            let ids = stmt.query_map(rusqlite::params![host_alias], |r| r.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ids
+        } else {
+            let placeholders = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql_select = format!(
+                "SELECT id FROM sessions WHERE host_alias=?1 AND tmux_name NOT IN ({placeholders})"
+            );
+            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
+            for n in keep_names {
+                params.push(n);
+            }
+            let mut stmt = self.conn.prepare(&sql_select)?;
+            let ids = stmt.query_map(params.as_slice(), |r| r.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ids
+        };
+
+        let deleted = if keep_names.is_empty() {
+            self.conn.execute(
                 "DELETE FROM sessions WHERE host_alias=?1",
                 rusqlite::params![host_alias],
+            )?
+        } else {
+            let placeholders = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "DELETE FROM sessions WHERE host_alias=?1 AND tmux_name NOT IN ({placeholders})"
             );
+            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
+            for n in keep_names {
+                params.push(n);
+            }
+            self.conn.execute(&sql, params.as_slice())?
+        };
+
+        for id in &ids_to_delete {
+            self.bus.session_killed(*id);
         }
-        let placeholders = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!(
-            "DELETE FROM sessions WHERE host_alias=?1 AND tmux_name NOT IN ({placeholders})"
-        );
-        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
-        for n in keep_names {
-            params.push(n);
-        }
-        self.conn.execute(&sql, params.as_slice())
+        Ok(deleted)
     }
 }
 
@@ -1060,5 +1242,53 @@ mod tests {
         // it as a public getter, so this test is intentionally minimal.
         let _ = std::sync::Arc::new(NoopEventBus); // also exercises Send+Sync
         let _ = store; // touch it to keep it alive past the new
+    }
+
+    fn store_with_recorder() -> (Store, Arc<crate::events::RecordingEventBus>) {
+        let bus = Arc::new(crate::events::RecordingEventBus::new());
+        let store = Store::open_with_bus_in_memory(bus.clone()).expect("store");
+        (store, bus)
+    }
+
+    #[test]
+    fn upsert_session_emits_created_then_updated() {
+        let (store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        bus.take(); // drain host:added
+        store.upsert_session("s1", "alpha", None, None, 100, 100, "running", None).unwrap();
+        store.upsert_session("s1", "alpha", None, None, 100, 200, "running", None).unwrap();
+        let evts = bus.take();
+        assert_eq!(evts.len(), 2, "expected one created + one updated, got {evts:?}");
+        assert!(evts[0].starts_with("session:created:"), "got: {}", evts[0]);
+        assert!(evts[1].starts_with("session:updated:"), "got: {}", evts[1]);
+    }
+
+    #[test]
+    fn delete_session_emits_killed() {
+        let (store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        bus.take(); // drain host:added
+        store.upsert_session("s1", "alpha", None, None, 100, 100, "running", None).unwrap();
+        let id = store.get_session("s1", "alpha").unwrap().expect("row").id;
+        bus.take(); // drain created event
+        store.delete_session(id).unwrap();
+        let evts = bus.take();
+        assert_eq!(evts.len(), 1);
+        assert_eq!(evts[0], format!("session:killed:{id}"));
+    }
+
+    #[test]
+    fn delete_sessions_not_in_emits_killed_per_row() {
+        let (store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        bus.take(); // drain host:added
+        store.upsert_session("s1", "alpha", None, None, 1, 1, "running", None).unwrap();
+        store.upsert_session("s2", "alpha", None, None, 1, 1, "running", None).unwrap();
+        store.upsert_session("s3", "alpha", None, None, 1, 1, "running", None).unwrap();
+        bus.take(); // drain creates
+        store.delete_sessions_not_in("alpha", &["s2".to_string()]).unwrap();
+        let evts = bus.take();
+        assert_eq!(evts.len(), 2, "expected 2 killed (s1, s3), got {evts:?}");
+        assert!(evts.iter().all(|e| e.starts_with("session:killed:")));
     }
 }
