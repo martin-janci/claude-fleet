@@ -65,3 +65,31 @@ describe('subscribeToRowEvents', () => {
     expect(seen).toEqual([]);
   });
 });
+
+// End-to-end: emit → handler → store update.
+describe('subscribeToRowEvents → store integration', () => {
+  it('session:created event updates the sessions store via mergeSession', async () => {
+    const { sessions, mergeSession, removeSession } = await import('./sessions');
+    sessions.set([]);
+    await subscribeToRowEvents({
+      onSessionCreated: mergeSession,
+      onSessionKilled: (p) => removeSession(p.id),
+    });
+    await (emit as ReturnType<typeof vi.fn>)('session:created', {
+      id: 7,
+      tmux_name: 'dev-test',
+      host_alias: 'local',
+      project_id: null,
+      worktree_id: null,
+      created_at: 1,
+      last_activity_at: 1,
+      status: 'running',
+      notes: null,
+      account_uuid: null,
+    });
+    const { get } = await import('svelte/store');
+    expect(get(sessions).map((s) => s.id)).toEqual([7]);
+    await (emit as ReturnType<typeof vi.fn>)('session:killed', { id: 7 });
+    expect(get(sessions)).toEqual([]);
+  });
+});
