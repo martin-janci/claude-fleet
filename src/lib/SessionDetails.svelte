@@ -62,7 +62,7 @@
       renaming = false;
       return;
     }
-    const r = await renameSession(session.tmux_name, next);
+    const r = await renameSession(session.host_alias, session.tmux_name, next);
     if (!r.ok) {
       actionError = r.error.message;
       return;
@@ -87,7 +87,7 @@
 
   async function onRestart() {
     actionError = null;
-    const r = await restartSession(session.tmux_name);
+    const r = await restartSession(session.host_alias, session.tmux_name);
     if (!r.ok) actionError = r.error.message;
   }
 
@@ -101,7 +101,7 @@
   }
   async function doKill() {
     confirmingKill = false;
-    const r = await killSession(session.tmux_name);
+    const r = await killSession(session.host_alias, session.tmux_name);
     if (r.ok) {
       clearSelection();
     } else {

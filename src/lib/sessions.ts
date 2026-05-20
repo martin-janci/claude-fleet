@@ -21,30 +21,36 @@ export async function loadSessions(): Promise<Result<SessionRow[]>> {
   return r;
 }
 
-export async function killSession(name: string): Promise<Result<void>> {
-  const r = await invokeCmd<void>('kill_session', { args: { name } });
-  if (r.ok) await loadSessions();
-  return r;
-}
-
-export async function renameSession(
-  oldName: string,
-  newName: string,
-): Promise<Result<SessionRow>> {
-  const r = await invokeCmd<SessionRow>('rename_session', {
-    args: { old_name: oldName, new_name: newName },
+export async function killSession(hostAlias: string, name: string): Promise<Result<void>> {
+  const r = await invokeCmd<void>('kill_session', {
+    args: { host_alias: hostAlias, name },
   });
   if (r.ok) await loadSessions();
   return r;
 }
 
-export async function restartSession(name: string): Promise<Result<SessionRow>> {
-  const r = await invokeCmd<SessionRow>('restart_session', { args: { name } });
+export async function renameSession(
+  hostAlias: string,
+  oldName: string,
+  newName: string,
+): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('rename_session', {
+    args: { host_alias: hostAlias, old_name: oldName, new_name: newName },
+  });
+  if (r.ok) await loadSessions();
+  return r;
+}
+
+export async function restartSession(hostAlias: string, name: string): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('restart_session', {
+    args: { host_alias: hostAlias, name },
+  });
   if (r.ok) await loadSessions();
   return r;
 }
 
 export interface NewSessionArgs {
+  host_alias: string;
   project_id: number;
   worktree_id: number | null;
   name: string;

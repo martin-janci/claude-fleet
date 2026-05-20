@@ -229,7 +229,9 @@
       return;
     }
     const oldName = renamingName;
-    const r = await renameSession(oldName, next);
+    const sess = $sessions.find((s) => s.tmux_name === oldName);
+    const hostAlias = sess?.host_alias ?? 'local';
+    const r = await renameSession(hostAlias, oldName, next);
     if (!r.ok) {
       renameError = r.error.message;
       return;
@@ -258,7 +260,7 @@
   async function doRestart(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
     actionError = null;
-    const r = await restartSession(sess.tmux_name);
+    const r = await restartSession(sess.host_alias, sess.tmux_name);
     if (!r.ok) actionError = r.error.message;
   }
 
@@ -272,7 +274,7 @@
     if (!pendingKill) return;
     const sess = pendingKill;
     pendingKill = null;
-    const r = await killSession(sess.tmux_name);
+    const r = await killSession(sess.host_alias, sess.tmux_name);
     if (!r.ok) {
       actionError = r.error.message;
       return;

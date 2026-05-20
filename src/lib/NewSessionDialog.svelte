@@ -2,6 +2,8 @@
   import { untrack } from 'svelte';
   import type { ProjectTreeRow, WorktreeRow } from './projects';
   import { newSession, type SessionRow } from './sessions';
+  import { hosts } from './hosts';
+  import { readPref, writePref } from './prefs';
 
   let {
     project,
@@ -12,6 +14,14 @@
     onCreate: (s: SessionRow) => void;
     onCancel: () => void;
   } = $props();
+
+  const isString = (v: unknown): v is string => typeof v === 'string';
+  let chosenHost = $state<string>(
+    readPref('last-host', 'local', isString),
+  );
+  $effect(() => {
+    writePref('last-host', chosenHost);
+  });
 
   function defaultName(wt: WorktreeRow | null): string {
     const base = `dev-${project.project.owner}-${project.project.repo}`;
@@ -38,6 +48,7 @@
     busy = true;
     error = null;
     const r = await newSession({
+      host_alias: chosenHost,
       project_id: project.project.id,
       worktree_id: chosenWorktreeId,
       name: name.trim(),
@@ -53,6 +64,20 @@
 
 <div class="dialog" role="dialog" aria-label="New session">
   <h3>New session — {project.project.owner}/{project.project.repo}</h3>
+
+  <label for="host-picker">Host</label>
+  <div class="host-row" id="host-picker" role="group">
+    {#each $hosts.filter((h) => !h.hidden) as h (h.alias)}
+      <button
+        class="host-pick"
+        class:active={chosenHost === h.alias}
+        disabled={!h.reachable && h.alias !== 'local'}
+        onclick={() => (chosenHost = h.alias)}
+      >
+        {h.alias}
+      </button>
+    {/each}
+  </div>
 
   {#if project.worktrees.length > 1}
     <label for="wt-picker">Worktree</label>
@@ -115,6 +140,19 @@
     cursor: pointer;
   }
   .wt-pick.active { color: var(--fg); border-color: var(--accent); }
+  .host-row { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+  .host-pick {
+    font-size: 0.75rem;
+    padding: 0.2rem 0.6rem;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--fg-muted);
+    border-radius: 999px;
+    cursor: pointer;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .host-pick.active { color: var(--fg); border-color: var(--accent); }
+  .host-pick:disabled { opacity: 0.4; cursor: not-allowed; }
   .err { color: #e64a4a; font-size: 0.8rem; }
   .actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
   .actions button {
