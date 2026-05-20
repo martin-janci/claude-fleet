@@ -49,13 +49,27 @@ import { hosts, hostFilter } from './hosts';
 import { accounts } from './accounts';
 
 function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof sessionFor>[]) {
-  (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+  (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: { args?: { id?: number; new_name?: string; alias?: string } }) => {
     if (cmd === 'list_projects') return projs;
     if (cmd === 'list_sessions') return sess;
     // Existing tests don't care about hosts — return empty so $hosts is a
     // valid array (never null) when Sidebar.svelte does `$hosts.filter(...)`.
     if (cmd === 'list_hosts') return [];
     if (cmd === 'list_accounts') return [];
+    // Iter 4a Task 13: mutation IPCs now return the affected row (or id for
+    // kill). The wrapper then patches the store via mergeSession/removeSession;
+    // mergeSession(null) would throw. Return a sentinel that satisfies the
+    // patch even though these tests only assert that the IPC was invoked.
+    const id = args?.args?.id ?? 0;
+    if (cmd === 'kill_session') return id;
+    if (cmd === 'new_session' || cmd === 'rename_session' || cmd === 'restart_session') {
+      const found = sess.find((s) => s.id === id) ?? sess[0];
+      return found ?? null;
+    }
+    if (cmd === 'add_host' || cmd === 'probe_ssh_alias' || cmd === 'remove_host' || cmd === 'hide_host') {
+      const alias = args?.args?.alias ?? 'local';
+      return { alias, ssh_alias: null, hidden: false, account_uuid: null, reachable: true, claude_version: null, tmux_version: null, probed_at: null };
+    }
     return null;
   });
 }
