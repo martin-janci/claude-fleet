@@ -43,15 +43,27 @@
     openError = null;
 
     term = new Terminal({
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+      fontFamily: 'Menlo, ui-monospace, SFMono-Regular, monospace',
       fontSize: 13,
       cursorBlink: true,
       scrollback: 5000,
-      theme: readThemeFromCss(),
+      // Force high-contrast theme to rule out CSS-var resolution issues —
+      // if --bg/--fg happen to resolve to the same value (unlikely but
+      // possible in some color-mode races), xterm would render invisible.
+      theme: {
+        background: '#0a0a0a',
+        foreground: '#e8e8e8',
+        cursor: '#ffffff',
+        cursorAccent: '#0a0a0a',
+        selectionBackground: '#3a3a55',
+      },
     });
     fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(container);
+    // Diagnostic line — proves xterm renders SOMETHING. If you don't see
+    // this line, the bug is in xterm DOM mounting / measurement.
+    term.writeln('\x1b[93m[xterm boot] terminal opened\x1b[0m');
 
     resizeObserver = new ResizeObserver((entries) => {
       const t = term;
@@ -217,6 +229,16 @@
       <span class="counters" data-testid="terminal-counters">
         ticks: {drainTicks} · {totalBytes}B
       </span>
+      <button
+        class="reconnect"
+        onclick={() => {
+          term?.writeln('\r\n\x1b[93m[test write] ' + new Date().toISOString() + '\x1b[0m');
+        }}
+        title="Synchronous writeln test"
+        data-testid="terminal-test"
+      >
+        ✎ test
+      </button>
       <button
         class="reconnect"
         onclick={() => $selectedSession && void openTerm($selectedSession.tmux_name)}
