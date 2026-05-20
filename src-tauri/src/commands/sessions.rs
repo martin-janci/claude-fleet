@@ -1,44 +1,88 @@
 use crate::ipc_error::IpcError;
+use crate::ssh::SshClient;
 use crate::store::{SessionRow, Store};
-use crate::tmux::{
-    kill_session as tmux_kill_session, list_local_sessions, new_session as tmux_new_session,
-    rename_session as tmux_rename_session, restart_session as tmux_restart_session,
-};
+use crate::tmux::{LocalTmux, RemoteTmux, TmuxExec};
 use serde::Deserialize;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::State;
 
-const LOCAL_HOST: &str = "local";
-
-fn reconcile_local_sessions(s: &Store) -> Result<Vec<SessionRow>, IpcError> {
-    let live = list_local_sessions()?;
-    s.upsert_host(LOCAL_HOST)?;
-    let mut keep = Vec::with_capacity(live.len());
-    for sess in &live {
-        keep.push(sess.name.clone());
-        // Best-effort project mapping: find a project whose base_path is a prefix
-        // of the session's working directory.
-        let project_id = find_project_id_for_path(s, &sess.path);
-        s.upsert_session(
-            &sess.name,
-            LOCAL_HOST,
-            project_id,
-            None,
-            sess.created,
-            sess.last_activity,
-            "running",
-        )?;
-        // last_session_at reflects the tmux-reported activity, not the wall-clock
-        // time of this scan. That way the recency filter survives across app
-        // restarts: a session that was last active 2 hours ago stays at that
-        // timestamp even if we rescan now.
-        if let Some(pid) = project_id {
-            s.touch_project_last_session_at(pid, sess.last_activity)?;
-        }
+fn exec_for(host: &str, ssh: &Arc<SshClient>) -> Box<dyn TmuxExec> {
+    if host == "local" {
+        Box::new(LocalTmux)
+    } else {
+        Box::new(RemoteTmux {
+            client: Arc::clone(ssh),
+            host: host.to_string(),
+        })
     }
-    s.delete_sessions_not_in(LOCAL_HOST, &keep)?;
-    s.list_sessions_for_host(LOCAL_HOST).map_err(IpcError::from)
+}
+
+fn reconcile_sessions(
+    s: &Store,
+    ssh: &Arc<SshClient>,
+) -> Result<Vec<SessionRow>, IpcError> {
+    // Ensure the local host always exists (it's the bootstrap default).
+    s.upsert_host("local")?;
+    let hosts = s.list_hosts()?;
+    let mut all_rows: Vec<SessionRow> = Vec::new();
+
+    for host in hosts {
+        if host.hidden {
+            continue;
+        }
+        let tmux = exec_for(&host.alias, ssh);
+        let live = match tmux.list_sessions() {
+            Ok(v) => v,
+            Err(_e) => {
+                // Mark host unreachable but don't fail the whole reconcile;
+                // other hosts can still list their sessions.
+                let _ = s.update_host_probe(
+                    &host.alias,
+                    false,
+                    host.claude_version.as_deref(),
+                    host.tmux_version.as_deref(),
+                    now_unix(),
+                );
+                continue;
+            }
+        };
+        // Successful list = reachable. Bump the timestamp.
+        let _ = s.update_host_probe(
+            &host.alias,
+            true,
+            host.claude_version.as_deref(),
+            host.tmux_version.as_deref(),
+            now_unix(),
+        );
+        let mut keep = Vec::with_capacity(live.len());
+        for sess in &live {
+            keep.push(sess.name.clone());
+            let project_id = find_project_id_for_path(s, &host.alias, &sess.path);
+            s.upsert_session(
+                &sess.name,
+                &host.alias,
+                project_id,
+                None,
+                sess.created,
+                sess.last_activity,
+                "running",
+            )?;
+            if let Some(pid) = project_id {
+                s.touch_project_last_session_at(pid, sess.last_activity)?;
+            }
+        }
+        s.delete_sessions_not_in(&host.alias, &keep)?;
+        all_rows.extend(s.list_sessions_for_host(&host.alias)?);
+    }
+    Ok(all_rows)
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Extract `(owner, repo)` from a path that follows the conventional
@@ -58,27 +102,45 @@ fn extract_owner_repo(path: &str) -> Option<(String, String)> {
     ))
 }
 
-fn find_project_id_for_path(s: &Store, path: &std::path::Path) -> Option<i64> {
+fn find_project_id_for_path(
+    s: &Store,
+    host_alias: &str,
+    path: &std::path::Path,
+) -> Option<i64> {
     let path_str = path.to_string_lossy();
     let projects = s.list_projects().ok()?;
-    // Prefer the longest matching base_path (handles worktrees that live under repos)
+    if host_alias == "local" {
+        // Local paths: existing prefix match (handles worktrees nested under repos).
+        return projects
+            .into_iter()
+            .filter(|p| path_str.starts_with(&p.base_path))
+            .max_by_key(|p| p.base_path.len())
+            .map(|p| p.id);
+    }
+    // Remote paths: match by owner+repo extracted from the conventional
+    // `.../projects/github.com/<owner>/<repo>/...` layout. Falls through
+    // to `None` (orphan) if the path doesn't follow the convention.
+    let (owner, repo) = extract_owner_repo(&path_str)?;
     projects
         .into_iter()
-        .filter(|p| path_str.starts_with(&p.base_path))
-        .max_by_key(|p| p.base_path.len())
+        .find(|p| p.owner == owner && p.repo == repo)
         .map(|p| p.id)
 }
 
 #[tauri::command]
-pub fn list_sessions(store: State<'_, Mutex<Store>>) -> Result<Vec<SessionRow>, IpcError> {
+pub fn list_sessions(
+    store: State<'_, Mutex<Store>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<Vec<SessionRow>, IpcError> {
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    reconcile_local_sessions(&s)
+    reconcile_sessions(&s, &ssh)
 }
 
 #[derive(Deserialize)]
 pub struct NewSessionArgs {
+    pub host_alias: String,
     pub project_id: i64,
     pub worktree_id: Option<i64>,
     pub name: String,
@@ -88,6 +150,7 @@ pub struct NewSessionArgs {
 pub fn new_session(
     args: NewSessionArgs,
     store: State<'_, Mutex<Store>>,
+    ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SessionRow, IpcError> {
     let path: PathBuf = {
         let s = store
@@ -107,39 +170,50 @@ pub fn new_session(
             PathBuf::from(row)
         }
     };
-    tmux_new_session(&args.name, &path)?;
+    let tmux = exec_for(&args.host_alias, &ssh);
+    tmux.new_session(&args.name, &path)?;
 
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    let rows = reconcile_local_sessions(&s)?;
+    let rows = reconcile_sessions(&s, &ssh)?;
     rows.into_iter()
-        .find(|r| r.tmux_name == args.name)
+        .find(|r| r.tmux_name == args.name && r.host_alias == args.host_alias)
         .ok_or_else(|| {
             IpcError::new(
                 "E_NOTFOUND",
-                format!("tmux session {} did not appear in list", args.name),
+                format!(
+                    "session {} on {} did not appear in list",
+                    args.name, args.host_alias
+                ),
             )
         })
 }
 
 #[derive(Deserialize)]
 pub struct KillSessionArgs {
+    pub host_alias: String,
     pub name: String,
 }
 
 #[tauri::command]
-pub fn kill_session(args: KillSessionArgs, store: State<'_, Mutex<Store>>) -> Result<(), IpcError> {
-    tmux_kill_session(&args.name)?;
+pub fn kill_session(
+    args: KillSessionArgs,
+    store: State<'_, Mutex<Store>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<(), IpcError> {
+    let tmux = exec_for(&args.host_alias, &ssh);
+    tmux.kill_session(&args.name)?;
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    reconcile_local_sessions(&s)?;
+    reconcile_sessions(&s, &ssh)?;
     Ok(())
 }
 
 #[derive(Deserialize)]
 pub struct RenameSessionArgs {
+    pub host_alias: String,
     pub old_name: String,
     pub new_name: String,
 }
@@ -148,24 +222,30 @@ pub struct RenameSessionArgs {
 pub fn rename_session(
     args: RenameSessionArgs,
     store: State<'_, Mutex<Store>>,
+    ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SessionRow, IpcError> {
-    tmux_rename_session(&args.old_name, &args.new_name)?;
+    let tmux = exec_for(&args.host_alias, &ssh);
+    tmux.rename_session(&args.old_name, &args.new_name)?;
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    let rows = reconcile_local_sessions(&s)?;
+    let rows = reconcile_sessions(&s, &ssh)?;
     rows.into_iter()
-        .find(|r| r.tmux_name == args.new_name.trim())
+        .find(|r| r.tmux_name == args.new_name.trim() && r.host_alias == args.host_alias)
         .ok_or_else(|| {
             IpcError::new(
                 "E_NOTFOUND",
-                format!("renamed session {} did not appear in list", args.new_name),
+                format!(
+                    "renamed session {} on {} did not appear in list",
+                    args.new_name, args.host_alias
+                ),
             )
         })
 }
 
 #[derive(Deserialize)]
 pub struct RestartSessionArgs {
+    pub host_alias: String,
     pub name: String,
 }
 
@@ -173,18 +253,23 @@ pub struct RestartSessionArgs {
 pub fn restart_session(
     args: RestartSessionArgs,
     store: State<'_, Mutex<Store>>,
+    ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SessionRow, IpcError> {
-    tmux_restart_session(&args.name)?;
+    let tmux = exec_for(&args.host_alias, &ssh);
+    tmux.restart_session(&args.name)?;
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    let rows = reconcile_local_sessions(&s)?;
+    let rows = reconcile_sessions(&s, &ssh)?;
     rows.into_iter()
-        .find(|r| r.tmux_name == args.name)
+        .find(|r| r.tmux_name == args.name && r.host_alias == args.host_alias)
         .ok_or_else(|| {
             IpcError::new(
                 "E_NOTFOUND",
-                format!("restarted session {} did not appear in list", args.name),
+                format!(
+                    "restarted session {} on {} did not appear in list",
+                    args.name, args.host_alias
+                ),
             )
         })
 }
