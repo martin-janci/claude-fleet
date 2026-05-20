@@ -1,0 +1,39 @@
+import { writable } from 'svelte/store';
+import { invokeCmd, type Result } from './result';
+
+export interface AccountRow {
+  uuid: string;
+  email: string | null;
+  display_name: string | null;
+  organization_name: string | null;
+  organization_uuid: string | null;
+  seat_tier: string | null;
+  last_seen_at: number | null;
+}
+
+export const accounts = writable<AccountRow[]>([]);
+
+export async function loadAccounts(): Promise<Result<AccountRow[]>> {
+  const r = await invokeCmd<AccountRow[]>('list_accounts');
+  if (r.ok) accounts.set(r.value);
+  return r;
+}
+
+// Used by AddHostPicker to preview probe results without persisting.
+export interface ProbePreview {
+  reachable: boolean;
+  claude_version: string | null;
+  tmux_version: string | null;
+  account: {
+    uuid: string | null;
+    email: string | null;
+    display_name: string | null;
+    organization_name: string | null;
+    organization_uuid: string | null;
+    seat_tier: string | null;
+  } | null;
+}
+
+export async function probeSshAlias(sshAlias: string): Promise<Result<ProbePreview>> {
+  return invokeCmd<ProbePreview>('probe_ssh_alias', { args: { ssh_alias: sshAlias } });
+}

@@ -28,12 +28,20 @@ vi.mock('@tauri-apps/api/core', () => ({
       tmux_version: '3.5a',
       hidden: false,
       last_pinged_at: 1,
+      account_uuid: null,
     }];
     if (cmd === 'discover_hosts') return [];
     if (cmd === 'add_host') return null;
     if (cmd === 'probe_host') return null;
     if (cmd === 'remove_host') return null;
     if (cmd === 'hide_host') return null;
+    if (cmd === 'list_accounts') return [];
+    if (cmd === 'probe_ssh_alias') return {
+      reachable: true,
+      claude_version: '2.1.144',
+      tmux_version: '3.6a',
+      account: null,
+    };
     return null;
   }),
 }));

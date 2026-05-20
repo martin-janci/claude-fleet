@@ -10,6 +10,7 @@ export interface HostRow {
   tmux_version: string | null;
   hidden: boolean;
   last_pinged_at: number | null;
+  account_uuid: string | null;
 }
 
 export interface SshHost {
