@@ -358,9 +358,9 @@ describe('Sidebar (sessions-grouped view)', () => {
       if (cmd === 'list_projects') return fakeProjects;
       if (cmd === 'list_sessions') return [];
       if (cmd === 'list_hosts') return [
-        { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null },
-        { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1 },
-        { alias: 'old', ssh_alias: 'old', reachable: false, claude_version: null, tmux_version: null, hidden: true, last_pinged_at: 1 },
+        { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null, account_uuid: null },
+        { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null },
+        { alias: 'old', ssh_alias: 'old', reachable: false, claude_version: null, tmux_version: null, hidden: true, last_pinged_at: 1, account_uuid: null },
       ];
       return null;
     });
@@ -380,8 +380,8 @@ describe('Sidebar (sessions-grouped view)', () => {
       if (cmd === 'list_projects') return fakeProjects;
       if (cmd === 'list_sessions') return [local, remote];
       if (cmd === 'list_hosts') return [
-        { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null },
-        { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1 },
+        { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null, account_uuid: null },
+        { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null },
       ];
       return null;
     });
@@ -401,7 +401,7 @@ describe('Sidebar (sessions-grouped view)', () => {
       if (cmd === 'list_projects') return fakeProjects;
       if (cmd === 'list_sessions') return [sessionFor(1, 'dev-foo')];
       if (cmd === 'list_hosts') return [
-        { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null },
+        { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null, account_uuid: null },
       ];
       return null;
     });

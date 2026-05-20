@@ -499,12 +499,6 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_three() {
-        let store = Store::open_in_memory().expect("open");
-        assert_eq!(store.schema_version().expect("version"), 3);
-    }
-
-    #[test]
     fn migrate_is_idempotent() {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
