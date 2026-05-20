@@ -35,6 +35,17 @@ pub struct SessionRow {
     pub notes: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HostRow {
+    pub alias: String,
+    pub ssh_alias: Option<String>,
+    pub reachable: bool,
+    pub claude_version: Option<String>,
+    pub tmux_version: Option<String>,
+    pub hidden: bool,
+    pub last_pinged_at: Option<i64>,
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -202,6 +213,86 @@ impl Store {
         self.conn.execute(
             "INSERT INTO hosts (alias, reachable) VALUES (?1, 1)
              ON CONFLICT(alias) DO UPDATE SET reachable=1",
+            rusqlite::params![alias],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_hosts(&self) -> Result<Vec<HostRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT alias, ssh_alias, reachable, claude_version, tmux_version, hidden, last_pinged_at
+             FROM hosts
+             ORDER BY (alias='local') DESC, alias ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(HostRow {
+                alias: row.get(0)?,
+                ssh_alias: row.get(1)?,
+                reachable: row.get::<_, i64>(2)? != 0,
+                claude_version: row.get(3)?,
+                tmux_version: row.get(4)?,
+                hidden: row.get::<_, i64>(5)? != 0,
+                last_pinged_at: row.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn insert_host(
+        &self,
+        alias: &str,
+        ssh_alias: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO hosts (alias, ssh_alias, reachable, hidden) VALUES (?1, ?2, 0, 0)
+             ON CONFLICT(alias) DO UPDATE SET ssh_alias=excluded.ssh_alias",
+            rusqlite::params![alias, ssh_alias],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_host_probe(
+        &self,
+        alias: &str,
+        reachable: bool,
+        claude_version: Option<&str>,
+        tmux_version: Option<&str>,
+        last_pinged_at: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE hosts SET reachable=?1, claude_version=?2, tmux_version=?3, last_pinged_at=?4 WHERE alias=?5",
+            rusqlite::params![
+                if reachable { 1 } else { 0 },
+                claude_version,
+                tmux_version,
+                last_pinged_at,
+                alias
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_host_hidden(&self, alias: &str, hidden: bool) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE hosts SET hidden=?1 WHERE alias=?2",
+            rusqlite::params![if hidden { 1 } else { 0 }, alias],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_host(&self, alias: &str) -> Result<(), rusqlite::Error> {
+        // Sessions are pruned naturally when reconcile_sessions runs against
+        // an empty hosts set; we don't cascade here. The `local` host is
+        // never removed.
+        if alias == "local" {
+            return Ok(());
+        }
+        self.conn.execute(
+            "DELETE FROM sessions WHERE host_alias=?1",
+            rusqlite::params![alias],
+        )?;
+        self.conn.execute(
+            "DELETE FROM hosts WHERE alias=?1",
             rusqlite::params![alias],
         )?;
         Ok(())
@@ -450,5 +541,78 @@ mod tests {
     fn schema_version_is_two_after_migration() {
         let s = Store::open_in_memory().expect("open");
         assert_eq!(s.schema_version().expect("version"), 2);
+    }
+
+    #[test]
+    fn list_hosts_orders_local_first_then_alpha() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        s.insert_host("zebra", Some("zebra")).unwrap();
+        s.insert_host("mefistos", Some("mefistos")).unwrap();
+        let names: Vec<String> = s
+            .list_hosts()
+            .unwrap()
+            .into_iter()
+            .map(|h| h.alias)
+            .collect();
+        assert_eq!(names, vec!["local", "mefistos", "zebra"]);
+    }
+
+    #[test]
+    fn insert_host_records_ssh_alias() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("mefistos", Some("mefistos")).unwrap();
+        let row = s
+            .list_hosts()
+            .unwrap()
+            .into_iter()
+            .find(|h| h.alias == "mefistos")
+            .unwrap();
+        assert_eq!(row.ssh_alias.as_deref(), Some("mefistos"));
+        assert!(!row.reachable);
+        assert!(!row.hidden);
+    }
+
+    #[test]
+    fn update_host_probe_persists_versions_and_reachability() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        s.update_host_probe("h", true, Some("2.1.144"), Some("3.6a"), 1000)
+            .unwrap();
+        let row = s.list_hosts().unwrap().into_iter().find(|x| x.alias == "h").unwrap();
+        assert!(row.reachable);
+        assert_eq!(row.claude_version.as_deref(), Some("2.1.144"));
+        assert_eq!(row.tmux_version.as_deref(), Some("3.6a"));
+        assert_eq!(row.last_pinged_at, Some(1000));
+    }
+
+    #[test]
+    fn delete_host_removes_host_and_its_sessions() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        s.upsert_session("dev-a", "h", None, None, 1, 1, "running")
+            .unwrap();
+        assert_eq!(s.list_sessions_for_host("h").unwrap().len(), 1);
+        s.delete_host("h").unwrap();
+        assert_eq!(s.list_hosts().unwrap().iter().filter(|x| x.alias == "h").count(), 0);
+        assert_eq!(s.list_sessions_for_host("h").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn delete_host_refuses_to_remove_local() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        s.delete_host("local").unwrap();
+        assert!(s.list_hosts().unwrap().iter().any(|h| h.alias == "local"));
+    }
+
+    #[test]
+    fn set_host_hidden_toggles() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        s.set_host_hidden("h", true).unwrap();
+        assert!(s.list_hosts().unwrap().iter().find(|x| x.alias == "h").unwrap().hidden);
+        s.set_host_hidden("h", false).unwrap();
+        assert!(!s.list_hosts().unwrap().iter().find(|x| x.alias == "h").unwrap().hidden);
     }
 }
