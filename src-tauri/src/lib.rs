@@ -161,6 +161,7 @@ pub fn run() {
             commands::sessions::kill_session,
             commands::sessions::rename_session,
             commands::sessions::restart_session,
+            commands::sessions::send_prompt,
             commands::hosts::discover_hosts,
             commands::hosts::list_hosts,
             commands::hosts::list_accounts,

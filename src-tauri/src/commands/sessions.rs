@@ -499,6 +499,78 @@ pub fn restart_session(
         })
 }
 
+/// Conservative single-quote shell escape (local copy — iter 4 will extract
+/// to a shared module). Wraps in `'...'`, replaces embedded `'` with the
+/// canonical `'\''` dance.
+fn shell_quote_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Build the two tmux invocations that together send a prompt to a session:
+///   1. send-keys -t <name> -l <prompt>   (literal, no key-name translation)
+///   2. send-keys -t <name> Enter         (real Enter to submit)
+pub fn build_send_commands(tmux_name: &str, prompt: &str) -> Vec<String> {
+    vec![
+        format!("tmux send-keys -t {} -l {}", shell_quote_str(tmux_name), shell_quote_str(prompt)),
+        format!("tmux send-keys -t {} Enter", shell_quote_str(tmux_name)),
+    ]
+}
+
+#[derive(Deserialize)]
+pub struct SendPromptArgs {
+    pub host_alias: String,
+    pub tmux_name: String,
+    pub prompt: String,
+}
+
+#[tauri::command]
+pub fn send_prompt(
+    args: SendPromptArgs,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<(), IpcError> {
+    let cmds = build_send_commands(&args.tmux_name, &args.prompt);
+    if args.host_alias == "local" {
+        for cmd in &cmds {
+            let out = std::process::Command::new("bash")
+                .args(["-c", cmd])
+                .output()
+                .map_err(|e| IpcError::new("E_TMUX", format!("spawn bash: {e}")))?;
+            if !out.status.success() {
+                return Err(IpcError::new(
+                    "E_TMUX",
+                    String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                ));
+            }
+        }
+    } else {
+        for cmd in &cmds {
+            let quoted = shell_quote_str(cmd);
+            let out = ssh.run(
+                &args.host_alias,
+                &["bash", "-lc", &quoted],
+                std::time::Duration::from_secs(10),
+            )?;
+            if !out.status.success() {
+                return Err(IpcError::new(
+                    "E_TMUX",
+                    String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -593,6 +665,29 @@ mod tests {
         ).unwrap();
         // Verify session kept the ORIGINAL account
         assert_eq!(s.get_session_account("h", "dev-a").unwrap().as_deref(), Some("u1"));
+    }
+
+    #[test]
+    fn build_send_commands_emits_literal_text_then_enter() {
+        let cmds = build_send_commands("dev-foo", "hello world");
+        assert_eq!(cmds.len(), 2);
+        assert!(cmds[0].starts_with("tmux send-keys -t "));
+        assert!(cmds[0].contains(" -l "));
+        assert!(cmds[0].contains("'hello world'"));
+        assert!(cmds[1].ends_with(" Enter"));
+    }
+
+    #[test]
+    fn build_send_commands_escapes_embedded_quotes() {
+        let cmds = build_send_commands("dev-foo", "it's a test");
+        // shell_quote_str uses the '\''..  dance for embedded singles.
+        assert!(cmds[0].contains("'it'\\''s a test'"));
+    }
+
+    #[test]
+    fn build_send_commands_quotes_session_name_with_dashes() {
+        let cmds = build_send_commands("dev-with-dashes", "x");
+        assert!(cmds[0].contains("'dev-with-dashes'"));
     }
 
     #[test]
