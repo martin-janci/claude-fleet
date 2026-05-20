@@ -140,22 +140,43 @@
     return acc.seat_tier ? `\n${email} (${acc.seat_tier})` : `\n${email}`;
   }
 
+  // --- Memoised indices (rebuilt once per $sessions change, not per row) ---
+
+  // Map: project_id → all sessions for that project (unfiltered by host)
+  const sessionsByProject = $derived.by(() => {
+    const m = new Map<number, SessionRow[]>();
+    for (const s of $sessions) {
+      if (s.project_id == null) continue;
+      if (!m.has(s.project_id)) m.set(s.project_id, []);
+      m.get(s.project_id)!.push(s);
+    }
+    return m;
+  });
+
+  // Map: session.id → count of other sessions sharing the same (project, worktree)
+  const relatedCountById = $derived.by(() => {
+    const grouped = new Map<string, SessionRow[]>();
+    for (const s of $sessions) {
+      if (s.project_id == null) continue;
+      const key = `${s.project_id}:${s.worktree_id ?? 'null'}`;
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key)!.push(s);
+    }
+    const out = new Map<number, number>();
+    for (const list of grouped.values()) {
+      for (const s of list) out.set(s.id, list.length - 1);
+    }
+    return out;
+  });
+
   function sessionsForProject(projectId: number): SessionRow[] {
-    return $sessions.filter(
-      (s) =>
-        s.project_id === projectId &&
-        ($hostFilter === 'all' || s.host_alias === $hostFilter),
-    );
+    const all = sessionsByProject.get(projectId) ?? [];
+    if ($hostFilter === 'all') return all;
+    return all.filter((s) => s.host_alias === $hostFilter);
   }
 
   function relatedCountFor(sess: SessionRow): number {
-    if (sess.project_id === null) return 0;
-    return $sessions.filter(
-      (s) =>
-        s.id !== sess.id &&
-        s.project_id === sess.project_id &&
-        s.worktree_id === sess.worktree_id,
-    ).length;
+    return relatedCountById.get(sess.id) ?? 0;
   }
 
   // Sessions whose tmux working directory didn't map to any known project.

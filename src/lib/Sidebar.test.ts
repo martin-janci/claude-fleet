@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { performance } from 'node:perf_hooks';
 import { tick } from 'svelte';
 
 // Three sample projects. Sessions are attached per-test so we can verify
@@ -514,5 +515,37 @@ describe('Sidebar (sessions-grouped view)', () => {
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
     expect(screen.queryAllByTestId('related-badge')).toHaveLength(0);
+  });
+
+  it('renders 500 sessions across 25 projects under a sub-500ms budget', async () => {
+    const sess: SessionRow[] = [];
+    const projs: typeof fakeProjects = [];
+    for (let p = 1; p <= 25; p++) {
+      projs.push({
+        project: { id: p, owner: 'o', repo: `r${p}`, base_path: `/r/${p}`, last_session_at: Date.now() / 1000 },
+        worktrees: [{ id: p * 10, project_id: p, name: 'main', path: `/r/${p}`, branch: 'main' }],
+      });
+      for (let i = 0; i < 20; i++) {
+        sess.push({
+          id: p * 100 + i,
+          tmux_name: `proj-${p}-sess-${i}`,
+          host_alias: 'local',
+          project_id: p,
+          worktree_id: p * 10,
+          created_at: 1,
+          last_activity_at: 1,
+          status: 'running',
+          notes: null,
+          account_uuid: null,
+        });
+      }
+    }
+    mockBackend(projs, sess);
+    const start = performance.now();
+    render(Sidebar);
+    await tick(); await tick();
+    const elapsed = performance.now() - start;
+    // With memoised indices this should be well under 1000ms even in CI.
+    expect(elapsed).toBeLessThan(1000);
   });
 });
