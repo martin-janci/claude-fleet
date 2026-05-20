@@ -107,4 +107,42 @@ describe('PromptComposer', () => {
     expect(payload.args.tmux_name).toBe('dev-sibling');
     expect(payload.args.prompt).toBe('echo hi');
   });
+
+  it('fires all sends concurrently, not sequentially', async () => {
+    const callTimes: number[] = [];
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'send_prompt') {
+        callTimes.push(performance.now());
+        await new Promise((r) => setTimeout(r, 50));
+        return null;
+      }
+      return null;
+    });
+    // Pre-populate 3 sibling targets with the same project_id+worktree_id as source.
+    const sibs = [2, 3, 4].map((id) => ({
+      id,
+      tmux_name: `dev-sib-${id}`,
+      host_alias: 'mefistos',
+      project_id: 1,
+      worktree_id: 10,
+      created_at: 1,
+      last_activity_at: 1,
+      status: 'running',
+      notes: null,
+      account_uuid: null,
+    }));
+    sessions.set([source, ...sibs]);
+    render(PromptComposer, { props: { source, onClose: () => {} } });
+    await tick();
+    const textarea = screen.getByTestId('composer-textarea') as HTMLTextAreaElement;
+    await fireEvent.input(textarea, { target: { value: 'hello' } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('composer-send'));
+    // Wait a tick or two for the parallel awaits to resolve.
+    for (let i = 0; i < 12; i++) await tick();
+    expect(callTimes).toHaveLength(3);
+    // All three should have fired within a small window of each other (parallel).
+    const span = Math.max(...callTimes) - Math.min(...callTimes);
+    expect(span).toBeLessThan(20);
+  });
 });

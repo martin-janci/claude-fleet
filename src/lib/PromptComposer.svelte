@@ -93,15 +93,17 @@
     errors = {};
     succeeded = {};
     const targets = displayTargets.filter((t) => checked[t.id]);
-    for (const t of targets) {
-      const key = targetKey(t);
-      const r = await sendPrompt(t.host_alias, t.tmux_name, prompt);
-      if (r.ok) {
-        succeeded[key] = true;
-      } else {
-        errors[key] = r.error.message;
-      }
-    }
+    await Promise.allSettled(
+      targets.map(async (t) => {
+        const key = targetKey(t);
+        const r = await sendPrompt(t.host_alias, t.tmux_name, prompt);
+        if (r.ok) {
+          succeeded[key] = true;
+        } else {
+          errors[key] = r.error.message;
+        }
+      }),
+    );
     sending = false;
     // Auto-close on full success
     if (Object.keys(errors).length === 0) {
@@ -129,7 +131,6 @@
                 <input
                   type="checkbox"
                   bind:checked={checked[t.id]}
-                  disabled={sending}
                   data-testid="target-checkbox-{t.id}"
                 />
                 <span class="host-badge">[{t.host_alias}]</span>
@@ -153,7 +154,6 @@
         <input
           type="checkbox"
           bind:checked={showAllFleet}
-          disabled={sending}
           data-testid="show-all-fleet"
         />
         Show all fleet sessions
@@ -164,7 +164,6 @@
       <h4>Prompt</h4>
       <textarea
         bind:value={prompt}
-        disabled={sending}
         rows="8"
         placeholder="Type a prompt to send to selected sessions…"
         data-testid="composer-textarea"
@@ -172,7 +171,7 @@
     </section>
 
     <div class="actions">
-      <button onclick={onClose} disabled={sending}>Cancel</button>
+      <button onclick={onClose}>Cancel</button>
       <button
         class="primary"
         disabled={!canSend}
