@@ -80,6 +80,10 @@ impl Store {
             self.conn
                 .execute_batch(include_str!("../migrations/002_hosts_ssh.sql"))?;
         }
+        if v < 3 {
+            self.conn
+                .execute_batch(include_str!("../migrations/003_accounts.sql"))?;
+        }
         Ok(())
     }
 
@@ -397,16 +401,16 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_two() {
+    fn schema_version_is_three() {
         let store = Store::open_in_memory().expect("open");
-        assert_eq!(store.schema_version().expect("version"), 2);
+        assert_eq!(store.schema_version().expect("version"), 3);
     }
 
     #[test]
     fn migrate_is_idempotent() {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
-        assert_eq!(store.schema_version().expect("version"), 2);
+        assert_eq!(store.schema_version().expect("version"), 3);
     }
 
     #[test]
@@ -538,9 +542,28 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_two_after_migration() {
+    fn schema_version_is_three_after_migration() {
         let s = Store::open_in_memory().expect("open");
-        assert_eq!(s.schema_version().expect("version"), 2);
+        assert_eq!(s.schema_version().expect("version"), 3);
+    }
+
+    #[test]
+    fn migration_003_adds_accounts_table_and_host_account_uuid_column() {
+        let s = Store::open_in_memory().expect("open");
+        assert!(s.has_table("accounts").expect("has_table"), "expected accounts table");
+        let mut stmt = s
+            .conn
+            .prepare("SELECT name FROM pragma_table_info('hosts')")
+            .unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(
+            cols.iter().any(|c| c == "account_uuid"),
+            "expected `account_uuid` column on hosts; got: {cols:?}"
+        );
     }
 
     #[test]
