@@ -1,9 +1,8 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { projects, loadProjects, refreshProjects, bootstrapProjects, type ProjectTreeRow } from './projects';
+  import { projects, refreshProjects, bootstrapProjects, type ProjectTreeRow } from './projects';
   import {
     sessions,
-    loadSessions,
     killSession,
     renameSession,
     restartSession,
@@ -16,8 +15,8 @@
   import { theme, cycleTheme } from './theme';
   import NewSessionDialog from './NewSessionDialog.svelte';
   import SettingsDialog from './SettingsDialog.svelte';
-  import { hosts, loadHosts, bootstrapHosts, hostFilter } from './hosts';
-  import { accounts, loadAccounts, bootstrapAccounts, type AccountRow } from './accounts';
+  import { hosts, bootstrapHosts, hostFilter } from './hosts';
+  import { accounts, bootstrapAccounts, type AccountRow } from './accounts';
 
   let showSettings = $state(false);
 

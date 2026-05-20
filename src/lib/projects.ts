@@ -51,6 +51,22 @@ export function mergeProject(row: ProjectTreeRow): void {
   });
 }
 
+/**
+ * Adapter for the `project:updated` Tauri event, which emits a bare `ProjectRow`
+ * (no nested worktrees — those have their own `worktree:updated` event). If the
+ * project is already in the store, update only its `project` field and preserve
+ * the existing `worktrees` array. If it's new, seed an empty `worktrees: []`.
+ */
+export function mergeProjectFromEvent(row: ProjectRow): void {
+  projects.update((arr) => {
+    const i = arr.findIndex((p) => p.project.id === row.id);
+    if (i === -1) return [...arr, { project: row, worktrees: [] }];
+    const next = arr.slice();
+    next[i] = { project: row, worktrees: arr[i].worktrees };
+    return next;
+  });
+}
+
 export function mergeWorktree(row: WorktreeRow): void {
   projects.update((arr) => {
     const idx = arr.findIndex((p) => p.project.id === row.project_id);

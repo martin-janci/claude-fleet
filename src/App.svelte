@@ -6,7 +6,7 @@
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
   import TerminalView from './lib/TerminalView.svelte';
-  import { loadProjects, bootstrapProjects, mergeProject, mergeWorktree } from './lib/projects';
+  import { loadProjects, bootstrapProjects, mergeProjectFromEvent, mergeWorktree } from './lib/projects';
   import { loadSessions, bootstrapSessions, mergeSession, removeSession } from './lib/sessions';
   import { bootstrapHosts, mergeHost, removeHost } from './lib/hosts';
   import { bootstrapAccounts, mergeAccount } from './lib/accounts';
@@ -84,7 +84,7 @@
       onHostProbed: mergeHost,
       onHostRemoved: (p) => removeHost(p.alias),
       onAccountUpserted: mergeAccount,
-      onProjectUpdated: mergeProject,
+      onProjectUpdated: mergeProjectFromEvent,
       onWorktreeUpdated: mergeWorktree,
     });
   });
