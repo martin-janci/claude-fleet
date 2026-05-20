@@ -2,6 +2,7 @@ mod commands;
 mod ipc_error;
 mod projects;
 mod pty;
+mod ssh;
 mod ssh_config;
 mod store;
 mod tmux;
