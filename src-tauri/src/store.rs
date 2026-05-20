@@ -437,6 +437,24 @@ impl Store {
         )
     }
 
+    pub fn get_session_account(
+        &self,
+        host_alias: &str,
+        tmux_name: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT account_uuid FROM sessions WHERE host_alias=?1 AND tmux_name=?2",
+        )?;
+        let mut rows = stmt.query_map(
+            rusqlite::params![host_alias, tmux_name],
+            |row| row.get::<_, Option<String>>(0),
+        )?;
+        match rows.next() {
+            Some(r) => Ok(r?),
+            None => Ok(None),
+        }
+    }
+
     pub fn list_sessions_for_host(
         &self,
         host_alias: &str,
@@ -856,5 +874,27 @@ mod tests {
         s.insert_host("h", Some("h")).unwrap();
         let row = s.list_hosts().unwrap().into_iter().find(|r| r.alias == "h").unwrap();
         assert!(row.account_uuid.is_none());
+    }
+
+    #[test]
+    fn get_session_account_returns_none_for_missing_then_some_after_upsert() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        // No session yet → None
+        assert!(s.get_session_account("h", "dev-foo").unwrap().is_none());
+        // Upsert with an account uuid
+        s.upsert_account(&AccountRow {
+            uuid: "u1".into(),
+            email: None,
+            display_name: None,
+            organization_name: None,
+            organization_uuid: None,
+            seat_tier: None,
+            last_seen_at: None,
+        })
+        .unwrap();
+        s.upsert_session("dev-foo", "h", None, None, 1, 1, "running", Some("u1"))
+            .unwrap();
+        assert_eq!(s.get_session_account("h", "dev-foo").unwrap().as_deref(), Some("u1"));
     }
 }

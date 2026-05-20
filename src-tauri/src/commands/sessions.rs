@@ -69,6 +69,12 @@ fn reconcile_sessions(
         for sess in &live {
             keep.push(sess.name.clone());
             let project_id = find_project_id_for_path(s, &host.alias, &sess.path);
+            // Preservation invariant: if the session already has an
+            // account_uuid in the DB, keep it; only capture the host's
+            // current account for newly-discovered sessions.
+            let account_uuid = s
+                .get_session_account(&host.alias, &sess.name)?
+                .or_else(|| host.account_uuid.clone());
             s.upsert_session(
                 &sess.name,
                 &host.alias,
@@ -77,7 +83,7 @@ fn reconcile_sessions(
                 sess.created,
                 sess.last_activity,
                 "running",
-                None,
+                account_uuid.as_deref(),
             )?;
             if let Some(pid) = project_id {
                 s.touch_project_last_session_at(pid, sess.last_activity)?;
@@ -543,5 +549,54 @@ mod tests {
     #[test]
     fn shq_escapes_embedded_single_quotes() {
         assert_eq!(shq("don't"), "'don'\\''t'");
+    }
+
+    #[test]
+    fn upsert_session_preserves_account_uuid_when_passed_existing_value() {
+        use crate::store::{AccountRow, Store};
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        s.upsert_account(&AccountRow {
+            uuid: "u1".into(), email: None, display_name: None,
+            organization_name: None, organization_uuid: None,
+            seat_tier: None, last_seen_at: None,
+        }).unwrap();
+        // First reconcile captures host's account
+        s.upsert_session("dev-a", "h", None, None, 1, 100, "running", Some("u1")).unwrap();
+        // Host re-auths into a different account
+        s.upsert_account(&AccountRow {
+            uuid: "u2".into(), email: None, display_name: None,
+            organization_name: None, organization_uuid: None,
+            seat_tier: None, last_seen_at: None,
+        }).unwrap();
+        // Second reconcile: caller reads existing account before upsert
+        let preserved = s.get_session_account("h", "dev-a").unwrap();
+        s.upsert_session(
+            "dev-a", "h", None, None, 1, 200, "running",
+            preserved.as_deref(),  // u1
+        ).unwrap();
+        // Verify session kept the ORIGINAL account
+        assert_eq!(s.get_session_account("h", "dev-a").unwrap().as_deref(), Some("u1"));
+    }
+
+    #[test]
+    fn upsert_session_captures_new_account_for_fresh_row() {
+        use crate::store::{AccountRow, Store};
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        s.upsert_account(&AccountRow {
+            uuid: "u1".into(), email: None, display_name: None,
+            organization_name: None, organization_uuid: None,
+            seat_tier: None, last_seen_at: None,
+        }).unwrap();
+        // Brand new session — no existing row
+        assert!(s.get_session_account("h", "dev-new").unwrap().is_none());
+        let preserved = s.get_session_account("h", "dev-new").unwrap();
+        let account = preserved.or(Some("u1".to_string()));
+        s.upsert_session(
+            "dev-new", "h", None, None, 1, 100, "running",
+            account.as_deref(),
+        ).unwrap();
+        assert_eq!(s.get_session_account("h", "dev-new").unwrap().as_deref(), Some("u1"));
     }
 }
