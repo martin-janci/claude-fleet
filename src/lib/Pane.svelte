@@ -14,7 +14,8 @@
     /**
      * When true, the body has no padding and no scrollbar — the slotted
      * content takes the whole pane below the optional title. Used by the
-     * terminal pane so xterm.js measures the full available rectangle.
+     * terminal pane so the embedded terminal grid can measure the full
+     * available rectangle and size its row/column count to it.
      */
     fullBleed?: boolean;
     children?: Snippet;

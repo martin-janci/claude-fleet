@@ -1,25 +1,47 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
-  import { Terminal } from 'xterm';
-  import { FitAddon } from 'xterm-addon-fit';
+  import { onDestroy, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { selectedSession } from './selection';
-  import 'xterm/css/xterm.css';
+  import { Screen, rowToRuns, colorToCss, type Run } from './ansi';
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Terminal pane — minimal ANSI renderer.
+  //
+  // We do NOT use xterm.js. In our Tauri 2.11 + macOS WKWebView setup,
+  // xterm's renderer silently fails to repaint after the first write for
+  // reasons we couldn't isolate without devtools (see commit history on
+  // branch `main` around 2026-05). Instead we maintain a virtual screen
+  // buffer (`./ansi.ts`) and render it as styled `<div>` rows, which is
+  // dirt-simple DOM that we can prove repaints. Tradeoffs:
+  //   - No mouse tracking, no application keypad, no scrollback beyond
+  //     what tmux's own scroll buffer can show with C-b [.
+  //   - No wide-glyph (CJK / emoji) width fixups.
+  //   - Keyboard input is forwarded as raw bytes; we translate the most
+  //     common keys (Enter/Backspace/arrows/Ctrl-*) and let everything
+  //     else go via printable character.
+  // For our use case (tmux + claude TUI legibly visible in-app) these
+  // limits are acceptable.
+  // ─────────────────────────────────────────────────────────────────────
 
   let container: HTMLDivElement | undefined = $state(undefined);
-  let term: Terminal | null = null;
-  let fitAddon: FitAddon | null = null;
+  let measureCell: HTMLSpanElement | undefined = $state(undefined);
+  let screen: Screen | null = null;
+  /** Bumped after every screen.write() so the reactive view recomputes. */
+  let renderVersion = $state(0);
   let resizeObserver: ResizeObserver | null = null;
   let drainTimer: ReturnType<typeof setInterval> | null = null;
   let currentSession: string | null = $state(null);
   let openError: string | null = $state(null);
   let ptyOpen = false;
-  let lastCols = 0;
-  let lastRows = 0;
-  let displayCols = $state(0);
-  let displayRows = $state(0);
+  let lastCols = $state(0);
+  let lastRows = $state(0);
   let totalBytes = $state(0);
   let drainTicks = $state(0);
+  /** Measured advance width of a single monospace cell, in px. We compute
+   *  this once after mount from a sample <span>. Without a sane fallback
+   *  the geometry calc would yield NaN and the view would never size. */
+  let cellWidth = 0;
+  let cellHeight = 0;
 
   $effect(() => {
     const sess = $selectedSession;
@@ -31,6 +53,10 @@
     void openTerm(sess.tmux_name);
   });
 
+  // When the container element first appears after a selection (Svelte 5
+  // mounts the {#if} block lazily) and we're not yet attached, open the
+  // PTY. Required because the first effect above can fire before the
+  // <div bind:this> has populated `container`.
   $effect(() => {
     if (container && $selectedSession && currentSession !== $selectedSession.tmux_name) {
       void openTerm($selectedSession.tmux_name);
@@ -41,119 +67,82 @@
     if (!container) return;
     await closeTerm();
     openError = null;
+    await tick();
 
-    term = new Terminal({
-      fontFamily: 'Menlo, ui-monospace, SFMono-Regular, monospace',
-      fontSize: 13,
-      cursorBlink: true,
-      scrollback: 5000,
-      // Force high-contrast theme to rule out CSS-var resolution issues —
-      // if --bg/--fg happen to resolve to the same value (unlikely but
-      // possible in some color-mode races), xterm would render invisible.
-      theme: {
-        background: '#0a0a0a',
-        foreground: '#e8e8e8',
-        cursor: '#ffffff',
-        cursorAccent: '#0a0a0a',
-        selectionBackground: '#3a3a55',
-      },
-    });
-    fitAddon = new FitAddon();
-    term.loadAddon(fitAddon);
-    term.open(container);
-    // Diagnostic line — proves xterm renders SOMETHING. If you don't see
-    // this line, the bug is in xterm DOM mounting / measurement.
-    term.writeln('\x1b[93m[xterm boot] terminal opened\x1b[0m');
+    measureCellSize();
+    const dim = computeDimensions();
+    lastCols = dim.cols;
+    lastRows = dim.rows;
+    screen = new Screen(dim.rows, dim.cols);
+    renderVersion++;
 
-    resizeObserver = new ResizeObserver((entries) => {
-      const t = term;
-      const fa = fitAddon;
-      if (!t || !fa) return;
-      const entry = entries[0];
-      if (entry && (entry.contentRect.width < 4 || entry.contentRect.height < 4)) return;
-      try {
-        fa.fit();
-      } catch {
-        return;
-      }
-      if (t.cols < 2 || t.rows < 2) return;
-      displayCols = t.cols;
-      displayRows = t.rows;
-      if (t.cols === lastCols && t.rows === lastRows && ptyOpen) return;
-      lastCols = t.cols;
-      lastRows = t.rows;
-      if (!ptyOpen) {
-        void firstOpen(sessionName);
-      } else {
-        void invoke('pty_resize', { args: { cols: t.cols, rows: t.rows } }).catch(() => {});
+    resizeObserver = new ResizeObserver(() => {
+      if (!screen) return;
+      const next = computeDimensions();
+      if (next.cols === lastCols && next.rows === lastRows) return;
+      lastCols = next.cols;
+      lastRows = next.rows;
+      screen.resize(next.rows, next.cols);
+      renderVersion++;
+      if (ptyOpen) {
+        void invoke('pty_resize', { args: { cols: next.cols, rows: next.rows } }).catch(() => {});
       }
     });
     resizeObserver.observe(container);
-
-    tryFitAndOpen(sessionName, 0);
-  }
-
-  function tryFitAndOpen(sessionName: string, attempt: number) {
-    requestAnimationFrame(() => {
-      if (!term || !fitAddon || !container) return;
-      try {
-        fitAddon.fit();
-      } catch {
-        if (attempt < 8) tryFitAndOpen(sessionName, attempt + 1);
-        return;
-      }
-      if (term.cols < 2 || term.rows < 2) {
-        if (attempt < 8) tryFitAndOpen(sessionName, attempt + 1);
-        return;
-      }
-      displayCols = term.cols;
-      displayRows = term.rows;
-      if (!ptyOpen) {
-        lastCols = term.cols;
-        lastRows = term.rows;
-        void firstOpen(sessionName);
-      }
-    });
-  }
-
-  async function firstOpen(sessionName: string) {
-    if (ptyOpen) return;
-    if (!term) return;
-    ptyOpen = true;
 
     try {
       await invoke('pty_open', {
         args: {
           session_name: sessionName,
-          cols: lastCols,
-          rows: lastRows,
+          cols: dim.cols,
+          rows: dim.rows,
         },
       });
       currentSession = sessionName;
+      ptyOpen = true;
     } catch (e) {
       openError = describeError(e);
-      term?.writeln(`\r\n\x1b[31mPTY open failed: ${openError}\x1b[0m\r\n`);
-      ptyOpen = false;
       return;
     }
 
-    term.onData((data) => {
-      void invoke('pty_write', { args: { data } }).catch(() => {});
-    });
-
-    // Start the drain loop. 30 ms = ~33 Hz, fast enough for interactive
-    // terminals without burning CPU. The kernel issues SIGWINCH at our
-    // next resize anyway, so tmux re-renders correctly.
+    // 30 ms = ~33 Hz drain. Plenty fast for tmux's redraw cadence while
+    // keeping CPU low. We do NOT batch the drain on rAF because tmux is
+    // happiest when bytes are consumed promptly (keepalive / status bar
+    // tickers stay responsive).
     drainTimer = setInterval(drainOnce, 30);
 
+    // Hint tmux to redraw at our exact size by re-sending the dimensions
+    // once after attach. Defends against race where pty_open runs before
+    // the slave-side process has set up SIGWINCH handling.
     setTimeout(() => {
-      if (!term || !ptyOpen) return;
-      void invoke('pty_resize', { args: { cols: term.cols, rows: term.rows } }).catch(() => {});
+      if (!ptyOpen) return;
+      void invoke('pty_resize', { args: { cols: lastCols, rows: lastRows } }).catch(() => {});
     }, 150);
   }
 
+  function measureCellSize() {
+    if (!measureCell) return;
+    const rect = measureCell.getBoundingClientRect();
+    // Fall back to a sensible default if measurement returns zero (jsdom).
+    cellWidth = rect.width > 0 ? rect.width : 7.8;
+    cellHeight = rect.height > 0 ? rect.height : 16;
+  }
+
+  function computeDimensions(): { cols: number; rows: number } {
+    if (!container) return { cols: 80, rows: 24 };
+    const cw = cellWidth > 0 ? cellWidth : 7.8;
+    const ch = cellHeight > 0 ? cellHeight : 16;
+    // Subtract our own 4px padding (see CSS) from both sides.
+    const w = Math.max(1, container.clientWidth - 8);
+    const h = Math.max(1, container.clientHeight - 8);
+    return {
+      cols: Math.max(10, Math.floor(w / cw)),
+      rows: Math.max(2, Math.floor(h / ch)),
+    };
+  }
+
   async function drainOnce() {
-    if (!term || !ptyOpen) return;
+    if (!screen || !ptyOpen) return;
     let result: { data: string; bytes: number };
     try {
       result = await invoke<{ data: string; bytes: number }>('pty_drain');
@@ -163,30 +152,30 @@
     drainTicks += 1;
     if (result.bytes === 0) return;
     totalBytes += result.bytes;
-    try {
-      term.write(result.data);
-    } catch (e) {
-      // eslint-disable-next-line no-console
-      console.error('xterm write failed:', e);
-    }
+    screen.write(result.data);
+    renderVersion++;
   }
 
   async function closeTerm() {
+    // No-op when there's nothing to clean up. Without this guard the
+    // mount-time effect fires closeTerm() against a fresh component,
+    // unconditionally writes state ($state assignments), and Svelte 5's
+    // reactivity scheduler treats the cascade as an effect-update loop.
+    const hadAnything = screen !== null || ptyOpen || drainTimer !== null || resizeObserver !== null;
+    if (!hadAnything) return;
+
     if (drainTimer) {
       clearInterval(drainTimer);
       drainTimer = null;
     }
     resizeObserver?.disconnect();
     resizeObserver = null;
-    term?.dispose();
-    term = null;
-    fitAddon = null;
+    screen = null;
     lastCols = 0;
     lastRows = 0;
-    displayCols = 0;
-    displayRows = 0;
     totalBytes = 0;
     drainTicks = 0;
+    renderVersion++;
     if (ptyOpen) {
       ptyOpen = false;
       try {
@@ -196,6 +185,47 @@
       }
     }
     currentSession = null;
+  }
+
+  /** Translate a KeyboardEvent into the byte sequence a real terminal would
+   *  send. Returns null for keys we choose not to forward (e.g. F-keys).
+   *  This is intentionally minimal — most apps only need printable chars,
+   *  Enter, Backspace, Tab, arrows, and Ctrl-letter chords. */
+  function keyToBytes(e: KeyboardEvent): string | null {
+    if (e.key === 'Enter') return '\r';
+    if (e.key === 'Backspace') return '\x7f';
+    if (e.key === 'Tab') return '\t';
+    if (e.key === 'Escape') return '\x1b';
+    if (e.key === 'ArrowUp') return '\x1b[A';
+    if (e.key === 'ArrowDown') return '\x1b[B';
+    if (e.key === 'ArrowRight') return '\x1b[C';
+    if (e.key === 'ArrowLeft') return '\x1b[D';
+    if (e.key === 'Home') return '\x1b[H';
+    if (e.key === 'End') return '\x1b[F';
+    if (e.key === 'PageUp') return '\x1b[5~';
+    if (e.key === 'PageDown') return '\x1b[6~';
+    // Ctrl + letter / common chord: send the C0 control byte.
+    if (e.ctrlKey && e.key.length === 1) {
+      const k = e.key.toLowerCase();
+      if (k >= 'a' && k <= 'z') {
+        return String.fromCharCode(k.charCodeAt(0) - 96);
+      }
+      if (k === ' ') return '\x00';
+      if (k === '[') return '\x1b';
+      if (k === '\\') return '\x1c';
+      if (k === ']') return '\x1d';
+    }
+    // A printable single character: forward as-is.
+    if (e.key.length === 1 && !e.metaKey) return e.key;
+    return null;
+  }
+
+  function onKeydown(e: KeyboardEvent) {
+    if (!ptyOpen) return;
+    const bytes = keyToBytes(e);
+    if (bytes === null) return;
+    e.preventDefault();
+    void invoke('pty_write', { args: { data: bytes } }).catch(() => {});
   }
 
   function describeError(e: unknown): string {
@@ -208,6 +238,29 @@
   onDestroy(() => {
     void closeTerm();
   });
+
+  // Derived view: a list of rows, each containing styled runs. Reading
+  // `renderVersion` makes Svelte recompute whenever screen.write() bumps it.
+  // We don't mutate the row arrays after building, so reactivity is fine.
+  const visibleRows = $derived.by<Run[][]>(() => {
+    // Touch the version so the derived recomputes; also gate on screen.
+    void renderVersion;
+    if (!screen) return [];
+    return screen.cells.map((row) => rowToRuns(row));
+  });
+
+  function runStyle(run: Run): string {
+    const parts: string[] = [];
+    const fg = colorToCss(run.fg);
+    const bg = colorToCss(run.bg);
+    if (fg) parts.push(`color:${fg}`);
+    if (bg) parts.push(`background:${bg}`);
+    if (run.attrs & 1) parts.push('font-weight:600'); // ATTR_BOLD
+    if (run.attrs & 2) parts.push('opacity:0.75'); // ATTR_DIM
+    if (run.attrs & 4) parts.push('font-style:italic'); // ATTR_ITALIC
+    if (run.attrs & 8) parts.push('text-decoration:underline'); // ATTR_UNDERLINE
+    return parts.join(';');
+  }
 </script>
 
 {#if $selectedSession}
@@ -216,21 +269,11 @@
       <span class="name">{$selectedSession.tmux_name}</span>
       <span class="host">on {$selectedSession.host_alias}</span>
       <span class="size" data-testid="terminal-size">
-        {#if displayCols > 0}{displayCols}×{displayRows}{:else}measuring…{/if}
+        {#if lastCols > 0}{lastCols}×{lastRows}{:else}measuring…{/if}
       </span>
       <span class="counters" data-testid="terminal-counters">
         ticks: {drainTicks} · {totalBytes}B
       </span>
-      <button
-        class="reconnect"
-        onclick={() => {
-          term?.writeln('\r\n\x1b[93m[test write] ' + new Date().toISOString() + '\x1b[0m');
-        }}
-        title="Synchronous writeln test"
-        data-testid="terminal-test"
-      >
-        ✎ test
-      </button>
       <button
         class="reconnect"
         onclick={() => $selectedSession && void openTerm($selectedSession.tmux_name)}
@@ -240,7 +283,30 @@
         ↻ reconnect
       </button>
     </div>
-    <div class="xterm-host" bind:this={container} data-testid="terminal-host"></div>
+    <!-- The grid container. tabindex makes it focusable so keyboard
+         input lands here. We render lines as block <div>s with monospace
+         spans for each style run. -->
+    <div
+      class="grid"
+      bind:this={container}
+      tabindex="0"
+      role="textbox"
+      aria-label="Terminal"
+      onkeydown={onKeydown}
+      data-testid="terminal-host"
+    >
+      <!-- Hidden 1ch×1lh probe used once to measure font metrics. We can't
+           rely on naive `font-size * 0.6` — system font metrics on macOS
+           drift slightly between Menlo and SF Mono. -->
+      <span class="measure" bind:this={measureCell} aria-hidden="true">M</span>
+      {#each visibleRows as runs, r (r)}
+        <div class="row">
+          {#each runs as run, i (i)}
+            <span style={runStyle(run)}>{run.text}</span>
+          {/each}
+        </div>
+      {/each}
+    </div>
     {#if openError}
       <div class="err">PTY error: {openError}</div>
     {/if}
@@ -300,22 +366,45 @@
     cursor: pointer;
   }
   .reconnect:hover { color: var(--fg); border-color: var(--accent); }
-  .xterm-host {
+  .grid {
     flex: 1 1 auto;
     min-height: 0;
     min-width: 0;
-    background: var(--bg);
+    background: #0a0a0a;
+    color: #e8e8e8;
     overflow: hidden;
-    position: relative;
-  }
-  .xterm-host :global(.xterm) {
-    height: 100%;
-    width: 100%;
     padding: 4px;
     box-sizing: border-box;
+    font-family: Menlo, ui-monospace, SFMono-Regular, monospace;
+    font-size: 13px;
+    line-height: 16px;
+    /* Show focus ring subtly so the user knows where keyboard input lands. */
+    outline: none;
   }
-  .xterm-host :global(.xterm-viewport) {
-    background-color: transparent !important;
+  .grid:focus-visible {
+    box-shadow: inset 0 0 0 1px var(--accent, #4f8fff);
+  }
+  .row {
+    white-space: pre;
+    /* Use exact cell height so the row count math stays consistent with
+       what we measure from `.measure`. */
+    height: 16px;
+    line-height: 16px;
+  }
+  .row span {
+    /* span color comes from inline style applied per run. */
+    display: inline;
+  }
+  .measure {
+    position: absolute;
+    visibility: hidden;
+    pointer-events: none;
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
+    /* Place outside flow so it doesn't push the grid around. */
+    top: -1000px;
+    left: -1000px;
   }
   .empty { color: var(--fg-muted); font-size: 0.9rem; padding: 0.75rem; }
   .err {

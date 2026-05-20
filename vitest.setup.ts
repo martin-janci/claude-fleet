@@ -17,13 +17,9 @@ vi.mock('@tauri-apps/api/core', () => ({
     if (cmd === 'pty_write') return null;
     if (cmd === 'pty_resize') return null;
     if (cmd === 'pty_close') return null;
+    if (cmd === 'pty_drain') return { data: '', bytes: 0 };
     return null;
   }),
-  // Minimal Channel stub kept for backward-compat with any test that still
-  // touches the older code path; current TerminalView uses listen() instead.
-  Channel: class {
-    onmessage: ((data: unknown) => void) | null = null;
-  },
 }));
 
 // pty-data and other Tauri events: listen returns an unlisten fn that does
@@ -33,8 +29,9 @@ vi.mock('@tauri-apps/api/event', () => ({
   emit: vi.fn(async () => {}),
 }));
 
-// xterm.js relies on DOM measurement APIs that jsdom doesn't implement.
-// Stub them as no-ops so components that mount xterm don't blow up tests.
+// ResizeObserver isn't implemented by jsdom. Our TerminalView attaches one
+// to re-fit the screen buffer on container resize; stub it as a no-op so
+// tests that mount the component don't blow up.
 if (typeof globalThis !== 'undefined') {
   // @ts-expect-error: jsdom stub
   globalThis.ResizeObserver ??= class {
