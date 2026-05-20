@@ -59,6 +59,16 @@ impl Store {
         self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         self.conn
             .execute_batch(include_str!("../migrations/001_init.sql"))?;
+        // Newer migrations are applied only if not yet recorded. We can't
+        // wrap them in CREATE-OR-IGNORE because they ALTER existing tables.
+        let v: i64 = self
+            .conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap_or(0);
+        if v < 2 {
+            self.conn
+                .execute_batch(include_str!("../migrations/002_hosts_ssh.sql"))?;
+        }
         Ok(())
     }
 
@@ -296,16 +306,16 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_one() {
+    fn schema_version_is_two() {
         let store = Store::open_in_memory().expect("open");
-        assert_eq!(store.schema_version().expect("version"), 1);
+        assert_eq!(store.schema_version().expect("version"), 2);
     }
 
     #[test]
     fn migrate_is_idempotent() {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
-        assert_eq!(store.schema_version().expect("version"), 1);
+        assert_eq!(store.schema_version().expect("version"), 2);
     }
 
     #[test]
@@ -415,5 +425,30 @@ mod tests {
             .unwrap();
         assert_eq!(removed, 2);
         assert_eq!(s.list_sessions_for_host("local").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn migration_002_adds_ssh_alias_column_to_hosts() {
+        let s = Store::open_in_memory().expect("open");
+        // sqlite_master pragma_table_info path
+        let mut stmt = s
+            .conn
+            .prepare("SELECT name FROM pragma_table_info('hosts')")
+            .unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(
+            cols.iter().any(|c| c == "ssh_alias"),
+            "expected `ssh_alias` column; got: {cols:?}"
+        );
+    }
+
+    #[test]
+    fn schema_version_is_two_after_migration() {
+        let s = Store::open_in_memory().expect("open");
+        assert_eq!(s.schema_version().expect("version"), 2);
     }
 }
