@@ -44,6 +44,18 @@ pub struct HostRow {
     pub tmux_version: Option<String>,
     pub hidden: bool,
     pub last_pinged_at: Option<i64>,
+    pub account_uuid: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AccountRow {
+    pub uuid: String,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    pub organization_name: Option<String>,
+    pub organization_uuid: Option<String>,
+    pub seat_tier: Option<String>,
+    pub last_seen_at: Option<i64>,
 }
 
 pub struct Store {
@@ -224,7 +236,8 @@ impl Store {
 
     pub fn list_hosts(&self) -> Result<Vec<HostRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT alias, ssh_alias, reachable, claude_version, tmux_version, hidden, last_pinged_at
+            "SELECT alias, ssh_alias, reachable, claude_version, tmux_version, hidden,
+                    last_pinged_at, account_uuid
              FROM hosts
              ORDER BY (alias='local') DESC, alias ASC",
         )?;
@@ -237,6 +250,7 @@ impl Store {
                 tmux_version: row.get(4)?,
                 hidden: row.get::<_, i64>(5)? != 0,
                 last_pinged_at: row.get(6)?,
+                account_uuid: row.get(7)?,
             })
         })?;
         rows.collect()
@@ -280,6 +294,90 @@ impl Store {
         self.conn.execute(
             "UPDATE hosts SET hidden=?1 WHERE alias=?2",
             rusqlite::params![if hidden { 1 } else { 0 }, alias],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_accounts(&self) -> Result<Vec<AccountRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT uuid, email, display_name, organization_name, organization_uuid,
+                    seat_tier, last_seen_at
+             FROM accounts
+             ORDER BY uuid ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(AccountRow {
+                uuid: row.get(0)?,
+                email: row.get(1)?,
+                display_name: row.get(2)?,
+                organization_name: row.get(3)?,
+                organization_uuid: row.get(4)?,
+                seat_tier: row.get(5)?,
+                last_seen_at: row.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn upsert_account(&self, a: &AccountRow) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO accounts (uuid, email, display_name, organization_name,
+                                   organization_uuid, seat_tier, last_seen_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(uuid) DO UPDATE SET
+               email=excluded.email,
+               display_name=excluded.display_name,
+               organization_name=excluded.organization_name,
+               organization_uuid=excluded.organization_uuid,
+               seat_tier=excluded.seat_tier,
+               last_seen_at=excluded.last_seen_at",
+            rusqlite::params![
+                a.uuid,
+                a.email,
+                a.display_name,
+                a.organization_name,
+                a.organization_uuid,
+                a.seat_tier,
+                a.last_seen_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_account_by_uuid(
+        &self,
+        uuid: &str,
+    ) -> Result<Option<AccountRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT uuid, email, display_name, organization_name, organization_uuid,
+                    seat_tier, last_seen_at
+             FROM accounts WHERE uuid=?1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![uuid], |row| {
+            Ok(AccountRow {
+                uuid: row.get(0)?,
+                email: row.get(1)?,
+                display_name: row.get(2)?,
+                organization_name: row.get(3)?,
+                organization_uuid: row.get(4)?,
+                seat_tier: row.get(5)?,
+                last_seen_at: row.get(6)?,
+            })
+        })?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn set_host_account(
+        &self,
+        alias: &str,
+        account_uuid: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE hosts SET account_uuid=?1 WHERE alias=?2",
+            rusqlite::params![account_uuid, alias],
         )?;
         Ok(())
     }
@@ -637,5 +735,104 @@ mod tests {
         assert!(s.list_hosts().unwrap().iter().find(|x| x.alias == "h").unwrap().hidden);
         s.set_host_hidden("h", false).unwrap();
         assert!(!s.list_hosts().unwrap().iter().find(|x| x.alias == "h").unwrap().hidden);
+    }
+
+    #[test]
+    fn upsert_account_inserts_then_updates_keeping_uuid_pk() {
+        let s = Store::open_in_memory().unwrap();
+        let a = AccountRow {
+            uuid: "uuid-1".into(),
+            email: Some("a@b.com".into()),
+            display_name: Some("A".into()),
+            organization_name: None,
+            organization_uuid: None,
+            seat_tier: Some("max".into()),
+            last_seen_at: Some(1000),
+        };
+        s.upsert_account(&a).unwrap();
+        let mut a2 = a.clone();
+        a2.email = Some("a@c.com".into());
+        a2.last_seen_at = Some(2000);
+        s.upsert_account(&a2).unwrap();
+        let listed = s.list_accounts().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].uuid, "uuid-1");
+        assert_eq!(listed[0].email.as_deref(), Some("a@c.com"));
+        assert_eq!(listed[0].last_seen_at, Some(2000));
+    }
+
+    #[test]
+    fn list_accounts_orders_by_uuid_ascending() {
+        let s = Store::open_in_memory().unwrap();
+        for uuid in ["zzz", "aaa", "mmm"] {
+            s.upsert_account(&AccountRow {
+                uuid: uuid.into(),
+                email: None,
+                display_name: None,
+                organization_name: None,
+                organization_uuid: None,
+                seat_tier: None,
+                last_seen_at: None,
+            })
+            .unwrap();
+        }
+        let listed = s.list_accounts().unwrap();
+        assert_eq!(
+            listed.iter().map(|a| a.uuid.as_str()).collect::<Vec<_>>(),
+            vec!["aaa", "mmm", "zzz"]
+        );
+    }
+
+    #[test]
+    fn get_account_by_uuid_returns_none_when_missing() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.get_account_by_uuid("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn get_account_by_uuid_returns_some_when_present() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_account(&AccountRow {
+            uuid: "u1".into(),
+            email: Some("x@y.com".into()),
+            display_name: None,
+            organization_name: None,
+            organization_uuid: None,
+            seat_tier: None,
+            last_seen_at: None,
+        })
+        .unwrap();
+        let got = s.get_account_by_uuid("u1").unwrap().unwrap();
+        assert_eq!(got.email.as_deref(), Some("x@y.com"));
+    }
+
+    #[test]
+    fn set_host_account_assigns_and_clears() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        s.upsert_account(&AccountRow {
+            uuid: "u1".into(),
+            email: None,
+            display_name: None,
+            organization_name: None,
+            organization_uuid: None,
+            seat_tier: None,
+            last_seen_at: None,
+        })
+        .unwrap();
+        s.set_host_account("h", Some("u1")).unwrap();
+        let row = s.list_hosts().unwrap().into_iter().find(|r| r.alias == "h").unwrap();
+        assert_eq!(row.account_uuid.as_deref(), Some("u1"));
+        s.set_host_account("h", None).unwrap();
+        let row = s.list_hosts().unwrap().into_iter().find(|r| r.alias == "h").unwrap();
+        assert!(row.account_uuid.is_none());
+    }
+
+    #[test]
+    fn list_hosts_includes_account_uuid_in_output() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        let row = s.list_hosts().unwrap().into_iter().find(|r| r.alias == "h").unwrap();
+        assert!(row.account_uuid.is_none());
     }
 }
