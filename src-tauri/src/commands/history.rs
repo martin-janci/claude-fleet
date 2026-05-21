@@ -1,8 +1,10 @@
 //! Read commands for the History & Branches views: commit log, branch list,
 //! one commit's metadata + changed files, and a file's diff within a commit.
 
-use crate::commands::repo::{repo_err, repo_script, run_in_repo, session_target};
+use crate::commands::files::{classify, ChangedFile, FileDiff};
+use crate::commands::repo::{diff_from_bytes, repo_err, repo_script, run_in_repo, session_target};
 use crate::ipc_error::IpcError;
+use crate::shell::quote as shq;
 use crate::ssh::SshClient;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
@@ -46,6 +48,17 @@ pub struct Commit {
     pub author: String,
     pub date: String,
     pub subject: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitDetail {
+    pub hash: String,
+    pub subject: String,
+    pub body: String,
+    pub author: String,
+    pub date: String,
+    pub files: Vec<ChangedFile>,
 }
 
 /// Parse `%D` decoration (e.g. "HEAD -> main, origin/main, tag: v1, feat/x")
@@ -240,9 +253,147 @@ pub async fn repo_branches(
     Ok(parse_branches(&out.stdout))
 }
 
+/// Parse `git show/diff-tree --name-status -z` output into `ChangedFile`s.
+/// Tokens are NUL-separated: a status code, then the path; rename/copy codes
+/// (`R*`/`C*`) are followed by the *old* path and then the *new* path.
+fn parse_name_status_z(raw: &[u8]) -> Vec<ChangedFile> {
+    let text = String::from_utf8_lossy(raw);
+    let tokens: Vec<&str> = text.split('\0').filter(|t| !t.is_empty()).collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let code = tokens[i];
+        i += 1;
+        let letter = code.chars().next().unwrap_or('M');
+        // `classify` takes the porcelain XY pair; a commit's name-status is a
+        // single staged code, so present it as (letter, ' ').
+        let (status, _) = classify(letter, ' ');
+        if (letter == 'R' || letter == 'C') && i + 1 < tokens.len() {
+            let orig = tokens[i].to_string();
+            let path = tokens[i + 1].to_string();
+            i += 2;
+            out.push(ChangedFile {
+                path,
+                status: status.to_string(),
+                staged: false,
+                orig_path: Some(orig),
+            });
+        } else if i < tokens.len() {
+            let path = tokens[i].to_string();
+            i += 1;
+            out.push(ChangedFile {
+                path,
+                status: status.to_string(),
+                staged: false,
+                orig_path: None,
+            });
+        }
+    }
+    out
+}
+
+#[derive(Deserialize)]
+pub struct RepoCommitArgs {
+    pub session_id: i64,
+    pub hash: String,
+}
+
+/// One commit's metadata + the files it changed (first-parent for merges).
+#[tauri::command]
+pub async fn repo_commit(
+    args: RepoCommitArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<CommitDetail, IpcError> {
+    crate::validate::commit_hash(&args.hash)?;
+    let (host, name) = session_target(&store, args.session_id)?;
+    let h = shq(&args.hash);
+    // Two git calls: metadata (US-separated) then NUL name-status. `set -e`
+    // (from repo_script) aborts on a bad hash.
+    let body = format!(
+        "git -C \"$root\" show -s --date=iso-strict \
+           --pretty=format:%H%x1f%s%x1f%b%x1f%an%x1f%aI {h}; \
+         printf '\\036'; \
+         git -C \"$root\" show --first-parent --name-status -z --pretty=format: {h}"
+    );
+    let script = repo_script(&name, &body);
+    let out = run_in_repo(&ssh, &host, &script).await?;
+    if !out.status.success() {
+        return Err(repo_err(&out));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    // Split metadata from name-status on the RS byte we printed between them.
+    let (meta, names) = match text.split_once('\u{1e}') {
+        Some(p) => p,
+        None => (text.as_ref(), ""),
+    };
+    let f: Vec<&str> = meta.splitn(5, '\u{1f}').collect();
+    let detail = CommitDetail {
+        hash: f.first().unwrap_or(&"").to_string(),
+        subject: f.get(1).unwrap_or(&"").to_string(),
+        body: f.get(2).unwrap_or(&"").trim_end().to_string(),
+        author: f.get(3).unwrap_or(&"").to_string(),
+        date: f.get(4).unwrap_or(&"").trim().to_string(),
+        files: parse_name_status_z(names.trim_start_matches('\n').as_bytes()),
+    };
+    Ok(detail)
+}
+
+#[derive(Deserialize)]
+pub struct RepoCommitDiffArgs {
+    pub session_id: i64,
+    pub hash: String,
+    pub path: String,
+}
+
+/// A single file's diff *within* a commit (first-parent for merges), so the
+/// existing DiffView can render it.
+#[tauri::command]
+pub async fn repo_commit_diff(
+    args: RepoCommitDiffArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<FileDiff, IpcError> {
+    crate::validate::commit_hash(&args.hash)?;
+    crate::validate::repo_rel_path(&args.path)?;
+    let (host, name) = session_target(&store, args.session_id)?;
+    let body = format!(
+        "git -C \"$root\" show --first-parent --format= {h} -- {p}",
+        h = shq(&args.hash),
+        p = shq(&args.path),
+    );
+    let script = repo_script(&name, &body);
+    let out = run_in_repo(&ssh, &host, &script).await?;
+    if !out.status.success() {
+        return Err(repo_err(&out));
+    }
+    let (diff, binary, truncated) = diff_from_bytes(&out.stdout);
+    Ok(FileDiff {
+        path: args.path,
+        diff,
+        binary,
+        truncated,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_name_status_handles_rename_and_plain() {
+        // "M\0a.ts\0R100\0old.ts\0new.ts\0A\0added.ts\0"
+        let raw = b"M\0a.ts\0R100\0old.ts\0new.ts\0A\0added.ts\0";
+        let files = parse_name_status_z(raw);
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0].path, "a.ts");
+        assert_eq!(files[0].status, "modified");
+        assert_eq!(files[1].status, "renamed");
+        assert_eq!(files[1].path, "new.ts");
+        assert_eq!(files[1].orig_path.as_deref(), Some("old.ts"));
+        assert_eq!(files[2].path, "added.ts");
+        assert_eq!(files[2].status, "added");
+    }
 
     #[test]
     fn parse_log_reads_fields_and_parents() {

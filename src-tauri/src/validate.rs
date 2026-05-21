@@ -104,7 +104,6 @@ pub fn git_ref(value: &str) -> Result<(), IpcError> {
 /// clicked in the History graph). Git object names are lowercase hex; we
 /// accept an abbreviated or full SHA-1 (4–40 chars) and nothing else, so the
 /// value cannot be read as an option or inject shell/git syntax.
-#[allow(dead_code)] // wired up when the History command is added
 pub fn commit_hash(value: &str) -> Result<(), IpcError> {
     if value.len() < 4 || value.len() > 40 {
         return Err(IpcError::new(

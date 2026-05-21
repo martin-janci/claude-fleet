@@ -310,6 +310,8 @@ pub fn run() {
             commands::upload::upload_to_session,
             commands::history::repo_log,
             commands::history::repo_branches,
+            commands::history::repo_commit,
+            commands::history::repo_commit_diff,
             commands::hosts::discover_hosts,
             commands::hosts::list_hosts,
             commands::hosts::list_accounts,
