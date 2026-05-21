@@ -29,7 +29,14 @@
   /** Bumped after every screen.write() so the reactive view recomputes. */
   let renderVersion = $state(0);
   let resizeObserver: ResizeObserver | null = null;
-  let drainTimer: ReturnType<typeof setInterval> | null = null;
+  // Drain loop: a self-rescheduling setTimeout (not setInterval) so a slow
+  // pty_drain round-trip can't pile up concurrent calls. The delay backs off
+  // adaptively — an idle terminal polls slowly, any output snaps it back to
+  // full rate — so an attached-but-quiet session costs almost nothing.
+  const DRAIN_MIN_MS = 30;
+  const DRAIN_MAX_MS = 250;
+  let drainTimer: ReturnType<typeof setTimeout> | null = null;
+  let drainDelay = DRAIN_MIN_MS;
   let currentSession: string | null = $state(null);
   let openError: string | null = $state(null);
   let ptyOpen = false;
@@ -120,11 +127,10 @@
       return;
     }
 
-    // 30 ms = ~33 Hz drain. Plenty fast for tmux's redraw cadence while
-    // keeping CPU low. We do NOT batch the drain on rAF because tmux is
-    // happiest when bytes are consumed promptly (keepalive / status bar
-    // tickers stay responsive).
-    drainTimer = setInterval(drainOnce, 30);
+    // Start the adaptive drain loop. 30 ms (~33 Hz) is the floor when output
+    // is flowing; it backs off to DRAIN_MAX_MS when the terminal is idle.
+    drainDelay = DRAIN_MIN_MS;
+    scheduleDrain();
 
     // Hint tmux to redraw at our exact size by re-sending the dimensions
     // once after attach. Defends against race where pty_open runs before
@@ -157,8 +163,35 @@
     };
   }
 
-  async function drainOnce() {
-    if (!screen || !ptyOpen) return;
+  function scheduleDrain() {
+    drainTimer = setTimeout(runDrain, drainDelay);
+  }
+
+  /** One drain tick, then reschedule itself. The delay halves to the floor on
+   *  any output and doubles toward DRAIN_MAX_MS when idle. */
+  async function runDrain() {
+    drainTimer = null;
+    const got = await drainOnce();
+    drainDelay = got ? DRAIN_MIN_MS : Math.min(DRAIN_MAX_MS, drainDelay * 2);
+    // Reschedule only if still attached and no newer loop has taken over
+    // (a concurrent openTerm would have set its own drainTimer).
+    if (screen && ptyOpen && drainTimer === null) scheduleDrain();
+  }
+
+  /** Force the loop back to full rate now — called on keypress so typing
+   *  feels responsive even if the terminal had backed off while idle. */
+  function bumpDrain() {
+    drainDelay = DRAIN_MIN_MS;
+    if (drainTimer !== null) {
+      clearTimeout(drainTimer);
+      drainTimer = null;
+      scheduleDrain();
+    }
+  }
+
+  /** Drain the PTY buffer once. Returns true if any bytes were consumed. */
+  async function drainOnce(): Promise<boolean> {
+    if (!screen || !ptyOpen) return false;
     // Capture the screen we're draining into. If the session is switched
     // (openTerm builds a new Screen) while this pty_drain is in flight, the
     // resolved bytes belong to the old PTY — discard them rather than write
@@ -168,11 +201,11 @@
     try {
       result = await invoke<{ data: string; bytes: number }>('pty_drain');
     } catch {
-      return;
+      return false;
     }
-    if (screen !== drainingInto) return;
+    if (screen !== drainingInto) return false;
     drainTicks += 1;
-    if (result.bytes === 0) return;
+    if (result.bytes === 0) return false;
     totalBytes += result.bytes;
     screen.write(result.data);
     renderVersion++;
@@ -182,6 +215,7 @@
     if (result.data.includes('[cf] PTY EOF') || result.data.includes('[cf] reader error')) {
       disconnected = true;
     }
+    return true;
   }
 
   async function reconnect() {
@@ -199,9 +233,10 @@
     if (!hadAnything) return;
 
     if (drainTimer) {
-      clearInterval(drainTimer);
+      clearTimeout(drainTimer);
       drainTimer = null;
     }
+    drainDelay = DRAIN_MIN_MS;
     resizeObserver?.disconnect();
     resizeObserver = null;
     screen = null;
@@ -260,6 +295,9 @@
     if (bytes === null) return;
     e.preventDefault();
     void invoke('pty_write', { args: { data: bytes } }).catch(() => {});
+    // The keystroke will produce output (echo / TUI redraw); pull the drain
+    // loop back to full rate so it doesn't sit on a backed-off delay.
+    bumpDrain();
   }
 
   function describeError(e: unknown): string {
