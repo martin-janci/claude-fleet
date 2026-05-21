@@ -7,6 +7,7 @@
   import { hosts } from './hosts';
   import { accounts, type AccountRow } from './accounts';
   import PromptComposer from './PromptComposer.svelte';
+  import ReviewDialog from './ReviewDialog.svelte';
 
   let { session }: { session: SessionRow } = $props();
 
@@ -126,6 +127,17 @@
     composerOpen = true;
   }
 
+  let reviewOpen = $state(false);
+
+  const reviewedSource = $derived.by(() => {
+    if (session.kind !== 'review' || session.reviews_session_id == null) return null;
+    return $sessions.find((s) => s.id === session.reviews_session_id) ?? null;
+  });
+
+  const reviewsOfThis = $derived(
+    $sessions.filter((s) => s.kind === 'review' && s.reviews_session_id === session.id),
+  );
+
   let confirmingKill = $state(false);
   function askKill() {
     confirmingKill = true;
@@ -189,6 +201,15 @@
 
     <dt>Last activity</dt>
     <dd>{formatRelative(session.last_activity_at)}</dd>
+
+    {#if reviewedSource}
+      <dt class="meta-label">Reviewing</dt>
+      <dd>
+        <button class="link" onclick={() => selectSession(reviewedSource)} data-testid="reviewing-link">
+          {reviewedSource.tmux_name}
+        </button>
+      </dd>
+    {/if}
   </dl>
 
   {#if related.length > 0}
@@ -200,6 +221,29 @@
             <button
               class="related-row"
               data-testid="related-row"
+              onclick={() => selectSession(r)}
+            >
+              <span class="host-badge">[{r.host_alias}]</span>
+              <span class="account">{accountText(accountForRow(r))}</span>
+              <span class="status-dot status-{r.status}" title={r.status}></span>
+              <span class="sess-name">{r.tmux_name}</span>
+              <span class="age">{formatRelative(r.last_activity_at)}</span>
+            </button>
+          </li>
+        {/each}
+      </ul>
+    </section>
+  {/if}
+
+  {#if reviewsOfThis.length > 0}
+    <section class="related" data-testid="reviews-panel">
+      <h3>Reviews ({reviewsOfThis.length})</h3>
+      <ul class="related-list">
+        {#each reviewsOfThis as r (r.id)}
+          <li>
+            <button
+              class="related-row"
+              data-testid="reviews-row"
               onclick={() => selectSession(r)}
             >
               <span class="host-badge">[{r.host_alias}]</span>
@@ -238,6 +282,9 @@
     <button class="ghost" onclick={openComposer} data-testid="send-prompt-from-details">
       → Send prompt
     </button>
+    <button class="ghost" onclick={() => (reviewOpen = true)} data-testid="open-review">
+      🔍 Review
+    </button>
     <button class="danger" onclick={askKill} data-testid="kill-from-details">
       Kill session
     </button>
@@ -246,6 +293,10 @@
 
 {#if composerOpen}
   <PromptComposer source={session} onClose={() => (composerOpen = false)} />
+{/if}
+
+{#if reviewOpen}
+  <ReviewDialog source={session} onClose={() => (reviewOpen = false)} />
 {/if}
 
 {#if confirmingKill}
@@ -383,6 +434,19 @@
   .danger:hover { background: rgba(230, 74, 74, 0.1); }
 
   .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
+
+  .link {
+    background: transparent;
+    border: none;
+    padding: 0;
+    color: var(--accent);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.9rem;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .link:hover { opacity: 0.8; }
 
   .modal-backdrop {
     position: fixed; inset: 0; background: rgba(0,0,0,0.4);

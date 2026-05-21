@@ -99,4 +99,32 @@ describe('SessionDetails', () => {
     await tick();
     expect(screen.queryByTestId('related-sessions')).toBeNull();
   });
+
+  it('shows the Review button', async () => {
+    sessions.set([sampleSession]);
+    render(SessionDetails, { props: { session: sampleSession } });
+    await tick();
+    expect(screen.getByTestId('open-review')).toBeTruthy();
+  });
+
+  it('shows "Reviewing: <source>" for a review session', async () => {
+    const source = { ...sampleSession, id: 1, tmux_name: 'dev-source', kind: 'work', reviews_session_id: null };
+    const review = { ...sampleSession, id: 2, tmux_name: 'review-foo', kind: 'review', reviews_session_id: 1 };
+    sessions.set([source, review]);
+    render(SessionDetails, { props: { session: review } });
+    await tick();
+    const link = await screen.findByTestId('reviewing-link');
+    expect(link.textContent?.trim()).toBe('dev-source');
+  });
+
+  it('lists reviews pointing at a source session', async () => {
+    const source = { ...sampleSession, id: 1, tmux_name: 'dev-source', kind: 'work', reviews_session_id: null };
+    const review = { ...sampleSession, id: 2, tmux_name: 'review-foo', kind: 'review', reviews_session_id: 1 };
+    sessions.set([source, review]);
+    render(SessionDetails, { props: { session: source } });
+    await tick();
+    const panel = await screen.findByTestId('reviews-panel');
+    expect(panel).toBeTruthy();
+    expect(panel.textContent).toContain('review-foo');
+  });
 });
