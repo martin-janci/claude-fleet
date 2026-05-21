@@ -27,7 +27,9 @@ pub fn list_hosts(store: State<'_, Mutex<Store>>) -> Result<Vec<HostRow>, IpcErr
 }
 
 #[tauri::command]
-pub fn list_accounts(store: State<'_, Mutex<Store>>) -> Result<Vec<crate::store::AccountRow>, IpcError> {
+pub fn list_accounts(
+    store: State<'_, Mutex<Store>>,
+) -> Result<Vec<crate::store::AccountRow>, IpcError> {
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
@@ -57,7 +59,10 @@ pub async fn add_host(
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
         s.insert_host(&args.alias, Some(&args.ssh_alias))?;
         // Link account if probe found one
-        if let Some(acc) = account.as_ref().and_then(|a| account_row_from(a, now_unix())) {
+        if let Some(acc) = account
+            .as_ref()
+            .and_then(|a| account_row_from(a, now_unix()))
+        {
             s.upsert_account(&acc)?;
             s.set_host_account(&args.alias, Some(&acc.uuid))?;
         } else {
@@ -162,7 +167,10 @@ pub async fn probe_host(
         let s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-        if let Some(acc) = account.as_ref().and_then(|a| account_row_from(a, now_unix())) {
+        if let Some(acc) = account
+            .as_ref()
+            .and_then(|a| account_row_from(a, now_unix()))
+        {
             s.upsert_account(&acc)?;
             s.set_host_account(&args.alias, Some(&acc.uuid))?;
         } else {
@@ -199,25 +207,20 @@ pub struct HideHostArgs {
 }
 
 #[tauri::command]
-pub fn hide_host(
-    args: HideHostArgs,
-    store: State<'_, Mutex<Store>>,
-) -> Result<HostRow, IpcError> {
+pub fn hide_host(args: HideHostArgs, store: State<'_, Mutex<Store>>) -> Result<HostRow, IpcError> {
     {
         let s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-        s.set_host_hidden(&args.alias, args.hidden).map_err(IpcError::from)?;
+        s.set_host_hidden(&args.alias, args.hidden)
+            .map_err(IpcError::from)?;
     }
     list_one(&store, &args.alias)
 }
 
 // --- helpers ---
 
-fn list_one(
-    store: &State<'_, Mutex<Store>>,
-    alias: &str,
-) -> Result<HostRow, IpcError> {
+fn list_one(store: &State<'_, Mutex<Store>>, alias: &str) -> Result<HostRow, IpcError> {
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
@@ -252,14 +255,24 @@ echo ---
 ( cat "$HOME/.claude.json" 2>/dev/null | jq -c .oauthAccount 2>/dev/null \
   || python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d.get("oauthAccount") or {}))' "$HOME/.claude.json" 2>/dev/null \
   || true )"#;
-    let out = ssh.run_cancellable(host, &["bash", "-lc", script], Duration::from_secs(5), token)
+    let out = ssh
+        .run_cancellable(
+            host,
+            &["bash", "-lc", script],
+            Duration::from_secs(5),
+            token,
+        )
         .await
         .map_err(|e| IpcError::new("E_PROBE", format!("ssh {host}: {}", e.message)))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(IpcError::new(
             "E_PROBE",
-            format!("ssh {host} exited {:?}: {}", out.status.code(), stderr.trim()),
+            format!(
+                "ssh {host} exited {:?}: {}",
+                out.status.code(),
+                stderr.trim()
+            ),
         ));
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -336,7 +349,9 @@ fn parse_tmux_version(line: &str) -> Option<String> {
 
 fn parse_claude_version(line: &str) -> Option<String> {
     // `2.1.144 (Claude Code)` → "2.1.144"
-    line.split_whitespace().next().map(|v| v.to_string())
+    line.split_whitespace()
+        .next()
+        .map(|v| v.to_string())
         .filter(|v| !v.is_empty())
 }
 
@@ -407,7 +422,10 @@ mod tests {
 
     #[test]
     fn parse_claude_version_extracts_first_token() {
-        assert_eq!(parse_claude_version("2.1.144 (Claude Code)").as_deref(), Some("2.1.144"));
+        assert_eq!(
+            parse_claude_version("2.1.144 (Claude Code)").as_deref(),
+            Some("2.1.144")
+        );
         assert_eq!(parse_claude_version("  2.1.12  "), Some("2.1.12".into()));
         assert_eq!(parse_claude_version(""), None);
     }

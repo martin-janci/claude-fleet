@@ -71,7 +71,10 @@ fn import_login_shell_env() -> bool {
         .map(|v| format!("printf '%s\\x1e' \"${v}\""))
         .collect::<Vec<_>>()
         .join("; ");
-    let Ok(output) = std::process::Command::new(&shell).args(["-l", "-c", &script]).output() else {
+    let Ok(output) = std::process::Command::new(&shell)
+        .args(["-l", "-c", &script])
+        .output()
+    else {
         return false;
     };
     if !output.status.success() {
@@ -108,7 +111,9 @@ fn backfill_locale_for_gui_launch() {
     let has_utf8 = ["LC_ALL", "LANG", "LC_CTYPE"]
         .iter()
         .filter_map(|v| std::env::var(v).ok())
-        .any(|v| v.to_ascii_uppercase().contains("UTF-8") || v.to_ascii_uppercase().contains("UTF8"));
+        .any(|v| {
+            v.to_ascii_uppercase().contains("UTF-8") || v.to_ascii_uppercase().contains("UTF8")
+        });
     if has_utf8 {
         return;
     }
@@ -264,9 +269,9 @@ mod path_backfill_tests {
     /// `backfill_locale_for_gui_launch`. Lifted out for testability —
     /// the real fn touches std::env which makes parallel tests racy.
     fn needs_locale_backfill(lc_all: &str, lang: &str, lc_ctype: &str) -> bool {
-        ![lc_all, lang, lc_ctype]
-            .iter()
-            .any(|v| v.to_ascii_uppercase().contains("UTF-8") || v.to_ascii_uppercase().contains("UTF8"))
+        ![lc_all, lang, lc_ctype].iter().any(|v| {
+            v.to_ascii_uppercase().contains("UTF-8") || v.to_ascii_uppercase().contains("UTF8")
+        })
     }
 
     #[test]

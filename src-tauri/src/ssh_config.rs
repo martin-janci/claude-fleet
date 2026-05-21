@@ -53,7 +53,9 @@ pub fn parse(input: &str) -> Vec<SshHost> {
             }
             continue;
         }
-        let Some(host) = current.as_mut() else { continue };
+        let Some(host) = current.as_mut() else {
+            continue;
+        };
         match key_l.as_str() {
             "hostname" => host.hostname = Some(value.trim().to_string()),
             "user" => host.user = Some(value.trim().to_string()),
@@ -70,7 +72,9 @@ pub fn parse(input: &str) -> Vec<SshHost> {
 /// Convenience wrapper: load and parse the user's `~/.ssh/config`. Returns
 /// an empty list if the file does not exist or cannot be read.
 pub fn load_user_config() -> Vec<SshHost> {
-    let Some(home) = dirs_home() else { return Vec::new() };
+    let Some(home) = dirs_home() else {
+        return Vec::new();
+    };
     let path = home.join(".ssh").join("config");
     match std::fs::read_to_string(&path) {
         Ok(contents) => parse(&contents),

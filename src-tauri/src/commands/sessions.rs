@@ -86,7 +86,9 @@ async fn reconcile_sessions(
 ) -> Result<Vec<SessionRow>, IpcError> {
     // 1. Snapshot under lock (brief). Ensure local host exists first.
     let hosts = {
-        let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = store
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
         s.upsert_host("local")?;
         s.list_hosts()?
     };
@@ -131,7 +133,9 @@ async fn reconcile_sessions(
     //    before the transaction opens.
     let mut all_rows: Vec<SessionRow> = Vec::new();
     {
-        let mut s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let mut s = store
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
 
         for (host, res) in &probed {
             // Per-host isolation: one host's DB write failure (e.g. an FK
@@ -167,7 +171,9 @@ async fn reconcile_one_host(
 ) -> Result<(), IpcError> {
     // 1. Snapshot the host under lock (brief).
     let host = {
-        let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = store
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
         s.list_hosts()?
             .into_iter()
             .find(|h| h.alias == alias)
@@ -181,7 +187,9 @@ async fn reconcile_one_host(
     // 3. Apply writes under one brief lock, via the same single-transaction
     //    + emit-after-commit path as the multi-host reconcile. Reads
     //    (project_id / account_uuid resolution) happen before the tx opens.
-    let mut s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let mut s = store
+        .lock()
+        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
     match result {
         Ok(live) => {
             let mut keep: Vec<String> = Vec::with_capacity(live.len());
@@ -272,11 +280,7 @@ fn worktree_key_for_path(path: &str) -> Option<String> {
     Some("main".to_string())
 }
 
-fn find_project_id_for_path(
-    s: &Store,
-    host_alias: &str,
-    path: &std::path::Path,
-) -> Option<i64> {
+fn find_project_id_for_path(s: &Store, host_alias: &str, path: &std::path::Path) -> Option<i64> {
     let path_str = path.to_string_lossy();
     let projects = s.list_projects().ok()?;
     if host_alias == "local" {
@@ -318,7 +322,8 @@ pub fn related_sessions(
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    s.list_related_sessions(args.session_id).map_err(IpcError::from)
+    s.list_related_sessions(args.session_id)
+        .map_err(IpcError::from)
 }
 
 #[derive(Deserialize)]
@@ -358,11 +363,13 @@ fn fetch_worktree(s: &Store, worktree_id: i64) -> Result<(String, Option<String>
 /// rather than guessing — calling `new_session` for an unreachable host
 /// should fail loudly.
 async fn remote_home(ssh: &Arc<SshClient>, host: &str) -> Result<String, IpcError> {
-    let out = ssh.run(
-        host,
-        &["printenv", "HOME"],
-        std::time::Duration::from_secs(5),
-    ).await?;
+    let out = ssh
+        .run(
+            host,
+            &["printenv", "HOME"],
+            std::time::Duration::from_secs(5),
+        )
+        .await?;
     if !out.status.success() {
         return Err(IpcError::new(
             "E_SSH",
@@ -466,12 +473,14 @@ async fn ensure_remote_project(
     // Wrap in bash -lc so $PATH (git on Homebrew/Linuxbrew) is sourced. Use
     // the same single-quote-the-whole-script trick as RemoteTmux::remote_bash
     // to avoid the ssh argv-joining bug.
-    let out = ssh.run_cancellable(
-        host,
-        &["bash", "-lc", &script],
-        std::time::Duration::from_secs(120),
-        token,
-    ).await?;
+    let out = ssh
+        .run_cancellable(
+            host,
+            &["bash", "-lc", &script],
+            std::time::Duration::from_secs(120),
+            token,
+        )
+        .await?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -576,14 +585,17 @@ async fn new_session_inner(
             &project_root,
             worktree_for_clone,
             token,
-        ).await?;
+        )
+        .await?;
         PathBuf::from(cwd)
     };
     let tmux = exec_for(&args.host_alias, ssh);
     tmux.new_session(&args.name, &path).await?;
 
     reconcile_one_host(store, ssh, &args.host_alias).await?;
-    let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = store
+        .lock()
+        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
     s.list_sessions_for_host(&args.host_alias)?
         .into_iter()
         .find(|r| r.tmux_name == args.name)
@@ -614,12 +626,16 @@ pub async fn kill_session(
     crate::validate::tmux_name(&args.name)?;
     // Look up id BEFORE killing so we can return it after.
     let id = {
-        let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = store
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
         s.list_sessions_for_host(&args.host_alias)?
             .into_iter()
             .find(|r| r.tmux_name == args.name)
             .map(|r| r.id)
-            .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("session {} not found", args.name)))?
+            .ok_or_else(|| {
+                IpcError::new("E_NOTFOUND", format!("session {} not found", args.name))
+            })?
     };
     let tmux = exec_for(&args.host_alias, &ssh);
     tmux.kill_session(&args.name).await?;
@@ -646,7 +662,9 @@ pub async fn rename_session(
     let tmux = exec_for(&args.host_alias, &ssh);
     tmux.rename_session(&args.old_name, &args.new_name).await?;
     reconcile_one_host(&store, &ssh, &args.host_alias).await?;
-    let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = store
+        .lock()
+        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
     s.list_sessions_for_host(&args.host_alias)?
         .into_iter()
         .find(|r| r.tmux_name == args.new_name.trim())
@@ -678,7 +696,9 @@ pub async fn restart_session(
     let tmux = exec_for(&args.host_alias, &ssh);
     tmux.restart_session(&args.name).await?;
     reconcile_one_host(&store, &ssh, &args.host_alias).await?;
-    let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = store
+        .lock()
+        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
     s.list_sessions_for_host(&args.host_alias)?
         .into_iter()
         .find(|r| r.tmux_name == args.name)
@@ -735,11 +755,13 @@ async fn send_prompt_inner(
     } else {
         for cmd in &cmds {
             let quoted = shq(cmd);
-            let out = ssh.run(
-                host_alias,
-                &["bash", "-lc", &quoted],
-                std::time::Duration::from_secs(10),
-            ).await?;
+            let out = ssh
+                .run(
+                    host_alias,
+                    &["bash", "-lc", &quoted],
+                    std::time::Duration::from_secs(10),
+                )
+                .await?;
             if !out.status.success() {
                 return Err(IpcError::new(
                     "E_TMUX",
@@ -814,8 +836,11 @@ pub async fn spawn_review(
 ) -> Result<crate::store::SessionRow, IpcError> {
     // 1. Snapshot source + resolve cwd under a brief lock.
     let (source, cwd) = {
-        let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-        let source = s.get_session_by_id(args.source_session_id)?
+        let s = store
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let source = s
+            .get_session_by_id(args.source_session_id)?
             .ok_or_else(|| IpcError::new("E_NOTFOUND", "source session not found"))?;
         let cwd = resolve_review_cwd(&s, &source)?;
         (source, cwd)
@@ -826,15 +851,19 @@ pub async fn spawn_review(
     let short = format!("{:x}", now_unix() & 0xfffff);
     let review_name = format!("{}--review-{}", source.tmux_name, short);
     let tmux = exec_for(&source.host_alias, &ssh);
-    tmux.new_session(&review_name, std::path::Path::new(&cwd)).await?;
+    tmux.new_session(&review_name, std::path::Path::new(&cwd))
+        .await?;
 
     // 3. Register via per-host reconcile.
     reconcile_one_host(&store, &ssh, &source.host_alias).await?;
 
     // 4. Tag as review + capture id.
     let review_id = {
-        let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-        let row = s.list_sessions_for_host(&source.host_alias)?
+        let s = store
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let row = s
+            .list_sessions_for_host(&source.host_alias)?
             .into_iter()
             .find(|r| r.tmux_name == review_name)
             .ok_or_else(|| IpcError::new("E_INTERNAL", "review session vanished after spawn"))?;
@@ -853,7 +882,9 @@ pub async fn spawn_review(
     }
 
     // 6. Return the tagged review row.
-    let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = store
+        .lock()
+        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
     s.get_session_by_id(review_id)?
         .ok_or_else(|| IpcError::new("E_INTERNAL", "review row missing after tag"))
 }
@@ -865,7 +896,9 @@ mod tests {
 
     #[test]
     fn extracts_owner_repo_from_macos_path() {
-        let r = extract_owner_repo("/Users/martinjanci/projects/github.com/martin-janci/claude-fleet/.claude/worktrees/x");
+        let r = extract_owner_repo(
+            "/Users/martinjanci/projects/github.com/martin-janci/claude-fleet/.claude/worktrees/x",
+        );
         assert_eq!(r, Some(("martin-janci".into(), "claude-fleet".into())));
     }
 
@@ -890,7 +923,10 @@ mod tests {
     #[test]
     fn remote_project_path_returns_project_root_for_main_or_no_worktree() {
         let (root, cwd) = remote_project_path("/home/mjanci", "martin-janci", "claude-fleet", None);
-        assert_eq!(root, "/home/mjanci/projects/github.com/martin-janci/claude-fleet");
+        assert_eq!(
+            root,
+            "/home/mjanci/projects/github.com/martin-janci/claude-fleet"
+        );
         assert_eq!(cwd, root);
 
         let (root, cwd) =
@@ -933,26 +969,47 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("h").unwrap();
         s.upsert_account(&AccountRow {
-            uuid: "u1".into(), email: None, display_name: None,
-            organization_name: None, organization_uuid: None,
-            seat_tier: None, last_seen_at: None,
-        }).unwrap();
+            uuid: "u1".into(),
+            email: None,
+            display_name: None,
+            organization_name: None,
+            organization_uuid: None,
+            seat_tier: None,
+            last_seen_at: None,
+        })
+        .unwrap();
         // First reconcile captures host's account
-        s.upsert_session("dev-a", "h", None, None, 1, 100, "running", Some("u1")).unwrap();
+        s.upsert_session("dev-a", "h", None, None, 1, 100, "running", Some("u1"))
+            .unwrap();
         // Host re-auths into a different account
         s.upsert_account(&AccountRow {
-            uuid: "u2".into(), email: None, display_name: None,
-            organization_name: None, organization_uuid: None,
-            seat_tier: None, last_seen_at: None,
-        }).unwrap();
+            uuid: "u2".into(),
+            email: None,
+            display_name: None,
+            organization_name: None,
+            organization_uuid: None,
+            seat_tier: None,
+            last_seen_at: None,
+        })
+        .unwrap();
         // Second reconcile: caller reads existing account before upsert
         let preserved = s.get_session_account("h", "dev-a").unwrap();
         s.upsert_session(
-            "dev-a", "h", None, None, 1, 200, "running",
-            preserved.as_deref(),  // u1
-        ).unwrap();
+            "dev-a",
+            "h",
+            None,
+            None,
+            1,
+            200,
+            "running",
+            preserved.as_deref(), // u1
+        )
+        .unwrap();
         // Verify session kept the ORIGINAL account
-        assert_eq!(s.get_session_account("h", "dev-a").unwrap().as_deref(), Some("u1"));
+        assert_eq!(
+            s.get_session_account("h", "dev-a").unwrap().as_deref(),
+            Some("u1")
+        );
     }
 
     #[test]
@@ -980,11 +1037,13 @@ mod tests {
 
     #[tokio::test]
     async fn parallel_reconcile_does_not_serialise_on_slow_host() {
-        use std::time::Duration;
-        use async_trait::async_trait;
         use crate::tmux::TmuxSession;
+        use async_trait::async_trait;
+        use std::time::Duration;
 
-        struct SleepyTmux { sleep_ms: u64 }
+        struct SleepyTmux {
+            sleep_ms: u64,
+        }
 
         #[async_trait]
         impl TmuxExec for SleepyTmux {
@@ -992,13 +1051,25 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(self.sleep_ms)).await;
                 Ok(Vec::new())
             }
-            async fn new_session(&self, _name: &str, _cwd: &std::path::Path) -> Result<(), IpcError> {
+            async fn new_session(
+                &self,
+                _name: &str,
+                _cwd: &std::path::Path,
+            ) -> Result<(), IpcError> {
                 Ok(())
             }
-            async fn kill_session(&self, _name: &str) -> Result<(), IpcError> { Ok(()) }
-            async fn rename_session(&self, _old: &str, _new: &str) -> Result<(), IpcError> { Ok(()) }
-            async fn restart_session(&self, _name: &str) -> Result<(), IpcError> { Ok(()) }
-            async fn capture_pane(&self, _name: &str) -> Result<String, IpcError> { Ok(String::new()) }
+            async fn kill_session(&self, _name: &str) -> Result<(), IpcError> {
+                Ok(())
+            }
+            async fn rename_session(&self, _old: &str, _new: &str) -> Result<(), IpcError> {
+                Ok(())
+            }
+            async fn restart_session(&self, _name: &str) -> Result<(), IpcError> {
+                Ok(())
+            }
+            async fn capture_pane(&self, _name: &str) -> Result<String, IpcError> {
+                Ok(String::new())
+            }
         }
 
         // Spawn 3 tasks with sleeps 50ms, 500ms, 50ms.
@@ -1006,9 +1077,7 @@ mod tests {
         let mut set = tokio::task::JoinSet::new();
         let start = std::time::Instant::now();
         for ms in [50u64, 500, 50] {
-            set.spawn(async move {
-                SleepyTmux { sleep_ms: ms }.list_sessions().await
-            });
+            set.spawn(async move { SleepyTmux { sleep_ms: ms }.list_sessions().await });
         }
         while set.join_next().await.is_some() {}
         let elapsed = start.elapsed();
@@ -1027,8 +1096,10 @@ mod tests {
             let s = store.lock().unwrap();
             s.upsert_host("alpha").unwrap();
             s.upsert_host("beta").unwrap();
-            s.upsert_session("alpha-s", "alpha", None, None, 1, 1, "running", None).unwrap();
-            s.upsert_session("beta-s", "beta", None, None, 1, 1, "running", None).unwrap();
+            s.upsert_session("alpha-s", "alpha", None, None, 1, 1, "running", None)
+                .unwrap();
+            s.upsert_session("beta-s", "beta", None, None, 1, 1, "running", None)
+                .unwrap();
         }
         // Simulate "alpha was probed and has zero sessions" — directly call the
         // delete helper that reconcile_one_host uses internally.
@@ -1050,19 +1121,34 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("h").unwrap();
         s.upsert_account(&AccountRow {
-            uuid: "u1".into(), email: None, display_name: None,
-            organization_name: None, organization_uuid: None,
-            seat_tier: None, last_seen_at: None,
-        }).unwrap();
+            uuid: "u1".into(),
+            email: None,
+            display_name: None,
+            organization_name: None,
+            organization_uuid: None,
+            seat_tier: None,
+            last_seen_at: None,
+        })
+        .unwrap();
         // Brand new session — no existing row
         assert!(s.get_session_account("h", "dev-new").unwrap().is_none());
         let preserved = s.get_session_account("h", "dev-new").unwrap();
         let account = preserved.or(Some("u1".to_string()));
         s.upsert_session(
-            "dev-new", "h", None, None, 1, 100, "running",
+            "dev-new",
+            "h",
+            None,
+            None,
+            1,
+            100,
+            "running",
             account.as_deref(),
-        ).unwrap();
-        assert_eq!(s.get_session_account("h", "dev-new").unwrap().as_deref(), Some("u1"));
+        )
+        .unwrap();
+        assert_eq!(
+            s.get_session_account("h", "dev-new").unwrap().as_deref(),
+            Some("u1")
+        );
     }
 
     #[tokio::test]
@@ -1070,23 +1156,41 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         use std::sync::Arc as StdArc;
 
-        struct FakeTmux { calls: StdArc<AtomicU32> }
+        struct FakeTmux {
+            calls: StdArc<AtomicU32>,
+        }
         #[async_trait::async_trait]
         impl TmuxExec for FakeTmux {
-            async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> { Ok(vec![]) }
-            async fn new_session(&self, _: &str, _: &std::path::Path) -> Result<(), IpcError> { Ok(()) }
-            async fn kill_session(&self, _: &str) -> Result<(), IpcError> { Ok(()) }
-            async fn rename_session(&self, _: &str, _: &str) -> Result<(), IpcError> { Ok(()) }
-            async fn restart_session(&self, _: &str) -> Result<(), IpcError> { Ok(()) }
+            async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+                Ok(vec![])
+            }
+            async fn new_session(&self, _: &str, _: &std::path::Path) -> Result<(), IpcError> {
+                Ok(())
+            }
+            async fn kill_session(&self, _: &str) -> Result<(), IpcError> {
+                Ok(())
+            }
+            async fn rename_session(&self, _: &str, _: &str) -> Result<(), IpcError> {
+                Ok(())
+            }
+            async fn restart_session(&self, _: &str) -> Result<(), IpcError> {
+                Ok(())
+            }
             async fn capture_pane(&self, _: &str) -> Result<String, IpcError> {
                 let n = self.calls.fetch_add(1, Ordering::SeqCst);
                 // Not ready for the first 2 polls, then the prompt appears.
-                if n < 2 { Ok("starting…".into()) } else { Ok("│ > ".into()) }
+                if n < 2 {
+                    Ok("starting…".into())
+                } else {
+                    Ok("│ > ".into())
+                }
             }
         }
 
         let calls = StdArc::new(AtomicU32::new(0));
-        let tmux = FakeTmux { calls: calls.clone() };
+        let tmux = FakeTmux {
+            calls: calls.clone(),
+        };
         let start = std::time::Instant::now();
         wait_for_repl_ready(&tmux, "x").await;
         // Returned after ~3 polls (~600ms), well under the 6s cap.
@@ -1100,36 +1204,63 @@ mod tests {
         store.upsert_host("alpha").unwrap();
         // Project with a base_path, and a worktree under it.
         let pid = store.upsert_project("o", "r", "/base/r").unwrap();
-        let wid = store.upsert_worktree(pid, "main", "/base/r/main", None).unwrap();
+        let wid = store
+            .upsert_worktree(pid, "main", "/base/r/main", None)
+            .unwrap();
         // Session with worktree → worktree path wins.
-        let s1 = store.upsert_session("s1", "alpha", Some(pid), Some(wid), 1, 1, "running", None).unwrap();
+        let s1 = store
+            .upsert_session("s1", "alpha", Some(pid), Some(wid), 1, 1, "running", None)
+            .unwrap();
         let row1 = store.get_session_by_id(s1).unwrap().unwrap();
         assert_eq!(resolve_review_cwd(&store, &row1).unwrap(), "/base/r/main");
         // Session with project but no worktree → project base.
-        let s2 = store.upsert_session("s2", "alpha", Some(pid), None, 1, 1, "running", None).unwrap();
+        let s2 = store
+            .upsert_session("s2", "alpha", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
         let row2 = store.get_session_by_id(s2).unwrap().unwrap();
         assert_eq!(resolve_review_cwd(&store, &row2).unwrap(), "/base/r");
         // Session with neither → error.
-        let s3 = store.upsert_session("s3", "alpha", None, None, 1, 1, "running", None).unwrap();
+        let s3 = store
+            .upsert_session("s3", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
         let row3 = store.get_session_by_id(s3).unwrap().unwrap();
         assert!(resolve_review_cwd(&store, &row3).is_err());
     }
 
     #[test]
     fn worktree_key_root_is_main_local_and_remote() {
-        assert_eq!(worktree_key_for_path("/Users/martinjanci/projects/github.com/martin-janci/claude-fleet"), Some("main".to_string()));
-        assert_eq!(worktree_key_for_path("/home/mjanci/projects/github.com/martin-janci/claude-fleet"), Some("main".to_string()));
+        assert_eq!(
+            worktree_key_for_path(
+                "/Users/martinjanci/projects/github.com/martin-janci/claude-fleet"
+            ),
+            Some("main".to_string())
+        );
+        assert_eq!(
+            worktree_key_for_path("/home/mjanci/projects/github.com/martin-janci/claude-fleet"),
+            Some("main".to_string())
+        );
     }
 
     #[test]
     fn worktree_key_extracts_named_worktree() {
-        assert_eq!(worktree_key_for_path("/Users/x/projects/github.com/o/r/.claude/worktrees/feat-auth"), Some("feat-auth".to_string()));
-        assert_eq!(worktree_key_for_path("/home/mjanci/projects/github.com/o/r/.claude/worktrees/feat-auth/src"), Some("feat-auth".to_string()));
+        assert_eq!(
+            worktree_key_for_path("/Users/x/projects/github.com/o/r/.claude/worktrees/feat-auth"),
+            Some("feat-auth".to_string())
+        );
+        assert_eq!(
+            worktree_key_for_path(
+                "/home/mjanci/projects/github.com/o/r/.claude/worktrees/feat-auth/src"
+            ),
+            Some("feat-auth".to_string())
+        );
     }
 
     #[test]
     fn worktree_key_other_subdir_is_main() {
-        assert_eq!(worktree_key_for_path("/Users/x/projects/github.com/o/r/src/lib"), Some("main".to_string()));
+        assert_eq!(
+            worktree_key_for_path("/Users/x/projects/github.com/o/r/src/lib"),
+            Some("main".to_string())
+        );
     }
 
     #[test]

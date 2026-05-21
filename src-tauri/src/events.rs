@@ -137,7 +137,9 @@ impl EventBus for AppHandleEventBus {
     fn host_removed(&self, alias: &str) {
         self.queue(
             "host:removed",
-            &HostRemovedPayload { alias: alias.to_string() },
+            &HostRemovedPayload {
+                alias: alias.to_string(),
+            },
         );
     }
     fn account_upserted(&self, row: &AccountRow) {
@@ -173,30 +175,57 @@ impl RecordingEventBus {
 #[cfg(test)]
 impl EventBus for RecordingEventBus {
     fn session_created(&self, r: &SessionRow) {
-        self.events.lock().unwrap().push(format!("session:created:{}", r.id));
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("session:created:{}", r.id));
     }
     fn session_updated(&self, r: &SessionRow) {
-        self.events.lock().unwrap().push(format!("session:updated:{}", r.id));
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("session:updated:{}", r.id));
     }
     fn session_killed(&self, id: i64) {
-        self.events.lock().unwrap().push(format!("session:killed:{}", id));
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("session:killed:{}", id));
     }
     fn host_added(&self, r: &HostRow) {
-        self.events.lock().unwrap().push(format!("host:added:{}", r.alias));
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("host:added:{}", r.alias));
     }
     fn host_probed(&self, r: &HostRow) {
-        self.events.lock().unwrap().push(format!("host:probed:{}", r.alias));
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("host:probed:{}", r.alias));
     }
     fn host_removed(&self, alias: &str) {
-        self.events.lock().unwrap().push(format!("host:removed:{}", alias));
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("host:removed:{}", alias));
     }
     fn account_upserted(&self, r: &AccountRow) {
-        self.events.lock().unwrap().push(format!("account:upserted:{}", r.uuid));
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("account:upserted:{}", r.uuid));
     }
     fn project_updated(&self, r: &ProjectRow) {
-        self.events.lock().unwrap().push(format!("project:updated:{}", r.id));
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("project:updated:{}", r.id));
     }
     fn worktree_updated(&self, r: &WorktreeRow) {
-        self.events.lock().unwrap().push(format!("worktree:updated:{}", r.id));
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("worktree:updated:{}", r.id));
     }
 }

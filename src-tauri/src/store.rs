@@ -7,8 +7,8 @@
 // `#[cfg(test)]` code, so they read as dead in a non-test build.
 #![allow(dead_code)]
 
-use rusqlite::{Connection, OptionalExtension, Result};
 use crate::events::{EventBus, NoopEventBus, RowChange};
+use rusqlite::{Connection, OptionalExtension, Result};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -119,7 +119,10 @@ impl Store {
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        let store = Self { conn, bus: Arc::new(NoopEventBus) };
+        let store = Self {
+            conn,
+            bus: Arc::new(NoopEventBus),
+        };
         store.migrate()?;
         Ok(store)
     }
@@ -215,9 +218,9 @@ impl Store {
     }
 
     fn get_worktree(&self, id: i64) -> Result<Option<WorktreeRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, project_id, name, path, branch FROM worktrees WHERE id=?1",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, project_id, name, path, branch FROM worktrees WHERE id=?1")?;
         let mut rows = stmt.query_map(rusqlite::params![id], |row| {
             Ok(WorktreeRow {
                 id: row.get(0)?,
@@ -452,11 +455,7 @@ impl Store {
         rows.collect()
     }
 
-    pub fn insert_host(
-        &self,
-        alias: &str,
-        ssh_alias: Option<&str>,
-    ) -> Result<(), rusqlite::Error> {
+    pub fn insert_host(&self, alias: &str, ssh_alias: Option<&str>) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO hosts (alias, ssh_alias, reachable, hidden) VALUES (?1, ?2, 0, 0)
              ON CONFLICT(alias) DO UPDATE SET ssh_alias=excluded.ssh_alias",
@@ -547,10 +546,7 @@ impl Store {
         Ok(())
     }
 
-    pub fn get_account_by_uuid(
-        &self,
-        uuid: &str,
-    ) -> Result<Option<AccountRow>, rusqlite::Error> {
+    pub fn get_account_by_uuid(&self, uuid: &str) -> Result<Option<AccountRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT uuid, email, display_name, organization_name, organization_uuid,
                     seat_tier, last_seen_at
@@ -605,10 +601,8 @@ impl Store {
             "DELETE FROM sessions WHERE host_alias=?1",
             rusqlite::params![alias],
         )?;
-        self.conn.execute(
-            "DELETE FROM hosts WHERE alias=?1",
-            rusqlite::params![alias],
-        )?;
+        self.conn
+            .execute("DELETE FROM hosts WHERE alias=?1", rusqlite::params![alias])?;
         for id in &orphan_ids {
             self.bus.session_killed(*id);
         }
@@ -629,11 +623,14 @@ impl Store {
         account_uuid: Option<&str>,
     ) -> Result<i64, rusqlite::Error> {
         // Check existence before the write so we can distinguish created vs updated.
-        let existing_id: Option<i64> = self.conn.query_row(
-            "SELECT id FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
-            rusqlite::params![tmux_name, host_alias],
-            |row| row.get(0),
-        ).optional()?;
+        let existing_id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
+                rusqlite::params![tmux_name, host_alias],
+                |row| row.get(0),
+            )
+            .optional()?;
 
         self.conn.execute(
             "INSERT INTO sessions (tmux_name, host_alias, project_id, worktree_id,
@@ -645,8 +642,16 @@ impl Store {
                last_activity_at=excluded.last_activity_at,
                status=excluded.status,
                account_uuid=excluded.account_uuid",
-            rusqlite::params![tmux_name, host_alias, project_id, worktree_id,
-                              created_at, last_activity_at, status, account_uuid],
+            rusqlite::params![
+                tmux_name,
+                host_alias,
+                project_id,
+                worktree_id,
+                created_at,
+                last_activity_at,
+                status,
+                account_uuid
+            ],
         )?;
         let id: i64 = self.conn.query_row(
             "SELECT id FROM sessions WHERE host_alias=?1 AND tmux_name=?2",
@@ -668,13 +673,12 @@ impl Store {
         host_alias: &str,
         tmux_name: &str,
     ) -> Result<Option<String>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
-            "SELECT account_uuid FROM sessions WHERE host_alias=?1 AND tmux_name=?2",
-        )?;
-        let mut rows = stmt.query_map(
-            rusqlite::params![host_alias, tmux_name],
-            |row| row.get::<_, Option<String>>(0),
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT account_uuid FROM sessions WHERE host_alias=?1 AND tmux_name=?2")?;
+        let mut rows = stmt.query_map(rusqlite::params![host_alias, tmux_name], |row| {
+            row.get::<_, Option<String>>(0)
+        })?;
         match rows.next() {
             Some(r) => Ok(r?),
             None => Ok(None),
@@ -822,19 +826,23 @@ impl Store {
     }
 
     pub fn worktree_path(&self, id: i64) -> Result<Option<String>, rusqlite::Error> {
-        self.conn.query_row(
-            "SELECT path FROM worktrees WHERE id = ?1",
-            rusqlite::params![id],
-            |row| row.get(0),
-        ).optional()
+        self.conn
+            .query_row(
+                "SELECT path FROM worktrees WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .optional()
     }
 
     pub fn project_base_path(&self, id: i64) -> Result<Option<String>, rusqlite::Error> {
-        self.conn.query_row(
-            "SELECT base_path FROM projects WHERE id = ?1",
-            rusqlite::params![id],
-            |row| row.get(0),
-        ).optional()
+        self.conn
+            .query_row(
+                "SELECT base_path FROM projects WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .optional()
     }
 
     /// Run `f` under the implicit lock and return its result.
@@ -930,11 +938,13 @@ impl Store {
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
         // Check existence before the write so we can distinguish created vs updated.
-        let existing_id: Option<i64> = tx.query_row(
-            "SELECT id FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
-            rusqlite::params![tmux_name, host_alias],
-            |row| row.get(0),
-        ).optional()?;
+        let existing_id: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
+                rusqlite::params![tmux_name, host_alias],
+                |row| row.get(0),
+            )
+            .optional()?;
 
         tx.execute(
             "INSERT INTO sessions (tmux_name, host_alias, project_id, worktree_id,
@@ -948,9 +958,17 @@ impl Store {
                status=excluded.status,
                account_uuid=excluded.account_uuid,
                worktree_key=excluded.worktree_key",
-            rusqlite::params![tmux_name, host_alias, project_id, worktree_id,
-                              created_at, last_activity_at, status, account_uuid,
-                              worktree_key],
+            rusqlite::params![
+                tmux_name,
+                host_alias,
+                project_id,
+                worktree_id,
+                created_at,
+                last_activity_at,
+                status,
+                account_uuid,
+                worktree_key
+            ],
         )?;
         if let Some(row) = fetch_session(tx, tmux_name, host_alias)? {
             if existing_id.is_none() {
@@ -987,7 +1005,8 @@ impl Store {
         // Collect ids to delete before the DELETE so we can emit one event per row.
         let ids_to_delete: Vec<i64> = if keep_names.is_empty() {
             let mut stmt = tx.prepare("SELECT id FROM sessions WHERE host_alias=?1")?;
-            let ids = stmt.query_map(rusqlite::params![host_alias], |r| r.get::<_, i64>(0))?
+            let ids = stmt
+                .query_map(rusqlite::params![host_alias], |r| r.get::<_, i64>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             ids
         } else {
@@ -1000,7 +1019,8 @@ impl Store {
                 params.push(n);
             }
             let mut stmt = tx.prepare(&sql_select)?;
-            let ids = stmt.query_map(params.as_slice(), |r| r.get::<_, i64>(0))?
+            let ids = stmt
+                .query_map(params.as_slice(), |r| r.get::<_, i64>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             ids
         };
@@ -1032,10 +1052,7 @@ impl Store {
     /// its `(project_id, account_uuid)` ALREADY resolved by the caller (those
     /// are reads — `find_project_id_for_path` / `get_session_account` — and
     /// must happen before the transaction opens).
-    pub fn apply_host_reconcile(
-        &mut self,
-        spec: HostReconcile<'_>,
-    ) -> Result<(), rusqlite::Error> {
+    pub fn apply_host_reconcile(&mut self, spec: HostReconcile<'_>) -> Result<(), rusqlite::Error> {
         // Phase 1: run all SQL inside one transaction, collecting RowChanges.
         let changes = self.with_transaction(|tx| {
             let mut out: Vec<RowChange> = Vec::new();
@@ -1067,7 +1084,10 @@ impl Store {
                     )?;
                     if let Some(pid) = sess.project_id {
                         Self::touch_project_last_session_at_in_tx(
-                            tx, pid, sess.last_activity_at, &mut out,
+                            tx,
+                            pid,
+                            sess.last_activity_at,
+                            &mut out,
                         )?;
                     }
                 }
@@ -1084,10 +1104,8 @@ impl Store {
     }
 
     pub fn delete_session(&self, id: i64) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
-            "DELETE FROM sessions WHERE id=?1",
-            rusqlite::params![id],
-        )?;
+        self.conn
+            .execute("DELETE FROM sessions WHERE id=?1", rusqlite::params![id])?;
         self.bus.session_killed(id);
         Ok(())
     }
@@ -1099,10 +1117,11 @@ impl Store {
     ) -> Result<usize, rusqlite::Error> {
         // Collect ids to delete before the DELETE so we can emit one event per row.
         let ids_to_delete: Vec<i64> = if keep_names.is_empty() {
-            let mut stmt = self.conn.prepare(
-                "SELECT id FROM sessions WHERE host_alias=?1",
-            )?;
-            let ids = stmt.query_map(rusqlite::params![host_alias], |r| r.get::<_, i64>(0))?
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id FROM sessions WHERE host_alias=?1")?;
+            let ids = stmt
+                .query_map(rusqlite::params![host_alias], |r| r.get::<_, i64>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             ids
         } else {
@@ -1115,7 +1134,8 @@ impl Store {
                 params.push(n);
             }
             let mut stmt = self.conn.prepare(&sql_select)?;
-            let ids = stmt.query_map(params.as_slice(), |r| r.get::<_, i64>(0))?
+            let ids = stmt
+                .query_map(params.as_slice(), |r| r.get::<_, i64>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             ids
         };
@@ -1210,9 +1230,8 @@ fn fetch_host(conn: &Connection, alias: &str) -> Result<Option<HostRow>, rusqlit
 }
 
 fn fetch_project(conn: &Connection, id: i64) -> Result<Option<ProjectRow>, rusqlite::Error> {
-    let mut stmt = conn.prepare(
-        "SELECT id, owner, repo, base_path, last_session_at FROM projects WHERE id=?1",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT id, owner, repo, base_path, last_session_at FROM projects WHERE id=?1")?;
     let mut rows = stmt.query_map(rusqlite::params![id], |row| {
         Ok(ProjectRow {
             id: row.get(0)?,
@@ -1397,14 +1416,27 @@ mod tests {
         // review still points at must succeed (link nulls), not fail the FK.
         let store = Store::open_in_memory().expect("store");
         store.upsert_host("alpha").unwrap();
-        let src = store.upsert_session("src", "alpha", None, None, 1, 1, "running", None).unwrap();
-        let rev = store.upsert_session("src--review-1", "alpha", None, None, 1, 1, "running", None).unwrap();
+        let src = store
+            .upsert_session("src", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        let rev = store
+            .upsert_session("src--review-1", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
         store.set_session_kind(rev, "review", Some(src)).unwrap();
         // Delete the source while the review still references it.
-        store.delete_session(src).expect("delete source must not trip the self-FK");
-        let row = store.list_sessions_for_host("alpha").unwrap()
-            .into_iter().find(|r| r.tmux_name == "src--review-1").unwrap();
-        assert_eq!(row.reviews_session_id, None, "link should be nulled by ON DELETE SET NULL");
+        store
+            .delete_session(src)
+            .expect("delete source must not trip the self-FK");
+        let row = store
+            .list_sessions_for_host("alpha")
+            .unwrap()
+            .into_iter()
+            .find(|r| r.tmux_name == "src--review-1")
+            .unwrap();
+        assert_eq!(
+            row.reviews_session_id, None,
+            "link should be nulled by ON DELETE SET NULL"
+        );
         assert_eq!(row.kind, "review", "the review row itself survives");
     }
 
@@ -1429,7 +1461,10 @@ mod tests {
     #[test]
     fn migration_003_adds_accounts_table_and_host_account_uuid_column() {
         let s = Store::open_in_memory().expect("open");
-        assert!(s.has_table("accounts").expect("has_table"), "expected accounts table");
+        assert!(
+            s.has_table("accounts").expect("has_table"),
+            "expected accounts table"
+        );
         let mut stmt = s
             .conn
             .prepare("SELECT name FROM pragma_table_info('hosts')")
@@ -1481,7 +1516,12 @@ mod tests {
         s.insert_host("h", Some("h")).unwrap();
         s.update_host_probe("h", true, Some("2.1.144"), Some("3.6a"), 1000)
             .unwrap();
-        let row = s.list_hosts().unwrap().into_iter().find(|x| x.alias == "h").unwrap();
+        let row = s
+            .list_hosts()
+            .unwrap()
+            .into_iter()
+            .find(|x| x.alias == "h")
+            .unwrap();
         assert!(row.reachable);
         assert_eq!(row.claude_version.as_deref(), Some("2.1.144"));
         assert_eq!(row.tmux_version.as_deref(), Some("3.6a"));
@@ -1496,7 +1536,14 @@ mod tests {
             .unwrap();
         assert_eq!(s.list_sessions_for_host("h").unwrap().len(), 1);
         s.delete_host("h").unwrap();
-        assert_eq!(s.list_hosts().unwrap().iter().filter(|x| x.alias == "h").count(), 0);
+        assert_eq!(
+            s.list_hosts()
+                .unwrap()
+                .iter()
+                .filter(|x| x.alias == "h")
+                .count(),
+            0
+        );
         assert_eq!(s.list_sessions_for_host("h").unwrap().len(), 0);
     }
 
@@ -1513,9 +1560,23 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.insert_host("h", Some("h")).unwrap();
         s.set_host_hidden("h", true).unwrap();
-        assert!(s.list_hosts().unwrap().iter().find(|x| x.alias == "h").unwrap().hidden);
+        assert!(
+            s.list_hosts()
+                .unwrap()
+                .iter()
+                .find(|x| x.alias == "h")
+                .unwrap()
+                .hidden
+        );
         s.set_host_hidden("h", false).unwrap();
-        assert!(!s.list_hosts().unwrap().iter().find(|x| x.alias == "h").unwrap().hidden);
+        assert!(
+            !s.list_hosts()
+                .unwrap()
+                .iter()
+                .find(|x| x.alias == "h")
+                .unwrap()
+                .hidden
+        );
     }
 
     #[test]
@@ -1602,10 +1663,20 @@ mod tests {
         })
         .unwrap();
         s.set_host_account("h", Some("u1")).unwrap();
-        let row = s.list_hosts().unwrap().into_iter().find(|r| r.alias == "h").unwrap();
+        let row = s
+            .list_hosts()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.alias == "h")
+            .unwrap();
         assert_eq!(row.account_uuid.as_deref(), Some("u1"));
         s.set_host_account("h", None).unwrap();
-        let row = s.list_hosts().unwrap().into_iter().find(|r| r.alias == "h").unwrap();
+        let row = s
+            .list_hosts()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.alias == "h")
+            .unwrap();
         assert!(row.account_uuid.is_none());
     }
 
@@ -1613,7 +1684,12 @@ mod tests {
     fn list_hosts_includes_account_uuid_in_output() {
         let s = Store::open_in_memory().unwrap();
         s.insert_host("h", Some("h")).unwrap();
-        let row = s.list_hosts().unwrap().into_iter().find(|r| r.alias == "h").unwrap();
+        let row = s
+            .list_hosts()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.alias == "h")
+            .unwrap();
         assert!(row.account_uuid.is_none());
     }
 
@@ -1636,7 +1712,10 @@ mod tests {
         .unwrap();
         s.upsert_session("dev-foo", "h", None, None, 1, 1, "running", Some("u1"))
             .unwrap();
-        assert_eq!(s.get_session_account("h", "dev-foo").unwrap().as_deref(), Some("u1"));
+        assert_eq!(
+            s.get_session_account("h", "dev-foo").unwrap().as_deref(),
+            Some("u1")
+        );
     }
 
     #[test]
@@ -1644,8 +1723,12 @@ mod tests {
         let store = Store::open_in_memory().expect("store");
         store.upsert_host("local").unwrap();
         let pid = store.upsert_project("o", "r", "/tmp/r").unwrap();
-        let a = store.upsert_session("a", "local", Some(pid), None, 1, 1, "running", None).unwrap();
-        let b = store.upsert_session("b", "local", Some(pid), None, 1, 1, "running", None).unwrap();
+        let a = store
+            .upsert_session("a", "local", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
+        let b = store
+            .upsert_session("b", "local", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
         store.set_worktree_key(a, Some("main")).unwrap();
         store.set_worktree_key(b, Some("main")).unwrap();
         let r = store.list_related_sessions(a).unwrap();
@@ -1658,8 +1741,12 @@ mod tests {
         let store = Store::open_in_memory().expect("store");
         store.upsert_host("local").unwrap();
         let pid = store.upsert_project("o", "r", "/tmp/r").unwrap();
-        let a = store.upsert_session("a", "local", Some(pid), None, 1, 1, "running", None).unwrap();
-        let b = store.upsert_session("b", "local", Some(pid), None, 1, 1, "running", None).unwrap();
+        let a = store
+            .upsert_session("a", "local", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
+        let b = store
+            .upsert_session("b", "local", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
         store.set_worktree_key(a, Some("main")).unwrap();
         store.set_worktree_key(b, Some("feat-x")).unwrap();
         assert!(store.list_related_sessions(a).unwrap().is_empty());
@@ -1671,8 +1758,12 @@ mod tests {
         store.upsert_host("local").unwrap();
         store.upsert_host("mefistos").unwrap();
         let pid = store.upsert_project("o", "r", "/tmp/r").unwrap();
-        let a = store.upsert_session("a", "local", Some(pid), None, 1, 1, "running", None).unwrap();
-        let b = store.upsert_session("b", "mefistos", Some(pid), None, 1, 1, "running", None).unwrap();
+        let a = store
+            .upsert_session("a", "local", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
+        let b = store
+            .upsert_session("b", "mefistos", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
         store.set_worktree_key(a, Some("main")).unwrap();
         store.set_worktree_key(b, Some("main")).unwrap();
         let r = store.list_related_sessions(a).unwrap();
@@ -1685,15 +1776,21 @@ mod tests {
         let store = Store::open_in_memory().expect("store");
         store.upsert_host("local").unwrap();
         let pid = store.upsert_project("o", "r", "/tmp/r").unwrap();
-        let a = store.upsert_session("a", "local", Some(pid), None, 1, 1, "running", None).unwrap();
-        let _b = store.upsert_session("b", "local", Some(pid), None, 1, 1, "running", None).unwrap();
+        let a = store
+            .upsert_session("a", "local", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
+        let _b = store
+            .upsert_session("b", "local", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
         assert!(store.list_related_sessions(a).unwrap().is_empty());
     }
 
     #[test]
     fn with_snapshot_returns_owned_data_for_off_lock_use() {
         let store = Store::open_in_memory().expect("in-memory store");
-        store.insert_host("alpha", Some("alpha-ssh")).expect("insert");
+        store
+            .insert_host("alpha", Some("alpha-ssh"))
+            .expect("insert");
         let hosts = store.with_snapshot(|s| s.list_hosts().expect("list"));
         assert_eq!(hosts.len(), 1);
         assert_eq!(hosts[0].alias, "alpha");
@@ -1727,7 +1824,10 @@ mod tests {
         });
         assert!(r.is_err());
         let hosts = store.list_hosts().expect("list");
-        assert!(!hosts.iter().any(|h| h.alias == "bar"), "rollback should have removed the bar row");
+        assert!(
+            !hosts.iter().any(|h| h.alias == "bar"),
+            "rollback should have removed the bar row"
+        );
     }
 
     #[test]
@@ -1736,7 +1836,8 @@ mod tests {
         s.upsert_project("o1", "r1", "/p1").unwrap();
         s.upsert_project("o2", "r2", "/p2").unwrap();
         s.upsert_worktree(1, "main", "/p1", None).unwrap();
-        s.upsert_worktree(1, "feature", "/p1/.worktrees/feature", Some("feature")).unwrap();
+        s.upsert_worktree(1, "feature", "/p1/.worktrees/feature", Some("feature"))
+            .unwrap();
         s.upsert_worktree(2, "main", "/p2", None).unwrap();
         let trees = s.list_projects_joined().expect("joined");
         assert_eq!(trees.len(), 2);
@@ -1750,10 +1851,18 @@ mod tests {
     fn list_related_sessions_excludes_orphans() {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("h").unwrap();
-        let a = s.upsert_session("dev-a", "h", None, None, 1, 1, "running", None).unwrap();
-        let _b = s.upsert_session("dev-b", "h", None, None, 1, 1, "running", None).unwrap();
+        let a = s
+            .upsert_session("dev-a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        let _b = s
+            .upsert_session("dev-b", "h", None, None, 1, 1, "running", None)
+            .unwrap();
         let related = s.list_related_sessions(a).unwrap();
-        assert!(related.is_empty(), "orphans should not match each other; got: {:?}", related.iter().map(|r| &r.tmux_name).collect::<Vec<_>>());
+        assert!(
+            related.is_empty(),
+            "orphans should not match each other; got: {:?}",
+            related.iter().map(|r| &r.tmux_name).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1778,10 +1887,18 @@ mod tests {
         let (store, bus) = store_with_recorder();
         store.upsert_host("alpha").unwrap();
         bus.take(); // drain host:added
-        store.upsert_session("s1", "alpha", None, None, 100, 100, "running", None).unwrap();
-        store.upsert_session("s1", "alpha", None, None, 100, 200, "running", None).unwrap();
+        store
+            .upsert_session("s1", "alpha", None, None, 100, 100, "running", None)
+            .unwrap();
+        store
+            .upsert_session("s1", "alpha", None, None, 100, 200, "running", None)
+            .unwrap();
         let evts = bus.take();
-        assert_eq!(evts.len(), 2, "expected one created + one updated, got {evts:?}");
+        assert_eq!(
+            evts.len(),
+            2,
+            "expected one created + one updated, got {evts:?}"
+        );
         assert!(evts[0].starts_with("session:created:"), "got: {}", evts[0]);
         assert!(evts[1].starts_with("session:updated:"), "got: {}", evts[1]);
     }
@@ -1791,7 +1908,9 @@ mod tests {
         let (store, bus) = store_with_recorder();
         store.upsert_host("alpha").unwrap();
         bus.take(); // drain host:added
-        store.upsert_session("s1", "alpha", None, None, 100, 100, "running", None).unwrap();
+        store
+            .upsert_session("s1", "alpha", None, None, 100, 100, "running", None)
+            .unwrap();
         let id = store.get_session("s1", "alpha").unwrap().expect("row").id;
         bus.take(); // drain created event
         store.delete_session(id).unwrap();
@@ -1805,11 +1924,19 @@ mod tests {
         let (store, bus) = store_with_recorder();
         store.upsert_host("alpha").unwrap();
         bus.take(); // drain host:added
-        store.upsert_session("s1", "alpha", None, None, 1, 1, "running", None).unwrap();
-        store.upsert_session("s2", "alpha", None, None, 1, 1, "running", None).unwrap();
-        store.upsert_session("s3", "alpha", None, None, 1, 1, "running", None).unwrap();
+        store
+            .upsert_session("s1", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store
+            .upsert_session("s2", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store
+            .upsert_session("s3", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
         bus.take(); // drain creates
-        store.delete_sessions_not_in("alpha", &["s2".to_string()]).unwrap();
+        store
+            .delete_sessions_not_in("alpha", &["s2".to_string()])
+            .unwrap();
         let evts = bus.take();
         assert_eq!(evts.len(), 2, "expected 2 killed (s1, s3), got {evts:?}");
         assert!(evts.iter().all(|e| e.starts_with("session:killed:")));
@@ -1819,13 +1946,21 @@ mod tests {
     fn delete_host_emits_session_killed_per_orphaned_session() {
         let (store, bus) = store_with_recorder();
         store.upsert_host("alpha").unwrap();
-        store.upsert_session("s1", "alpha", None, None, 1, 1, "running", None).unwrap();
-        store.upsert_session("s2", "alpha", None, None, 1, 1, "running", None).unwrap();
+        store
+            .upsert_session("s1", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store
+            .upsert_session("s2", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
         bus.take(); // drain host:added + 2x session:created
         store.delete_host("alpha").unwrap();
         let evts = bus.take();
         // Expected order: 2x session:killed (one per orphan), then host:removed.
-        assert_eq!(evts.len(), 3, "expected 2 session:killed + 1 host:removed, got {evts:?}");
+        assert_eq!(
+            evts.len(),
+            3,
+            "expected 2 session:killed + 1 host:removed, got {evts:?}"
+        );
         assert!(evts[0].starts_with("session:killed:"), "got: {}", evts[0]);
         assert!(evts[1].starts_with("session:killed:"), "got: {}", evts[1]);
         assert_eq!(evts[2], "host:removed:alpha");
@@ -1835,7 +1970,9 @@ mod tests {
     fn migration_005_adds_kind_and_reviews_columns_with_defaults() {
         let store = Store::open_in_memory().expect("store");
         store.upsert_host("alpha").unwrap();
-        store.upsert_session("s1", "alpha", None, None, 1, 1, "running", None).unwrap();
+        store
+            .upsert_session("s1", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
         let rows = store.list_sessions_for_host("alpha").unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, "work");
@@ -1846,12 +1983,22 @@ mod tests {
     fn set_session_kind_marks_review_and_survives_reupsert() {
         let store = Store::open_in_memory().expect("store");
         store.upsert_host("alpha").unwrap();
-        let src = store.upsert_session("src", "alpha", None, None, 1, 1, "running", None).unwrap();
-        let rev = store.upsert_session("src--review-1", "alpha", None, None, 1, 1, "running", None).unwrap();
+        let src = store
+            .upsert_session("src", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        let rev = store
+            .upsert_session("src--review-1", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
         store.set_session_kind(rev, "review", Some(src)).unwrap();
-        store.upsert_session("src--review-1", "alpha", None, None, 1, 2, "running", None).unwrap();
-        let row = store.list_sessions_for_host("alpha").unwrap()
-            .into_iter().find(|r| r.tmux_name == "src--review-1").unwrap();
+        store
+            .upsert_session("src--review-1", "alpha", None, None, 1, 2, "running", None)
+            .unwrap();
+        let row = store
+            .list_sessions_for_host("alpha")
+            .unwrap()
+            .into_iter()
+            .find(|r| r.tmux_name == "src--review-1")
+            .unwrap();
         assert_eq!(row.kind, "review", "kind must survive re-upsert");
         assert_eq!(row.reviews_session_id, Some(src));
     }
@@ -1863,8 +2010,12 @@ mod tests {
         let pid = store.upsert_project("o", "r", "/base/r").unwrap();
         // Pre-seed a stale row that should be pruned (kill), and one that
         // already exists so it produces an `updated` (not `created`).
-        store.upsert_session("stale", "alpha", None, None, 1, 1, "running", None).unwrap();
-        store.upsert_session("keep-existing", "alpha", None, None, 1, 1, "running", None).unwrap();
+        store
+            .upsert_session("stale", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store
+            .upsert_session("keep-existing", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
         let stale_id = store.get_session("stale", "alpha").unwrap().unwrap().id;
         bus.take(); // drain all setup events
 
@@ -1908,8 +2059,17 @@ mod tests {
             .into_iter()
             .map(|r| r.tmux_name)
             .collect();
-        assert_eq!(names, vec!["fresh", "keep-existing"], "stale pruned, two live");
-        let host = store.list_hosts().unwrap().into_iter().find(|h| h.alias == "alpha").unwrap();
+        assert_eq!(
+            names,
+            vec!["fresh", "keep-existing"],
+            "stale pruned, two live"
+        );
+        let host = store
+            .list_hosts()
+            .unwrap()
+            .into_iter()
+            .find(|h| h.alias == "alpha")
+            .unwrap();
         assert_eq!(host.claude_version.as_deref(), Some("2.1"));
         assert_eq!(host.last_pinged_at, Some(999));
         assert_eq!(store.list_projects().unwrap()[0].last_session_at, Some(60));
@@ -1917,7 +2077,10 @@ mod tests {
         // (b) the events fired — and only after commit (we drained pre-batch, so
         // everything here was emitted by the flush phase).
         let evts = bus.take();
-        assert!(evts.contains(&"host:probed:alpha".to_string()), "got: {evts:?}");
+        assert!(
+            evts.contains(&"host:probed:alpha".to_string()),
+            "got: {evts:?}"
+        );
         assert!(
             evts.iter().any(|e| e.starts_with("session:updated:")),
             "expected an update for keep-existing; got: {evts:?}"
@@ -1926,7 +2089,10 @@ mod tests {
             evts.iter().any(|e| e.starts_with("session:created:")),
             "expected a create for fresh; got: {evts:?}"
         );
-        assert!(evts.contains(&format!("session:killed:{stale_id}")), "got: {evts:?}");
+        assert!(
+            evts.contains(&format!("session:killed:{stale_id}")),
+            "got: {evts:?}"
+        );
         assert!(
             evts.iter().any(|e| e.starts_with("project:updated:")),
             "expected project:updated; got: {evts:?}"
@@ -1941,7 +2107,11 @@ mod tests {
 
         let row_count = |s: &Store| -> i64 {
             s.conn
-                .query_row("SELECT COUNT(*) FROM sessions WHERE host_alias='alpha'", [], |r| r.get(0))
+                .query_row(
+                    "SELECT COUNT(*) FROM sessions WHERE host_alias='alpha'",
+                    [],
+                    |r| r.get(0),
+                )
                 .unwrap()
         };
         assert_eq!(row_count(&store), 0);
@@ -1980,12 +2150,28 @@ mod tests {
 
         assert!(res.is_err(), "FK violation should abort the batch");
         // (a) NO rows persisted — not even the 'good' one before the failure.
-        assert_eq!(row_count(&store), 0, "transaction must have rolled back all writes");
+        assert_eq!(
+            row_count(&store),
+            0,
+            "transaction must have rolled back all writes"
+        );
         // host probe row must also be untouched (it was part of the same tx).
-        let host = store.list_hosts().unwrap().into_iter().find(|h| h.alias == "alpha").unwrap();
-        assert_ne!(host.claude_version.as_deref(), Some("9.9"), "host probe rolled back");
+        let host = store
+            .list_hosts()
+            .unwrap()
+            .into_iter()
+            .find(|h| h.alias == "alpha")
+            .unwrap();
+        assert_ne!(
+            host.claude_version.as_deref(),
+            Some("9.9"),
+            "host probe rolled back"
+        );
         assert_eq!(host.last_pinged_at, None, "host probe rolled back");
         // (b) NO events emitted — the flush phase never runs on rollback.
-        assert!(bus.take().is_empty(), "no event may fire for a rolled-back batch");
+        assert!(
+            bus.take().is_empty(),
+            "no event may fire for a rolled-back batch"
+        );
     }
 }

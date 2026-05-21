@@ -57,8 +57,10 @@ pub async fn refresh_projects(
     }
 
     // Collect git results off-lock.
-    let mut upserts: Vec<(crate::projects::DiscoveredProject, Vec<crate::projects::DiscoveredWorktree>)> =
-        Vec::new();
+    let mut upserts: Vec<(
+        crate::projects::DiscoveredProject,
+        Vec<crate::projects::DiscoveredWorktree>,
+    )> = Vec::new();
     while let Some(joined) = set.join_next().await {
         if let Ok((dp, Ok(worktrees))) = joined {
             upserts.push((dp, worktrees));

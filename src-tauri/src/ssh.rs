@@ -330,7 +330,9 @@ mod tests {
         let pid = child.id().expect("child has pid");
 
         let token2 = token.clone();
-        tokio::spawn(async move { token2.cancel(); });
+        tokio::spawn(async move {
+            token2.cancel();
+        });
 
         let result: &str = tokio::select! {
             _ = token.cancelled() => {
@@ -365,10 +367,7 @@ mod tests {
         // OnceCell semantics still apply: both calls share the same cell.
         let client = SshClient::new();
         let alias = "nonexistent-test-host-for-iter4a";
-        let (a, b) = tokio::join!(
-            client.ensure_master(alias),
-            client.ensure_master(alias),
-        );
+        let (a, b) = tokio::join!(client.ensure_master(alias), client.ensure_master(alias),);
         // Either both Ok (somehow worked) or both Err (the expected case); both
         // must agree — single OnceCell guarantees that.
         assert_eq!(a.is_ok(), b.is_ok(), "concurrent ensure_master must agree");

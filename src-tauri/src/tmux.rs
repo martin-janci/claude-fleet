@@ -1,6 +1,6 @@
-use async_trait::async_trait;
 use crate::ipc_error::IpcError;
 use crate::shell::quote as shell_quote;
+use async_trait::async_trait;
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -74,7 +74,13 @@ impl RemoteTmux {
     /// per-arg quoting inside `script`.
     async fn remote_bash(&self, script: &str) -> Result<std::process::Output, IpcError> {
         let quoted = shell_quote(script);
-        self.client.run(&self.host, &["bash", "-lc", &quoted], std::time::Duration::from_secs(10)).await
+        self.client
+            .run(
+                &self.host,
+                &["bash", "-lc", &quoted],
+                std::time::Duration::from_secs(10),
+            )
+            .await
     }
 }
 
@@ -101,7 +107,10 @@ impl TmuxExec for RemoteTmux {
         script.push_str(&format!(" -c {}", shell_quote(&cwd.to_string_lossy())));
         // Forward env explicitly — remote sshd typically doesn't pass LANG.
         script.push_str(" -e COLORTERM=truecolor -e TERM=xterm-256color");
-        script.push_str(&format!(" -e LANG={}", shell_quote(&std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".into()))));
+        script.push_str(&format!(
+            " -e LANG={}",
+            shell_quote(&std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".into()))
+        ));
         script.push(' ');
         script.push_str(&shell_quote(&pane_command()));
         let output = self.remote_bash(&script).await?;
@@ -131,7 +140,10 @@ impl TmuxExec for RemoteTmux {
     async fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError> {
         let trimmed = new.trim();
         if trimmed.is_empty() {
-            return Err(IpcError::new("E_TMUX", "new session name must not be empty"));
+            return Err(IpcError::new(
+                "E_TMUX",
+                "new session name must not be empty",
+            ));
         }
         if trimmed.contains(|c: char| c.is_whitespace() || c == '.' || c == ':') {
             return Err(IpcError::new(
@@ -279,7 +291,14 @@ pub async fn new_session(name: &str, working_dir: &std::path::Path) -> Result<()
     // login shell). `-e` overrides the server env for processes started
     // in this session, so the spawned `cl`/`bash` reliably sees UTF-8.
     let mut cmd = tokio::process::Command::new("tmux");
-    cmd.args(["new-session", "-d", "-s", name, "-c", &working_dir.to_string_lossy()]);
+    cmd.args([
+        "new-session",
+        "-d",
+        "-s",
+        name,
+        "-c",
+        &working_dir.to_string_lossy(),
+    ]);
     for var in ["LANG", "LC_ALL", "LC_CTYPE", "PATH"] {
         if let Ok(val) = std::env::var(var) {
             if !val.is_empty() {
@@ -307,7 +326,10 @@ pub async fn new_session(name: &str, working_dir: &std::path::Path) -> Result<()
 pub async fn rename_session(old: &str, new: &str) -> Result<(), IpcError> {
     let trimmed = new.trim();
     if trimmed.is_empty() {
-        return Err(IpcError::new("E_TMUX", "new session name must not be empty"));
+        return Err(IpcError::new(
+            "E_TMUX",
+            "new session name must not be empty",
+        ));
     }
     if trimmed.contains(|c: char| c.is_whitespace() || c == '.' || c == ':') {
         return Err(IpcError::new(
@@ -337,7 +359,13 @@ pub async fn rename_session(old: &str, new: &str) -> Result<(), IpcError> {
 /// or already dropped to shell.
 pub async fn restart_session(name: &str) -> Result<(), IpcError> {
     let output = tokio::process::Command::new("tmux")
-        .args(["respawn-pane", "-k", "-t", &format!("{name}:"), &pane_command()])
+        .args([
+            "respawn-pane",
+            "-k",
+            "-t",
+            &format!("{name}:"),
+            &pane_command(),
+        ])
         .output()
         .await
         .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
