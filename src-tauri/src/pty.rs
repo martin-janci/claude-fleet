@@ -1,5 +1,6 @@
 use crate::ipc_error::IpcError;
 use crate::shell::quote as shell_escape;
+use crate::ssh::SshClient;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -65,7 +66,11 @@ pub struct PtyOpenArgs {
 }
 
 #[tauri::command]
-pub fn pty_open(args: PtyOpenArgs, state: State<'_, Mutex<PtyState>>) -> Result<(), IpcError> {
+pub fn pty_open(
+    args: PtyOpenArgs,
+    state: State<'_, Mutex<PtyState>>,
+    ssh: State<'_, std::sync::Arc<SshClient>>,
+) -> Result<(), IpcError> {
     // Validate untrusted IPC input before it reaches `ssh` / `tmux`.
     crate::validate::host_alias(&args.host_alias)?;
     crate::validate::tmux_name(&args.session_name)?;
@@ -85,18 +90,19 @@ pub fn pty_open(args: PtyOpenArgs, state: State<'_, Mutex<PtyState>>) -> Result<
         c.args(["attach", "-t", &args.session_name]);
         c
     } else {
-        // Build the ControlPath the same way SshClient does so we share
-        // the established master. We don't need to import SshClient just
-        // to format a path — the format is stable.
-        let cm = {
-            let home = std::env::var("HOME").unwrap_or_default();
-            format!("{home}/.cache/claude-fleet/cm-{}.sock", args.host_alias)
-        };
+        // Reuse SshClient's ControlPath so this PTY multiplexes through the
+        // same master as every other ssh command (ControlMaster=auto creates
+        // it if it isn't up yet).
+        let cm = ssh.control_path(&args.host_alias);
         let mut c = CommandBuilder::new("ssh");
         c.args([
             "-tt",
             "-o",
-            &format!("ControlPath={}", cm),
+            "ControlMaster=auto",
+            "-o",
+            &format!("ControlPath={}", cm.display()),
+            "-o",
+            "ControlPersist=10m",
             "-o",
             "BatchMode=yes",
             "-o",
