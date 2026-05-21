@@ -164,8 +164,9 @@ impl Store {
             tx.commit()?;
         }
         if v < 5 {
-            self.conn
-                .execute_batch(include_str!("../migrations/005_session_reviews.sql"))?;
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../migrations/005_session_reviews.sql"))?;
+            tx.commit()?;
         }
         if v < 6 {
             self.conn
