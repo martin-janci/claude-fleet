@@ -292,6 +292,9 @@ pub struct NewSessionArgs {
     pub name: String,
     pub call_id: Option<u64>,
     pub new_worktree: Option<String>,
+    /// Session kind: `"work"` (default) runs Claude Code in the pane;
+    /// `"shell"` runs a plain interactive login shell.
+    pub kind: Option<String>,
 }
 
 /// Look up `(owner, repo)` for a given project id.
@@ -634,14 +637,24 @@ async fn new_session_inner(
             PathBuf::from(cwd)
         }
     };
+    // A "shell" session runs a plain login shell in the pane instead of
+    // Claude Code. Any other value (incl. None) is treated as a "work" session.
+    let is_shell = args.kind.as_deref() == Some("shell");
+    let pane_cmd = if is_shell {
+        crate::tmux::shell_pane_command()
+    } else {
+        crate::tmux::pane_command()
+    };
+
     let tmux = exec_for(&args.host_alias, ssh);
-    tmux.new_session(&args.name, &path).await?;
+    tmux.new_session(&args.name, &path, pane_cmd).await?;
 
     reconcile_one_host(store, ssh, &args.host_alias).await?;
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    s.list_sessions_for_host(&args.host_alias)?
+    let row = s
+        .list_sessions_for_host(&args.host_alias)?
         .into_iter()
         .find(|r| r.tmux_name == args.name)
         .ok_or_else(|| {
@@ -652,7 +665,16 @@ async fn new_session_inner(
                     args.name, args.host_alias
                 ),
             )
-        })
+        })?;
+    // Reconcile inserts every session as kind="work"; tag shell sessions
+    // afterwards. The session upsert preserves `kind` on re-reconcile.
+    if is_shell {
+        s.set_session_kind(row.id, "shell", None)?;
+        return s
+            .get_session(&args.name, &args.host_alias)?
+            .ok_or_else(|| IpcError::new("E_INTERNAL", "session vanished after kind tag"));
+    }
+    Ok(row)
 }
 
 #[derive(Deserialize)]
@@ -734,8 +756,23 @@ pub async fn restart_session(
 ) -> Result<SessionRow, IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
     crate::validate::tmux_name(&args.name)?;
+    // Respawn the pane with the command matching the session's kind so a
+    // restarted shell session comes back as a shell, not a Claude pane.
+    let is_shell = {
+        let s = store
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        s.get_session(&args.name, &args.host_alias)?
+            .map(|r| r.kind == "shell")
+            .unwrap_or(false)
+    };
+    let pane_cmd = if is_shell {
+        crate::tmux::shell_pane_command()
+    } else {
+        crate::tmux::pane_command()
+    };
     let tmux = exec_for(&args.host_alias, &ssh);
-    tmux.restart_session(&args.name).await?;
+    tmux.restart_session(&args.name, pane_cmd).await?;
     reconcile_one_host(&store, &ssh, &args.host_alias).await?;
     let s = store
         .lock()
@@ -877,12 +914,16 @@ pub async fn spawn_review(
     };
 
     // 2. Spawn the review tmux session (off-lock).
-    //    new_session runs pane_command() internally — same as any other session.
+    //    A review runs Claude Code — same pane command as any "work" session.
     let short = format!("{:x}", now_unix() & 0xfffff);
     let review_name = format!("{}--review-{}", source.tmux_name, short);
     let tmux = exec_for(&source.host_alias, &ssh);
-    tmux.new_session(&review_name, std::path::Path::new(&cwd))
-        .await?;
+    tmux.new_session(
+        &review_name,
+        std::path::Path::new(&cwd),
+        crate::tmux::pane_command(),
+    )
+    .await?;
 
     // 3. Register via per-host reconcile.
     reconcile_one_host(&store, &ssh, &source.host_alias).await?;
@@ -1085,6 +1126,7 @@ mod tests {
                 &self,
                 _name: &str,
                 _cwd: &std::path::Path,
+                _pane_cmd: &str,
             ) -> Result<(), IpcError> {
                 Ok(())
             }
@@ -1094,7 +1136,7 @@ mod tests {
             async fn rename_session(&self, _old: &str, _new: &str) -> Result<(), IpcError> {
                 Ok(())
             }
-            async fn restart_session(&self, _name: &str) -> Result<(), IpcError> {
+            async fn restart_session(&self, _name: &str, _pane_cmd: &str) -> Result<(), IpcError> {
                 Ok(())
             }
             async fn capture_pane(&self, _name: &str) -> Result<String, IpcError> {
@@ -1194,7 +1236,12 @@ mod tests {
             async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
                 Ok(vec![])
             }
-            async fn new_session(&self, _: &str, _: &std::path::Path) -> Result<(), IpcError> {
+            async fn new_session(
+                &self,
+                _: &str,
+                _: &std::path::Path,
+                _: &str,
+            ) -> Result<(), IpcError> {
                 Ok(())
             }
             async fn kill_session(&self, _: &str) -> Result<(), IpcError> {
@@ -1203,7 +1250,7 @@ mod tests {
             async fn rename_session(&self, _: &str, _: &str) -> Result<(), IpcError> {
                 Ok(())
             }
-            async fn restart_session(&self, _: &str) -> Result<(), IpcError> {
+            async fn restart_session(&self, _: &str, _: &str) -> Result<(), IpcError> {
                 Ok(())
             }
             async fn capture_pane(&self, _: &str) -> Result<String, IpcError> {

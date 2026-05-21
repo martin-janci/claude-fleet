@@ -504,6 +504,9 @@
                     {#if sess.kind === 'review'}
                       <span class="review-badge" title="review session">🔍</span>
                     {/if}
+                    {#if sess.kind === 'shell'}
+                      <span class="shell-badge" title="shell session">▶</span>
+                    {/if}
                     <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
                     <span class="sess-name">{sess.tmux_name}</span>
                     <div class="row-actions">
@@ -585,6 +588,9 @@
               {/if}
               {#if sess.kind === 'review'}
                 <span class="review-badge" title="review session">🔍</span>
+              {/if}
+              {#if sess.kind === 'shell'}
+                <span class="shell-badge" title="shell session">▶</span>
               {/if}
               <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
               <span class="sess-name">{sess.tmux_name}</span>
@@ -775,6 +781,7 @@
   }
 
   .review-badge { font-size: 0.7rem; margin-left: 0.2rem; }
+  .shell-badge { font-size: 0.7rem; margin-left: 0.2rem; color: var(--fg-muted); }
 
   .scroller {
     flex: 1 1 auto;
