@@ -481,6 +481,9 @@
                         title="{relatedCountFor(sess)} related session(s)"
                       >🔗{relatedCountFor(sess)}</span>
                     {/if}
+                    {#if sess.kind === 'review'}
+                      <span class="review-badge" title="review session">🔍</span>
+                    {/if}
                     <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
                     <span class="sess-name">{sess.tmux_name}</span>
                     <div class="row-actions">
@@ -558,6 +561,9 @@
                   data-testid="related-badge"
                   title="{relatedCountFor(sess)} related session(s)"
                 >🔗{relatedCountFor(sess)}</span>
+              {/if}
+              {#if sess.kind === 'review'}
+                <span class="review-badge" title="review session">🔍</span>
               {/if}
               <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
               <span class="sess-name">{sess.tmux_name}</span>
@@ -746,6 +752,8 @@
     border-radius: 3px;
     flex-shrink: 0;
   }
+
+  .review-badge { font-size: 0.7rem; margin-left: 0.2rem; }
 
   .scroller {
     flex: 1 1 auto;

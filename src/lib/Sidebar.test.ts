@@ -519,6 +519,16 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(screen.queryAllByTestId('related-badge')).toHaveLength(0);
   });
 
+  it('shows a 🔍 badge for review sessions', async () => {
+    const rev = sessionFor(1, 'dev-foo--review-1');
+    rev.kind = 'review';
+    rev.reviews_session_id = 999;
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-foo'), rev]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByText('🔍')).toBeInTheDocument();
+  });
+
   it('renders 500 sessions across 25 projects under a sub-500ms budget', async () => {
     const sess: SessionRow[] = [];
     const projs: typeof fakeProjects = [];
