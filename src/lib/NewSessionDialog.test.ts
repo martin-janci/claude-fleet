@@ -103,4 +103,43 @@ describe('NewSessionDialog', () => {
 
     newSessionAbortableSpy.mockRestore();
   });
+
+  it('defaults to a "work" session', async () => {
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({
+      ok: true,
+      value: {
+        id: 1, tmux_name: 'dev-martin-janci-claude-fleet', host_alias: 'local',
+        project_id: 1, worktree_id: 11, created_at: 1, last_activity_at: 1,
+        status: 'running', notes: null, account_uuid: null, kind: 'work',
+        reviews_session_id: null, worktree_key: null,
+      },
+    });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+    expect(spy.mock.calls[0][0].kind).toBe('work');
+    spy.mockRestore();
+  });
+
+  it('picking Shell passes kind="shell" and suffixes the tmux name with -sh', async () => {
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({
+      ok: true,
+      value: {
+        id: 2, tmux_name: 'dev-martin-janci-claude-fleet-sh', host_alias: 'local',
+        project_id: 1, worktree_id: 11, created_at: 1, last_activity_at: 1,
+        status: 'running', notes: null, account_uuid: null, kind: 'shell',
+        reviews_session_id: null, worktree_key: null,
+      },
+    });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('kind-shell'));
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+    expect(spy.mock.calls[0][0].kind).toBe('shell');
+    expect(spy.mock.calls[0][0].name).toBe('dev-martin-janci-claude-fleet-sh');
+    spy.mockRestore();
+  });
 });

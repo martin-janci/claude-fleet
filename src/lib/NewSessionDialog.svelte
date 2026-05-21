@@ -23,21 +23,37 @@
     writePref('last-host', chosenHost);
   });
 
+  // "work" runs Claude Code in the pane; "shell" runs a plain login shell.
+  let chosenKind = $state<'work' | 'shell'>('work');
+
   function defaultName(wt: WorktreeRow | null): string {
     const base = `dev-${project.project.owner}-${project.project.repo}`;
-    if (!wt || wt.name === 'main') return base;
-    return `${base}--${wt.name}`;
+    const suffix = chosenKind === 'shell' ? '-sh' : '';
+    if (!wt || wt.name === 'main') return base + suffix;
+    return `${base}--${wt.name}${suffix}`;
   }
 
   function defaultNameForNew(newName: string): string {
     const base = `dev-${project.project.owner}-${project.project.repo}`;
-    if (!newName.trim()) return base;
-    return `${base}--${newName.trim()}`;
+    const suffix = chosenKind === 'shell' ? '-sh' : '';
+    if (!newName.trim()) return base + suffix;
+    return `${base}--${newName.trim()}${suffix}`;
   }
 
   let chosenWorktreeId = $state<number | null>(untrack(() => project.worktrees[0]?.id ?? null));
   let newWorktreeName = $state<string>('');
   let name = $state(untrack(() => defaultName(project.worktrees[0] ?? null)));
+
+  // Re-derive the tmux name when the kind toggles so the `-sh` suffix tracks it.
+  function onPickKind(kind: 'work' | 'shell') {
+    chosenKind = kind;
+    if (inNewMode) {
+      name = defaultNameForNew(newWorktreeName);
+    } else {
+      const wt = project.worktrees.find((w) => w.id === chosenWorktreeId) ?? null;
+      name = defaultName(wt);
+    }
+  }
   let busy = $state(false);
   let error: string | null = $state(null);
   let createController: AbortController | null = null;
@@ -82,6 +98,7 @@
         worktree_id: inNewMode ? null : chosenWorktreeId,
         name: name.trim(),
         new_worktree: inNewMode ? newWorktreeName.trim() || null : null,
+        kind: chosenKind,
       },
       createController.signal,
     );
@@ -103,6 +120,26 @@
 
 <div class="dialog" role="dialog" aria-label="New session">
   <h3>New session — {project.project.owner}/{project.project.repo}</h3>
+
+  <label for="kind-picker">Type</label>
+  <div class="kind-row" id="kind-picker" role="group">
+    <button
+      class="kind-pick"
+      class:active={chosenKind === 'work'}
+      data-testid="kind-work"
+      onclick={() => onPickKind('work')}
+    >
+      Claude
+    </button>
+    <button
+      class="kind-pick"
+      class:active={chosenKind === 'shell'}
+      data-testid="kind-shell"
+      onclick={() => onPickKind('shell')}
+    >
+      Shell
+    </button>
+  </div>
 
   <label for="host-picker">Host</label>
   <div class="host-row" id="host-picker" role="group">
@@ -214,6 +251,17 @@
   }
   .host-pick.active { color: var(--fg); border-color: var(--accent); }
   .host-pick:disabled { opacity: 0.4; cursor: not-allowed; }
+  .kind-row { display: flex; gap: 0.3rem; }
+  .kind-pick {
+    font-size: 0.75rem;
+    padding: 0.2rem 0.7rem;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--fg-muted);
+    border-radius: 999px;
+    cursor: pointer;
+  }
+  .kind-pick.active { color: var(--fg); border-color: var(--accent); }
   .err { color: #e64a4a; font-size: 0.8rem; }
   .actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
   .actions button {
