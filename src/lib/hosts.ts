@@ -45,13 +45,22 @@ export async function addHost(
   const r = await invokeCmd<HostRow>('add_host', {
     args: { alias, ssh_alias: sshAlias },
   });
-  if (r.ok) mergeHost(r.value);
+  if (r.ok) {
+    // An explicit re-add overrides any lingering tombstone from a recent
+    // removeHost() of the same alias.
+    hostTombstones.delete(alias);
+    mergeHost(r.value);
+  }
   return r;
 }
 
 export async function probeHost(alias: string): Promise<Result<HostRow>> {
   const r = await invokeCmd<HostRow>('probe_host', { args: { alias } });
-  if (r.ok) mergeHost(r.value);
+  // A command result is authoritative — clear any stale tombstone first.
+  if (r.ok) {
+    hostTombstones.delete(alias);
+    mergeHost(r.value);
+  }
   return r;
 }
 
@@ -66,7 +75,10 @@ export async function hideHost(
   hidden: boolean,
 ): Promise<Result<HostRow>> {
   const r = await invokeCmd<HostRow>('hide_host', { args: { alias, hidden } });
-  if (r.ok) mergeHost(r.value);
+  if (r.ok) {
+    hostTombstones.delete(alias);
+    mergeHost(r.value);
+  }
   return r;
 }
 
@@ -75,7 +87,25 @@ export async function bootstrapHosts(): Promise<void> {
   if (r.ok) hosts.set(r.value);
 }
 
+// Recently-removed host aliases. `removeHost()` (optimistic) and the
+// `host:removed` event both delete a row; a `host:probed` event still in
+// flight for that alias would otherwise re-insert the dead host. Entries
+// expire so re-adding a host with the same alias isn't blocked for long.
+const hostTombstones = new Map<string, number>();
+const HOST_TOMBSTONE_MS = 5000;
+
+function isHostTombstoned(alias: string): boolean {
+  const t = hostTombstones.get(alias);
+  if (t === undefined) return false;
+  if (Date.now() - t > HOST_TOMBSTONE_MS) {
+    hostTombstones.delete(alias);
+    return false;
+  }
+  return true;
+}
+
 export function mergeHost(row: HostRow): void {
+  if (isHostTombstoned(row.alias)) return;
   hosts.update((arr) => {
     const i = arr.findIndex((h) => h.alias === row.alias);
     if (i === -1) return [...arr, row];
@@ -86,5 +116,6 @@ export function mergeHost(row: HostRow): void {
 }
 
 export function removeHost(alias: string): void {
+  hostTombstones.set(alias, Date.now());
   hosts.update((arr) => arr.filter((h) => h.alias !== alias));
 }

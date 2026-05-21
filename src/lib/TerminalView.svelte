@@ -64,10 +64,19 @@
     }
   });
 
+  /** Reentrancy guard. The two $effects above can both call openTerm() for
+   *  the same selection in one flush; openTerm is async and its
+   *  `currentSession` guard is only set after `await pty_open`, so a second
+   *  call would otherwise run a full second open — leaking a ResizeObserver
+   *  and a drain timer and double-opening the PTY. */
+  let opening = false;
+
   async function openTerm() {
+    if (opening) return;
     const sess = $selectedSession;
     if (!sess) return;
     if (!container) return;
+    opening = true;
     await closeTerm();
     openError = null;
     disconnected = false;
@@ -107,6 +116,7 @@
       ptyOpen = true;
     } catch (e) {
       openError = describeError(e);
+      opening = false;
       return;
     }
 
@@ -123,6 +133,7 @@
       if (!ptyOpen) return;
       void invoke('pty_resize', { args: { cols: lastCols, rows: lastRows } }).catch(() => {});
     }, 150);
+    opening = false;
   }
 
   function measureCellSize() {
@@ -148,12 +159,18 @@
 
   async function drainOnce() {
     if (!screen || !ptyOpen) return;
+    // Capture the screen we're draining into. If the session is switched
+    // (openTerm builds a new Screen) while this pty_drain is in flight, the
+    // resolved bytes belong to the old PTY — discard them rather than write
+    // stale output into the new screen.
+    const drainingInto = screen;
     let result: { data: string; bytes: number };
     try {
       result = await invoke<{ data: string; bytes: number }>('pty_drain');
     } catch {
       return;
     }
+    if (screen !== drainingInto) return;
     drainTicks += 1;
     if (result.bytes === 0) return;
     totalBytes += result.bytes;

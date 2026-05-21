@@ -41,7 +41,7 @@ export async function renameSession(
   const r = await invokeCmd<SessionRow>('rename_session', {
     args: { host_alias: hostAlias, old_name: oldName, new_name: newName },
   });
-  if (r.ok) mergeSession(r.value);
+  if (r.ok) acceptCommandRow(r.value);
   return r;
 }
 
@@ -49,7 +49,7 @@ export async function restartSession(hostAlias: string, name: string): Promise<R
   const r = await invokeCmd<SessionRow>('restart_session', {
     args: { host_alias: hostAlias, name },
   });
-  if (r.ok) mergeSession(r.value);
+  if (r.ok) acceptCommandRow(r.value);
   return r;
 }
 
@@ -62,7 +62,7 @@ export interface NewSessionArgs {
 
 export async function newSession(args: NewSessionArgs): Promise<Result<SessionRow>> {
   const r = await invokeCmd<SessionRow>('new_session', { args });
-  if (r.ok) mergeSession(r.value);
+  if (r.ok) acceptCommandRow(r.value);
   return r;
 }
 
@@ -71,7 +71,7 @@ export async function newSessionAbortable(
   signal?: AbortSignal,
 ): Promise<Result<SessionRow>> {
   const r = await invokeCmdAbortable<SessionRow>('new_session', { args }, signal);
-  if (r.ok) mergeSession(r.value);
+  if (r.ok) acceptCommandRow(r.value);
   return r;
 }
 
@@ -80,10 +80,33 @@ export async function bootstrapSessions(): Promise<void> {
   if (r.ok) sessions.set(r.value);
 }
 
+// Recently-removed session ids. Both the optimistic `removeSession()` and the
+// `session:killed` event delete a row; without a tombstone, a `session:updated`
+// event still in flight for that id would re-insert the dead row ("ghost
+// session"). Entries expire so a genuinely new id is never blocked.
+const tombstones = new Map<number, number>();
+const TOMBSTONE_MS = 5000;
+
+function isTombstoned(id: number): boolean {
+  const t = tombstones.get(id);
+  if (t === undefined) return false;
+  if (Date.now() - t > TOMBSTONE_MS) {
+    tombstones.delete(id);
+    return false;
+  }
+  return true;
+}
+
 export function mergeSession(row: SessionRow): void {
+  if (!row) return;
+  if (isTombstoned(row.id)) return;
   sessions.update((arr) => {
     const i = arr.findIndex((s) => s.id === row.id);
     if (i === -1) return [...arr, row];
+    // Monotonic guard: don't let a staler payload (e.g. a command return
+    // value that raced a newer `session:updated` event) clobber a fresher
+    // row. Equal timestamps still apply — they may carry a status change.
+    if (row.last_activity_at < arr[i].last_activity_at) return arr;
     const next = arr.slice();
     next[i] = row;
     return next;
@@ -91,7 +114,17 @@ export function mergeSession(row: SessionRow): void {
 }
 
 export function removeSession(id: number): void {
+  tombstones.set(id, Date.now());
   sessions.update((arr) => arr.filter((s) => s.id !== id));
+}
+
+/** Apply a row returned by a mutation command (rename/restart/new). Unlike an
+ *  event, a command result is the authoritative response to a request the
+ *  user just made, so it clears any tombstone for that id before merging. */
+function acceptCommandRow(row: SessionRow | null | undefined): void {
+  if (!row) return;
+  tombstones.delete(row.id);
+  mergeSession(row);
 }
 
 export async function relatedSessions(sessionId: number): Promise<Result<SessionRow[]>> {
