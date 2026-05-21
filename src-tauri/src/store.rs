@@ -2,6 +2,11 @@
 // registered via `tauri::Manager::manage()` because `rusqlite::Connection`
 // is not Send+Sync. Commands access it via `State<'_, Mutex<Store>>`.
 
+// Store is a coherent data-access API; several methods (e.g. `with_transaction`,
+// `get_account_by_uuid`, `delete_session`) are currently exercised only by
+// `#[cfg(test)]` code, so they read as dead in a non-test build.
+#![allow(dead_code)]
+
 use rusqlite::{Connection, OptionalExtension, Result};
 use crate::events::{EventBus, NoopEventBus, RowChange};
 use std::sync::Arc;

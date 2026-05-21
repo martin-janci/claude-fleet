@@ -86,10 +86,7 @@ pub fn git_ref(value: &str) -> Result<(), IpcError> {
         return Err(IpcError::new("E_INVALID", "branch must not be empty"));
     }
     if value.starts_with('-') {
-        return Err(IpcError::new(
-            "E_INVALID",
-            "branch must not start with '-'",
-        ));
+        return Err(IpcError::new("E_INVALID", "branch must not start with '-'"));
     }
     if value.contains("..") {
         return Err(IpcError::new("E_INVALID", "branch must not contain '..'"));
@@ -109,10 +106,7 @@ pub fn git_ref(value: &str) -> Result<(), IpcError> {
 pub fn tmux_name(value: &str) -> Result<(), IpcError> {
     let v = value.trim();
     if v.is_empty() {
-        return Err(IpcError::new(
-            "E_INVALID",
-            "session name must not be empty",
-        ));
+        return Err(IpcError::new("E_INVALID", "session name must not be empty"));
     }
     if v.starts_with('-') {
         return Err(IpcError::new(
@@ -120,8 +114,7 @@ pub fn tmux_name(value: &str) -> Result<(), IpcError> {
             "session name must not start with '-'",
         ));
     }
-    if v
-        .chars()
+    if v.chars()
         .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '.' | ':'))
     {
         return Err(IpcError::new(

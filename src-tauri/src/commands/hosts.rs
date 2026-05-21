@@ -275,27 +275,15 @@ echo ---
     ))
 }
 
-/// Lenient probe — never errors. Used by `add_host` internally.
-async fn probe_lenient(
-    ssh: &Arc<SshClient>,
-    host: &str,
-) -> (bool, Option<String>, Option<String>, Option<OauthAccount>) {
-    match probe(ssh, host).await {
-        Ok(v) => v,
-        Err(_) => (false, None, None, None),
-    }
-}
-
 /// Lenient probe with an explicit cancellation token. Used by `probe_host`.
+/// An SSH failure collapses to "unreachable, nothing known" rather than an
+/// error, so a Re-probe of a down host updates `reachable=false` in the UI.
 async fn probe_lenient_with_token(
     ssh: &Arc<SshClient>,
     host: &str,
     token: CancellationToken,
 ) -> (bool, Option<String>, Option<String>, Option<OauthAccount>) {
-    match probe_with_token(ssh, host, token).await {
-        Ok(v) => v,
-        Err(_) => (false, None, None, None),
-    }
+    probe_with_token(ssh, host, token).await.unwrap_or_default()
 }
 
 fn probe_local() -> (bool, Option<String>, Option<String>, Option<OauthAccount>) {

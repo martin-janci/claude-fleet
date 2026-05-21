@@ -52,10 +52,10 @@ fn compute_backfilled_path(
 /// Finder-launched GUI app does not inherit by default:
 ///
 ///   - PATH    — catches Homebrew, dotfiles bin/, fnm/nvm/asdf/mise, and
-///               custom per-user wrappers like `cl`.
+///     custom per-user wrappers like `cl`.
 ///   - LANG / LC_ALL / LC_CTYPE — locale. Without these, claude and other
-///               TUIs detect a non-UTF-8 terminal and render ASCII fallbacks
-///               (`_` instead of `└` / `↑` / `█` etc.).
+///     TUIs detect a non-UTF-8 terminal and render ASCII fallbacks
+///     (`_` instead of `└` / `↑` / `█` etc.).
 ///
 /// One shell invocation prints the values delimited by `\x1f` (US sep) and
 /// terminated by `\x1e` (RS) per variable. We parse and call set_var on each
@@ -287,7 +287,7 @@ mod path_backfill_tests {
     }
 
     #[test]
-    fn locale_backfill_triggers_when_only_C() {
+    fn locale_backfill_triggers_when_only_c() {
         // Plain POSIX C locale isn't UTF-8 — we should still backfill.
         assert!(needs_locale_backfill("C", "C", "C"));
         assert!(needs_locale_backfill("POSIX", "POSIX", ""));
