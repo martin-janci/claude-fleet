@@ -119,11 +119,13 @@ pub async fn start(
                     move |request: axum::extract::Request, next: axum::middleware::Next| {
                         let token = Arc::clone(&token);
                         async move {
-                            let header = request.headers().get(axum::http::header::AUTHORIZATION);
-                            if auth::bearer_matches(header, &token) {
-                                Ok(next.run(request).await)
-                            } else {
-                                Err(axum::http::StatusCode::UNAUTHORIZED)
+                            // DNS-rebinding defense + bearer token, in that order.
+                            match auth::check_request(request.headers(), &token) {
+                                Ok(()) => Ok(next.run(request).await),
+                                Err(status) => {
+                                    eprintln!("[mcp] rejected request: {status}");
+                                    Err(status)
+                                }
                             }
                         }
                     },

@@ -76,6 +76,9 @@ A typical loop: `list_sessions` to see state → `new_session` to spawn one →
 - **Bearer token.** Missing, malformed, or wrong tokens get `401`. The token
   guards against other local processes and against a malicious web page's
   `fetch` (which cannot read the token).
+- **DNS-rebinding defense.** Requests carrying a non-loopback `Origin` or
+  `Host` header are rejected with `403` before the token is even checked — a
+  remote page cannot reach the server by rebinding its domain to `127.0.0.1`.
 - **Off by default.** No listener exists until you enable it in Settings.
 - **Same trust as the UI.** Tools call the same validated, shell-quoted code
   paths the desktop UI uses — the API adds no new SSH-command surface.
