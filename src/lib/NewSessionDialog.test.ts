@@ -1,6 +1,7 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tick } from 'svelte';
+import * as sessionsModule from './sessions';
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -56,5 +57,50 @@ describe('NewSessionDialog', () => {
     await tick();
     const newSessionCall = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.find((c) => c[0] === 'new_session');
     expect((newSessionCall![1] as any).args.host_alias).toBe('mefistos');
+  });
+
+  it('clicking + new chip, typing a name, and clicking Create passes new_worktree and worktree_id=null', async () => {
+    const newSessionAbortableSpy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({
+      ok: true,
+      value: {
+        id: 42,
+        tmux_name: 'dev-martin-janci-claude-fleet--feat-test',
+        host_alias: 'local',
+        project_id: 1,
+        worktree_id: null,
+        created_at: 1,
+        last_activity_at: 1,
+        status: 'running',
+        notes: null,
+        account_uuid: null,
+        kind: 'work',
+        reviews_session_id: null,
+        worktree_key: null,
+      },
+    });
+
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+
+    // Click the "+ new" chip
+    const newChip = screen.getByTestId('new-worktree-chip');
+    await fireEvent.click(newChip);
+    await tick();
+
+    // Type a worktree name
+    const nameInput = screen.getByTestId('new-worktree-name');
+    await fireEvent.input(nameInput, { target: { value: 'feat-test' } });
+    await tick();
+
+    // Click Create
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+
+    expect(newSessionAbortableSpy).toHaveBeenCalledOnce();
+    const callArgs = newSessionAbortableSpy.mock.calls[0][0];
+    expect(callArgs.new_worktree).toBe('feat-test');
+    expect(callArgs.worktree_id).toBeNull();
+
+    newSessionAbortableSpy.mockRestore();
   });
 });

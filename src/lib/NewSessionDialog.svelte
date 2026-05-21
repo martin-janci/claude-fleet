@@ -29,7 +29,14 @@
     return `${base}--${wt.name}`;
   }
 
+  function defaultNameForNew(newName: string): string {
+    const base = `dev-${project.project.owner}-${project.project.repo}`;
+    if (!newName.trim()) return base;
+    return `${base}--${newName.trim()}`;
+  }
+
   let chosenWorktreeId = $state<number | null>(untrack(() => project.worktrees[0]?.id ?? null));
+  let newWorktreeName = $state<string>('');
   let name = $state(untrack(() => defaultName(project.worktrees[0] ?? null)));
   let busy = $state(false);
   let error: string | null = $state(null);
@@ -37,13 +44,32 @@
 
   function onPickWorktree(id: number) {
     chosenWorktreeId = id;
+    newWorktreeName = '';
     const wt = project.worktrees.find((w) => w.id === id) ?? null;
     name = defaultName(wt);
   }
 
+  function onPickNew() {
+    chosenWorktreeId = null;
+    newWorktreeName = '';
+    name = defaultNameForNew('');
+  }
+
+  function onNewWorktreeNameInput(value: string) {
+    newWorktreeName = value;
+    name = defaultNameForNew(value);
+  }
+
+  // Re-derive: new-worktree mode is active when chosenWorktreeId is null
+  let inNewMode = $derived(chosenWorktreeId === null);
+
   async function submit() {
     if (!name.trim()) {
       error = 'Session name required';
+      return;
+    }
+    if (inNewMode && !newWorktreeName.trim()) {
+      error = 'Worktree name required';
       return;
     }
     busy = true;
@@ -53,8 +79,9 @@
       {
         host_alias: chosenHost,
         project_id: project.project.id,
-        worktree_id: chosenWorktreeId,
+        worktree_id: inNewMode ? null : chosenWorktreeId,
         name: name.trim(),
+        new_worktree: inNewMode ? newWorktreeName.trim() || null : null,
       },
       createController.signal,
     );
@@ -91,19 +118,36 @@
     {/each}
   </div>
 
-  {#if project.worktrees.length > 1}
-    <label for="wt-picker">Worktree</label>
-    <div class="worktree-row" id="wt-picker" role="group">
-      {#each project.worktrees as wt (wt.id)}
-        <button
-          class="wt-pick"
-          class:active={chosenWorktreeId === wt.id}
-          onclick={() => onPickWorktree(wt.id)}
-        >
-          {wt.name}
-        </button>
-      {/each}
-    </div>
+  <label for="wt-picker">Worktree</label>
+  <div class="worktree-row" id="wt-picker" role="group">
+    {#each project.worktrees as wt (wt.id)}
+      <button
+        class="wt-pick"
+        class:active={chosenWorktreeId === wt.id}
+        onclick={() => onPickWorktree(wt.id)}
+      >
+        {wt.name}
+      </button>
+    {/each}
+    <button
+      class="wt-pick wt-new"
+      class:active={inNewMode}
+      data-testid="new-worktree-chip"
+      onclick={onPickNew}
+    >
+      + new
+    </button>
+  </div>
+
+  {#if inNewMode}
+    <label for="new-wt-name">new branch / worktree name</label>
+    <input
+      id="new-wt-name"
+      data-testid="new-worktree-name"
+      value={newWorktreeName}
+      oninput={(e) => onNewWorktreeNameInput((e.target as HTMLInputElement).value)}
+      placeholder="feat-my-feature"
+    />
   {/if}
 
   <label for="session-name">tmux name</label>
@@ -118,7 +162,7 @@
     {#if busy}
       <button type="button" data-testid="cancel-create" onclick={cancelCreate}>Cancel creation</button>
     {:else}
-      <button onclick={submit} disabled={!name.trim()}>Create</button>
+      <button onclick={submit} disabled={!name.trim() || (inNewMode && !newWorktreeName.trim())}>Create</button>
     {/if}
   </div>
 </div>
@@ -156,6 +200,7 @@
     cursor: pointer;
   }
   .wt-pick.active { color: var(--fg); border-color: var(--accent); }
+  .wt-new { font-style: italic; }
   .host-row { display: flex; gap: 0.3rem; flex-wrap: wrap; }
   .host-pick {
     font-size: 0.75rem;

@@ -58,6 +58,7 @@ export interface NewSessionArgs {
   project_id: number;
   worktree_id: number | null;
   name: string;
+  new_worktree?: string | null;
 }
 
 export async function newSession(args: NewSessionArgs): Promise<Result<SessionRow>> {

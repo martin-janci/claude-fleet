@@ -333,6 +333,7 @@ pub struct NewSessionArgs {
     pub worktree_id: Option<i64>,
     pub name: String,
     pub call_id: Option<u64>,
+    pub new_worktree: Option<String>,
 }
 
 /// Look up `(owner, repo)` for a given project id.
@@ -499,6 +500,49 @@ async fn ensure_remote_project(
     Ok(())
 }
 
+/// Build a bash script (run via `bash -lc`) that creates a new worktree for a
+/// NEW branch `name` off the repo's default branch, under `.worktrees/` or
+/// `.claude/worktrees/` (auto-detected, fallback `.worktrees/`). Idempotent:
+/// if the worktree dir already exists it's reused. Git's chatter goes to
+/// stderr; the ONLY stdout is the absolute path of the worktree (last line),
+/// which the caller uses as the tmux cwd.
+fn worktree_add_script(root: &str, name: &str) -> String {
+    format!(
+        "set -e\n\
+         cd {root}\n\
+         name={name}\n\
+         if [ -d .worktrees ]; then base=.worktrees\n\
+         elif [ -d .claude/worktrees ]; then base=.claude/worktrees\n\
+         else base=.worktrees\n\
+         fi\n\
+         wt=\"$base/$name\"\n\
+         if [ ! -e \"$wt\" ]; then\n\
+         def=\"$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')\"\n\
+         [ -z \"$def\" ] && def=\"$(git rev-parse --abbrev-ref HEAD 2>/dev/null)\"\n\
+         git worktree add \"$wt\" -b \"$name\" \"$def\" 1>&2\n\
+         fi\n\
+         ( cd \"$wt\" && pwd )\n",
+        root = shq(root),
+        name = shq(name),
+    )
+}
+
+async fn create_worktree_local(root: &str, name: &str) -> Result<String, IpcError> {
+    let script = worktree_add_script(root, name);
+    let out = tokio::process::Command::new("bash")
+        .args(["-lc", &script])
+        .output()
+        .await
+        .map_err(|e| IpcError::new("E_GIT_SETUP", format!("bash: {e}")))?;
+    if !out.status.success() {
+        return Err(IpcError::new(
+            "E_GIT_SETUP",
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 #[tauri::command]
 pub async fn new_session(
     args: NewSessionArgs,
@@ -509,6 +553,16 @@ pub async fn new_session(
     // Reject hostile input before it reaches ssh / tmux / git.
     crate::validate::host_alias(&args.host_alias)?;
     crate::validate::tmux_name(&args.name)?;
+
+    if let Some(name) = args.new_worktree.as_deref() {
+        crate::validate::git_ref(name)?;
+        if name == "main" || name == "master" {
+            return Err(IpcError::new(
+                "E_INVALID",
+                "worktree name must not be 'main' or 'master'",
+            ));
+        }
+    }
 
     // Mint / bind a cancellation token for the duration of this command.
     // If a call_id was provided by the frontend, bind under that id so the
@@ -541,53 +595,108 @@ async fn new_session_inner(
     // machine — so we translate to `~/projects/github.com/<owner>/<repo>`
     // (matching proj-clean's convention) and auto-clone if missing.
     let path: PathBuf = if args.host_alias == "local" {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-        if let Some(wid) = args.worktree_id {
-            let mut stmt = s
-                .conn_ref()
-                .prepare("SELECT path FROM worktrees WHERE id=?1")?;
-            let row: String = stmt.query_row(rusqlite::params![wid], |r| r.get(0))?;
-            PathBuf::from(row)
+        if let Some(ref name) = args.new_worktree {
+            // NEW WORKTREE: create branch + worktree, return the new dir.
+            let base_path = {
+                let s = store
+                    .lock()
+                    .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+                let mut stmt = s
+                    .conn_ref()
+                    .prepare("SELECT base_path FROM projects WHERE id=?1")?;
+                let row: String =
+                    stmt.query_row(rusqlite::params![args.project_id], |r| r.get(0))?;
+                row
+            };
+            PathBuf::from(create_worktree_local(&base_path, name).await?)
         } else {
-            let mut stmt = s
-                .conn_ref()
-                .prepare("SELECT base_path FROM projects WHERE id=?1")?;
-            let row: String = stmt.query_row(rusqlite::params![args.project_id], |r| r.get(0))?;
-            PathBuf::from(row)
-        }
-    } else {
-        // Remote path: derive from owner/repo, then ensure-on-remote.
-        let (owner, repo, wt_info) = {
             let s = store
                 .lock()
                 .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-            let (owner, repo) = fetch_owner_repo(&s, args.project_id)?;
-            let wt = if let Some(wid) = args.worktree_id {
-                Some(fetch_worktree(&s, wid)?)
+            if let Some(wid) = args.worktree_id {
+                let mut stmt = s
+                    .conn_ref()
+                    .prepare("SELECT path FROM worktrees WHERE id=?1")?;
+                let row: String = stmt.query_row(rusqlite::params![wid], |r| r.get(0))?;
+                PathBuf::from(row)
             } else {
-                None
+                let mut stmt = s
+                    .conn_ref()
+                    .prepare("SELECT base_path FROM projects WHERE id=?1")?;
+                let row: String =
+                    stmt.query_row(rusqlite::params![args.project_id], |r| r.get(0))?;
+                PathBuf::from(row)
+            }
+        }
+    } else {
+        // Remote path: derive from owner/repo, then ensure-on-remote.
+        if let Some(ref name) = args.new_worktree {
+            // NEW WORKTREE on remote: ensure clone exists, then create worktree.
+            let (owner, repo) = {
+                let s = store
+                    .lock()
+                    .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+                fetch_owner_repo(&s, args.project_id)?
             };
-            (owner, repo, wt)
-        };
-        let home = remote_home(ssh, &args.host_alias).await?;
-        let wt_name_str = wt_info.as_ref().map(|(name, _)| name.as_str());
-        let (project_root, cwd) = remote_project_path(&home, &owner, &repo, wt_name_str);
-        let worktree_for_clone = wt_info
-            .as_ref()
-            .map(|(name, branch)| (name.as_str(), branch.as_deref()));
-        ensure_remote_project(
-            ssh,
-            &args.host_alias,
-            &owner,
-            &repo,
-            &project_root,
-            worktree_for_clone,
-            token,
-        )
-        .await?;
-        PathBuf::from(cwd)
+            let home = remote_home(ssh, &args.host_alias).await?;
+            let (project_root, _) = remote_project_path(&home, &owner, &repo, None);
+            ensure_remote_project(
+                ssh,
+                &args.host_alias,
+                &owner,
+                &repo,
+                &project_root,
+                None,
+                token.clone(),
+            )
+            .await?;
+            let script = worktree_add_script(&project_root, name);
+            let out = ssh
+                .run_cancellable(
+                    &args.host_alias,
+                    &["bash", "-lc", &script],
+                    std::time::Duration::from_secs(60),
+                    token,
+                )
+                .await?;
+            if !out.status.success() {
+                return Err(IpcError::new(
+                    "E_GIT_SETUP",
+                    String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                ));
+            }
+            PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        } else {
+            let (owner, repo, wt_info) = {
+                let s = store
+                    .lock()
+                    .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+                let (owner, repo) = fetch_owner_repo(&s, args.project_id)?;
+                let wt = if let Some(wid) = args.worktree_id {
+                    Some(fetch_worktree(&s, wid)?)
+                } else {
+                    None
+                };
+                (owner, repo, wt)
+            };
+            let home = remote_home(ssh, &args.host_alias).await?;
+            let wt_name_str = wt_info.as_ref().map(|(name, _)| name.as_str());
+            let (project_root, cwd) = remote_project_path(&home, &owner, &repo, wt_name_str);
+            let worktree_for_clone = wt_info
+                .as_ref()
+                .map(|(name, branch)| (name.as_str(), branch.as_deref()));
+            ensure_remote_project(
+                ssh,
+                &args.host_alias,
+                &owner,
+                &repo,
+                &project_root,
+                worktree_for_clone,
+                token,
+            )
+            .await?;
+            PathBuf::from(cwd)
+        }
     };
     let tmux = exec_for(&args.host_alias, ssh);
     tmux.new_session(&args.name, &path).await?;
@@ -1277,5 +1386,97 @@ mod tests {
             worktree_key_for_path("/Users/x/projects/github.com/o/r/.claude/worktrees/"),
             Some("main".to_string())
         );
+    }
+
+    // ── worktree_add_script unit tests ────────────────────────────────────────
+
+    #[test]
+    fn worktree_add_script_contains_expected_fragments() {
+        let script = worktree_add_script("/repo/root", "feat-x");
+        assert!(script.contains("cd '/repo/root'"), "cd root: {script}");
+        assert!(script.contains("name='feat-x'"), "name assignment: {script}");
+        assert!(script.contains("git worktree add"), "worktree add: {script}");
+        assert!(script.contains(" -b "), "branch flag: {script}");
+        assert!(script.contains(".worktrees"), ".worktrees dir: {script}");
+        assert!(
+            script.contains(".claude/worktrees"),
+            ".claude/worktrees dir: {script}"
+        );
+        assert!(
+            script.contains("refs/remotes/origin/HEAD"),
+            "default branch detection: {script}"
+        );
+    }
+
+    // ── create_worktree_local integration test ────────────────────────────────
+
+    #[tokio::test]
+    async fn create_worktree_local_creates_and_is_idempotent() {
+        use std::process::Command;
+
+        // Create a unique temp dir for the bare repo
+        let base = std::env::temp_dir().join(format!(
+            "cf-wt-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&base).expect("create base");
+
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo");
+        let repo_str = repo.to_str().unwrap();
+
+        // git init
+        let status = Command::new("git")
+            .args(["init", repo_str])
+            .status()
+            .expect("git init");
+        assert!(status.success());
+
+        // configure user.email and user.name so commit works
+        Command::new("git")
+            .args(["-C", repo_str, "config", "user.email", "test@test.com"])
+            .status()
+            .expect("git config email");
+        Command::new("git")
+            .args(["-C", repo_str, "config", "user.name", "Test"])
+            .status()
+            .expect("git config name");
+
+        // write a file and commit
+        let file = repo.join("README.md");
+        std::fs::write(&file, "hello").expect("write file");
+        Command::new("git")
+            .args(["-C", repo_str, "add", "."])
+            .status()
+            .expect("git add");
+        Command::new("git")
+            .args(["-C", repo_str, "commit", "-m", "init"])
+            .status()
+            .expect("git commit");
+
+        // call create_worktree_local
+        let result = create_worktree_local(repo_str, "feat-x").await;
+        assert!(result.is_ok(), "first call failed: {:?}", result);
+        let wt_path = result.unwrap();
+        assert!(
+            wt_path.ends_with("/.worktrees/feat-x"),
+            "path should end with /.worktrees/feat-x, got: {wt_path}"
+        );
+        assert!(
+            std::path::Path::new(&wt_path).is_dir(),
+            "worktree dir should exist: {wt_path}"
+        );
+
+        // second call — idempotent
+        let result2 = create_worktree_local(repo_str, "feat-x").await;
+        assert!(result2.is_ok(), "second (idempotent) call failed: {:?}", result2);
+        assert_eq!(result2.unwrap(), wt_path, "idempotent call must return same path");
+
+        // cleanup
+        std::fs::remove_dir_all(&base).ok();
     }
 }
