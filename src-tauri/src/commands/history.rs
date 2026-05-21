@@ -18,6 +18,18 @@ const LOG_FORMAT: &str = "--pretty=format:%x1e%H%x1f%h%x1f%P%x1f%D%x1f%an%x1f%aI
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct Branch {
+    pub name: String,
+    pub is_current: bool,
+    pub is_remote: bool,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub tip_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct GitRef {
     pub name: String,
     /// branch | remote | tag | head
@@ -152,6 +164,82 @@ pub async fn repo_log(
     Ok(parse_log(&out.stdout))
 }
 
+const BRANCH_FORMAT: &str =
+    "--format=%(refname)%1f%(objectname:short)%1f%(HEAD)%1f%(upstream:short)%1f%(upstream:track)";
+
+/// Parse `[ahead N, behind M]` (either part may be absent) into `(ahead, behind)`.
+fn parse_track(s: &str) -> (u32, u32) {
+    let inner = s.trim().trim_start_matches('[').trim_end_matches(']');
+    let mut ahead = 0;
+    let mut behind = 0;
+    for part in inner.split(',') {
+        let p = part.trim();
+        if let Some(n) = p.strip_prefix("ahead ") {
+            ahead = n.trim().parse().unwrap_or(0);
+        } else if let Some(n) = p.strip_prefix("behind ") {
+            behind = n.trim().parse().unwrap_or(0);
+        }
+    }
+    (ahead, behind)
+}
+
+fn parse_branches(raw: &[u8]) -> Vec<Branch> {
+    let text = String::from_utf8_lossy(raw);
+    let mut out = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.splitn(5, '\u{1f}').collect();
+        if f.len() < 5 {
+            continue;
+        }
+        let refname = f[0];
+        let (name, is_remote) = if let Some(n) = refname.strip_prefix("refs/heads/") {
+            (n.to_string(), false)
+        } else if let Some(n) = refname.strip_prefix("refs/remotes/") {
+            (n.to_string(), true)
+        } else {
+            continue;
+        };
+        let (ahead, behind) = parse_track(f[4]);
+        out.push(Branch {
+            name,
+            is_current: f[2] == "*",
+            is_remote,
+            upstream: if f[3].is_empty() {
+                None
+            } else {
+                Some(f[3].to_string())
+            },
+            ahead,
+            behind,
+            tip_hash: f[1].to_string(),
+        });
+    }
+    out
+}
+
+/// Local + remote branches for a session's worktree.
+#[tauri::command]
+pub async fn repo_branches(
+    args: crate::commands::files::SessionIdArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<Vec<Branch>, IpcError> {
+    let (host, name) = session_target(&store, args.session_id)?;
+    let body = format!(
+        "git -C \"$root\" for-each-ref {fmt} refs/heads refs/remotes",
+        fmt = BRANCH_FORMAT,
+    );
+    let script = repo_script(&name, &body);
+    let out = run_in_repo(&ssh, &host, &script).await?;
+    if !out.status.success() {
+        return Err(repo_err(&out));
+    }
+    Ok(parse_branches(&out.stdout))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +285,26 @@ mod tests {
         assert_eq!(refs[0].kind, "tag");
         assert_eq!(refs[1].kind, "remote");
         assert_eq!(refs[2].kind, "branch");
+    }
+
+    #[test]
+    fn parse_branches_reads_current_remote_and_track() {
+        // refname US short US HEAD US upstream US track  — one ref per line.
+        let raw = "refs/heads/main\u{1f}aaaa\u{1f}*\u{1f}origin/main\u{1f}[ahead 2, behind 1]\n\
+                   refs/heads/feat\u{1f}bbbb\u{1f} \u{1f}\u{1f}\n\
+                   refs/remotes/origin/main\u{1f}aaaa\u{1f} \u{1f}\u{1f}\n";
+        let bs = parse_branches(raw.as_bytes());
+        assert_eq!(bs.len(), 3);
+        assert_eq!(bs[0].name, "main");
+        assert!(bs[0].is_current);
+        assert!(!bs[0].is_remote);
+        assert_eq!(bs[0].upstream.as_deref(), Some("origin/main"));
+        assert_eq!(bs[0].ahead, 2);
+        assert_eq!(bs[0].behind, 1);
+        assert_eq!(bs[1].name, "feat");
+        assert!(!bs[1].is_current);
+        assert_eq!(bs[1].ahead, 0);
+        assert_eq!(bs[2].name, "origin/main");
+        assert!(bs[2].is_remote);
     }
 }
