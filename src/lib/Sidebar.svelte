@@ -362,6 +362,60 @@
 </script>
 
 <div class="sidebar" data-testid="sidebar-tree">
+  {#snippet sessionRow(sess: SessionRow)}
+    {@const sessSelected = $selectedSession?.id === sess.id}
+    {@const isRenaming = renamingName === sess.tmux_name}
+    <div
+      class="sess-row"
+      class:selected={sessSelected}
+      class:renaming={isRenaming}
+      data-testid="sess-row"
+      role="button"
+      tabindex="0"
+      ondblclick={(e) => beginRename(sess, e)}
+      onclick={() => !isRenaming && onSelectSession(sess)}
+      onkeydown={(e) => !isRenaming && onKeySession(e, sess)}
+    >
+      {#if isRenaming}
+        <input
+          bind:this={renameInput}
+          class="rename-input"
+          data-testid="rename-input"
+          bind:value={renameValue}
+          onkeydown={onRenameKey}
+          onblur={commitRename}
+        />
+      {:else}
+        <span class="status-dot status-{sess.status}" title={sess.status} aria-hidden="true"></span>
+        {#if relatedCountFor(sess) > 0}
+          <span
+            class="related-badge"
+            data-testid="related-badge"
+            role="img"
+            title="{relatedCountFor(sess)} related session(s)"
+            aria-label="{relatedCountFor(sess)} related sessions"
+          >🔗{relatedCountFor(sess)}</span>
+        {/if}
+        {#if sess.kind === 'review'}
+          <span class="review-badge" role="img" title="review session" aria-label="review session">🔍</span>
+        {/if}
+        {#if sess.kind === 'shell'}
+          <span class="shell-badge" title="shell session">▶</span>
+        {/if}
+        <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
+        <span class="sess-name">{sess.tmux_name}</span>
+        <div class="row-actions">
+          <button class="icon-btn small" onclick={(e) => doRestart(sess, e)} title="Restart claude in this session" aria-label="Restart">↻</button>
+          <button class="icon-btn small" onclick={(e) => beginRename(sess, e)} title="Rename session" aria-label="Rename">✎</button>
+          <button class="icon-btn small danger" onclick={(e) => askKill(sess, e)} title="Kill session" aria-label="Kill">×</button>
+        </div>
+      {/if}
+    </div>
+    {#if isRenaming && renameError}
+      <p class="err inline-err">{renameError}</p>
+    {/if}
+  {/snippet}
+
   <header class="sidebar-header" data-testid="sidebar-chrome-top">
     <div class="row">
       <input
@@ -466,76 +520,7 @@
 
             {#if !isCollapsed}
               {#each projectSessions as sess (sess.id)}
-                {@const sessSelected = $selectedSession?.id === sess.id}
-                {@const isRenaming = renamingName === sess.tmux_name}
-                <div
-                  class="sess-row"
-                  class:selected={sessSelected}
-                  class:renaming={isRenaming}
-                  data-testid="sess-row"
-                  role="button"
-                  tabindex="0"
-                  ondblclick={(e) => beginRename(sess, e)}
-                  onclick={() => !isRenaming && onSelectSession(sess)}
-                  onkeydown={(e) => !isRenaming && onKeySession(e, sess)}
-                >
-                  {#if isRenaming}
-                    <input
-                      bind:this={renameInput}
-                      class="rename-input"
-                      data-testid="rename-input"
-                      bind:value={renameValue}
-                      onkeydown={onRenameKey}
-                      onblur={commitRename}
-                    />
-                  {:else}
-                    <span
-                      class="status-dot status-{sess.status}"
-                      title={sess.status}
-                      aria-hidden="true"
-                    ></span>
-                    {#if relatedCountFor(sess) > 0}
-                      <span
-                        class="related-badge"
-                        data-testid="related-badge"
-                        role="img"
-                        title="{relatedCountFor(sess)} related session(s)"
-                        aria-label="{relatedCountFor(sess)} related sessions"
-                      >🔗{relatedCountFor(sess)}</span>
-                    {/if}
-                    {#if sess.kind === 'review'}
-                      <span class="review-badge" role="img" title="review session" aria-label="review session">🔍</span>
-                    {/if}
-                    {#if sess.kind === 'shell'}
-                      <span class="shell-badge" title="shell session">▶</span>
-                    {/if}
-                    <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
-                    <span class="sess-name">{sess.tmux_name}</span>
-                    <div class="row-actions">
-                      <button
-                        class="icon-btn small"
-                        onclick={(e) => doRestart(sess, e)}
-                        title="Restart claude in this session"
-                        aria-label="Restart"
-                      >↻</button>
-                      <button
-                        class="icon-btn small"
-                        onclick={(e) => beginRename(sess, e)}
-                        title="Rename session"
-                        aria-label="Rename"
-                      >✎</button>
-                      <button
-                        class="icon-btn small danger"
-                        onclick={(e) => askKill(sess, e)}
-                        title="Kill session"
-                        aria-label="Kill"
-                      >×</button>
-                    </div>
-                  {/if}
-                </div>
-                {#if isRenaming && renameError}
-                  <p class="err inline-err">{renameError}</p>
-                {/if}
+                {@render sessionRow(sess)}
               {/each}
             {/if}
           </li>
@@ -553,61 +538,7 @@
       <div class="orphan-section" data-testid="orphan-sessions">
         <div class="section-header">Other sessions ({orphanSessions.length})</div>
         {#each orphanSessions as sess (sess.id)}
-          {@const sessSelected = $selectedSession?.id === sess.id}
-          {@const isRenaming = renamingName === sess.tmux_name}
-          <div
-            class="sess-row"
-            class:selected={sessSelected}
-            class:renaming={isRenaming}
-            data-testid="sess-row"
-            role="button"
-            tabindex="0"
-            ondblclick={(e) => beginRename(sess, e)}
-            onclick={() => !isRenaming && onSelectSession(sess)}
-            onkeydown={(e) => !isRenaming && onKeySession(e, sess)}
-          >
-            {#if isRenaming}
-              <input
-                bind:this={renameInput}
-                class="rename-input"
-                data-testid="rename-input"
-                bind:value={renameValue}
-                onkeydown={onRenameKey}
-                onblur={commitRename}
-              />
-            {:else}
-              <span
-                class="status-dot status-{sess.status}"
-                title={sess.status}
-                aria-hidden="true"
-              ></span>
-              {#if relatedCountFor(sess) > 0}
-                <span
-                  class="related-badge"
-                  data-testid="related-badge"
-                  role="img"
-                  title="{relatedCountFor(sess)} related session(s)"
-                  aria-label="{relatedCountFor(sess)} related sessions"
-                >🔗{relatedCountFor(sess)}</span>
-              {/if}
-              {#if sess.kind === 'review'}
-                <span class="review-badge" role="img" title="review session" aria-label="review session">🔍</span>
-              {/if}
-              {#if sess.kind === 'shell'}
-                <span class="shell-badge" title="shell session">▶</span>
-              {/if}
-              <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
-              <span class="sess-name">{sess.tmux_name}</span>
-              <div class="row-actions">
-                <button class="icon-btn small" onclick={(e) => doRestart(sess, e)} title="Restart">↻</button>
-                <button class="icon-btn small" onclick={(e) => beginRename(sess, e)} title="Rename">✎</button>
-                <button class="icon-btn small danger" onclick={(e) => askKill(sess, e)} title="Kill">×</button>
-              </div>
-            {/if}
-          </div>
-          {#if isRenaming && renameError}
-            <p class="err inline-err">{renameError}</p>
-          {/if}
+          {@render sessionRow(sess)}
         {/each}
       </div>
     {/if}
