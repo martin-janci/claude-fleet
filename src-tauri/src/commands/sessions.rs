@@ -743,6 +743,22 @@ fn resolve_review_cwd(s: &Store, source: &crate::store::SessionRow) -> Result<St
     ))
 }
 
+/// Poll the tmux pane until `cl`'s REPL prompt appears, up to ~6s. Returns
+/// when ready, or after the timeout (best-effort — a missed prompt just means
+/// the user presses Enter / re-sends manually; spawn_review already soft-fails
+/// the seed). `cl`'s prompt box draws a border (│) and a `>` prompt; we look
+/// for either as a readiness signal.
+async fn wait_for_repl_ready(tmux: &dyn TmuxExec, name: &str) {
+    for _ in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        if let Ok(pane) = tmux.capture_pane(name).await {
+            if pane.contains('>') || pane.contains('│') {
+                return;
+            }
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct SpawnReviewArgs {
     pub source_session_id: i64,
@@ -791,9 +807,8 @@ pub async fn spawn_review(
         row.id
     };
 
-    // 5. Seed the prompt. cl needs a beat to boot its TUI before send-keys lands.
-    // TODO(iter4b-followup): replace fixed delay with pane-readiness poll
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    // 5. Seed the prompt. Wait until cl's TUI is ready before send-keys lands.
+    wait_for_repl_ready(tmux.as_ref(), &review_name).await;
     // Soft-fail: the review session is already spawned, registered, and tagged.
     // If seeding the prompt fails (e.g. cl wasn't ready yet), DON'T discard the
     // session — return it anyway so the user can type the review prompt manually
@@ -948,6 +963,7 @@ mod tests {
             async fn kill_session(&self, _name: &str) -> Result<(), IpcError> { Ok(()) }
             async fn rename_session(&self, _old: &str, _new: &str) -> Result<(), IpcError> { Ok(()) }
             async fn restart_session(&self, _name: &str) -> Result<(), IpcError> { Ok(()) }
+            async fn capture_pane(&self, _name: &str) -> Result<String, IpcError> { Ok(String::new()) }
         }
 
         // Spawn 3 tasks with sleeps 50ms, 500ms, 50ms.
@@ -1012,6 +1028,35 @@ mod tests {
             account.as_deref(),
         ).unwrap();
         assert_eq!(s.get_session_account("h", "dev-new").unwrap().as_deref(), Some("u1"));
+    }
+
+    #[tokio::test]
+    async fn wait_for_repl_ready_returns_once_prompt_appears() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc as StdArc;
+
+        struct FakeTmux { calls: StdArc<AtomicU32> }
+        #[async_trait::async_trait]
+        impl TmuxExec for FakeTmux {
+            async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> { Ok(vec![]) }
+            async fn new_session(&self, _: &str, _: &std::path::Path) -> Result<(), IpcError> { Ok(()) }
+            async fn kill_session(&self, _: &str) -> Result<(), IpcError> { Ok(()) }
+            async fn rename_session(&self, _: &str, _: &str) -> Result<(), IpcError> { Ok(()) }
+            async fn restart_session(&self, _: &str) -> Result<(), IpcError> { Ok(()) }
+            async fn capture_pane(&self, _: &str) -> Result<String, IpcError> {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                // Not ready for the first 2 polls, then the prompt appears.
+                if n < 2 { Ok("starting…".into()) } else { Ok("│ > ".into()) }
+            }
+        }
+
+        let calls = StdArc::new(AtomicU32::new(0));
+        let tmux = FakeTmux { calls: calls.clone() };
+        let start = std::time::Instant::now();
+        wait_for_repl_ready(&tmux, "x").await;
+        // Returned after ~3 polls (~600ms), well under the 6s cap.
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        assert!(calls.load(Ordering::SeqCst) >= 3);
     }
 
     #[test]

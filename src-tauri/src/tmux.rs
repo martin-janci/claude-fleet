@@ -15,6 +15,7 @@ pub trait TmuxExec: Send + Sync {
     async fn kill_session(&self, name: &str) -> Result<(), IpcError>;
     async fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError>;
     async fn restart_session(&self, name: &str) -> Result<(), IpcError>;
+    async fn capture_pane(&self, name: &str) -> Result<String, IpcError>;
 }
 
 pub struct LocalTmux;
@@ -35,6 +36,19 @@ impl TmuxExec for LocalTmux {
     }
     async fn restart_session(&self, name: &str) -> Result<(), IpcError> {
         restart_session(name).await
+    }
+    async fn capture_pane(&self, name: &str) -> Result<String, IpcError> {
+        let output = tokio::process::Command::new("tmux")
+            .args(["capture-pane", "-t", name, "-p"])
+            .output()
+            .await
+            .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        } else {
+            // Non-existent pane: return empty so the poller keeps waiting.
+            Ok(String::new())
+        }
     }
 }
 
@@ -157,6 +171,17 @@ impl TmuxExec for RemoteTmux {
                 "E_TMUX",
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
             ))
+        }
+    }
+
+    async fn capture_pane(&self, name: &str) -> Result<String, IpcError> {
+        let script = format!("tmux capture-pane -t {} -p", shell_quote(name));
+        let output = self.remote_bash(&script).await?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        } else {
+            // Non-existent pane: return empty so the poller keeps waiting.
+            Ok(String::new())
         }
     }
 }
