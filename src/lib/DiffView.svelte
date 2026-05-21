@@ -49,8 +49,11 @@
       } else if (line.startsWith('-')) {
         rows.push({ kind: 'del', oldNo: oldNo++, newNo: null, text: line.slice(1) });
       } else {
-        // Context line (leading space) or a genuinely empty line.
-        rows.push({ kind: 'ctx', oldNo: oldNo++, newNo: newNo++, text: line.slice(1) });
+        // Context line: a well-formed unified diff prefixes it with a single
+        // space. Strip only that — a bare '' (git's last-line edge cases) or
+        // any line without the space prefix keeps its full text.
+        const text = line.startsWith(' ') ? line.slice(1) : line;
+        rows.push({ kind: 'ctx', oldNo: oldNo++, newNo: newNo++, text });
       }
     }
     return rows;

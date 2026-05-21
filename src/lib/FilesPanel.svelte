@@ -54,18 +54,24 @@
   });
 
   async function loadChanges(): Promise<void> {
+    const sid = session.id;
     loading = true;
     error = null;
-    const r = await repoChanges(session.id);
+    const r = await repoChanges(sid);
+    // The user switched sessions while this was in flight — the session
+    // effect has already started a fresh load; drop this stale result.
+    if (sid !== session.id) return;
     loading = false;
     if (r.ok) changes = r.value;
     else error = r.error.message;
   }
 
   async function loadTree(): Promise<void> {
+    const sid = session.id;
     loading = true;
     error = null;
-    const r = await repoTree(session.id);
+    const r = await repoTree(sid);
+    if (sid !== session.id) return;
     loading = false;
     if (r.ok) {
       tree = r.value;

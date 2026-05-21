@@ -49,6 +49,34 @@ describe('parseUnifiedDiff', () => {
   it('handles an empty diff', () => {
     expect(parseUnifiedDiff('')).toEqual([]);
   });
+
+  it('resets line numbers at each hunk header', () => {
+    const twoHunks = [
+      '@@ -1,2 +1,2 @@',
+      ' a',
+      '-b',
+      '+B',
+      '@@ -50,2 +50,3 @@',
+      ' x',
+      '+Y',
+      ' z',
+    ].join('\n');
+    const rows = parseUnifiedDiff(twoHunks);
+    // First hunk starts at 1.
+    expect(rows[1]).toMatchObject({ kind: 'ctx', oldNo: 1, newNo: 1 });
+    // Second hunk header resets both counters to 50.
+    const secondCtx = rows.filter((r) => r.kind === 'ctx');
+    expect(secondCtx[1]).toMatchObject({ oldNo: 50, newNo: 50 });
+    const add = rows.filter((r) => r.kind === 'add');
+    expect(add[1]).toMatchObject({ text: 'Y', newNo: 51 });
+  });
+
+  it('keeps the full text of a context line lacking a space prefix', () => {
+    // A bare line (no leading space) must not lose its first character.
+    const rows = parseUnifiedDiff('@@ -1,1 +1,1 @@\nhello');
+    const ctx = rows.find((r) => r.kind === 'ctx');
+    expect(ctx?.text).toBe('hello');
+  });
 });
 
 describe('buildTree', () => {

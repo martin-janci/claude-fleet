@@ -34,7 +34,14 @@
   // a different session never serves stale content.
   const diffCache = new Map<string, FileDiff>();
   const fileCache = new Map<string, FileContent>();
-  const cacheKey = (p: string) => `${session.id}:${reloadKey}:${p}`;
+  const cacheKey = (sid: number, p: string) => `${sid}:${reloadKey}:${p}`;
+
+  // Monotonic token: every `load()` claims one, and only the most recent
+  // claim may mutate `loading`/`diff`/`file`/`error`. A fetch that was
+  // superseded (newer selection, view flip, or session switch) returns
+  // silently — so a slow stale fetch can never clear a fresh load's spinner
+  // or overwrite its result.
+  let loadSeq = 0;
 
   const canDiff = $derived(hasDiff(status));
 
@@ -64,8 +71,12 @@
   });
 
   async function load(p: string, v: View): Promise<void> {
+    // Pin the session id now: an `await` below may straddle a session switch,
+    // and the result must be cached/displayed under the session it came from.
+    const sid = session.id;
+    const token = ++loadSeq;
     error = null;
-    const k = cacheKey(p);
+    const k = cacheKey(sid, p);
     if (v === 'diff') {
       const cached = diffCache.get(k);
       if (cached) {
@@ -73,10 +84,10 @@
         return;
       }
       loading = true;
-      const r = await repoDiff(session.id, p);
+      const r = await repoDiff(sid, p);
+      // A newer load (selection, view flip, or session switch) superseded us.
+      if (token !== loadSeq) return;
       loading = false;
-      // A newer selection may have landed while we awaited — ignore stale.
-      if (path !== p || view !== v) return;
       if (r.ok) {
         diffCache.set(k, r.value);
         diff = r.value;
@@ -90,9 +101,9 @@
         return;
       }
       loading = true;
-      const r = await repoFile(session.id, p);
+      const r = await repoFile(sid, p);
+      if (token !== loadSeq) return;
       loading = false;
-      if (path !== p || view !== v) return;
       if (r.ok) {
         fileCache.set(k, r.value);
         file = r.value;
