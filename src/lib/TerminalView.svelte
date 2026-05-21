@@ -256,14 +256,34 @@
     void closeTerm();
   });
 
-  // Derived view: a list of rows, each containing styled runs. Reading
-  // `renderVersion` makes Svelte recompute whenever screen.write() bumps it.
-  // We don't mutate the row arrays after building, so reactivity is fine.
-  const visibleRows = $derived.by<Run[][]>(() => {
+  // Derived view: a list of rows, each carrying its styled runs plus a
+  // content-derived `key`. Reading `renderVersion` makes Svelte recompute
+  // whenever screen.write() bumps it.
+  //
+  // The key encodes the row index followed by every run's style + text. When
+  // a row's content changes, its key changes, so Svelte destroys and
+  // recreates that row's <div> instead of mutating its text nodes in place.
+  // Recreating the DOM node is what forces WKWebView to repaint it: in-place
+  // text mutation across many rows in one frame leaves some rows unpainted,
+  // which shows up as "duplicated" lines/chars where content moved. Rows
+  // whose content is unchanged keep a stable key (and their DOM node), so
+  // this costs nothing for the static parts of the screen.
+  const visibleRows = $derived.by<{ key: string; runs: Run[] }[]>(() => {
     // Touch the version so the derived recomputes; also gate on screen.
     void renderVersion;
     if (!screen) return [];
-    return screen.cells.map((row) => rowToRuns(row));
+    return screen.cells.map((row, r) => {
+      const runs = rowToRuns(row);
+      // Fields are joined with control bytes 0x01..0x04. Cells only ever
+      // hold printable chars (code >= 0x20), so these bytes never occur in
+      // run.text — the row index can't bleed into the content and collide
+      // with another row (e.g. row "1" + "2…" vs row "12" + "…").
+      let key = String(r);
+      for (const run of runs) {
+        key += `${run.fg}${run.bg}${run.attrs}${run.text}`;
+      }
+      return { key, runs };
+    });
   });
 
   function runStyle(run: Run): string {
@@ -322,9 +342,9 @@
            rely on naive `font-size * 0.6` — system font metrics on macOS
            drift slightly between Menlo and SF Mono. -->
       <span class="measure" bind:this={measureCell} aria-hidden="true">M</span>
-      {#each visibleRows as runs, r (r)}
+      {#each visibleRows as row (row.key)}
         <div class="row">
-          {#each runs as run, i (i)}
+          {#each row.runs as run, i (i)}
             <span style={runStyle(run)}>{run.text}</span>
           {/each}
         </div>
