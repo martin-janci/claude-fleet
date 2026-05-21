@@ -6,6 +6,7 @@
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
   import TerminalView from './lib/TerminalView.svelte';
+  import FilesPanel from './lib/FilesPanel.svelte';
   import { loadProjects, bootstrapProjects, mergeProjectFromEvent, mergeWorktree } from './lib/projects';
   import { loadSessions, bootstrapSessions, mergeSession, removeSession } from './lib/sessions';
   import { bootstrapHosts, mergeHost, removeHost } from './lib/hosts';
@@ -124,10 +125,12 @@
 
   onMount(() => {
     window.addEventListener('focus', onFocus);
+    window.addEventListener('keydown', onKeydown);
   });
 
   onDestroy(() => {
     window.removeEventListener('focus', onFocus);
+    window.removeEventListener('keydown', onKeydown);
     unlistenEvents?.();
   });
 
@@ -145,6 +148,28 @@
     centerCollapsed = !centerCollapsed;
   }
 
+  // Files mode swaps the center + terminal region for the worktree file
+  // viewer. The Files tab needs a selected session (the worktree to browse);
+  // deselecting one drops back to the terminal automatically.
+  let filesMode = $state(false);
+  $effect(() => {
+    if (!$selectedSession) filesMode = false;
+  });
+  function showTerminal() {
+    filesMode = false;
+  }
+  function showFiles() {
+    if ($selectedSession) filesMode = true;
+  }
+  function onKeydown(e: KeyboardEvent) {
+    // Esc leaves files mode (the terminal is covered while it's open, so Esc
+    // can't be meant for the terminal here).
+    if (e.key === 'Escape' && filesMode) {
+      filesMode = false;
+      e.stopPropagation();
+    }
+  }
+
   // Build the grid template based on which panes are collapsed. We keep a
   // constant 5-column layout (panel, resizer, panel, resizer, panel) so the
   // grid placement of each named child stays stable across toggles. Setting
@@ -152,8 +177,10 @@
   const gridTemplate = $derived.by(() => {
     const sb = sidebarCollapsed ? '20px' : `${sidebarPx}px`;
     const sbResizer = sidebarCollapsed ? '0px' : '4px';
-    const center = centerCollapsed ? '20px' : `${centerPx}px`;
-    const centerResizer = centerCollapsed ? '0px' : '4px';
+    // In files mode the center pane collapses to zero — the file viewer
+    // takes the whole region right of the sidebar.
+    const center = filesMode ? '0px' : centerCollapsed ? '20px' : `${centerPx}px`;
+    const centerResizer = filesMode || centerCollapsed ? '0px' : '4px';
     return `${sb} ${sbResizer} ${center} ${centerResizer} 1fr`;
   });
 </script>
@@ -178,7 +205,11 @@
     <Resizer id="sidebar" onresize={onResizeSidebar} />
   {/if}
 
-  {#if centerCollapsed}
+  {#if filesMode}
+    <!-- Center collapsed to 0 in files mode — two empty grid cells. -->
+    <div></div>
+    <div></div>
+  {:else if centerCollapsed}
     <button
       class="strip-expand left-edge"
       onclick={toggleCenter}
@@ -205,11 +236,41 @@
     <Resizer id="center" onresize={onResizeCenter} />
   {/if}
 
-  <Pane id="terminal" fullBleed>
-    {#snippet children()}
-      <TerminalView />
-    {/snippet}
-  </Pane>
+  <div class="right-col" data-testid="pane-terminal">
+    <div class="view-tabs" role="tablist">
+      <button
+        class="view-tab"
+        class:active={!filesMode}
+        role="tab"
+        aria-selected={!filesMode}
+        onclick={showTerminal}
+        data-testid="tab-terminal">Terminal</button
+      >
+      <button
+        class="view-tab"
+        class:active={filesMode}
+        role="tab"
+        aria-selected={filesMode}
+        disabled={!$selectedSession}
+        title={$selectedSession ? 'Browse the session worktree' : 'Select a session first'}
+        onclick={showFiles}
+        data-testid="tab-files">Files</button
+      >
+    </div>
+    <div class="right-body">
+      <!-- TerminalView stays mounted underneath so the PTY and its ANSI
+           buffer survive a Files-mode round trip — flipping back is instant
+           and never re-fits or reconnects the terminal. -->
+      <div class="view-slot">
+        <TerminalView />
+      </div>
+      {#if filesMode && $selectedSession}
+        <div class="view-slot overlay">
+          <FilesPanel session={$selectedSession} />
+        </div>
+      {/if}
+    </div>
+  </div>
 </main>
 
 <footer class="status">
@@ -290,4 +351,57 @@
     z-index: 2;
   }
   .center-collapse:hover { color: var(--fg); border-color: var(--accent); }
+
+  /* Right column: a thin Terminal/Files tab strip above the body. */
+  .right-col {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    height: 100%;
+    overflow: hidden;
+  }
+  .view-tabs {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 1px;
+    padding: 0.2rem 0.35rem 0;
+    background: var(--bg-pane);
+    border-bottom: 1px solid var(--border);
+  }
+  .view-tab {
+    background: transparent;
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: 5px 5px 0 0;
+    color: var(--fg-muted);
+    cursor: pointer;
+    font-size: 0.74rem;
+    padding: 0.25rem 0.8rem;
+  }
+  .view-tab:hover:not(:disabled) { color: var(--fg); }
+  .view-tab.active {
+    background: var(--bg);
+    border-color: var(--border);
+    color: var(--fg);
+    /* Sit on top of the strip's bottom border. */
+    margin-bottom: -1px;
+    padding-bottom: calc(0.25rem + 1px);
+  }
+  .view-tab:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .right-body {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+  /* Both slots fill the body; the Files overlay (opaque) covers the
+     terminal while active rather than unmounting/resizing it. */
+  .view-slot {
+    position: absolute;
+    inset: 0;
+  }
+  .view-slot.overlay {
+    z-index: 2;
+    background: var(--bg);
+  }
 </style>

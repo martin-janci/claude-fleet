@@ -100,6 +100,50 @@ pub fn git_ref(value: &str) -> Result<(), IpcError> {
     Ok(())
 }
 
+/// Validate a repo-relative file path supplied by the frontend (the file the
+/// user clicked in the Files viewer). The path is joined onto a trusted
+/// worktree cwd before being read, so it must not escape that directory:
+/// reject empty, absolute paths, a leading `-`, any `..` path component, and
+/// control characters. A plain `/` separator is allowed (paths have subdirs).
+pub fn repo_rel_path(value: &str) -> Result<(), IpcError> {
+    if value.is_empty() {
+        return Err(IpcError::new("E_INVALID", "file path must not be empty"));
+    }
+    if value.len() > 4096 {
+        return Err(IpcError::new("E_INVALID", "file path is too long"));
+    }
+    if value.starts_with('/') || value.starts_with('\\') {
+        return Err(IpcError::new(
+            "E_INVALID",
+            "file path must be relative to the worktree",
+        ));
+    }
+    if value.starts_with('-') {
+        return Err(IpcError::new(
+            "E_INVALID",
+            "file path must not start with '-'",
+        ));
+    }
+    if value.chars().any(|c| c.is_control()) {
+        return Err(IpcError::new(
+            "E_INVALID",
+            "file path must not contain control characters",
+        ));
+    }
+    // Reject `..` as a whole component on either separator — `a/../b`,
+    // `../x`, `x/..` all escape the worktree.
+    if value
+        .split(['/', '\\'])
+        .any(|component| component == "..")
+    {
+        return Err(IpcError::new(
+            "E_INVALID",
+            "file path must not contain a '..' component",
+        ));
+    }
+    Ok(())
+}
+
 /// Validate a tmux session name. tmux forbids `.`, `:` and whitespace in
 /// session names; we additionally reject control characters and a leading
 /// `-` (which a `tmux -t <name>` target would parse as an option).
@@ -166,6 +210,26 @@ mod tests {
         assert!(git_ref("a..b").is_err());
         assert!(git_ref("has space").is_err());
         assert!(git_ref("").is_err());
+    }
+
+    #[test]
+    fn repo_rel_path_accepts_normal_paths() {
+        for ok in ["README.md", "src/lib/files.ts", "a/b/c/d.rs", ".gitignore"] {
+            assert!(repo_rel_path(ok).is_ok(), "{ok} should be valid");
+        }
+    }
+
+    #[test]
+    fn repo_rel_path_blocks_traversal_and_absolute() {
+        assert!(repo_rel_path("").is_err());
+        assert!(repo_rel_path("/etc/passwd").is_err());
+        assert!(repo_rel_path("../secrets").is_err());
+        assert!(repo_rel_path("src/../../etc").is_err());
+        assert!(repo_rel_path("a/..").is_err());
+        assert!(repo_rel_path("-rf").is_err());
+        assert!(repo_rel_path("bad\nname").is_err());
+        // A `..` only as a substring of a real name is fine.
+        assert!(repo_rel_path("src/my..file.ts").is_ok());
     }
 
     #[test]
