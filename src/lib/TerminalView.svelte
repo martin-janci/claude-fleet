@@ -94,8 +94,10 @@
    *  then frame in bracketed-paste markers if the app requested mode 2004.
    *  Shared by Cmd+V and the drag-drop path. */
   function sendPaste(text: string) {
-    if (!ptyOpen || text === '') return;
-    const framed = framePaste(sanitizePaste(text), screen?.bracketedPaste ?? false);
+    if (!ptyOpen) return;
+    const clean = sanitizePaste(text);
+    if (clean === '') return;
+    const framed = framePaste(clean, screen?.bracketedPaste ?? false);
     void invoke('pty_write', { args: { data: framed } }).catch(() => {});
     bumpDrain();
   }
@@ -111,10 +113,15 @@
   }
 
   /** Build the prompt text for a set of uploaded remote paths: space-joined,
-   *  single-quoted if a path contains whitespace, trailing space so the user
-   *  can keep typing. */
+   *  POSIX single-quoted (embedded quotes escaped as '\'') when a path
+   *  contains whitespace or a quote, trailing space so the user can keep
+   *  typing. */
   function pathsToPasteText(paths: string[]): string {
-    return paths.map((p) => (/\s/.test(p) ? `'${p}'` : p)).join(' ') + ' ';
+    return (
+      paths
+        .map((p) => (/[\s']/.test(p) ? `'${p.replace(/'/g, "'\\''")}'` : p))
+        .join(' ') + ' '
+    );
   }
 
   async function handleDrop(paths: string[]) {
