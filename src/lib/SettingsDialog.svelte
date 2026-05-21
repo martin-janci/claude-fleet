@@ -16,9 +16,23 @@
   let mcpBusy = $state(false);
   let mcpError: string | null = $state(null);
   let tokenShown = $state(false);
-  let portInput = $state(4180);
+  // `bind:value` on a number input yields `null` when the field is cleared,
+  // so the state is genuinely `number | null`.
+  let portInput = $state<number | null>(4180);
 
   const configBlock = $derived(mcp ? mcpClientConfig(mcp) : '');
+
+  // A valid TCP port: an integer in 1–65535. The Apply button and the
+  // enable/regenerate paths refuse to forward anything outside this range.
+  const portValid = $derived(
+    portInput !== null &&
+      Number.isInteger(portInput) &&
+      portInput >= 1 &&
+      portInput <= 65535,
+  );
+  // The port to send with a non-port change (toggle/regenerate): the typed
+  // value when valid, else `undefined` so the backend keeps the current one.
+  const safePort = $derived(portValid ? (portInput ?? undefined) : undefined);
 
   onMount(async () => {
     const r = await mcpStatus();
@@ -96,6 +110,11 @@
     if (!r.ok) error = r.error.message;
   }
 </script>
+
+<svelte:window
+  onkeydown={(e) => {
+    if (e.key === 'Escape') onClose();
+  }} />
 
 <div class="modal-backdrop" onclick={onClose} role="presentation">
   <div class="dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-label="Settings">
@@ -176,7 +195,7 @@
               type="checkbox"
               checked={mcp.enabled}
               disabled={mcpBusy}
-              onchange={() => applyMcp({ enabled: !mcp!.enabled, port: portInput })}
+              onchange={() => applyMcp({ enabled: !mcp!.enabled, port: safePort })}
               data-testid="mcp-enable" />
             Enable control API
           </label>
@@ -192,16 +211,20 @@
           <span class="lbl">Port</span>
           <input
             class="port"
+            class:invalid={!portValid}
             type="number"
             min="1"
             max="65535"
             bind:value={portInput}
             disabled={mcpBusy} />
           <button
-            disabled={mcpBusy || portInput === mcp.port}
-            onclick={() => applyMcp({ enabled: mcp!.enabled, port: portInput })}>
+            disabled={mcpBusy || !portValid || portInput === mcp.port}
+            onclick={() => applyMcp({ enabled: mcp!.enabled, port: portInput ?? undefined })}>
             Apply
           </button>
+          {#if !portValid}
+            <span class="err">Port must be 1–65535.</span>
+          {/if}
         </div>
 
         <div class="mcp-field">
@@ -221,7 +244,7 @@
             class="danger"
             disabled={mcpBusy}
             onclick={() =>
-              applyMcp({ enabled: mcp!.enabled, port: portInput, regenerateToken: true })}
+              applyMcp({ enabled: mcp!.enabled, port: safePort, regenerateToken: true })}
             title="Mint a new token — invalidates existing clients">
             Regenerate
           </button>
@@ -401,6 +424,9 @@
     color: var(--fg);
     border-radius: 4px;
     padding: 0.2rem 0.4rem;
+  }
+  .mcp-field .port.invalid {
+    border-color: #e64a4a;
   }
   .mcp-field button {
     background: transparent;

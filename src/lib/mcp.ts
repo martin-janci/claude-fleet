@@ -30,10 +30,15 @@ export async function mcpConfigure(opts: {
   port?: number;
   regenerateToken?: boolean;
 }): Promise<Result<McpStatus>> {
+  // `?? null` is not enough — `NaN ?? null` is `NaN`. Only forward a real,
+  // integral port; anything else is sent as null so the backend keeps the
+  // current one.
+  const port =
+    typeof opts.port === 'number' && Number.isInteger(opts.port) ? opts.port : null;
   return invokeCmd<McpStatus>('mcp_configure', {
     args: {
       enabled: opts.enabled,
-      port: opts.port ?? null,
+      port,
       regenerate_token: opts.regenerateToken ?? false,
     },
   });
