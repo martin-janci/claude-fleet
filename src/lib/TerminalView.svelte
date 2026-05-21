@@ -144,6 +144,9 @@
 
   function measureCellSize() {
     if (!measureCell) return;
+    // Font metrics don't change between sessions — measure once and reuse
+    // across every openTerm() / reconnect.
+    if (cellWidth > 0 && cellHeight > 0) return;
     const rect = measureCell.getBoundingClientRect();
     // Fall back to a sensible default if measurement returns zero (jsdom).
     cellWidth = rect.width > 0 ? rect.width : 7.8;

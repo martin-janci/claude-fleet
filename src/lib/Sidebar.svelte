@@ -41,6 +41,19 @@
     writePref('recency', recency);
   });
   let search = $state('');
+  // `filtered` re-derives the whole project tree on its dependencies; debounce
+  // the search term so each keystroke doesn't trigger a full re-derive +
+  // re-render. The input stays bound to `search` for instant feedback.
+  let searchQuery = $state('');
+  let searchTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    const q = search;
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      searchQuery = q;
+    }, 150);
+    return () => clearTimeout(searchTimer);
+  });
 
   // Per-session UI state. Kept here instead of on each row so collapse and
   // rename state survive a sessions store refresh that creates new row
@@ -106,7 +119,7 @@
     $projects.filter(
       (p) =>
         matchesRecency(p, recency) &&
-        matchesSearch(p, search) &&
+        matchesSearch(p, searchQuery) &&
         sessionsForProject(p.project.id).length > 0,
     ),
   );

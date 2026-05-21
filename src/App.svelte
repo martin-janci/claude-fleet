@@ -24,8 +24,14 @@
   // project tree itself and doesn't make sense to differ between sessions.
   let sidebarPx = $state(readPref('layout.sidebar', 280, isNumber));
   let sidebarCollapsed = $state(readPref('layout.sidebar-collapsed', false, isBool));
+  // sidebarPx changes on every resize-drag frame; debounce the localStorage
+  // write so a drag persists once (on settle) instead of per frame.
+  let sidebarSaveTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
-    writePref('layout.sidebar', sidebarPx);
+    const px = sidebarPx;
+    clearTimeout(sidebarSaveTimer);
+    sidebarSaveTimer = setTimeout(() => writePref('layout.sidebar', px), 200);
+    return () => clearTimeout(sidebarSaveTimer);
   });
   $effect(() => {
     writePref('layout.sidebar-collapsed', sidebarCollapsed);
@@ -59,10 +65,18 @@
     });
   });
 
+  // centerPx changes per resize-drag frame too — debounce its persistence.
+  let centerSaveTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
     const sess = $selectedSession;
+    const px = centerPx;
     if (!sess || hydrating) return;
-    saveSessionUi(sess.host_alias, sess.tmux_name, { centerPx });
+    clearTimeout(centerSaveTimer);
+    centerSaveTimer = setTimeout(
+      () => saveSessionUi(sess.host_alias, sess.tmux_name, { centerPx: px }),
+      200,
+    );
+    return () => clearTimeout(centerSaveTimer);
   });
 
   let health = $state<Health | null>(null);
