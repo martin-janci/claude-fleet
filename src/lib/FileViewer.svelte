@@ -36,6 +36,19 @@
   const fileCache = new Map<string, FileContent>();
   const cacheKey = (sid: number, p: string) => `${sid}:${reloadKey}:${p}`;
 
+  // Cap each cache: a long session-hopping run could otherwise pin many
+  // large (up to 512 KiB) file bodies in memory for the panel's lifetime.
+  // A Map preserves insertion order, so the first key is the oldest.
+  const MAX_CACHE_ENTRIES = 40;
+  function cachePut<T>(cache: Map<string, T>, k: string, v: T): void {
+    cache.set(k, v);
+    while (cache.size > MAX_CACHE_ENTRIES) {
+      const oldest = cache.keys().next().value;
+      if (oldest === undefined) break;
+      cache.delete(oldest);
+    }
+  }
+
   // Monotonic token: every `load()` claims one, and only the most recent
   // claim may mutate `loading`/`diff`/`file`/`error`. A fetch that was
   // superseded (newer selection, view flip, or session switch) returns
@@ -89,7 +102,7 @@
       if (token !== loadSeq) return;
       loading = false;
       if (r.ok) {
-        diffCache.set(k, r.value);
+        cachePut(diffCache, k, r.value);
         diff = r.value;
       } else {
         error = r.error.message;
@@ -105,7 +118,7 @@
       if (token !== loadSeq) return;
       loading = false;
       if (r.ok) {
-        fileCache.set(k, r.value);
+        cachePut(fileCache, k, r.value);
         file = r.value;
       } else {
         error = r.error.message;

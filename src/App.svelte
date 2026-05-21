@@ -168,10 +168,13 @@
   }
   function onKeydown(e: KeyboardEvent) {
     // Esc leaves files mode (the terminal is covered while it's open, so Esc
-    // can't be meant for the terminal here).
+    // can't be meant for the terminal here) — but not while the user is
+    // typing in a field such as the file filter, where Esc belongs to that
+    // input and exiting the whole panel would be surprising.
     if (e.key === 'Escape' && filesMode) {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
       filesMode = false;
-      e.stopPropagation();
     }
   }
 
