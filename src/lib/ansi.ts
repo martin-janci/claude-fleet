@@ -857,6 +857,10 @@ export class Screen {
         } else if (params[i + 1] === 2 && i + 4 < params.length) {
           this.curFg = rgb(params[i + 2], params[i + 3], params[i + 4]);
           i += 4;
+        } else {
+          // Truncated 38 sequence — abandon the rest of the params rather
+          // than re-reading `5`/`2`/RGB digits as standalone SGR codes.
+          i = params.length;
         }
       } else if (p === 39) {
         this.curFg = COLOR_DEFAULT;
@@ -869,6 +873,9 @@ export class Screen {
         } else if (params[i + 1] === 2 && i + 4 < params.length) {
           this.curBg = rgb(params[i + 2], params[i + 3], params[i + 4]);
           i += 4;
+        } else {
+          // Truncated 48 sequence — abandon the rest of the params.
+          i = params.length;
         }
       } else if (p === 49) {
         this.curBg = COLOR_DEFAULT;

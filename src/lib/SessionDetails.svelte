@@ -278,9 +278,11 @@
     <button class="ghost" onclick={onRestart} data-testid="restart-from-details">
       ↻ Restart
     </button>
-    <button class="ghost" onclick={openComposer} data-testid="send-prompt-from-details">
-      → Send prompt
-    </button>
+    {#if session.kind !== 'shell'}
+      <button class="ghost" onclick={openComposer} data-testid="send-prompt-from-details">
+        → Send prompt
+      </button>
+    {/if}
     <button class="ghost" onclick={() => (reviewOpen = true)} data-testid="open-review">
       🔍 Review
     </button>

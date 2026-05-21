@@ -9,27 +9,23 @@ or quality it buys. Nothing here is a correctness bug.
 
 ## Resolution status (updated 2026-05-21)
 
-**Implemented** (commits on `main`): B1, B2, B3, B4, B6, B7, B8, B9, B10, B11,
-B12, B13, B16, B17, B18, B19; F1, F2, F3, F4, F6, F7, F10, F11, F12, F15, F17.
-All verified — `cargo test` + `cargo clippy -D warnings` + `vitest` green.
+**Implemented** (commits on `main`): B1–B4, B6–B19; F1–F4, F6, F7, F10–F12,
+F15–F18. B5 skips the startup login-shell spawn behind a conservative
+"env looks complete" heuristic; B14/B15 use `RETURNING`. All verified —
+`cargo test` + `cargo clippy -D warnings` + `vitest` green.
 
 **Deliberately not done** (judgement calls — cost exceeded value):
 
-- **B5** (skip the login-shell spawn at startup) — the only safe heuristic
-  risks regressing the Finder-launch PATH recovery; deferred.
-- **B14 / B15** (`DELETE`/`INSERT … RETURNING`) — LOW micro-opts; the
-  store.rs refactor risk isn't worth a sub-µs gain at current scale.
 - **F8** (Map-backed stores) — the real win needs microtask-batched
-  notification, which breaks the synchronous store contract the
-  optimistic-update path and the test suite rely on; the unbatched Map
-  variant is no faster. Deferred.
-- **F5** (sidebar virtualization) — fine at the current fleet size; revisit
-  if session counts grow large.
-- **F9 / F13 / F14** — the analysis itself rated these "acceptable / fine".
-- **F16** (extract a `SessionRow` component) — a quality refactor; deferred
-  to keep this batch free of behaviour-change risk.
-- **F18** (a11y aria-labels) — the badges already carry `title`; minimal
-  value for a single-user tool.
+  store notification, which breaks the *synchronous* store contract the
+  optimistic-update path and the test suite rely on; a synchronous
+  Map-backed variant is no faster than the current array merge. The
+  premise (huge event bursts) also doesn't match the real fleet size
+  (tens of sessions). Genuinely architecture-incompatible — deferred.
+- **F5** (sidebar virtualization) — the analysis itself rated it "fine at
+  the current fleet size; revisit if counts grow". Building it now is
+  building for a problem that doesn't exist.
+- **F9 / F13 / F14** — the analysis rated these "acceptable / fine as-is".
 
 ## Top wins — cheapest, highest-leverage first
 
