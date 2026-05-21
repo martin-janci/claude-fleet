@@ -97,6 +97,14 @@ impl SshClient {
         // best-effort: ignore errors (caller falls back to per-call ssh if
         // dir doesn't exist).
         let _ = std::fs::create_dir_all(&dir);
+        // Lock the directory to 0700: the ControlMaster sockets inside it are
+        // authenticated SSH channels to every configured host. On a shared
+        // machine a 0755 dir would let another local user reach them.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
         dir.join(format!("cm-{host}.sock"))
     }
 

@@ -171,7 +171,18 @@ pub fn run() {
             let handle = app.handle().clone();
             let bus: std::sync::Arc<dyn crate::events::EventBus> =
                 std::sync::Arc::new(crate::events::AppHandleEventBus::new(handle));
-            let store = Store::open_with_bus(&appdata_db_path(), bus).expect("open store");
+            let db_path = appdata_db_path();
+            let store = Store::open_with_bus(&db_path, bus).unwrap_or_else(|e| {
+                // Still a hard fail (the app can't run without its DB), but
+                // with an actionable message instead of a bare "open store".
+                panic!(
+                    "failed to open the claude-fleet database at {}: {e}\n\
+                     If the file is corrupt, deleting it resets all local \
+                     state — hosts, projects and sessions are re-discovered \
+                     on the next launch.",
+                    db_path.display()
+                )
+            });
             app.manage(Mutex::new(store));
             Ok(())
         })

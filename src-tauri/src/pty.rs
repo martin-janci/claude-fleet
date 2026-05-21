@@ -273,9 +273,34 @@ pub fn pty_drain(state: State<'_, Mutex<PtyState>>) -> Result<PtyDrainResult, Ip
         }
         std::mem::take(&mut *buf)
     };
-    let bytes = raw.len();
-    let data = String::from_utf8_lossy(&raw).into_owned();
-    Ok(PtyDrainResult { data, bytes })
+    // Decode the valid UTF-8 prefix. If the buffer ends in an INCOMPLETE
+    // multi-byte sequence (a chunk boundary fell mid-codepoint), push those
+    // trailing bytes back so they complete on the next drain instead of
+    // being lossily replaced with U+FFFD.
+    let valid_end = match std::str::from_utf8(&raw) {
+        Ok(_) => raw.len(),
+        // `error_len() == None` means "unexpected end of input" — incomplete.
+        Err(e) if e.error_len().is_none() => e.valid_up_to(),
+        // A genuine invalid byte mid-stream: lossy-decode the whole buffer.
+        Err(_) => raw.len(),
+    };
+    let data = String::from_utf8_lossy(&raw[..valid_end]).into_owned();
+    if valid_end < raw.len() {
+        let s = state
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
+        let mut buf = s
+            .buffer
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "pty buffer poisoned"))?;
+        // Prepend: the retained tail is chronologically before anything the
+        // reader thread appended since the mem::take above.
+        buf.splice(0..0, raw[valid_end..].iter().copied());
+    }
+    Ok(PtyDrainResult {
+        data,
+        bytes: valid_end,
+    })
 }
 
 #[derive(Deserialize)]
