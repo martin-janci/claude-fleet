@@ -16,23 +16,22 @@ all green):
 
 - **CRITICAL:** CR1, CR2, CR3.
 - **HIGH:** H1–H7.
-- **MEDIUM:** M1, M2, M3, M4, M7, M8, M9, M10, M11, M12. M6 (`with_transaction`
-  in reconcile) was resolved independently by the iter-4b `apply_host_reconcile`
-  rework.
-- **LOW:** L1, L8. L4 (double bootstrap) and L6 (ANSI scroll region) were
-  resolved by other work.
+- **MEDIUM:** M1–M5, M7–M12. M5 was fixed by moving to `ControlMaster=auto`
+  (ssh owns the master lifecycle — no app-side staleness, less code). M6
+  (`with_transaction` in reconcile) was resolved independently by the iter-4b
+  `apply_host_reconcile` rework.
+- **LOW:** L1, L2, L3, L7, L8. L4 (double bootstrap) and L6 (ANSI scroll
+  region) were resolved by other work.
 - The pre-existing `localStorage`-undefined vitest failure is also fixed
   (in-memory polyfill in `vitest.setup.ts`).
 
-**Deliberately deferred:**
+**Deliberately not done:**
 
-- **M5** (`ensure_master` keeps a stale `OnceCell` after `ControlPersist`
-  expiry) — the only fixes are a round-trip-per-call `ssh -O check` or an
-  invasive rewrite to `ControlMaster=auto`; the impact is a lost-multiplexing
-  perf degradation after 10 min idle, not a correctness bug.
-- **L2, L3, L5, L7** and the remaining LOW items — micro-opts / naming /
-  feature gaps; tracked here but low value.
-- The spec-vs-code gaps (Handoff, Freeze) — need a product decision.
+- **L5** (rename `result.ts` → `ipc.ts`) — pure cosmetics; the rename
+  cascades into the three `ipc*/result*` test-file names. Not worth the
+  import-sweep churn for a one-time "which file?" confusion.
+- The spec-vs-code gaps (Handoff, Freeze) — these are unbuilt *features*,
+  not review findings; they need a product decision, not a fix.
 
 The remainder of this document is the original review, left intact as the
 backlog.
