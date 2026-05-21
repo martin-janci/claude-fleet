@@ -61,6 +61,8 @@ export interface NewSessionArgs {
   new_worktree?: string | null;
   /** "work" (default) runs Claude Code; "shell" runs a plain login shell. */
   kind?: 'work' | 'shell';
+  /** Optional command run on start for a shell session (null = bare shell). */
+  start_command?: string | null;
 }
 
 export async function newSession(args: NewSessionArgs): Promise<Result<SessionRow>> {

@@ -25,17 +25,19 @@
 
   // "work" runs Claude Code in the pane; "shell" runs a plain login shell.
   let chosenKind = $state<'work' | 'shell'>('work');
+  // Optional command run on start for a shell session (empty = bare shell).
+  let startCommand = $state<string>('');
 
   function defaultName(wt: WorktreeRow | null): string {
     const base = `dev-${project.project.owner}-${project.project.repo}`;
-    const suffix = chosenKind === 'shell' ? '-sh' : '';
+    const suffix = chosenKind === 'shell' ? '-term' : '';
     if (!wt || wt.name === 'main') return base + suffix;
     return `${base}--${wt.name}${suffix}`;
   }
 
   function defaultNameForNew(newName: string): string {
     const base = `dev-${project.project.owner}-${project.project.repo}`;
-    const suffix = chosenKind === 'shell' ? '-sh' : '';
+    const suffix = chosenKind === 'shell' ? '-term' : '';
     if (!newName.trim()) return base + suffix;
     return `${base}--${newName.trim()}${suffix}`;
   }
@@ -99,6 +101,8 @@
         name: name.trim(),
         new_worktree: inNewMode ? newWorktreeName.trim() || null : null,
         kind: chosenKind,
+        start_command:
+          chosenKind === 'shell' ? startCommand.trim() || null : null,
       },
       createController.signal,
     );
@@ -140,6 +144,16 @@
       Shell
     </button>
   </div>
+
+  {#if chosenKind === 'shell'}
+    <label for="start-command">start command (optional)</label>
+    <input
+      id="start-command"
+      data-testid="start-command"
+      bind:value={startCommand}
+      placeholder="e.g. pnpm test"
+    />
+  {/if}
 
   <label for="host-picker">Host</label>
   <div class="host-row" id="host-picker" role="group">

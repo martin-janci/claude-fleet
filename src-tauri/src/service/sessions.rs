@@ -292,6 +292,9 @@ pub struct NewSessionArgs {
     /// Session kind: `"work"` (default) runs Claude Code in the pane;
     /// `"shell"` runs a plain interactive login shell.
     pub kind: Option<String>,
+    /// Optional command run once on start for a `"shell"` session, before
+    /// the pane drops to an interactive shell. Ignored for `"work"`.
+    pub start_command: Option<String>,
 }
 
 /// Look up `(owner, repo)` for a given project id.
@@ -636,14 +639,14 @@ async fn new_session_inner(
     // A "shell" session runs a plain login shell in the pane instead of
     // Claude Code. Any other value (incl. None) is treated as a "work" session.
     let is_shell = args.kind.as_deref() == Some("shell");
-    let pane_cmd = if is_shell {
-        crate::tmux::shell_pane_command()
+    let pane_cmd: String = if is_shell {
+        crate::tmux::shell_pane_command(args.start_command.as_deref())
     } else {
-        crate::tmux::pane_command()
+        crate::tmux::pane_command().to_string()
     };
 
     let tmux = exec_for(&args.host_alias, ssh);
-    tmux.new_session(&args.name, &path, pane_cmd).await?;
+    tmux.new_session(&args.name, &path, &pane_cmd).await?;
 
     reconcile_one_host(store, ssh, &args.host_alias).await?;
     let s = store
@@ -761,13 +764,15 @@ pub async fn restart_session(
             .map(|r| r.kind == "shell")
             .unwrap_or(false)
     };
-    let pane_cmd = if is_shell {
-        crate::tmux::shell_pane_command()
+    // Restart respawns a bare shell — the original start command isn't
+    // persisted, and a restart is a recovery action, not a re-run.
+    let pane_cmd: String = if is_shell {
+        crate::tmux::shell_pane_command(None)
     } else {
-        crate::tmux::pane_command()
+        crate::tmux::pane_command().to_string()
     };
     let tmux = exec_for(&args.host_alias, ssh);
-    tmux.restart_session(&args.name, pane_cmd).await?;
+    tmux.restart_session(&args.name, &pane_cmd).await?;
     reconcile_one_host(store, ssh, &args.host_alias).await?;
     let s = store
         .lock()

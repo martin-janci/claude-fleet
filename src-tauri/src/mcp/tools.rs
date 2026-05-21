@@ -325,6 +325,7 @@ impl FleetTools {
             // exposed yet.
             new_worktree: None,
             kind: None,
+            start_command: None,
         };
         let row = sessions::new_session(args, &self.store, &self.ssh, &self.reg)
             .await
