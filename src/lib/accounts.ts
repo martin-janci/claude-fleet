@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store';
+import { writable, derived } from 'svelte/store';
 import { invokeCmd, invokeCmdAbortable, type Result } from './result';
 
 export interface AccountRow {
@@ -12,6 +12,9 @@ export interface AccountRow {
 }
 
 export const accounts = writable<AccountRow[]>([]);
+
+/** O(1) uuid -> account lookup, derived once per `accounts` change. */
+export const accountByUuid = derived(accounts, ($a) => new Map($a.map((a) => [a.uuid, a])));
 
 export async function loadAccounts(): Promise<Result<AccountRow[]>> {
   const r = await invokeCmd<AccountRow[]>('list_accounts');

@@ -2,10 +2,10 @@
   import { tick } from 'svelte';
   import { sessions, type SessionRow } from './sessions';
   import { killSession, renameSession, restartSession } from './sessions';
-  import { projects } from './projects';
+  import { projectById } from './projects';
   import { selectSession, clearSelection } from './selection';
-  import { hosts } from './hosts';
-  import { accounts, type AccountRow } from './accounts';
+  import { hostByAlias } from './hosts';
+  import { accountByUuid, type AccountRow } from './accounts';
   import PromptComposer from './PromptComposer.svelte';
   import ReviewDialog from './ReviewDialog.svelte';
 
@@ -15,14 +15,12 @@
   const parentProject = $derived(
     session.project_id === null
       ? null
-      : ($projects.find((p) => p.project.id === session.project_id) ?? null),
+      : ($projectById.get(session.project_id) ?? null),
   );
 
-  const hostRow = $derived(
-    $hosts.find((h) => h.alias === session.host_alias) ?? null,
-  );
+  const hostRow = $derived($hostByAlias.get(session.host_alias) ?? null);
   const accountRow = $derived(
-    hostRow?.account_uuid ? $accounts.find((a) => a.uuid === hostRow.account_uuid) ?? null : null,
+    hostRow?.account_uuid ? ($accountByUuid.get(hostRow.account_uuid) ?? null) : null,
   );
   function accountText(a: AccountRow | null): string {
     if (!a) return '—';
@@ -32,7 +30,7 @@
 
   function accountForRow(s: SessionRow): AccountRow | null {
     if (!s.account_uuid) return null;
-    return $accounts.find((a) => a.uuid === s.account_uuid) ?? null;
+    return $accountByUuid.get(s.account_uuid) ?? null;
   }
 
   const related = $derived(

@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store';
+import { writable, derived } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 
 export interface ProjectRow {
@@ -23,6 +23,9 @@ export interface ProjectTreeRow {
 }
 
 export const projects = writable<ProjectTreeRow[]>([]);
+
+/** O(1) project-id -> tree-row lookup, derived once per `projects` change. */
+export const projectById = derived(projects, ($p) => new Map($p.map((p) => [p.project.id, p])));
 
 export async function loadProjects(): Promise<Result<ProjectTreeRow[]>> {
   const r = await invokeCmd<ProjectTreeRow[]>('list_projects');
