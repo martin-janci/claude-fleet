@@ -374,6 +374,54 @@ describe('ansi.Screen — DECSTBM scroll region', () => {
     expect(rowText(s, 3).slice(0, 1)).toBe('Z'); // outside region — untouched
   });
 
+  it('SU (CSI S) scrolls the region up regardless of cursor position', () => {
+    // tmux emits SU to scroll a pane up without parking the cursor on the
+    // bottom margin — the case plain LF never reaches. Dropping SU is THE
+    // residual drift bug: our model fell out of sync with the real screen.
+    const s = new Screen(4, 4);
+    s.write('\x1b[1;3r'); // region rows 0..2
+    s.write('\x1b[1;1HA');
+    s.write('\x1b[2;1HB');
+    s.write('\x1b[3;1HC');
+    s.write('\x1b[4;1HZ'); // row 3, outside the region
+    s.write('\x1b[1;1H'); // cursor at the TOP margin — not the bottom
+    s.write('\x1b[2S'); // scroll region up by 2
+    expect(rowText(s, 0).slice(0, 1)).toBe('C'); // A,B fell off the top
+    expect(rowText(s, 1)).toBe('    '); // fresh blank
+    expect(rowText(s, 2)).toBe('    '); // fresh blank
+    expect(rowText(s, 3).slice(0, 1)).toBe('Z'); // outside region — untouched
+  });
+
+  it('SU (CSI S) defaults to one line and leaves the cursor put', () => {
+    const s = new Screen(3, 4);
+    s.write('\x1b[1;1HA');
+    s.write('\x1b[2;1HB');
+    s.write('\x1b[3;1HC');
+    s.write('\x1b[2;3H'); // park cursor at row 1, col 2
+    s.write('\x1b[S'); // SU default = 1, whole-screen region
+    expect(rowText(s, 0).slice(0, 1)).toBe('B');
+    expect(rowText(s, 1).slice(0, 1)).toBe('C');
+    expect(rowText(s, 2)).toBe('    ');
+    // Cursor unmoved by SU: the next char lands at row 1, col 2.
+    s.write('X');
+    expect(rowText(s, 1).slice(2, 3)).toBe('X');
+  });
+
+  it('SD (CSI T) scrolls the region down, filling blanks at the top', () => {
+    const s = new Screen(4, 4);
+    s.write('\x1b[1;3r'); // region rows 0..2
+    s.write('\x1b[1;1HA');
+    s.write('\x1b[2;1HB');
+    s.write('\x1b[3;1HC');
+    s.write('\x1b[4;1HZ'); // row 3, outside the region
+    s.write('\x1b[1;1H'); // cursor at the top margin
+    s.write('\x1b[2T'); // scroll region down by 2
+    expect(rowText(s, 0)).toBe('    '); // fresh blank at top
+    expect(rowText(s, 1)).toBe('    '); // fresh blank
+    expect(rowText(s, 2).slice(0, 1)).toBe('A'); // A pushed down; B,C fell off
+    expect(rowText(s, 3).slice(0, 1)).toBe('Z'); // outside region — untouched
+  });
+
   it('with no DECSTBM the default region is the whole screen (regression guard)', () => {
     const s = new Screen(3, 4);
     s.write('aaaa\r\nbbbb\r\ncccc');

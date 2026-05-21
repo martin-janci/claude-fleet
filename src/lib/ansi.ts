@@ -334,6 +334,29 @@ export class Screen {
     }
   }
 
+  /** SU (scroll up): scroll the active region up by `n` lines irrespective of
+   *  the cursor — blanks fill in at the bottom margin, the cursor stays put.
+   *  tmux uses this to scroll a pane without parking the cursor on the bottom
+   *  row (the case `lineFeed` never reaches), so dropping it drifts our model
+   *  out of sync until a full repaint (e.g. a resize) re-syncs it. */
+  private scrollUp(n: number): void {
+    n = Math.min(n, this.scrollBottom - this.scrollTop + 1);
+    for (let i = 0; i < n; i++) {
+      this.cells.splice(this.scrollTop, 1);
+      this.cells.splice(this.scrollBottom, 0, makeRow(this.cols));
+    }
+  }
+
+  /** SD (scroll down): mirror of `scrollUp` — blanks fill in at the top
+   *  margin, content at the bottom margin falls off, the cursor stays put. */
+  private scrollDown(n: number): void {
+    n = Math.min(n, this.scrollBottom - this.scrollTop + 1);
+    for (let i = 0; i < n; i++) {
+      this.cells.splice(this.scrollBottom, 1);
+      this.cells.splice(this.scrollTop, 0, makeRow(this.cols));
+    }
+  }
+
   /** Parse a single escape sequence starting at `start`. Returns number of
    *  chars consumed including the leading ESC, or -1 if incomplete. */
   private parseEscape(s: string, start: number): number {
@@ -500,6 +523,12 @@ export class Screen {
         return;
       case 'd': // VPA - vertical position absolute
         this.cursorRow = clamp(Math.max(1, p0) - 1, 0, this.rows - 1);
+        return;
+      case 'S': // SU - scroll up (private `?...S` is XTSMGRAPHICS/sixel: skip)
+        if (!isPrivate) this.scrollUp(Math.max(1, p0));
+        return;
+      case 'T': // SD - scroll down (private/`>`-marked T is title-mode reset)
+        if (!isPrivate) this.scrollDown(Math.max(1, p0));
         return;
       case 'r': { // DECSTBM - set top/bottom scroll margins
         // A private `?...r` is XTRESTORE (restore DEC private modes), NOT
