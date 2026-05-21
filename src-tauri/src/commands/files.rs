@@ -217,7 +217,7 @@ pub struct SessionIdArgs {
 #[tauri::command]
 pub async fn repo_changes(
     args: SessionIdArgs,
-    store: State<'_, Mutex<Store>>,
+    store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<Vec<ChangedFile>, IpcError> {
     let (host, name) = session_target(&store, args.session_id)?;
@@ -236,7 +236,7 @@ pub async fn repo_changes(
 #[tauri::command]
 pub async fn repo_tree(
     args: SessionIdArgs,
-    store: State<'_, Mutex<Store>>,
+    store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<RepoTree, IpcError> {
     let (host, name) = session_target(&store, args.session_id)?;
@@ -273,7 +273,7 @@ pub struct RepoFileArgs {
 #[tauri::command]
 pub async fn repo_file(
     args: RepoFileArgs,
-    store: State<'_, Mutex<Store>>,
+    store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<FileContent, IpcError> {
     crate::validate::repo_rel_path(&args.path)?;
@@ -316,7 +316,7 @@ pub async fn repo_file(
 #[tauri::command]
 pub async fn repo_diff(
     args: RepoFileArgs,
-    store: State<'_, Mutex<Store>>,
+    store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<FileDiff, IpcError> {
     crate::validate::repo_rel_path(&args.path)?;

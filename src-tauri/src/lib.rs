@@ -2,8 +2,10 @@ mod cancel;
 mod commands;
 mod events;
 mod ipc_error;
+mod mcp;
 mod projects;
 mod pty;
+mod service;
 mod shell;
 mod ssh;
 mod ssh_config;
@@ -164,6 +166,70 @@ async fn cancel_command(
     Ok(())
 }
 
+/// Read the MCP control-API settings and, if the user enabled it, start the
+/// server, recording the outcome in the managed `McpRuntime`. Generates and
+/// persists a bearer token on first enable. Off by default — a fresh install
+/// never opens a listener.
+fn maybe_start_mcp(
+    app: &tauri::AppHandle,
+    store: &std::sync::Arc<Mutex<Store>>,
+    ssh: &std::sync::Arc<ssh::SshClient>,
+    reg: &std::sync::Arc<cancel::CancellationRegistry>,
+) {
+    use tauri::Manager;
+    let (enabled, port, token) = {
+        let Ok(s) = store.lock() else {
+            return;
+        };
+        let enabled = s
+            .get_setting(mcp::SETTING_ENABLED)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("true");
+        let port = s
+            .get_setting(mcp::SETTING_PORT)
+            .ok()
+            .flatten()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(mcp::DEFAULT_PORT);
+        let token = s.get_setting(mcp::SETTING_TOKEN).ok().flatten();
+        (enabled, port, token)
+    };
+    if !enabled {
+        return;
+    }
+    // Ensure a token exists before the listener binds — never a tokenless API.
+    let token = match token {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            let fresh = mcp::generate_token();
+            if let Ok(s) = store.lock() {
+                let _ = s.set_setting(mcp::SETTING_TOKEN, &fresh);
+            }
+            fresh
+        }
+    };
+    let result = tauri::async_runtime::block_on(mcp::start(
+        std::sync::Arc::clone(store),
+        std::sync::Arc::clone(ssh),
+        std::sync::Arc::clone(reg),
+        port,
+        token,
+    ));
+    if let Some(runtime) = app.try_state::<Mutex<mcp::McpRuntime>>() {
+        if let Ok(mut rt) = runtime.lock() {
+            match result {
+                Ok(shutdown) => rt.set_running(shutdown),
+                Err(e) => {
+                    eprintln!("[mcp] {e}");
+                    rt.set_error(e);
+                }
+            }
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Layered env recovery for Finder-launched apps:
@@ -188,11 +254,13 @@ pub fn run() {
 
     let ssh_client = std::sync::Arc::new(ssh::SshClient::new());
     let ssh_client_for_exit = std::sync::Arc::clone(&ssh_client);
+    let ssh_client_for_setup = std::sync::Arc::clone(&ssh_client);
     let reg = cancel::CancellationRegistry::new();
+    let reg_for_setup = std::sync::Arc::clone(&reg);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
+        .setup(move |app| {
             use tauri::Manager;
             let handle = app.handle().clone();
             let bus: std::sync::Arc<dyn crate::events::EventBus> =
@@ -209,7 +277,14 @@ pub fn run() {
                     db_path.display()
                 )
             });
-            app.manage(Mutex::new(store));
+            // Managed as Arc<Mutex<Store>> (not bare Mutex<Store>) so the
+            // embedded MCP server can hold a clone of the same store handle.
+            let store = std::sync::Arc::new(Mutex::new(store));
+            app.manage(std::sync::Arc::clone(&store));
+            app.manage(Mutex::new(mcp::McpRuntime::default()));
+            // Start the MCP control API if the user has enabled it (off by
+            // default). Reuses the same Store / SshClient / registry as the UI.
+            maybe_start_mcp(app.handle(), &store, &ssh_client_for_setup, &reg_for_setup);
             Ok(())
         })
         .manage(Mutex::new(PtyState::new()))
@@ -239,6 +314,8 @@ pub fn run() {
             commands::hosts::probe_ssh_alias,
             commands::hosts::remove_host,
             commands::hosts::hide_host,
+            commands::mcp::mcp_status,
+            commands::mcp::mcp_configure,
             pty::pty_open,
             pty::pty_write,
             pty::pty_resize,
@@ -253,6 +330,11 @@ pub fn run() {
             if let tauri::WindowEvent::Destroyed = event {
                 use tauri::Manager;
                 ssh_client_for_exit.shutdown_all();
+                if let Some(runtime) = window.try_state::<Mutex<mcp::McpRuntime>>() {
+                    if let Ok(mut rt) = runtime.lock() {
+                        rt.stop();
+                    }
+                }
                 if let Some(pty) = window.try_state::<Mutex<PtyState>>() {
                     if let Ok(mut s) = pty.lock() {
                         s.close();

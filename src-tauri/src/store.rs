@@ -201,6 +201,27 @@ impl Store {
             })
     }
 
+    /// Read a value from the key/value `settings` table. `None` if absent.
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT value FROM settings WHERE key=?1",
+                rusqlite::params![key],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    /// Insert or replace a value in the `settings` table.
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![key, value],
+        )?;
+        Ok(())
+    }
+
     // ---- Private fetch helpers used after writes to produce emit payloads ----
     //
     // The row-mapping SQL lives in free `fetch_*` functions that take a bare
@@ -289,7 +310,7 @@ impl Store {
     /// Within each project worktrees are ordered by id.
     pub fn list_projects_joined(
         &self,
-    ) -> Result<Vec<crate::commands::projects::ProjectTreeRow>, crate::ipc_error::IpcError> {
+    ) -> Result<Vec<crate::service::projects::ProjectTreeRow>, crate::ipc_error::IpcError> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT p.id, p.owner, p.repo, p.base_path, p.last_session_at,
                     w.id, w.project_id, w.name, w.path, w.branch
@@ -315,12 +336,12 @@ impl Store {
                 row.get::<_, Option<String>>(9)?,
             ))
         })?;
-        let mut out: Vec<crate::commands::projects::ProjectTreeRow> = Vec::new();
+        let mut out: Vec<crate::service::projects::ProjectTreeRow> = Vec::new();
         let mut last_pid: Option<i64> = None;
         for r in rows {
             let (pid, owner, repo, base, last, wid, _wpid, wname, wpath, wbranch) = r?;
             if last_pid != Some(pid) {
-                out.push(crate::commands::projects::ProjectTreeRow {
+                out.push(crate::service::projects::ProjectTreeRow {
                     project: ProjectRow {
                         id: pid,
                         owner,
