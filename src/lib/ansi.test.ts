@@ -8,6 +8,7 @@ import {
   rgb,
   isRgb,
   colorToCss,
+  encodeMouse,
 } from './ansi';
 
 function rowText(s: Screen, r: number): string {
@@ -610,5 +611,112 @@ describe('ansi.Screen.rowVersion (dirty-row tracking)', () => {
     s.resize(8, 10);
     expect(s.rowVersion).toHaveLength(8);
     expect(s.rowVersion.every((v) => v > 0)).toBe(true);
+  });
+});
+
+describe('encodeMouse — SGR encoding (?1006h)', () => {
+  it('SGR left press at col=5, row=10', () => {
+    expect(encodeMouse(0, 5, 10, false, true)).toBe('\x1b[<0;5;10M');
+  });
+
+  it('SGR left release at col=5, row=10', () => {
+    expect(encodeMouse(0, 5, 10, true, true)).toBe('\x1b[<0;5;10m');
+  });
+
+  it('SGR wheel-up at col=1, row=1', () => {
+    expect(encodeMouse(64, 1, 1, false, true)).toBe('\x1b[<64;1;1M');
+  });
+
+  it('SGR wheel-down at col=1, row=1', () => {
+    expect(encodeMouse(65, 1, 1, false, true)).toBe('\x1b[<65;1;1M');
+  });
+
+  it('SGR drag (left held + motion, cb=32) at col=3, row=4', () => {
+    expect(encodeMouse(32, 3, 4, false, true)).toBe('\x1b[<32;3;4M');
+  });
+});
+
+describe('encodeMouse — X10/legacy encoding', () => {
+  it('X10 left press at col=1, row=1: bytes [32, 33, 33]', () => {
+    const result = encodeMouse(0, 1, 1, false, false);
+    expect(result).toBe('\x1b[M' + String.fromCharCode(32, 33, 33));
+  });
+
+  it('X10 release (low bits → 3): byte1 = 3+32 = 35', () => {
+    const result = encodeMouse(0, 1, 1, true, false);
+    // cb=0 release → low bits become 3 → cbX10=3 → byte1=3+32=35
+    expect(result).toBe('\x1b[M' + String.fromCharCode(35, 33, 33));
+  });
+
+  it('X10 right press (cb=2) at col=1, row=1: byte1 = 2+32 = 34', () => {
+    const result = encodeMouse(2, 1, 1, false, false);
+    expect(result).toBe('\x1b[M' + String.fromCharCode(34, 33, 33));
+  });
+});
+
+describe('ansi.Screen — mouse mode tracking', () => {
+  it('fresh Screen has all mouse modes false', () => {
+    const s = new Screen(24, 80);
+    expect(s.mouseEnabled).toBe(false);
+    expect(s.mouseButtonMotion).toBe(false);
+    expect(s.mouseAnyMotion).toBe(false);
+    expect(s.mouseSgr).toBe(false);
+  });
+
+  it('?1000h sets mouseEnabled; ?1000l clears it', () => {
+    const s = new Screen(24, 80);
+    s.write('\x1b[?1000h');
+    expect(s.mouseEnabled).toBe(true);
+    s.write('\x1b[?1000l');
+    expect(s.mouseEnabled).toBe(false);
+  });
+
+  it('?1006h sets mouseSgr; ?1006l clears it', () => {
+    const s = new Screen(24, 80);
+    s.write('\x1b[?1006h');
+    expect(s.mouseSgr).toBe(true);
+    s.write('\x1b[?1006l');
+    expect(s.mouseSgr).toBe(false);
+  });
+
+  it('?1000h + ?1006h: both mouseEnabled and mouseSgr true', () => {
+    const s = new Screen(24, 80);
+    s.write('\x1b[?1000h\x1b[?1006h');
+    expect(s.mouseEnabled).toBe(true);
+    expect(s.mouseSgr).toBe(true);
+  });
+
+  it('?1002h sets mouseEnabled and mouseButtonMotion but not mouseAnyMotion', () => {
+    const s = new Screen(24, 80);
+    s.write('\x1b[?1002h');
+    expect(s.mouseEnabled).toBe(true);
+    expect(s.mouseButtonMotion).toBe(true);
+    expect(s.mouseAnyMotion).toBe(false);
+  });
+
+  it('?1003h sets mouseEnabled, mouseButtonMotion, and mouseAnyMotion', () => {
+    const s = new Screen(24, 80);
+    s.write('\x1b[?1003h');
+    expect(s.mouseEnabled).toBe(true);
+    expect(s.mouseButtonMotion).toBe(true);
+    expect(s.mouseAnyMotion).toBe(true);
+  });
+
+  it('?1003l clears all three motion flags', () => {
+    const s = new Screen(24, 80);
+    s.write('\x1b[?1003h');
+    s.write('\x1b[?1003l');
+    expect(s.mouseEnabled).toBe(false);
+    expect(s.mouseButtonMotion).toBe(false);
+    expect(s.mouseAnyMotion).toBe(false);
+  });
+
+  it('cursor is visible by default and toggles with ?25 (DECTCEM)', () => {
+    const s = new Screen(24, 80);
+    expect(s.cursorVisible).toBe(true);
+    s.write('\x1b[?25l');
+    expect(s.cursorVisible).toBe(false);
+    s.write('\x1b[?25h');
+    expect(s.cursorVisible).toBe(true);
   });
 });

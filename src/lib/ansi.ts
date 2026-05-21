@@ -156,6 +156,9 @@ export class Screen {
   cells: Cell[][];
   cursorRow = 0;
   cursorCol = 0;
+  /** Cursor visibility (DECSET ?25). Visible by default per the VT spec;
+   *  tmux/claude toggle it with ?25h / ?25l around redraws. */
+  cursorVisible = true;
   /** Current SGR state — applied to each printed cell. */
   curFg = COLOR_DEFAULT;
   curBg = COLOR_DEFAULT;
@@ -191,6 +194,31 @@ export class Screen {
    *  rebuild into O(changed rows). */
   rowVersion: number[] = [];
   private dirtyClock = 0;
+
+  // ─── Mouse mode state (DECSET/DECRST) ────────────────────────────────
+  // These track which mouse-reporting modes the host app (tmux) has
+  // requested via escape sequences. We store them so the component can
+  // gate event forwarding on them.
+  //
+  //   ?1000  — X10 basic mouse reporting (click/release)
+  //   ?1002  — button-event tracking (motion while a button is held)
+  //   ?1003  — any-event tracking (motion even without a button)
+  //   ?1006  — SGR extended coordinates
+  //
+  // Getters exposed publicly:
+  //   mouseEnabled       — 1000 || 1002 || 1003
+  //   mouseButtonMotion  — 1002 || 1003
+  //   mouseAnyMotion     — 1003
+  //   mouseSgr           — 1006
+  private _mouse1000 = false;
+  private _mouse1002 = false;
+  private _mouse1003 = false;
+  private _mouse1006 = false;
+
+  get mouseEnabled(): boolean { return this._mouse1000 || this._mouse1002 || this._mouse1003; }
+  get mouseButtonMotion(): boolean { return this._mouse1002 || this._mouse1003; }
+  get mouseAnyMotion(): boolean { return this._mouse1003; }
+  get mouseSgr(): boolean { return this._mouse1006; }
 
   constructor(rows: number, cols: number) {
     this.rows = Math.max(1, rows);
@@ -625,9 +653,18 @@ export class Screen {
           this.cursorRow = this.savedRow;
           this.cursorCol = this.savedCol;
         }
+      } else if (p === 1000) {
+        this._mouse1000 = set;
+      } else if (p === 1002) {
+        this._mouse1002 = set;
+      } else if (p === 1003) {
+        this._mouse1003 = set;
+      } else if (p === 1006) {
+        this._mouse1006 = set;
+      } else if (p === 25) {
+        this.cursorVisible = set;
       }
-      // Other private modes (?25 cursor visibility, ?1000 mouse, etc.)
-      // are intentionally ignored.
+      // Other private modes are intentionally ignored.
     }
   }
 
@@ -924,4 +961,47 @@ export function colorToCss(c: number): string | null {
   if (c === COLOR_DEFAULT) return null;
   if (isRgb(c)) return rgbToCss(c);
   return paletteToCss(c);
+}
+
+/**
+ * Encode a mouse event as the escape sequence a terminal sends to the host.
+ *
+ * @param cb       Base button code (already including motion/modifier bits):
+ *                   left=0, middle=1, right=2
+ *                   wheel-up=64, wheel-down=65
+ *                   motion (button held)  = pressedButton + 32
+ *                   any-motion (no button) = 3 + 32 = 35
+ *                   Modifiers: shift=4, alt=8, ctrl=16 may be OR'd in.
+ * @param col      1-based column
+ * @param row      1-based row
+ * @param release  true for mouse-button release events
+ * @param sgr      true if ?1006 (SGR) mode is active; false for X10/legacy
+ *
+ * SGR format:  ESC [ < {cb} ; {col} ; {row} M   (press/motion/wheel)
+ *              ESC [ < {cb} ; {col} ; {row} m   (release)
+ *
+ * X10/legacy format:  ESC [ M  + three raw bytes clamped to [32,255]:
+ *   byte1 = min(cbX10, 223) + 32   where on release low-2-bits → 3 (button lost)
+ *   byte2 = min(col,   223) + 32
+ *   byte3 = min(row,   223) + 32
+ */
+export function encodeMouse(
+  cb: number,
+  col: number,
+  row: number,
+  release: boolean,
+  sgr: boolean,
+): string {
+  if (sgr) {
+    // SGR: button identity is preserved on release (distinguished by M vs m).
+    const final = release ? 'm' : 'M';
+    return `\x1b[<${cb};${col};${row}${final}`;
+  } else {
+    // X10/legacy: on release the low two bits of cb become 3 (button identity lost).
+    const cbX10 = release ? (cb & ~0b11) | 0b11 : cb;
+    const b1 = Math.min(cbX10, 223) + 32;
+    const b2 = Math.min(col,   223) + 32;
+    const b3 = Math.min(row,   223) + 32;
+    return '\x1b[M' + String.fromCharCode(b1, b2, b3);
+  }
 }

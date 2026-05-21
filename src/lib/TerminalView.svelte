@@ -2,7 +2,7 @@
   import { onDestroy, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { selectedSession } from './selection';
-  import { Screen, rowToRuns, colorToCss, type Run } from './ansi';
+  import { Screen, rowToRuns, colorToCss, encodeMouse, type Run } from './ansi';
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -50,6 +50,121 @@
   let cellWidth = 0;
   let cellHeight = 0;
   let disconnected = $state(false);
+
+  // ─── Mouse forwarding state ───────────────────────────────────────────
+  /** Which button (0/1/2, encoded as cb) is currently pressed. Null = none. */
+  let pressedButton: number | null = null;
+  /** The last cell (1-based col, row) for which we sent a motion report,
+   *  used to throttle: we only send a new report when the cell changes. */
+  let lastMotionCell: { col: number; row: number } | null = null;
+  /** Cleanup functions for the window-level mousemove/mouseup listeners added
+   *  on mousedown. Removed on mouseup or component destroy. */
+  let removeWindowListeners: (() => void) | null = null;
+  /** Accumulated (pixel-normalized) wheel delta not yet turned into reports.
+   *  We forward one wheel report per WHEEL_TICK_PX of scroll instead of one
+   *  per event, so trackpads (many tiny deltas) don't flood tmux and line-mode
+   *  wheels still register — smooth, proportional scrolling either way. */
+  let wheelAccum = 0;
+  const WHEEL_TICK_PX = 40;
+
+  /** Map a MouseEvent's client coordinates to a 1-based terminal cell,
+   *  clamped to the visible grid. Accounts for the 4px left/top padding. */
+  function eventToCell(e: MouseEvent): { col: number; row: number } {
+    const rect = container!.getBoundingClientRect();
+    const col = Math.max(1, Math.min(lastCols,
+      Math.floor((e.clientX - rect.left - 4) / cellWidth) + 1));
+    const row = Math.max(1, Math.min(lastRows,
+      Math.floor((e.clientY - rect.top) / cellHeight) + 1));
+    return { col, row };
+  }
+
+  /** Write a mouse escape sequence to the PTY. */
+  function sendMouse(data: string) {
+    void invoke('pty_write', { args: { data } }).catch(() => {});
+  }
+
+  function onWheel(e: WheelEvent) {
+    if (!ptyOpen || !screen || !screen.mouseEnabled) return;
+    e.preventDefault();
+    // Normalize the delta to pixels across deltaMode (0=px, 1=lines, 2=pages)
+    // so wheels and trackpads accumulate on the same scale.
+    const line = cellHeight || 16;
+    let dy = e.deltaY;
+    if (e.deltaMode === 1) dy *= line;
+    else if (e.deltaMode === 2) dy *= line * (lastRows || 24);
+    // Reset on direction change so a flip registers immediately.
+    if ((dy < 0 && wheelAccum > 0) || (dy > 0 && wheelAccum < 0)) wheelAccum = 0;
+    wheelAccum += dy;
+    const { col, row } = eventToCell(e);
+    const sgr = screen.mouseSgr;
+    // Emit one wheel report per WHEEL_TICK_PX of accumulated scroll. Batch all
+    // reports for this event into a single PTY write; guard caps a pathological
+    // delta at 64 reports.
+    let reports = '';
+    let guard = 0;
+    while (Math.abs(wheelAccum) >= WHEEL_TICK_PX && guard++ < 64) {
+      const up = wheelAccum < 0;
+      reports += encodeMouse(up ? 64 : 65, col, row, false, sgr);
+      wheelAccum += up ? WHEEL_TICK_PX : -WHEEL_TICK_PX;
+    }
+    if (reports) sendMouse(reports);
+  }
+
+  function onMousedown(e: MouseEvent) {
+    if (!ptyOpen || !screen || !screen.mouseEnabled) return;
+    // Only forward left (0), middle (1), right (2).
+    if (e.button > 2) return;
+    e.preventDefault();
+    // preventDefault() suppresses the browser's default focus-on-click; focus
+    // the terminal explicitly so keystrokes keep flowing after a mouse-mode click.
+    (e.currentTarget as HTMLElement | null)?.focus();
+    const { col, row } = eventToCell(e);
+    const cb = e.button; // 0=left 1=middle 2=right
+    pressedButton = cb;
+    lastMotionCell = { col, row };
+    const sgr = screen.mouseSgr;
+    sendMouse(encodeMouse(cb, col, row, false, sgr));
+
+    // Attach window-level listeners so we keep tracking if the pointer
+    // leaves the terminal element before the button is released.
+    const handleMove = (ev: MouseEvent) => onWindowMousemove(ev);
+    const handleUp   = (ev: MouseEvent) => onWindowMouseup(ev);
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', handleUp);
+    removeWindowListeners = () => {
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseup', handleUp);
+      removeWindowListeners = null;
+    };
+  }
+
+  function onWindowMousemove(e: MouseEvent) {
+    if (!ptyOpen || !screen || pressedButton === null && !screen.mouseAnyMotion) return;
+    const { col, row } = eventToCell(e);
+    // Throttle: only send a report if the cell actually changed.
+    if (lastMotionCell && lastMotionCell.col === col && lastMotionCell.row === row) return;
+    lastMotionCell = { col, row };
+    const sgr = screen.mouseSgr;
+    if (pressedButton !== null && screen.mouseButtonMotion) {
+      // Button held — report as motion with the pressed button.
+      sendMouse(encodeMouse(pressedButton + 32, col, row, false, sgr));
+    } else if (pressedButton === null && screen.mouseAnyMotion) {
+      // No button held — any-motion mode (cb = 3 + 32 = 35).
+      sendMouse(encodeMouse(35, col, row, false, sgr));
+    }
+  }
+
+  function onWindowMouseup(e: MouseEvent) {
+    if (pressedButton === null) return;
+    if (ptyOpen && screen && screen.mouseEnabled && container) {
+      const { col, row } = eventToCell(e);
+      const sgr = screen.mouseSgr;
+      sendMouse(encodeMouse(pressedButton, col, row, true, sgr));
+    }
+    pressedButton = null;
+    lastMotionCell = null;
+    removeWindowListeners?.();
+  }
 
   $effect(() => {
     const sess = $selectedSession;
@@ -312,6 +427,7 @@
 
   onDestroy(() => {
     void closeTerm();
+    removeWindowListeners?.();
   });
 
   // Per-row render cache, keyed by the Screen instance so it resets on a
@@ -372,13 +488,38 @@
   // collapses it to a Map lookup.
   const styleCache = new Map<string, string>();
 
+  // Cursor overlay position. Touch renderVersion so it tracks every drain.
+  // Null when hidden (?25l) or before font metrics are measured. The grid has
+  // 4px padding; cells run cellWidth × cellHeight from there.
+  const cursor = $derived.by<{ left: number; top: number; w: number; h: number } | null>(() => {
+    void renderVersion;
+    if (!screen || !screen.cursorVisible) return null;
+    if (cellWidth <= 0 || cellHeight <= 0) return null;
+    return {
+      left: 4 + screen.cursorCol * cellWidth,
+      top: 4 + screen.cursorRow * cellHeight,
+      w: cellWidth,
+      h: cellHeight,
+    };
+  });
+
   function runStyle(run: Run): string {
     const cacheKey = `${run.fg}|${run.bg}|${run.attrs}`;
     const hit = styleCache.get(cacheKey);
     if (hit !== undefined) return hit;
     const parts: string[] = [];
-    const fg = colorToCss(run.fg);
-    const bg = colorToCss(run.bg);
+    let fg = colorToCss(run.fg);
+    let bg = colorToCss(run.bg);
+    // Reverse video (SGR 7 → ATTR_REVERSE): swap fg/bg, substituting the grid
+    // defaults for cells that use the default color. This is how claude/tmux
+    // draw the input CARET (a reverse-video block) and selections — without it
+    // they render as plain text and are invisible.
+    if (run.attrs & 16) {
+      const f = fg ?? '#e8e8e8'; // grid default text color (.grid color)
+      const b = bg ?? '#0a0a0a'; // grid default background (.grid background)
+      fg = b;
+      bg = f;
+    }
     if (fg) parts.push(`color:${fg}`);
     if (bg) parts.push(`background:${bg}`);
     if (run.attrs & 1) parts.push('font-weight:600'); // ATTR_BOLD
@@ -427,6 +568,8 @@
       role="textbox"
       aria-label="Terminal"
       onkeydown={onKeydown}
+      onwheel={onWheel}
+      onmousedown={onMousedown}
       data-testid="terminal-host"
     >
       <!-- Hidden 1ch×1lh probe used once to measure font metrics. We can't
@@ -440,6 +583,14 @@
           {/each}
         </div>
       {/each}
+      {#if cursor}
+        <div
+          class="cursor"
+          style="left:{cursor.left}px; top:{cursor.top}px; width:{cursor.w}px; height:{cursor.h}px"
+          aria-hidden="true"
+          data-testid="terminal-cursor"
+        ></div>
+      {/if}
     </div>
     {#if openError}
       <div class="err">PTY error: {openError}</div>
@@ -527,6 +678,7 @@
   }
   .reconnect:hover { color: var(--fg); border-color: var(--accent); }
   .grid {
+    position: relative;
     flex: 1 1 auto;
     min-height: 0;
     min-width: 0;
@@ -554,6 +706,20 @@
   .row span {
     /* span color comes from inline style applied per run. */
     display: inline;
+  }
+  /* Block cursor overlay. Translucent so the glyph under it stays readable;
+     blinks like a standard terminal cursor. Position/size are set inline from
+     the measured cell metrics. Hidden automatically when the app sends ?25l. */
+  .cursor {
+    position: absolute;
+    background: #e8e8e8;
+    opacity: 0.55;
+    pointer-events: none;
+    z-index: 1;
+    animation: cf-cursor-blink 1.1s steps(1, end) infinite;
+  }
+  @keyframes cf-cursor-blink {
+    50% { opacity: 0; }
   }
   .measure {
     position: absolute;
