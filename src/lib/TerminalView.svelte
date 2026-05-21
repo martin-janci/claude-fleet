@@ -3,6 +3,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { selectedSession } from './selection';
   import { Screen, rowToRuns, colorToCss, encodeMouse, type Run } from './ansi';
+  import { trimSelectionText, sanitizePaste, framePaste } from './clipboard';
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -84,6 +85,7 @@
   }
 
   function onWheel(e: WheelEvent) {
+    if (e.altKey) return;
     if (!ptyOpen || !screen || !screen.mouseEnabled) return;
     e.preventDefault();
     // Normalize the delta to pixels across deltaMode (0=px, 1=lines, 2=pages)
@@ -111,6 +113,10 @@
   }
 
   function onMousedown(e: MouseEvent) {
+    // Option (Alt) held → let the browser do a native text selection instead
+    // of forwarding the click to the app, so the user can copy while mouse
+    // reporting is on.
+    if (e.altKey) return;
     if (!ptyOpen || !screen || !screen.mouseEnabled) return;
     // Only forward left (0), middle (1), right (2).
     if (e.button > 2) return;
@@ -164,6 +170,19 @@
     pressedButton = null;
     lastMotionCell = null;
     removeWindowListeners?.();
+  }
+
+  /** After a mouse-up, if the user selected text inside the grid, copy it to
+   *  the clipboard automatically (iTerm "copy on select"). The selection is
+   *  left highlighted. Trailing whitespace per line is trimmed because rows
+   *  are space-padded to the full width. */
+  function onGridMouseup() {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !container) return;
+    if (!container.contains(sel.anchorNode) && !container.contains(sel.focusNode)) return;
+    const text = trimSelectionText(sel.toString());
+    if (text.trim() === '') return;
+    void navigator.clipboard.writeText(text).catch(() => {});
   }
 
   $effect(() => {
@@ -583,6 +602,7 @@
       oncompositionend={onCompositionEnd}
       onwheel={onWheel}
       onmousedown={onMousedown}
+      onmouseup={onGridMouseup}
       data-testid="terminal-host"
     >
       <!-- Hidden 1ch×1lh probe used once to measure font metrics. We can't
@@ -695,6 +715,8 @@
     flex: 1 1 auto;
     min-height: 0;
     min-width: 0;
+    user-select: text;
+    -webkit-user-select: text;
     background: #0a0a0a;
     color: #e8e8e8;
     overflow: hidden;
