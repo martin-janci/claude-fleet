@@ -513,6 +513,11 @@ impl Store {
             "UPDATE hosts SET hidden=?1 WHERE alias=?2",
             rusqlite::params![if hidden { 1 } else { 0 }, alias],
         )?;
+        // Emit like every other host mutation — the HostRow carries `hidden`,
+        // so subscribers see the toggle without a manual refetch.
+        if let Some(row) = self.get_host(alias)? {
+            self.bus.host_probed(&row);
+        }
         Ok(())
     }
 

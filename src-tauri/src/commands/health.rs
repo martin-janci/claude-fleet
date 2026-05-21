@@ -23,10 +23,16 @@ pub fn health_from_store(s: &Store) -> Health {
 
 #[tauri::command]
 pub fn health_check(store: State<'_, Mutex<Store>>) -> Health {
-    // TODO(T3): once IpcError exists, return Result<Health, IpcError> and
-    // map the mutex poison error to E_LOCK.
-    let s = store.lock().expect("store mutex poisoned");
-    health_from_store(&s)
+    // A poisoned store mutex IS an unhealthy state — report db_ready=false
+    // rather than panicking the command (which the old `.expect` did).
+    match store.lock() {
+        Ok(s) => health_from_store(&s),
+        Err(_) => Health {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            db_ready: false,
+            schema_version: 0,
+        },
+    }
 }
 
 #[cfg(test)]
