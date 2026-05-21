@@ -409,12 +409,23 @@
 
   function onKeydown(e: KeyboardEvent) {
     if (!ptyOpen) return;
+    // While an IME / dead-key composition is in progress the keydowns are
+    // part of composing — the finished text arrives via compositionend.
+    if (e.isComposing) return;
     const bytes = keyToBytes(e);
     if (bytes === null) return;
     e.preventDefault();
     void invoke('pty_write', { args: { data: bytes } }).catch(() => {});
     // The keystroke will produce output (echo / TUI redraw); pull the drain
     // loop back to full rate so it doesn't sit on a backed-off delay.
+    bumpDrain();
+  }
+
+  /** Forward IME / dead-key composed text (e.g. Slovak `á`, CJK input) — it
+   *  never reaches `onKeydown` as a single printable char. */
+  function onCompositionEnd(e: CompositionEvent) {
+    if (!ptyOpen || !e.data) return;
+    void invoke('pty_write', { args: { data: e.data } }).catch(() => {});
     bumpDrain();
   }
 
@@ -567,7 +578,9 @@
       tabindex="0"
       role="textbox"
       aria-label="Terminal"
+      aria-multiline="true"
       onkeydown={onKeydown}
+      oncompositionend={onCompositionEnd}
       onwheel={onWheel}
       onmousedown={onMousedown}
       data-testid="terminal-host"

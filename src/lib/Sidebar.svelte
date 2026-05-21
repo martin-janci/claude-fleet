@@ -498,11 +498,13 @@
                       <span
                         class="related-badge"
                         data-testid="related-badge"
+                        role="img"
                         title="{relatedCountFor(sess)} related session(s)"
+                        aria-label="{relatedCountFor(sess)} related sessions"
                       >🔗{relatedCountFor(sess)}</span>
                     {/if}
                     {#if sess.kind === 'review'}
-                      <span class="review-badge" title="review session">🔍</span>
+                      <span class="review-badge" role="img" title="review session" aria-label="review session">🔍</span>
                     {/if}
                     {#if sess.kind === 'shell'}
                       <span class="shell-badge" title="shell session">▶</span>
@@ -583,11 +585,13 @@
                 <span
                   class="related-badge"
                   data-testid="related-badge"
+                  role="img"
                   title="{relatedCountFor(sess)} related session(s)"
+                  aria-label="{relatedCountFor(sess)} related sessions"
                 >🔗{relatedCountFor(sess)}</span>
               {/if}
               {#if sess.kind === 'review'}
-                <span class="review-badge" title="review session">🔍</span>
+                <span class="review-badge" role="img" title="review session" aria-label="review session">🔍</span>
               {/if}
               {#if sess.kind === 'shell'}
                 <span class="shell-badge" title="shell session">▶</span>
