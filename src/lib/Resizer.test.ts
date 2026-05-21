@@ -9,8 +9,8 @@ describe('Resizer', () => {
     const handle = getByTestId('resizer-a');
 
     await fireEvent.pointerDown(handle, { clientX: 100, pointerId: 1 });
-    await fireEvent.pointerMove(window, { clientX: 150, pointerId: 1 });
-    await fireEvent.pointerUp(window, { clientX: 150, pointerId: 1 });
+    await fireEvent.pointerMove(handle, { clientX: 150, pointerId: 1 });
+    await fireEvent.pointerUp(handle, { clientX: 150, pointerId: 1 });
 
     expect(onresize).toHaveBeenCalledTimes(1);
     expect(onresize).toHaveBeenLastCalledWith(50);
@@ -22,9 +22,9 @@ describe('Resizer', () => {
     const handle = getByTestId('resizer-b');
 
     await fireEvent.pointerDown(handle, { clientX: 100, pointerId: 1 });
-    await fireEvent.pointerMove(window, { clientX: 130, pointerId: 1 });
-    await fireEvent.pointerMove(window, { clientX: 150, pointerId: 1 });
-    await fireEvent.pointerUp(window, { clientX: 150, pointerId: 1 });
+    await fireEvent.pointerMove(handle, { clientX: 130, pointerId: 1 });
+    await fireEvent.pointerMove(handle, { clientX: 150, pointerId: 1 });
+    await fireEvent.pointerUp(handle, { clientX: 150, pointerId: 1 });
 
     expect(onresize).toHaveBeenCalledTimes(2);
     expect(onresize).toHaveBeenNthCalledWith(1, 30);

@@ -61,6 +61,15 @@
   let renamingName: string | null = $state(null);
   let renameValue = $state('');
   let renameError: string | null = $state(null);
+  // The live rename <input> (only one renders at a time). Bound directly so
+  // focus targets the right element — a `data-testid` querySelector would
+  // pick the first match if a tree row and an orphan row shared a name.
+  let renameInput: HTMLInputElement | undefined;
+  // Synchronous in-flight guard: commitRename is wired to BOTH Enter and
+  // onblur, and Enter blurs the input — without this the rename IPC fires
+  // twice (the `!renamingName` check doesn't help: it's still set during the
+  // first call's await).
+  let committingRename = false;
   let pendingKill: SessionRow | null = $state(null);
   // Projects intentionally collapsed by the user. Anything not in this set
   // is open by default — most users have one or two projects and want to
@@ -262,9 +271,8 @@
     renameValue = sess.tmux_name;
     renameError = null;
     await tick();
-    const input = document.querySelector<HTMLInputElement>('[data-testid="rename-input"]');
-    input?.focus();
-    input?.select();
+    renameInput?.focus();
+    renameInput?.select();
   }
 
   function cancelRename() {
@@ -274,29 +282,34 @@
   }
 
   async function commitRename() {
-    if (!renamingName) return;
+    if (committingRename || !renamingName) return;
     const next = renameValue.trim();
     if (!next || next === renamingName) {
       cancelRename();
       return;
     }
-    const oldName = renamingName;
-    const sess = $sessions.find((s) => s.tmux_name === oldName);
-    const hostAlias = sess?.host_alias ?? 'local';
-    const r = await renameSession(hostAlias, oldName, next);
-    if (!r.ok) {
-      renameError = r.error.message;
-      return;
+    committingRename = true;
+    try {
+      const oldName = renamingName;
+      const sess = $sessions.find((s) => s.tmux_name === oldName);
+      const hostAlias = sess?.host_alias ?? 'local';
+      const r = await renameSession(hostAlias, oldName, next);
+      if (!r.ok) {
+        renameError = r.error.message;
+        return;
+      }
+      // Persisted UI state (pane widths, collapsed) is keyed by tmux name;
+      // bring it along to the new name so the user's layout sticks.
+      migrateSessionUi(r.value.host_alias, oldName, r.value.tmux_name);
+      // If the renamed session was the selected one, follow the rename.
+      const cur = $selectedSession;
+      if (cur && cur.tmux_name === oldName) {
+        selectSession(r.value);
+      }
+      cancelRename();
+    } finally {
+      committingRename = false;
     }
-    // Persisted UI state (pane widths, collapsed) is keyed by tmux name;
-    // bring it along to the new name so the user's layout sticks.
-    migrateSessionUi(r.value.host_alias, oldName, r.value.tmux_name);
-    // If the renamed session was the selected one, follow the rename.
-    const cur = $selectedSession;
-    if (cur && cur.tmux_name === oldName) {
-      selectSession(r.value);
-    }
-    cancelRename();
   }
 
   function onRenameKey(e: KeyboardEvent) {
@@ -468,6 +481,7 @@
                 >
                   {#if isRenaming}
                     <input
+                      bind:this={renameInput}
                       class="rename-input"
                       data-testid="rename-input"
                       bind:value={renameValue}
@@ -549,6 +563,7 @@
           >
             {#if isRenaming}
               <input
+                bind:this={renameInput}
                 class="rename-input"
                 data-testid="rename-input"
                 bind:value={renameValue}

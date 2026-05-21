@@ -50,19 +50,21 @@
     writePref('layout.center-collapsed', centerCollapsed);
   });
 
-  // When the selected session changes, swap in its persisted layout. We use
-  // a `hydrating` gate so the save-effect below doesn't immediately echo
-  // the freshly-loaded values back to storage.
-  let hydrating = false;
+  // When the selected session changes, swap in its persisted layout. The
+  // save-effect below is gated on a per-session token (`hydratedKey`) rather
+  // than a boolean+microtask: a boolean races across rapid session switches
+  // and can save one session's centerPx under another's key.
+  let hydratedKey: string | null = null;
+  const sessionKey = (s: { host_alias: string; tmux_name: string }) =>
+    `${s.host_alias}/${s.tmux_name}`;
   $effect(() => {
     const sess = $selectedSession;
     if (!sess) return;
-    hydrating = true;
+    const key = sessionKey(sess);
+    if (key === hydratedKey) return;
     const ui = loadSessionUi(sess.host_alias, sess.tmux_name);
     centerPx = ui.centerPx;
-    queueMicrotask(() => {
-      hydrating = false;
-    });
+    hydratedKey = key;
   });
 
   // centerPx changes per resize-drag frame too — debounce its persistence.
@@ -70,7 +72,10 @@
   $effect(() => {
     const sess = $selectedSession;
     const px = centerPx;
-    if (!sess || hydrating) return;
+    if (!sess) return;
+    // Only persist once centerPx has actually been hydrated FOR this session
+    // — otherwise we'd write the previous session's value under this key.
+    if (sessionKey(sess) !== hydratedKey) return;
     clearTimeout(centerSaveTimer);
     centerSaveTimer = setTimeout(
       () => saveSessionUi(sess.host_alias, sess.tmux_name, { centerPx: px }),
