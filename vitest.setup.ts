@@ -56,6 +56,36 @@ vi.mock('@tauri-apps/api/event', () => ({
   emit: vi.fn(async () => {}),
 }));
 
+// vitest's jsdom environment does not expose a usable global `localStorage`
+// (the document origin is opaque, so jsdom omits the Web Storage API).
+// Provide a minimal in-memory Storage so modules that read prefs / theme /
+// session-ui state — some at import time — don't crash. Setup files load
+// before any test module is imported.
+if (typeof globalThis.localStorage === 'undefined') {
+  const mem = new Map<string, string>();
+  const storage: Storage = {
+    get length() {
+      return mem.size;
+    },
+    clear() {
+      mem.clear();
+    },
+    getItem(key: string) {
+      return mem.has(key) ? mem.get(key)! : null;
+    },
+    setItem(key: string, value: string) {
+      mem.set(key, String(value));
+    },
+    removeItem(key: string) {
+      mem.delete(key);
+    },
+    key(index: number) {
+      return Array.from(mem.keys())[index] ?? null;
+    },
+  };
+  globalThis.localStorage = storage;
+}
+
 // ResizeObserver isn't implemented by jsdom. Our TerminalView attaches one
 // to re-fit the screen buffer on container resize; stub it as a no-op so
 // tests that mount the component don't blow up.
