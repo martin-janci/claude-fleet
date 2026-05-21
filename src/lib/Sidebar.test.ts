@@ -35,6 +35,7 @@ function sessionFor(projectId: number | null, name = `dev-${projectId ?? 'orphan
     account_uuid: null,
     kind: 'work',
     reviews_session_id: null,
+    worktree_key: 'main',
   };
 }
 
@@ -499,9 +500,9 @@ describe('Sidebar (sessions-grouped view)', () => {
 
   it('renders 🔗N badge for sessions with related siblings', async () => {
     const a = sessionFor(1, 'dev-a');
-    a.worktree_id = 10;
+    a.worktree_key = 'main';
     const b = sessionFor(1, 'dev-b');
-    b.worktree_id = 10;
+    b.worktree_key = 'main';
     mockBackend(fakeProjects, [a, b]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
@@ -512,8 +513,19 @@ describe('Sidebar (sessions-grouped view)', () => {
 
   it('omits 🔗 badge for solo sessions', async () => {
     const solo = sessionFor(1, 'dev-solo');
-    solo.worktree_id = 10;
+    solo.worktree_key = 'main';
     mockBackend(fakeProjects, [solo]);
+    render(Sidebar);
+    for (let i = 0; i < 8; i++) await tick();
+    expect(screen.queryAllByTestId('related-badge')).toHaveLength(0);
+  });
+
+  it('omits 🔗 badge for same-project sessions with different worktree_key', async () => {
+    const a = sessionFor(1, 'dev-a');
+    a.worktree_key = 'main';
+    const b = sessionFor(1, 'dev-b');
+    b.worktree_key = 'feature-x';
+    mockBackend(fakeProjects, [a, b]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
     expect(screen.queryAllByTestId('related-badge')).toHaveLength(0);
@@ -551,6 +563,7 @@ describe('Sidebar (sessions-grouped view)', () => {
           account_uuid: null,
           kind: 'work',
           reviews_session_id: null,
+          worktree_key: 'main',
         });
       }
     }

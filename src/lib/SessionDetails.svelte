@@ -35,15 +35,16 @@
     return $accounts.find((a) => a.uuid === s.account_uuid) ?? null;
   }
 
-  const related = $derived.by(() => {
-    if (session.project_id === null) return [];
-    return $sessions.filter(
-      (s) =>
-        s.id !== session.id &&
-        s.project_id === session.project_id &&
-        s.worktree_id === session.worktree_id,
-    );
-  });
+  const related = $derived(
+    session.project_id == null || session.worktree_key == null
+      ? []
+      : $sessions.filter(
+          (s) =>
+            s.id !== session.id &&
+            s.project_id === session.project_id &&
+            s.worktree_key === session.worktree_key,
+        ),
+  );
 
   // Local-only for v0.2 (Phase 4 will branch on host_alias for remote attach).
   const attachCommand = $derived(`tmux attach -t ${session.tmux_name}`);

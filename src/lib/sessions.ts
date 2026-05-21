@@ -14,6 +14,7 @@ export interface SessionRow {
   account_uuid: string | null;
   kind: string;
   reviews_session_id: number | null;
+  worktree_key: string | null;
 }
 
 export const sessions = writable<SessionRow[]>([]);

@@ -154,12 +154,12 @@
     return m;
   });
 
-  // Map: session.id → count of other sessions sharing the same (project, worktree)
+  // Map: session.id → count of other sessions sharing the same (project, worktree_key)
   const relatedCountById = $derived.by(() => {
     const grouped = new Map<string, SessionRow[]>();
     for (const s of $sessions) {
-      if (s.project_id == null) continue;
-      const key = `${s.project_id}:${s.worktree_id ?? 'null'}`;
+      if (s.project_id == null || s.worktree_key == null) continue;
+      const key = `${s.project_id}:${s.worktree_key}`;
       if (!grouped.has(key)) grouped.set(key, []);
       grouped.get(key)!.push(s);
     }

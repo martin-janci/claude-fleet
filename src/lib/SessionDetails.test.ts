@@ -25,6 +25,7 @@ const sampleSession = {
   account_uuid: null,
   kind: 'work',
   reviews_session_id: null,
+  worktree_key: null,
 };
 
 beforeEach(() => {
@@ -69,8 +70,8 @@ describe('SessionDetails', () => {
   });
 
   it('shows Related sessions panel when siblings exist', async () => {
-    const source = { ...sampleSession, id: 1, project_id: 1, worktree_id: 10 };
-    const sibling = { ...sampleSession, id: 2, tmux_name: 'dev-sib', host_alias: 'mefistos', project_id: 1, worktree_id: 10 };
+    const source = { ...sampleSession, id: 1, project_id: 1, worktree_id: 10, worktree_key: 'main' };
+    const sibling = { ...sampleSession, id: 2, tmux_name: 'dev-sib', host_alias: 'mefistos', project_id: 1, worktree_id: 10, worktree_key: 'main' };
     hosts.set([
       { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null },
     ]);
@@ -84,7 +85,7 @@ describe('SessionDetails', () => {
   });
 
   it('hides Related panel when session has no siblings', async () => {
-    const lone = { ...sampleSession, id: 1, project_id: 1, worktree_id: 10 };
+    const lone = { ...sampleSession, id: 1, project_id: 1, worktree_id: 10, worktree_key: 'main' };
     sessions.set([lone]);
     render(SessionDetails, { props: { session: lone } });
     await tick();
@@ -92,10 +93,19 @@ describe('SessionDetails', () => {
   });
 
   it('hides Related panel for orphan sessions (project_id=null)', async () => {
-    const orphan = { ...sampleSession, id: 1, project_id: null, worktree_id: null };
-    const otherOrphan = { ...sampleSession, id: 2, tmux_name: 'dev-other', project_id: null, worktree_id: null };
+    const orphan = { ...sampleSession, id: 1, project_id: null, worktree_id: null, worktree_key: null };
+    const otherOrphan = { ...sampleSession, id: 2, tmux_name: 'dev-other', project_id: null, worktree_id: null, worktree_key: null };
     sessions.set([orphan, otherOrphan]);
     render(SessionDetails, { props: { session: orphan } });
+    await tick();
+    expect(screen.queryByTestId('related-sessions')).toBeNull();
+  });
+
+  it('hides Related panel for sessions with different worktree_key', async () => {
+    const source = { ...sampleSession, id: 1, project_id: 1, worktree_id: 10, worktree_key: 'main' };
+    const diffKey = { ...sampleSession, id: 2, tmux_name: 'dev-feat', project_id: 1, worktree_id: 11, worktree_key: 'feature-x' };
+    sessions.set([source, diffKey]);
+    render(SessionDetails, { props: { session: source } });
     await tick();
     expect(screen.queryByTestId('related-sessions')).toBeNull();
   });

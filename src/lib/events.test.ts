@@ -39,6 +39,7 @@ describe('subscribeToRowEvents', () => {
       account_uuid: null,
       kind: 'work',
       reviews_session_id: null,
+      worktree_key: null,
     });
     expect(seen).toEqual([42]);
   });
@@ -63,7 +64,7 @@ describe('subscribeToRowEvents', () => {
       project_id: null, worktree_id: null,
       created_at: 0, last_activity_at: 0,
       status: 'running', notes: null, account_uuid: null,
-      kind: 'work', reviews_session_id: null,
+      kind: 'work', reviews_session_id: null, worktree_key: null,
     });
     expect(seen).toEqual([]);
   });
@@ -91,6 +92,7 @@ describe('subscribeToRowEvents → store integration', () => {
       account_uuid: null,
       kind: 'work',
       reviews_session_id: null,
+      worktree_key: null,
     });
     const { get } = await import('svelte/store');
     expect(get(sessions).map((s) => s.id)).toEqual([7]);
