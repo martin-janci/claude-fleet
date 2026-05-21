@@ -178,11 +178,19 @@ export class Screen {
    *  active so a `?...l` can restore exactly. We only support one level —
    *  nesting another ?1049h while already in alt is a no-op. */
   private savedScreen: SavedScreenState | null = null;
+  /** Scroll region (DECSTBM) — inclusive top/bottom row indices. The region
+   *  defaults to the whole screen (0 .. rows-1). LF/RI/IL/DL all operate
+   *  within these bounds; rows outside the region (e.g. a tmux status bar
+   *  pinned to the last row) are never scrolled. */
+  scrollTop = 0;
+  scrollBottom = 0;
 
   constructor(rows: number, cols: number) {
     this.rows = Math.max(1, rows);
     this.cols = Math.max(1, cols);
     this.cells = makeGrid(this.rows, this.cols);
+    this.scrollTop = 0;
+    this.scrollBottom = this.rows - 1;
   }
 
   /** Resize the buffer. Existing content is preserved by clamping or
@@ -204,6 +212,11 @@ export class Screen {
     this.cols = cols;
     if (this.cursorRow >= rows) this.cursorRow = rows - 1;
     if (this.cursorCol >= cols) this.cursorCol = cols - 1;
+    // A SIGWINCH invalidates the scroll region — programs re-establish it
+    // after the resize (that's exactly why a resize "fixes" a garbled pane).
+    // Reset to the full new screen so stale margins can't mis-scroll.
+    this.scrollTop = 0;
+    this.scrollBottom = this.rows - 1;
   }
 
   /** Feed bytes (already decoded to UTF-16) into the parser. */
@@ -289,13 +302,35 @@ export class Screen {
     this.cursorCol++;
   }
 
-  /** LF: move to next row, scrolling up if we'd fall off the bottom. */
+  /** LF: move to next row, scrolling the active region up if we're at the
+   *  bottom margin. Only the rows in [scrollTop..scrollBottom] move; the
+   *  cursor is left on the (now-blank) bottom margin row. When the cursor is
+   *  not at the bottom margin we just advance (clamped to the last row), so a
+   *  cursor parked below the region — e.g. on a status bar — does not scroll
+   *  the body. */
   private lineFeed(): void {
-    if (this.cursorRow + 1 >= this.rows) {
-      this.cells.shift();
-      this.cells.push(makeRow(this.cols));
-    } else {
+    if (this.cursorRow === this.scrollBottom) {
+      // Remove the top line of the region; everything above the new top
+      // shifts up by one. After the removal the array is one shorter, so
+      // inserting at `scrollBottom` lands the blank on the region's last row.
+      this.cells.splice(this.scrollTop, 1);
+      this.cells.splice(this.scrollBottom, 0, makeRow(this.cols));
+    } else if (this.cursorRow < this.rows - 1) {
       this.cursorRow++;
+    }
+  }
+
+  /** RI (reverse index): move up one row, scrolling the active region down if
+   *  we're at the top margin. Mirror of `lineFeed`. */
+  private reverseIndex(): void {
+    if (this.cursorRow === this.scrollTop) {
+      // Remove the bottom line of the region; everything below the cursor up
+      // to scrollBottom shifts down. Inserting at `scrollTop` puts the blank
+      // on the region's first row.
+      this.cells.splice(this.scrollBottom, 1);
+      this.cells.splice(this.scrollTop, 0, makeRow(this.cols));
+    } else if (this.cursorRow > 0) {
+      this.cursorRow--;
     }
   }
 
@@ -317,6 +352,22 @@ export class Screen {
     if (intro === '8') {
       this.cursorRow = this.savedRow;
       this.cursorCol = this.savedCol;
+      return 2;
+    }
+    // ESC M — RI (reverse index): up one row, scroll region down at top margin.
+    if (intro === 'M') {
+      this.reverseIndex();
+      return 2;
+    }
+    // ESC D — IND (index): identical to LF (down one row / scroll at bottom).
+    if (intro === 'D') {
+      this.lineFeed();
+      return 2;
+    }
+    // ESC E — NEL (next line): carriage return + line feed.
+    if (intro === 'E') {
+      this.cursorCol = 0;
+      this.lineFeed();
       return 2;
     }
     if (intro === '[') {
@@ -377,6 +428,8 @@ export class Screen {
     this.g0Graphics = false;
     this.g1Graphics = false;
     this.useG1 = false;
+    this.scrollTop = 0;
+    this.scrollBottom = this.rows - 1;
     // ESC c is a full power-on reset — drop any alt-screen snapshot so
     // we don't pop back into stale content the next time we leave alt.
     this.savedScreen = null;
@@ -448,6 +501,24 @@ export class Screen {
       case 'd': // VPA - vertical position absolute
         this.cursorRow = clamp(Math.max(1, p0) - 1, 0, this.rows - 1);
         return;
+      case 'r': { // DECSTBM - set top/bottom scroll margins
+        // A private `?...r` is XTRESTORE (restore DEC private modes), NOT
+        // DECSTBM — ignore it so we don't clobber the scroll region.
+        if (isPrivate) return;
+        const top = p0 ? p0 - 1 : 0;
+        const bottom = p1 ? p1 - 1 : this.rows - 1;
+        // Valid only if both margins are in range and top is strictly above
+        // bottom; otherwise xterm ignores the request and leaves the region
+        // unchanged.
+        if (top >= 0 && bottom < this.rows && top < bottom) {
+          this.scrollTop = top;
+          this.scrollBottom = bottom;
+          // DECSTBM homes the cursor (origin mode off → screen home).
+          this.cursorRow = 0;
+          this.cursorCol = 0;
+        }
+        return;
+      }
       case 's': // save cursor (ANSI.SYS variant)
         this.savedRow = this.cursorRow;
         this.savedCol = this.cursorCol;
@@ -528,6 +599,11 @@ export class Screen {
     this.g0Graphics = false;
     this.g1Graphics = false;
     this.useG1 = false;
+    // The alt buffer starts with full-screen margins; the program re-sets a
+    // region if it wants one. We don't snapshot the primary's margins —
+    // programs re-establish them on leave too (see leaveAltScreen).
+    this.scrollTop = 0;
+    this.scrollBottom = this.rows - 1;
   }
 
   /** Swap back to the primary buffer. No-op if we weren't on alt — guards
@@ -547,6 +623,10 @@ export class Screen {
     this.g1Graphics = saved.g1Graphics;
     this.useG1 = saved.useG1;
     this.savedScreen = null;
+    // Restoring the primary buffer resets margins to full; the program that
+    // owns the primary re-establishes its own region after the buffer pops.
+    this.scrollTop = 0;
+    this.scrollBottom = this.rows - 1;
   }
 
   private eraseInDisplay(mode: number): void {
@@ -578,18 +658,29 @@ export class Screen {
   }
 
   private insertLines(n: number): void {
+    // IL is bounded by the scroll region: rows from the cursor down shift
+    // down, and lines pushed past `scrollBottom` fall off. A cursor outside
+    // the region is a no-op (xterm behaviour) so a status bar below the
+    // region is never disturbed.
+    if (this.cursorRow < this.scrollTop || this.cursorRow > this.scrollBottom) return;
     for (let i = 0; i < n; i++) {
-      if (this.cursorRow >= this.rows) break;
+      // Drop the line currently at the region bottom, then insert a blank at
+      // the cursor — everything between shifts down by one within the region.
+      this.cells.splice(this.scrollBottom, 1);
       this.cells.splice(this.cursorRow, 0, makeRow(this.cols));
-      if (this.cells.length > this.rows) this.cells.length = this.rows;
     }
   }
 
   private deleteLines(n: number): void {
+    // DL is bounded by the scroll region: rows below the cursor shift up and
+    // blanks fill in at `scrollBottom`. A cursor outside the region is a
+    // no-op.
+    if (this.cursorRow < this.scrollTop || this.cursorRow > this.scrollBottom) return;
     for (let i = 0; i < n; i++) {
-      if (this.cursorRow >= this.rows) break;
+      // Remove the cursor line, then insert a blank at the region bottom —
+      // everything between shifts up by one within the region.
       this.cells.splice(this.cursorRow, 1);
-      this.cells.push(makeRow(this.cols));
+      this.cells.splice(this.scrollBottom, 0, makeRow(this.cols));
     }
   }
 

@@ -320,6 +320,175 @@ describe('ansi.Screen — alt screen buffer (DECSET 1049)', () => {
   });
 });
 
+describe('ansi.Screen — DECSTBM scroll region', () => {
+  it('LF scrolls only the region; a pinned status bar on the last row is preserved', () => {
+    // The tmux scenario: status bar pinned to the last row, body scrolls
+    // within a region above it. This is THE bug — without DECSTBM the LF
+    // would scroll the whole screen and carry the status bar away.
+    const s = new Screen(5, 6);
+    // Status bar on the last row (index 4).
+    s.write('\x1b[5;1HSTATUS');
+    // Region = rows 1..4 (1-based) → indices 0..3.
+    s.write('\x1b[1;4r');
+    // After DECSTBM the cursor homes to (0,0). Fill the region: put LINE4 on
+    // the bottom region row, then CRLF (scrolls the region) and write LINE5.
+    // tmux always emits \r\n, so the CR resets the column for the next line.
+    s.write('\x1b[4;1HLINE4');
+    s.write('\r\n');
+    s.write('LINE5');
+    // Body scrolled within the region: LINE4 moved up to row 2, LINE5 landed
+    // on the freshly-blanked bottom region row (row 3).
+    expect(rowText(s, 2).slice(0, 5)).toBe('LINE4');
+    expect(rowText(s, 3).slice(0, 5)).toBe('LINE5');
+    // The status bar on the last row is untouched — the whole point of DECSTBM.
+    expect(rowText(s, 4)).toBe('STATUS');
+  });
+
+  it('LF at the bottom margin scrolls the region up, leaving rows below untouched', () => {
+    const s = new Screen(4, 4);
+    s.write('\x1b[1;3r'); // region rows 0..2
+    s.write('\x1b[1;1HA');
+    s.write('\x1b[2;1HB');
+    s.write('\x1b[3;1HC');
+    s.write('\x1b[4;1HZ'); // row 3, outside the region
+    s.write('\x1b[3;1H'); // cursor at row 2 (bottom margin)
+    s.write('\n'); // LF at bottom margin → region scrolls up
+    expect(rowText(s, 0).slice(0, 1)).toBe('B');
+    expect(rowText(s, 1).slice(0, 1)).toBe('C');
+    expect(rowText(s, 2)).toBe('    '); // fresh blank at region bottom
+    expect(rowText(s, 3).slice(0, 1)).toBe('Z'); // outside region — untouched
+  });
+
+  it('RI (ESC M) at the top margin scrolls the region down', () => {
+    const s = new Screen(4, 4);
+    s.write('\x1b[1;3r'); // region rows 0..2
+    s.write('\x1b[1;1HA');
+    s.write('\x1b[2;1HB');
+    s.write('\x1b[3;1HC');
+    s.write('\x1b[4;1HZ'); // row 3, outside the region
+    s.write('\x1b[1;1H'); // cursor at row 0 (top margin)
+    s.write('\x1bM'); // RI at top margin → region scrolls down
+    expect(rowText(s, 0)).toBe('    '); // fresh blank at region top
+    expect(rowText(s, 1).slice(0, 1)).toBe('A');
+    expect(rowText(s, 2).slice(0, 1)).toBe('B'); // C was pushed off
+    expect(rowText(s, 3).slice(0, 1)).toBe('Z'); // outside region — untouched
+  });
+
+  it('with no DECSTBM the default region is the whole screen (regression guard)', () => {
+    const s = new Screen(3, 4);
+    s.write('aaaa\r\nbbbb\r\ncccc');
+    s.write('\n'); // LF at last row scrolls the whole screen
+    expect(rowText(s, 0)).toBe('bbbb');
+    expect(rowText(s, 1)).toBe('cccc');
+    expect(rowText(s, 2)).toBe('    ');
+  });
+
+  it('resize resets the scroll region to the full new screen', () => {
+    const s = new Screen(5, 4);
+    s.write('\x1b[1;3r'); // region rows 0..2
+    s.resize(3, 4); // margins reset to full
+    s.write('aaaa\r\nbbbb\r\ncccc');
+    s.write('\n'); // LF at last row scrolls the whole (resized) screen
+    expect(rowText(s, 0)).toBe('bbbb');
+    expect(rowText(s, 1)).toBe('cccc');
+    expect(rowText(s, 2)).toBe('    ');
+  });
+
+  it('full reset (ESC c) resets the scroll region to the whole screen', () => {
+    const s = new Screen(3, 4);
+    s.write('\x1b[1;2r'); // region rows 0..1
+    s.write('\x1bc'); // full reset
+    s.write('aaaa\r\nbbbb\r\ncccc');
+    s.write('\n');
+    expect(rowText(s, 0)).toBe('bbbb');
+    expect(rowText(s, 2)).toBe('    ');
+  });
+
+  it('an out-of-range / inverted DECSTBM is ignored (region stays full screen)', () => {
+    const s = new Screen(3, 4);
+    s.write('\x1b[3;1r'); // top >= bottom → invalid, ignored
+    s.write('aaaa\r\nbbbb\r\ncccc');
+    s.write('\n');
+    expect(rowText(s, 0)).toBe('bbbb');
+    expect(rowText(s, 2)).toBe('    ');
+  });
+
+  it('IND (ESC D) behaves like LF, scrolling the region at the bottom margin', () => {
+    const s = new Screen(4, 4);
+    s.write('\x1b[1;3r'); // region rows 0..2
+    s.write('\x1b[1;1HA');
+    s.write('\x1b[2;1HB');
+    s.write('\x1b[3;1HC');
+    s.write('\x1b[4;1HZ');
+    s.write('\x1b[3;1H'); // cursor at bottom margin
+    s.write('\x1bD'); // IND
+    expect(rowText(s, 0).slice(0, 1)).toBe('B');
+    expect(rowText(s, 1).slice(0, 1)).toBe('C');
+    expect(rowText(s, 2)).toBe('    ');
+    expect(rowText(s, 3).slice(0, 1)).toBe('Z');
+  });
+
+  it('NEL (ESC E) does CR + LF', () => {
+    const s = new Screen(3, 6);
+    s.write('\x1b[1;3HAB'); // cursor lands at row 0, col 2 then writes "AB"
+    s.write('\x1bE'); // NEL → col 0, next row
+    s.write('C');
+    expect(s.cursorRow).toBe(1);
+    expect(rowText(s, 1).slice(0, 1)).toBe('C'); // CR returned to col 0
+  });
+
+  it('LF on a row below the scroll region does not scroll the region', () => {
+    // Cursor on the status bar (below the region) doing LF must NOT move the
+    // body. With scrollBottom < last row, LF at the last row is a no-op.
+    const s = new Screen(4, 4);
+    s.write('\x1b[1;3r'); // region rows 0..2
+    s.write('\x1b[1;1HA');
+    s.write('\x1b[2;1HB');
+    s.write('\x1b[3;1HC');
+    s.write('\x1b[4;1HZ'); // status bar on last row (index 3)
+    s.write('\n'); // LF while cursor is at row 3 (below region) — no scroll
+    expect(rowText(s, 0).slice(0, 1)).toBe('A');
+    expect(rowText(s, 1).slice(0, 1)).toBe('B');
+    expect(rowText(s, 2).slice(0, 1)).toBe('C');
+    expect(rowText(s, 3).slice(0, 1)).toBe('Z');
+  });
+
+  it('IL/DL are bounded by the scroll region', () => {
+    // Insert/delete lines must discard/fill at scrollBottom, not the last row,
+    // so a pinned status bar below the region is never disturbed.
+    const s = new Screen(5, 4);
+    s.write('\x1b[1;4r'); // region rows 0..3
+    s.write('\x1b[1;1HA');
+    s.write('\x1b[2;1HB');
+    s.write('\x1b[3;1HC');
+    s.write('\x1b[4;1HD');
+    s.write('\x1b[5;1HS'); // status bar on last row (index 4)
+    // Delete the top line of the region: B,C,D shift up; region bottom blanks.
+    s.write('\x1b[1;1H'); // cursor at region top
+    s.write('\x1b[M'); // DL 1
+    expect(rowText(s, 0).slice(0, 1)).toBe('B');
+    expect(rowText(s, 1).slice(0, 1)).toBe('C');
+    expect(rowText(s, 2).slice(0, 1)).toBe('D');
+    expect(rowText(s, 3)).toBe('    '); // blank filled at region bottom
+    expect(rowText(s, 4).slice(0, 1)).toBe('S'); // status bar untouched
+  });
+
+  it('alt-screen swap resets the scroll region to full on enter and leave', () => {
+    const s = new Screen(4, 4);
+    s.write('\x1b[1;2r'); // region rows 0..1 on primary
+    s.write('\x1b[?1049h'); // enter alt — margins should reset to full
+    s.write('aaaa\r\nbbbb\r\ncccc\r\ndddd');
+    s.write('\n'); // LF at last row scrolls whole alt screen
+    expect(rowText(s, 0)).toBe('bbbb');
+    expect(rowText(s, 3)).toBe('    ');
+    s.write('\x1b[?1049l'); // leave alt — margins reset to full again
+    s.write('\x1b[1;1Hpppp\r\nqqqq\r\nrrrr\r\nssss');
+    s.write('\n'); // LF at last row scrolls the whole primary screen
+    expect(rowText(s, 0)).toBe('qqqq');
+    expect(rowText(s, 3)).toBe('    ');
+  });
+});
+
 describe('ansi.rowToRuns', () => {
   it('groups adjacent cells with identical style into one run', () => {
     const s = new Screen(1, 6);
