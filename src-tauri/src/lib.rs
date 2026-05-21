@@ -147,14 +147,16 @@ async fn cancel_command(
 }
 
 /// Read the MCP control-API settings and, if the user enabled it, start the
-/// server. Generates and persists a bearer token on first enable. Off by
-/// default — a fresh install never opens a listener.
+/// server, recording the outcome in the managed `McpRuntime`. Generates and
+/// persists a bearer token on first enable. Off by default — a fresh install
+/// never opens a listener.
 fn maybe_start_mcp(
+    app: &tauri::AppHandle,
     store: &std::sync::Arc<Mutex<Store>>,
     ssh: &std::sync::Arc<ssh::SshClient>,
     reg: &std::sync::Arc<cancel::CancellationRegistry>,
-    shutdown: tokio_util::sync::CancellationToken,
 ) {
+    use tauri::Manager;
     let (enabled, port, token) = {
         let Ok(s) = store.lock() else {
             return;
@@ -188,14 +190,24 @@ fn maybe_start_mcp(
             fresh
         }
     };
-    mcp::spawn_server(
+    let result = tauri::async_runtime::block_on(mcp::start(
         std::sync::Arc::clone(store),
         std::sync::Arc::clone(ssh),
         std::sync::Arc::clone(reg),
         port,
         token,
-        shutdown,
-    );
+    ));
+    if let Some(runtime) = app.try_state::<Mutex<mcp::McpRuntime>>() {
+        if let Ok(mut rt) = runtime.lock() {
+            match result {
+                Ok(shutdown) => rt.set_running(shutdown),
+                Err(e) => {
+                    eprintln!("[mcp] {e}");
+                    rt.set_error(e);
+                }
+            }
+        }
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -219,11 +231,6 @@ pub fn run() {
     let ssh_client_for_setup = std::sync::Arc::clone(&ssh_client);
     let reg = cancel::CancellationRegistry::new();
     let reg_for_setup = std::sync::Arc::clone(&reg);
-    // Shutdown signal for the embedded MCP server. Cancelled on window close
-    // (harmless no-op if the server was never started).
-    let mcp_shutdown = tokio_util::sync::CancellationToken::new();
-    let mcp_shutdown_for_setup = mcp_shutdown.clone();
-    let mcp_shutdown_for_exit = mcp_shutdown.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -237,14 +244,10 @@ pub fn run() {
             // embedded MCP server can hold a clone of the same store handle.
             let store = std::sync::Arc::new(Mutex::new(store));
             app.manage(std::sync::Arc::clone(&store));
+            app.manage(Mutex::new(mcp::McpRuntime::default()));
             // Start the MCP control API if the user has enabled it (off by
             // default). Reuses the same Store / SshClient / registry as the UI.
-            maybe_start_mcp(
-                &store,
-                &ssh_client_for_setup,
-                &reg_for_setup,
-                mcp_shutdown_for_setup,
-            );
+            maybe_start_mcp(app.handle(), &store, &ssh_client_for_setup, &reg_for_setup);
             Ok(())
         })
         .manage(Mutex::new(PtyState::new()))
@@ -270,6 +273,8 @@ pub fn run() {
             commands::hosts::probe_ssh_alias,
             commands::hosts::remove_host,
             commands::hosts::hide_host,
+            commands::mcp::mcp_status,
+            commands::mcp::mcp_configure,
             pty::pty_open,
             pty::pty_write,
             pty::pty_resize,
@@ -284,7 +289,11 @@ pub fn run() {
             if let tauri::WindowEvent::Destroyed = event {
                 use tauri::Manager;
                 ssh_client_for_exit.shutdown_all();
-                mcp_shutdown_for_exit.cancel();
+                if let Some(runtime) = window.try_state::<Mutex<mcp::McpRuntime>>() {
+                    if let Ok(mut rt) = runtime.lock() {
+                        rt.stop();
+                    }
+                }
                 if let Some(pty) = window.try_state::<Mutex<PtyState>>() {
                     if let Ok(mut s) = pty.lock() {
                         s.close();

@@ -45,6 +45,15 @@ vi.mock('@tauri-apps/api/core', () => ({
     if (cmd === 'related_sessions') return [];
     if (cmd === 'send_prompt') return null;
     if (cmd === 'spawn_review') return null;
+    if (cmd === 'mcp_status' || cmd === 'mcp_configure')
+      return {
+        enabled: false,
+        running: false,
+        port: 4180,
+        token: 'test-token',
+        url: 'http://127.0.0.1:4180/mcp',
+        bind_error: null,
+      };
     return null;
   }),
 }));

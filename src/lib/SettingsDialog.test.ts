@@ -16,8 +16,36 @@ const sample = [
   { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null },
 ];
 
+const mcpStatusObj = {
+  enabled: false,
+  running: false,
+  port: 4180,
+  token: 'test-token',
+  url: 'http://127.0.0.1:4180/mcp',
+  bind_error: null,
+};
+
+// Route invoke() by command name. The dialog calls mcp_status on mount, so an
+// ordered mockResolvedValueOnce chain would be consumed by the wrong call —
+// a routed implementation keeps each command's response stable.
 beforeEach(() => {
-  (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
+  const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+  inv.mockReset();
+  inv.mockImplementation(async (cmd: string) => {
+    switch (cmd) {
+      case 'mcp_status':
+      case 'mcp_configure':
+        return mcpStatusObj;
+      case 'discover_hosts':
+        return [];
+      case 'probe_host':
+        return sample[1];
+      case 'list_hosts':
+        return sample;
+      default:
+        return null;
+    }
+  });
   hosts.set(sample);
 });
 
@@ -39,8 +67,6 @@ describe('SettingsDialog', () => {
   });
 
   it('clicking Re-probe invokes probe_host', async () => {
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sample[1]);
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sample);
     render(SettingsDialog, { props: { onClose: () => {} } });
     await tick();
     const rows = document.querySelectorAll('.hosts-table tbody tr');
@@ -52,7 +78,6 @@ describe('SettingsDialog', () => {
   });
 
   it('clicking + Add host opens the AddHostPicker', async () => {
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]); // discover_hosts call from picker
     render(SettingsDialog, { props: { onClose: () => {} } });
     await tick();
     await fireEvent.click(screen.getByTestId('settings-add-host'));
@@ -73,6 +98,21 @@ describe('SettingsDialog', () => {
     const mefRow = cells[0];  // single row in this test
     expect(mefRow.textContent).toContain('m.janci@32bit.sk');
     expect(mefRow.textContent).toContain('max');
+  });
+
+  it('renders the Control API section and toggling enable calls mcp_configure', async () => {
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick();
+    const section = await screen.findByTestId('mcp-section');
+    expect(section.textContent).toContain('Control API');
+    const toggle = screen.getByTestId('mcp-enable') as HTMLInputElement;
+    await fireEvent.click(toggle);
+    await tick();
+    expect(
+      (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.some(
+        (c) => c[0] === 'mcp_configure',
+      ),
+    ).toBe(true);
   });
 
   it('Account column shows — when host has no account', async () => {
