@@ -159,6 +159,11 @@ export class Screen {
   /** Cursor visibility (DECSET ?25). Visible by default per the VT spec;
    *  tmux/claude toggle it with ?25h / ?25l around redraws. */
   cursorVisible = true;
+  /** Bracketed-paste mode (DECSET ?2004). When on, the host app (e.g. Claude
+   *  Code) wants pasted text wrapped in ESC[200~ … ESC[201~ so multi-line
+   *  pastes aren't treated as typed input. The component reads this to decide
+   *  whether to frame a paste. */
+  bracketedPaste = false;
   /** Current SGR state — applied to each printed cell. */
   curFg = COLOR_DEFAULT;
   curBg = COLOR_DEFAULT;
@@ -661,6 +666,8 @@ export class Screen {
         this._mouse1003 = set;
       } else if (p === 1006) {
         this._mouse1006 = set;
+      } else if (p === 2004) {
+        this.bracketedPaste = set;
       } else if (p === 25) {
         this.cursorVisible = set;
       }

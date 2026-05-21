@@ -720,3 +720,22 @@ describe('ansi.Screen — mouse mode tracking', () => {
     expect(s.cursorVisible).toBe(true);
   });
 });
+
+describe('bracketed paste mode (DECSET ?2004)', () => {
+  it('defaults to off', () => {
+    expect(new Screen(24, 80).bracketedPaste).toBe(false);
+  });
+  it('?2004h enables and ?2004l disables', () => {
+    const s = new Screen(24, 80);
+    s.write('\x1b[?2004h');
+    expect(s.bracketedPaste).toBe(true);
+    s.write('\x1b[?2004l');
+    expect(s.bracketedPaste).toBe(false);
+  });
+  it('an unrelated private mode leaves it unchanged', () => {
+    const s = new Screen(24, 80);
+    s.write('\x1b[?2004h');
+    s.write('\x1b[?25l'); // hide cursor — must not touch bracketedPaste
+    expect(s.bracketedPaste).toBe(true);
+  });
+});
