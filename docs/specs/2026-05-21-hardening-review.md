@@ -11,16 +11,31 @@ system libs) — the backend review is static.
 
 ## Resolution status (updated 2026-05-21)
 
-**CR1, CR2, CR3 and H1–H7 are fixed** in commits `e02ddf4` (backend) and
-`fd4acbb` (frontend). The Rust changes were made by static editing and still
-need `cargo test` + `cargo clippy --all-targets -- -D warnings` on a machine
-with the Tauri prerequisites. The frontend changes are verified by vitest.
+**Fixed and verified** (`cargo test` + `cargo clippy -D warnings` + `vitest`
+all green):
 
-Still open: all MEDIUM and LOW items below, the spec-vs-code gaps, and the
-pre-existing `localStorage`-undefined failure in the vitest suite (config
-already sets `environment: 'jsdom'` — likely a vitest 4 / jsdom 29 compat
-issue). The remainder of this document is the original review and is left
-intact as the backlog.
+- **CRITICAL:** CR1, CR2, CR3.
+- **HIGH:** H1–H7.
+- **MEDIUM:** M1, M2, M3, M4, M7, M8, M9, M10, M11, M12. M6 (`with_transaction`
+  in reconcile) was resolved independently by the iter-4b `apply_host_reconcile`
+  rework.
+- **LOW:** L1, L8. L4 (double bootstrap) and L6 (ANSI scroll region) were
+  resolved by other work.
+- The pre-existing `localStorage`-undefined vitest failure is also fixed
+  (in-memory polyfill in `vitest.setup.ts`).
+
+**Deliberately deferred:**
+
+- **M5** (`ensure_master` keeps a stale `OnceCell` after `ControlPersist`
+  expiry) — the only fixes are a round-trip-per-call `ssh -O check` or an
+  invasive rewrite to `ControlMaster=auto`; the impact is a lost-multiplexing
+  perf degradation after 10 min idle, not a correctness bug.
+- **L2, L3, L5, L7** and the remaining LOW items — micro-opts / naming /
+  feature gaps; tracked here but low value.
+- The spec-vs-code gaps (Handoff, Freeze) — need a product decision.
+
+The remainder of this document is the original review, left intact as the
+backlog.
 
 ---
 
