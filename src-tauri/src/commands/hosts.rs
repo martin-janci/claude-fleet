@@ -586,7 +586,10 @@ mod tests {
         assert!(reachable, "mefistos must be reachable");
         // The tmux version is the field the re-tokenization bug dropped — it
         // must be present once the script is `shq`'d.
-        assert!(tmux_v.is_some(), "tmux version must parse (was empty before the shq fix)");
+        assert!(
+            tmux_v.is_some(),
+            "tmux version must parse (was empty before the shq fix)"
+        );
         assert!(claude_v.is_some(), "claude version must parse");
         let acct = account.expect("oauthAccount must parse");
         assert!(acct.uuid.is_some(), "parsed account must carry a uuid");
