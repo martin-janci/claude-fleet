@@ -316,38 +316,6 @@ fn fetch_worktree(s: &Store, worktree_id: i64) -> Result<(String, Option<String>
     .map_err(IpcError::from)
 }
 
-/// Resolve `$HOME` on a remote host. Each new_session call hits this once;
-/// for the iter-1 MVP we don't cache (sub-50ms over an established control
-/// master). If the SSH session is unreachable, this propagates an error
-/// rather than guessing — calling `new_session` for an unreachable host
-/// should fail loudly.
-async fn remote_home(ssh: &Arc<SshClient>, host: &str) -> Result<String, IpcError> {
-    let out = ssh
-        .run(
-            host,
-            &["printenv", "HOME"],
-            std::time::Duration::from_secs(5),
-        )
-        .await?;
-    if !out.status.success() {
-        return Err(IpcError::new(
-            "E_SSH",
-            format!(
-                "couldn't read $HOME on {host}: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ),
-        ));
-    }
-    let home = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if home.is_empty() {
-        return Err(IpcError::new(
-            "E_SSH",
-            format!("remote $HOME on {host} is empty"),
-        ));
-    }
-    Ok(home)
-}
-
 /// Build the absolute path on the remote host where a project (and optional
 /// worktree) should live. Mirrors the local convention `proj-clean` enforces:
 /// `~/projects/github.com/<owner>/<repo>` for the project root and
@@ -596,7 +564,7 @@ async fn new_session_inner(
                     .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
                 fetch_owner_repo(&s, args.project_id)?
             };
-            let home = remote_home(ssh, &args.host_alias).await?;
+            let home = ssh.remote_home(&args.host_alias).await?;
             let (project_root, _) = remote_project_path(&home, &owner, &repo, None);
             ensure_remote_project(
                 ssh,
@@ -637,7 +605,7 @@ async fn new_session_inner(
                 };
                 (owner, repo, wt)
             };
-            let home = remote_home(ssh, &args.host_alias).await?;
+            let home = ssh.remote_home(&args.host_alias).await?;
             let wt_name_str = wt_info.as_ref().map(|(name, _)| name.as_str());
             let (project_root, cwd) = remote_project_path(&home, &owner, &repo, wt_name_str);
             let worktree_for_clone = wt_info
@@ -696,9 +664,7 @@ pub async fn kill_session(
         let s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-        s.list_sessions_for_host(&args.host_alias)?
-            .into_iter()
-            .find(|r| r.tmux_name == args.name)
+        s.get_session(&args.name, &args.host_alias)?
             .map(|r| r.id)
             .ok_or_else(|| {
                 IpcError::new("E_NOTFOUND", format!("session {} not found", args.name))
@@ -732,9 +698,7 @@ pub async fn rename_session(
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    s.list_sessions_for_host(&args.host_alias)?
-        .into_iter()
-        .find(|r| r.tmux_name == args.new_name.trim())
+    s.get_session(args.new_name.trim(), &args.host_alias)?
         .ok_or_else(|| {
             IpcError::new(
                 "E_NOTFOUND",
@@ -766,18 +730,15 @@ pub async fn restart_session(
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    s.list_sessions_for_host(&args.host_alias)?
-        .into_iter()
-        .find(|r| r.tmux_name == args.name)
-        .ok_or_else(|| {
-            IpcError::new(
-                "E_NOTFOUND",
-                format!(
-                    "restarted session {} on {} did not appear in list",
-                    args.name, args.host_alias
-                ),
-            )
-        })
+    s.get_session(&args.name, &args.host_alias)?.ok_or_else(|| {
+        IpcError::new(
+            "E_NOTFOUND",
+            format!(
+                "restarted session {} on {} did not appear in list",
+                args.name, args.host_alias
+            ),
+        )
+    })
 }
 
 /// Build the two tmux invocations that together send a prompt to a session:
@@ -805,37 +766,29 @@ async fn send_prompt_inner(
 ) -> Result<(), IpcError> {
     crate::validate::host_alias(host_alias)?;
     crate::validate::tmux_name(tmux_name)?;
-    let cmds = build_send_commands(tmux_name, prompt);
-    if host_alias == "local" {
-        for cmd in &cmds {
-            let out = std::process::Command::new("bash")
-                .args(["-c", cmd])
-                .output()
-                .map_err(|e| IpcError::new("E_TMUX", format!("spawn bash: {e}")))?;
-            if !out.status.success() {
-                return Err(IpcError::new(
-                    "E_TMUX",
-                    String::from_utf8_lossy(&out.stderr).trim().to_string(),
-                ));
-            }
-        }
+    // Both send-keys commands in ONE shell invocation joined with `&&` (so a
+    // failed literal-text send doesn't still fire Enter) — one round-trip
+    // instead of two.
+    let script = build_send_commands(tmux_name, prompt).join(" && ");
+    let out = if host_alias == "local" {
+        tokio::process::Command::new("bash")
+            .args(["-c", &script])
+            .output()
+            .await
+            .map_err(|e| IpcError::new("E_TMUX", format!("spawn bash: {e}")))?
     } else {
-        for cmd in &cmds {
-            let quoted = shq(cmd);
-            let out = ssh
-                .run(
-                    host_alias,
-                    &["bash", "-lc", &quoted],
-                    std::time::Duration::from_secs(10),
-                )
-                .await?;
-            if !out.status.success() {
-                return Err(IpcError::new(
-                    "E_TMUX",
-                    String::from_utf8_lossy(&out.stderr).trim().to_string(),
-                ));
-            }
-        }
+        ssh.run(
+            host_alias,
+            &["bash", "-lc", &shq(&script)],
+            std::time::Duration::from_secs(10),
+        )
+        .await?
+    };
+    if !out.status.success() {
+        return Err(IpcError::new(
+            "E_TMUX",
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
     }
     Ok(())
 }

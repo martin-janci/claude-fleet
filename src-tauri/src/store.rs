@@ -207,7 +207,7 @@ impl Store {
     // `&Connection` so it can be reused both by these `&self` helpers AND by
     // the `_in_tx` mutation variants (a `&Transaction` derefs to `&Connection`).
 
-    fn get_session(
+    pub fn get_session(
         &self,
         tmux_name: &str,
         host_alias: &str,

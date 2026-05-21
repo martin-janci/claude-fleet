@@ -35,6 +35,10 @@ struct SshClientInner {
     /// Per-host OnceCell. The cell's init future runs the master-spawn exactly
     /// once; subsequent callers receive the cached result immediately.
     masters: DashMap<String, Arc<OnceCell<()>>>,
+    /// Per-host `$HOME` cache. A host's home directory does not change for
+    /// the lifetime of the app, so the `printenv HOME` round-trip is paid
+    /// once and reused (it was previously one SSH round-trip per new_session).
+    homes: DashMap<String, String>,
 }
 
 /// Cheaply cloneable SSH client. Each clone shares the same underlying
@@ -50,8 +54,39 @@ impl SshClient {
         Self {
             inner: Arc::new(SshClientInner {
                 masters: DashMap::new(),
+                homes: DashMap::new(),
             }),
         }
+    }
+
+    /// Resolve `$HOME` on a remote host, cached for the lifetime of the app.
+    /// The first call pays one `printenv HOME` round-trip; later calls return
+    /// the cached value. Errors are not cached — a transient failure retries.
+    pub async fn remote_home(&self, host: &str) -> Result<String, IpcError> {
+        if let Some(home) = self.inner.homes.get(host) {
+            return Ok(home.clone());
+        }
+        let out = self
+            .run(host, &["printenv", "HOME"], Duration::from_secs(5))
+            .await?;
+        if !out.status.success() {
+            return Err(IpcError::new(
+                "E_SSH",
+                format!(
+                    "couldn't read $HOME on {host}: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+            ));
+        }
+        let home = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if home.is_empty() {
+            return Err(IpcError::new(
+                "E_SSH",
+                format!("remote $HOME on {host} is empty"),
+            ));
+        }
+        self.inner.homes.insert(host.to_string(), home.clone());
+        Ok(home)
     }
 
     /// Returns the dedicated ControlPath for a host. Side effect: creates
