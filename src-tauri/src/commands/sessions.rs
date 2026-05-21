@@ -400,10 +400,17 @@ async fn ensure_remote_project(
     // Wrap in bash -lc so $PATH (git on Homebrew/Linuxbrew) is sourced. Use
     // the same single-quote-the-whole-script trick as RemoteTmux::remote_bash
     // to avoid the ssh argv-joining bug.
+    // Single-quote the WHOLE script so it crosses the ssh argv-join as one
+    // word. ssh concatenates the trailing args with spaces and the remote
+    // LOGIN shell (often zsh) re-tokenizes them — without quoting, the
+    // `if ...; then ...; fi` splits at `;` and orphans `then` ("zsh: parse
+    // error near then"). `shq` escapes the inner single-quotes from the path
+    // interpolation above.
+    let quoted = shq(&script);
     let out = ssh
         .run_cancellable(
             host,
-            &["bash", "-lc", &script],
+            &["bash", "-lc", &quoted],
             std::time::Duration::from_secs(120),
             token,
         )
@@ -577,10 +584,13 @@ async fn new_session_inner(
             )
             .await?;
             let script = worktree_add_script(&project_root, name);
+            // Quote the whole script so it survives the ssh argv-join +
+            // remote login-shell re-tokenization (see ensure_remote_project).
+            let quoted = shq(&script);
             let out = ssh
                 .run_cancellable(
                     &args.host_alias,
-                    &["bash", "-lc", &script],
+                    &["bash", "-lc", &quoted],
                     std::time::Duration::from_secs(60),
                     token,
                 )
@@ -1403,5 +1413,38 @@ mod tests {
 
         // cleanup
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn remote_script_must_be_quoted_to_survive_login_shell_retokenization() {
+        // Regression for "zsh: parse error near `then`" on remote session
+        // creation. ssh concatenates the trailing argv with spaces and the
+        // remote LOGIN shell re-tokenizes the result, so `bash -lc <script>`
+        // with an UNQUOTED `if ...; then ...; fi` splits at `;` and orphans
+        // `then`. We reproduce that re-tokenization locally with `sh -c`.
+        use std::process::Command;
+        let script = "if true; then echo OK; fi";
+
+        // RAW (the bug): the re-login shell mis-parses the orphaned `then`.
+        let raw = Command::new("sh")
+            .args(["-c", &format!("bash -lc {script}")])
+            .output()
+            .expect("sh");
+        assert!(
+            !raw.status.success(),
+            "unquoted if/then must fail at the re-tokenizing login shell"
+        );
+
+        // QUOTED (the fix): crosses as one word, bash runs the whole script.
+        let quoted = Command::new("sh")
+            .args(["-c", &format!("bash -lc {}", shq(script))])
+            .output()
+            .expect("sh");
+        assert!(
+            quoted.status.success(),
+            "shq'd script must run cleanly: {}",
+            String::from_utf8_lossy(&quoted.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&quoted.stdout).trim(), "OK");
     }
 }
