@@ -1122,4 +1122,14 @@ mod tests {
         assert_eq!(worktree_key_for_path("/tmp/whatever"), None);
         assert_eq!(worktree_key_for_path("/Users/x/Documents"), None);
     }
+
+    #[test]
+    fn worktree_key_empty_worktree_name_falls_back_to_main() {
+        // A trailing `.claude/worktrees/` with no name segment must not yield
+        // Some("") — it degrades to the safe "main" fallback.
+        assert_eq!(
+            worktree_key_for_path("/Users/x/projects/github.com/o/r/.claude/worktrees/"),
+            Some("main".to_string())
+        );
+    }
 }
