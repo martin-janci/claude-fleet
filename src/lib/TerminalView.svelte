@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { selectedSession } from './selection';
   import { Screen, rowToRuns, colorToCss, encodeMouse, type Run } from './ansi';
   import { trimSelectionText, sanitizePaste, framePaste } from './clipboard';
@@ -39,6 +40,11 @@
   let drainTimer: ReturnType<typeof setTimeout> | null = null;
   let drainDelay = DRAIN_MIN_MS;
   let currentSession: string | null = $state(null);
+  let currentHost: string | null = $state(null);
+  /** Drop-overlay state: shown while a drag is over the grid, switched to a
+   *  spinner during the upload. */
+  let dragOver = $state(false);
+  let uploading = $state(false);
   let openError: string | null = $state(null);
   let ptyOpen = false;
   let lastCols = $state(0);
@@ -92,6 +98,38 @@
     const framed = framePaste(sanitizePaste(text), screen?.bracketedPaste ?? false);
     void invoke('pty_write', { args: { data: framed } }).catch(() => {});
     bumpDrain();
+  }
+
+  /** Is a physical-pixel point inside the terminal grid? */
+  function pointOverGrid(px: number, py: number): boolean {
+    if (!container) return false;
+    const dpr = window.devicePixelRatio || 1;
+    const r = container.getBoundingClientRect();
+    const x = px / dpr;
+    const y = py / dpr;
+    return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+  }
+
+  /** Build the prompt text for a set of uploaded remote paths: space-joined,
+   *  single-quoted if a path contains whitespace, trailing space so the user
+   *  can keep typing. */
+  function pathsToPasteText(paths: string[]): string {
+    return paths.map((p) => (/\s/.test(p) ? `'${p}'` : p)).join(' ') + ' ';
+  }
+
+  async function handleDrop(paths: string[]) {
+    if (!ptyOpen || !currentSession || !currentHost || paths.length === 0) return;
+    uploading = true;
+    try {
+      const remote = await invoke<string[]>('upload_to_session', {
+        args: { host_alias: currentHost, session_name: currentSession, local_paths: paths },
+      });
+      if (remote.length > 0) sendPaste(pathsToPasteText(remote));
+    } catch (e) {
+      openError = describeError(e);
+    } finally {
+      uploading = false;
+    }
   }
 
   function onWheel(e: WheelEvent) {
@@ -215,6 +253,35 @@
     }
   });
 
+  // Native (OS-level) drag-drop. HTML5 drop in WKWebView can't expose real
+  // file paths, so we use Tauri's window event, which does. We only act on
+  // drops that land over the grid.
+  $effect(() => {
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const p = event.payload;
+        if (p.type === 'enter' || p.type === 'over') {
+          dragOver = pointOverGrid(p.position.x, p.position.y);
+        } else if (p.type === 'leave') {
+          dragOver = false;
+        } else if (p.type === 'drop') {
+          const over = pointOverGrid(p.position.x, p.position.y);
+          dragOver = false;
+          if (over) void handleDrop(p.paths);
+        }
+      })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  });
+
   /** Reentrancy guard. The two $effects above can both call openTerm() for
    *  the same selection in one flush; openTerm is async and its
    *  `currentSession` guard is only set after `await pty_open`, so a second
@@ -264,6 +331,7 @@
         },
       });
       currentSession = sess.tmux_name;
+      currentHost = sess.host_alias;
       ptyOpen = true;
     } catch (e) {
       openError = describeError(e);
@@ -641,6 +709,11 @@
           data-testid="terminal-cursor"
         ></div>
       {/if}
+      {#if dragOver || uploading}
+        <div class="drop-overlay" data-testid="terminal-drop-overlay">
+          {uploading ? 'Uploading…' : `Drop files to upload to ${currentHost ?? 'host'}`}
+        </div>
+      {/if}
     </div>
     {#if openError}
       <div class="err">PTY error: {openError}</div>
@@ -772,6 +845,19 @@
   }
   @keyframes cf-cursor-blink {
     50% { opacity: 0; }
+  }
+  .drop-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 4;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(20, 30, 50, 0.55);
+    border: 2px dashed var(--accent, #4f8fff);
+    color: #e8e8e8;
+    font-size: 0.95rem;
+    pointer-events: none;
   }
   .measure {
     position: absolute;
