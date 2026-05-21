@@ -1049,9 +1049,26 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_four_after_migration() {
+    fn schema_version_is_five_after_migration() {
         let s = Store::open_in_memory().expect("open");
         assert_eq!(s.schema_version().expect("version"), 5);
+    }
+
+    #[test]
+    fn deleting_a_reviewed_source_nulls_the_review_link_not_errors() {
+        // Self-FK uses ON DELETE SET NULL: deleting a source session that a
+        // review still points at must succeed (link nulls), not fail the FK.
+        let store = Store::open_in_memory().expect("store");
+        store.upsert_host("alpha").unwrap();
+        let src = store.upsert_session("src", "alpha", None, None, 1, 1, "running", None).unwrap();
+        let rev = store.upsert_session("src--review-1", "alpha", None, None, 1, 1, "running", None).unwrap();
+        store.set_session_kind(rev, "review", Some(src)).unwrap();
+        // Delete the source while the review still references it.
+        store.delete_session(src).expect("delete source must not trip the self-FK");
+        let row = store.list_sessions_for_host("alpha").unwrap()
+            .into_iter().find(|r| r.tmux_name == "src--review-1").unwrap();
+        assert_eq!(row.reviews_session_id, None, "link should be nulled by ON DELETE SET NULL");
+        assert_eq!(row.kind, "review", "the review row itself survives");
     }
 
     #[test]
