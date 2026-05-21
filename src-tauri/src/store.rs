@@ -776,7 +776,7 @@ impl Store {
         Ok(())
     }
 
-    fn get_session_by_id(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
+    pub fn get_session_by_id(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id
@@ -802,6 +802,22 @@ impl Store {
             Some(r) => Ok(Some(r?)),
             None => Ok(None),
         }
+    }
+
+    pub fn worktree_path(&self, id: i64) -> Result<Option<String>, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT path FROM worktrees WHERE id = ?1",
+            rusqlite::params![id],
+            |row| row.get(0),
+        ).optional()
+    }
+
+    pub fn project_base_path(&self, id: i64) -> Result<Option<String>, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT base_path FROM projects WHERE id = ?1",
+            rusqlite::params![id],
+            |row| row.get(0),
+        ).optional()
     }
 
     /// Run `f` under the implicit lock and return its result.

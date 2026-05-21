@@ -677,13 +677,14 @@ pub struct SendPromptArgs {
     pub prompt: String,
 }
 
-#[tauri::command]
-pub async fn send_prompt(
-    args: SendPromptArgs,
-    ssh: State<'_, Arc<SshClient>>,
+async fn send_prompt_inner(
+    ssh: &Arc<SshClient>,
+    host_alias: &str,
+    tmux_name: &str,
+    prompt: &str,
 ) -> Result<(), IpcError> {
-    let cmds = build_send_commands(&args.tmux_name, &args.prompt);
-    if args.host_alias == "local" {
+    let cmds = build_send_commands(tmux_name, prompt);
+    if host_alias == "local" {
         for cmd in &cmds {
             let out = std::process::Command::new("bash")
                 .args(["-c", cmd])
@@ -700,7 +701,7 @@ pub async fn send_prompt(
         for cmd in &cmds {
             let quoted = shell_quote_str(cmd);
             let out = ssh.run(
-                &args.host_alias,
+                host_alias,
                 &["bash", "-lc", &quoted],
                 std::time::Duration::from_secs(10),
             ).await?;
@@ -715,9 +716,91 @@ pub async fn send_prompt(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn send_prompt(
+    args: SendPromptArgs,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<(), IpcError> {
+    send_prompt_inner(&ssh, &args.host_alias, &args.tmux_name, &args.prompt).await
+}
+
+/// Resolve the cwd a review should open in. Order: source's worktree path
+/// (by worktree_id) → source's project base_path → error.
+fn resolve_review_cwd(s: &Store, source: &crate::store::SessionRow) -> Result<String, IpcError> {
+    if let Some(wt_id) = source.worktree_id {
+        if let Some(path) = s.worktree_path(wt_id)? {
+            return Ok(path);
+        }
+    }
+    if let Some(pid) = source.project_id {
+        if let Some(base) = s.project_base_path(pid)? {
+            return Ok(base);
+        }
+    }
+    Err(IpcError::new(
+        "E_INVALID",
+        "cannot determine a worktree path to review for this session",
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct SpawnReviewArgs {
+    pub source_session_id: i64,
+    pub prompt: String,
+    pub call_id: Option<u64>,
+}
+
+#[tauri::command]
+pub async fn spawn_review(
+    args: SpawnReviewArgs,
+    store: State<'_, Mutex<Store>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<crate::store::SessionRow, IpcError> {
+    // 1. Snapshot source + resolve cwd under a brief lock.
+    let (source, cwd) = {
+        let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let source = s.get_session_by_id(args.source_session_id)?
+            .ok_or_else(|| IpcError::new("E_NOTFOUND", "source session not found"))?;
+        let cwd = resolve_review_cwd(&s, &source)?;
+        (source, cwd)
+    };
+
+    // 2. Spawn the review tmux session (off-lock).
+    //    new_session runs pane_command() internally — same as any other session.
+    let short = format!("{:x}", now_unix() & 0xfffff);
+    let review_name = format!("{}--review-{}", source.tmux_name, short);
+    let tmux = exec_for(&source.host_alias, &ssh);
+    tmux.new_session(&review_name, std::path::Path::new(&cwd)).await?;
+
+    // 3. Register via per-host reconcile.
+    reconcile_one_host(&store, &ssh, &source.host_alias).await?;
+
+    // 4. Tag as review + capture id.
+    let review_id = {
+        let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let row = s.list_sessions_for_host(&source.host_alias)?
+            .into_iter()
+            .find(|r| r.tmux_name == review_name)
+            .ok_or_else(|| IpcError::new("E_INTERNAL", "review session vanished after spawn"))?;
+        s.set_session_kind(row.id, "review", Some(source.id))?;
+        row.id
+    };
+
+    // 5. Seed the prompt. cl needs a beat to boot its TUI before send-keys lands.
+    // TODO(iter4b-followup): replace fixed delay with pane-readiness poll
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    send_prompt_inner(&ssh, &source.host_alias, &review_name, &args.prompt).await?;
+
+    // 6. Return the tagged review row.
+    let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    s.get_session_by_id(review_id)?
+        .ok_or_else(|| IpcError::new("E_INTERNAL", "review row missing after tag"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::Store;
 
     #[test]
     fn extracts_owner_repo_from_macos_path() {
@@ -901,7 +984,7 @@ mod tests {
 
     #[test]
     fn upsert_session_captures_new_account_for_fresh_row() {
-        use crate::store::{AccountRow, Store};
+        use crate::store::AccountRow;
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("h").unwrap();
         s.upsert_account(&AccountRow {
@@ -918,5 +1001,26 @@ mod tests {
             account.as_deref(),
         ).unwrap();
         assert_eq!(s.get_session_account("h", "dev-new").unwrap().as_deref(), Some("u1"));
+    }
+
+    #[test]
+    fn resolve_review_cwd_prefers_worktree_then_project_then_errors() {
+        let store = Store::open_in_memory().expect("store");
+        store.upsert_host("alpha").unwrap();
+        // Project with a base_path, and a worktree under it.
+        let pid = store.upsert_project("o", "r", "/base/r").unwrap();
+        let wid = store.upsert_worktree(pid, "main", "/base/r/main", None).unwrap();
+        // Session with worktree → worktree path wins.
+        let s1 = store.upsert_session("s1", "alpha", Some(pid), Some(wid), 1, 1, "running", None).unwrap();
+        let row1 = store.get_session_by_id(s1).unwrap().unwrap();
+        assert_eq!(resolve_review_cwd(&store, &row1).unwrap(), "/base/r/main");
+        // Session with project but no worktree → project base.
+        let s2 = store.upsert_session("s2", "alpha", Some(pid), None, 1, 1, "running", None).unwrap();
+        let row2 = store.get_session_by_id(s2).unwrap().unwrap();
+        assert_eq!(resolve_review_cwd(&store, &row2).unwrap(), "/base/r");
+        // Session with neither → error.
+        let s3 = store.upsert_session("s3", "alpha", None, None, 1, 1, "running", None).unwrap();
+        let row3 = store.get_session_by_id(s3).unwrap().unwrap();
+        assert!(resolve_review_cwd(&store, &row3).is_err());
     }
 }

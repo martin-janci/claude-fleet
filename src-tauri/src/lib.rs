@@ -182,6 +182,7 @@ pub fn run() {
             commands::sessions::rename_session,
             commands::sessions::restart_session,
             commands::sessions::send_prompt,
+            commands::sessions::spawn_review,
             commands::hosts::discover_hosts,
             commands::hosts::list_hosts,
             commands::hosts::list_accounts,
