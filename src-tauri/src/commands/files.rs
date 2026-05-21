@@ -11,23 +11,17 @@
 //! and the frontend-supplied file path is additionally validated
 //! (`validate::repo_rel_path`) so it cannot escape the worktree.
 
+use crate::commands::repo::{
+    diff_from_bytes, repo_err, repo_script, run_in_repo, session_target, MAX_FILE_BYTES,
+    MAX_TREE_ENTRIES,
+};
 use crate::ipc_error::IpcError;
 use crate::shell::quote as shq;
 use crate::ssh::SshClient;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tauri::State;
-
-/// Per-call SSH timeout for git/file reads.
-const REPO_TIMEOUT_SECS: u64 = 10;
-/// Largest file body returned by `repo_file`. Larger files are truncated.
-const MAX_FILE_BYTES: usize = 512 * 1024;
-/// Largest diff returned by `repo_diff`. Larger diffs are truncated.
-const MAX_DIFF_BYTES: usize = 1024 * 1024;
-/// Largest worktree listing returned by `repo_tree`.
-const MAX_TREE_ENTRIES: usize = 20_000;
 
 // ─── wire types ───────────────────────────────────────────────────────────
 
@@ -73,78 +67,6 @@ pub struct FileDiff {
     pub truncated: bool,
 }
 
-// ─── shared helpers ───────────────────────────────────────────────────────
-
-/// Resolve a session id to its `(host_alias, tmux_name)`, validating both.
-fn session_target(store: &Mutex<Store>, session_id: i64) -> Result<(String, String), IpcError> {
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    let sess = s
-        .get_session_by_id(session_id)?
-        .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("session {session_id} not found")))?;
-    crate::validate::host_alias(&sess.host_alias)?;
-    crate::validate::tmux_name(&sess.tmux_name)?;
-    Ok((sess.host_alias, sess.tmux_name))
-}
-
-/// Wrap `body` in a script that first resolves the worktree root. `body` may
-/// reference `"$root"` (the absolute worktree root). `tmux display-message`
-/// reads the session pane's cwd; `git rev-parse --show-toplevel` walks up to
-/// the repo root. `set -e` aborts (→ non-zero exit → `E_REPO`) if the session
-/// is gone or the path isn't inside a git repo.
-fn repo_script(tmux_name: &str, body: &str) -> String {
-    format!(
-        "set -e\n\
-         p=\"$(tmux display-message -t {name} -p '#{{pane_current_path}}')\"\n\
-         root=\"$(git -C \"$p\" rev-parse --show-toplevel)\"\n\
-         {body}",
-        name = shq(tmux_name),
-    )
-}
-
-/// Run a script in the session's repo — locally via `bash -lc`, or remotely
-/// via the multiplexed SSH client. Remote scripts are quoted as one word (the
-/// ssh argv-join rule, see `tmux::RemoteTmux::remote_bash`).
-async fn run_in_repo(
-    ssh: &Arc<SshClient>,
-    host: &str,
-    script: &str,
-) -> Result<std::process::Output, IpcError> {
-    if host == "local" {
-        tokio::process::Command::new("bash")
-            .args(["-lc", script])
-            .output()
-            .await
-            .map_err(|e| IpcError::new("E_REPO", format!("spawn bash: {e}")))
-    } else {
-        ssh.run(
-            host,
-            &["bash", "-lc", &shq(script)],
-            Duration::from_secs(REPO_TIMEOUT_SECS),
-        )
-        .await
-    }
-}
-
-/// Turn a failed `Output` into an `E_REPO` error carrying stderr (or stdout).
-fn repo_err(out: &std::process::Output) -> IpcError {
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let msg = if stderr.trim().is_empty() {
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
-    } else {
-        stderr.trim().to_string()
-    };
-    IpcError::new(
-        "E_REPO",
-        if msg.is_empty() {
-            "git command failed".to_string()
-        } else {
-            msg
-        },
-    )
-}
-
 /// Parse `git status --porcelain=v1 -z` output. Entries are NUL-separated;
 /// a rename/copy entry is followed by a second token (the original path).
 fn parse_status_z(raw: &[u8]) -> Vec<ChangedFile> {
@@ -183,7 +105,7 @@ fn parse_status_z(raw: &[u8]) -> Vec<ChangedFile> {
 }
 
 /// Map a porcelain XY status pair to a friendly label + staged flag.
-fn classify(x: char, y: char) -> (&'static str, bool) {
+pub fn classify(x: char, y: char) -> (&'static str, bool) {
     if x == '?' && y == '?' {
         return ("untracked", false);
     }
@@ -350,22 +272,7 @@ pub async fn repo_diff(
         }
     }
 
-    let text = String::from_utf8_lossy(&raw);
-    let binary = text.contains("Binary files ") || text.contains("GIT binary patch");
-    let truncated = raw.len() > MAX_DIFF_BYTES;
-    let diff = if binary {
-        String::new()
-    } else if truncated {
-        // Cut on a UTF-8 boundary near the cap: back off any continuation
-        // bytes (0b10xx_xxxx) so we don't split a multi-byte char.
-        let mut end = MAX_DIFF_BYTES;
-        while end > 0 && (raw[end] & 0xC0) == 0x80 {
-            end -= 1;
-        }
-        String::from_utf8_lossy(&raw[..end]).into_owned()
-    } else {
-        text.into_owned()
-    };
+    let (diff, binary, truncated) = diff_from_bytes(&raw);
     Ok(FileDiff {
         path: args.path,
         diff,
@@ -422,14 +329,5 @@ mod tests {
     fn parse_status_z_empty_input() {
         assert!(parse_status_z(b"").is_empty());
         assert!(parse_status_z(b"\0\0").is_empty());
-    }
-
-    #[test]
-    fn repo_script_embeds_quoted_name_and_body() {
-        let s = repo_script("dev-foo", "git -C \"$root\" status");
-        assert!(s.contains("display-message -t 'dev-foo'"), "got: {s}");
-        assert!(s.contains("#{pane_current_path}"), "got: {s}");
-        assert!(s.contains("rev-parse --show-toplevel"), "got: {s}");
-        assert!(s.trim_end().ends_with("git -C \"$root\" status"));
     }
 }
