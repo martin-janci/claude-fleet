@@ -122,11 +122,11 @@ describe('NewSessionDialog', () => {
     spy.mockRestore();
   });
 
-  it('picking Shell passes kind="shell" and suffixes the tmux name with -sh', async () => {
+  it('picking Shell passes kind="shell" and suffixes the tmux name with -term', async () => {
     const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({
       ok: true,
       value: {
-        id: 2, tmux_name: 'dev-martin-janci-claude-fleet-sh', host_alias: 'local',
+        id: 2, tmux_name: 'dev-martin-janci-claude-fleet-term', host_alias: 'local',
         project_id: 1, worktree_id: 11, created_at: 1, last_activity_at: 1,
         status: 'running', notes: null, account_uuid: null, kind: 'shell',
         reviews_session_id: null, worktree_key: null,
@@ -139,7 +139,30 @@ describe('NewSessionDialog', () => {
     await fireEvent.click(screen.getByText('Create'));
     await tick();
     expect(spy.mock.calls[0][0].kind).toBe('shell');
-    expect(spy.mock.calls[0][0].name).toBe('dev-martin-janci-claude-fleet-sh');
+    expect(spy.mock.calls[0][0].name).toBe('dev-martin-janci-claude-fleet-term');
+    expect(spy.mock.calls[0][0].start_command).toBeNull();
+    spy.mockRestore();
+  });
+
+  it('a start command typed in Shell mode is passed as start_command', async () => {
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({
+      ok: true,
+      value: {
+        id: 3, tmux_name: 'dev-martin-janci-claude-fleet-term', host_alias: 'local',
+        project_id: 1, worktree_id: 11, created_at: 1, last_activity_at: 1,
+        status: 'running', notes: null, account_uuid: null, kind: 'shell',
+        reviews_session_id: null, worktree_key: null,
+      },
+    });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('kind-shell'));
+    await tick();
+    await fireEvent.input(screen.getByTestId('start-command'), { target: { value: 'pnpm test' } });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+    expect(spy.mock.calls[0][0].start_command).toBe('pnpm test');
     spy.mockRestore();
   });
 });

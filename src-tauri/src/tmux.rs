@@ -310,8 +310,20 @@ pub fn pane_command() -> &'static str {
 /// Pane command for a plain shell session (`kind = "shell"`). Runs an
 /// interactive login shell in a loop so the pane — and therefore the tmux
 /// session — survives the user typing `exit`; a fresh shell respawns instead.
-pub fn shell_pane_command() -> &'static str {
-    "while :; do ${SHELL:-/bin/zsh} -l; done"
+///
+/// When `start_command` is given, it runs first (in the session's cwd, with
+/// the env tmux injected via `-e`), its exit code is printed, and then the
+/// pane drops to the respawning interactive shell — so the output stays
+/// visible. `start_command` is the user's raw text; the remote transport
+/// layer (`shell_quote`) escapes the whole pane command as one shell word.
+pub fn shell_pane_command(start_command: Option<&str>) -> String {
+    let respawn = "while :; do ${SHELL:-/bin/zsh} -l; done";
+    match start_command {
+        Some(cmd) if !cmd.trim().is_empty() => {
+            format!("{{ {cmd}; }}; printf '\\n[exit %s]\\n' \"$?\"; {respawn}")
+        }
+        _ => respawn.to_string(),
+    }
 }
 
 pub async fn new_session(
@@ -492,11 +504,23 @@ mod tests {
 
     #[test]
     fn shell_pane_command_respawns_shell_so_session_survives_exit() {
-        let cmd = shell_pane_command();
+        let cmd = shell_pane_command(None);
         // The loop is the point: a shell session must NOT die when the user
         // types `exit` — a fresh login shell respawns instead.
         assert!(cmd.contains("while :;"), "got: {cmd}");
         assert!(cmd.contains("${SHELL:-/bin/zsh}"), "got: {cmd}");
+    }
+
+    #[test]
+    fn shell_pane_command_runs_start_command_then_keeps_pane_alive() {
+        let cmd = shell_pane_command(Some("cargo test"));
+        // Start command runs, its exit code is printed, then the pane drops
+        // to the same respawning shell so the output stays on screen.
+        assert!(cmd.contains("{ cargo test; }"), "got: {cmd}");
+        assert!(cmd.contains("[exit %s]"), "got: {cmd}");
+        assert!(cmd.contains("while :;"), "got: {cmd}");
+        // Blank / whitespace-only start command is treated as "no command".
+        assert_eq!(shell_pane_command(Some("  ")), shell_pane_command(None));
     }
 
     #[tokio::test]
