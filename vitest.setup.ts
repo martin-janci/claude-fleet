@@ -44,6 +44,7 @@ vi.mock('@tauri-apps/api/core', () => ({
     };
     if (cmd === 'related_sessions') return [];
     if (cmd === 'send_prompt') return null;
+    if (cmd === 'spawn_review') return null;
     return null;
   }),
 }));

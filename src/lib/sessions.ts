@@ -106,3 +106,25 @@ export async function sendPrompt(
     args: { host_alias: hostAlias, tmux_name: tmuxName, prompt },
   });
 }
+
+export const DEFAULT_REVIEW_PROMPT = `Review the work in this worktree. Run \`git diff\` and \`git log\` against the base branch to see what changed.
+
+Pass 1 — correctness: does the code do what it should? Any bugs?
+Pass 2 — code quality: clarity, structure, test coverage.
+Pass 3 — risk: anything dangerous, security-sensitive, or destructive?
+
+Cite file:line for every point. End with an overall verdict: approve / approve-with-fixes / needs-rework.`;
+
+export async function spawnReview(
+  sourceSessionId: number,
+  prompt: string,
+  signal?: AbortSignal,
+): Promise<Result<SessionRow>> {
+  const r = await invokeCmdAbortable<SessionRow>(
+    'spawn_review',
+    { args: { source_session_id: sourceSessionId, prompt } },
+    signal,
+  );
+  if (r.ok) mergeSession(r.value);
+  return r;
+}
