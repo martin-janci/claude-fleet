@@ -38,6 +38,7 @@ pub struct SessionRow {
     pub account_uuid: Option<String>,
     pub kind: String,
     pub reviews_session_id: Option<i64>,
+    pub worktree_key: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -150,6 +151,10 @@ impl Store {
         if v < 5 {
             self.conn
                 .execute_batch(include_str!("../migrations/005_session_reviews.sql"))?;
+        }
+        if v < 6 {
+            self.conn
+                .execute_batch(include_str!("../migrations/006_session_worktree_key.sql"))?;
         }
         Ok(())
     }
@@ -666,7 +671,8 @@ impl Store {
     ) -> Result<Vec<SessionRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
-                    last_activity_at, status, notes, account_uuid, kind, reviews_session_id
+                    last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
+                    worktree_key
              FROM sessions WHERE host_alias=?1 ORDER BY last_activity_at DESC",
         )?;
         let rows = stmt.query_map(rusqlite::params![host_alias], |row| {
@@ -683,6 +689,7 @@ impl Store {
                 account_uuid: row.get(9)?,
                 kind: row.get(10)?,
                 reviews_session_id: row.get(11)?,
+                worktree_key: row.get(12)?,
             })
         })?;
         rows.collect()
@@ -704,7 +711,8 @@ impl Store {
         };
         let mut stmt = self.conn.prepare(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
-                    last_activity_at, status, notes, account_uuid, kind, reviews_session_id
+                    last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
+                    worktree_key
              FROM sessions
              WHERE project_id=?1
                AND ((?2 IS NULL AND worktree_id IS NULL) OR worktree_id=?2)
@@ -725,6 +733,7 @@ impl Store {
                 account_uuid: row.get(9)?,
                 kind: row.get(10)?,
                 reviews_session_id: row.get(11)?,
+                worktree_key: row.get(12)?,
             })
         })?;
         rows.collect()
@@ -750,10 +759,24 @@ impl Store {
         Ok(())
     }
 
+    /// Set a session's portable worktree key (derived from its cwd by reconcile).
+    /// Emits `session_updated` so the frontend patches in place.
+    pub fn set_worktree_key(&self, id: i64, key: Option<&str>) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET worktree_key = ?1 WHERE id = ?2",
+            rusqlite::params![key, id],
+        )?;
+        if let Some(row) = self.get_session_by_id(id)? {
+            self.bus.session_updated(&row);
+        }
+        Ok(())
+    }
+
     pub fn get_session_by_id(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
-                    last_activity_at, status, notes, account_uuid, kind, reviews_session_id
+                    last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
+                    worktree_key
              FROM sessions WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![id], |row| {
@@ -770,6 +793,7 @@ impl Store {
                 account_uuid: row.get(9)?,
                 kind: row.get(10)?,
                 reviews_session_id: row.get(11)?,
+                worktree_key: row.get(12)?,
             })
         })?;
         match rows.next() {
@@ -1106,7 +1130,8 @@ fn fetch_session(
 ) -> Result<Option<SessionRow>, rusqlite::Error> {
     let mut stmt = conn.prepare(
         "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
-                last_activity_at, status, notes, account_uuid, kind, reviews_session_id
+                last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
+                worktree_key
          FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
     )?;
     let mut rows = stmt.query_map(rusqlite::params![tmux_name, host_alias], |row| {
@@ -1123,6 +1148,7 @@ fn fetch_session(
             account_uuid: row.get(9)?,
             kind: row.get(10)?,
             reviews_session_id: row.get(11)?,
+            worktree_key: row.get(12)?,
         })
     })?;
     match rows.next() {
@@ -1200,7 +1226,7 @@ mod tests {
     fn migrate_is_idempotent() {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
-        assert_eq!(store.schema_version().expect("version"), 5);
+        assert_eq!(store.schema_version().expect("version"), 6);
     }
 
     #[test]
@@ -1332,9 +1358,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_five_after_migration() {
+    fn schema_version_is_six_after_migration() {
         let s = Store::open_in_memory().expect("open");
-        assert_eq!(s.schema_version().expect("version"), 5);
+        assert_eq!(s.schema_version().expect("version"), 6);
     }
 
     #[test]

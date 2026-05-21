@@ -221,6 +221,27 @@ fn extract_owner_repo(path: &str) -> Option<(String, String)> {
     ))
 }
 
+/// Derive a portable worktree name from a session's cwd. Host-path-independent:
+///   - <repo>/.claude/worktrees/<name>[/…]  → Some("<name>")
+///   - <repo> root or any other subdir       → Some("main")
+///   - path without a github.com repo segment → None (orphan)
+fn worktree_key_for_path(path: &str) -> Option<String> {
+    static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"/projects/github\.com/[^/]+/[^/]+(/.*)?$").expect("static regex")
+    });
+    let caps = RE.captures(path)?;
+    let remainder = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+    if let Some(idx) = remainder.find("/.claude/worktrees/") {
+        let after = &remainder[idx + "/.claude/worktrees/".len()..];
+        if let Some(name) = after.split('/').next() {
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    Some("main".to_string())
+}
+
 fn find_project_id_for_path(
     s: &Store,
     host_alias: &str,
@@ -1077,5 +1098,28 @@ mod tests {
         let s3 = store.upsert_session("s3", "alpha", None, None, 1, 1, "running", None).unwrap();
         let row3 = store.get_session_by_id(s3).unwrap().unwrap();
         assert!(resolve_review_cwd(&store, &row3).is_err());
+    }
+
+    #[test]
+    fn worktree_key_root_is_main_local_and_remote() {
+        assert_eq!(worktree_key_for_path("/Users/martinjanci/projects/github.com/martin-janci/claude-fleet"), Some("main".to_string()));
+        assert_eq!(worktree_key_for_path("/home/mjanci/projects/github.com/martin-janci/claude-fleet"), Some("main".to_string()));
+    }
+
+    #[test]
+    fn worktree_key_extracts_named_worktree() {
+        assert_eq!(worktree_key_for_path("/Users/x/projects/github.com/o/r/.claude/worktrees/feat-auth"), Some("feat-auth".to_string()));
+        assert_eq!(worktree_key_for_path("/home/mjanci/projects/github.com/o/r/.claude/worktrees/feat-auth/src"), Some("feat-auth".to_string()));
+    }
+
+    #[test]
+    fn worktree_key_other_subdir_is_main() {
+        assert_eq!(worktree_key_for_path("/Users/x/projects/github.com/o/r/src/lib"), Some("main".to_string()));
+    }
+
+    #[test]
+    fn worktree_key_non_repo_path_is_none() {
+        assert_eq!(worktree_key_for_path("/tmp/whatever"), None);
+        assert_eq!(worktree_key_for_path("/Users/x/Documents"), None);
     }
 }
