@@ -1,7 +1,7 @@
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::IpcError;
 use crate::ssh::SshClient;
-use crate::store::{HostRow, SessionRow, Store};
+use crate::store::{HostReconcile, HostRow, ReconcileSession, SessionRow, Store};
 use crate::tmux::{LocalTmux, RemoteTmux, TmuxExec};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -60,29 +60,24 @@ async fn reconcile_sessions(
         }
     }
 
-    // 3. Apply all writes in a single short lock window.
+    // 3. Apply all writes in a single short lock window. Each host's
+    //    write-burst goes through `Store::apply_host_reconcile`, which wraps
+    //    update_host_probe + upserts + touches + delete-not-in in ONE
+    //    transaction (one fsync) and emits events only AFTER it commits — so a
+    //    mid-burst error rolls everything back and emits nothing for that host.
     //
-    //    TODO(iter4a-M3): wrap the body of this block in
-    //    `s.with_transaction(|tx| { … _in_tx variants … })` so the whole
-    //    reconcile commits with one fsync instead of one per upsert. The
-    //    `_in_tx` Store variants are added when M3 wires the EventBus into
-    //    Store mutations (Task 8/9), so the transaction wrap lands cleanly
-    //    at the same time.
+    //    The (project_id, account_uuid) resolution stays HERE: those are reads
+    //    (`find_project_id_for_path`, `get_session_account`) and must run
+    //    before the transaction opens.
     let mut all_rows: Vec<SessionRow> = Vec::new();
     {
-        let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let mut s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
 
         for (host, res) in &probed {
             match res {
                 Ok(live) => {
-                    let _ = s.update_host_probe(
-                        &host.alias,
-                        true,
-                        host.claude_version.as_deref(),
-                        host.tmux_version.as_deref(),
-                        now_unix(),
-                    );
                     let mut keep: Vec<String> = Vec::with_capacity(live.len());
+                    let mut sessions: Vec<ReconcileSession> = Vec::with_capacity(live.len());
                     for sess in live {
                         keep.push(sess.name.clone());
                         let project_id = find_project_id_for_path(&s, &host.alias, &sess.path);
@@ -92,33 +87,37 @@ async fn reconcile_sessions(
                         let account_uuid = s
                             .get_session_account(&host.alias, &sess.name)?
                             .or_else(|| host.account_uuid.clone());
-                        s.upsert_session(
-                            &sess.name,
-                            &host.alias,
+                        sessions.push(ReconcileSession {
+                            tmux_name: &sess.name,
                             project_id,
-                            None,
-                            sess.created,
-                            sess.last_activity,
-                            "running",
-                            account_uuid.as_deref(),
-                        )?;
-                        if let Some(pid) = project_id {
-                            s.touch_project_last_session_at(pid, sess.last_activity)?;
-                        }
+                            created_at: sess.created,
+                            last_activity_at: sess.last_activity,
+                            account_uuid,
+                        });
                     }
-                    s.delete_sessions_not_in(&host.alias, &keep)?;
+                    s.apply_host_reconcile(HostReconcile {
+                        alias: &host.alias,
+                        reachable: true,
+                        claude_version: host.claude_version.as_deref(),
+                        tmux_version: host.tmux_version.as_deref(),
+                        last_pinged_at: now_unix(),
+                        sessions: &sessions,
+                        keep: &keep,
+                    })?;
                     all_rows.extend(s.list_sessions_for_host(&host.alias)?);
                 }
                 Err(_e) => {
                     // Mark host unreachable; surface last-known sessions so the
                     // UI can render them dimmed/red. We KEEP them (no delete).
-                    let _ = s.update_host_probe(
-                        &host.alias,
-                        false,
-                        host.claude_version.as_deref(),
-                        host.tmux_version.as_deref(),
-                        now_unix(),
-                    );
+                    s.apply_host_reconcile(HostReconcile {
+                        alias: &host.alias,
+                        reachable: false,
+                        claude_version: host.claude_version.as_deref(),
+                        tmux_version: host.tmux_version.as_deref(),
+                        last_pinged_at: now_unix(),
+                        sessions: &[],
+                        keep: &[],
+                    })?;
                     all_rows.extend(s.list_sessions_for_host(&host.alias)?);
                 }
             }
@@ -151,48 +150,48 @@ async fn reconcile_one_host(
     let tmux = exec_for(&host.alias, ssh);
     let result = tmux.list_sessions().await;
 
-    // 3. Apply writes under one brief lock.
-    let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    // 3. Apply writes under one brief lock, via the same single-transaction
+    //    + emit-after-commit path as the multi-host reconcile. Reads
+    //    (project_id / account_uuid resolution) happen before the tx opens.
+    let mut s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
     match result {
         Ok(live) => {
-            let _ = s.update_host_probe(
-                &host.alias,
-                true,
-                host.claude_version.as_deref(),
-                host.tmux_version.as_deref(),
-                now_unix(),
-            );
             let mut keep: Vec<String> = Vec::with_capacity(live.len());
+            let mut sessions: Vec<ReconcileSession> = Vec::with_capacity(live.len());
             for sess in &live {
                 keep.push(sess.name.clone());
                 let project_id = find_project_id_for_path(&s, &host.alias, &sess.path);
                 let account_uuid = s
                     .get_session_account(&host.alias, &sess.name)?
                     .or_else(|| host.account_uuid.clone());
-                s.upsert_session(
-                    &sess.name,
-                    &host.alias,
+                sessions.push(ReconcileSession {
+                    tmux_name: &sess.name,
                     project_id,
-                    None,
-                    sess.created,
-                    sess.last_activity,
-                    "running",
-                    account_uuid.as_deref(),
-                )?;
-                if let Some(pid) = project_id {
-                    s.touch_project_last_session_at(pid, sess.last_activity)?;
-                }
+                    created_at: sess.created,
+                    last_activity_at: sess.last_activity,
+                    account_uuid,
+                });
             }
-            s.delete_sessions_not_in(&host.alias, &keep)?;
+            s.apply_host_reconcile(HostReconcile {
+                alias: &host.alias,
+                reachable: true,
+                claude_version: host.claude_version.as_deref(),
+                tmux_version: host.tmux_version.as_deref(),
+                last_pinged_at: now_unix(),
+                sessions: &sessions,
+                keep: &keep,
+            })?;
         }
         Err(_e) => {
-            let _ = s.update_host_probe(
-                &host.alias,
-                false,
-                host.claude_version.as_deref(),
-                host.tmux_version.as_deref(),
-                now_unix(),
-            );
+            s.apply_host_reconcile(HostReconcile {
+                alias: &host.alias,
+                reachable: false,
+                claude_version: host.claude_version.as_deref(),
+                tmux_version: host.tmux_version.as_deref(),
+                last_pinged_at: now_unix(),
+                sessions: &[],
+                keep: &[],
+            })?;
         }
     }
     Ok(())

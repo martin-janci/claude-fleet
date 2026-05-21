@@ -3,7 +3,7 @@
 // is not Send+Sync. Commands access it via `State<'_, Mutex<Store>>`.
 
 use rusqlite::{Connection, OptionalExtension, Result};
-use crate::events::{EventBus, NoopEventBus};
+use crate::events::{EventBus, NoopEventBus, RowChange};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -61,6 +61,35 @@ pub struct AccountRow {
     pub organization_uuid: Option<String>,
     pub seat_tier: Option<String>,
     pub last_seen_at: Option<i64>,
+}
+
+/// One live session to upsert during a reconcile write-burst. `project_id`
+/// and `account_uuid` are PRE-RESOLVED by the caller (they require reads —
+/// `find_project_id_for_path` / `get_session_account` — that must run before
+/// the transaction opens).
+pub struct ReconcileSession<'a> {
+    pub tmux_name: &'a str,
+    pub project_id: Option<i64>,
+    pub created_at: i64,
+    pub last_activity_at: i64,
+    pub account_uuid: Option<String>,
+}
+
+/// All inputs for applying one host's probe result atomically. Consumed by
+/// `Store::apply_host_reconcile`.
+pub struct HostReconcile<'a> {
+    pub alias: &'a str,
+    /// Whether the probe succeeded. `false` ⇒ only the host row's
+    /// reachability/versions are updated; sessions are left untouched.
+    pub reachable: bool,
+    pub claude_version: Option<&'a str>,
+    pub tmux_version: Option<&'a str>,
+    pub last_pinged_at: i64,
+    /// Live sessions to upsert (empty / ignored when `!reachable`).
+    pub sessions: &'a [ReconcileSession<'a>],
+    /// tmux_names to keep; rows on this host not in the set are deleted
+    /// (only used when `reachable`).
+    pub keep: &'a [String],
 }
 
 pub struct Store {
@@ -143,80 +172,25 @@ impl Store {
     }
 
     // ---- Private fetch helpers used after writes to produce emit payloads ----
+    //
+    // The row-mapping SQL lives in free `fetch_*` functions that take a bare
+    // `&Connection` so it can be reused both by these `&self` helpers AND by
+    // the `_in_tx` mutation variants (a `&Transaction` derefs to `&Connection`).
 
     fn get_session(
         &self,
         tmux_name: &str,
         host_alias: &str,
     ) -> Result<Option<SessionRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
-                    last_activity_at, status, notes, account_uuid, kind, reviews_session_id
-             FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
-        )?;
-        let mut rows = stmt.query_map(rusqlite::params![tmux_name, host_alias], |row| {
-            Ok(SessionRow {
-                id: row.get(0)?,
-                tmux_name: row.get(1)?,
-                host_alias: row.get(2)?,
-                project_id: row.get(3)?,
-                worktree_id: row.get(4)?,
-                created_at: row.get(5)?,
-                last_activity_at: row.get(6)?,
-                status: row.get(7)?,
-                notes: row.get(8)?,
-                account_uuid: row.get(9)?,
-                kind: row.get(10)?,
-                reviews_session_id: row.get(11)?,
-            })
-        })?;
-        match rows.next() {
-            Some(r) => Ok(Some(r?)),
-            None => Ok(None),
-        }
+        fetch_session(&self.conn, tmux_name, host_alias)
     }
 
     fn get_host(&self, alias: &str) -> Result<Option<HostRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
-            "SELECT alias, ssh_alias, reachable, claude_version, tmux_version, hidden,
-                    last_pinged_at, account_uuid
-             FROM hosts WHERE alias=?1",
-        )?;
-        let mut rows = stmt.query_map(rusqlite::params![alias], |row| {
-            Ok(HostRow {
-                alias: row.get(0)?,
-                ssh_alias: row.get(1)?,
-                reachable: row.get::<_, i64>(2)? != 0,
-                claude_version: row.get(3)?,
-                tmux_version: row.get(4)?,
-                hidden: row.get::<_, i64>(5)? != 0,
-                last_pinged_at: row.get(6)?,
-                account_uuid: row.get(7)?,
-            })
-        })?;
-        match rows.next() {
-            Some(r) => Ok(Some(r?)),
-            None => Ok(None),
-        }
+        fetch_host(&self.conn, alias)
     }
 
     fn get_project(&self, id: i64) -> Result<Option<ProjectRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, owner, repo, base_path, last_session_at FROM projects WHERE id=?1",
-        )?;
-        let mut rows = stmt.query_map(rusqlite::params![id], |row| {
-            Ok(ProjectRow {
-                id: row.get(0)?,
-                owner: row.get(1)?,
-                repo: row.get(2)?,
-                base_path: row.get(3)?,
-                last_session_at: row.get(4)?,
-            })
-        })?;
-        match rows.next() {
-            Some(r) => Ok(Some(r?)),
-            None => Ok(None),
-        }
+        fetch_project(&self.conn, id)
     }
 
     fn get_worktree(&self, id: i64) -> Result<Option<WorktreeRow>, rusqlite::Error> {
@@ -846,6 +820,208 @@ impl Store {
         Ok(r)
     }
 
+    // ---- Reconcile write-burst: single transaction + emit-after-commit ----
+    //
+    // The `*_in_tx` helpers below run ONLY their SQL against an ambient
+    // `&Transaction` and return a `RowChange` describing the event to emit —
+    // they do NOT touch `self.bus`. `apply_host_reconcile` drives them inside
+    // one transaction, commits, and only THEN flushes the collected changes to
+    // the bus. A mid-batch error rolls the whole transaction back, so no event
+    // fires for a write that didn't persist.
+    //
+    // The public `update_host_probe` / `upsert_session` /
+    // `touch_project_last_session_at` / `delete_sessions_not_in` methods are
+    // intentionally left untouched — direct (non-reconcile) callers keep
+    // emitting immediately.
+
+    fn update_host_probe_in_tx(
+        tx: &rusqlite::Transaction,
+        alias: &str,
+        reachable: bool,
+        claude_version: Option<&str>,
+        tmux_version: Option<&str>,
+        last_pinged_at: i64,
+        out: &mut Vec<RowChange>,
+    ) -> Result<(), rusqlite::Error> {
+        tx.execute(
+            "UPDATE hosts SET reachable=?1, claude_version=?2, tmux_version=?3, last_pinged_at=?4 WHERE alias=?5",
+            rusqlite::params![
+                if reachable { 1 } else { 0 },
+                claude_version,
+                tmux_version,
+                last_pinged_at,
+                alias
+            ],
+        )?;
+        if let Some(row) = fetch_host(tx, alias)? {
+            out.push(RowChange::HostProbed(row));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn upsert_session_in_tx(
+        tx: &rusqlite::Transaction,
+        tmux_name: &str,
+        host_alias: &str,
+        project_id: Option<i64>,
+        worktree_id: Option<i64>,
+        created_at: i64,
+        last_activity_at: i64,
+        status: &str,
+        account_uuid: Option<&str>,
+        out: &mut Vec<RowChange>,
+    ) -> Result<(), rusqlite::Error> {
+        // Check existence before the write so we can distinguish created vs updated.
+        let existing_id: Option<i64> = tx.query_row(
+            "SELECT id FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
+            rusqlite::params![tmux_name, host_alias],
+            |row| row.get(0),
+        ).optional()?;
+
+        tx.execute(
+            "INSERT INTO sessions (tmux_name, host_alias, project_id, worktree_id,
+                                   created_at, last_activity_at, status, account_uuid)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(host_alias, tmux_name) DO UPDATE SET
+               project_id=excluded.project_id,
+               worktree_id=excluded.worktree_id,
+               last_activity_at=excluded.last_activity_at,
+               status=excluded.status,
+               account_uuid=excluded.account_uuid",
+            rusqlite::params![tmux_name, host_alias, project_id, worktree_id,
+                              created_at, last_activity_at, status, account_uuid],
+        )?;
+        if let Some(row) = fetch_session(tx, tmux_name, host_alias)? {
+            if existing_id.is_none() {
+                out.push(RowChange::SessionCreated(row));
+            } else {
+                out.push(RowChange::SessionUpdated(row));
+            }
+        }
+        Ok(())
+    }
+
+    fn touch_project_last_session_at_in_tx(
+        tx: &rusqlite::Transaction,
+        project_id: i64,
+        ts: i64,
+        out: &mut Vec<RowChange>,
+    ) -> Result<(), rusqlite::Error> {
+        tx.execute(
+            "UPDATE projects SET last_session_at = MAX(COALESCE(last_session_at, 0), ?1) WHERE id = ?2",
+            rusqlite::params![ts, project_id],
+        )?;
+        if let Some(row) = fetch_project(tx, project_id)? {
+            out.push(RowChange::ProjectUpdated(row));
+        }
+        Ok(())
+    }
+
+    fn delete_sessions_not_in_in_tx(
+        tx: &rusqlite::Transaction,
+        host_alias: &str,
+        keep_names: &[String],
+        out: &mut Vec<RowChange>,
+    ) -> Result<usize, rusqlite::Error> {
+        // Collect ids to delete before the DELETE so we can emit one event per row.
+        let ids_to_delete: Vec<i64> = if keep_names.is_empty() {
+            let mut stmt = tx.prepare("SELECT id FROM sessions WHERE host_alias=?1")?;
+            let ids = stmt.query_map(rusqlite::params![host_alias], |r| r.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ids
+        } else {
+            let placeholders = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql_select = format!(
+                "SELECT id FROM sessions WHERE host_alias=?1 AND tmux_name NOT IN ({placeholders})"
+            );
+            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
+            for n in keep_names {
+                params.push(n);
+            }
+            let mut stmt = tx.prepare(&sql_select)?;
+            let ids = stmt.query_map(params.as_slice(), |r| r.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ids
+        };
+
+        let deleted = if keep_names.is_empty() {
+            tx.execute(
+                "DELETE FROM sessions WHERE host_alias=?1",
+                rusqlite::params![host_alias],
+            )?
+        } else {
+            let placeholders = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "DELETE FROM sessions WHERE host_alias=?1 AND tmux_name NOT IN ({placeholders})"
+            );
+            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
+            for n in keep_names {
+                params.push(n);
+            }
+            tx.execute(&sql, params.as_slice())?
+        };
+
+        for id in &ids_to_delete {
+            out.push(RowChange::SessionKilled(*id));
+        }
+        Ok(deleted)
+    }
+
+    /// One probed/live session to apply during a reconcile write-burst, with
+    /// its `(project_id, account_uuid)` ALREADY resolved by the caller (those
+    /// are reads — `find_project_id_for_path` / `get_session_account` — and
+    /// must happen before the transaction opens).
+    pub fn apply_host_reconcile(
+        &mut self,
+        spec: HostReconcile<'_>,
+    ) -> Result<(), rusqlite::Error> {
+        // Phase 1: run all SQL inside one transaction, collecting RowChanges.
+        let changes = self.with_transaction(|tx| {
+            let mut out: Vec<RowChange> = Vec::new();
+            Self::update_host_probe_in_tx(
+                tx,
+                spec.alias,
+                spec.reachable,
+                spec.claude_version,
+                spec.tmux_version,
+                spec.last_pinged_at,
+                &mut out,
+            )?;
+            // Only a reachable probe rewrites the session set. An unreachable
+            // host keeps its last-known rows (no upserts, no delete-not-in).
+            if spec.reachable {
+                for sess in spec.sessions {
+                    Self::upsert_session_in_tx(
+                        tx,
+                        sess.tmux_name,
+                        spec.alias,
+                        sess.project_id,
+                        None,
+                        sess.created_at,
+                        sess.last_activity_at,
+                        "running",
+                        sess.account_uuid.as_deref(),
+                        &mut out,
+                    )?;
+                    if let Some(pid) = sess.project_id {
+                        Self::touch_project_last_session_at_in_tx(
+                            tx, pid, sess.last_activity_at, &mut out,
+                        )?;
+                    }
+                }
+                Self::delete_sessions_not_in_in_tx(tx, spec.alias, spec.keep, &mut out)?;
+            }
+            Ok(out)
+        })?;
+
+        // Phase 2: transaction committed — now it is safe to emit.
+        for change in &changes {
+            self.bus.emit_change(change);
+        }
+        Ok(())
+    }
+
     pub fn delete_session(&self, id: i64) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "DELETE FROM sessions WHERE id=?1",
@@ -904,6 +1080,88 @@ impl Store {
             self.bus.session_killed(*id);
         }
         Ok(deleted)
+    }
+}
+
+// ---- Connection-level row fetch helpers ----
+//
+// Free functions (not methods) so they accept a bare `&Connection`. A
+// `&Transaction` derefs to `&Connection`, so the same SQL serves both the
+// autocommit `&self` helpers and the transactional `_in_tx` mutation paths
+// without duplicating the row-mapping closures.
+
+fn fetch_session(
+    conn: &Connection,
+    tmux_name: &str,
+    host_alias: &str,
+) -> Result<Option<SessionRow>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
+                last_activity_at, status, notes, account_uuid, kind, reviews_session_id
+         FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
+    )?;
+    let mut rows = stmt.query_map(rusqlite::params![tmux_name, host_alias], |row| {
+        Ok(SessionRow {
+            id: row.get(0)?,
+            tmux_name: row.get(1)?,
+            host_alias: row.get(2)?,
+            project_id: row.get(3)?,
+            worktree_id: row.get(4)?,
+            created_at: row.get(5)?,
+            last_activity_at: row.get(6)?,
+            status: row.get(7)?,
+            notes: row.get(8)?,
+            account_uuid: row.get(9)?,
+            kind: row.get(10)?,
+            reviews_session_id: row.get(11)?,
+        })
+    })?;
+    match rows.next() {
+        Some(r) => Ok(Some(r?)),
+        None => Ok(None),
+    }
+}
+
+fn fetch_host(conn: &Connection, alias: &str) -> Result<Option<HostRow>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT alias, ssh_alias, reachable, claude_version, tmux_version, hidden,
+                last_pinged_at, account_uuid
+         FROM hosts WHERE alias=?1",
+    )?;
+    let mut rows = stmt.query_map(rusqlite::params![alias], |row| {
+        Ok(HostRow {
+            alias: row.get(0)?,
+            ssh_alias: row.get(1)?,
+            reachable: row.get::<_, i64>(2)? != 0,
+            claude_version: row.get(3)?,
+            tmux_version: row.get(4)?,
+            hidden: row.get::<_, i64>(5)? != 0,
+            last_pinged_at: row.get(6)?,
+            account_uuid: row.get(7)?,
+        })
+    })?;
+    match rows.next() {
+        Some(r) => Ok(Some(r?)),
+        None => Ok(None),
+    }
+}
+
+fn fetch_project(conn: &Connection, id: i64) -> Result<Option<ProjectRow>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT id, owner, repo, base_path, last_session_at FROM projects WHERE id=?1",
+    )?;
+    let mut rows = stmt.query_map(rusqlite::params![id], |row| {
+        Ok(ProjectRow {
+            id: row.get(0)?,
+            owner: row.get(1)?,
+            repo: row.get(2)?,
+            base_path: row.get(3)?,
+            last_session_at: row.get(4)?,
+        })
+    })?;
+    match rows.next() {
+        Some(r) => Ok(Some(r?)),
+        None => Ok(None),
     }
 }
 
@@ -1512,5 +1770,134 @@ mod tests {
             .into_iter().find(|r| r.tmux_name == "src--review-1").unwrap();
         assert_eq!(row.kind, "review", "kind must survive re-upsert");
         assert_eq!(row.reviews_session_id, Some(src));
+    }
+
+    #[test]
+    fn apply_host_reconcile_happy_path_persists_all_and_emits_after_commit() {
+        let (mut store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let pid = store.upsert_project("o", "r", "/base/r").unwrap();
+        // Pre-seed a stale row that should be pruned (kill), and one that
+        // already exists so it produces an `updated` (not `created`).
+        store.upsert_session("stale", "alpha", None, None, 1, 1, "running", None).unwrap();
+        store.upsert_session("keep-existing", "alpha", None, None, 1, 1, "running", None).unwrap();
+        let stale_id = store.get_session("stale", "alpha").unwrap().unwrap().id;
+        bus.take(); // drain all setup events
+
+        let sessions = vec![
+            // existing → update
+            ReconcileSession {
+                tmux_name: "keep-existing",
+                project_id: Some(pid),
+                created_at: 1,
+                last_activity_at: 50,
+                account_uuid: None,
+            },
+            // brand new → create
+            ReconcileSession {
+                tmux_name: "fresh",
+                project_id: Some(pid),
+                created_at: 10,
+                last_activity_at: 60,
+                account_uuid: None,
+            },
+        ];
+        let keep = vec!["keep-existing".to_string(), "fresh".to_string()];
+        store
+            .apply_host_reconcile(HostReconcile {
+                alias: "alpha",
+                reachable: true,
+                claude_version: Some("2.1"),
+                tmux_version: Some("3.6"),
+                last_pinged_at: 999,
+                sessions: &sessions,
+                keep: &keep,
+            })
+            .expect("reconcile ok");
+
+        // (a) rows persisted: stale gone, two live, host probe updated.
+        let names: Vec<String> = store
+            .list_sessions_for_host("alpha")
+            .unwrap()
+            .into_iter()
+            .map(|r| r.tmux_name)
+            .collect();
+        assert_eq!(names, vec!["fresh", "keep-existing"], "stale pruned, two live");
+        let host = store.list_hosts().unwrap().into_iter().find(|h| h.alias == "alpha").unwrap();
+        assert_eq!(host.claude_version.as_deref(), Some("2.1"));
+        assert_eq!(host.last_pinged_at, Some(999));
+        assert_eq!(store.list_projects().unwrap()[0].last_session_at, Some(60));
+
+        // (b) the events fired — and only after commit (we drained pre-batch, so
+        // everything here was emitted by the flush phase).
+        let evts = bus.take();
+        assert!(evts.contains(&"host:probed:alpha".to_string()), "got: {evts:?}");
+        assert!(
+            evts.iter().any(|e| e.starts_with("session:updated:")),
+            "expected an update for keep-existing; got: {evts:?}"
+        );
+        assert!(
+            evts.iter().any(|e| e.starts_with("session:created:")),
+            "expected a create for fresh; got: {evts:?}"
+        );
+        assert!(evts.contains(&format!("session:killed:{stale_id}")), "got: {evts:?}");
+        assert!(
+            evts.iter().any(|e| e.starts_with("project:updated:")),
+            "expected project:updated; got: {evts:?}"
+        );
+    }
+
+    #[test]
+    fn reconcile_batch_rolls_back_and_emits_nothing_on_error() {
+        let (mut store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        bus.take(); // drain host:added
+
+        let row_count = |s: &Store| -> i64 {
+            s.conn
+                .query_row("SELECT COUNT(*) FROM sessions WHERE host_alias='alpha'", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(row_count(&store), 0);
+
+        // First a good upsert, then one whose project_id points at a
+        // non-existent project — with foreign_keys=ON this trips the
+        // sessions.project_id FK mid-batch and aborts the transaction.
+        let sessions = vec![
+            ReconcileSession {
+                tmux_name: "good",
+                project_id: None,
+                created_at: 1,
+                last_activity_at: 1,
+                account_uuid: None,
+            },
+            ReconcileSession {
+                tmux_name: "bad",
+                project_id: Some(999_999), // no such project → FK violation
+                created_at: 1,
+                last_activity_at: 1,
+                account_uuid: None,
+            },
+        ];
+        let keep = vec!["good".to_string(), "bad".to_string()];
+        let res = store.apply_host_reconcile(HostReconcile {
+            alias: "alpha",
+            reachable: true,
+            claude_version: Some("9.9"),
+            tmux_version: None,
+            last_pinged_at: 12345,
+            sessions: &sessions,
+            keep: &keep,
+        });
+
+        assert!(res.is_err(), "FK violation should abort the batch");
+        // (a) NO rows persisted — not even the 'good' one before the failure.
+        assert_eq!(row_count(&store), 0, "transaction must have rolled back all writes");
+        // host probe row must also be untouched (it was part of the same tx).
+        let host = store.list_hosts().unwrap().into_iter().find(|h| h.alias == "alpha").unwrap();
+        assert_ne!(host.claude_version.as_deref(), Some("9.9"), "host probe rolled back");
+        assert_eq!(host.last_pinged_at, None, "host probe rolled back");
+        // (b) NO events emitted — the flush phase never runs on rollback.
+        assert!(bus.take().is_empty(), "no event may fire for a rolled-back batch");
     }
 }

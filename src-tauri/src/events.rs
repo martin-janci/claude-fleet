@@ -9,6 +9,20 @@
 use crate::store::{AccountRow, HostRow, ProjectRow, SessionRow, WorktreeRow};
 use serde::Serialize;
 
+/// A row mutation captured during a batched write (e.g. reconcile's
+/// per-host write-burst). The SQL is applied inside a transaction; the
+/// corresponding event is held as a `RowChange` and only flushed to the
+/// `EventBus` AFTER the transaction commits. This guarantees no event fires
+/// for a change that gets rolled back. See `EventBus::emit_change`.
+#[derive(Clone)]
+pub enum RowChange {
+    SessionCreated(SessionRow),
+    SessionUpdated(SessionRow),
+    SessionKilled(i64),
+    HostProbed(HostRow),
+    ProjectUpdated(ProjectRow),
+}
+
 #[derive(Serialize, Clone)]
 pub struct SessionKilledPayload {
     pub id: i64,
@@ -29,6 +43,20 @@ pub trait EventBus: Send + Sync {
     fn account_upserted(&self, row: &AccountRow);
     fn project_updated(&self, row: &ProjectRow);
     fn worktree_updated(&self, row: &WorktreeRow);
+
+    /// Flush a single deferred `RowChange` through the matching typed method.
+    /// Used by batched (transactional) writes to emit AFTER commit. The
+    /// default impl dispatches to the existing methods, so no bus needs to
+    /// override it.
+    fn emit_change(&self, change: &RowChange) {
+        match change {
+            RowChange::SessionCreated(r) => self.session_created(r),
+            RowChange::SessionUpdated(r) => self.session_updated(r),
+            RowChange::SessionKilled(id) => self.session_killed(*id),
+            RowChange::HostProbed(r) => self.host_probed(r),
+            RowChange::ProjectUpdated(r) => self.project_updated(r),
+        }
+    }
 }
 
 /// Silently drops every event. For tests and any context that doesn't need
