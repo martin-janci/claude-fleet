@@ -4,10 +4,12 @@ mod events;
 mod ipc_error;
 mod projects;
 mod pty;
+mod shell;
 mod ssh;
 mod ssh_config;
 mod store;
 mod tmux;
+mod validate;
 
 pub use events::{AppHandleEventBus, EventBus, NoopEventBus};
 
@@ -198,11 +200,18 @@ pub fn run() {
             pty::pty_drain,
             cancel_command,
         ])
-        .on_window_event(move |_window, event| {
-            // Close ssh masters when the app is about to exit so we don't
-            // leak background ssh processes after quit.
+        .on_window_event(move |window, event| {
+            // On exit: close ssh masters AND any open PTY, so we don't leak
+            // background ssh processes or an orphaned `tmux attach` / `ssh
+            // -tt` child after quit.
             if let tauri::WindowEvent::Destroyed = event {
+                use tauri::Manager;
                 ssh_client_for_exit.shutdown_all();
+                if let Some(pty) = window.try_state::<Mutex<PtyState>>() {
+                    if let Ok(mut s) = pty.lock() {
+                        s.close();
+                    }
+                }
             }
         })
         .run(tauri::generate_context!())

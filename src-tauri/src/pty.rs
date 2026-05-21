@@ -1,4 +1,5 @@
 use crate::ipc_error::IpcError;
+use crate::shell::quote as shell_escape;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -34,7 +35,7 @@ impl PtyState {
         }
     }
 
-    fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         // Drop writer first so the slave EOFs; then kill child to make sure
         // the reader thread terminates. Clear the buffer so a subsequent open
         // doesn't deliver stale bytes from the previous session.
@@ -61,6 +62,10 @@ pub struct PtyOpenArgs {
 
 #[tauri::command]
 pub fn pty_open(args: PtyOpenArgs, state: State<'_, Mutex<PtyState>>) -> Result<(), IpcError> {
+    // Validate untrusted IPC input before it reaches `ssh` / `tmux`.
+    crate::validate::host_alias(&args.host_alias)?;
+    crate::validate::tmux_name(&args.session_name)?;
+
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -92,6 +97,10 @@ pub fn pty_open(args: PtyOpenArgs, state: State<'_, Mutex<PtyState>>) -> Result<
             "BatchMode=yes",
             "-o",
             "ConnectTimeout=5",
+            // `--` ends ssh option parsing so a host alias can never be
+            // interpreted as an option (defence-in-depth; the alias is also
+            // validated above).
+            "--",
             &args.host_alias,
             "bash",
             "-lc",
@@ -150,15 +159,12 @@ pub fn pty_open(args: PtyOpenArgs, state: State<'_, Mutex<PtyState>>) -> Result<
         .take_writer()
         .map_err(|e| IpcError::new("E_PTY", format!("take writer: {e}")))?;
 
-    // Acquire the shared buffer up-front so the reader thread can use it
-    // without re-locking the PtyState. The buffer is an Arc<Mutex<Vec<u8>>>
-    // so handles can be cloned cheaply across threads.
-    let buffer_for_thread = {
-        let s = state
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
-        Arc::clone(&s.buffer)
-    };
+    // A FRESH buffer for each open. The previous PTY's reader thread may
+    // still be alive momentarily (kill+wait is best-effort and the thread
+    // loops on `read`) — handing the new reader its own buffer means stale
+    // bytes from the old session can never bleed into the new screen. The
+    // old buffer is orphaned and freed once that thread observes EOF.
+    let buffer_for_thread: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     {
         let mut s = state
             .lock()
@@ -167,7 +173,7 @@ pub fn pty_open(args: PtyOpenArgs, state: State<'_, Mutex<PtyState>>) -> Result<
         s.master = Some(pair.master);
         s.writer = Some(writer);
         s.child = Some(child);
-        s.buffer = buffer_for_thread.clone();
+        s.buffer = Arc::clone(&buffer_for_thread);
     }
 
     // Append a marker so the user can see in xterm that the channel is up.
@@ -310,18 +316,4 @@ pub fn pty_close(state: State<'_, Mutex<PtyState>>) -> Result<(), IpcError> {
         .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
     s.close();
     Ok(())
-}
-
-fn shell_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for ch in s.chars() {
-        if ch == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
 }

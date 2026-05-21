@@ -104,15 +104,16 @@ fn split_kv(line: &str) -> Option<(&str, &str)> {
 }
 
 fn is_real_alias(alias: &str) -> bool {
-    if alias.is_empty() {
+    // Reject anything that isn't a safe machine alias: empty, wildcards
+    // (`*`/`?`), an option-like leading `-` (an alias beginning with `-`
+    // could be parsed by `ssh` as an option — arbitrary local command
+    // execution), whitespace, and non-alias characters. All of these are
+    // caught by the shared validator.
+    if crate::validate::host_alias(alias).is_err() {
         return false;
     }
-    // Wildcards are not user-facing hosts; github.com is a special case
-    // used to pin IdentityFile, not a machine alias the user can ssh to
-    // for tmux.
-    if alias.contains('*') || alias.contains('?') {
-        return false;
-    }
+    // github.com etc. are valid aliases but used to pin IdentityFile, not
+    // machine aliases the user can ssh to for tmux.
     const DENYLIST: &[&str] = &["github.com", "gitlab.com", "bitbucket.org"];
     !DENYLIST.contains(&alias)
 }

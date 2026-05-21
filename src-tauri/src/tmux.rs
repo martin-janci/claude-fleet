@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use crate::ipc_error::IpcError;
+use crate::shell::quote as shell_quote;
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -184,23 +185,6 @@ impl TmuxExec for RemoteTmux {
             Ok(String::new())
         }
     }
-}
-
-/// Conservative single-quote shell escape: wraps in `'...'` and replaces
-/// embedded single quotes with the canonical `'\''` dance. Avoids depending
-/// on a crate for a small, well-tested operation.
-fn shell_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for ch in s.chars() {
-        if ch == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

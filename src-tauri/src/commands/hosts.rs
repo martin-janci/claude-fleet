@@ -46,6 +46,9 @@ pub async fn add_host(
     store: State<'_, Mutex<Store>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<HostRow, IpcError> {
+    // Reject hostile aliases (e.g. `-oProxyCommand=…`) before they reach ssh.
+    crate::validate::host_alias(&args.alias)?;
+    crate::validate::host_alias(&args.ssh_alias)?;
     // Probe first; we don't want to persist a host we can't talk to.
     let (reachable, claude_ver, tmux_ver, account) = probe(&ssh, &args.ssh_alias).await?;
     {
@@ -94,23 +97,20 @@ pub async fn probe_ssh_alias(
     ssh: State<'_, Arc<SshClient>>,
     reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<ProbePreview, IpcError> {
+    crate::validate::host_alias(&args.ssh_alias)?;
     let (cancel_id, token) = match args.call_id {
         Some(id) => {
             let token = CancellationToken::new();
             reg.bind(id, token.clone());
-            (Some(id), token)
+            (id, token)
         }
-        None => {
-            let (id, token) = reg.register_anonymous();
-            (Some(id), token)
-        }
+        None => reg.register_anonymous(),
     };
+    // RAII guard releases the registry slot on every exit path, including a
+    // panic — a manual unregister would leak the slot on unwind.
+    let _guard = crate::cancel::CancelGuard::new(reg.inner().clone(), cancel_id);
 
     let result = probe_with_token(&ssh, &args.ssh_alias, token).await;
-
-    if let Some(id) = cancel_id {
-        reg.unregister(id);
-    }
 
     let (reachable, claude_version, tmux_version, account) = result?;
     Ok(ProbePreview {
@@ -150,12 +150,13 @@ pub async fn probe_host(
     let (reachable, claude_ver, tmux_ver, account) = if args.alias == "local" {
         probe_local()
     } else {
+        crate::validate::host_alias(target)?;
         // Anonymous token — probe_host is user-triggered re-probe; we give it
         // a token so it can be cancelled if needed, but no frontend call_id.
-        let (_id, token) = reg.register_anonymous();
-        let result = probe_lenient_with_token(&ssh, target, token.clone()).await;
-        reg.unregister(_id);
-        result
+        // The CancelGuard releases the slot even if the probe panics.
+        let (id, token) = reg.register_anonymous();
+        let _guard = crate::cancel::CancelGuard::new(reg.inner().clone(), id);
+        probe_lenient_with_token(&ssh, target, token).await
     };
     {
         let s = store

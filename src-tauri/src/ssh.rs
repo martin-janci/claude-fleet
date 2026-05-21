@@ -88,6 +88,7 @@ impl SshClient {
                     &format!("ControlPath={}", path.display()),
                     "-O",
                     "exit",
+                    "--",
                     host,
                 ])
                 .stdout(std::process::Stdio::null())
@@ -111,6 +112,7 @@ impl SshClient {
                     "BatchMode=yes",
                     "-o",
                     "ConnectTimeout=5",
+                    "--",
                     host,
                 ])
                 .status()
@@ -153,6 +155,9 @@ impl SshClient {
             "BatchMode=yes",
             "-o",
             &format!("ConnectTimeout={}", timeout.as_secs().max(1)),
+            // `--` ends option parsing — the host can never be read as an
+            // ssh option even if validation upstream were bypassed.
+            "--",
             host,
         ]);
         cmd.args(args);
@@ -189,6 +194,7 @@ impl SshClient {
                 "BatchMode=yes",
                 "-o",
                 &format!("ConnectTimeout={}", timeout.as_secs().max(1)),
+                "--",
                 host,
             ])
             .args(args)
@@ -226,6 +232,11 @@ impl SshClient {
                 // exits).
                 let _ = child.start_kill();
                 let _ = child.wait().await;
+                // Abort the pipe-reader tasks. They would normally finish on
+                // EOF once the child dies, but a grandchild inheriting the fd
+                // could keep a pipe open and leak the task.
+                stdout_task.abort();
+                stderr_task.abort();
                 Err(IpcError::new("E_CANCELLED", format!("ssh {host} cancelled")))
             }
             status = child.wait() => {
@@ -257,6 +268,7 @@ impl SshClient {
                     &format!("ControlPath={}", path.display()),
                     "-O",
                     "exit",
+                    "--",
                     &host,
                 ])
                 .stdout(std::process::Stdio::null())

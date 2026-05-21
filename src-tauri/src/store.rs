@@ -137,17 +137,26 @@ impl Store {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap_or(0);
+        // Each ALTER-based migration runs in its OWN transaction, together
+        // with the `schema_version` row it inserts. SQLite DDL is
+        // transactional, so an interrupted migration rolls back entirely —
+        // it can never leave a column half-added, which on the next launch
+        // would re-run the migration and fail with "duplicate column",
+        // bricking startup.
         if v < 2 {
-            self.conn
-                .execute_batch(include_str!("../migrations/002_hosts_ssh.sql"))?;
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../migrations/002_hosts_ssh.sql"))?;
+            tx.commit()?;
         }
         if v < 3 {
-            self.conn
-                .execute_batch(include_str!("../migrations/003_accounts.sql"))?;
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../migrations/003_accounts.sql"))?;
+            tx.commit()?;
         }
         if v < 4 {
-            self.conn
-                .execute_batch(include_str!("../migrations/004_session_account.sql"))?;
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../migrations/004_session_account.sql"))?;
+            tx.commit()?;
         }
         if v < 5 {
             self.conn

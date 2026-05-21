@@ -58,6 +58,27 @@ impl CancellationRegistry {
     }
 }
 
+/// RAII guard that unregisters a cancellation token when dropped — including
+/// on a panic / unwind. Without it, a command that panics before reaching
+/// its manual `unregister` call would leak the `DashMap` slot forever, so
+/// the registry would grow unbounded over the lifetime of the process.
+pub struct CancelGuard {
+    reg: Arc<CancellationRegistry>,
+    id: u64,
+}
+
+impl CancelGuard {
+    pub fn new(reg: Arc<CancellationRegistry>, id: u64) -> Self {
+        Self { reg, id }
+    }
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        self.reg.unregister(self.id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +112,16 @@ mod tests {
     fn cancel_unknown_id_is_noop() {
         let reg = CancellationRegistry::new();
         reg.cancel(99); // must not panic
+    }
+
+    #[test]
+    fn cancel_guard_unregisters_on_drop() {
+        let reg = CancellationRegistry::new();
+        let (id, _token) = reg.register_anonymous();
+        assert_eq!(reg.tokens.len(), 1);
+        {
+            let _g = CancelGuard::new(Arc::clone(&reg), id);
+        }
+        assert_eq!(reg.tokens.len(), 0, "guard must release the slot on drop");
     }
 }

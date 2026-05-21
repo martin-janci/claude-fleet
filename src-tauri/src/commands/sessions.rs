@@ -1,5 +1,6 @@
-use crate::cancel::CancellationRegistry;
+use crate::cancel::{CancelGuard, CancellationRegistry};
 use crate::ipc_error::IpcError;
+use crate::shell::quote as shq;
 use crate::ssh::SshClient;
 use crate::store::{HostReconcile, HostRow, ReconcileSession, SessionRow, Store};
 use crate::tmux::{LocalTmux, RemoteTmux, TmuxExec};
@@ -18,6 +19,65 @@ fn exec_for(host: &str, ssh: &Arc<SshClient>) -> Box<dyn TmuxExec> {
             host: host.to_string(),
         })
     }
+}
+
+/// Apply one host's probe result to the store. Extracted from the reconcile
+/// loop so a per-host write failure can be isolated (logged) without `?`
+/// aborting the whole multi-host reconcile. The write itself goes through the
+/// transactional `Store::apply_host_reconcile` (one fsync, emit-after-commit).
+fn reconcile_write_one_host(
+    s: &mut Store,
+    host: &HostRow,
+    res: &Result<Vec<crate::tmux::TmuxSession>, IpcError>,
+) -> Result<(), IpcError> {
+    match res {
+        Ok(live) => {
+            let mut keep: Vec<String> = Vec::with_capacity(live.len());
+            let mut sessions: Vec<ReconcileSession> = Vec::with_capacity(live.len());
+            for sess in live {
+                keep.push(sess.name.clone());
+                let project_id = find_project_id_for_path(s, &host.alias, &sess.path);
+                // Preservation invariant: if the session already has an
+                // account_uuid in the DB, keep it; only capture the host's
+                // current account for newly-discovered sessions.
+                let account_uuid = s
+                    .get_session_account(&host.alias, &sess.name)?
+                    .or_else(|| host.account_uuid.clone());
+                let worktree_key = worktree_key_for_path(&sess.path.to_string_lossy());
+                sessions.push(ReconcileSession {
+                    tmux_name: &sess.name,
+                    project_id,
+                    created_at: sess.created,
+                    last_activity_at: sess.last_activity,
+                    account_uuid,
+                    worktree_key,
+                });
+            }
+            s.apply_host_reconcile(HostReconcile {
+                alias: &host.alias,
+                reachable: true,
+                claude_version: host.claude_version.as_deref(),
+                tmux_version: host.tmux_version.as_deref(),
+                last_pinged_at: now_unix(),
+                sessions: &sessions,
+                keep: &keep,
+            })?;
+        }
+        Err(_e) => {
+            // Mark host unreachable; surface last-known sessions so the UI
+            // can render them dimmed/red. We KEEP them (no delete).
+            s.apply_host_reconcile(HostReconcile {
+                alias: &host.alias,
+                reachable: false,
+                claude_version: host.claude_version.as_deref(),
+                tmux_version: host.tmux_version.as_deref(),
+                last_pinged_at: now_unix(),
+                sessions: &[],
+                keep: &[],
+            })?;
+        }
+    }
+    Ok(())
 }
 
 async fn reconcile_sessions(
@@ -74,54 +134,20 @@ async fn reconcile_sessions(
         let mut s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
 
         for (host, res) in &probed {
-            match res {
-                Ok(live) => {
-                    let mut keep: Vec<String> = Vec::with_capacity(live.len());
-                    let mut sessions: Vec<ReconcileSession> = Vec::with_capacity(live.len());
-                    for sess in live {
-                        keep.push(sess.name.clone());
-                        let project_id = find_project_id_for_path(&s, &host.alias, &sess.path);
-                        // Preservation invariant: if the session already has an
-                        // account_uuid in the DB, keep it; only capture the host's
-                        // current account for newly-discovered sessions.
-                        let account_uuid = s
-                            .get_session_account(&host.alias, &sess.name)?
-                            .or_else(|| host.account_uuid.clone());
-                        let worktree_key = worktree_key_for_path(&sess.path.to_string_lossy());
-                        sessions.push(ReconcileSession {
-                            tmux_name: &sess.name,
-                            project_id,
-                            created_at: sess.created,
-                            last_activity_at: sess.last_activity,
-                            account_uuid,
-                            worktree_key,
-                        });
-                    }
-                    s.apply_host_reconcile(HostReconcile {
-                        alias: &host.alias,
-                        reachable: true,
-                        claude_version: host.claude_version.as_deref(),
-                        tmux_version: host.tmux_version.as_deref(),
-                        last_pinged_at: now_unix(),
-                        sessions: &sessions,
-                        keep: &keep,
-                    })?;
-                    all_rows.extend(s.list_sessions_for_host(&host.alias)?);
-                }
-                Err(_e) => {
-                    // Mark host unreachable; surface last-known sessions so the
-                    // UI can render them dimmed/red. We KEEP them (no delete).
-                    s.apply_host_reconcile(HostReconcile {
-                        alias: &host.alias,
-                        reachable: false,
-                        claude_version: host.claude_version.as_deref(),
-                        tmux_version: host.tmux_version.as_deref(),
-                        last_pinged_at: now_unix(),
-                        sessions: &[],
-                        keep: &[],
-                    })?;
-                    all_rows.extend(s.list_sessions_for_host(&host.alias)?);
-                }
+            // Per-host isolation: one host's DB write failure (e.g. an FK
+            // violation on a stale account_uuid) must NOT abort reconcile for
+            // every other host. apply_host_reconcile is transactional, so a
+            // failed host rolls back cleanly; we log it and carry on.
+            if let Err(e) = reconcile_write_one_host(&mut s, host, res) {
+                eprintln!(
+                    "reconcile: write for host {} failed: {}",
+                    host.alias, e.message
+                );
+            }
+            // Always surface this host's last-known rows, even after a
+            // partial write failure above.
+            if let Ok(rows) = s.list_sessions_for_host(&host.alias) {
+                all_rows.extend(rows);
             }
         }
 
@@ -377,23 +403,6 @@ fn remote_project_path(
     (project_root, cwd)
 }
 
-/// Conservative single-quote shell escape (duplicated from `tmux::shell_quote`
-/// to keep this module self-contained for the iter-1 MVP; consolidating into
-/// a shared util is a planned iter-2 cleanup).
-fn shq(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for ch in s.chars() {
-        if ch == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
-}
-
 /// Ensure the remote host has the project cloned at `<project_root>` and,
 /// optionally, has a worktree at `<project_root>/.claude/worktrees/<wt>`
 /// checked out to `<branch>`. Idempotent: if the directory + .git is already
@@ -417,6 +426,18 @@ async fn ensure_remote_project(
     worktree: Option<(&str, Option<&str>)>, // (name, branch)
     token: CancellationToken,
 ) -> Result<(), IpcError> {
+    // Validate every component that gets interpolated into a remote path or
+    // git command. Shell-quoting (below) stops command injection but NOT
+    // `..` path traversal — a repo named `../../.ssh` would still be a valid
+    // quoted argument that escapes the projects directory.
+    crate::validate::path_component("owner", owner)?;
+    crate::validate::path_component("repo", repo)?;
+    if let Some((wt_name, branch)) = worktree {
+        crate::validate::path_component("worktree name", wt_name)?;
+        if let Some(b) = branch {
+            crate::validate::git_ref(b)?;
+        }
+    }
     let clone_url = format!("git@github.com:{owner}/{repo}.git");
     // Build a single bash script that:
     //   1. clones the repo if .git is missing
@@ -476,6 +497,10 @@ pub async fn new_session(
     ssh: State<'_, Arc<SshClient>>,
     reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<SessionRow, IpcError> {
+    // Reject hostile input before it reaches ssh / tmux / git.
+    crate::validate::host_alias(&args.host_alias)?;
+    crate::validate::tmux_name(&args.name)?;
+
     // Mint / bind a cancellation token for the duration of this command.
     // If a call_id was provided by the frontend, bind under that id so the
     // frontend can cancel via cancel_command(call_id). Otherwise use an
@@ -484,21 +509,15 @@ pub async fn new_session(
         Some(id) => {
             let token = CancellationToken::new();
             reg.bind(id, token.clone());
-            (Some(id), token)
+            (id, token)
         }
-        None => {
-            let (id, token) = reg.register_anonymous();
-            (Some(id), token)
-        }
+        None => reg.register_anonymous(),
     };
+    // RAII guard releases the registry slot on every exit path — including a
+    // panic inside new_session_inner, which a manual unregister would miss.
+    let _guard = CancelGuard::new(reg.inner().clone(), cancel_id);
 
-    let result = new_session_inner(args, &store, &ssh, token).await;
-
-    if let Some(id) = cancel_id {
-        reg.unregister(id);
-    }
-
-    result
+    new_session_inner(args, &store, &ssh, token).await
 }
 
 async fn new_session_inner(
@@ -591,6 +610,8 @@ pub async fn kill_session(
     store: State<'_, Mutex<Store>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<i64, IpcError> {
+    crate::validate::host_alias(&args.host_alias)?;
+    crate::validate::tmux_name(&args.name)?;
     // Look up id BEFORE killing so we can return it after.
     let id = {
         let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
@@ -619,6 +640,9 @@ pub async fn rename_session(
     store: State<'_, Mutex<Store>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SessionRow, IpcError> {
+    crate::validate::host_alias(&args.host_alias)?;
+    crate::validate::tmux_name(&args.old_name)?;
+    crate::validate::tmux_name(&args.new_name)?;
     let tmux = exec_for(&args.host_alias, &ssh);
     tmux.rename_session(&args.old_name, &args.new_name).await?;
     reconcile_one_host(&store, &ssh, &args.host_alias).await?;
@@ -649,6 +673,8 @@ pub async fn restart_session(
     store: State<'_, Mutex<Store>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SessionRow, IpcError> {
+    crate::validate::host_alias(&args.host_alias)?;
+    crate::validate::tmux_name(&args.name)?;
     let tmux = exec_for(&args.host_alias, &ssh);
     tmux.restart_session(&args.name).await?;
     reconcile_one_host(&store, &ssh, &args.host_alias).await?;
@@ -667,30 +693,13 @@ pub async fn restart_session(
         })
 }
 
-/// Conservative single-quote shell escape (local copy — iter 4 will extract
-/// to a shared module). Wraps in `'...'`, replaces embedded `'` with the
-/// canonical `'\''` dance.
-fn shell_quote_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for ch in s.chars() {
-        if ch == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
-}
-
 /// Build the two tmux invocations that together send a prompt to a session:
 ///   1. send-keys -t <name> -l <prompt>   (literal, no key-name translation)
 ///   2. send-keys -t <name> Enter         (real Enter to submit)
 pub fn build_send_commands(tmux_name: &str, prompt: &str) -> Vec<String> {
     vec![
-        format!("tmux send-keys -t {} -l {}", shell_quote_str(tmux_name), shell_quote_str(prompt)),
-        format!("tmux send-keys -t {} Enter", shell_quote_str(tmux_name)),
+        format!("tmux send-keys -t {} -l {}", shq(tmux_name), shq(prompt)),
+        format!("tmux send-keys -t {} Enter", shq(tmux_name)),
     ]
 }
 
@@ -707,6 +716,8 @@ async fn send_prompt_inner(
     tmux_name: &str,
     prompt: &str,
 ) -> Result<(), IpcError> {
+    crate::validate::host_alias(host_alias)?;
+    crate::validate::tmux_name(tmux_name)?;
     let cmds = build_send_commands(tmux_name, prompt);
     if host_alias == "local" {
         for cmd in &cmds {
@@ -723,7 +734,7 @@ async fn send_prompt_inner(
         }
     } else {
         for cmd in &cmds {
-            let quoted = shell_quote_str(cmd);
+            let quoted = shq(cmd);
             let out = ssh.run(
                 host_alias,
                 &["bash", "-lc", &quoted],

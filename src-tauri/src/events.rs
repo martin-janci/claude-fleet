@@ -74,51 +74,80 @@ impl EventBus for NoopEventBus {
     fn worktree_updated(&self, _: &WorktreeRow) {}
 }
 
-/// Production event bus: forwards every event to the Tauri frontend via
-/// `AppHandle::emit`. Errors are intentionally swallowed — if the webview
-/// isn't ready the Store mutation has already committed and we don't want
-/// to roll it back.
+/// Production event bus: forwards every event to the Tauri frontend.
+///
+/// Events are serialized immediately (a cheap in-memory operation) and handed
+/// to a dedicated drain thread over an mpsc channel; the thread performs the
+/// actual `AppHandle::emit`. This matters because the `Store` is mutated
+/// while its `Mutex` is held: a bus call must NOT block, or it would stall
+/// every other thread waiting on `store.lock()` for the duration of the
+/// emit. A channel `send` is effectively instant.
+///
+/// Ordering is preserved (single channel, single consumer). Emit errors are
+/// intentionally swallowed — if the webview isn't ready the Store mutation
+/// has already committed and we don't want to roll it back.
 pub struct AppHandleEventBus {
-    handle: tauri::AppHandle,
+    // `mpsc::Sender` is `Send` but not `Sync`; the `EventBus` trait requires
+    // `Sync`, so the sender lives behind a `Mutex`. The lock is held only for
+    // the duration of a non-blocking `send`, so contention is negligible.
+    tx: std::sync::Mutex<std::sync::mpsc::Sender<(&'static str, serde_json::Value)>>,
 }
 
 impl AppHandleEventBus {
     pub fn new(handle: tauri::AppHandle) -> Self {
-        Self { handle }
+        let (tx, rx) = std::sync::mpsc::channel::<(&'static str, serde_json::Value)>();
+        std::thread::spawn(move || {
+            // Lives for the lifetime of the app; exits when the bus (and so
+            // the Sender) is dropped and `recv` returns Err.
+            while let Ok((name, payload)) = rx.recv() {
+                let _ = tauri::Emitter::emit(&handle, name, payload);
+            }
+        });
+        Self {
+            tx: std::sync::Mutex::new(tx),
+        }
+    }
+
+    fn queue<T: Serialize>(&self, name: &'static str, payload: &T) {
+        // `to_value` on these small structs cannot realistically fail; on the
+        // off chance it does we send Null rather than panic.
+        let value = serde_json::to_value(payload).unwrap_or(serde_json::Value::Null);
+        if let Ok(tx) = self.tx.lock() {
+            let _ = tx.send((name, value));
+        }
     }
 }
 
 impl EventBus for AppHandleEventBus {
     fn session_created(&self, row: &SessionRow) {
-        let _ = tauri::Emitter::emit(&self.handle, "session:created", row);
+        self.queue("session:created", row);
     }
     fn session_updated(&self, row: &SessionRow) {
-        let _ = tauri::Emitter::emit(&self.handle, "session:updated", row);
+        self.queue("session:updated", row);
     }
     fn session_killed(&self, id: i64) {
-        let _ = tauri::Emitter::emit(&self.handle, "session:killed", SessionKilledPayload { id });
+        self.queue("session:killed", &SessionKilledPayload { id });
     }
     fn host_added(&self, row: &HostRow) {
-        let _ = tauri::Emitter::emit(&self.handle, "host:added", row);
+        self.queue("host:added", row);
     }
     fn host_probed(&self, row: &HostRow) {
-        let _ = tauri::Emitter::emit(&self.handle, "host:probed", row);
+        self.queue("host:probed", row);
     }
     fn host_removed(&self, alias: &str) {
-        let _ = tauri::Emitter::emit(
-            &self.handle,
+        self.queue(
             "host:removed",
-            HostRemovedPayload { alias: alias.to_string() },
+            &HostRemovedPayload { alias: alias.to_string() },
         );
     }
     fn account_upserted(&self, row: &AccountRow) {
-        let _ = tauri::Emitter::emit(&self.handle, "account:upserted", row);
+        self.queue("account:upserted", row);
     }
     fn project_updated(&self, row: &ProjectRow) {
-        let _ = tauri::Emitter::emit(&self.handle, "project:updated", row);
+        self.queue("project:updated", row);
     }
     fn worktree_updated(&self, row: &WorktreeRow) {
-        let _ = tauri::Emitter::emit(&self.handle, "worktree:updated", row);
+        self.queue("worktree:updated", row);
     }
 }
 
