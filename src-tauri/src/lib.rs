@@ -4,6 +4,7 @@ mod events;
 mod ipc_error;
 mod projects;
 mod pty;
+mod service;
 mod shell;
 mod ssh;
 mod ssh_config;
@@ -172,7 +173,9 @@ pub fn run() {
             let bus: std::sync::Arc<dyn crate::events::EventBus> =
                 std::sync::Arc::new(crate::events::AppHandleEventBus::new(handle));
             let store = Store::open_with_bus(&appdata_db_path(), bus).expect("open store");
-            app.manage(Mutex::new(store));
+            // Managed as Arc<Mutex<Store>> (not bare Mutex<Store>) so the
+            // embedded MCP server can hold a clone of the same store handle.
+            app.manage(std::sync::Arc::new(Mutex::new(store)));
             Ok(())
         })
         .manage(Mutex::new(PtyState::new()))
