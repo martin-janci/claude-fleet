@@ -2,18 +2,22 @@
 //!
 //! `FleetTools` holds the shared backend state (`Store`, `SshClient`,
 //! `CancellationRegistry`) and exposes claude-fleet operations as MCP tools.
-//! Each tool calls into the transport-agnostic `service` layer — the same
-//! code path the Tauri IPC commands use.
+//! Every tool calls into the transport-agnostic `service` layer — the exact
+//! same code path the Tauri IPC commands use; neither path is privileged.
 //!
-//! M2 ships a single tool (`fleet_health`) to prove the transport end to end;
-//! M3 wires the remaining operations.
+//! Tool arguments are MCP-specific structs (deriving `JsonSchema` so the AI
+//! sees a typed schema). They deliberately omit the `call_id` cancellation
+//! field the frontend uses — MCP tool calls run to completion.
 
 use crate::cancel::CancellationRegistry;
+use crate::ipc_error::IpcError;
+use crate::service::{health, hosts, projects, sessions};
 use crate::ssh::SshClient;
 use crate::store::Store;
 use rmcp::{
-    handler::server::router::tool::ToolRouter, model::*, tool, tool_handler, tool_router,
-    ErrorData as McpError, ServerHandler,
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    model::*,
+    schemars, tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler,
 };
 use std::sync::{Arc, Mutex};
 
@@ -22,17 +26,128 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone)]
 pub struct FleetTools {
     store: Arc<Mutex<Store>>,
-    // `ssh` and `reg` are unused until M3 wires the host/session tools; held
-    // now so the handler is constructed with its full state from the start.
-    #[allow(dead_code)]
     ssh: Arc<SshClient>,
-    #[allow(dead_code)]
     reg: Arc<CancellationRegistry>,
     // Consumed by the `#[tool_router]` / `#[tool_handler]` macro-generated
     // dispatch; the field itself reads as dead to the lint.
     #[allow(dead_code)]
     tool_router: ToolRouter<FleetTools>,
 }
+
+// --- shared helpers --------------------------------------------------------
+
+/// Emit a one-line audit record for a tool call. A remote-control surface
+/// that can mutate the fleet should be traceable; this logs the tool name and
+/// the identifying (non-secret) arguments. Prompt *bodies* are never logged.
+fn audit(tool: &str, detail: &str) {
+    if detail.is_empty() {
+        eprintln!("[mcp] tool call: {tool}");
+    } else {
+        eprintln!("[mcp] tool call: {tool} {detail}");
+    }
+}
+
+/// Map a backend `IpcError` to an MCP tool error, preserving the `E_*` code.
+fn to_mcp_err(e: IpcError) -> McpError {
+    McpError::internal_error(format!("{}: {}", e.code, e.message), None)
+}
+
+/// Serialize a successful result to pretty JSON wrapped in a tool result.
+fn ok_json<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpError> {
+    let json = serde_json::to_string_pretty(value)
+        .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
+    Ok(CallToolResult::success(vec![Content::text(json)]))
+}
+
+// --- tool parameter structs ------------------------------------------------
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct AddHostParams {
+    /// claude-fleet alias to register the host under (must be a safe
+    /// identifier — letters, digits, dashes).
+    pub alias: String,
+    /// SSH config alias used to reach the host (from `~/.ssh/config`).
+    pub ssh_alias: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct HostAliasParams {
+    /// The claude-fleet host alias (e.g. "local", "mefistos").
+    pub alias: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct HideHostParams {
+    /// The claude-fleet host alias.
+    pub alias: String,
+    /// `true` to hide the host (skipped during reconcile), `false` to show it.
+    pub hidden: bool,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RelatedSessionsParams {
+    /// The session id to find siblings of (same project + worktree).
+    pub session_id: i64,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct NewSessionParams {
+    /// Host alias to create the session on.
+    pub host_alias: String,
+    /// Project id (see `list_projects`).
+    pub project_id: i64,
+    /// Optional worktree id; omit to use the project root.
+    #[serde(default)]
+    pub worktree_id: Option<i64>,
+    /// tmux session name to create.
+    pub name: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct KillSessionParams {
+    /// Host alias the session lives on.
+    pub host_alias: String,
+    /// tmux session name to kill.
+    pub name: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RenameSessionParams {
+    /// Host alias the session lives on.
+    pub host_alias: String,
+    /// Current tmux session name.
+    pub old_name: String,
+    /// New tmux session name.
+    pub new_name: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RestartSessionParams {
+    /// Host alias the session lives on.
+    pub host_alias: String,
+    /// tmux session name to restart.
+    pub name: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SendPromptParams {
+    /// Host alias the session lives on.
+    pub host_alias: String,
+    /// tmux session name to send the prompt to.
+    pub tmux_name: String,
+    /// The prompt text to deliver to the session's Claude REPL.
+    pub prompt: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SpawnReviewParams {
+    /// Id of the session whose work should be reviewed.
+    pub source_session_id: i64,
+    /// The review prompt to seed the new review session with.
+    pub prompt: String,
+}
+
+// --- tools -----------------------------------------------------------------
 
 #[tool_router]
 impl FleetTools {
@@ -53,10 +168,270 @@ impl FleetTools {
         description = "Report claude-fleet backend health: application version, SQLite schema version, and database readiness. Returns JSON."
     )]
     async fn fleet_health(&self) -> Result<CallToolResult, McpError> {
-        let health = crate::service::health::health_check(&self.store);
-        let json = serde_json::to_string_pretty(&health)
-            .map_err(|e| McpError::internal_error(format!("serialize health: {e}"), None))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        audit("fleet_health", "");
+        ok_json(&health::health_check(&self.store))
+    }
+
+    // ---- hosts ----
+
+    #[tool(description = "List all registered hosts with their reachability, \
+        claude/tmux versions, and linked account. Returns JSON.")]
+    async fn list_hosts(&self) -> Result<CallToolResult, McpError> {
+        audit("list_hosts", "");
+        ok_json(&hosts::list_hosts(&self.store).map_err(to_mcp_err)?)
+    }
+
+    #[tool(description = "Discover SSH hosts from the user's ~/.ssh/config. \
+        These are candidates for add_host. Returns JSON.")]
+    async fn discover_hosts(&self) -> Result<CallToolResult, McpError> {
+        audit("discover_hosts", "");
+        ok_json(&hosts::discover_hosts().map_err(to_mcp_err)?)
+    }
+
+    #[tool(description = "List the cached Claude accounts seen across hosts. \
+        Returns JSON.")]
+    async fn list_accounts(&self) -> Result<CallToolResult, McpError> {
+        audit("list_accounts", "");
+        ok_json(&hosts::list_accounts(&self.store).map_err(to_mcp_err)?)
+    }
+
+    #[tool(description = "Register a new SSH host. Probes it first; only \
+        persists the host if it is reachable. Returns the host row as JSON.")]
+    async fn add_host(
+        &self,
+        Parameters(p): Parameters<AddHostParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "add_host",
+            &format!("alias={} ssh_alias={}", p.alias, p.ssh_alias),
+        );
+        let args = hosts::AddHostArgs {
+            alias: p.alias,
+            ssh_alias: p.ssh_alias,
+        };
+        let row = hosts::add_host(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
+    #[tool(description = "Re-probe a registered host's reachability and \
+        versions. Returns the updated host row as JSON.")]
+    async fn probe_host(
+        &self,
+        Parameters(p): Parameters<HostAliasParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("probe_host", &format!("alias={}", p.alias));
+        let args = hosts::HostAliasArgs { alias: p.alias };
+        let row = hosts::probe_host(args, &self.store, &self.ssh, &self.reg)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
+    #[tool(description = "Remove a registered host. Its sessions are orphaned. \
+        Returns the removed host row as JSON.")]
+    async fn remove_host(
+        &self,
+        Parameters(p): Parameters<HostAliasParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("remove_host", &format!("alias={}", p.alias));
+        let args = hosts::HostAliasArgs { alias: p.alias };
+        ok_json(&hosts::remove_host(args, &self.store).map_err(to_mcp_err)?)
+    }
+
+    #[tool(description = "Hide or show a host. Hidden hosts are skipped during \
+        reconcile. Returns the updated host row as JSON.")]
+    async fn hide_host(
+        &self,
+        Parameters(p): Parameters<HideHostParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "hide_host",
+            &format!("alias={} hidden={}", p.alias, p.hidden),
+        );
+        let args = hosts::HideHostArgs {
+            alias: p.alias,
+            hidden: p.hidden,
+        };
+        ok_json(&hosts::hide_host(args, &self.store).map_err(to_mcp_err)?)
+    }
+
+    // ---- projects ----
+
+    #[tool(description = "List all discovered projects with their worktrees. \
+        Returns JSON.")]
+    async fn list_projects(&self) -> Result<CallToolResult, McpError> {
+        audit("list_projects", "");
+        ok_json(&projects::list_projects(&self.store).map_err(to_mcp_err)?)
+    }
+
+    #[tool(description = "Rescan the local projects directory for new or \
+        removed repositories and worktrees. Returns the fresh project list.")]
+    async fn refresh_projects(&self) -> Result<CallToolResult, McpError> {
+        audit("refresh_projects", "");
+        ok_json(
+            &projects::refresh_projects(&self.store)
+                .await
+                .map_err(to_mcp_err)?,
+        )
+    }
+
+    // ---- sessions ----
+
+    #[tool(description = "Reconcile and list all tmux sessions across every \
+        reachable host. This is the primary way to see fleet state. JSON.")]
+    async fn list_sessions(&self) -> Result<CallToolResult, McpError> {
+        audit("list_sessions", "");
+        ok_json(
+            &sessions::list_sessions(&self.store, &self.ssh)
+                .await
+                .map_err(to_mcp_err)?,
+        )
+    }
+
+    #[tool(description = "List sessions related to a given session — those \
+        sharing the same project and worktree. Returns JSON.")]
+    async fn related_sessions(
+        &self,
+        Parameters(p): Parameters<RelatedSessionsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("related_sessions", &format!("session_id={}", p.session_id));
+        let args = sessions::RelatedSessionsArgs {
+            session_id: p.session_id,
+        };
+        ok_json(&sessions::related_sessions(args, &self.store).map_err(to_mcp_err)?)
+    }
+
+    #[tool(description = "Create a new Claude Code tmux session on a host, in \
+        the given project (and optional worktree). Auto-clones the repo on \
+        remote hosts if missing. Returns the new session row as JSON.")]
+    async fn new_session(
+        &self,
+        Parameters(p): Parameters<NewSessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "new_session",
+            &format!("host={} name={}", p.host_alias, p.name),
+        );
+        let args = sessions::NewSessionArgs {
+            host_alias: p.host_alias,
+            project_id: p.project_id,
+            worktree_id: p.worktree_id,
+            name: p.name,
+            call_id: None,
+        };
+        let row = sessions::new_session(args, &self.store, &self.ssh, &self.reg)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
+    #[tool(description = "Kill a tmux session on a host. Returns the killed \
+        session's id.")]
+    async fn kill_session(
+        &self,
+        Parameters(p): Parameters<KillSessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "kill_session",
+            &format!("host={} name={}", p.host_alias, p.name),
+        );
+        let args = sessions::KillSessionArgs {
+            host_alias: p.host_alias,
+            name: p.name,
+        };
+        let id = sessions::kill_session(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&id)
+    }
+
+    #[tool(description = "Rename a tmux session on a host. Returns the updated \
+        session row as JSON.")]
+    async fn rename_session(
+        &self,
+        Parameters(p): Parameters<RenameSessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "rename_session",
+            &format!("host={} {} -> {}", p.host_alias, p.old_name, p.new_name),
+        );
+        let args = sessions::RenameSessionArgs {
+            host_alias: p.host_alias,
+            old_name: p.old_name,
+            new_name: p.new_name,
+        };
+        let row = sessions::rename_session(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
+    #[tool(description = "Restart a tmux session (kill and recreate it in the \
+        same place). Returns the updated session row as JSON.")]
+    async fn restart_session(
+        &self,
+        Parameters(p): Parameters<RestartSessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "restart_session",
+            &format!("host={} name={}", p.host_alias, p.name),
+        );
+        let args = sessions::RestartSessionArgs {
+            host_alias: p.host_alias,
+            name: p.name,
+        };
+        let row = sessions::restart_session(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
+    #[tool(description = "Send a prompt (literal text + Enter) to a running \
+        Claude session's REPL. This is how you steer a session.")]
+    async fn send_prompt(
+        &self,
+        Parameters(p): Parameters<SendPromptParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // Prompt body intentionally not logged.
+        audit(
+            "send_prompt",
+            &format!("host={} session={}", p.host_alias, p.tmux_name),
+        );
+        let args = sessions::SendPromptArgs {
+            host_alias: p.host_alias,
+            tmux_name: p.tmux_name,
+            prompt: p.prompt,
+        };
+        sessions::send_prompt(args, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            "prompt delivered",
+        )]))
+    }
+
+    #[tool(description = "Spawn a review session: a new Claude session in the \
+        source session's worktree, seeded with a review prompt. Returns the \
+        new review session row as JSON.")]
+    async fn spawn_review(
+        &self,
+        Parameters(p): Parameters<SpawnReviewParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "spawn_review",
+            &format!("source_session_id={}", p.source_session_id),
+        );
+        let args = sessions::SpawnReviewArgs {
+            source_session_id: p.source_session_id,
+            prompt: p.prompt,
+            call_id: None,
+        };
+        let row = sessions::spawn_review(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&row)
     }
 }
 
@@ -68,7 +443,8 @@ impl ServerHandler for FleetTools {
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(
                 "claude-fleet control API. Drives long-lived Claude Code sessions \
-                 running in tmux across multiple hosts."
+                 running in tmux across multiple hosts. Call list_sessions to see \
+                 fleet state, new_session to spawn one, and send_prompt to steer it."
                     .to_string(),
             )
     }
