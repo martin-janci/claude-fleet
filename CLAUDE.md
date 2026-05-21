@@ -39,8 +39,8 @@ your change.
 - **Backend** (`src-tauri/src/`): Tauri command handlers in `commands/`; SSH
   multiplexing in `ssh.rs` (per-host `ControlMaster`, async `tokio::process`);
   tmux command construction in `tmux.rs`; the single global PTY in `pty.rs`;
-  SQLite in `store.rs` (migrations `001`–`004`); the event bus in `events.rs`;
-  cancellation registry in `cancel.rs`.
+  SQLite in `store.rs` (migrations `001`–`007` in `src-tauri/migrations/`);
+  the event bus in `events.rs`; cancellation registry in `cancel.rs`.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
   `TerminalView.svelte`), *not* xterm.js — xterm's renderer failed to repaint in
   the WKWebView setup. Only one PTY is attached at a time.
@@ -58,9 +58,18 @@ your change.
 
 ## Status & known issues
 
-Iterations 1–4a are landed (multi-host, accounts, cross-host sessions, prompt
-transfer, async/events rework). Handoff and Freeze from the original spec are
-not implemented. A full hardening review is in
+Iterations 1–4b are landed (multi-host, accounts, cross-host sessions, prompt
+transfer, async/events rework, and on-demand Reviews). Handoff and Freeze from
+the original spec are not implemented. A full hardening review is in
 `docs/specs/2026-05-21-hardening-review.md` — consult it before touching SSH
 command construction, the PTY, migrations, or the optimistic-merge / event-bus
 paths.
+
+## Further documentation
+
+- `docs/ARCHITECTURE.md` — backend/frontend internals, data model, IPC surface,
+  event flow, and the lifecycle of each operation.
+- `docs/USE_CASES.md` — what the app is for, the workflows it supports, and
+  step-by-step walkthroughs of each.
+- `docs/specs/` — per-iteration design specs; `docs/plans/` — implementation
+  plans. The original product design is `docs/specs/2026-05-19-claude-fleet-design.md`.

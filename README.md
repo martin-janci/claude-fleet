@@ -2,11 +2,23 @@
 
 A native cross-platform desktop app for managing long-lived [Claude Code](https://claude.com/claude-code) sessions running in tmux across multiple machines (mac, mefistos, hetzner). Built with Rust + Tauri 2 + Svelte.
 
-> Status: iteration 4a complete — multi-host SSH, account model, cross-host
-> session memory, prompt transfer, and the async/event-driven responsiveness
-> rework are all landed. Handoff and Freeze (original spec §8.3–8.4) remain
-> unimplemented. See [docs/specs](docs/specs/) for the per-iteration designs and
-> [docs/plans](docs/plans/) for the implementation plans.
+> Status: iteration 4b complete — multi-host SSH, account model, cross-host
+> session memory, prompt transfer, the async/event-driven responsiveness
+> rework, and on-demand Reviews are all landed. Handoff and Freeze (original
+> spec §8.3–8.4) remain unimplemented. See [docs/specs](docs/specs/) for the
+> per-iteration designs and [docs/plans](docs/plans/) for the implementation
+> plans.
+
+## Documentation
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — backend/frontend internals,
+  data model, IPC surface, event flow, operation lifecycles.
+- [docs/USE_CASES.md](docs/USE_CASES.md) — what the app is for and step-by-step
+  workflow walkthroughs.
+- [CHANGELOG.md](CHANGELOG.md) — release history and the versioning policy.
+- [CLAUDE.md](CLAUDE.md) — orientation for Claude Code working in this repo.
+- [docs/specs](docs/specs/) / [docs/plans](docs/plans/) — per-iteration designs
+  and implementation plans.
 
 ## Features
 
@@ -54,7 +66,7 @@ cd src-tauri && cargo fmt --check
 src/lib/            # Svelte 5 components + TS stores (hosts, sessions, projects, accounts, events)
 src-tauri/src/      # Rust backend: Tauri commands, ssh/tmux/pty, SQLite store, event bus
 src-tauri/src/commands/  # IPC command handlers (hosts, sessions, projects, health)
-src-tauri/migrations/    # SQLite migrations (001–004)
+src-tauri/migrations/    # SQLite migrations (001–007)
 docs/specs/         # per-iteration design specs
 docs/plans/         # per-iteration implementation plans
 CLAUDE.md           # orientation for Claude Code working in this repo
