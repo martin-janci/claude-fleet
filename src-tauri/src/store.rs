@@ -654,7 +654,9 @@ impl Store {
             )
             .optional()?;
 
-        self.conn.execute(
+        // INSERT ... RETURNING id — one statement instead of the old
+        // INSERT then separate `SELECT id`.
+        let id: i64 = self.conn.query_row(
             "INSERT INTO sessions (tmux_name, host_alias, project_id, worktree_id,
                                    created_at, last_activity_at, status, account_uuid)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -663,7 +665,8 @@ impl Store {
                worktree_id=excluded.worktree_id,
                last_activity_at=excluded.last_activity_at,
                status=excluded.status,
-               account_uuid=excluded.account_uuid",
+               account_uuid=excluded.account_uuid
+             RETURNING id",
             rusqlite::params![
                 tmux_name,
                 host_alias,
@@ -674,10 +677,6 @@ impl Store {
                 status,
                 account_uuid
             ],
-        )?;
-        let id: i64 = self.conn.query_row(
-            "SELECT id FROM sessions WHERE host_alias=?1 AND tmux_name=?2",
-            rusqlite::params![host_alias, tmux_name],
             |row| row.get(0),
         )?;
         if let Some(row) = self.get_session(tmux_name, host_alias)? {
@@ -1053,50 +1052,36 @@ impl Store {
         keep_names: &[String],
         out: &mut Vec<RowChange>,
     ) -> Result<usize, rusqlite::Error> {
-        // Collect ids to delete before the DELETE so we can emit one event per row.
+        // `DELETE ... RETURNING id` — the delete and the deleted-id collection
+        // are one statement (no separate SELECT-then-DELETE pass, and no
+        // TOCTOU between them).
         let ids_to_delete: Vec<i64> = if keep_names.is_empty() {
-            let mut stmt = tx.prepare_cached("SELECT id FROM sessions WHERE host_alias=?1")?;
+            let mut stmt =
+                tx.prepare_cached("DELETE FROM sessions WHERE host_alias=?1 RETURNING id")?;
             let ids = stmt
                 .query_map(rusqlite::params![host_alias], |r| r.get::<_, i64>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             ids
         } else {
             let placeholders = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let sql_select = format!(
-                "SELECT id FROM sessions WHERE host_alias=?1 AND tmux_name NOT IN ({placeholders})"
+            let sql = format!(
+                "DELETE FROM sessions WHERE host_alias=?1 AND tmux_name NOT IN ({placeholders}) RETURNING id"
             );
             let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
             for n in keep_names {
                 params.push(n);
             }
-            let mut stmt = tx.prepare(&sql_select)?;
+            let mut stmt = tx.prepare(&sql)?;
             let ids = stmt
                 .query_map(params.as_slice(), |r| r.get::<_, i64>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             ids
         };
 
-        let deleted = if keep_names.is_empty() {
-            tx.execute(
-                "DELETE FROM sessions WHERE host_alias=?1",
-                rusqlite::params![host_alias],
-            )?
-        } else {
-            let placeholders = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let sql = format!(
-                "DELETE FROM sessions WHERE host_alias=?1 AND tmux_name NOT IN ({placeholders})"
-            );
-            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
-            for n in keep_names {
-                params.push(n);
-            }
-            tx.execute(&sql, params.as_slice())?
-        };
-
         for id in &ids_to_delete {
             out.push(RowChange::SessionKilled(*id));
         }
-        Ok(deleted)
+        Ok(ids_to_delete.len())
     }
 
     /// One probed/live session to apply during a reconcile write-burst, with
@@ -1170,52 +1155,36 @@ impl Store {
         host_alias: &str,
         keep_names: &[String],
     ) -> Result<usize, rusqlite::Error> {
-        // Collect ids to delete before the DELETE so we can emit one event per row.
+        // `DELETE ... RETURNING id` — delete and collect deleted ids in one
+        // statement (no separate SELECT-then-DELETE).
         let ids_to_delete: Vec<i64> = if keep_names.is_empty() {
             let mut stmt = self
                 .conn
-                .prepare_cached("SELECT id FROM sessions WHERE host_alias=?1")?;
+                .prepare_cached("DELETE FROM sessions WHERE host_alias=?1 RETURNING id")?;
             let ids = stmt
                 .query_map(rusqlite::params![host_alias], |r| r.get::<_, i64>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             ids
         } else {
             let placeholders = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let sql_select = format!(
-                "SELECT id FROM sessions WHERE host_alias=?1 AND tmux_name NOT IN ({placeholders})"
+            let sql = format!(
+                "DELETE FROM sessions WHERE host_alias=?1 AND tmux_name NOT IN ({placeholders}) RETURNING id"
             );
             let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
             for n in keep_names {
                 params.push(n);
             }
-            let mut stmt = self.conn.prepare(&sql_select)?;
+            let mut stmt = self.conn.prepare(&sql)?;
             let ids = stmt
                 .query_map(params.as_slice(), |r| r.get::<_, i64>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             ids
         };
 
-        let deleted = if keep_names.is_empty() {
-            self.conn.execute(
-                "DELETE FROM sessions WHERE host_alias=?1",
-                rusqlite::params![host_alias],
-            )?
-        } else {
-            let placeholders = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let sql = format!(
-                "DELETE FROM sessions WHERE host_alias=?1 AND tmux_name NOT IN ({placeholders})"
-            );
-            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
-            for n in keep_names {
-                params.push(n);
-            }
-            self.conn.execute(&sql, params.as_slice())?
-        };
-
         for id in &ids_to_delete {
             self.bus.session_killed(*id);
         }
-        Ok(deleted)
+        Ok(ids_to_delete.len())
     }
 }
 
