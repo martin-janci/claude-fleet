@@ -747,6 +747,11 @@ fn resolve_review_cwd(s: &Store, source: &crate::store::SessionRow) -> Result<St
 pub struct SpawnReviewArgs {
     pub source_session_id: i64,
     pub prompt: String,
+    // Reserved for future cancellation wiring. The frontend's
+    // invokeCmdAbortable injects a call_id; v1 spawn_review doesn't register a
+    // CancellationToken under it (the spawn is short — tmux create + reconcile
+    // + ~1.5s seed delay), so an abort is currently a no-op on the backend.
+    #[allow(dead_code)]
     pub call_id: Option<u64>,
 }
 
@@ -789,7 +794,13 @@ pub async fn spawn_review(
     // 5. Seed the prompt. cl needs a beat to boot its TUI before send-keys lands.
     // TODO(iter4b-followup): replace fixed delay with pane-readiness poll
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-    send_prompt_inner(&ssh, &source.host_alias, &review_name, &args.prompt).await?;
+    // Soft-fail: the review session is already spawned, registered, and tagged.
+    // If seeding the prompt fails (e.g. cl wasn't ready yet), DON'T discard the
+    // session — return it anyway so the user can type the review prompt manually
+    // in the terminal. Log the failure for diagnostics.
+    if let Err(e) = send_prompt_inner(&ssh, &source.host_alias, &review_name, &args.prompt).await {
+        eprintln!("spawn_review: seeding prompt to {review_name} failed (session is live, seed manually): {e:?}");
+    }
 
     // 6. Return the tagged review row.
     let s = store.lock().map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
