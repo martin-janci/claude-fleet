@@ -428,13 +428,24 @@ impl Store {
     }
 
     pub fn upsert_host(&self, alias: &str) -> Result<(), rusqlite::Error> {
+        // Check existence first so `host_added` fires only on a genuine
+        // insert. Reconcile calls this for `local` every run; without the
+        // check it emitted a spurious host:added (plus a get_host fetch)
+        // on every window focus.
+        let existed = self
+            .conn
+            .query_row("SELECT 1 FROM hosts WHERE alias=?1", [alias], |_| Ok(()))
+            .optional()?
+            .is_some();
         self.conn.execute(
             "INSERT INTO hosts (alias, reachable) VALUES (?1, 1)
              ON CONFLICT(alias) DO UPDATE SET reachable=1",
             rusqlite::params![alias],
         )?;
-        if let Some(row) = self.get_host(alias)? {
-            self.bus.host_added(&row);
+        if !existed {
+            if let Some(row) = self.get_host(alias)? {
+                self.bus.host_added(&row);
+            }
         }
         Ok(())
     }
@@ -1103,6 +1114,11 @@ impl Store {
             // Only a reachable probe rewrites the session set. An unreachable
             // host keeps its last-known rows (no upserts, no delete-not-in).
             if spec.reachable {
+                // Accumulate the latest activity per project, then touch each
+                // project ONCE — N sessions in one project would otherwise
+                // fire N redundant UPDATEs + N `project:updated` events.
+                let mut project_touch: std::collections::HashMap<i64, i64> =
+                    std::collections::HashMap::new();
                 for sess in spec.sessions {
                     Self::upsert_session_in_tx(
                         tx,
@@ -1118,13 +1134,12 @@ impl Store {
                         &mut out,
                     )?;
                     if let Some(pid) = sess.project_id {
-                        Self::touch_project_last_session_at_in_tx(
-                            tx,
-                            pid,
-                            sess.last_activity_at,
-                            &mut out,
-                        )?;
+                        let latest = project_touch.entry(pid).or_insert(0);
+                        *latest = (*latest).max(sess.last_activity_at);
                     }
+                }
+                for (pid, ts) in project_touch {
+                    Self::touch_project_last_session_at_in_tx(tx, pid, ts, &mut out)?;
                 }
                 Self::delete_sessions_not_in_in_tx(tx, spec.alias, spec.keep, &mut out)?;
             }

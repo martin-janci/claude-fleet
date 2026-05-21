@@ -112,7 +112,7 @@ impl TmuxExec for RemoteTmux {
             shell_quote(&std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".into()))
         ));
         script.push(' ');
-        script.push_str(&shell_quote(&pane_command()));
+        script.push_str(&shell_quote(pane_command()));
         let output = self.remote_bash(&script).await?;
         if output.status.success() {
             Ok(())
@@ -174,7 +174,7 @@ impl TmuxExec for RemoteTmux {
         let script = format!(
             "tmux respawn-pane -k -t {}: {}",
             shell_quote(name),
-            shell_quote(&pane_command())
+            shell_quote(pane_command())
         );
         let output = self.remote_bash(&script).await?;
         if output.status.success() {
@@ -256,19 +256,24 @@ fn parse_sessions(input: &str) -> Vec<TmuxSession> {
     input
         .lines()
         .filter_map(|line| {
-            let parts: Vec<&str> = line.split('|').collect();
-            if parts.len() != 5 {
+            // Destructure the fixed 5-field format off the split iterator —
+            // no per-line `Vec` allocation. A 6th field means the line is
+            // malformed (a `|` inside a session name); reject it.
+            let mut it = line.split('|');
+            let name = it.next()?;
+            let created = it.next()?.parse::<i64>().ok()?;
+            let last_activity = it.next()?.parse::<i64>().ok()?;
+            let attached_int = it.next()?.parse::<i64>().ok()?;
+            let path = it.next()?;
+            if it.next().is_some() {
                 return None;
             }
-            let created = parts[1].parse::<i64>().ok()?;
-            let last_activity = parts[2].parse::<i64>().ok()?;
-            let attached_int = parts[3].parse::<i64>().ok()?;
             Some(TmuxSession {
-                name: parts[0].to_string(),
+                name: name.to_string(),
                 created,
                 last_activity,
                 attached: attached_int > 0,
-                path: PathBuf::from(parts[4]),
+                path: PathBuf::from(path),
             })
         })
         .collect()
@@ -280,8 +285,8 @@ fn parse_sessions(input: &str) -> Vec<TmuxSession> {
 /// alive as a normal interactive shell. Without that, claude returning 0
 /// would close the pane and the whole session would disappear — the user
 /// would lose the ability to "restart" or even attach to it.
-pub fn pane_command() -> String {
-    "cl --continue || cl; exec ${SHELL:-/bin/zsh} -l".to_string()
+pub fn pane_command() -> &'static str {
+    "cl --continue || cl; exec ${SHELL:-/bin/zsh} -l"
 }
 
 pub async fn new_session(name: &str, working_dir: &std::path::Path) -> Result<(), IpcError> {
@@ -364,7 +369,7 @@ pub async fn restart_session(name: &str) -> Result<(), IpcError> {
             "-k",
             "-t",
             &format!("{name}:"),
-            &pane_command(),
+            pane_command(),
         ])
         .output()
         .await

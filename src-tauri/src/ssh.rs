@@ -295,8 +295,9 @@ impl SshClient {
         let hosts: Vec<String> = self.inner.masters.iter().map(|e| e.key().clone()).collect();
         for host in hosts {
             let path = self.control_path(&host);
-            // Fire-and-forget via std::process::Command — shutdown_all is
-            // called from a sync context and we just want best-effort cleanup.
+            // Fire-and-forget: `spawn()` (not `status()`) so we don't block
+            // app quit waiting on each `ssh -O exit` serially. ControlPersist
+            // would reap an un-exited master anyway — this is best-effort.
             let _ = std::process::Command::new("ssh")
                 .args([
                     "-o",
@@ -308,7 +309,7 @@ impl SshClient {
                 ])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .status();
+                .spawn();
         }
     }
 }

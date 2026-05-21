@@ -153,7 +153,11 @@ pub async fn probe_host(
     // unreachable host updates `reachable=false` instead of returning an
     // error to the UI.
     let (reachable, claude_ver, tmux_ver, account) = if args.alias == "local" {
-        probe_local()
+        // probe_local does blocking std::process + fs I/O — keep it off the
+        // async runtime worker thread.
+        tokio::task::spawn_blocking(probe_local)
+            .await
+            .unwrap_or_default()
     } else {
         crate::validate::host_alias(target)?;
         // Anonymous token — probe_host is user-triggered re-probe; we give it
