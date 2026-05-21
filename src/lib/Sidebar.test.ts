@@ -46,11 +46,11 @@ vi.mock('@tauri-apps/api/core', () => ({
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import { get } from 'svelte/store';
 import Sidebar from './Sidebar.svelte';
-import { projects } from './projects';
-import { sessions, type SessionRow } from './sessions';
+import { projects, bootstrapProjects } from './projects';
+import { sessions, bootstrapSessions, type SessionRow } from './sessions';
 import { selectedSession, selectSession } from './selection';
-import { hosts, hostFilter } from './hosts';
-import { accounts } from './accounts';
+import { hosts, bootstrapHosts, hostFilter } from './hosts';
+import { accounts, bootstrapAccounts } from './accounts';
 
 function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof sessionFor>[]) {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: { args?: { id?: number; new_name?: string; alias?: string } }) => {
@@ -76,6 +76,10 @@ function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof session
     }
     return null;
   });
+  // Sidebar no longer bootstraps the stores itself (App.svelte owns that),
+  // so seed them directly — the mounted component is a pure consumer.
+  projects.set(projs);
+  sessions.set(sess);
 }
 
 beforeEach(() => {
@@ -383,6 +387,7 @@ describe('Sidebar (sessions-grouped view)', () => {
       ];
       return null;
     });
+    await Promise.all([bootstrapProjects(), bootstrapSessions(), bootstrapHosts(), bootstrapAccounts()]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
     const hostsBar = document.querySelector('.hosts');
@@ -404,6 +409,7 @@ describe('Sidebar (sessions-grouped view)', () => {
       ];
       return null;
     });
+    await Promise.all([bootstrapProjects(), bootstrapSessions(), bootstrapHosts(), bootstrapAccounts()]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
     expect(screen.queryAllByTestId('sess-row')).toHaveLength(2);
@@ -424,6 +430,7 @@ describe('Sidebar (sessions-grouped view)', () => {
       ];
       return null;
     });
+    await Promise.all([bootstrapProjects(), bootstrapSessions(), bootstrapHosts(), bootstrapAccounts()]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
     const badges = screen.queryAllByTestId('host-badge');
@@ -460,6 +467,7 @@ describe('Sidebar (sessions-grouped view)', () => {
       ];
       return null;
     });
+    await Promise.all([bootstrapProjects(), bootstrapSessions(), bootstrapHosts(), bootstrapAccounts()]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
     const pills = document.querySelectorAll('.hosts .pill');
@@ -488,6 +496,7 @@ describe('Sidebar (sessions-grouped view)', () => {
       if (cmd === 'list_accounts') return [];
       return null;
     });
+    await Promise.all([bootstrapProjects(), bootstrapSessions(), bootstrapHosts(), bootstrapAccounts()]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
     const pills = document.querySelectorAll('.hosts .pill');
@@ -504,6 +513,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     const b = sessionFor(1, 'dev-b');
     b.worktree_key = 'main';
     mockBackend(fakeProjects, [a, b]);
+    await Promise.all([bootstrapProjects(), bootstrapSessions(), bootstrapHosts(), bootstrapAccounts()]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
     const badges = screen.queryAllByTestId('related-badge');
@@ -515,6 +525,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     const solo = sessionFor(1, 'dev-solo');
     solo.worktree_key = 'main';
     mockBackend(fakeProjects, [solo]);
+    await Promise.all([bootstrapProjects(), bootstrapSessions(), bootstrapHosts(), bootstrapAccounts()]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
     expect(screen.queryAllByTestId('related-badge')).toHaveLength(0);
@@ -526,6 +537,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     const b = sessionFor(1, 'dev-b');
     b.worktree_key = 'feature-x';
     mockBackend(fakeProjects, [a, b]);
+    await Promise.all([bootstrapProjects(), bootstrapSessions(), bootstrapHosts(), bootstrapAccounts()]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
     expect(screen.queryAllByTestId('related-badge')).toHaveLength(0);

@@ -1,13 +1,12 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
-  import { projects, refreshProjects, bootstrapProjects, type ProjectTreeRow } from './projects';
+  import { tick } from 'svelte';
+  import { projects, refreshProjects, type ProjectTreeRow } from './projects';
   import {
     sessions,
     loadSessions,
     killSession,
     renameSession,
     restartSession,
-    bootstrapSessions,
     type SessionRow,
   } from './sessions';
   import { selectedSession, selectSession } from './selection';
@@ -16,8 +15,8 @@
   import { theme, cycleTheme } from './theme';
   import NewSessionDialog from './NewSessionDialog.svelte';
   import SettingsDialog from './SettingsDialog.svelte';
-  import { hosts, bootstrapHosts, hostFilter } from './hosts';
-  import { accounts, bootstrapAccounts, type AccountRow } from './accounts';
+  import { hosts, hostFilter } from './hosts';
+  import { accounts, type AccountRow } from './accounts';
 
   let showSettings = $state(false);
 
@@ -56,14 +55,8 @@
   let collapsed: Set<number> = $state(new Set());
   let actionError: string | null = $state(null);
 
-  onMount(async () => {
-    await Promise.all([
-      bootstrapProjects(),
-      bootstrapSessions(),
-      bootstrapHosts(),
-      bootstrapAccounts(),
-    ]);
-  });
+  // Stores are bootstrapped once by App.svelte's onMount; Sidebar just reads
+  // them. (A second bootstrap here would double every startup IPC call.)
 
   async function onRefresh() {
     loading = true;
