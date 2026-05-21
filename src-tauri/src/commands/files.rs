@@ -323,8 +323,17 @@ pub async fn repo_diff(
     let (host, name) = session_target(&store, args.session_id)?;
     let quoted = shq(&args.path);
 
-    // Tracked diff vs HEAD.
-    let script = repo_script(&name, &format!("git -C \"$root\" diff HEAD -- {quoted}"));
+    // Tracked diff vs HEAD. A repo with no commits yet has no HEAD — `git
+    // diff HEAD` would abort with "bad revision", so skip it when HEAD is
+    // unborn and let the untracked `--no-index` fallback below render the
+    // file as all-added.
+    let script = repo_script(
+        &name,
+        &format!(
+            "if git -C \"$root\" rev-parse --verify -q HEAD >/dev/null 2>&1; then \
+             git -C \"$root\" diff HEAD -- {quoted}; fi"
+        ),
+    );
     let out = run_in_repo(&ssh, &host, &script).await?;
     if !out.status.success() {
         return Err(repo_err(&out));

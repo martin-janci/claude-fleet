@@ -132,10 +132,7 @@ pub fn repo_rel_path(value: &str) -> Result<(), IpcError> {
     }
     // Reject `..` as a whole component on either separator — `a/../b`,
     // `../x`, `x/..` all escape the worktree.
-    if value
-        .split(['/', '\\'])
-        .any(|component| component == "..")
-    {
+    if value.split(['/', '\\']).any(|component| component == "..") {
         return Err(IpcError::new(
             "E_INVALID",
             "file path must not contain a '..' component",
