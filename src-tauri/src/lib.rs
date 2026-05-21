@@ -120,6 +120,26 @@ fn backfill_locale_for_gui_launch() {
     std::env::set_var("LANG", "en_US.UTF-8");
 }
 
+/// True when the process already has a Homebrew bin dir on PATH and a UTF-8
+/// locale — the signature of a terminal launch, where the (100-500 ms)
+/// login-shell import is redundant. Errs toward `false` (run the import) when
+/// unsure: claude-fleet only shells out to `ssh`/`git`/`tmux`, which live in
+/// the standard bin dirs `backfill_path_for_gui_launch` guarantees anyway.
+fn env_looks_complete() -> bool {
+    let path = std::env::var("PATH").unwrap_or_default();
+    let has_brew = path
+        .split(':')
+        .any(|p| p == "/opt/homebrew/bin" || p == "/usr/local/bin");
+    let has_utf8 = ["LC_ALL", "LANG", "LC_CTYPE"]
+        .iter()
+        .filter_map(|v| std::env::var(v).ok())
+        .any(|v| {
+            let u = v.to_ascii_uppercase();
+            u.contains("UTF-8") || u.contains("UTF8")
+        });
+    has_brew && has_utf8
+}
+
 fn backfill_path_for_gui_launch() {
     const COMMON_BIN_DIRS: &[&str] = &[
         "/opt/homebrew/bin", // Apple Silicon Homebrew
@@ -156,7 +176,13 @@ pub fn run() {
     //      stunted PATH.
     //   3. Force LANG to a sensible UTF-8 default if both step 1 and the
     //      OS env left it empty.
-    import_login_shell_env();
+    //
+    // Step 1 spawns a login shell (~100-500ms). Skip it when the env already
+    // looks like a terminal launch — the common dev case — so startup stays
+    // snappy; the backfills below still run as a safety net.
+    if !env_looks_complete() {
+        import_login_shell_env();
+    }
     backfill_path_for_gui_launch();
     backfill_locale_for_gui_launch();
 
