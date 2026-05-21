@@ -381,7 +381,7 @@
   function keyToBytes(e: KeyboardEvent): string | null {
     if (e.key === 'Enter') return '\r';
     if (e.key === 'Backspace') return '\x7f';
-    if (e.key === 'Tab') return '\t';
+    if (e.key === 'Tab') return e.shiftKey ? '\x1b[Z' : '\t'; // Shift+Tab → CBT (back-tab)
     if (e.key === 'Escape') return '\x1b';
     if (e.key === 'ArrowUp') return '\x1b[A';
     if (e.key === 'ArrowDown') return '\x1b[B';
