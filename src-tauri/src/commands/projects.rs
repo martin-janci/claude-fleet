@@ -25,35 +25,58 @@ pub fn list_projects(store: State<'_, Mutex<Store>>) -> Result<Vec<ProjectTreeRo
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    let projects = s.list_projects()?;
-    let mut out = Vec::with_capacity(projects.len());
-    for p in projects {
-        let wts = s.list_worktrees_for_project(p.id)?;
-        out.push(ProjectTreeRow {
-            project: p,
-            worktrees: wts,
-        });
-    }
-    Ok(out)
+    s.list_projects_joined()
 }
 
 #[tauri::command]
-pub fn refresh_projects(store: State<'_, Mutex<Store>>) -> Result<Vec<ProjectTreeRow>, IpcError> {
+pub async fn refresh_projects(
+    store: State<'_, Mutex<Store>>,
+) -> Result<Vec<ProjectTreeRow>, IpcError> {
     let base = projects_base();
+
+    // 1. Snapshot the current project list under a brief lock.
+    let snapshot = {
+        let s = store
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        s.list_projects_joined()?
+    };
+
+    // 2. Scan the filesystem for new/removed projects (IO-only, no lock needed).
     let discovered = scan_projects(&base)?;
+
+    // 3. Fan-out: run `git worktree list` for each discovered project, off-lock
+    //    and in parallel using tokio tasks.
+    let mut set = tokio::task::JoinSet::new();
+    for dp in discovered.iter().cloned() {
+        let _ = &snapshot; // borrow-check: snapshot not moved into tasks
+        set.spawn(async move {
+            let result = list_worktrees(&dp.base_path);
+            (dp, result)
+        });
+    }
+
+    // Collect git results off-lock.
+    let mut upserts: Vec<(crate::projects::DiscoveredProject, Vec<crate::projects::DiscoveredWorktree>)> =
+        Vec::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok((dp, Ok(worktrees))) = joined {
+            upserts.push((dp, worktrees));
+        }
+        // If the join errored or `list_worktrees` failed, skip — same behaviour
+        // as the original `Err(_) => continue`.
+    }
+
+    // 4. Apply all writes under a single brief lock.
     {
         let s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-        for dp in &discovered {
+        for (dp, worktrees) in &upserts {
             let project_id =
                 s.upsert_project(&dp.owner, &dp.repo, &dp.base_path.to_string_lossy())?;
-            let worktrees = match list_worktrees(&dp.base_path) {
-                Ok(v) => v,
-                Err(_) => continue, // Skip projects where `git worktree list` failed
-            };
             let mut keep_names = Vec::with_capacity(worktrees.len());
-            for wt in &worktrees {
+            for wt in worktrees {
                 keep_names.push(wt.name.clone());
                 s.upsert_worktree(
                     project_id,
@@ -65,5 +88,10 @@ pub fn refresh_projects(store: State<'_, Mutex<Store>>) -> Result<Vec<ProjectTre
             s.delete_worktrees_not_in(project_id, &keep_names)?;
         }
     }
-    list_projects(store)
+
+    // 5. Return the fresh list under one final brief lock.
+    let s = store
+        .lock()
+        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    s.list_projects_joined()
 }

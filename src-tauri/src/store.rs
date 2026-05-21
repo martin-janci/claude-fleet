@@ -270,6 +270,69 @@ impl Store {
         rows.collect()
     }
 
+    /// Single-query variant that builds `Vec<ProjectTreeRow>` in one trip —
+    /// eliminates the N+1 of calling `list_worktrees_for_project` per project.
+    ///
+    /// Projects are ordered: most-recently-used first, NULLs last, then by id.
+    /// Within each project worktrees are ordered by id.
+    pub fn list_projects_joined(
+        &self,
+    ) -> Result<Vec<crate::commands::projects::ProjectTreeRow>, crate::ipc_error::IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.id, p.owner, p.repo, p.base_path, p.last_session_at,
+                    w.id, w.project_id, w.name, w.path, w.branch
+             FROM projects p
+             LEFT JOIN worktrees w ON w.project_id = p.id
+             ORDER BY
+               CASE WHEN p.last_session_at IS NULL THEN 1 ELSE 0 END,
+               p.last_session_at DESC,
+               p.id,
+               w.id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+            ))
+        })?;
+        let mut out: Vec<crate::commands::projects::ProjectTreeRow> = Vec::new();
+        let mut last_pid: Option<i64> = None;
+        for r in rows {
+            let (pid, owner, repo, base, last, wid, _wpid, wname, wpath, wbranch) = r?;
+            if last_pid != Some(pid) {
+                out.push(crate::commands::projects::ProjectTreeRow {
+                    project: ProjectRow {
+                        id: pid,
+                        owner,
+                        repo,
+                        base_path: base,
+                        last_session_at: last,
+                    },
+                    worktrees: Vec::new(),
+                });
+                last_pid = Some(pid);
+            }
+            if let (Some(wid), Some(wname), Some(wpath)) = (wid, wname, wpath) {
+                out.last_mut().unwrap().worktrees.push(WorktreeRow {
+                    id: wid,
+                    project_id: pid,
+                    name: wname,
+                    path: wpath,
+                    branch: wbranch,
+                });
+            }
+        }
+        Ok(out)
+    }
+
     pub fn upsert_worktree(
         &self,
         project_id: i64,
@@ -1230,6 +1293,22 @@ mod tests {
         assert!(r.is_err());
         let hosts = store.list_hosts().expect("list");
         assert!(!hosts.iter().any(|h| h.alias == "bar"), "rollback should have removed the bar row");
+    }
+
+    #[test]
+    fn list_projects_joined_groups_worktrees_by_project() {
+        let s = Store::open_in_memory().expect("store");
+        s.upsert_project("o1", "r1", "/p1").unwrap();
+        s.upsert_project("o2", "r2", "/p2").unwrap();
+        s.upsert_worktree(1, "main", "/p1", None).unwrap();
+        s.upsert_worktree(1, "feature", "/p1/.worktrees/feature", Some("feature")).unwrap();
+        s.upsert_worktree(2, "main", "/p2", None).unwrap();
+        let trees = s.list_projects_joined().expect("joined");
+        assert_eq!(trees.len(), 2);
+        let p1 = trees.iter().find(|t| t.project.repo == "r1").expect("p1");
+        let p2 = trees.iter().find(|t| t.project.repo == "r2").expect("p2");
+        assert_eq!(p1.worktrees.len(), 2);
+        assert_eq!(p2.worktrees.len(), 1);
     }
 
     #[test]
