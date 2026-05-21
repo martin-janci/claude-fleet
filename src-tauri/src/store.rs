@@ -833,6 +833,15 @@ impl Store {
     // `touch_project_last_session_at` / `delete_sessions_not_in` methods are
     // intentionally left untouched — direct (non-reconcile) callers keep
     // emitting immediately.
+    //
+    // MAINTENANCE: each `*_in_tx` helper deliberately mirrors the SQL of its
+    // public twin (same column lists, same upsert ON CONFLICT clause, same
+    // SELECT-ids-before-DELETE). They differ ONLY in: (a) `tx` vs `self.conn`,
+    // and (b) collecting a `RowChange` vs emitting via `self.bus`. If you change
+    // a schema/SQL detail in a public method, change its `_in_tx` twin too.
+    // Both paths are test-covered (direct: the `*_emits_*` event tests; tx: the
+    // `apply_host_reconcile` rollback + happy-path tests), so a divergence will
+    // surface as a test failure rather than silent corruption.
 
     fn update_host_probe_in_tx(
         tx: &rusqlite::Transaction,
