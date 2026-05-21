@@ -122,6 +122,26 @@ fn backfill_locale_for_gui_launch() {
     std::env::set_var("LANG", "en_US.UTF-8");
 }
 
+/// True when the process already has a Homebrew bin dir on PATH and a UTF-8
+/// locale — the signature of a terminal launch, where the (100-500 ms)
+/// login-shell import is redundant. Errs toward `false` (run the import) when
+/// unsure: claude-fleet only shells out to `ssh`/`git`/`tmux`, which live in
+/// the standard bin dirs `backfill_path_for_gui_launch` guarantees anyway.
+fn env_looks_complete() -> bool {
+    let path = std::env::var("PATH").unwrap_or_default();
+    let has_brew = path
+        .split(':')
+        .any(|p| p == "/opt/homebrew/bin" || p == "/usr/local/bin");
+    let has_utf8 = ["LC_ALL", "LANG", "LC_CTYPE"]
+        .iter()
+        .filter_map(|v| std::env::var(v).ok())
+        .any(|v| {
+            let u = v.to_ascii_uppercase();
+            u.contains("UTF-8") || u.contains("UTF8")
+        });
+    has_brew && has_utf8
+}
+
 fn backfill_path_for_gui_launch() {
     const COMMON_BIN_DIRS: &[&str] = &[
         "/opt/homebrew/bin", // Apple Silicon Homebrew
@@ -222,7 +242,13 @@ pub fn run() {
     //      stunted PATH.
     //   3. Force LANG to a sensible UTF-8 default if both step 1 and the
     //      OS env left it empty.
-    import_login_shell_env();
+    //
+    // Step 1 spawns a login shell (~100-500ms). Skip it when the env already
+    // looks like a terminal launch — the common dev case — so startup stays
+    // snappy; the backfills below still run as a safety net.
+    if !env_looks_complete() {
+        import_login_shell_env();
+    }
     backfill_path_for_gui_launch();
     backfill_locale_for_gui_launch();
 
@@ -239,7 +265,18 @@ pub fn run() {
             let handle = app.handle().clone();
             let bus: std::sync::Arc<dyn crate::events::EventBus> =
                 std::sync::Arc::new(crate::events::AppHandleEventBus::new(handle));
-            let store = Store::open_with_bus(&appdata_db_path(), bus).expect("open store");
+            let db_path = appdata_db_path();
+            let store = Store::open_with_bus(&db_path, bus).unwrap_or_else(|e| {
+                // Still a hard fail (the app can't run without its DB), but
+                // with an actionable message instead of a bare "open store".
+                panic!(
+                    "failed to open the claude-fleet database at {}: {e}\n\
+                     If the file is corrupt, deleting it resets all local \
+                     state — hosts, projects and sessions are re-discovered \
+                     on the next launch.",
+                    db_path.display()
+                )
+            });
             // Managed as Arc<Mutex<Store>> (not bare Mutex<Store>) so the
             // embedded MCP server can hold a clone of the same store handle.
             let store = std::sync::Arc::new(Mutex::new(store));
@@ -265,6 +302,10 @@ pub fn run() {
             commands::sessions::restart_session,
             commands::sessions::send_prompt,
             commands::sessions::spawn_review,
+            commands::files::repo_changes,
+            commands::files::repo_tree,
+            commands::files::repo_file,
+            commands::files::repo_diff,
             commands::hosts::discover_hosts,
             commands::hosts::list_hosts,
             commands::hosts::list_accounts,

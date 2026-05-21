@@ -2,7 +2,7 @@
   import { onDestroy, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { selectedSession } from './selection';
-  import { Screen, rowToRuns, colorToCss, type Run } from './ansi';
+  import { Screen, rowToRuns, colorToCss, encodeMouse, type Run } from './ansi';
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -29,7 +29,14 @@
   /** Bumped after every screen.write() so the reactive view recomputes. */
   let renderVersion = $state(0);
   let resizeObserver: ResizeObserver | null = null;
-  let drainTimer: ReturnType<typeof setInterval> | null = null;
+  // Drain loop: a self-rescheduling setTimeout (not setInterval) so a slow
+  // pty_drain round-trip can't pile up concurrent calls. The delay backs off
+  // adaptively — an idle terminal polls slowly, any output snaps it back to
+  // full rate — so an attached-but-quiet session costs almost nothing.
+  const DRAIN_MIN_MS = 30;
+  const DRAIN_MAX_MS = 250;
+  let drainTimer: ReturnType<typeof setTimeout> | null = null;
+  let drainDelay = DRAIN_MIN_MS;
   let currentSession: string | null = $state(null);
   let openError: string | null = $state(null);
   let ptyOpen = false;
@@ -43,6 +50,121 @@
   let cellWidth = 0;
   let cellHeight = 0;
   let disconnected = $state(false);
+
+  // ─── Mouse forwarding state ───────────────────────────────────────────
+  /** Which button (0/1/2, encoded as cb) is currently pressed. Null = none. */
+  let pressedButton: number | null = null;
+  /** The last cell (1-based col, row) for which we sent a motion report,
+   *  used to throttle: we only send a new report when the cell changes. */
+  let lastMotionCell: { col: number; row: number } | null = null;
+  /** Cleanup functions for the window-level mousemove/mouseup listeners added
+   *  on mousedown. Removed on mouseup or component destroy. */
+  let removeWindowListeners: (() => void) | null = null;
+  /** Accumulated (pixel-normalized) wheel delta not yet turned into reports.
+   *  We forward one wheel report per WHEEL_TICK_PX of scroll instead of one
+   *  per event, so trackpads (many tiny deltas) don't flood tmux and line-mode
+   *  wheels still register — smooth, proportional scrolling either way. */
+  let wheelAccum = 0;
+  const WHEEL_TICK_PX = 40;
+
+  /** Map a MouseEvent's client coordinates to a 1-based terminal cell,
+   *  clamped to the visible grid. Accounts for the 4px left/top padding. */
+  function eventToCell(e: MouseEvent): { col: number; row: number } {
+    const rect = container!.getBoundingClientRect();
+    const col = Math.max(1, Math.min(lastCols,
+      Math.floor((e.clientX - rect.left - 4) / cellWidth) + 1));
+    const row = Math.max(1, Math.min(lastRows,
+      Math.floor((e.clientY - rect.top) / cellHeight) + 1));
+    return { col, row };
+  }
+
+  /** Write a mouse escape sequence to the PTY. */
+  function sendMouse(data: string) {
+    void invoke('pty_write', { args: { data } }).catch(() => {});
+  }
+
+  function onWheel(e: WheelEvent) {
+    if (!ptyOpen || !screen || !screen.mouseEnabled) return;
+    e.preventDefault();
+    // Normalize the delta to pixels across deltaMode (0=px, 1=lines, 2=pages)
+    // so wheels and trackpads accumulate on the same scale.
+    const line = cellHeight || 16;
+    let dy = e.deltaY;
+    if (e.deltaMode === 1) dy *= line;
+    else if (e.deltaMode === 2) dy *= line * (lastRows || 24);
+    // Reset on direction change so a flip registers immediately.
+    if ((dy < 0 && wheelAccum > 0) || (dy > 0 && wheelAccum < 0)) wheelAccum = 0;
+    wheelAccum += dy;
+    const { col, row } = eventToCell(e);
+    const sgr = screen.mouseSgr;
+    // Emit one wheel report per WHEEL_TICK_PX of accumulated scroll. Batch all
+    // reports for this event into a single PTY write; guard caps a pathological
+    // delta at 64 reports.
+    let reports = '';
+    let guard = 0;
+    while (Math.abs(wheelAccum) >= WHEEL_TICK_PX && guard++ < 64) {
+      const up = wheelAccum < 0;
+      reports += encodeMouse(up ? 64 : 65, col, row, false, sgr);
+      wheelAccum += up ? WHEEL_TICK_PX : -WHEEL_TICK_PX;
+    }
+    if (reports) sendMouse(reports);
+  }
+
+  function onMousedown(e: MouseEvent) {
+    if (!ptyOpen || !screen || !screen.mouseEnabled) return;
+    // Only forward left (0), middle (1), right (2).
+    if (e.button > 2) return;
+    e.preventDefault();
+    // preventDefault() suppresses the browser's default focus-on-click; focus
+    // the terminal explicitly so keystrokes keep flowing after a mouse-mode click.
+    (e.currentTarget as HTMLElement | null)?.focus();
+    const { col, row } = eventToCell(e);
+    const cb = e.button; // 0=left 1=middle 2=right
+    pressedButton = cb;
+    lastMotionCell = { col, row };
+    const sgr = screen.mouseSgr;
+    sendMouse(encodeMouse(cb, col, row, false, sgr));
+
+    // Attach window-level listeners so we keep tracking if the pointer
+    // leaves the terminal element before the button is released.
+    const handleMove = (ev: MouseEvent) => onWindowMousemove(ev);
+    const handleUp   = (ev: MouseEvent) => onWindowMouseup(ev);
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', handleUp);
+    removeWindowListeners = () => {
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseup', handleUp);
+      removeWindowListeners = null;
+    };
+  }
+
+  function onWindowMousemove(e: MouseEvent) {
+    if (!ptyOpen || !screen || pressedButton === null && !screen.mouseAnyMotion) return;
+    const { col, row } = eventToCell(e);
+    // Throttle: only send a report if the cell actually changed.
+    if (lastMotionCell && lastMotionCell.col === col && lastMotionCell.row === row) return;
+    lastMotionCell = { col, row };
+    const sgr = screen.mouseSgr;
+    if (pressedButton !== null && screen.mouseButtonMotion) {
+      // Button held — report as motion with the pressed button.
+      sendMouse(encodeMouse(pressedButton + 32, col, row, false, sgr));
+    } else if (pressedButton === null && screen.mouseAnyMotion) {
+      // No button held — any-motion mode (cb = 3 + 32 = 35).
+      sendMouse(encodeMouse(35, col, row, false, sgr));
+    }
+  }
+
+  function onWindowMouseup(e: MouseEvent) {
+    if (pressedButton === null) return;
+    if (ptyOpen && screen && screen.mouseEnabled && container) {
+      const { col, row } = eventToCell(e);
+      const sgr = screen.mouseSgr;
+      sendMouse(encodeMouse(pressedButton, col, row, true, sgr));
+    }
+    pressedButton = null;
+    lastMotionCell = null;
+    removeWindowListeners?.();
+  }
 
   $effect(() => {
     const sess = $selectedSession;
@@ -120,11 +242,10 @@
       return;
     }
 
-    // 30 ms = ~33 Hz drain. Plenty fast for tmux's redraw cadence while
-    // keeping CPU low. We do NOT batch the drain on rAF because tmux is
-    // happiest when bytes are consumed promptly (keepalive / status bar
-    // tickers stay responsive).
-    drainTimer = setInterval(drainOnce, 30);
+    // Start the adaptive drain loop. 30 ms (~33 Hz) is the floor when output
+    // is flowing; it backs off to DRAIN_MAX_MS when the terminal is idle.
+    drainDelay = DRAIN_MIN_MS;
+    scheduleDrain();
 
     // Hint tmux to redraw at our exact size by re-sending the dimensions
     // once after attach. Defends against race where pty_open runs before
@@ -138,6 +259,9 @@
 
   function measureCellSize() {
     if (!measureCell) return;
+    // Font metrics don't change between sessions — measure once and reuse
+    // across every openTerm() / reconnect.
+    if (cellWidth > 0 && cellHeight > 0) return;
     const rect = measureCell.getBoundingClientRect();
     // Fall back to a sensible default if measurement returns zero (jsdom).
     cellWidth = rect.width > 0 ? rect.width : 7.8;
@@ -157,8 +281,35 @@
     };
   }
 
-  async function drainOnce() {
-    if (!screen || !ptyOpen) return;
+  function scheduleDrain() {
+    drainTimer = setTimeout(runDrain, drainDelay);
+  }
+
+  /** One drain tick, then reschedule itself. The delay halves to the floor on
+   *  any output and doubles toward DRAIN_MAX_MS when idle. */
+  async function runDrain() {
+    drainTimer = null;
+    const got = await drainOnce();
+    drainDelay = got ? DRAIN_MIN_MS : Math.min(DRAIN_MAX_MS, drainDelay * 2);
+    // Reschedule only if still attached and no newer loop has taken over
+    // (a concurrent openTerm would have set its own drainTimer).
+    if (screen && ptyOpen && drainTimer === null) scheduleDrain();
+  }
+
+  /** Force the loop back to full rate now — called on keypress so typing
+   *  feels responsive even if the terminal had backed off while idle. */
+  function bumpDrain() {
+    drainDelay = DRAIN_MIN_MS;
+    if (drainTimer !== null) {
+      clearTimeout(drainTimer);
+      drainTimer = null;
+      scheduleDrain();
+    }
+  }
+
+  /** Drain the PTY buffer once. Returns true if any bytes were consumed. */
+  async function drainOnce(): Promise<boolean> {
+    if (!screen || !ptyOpen) return false;
     // Capture the screen we're draining into. If the session is switched
     // (openTerm builds a new Screen) while this pty_drain is in flight, the
     // resolved bytes belong to the old PTY — discard them rather than write
@@ -168,11 +319,11 @@
     try {
       result = await invoke<{ data: string; bytes: number }>('pty_drain');
     } catch {
-      return;
+      return false;
     }
-    if (screen !== drainingInto) return;
+    if (screen !== drainingInto) return false;
     drainTicks += 1;
-    if (result.bytes === 0) return;
+    if (result.bytes === 0) return false;
     totalBytes += result.bytes;
     screen.write(result.data);
     renderVersion++;
@@ -182,6 +333,7 @@
     if (result.data.includes('[cf] PTY EOF') || result.data.includes('[cf] reader error')) {
       disconnected = true;
     }
+    return true;
   }
 
   async function reconnect() {
@@ -199,9 +351,10 @@
     if (!hadAnything) return;
 
     if (drainTimer) {
-      clearInterval(drainTimer);
+      clearTimeout(drainTimer);
       drainTimer = null;
     }
+    drainDelay = DRAIN_MIN_MS;
     resizeObserver?.disconnect();
     resizeObserver = null;
     screen = null;
@@ -228,7 +381,7 @@
   function keyToBytes(e: KeyboardEvent): string | null {
     if (e.key === 'Enter') return '\r';
     if (e.key === 'Backspace') return '\x7f';
-    if (e.key === 'Tab') return '\t';
+    if (e.key === 'Tab') return e.shiftKey ? '\x1b[Z' : '\t'; // Shift+Tab → CBT (back-tab)
     if (e.key === 'Escape') return '\x1b';
     if (e.key === 'ArrowUp') return '\x1b[A';
     if (e.key === 'ArrowDown') return '\x1b[B';
@@ -256,10 +409,24 @@
 
   function onKeydown(e: KeyboardEvent) {
     if (!ptyOpen) return;
+    // While an IME / dead-key composition is in progress the keydowns are
+    // part of composing — the finished text arrives via compositionend.
+    if (e.isComposing) return;
     const bytes = keyToBytes(e);
     if (bytes === null) return;
     e.preventDefault();
     void invoke('pty_write', { args: { data: bytes } }).catch(() => {});
+    // The keystroke will produce output (echo / TUI redraw); pull the drain
+    // loop back to full rate so it doesn't sit on a backed-off delay.
+    bumpDrain();
+  }
+
+  /** Forward IME / dead-key composed text (e.g. Slovak `á`, CJK input) — it
+   *  never reaches `onKeydown` as a single printable char. */
+  function onCompositionEnd(e: CompositionEvent) {
+    if (!ptyOpen || !e.data) return;
+    void invoke('pty_write', { args: { data: e.data } }).catch(() => {});
+    bumpDrain();
   }
 
   function describeError(e: unknown): string {
@@ -271,7 +438,14 @@
 
   onDestroy(() => {
     void closeTerm();
+    removeWindowListeners?.();
   });
+
+  // Per-row render cache, keyed by the Screen instance so it resets on a
+  // session switch. Each entry holds the row's `Screen.rowVersion` at build
+  // time plus its derived `key` + `runs`.
+  let rowCache: { ver: number; key: string; runs: Run[] }[] = [];
+  let cacheScreen: Screen | null = null;
 
   // Derived view: a list of rows, each carrying its styled runs plus a
   // content-derived `key`. Reading `renderVersion` makes Svelte recompute
@@ -282,38 +456,90 @@
   // recreates that row's <div> instead of mutating its text nodes in place.
   // Recreating the DOM node is what forces WKWebView to repaint it: in-place
   // text mutation across many rows in one frame leaves some rows unpainted,
-  // which shows up as "duplicated" lines/chars where content moved. Rows
-  // whose content is unchanged keep a stable key (and their DOM node), so
-  // this costs nothing for the static parts of the screen.
+  // which shows up as "duplicated" lines/chars where content moved.
+  //
+  // A row whose `Screen.rowVersion` is unchanged since we last drew it reuses
+  // its cached entry untouched, so an idle screen costs almost nothing and a
+  // typical update only re-derives the few rows that actually moved.
   const visibleRows = $derived.by<{ key: string; runs: Run[] }[]>(() => {
     // Touch the version so the derived recomputes; also gate on screen.
     void renderVersion;
-    if (!screen) return [];
-    return screen.cells.map((row, r) => {
-      const runs = rowToRuns(row);
-      // Fields are joined with control bytes 0x01..0x04. Cells only ever
-      // hold printable chars (code >= 0x20), so these bytes never occur in
-      // run.text — the row index can't bleed into the content and collide
-      // with another row (e.g. row "1" + "2…" vs row "12" + "…").
+    const scr = screen;
+    if (!scr) return [];
+    if (cacheScreen !== scr) {
+      rowCache = [];
+      cacheScreen = scr;
+    }
+    const out: { key: string; runs: Run[] }[] = new Array(scr.rows);
+    for (let r = 0; r < scr.rows; r++) {
+      const ver = scr.rowVersion[r];
+      const cached = rowCache[r];
+      if (cached !== undefined && cached.ver === ver) {
+        out[r] = cached;
+        continue;
+      }
+      const runs = rowToRuns(scr.cells[r]);
+      // Row index + each run's style/text, joined with control bytes
+      // 0x01..0x04. Cells only ever hold printable chars (code >= 0x20), so
+      // those bytes never occur in run.text and the fields can't collide.
       let key = String(r);
       for (const run of runs) {
-        key += `${run.fg}${run.bg}${run.attrs}${run.text}`;
+        key += `\u0001${run.fg}\u0002${run.bg}\u0003${run.attrs}\u0004${run.text}`;
       }
-      return { key, runs };
-    });
+      const entry = { ver, key, runs };
+      rowCache[r] = entry;
+      out[r] = entry;
+    }
+    if (rowCache.length > scr.rows) rowCache.length = scr.rows;
+    return out;
+  });
+
+  // Memoized: a screen uses only a handful of distinct (fg, bg, attrs)
+  // combos, but runStyle is called for every run on every render — caching
+  // collapses it to a Map lookup.
+  const styleCache = new Map<string, string>();
+
+  // Cursor overlay position. Touch renderVersion so it tracks every drain.
+  // Null when hidden (?25l) or before font metrics are measured. The grid has
+  // 4px padding; cells run cellWidth × cellHeight from there.
+  const cursor = $derived.by<{ left: number; top: number; w: number; h: number } | null>(() => {
+    void renderVersion;
+    if (!screen || !screen.cursorVisible) return null;
+    if (cellWidth <= 0 || cellHeight <= 0) return null;
+    return {
+      left: 4 + screen.cursorCol * cellWidth,
+      top: 4 + screen.cursorRow * cellHeight,
+      w: cellWidth,
+      h: cellHeight,
+    };
   });
 
   function runStyle(run: Run): string {
+    const cacheKey = `${run.fg}|${run.bg}|${run.attrs}`;
+    const hit = styleCache.get(cacheKey);
+    if (hit !== undefined) return hit;
     const parts: string[] = [];
-    const fg = colorToCss(run.fg);
-    const bg = colorToCss(run.bg);
+    let fg = colorToCss(run.fg);
+    let bg = colorToCss(run.bg);
+    // Reverse video (SGR 7 → ATTR_REVERSE): swap fg/bg, substituting the grid
+    // defaults for cells that use the default color. This is how claude/tmux
+    // draw the input CARET (a reverse-video block) and selections — without it
+    // they render as plain text and are invisible.
+    if (run.attrs & 16) {
+      const f = fg ?? '#e8e8e8'; // grid default text color (.grid color)
+      const b = bg ?? '#0a0a0a'; // grid default background (.grid background)
+      fg = b;
+      bg = f;
+    }
     if (fg) parts.push(`color:${fg}`);
     if (bg) parts.push(`background:${bg}`);
     if (run.attrs & 1) parts.push('font-weight:600'); // ATTR_BOLD
     if (run.attrs & 2) parts.push('opacity:0.75'); // ATTR_DIM
     if (run.attrs & 4) parts.push('font-style:italic'); // ATTR_ITALIC
     if (run.attrs & 8) parts.push('text-decoration:underline'); // ATTR_UNDERLINE
-    return parts.join(';');
+    const style = parts.join(';');
+    styleCache.set(cacheKey, style);
+    return style;
   }
 </script>
 
@@ -352,7 +578,11 @@
       tabindex="0"
       role="textbox"
       aria-label="Terminal"
+      aria-multiline="true"
       onkeydown={onKeydown}
+      oncompositionend={onCompositionEnd}
+      onwheel={onWheel}
+      onmousedown={onMousedown}
       data-testid="terminal-host"
     >
       <!-- Hidden 1ch×1lh probe used once to measure font metrics. We can't
@@ -366,6 +596,14 @@
           {/each}
         </div>
       {/each}
+      {#if cursor}
+        <div
+          class="cursor"
+          style="left:{cursor.left}px; top:{cursor.top}px; width:{cursor.w}px; height:{cursor.h}px"
+          aria-hidden="true"
+          data-testid="terminal-cursor"
+        ></div>
+      {/if}
     </div>
     {#if openError}
       <div class="err">PTY error: {openError}</div>
@@ -453,6 +691,7 @@
   }
   .reconnect:hover { color: var(--fg); border-color: var(--accent); }
   .grid {
+    position: relative;
     flex: 1 1 auto;
     min-height: 0;
     min-width: 0;
@@ -480,6 +719,20 @@
   .row span {
     /* span color comes from inline style applied per run. */
     display: inline;
+  }
+  /* Block cursor overlay. Translucent so the glyph under it stays readable;
+     blinks like a standard terminal cursor. Position/size are set inline from
+     the measured cell metrics. Hidden automatically when the app sends ?25l. */
+  .cursor {
+    position: absolute;
+    background: #e8e8e8;
+    opacity: 0.55;
+    pointer-events: none;
+    z-index: 1;
+    animation: cf-cursor-blink 1.1s steps(1, end) infinite;
+  }
+  @keyframes cf-cursor-blink {
+    50% { opacity: 0; }
   }
   .measure {
     position: absolute;

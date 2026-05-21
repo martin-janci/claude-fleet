@@ -12,10 +12,18 @@ use std::sync::Arc;
 #[async_trait]
 pub trait TmuxExec: Send + Sync {
     async fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError>;
-    async fn new_session(&self, name: &str, working_dir: &std::path::Path) -> Result<(), IpcError>;
+    /// `pane_cmd` is the shell command tmux runs as the pane's initial
+    /// process — `pane_command()` for a Claude session, `shell_pane_command()`
+    /// for a plain shell session.
+    async fn new_session(
+        &self,
+        name: &str,
+        working_dir: &std::path::Path,
+        pane_cmd: &str,
+    ) -> Result<(), IpcError>;
     async fn kill_session(&self, name: &str) -> Result<(), IpcError>;
     async fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError>;
-    async fn restart_session(&self, name: &str) -> Result<(), IpcError>;
+    async fn restart_session(&self, name: &str, pane_cmd: &str) -> Result<(), IpcError>;
     async fn capture_pane(&self, name: &str) -> Result<String, IpcError>;
 }
 
@@ -26,8 +34,13 @@ impl TmuxExec for LocalTmux {
     async fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError> {
         list_local_sessions().await
     }
-    async fn new_session(&self, name: &str, cwd: &std::path::Path) -> Result<(), IpcError> {
-        new_session(name, cwd).await
+    async fn new_session(
+        &self,
+        name: &str,
+        cwd: &std::path::Path,
+        pane_cmd: &str,
+    ) -> Result<(), IpcError> {
+        new_session(name, cwd, pane_cmd).await
     }
     async fn kill_session(&self, name: &str) -> Result<(), IpcError> {
         kill_session(name).await
@@ -35,8 +48,8 @@ impl TmuxExec for LocalTmux {
     async fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError> {
         rename_session(old, new).await
     }
-    async fn restart_session(&self, name: &str) -> Result<(), IpcError> {
-        restart_session(name).await
+    async fn restart_session(&self, name: &str, pane_cmd: &str) -> Result<(), IpcError> {
+        restart_session(name, pane_cmd).await
     }
     async fn capture_pane(&self, name: &str) -> Result<String, IpcError> {
         let output = tokio::process::Command::new("tmux")
@@ -99,7 +112,12 @@ impl TmuxExec for RemoteTmux {
         Err(IpcError::new("E_TMUX", combined.trim()))
     }
 
-    async fn new_session(&self, name: &str, cwd: &std::path::Path) -> Result<(), IpcError> {
+    async fn new_session(
+        &self,
+        name: &str,
+        cwd: &std::path::Path,
+        pane_cmd: &str,
+    ) -> Result<(), IpcError> {
         // Build the `tmux new-session` command identically to LocalTmux but
         // shell-escape arguments since we're sending a single script string.
         let mut script = String::from("tmux new-session -d");
@@ -112,7 +130,7 @@ impl TmuxExec for RemoteTmux {
             shell_quote(&std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".into()))
         ));
         script.push(' ');
-        script.push_str(&shell_quote(&pane_command()));
+        script.push_str(&shell_quote(pane_cmd));
         let output = self.remote_bash(&script).await?;
         if output.status.success() {
             Ok(())
@@ -170,11 +188,11 @@ impl TmuxExec for RemoteTmux {
         }
     }
 
-    async fn restart_session(&self, name: &str) -> Result<(), IpcError> {
+    async fn restart_session(&self, name: &str, pane_cmd: &str) -> Result<(), IpcError> {
         let script = format!(
             "tmux respawn-pane -k -t {}: {}",
             shell_quote(name),
-            shell_quote(&pane_command())
+            shell_quote(pane_cmd)
         );
         let output = self.remote_bash(&script).await?;
         if output.status.success() {
@@ -256,19 +274,24 @@ fn parse_sessions(input: &str) -> Vec<TmuxSession> {
     input
         .lines()
         .filter_map(|line| {
-            let parts: Vec<&str> = line.split('|').collect();
-            if parts.len() != 5 {
+            // Destructure the fixed 5-field format off the split iterator —
+            // no per-line `Vec` allocation. A 6th field means the line is
+            // malformed (a `|` inside a session name); reject it.
+            let mut it = line.split('|');
+            let name = it.next()?;
+            let created = it.next()?.parse::<i64>().ok()?;
+            let last_activity = it.next()?.parse::<i64>().ok()?;
+            let attached_int = it.next()?.parse::<i64>().ok()?;
+            let path = it.next()?;
+            if it.next().is_some() {
                 return None;
             }
-            let created = parts[1].parse::<i64>().ok()?;
-            let last_activity = parts[2].parse::<i64>().ok()?;
-            let attached_int = parts[3].parse::<i64>().ok()?;
             Some(TmuxSession {
-                name: parts[0].to_string(),
+                name: name.to_string(),
                 created,
                 last_activity,
                 attached: attached_int > 0,
-                path: PathBuf::from(parts[4]),
+                path: PathBuf::from(path),
             })
         })
         .collect()
@@ -280,11 +303,22 @@ fn parse_sessions(input: &str) -> Vec<TmuxSession> {
 /// alive as a normal interactive shell. Without that, claude returning 0
 /// would close the pane and the whole session would disappear — the user
 /// would lose the ability to "restart" or even attach to it.
-pub fn pane_command() -> String {
-    "cl --continue || cl; exec ${SHELL:-/bin/zsh} -l".to_string()
+pub fn pane_command() -> &'static str {
+    "cl --continue || cl; exec ${SHELL:-/bin/zsh} -l"
 }
 
-pub async fn new_session(name: &str, working_dir: &std::path::Path) -> Result<(), IpcError> {
+/// Pane command for a plain shell session (`kind = "shell"`). Runs an
+/// interactive login shell in a loop so the pane — and therefore the tmux
+/// session — survives the user typing `exit`; a fresh shell respawns instead.
+pub fn shell_pane_command() -> &'static str {
+    "while :; do ${SHELL:-/bin/zsh} -l; done"
+}
+
+pub async fn new_session(
+    name: &str,
+    working_dir: &std::path::Path,
+    pane_cmd: &str,
+) -> Result<(), IpcError> {
     // Push env into the session explicitly via `-e KEY=VAL`. This matters
     // because the tmux SERVER may already be running with stale env (e.g.
     // started before claude-fleet imported the user's locale from their
@@ -307,7 +341,7 @@ pub async fn new_session(name: &str, working_dir: &std::path::Path) -> Result<()
         }
     }
     cmd.args(["-e", "COLORTERM=truecolor", "-e", "TERM=xterm-256color"]);
-    cmd.arg(pane_command());
+    cmd.arg(pane_cmd);
     let output = cmd
         .output()
         .await
@@ -357,15 +391,9 @@ pub async fn rename_session(old: &str, new: &str) -> Result<(), IpcError> {
 /// respawning with the same command the session was created with. Uses
 /// `respawn-pane -k` so we don't need to know if claude is currently running
 /// or already dropped to shell.
-pub async fn restart_session(name: &str) -> Result<(), IpcError> {
+pub async fn restart_session(name: &str, pane_cmd: &str) -> Result<(), IpcError> {
     let output = tokio::process::Command::new("tmux")
-        .args([
-            "respawn-pane",
-            "-k",
-            "-t",
-            &format!("{name}:"),
-            &pane_command(),
-        ])
+        .args(["respawn-pane", "-k", "-t", &format!("{name}:"), pane_cmd])
         .output()
         .await
         .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
@@ -460,6 +488,15 @@ mod tests {
         // /exit" bug.
         assert!(cmd.contains("cl --continue || cl;"), "got: {cmd}");
         assert!(cmd.contains("exec ${SHELL:-/bin/zsh}"), "got: {cmd}");
+    }
+
+    #[test]
+    fn shell_pane_command_respawns_shell_so_session_survives_exit() {
+        let cmd = shell_pane_command();
+        // The loop is the point: a shell session must NOT die when the user
+        // types `exit` — a fresh login shell respawns instead.
+        assert!(cmd.contains("while :;"), "got: {cmd}");
+        assert!(cmd.contains("${SHELL:-/bin/zsh}"), "got: {cmd}");
     }
 
     #[tokio::test]

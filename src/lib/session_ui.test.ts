@@ -14,15 +14,13 @@ beforeEach(() => {
 describe('session_ui', () => {
   it('returns defaults for an unknown session', () => {
     const ui = loadSessionUi('local', 'dev-foo');
-    expect(ui).toEqual(DEFAULT_UI);
+    expect(ui).toEqual({ centerPx: 360 });
   });
 
-  it('persists centerPx + centerCollapsed and reloads them', () => {
+  it('persists centerPx only (centerCollapsed is now a global pref)', () => {
     saveSessionUi('local', 'dev-foo', { centerPx: 200 });
-    saveSessionUi('local', 'dev-foo', { centerCollapsed: true });
     const ui = loadSessionUi('local', 'dev-foo');
-    expect(ui.centerPx).toBe(200);
-    expect(ui.centerCollapsed).toBe(true);
+    expect(ui).toEqual({ centerPx: 200 });
   });
 
   it('keeps sessions on different hosts separate', () => {
@@ -33,11 +31,10 @@ describe('session_ui', () => {
   });
 
   it('migrates a session key when the tmux name is renamed', () => {
-    saveSessionUi('local', 'dev-foo', { centerPx: 250, centerCollapsed: true });
+    saveSessionUi('local', 'dev-foo', { centerPx: 250 });
     migrateSessionUi('local', 'dev-foo', 'dev-bar');
     expect(loadSessionUi('local', 'dev-foo')).toEqual(DEFAULT_UI);
     expect(loadSessionUi('local', 'dev-bar').centerPx).toBe(250);
-    expect(loadSessionUi('local', 'dev-bar').centerCollapsed).toBe(true);
   });
 
   it('migration is a no-op when nothing was stored for the old name', () => {

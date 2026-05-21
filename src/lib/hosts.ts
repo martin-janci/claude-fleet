@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store';
+import { writable, derived } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import { readPref, writePref } from './prefs';
 
@@ -21,6 +21,10 @@ export interface SshHost {
 }
 
 export const hosts = writable<HostRow[]>([]);
+
+/** O(1) alias -> host lookup, derived once per `hosts` change. Consumers
+ *  that previously did a linear `$hosts.find` should read this instead. */
+export const hostByAlias = derived(hosts, ($h) => new Map($h.map((h) => [h.alias, h])));
 
 // Sidebar host filter — `'all'` shows sessions from every host, otherwise
 // the value is a specific `alias`. Persisted across restarts.

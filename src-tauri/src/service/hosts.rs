@@ -1,10 +1,10 @@
-//! Service layer for SSH host management. Each function is transport-agnostic
-//! logic over `store.rs` helpers plus `ssh_config.rs` (for discovery) and
-//! `ssh::SshClient` (for probing). Called by both the Tauri command wrappers
-//! and the MCP server.
+//! Service layer for SSH host management — transport-agnostic logic over
+//! `store.rs` helpers plus `ssh_config.rs` (discovery) and `ssh::SshClient`
+//! (probing). Called by both the Tauri command wrappers and the MCP server.
 
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::IpcError;
+use crate::shell::quote as shq;
 use crate::ssh::SshClient;
 use crate::ssh_config::{self, SshHost};
 use crate::store::{HostRow, Store};
@@ -145,7 +145,11 @@ pub async fn probe_host(
     // unreachable host updates `reachable=false` instead of returning an
     // error to the UI.
     let (reachable, claude_ver, tmux_ver, account) = if args.alias == "local" {
-        probe_local()
+        // probe_local does blocking std::process + fs I/O — keep it off the
+        // async runtime worker thread.
+        tokio::task::spawn_blocking(probe_local)
+            .await
+            .unwrap_or_default()
     } else {
         crate::validate::host_alias(target)?;
         // Anonymous token — probe_host is user-triggered re-probe; we give it
@@ -228,6 +232,20 @@ async fn probe(
     probe_with_token(ssh, host, token).await
 }
 
+/// The remote probe script: reads tmux + claude versions AND the
+/// `oauthAccount` from `~/.claude.json` in one SSH round trip, with the three
+/// sections separated by a literal `---`. Each section is independently
+/// guarded (`|| true`) so a missing tool/file degrades to an empty section
+/// rather than failing the whole probe. MUST be `shq`'d before it's handed to
+/// `bash -lc` over ssh (see `probe_with_token`).
+const PROBE_SCRIPT: &str = r#"tmux -V 2>/dev/null || true
+echo ---
+claude --version 2>/dev/null || true
+echo ---
+( cat "$HOME/.claude.json" 2>/dev/null | jq -c .oauthAccount 2>/dev/null \
+  || python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d.get("oauthAccount") or {}))' "$HOME/.claude.json" 2>/dev/null \
+  || true )"#;
+
 /// Like `probe` but uses the provided `CancellationToken` so the caller can
 /// cancel the SSH round trip.
 async fn probe_with_token(
@@ -235,17 +253,21 @@ async fn probe_with_token(
     host: &str,
     token: CancellationToken,
 ) -> Result<(bool, Option<String>, Option<String>, Option<OauthAccount>), IpcError> {
-    let script = r#"tmux -V 2>/dev/null || true
-echo ---
-claude --version 2>/dev/null || true
-echo ---
-( cat "$HOME/.claude.json" 2>/dev/null | jq -c .oauthAccount 2>/dev/null \
-  || python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d.get("oauthAccount") or {}))' "$HOME/.claude.json" 2>/dev/null \
-  || true )"#;
+    // Single-quote the WHOLE script so it crosses the ssh argv-join as one
+    // word. ssh concatenates the trailing args with spaces and the remote
+    // LOGIN shell (often zsh) re-tokenizes them — without quoting, this
+    // multi-line `||`/`(...)` probe splits at the login-shell level: the first
+    // line collapses to `bash -lc tmux` (with `-V` swallowed as $0) and the
+    // remaining lines run in the login shell, not under `bash -lc`, so the
+    // probe came back degraded/partial (the tmux-version section came back
+    // empty; depending on the remote login shell other sections can drop too).
+    // `shq` also escapes the inner single-quotes of the embedded python3
+    // one-liner. Same fix as `ensure_remote_project` in commands/sessions.rs.
+    let quoted = shq(PROBE_SCRIPT);
     let out = ssh
         .run_cancellable(
             host,
-            &["bash", "-lc", script],
+            &["bash", "-lc", &quoted],
             Duration::from_secs(5),
             token,
         )
@@ -458,5 +480,104 @@ mod tests {
     fn parse_oauth_account_returns_none_for_malformed_json() {
         assert!(parse_oauth_account("{not-json").is_none());
         assert!(parse_oauth_account("not even an object").is_none());
+    }
+
+    // ── probe script: ssh argv-join + login-shell re-tokenization ─────────────
+
+    #[test]
+    fn probe_script_runs_as_one_program_when_quoted() {
+        // The real PROBE_SCRIPT, single-quoted exactly as `probe_with_token`
+        // now does, must survive the ssh argv space-join + the remote login
+        // shell's re-tokenization and run as ONE `bash -lc` program — exiting 0
+        // and emitting its two `---` section separators. The `|| true` guards
+        // make this deterministic whether or not tmux / claude / jq /
+        // ~/.claude.json are present, so it holds on CI too.
+        use std::process::Command;
+        let out = Command::new("sh")
+            .args(["-c", &format!("bash -lc {}", shq(PROBE_SCRIPT))])
+            .output()
+            .expect("run sh");
+        assert!(
+            out.status.success(),
+            "quoted probe must exit 0, stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.matches("---").count() >= 2,
+            "quoted probe must emit its two section separators, got: {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn probe_script_must_be_quoted_to_survive_login_shell_retokenization() {
+        // Why `probe_with_token` must `shq` the script: a RAW multi-line
+        // `bash -lc <script>` is re-tokenized by the (remote login) shell —
+        // only the first word stays the bash program, its operands are eaten as
+        // $0/$1, and later lines run in the login shell, not under `bash -lc`.
+        // The probe's leading `tmux -V` degrades exactly this way (it collapses
+        // to `bash -lc tmux` with `-V` swallowed, so the version never reaches
+        // stdout). We reproduce the re-tokenization locally with `sh -c` and a
+        // shell builtin so the test is PATH- and login-profile-independent.
+        use std::process::Command;
+        let script = "echo VER_MARKER tail\necho ---\necho SECOND";
+        let section1 = |stdout: &[u8]| -> String {
+            String::from_utf8_lossy(stdout)
+                .split("---")
+                .next()
+                .unwrap_or("")
+                .to_string()
+        };
+
+        // RAW (the bug): `echo VER_MARKER tail` collapses to `bash -lc echo`
+        // (VER_MARKER → $0, tail → $1), so the marker never reaches stdout.
+        let raw = Command::new("sh")
+            .args(["-c", &format!("bash -lc {script}")])
+            .output()
+            .expect("run sh raw");
+        assert!(
+            !section1(&raw.stdout).contains("VER_MARKER"),
+            "raw script must LOSE section-1 content, got: {:?}",
+            String::from_utf8_lossy(&raw.stdout)
+        );
+
+        // QUOTED (the fix): the whole script crosses as one word; bash runs it
+        // intact and section 1 keeps its content.
+        let quoted = Command::new("sh")
+            .args(["-c", &format!("bash -lc {}", shq(script))])
+            .output()
+            .expect("run sh quoted");
+        assert!(
+            section1(&quoted.stdout).contains("VER_MARKER"),
+            "quoted script must PRESERVE section-1 content, got: {:?} stderr: {:?}",
+            String::from_utf8_lossy(&quoted.stdout),
+            String::from_utf8_lossy(&quoted.stderr)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires network + a reachable 'mefistos' ssh host with claude logged in"]
+    async fn probe_mefistos_end_to_end() {
+        // Exercises the REAL probe path (probe → ssh `bash -lc` → mefistos).
+        // Before the shq fix the multi-line script was re-tokenized by the
+        // remote login shell, so the first line collapsed to `bash -lc tmux`
+        // (with `-V` swallowed as $0) and the tmux version came back empty —
+        // a degraded/partial probe. After the fix the whole script runs as one
+        // bash program and every section is populated. Run with:
+        //   cargo test -- --ignored probe_mefistos_end_to_end --nocapture
+        let ssh = Arc::new(SshClient::new());
+        let (reachable, claude_v, tmux_v, account) =
+            probe(&ssh, "mefistos").await.expect("probe mefistos");
+        eprintln!("reachable={reachable} claude={claude_v:?} tmux={tmux_v:?} account={account:?}");
+        assert!(reachable, "mefistos must be reachable");
+        // The tmux version is the field the re-tokenization bug dropped — it
+        // must be present once the script is `shq`'d.
+        assert!(
+            tmux_v.is_some(),
+            "tmux version must parse (was empty before the shq fix)"
+        );
+        assert!(claude_v.is_some(), "claude version must parse");
+        let acct = account.expect("oauthAccount must parse");
+        assert!(acct.uuid.is_some(), "parsed account must carry a uuid");
     }
 }

@@ -21,10 +21,16 @@ pub fn health_from_store(s: &Store) -> Health {
 }
 
 pub fn health_check(store: &Mutex<Store>) -> Health {
-    // TODO(T3): once IpcError exists, return Result<Health, IpcError> and
-    // map the mutex poison error to E_LOCK.
-    let s = store.lock().expect("store mutex poisoned");
-    health_from_store(&s)
+    // A poisoned store mutex IS an unhealthy state — report db_ready=false
+    // rather than panicking the command (which the old `.expect` did).
+    match store.lock() {
+        Ok(s) => health_from_store(&s),
+        Err(_) => Health {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            db_ready: false,
+            schema_version: 0,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -39,6 +45,6 @@ mod tests {
         let h = health_from_store(&s);
         assert_eq!(h.version, env!("CARGO_PKG_VERSION"));
         assert!(h.db_ready);
-        assert_eq!(h.schema_version, 6);
+        assert_eq!(h.schema_version, 7);
     }
 }

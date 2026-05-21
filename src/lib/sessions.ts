@@ -58,6 +58,9 @@ export interface NewSessionArgs {
   project_id: number;
   worktree_id: number | null;
   name: string;
+  new_worktree?: string | null;
+  /** "work" (default) runs Claude Code; "shell" runs a plain login shell. */
+  kind?: 'work' | 'shell';
 }
 
 export async function newSession(args: NewSessionArgs): Promise<Result<SessionRow>> {

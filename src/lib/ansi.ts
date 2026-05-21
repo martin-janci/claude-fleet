@@ -156,6 +156,9 @@ export class Screen {
   cells: Cell[][];
   cursorRow = 0;
   cursorCol = 0;
+  /** Cursor visibility (DECSET ?25). Visible by default per the VT spec;
+   *  tmux/claude toggle it with ?25h / ?25l around redraws. */
+  cursorVisible = true;
   /** Current SGR state — applied to each printed cell. */
   curFg = COLOR_DEFAULT;
   curBg = COLOR_DEFAULT;
@@ -178,11 +181,68 @@ export class Screen {
    *  active so a `?...l` can restore exactly. We only support one level —
    *  nesting another ?1049h while already in alt is a no-op. */
   private savedScreen: SavedScreenState | null = null;
+  /** Scroll region (DECSTBM) — inclusive top/bottom row indices. The region
+   *  defaults to the whole screen (0 .. rows-1). LF/RI/IL/DL all operate
+   *  within these bounds; rows outside the region (e.g. a tmux status bar
+   *  pinned to the last row) are never scrolled. */
+  scrollTop = 0;
+  scrollBottom = 0;
+  /** Per-row change counter. Each entry is set to a fresh monotonic value
+   *  whenever that row's cell content changes; an unchanged row keeps its
+   *  value. The renderer compares against what it last drew so it can skip
+   *  re-deriving rows that didn't move — turning a per-frame O(rows×cols)
+   *  rebuild into O(changed rows). */
+  rowVersion: number[] = [];
+  private dirtyClock = 0;
+
+  // ─── Mouse mode state (DECSET/DECRST) ────────────────────────────────
+  // These track which mouse-reporting modes the host app (tmux) has
+  // requested via escape sequences. We store them so the component can
+  // gate event forwarding on them.
+  //
+  //   ?1000  — X10 basic mouse reporting (click/release)
+  //   ?1002  — button-event tracking (motion while a button is held)
+  //   ?1003  — any-event tracking (motion even without a button)
+  //   ?1006  — SGR extended coordinates
+  //
+  // Getters exposed publicly:
+  //   mouseEnabled       — 1000 || 1002 || 1003
+  //   mouseButtonMotion  — 1002 || 1003
+  //   mouseAnyMotion     — 1003
+  //   mouseSgr           — 1006
+  private _mouse1000 = false;
+  private _mouse1002 = false;
+  private _mouse1003 = false;
+  private _mouse1006 = false;
+
+  get mouseEnabled(): boolean { return this._mouse1000 || this._mouse1002 || this._mouse1003; }
+  get mouseButtonMotion(): boolean { return this._mouse1002 || this._mouse1003; }
+  get mouseAnyMotion(): boolean { return this._mouse1003; }
+  get mouseSgr(): boolean { return this._mouse1006; }
 
   constructor(rows: number, cols: number) {
     this.rows = Math.max(1, rows);
     this.cols = Math.max(1, cols);
     this.cells = makeGrid(this.rows, this.cols);
+    this.scrollTop = 0;
+    this.scrollBottom = this.rows - 1;
+    this.rowVersion = new Array(this.rows);
+    this.markAll();
+  }
+
+  /** Mark a single row changed. */
+  private markRow(r: number): void {
+    if (r >= 0 && r < this.rows) this.rowVersion[r] = ++this.dirtyClock;
+  }
+
+  /** Mark an inclusive range of rows changed. */
+  private markRows(a: number, b: number): void {
+    for (let r = a; r <= b; r++) this.markRow(r);
+  }
+
+  /** Mark every row changed (buffer wholesale-replaced or resized). */
+  private markAll(): void {
+    for (let r = 0; r < this.rows; r++) this.rowVersion[r] = ++this.dirtyClock;
   }
 
   /** Resize the buffer. Existing content is preserved by clamping or
@@ -202,8 +262,15 @@ export class Screen {
     }
     this.rows = rows;
     this.cols = cols;
+    this.rowVersion = new Array(this.rows);
+    this.markAll();
     if (this.cursorRow >= rows) this.cursorRow = rows - 1;
     if (this.cursorCol >= cols) this.cursorCol = cols - 1;
+    // A SIGWINCH invalidates the scroll region — programs re-establish it
+    // after the resize (that's exactly why a resize "fixes" a garbled pane).
+    // Reset to the full new screen so stale margins can't mis-scroll.
+    this.scrollTop = 0;
+    this.scrollBottom = this.rows - 1;
   }
 
   /** Feed bytes (already decoded to UTF-16) into the parser. */
@@ -286,17 +353,69 @@ export class Screen {
     cell.fg = this.curFg;
     cell.bg = this.curBg;
     cell.attrs = this.curAttrs;
+    this.markRow(this.cursorRow);
     this.cursorCol++;
   }
 
-  /** LF: move to next row, scrolling up if we'd fall off the bottom. */
+  /** LF: move to next row, scrolling the active region up if we're at the
+   *  bottom margin. Only the rows in [scrollTop..scrollBottom] move; the
+   *  cursor is left on the (now-blank) bottom margin row. When the cursor is
+   *  not at the bottom margin we just advance (clamped to the last row), so a
+   *  cursor parked below the region — e.g. on a status bar — does not scroll
+   *  the body. */
   private lineFeed(): void {
-    if (this.cursorRow + 1 >= this.rows) {
-      this.cells.shift();
-      this.cells.push(makeRow(this.cols));
-    } else {
+    if (this.cursorRow === this.scrollBottom) {
+      // Remove the top line of the region; everything above the new top
+      // shifts up by one. After the removal the array is one shorter, so
+      // inserting at `scrollBottom` lands the blank on the region's last row.
+      this.cells.splice(this.scrollTop, 1);
+      this.cells.splice(this.scrollBottom, 0, makeRow(this.cols));
+      this.markRows(this.scrollTop, this.scrollBottom);
+    } else if (this.cursorRow < this.rows - 1) {
       this.cursorRow++;
     }
+  }
+
+  /** RI (reverse index): move up one row, scrolling the active region down if
+   *  we're at the top margin. Mirror of `lineFeed`. */
+  private reverseIndex(): void {
+    if (this.cursorRow === this.scrollTop) {
+      // Remove the bottom line of the region; everything below the cursor up
+      // to scrollBottom shifts down. Inserting at `scrollTop` puts the blank
+      // on the region's first row.
+      this.cells.splice(this.scrollBottom, 1);
+      this.cells.splice(this.scrollTop, 0, makeRow(this.cols));
+      this.markRows(this.scrollTop, this.scrollBottom);
+    } else if (this.cursorRow > 0) {
+      this.cursorRow--;
+    }
+  }
+
+  /** SU (scroll up): scroll the active region up by `n` lines irrespective of
+   *  the cursor — blanks fill in at the bottom margin, the cursor stays put.
+   *  tmux uses this to scroll a pane without parking the cursor on the bottom
+   *  row (the case `lineFeed` never reaches), so dropping it drifts our model
+   *  out of sync until a full repaint (e.g. a resize) re-syncs it. */
+  private scrollUp(n: number): void {
+    n = Math.min(n, this.scrollBottom - this.scrollTop + 1);
+    if (n <= 0) return;
+    // Batched: one splice removes the top `n` rows of the region, one more
+    // inserts `n` blanks at the bottom — vs `n` individual splice pairs.
+    this.cells.splice(this.scrollTop, n);
+    const blanks = Array.from({ length: n }, () => makeRow(this.cols));
+    this.cells.splice(this.scrollBottom - n + 1, 0, ...blanks);
+    this.markRows(this.scrollTop, this.scrollBottom);
+  }
+
+  /** SD (scroll down): mirror of `scrollUp` — blanks fill in at the top
+   *  margin, content at the bottom margin falls off, the cursor stays put. */
+  private scrollDown(n: number): void {
+    n = Math.min(n, this.scrollBottom - this.scrollTop + 1);
+    if (n <= 0) return;
+    this.cells.splice(this.scrollBottom - n + 1, n);
+    const blanks = Array.from({ length: n }, () => makeRow(this.cols));
+    this.cells.splice(this.scrollTop, 0, ...blanks);
+    this.markRows(this.scrollTop, this.scrollBottom);
   }
 
   /** Parse a single escape sequence starting at `start`. Returns number of
@@ -317,6 +436,22 @@ export class Screen {
     if (intro === '8') {
       this.cursorRow = this.savedRow;
       this.cursorCol = this.savedCol;
+      return 2;
+    }
+    // ESC M — RI (reverse index): up one row, scroll region down at top margin.
+    if (intro === 'M') {
+      this.reverseIndex();
+      return 2;
+    }
+    // ESC D — IND (index): identical to LF (down one row / scroll at bottom).
+    if (intro === 'D') {
+      this.lineFeed();
+      return 2;
+    }
+    // ESC E — NEL (next line): carriage return + line feed.
+    if (intro === 'E') {
+      this.cursorCol = 0;
+      this.lineFeed();
       return 2;
     }
     if (intro === '[') {
@@ -369,6 +504,7 @@ export class Screen {
 
   private fullReset(): void {
     this.cells = makeGrid(this.rows, this.cols);
+    this.markAll();
     this.cursorRow = 0;
     this.cursorCol = 0;
     this.curFg = COLOR_DEFAULT;
@@ -377,6 +513,8 @@ export class Screen {
     this.g0Graphics = false;
     this.g1Graphics = false;
     this.useG1 = false;
+    this.scrollTop = 0;
+    this.scrollBottom = this.rows - 1;
     // ESC c is a full power-on reset — drop any alt-screen snapshot so
     // we don't pop back into stale content the next time we leave alt.
     this.savedScreen = null;
@@ -448,6 +586,30 @@ export class Screen {
       case 'd': // VPA - vertical position absolute
         this.cursorRow = clamp(Math.max(1, p0) - 1, 0, this.rows - 1);
         return;
+      case 'S': // SU - scroll up (private `?...S` is XTSMGRAPHICS/sixel: skip)
+        if (!isPrivate) this.scrollUp(Math.max(1, p0));
+        return;
+      case 'T': // SD - scroll down (private/`>`-marked T is title-mode reset)
+        if (!isPrivate) this.scrollDown(Math.max(1, p0));
+        return;
+      case 'r': { // DECSTBM - set top/bottom scroll margins
+        // A private `?...r` is XTRESTORE (restore DEC private modes), NOT
+        // DECSTBM — ignore it so we don't clobber the scroll region.
+        if (isPrivate) return;
+        const top = p0 ? p0 - 1 : 0;
+        const bottom = p1 ? p1 - 1 : this.rows - 1;
+        // Valid only if both margins are in range and top is strictly above
+        // bottom; otherwise xterm ignores the request and leaves the region
+        // unchanged.
+        if (top >= 0 && bottom < this.rows && top < bottom) {
+          this.scrollTop = top;
+          this.scrollBottom = bottom;
+          // DECSTBM homes the cursor (origin mode off → screen home).
+          this.cursorRow = 0;
+          this.cursorCol = 0;
+        }
+        return;
+      }
       case 's': // save cursor (ANSI.SYS variant)
         this.savedRow = this.cursorRow;
         this.savedCol = this.cursorCol;
@@ -491,9 +653,18 @@ export class Screen {
           this.cursorRow = this.savedRow;
           this.cursorCol = this.savedCol;
         }
+      } else if (p === 1000) {
+        this._mouse1000 = set;
+      } else if (p === 1002) {
+        this._mouse1002 = set;
+      } else if (p === 1003) {
+        this._mouse1003 = set;
+      } else if (p === 1006) {
+        this._mouse1006 = set;
+      } else if (p === 25) {
+        this.cursorVisible = set;
       }
-      // Other private modes (?25 cursor visibility, ?1000 mouse, etc.)
-      // are intentionally ignored.
+      // Other private modes are intentionally ignored.
     }
   }
 
@@ -518,6 +689,7 @@ export class Screen {
     // Hand the alt buffer a clean slate and reset transient state. Per
     // xterm: the alt screen starts blank with cursor at home.
     this.cells = makeGrid(this.rows, this.cols);
+    this.markAll();
     this.cursorRow = 0;
     this.cursorCol = 0;
     this.curFg = COLOR_DEFAULT;
@@ -528,6 +700,11 @@ export class Screen {
     this.g0Graphics = false;
     this.g1Graphics = false;
     this.useG1 = false;
+    // The alt buffer starts with full-screen margins; the program re-sets a
+    // region if it wants one. We don't snapshot the primary's margins —
+    // programs re-establish them on leave too (see leaveAltScreen).
+    this.scrollTop = 0;
+    this.scrollBottom = this.rows - 1;
   }
 
   /** Swap back to the primary buffer. No-op if we weren't on alt — guards
@@ -536,6 +713,7 @@ export class Screen {
     const saved = this.savedScreen;
     if (saved === null) return;
     this.cells = saved.cells;
+    this.markAll();
     this.cursorRow = saved.cursorRow;
     this.cursorCol = saved.cursorCol;
     this.curFg = saved.curFg;
@@ -547,6 +725,10 @@ export class Screen {
     this.g1Graphics = saved.g1Graphics;
     this.useG1 = saved.useG1;
     this.savedScreen = null;
+    // Restoring the primary buffer resets margins to full; the program that
+    // owns the primary re-establishes its own region after the buffer pops.
+    this.scrollTop = 0;
+    this.scrollBottom = this.rows - 1;
   }
 
   private eraseInDisplay(mode: number): void {
@@ -578,19 +760,32 @@ export class Screen {
   }
 
   private insertLines(n: number): void {
+    // IL is bounded by the scroll region: rows from the cursor down shift
+    // down, and lines pushed past `scrollBottom` fall off. A cursor outside
+    // the region is a no-op (xterm behaviour) so a status bar below the
+    // region is never disturbed.
+    if (this.cursorRow < this.scrollTop || this.cursorRow > this.scrollBottom) return;
     for (let i = 0; i < n; i++) {
-      if (this.cursorRow >= this.rows) break;
+      // Drop the line currently at the region bottom, then insert a blank at
+      // the cursor — everything between shifts down by one within the region.
+      this.cells.splice(this.scrollBottom, 1);
       this.cells.splice(this.cursorRow, 0, makeRow(this.cols));
-      if (this.cells.length > this.rows) this.cells.length = this.rows;
     }
+    this.markRows(this.cursorRow, this.scrollBottom);
   }
 
   private deleteLines(n: number): void {
+    // DL is bounded by the scroll region: rows below the cursor shift up and
+    // blanks fill in at `scrollBottom`. A cursor outside the region is a
+    // no-op.
+    if (this.cursorRow < this.scrollTop || this.cursorRow > this.scrollBottom) return;
     for (let i = 0; i < n; i++) {
-      if (this.cursorRow >= this.rows) break;
+      // Remove the cursor line, then insert a blank at the region bottom —
+      // everything between shifts up by one within the region.
       this.cells.splice(this.cursorRow, 1);
-      this.cells.push(makeRow(this.cols));
+      this.cells.splice(this.scrollBottom, 0, makeRow(this.cols));
     }
+    this.markRows(this.cursorRow, this.scrollBottom);
   }
 
   private deleteChars(n: number): void {
@@ -598,12 +793,14 @@ export class Screen {
     row.splice(this.cursorCol, n);
     while (row.length < this.cols) row.push(emptyCell());
     if (row.length > this.cols) row.length = this.cols;
+    this.markRow(this.cursorRow);
   }
 
   private insertChars(n: number): void {
     const row = this.cells[this.cursorRow];
     for (let i = 0; i < n; i++) row.splice(this.cursorCol, 0, emptyCell());
     if (row.length > this.cols) row.length = this.cols;
+    this.markRow(this.cursorRow);
   }
 
   private eraseChars(n: number): void {
@@ -620,6 +817,7 @@ export class Screen {
     cell.fg = COLOR_DEFAULT;
     cell.bg = COLOR_DEFAULT;
     cell.attrs = 0;
+    this.markRow(r);
   }
 
   private applySgr(params: number[]): void {
@@ -659,6 +857,10 @@ export class Screen {
         } else if (params[i + 1] === 2 && i + 4 < params.length) {
           this.curFg = rgb(params[i + 2], params[i + 3], params[i + 4]);
           i += 4;
+        } else {
+          // Truncated 38 sequence — abandon the rest of the params rather
+          // than re-reading `5`/`2`/RGB digits as standalone SGR codes.
+          i = params.length;
         }
       } else if (p === 39) {
         this.curFg = COLOR_DEFAULT;
@@ -671,6 +873,9 @@ export class Screen {
         } else if (params[i + 1] === 2 && i + 4 < params.length) {
           this.curBg = rgb(params[i + 2], params[i + 3], params[i + 4]);
           i += 4;
+        } else {
+          // Truncated 48 sequence — abandon the rest of the params.
+          i = params.length;
         }
       } else if (p === 49) {
         this.curBg = COLOR_DEFAULT;
@@ -763,4 +968,47 @@ export function colorToCss(c: number): string | null {
   if (c === COLOR_DEFAULT) return null;
   if (isRgb(c)) return rgbToCss(c);
   return paletteToCss(c);
+}
+
+/**
+ * Encode a mouse event as the escape sequence a terminal sends to the host.
+ *
+ * @param cb       Base button code (already including motion/modifier bits):
+ *                   left=0, middle=1, right=2
+ *                   wheel-up=64, wheel-down=65
+ *                   motion (button held)  = pressedButton + 32
+ *                   any-motion (no button) = 3 + 32 = 35
+ *                   Modifiers: shift=4, alt=8, ctrl=16 may be OR'd in.
+ * @param col      1-based column
+ * @param row      1-based row
+ * @param release  true for mouse-button release events
+ * @param sgr      true if ?1006 (SGR) mode is active; false for X10/legacy
+ *
+ * SGR format:  ESC [ < {cb} ; {col} ; {row} M   (press/motion/wheel)
+ *              ESC [ < {cb} ; {col} ; {row} m   (release)
+ *
+ * X10/legacy format:  ESC [ M  + three raw bytes clamped to [32,255]:
+ *   byte1 = min(cbX10, 223) + 32   where on release low-2-bits → 3 (button lost)
+ *   byte2 = min(col,   223) + 32
+ *   byte3 = min(row,   223) + 32
+ */
+export function encodeMouse(
+  cb: number,
+  col: number,
+  row: number,
+  release: boolean,
+  sgr: boolean,
+): string {
+  if (sgr) {
+    // SGR: button identity is preserved on release (distinguished by M vs m).
+    const final = release ? 'm' : 'M';
+    return `\x1b[<${cb};${col};${row}${final}`;
+  } else {
+    // X10/legacy: on release the low two bits of cb become 3 (button identity lost).
+    const cbX10 = release ? (cb & ~0b11) | 0b11 : cb;
+    const b1 = Math.min(cbX10, 223) + 32;
+    const b2 = Math.min(col,   223) + 32;
+    const b3 = Math.min(row,   223) + 32;
+    return '\x1b[M' + String.fromCharCode(b1, b2, b3);
+  }
 }

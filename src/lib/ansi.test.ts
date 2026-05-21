@@ -8,6 +8,7 @@ import {
   rgb,
   isRgb,
   colorToCss,
+  encodeMouse,
 } from './ansi';
 
 function rowText(s: Screen, r: number): string {
@@ -320,6 +321,223 @@ describe('ansi.Screen — alt screen buffer (DECSET 1049)', () => {
   });
 });
 
+describe('ansi.Screen — DECSTBM scroll region', () => {
+  it('LF scrolls only the region; a pinned status bar on the last row is preserved', () => {
+    // The tmux scenario: status bar pinned to the last row, body scrolls
+    // within a region above it. This is THE bug — without DECSTBM the LF
+    // would scroll the whole screen and carry the status bar away.
+    const s = new Screen(5, 6);
+    // Status bar on the last row (index 4).
+    s.write('\x1b[5;1HSTATUS');
+    // Region = rows 1..4 (1-based) → indices 0..3.
+    s.write('\x1b[1;4r');
+    // After DECSTBM the cursor homes to (0,0). Fill the region: put LINE4 on
+    // the bottom region row, then CRLF (scrolls the region) and write LINE5.
+    // tmux always emits \r\n, so the CR resets the column for the next line.
+    s.write('\x1b[4;1HLINE4');
+    s.write('\r\n');
+    s.write('LINE5');
+    // Body scrolled within the region: LINE4 moved up to row 2, LINE5 landed
+    // on the freshly-blanked bottom region row (row 3).
+    expect(rowText(s, 2).slice(0, 5)).toBe('LINE4');
+    expect(rowText(s, 3).slice(0, 5)).toBe('LINE5');
+    // The status bar on the last row is untouched — the whole point of DECSTBM.
+    expect(rowText(s, 4)).toBe('STATUS');
+  });
+
+  it('LF at the bottom margin scrolls the region up, leaving rows below untouched', () => {
+    const s = new Screen(4, 4);
+    s.write('\x1b[1;3r'); // region rows 0..2
+    s.write('\x1b[1;1HA');
+    s.write('\x1b[2;1HB');
+    s.write('\x1b[3;1HC');
+    s.write('\x1b[4;1HZ'); // row 3, outside the region
+    s.write('\x1b[3;1H'); // cursor at row 2 (bottom margin)
+    s.write('\n'); // LF at bottom margin → region scrolls up
+    expect(rowText(s, 0).slice(0, 1)).toBe('B');
+    expect(rowText(s, 1).slice(0, 1)).toBe('C');
+    expect(rowText(s, 2)).toBe('    '); // fresh blank at region bottom
+    expect(rowText(s, 3).slice(0, 1)).toBe('Z'); // outside region — untouched
+  });
+
+  it('RI (ESC M) at the top margin scrolls the region down', () => {
+    const s = new Screen(4, 4);
+    s.write('\x1b[1;3r'); // region rows 0..2
+    s.write('\x1b[1;1HA');
+    s.write('\x1b[2;1HB');
+    s.write('\x1b[3;1HC');
+    s.write('\x1b[4;1HZ'); // row 3, outside the region
+    s.write('\x1b[1;1H'); // cursor at row 0 (top margin)
+    s.write('\x1bM'); // RI at top margin → region scrolls down
+    expect(rowText(s, 0)).toBe('    '); // fresh blank at region top
+    expect(rowText(s, 1).slice(0, 1)).toBe('A');
+    expect(rowText(s, 2).slice(0, 1)).toBe('B'); // C was pushed off
+    expect(rowText(s, 3).slice(0, 1)).toBe('Z'); // outside region — untouched
+  });
+
+  it('SU (CSI S) scrolls the region up regardless of cursor position', () => {
+    // tmux emits SU to scroll a pane up without parking the cursor on the
+    // bottom margin — the case plain LF never reaches. Dropping SU is THE
+    // residual drift bug: our model fell out of sync with the real screen.
+    const s = new Screen(4, 4);
+    s.write('\x1b[1;3r'); // region rows 0..2
+    s.write('\x1b[1;1HA');
+    s.write('\x1b[2;1HB');
+    s.write('\x1b[3;1HC');
+    s.write('\x1b[4;1HZ'); // row 3, outside the region
+    s.write('\x1b[1;1H'); // cursor at the TOP margin — not the bottom
+    s.write('\x1b[2S'); // scroll region up by 2
+    expect(rowText(s, 0).slice(0, 1)).toBe('C'); // A,B fell off the top
+    expect(rowText(s, 1)).toBe('    '); // fresh blank
+    expect(rowText(s, 2)).toBe('    '); // fresh blank
+    expect(rowText(s, 3).slice(0, 1)).toBe('Z'); // outside region — untouched
+  });
+
+  it('SU (CSI S) defaults to one line and leaves the cursor put', () => {
+    const s = new Screen(3, 4);
+    s.write('\x1b[1;1HA');
+    s.write('\x1b[2;1HB');
+    s.write('\x1b[3;1HC');
+    s.write('\x1b[2;3H'); // park cursor at row 1, col 2
+    s.write('\x1b[S'); // SU default = 1, whole-screen region
+    expect(rowText(s, 0).slice(0, 1)).toBe('B');
+    expect(rowText(s, 1).slice(0, 1)).toBe('C');
+    expect(rowText(s, 2)).toBe('    ');
+    // Cursor unmoved by SU: the next char lands at row 1, col 2.
+    s.write('X');
+    expect(rowText(s, 1).slice(2, 3)).toBe('X');
+  });
+
+  it('SD (CSI T) scrolls the region down, filling blanks at the top', () => {
+    const s = new Screen(4, 4);
+    s.write('\x1b[1;3r'); // region rows 0..2
+    s.write('\x1b[1;1HA');
+    s.write('\x1b[2;1HB');
+    s.write('\x1b[3;1HC');
+    s.write('\x1b[4;1HZ'); // row 3, outside the region
+    s.write('\x1b[1;1H'); // cursor at the top margin
+    s.write('\x1b[2T'); // scroll region down by 2
+    expect(rowText(s, 0)).toBe('    '); // fresh blank at top
+    expect(rowText(s, 1)).toBe('    '); // fresh blank
+    expect(rowText(s, 2).slice(0, 1)).toBe('A'); // A pushed down; B,C fell off
+    expect(rowText(s, 3).slice(0, 1)).toBe('Z'); // outside region — untouched
+  });
+
+  it('with no DECSTBM the default region is the whole screen (regression guard)', () => {
+    const s = new Screen(3, 4);
+    s.write('aaaa\r\nbbbb\r\ncccc');
+    s.write('\n'); // LF at last row scrolls the whole screen
+    expect(rowText(s, 0)).toBe('bbbb');
+    expect(rowText(s, 1)).toBe('cccc');
+    expect(rowText(s, 2)).toBe('    ');
+  });
+
+  it('resize resets the scroll region to the full new screen', () => {
+    const s = new Screen(5, 4);
+    s.write('\x1b[1;3r'); // region rows 0..2
+    s.resize(3, 4); // margins reset to full
+    s.write('aaaa\r\nbbbb\r\ncccc');
+    s.write('\n'); // LF at last row scrolls the whole (resized) screen
+    expect(rowText(s, 0)).toBe('bbbb');
+    expect(rowText(s, 1)).toBe('cccc');
+    expect(rowText(s, 2)).toBe('    ');
+  });
+
+  it('full reset (ESC c) resets the scroll region to the whole screen', () => {
+    const s = new Screen(3, 4);
+    s.write('\x1b[1;2r'); // region rows 0..1
+    s.write('\x1bc'); // full reset
+    s.write('aaaa\r\nbbbb\r\ncccc');
+    s.write('\n');
+    expect(rowText(s, 0)).toBe('bbbb');
+    expect(rowText(s, 2)).toBe('    ');
+  });
+
+  it('an out-of-range / inverted DECSTBM is ignored (region stays full screen)', () => {
+    const s = new Screen(3, 4);
+    s.write('\x1b[3;1r'); // top >= bottom → invalid, ignored
+    s.write('aaaa\r\nbbbb\r\ncccc');
+    s.write('\n');
+    expect(rowText(s, 0)).toBe('bbbb');
+    expect(rowText(s, 2)).toBe('    ');
+  });
+
+  it('IND (ESC D) behaves like LF, scrolling the region at the bottom margin', () => {
+    const s = new Screen(4, 4);
+    s.write('\x1b[1;3r'); // region rows 0..2
+    s.write('\x1b[1;1HA');
+    s.write('\x1b[2;1HB');
+    s.write('\x1b[3;1HC');
+    s.write('\x1b[4;1HZ');
+    s.write('\x1b[3;1H'); // cursor at bottom margin
+    s.write('\x1bD'); // IND
+    expect(rowText(s, 0).slice(0, 1)).toBe('B');
+    expect(rowText(s, 1).slice(0, 1)).toBe('C');
+    expect(rowText(s, 2)).toBe('    ');
+    expect(rowText(s, 3).slice(0, 1)).toBe('Z');
+  });
+
+  it('NEL (ESC E) does CR + LF', () => {
+    const s = new Screen(3, 6);
+    s.write('\x1b[1;3HAB'); // cursor lands at row 0, col 2 then writes "AB"
+    s.write('\x1bE'); // NEL → col 0, next row
+    s.write('C');
+    expect(s.cursorRow).toBe(1);
+    expect(rowText(s, 1).slice(0, 1)).toBe('C'); // CR returned to col 0
+  });
+
+  it('LF on a row below the scroll region does not scroll the region', () => {
+    // Cursor on the status bar (below the region) doing LF must NOT move the
+    // body. With scrollBottom < last row, LF at the last row is a no-op.
+    const s = new Screen(4, 4);
+    s.write('\x1b[1;3r'); // region rows 0..2
+    s.write('\x1b[1;1HA');
+    s.write('\x1b[2;1HB');
+    s.write('\x1b[3;1HC');
+    s.write('\x1b[4;1HZ'); // status bar on last row (index 3)
+    s.write('\n'); // LF while cursor is at row 3 (below region) — no scroll
+    expect(rowText(s, 0).slice(0, 1)).toBe('A');
+    expect(rowText(s, 1).slice(0, 1)).toBe('B');
+    expect(rowText(s, 2).slice(0, 1)).toBe('C');
+    expect(rowText(s, 3).slice(0, 1)).toBe('Z');
+  });
+
+  it('IL/DL are bounded by the scroll region', () => {
+    // Insert/delete lines must discard/fill at scrollBottom, not the last row,
+    // so a pinned status bar below the region is never disturbed.
+    const s = new Screen(5, 4);
+    s.write('\x1b[1;4r'); // region rows 0..3
+    s.write('\x1b[1;1HA');
+    s.write('\x1b[2;1HB');
+    s.write('\x1b[3;1HC');
+    s.write('\x1b[4;1HD');
+    s.write('\x1b[5;1HS'); // status bar on last row (index 4)
+    // Delete the top line of the region: B,C,D shift up; region bottom blanks.
+    s.write('\x1b[1;1H'); // cursor at region top
+    s.write('\x1b[M'); // DL 1
+    expect(rowText(s, 0).slice(0, 1)).toBe('B');
+    expect(rowText(s, 1).slice(0, 1)).toBe('C');
+    expect(rowText(s, 2).slice(0, 1)).toBe('D');
+    expect(rowText(s, 3)).toBe('    '); // blank filled at region bottom
+    expect(rowText(s, 4).slice(0, 1)).toBe('S'); // status bar untouched
+  });
+
+  it('alt-screen swap resets the scroll region to full on enter and leave', () => {
+    const s = new Screen(4, 4);
+    s.write('\x1b[1;2r'); // region rows 0..1 on primary
+    s.write('\x1b[?1049h'); // enter alt — margins should reset to full
+    s.write('aaaa\r\nbbbb\r\ncccc\r\ndddd');
+    s.write('\n'); // LF at last row scrolls whole alt screen
+    expect(rowText(s, 0)).toBe('bbbb');
+    expect(rowText(s, 3)).toBe('    ');
+    s.write('\x1b[?1049l'); // leave alt — margins reset to full again
+    s.write('\x1b[1;1Hpppp\r\nqqqq\r\nrrrr\r\nssss');
+    s.write('\n'); // LF at last row scrolls the whole primary screen
+    expect(rowText(s, 0)).toBe('qqqq');
+    expect(rowText(s, 3)).toBe('    ');
+  });
+});
+
 describe('ansi.rowToRuns', () => {
   it('groups adjacent cells with identical style into one run', () => {
     const s = new Screen(1, 6);
@@ -351,5 +569,154 @@ describe('ansi.colorToCss', () => {
 
   it('returns an rgb() string for 24-bit colors', () => {
     expect(colorToCss(rgb(10, 20, 30))).toBe('rgb(10,20,30)');
+  });
+});
+
+describe('ansi.Screen.rowVersion (dirty-row tracking)', () => {
+  it('starts every row at a fresh version', () => {
+    const s = new Screen(5, 10);
+    expect(s.rowVersion).toHaveLength(5);
+    expect(s.rowVersion.every((v) => v > 0)).toBe(true);
+  });
+
+  it('bumps only the cursor row on a printed char', () => {
+    const s = new Screen(5, 10);
+    const before = [...s.rowVersion];
+    s.write('\x1b[3;1H'); // cursor → row 2 (0-based)
+    s.write('x');
+    expect(s.rowVersion[2]).not.toBe(before[2]);
+    expect(s.rowVersion[0]).toBe(before[0]);
+    expect(s.rowVersion[4]).toBe(before[4]);
+  });
+
+  it('bumps the scroll region on a bottom-margin line feed', () => {
+    const s = new Screen(4, 10);
+    s.write('\x1b[4;1H'); // cursor on the last row
+    const before = [...s.rowVersion];
+    s.write('\n'); // scrolls the whole region up
+    expect(s.rowVersion.every((v, r) => v !== before[r])).toBe(true);
+  });
+
+  it('bumps a row when it is erased', () => {
+    const s = new Screen(5, 10);
+    s.write('\x1b[2;1Habc'); // write on row 1
+    const before = [...s.rowVersion];
+    s.write('\x1b[2;1H\x1b[K'); // erase row 1
+    expect(s.rowVersion[1]).not.toBe(before[1]);
+    expect(s.rowVersion[3]).toBe(before[3]);
+  });
+
+  it('rebuilds rowVersion to the new length on resize', () => {
+    const s = new Screen(5, 10);
+    s.resize(8, 10);
+    expect(s.rowVersion).toHaveLength(8);
+    expect(s.rowVersion.every((v) => v > 0)).toBe(true);
+  });
+});
+
+describe('encodeMouse — SGR encoding (?1006h)', () => {
+  it('SGR left press at col=5, row=10', () => {
+    expect(encodeMouse(0, 5, 10, false, true)).toBe('\x1b[<0;5;10M');
+  });
+
+  it('SGR left release at col=5, row=10', () => {
+    expect(encodeMouse(0, 5, 10, true, true)).toBe('\x1b[<0;5;10m');
+  });
+
+  it('SGR wheel-up at col=1, row=1', () => {
+    expect(encodeMouse(64, 1, 1, false, true)).toBe('\x1b[<64;1;1M');
+  });
+
+  it('SGR wheel-down at col=1, row=1', () => {
+    expect(encodeMouse(65, 1, 1, false, true)).toBe('\x1b[<65;1;1M');
+  });
+
+  it('SGR drag (left held + motion, cb=32) at col=3, row=4', () => {
+    expect(encodeMouse(32, 3, 4, false, true)).toBe('\x1b[<32;3;4M');
+  });
+});
+
+describe('encodeMouse — X10/legacy encoding', () => {
+  it('X10 left press at col=1, row=1: bytes [32, 33, 33]', () => {
+    const result = encodeMouse(0, 1, 1, false, false);
+    expect(result).toBe('\x1b[M' + String.fromCharCode(32, 33, 33));
+  });
+
+  it('X10 release (low bits → 3): byte1 = 3+32 = 35', () => {
+    const result = encodeMouse(0, 1, 1, true, false);
+    // cb=0 release → low bits become 3 → cbX10=3 → byte1=3+32=35
+    expect(result).toBe('\x1b[M' + String.fromCharCode(35, 33, 33));
+  });
+
+  it('X10 right press (cb=2) at col=1, row=1: byte1 = 2+32 = 34', () => {
+    const result = encodeMouse(2, 1, 1, false, false);
+    expect(result).toBe('\x1b[M' + String.fromCharCode(34, 33, 33));
+  });
+});
+
+describe('ansi.Screen — mouse mode tracking', () => {
+  it('fresh Screen has all mouse modes false', () => {
+    const s = new Screen(24, 80);
+    expect(s.mouseEnabled).toBe(false);
+    expect(s.mouseButtonMotion).toBe(false);
+    expect(s.mouseAnyMotion).toBe(false);
+    expect(s.mouseSgr).toBe(false);
+  });
+
+  it('?1000h sets mouseEnabled; ?1000l clears it', () => {
+    const s = new Screen(24, 80);
+    s.write('\x1b[?1000h');
+    expect(s.mouseEnabled).toBe(true);
+    s.write('\x1b[?1000l');
+    expect(s.mouseEnabled).toBe(false);
+  });
+
+  it('?1006h sets mouseSgr; ?1006l clears it', () => {
+    const s = new Screen(24, 80);
+    s.write('\x1b[?1006h');
+    expect(s.mouseSgr).toBe(true);
+    s.write('\x1b[?1006l');
+    expect(s.mouseSgr).toBe(false);
+  });
+
+  it('?1000h + ?1006h: both mouseEnabled and mouseSgr true', () => {
+    const s = new Screen(24, 80);
+    s.write('\x1b[?1000h\x1b[?1006h');
+    expect(s.mouseEnabled).toBe(true);
+    expect(s.mouseSgr).toBe(true);
+  });
+
+  it('?1002h sets mouseEnabled and mouseButtonMotion but not mouseAnyMotion', () => {
+    const s = new Screen(24, 80);
+    s.write('\x1b[?1002h');
+    expect(s.mouseEnabled).toBe(true);
+    expect(s.mouseButtonMotion).toBe(true);
+    expect(s.mouseAnyMotion).toBe(false);
+  });
+
+  it('?1003h sets mouseEnabled, mouseButtonMotion, and mouseAnyMotion', () => {
+    const s = new Screen(24, 80);
+    s.write('\x1b[?1003h');
+    expect(s.mouseEnabled).toBe(true);
+    expect(s.mouseButtonMotion).toBe(true);
+    expect(s.mouseAnyMotion).toBe(true);
+  });
+
+  it('?1003l clears all three motion flags', () => {
+    const s = new Screen(24, 80);
+    s.write('\x1b[?1003h');
+    s.write('\x1b[?1003l');
+    expect(s.mouseEnabled).toBe(false);
+    expect(s.mouseButtonMotion).toBe(false);
+    expect(s.mouseAnyMotion).toBe(false);
+  });
+
+  it('cursor is visible by default and toggles with ?25 (DECTCEM)', () => {
+    const s = new Screen(24, 80);
+    expect(s.cursorVisible).toBe(true);
+    s.write('\x1b[?25l');
+    expect(s.cursorVisible).toBe(false);
+    s.write('\x1b[?25h');
+    expect(s.cursorVisible).toBe(true);
   });
 });

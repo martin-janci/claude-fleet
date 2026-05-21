@@ -1,10 +1,15 @@
 use crate::ipc_error::IpcError;
 use crate::shell::quote as shell_escape;
+use crate::ssh::SshClient;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use tauri::State;
+
+/// Hard cap on the un-drained PTY byte buffer (1 MiB). The frontend normally
+/// drains every 30-250 ms; this only bites if it stops entirely.
+const PTY_BUFFER_CAP: usize = 1 << 20;
 
 /// One active PTY at a time (we render a single terminal pane). Opening a new
 /// PTY closes the previous one. Holds the master (for resize), a writer (for
@@ -61,7 +66,11 @@ pub struct PtyOpenArgs {
 }
 
 #[tauri::command]
-pub fn pty_open(args: PtyOpenArgs, state: State<'_, Mutex<PtyState>>) -> Result<(), IpcError> {
+pub fn pty_open(
+    args: PtyOpenArgs,
+    state: State<'_, Mutex<PtyState>>,
+    ssh: State<'_, std::sync::Arc<SshClient>>,
+) -> Result<(), IpcError> {
     // Validate untrusted IPC input before it reaches `ssh` / `tmux`.
     crate::validate::host_alias(&args.host_alias)?;
     crate::validate::tmux_name(&args.session_name)?;
@@ -81,18 +90,19 @@ pub fn pty_open(args: PtyOpenArgs, state: State<'_, Mutex<PtyState>>) -> Result<
         c.args(["attach", "-t", &args.session_name]);
         c
     } else {
-        // Build the ControlPath the same way SshClient does so we share
-        // the established master. We don't need to import SshClient just
-        // to format a path — the format is stable.
-        let cm = {
-            let home = std::env::var("HOME").unwrap_or_default();
-            format!("{home}/.cache/claude-fleet/cm-{}.sock", args.host_alias)
-        };
+        // Reuse SshClient's ControlPath so this PTY multiplexes through the
+        // same master as every other ssh command (ControlMaster=auto creates
+        // it if it isn't up yet).
+        let cm = ssh.control_path(&args.host_alias);
         let mut c = CommandBuilder::new("ssh");
         c.args([
             "-tt",
             "-o",
-            &format!("ControlPath={}", cm),
+            "ControlMaster=auto",
+            "-o",
+            &format!("ControlPath={}", cm.display()),
+            "-o",
+            "ControlPersist=10m",
             "-o",
             "BatchMode=yes",
             "-o",
@@ -209,6 +219,15 @@ pub fn pty_open(args: PtyOpenArgs, state: State<'_, Mutex<PtyState>>) -> Result<
                     total += n;
                     if let Ok(mut b) = buffer_for_thread.lock() {
                         b.extend_from_slice(&buf[..n]);
+                        // Safety valve: if the frontend has stopped draining
+                        // (backgrounded tab, stalled loop) a busy session
+                        // could grow this without bound. Cap it by dropping
+                        // the oldest bytes — losing scrollback is acceptable;
+                        // OOMing the process is not.
+                        if b.len() > PTY_BUFFER_CAP {
+                            let excess = b.len() - PTY_BUFFER_CAP;
+                            b.drain(0..excess);
+                        }
                     } else {
                         break;
                     }
@@ -241,23 +260,53 @@ pub struct PtyDrainResult {
 
 #[tauri::command]
 pub fn pty_drain(state: State<'_, Mutex<PtyState>>) -> Result<PtyDrainResult, IpcError> {
-    let s = state
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
-    let mut buf = s
-        .buffer
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "pty buffer poisoned"))?;
-    if buf.is_empty() {
-        return Ok(PtyDrainResult {
-            data: String::new(),
-            bytes: 0,
-        });
+    // Swap the accumulated bytes out under the locks, then decode AFTER
+    // releasing them — the UTF-8 decode is the bulk of the work and shouldn't
+    // block the reader thread (which needs the buffer lock to append).
+    let raw: Vec<u8> = {
+        let s = state
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
+        let mut buf = s
+            .buffer
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "pty buffer poisoned"))?;
+        if buf.is_empty() {
+            return Ok(PtyDrainResult {
+                data: String::new(),
+                bytes: 0,
+            });
+        }
+        std::mem::take(&mut *buf)
+    };
+    // Decode the valid UTF-8 prefix. If the buffer ends in an INCOMPLETE
+    // multi-byte sequence (a chunk boundary fell mid-codepoint), push those
+    // trailing bytes back so they complete on the next drain instead of
+    // being lossily replaced with U+FFFD.
+    let valid_end = match std::str::from_utf8(&raw) {
+        Ok(_) => raw.len(),
+        // `error_len() == None` means "unexpected end of input" — incomplete.
+        Err(e) if e.error_len().is_none() => e.valid_up_to(),
+        // A genuine invalid byte mid-stream: lossy-decode the whole buffer.
+        Err(_) => raw.len(),
+    };
+    let data = String::from_utf8_lossy(&raw[..valid_end]).into_owned();
+    if valid_end < raw.len() {
+        let s = state
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
+        let mut buf = s
+            .buffer
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "pty buffer poisoned"))?;
+        // Prepend: the retained tail is chronologically before anything the
+        // reader thread appended since the mem::take above.
+        buf.splice(0..0, raw[valid_end..].iter().copied());
     }
-    let bytes = buf.len();
-    let data = String::from_utf8_lossy(&buf).into_owned();
-    buf.clear();
-    Ok(PtyDrainResult { data, bytes })
+    Ok(PtyDrainResult {
+        data,
+        bytes: valid_end,
+    })
 }
 
 #[derive(Deserialize)]

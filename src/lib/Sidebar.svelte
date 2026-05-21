@@ -1,13 +1,12 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
-  import { projects, refreshProjects, bootstrapProjects, type ProjectTreeRow } from './projects';
+  import { tick } from 'svelte';
+  import { projects, refreshProjects, type ProjectTreeRow } from './projects';
   import {
     sessions,
     loadSessions,
     killSession,
     renameSession,
     restartSession,
-    bootstrapSessions,
     type SessionRow,
   } from './sessions';
   import { selectedSession, selectSession } from './selection';
@@ -16,8 +15,8 @@
   import { theme, cycleTheme } from './theme';
   import NewSessionDialog from './NewSessionDialog.svelte';
   import SettingsDialog from './SettingsDialog.svelte';
-  import { hosts, bootstrapHosts, hostFilter } from './hosts';
-  import { accounts, bootstrapAccounts, type AccountRow } from './accounts';
+  import { hosts, hostFilter } from './hosts';
+  import { accounts, type AccountRow } from './accounts';
 
   let showSettings = $state(false);
 
@@ -42,6 +41,19 @@
     writePref('recency', recency);
   });
   let search = $state('');
+  // `filtered` re-derives the whole project tree on its dependencies; debounce
+  // the search term so each keystroke doesn't trigger a full re-derive +
+  // re-render. The input stays bound to `search` for instant feedback.
+  let searchQuery = $state('');
+  let searchTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    const q = search;
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      searchQuery = q;
+    }, 150);
+    return () => clearTimeout(searchTimer);
+  });
 
   // Per-session UI state. Kept here instead of on each row so collapse and
   // rename state survive a sessions store refresh that creates new row
@@ -49,6 +61,15 @@
   let renamingName: string | null = $state(null);
   let renameValue = $state('');
   let renameError: string | null = $state(null);
+  // The live rename <input> (only one renders at a time). Bound directly so
+  // focus targets the right element — a `data-testid` querySelector would
+  // pick the first match if a tree row and an orphan row shared a name.
+  let renameInput: HTMLInputElement | undefined;
+  // Synchronous in-flight guard: commitRename is wired to BOTH Enter and
+  // onblur, and Enter blurs the input — without this the rename IPC fires
+  // twice (the `!renamingName` check doesn't help: it's still set during the
+  // first call's await).
+  let committingRename = false;
   let pendingKill: SessionRow | null = $state(null);
   // Projects intentionally collapsed by the user. Anything not in this set
   // is open by default — most users have one or two projects and want to
@@ -56,14 +77,8 @@
   let collapsed: Set<number> = $state(new Set());
   let actionError: string | null = $state(null);
 
-  onMount(async () => {
-    await Promise.all([
-      bootstrapProjects(),
-      bootstrapSessions(),
-      bootstrapHosts(),
-      bootstrapAccounts(),
-    ]);
-  });
+  // Stores are bootstrapped once by App.svelte's onMount; Sidebar just reads
+  // them. (A second bootstrap here would double every startup IPC call.)
 
   async function onRefresh() {
     loading = true;
@@ -113,7 +128,7 @@
     $projects.filter(
       (p) =>
         matchesRecency(p, recency) &&
-        matchesSearch(p, search) &&
+        matchesSearch(p, searchQuery) &&
         sessionsForProject(p.project.id).length > 0,
     ),
   );
@@ -256,9 +271,8 @@
     renameValue = sess.tmux_name;
     renameError = null;
     await tick();
-    const input = document.querySelector<HTMLInputElement>('[data-testid="rename-input"]');
-    input?.focus();
-    input?.select();
+    renameInput?.focus();
+    renameInput?.select();
   }
 
   function cancelRename() {
@@ -268,29 +282,34 @@
   }
 
   async function commitRename() {
-    if (!renamingName) return;
+    if (committingRename || !renamingName) return;
     const next = renameValue.trim();
     if (!next || next === renamingName) {
       cancelRename();
       return;
     }
-    const oldName = renamingName;
-    const sess = $sessions.find((s) => s.tmux_name === oldName);
-    const hostAlias = sess?.host_alias ?? 'local';
-    const r = await renameSession(hostAlias, oldName, next);
-    if (!r.ok) {
-      renameError = r.error.message;
-      return;
+    committingRename = true;
+    try {
+      const oldName = renamingName;
+      const sess = $sessions.find((s) => s.tmux_name === oldName);
+      const hostAlias = sess?.host_alias ?? 'local';
+      const r = await renameSession(hostAlias, oldName, next);
+      if (!r.ok) {
+        renameError = r.error.message;
+        return;
+      }
+      // Persisted UI state (pane widths, collapsed) is keyed by tmux name;
+      // bring it along to the new name so the user's layout sticks.
+      migrateSessionUi(r.value.host_alias, oldName, r.value.tmux_name);
+      // If the renamed session was the selected one, follow the rename.
+      const cur = $selectedSession;
+      if (cur && cur.tmux_name === oldName) {
+        selectSession(r.value);
+      }
+      cancelRename();
+    } finally {
+      committingRename = false;
     }
-    // Persisted UI state (pane widths, collapsed) is keyed by tmux name;
-    // bring it along to the new name so the user's layout sticks.
-    migrateSessionUi(r.value.host_alias, oldName, r.value.tmux_name);
-    // If the renamed session was the selected one, follow the rename.
-    const cur = $selectedSession;
-    if (cur && cur.tmux_name === oldName) {
-      selectSession(r.value);
-    }
-    cancelRename();
   }
 
   function onRenameKey(e: KeyboardEvent) {
@@ -343,6 +362,60 @@
 </script>
 
 <div class="sidebar" data-testid="sidebar-tree">
+  {#snippet sessionRow(sess: SessionRow)}
+    {@const sessSelected = $selectedSession?.id === sess.id}
+    {@const isRenaming = renamingName === sess.tmux_name}
+    <div
+      class="sess-row"
+      class:selected={sessSelected}
+      class:renaming={isRenaming}
+      data-testid="sess-row"
+      role="button"
+      tabindex="0"
+      ondblclick={(e) => beginRename(sess, e)}
+      onclick={() => !isRenaming && onSelectSession(sess)}
+      onkeydown={(e) => !isRenaming && onKeySession(e, sess)}
+    >
+      {#if isRenaming}
+        <input
+          bind:this={renameInput}
+          class="rename-input"
+          data-testid="rename-input"
+          bind:value={renameValue}
+          onkeydown={onRenameKey}
+          onblur={commitRename}
+        />
+      {:else}
+        <span class="status-dot status-{sess.status}" title={sess.status} aria-hidden="true"></span>
+        {#if relatedCountFor(sess) > 0}
+          <span
+            class="related-badge"
+            data-testid="related-badge"
+            role="img"
+            title="{relatedCountFor(sess)} related session(s)"
+            aria-label="{relatedCountFor(sess)} related sessions"
+          >🔗{relatedCountFor(sess)}</span>
+        {/if}
+        {#if sess.kind === 'review'}
+          <span class="review-badge" role="img" title="review session" aria-label="review session">🔍</span>
+        {/if}
+        {#if sess.kind === 'shell'}
+          <span class="shell-badge" title="shell session">▶</span>
+        {/if}
+        <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
+        <span class="sess-name">{sess.tmux_name}</span>
+        <div class="row-actions">
+          <button class="icon-btn small" onclick={(e) => doRestart(sess, e)} title="Restart claude in this session" aria-label="Restart">↻</button>
+          <button class="icon-btn small" onclick={(e) => beginRename(sess, e)} title="Rename session" aria-label="Rename">✎</button>
+          <button class="icon-btn small danger" onclick={(e) => askKill(sess, e)} title="Kill session" aria-label="Kill">×</button>
+        </div>
+      {/if}
+    </div>
+    {#if isRenaming && renameError}
+      <p class="err inline-err">{renameError}</p>
+    {/if}
+  {/snippet}
+
   <header class="sidebar-header" data-testid="sidebar-chrome-top">
     <div class="row">
       <input
@@ -447,70 +520,7 @@
 
             {#if !isCollapsed}
               {#each projectSessions as sess (sess.id)}
-                {@const sessSelected = $selectedSession?.id === sess.id}
-                {@const isRenaming = renamingName === sess.tmux_name}
-                <div
-                  class="sess-row"
-                  class:selected={sessSelected}
-                  class:renaming={isRenaming}
-                  data-testid="sess-row"
-                  role="button"
-                  tabindex="0"
-                  ondblclick={(e) => beginRename(sess, e)}
-                  onclick={() => !isRenaming && onSelectSession(sess)}
-                  onkeydown={(e) => !isRenaming && onKeySession(e, sess)}
-                >
-                  {#if isRenaming}
-                    <input
-                      class="rename-input"
-                      data-testid="rename-input"
-                      bind:value={renameValue}
-                      onkeydown={onRenameKey}
-                      onblur={commitRename}
-                    />
-                  {:else}
-                    <span
-                      class="status-dot status-{sess.status}"
-                      title={sess.status}
-                      aria-hidden="true"
-                    ></span>
-                    {#if relatedCountFor(sess) > 0}
-                      <span
-                        class="related-badge"
-                        data-testid="related-badge"
-                        title="{relatedCountFor(sess)} related session(s)"
-                      >🔗{relatedCountFor(sess)}</span>
-                    {/if}
-                    {#if sess.kind === 'review'}
-                      <span class="review-badge" title="review session">🔍</span>
-                    {/if}
-                    <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
-                    <span class="sess-name">{sess.tmux_name}</span>
-                    <div class="row-actions">
-                      <button
-                        class="icon-btn small"
-                        onclick={(e) => doRestart(sess, e)}
-                        title="Restart claude in this session"
-                        aria-label="Restart"
-                      >↻</button>
-                      <button
-                        class="icon-btn small"
-                        onclick={(e) => beginRename(sess, e)}
-                        title="Rename session"
-                        aria-label="Rename"
-                      >✎</button>
-                      <button
-                        class="icon-btn small danger"
-                        onclick={(e) => askKill(sess, e)}
-                        title="Kill session"
-                        aria-label="Kill"
-                      >×</button>
-                    </div>
-                  {/if}
-                </div>
-                {#if isRenaming && renameError}
-                  <p class="err inline-err">{renameError}</p>
-                {/if}
+                {@render sessionRow(sess)}
               {/each}
             {/if}
           </li>
@@ -528,55 +538,7 @@
       <div class="orphan-section" data-testid="orphan-sessions">
         <div class="section-header">Other sessions ({orphanSessions.length})</div>
         {#each orphanSessions as sess (sess.id)}
-          {@const sessSelected = $selectedSession?.id === sess.id}
-          {@const isRenaming = renamingName === sess.tmux_name}
-          <div
-            class="sess-row"
-            class:selected={sessSelected}
-            class:renaming={isRenaming}
-            data-testid="sess-row"
-            role="button"
-            tabindex="0"
-            ondblclick={(e) => beginRename(sess, e)}
-            onclick={() => !isRenaming && onSelectSession(sess)}
-            onkeydown={(e) => !isRenaming && onKeySession(e, sess)}
-          >
-            {#if isRenaming}
-              <input
-                class="rename-input"
-                data-testid="rename-input"
-                bind:value={renameValue}
-                onkeydown={onRenameKey}
-                onblur={commitRename}
-              />
-            {:else}
-              <span
-                class="status-dot status-{sess.status}"
-                title={sess.status}
-                aria-hidden="true"
-              ></span>
-              {#if relatedCountFor(sess) > 0}
-                <span
-                  class="related-badge"
-                  data-testid="related-badge"
-                  title="{relatedCountFor(sess)} related session(s)"
-                >🔗{relatedCountFor(sess)}</span>
-              {/if}
-              {#if sess.kind === 'review'}
-                <span class="review-badge" title="review session">🔍</span>
-              {/if}
-              <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
-              <span class="sess-name">{sess.tmux_name}</span>
-              <div class="row-actions">
-                <button class="icon-btn small" onclick={(e) => doRestart(sess, e)} title="Restart">↻</button>
-                <button class="icon-btn small" onclick={(e) => beginRename(sess, e)} title="Rename">✎</button>
-                <button class="icon-btn small danger" onclick={(e) => askKill(sess, e)} title="Kill">×</button>
-              </div>
-            {/if}
-          </div>
-          {#if isRenaming && renameError}
-            <p class="err inline-err">{renameError}</p>
-          {/if}
+          {@render sessionRow(sess)}
         {/each}
       </div>
     {/if}
@@ -754,6 +716,7 @@
   }
 
   .review-badge { font-size: 0.7rem; margin-left: 0.2rem; }
+  .shell-badge { font-size: 0.7rem; margin-left: 0.2rem; color: var(--fg-muted); }
 
   .scroller {
     flex: 1 1 auto;

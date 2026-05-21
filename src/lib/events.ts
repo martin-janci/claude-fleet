@@ -24,22 +24,27 @@ export type RowEventHandlers = {
  * the session handlers. The listeners not declared are simply never created.
  */
 export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<UnlistenFn> {
-  const unlisteners: UnlistenFn[] = [];
-  const sub = async <T>(name: string, handler: ((payload: T) => void) | undefined): Promise<void> => {
-    if (!handler) return;
-    const u = await listen<T>(name, (e) => handler(e.payload));
-    unlisteners.push(u);
+  const sub = <T>(
+    name: string,
+    handler: ((payload: T) => void) | undefined,
+  ): Promise<UnlistenFn | null> => {
+    if (!handler) return Promise.resolve(null);
+    return listen<T>(name, (e) => handler(e.payload));
   };
-  await sub<SessionRow>('session:created', handlers.onSessionCreated);
-  await sub<SessionRow>('session:updated', handlers.onSessionUpdated);
-  await sub<{ id: number }>('session:killed', handlers.onSessionKilled);
-  await sub<HostRow>('host:added', handlers.onHostAdded);
-  await sub<HostRow>('host:probed', handlers.onHostProbed);
-  await sub<{ alias: string }>('host:removed', handlers.onHostRemoved);
-  await sub<AccountRow>('account:upserted', handlers.onAccountUpserted);
-  await sub<ProjectRow>('project:updated', handlers.onProjectUpdated);
-  await sub<WorktreeRow>('worktree:updated', handlers.onWorktreeUpdated);
+  // Register all listeners concurrently — each `listen` is its own IPC
+  // round-trip; awaiting them serially needlessly delayed event flow on mount.
+  const unlisteners = await Promise.all([
+    sub<SessionRow>('session:created', handlers.onSessionCreated),
+    sub<SessionRow>('session:updated', handlers.onSessionUpdated),
+    sub<{ id: number }>('session:killed', handlers.onSessionKilled),
+    sub<HostRow>('host:added', handlers.onHostAdded),
+    sub<HostRow>('host:probed', handlers.onHostProbed),
+    sub<{ alias: string }>('host:removed', handlers.onHostRemoved),
+    sub<AccountRow>('account:upserted', handlers.onAccountUpserted),
+    sub<ProjectRow>('project:updated', handlers.onProjectUpdated),
+    sub<WorktreeRow>('worktree:updated', handlers.onWorktreeUpdated),
+  ]);
   return () => {
-    for (const u of unlisteners) u();
+    for (const u of unlisteners) u?.();
   };
 }

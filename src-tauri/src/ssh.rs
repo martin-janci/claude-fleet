@@ -1,26 +1,24 @@
-//! Per-host ControlMaster-backed SSH client.
+//! ControlMaster-backed SSH client.
 //!
 //! Why ControlMaster: every list_sessions / kill / rename involves a tmux
 //! command on the remote host. Without a persistent socket each call pays
 //! the full ssh handshake (~500-2000ms on a LAN, more over WAN). With
-//! ControlMaster the first call sets up a background `ssh -M -N`, every
-//! subsequent call multiplexes through it and returns in <50ms.
+//! ControlMaster the first call sets up the master, every subsequent call
+//! multiplexes through it and returns in <50ms.
 //!
 //! Socket path: ~/.cache/claude-fleet/cm-<host>.sock — dedicated to this app
 //! so we never collide with a user's global ssh ControlPath setting.
 //!
-//! ## Concurrency model (iter 4a)
+//! ## Master lifecycle
 //!
-//! `masters` is a `DashMap<String, Arc<OnceCell<()>>>`. The `OnceCell` for
-//! each host guarantees that concurrent first-touches share exactly one master
-//! spawn: `get_or_try_init` blocks all waiters until the winner's future
-//! resolves, then returns the cached `Ok(())` to every other caller.
-//!
-//! Error semantics: `tokio::sync::OnceCell::get_or_try_init` does NOT cache
-//! `Err`. If the init future fails, the cell stays empty and the next call
-//! retries — this is intentional, so a transient ssh failure (e.g. host
-//! briefly unreachable) doesn't poison the host's master slot for the lifetime
-//! of the process.
+//! Every `run` passes `-o ControlMaster=auto -o ControlPath=... -o
+//! ControlPersist=10m`, so ssh itself owns the master: the first connection
+//! to a host establishes it, subsequent ones multiplex, and after 10 min
+//! idle it self-closes — the next call simply re-establishes it. There is no
+//! app-side "is the master spawned" cache to go stale (the previous design
+//! cached that in a `OnceCell` and silently lost multiplexing once the master
+//! self-closed). Concurrent first-connects are serialised by ssh via the
+//! ControlPath.
 
 use crate::ipc_error::IpcError;
 use dashmap::DashMap;
@@ -28,18 +26,20 @@ use std::path::PathBuf;
 use std::process::Output;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
 struct SshClientInner {
-    /// Per-host OnceCell. The cell's init future runs the master-spawn exactly
-    /// once; subsequent callers receive the cached result immediately.
-    masters: DashMap<String, Arc<OnceCell<()>>>,
+    /// Hosts a command has been run against — used only so `shutdown_all`
+    /// knows which ControlPaths to close on app exit.
+    seen: DashMap<String, ()>,
+    /// Per-host `$HOME` cache. A host's home directory does not change for
+    /// the lifetime of the app, so the `printenv HOME` round-trip is paid
+    /// once and reused (it was previously one SSH round-trip per new_session).
+    homes: DashMap<String, String>,
 }
 
-/// Cheaply cloneable SSH client. Each clone shares the same underlying
-/// `DashMap` of ControlMaster cells via `Arc`, so the master is only
-/// ever spawned once per host even across concurrent clones.
+/// Cheaply cloneable SSH client. Clones share the same underlying state via
+/// `Arc`.
 #[derive(Clone)]
 pub struct SshClient {
     inner: Arc<SshClientInner>,
@@ -49,120 +49,95 @@ impl SshClient {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(SshClientInner {
-                masters: DashMap::new(),
+                seen: DashMap::new(),
+                homes: DashMap::new(),
             }),
         }
     }
 
-    /// Returns the dedicated ControlPath for a host. Side effect: creates
-    /// the parent dir if missing. The path is used by both `-M` master spawn
-    /// and subsequent `-o ControlPath=...` calls.
+    /// Resolve `$HOME` on a remote host, cached for the lifetime of the app.
+    /// The first call pays one `printenv HOME` round-trip; later calls return
+    /// the cached value. Errors are not cached — a transient failure retries.
+    pub async fn remote_home(&self, host: &str) -> Result<String, IpcError> {
+        if let Some(home) = self.inner.homes.get(host) {
+            return Ok(home.clone());
+        }
+        let out = self
+            .run(host, &["printenv", "HOME"], Duration::from_secs(5))
+            .await?;
+        if !out.status.success() {
+            return Err(IpcError::new(
+                "E_SSH",
+                format!(
+                    "couldn't read $HOME on {host}: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+            ));
+        }
+        let home = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if home.is_empty() {
+            return Err(IpcError::new(
+                "E_SSH",
+                format!("remote $HOME on {host} is empty"),
+            ));
+        }
+        self.inner.homes.insert(host.to_string(), home.clone());
+        Ok(home)
+    }
+
+    /// Returns the dedicated ControlPath for a host. Side effect: creates the
+    /// parent dir (locked to 0700) if missing.
     pub fn control_path(&self, host: &str) -> PathBuf {
         let dir = cache_dir();
-        // best-effort: ignore errors (caller falls back to per-call ssh if
-        // dir doesn't exist).
+        // best-effort: ignore errors (ssh falls back to a fresh connection
+        // if the dir doesn't exist).
         let _ = std::fs::create_dir_all(&dir);
+        // Lock the directory to 0700: the ControlMaster sockets inside it are
+        // authenticated SSH channels to every configured host. On a shared
+        // machine a 0755 dir would let another local user reach them.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
         dir.join(format!("cm-{host}.sock"))
     }
 
-    /// Spawn a background master if we haven't already for this host.
-    ///
-    /// Concurrent calls for the same host share a single `OnceCell`: exactly
-    /// one task runs the spawn future; all others await and reuse the result.
-    pub async fn ensure_master(&self, host: &str) -> Result<(), IpcError> {
-        let cell = self
-            .inner
-            .masters
-            .entry(host.to_string())
-            .or_insert_with(|| Arc::new(OnceCell::new()))
-            .clone();
-
-        cell.get_or_try_init(|| async {
-            let path = self.control_path(host);
-
-            // If a stale socket exists, ask any orphan master to exit. Errors
-            // are non-fatal — `-O exit` returns 255 if no master is listening.
-            let _ = tokio::process::Command::new("ssh")
-                .args([
-                    "-o",
-                    &format!("ControlPath={}", path.display()),
-                    "-O",
-                    "exit",
-                    "--",
-                    host,
-                ])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .await;
-
-            // Spawn the master. -f makes ssh fork into the background after
-            // authenticating. -N requests no remote command. ControlPersist
-            // keeps the master idle for 10 minutes before self-closing.
-            let status = tokio::process::Command::new("ssh")
-                .args([
-                    "-fN",
-                    "-o",
-                    "ControlMaster=yes",
-                    "-o",
-                    &format!("ControlPath={}", path.display()),
-                    "-o",
-                    "ControlPersist=10m",
-                    "-o",
-                    "BatchMode=yes",
-                    "-o",
-                    "ConnectTimeout=5",
-                    "--",
-                    host,
-                ])
-                .status()
-                .await
-                .map_err(|e| IpcError::new("E_SSH", format!("spawn ssh master: {e}")))?;
-
-            if !status.success() {
-                return Err(IpcError::new(
-                    "E_SSH",
-                    format!("ssh master to {host} failed (status: {status:?})"),
-                ));
-            }
-            Ok(())
-        })
-        .await
-        .map(|_| ())
+    /// The `-o` flags shared by every multiplexed ssh invocation. With
+    /// `ControlMaster=auto` + `ControlPersist`, ssh creates the master on the
+    /// first call and reuses/recreates it as needed — no app-side bookkeeping.
+    fn mux_opts(&self, host: &str, timeout: Duration) -> Vec<String> {
+        let path = self.control_path(host);
+        vec![
+            "-o".into(),
+            "ControlMaster=auto".into(),
+            "-o".into(),
+            format!("ControlPath={}", path.display()),
+            "-o".into(),
+            "ControlPersist=10m".into(),
+            "-o".into(),
+            "BatchMode=yes".into(),
+            "-o".into(),
+            format!("ConnectTimeout={}", timeout.as_secs().max(1)),
+        ]
     }
 
-    /// Run a command on `host`, multiplexing through the established master.
-    /// `timeout` is enforced via `-o ConnectTimeout` (handshake only); the
-    /// command itself runs to completion — we trust tmux invocations to be
-    /// fast. Returns the full Output for callers to inspect stdout/stderr.
-    ///
-    /// NOTE: callers are converted to async in iter 4a Task 5; until then
-    /// this method is async and call sites that haven't been migrated yet
-    /// will fail to compile (expected — Task 5 fixes them).
+    /// Run a command on `host`, multiplexing through the ControlMaster.
+    /// Returns the full Output for callers to inspect stdout/stderr.
     pub async fn run(
         &self,
         host: &str,
         args: &[&str],
         timeout: Duration,
     ) -> Result<Output, IpcError> {
-        self.ensure_master(host).await?;
-        let path = self.control_path(host);
+        self.inner.seen.insert(host.to_string(), ());
         let mut cmd = tokio::process::Command::new("ssh");
-        cmd.args([
-            "-o",
-            &format!("ControlPath={}", path.display()),
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            &format!("ConnectTimeout={}", timeout.as_secs().max(1)),
-            // `--` ends option parsing — the host can never be read as an
-            // ssh option even if validation upstream were bypassed.
-            "--",
-            host,
-        ]);
-        cmd.args(args);
-        // tokio::process::Command::output() returns tokio's Output which is
-        // std::process::Output re-exported — same type as before.
+        for opt in self.mux_opts(host, timeout) {
+            cmd.arg(opt);
+        }
+        // `--` ends option parsing — the host can never be read as an ssh
+        // option even if validation upstream were bypassed.
+        cmd.arg("--").arg(host).args(args);
         cmd.output()
             .await
             .map_err(|e| IpcError::new("E_SSH", format!("ssh {host}: {e}")))
@@ -184,20 +159,13 @@ impl SshClient {
         timeout: Duration,
         token: CancellationToken,
     ) -> Result<Output, IpcError> {
-        self.ensure_master(host).await?;
-        let path = self.control_path(host);
-        let mut child = tokio::process::Command::new("ssh")
-            .args([
-                "-o",
-                &format!("ControlPath={}", path.display()),
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                &format!("ConnectTimeout={}", timeout.as_secs().max(1)),
-                "--",
-                host,
-            ])
-            .args(args)
+        self.inner.seen.insert(host.to_string(), ());
+        let mut cmd = tokio::process::Command::new("ssh");
+        for opt in self.mux_opts(host, timeout) {
+            cmd.arg(opt);
+        }
+        cmd.arg("--").arg(host).args(args);
+        let mut child = cmd
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             // Belt-and-suspenders: if the cancel arm panics before reaping
@@ -249,19 +217,16 @@ impl SshClient {
         }
     }
 
-    /// Tell every known master to exit. Called from Tauri on_exit so we
-    /// don't leak persistent ssh processes after the app closes.
+    /// Tell every touched host's master to exit. Called from Tauri on_exit so
+    /// we don't leak persistent ssh processes after the app closes.
     ///
-    /// This is intentionally synchronous (blocking) because it is called from
-    /// a sync on_exit hook. It uses `std::process::Command` directly (NOT
-    /// tokio) so it works without a running runtime — best-effort fire-and-
-    /// forget cleanup.
+    /// Synchronous (it runs from a sync on_exit hook) and fire-and-forget:
+    /// `spawn()` not `status()` so quit isn't serialised on N round-trips,
+    /// and ControlPersist would reap an un-exited master anyway.
     pub fn shutdown_all(&self) {
-        let hosts: Vec<String> = self.inner.masters.iter().map(|e| e.key().clone()).collect();
+        let hosts: Vec<String> = self.inner.seen.iter().map(|e| e.key().clone()).collect();
         for host in hosts {
             let path = self.control_path(&host);
-            // Fire-and-forget via std::process::Command — shutdown_all is
-            // called from a sync context and we just want best-effort cleanup.
             let _ = std::process::Command::new("ssh")
                 .args([
                     "-o",
@@ -273,7 +238,7 @@ impl SshClient {
                 ])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .status();
+                .spawn();
         }
     }
 }
@@ -308,9 +273,18 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_when_no_masters_is_noop() {
+    fn shutdown_when_no_hosts_seen_is_noop() {
         let c = SshClient::new();
-        c.shutdown_all(); // must not panic when masters map is empty
+        c.shutdown_all(); // must not panic when no host has been touched
+    }
+
+    #[test]
+    fn mux_opts_carry_controlmaster_auto_and_persist() {
+        let c = SshClient::new();
+        let opts = c.mux_opts("h", Duration::from_secs(5));
+        assert!(opts.iter().any(|o| o == "ControlMaster=auto"));
+        assert!(opts.iter().any(|o| o == "ControlPersist=10m"));
+        assert!(opts.iter().any(|o| o == "ConnectTimeout=5"));
     }
 
     #[tokio::test]
@@ -358,19 +332,5 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("child pid {pid} still alive 1s after cancel — kill+wait failed to reap");
-    }
-
-    #[tokio::test]
-    async fn ensure_master_idempotent_across_concurrent_calls() {
-        // Two concurrent ensure_master() for the same alias should resolve in ≤ 1
-        // master spawn. The actual ssh call will fail (alias doesn't exist), but
-        // OnceCell semantics still apply: both calls share the same cell.
-        let client = SshClient::new();
-        let alias = "nonexistent-test-host-for-iter4a";
-        let (a, b) = tokio::join!(client.ensure_master(alias), client.ensure_master(alias),);
-        // Either both Ok (somehow worked) or both Err (the expected case); both
-        // must agree — single OnceCell guarantees that.
-        assert_eq!(a.is_ok(), b.is_ok(), "concurrent ensure_master must agree");
-        assert_eq!(client.inner.masters.len(), 1, "exactly one cell registered");
     }
 }

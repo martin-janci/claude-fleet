@@ -3,8 +3,10 @@
  *
  * Things that vary per tmux session:
  *   - centerPx: width (px) of the middle "Details" pane.
- *   - centerCollapsed: whether the user has hidden the middle pane to
- *     reclaim space for the terminal.
+ *
+ * (The middle pane's *collapsed* state is NOT per-session — it's a global
+ * UI pref persisted via prefs.ts under `layout.center-collapsed`, mirroring
+ * the sidebar. Only the split width is remembered per session.)
  *
  * Identity is the tuple `host_alias + tmux_name`. tmux_name alone is not
  * unique across hosts; the DB row's numeric `id` is, but it churns whenever
@@ -14,8 +16,8 @@
  * for rename-migration without scanning every localStorage key):
  *
  *     cf:session-ui = {
- *       "local:dev-foo":     { centerPx: 360, centerCollapsed: false },
- *       "local:dev-bar":     { centerPx: 240, centerCollapsed: true  },
+ *       "local:dev-foo":     { centerPx: 360 },
+ *       "local:dev-bar":     { centerPx: 240 },
  *       ...
  *     }
  */
@@ -24,12 +26,10 @@ const STORAGE_KEY = 'cf:session-ui';
 
 export interface SessionUiState {
   centerPx: number;
-  centerCollapsed: boolean;
 }
 
 export const DEFAULT_UI: SessionUiState = {
   centerPx: 360,
-  centerCollapsed: false,
 };
 
 /** Key used both as map entry name and rename migration target. */
@@ -67,7 +67,6 @@ export function loadSessionUi(hostAlias: string, tmuxName: string): SessionUiSta
   if (!found) return { ...DEFAULT_UI };
   return {
     centerPx: typeof found.centerPx === 'number' ? found.centerPx : DEFAULT_UI.centerPx,
-    centerCollapsed: typeof found.centerCollapsed === 'boolean' ? found.centerCollapsed : DEFAULT_UI.centerCollapsed,
   };
 }
 

@@ -320,6 +320,11 @@ impl FleetTools {
             worktree_id: p.worktree_id,
             name: p.name,
             call_id: None,
+            // v1 of the MCP surface spawns a normal Claude session in an
+            // existing project/worktree; new-branch and shell kinds are not
+            // exposed yet.
+            new_worktree: None,
+            kind: None,
         };
         let row = sessions::new_session(args, &self.store, &self.ssh, &self.reg)
             .await

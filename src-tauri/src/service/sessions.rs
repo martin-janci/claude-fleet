@@ -2,7 +2,7 @@ use crate::cancel::{CancelGuard, CancellationRegistry};
 use crate::ipc_error::IpcError;
 use crate::shell::quote as shq;
 use crate::ssh::SshClient;
-use crate::store::{HostReconcile, HostRow, ReconcileSession, SessionRow, Store};
+use crate::store::{HostReconcile, HostRow, ProjectRow, ReconcileSession, SessionRow, Store};
 use crate::tmux::{LocalTmux, RemoteTmux, TmuxExec};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -28,6 +28,7 @@ fn reconcile_write_one_host(
     s: &mut Store,
     host: &HostRow,
     res: &Result<Vec<crate::tmux::TmuxSession>, IpcError>,
+    projects: &[ProjectRow],
 ) -> Result<(), IpcError> {
     match res {
         Ok(live) => {
@@ -35,7 +36,7 @@ fn reconcile_write_one_host(
             let mut sessions: Vec<ReconcileSession> = Vec::with_capacity(live.len());
             for sess in live {
                 keep.push(sess.name.clone());
-                let project_id = find_project_id_for_path(s, &host.alias, &sess.path);
+                let project_id = find_project_id_for_path(projects, &host.alias, &sess.path);
                 // Preservation invariant: if the session already has an
                 // account_uuid in the DB, keep it; only capture the host's
                 // current account for newly-discovered sessions.
@@ -93,8 +94,8 @@ async fn reconcile_sessions(
     };
 
     // 2. Fan out probes (off-lock) via JoinSet for parallel execution.
-    //    Hidden hosts are skipped here — their last-known sessions are
-    //    fetched in the write phase without probing.
+    //    Hidden hosts are skipped here — their last-known sessions are still
+    //    surfaced by the final `list_all_sessions` read, without probing.
     //    Each task receives owned data so it satisfies 'static + Send.
     //
     //    TODO(iter4a-M4): `JoinSet::drop` aborts the futures but does NOT
@@ -126,41 +127,35 @@ async fn reconcile_sessions(
     //    update_host_probe + upserts + touches + delete-not-in in ONE
     //    transaction (one fsync) and emits events only AFTER it commits — so a
     //    mid-burst error rolls everything back and emits nothing for that host.
-    //
-    //    The (project_id, account_uuid) resolution stays HERE: those are reads
-    //    (`find_project_id_for_path`, `get_session_account`) and must run
-    //    before the transaction opens.
-    let mut all_rows: Vec<SessionRow> = Vec::new();
     {
         let mut s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+
+        // The project list is identical for every host — fetch it once here
+        // rather than re-querying inside `find_project_id_for_path` per session.
+        let projects = s.list_projects()?;
 
         for (host, res) in &probed {
             // Per-host isolation: one host's DB write failure (e.g. an FK
             // violation on a stale account_uuid) must NOT abort reconcile for
             // every other host. apply_host_reconcile is transactional, so a
             // failed host rolls back cleanly; we log it and carry on.
-            if let Err(e) = reconcile_write_one_host(&mut s, host, res) {
+            if let Err(e) = reconcile_write_one_host(&mut s, host, res, &projects) {
                 eprintln!(
                     "reconcile: write for host {} failed: {}",
                     host.alias, e.message
                 );
             }
-            // Always surface this host's last-known rows, even after a
-            // partial write failure above.
-            if let Ok(rows) = s.list_sessions_for_host(&host.alias) {
-                all_rows.extend(rows);
-            }
-        }
-
-        // Hidden hosts: don't probe but DO surface their last-known sessions.
-        let all_hosts = s.list_hosts()?;
-        for host in all_hosts.iter().filter(|h| h.hidden) {
-            all_rows.extend(s.list_sessions_for_host(&host.alias)?);
         }
     }
-    Ok(all_rows)
+
+    // 4. Read the final session set in one query (covers active + hidden
+    //    hosts) instead of N per-host reads.
+    let s = store
+        .lock()
+        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    s.list_all_sessions().map_err(IpcError::from)
 }
 
 async fn reconcile_one_host(
@@ -183,55 +178,13 @@ async fn reconcile_one_host(
     let tmux = exec_for(&host.alias, ssh);
     let result = tmux.list_sessions().await;
 
-    // 3. Apply writes under one brief lock, via the same single-transaction
-    //    + emit-after-commit path as the multi-host reconcile. Reads
-    //    (project_id / account_uuid resolution) happen before the tx opens.
+    // 3. Apply writes under one brief lock, via the SAME per-host write path
+    //    as the multi-host reconcile (single transaction + emit-after-commit).
     let mut s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    match result {
-        Ok(live) => {
-            let mut keep: Vec<String> = Vec::with_capacity(live.len());
-            let mut sessions: Vec<ReconcileSession> = Vec::with_capacity(live.len());
-            for sess in &live {
-                keep.push(sess.name.clone());
-                let project_id = find_project_id_for_path(&s, &host.alias, &sess.path);
-                let account_uuid = s
-                    .get_session_account(&host.alias, &sess.name)?
-                    .or_else(|| host.account_uuid.clone());
-                let worktree_key = worktree_key_for_path(&sess.path.to_string_lossy());
-                sessions.push(ReconcileSession {
-                    tmux_name: &sess.name,
-                    project_id,
-                    created_at: sess.created,
-                    last_activity_at: sess.last_activity,
-                    account_uuid,
-                    worktree_key,
-                });
-            }
-            s.apply_host_reconcile(HostReconcile {
-                alias: &host.alias,
-                reachable: true,
-                claude_version: host.claude_version.as_deref(),
-                tmux_version: host.tmux_version.as_deref(),
-                last_pinged_at: now_unix(),
-                sessions: &sessions,
-                keep: &keep,
-            })?;
-        }
-        Err(_e) => {
-            s.apply_host_reconcile(HostReconcile {
-                alias: &host.alias,
-                reachable: false,
-                claude_version: host.claude_version.as_deref(),
-                tmux_version: host.tmux_version.as_deref(),
-                last_pinged_at: now_unix(),
-                sessions: &[],
-                keep: &[],
-            })?;
-        }
-    }
-    Ok(())
+    let projects = s.list_projects()?;
+    reconcile_write_one_host(&mut s, &host, &result, &projects)
 }
 
 fn now_unix() -> i64 {
@@ -279,13 +232,18 @@ fn worktree_key_for_path(path: &str) -> Option<String> {
     Some("main".to_string())
 }
 
-fn find_project_id_for_path(s: &Store, host_alias: &str, path: &std::path::Path) -> Option<i64> {
+/// Match a session's cwd to a known project id. `projects` is passed in by the
+/// caller (fetched once per reconcile) rather than queried per session.
+fn find_project_id_for_path(
+    projects: &[ProjectRow],
+    host_alias: &str,
+    path: &std::path::Path,
+) -> Option<i64> {
     let path_str = path.to_string_lossy();
-    let projects = s.list_projects().ok()?;
     if host_alias == "local" {
-        // Local paths: existing prefix match (handles worktrees nested under repos).
+        // Local paths: prefix match (handles worktrees nested under repos).
         return projects
-            .into_iter()
+            .iter()
             .filter(|p| path_str.starts_with(&p.base_path))
             .max_by_key(|p| p.base_path.len())
             .map(|p| p.id);
@@ -295,7 +253,7 @@ fn find_project_id_for_path(s: &Store, host_alias: &str, path: &std::path::Path)
     // to `None` (orphan) if the path doesn't follow the convention.
     let (owner, repo) = extract_owner_repo(&path_str)?;
     projects
-        .into_iter()
+        .iter()
         .find(|p| p.owner == owner && p.repo == repo)
         .map(|p| p.id)
 }
@@ -330,6 +288,10 @@ pub struct NewSessionArgs {
     pub worktree_id: Option<i64>,
     pub name: String,
     pub call_id: Option<u64>,
+    pub new_worktree: Option<String>,
+    /// Session kind: `"work"` (default) runs Claude Code in the pane;
+    /// `"shell"` runs a plain interactive login shell.
+    pub kind: Option<String>,
 }
 
 /// Look up `(owner, repo)` for a given project id.
@@ -352,38 +314,6 @@ fn fetch_worktree(s: &Store, worktree_id: i64) -> Result<(String, Option<String>
         Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
     })
     .map_err(IpcError::from)
-}
-
-/// Resolve `$HOME` on a remote host. Each new_session call hits this once;
-/// for the iter-1 MVP we don't cache (sub-50ms over an established control
-/// master). If the SSH session is unreachable, this propagates an error
-/// rather than guessing — calling `new_session` for an unreachable host
-/// should fail loudly.
-async fn remote_home(ssh: &Arc<SshClient>, host: &str) -> Result<String, IpcError> {
-    let out = ssh
-        .run(
-            host,
-            &["printenv", "HOME"],
-            std::time::Duration::from_secs(5),
-        )
-        .await?;
-    if !out.status.success() {
-        return Err(IpcError::new(
-            "E_SSH",
-            format!(
-                "couldn't read $HOME on {host}: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ),
-        ));
-    }
-    let home = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if home.is_empty() {
-        return Err(IpcError::new(
-            "E_SSH",
-            format!("remote $HOME on {host} is empty"),
-        ));
-    }
-    Ok(home)
 }
 
 /// Build the absolute path on the remote host where a project (and optional
@@ -470,10 +400,17 @@ async fn ensure_remote_project(
     // Wrap in bash -lc so $PATH (git on Homebrew/Linuxbrew) is sourced. Use
     // the same single-quote-the-whole-script trick as RemoteTmux::remote_bash
     // to avoid the ssh argv-joining bug.
+    // Single-quote the WHOLE script so it crosses the ssh argv-join as one
+    // word. ssh concatenates the trailing args with spaces and the remote
+    // LOGIN shell (often zsh) re-tokenizes them — without quoting, the
+    // `if ...; then ...; fi` splits at `;` and orphans `then` ("zsh: parse
+    // error near then"). `shq` escapes the inner single-quotes from the path
+    // interpolation above.
+    let quoted = shq(&script);
     let out = ssh
         .run_cancellable(
             host,
-            &["bash", "-lc", &script],
+            &["bash", "-lc", &quoted],
             std::time::Duration::from_secs(120),
             token,
         )
@@ -496,6 +433,49 @@ async fn ensure_remote_project(
     Ok(())
 }
 
+/// Build a bash script (run via `bash -lc`) that creates a new worktree for a
+/// NEW branch `name` off the repo's default branch, under `.worktrees/` or
+/// `.claude/worktrees/` (auto-detected, fallback `.worktrees/`). Idempotent:
+/// if the worktree dir already exists it's reused. Git's chatter goes to
+/// stderr; the ONLY stdout is the absolute path of the worktree (last line),
+/// which the caller uses as the tmux cwd.
+fn worktree_add_script(root: &str, name: &str) -> String {
+    format!(
+        "set -e\n\
+         cd {root}\n\
+         name={name}\n\
+         if [ -d .worktrees ]; then base=.worktrees\n\
+         elif [ -d .claude/worktrees ]; then base=.claude/worktrees\n\
+         else base=.worktrees\n\
+         fi\n\
+         wt=\"$base/$name\"\n\
+         if [ ! -e \"$wt\" ]; then\n\
+         def=\"$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')\"\n\
+         [ -z \"$def\" ] && def=\"$(git rev-parse --abbrev-ref HEAD 2>/dev/null)\"\n\
+         git worktree add \"$wt\" -b \"$name\" \"$def\" 1>&2\n\
+         fi\n\
+         ( cd \"$wt\" && pwd )\n",
+        root = shq(root),
+        name = shq(name),
+    )
+}
+
+async fn create_worktree_local(root: &str, name: &str) -> Result<String, IpcError> {
+    let script = worktree_add_script(root, name);
+    let out = tokio::process::Command::new("bash")
+        .args(["-lc", &script])
+        .output()
+        .await
+        .map_err(|e| IpcError::new("E_GIT_SETUP", format!("bash: {e}")))?;
+    if !out.status.success() {
+        return Err(IpcError::new(
+            "E_GIT_SETUP",
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 pub async fn new_session(
     args: NewSessionArgs,
     store: &Mutex<Store>,
@@ -505,6 +485,16 @@ pub async fn new_session(
     // Reject hostile input before it reaches ssh / tmux / git.
     crate::validate::host_alias(&args.host_alias)?;
     crate::validate::tmux_name(&args.name)?;
+
+    if let Some(name) = args.new_worktree.as_deref() {
+        crate::validate::git_ref(name)?;
+        if name == "main" || name == "master" {
+            return Err(IpcError::new(
+                "E_INVALID",
+                "worktree name must not be 'main' or 'master'",
+            ));
+        }
+    }
 
     // Mint / bind a cancellation token for the duration of this command.
     // If a call_id was provided by the frontend, bind under that id so the
@@ -537,62 +527,130 @@ async fn new_session_inner(
     // machine — so we translate to `~/projects/github.com/<owner>/<repo>`
     // (matching proj-clean's convention) and auto-clone if missing.
     let path: PathBuf = if args.host_alias == "local" {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-        if let Some(wid) = args.worktree_id {
-            let mut stmt = s
-                .conn_ref()
-                .prepare("SELECT path FROM worktrees WHERE id=?1")?;
-            let row: String = stmt.query_row(rusqlite::params![wid], |r| r.get(0))?;
-            PathBuf::from(row)
+        if let Some(ref name) = args.new_worktree {
+            // NEW WORKTREE: create branch + worktree, return the new dir.
+            let base_path = {
+                let s = store
+                    .lock()
+                    .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+                let mut stmt = s
+                    .conn_ref()
+                    .prepare("SELECT base_path FROM projects WHERE id=?1")?;
+                let row: String =
+                    stmt.query_row(rusqlite::params![args.project_id], |r| r.get(0))?;
+                row
+            };
+            PathBuf::from(create_worktree_local(&base_path, name).await?)
         } else {
-            let mut stmt = s
-                .conn_ref()
-                .prepare("SELECT base_path FROM projects WHERE id=?1")?;
-            let row: String = stmt.query_row(rusqlite::params![args.project_id], |r| r.get(0))?;
-            PathBuf::from(row)
-        }
-    } else {
-        // Remote path: derive from owner/repo, then ensure-on-remote.
-        let (owner, repo, wt_info) = {
             let s = store
                 .lock()
                 .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-            let (owner, repo) = fetch_owner_repo(&s, args.project_id)?;
-            let wt = if let Some(wid) = args.worktree_id {
-                Some(fetch_worktree(&s, wid)?)
+            if let Some(wid) = args.worktree_id {
+                let mut stmt = s
+                    .conn_ref()
+                    .prepare("SELECT path FROM worktrees WHERE id=?1")?;
+                let row: String = stmt.query_row(rusqlite::params![wid], |r| r.get(0))?;
+                PathBuf::from(row)
             } else {
-                None
+                let mut stmt = s
+                    .conn_ref()
+                    .prepare("SELECT base_path FROM projects WHERE id=?1")?;
+                let row: String =
+                    stmt.query_row(rusqlite::params![args.project_id], |r| r.get(0))?;
+                PathBuf::from(row)
+            }
+        }
+    } else {
+        // Remote path: derive from owner/repo, then ensure-on-remote.
+        if let Some(ref name) = args.new_worktree {
+            // NEW WORKTREE on remote: ensure clone exists, then create worktree.
+            let (owner, repo) = {
+                let s = store
+                    .lock()
+                    .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+                fetch_owner_repo(&s, args.project_id)?
             };
-            (owner, repo, wt)
-        };
-        let home = remote_home(ssh, &args.host_alias).await?;
-        let wt_name_str = wt_info.as_ref().map(|(name, _)| name.as_str());
-        let (project_root, cwd) = remote_project_path(&home, &owner, &repo, wt_name_str);
-        let worktree_for_clone = wt_info
-            .as_ref()
-            .map(|(name, branch)| (name.as_str(), branch.as_deref()));
-        ensure_remote_project(
-            ssh,
-            &args.host_alias,
-            &owner,
-            &repo,
-            &project_root,
-            worktree_for_clone,
-            token,
-        )
-        .await?;
-        PathBuf::from(cwd)
+            let home = ssh.remote_home(&args.host_alias).await?;
+            let (project_root, _) = remote_project_path(&home, &owner, &repo, None);
+            ensure_remote_project(
+                ssh,
+                &args.host_alias,
+                &owner,
+                &repo,
+                &project_root,
+                None,
+                token.clone(),
+            )
+            .await?;
+            let script = worktree_add_script(&project_root, name);
+            // Quote the whole script so it survives the ssh argv-join +
+            // remote login-shell re-tokenization (see ensure_remote_project).
+            let quoted = shq(&script);
+            let out = ssh
+                .run_cancellable(
+                    &args.host_alias,
+                    &["bash", "-lc", &quoted],
+                    std::time::Duration::from_secs(60),
+                    token,
+                )
+                .await?;
+            if !out.status.success() {
+                return Err(IpcError::new(
+                    "E_GIT_SETUP",
+                    String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                ));
+            }
+            PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        } else {
+            let (owner, repo, wt_info) = {
+                let s = store
+                    .lock()
+                    .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+                let (owner, repo) = fetch_owner_repo(&s, args.project_id)?;
+                let wt = if let Some(wid) = args.worktree_id {
+                    Some(fetch_worktree(&s, wid)?)
+                } else {
+                    None
+                };
+                (owner, repo, wt)
+            };
+            let home = ssh.remote_home(&args.host_alias).await?;
+            let wt_name_str = wt_info.as_ref().map(|(name, _)| name.as_str());
+            let (project_root, cwd) = remote_project_path(&home, &owner, &repo, wt_name_str);
+            let worktree_for_clone = wt_info
+                .as_ref()
+                .map(|(name, branch)| (name.as_str(), branch.as_deref()));
+            ensure_remote_project(
+                ssh,
+                &args.host_alias,
+                &owner,
+                &repo,
+                &project_root,
+                worktree_for_clone,
+                token,
+            )
+            .await?;
+            PathBuf::from(cwd)
+        }
     };
+    // A "shell" session runs a plain login shell in the pane instead of
+    // Claude Code. Any other value (incl. None) is treated as a "work" session.
+    let is_shell = args.kind.as_deref() == Some("shell");
+    let pane_cmd = if is_shell {
+        crate::tmux::shell_pane_command()
+    } else {
+        crate::tmux::pane_command()
+    };
+
     let tmux = exec_for(&args.host_alias, ssh);
-    tmux.new_session(&args.name, &path).await?;
+    tmux.new_session(&args.name, &path, pane_cmd).await?;
 
     reconcile_one_host(store, ssh, &args.host_alias).await?;
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    s.list_sessions_for_host(&args.host_alias)?
+    let row = s
+        .list_sessions_for_host(&args.host_alias)?
         .into_iter()
         .find(|r| r.tmux_name == args.name)
         .ok_or_else(|| {
@@ -603,7 +661,16 @@ async fn new_session_inner(
                     args.name, args.host_alias
                 ),
             )
-        })
+        })?;
+    // Reconcile inserts every session as kind="work"; tag shell sessions
+    // afterwards. The session upsert preserves `kind` on re-reconcile.
+    if is_shell {
+        s.set_session_kind(row.id, "shell", None)?;
+        return s
+            .get_session(&args.name, &args.host_alias)?
+            .ok_or_else(|| IpcError::new("E_INTERNAL", "session vanished after kind tag"));
+    }
+    Ok(row)
 }
 
 #[derive(Deserialize)]
@@ -624,9 +691,7 @@ pub async fn kill_session(
         let s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-        s.list_sessions_for_host(&args.host_alias)?
-            .into_iter()
-            .find(|r| r.tmux_name == args.name)
+        s.get_session(&args.name, &args.host_alias)?
             .map(|r| r.id)
             .ok_or_else(|| {
                 IpcError::new("E_NOTFOUND", format!("session {} not found", args.name))
@@ -659,9 +724,7 @@ pub async fn rename_session(
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    s.list_sessions_for_host(&args.host_alias)?
-        .into_iter()
-        .find(|r| r.tmux_name == args.new_name.trim())
+    s.get_session(args.new_name.trim(), &args.host_alias)?
         .ok_or_else(|| {
             IpcError::new(
                 "E_NOTFOUND",
@@ -686,24 +749,36 @@ pub async fn restart_session(
 ) -> Result<SessionRow, IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
     crate::validate::tmux_name(&args.name)?;
+    // Respawn the pane with the command matching the session's kind so a
+    // restarted shell session comes back as a shell, not a Claude pane.
+    let is_shell = {
+        let s = store
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        s.get_session(&args.name, &args.host_alias)?
+            .map(|r| r.kind == "shell")
+            .unwrap_or(false)
+    };
+    let pane_cmd = if is_shell {
+        crate::tmux::shell_pane_command()
+    } else {
+        crate::tmux::pane_command()
+    };
     let tmux = exec_for(&args.host_alias, ssh);
-    tmux.restart_session(&args.name).await?;
+    tmux.restart_session(&args.name, pane_cmd).await?;
     reconcile_one_host(store, ssh, &args.host_alias).await?;
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    s.list_sessions_for_host(&args.host_alias)?
-        .into_iter()
-        .find(|r| r.tmux_name == args.name)
-        .ok_or_else(|| {
-            IpcError::new(
-                "E_NOTFOUND",
-                format!(
-                    "restarted session {} on {} did not appear in list",
-                    args.name, args.host_alias
-                ),
-            )
-        })
+    s.get_session(&args.name, &args.host_alias)?.ok_or_else(|| {
+        IpcError::new(
+            "E_NOTFOUND",
+            format!(
+                "restarted session {} on {} did not appear in list",
+                args.name, args.host_alias
+            ),
+        )
+    })
 }
 
 /// Build the two tmux invocations that together send a prompt to a session:
@@ -731,37 +806,29 @@ async fn send_prompt_inner(
 ) -> Result<(), IpcError> {
     crate::validate::host_alias(host_alias)?;
     crate::validate::tmux_name(tmux_name)?;
-    let cmds = build_send_commands(tmux_name, prompt);
-    if host_alias == "local" {
-        for cmd in &cmds {
-            let out = std::process::Command::new("bash")
-                .args(["-c", cmd])
-                .output()
-                .map_err(|e| IpcError::new("E_TMUX", format!("spawn bash: {e}")))?;
-            if !out.status.success() {
-                return Err(IpcError::new(
-                    "E_TMUX",
-                    String::from_utf8_lossy(&out.stderr).trim().to_string(),
-                ));
-            }
-        }
+    // Both send-keys commands in ONE shell invocation joined with `&&` (so a
+    // failed literal-text send doesn't still fire Enter) — one round-trip
+    // instead of two.
+    let script = build_send_commands(tmux_name, prompt).join(" && ");
+    let out = if host_alias == "local" {
+        tokio::process::Command::new("bash")
+            .args(["-c", &script])
+            .output()
+            .await
+            .map_err(|e| IpcError::new("E_TMUX", format!("spawn bash: {e}")))?
     } else {
-        for cmd in &cmds {
-            let quoted = shq(cmd);
-            let out = ssh
-                .run(
-                    host_alias,
-                    &["bash", "-lc", &quoted],
-                    std::time::Duration::from_secs(10),
-                )
-                .await?;
-            if !out.status.success() {
-                return Err(IpcError::new(
-                    "E_TMUX",
-                    String::from_utf8_lossy(&out.stderr).trim().to_string(),
-                ));
-            }
-        }
+        ssh.run(
+            host_alias,
+            &["bash", "-lc", &shq(&script)],
+            std::time::Duration::from_secs(10),
+        )
+        .await?
+    };
+    if !out.status.success() {
+        return Err(IpcError::new(
+            "E_TMUX",
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
     }
     Ok(())
 }
@@ -835,12 +902,16 @@ pub async fn spawn_review(
     };
 
     // 2. Spawn the review tmux session (off-lock).
-    //    new_session runs pane_command() internally — same as any other session.
+    //    A review runs Claude Code — same pane command as any "work" session.
     let short = format!("{:x}", now_unix() & 0xfffff);
     let review_name = format!("{}--review-{}", source.tmux_name, short);
     let tmux = exec_for(&source.host_alias, ssh);
-    tmux.new_session(&review_name, std::path::Path::new(&cwd))
-        .await?;
+    tmux.new_session(
+        &review_name,
+        std::path::Path::new(&cwd),
+        crate::tmux::pane_command(),
+    )
+    .await?;
 
     // 3. Register via per-host reconcile.
     reconcile_one_host(store, ssh, &source.host_alias).await?;
@@ -1043,6 +1114,7 @@ mod tests {
                 &self,
                 _name: &str,
                 _cwd: &std::path::Path,
+                _pane_cmd: &str,
             ) -> Result<(), IpcError> {
                 Ok(())
             }
@@ -1052,7 +1124,7 @@ mod tests {
             async fn rename_session(&self, _old: &str, _new: &str) -> Result<(), IpcError> {
                 Ok(())
             }
-            async fn restart_session(&self, _name: &str) -> Result<(), IpcError> {
+            async fn restart_session(&self, _name: &str, _pane_cmd: &str) -> Result<(), IpcError> {
                 Ok(())
             }
             async fn capture_pane(&self, _name: &str) -> Result<String, IpcError> {
@@ -1152,7 +1224,12 @@ mod tests {
             async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
                 Ok(vec![])
             }
-            async fn new_session(&self, _: &str, _: &std::path::Path) -> Result<(), IpcError> {
+            async fn new_session(
+                &self,
+                _: &str,
+                _: &std::path::Path,
+                _: &str,
+            ) -> Result<(), IpcError> {
                 Ok(())
             }
             async fn kill_session(&self, _: &str) -> Result<(), IpcError> {
@@ -1161,7 +1238,7 @@ mod tests {
             async fn rename_session(&self, _: &str, _: &str) -> Result<(), IpcError> {
                 Ok(())
             }
-            async fn restart_session(&self, _: &str) -> Result<(), IpcError> {
+            async fn restart_session(&self, _: &str, _: &str) -> Result<(), IpcError> {
                 Ok(())
             }
             async fn capture_pane(&self, _: &str) -> Result<String, IpcError> {
@@ -1265,5 +1342,144 @@ mod tests {
             worktree_key_for_path("/Users/x/projects/github.com/o/r/.claude/worktrees/"),
             Some("main".to_string())
         );
+    }
+
+    // ── worktree_add_script unit tests ────────────────────────────────────────
+
+    #[test]
+    fn worktree_add_script_contains_expected_fragments() {
+        let script = worktree_add_script("/repo/root", "feat-x");
+        assert!(script.contains("cd '/repo/root'"), "cd root: {script}");
+        assert!(
+            script.contains("name='feat-x'"),
+            "name assignment: {script}"
+        );
+        assert!(
+            script.contains("git worktree add"),
+            "worktree add: {script}"
+        );
+        assert!(script.contains(" -b "), "branch flag: {script}");
+        assert!(script.contains(".worktrees"), ".worktrees dir: {script}");
+        assert!(
+            script.contains(".claude/worktrees"),
+            ".claude/worktrees dir: {script}"
+        );
+        assert!(
+            script.contains("refs/remotes/origin/HEAD"),
+            "default branch detection: {script}"
+        );
+    }
+
+    // ── create_worktree_local integration test ────────────────────────────────
+
+    #[tokio::test]
+    async fn create_worktree_local_creates_and_is_idempotent() {
+        use std::process::Command;
+
+        // Create a unique temp dir for the bare repo
+        let base = std::env::temp_dir().join(format!(
+            "cf-wt-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&base).expect("create base");
+
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo");
+        let repo_str = repo.to_str().unwrap();
+
+        // git init
+        let status = Command::new("git")
+            .args(["init", repo_str])
+            .status()
+            .expect("git init");
+        assert!(status.success());
+
+        // configure user.email and user.name so commit works
+        Command::new("git")
+            .args(["-C", repo_str, "config", "user.email", "test@test.com"])
+            .status()
+            .expect("git config email");
+        Command::new("git")
+            .args(["-C", repo_str, "config", "user.name", "Test"])
+            .status()
+            .expect("git config name");
+
+        // write a file and commit
+        let file = repo.join("README.md");
+        std::fs::write(&file, "hello").expect("write file");
+        Command::new("git")
+            .args(["-C", repo_str, "add", "."])
+            .status()
+            .expect("git add");
+        Command::new("git")
+            .args(["-C", repo_str, "commit", "-m", "init"])
+            .status()
+            .expect("git commit");
+
+        // call create_worktree_local
+        let result = create_worktree_local(repo_str, "feat-x").await;
+        assert!(result.is_ok(), "first call failed: {:?}", result);
+        let wt_path = result.unwrap();
+        assert!(
+            wt_path.ends_with("/.worktrees/feat-x"),
+            "path should end with /.worktrees/feat-x, got: {wt_path}"
+        );
+        assert!(
+            std::path::Path::new(&wt_path).is_dir(),
+            "worktree dir should exist: {wt_path}"
+        );
+
+        // second call — idempotent
+        let result2 = create_worktree_local(repo_str, "feat-x").await;
+        assert!(
+            result2.is_ok(),
+            "second (idempotent) call failed: {:?}",
+            result2
+        );
+        assert_eq!(
+            result2.unwrap(),
+            wt_path,
+            "idempotent call must return same path"
+        );
+
+        // cleanup
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn remote_script_must_be_quoted_to_survive_login_shell_retokenization() {
+        // Regression for "zsh: parse error near `then`" on remote session
+        // creation. ssh concatenates the trailing argv with spaces and the
+        // remote LOGIN shell re-tokenizes the result, so `bash -lc <script>`
+        // with an UNQUOTED `if ...; then ...; fi` splits at `;` and orphans
+        // `then`. We reproduce that re-tokenization locally with `sh -c`.
+        use std::process::Command;
+        let script = "if true; then echo OK; fi";
+
+        // RAW (the bug): the re-login shell mis-parses the orphaned `then`.
+        let raw = Command::new("sh")
+            .args(["-c", &format!("bash -lc {script}")])
+            .output()
+            .expect("sh");
+        assert!(
+            !raw.status.success(),
+            "unquoted if/then must fail at the re-tokenizing login shell"
+        );
+
+        // QUOTED (the fix): crosses as one word, bash runs the whole script.
+        let quoted = Command::new("sh")
+            .args(["-c", &format!("bash -lc {}", shq(script))])
+            .output()
+            .expect("sh");
+        assert!(
+            quoted.status.success(),
+            "shq'd script must run cleanly: {}",
+            String::from_utf8_lossy(&quoted.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&quoted.stdout).trim(), "OK");
     }
 }
