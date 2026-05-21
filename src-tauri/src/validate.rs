@@ -100,6 +100,30 @@ pub fn git_ref(value: &str) -> Result<(), IpcError> {
     Ok(())
 }
 
+/// Validate a git commit hash supplied by the frontend (the commit the user
+/// clicked in the History graph). Git object names are lowercase hex; we
+/// accept an abbreviated or full SHA-1 (4–40 chars) and nothing else, so the
+/// value cannot be read as an option or inject shell/git syntax.
+#[allow(dead_code)] // wired up when the History command is added
+pub fn commit_hash(value: &str) -> Result<(), IpcError> {
+    if value.len() < 4 || value.len() > 40 {
+        return Err(IpcError::new(
+            "E_INVALID",
+            "commit hash must be 4–40 characters",
+        ));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
+    {
+        return Err(IpcError::new(
+            "E_INVALID",
+            "commit hash must be lowercase hexadecimal",
+        ));
+    }
+    Ok(())
+}
+
 /// Validate a repo-relative file path supplied by the frontend (the file the
 /// user clicked in the Files viewer). The path is joined onto a trusted
 /// worktree cwd before being read, so it must not escape that directory:
@@ -234,6 +258,18 @@ mod tests {
         assert!(repo_rel_path("bad\nname").is_err());
         // A `..` only as a substring of a real name is fine.
         assert!(repo_rel_path("src/my..file.ts").is_ok());
+    }
+
+    #[test]
+    fn commit_hash_accepts_hex_rejects_junk() {
+        assert!(commit_hash("a1b2c3d").is_ok());
+        assert!(commit_hash("0123456789abcdef0123456789abcdef01234567").is_ok());
+        assert!(commit_hash("ABC").is_err()); // uppercase not produced by git short hashes we use
+        assert!(commit_hash("xyz").is_err()); // non-hex
+        assert!(commit_hash("").is_err());
+        assert!(commit_hash("-rf").is_err());
+        assert!(commit_hash("123").is_err()); // too short (<4)
+        assert!(commit_hash(&"a".repeat(41)).is_err()); // too long (>40)
     }
 
     #[test]
