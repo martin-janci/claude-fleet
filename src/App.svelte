@@ -31,12 +31,18 @@
     writePref('layout.sidebar-collapsed', sidebarCollapsed);
   });
 
-  // Center pane state is PER SESSION — the user said "Kazda session ma mat
+  // Center pane WIDTH is per-session — the user said "Kazda session ma mat
   // aj vlastnu pamat UI, nastavenia rozdelenia". When the user picks a
-  // session we hydrate from localStorage; when they resize or toggle
-  // collapse we persist back under that session's key.
+  // session we hydrate centerPx from localStorage; when they resize we
+  // persist it back under that session's key (below).
   let centerPx = $state(DEFAULT_UI.centerPx);
-  let centerCollapsed = $state(DEFAULT_UI.centerCollapsed);
+  // Center COLLAPSED state is GLOBAL (like the sidebar) — the user wants the
+  // pane to remember collapsed/expanded across restarts regardless of which
+  // session is open, so it lives in prefs.ts, not the per-session record.
+  let centerCollapsed = $state(readPref('layout.center-collapsed', false, isBool));
+  $effect(() => {
+    writePref('layout.center-collapsed', centerCollapsed);
+  });
 
   // When the selected session changes, swap in its persisted layout. We use
   // a `hydrating` gate so the save-effect below doesn't immediately echo
@@ -48,7 +54,6 @@
     hydrating = true;
     const ui = loadSessionUi(sess.host_alias, sess.tmux_name);
     centerPx = ui.centerPx;
-    centerCollapsed = ui.centerCollapsed;
     queueMicrotask(() => {
       hydrating = false;
     });
@@ -57,7 +62,7 @@
   $effect(() => {
     const sess = $selectedSession;
     if (!sess || hydrating) return;
-    saveSessionUi(sess.host_alias, sess.tmux_name, { centerPx, centerCollapsed });
+    saveSessionUi(sess.host_alias, sess.tmux_name, { centerPx });
   });
 
   let health = $state<Health | null>(null);
