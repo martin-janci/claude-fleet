@@ -84,6 +84,16 @@
     void invoke('pty_write', { args: { data } }).catch(() => {});
   }
 
+  /** Send text to the PTY as a paste: strip any embedded paste-end marker,
+   *  then frame in bracketed-paste markers if the app requested mode 2004.
+   *  Shared by Cmd+V and the drag-drop path. */
+  function sendPaste(text: string) {
+    if (!ptyOpen || text === '') return;
+    const framed = framePaste(sanitizePaste(text), screen?.bracketedPaste ?? false);
+    void invoke('pty_write', { args: { data: framed } }).catch(() => {});
+    bumpDrain();
+  }
+
   function onWheel(e: WheelEvent) {
     if (e.altKey) return;
     if (!ptyOpen || !screen || !screen.mouseEnabled) return;
@@ -431,6 +441,13 @@
     // While an IME / dead-key composition is in progress the keydowns are
     // part of composing — the finished text arrives via compositionend.
     if (e.isComposing) return;
+    // Cmd+V / Ctrl+V → read the clipboard and paste into the PTY. A non-editable
+    // <div> doesn't fire a native paste event, so we read the clipboard here.
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'v') {
+      e.preventDefault();
+      void navigator.clipboard.readText().then((t) => sendPaste(t)).catch(() => {});
+      return;
+    }
     const bytes = keyToBytes(e);
     if (bytes === null) return;
     e.preventDefault();
