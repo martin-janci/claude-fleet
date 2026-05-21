@@ -64,16 +64,17 @@ pub struct AccountRow {
     pub last_seen_at: Option<i64>,
 }
 
-/// One live session to upsert during a reconcile write-burst. `project_id`
-/// and `account_uuid` are PRE-RESOLVED by the caller (they require reads —
-/// `find_project_id_for_path` / `get_session_account` — that must run before
-/// the transaction opens).
+/// One live session to upsert during a reconcile write-burst. `project_id`,
+/// `account_uuid`, and `worktree_key` are PRE-RESOLVED by the caller (they
+/// require reads — `find_project_id_for_path` / `get_session_account` /
+/// `worktree_key_for_path` — that must run before the transaction opens).
 pub struct ReconcileSession<'a> {
     pub tmux_name: &'a str,
     pub project_id: Option<i64>,
     pub created_at: i64,
     pub last_activity_at: i64,
     pub account_uuid: Option<String>,
+    pub worktree_key: Option<String>,
 }
 
 /// All inputs for applying one host's probe result atomically. Consumed by
@@ -699,9 +700,9 @@ impl Store {
         &self,
         session_id: i64,
     ) -> Result<Vec<SessionRow>, rusqlite::Error> {
-        // Look up source's (project_id, worktree_id) first.
-        let (proj, wt): (Option<i64>, Option<i64>) = self.conn.query_row(
-            "SELECT project_id, worktree_id FROM sessions WHERE id=?1",
+        // Look up source's (project_id, worktree_key) first.
+        let (proj, key): (Option<i64>, Option<String>) = self.conn.query_row(
+            "SELECT project_id, worktree_key FROM sessions WHERE id=?1",
             rusqlite::params![session_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
@@ -709,17 +710,20 @@ impl Store {
         let Some(project_id) = proj else {
             return Ok(Vec::new());
         };
+        // A project-having session always has a worktree_key after reconcile
+        // ("main" at minimum). A NULL key (legacy/pre-reconcile) matches nothing.
+        let Some(key) = key else {
+            return Ok(Vec::new());
+        };
         let mut stmt = self.conn.prepare(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                     worktree_key
              FROM sessions
-             WHERE project_id=?1
-               AND ((?2 IS NULL AND worktree_id IS NULL) OR worktree_id=?2)
-               AND id<>?3
+             WHERE project_id=?1 AND worktree_key=?2 AND id<>?3
              ORDER BY host_alias ASC, tmux_name ASC",
         )?;
-        let rows = stmt.query_map(rusqlite::params![project_id, wt, session_id], |row| {
+        let rows = stmt.query_map(rusqlite::params![project_id, key, session_id], |row| {
             Ok(SessionRow {
                 id: row.get(0)?,
                 tmux_name: row.get(1)?,
@@ -866,6 +870,10 @@ impl Store {
     // Both paths are test-covered (direct: the `*_emits_*` event tests; tx: the
     // `apply_host_reconcile` rollback + happy-path tests), so a divergence will
     // surface as a test failure rather than silent corruption.
+    //
+    // `worktree_key` is written by `upsert_session_in_tx` ONLY — the public
+    // `upsert_session` intentionally omits it (reconcile is the only path that
+    // knows the session's cwd and can compute the key).
 
     fn update_host_probe_in_tx(
         tx: &rusqlite::Transaction,
@@ -903,6 +911,7 @@ impl Store {
         last_activity_at: i64,
         status: &str,
         account_uuid: Option<&str>,
+        worktree_key: Option<&str>,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
         // Check existence before the write so we can distinguish created vs updated.
@@ -914,16 +923,19 @@ impl Store {
 
         tx.execute(
             "INSERT INTO sessions (tmux_name, host_alias, project_id, worktree_id,
-                                   created_at, last_activity_at, status, account_uuid)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                                   created_at, last_activity_at, status, account_uuid,
+                                   worktree_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(host_alias, tmux_name) DO UPDATE SET
                project_id=excluded.project_id,
                worktree_id=excluded.worktree_id,
                last_activity_at=excluded.last_activity_at,
                status=excluded.status,
-               account_uuid=excluded.account_uuid",
+               account_uuid=excluded.account_uuid,
+               worktree_key=excluded.worktree_key",
             rusqlite::params![tmux_name, host_alias, project_id, worktree_id,
-                              created_at, last_activity_at, status, account_uuid],
+                              created_at, last_activity_at, status, account_uuid,
+                              worktree_key],
         )?;
         if let Some(row) = fetch_session(tx, tmux_name, host_alias)? {
             if existing_id.is_none() {
@@ -1035,6 +1047,7 @@ impl Store {
                         sess.last_activity_at,
                         "running",
                         sess.account_uuid.as_deref(),
+                        sess.worktree_key.as_deref(),
                         &mut out,
                     )?;
                     if let Some(pid) = sess.project_id {
@@ -1612,33 +1625,54 @@ mod tests {
     }
 
     #[test]
-    fn list_related_sessions_returns_siblings_with_same_project_and_worktree() {
-        let s = Store::open_in_memory().unwrap();
-        s.upsert_host("local").unwrap();
-        s.upsert_host("mefistos").unwrap();
-        let pid = s.upsert_project("o", "r", "/tmp/r").unwrap();
-        let wt1 = s.upsert_worktree(pid, "main", "/tmp/r", Some("main")).unwrap();
-        let wt2 = s.upsert_worktree(pid, "feature-x", "/tmp/r/.wt/x", Some("feature-x")).unwrap();
-        let a = s.upsert_session("dev-a", "local", Some(pid), Some(wt1), 1, 1, "running", None).unwrap();
-        let _b = s.upsert_session("dev-b", "mefistos", Some(pid), Some(wt1), 1, 1, "running", None).unwrap();
-        let _c = s.upsert_session("dev-c", "local", Some(pid), Some(wt2), 1, 1, "running", None).unwrap();
-        let related = s.list_related_sessions(a).unwrap();
-        assert_eq!(related.len(), 1, "expected only dev-b as related; got: {:?}", related.iter().map(|r| &r.tmux_name).collect::<Vec<_>>());
-        assert_eq!(related[0].tmux_name, "dev-b");
+    fn related_matches_same_project_and_worktree_key() {
+        let store = Store::open_in_memory().expect("store");
+        store.upsert_host("local").unwrap();
+        let pid = store.upsert_project("o", "r", "/tmp/r").unwrap();
+        let a = store.upsert_session("a", "local", Some(pid), None, 1, 1, "running", None).unwrap();
+        let b = store.upsert_session("b", "local", Some(pid), None, 1, 1, "running", None).unwrap();
+        store.set_worktree_key(a, Some("main")).unwrap();
+        store.set_worktree_key(b, Some("main")).unwrap();
+        let r = store.list_related_sessions(a).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].tmux_name, "b");
     }
 
     #[test]
-    fn list_related_sessions_matches_null_worktree() {
-        let s = Store::open_in_memory().unwrap();
-        s.upsert_host("h").unwrap();
-        let pid = s.upsert_project("o", "r", "/tmp/r").unwrap();
-        let wt = s.upsert_worktree(pid, "main", "/tmp/r", Some("main")).unwrap();
-        let a = s.upsert_session("dev-a", "h", Some(pid), None, 1, 1, "running", None).unwrap();
-        let _b = s.upsert_session("dev-b", "h", Some(pid), None, 1, 1, "running", None).unwrap();
-        let _c = s.upsert_session("dev-c", "h", Some(pid), Some(wt), 1, 1, "running", None).unwrap();
-        let related = s.list_related_sessions(a).unwrap();
-        assert_eq!(related.len(), 1);
-        assert_eq!(related[0].tmux_name, "dev-b");
+    fn related_excludes_different_worktree_key() {
+        let store = Store::open_in_memory().expect("store");
+        store.upsert_host("local").unwrap();
+        let pid = store.upsert_project("o", "r", "/tmp/r").unwrap();
+        let a = store.upsert_session("a", "local", Some(pid), None, 1, 1, "running", None).unwrap();
+        let b = store.upsert_session("b", "local", Some(pid), None, 1, 1, "running", None).unwrap();
+        store.set_worktree_key(a, Some("main")).unwrap();
+        store.set_worktree_key(b, Some("feat-x")).unwrap();
+        assert!(store.list_related_sessions(a).unwrap().is_empty());
+    }
+
+    #[test]
+    fn related_matches_across_hosts_same_key() {
+        let store = Store::open_in_memory().expect("store");
+        store.upsert_host("local").unwrap();
+        store.upsert_host("mefistos").unwrap();
+        let pid = store.upsert_project("o", "r", "/tmp/r").unwrap();
+        let a = store.upsert_session("a", "local", Some(pid), None, 1, 1, "running", None).unwrap();
+        let b = store.upsert_session("b", "mefistos", Some(pid), None, 1, 1, "running", None).unwrap();
+        store.set_worktree_key(a, Some("main")).unwrap();
+        store.set_worktree_key(b, Some("main")).unwrap();
+        let r = store.list_related_sessions(a).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].host_alias, "mefistos");
+    }
+
+    #[test]
+    fn related_returns_empty_for_null_key() {
+        let store = Store::open_in_memory().expect("store");
+        store.upsert_host("local").unwrap();
+        let pid = store.upsert_project("o", "r", "/tmp/r").unwrap();
+        let a = store.upsert_session("a", "local", Some(pid), None, 1, 1, "running", None).unwrap();
+        let _b = store.upsert_session("b", "local", Some(pid), None, 1, 1, "running", None).unwrap();
+        assert!(store.list_related_sessions(a).unwrap().is_empty());
     }
 
     #[test]
@@ -1827,6 +1861,7 @@ mod tests {
                 created_at: 1,
                 last_activity_at: 50,
                 account_uuid: None,
+                worktree_key: Some("main".to_string()),
             },
             // brand new → create
             ReconcileSession {
@@ -1835,6 +1870,7 @@ mod tests {
                 created_at: 10,
                 last_activity_at: 60,
                 account_uuid: None,
+                worktree_key: Some("main".to_string()),
             },
         ];
         let keep = vec!["keep-existing".to_string(), "fresh".to_string()];
@@ -1905,6 +1941,7 @@ mod tests {
                 created_at: 1,
                 last_activity_at: 1,
                 account_uuid: None,
+                worktree_key: None,
             },
             ReconcileSession {
                 tmux_name: "bad",
@@ -1912,6 +1949,7 @@ mod tests {
                 created_at: 1,
                 last_activity_at: 1,
                 account_uuid: None,
+                worktree_key: None,
             },
         ];
         let keep = vec!["good".to_string(), "bad".to_string()];

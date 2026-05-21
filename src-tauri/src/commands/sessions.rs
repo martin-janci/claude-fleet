@@ -87,12 +87,14 @@ async fn reconcile_sessions(
                         let account_uuid = s
                             .get_session_account(&host.alias, &sess.name)?
                             .or_else(|| host.account_uuid.clone());
+                        let worktree_key = worktree_key_for_path(&sess.path.to_string_lossy());
                         sessions.push(ReconcileSession {
                             tmux_name: &sess.name,
                             project_id,
                             created_at: sess.created,
                             last_activity_at: sess.last_activity,
                             account_uuid,
+                            worktree_key,
                         });
                     }
                     s.apply_host_reconcile(HostReconcile {
@@ -164,12 +166,14 @@ async fn reconcile_one_host(
                 let account_uuid = s
                     .get_session_account(&host.alias, &sess.name)?
                     .or_else(|| host.account_uuid.clone());
+                let worktree_key = worktree_key_for_path(&sess.path.to_string_lossy());
                 sessions.push(ReconcileSession {
                     tmux_name: &sess.name,
                     project_id,
                     created_at: sess.created,
                     last_activity_at: sess.last_activity,
                     account_uuid,
+                    worktree_key,
                 });
             }
             s.apply_host_reconcile(HostReconcile {
