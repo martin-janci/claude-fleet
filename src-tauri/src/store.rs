@@ -196,6 +196,27 @@ impl Store {
             })
     }
 
+    /// Read a value from the key/value `settings` table. `None` if absent.
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT value FROM settings WHERE key=?1",
+                rusqlite::params![key],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    /// Insert or replace a value in the `settings` table.
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![key, value],
+        )?;
+        Ok(())
+    }
+
     // ---- Private fetch helpers used after writes to produce emit payloads ----
     //
     // The row-mapping SQL lives in free `fetch_*` functions that take a bare

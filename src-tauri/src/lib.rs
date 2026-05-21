@@ -2,6 +2,7 @@ mod cancel;
 mod commands;
 mod events;
 mod ipc_error;
+mod mcp;
 mod projects;
 mod pty;
 mod service;
@@ -145,6 +146,58 @@ async fn cancel_command(
     Ok(())
 }
 
+/// Read the MCP control-API settings and, if the user enabled it, start the
+/// server. Generates and persists a bearer token on first enable. Off by
+/// default — a fresh install never opens a listener.
+fn maybe_start_mcp(
+    store: &std::sync::Arc<Mutex<Store>>,
+    ssh: &std::sync::Arc<ssh::SshClient>,
+    reg: &std::sync::Arc<cancel::CancellationRegistry>,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    let (enabled, port, token) = {
+        let Ok(s) = store.lock() else {
+            return;
+        };
+        let enabled = s
+            .get_setting(mcp::SETTING_ENABLED)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("true");
+        let port = s
+            .get_setting(mcp::SETTING_PORT)
+            .ok()
+            .flatten()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(mcp::DEFAULT_PORT);
+        let token = s.get_setting(mcp::SETTING_TOKEN).ok().flatten();
+        (enabled, port, token)
+    };
+    if !enabled {
+        return;
+    }
+    // Ensure a token exists before the listener binds — never a tokenless API.
+    let token = match token {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            let fresh = mcp::generate_token();
+            if let Ok(s) = store.lock() {
+                let _ = s.set_setting(mcp::SETTING_TOKEN, &fresh);
+            }
+            fresh
+        }
+    };
+    mcp::spawn_server(
+        std::sync::Arc::clone(store),
+        std::sync::Arc::clone(ssh),
+        std::sync::Arc::clone(reg),
+        port,
+        token,
+        shutdown,
+    );
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Layered env recovery for Finder-launched apps:
@@ -163,11 +216,18 @@ pub fn run() {
 
     let ssh_client = std::sync::Arc::new(ssh::SshClient::new());
     let ssh_client_for_exit = std::sync::Arc::clone(&ssh_client);
+    let ssh_client_for_setup = std::sync::Arc::clone(&ssh_client);
     let reg = cancel::CancellationRegistry::new();
+    let reg_for_setup = std::sync::Arc::clone(&reg);
+    // Shutdown signal for the embedded MCP server. Cancelled on window close
+    // (harmless no-op if the server was never started).
+    let mcp_shutdown = tokio_util::sync::CancellationToken::new();
+    let mcp_shutdown_for_setup = mcp_shutdown.clone();
+    let mcp_shutdown_for_exit = mcp_shutdown.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
+        .setup(move |app| {
             use tauri::Manager;
             let handle = app.handle().clone();
             let bus: std::sync::Arc<dyn crate::events::EventBus> =
@@ -175,7 +235,16 @@ pub fn run() {
             let store = Store::open_with_bus(&appdata_db_path(), bus).expect("open store");
             // Managed as Arc<Mutex<Store>> (not bare Mutex<Store>) so the
             // embedded MCP server can hold a clone of the same store handle.
-            app.manage(std::sync::Arc::new(Mutex::new(store)));
+            let store = std::sync::Arc::new(Mutex::new(store));
+            app.manage(std::sync::Arc::clone(&store));
+            // Start the MCP control API if the user has enabled it (off by
+            // default). Reuses the same Store / SshClient / registry as the UI.
+            maybe_start_mcp(
+                &store,
+                &ssh_client_for_setup,
+                &reg_for_setup,
+                mcp_shutdown_for_setup,
+            );
             Ok(())
         })
         .manage(Mutex::new(PtyState::new()))
@@ -215,6 +284,7 @@ pub fn run() {
             if let tauri::WindowEvent::Destroyed = event {
                 use tauri::Manager;
                 ssh_client_for_exit.shutdown_all();
+                mcp_shutdown_for_exit.cancel();
                 if let Some(pty) = window.try_state::<Mutex<PtyState>>() {
                     if let Ok(mut s) = pty.lock() {
                         s.close();
