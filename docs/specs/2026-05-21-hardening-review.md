@@ -9,6 +9,19 @@ startup brick), **HIGH** (correctness / leaks under normal use), **MEDIUM**,
 The Rust build could not be compiled in the review environment (missing GUI
 system libs) — the backend review is static.
 
+## Resolution status (updated 2026-05-21)
+
+**CR1, CR2, CR3 and H1–H7 are fixed** in commits `e02ddf4` (backend) and
+`fd4acbb` (frontend). The Rust changes were made by static editing and still
+need `cargo test` + `cargo clippy --all-targets -- -D warnings` on a machine
+with the Tauri prerequisites. The frontend changes are verified by vitest.
+
+Still open: all MEDIUM and LOW items below, the spec-vs-code gaps, and the
+pre-existing `localStorage`-undefined failure in the vitest suite (config
+already sets `environment: 'jsdom'` — likely a vitest 4 / jsdom 29 compat
+issue). The remainder of this document is the original review and is left
+intact as the backlog.
+
 ---
 
 ## CRITICAL
