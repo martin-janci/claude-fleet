@@ -36,6 +36,8 @@ pub struct SessionRow {
     pub status: String,
     pub notes: Option<String>,
     pub account_uuid: Option<String>,
+    pub kind: String,
+    pub reviews_session_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -116,6 +118,10 @@ impl Store {
             self.conn
                 .execute_batch(include_str!("../migrations/004_session_account.sql"))?;
         }
+        if v < 5 {
+            self.conn
+                .execute_batch(include_str!("../migrations/005_session_reviews.sql"))?;
+        }
         Ok(())
     }
 
@@ -145,7 +151,7 @@ impl Store {
     ) -> Result<Option<SessionRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
-                    last_activity_at, status, notes, account_uuid
+                    last_activity_at, status, notes, account_uuid, kind, reviews_session_id
              FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![tmux_name, host_alias], |row| {
@@ -160,6 +166,8 @@ impl Store {
                 status: row.get(7)?,
                 notes: row.get(8)?,
                 account_uuid: row.get(9)?,
+                kind: row.get(10)?,
+                reviews_session_id: row.get(11)?,
             })
         })?;
         match rows.next() {
@@ -684,7 +692,7 @@ impl Store {
     ) -> Result<Vec<SessionRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
-                    last_activity_at, status, notes, account_uuid
+                    last_activity_at, status, notes, account_uuid, kind, reviews_session_id
              FROM sessions WHERE host_alias=?1 ORDER BY last_activity_at DESC",
         )?;
         let rows = stmt.query_map(rusqlite::params![host_alias], |row| {
@@ -699,6 +707,8 @@ impl Store {
                 status: row.get(7)?,
                 notes: row.get(8)?,
                 account_uuid: row.get(9)?,
+                kind: row.get(10)?,
+                reviews_session_id: row.get(11)?,
             })
         })?;
         rows.collect()
@@ -720,7 +730,7 @@ impl Store {
         };
         let mut stmt = self.conn.prepare(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
-                    last_activity_at, status, notes, account_uuid
+                    last_activity_at, status, notes, account_uuid, kind, reviews_session_id
              FROM sessions
              WHERE project_id=?1
                AND ((?2 IS NULL AND worktree_id IS NULL) OR worktree_id=?2)
@@ -739,9 +749,59 @@ impl Store {
                 status: row.get(7)?,
                 notes: row.get(8)?,
                 account_uuid: row.get(9)?,
+                kind: row.get(10)?,
+                reviews_session_id: row.get(11)?,
             })
         })?;
         rows.collect()
+    }
+
+    /// Mark a session as a review of `reviews_session_id` (or back to 'work' with
+    /// None). Write-once at spawn_review time. Reconcile never touches these
+    /// columns — they survive re-probe because upsert_session's ON CONFLICT clause
+    /// omits them.
+    pub fn set_session_kind(
+        &self,
+        id: i64,
+        kind: &str,
+        reviews_session_id: Option<i64>,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET kind = ?1, reviews_session_id = ?2 WHERE id = ?3",
+            rusqlite::params![kind, reviews_session_id, id],
+        )?;
+        if let Some(row) = self.get_session_by_id(id)? {
+            self.bus.session_updated(&row);
+        }
+        Ok(())
+    }
+
+    fn get_session_by_id(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
+                    last_activity_at, status, notes, account_uuid, kind, reviews_session_id
+             FROM sessions WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![id], |row| {
+            Ok(SessionRow {
+                id: row.get(0)?,
+                tmux_name: row.get(1)?,
+                host_alias: row.get(2)?,
+                project_id: row.get(3)?,
+                worktree_id: row.get(4)?,
+                created_at: row.get(5)?,
+                last_activity_at: row.get(6)?,
+                status: row.get(7)?,
+                notes: row.get(8)?,
+                account_uuid: row.get(9)?,
+                kind: row.get(10)?,
+                reviews_session_id: row.get(11)?,
+            })
+        })?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
     }
 
     /// Run `f` under the implicit lock and return its result.
@@ -857,7 +917,7 @@ mod tests {
     fn migrate_is_idempotent() {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
-        assert_eq!(store.schema_version().expect("version"), 4);
+        assert_eq!(store.schema_version().expect("version"), 5);
     }
 
     #[test]
@@ -991,7 +1051,7 @@ mod tests {
     #[test]
     fn schema_version_is_four_after_migration() {
         let s = Store::open_in_memory().expect("open");
-        assert_eq!(s.schema_version().expect("version"), 4);
+        assert_eq!(s.schema_version().expect("version"), 5);
     }
 
     #[test]
@@ -1394,5 +1454,30 @@ mod tests {
         assert!(evts[0].starts_with("session:killed:"), "got: {}", evts[0]);
         assert!(evts[1].starts_with("session:killed:"), "got: {}", evts[1]);
         assert_eq!(evts[2], "host:removed:alpha");
+    }
+
+    #[test]
+    fn migration_005_adds_kind_and_reviews_columns_with_defaults() {
+        let store = Store::open_in_memory().expect("store");
+        store.upsert_host("alpha").unwrap();
+        store.upsert_session("s1", "alpha", None, None, 1, 1, "running", None).unwrap();
+        let rows = store.list_sessions_for_host("alpha").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "work");
+        assert_eq!(rows[0].reviews_session_id, None);
+    }
+
+    #[test]
+    fn set_session_kind_marks_review_and_survives_reupsert() {
+        let store = Store::open_in_memory().expect("store");
+        store.upsert_host("alpha").unwrap();
+        let src = store.upsert_session("src", "alpha", None, None, 1, 1, "running", None).unwrap();
+        let rev = store.upsert_session("src--review-1", "alpha", None, None, 1, 1, "running", None).unwrap();
+        store.set_session_kind(rev, "review", Some(src)).unwrap();
+        store.upsert_session("src--review-1", "alpha", None, None, 1, 2, "running", None).unwrap();
+        let row = store.list_sessions_for_host("alpha").unwrap()
+            .into_iter().find(|r| r.tmux_name == "src--review-1").unwrap();
+        assert_eq!(row.kind, "review", "kind must survive re-upsert");
+        assert_eq!(row.reviews_session_id, Some(src));
     }
 }
