@@ -172,8 +172,9 @@ impl Store {
             tx.commit()?;
         }
         if v < 6 {
-            self.conn
-                .execute_batch(include_str!("../migrations/006_session_worktree_key.sql"))?;
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../migrations/006_session_worktree_key.sql"))?;
+            tx.commit()?;
         }
         Ok(())
     }
