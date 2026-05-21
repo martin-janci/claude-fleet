@@ -12,6 +12,8 @@ export interface SessionRow {
   status: string;
   notes: string | null;
   account_uuid: string | null;
+  kind: string;
+  reviews_session_id: number | null;
 }
 
 export const sessions = writable<SessionRow[]>([]);

@@ -23,6 +23,8 @@ const sampleSession = {
   status: 'running',
   notes: null,
   account_uuid: null,
+  kind: 'work',
+  reviews_session_id: null,
 };
 
 beforeEach(() => {

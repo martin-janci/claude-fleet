@@ -23,6 +23,8 @@ const source: SessionRow = {
   status: 'running',
   notes: null,
   account_uuid: null,
+  kind: 'work',
+  reviews_session_id: null,
 };
 
 const sibling: SessionRow = {
@@ -36,6 +38,8 @@ const sibling: SessionRow = {
   status: 'running',
   notes: null,
   account_uuid: null,
+  kind: 'work',
+  reviews_session_id: null,
 };
 
 const unrelated: SessionRow = {
@@ -49,6 +53,8 @@ const unrelated: SessionRow = {
   status: 'running',
   notes: null,
   account_uuid: null,
+  kind: 'work',
+  reviews_session_id: null,
 };
 
 beforeEach(() => {
@@ -130,6 +136,8 @@ describe('PromptComposer', () => {
       status: 'running',
       notes: null,
       account_uuid: null,
+      kind: 'work',
+      reviews_session_id: null,
     }));
     sessions.set([source, ...sibs]);
     render(PromptComposer, { props: { source, onClose: () => {} } });

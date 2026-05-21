@@ -33,6 +33,8 @@ function sessionFor(projectId: number | null, name = `dev-${projectId ?? 'orphan
     status: 'running',
     notes: null,
     account_uuid: null,
+    kind: 'work',
+    reviews_session_id: null,
   };
 }
 
@@ -537,6 +539,8 @@ describe('Sidebar (sessions-grouped view)', () => {
           status: 'running',
           notes: null,
           account_uuid: null,
+          kind: 'work',
+          reviews_session_id: null,
         });
       }
     }
