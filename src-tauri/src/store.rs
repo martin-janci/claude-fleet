@@ -176,6 +176,11 @@ impl Store {
             tx.execute_batch(include_str!("../migrations/006_session_worktree_key.sql"))?;
             tx.commit()?;
         }
+        if v < 7 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../migrations/007_indexes.sql"))?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -219,9 +224,9 @@ impl Store {
     }
 
     fn get_worktree(&self, id: i64) -> Result<Option<WorktreeRow>, rusqlite::Error> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, project_id, name, path, branch FROM worktrees WHERE id=?1")?;
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, project_id, name, path, branch FROM worktrees WHERE id=?1",
+        )?;
         let mut rows = stmt.query_map(rusqlite::params![id], |row| {
             Ok(WorktreeRow {
                 id: row.get(0)?,
@@ -262,7 +267,7 @@ impl Store {
     }
 
     pub fn list_projects(&self) -> Result<Vec<ProjectRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id, owner, repo, base_path, last_session_at FROM projects ORDER BY owner, repo",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -285,7 +290,7 @@ impl Store {
     pub fn list_projects_joined(
         &self,
     ) -> Result<Vec<crate::commands::projects::ProjectTreeRow>, crate::ipc_error::IpcError> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT p.id, p.owner, p.repo, p.base_path, p.last_session_at,
                     w.id, w.project_id, w.name, w.path, w.branch
              FROM projects p
@@ -367,7 +372,7 @@ impl Store {
         &self,
         project_id: i64,
     ) -> Result<Vec<WorktreeRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id, project_id, name, path, branch FROM worktrees WHERE project_id=?1 ORDER BY name",
         )?;
         let rows = stmt.query_map(rusqlite::params![project_id], |row| {
@@ -435,7 +440,7 @@ impl Store {
     }
 
     pub fn list_hosts(&self) -> Result<Vec<HostRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT alias, ssh_alias, reachable, claude_version, tmux_version, hidden,
                     last_pinged_at, account_uuid
              FROM hosts
@@ -501,7 +506,7 @@ impl Store {
     }
 
     pub fn list_accounts(&self) -> Result<Vec<AccountRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT uuid, email, display_name, organization_name, organization_uuid,
                     seat_tier, last_seen_at
              FROM accounts
@@ -548,7 +553,7 @@ impl Store {
     }
 
     pub fn get_account_by_uuid(&self, uuid: &str) -> Result<Option<AccountRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT uuid, email, display_name, organization_name, organization_uuid,
                     seat_tier, last_seen_at
              FROM accounts WHERE uuid=?1",
@@ -595,7 +600,7 @@ impl Store {
         // would carry stale rows that point to a host that no longer exists.
         let orphan_ids: Vec<i64> = self
             .conn
-            .prepare("SELECT id FROM sessions WHERE host_alias=?1")?
+            .prepare_cached("SELECT id FROM sessions WHERE host_alias=?1")?
             .query_map(rusqlite::params![alias], |row| row.get::<_, i64>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         self.conn.execute(
@@ -674,9 +679,9 @@ impl Store {
         host_alias: &str,
         tmux_name: &str,
     ) -> Result<Option<String>, rusqlite::Error> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT account_uuid FROM sessions WHERE host_alias=?1 AND tmux_name=?2")?;
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT account_uuid FROM sessions WHERE host_alias=?1 AND tmux_name=?2",
+        )?;
         let mut rows = stmt.query_map(rusqlite::params![host_alias, tmux_name], |row| {
             row.get::<_, Option<String>>(0)
         })?;
@@ -690,13 +695,42 @@ impl Store {
         &self,
         host_alias: &str,
     ) -> Result<Vec<SessionRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                     worktree_key
              FROM sessions WHERE host_alias=?1 ORDER BY last_activity_at DESC",
         )?;
         let rows = stmt.query_map(rusqlite::params![host_alias], |row| {
+            Ok(SessionRow {
+                id: row.get(0)?,
+                tmux_name: row.get(1)?,
+                host_alias: row.get(2)?,
+                project_id: row.get(3)?,
+                worktree_id: row.get(4)?,
+                created_at: row.get(5)?,
+                last_activity_at: row.get(6)?,
+                status: row.get(7)?,
+                notes: row.get(8)?,
+                account_uuid: row.get(9)?,
+                kind: row.get(10)?,
+                reviews_session_id: row.get(11)?,
+                worktree_key: row.get(12)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// All sessions across every host, in one query. Used by `reconcile_sessions`
+    /// to collect its return value once at the end instead of N per-host reads.
+    pub fn list_all_sessions(&self) -> Result<Vec<SessionRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
+                    last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
+                    worktree_key
+             FROM sessions ORDER BY last_activity_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
             Ok(SessionRow {
                 id: row.get(0)?,
                 tmux_name: row.get(1)?,
@@ -735,7 +769,7 @@ impl Store {
         let Some(key) = key else {
             return Ok(Vec::new());
         };
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                     worktree_key
@@ -797,7 +831,7 @@ impl Store {
     }
 
     pub fn get_session_by_id(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                     worktree_key
@@ -1005,7 +1039,7 @@ impl Store {
     ) -> Result<usize, rusqlite::Error> {
         // Collect ids to delete before the DELETE so we can emit one event per row.
         let ids_to_delete: Vec<i64> = if keep_names.is_empty() {
-            let mut stmt = tx.prepare("SELECT id FROM sessions WHERE host_alias=?1")?;
+            let mut stmt = tx.prepare_cached("SELECT id FROM sessions WHERE host_alias=?1")?;
             let ids = stmt
                 .query_map(rusqlite::params![host_alias], |r| r.get::<_, i64>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1120,7 +1154,7 @@ impl Store {
         let ids_to_delete: Vec<i64> = if keep_names.is_empty() {
             let mut stmt = self
                 .conn
-                .prepare("SELECT id FROM sessions WHERE host_alias=?1")?;
+                .prepare_cached("SELECT id FROM sessions WHERE host_alias=?1")?;
             let ids = stmt
                 .query_map(rusqlite::params![host_alias], |r| r.get::<_, i64>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1177,7 +1211,7 @@ fn fetch_session(
     tmux_name: &str,
     host_alias: &str,
 ) -> Result<Option<SessionRow>, rusqlite::Error> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                 last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                 worktree_key
@@ -1207,7 +1241,7 @@ fn fetch_session(
 }
 
 fn fetch_host(conn: &Connection, alias: &str) -> Result<Option<HostRow>, rusqlite::Error> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT alias, ssh_alias, reachable, claude_version, tmux_version, hidden,
                 last_pinged_at, account_uuid
          FROM hosts WHERE alias=?1",
@@ -1231,8 +1265,9 @@ fn fetch_host(conn: &Connection, alias: &str) -> Result<Option<HostRow>, rusqlit
 }
 
 fn fetch_project(conn: &Connection, id: i64) -> Result<Option<ProjectRow>, rusqlite::Error> {
-    let mut stmt = conn
-        .prepare("SELECT id, owner, repo, base_path, last_session_at FROM projects WHERE id=?1")?;
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, owner, repo, base_path, last_session_at FROM projects WHERE id=?1",
+    )?;
     let mut rows = stmt.query_map(rusqlite::params![id], |row| {
         Ok(ProjectRow {
             id: row.get(0)?,
@@ -1274,7 +1309,7 @@ mod tests {
     fn migrate_is_idempotent() {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
-        assert_eq!(store.schema_version().expect("version"), 6);
+        assert_eq!(store.schema_version().expect("version"), 7);
     }
 
     #[test]
@@ -1392,7 +1427,7 @@ mod tests {
         // sqlite_master pragma_table_info path
         let mut stmt = s
             .conn
-            .prepare("SELECT name FROM pragma_table_info('hosts')")
+            .prepare_cached("SELECT name FROM pragma_table_info('hosts')")
             .unwrap();
         let cols: Vec<String> = stmt
             .query_map([], |r| r.get::<_, String>(0))
@@ -1406,9 +1441,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_six_after_migration() {
+    fn schema_version_is_seven_after_migration() {
         let s = Store::open_in_memory().expect("open");
-        assert_eq!(s.schema_version().expect("version"), 6);
+        assert_eq!(s.schema_version().expect("version"), 7);
     }
 
     #[test]
@@ -1446,7 +1481,7 @@ mod tests {
         let s = Store::open_in_memory().expect("open");
         let mut stmt = s
             .conn
-            .prepare("SELECT name FROM pragma_table_info('sessions')")
+            .prepare_cached("SELECT name FROM pragma_table_info('sessions')")
             .unwrap();
         let cols: Vec<String> = stmt
             .query_map([], |r| r.get::<_, String>(0))
@@ -1468,7 +1503,7 @@ mod tests {
         );
         let mut stmt = s
             .conn
-            .prepare("SELECT name FROM pragma_table_info('hosts')")
+            .prepare_cached("SELECT name FROM pragma_table_info('hosts')")
             .unwrap();
         let cols: Vec<String> = stmt
             .query_map([], |r| r.get::<_, String>(0))

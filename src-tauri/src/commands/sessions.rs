@@ -2,7 +2,7 @@ use crate::cancel::{CancelGuard, CancellationRegistry};
 use crate::ipc_error::IpcError;
 use crate::shell::quote as shq;
 use crate::ssh::SshClient;
-use crate::store::{HostReconcile, HostRow, ReconcileSession, SessionRow, Store};
+use crate::store::{HostReconcile, HostRow, ProjectRow, ReconcileSession, SessionRow, Store};
 use crate::tmux::{LocalTmux, RemoteTmux, TmuxExec};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -29,6 +29,7 @@ fn reconcile_write_one_host(
     s: &mut Store,
     host: &HostRow,
     res: &Result<Vec<crate::tmux::TmuxSession>, IpcError>,
+    projects: &[ProjectRow],
 ) -> Result<(), IpcError> {
     match res {
         Ok(live) => {
@@ -36,7 +37,7 @@ fn reconcile_write_one_host(
             let mut sessions: Vec<ReconcileSession> = Vec::with_capacity(live.len());
             for sess in live {
                 keep.push(sess.name.clone());
-                let project_id = find_project_id_for_path(s, &host.alias, &sess.path);
+                let project_id = find_project_id_for_path(projects, &host.alias, &sess.path);
                 // Preservation invariant: if the session already has an
                 // account_uuid in the DB, keep it; only capture the host's
                 // current account for newly-discovered sessions.
@@ -94,8 +95,8 @@ async fn reconcile_sessions(
     };
 
     // 2. Fan out probes (off-lock) via JoinSet for parallel execution.
-    //    Hidden hosts are skipped here — their last-known sessions are
-    //    fetched in the write phase without probing.
+    //    Hidden hosts are skipped here — their last-known sessions are still
+    //    surfaced by the final `list_all_sessions` read, without probing.
     //    Each task receives owned data so it satisfies 'static + Send.
     //
     //    TODO(iter4a-M4): `JoinSet::drop` aborts the futures but does NOT
@@ -127,41 +128,35 @@ async fn reconcile_sessions(
     //    update_host_probe + upserts + touches + delete-not-in in ONE
     //    transaction (one fsync) and emits events only AFTER it commits — so a
     //    mid-burst error rolls everything back and emits nothing for that host.
-    //
-    //    The (project_id, account_uuid) resolution stays HERE: those are reads
-    //    (`find_project_id_for_path`, `get_session_account`) and must run
-    //    before the transaction opens.
-    let mut all_rows: Vec<SessionRow> = Vec::new();
     {
         let mut s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+
+        // The project list is identical for every host — fetch it once here
+        // rather than re-querying inside `find_project_id_for_path` per session.
+        let projects = s.list_projects()?;
 
         for (host, res) in &probed {
             // Per-host isolation: one host's DB write failure (e.g. an FK
             // violation on a stale account_uuid) must NOT abort reconcile for
             // every other host. apply_host_reconcile is transactional, so a
             // failed host rolls back cleanly; we log it and carry on.
-            if let Err(e) = reconcile_write_one_host(&mut s, host, res) {
+            if let Err(e) = reconcile_write_one_host(&mut s, host, res, &projects) {
                 eprintln!(
                     "reconcile: write for host {} failed: {}",
                     host.alias, e.message
                 );
             }
-            // Always surface this host's last-known rows, even after a
-            // partial write failure above.
-            if let Ok(rows) = s.list_sessions_for_host(&host.alias) {
-                all_rows.extend(rows);
-            }
-        }
-
-        // Hidden hosts: don't probe but DO surface their last-known sessions.
-        let all_hosts = s.list_hosts()?;
-        for host in all_hosts.iter().filter(|h| h.hidden) {
-            all_rows.extend(s.list_sessions_for_host(&host.alias)?);
         }
     }
-    Ok(all_rows)
+
+    // 4. Read the final session set in one query (covers active + hidden
+    //    hosts) instead of N per-host reads.
+    let s = store
+        .lock()
+        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    s.list_all_sessions().map_err(IpcError::from)
 }
 
 async fn reconcile_one_host(
@@ -184,55 +179,13 @@ async fn reconcile_one_host(
     let tmux = exec_for(&host.alias, ssh);
     let result = tmux.list_sessions().await;
 
-    // 3. Apply writes under one brief lock, via the same single-transaction
-    //    + emit-after-commit path as the multi-host reconcile. Reads
-    //    (project_id / account_uuid resolution) happen before the tx opens.
+    // 3. Apply writes under one brief lock, via the SAME per-host write path
+    //    as the multi-host reconcile (single transaction + emit-after-commit).
     let mut s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    match result {
-        Ok(live) => {
-            let mut keep: Vec<String> = Vec::with_capacity(live.len());
-            let mut sessions: Vec<ReconcileSession> = Vec::with_capacity(live.len());
-            for sess in &live {
-                keep.push(sess.name.clone());
-                let project_id = find_project_id_for_path(&s, &host.alias, &sess.path);
-                let account_uuid = s
-                    .get_session_account(&host.alias, &sess.name)?
-                    .or_else(|| host.account_uuid.clone());
-                let worktree_key = worktree_key_for_path(&sess.path.to_string_lossy());
-                sessions.push(ReconcileSession {
-                    tmux_name: &sess.name,
-                    project_id,
-                    created_at: sess.created,
-                    last_activity_at: sess.last_activity,
-                    account_uuid,
-                    worktree_key,
-                });
-            }
-            s.apply_host_reconcile(HostReconcile {
-                alias: &host.alias,
-                reachable: true,
-                claude_version: host.claude_version.as_deref(),
-                tmux_version: host.tmux_version.as_deref(),
-                last_pinged_at: now_unix(),
-                sessions: &sessions,
-                keep: &keep,
-            })?;
-        }
-        Err(_e) => {
-            s.apply_host_reconcile(HostReconcile {
-                alias: &host.alias,
-                reachable: false,
-                claude_version: host.claude_version.as_deref(),
-                tmux_version: host.tmux_version.as_deref(),
-                last_pinged_at: now_unix(),
-                sessions: &[],
-                keep: &[],
-            })?;
-        }
-    }
-    Ok(())
+    let projects = s.list_projects()?;
+    reconcile_write_one_host(&mut s, &host, &result, &projects)
 }
 
 fn now_unix() -> i64 {
@@ -280,13 +233,18 @@ fn worktree_key_for_path(path: &str) -> Option<String> {
     Some("main".to_string())
 }
 
-fn find_project_id_for_path(s: &Store, host_alias: &str, path: &std::path::Path) -> Option<i64> {
+/// Match a session's cwd to a known project id. `projects` is passed in by the
+/// caller (fetched once per reconcile) rather than queried per session.
+fn find_project_id_for_path(
+    projects: &[ProjectRow],
+    host_alias: &str,
+    path: &std::path::Path,
+) -> Option<i64> {
     let path_str = path.to_string_lossy();
-    let projects = s.list_projects().ok()?;
     if host_alias == "local" {
-        // Local paths: existing prefix match (handles worktrees nested under repos).
+        // Local paths: prefix match (handles worktrees nested under repos).
         return projects
-            .into_iter()
+            .iter()
             .filter(|p| path_str.starts_with(&p.base_path))
             .max_by_key(|p| p.base_path.len())
             .map(|p| p.id);
@@ -296,7 +254,7 @@ fn find_project_id_for_path(s: &Store, host_alias: &str, path: &std::path::Path)
     // to `None` (orphan) if the path doesn't follow the convention.
     let (owner, repo) = extract_owner_repo(&path_str)?;
     projects
-        .into_iter()
+        .iter()
         .find(|p| p.owner == owner && p.repo == repo)
         .map(|p| p.id)
 }
@@ -1394,8 +1352,14 @@ mod tests {
     fn worktree_add_script_contains_expected_fragments() {
         let script = worktree_add_script("/repo/root", "feat-x");
         assert!(script.contains("cd '/repo/root'"), "cd root: {script}");
-        assert!(script.contains("name='feat-x'"), "name assignment: {script}");
-        assert!(script.contains("git worktree add"), "worktree add: {script}");
+        assert!(
+            script.contains("name='feat-x'"),
+            "name assignment: {script}"
+        );
+        assert!(
+            script.contains("git worktree add"),
+            "worktree add: {script}"
+        );
         assert!(script.contains(" -b "), "branch flag: {script}");
         assert!(script.contains(".worktrees"), ".worktrees dir: {script}");
         assert!(
@@ -1473,8 +1437,16 @@ mod tests {
 
         // second call — idempotent
         let result2 = create_worktree_local(repo_str, "feat-x").await;
-        assert!(result2.is_ok(), "second (idempotent) call failed: {:?}", result2);
-        assert_eq!(result2.unwrap(), wt_path, "idempotent call must return same path");
+        assert!(
+            result2.is_ok(),
+            "second (idempotent) call failed: {:?}",
+            result2
+        );
+        assert_eq!(
+            result2.unwrap(),
+            wt_path,
+            "idempotent call must return same path"
+        );
 
         // cleanup
         std::fs::remove_dir_all(&base).ok();
