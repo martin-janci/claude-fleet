@@ -724,7 +724,9 @@ pub async fn rename_session(
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    s.get_session(args.new_name.trim(), &args.host_alias)?
+    // `new_name` is validated verbatim (no padding), so look it up as-is —
+    // consistent with kill_session / restart_session.
+    s.get_session(&args.new_name, &args.host_alias)?
         .ok_or_else(|| {
             IpcError::new(
                 "E_NOTFOUND",

@@ -144,18 +144,25 @@ pub fn repo_rel_path(value: &str) -> Result<(), IpcError> {
 /// Validate a tmux session name. tmux forbids `.`, `:` and whitespace in
 /// session names; we additionally reject control characters and a leading
 /// `-` (which a `tmux -t <name>` target would parse as an option).
+///
+/// The name is checked *verbatim* — leading/trailing whitespace is rejected,
+/// not trimmed away. A trimming validator would accept `" foo "` while the
+/// rest of the pipeline (tmux create, DB store, `get_session` lookup) uses
+/// the un-trimmed value, so a padded name would create a session later
+/// commands could not find. The UI trims before calling in; only DevTools /
+/// the MCP API reach here with padding, and they get a clear `E_INVALID`.
 pub fn tmux_name(value: &str) -> Result<(), IpcError> {
-    let v = value.trim();
-    if v.is_empty() {
+    if value.is_empty() {
         return Err(IpcError::new("E_INVALID", "session name must not be empty"));
     }
-    if v.starts_with('-') {
+    if value.starts_with('-') {
         return Err(IpcError::new(
             "E_INVALID",
             "session name must not start with '-'",
         ));
     }
-    if v.chars()
+    if value
+        .chars()
         .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '.' | ':'))
     {
         return Err(IpcError::new(
@@ -232,7 +239,9 @@ mod tests {
     #[test]
     fn tmux_name_matches_tmux_rules() {
         assert!(tmux_name("dev-foo").is_ok());
-        assert!(tmux_name("  dev-foo  ").is_ok()); // trimmed
+        assert!(tmux_name("  dev-foo  ").is_err()); // padding rejected, not trimmed
+        assert!(tmux_name("dev-foo ").is_err()); // trailing space
+        assert!(tmux_name(" dev-foo").is_err()); // leading space
         assert!(tmux_name("has space").is_err());
         assert!(tmux_name("has.dot").is_err());
         assert!(tmux_name("has:colon").is_err());
