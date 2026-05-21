@@ -6,6 +6,10 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use tauri::State;
 
+/// Hard cap on the un-drained PTY byte buffer (1 MiB). The frontend normally
+/// drains every 30-250 ms; this only bites if it stops entirely.
+const PTY_BUFFER_CAP: usize = 1 << 20;
+
 /// One active PTY at a time (we render a single terminal pane). Opening a new
 /// PTY closes the previous one. Holds the master (for resize), a writer (for
 /// input forwarding), and the child handle (for kill on close). The reader is
@@ -209,6 +213,15 @@ pub fn pty_open(args: PtyOpenArgs, state: State<'_, Mutex<PtyState>>) -> Result<
                     total += n;
                     if let Ok(mut b) = buffer_for_thread.lock() {
                         b.extend_from_slice(&buf[..n]);
+                        // Safety valve: if the frontend has stopped draining
+                        // (backgrounded tab, stalled loop) a busy session
+                        // could grow this without bound. Cap it by dropping
+                        // the oldest bytes — losing scrollback is acceptable;
+                        // OOMing the process is not.
+                        if b.len() > PTY_BUFFER_CAP {
+                            let excess = b.len() - PTY_BUFFER_CAP;
+                            b.drain(0..excess);
+                        }
                     } else {
                         break;
                     }
@@ -241,22 +254,27 @@ pub struct PtyDrainResult {
 
 #[tauri::command]
 pub fn pty_drain(state: State<'_, Mutex<PtyState>>) -> Result<PtyDrainResult, IpcError> {
-    let s = state
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
-    let mut buf = s
-        .buffer
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "pty buffer poisoned"))?;
-    if buf.is_empty() {
-        return Ok(PtyDrainResult {
-            data: String::new(),
-            bytes: 0,
-        });
-    }
-    let bytes = buf.len();
-    let data = String::from_utf8_lossy(&buf).into_owned();
-    buf.clear();
+    // Swap the accumulated bytes out under the locks, then decode AFTER
+    // releasing them — the UTF-8 decode is the bulk of the work and shouldn't
+    // block the reader thread (which needs the buffer lock to append).
+    let raw: Vec<u8> = {
+        let s = state
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
+        let mut buf = s
+            .buffer
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "pty buffer poisoned"))?;
+        if buf.is_empty() {
+            return Ok(PtyDrainResult {
+                data: String::new(),
+                bytes: 0,
+            });
+        }
+        std::mem::take(&mut *buf)
+    };
+    let bytes = raw.len();
+    let data = String::from_utf8_lossy(&raw).into_owned();
     Ok(PtyDrainResult { data, bytes })
 }
 
