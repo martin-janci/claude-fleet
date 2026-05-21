@@ -184,6 +184,13 @@ export class Screen {
    *  pinned to the last row) are never scrolled. */
   scrollTop = 0;
   scrollBottom = 0;
+  /** Per-row change counter. Each entry is set to a fresh monotonic value
+   *  whenever that row's cell content changes; an unchanged row keeps its
+   *  value. The renderer compares against what it last drew so it can skip
+   *  re-deriving rows that didn't move — turning a per-frame O(rows×cols)
+   *  rebuild into O(changed rows). */
+  rowVersion: number[] = [];
+  private dirtyClock = 0;
 
   constructor(rows: number, cols: number) {
     this.rows = Math.max(1, rows);
@@ -191,6 +198,23 @@ export class Screen {
     this.cells = makeGrid(this.rows, this.cols);
     this.scrollTop = 0;
     this.scrollBottom = this.rows - 1;
+    this.rowVersion = new Array(this.rows);
+    this.markAll();
+  }
+
+  /** Mark a single row changed. */
+  private markRow(r: number): void {
+    if (r >= 0 && r < this.rows) this.rowVersion[r] = ++this.dirtyClock;
+  }
+
+  /** Mark an inclusive range of rows changed. */
+  private markRows(a: number, b: number): void {
+    for (let r = a; r <= b; r++) this.markRow(r);
+  }
+
+  /** Mark every row changed (buffer wholesale-replaced or resized). */
+  private markAll(): void {
+    for (let r = 0; r < this.rows; r++) this.rowVersion[r] = ++this.dirtyClock;
   }
 
   /** Resize the buffer. Existing content is preserved by clamping or
@@ -210,6 +234,8 @@ export class Screen {
     }
     this.rows = rows;
     this.cols = cols;
+    this.rowVersion = new Array(this.rows);
+    this.markAll();
     if (this.cursorRow >= rows) this.cursorRow = rows - 1;
     if (this.cursorCol >= cols) this.cursorCol = cols - 1;
     // A SIGWINCH invalidates the scroll region — programs re-establish it
@@ -299,6 +325,7 @@ export class Screen {
     cell.fg = this.curFg;
     cell.bg = this.curBg;
     cell.attrs = this.curAttrs;
+    this.markRow(this.cursorRow);
     this.cursorCol++;
   }
 
@@ -315,6 +342,7 @@ export class Screen {
       // inserting at `scrollBottom` lands the blank on the region's last row.
       this.cells.splice(this.scrollTop, 1);
       this.cells.splice(this.scrollBottom, 0, makeRow(this.cols));
+      this.markRows(this.scrollTop, this.scrollBottom);
     } else if (this.cursorRow < this.rows - 1) {
       this.cursorRow++;
     }
@@ -329,6 +357,7 @@ export class Screen {
       // on the region's first row.
       this.cells.splice(this.scrollBottom, 1);
       this.cells.splice(this.scrollTop, 0, makeRow(this.cols));
+      this.markRows(this.scrollTop, this.scrollBottom);
     } else if (this.cursorRow > 0) {
       this.cursorRow--;
     }
@@ -341,20 +370,24 @@ export class Screen {
    *  out of sync until a full repaint (e.g. a resize) re-syncs it. */
   private scrollUp(n: number): void {
     n = Math.min(n, this.scrollBottom - this.scrollTop + 1);
-    for (let i = 0; i < n; i++) {
-      this.cells.splice(this.scrollTop, 1);
-      this.cells.splice(this.scrollBottom, 0, makeRow(this.cols));
-    }
+    if (n <= 0) return;
+    // Batched: one splice removes the top `n` rows of the region, one more
+    // inserts `n` blanks at the bottom — vs `n` individual splice pairs.
+    this.cells.splice(this.scrollTop, n);
+    const blanks = Array.from({ length: n }, () => makeRow(this.cols));
+    this.cells.splice(this.scrollBottom - n + 1, 0, ...blanks);
+    this.markRows(this.scrollTop, this.scrollBottom);
   }
 
   /** SD (scroll down): mirror of `scrollUp` — blanks fill in at the top
    *  margin, content at the bottom margin falls off, the cursor stays put. */
   private scrollDown(n: number): void {
     n = Math.min(n, this.scrollBottom - this.scrollTop + 1);
-    for (let i = 0; i < n; i++) {
-      this.cells.splice(this.scrollBottom, 1);
-      this.cells.splice(this.scrollTop, 0, makeRow(this.cols));
-    }
+    if (n <= 0) return;
+    this.cells.splice(this.scrollBottom - n + 1, n);
+    const blanks = Array.from({ length: n }, () => makeRow(this.cols));
+    this.cells.splice(this.scrollTop, 0, ...blanks);
+    this.markRows(this.scrollTop, this.scrollBottom);
   }
 
   /** Parse a single escape sequence starting at `start`. Returns number of
@@ -443,6 +476,7 @@ export class Screen {
 
   private fullReset(): void {
     this.cells = makeGrid(this.rows, this.cols);
+    this.markAll();
     this.cursorRow = 0;
     this.cursorCol = 0;
     this.curFg = COLOR_DEFAULT;
@@ -618,6 +652,7 @@ export class Screen {
     // Hand the alt buffer a clean slate and reset transient state. Per
     // xterm: the alt screen starts blank with cursor at home.
     this.cells = makeGrid(this.rows, this.cols);
+    this.markAll();
     this.cursorRow = 0;
     this.cursorCol = 0;
     this.curFg = COLOR_DEFAULT;
@@ -641,6 +676,7 @@ export class Screen {
     const saved = this.savedScreen;
     if (saved === null) return;
     this.cells = saved.cells;
+    this.markAll();
     this.cursorRow = saved.cursorRow;
     this.cursorCol = saved.cursorCol;
     this.curFg = saved.curFg;
@@ -698,6 +734,7 @@ export class Screen {
       this.cells.splice(this.scrollBottom, 1);
       this.cells.splice(this.cursorRow, 0, makeRow(this.cols));
     }
+    this.markRows(this.cursorRow, this.scrollBottom);
   }
 
   private deleteLines(n: number): void {
@@ -711,6 +748,7 @@ export class Screen {
       this.cells.splice(this.cursorRow, 1);
       this.cells.splice(this.scrollBottom, 0, makeRow(this.cols));
     }
+    this.markRows(this.cursorRow, this.scrollBottom);
   }
 
   private deleteChars(n: number): void {
@@ -718,12 +756,14 @@ export class Screen {
     row.splice(this.cursorCol, n);
     while (row.length < this.cols) row.push(emptyCell());
     if (row.length > this.cols) row.length = this.cols;
+    this.markRow(this.cursorRow);
   }
 
   private insertChars(n: number): void {
     const row = this.cells[this.cursorRow];
     for (let i = 0; i < n; i++) row.splice(this.cursorCol, 0, emptyCell());
     if (row.length > this.cols) row.length = this.cols;
+    this.markRow(this.cursorRow);
   }
 
   private eraseChars(n: number): void {
@@ -740,6 +780,7 @@ export class Screen {
     cell.fg = COLOR_DEFAULT;
     cell.bg = COLOR_DEFAULT;
     cell.attrs = 0;
+    this.markRow(r);
   }
 
   private applySgr(params: number[]): void {

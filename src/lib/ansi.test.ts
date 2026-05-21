@@ -570,3 +570,45 @@ describe('ansi.colorToCss', () => {
     expect(colorToCss(rgb(10, 20, 30))).toBe('rgb(10,20,30)');
   });
 });
+
+describe('ansi.Screen.rowVersion (dirty-row tracking)', () => {
+  it('starts every row at a fresh version', () => {
+    const s = new Screen(5, 10);
+    expect(s.rowVersion).toHaveLength(5);
+    expect(s.rowVersion.every((v) => v > 0)).toBe(true);
+  });
+
+  it('bumps only the cursor row on a printed char', () => {
+    const s = new Screen(5, 10);
+    const before = [...s.rowVersion];
+    s.write('\x1b[3;1H'); // cursor → row 2 (0-based)
+    s.write('x');
+    expect(s.rowVersion[2]).not.toBe(before[2]);
+    expect(s.rowVersion[0]).toBe(before[0]);
+    expect(s.rowVersion[4]).toBe(before[4]);
+  });
+
+  it('bumps the scroll region on a bottom-margin line feed', () => {
+    const s = new Screen(4, 10);
+    s.write('\x1b[4;1H'); // cursor on the last row
+    const before = [...s.rowVersion];
+    s.write('\n'); // scrolls the whole region up
+    expect(s.rowVersion.every((v, r) => v !== before[r])).toBe(true);
+  });
+
+  it('bumps a row when it is erased', () => {
+    const s = new Screen(5, 10);
+    s.write('\x1b[2;1Habc'); // write on row 1
+    const before = [...s.rowVersion];
+    s.write('\x1b[2;1H\x1b[K'); // erase row 1
+    expect(s.rowVersion[1]).not.toBe(before[1]);
+    expect(s.rowVersion[3]).toBe(before[3]);
+  });
+
+  it('rebuilds rowVersion to the new length on resize', () => {
+    const s = new Screen(5, 10);
+    s.resize(8, 10);
+    expect(s.rowVersion).toHaveLength(8);
+    expect(s.rowVersion.every((v) => v > 0)).toBe(true);
+  });
+});

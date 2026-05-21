@@ -311,6 +311,12 @@
     void closeTerm();
   });
 
+  // Per-row render cache, keyed by the Screen instance so it resets on a
+  // session switch. Each entry holds the row's `Screen.rowVersion` at build
+  // time plus its derived `key` + `runs`.
+  let rowCache: { ver: number; key: string; runs: Run[] }[] = [];
+  let cacheScreen: Screen | null = null;
+
   // Derived view: a list of rows, each carrying its styled runs plus a
   // content-derived `key`. Reading `renderVersion` makes Svelte recompute
   // whenever screen.write() bumps it.
@@ -320,28 +326,53 @@
   // recreates that row's <div> instead of mutating its text nodes in place.
   // Recreating the DOM node is what forces WKWebView to repaint it: in-place
   // text mutation across many rows in one frame leaves some rows unpainted,
-  // which shows up as "duplicated" lines/chars where content moved. Rows
-  // whose content is unchanged keep a stable key (and their DOM node), so
-  // this costs nothing for the static parts of the screen.
+  // which shows up as "duplicated" lines/chars where content moved.
+  //
+  // A row whose `Screen.rowVersion` is unchanged since we last drew it reuses
+  // its cached entry untouched, so an idle screen costs almost nothing and a
+  // typical update only re-derives the few rows that actually moved.
   const visibleRows = $derived.by<{ key: string; runs: Run[] }[]>(() => {
     // Touch the version so the derived recomputes; also gate on screen.
     void renderVersion;
-    if (!screen) return [];
-    return screen.cells.map((row, r) => {
-      const runs = rowToRuns(row);
-      // Fields are joined with control bytes 0x01..0x04. Cells only ever
-      // hold printable chars (code >= 0x20), so these bytes never occur in
-      // run.text — the row index can't bleed into the content and collide
-      // with another row (e.g. row "1" + "2…" vs row "12" + "…").
+    const scr = screen;
+    if (!scr) return [];
+    if (cacheScreen !== scr) {
+      rowCache = [];
+      cacheScreen = scr;
+    }
+    const out: { key: string; runs: Run[] }[] = new Array(scr.rows);
+    for (let r = 0; r < scr.rows; r++) {
+      const ver = scr.rowVersion[r];
+      const cached = rowCache[r];
+      if (cached !== undefined && cached.ver === ver) {
+        out[r] = cached;
+        continue;
+      }
+      const runs = rowToRuns(scr.cells[r]);
+      // Row index + each run's style/text, joined with control bytes
+      // 0x01..0x04. Cells only ever hold printable chars (code >= 0x20), so
+      // those bytes never occur in run.text and the fields can't collide.
       let key = String(r);
       for (const run of runs) {
-        key += `${run.fg}${run.bg}${run.attrs}${run.text}`;
+        key += `\u0001${run.fg}\u0002${run.bg}\u0003${run.attrs}\u0004${run.text}`;
       }
-      return { key, runs };
-    });
+      const entry = { ver, key, runs };
+      rowCache[r] = entry;
+      out[r] = entry;
+    }
+    if (rowCache.length > scr.rows) rowCache.length = scr.rows;
+    return out;
   });
 
+  // Memoized: a screen uses only a handful of distinct (fg, bg, attrs)
+  // combos, but runStyle is called for every run on every render — caching
+  // collapses it to a Map lookup.
+  const styleCache = new Map<string, string>();
+
   function runStyle(run: Run): string {
+    const cacheKey = `${run.fg}|${run.bg}|${run.attrs}`;
+    const hit = styleCache.get(cacheKey);
+    if (hit !== undefined) return hit;
     const parts: string[] = [];
     const fg = colorToCss(run.fg);
     const bg = colorToCss(run.bg);
@@ -351,7 +382,9 @@
     if (run.attrs & 2) parts.push('opacity:0.75'); // ATTR_DIM
     if (run.attrs & 4) parts.push('font-style:italic'); // ATTR_ITALIC
     if (run.attrs & 8) parts.push('text-decoration:underline'); // ATTR_UNDERLINE
-    return parts.join(';');
+    const style = parts.join(';');
+    styleCache.set(cacheKey, style);
+    return style;
   }
 </script>
 
