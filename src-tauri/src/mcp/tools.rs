@@ -153,6 +153,10 @@ pub struct RestartSessionParams {
     pub name: String,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SendPromptParams {
     /// Host alias the session lives on.
@@ -161,6 +165,10 @@ pub struct SendPromptParams {
     pub tmux_name: String,
     /// The prompt text to deliver to the session's Claude REPL.
     pub prompt: String,
+    /// Whether to submit the prompt (press Enter). Defaults to true. Set
+    /// `submit: false` to stage the text in the REPL without submitting it.
+    #[serde(default = "default_true")]
+    pub submit: bool,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -482,8 +490,10 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "Send a prompt (literal text + Enter) to a running \
-        Claude session's REPL. This is how you steer a session.")]
+    #[tool(description = "Send and SUBMIT a prompt to a running Claude \
+        session's REPL (literal text, then one Enter). This is how you steer a \
+        session. Set submit=false to stage text in the REPL without submitting \
+        it.")]
     async fn send_prompt(
         &self,
         Parameters(p): Parameters<SendPromptParams>,
@@ -497,6 +507,7 @@ impl FleetTools {
             host_alias: p.host_alias,
             tmux_name: p.tmux_name,
             prompt: p.prompt,
+            submit: p.submit,
         };
         sessions::send_prompt(args, &self.ssh)
             .await
