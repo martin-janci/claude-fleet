@@ -14,6 +14,7 @@
   import Resizer from './Resizer.svelte';
   import CommitGraph from './CommitGraph.svelte';
   import BranchList from './BranchList.svelte';
+  import RemoteToolbar from './RemoteToolbar.svelte';
 
   let { session }: { session: SessionRow } = $props();
 
@@ -215,8 +216,9 @@
   <!-- Mode-aware body -->
   {#if mode === 'history' && !openCommit}
     <div class="full-col" data-testid="history-view">
-      <div class="hbar">
+      <div class="hbar hbar-row">
         <label><input type="checkbox" bind:checked={allBranches} onchange={() => loadHistory()} /> All branches</label>
+        <RemoteToolbar {session} ondone={onRefresh} />
       </div>
       <div class="hscroll">
         {#if loading && commits.length === 0}
@@ -239,14 +241,19 @@
     </div>
   {:else if mode === 'branches'}
     <div class="full-col" data-testid="branches-view">
-      <BranchList
-        {branches}
-        {loading}
-        {error}
-        onCheckout={(n) => confirmCheckout(n)}
-        onDelete={(n) => confirmDeleteBranch(n)}
-        onNew={() => promptCreateBranch(null)}
-      />
+      <div class="hbar hbar-row">
+        <RemoteToolbar {session} ondone={onRefresh} />
+      </div>
+      <div class="branch-scroll">
+        <BranchList
+          {branches}
+          {loading}
+          {error}
+          onCheckout={(n) => confirmCheckout(n)}
+          onDelete={(n) => confirmDeleteBranch(n)}
+          onNew={() => promptCreateBranch(null)}
+        />
+      </div>
     </div>
   {:else}
     <div class="files-panel" data-testid="files-panel" style="--list-px: {listPx}px">
@@ -377,6 +384,16 @@
     align-items: center;
     gap: 0.4rem;
     cursor: pointer;
+  }
+  .hbar-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .branch-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
   }
   .hscroll {
     flex: 1 1 auto;
