@@ -15,3 +15,4 @@ pub mod hosts;
 pub mod projects;
 pub mod provision;
 pub mod sessions;
+pub mod tunnel;
