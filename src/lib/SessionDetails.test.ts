@@ -27,6 +27,7 @@ const sampleSession = {
   reviews_session_id: null,
   worktree_key: null,
   lost_at: null,
+  claude_session_id: null,
 };
 
 beforeEach(() => {

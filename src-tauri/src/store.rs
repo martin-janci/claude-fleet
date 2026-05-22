@@ -45,6 +45,7 @@ pub struct SessionRow {
     pub reviews_session_id: Option<i64>,
     pub worktree_key: Option<String>,
     pub lost_at: Option<i64>,
+    pub claude_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -185,6 +186,11 @@ impl Store {
         if v < 8 {
             let tx = self.conn.unchecked_transaction()?;
             tx.execute_batch(include_str!("../migrations/008_ghost_sessions.sql"))?;
+            tx.commit()?;
+        }
+        if v < 9 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../migrations/009_session_claude_id.sql"))?;
             tx.commit()?;
         }
         Ok(())
@@ -740,7 +746,7 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                    worktree_key, lost_at
+                    worktree_key, lost_at, claude_session_id
              FROM sessions WHERE host_alias=?1 ORDER BY last_activity_at DESC",
         )?;
         let rows = stmt.query_map(rusqlite::params![host_alias], |row| {
@@ -759,6 +765,7 @@ impl Store {
                 reviews_session_id: row.get(11)?,
                 worktree_key: row.get(12)?,
                 lost_at: row.get(13)?,
+                claude_session_id: row.get(14)?,
             })
         })?;
         rows.collect()
@@ -770,7 +777,7 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                    worktree_key, lost_at
+                    worktree_key, lost_at, claude_session_id
              FROM sessions ORDER BY last_activity_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -789,6 +796,7 @@ impl Store {
                 reviews_session_id: row.get(11)?,
                 worktree_key: row.get(12)?,
                 lost_at: row.get(13)?,
+                claude_session_id: row.get(14)?,
             })
         })?;
         rows.collect()
@@ -816,7 +824,7 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                    worktree_key, lost_at
+                    worktree_key, lost_at, claude_session_id
              FROM sessions
              WHERE project_id=?1 AND worktree_key=?2 AND id<>?3
              ORDER BY host_alias ASC, tmux_name ASC",
@@ -837,6 +845,7 @@ impl Store {
                 reviews_session_id: row.get(11)?,
                 worktree_key: row.get(12)?,
                 lost_at: row.get(13)?,
+                claude_session_id: row.get(14)?,
             })
         })?;
         rows.collect()
@@ -859,6 +868,17 @@ impl Store {
         if let Some(row) = self.get_session_by_id(id)? {
             self.bus.session_updated(&row);
         }
+        Ok(())
+    }
+
+    /// Record the Claude Code session id minted for a session. Reconcile's
+    /// `upsert_session` never writes this column, so the value survives
+    /// reconciliation.
+    pub fn set_claude_session_id(&self, id: i64, uuid: &str) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET claude_session_id=?1 WHERE id=?2",
+            rusqlite::params![uuid, id],
+        )?;
         Ok(())
     }
 
@@ -1287,7 +1307,7 @@ fn fetch_session(
     let mut stmt = conn.prepare_cached(
         "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                 last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                worktree_key, lost_at
+                worktree_key, lost_at, claude_session_id
          FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
     )?;
     let mut rows = stmt.query_map(rusqlite::params![tmux_name, host_alias], |row| {
@@ -1306,6 +1326,7 @@ fn fetch_session(
             reviews_session_id: row.get(11)?,
             worktree_key: row.get(12)?,
             lost_at: row.get(13)?,
+            claude_session_id: row.get(14)?,
         })
     })?;
     match rows.next() {
@@ -1318,7 +1339,7 @@ fn fetch_session_by_id(conn: &Connection, id: i64) -> Result<Option<SessionRow>,
     let mut stmt = conn.prepare_cached(
         "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                 last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                worktree_key, lost_at
+                worktree_key, lost_at, claude_session_id
          FROM sessions WHERE id=?1",
     )?;
     let mut rows = stmt.query_map(rusqlite::params![id], |row| {
@@ -1337,6 +1358,7 @@ fn fetch_session_by_id(conn: &Connection, id: i64) -> Result<Option<SessionRow>,
             reviews_session_id: row.get(11)?,
             worktree_key: row.get(12)?,
             lost_at: row.get(13)?,
+            claude_session_id: row.get(14)?,
         })
     })?;
     match rows.next() {
@@ -1414,7 +1436,7 @@ mod tests {
     fn migrate_is_idempotent() {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
-        assert_eq!(store.schema_version().expect("version"), 8);
+        assert_eq!(store.schema_version().expect("version"), 9);
     }
 
     #[test]
@@ -1548,7 +1570,7 @@ mod tests {
     #[test]
     fn schema_version_is_seven_after_migration() {
         let s = Store::open_in_memory().expect("open");
-        assert_eq!(s.schema_version().expect("version"), 8);
+        assert_eq!(s.schema_version().expect("version"), 9);
     }
 
     #[test]
@@ -2156,7 +2178,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 8, "schema_version should be 8 after migration");
+        assert_eq!(v, 9, "schema_version should be 9 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store
@@ -2432,6 +2454,50 @@ mod tests {
         assert!(
             evts2.contains(&format!("session:killed:{s1_id}")),
             "second cycle must emit session:killed; got: {evts2:?}"
+        );
+    }
+
+    #[test]
+    fn claude_session_id_round_trips_and_defaults_none() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session("dev", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let id = s.get_session("dev", "local").unwrap().unwrap().id;
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().claude_session_id,
+            None
+        );
+        s.set_claude_session_id(id, "550e8400-e29b-41d4-a716-446655440000")
+            .unwrap();
+        assert_eq!(
+            s.get_session_by_id(id)
+                .unwrap()
+                .unwrap()
+                .claude_session_id
+                .as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+    }
+
+    #[test]
+    fn upsert_session_preserves_claude_session_id() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session("dev", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let id = s.get_session("dev", "local").unwrap().unwrap().id;
+        s.set_claude_session_id(id, "550e8400-e29b-41d4-a716-446655440000")
+            .unwrap();
+        s.upsert_session("dev", "local", None, None, 1, 2, "running", None)
+            .unwrap();
+        assert_eq!(
+            s.get_session_by_id(id)
+                .unwrap()
+                .unwrap()
+                .claude_session_id
+                .as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
         );
     }
 }

@@ -123,6 +123,29 @@ pub fn commit_hash(value: &str) -> Result<(), IpcError> {
     Ok(())
 }
 
+/// Validate a Claude Code session id (a canonical lowercase UUID,
+/// `8-4-4-4-12` hex). The app generates these as UUIDv4 and interpolates them
+/// into the pane launch command, so this guards a tampered DB value from
+/// injecting shell. Anything not matching the exact shape is rejected.
+pub fn claude_session_id(value: &str) -> Result<(), IpcError> {
+    let groups = [8usize, 4, 4, 4, 12];
+    let parts: Vec<&str> = value.split('-').collect();
+    let shape_ok = parts.len() == groups.len()
+        && parts.iter().zip(groups).all(|(p, n)| {
+            p.len() == n
+                && p.chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
+        });
+    if shape_ok {
+        Ok(())
+    } else {
+        Err(IpcError::new(
+            "E_INVALID",
+            "claude session id must be a lowercase UUID",
+        ))
+    }
+}
+
 /// Validate a repo-relative file path supplied by the frontend (the file the
 /// user clicked in the Files viewer). The path is joined onto a trusted
 /// worktree cwd before being read, so it must not escape that directory:
@@ -269,6 +292,18 @@ mod tests {
         assert!(commit_hash("-rf").is_err());
         assert!(commit_hash("123").is_err()); // too short (<4)
         assert!(commit_hash(&"a".repeat(41)).is_err()); // too long (>40)
+    }
+
+    #[test]
+    fn claude_session_id_accepts_uuid_rejects_junk() {
+        assert!(claude_session_id("550e8400-e29b-41d4-a716-446655440000").is_ok());
+        assert!(claude_session_id("550E8400-E29B-41D4-A716-446655440000").is_err()); // uppercase
+        assert!(claude_session_id("").is_err());
+        assert!(claude_session_id("not-a-uuid").is_err());
+        assert!(claude_session_id("550e8400e29b41d4a716446655440000").is_err()); // no hyphens
+        assert!(claude_session_id("550e8400-e29b-41d4-a716-44665544000g").is_err()); // non-hex
+        assert!(claude_session_id("'; rm -rf / #").is_err());
+        assert!(claude_session_id(&"a".repeat(36)).is_err()); // right length, wrong shape
     }
 
     #[test]

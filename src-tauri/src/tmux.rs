@@ -13,7 +13,7 @@ use std::sync::Arc;
 pub trait TmuxExec: Send + Sync {
     async fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError>;
     /// `pane_cmd` is the shell command tmux runs as the pane's initial
-    /// process — `pane_command()` for a Claude session, `shell_pane_command()`
+    /// process — `pane_command_for()` for a Claude session, `shell_pane_command()`
     /// for a plain shell session.
     async fn new_session(
         &self,
@@ -297,14 +297,20 @@ fn parse_sessions(input: &str) -> Vec<TmuxSession> {
         .collect()
 }
 
-/// Command tmux runs as the pane's initial process. We use `cl --continue || cl`
-/// to resume the user's last claude conversation if any, otherwise start fresh.
-/// CRUCIAL: after claude exits we `exec $SHELL -l` so the tmux pane stays
-/// alive as a normal interactive shell. Without that, claude returning 0
-/// would close the pane and the whole session would disappear — the user
-/// would lose the ability to "restart" or even attach to it.
-pub fn pane_command() -> &'static str {
-    "cl --continue || cl; exec ${SHELL:-/bin/zsh} -l"
+/// The pane command for a Claude ("work"/"review") session. With a known
+/// session id: resume it, else create it under that id, else a bare `cl` — an
+/// idempotent create-or-resume. Without an id (legacy rows): today's
+/// most-recent-for-cwd behavior. The id is single-quoted; externally-supplied
+/// ids should be validated with `validate::claude_session_id` before being
+/// passed in (minted ids are safe by construction).
+pub fn pane_command_for(claude_session_id: Option<&str>) -> String {
+    let tail = "exec ${SHELL:-/bin/zsh} -l";
+    match claude_session_id {
+        Some(id) => {
+            format!("cl --resume '{id}' 2>/dev/null || cl --session-id '{id}' || cl; {tail}")
+        }
+        None => format!("cl --continue || cl; {tail}"),
+    }
 }
 
 /// Pane command for a plain shell session (`kind = "shell"`). Runs an
@@ -491,8 +497,8 @@ mod tests {
     }
 
     #[test]
-    fn pane_command_falls_back_to_shell_after_claude_exits() {
-        let cmd = pane_command();
+    fn pane_command_for_none_falls_back_to_shell_after_claude_exits() {
+        let cmd = pane_command_for(None);
         // The semicolon (NOT `||`) after the second `cl` is the whole point:
         // it makes the shell always continue to the exec regardless of `cl`'s
         // exit status. Regression test that the next person who edits this
@@ -548,5 +554,25 @@ mod tests {
     #[test]
     fn shell_quote_handles_paths_with_spaces() {
         assert_eq!(shell_quote("/tmp/with space"), "'/tmp/with space'");
+    }
+
+    #[test]
+    fn pane_command_for_resumes_or_creates_with_id() {
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        let cmd = pane_command_for(Some(id));
+        assert!(cmd.contains(&format!("cl --resume '{id}'")), "got: {cmd}");
+        assert!(
+            cmd.contains(&format!("cl --session-id '{id}'")),
+            "got: {cmd}"
+        );
+        assert!(cmd.contains("|| cl;"), "bare fallback missing: {cmd}");
+        assert!(cmd.contains("exec ${SHELL"), "got: {cmd}");
+    }
+
+    #[test]
+    fn pane_command_for_none_uses_continue() {
+        let cmd = pane_command_for(None);
+        assert!(cmd.contains("cl --continue || cl;"), "got: {cmd}");
+        assert!(!cmd.contains("--session-id"), "got: {cmd}");
     }
 }
