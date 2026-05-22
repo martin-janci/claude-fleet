@@ -15,6 +15,7 @@ export interface SessionRow {
   kind: string;
   reviews_session_id: number | null;
   worktree_key: string | null;
+  lost_at: number | null;
 }
 
 export const sessions = writable<SessionRow[]>([]);
@@ -165,5 +166,21 @@ export async function spawnReview(
     signal,
   );
   if (r.ok) mergeSession(r.value);
+  return r;
+}
+
+export async function recreateSession(sessionId: number): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('recreate_session', {
+    args: { session_id: sessionId },
+  });
+  if (r.ok) acceptCommandRow(r.value);
+  return r;
+}
+
+export async function dismissGhostSession(sessionId: number): Promise<Result<void>> {
+  const r = await invokeCmd<void>('dismiss_ghost_session', {
+    args: { session_id: sessionId },
+  });
+  if (r.ok) removeSession(sessionId);
   return r;
 }
