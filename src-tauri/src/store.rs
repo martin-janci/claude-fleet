@@ -875,6 +875,20 @@ impl Store {
         Ok(())
     }
 
+    /// Transition a ghost session back to running. Called after `bare_new_session`
+    /// successfully recreates the tmux session on the host.
+    pub fn restore_session(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET status='running', lost_at=NULL WHERE id=?1",
+            rusqlite::params![id],
+        )?;
+        let row = fetch_session_by_id(&self.conn, id)?;
+        if let Some(ref r) = row {
+            self.bus.session_updated(r);
+        }
+        Ok(row)
+    }
+
     pub fn get_session_by_id(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
         fetch_session_by_id(&self.conn, id)
     }
@@ -2096,6 +2110,35 @@ mod tests {
         assert!(evts[0].starts_with("session:killed:"), "got: {}", evts[0]);
         assert!(evts[1].starts_with("session:killed:"), "got: {}", evts[1]);
         assert_eq!(evts[2], "host:removed:alpha");
+    }
+
+    #[test]
+    fn restore_session_clears_ghost_status_and_lost_at() {
+        let (store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        store
+            .upsert_session("s1", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        let id = store.get_session("s1", "alpha").unwrap().unwrap().id;
+        // Manually ghost it
+        store
+            .conn
+            .execute(
+                "UPDATE sessions SET status='ghost', lost_at=999 WHERE id=?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        bus.take(); // drain
+
+        let row = store.restore_session(id).unwrap().expect("row must exist");
+        assert_eq!(row.status, "running");
+        assert_eq!(row.lost_at, None);
+
+        let evts = bus.take();
+        assert!(
+            evts.iter().any(|e| e.starts_with("session:updated:")),
+            "restore must emit session:updated; got: {evts:?}"
+        );
     }
 
     #[test]
