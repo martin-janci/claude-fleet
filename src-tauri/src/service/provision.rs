@@ -1,6 +1,85 @@
 //! Provision a host's Claude with the fleet-control skill + MCP server entry.
 
 use crate::ipc_error::IpcError;
+use crate::shell::quote as shq;
+use crate::ssh::SshClient;
+use std::sync::Arc;
+use std::time::Duration;
+
+const PROVISION_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Read a file from a host. `local` → `std::fs`; remote → `cat` over SSH.
+/// Missing file → `Ok(String::new())` (caller treats as empty config).
+// called by provision_one in the next task; remove the allow then.
+#[allow(dead_code)]
+pub async fn read_host_file(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    path: &str,
+) -> Result<String, IpcError> {
+    if host == "local" {
+        let expanded = expand_home_local(path)?;
+        return Ok(std::fs::read_to_string(&expanded).unwrap_or_default());
+    }
+    let script = format!("cat {} 2>/dev/null || true", shq(path));
+    let out = ssh
+        .run(host, &["bash", "-lc", &script], PROVISION_TIMEOUT)
+        .await?;
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Write a file to a host (creating parent dirs). `local` → fs; remote → a
+/// shell that `mkdir -p`s the parent and `printf '%s'`s the (shell-quoted)
+/// content to `path`. `dir` is the parent dir; `path` the file.
+// called by provision_one in the next task; remove the allow then.
+#[allow(dead_code)]
+pub async fn write_host_file(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    dir: &str,
+    path: &str,
+    content: &str,
+) -> Result<(), IpcError> {
+    if host == "local" {
+        let edir = expand_home_local(dir)?;
+        std::fs::create_dir_all(&edir)
+            .map_err(|e| IpcError::new("E_PROVISION", format!("mkdir {edir}: {e}")))?;
+        let epath = expand_home_local(path)?;
+        std::fs::write(&epath, content)
+            .map_err(|e| IpcError::new("E_PROVISION", format!("write {epath}: {e}")))?;
+        return Ok(());
+    }
+    let script = format!(
+        "mkdir -p {} && printf '%s' {} > {}",
+        shq(dir),
+        shq(content),
+        shq(path)
+    );
+    let out = ssh
+        .run(host, &["bash", "-lc", &script], PROVISION_TIMEOUT)
+        .await?;
+    if !out.status.success() {
+        return Err(IpcError::new(
+            "E_PROVISION",
+            format!(
+                "write {path} on {host}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Expand a leading `~/` against the LOCAL home dir.
+fn expand_home_local(path: &str) -> Result<String, IpcError> {
+    if let Some(rest) = path.strip_prefix("~/") {
+        let home =
+            std::env::var("HOME").map_err(|_| IpcError::new("E_PROVISION", "HOME not set"))?;
+        Ok(format!("{home}/{rest}"))
+    } else {
+        Ok(path.to_string())
+    }
+}
 
 /// Merge the claude-fleet HTTP MCP server entry into a host's `~/.claude.json`
 /// content, preserving every existing key. Returns the new JSON (pretty).
@@ -89,5 +168,15 @@ mod tests {
     #[test]
     fn merge_rejects_invalid_json() {
         assert!(merge_mcp_entry("not json", "u", "t").is_err());
+    }
+
+    #[test]
+    fn expand_home_local_expands_tilde() {
+        std::env::set_var("HOME", "/Users/test");
+        assert_eq!(
+            super::expand_home_local("~/.claude.json").unwrap(),
+            "/Users/test/.claude.json"
+        );
+        assert_eq!(super::expand_home_local("/abs/path").unwrap(), "/abs/path");
     }
 }
