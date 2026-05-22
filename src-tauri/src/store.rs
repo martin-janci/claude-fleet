@@ -893,6 +893,10 @@ impl Store {
         fetch_session_by_id(&self.conn, id)
     }
 
+    pub fn get_host_row(&self, alias: &str) -> Result<Option<HostRow>, rusqlite::Error> {
+        fetch_host(&self.conn, alias)
+    }
+
     pub fn worktree_path(&self, id: i64) -> Result<Option<String>, rusqlite::Error> {
         self.conn
             .query_row(
