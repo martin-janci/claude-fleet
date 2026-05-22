@@ -65,12 +65,35 @@ vi.mock('@tauri-apps/api/event', () => ({
   emit: vi.fn(async () => {}),
 }));
 
+// The real getCurrentWebview() reads Tauri window internals that don't exist
+// in jsdom, so it throws on access. TerminalView subscribes to drag-drop
+// events through it on mount; stub it so onDragDropEvent resolves to a no-op
+// unlisten fn and mounting the component doesn't crash.
+vi.mock('@tauri-apps/api/webview', () => ({
+  getCurrentWebview: () => ({
+    onDragDropEvent: vi.fn(async () => () => {}),
+  }),
+}));
+
 // vitest's jsdom environment does not expose a usable global `localStorage`
 // (the document origin is opaque, so jsdom omits the Web Storage API).
 // Provide a minimal in-memory Storage so modules that read prefs / theme /
 // session-ui state — some at import time — don't crash. Setup files load
 // before any test module is imported.
-if (typeof globalThis.localStorage === 'undefined') {
+//
+// We replace it both when it's missing AND when it's present-but-unusable:
+// Node 22+ ships an experimental global `localStorage` that throws unless the
+// process was started with `--localstorage-file`, so a bare `typeof` check
+// isn't enough — probe a real call.
+function localStorageUsable(): boolean {
+  try {
+    globalThis.localStorage?.getItem('__probe__');
+    return typeof globalThis.localStorage?.getItem === 'function';
+  } catch {
+    return false;
+  }
+}
+if (!localStorageUsable()) {
   const mem = new Map<string, string>();
   const storage: Storage = {
     get length() {
@@ -92,7 +115,13 @@ if (typeof globalThis.localStorage === 'undefined') {
       return Array.from(mem.keys())[index] ?? null;
     },
   };
-  globalThis.localStorage = storage;
+  // Use defineProperty: Node's built-in `localStorage` is a non-writable
+  // accessor, so a plain assignment would throw.
+  Object.defineProperty(globalThis, 'localStorage', {
+    value: storage,
+    configurable: true,
+    writable: true,
+  });
 }
 
 // ResizeObserver isn't implemented by jsdom. Our TerminalView attaches one
