@@ -62,6 +62,7 @@ pub struct HostRow {
     pub hidden: bool,
     pub last_pinged_at: Option<i64>,
     pub account_uuid: Option<String>,
+    pub provisioned: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -206,6 +207,11 @@ impl Store {
         if v < 10 {
             let tx = self.conn.unchecked_transaction()?;
             tx.execute_batch(include_str!("../migrations/010_claude_agent_fields.sql"))?;
+            tx.commit()?;
+        }
+        if v < 11 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../migrations/011_host_provisioned.sql"))?;
             tx.commit()?;
         }
         Ok(())
@@ -527,7 +533,7 @@ impl Store {
     pub fn list_hosts(&self) -> Result<Vec<HostRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT alias, ssh_alias, reachable, claude_version, tmux_version, hidden,
-                    last_pinged_at, account_uuid
+                    last_pinged_at, account_uuid, provisioned
              FROM hosts
              ORDER BY (alias='local') DESC, alias ASC",
         )?;
@@ -541,6 +547,7 @@ impl Store {
                 hidden: row.get::<_, i64>(5)? != 0,
                 last_pinged_at: row.get(6)?,
                 account_uuid: row.get(7)?,
+                provisioned: row.get::<_, i64>(8)? != 0,
             })
         })?;
         rows.collect()
@@ -677,6 +684,18 @@ impl Store {
         if let Some(row) = self.get_host(alias)? {
             self.bus.host_probed(&row);
         }
+        Ok(())
+    }
+
+    pub fn set_host_provisioned(
+        &self,
+        alias: &str,
+        provisioned: bool,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE hosts SET provisioned=?1 WHERE alias=?2",
+            rusqlite::params![if provisioned { 1 } else { 0 }, alias],
+        )?;
         Ok(())
     }
 
@@ -1516,7 +1535,7 @@ fn fetch_session_by_id(conn: &Connection, id: i64) -> Result<Option<SessionRow>,
 fn fetch_host(conn: &Connection, alias: &str) -> Result<Option<HostRow>, rusqlite::Error> {
     let mut stmt = conn.prepare_cached(
         "SELECT alias, ssh_alias, reachable, claude_version, tmux_version, hidden,
-                last_pinged_at, account_uuid
+                last_pinged_at, account_uuid, provisioned
          FROM hosts WHERE alias=?1",
     )?;
     let mut rows = stmt.query_map(rusqlite::params![alias], |row| {
@@ -1529,6 +1548,7 @@ fn fetch_host(conn: &Connection, alias: &str) -> Result<Option<HostRow>, rusqlit
             hidden: row.get::<_, i64>(5)? != 0,
             last_pinged_at: row.get(6)?,
             account_uuid: row.get(7)?,
+            provisioned: row.get::<_, i64>(8)? != 0,
         })
     })?;
     match rows.next() {
@@ -1582,7 +1602,7 @@ mod tests {
     fn migrate_is_idempotent() {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
-        assert_eq!(store.schema_version().expect("version"), 10);
+        assert_eq!(store.schema_version().expect("version"), 11);
     }
 
     #[test]
@@ -1716,7 +1736,7 @@ mod tests {
     #[test]
     fn schema_version_is_seven_after_migration() {
         let s = Store::open_in_memory().expect("open");
-        assert_eq!(s.schema_version().expect("version"), 10);
+        assert_eq!(s.schema_version().expect("version"), 11);
     }
 
     #[test]
@@ -1886,6 +1906,15 @@ mod tests {
                 .unwrap()
                 .hidden
         );
+    }
+
+    #[test]
+    fn host_provisioned_defaults_false_and_round_trips() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        assert!(!s.get_host_row("local").unwrap().unwrap().provisioned);
+        s.set_host_provisioned("local", true).unwrap();
+        assert!(s.get_host_row("local").unwrap().unwrap().provisioned);
     }
 
     #[test]
@@ -2324,7 +2353,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 10, "schema_version should be 10 after migration");
+        assert_eq!(v, 11, "schema_version should be 11 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store
