@@ -36,6 +36,11 @@ function sessionFor(projectId: number | null, name = `dev-${projectId ?? 'orphan
     reviews_session_id: null,
     worktree_key: 'main',
     lost_at: null,
+    claude_session_id: null,
+    claude_status: null,
+    effort_level: null,
+    pr_url: null,
+    current_activity: null,
   };
 }
 
@@ -577,6 +582,11 @@ describe('Sidebar (sessions-grouped view)', () => {
           reviews_session_id: null,
           worktree_key: 'main',
           lost_at: null,
+          claude_session_id: null,
+          claude_status: null,
+          effort_level: null,
+          pr_url: null,
+          current_activity: null,
         });
       }
     }

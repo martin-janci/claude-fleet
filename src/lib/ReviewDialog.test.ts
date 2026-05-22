@@ -13,6 +13,7 @@ const source: SessionRow = {
   project_id: 1, worktree_id: 10, created_at: 1, last_activity_at: 1,
   status: 'running', notes: null, account_uuid: null, kind: 'work', reviews_session_id: null,
   worktree_key: 'main', lost_at: null,
+  claude_session_id: null, claude_status: null, effort_level: null, pr_url: null, current_activity: null,
 };
 
 beforeEach(() => { (mockedInvoke as ReturnType<typeof vi.fn>).mockReset(); });
@@ -27,7 +28,7 @@ describe('ReviewDialog', () => {
 
   it('Start review calls spawn_review with source id + prompt', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
-      if (cmd === 'spawn_review') return { ...source, id: 2, tmux_name: 'dev-source--review-abc', kind: 'review', reviews_session_id: 1, lost_at: null };
+      if (cmd === 'spawn_review') return { ...source, id: 2, tmux_name: 'dev-source--review-abc', kind: 'review', reviews_session_id: 1 };
       return null;
     });
     render(ReviewDialog, { props: { source, onClose: () => {} } });

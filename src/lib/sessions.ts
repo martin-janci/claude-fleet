@@ -16,6 +16,12 @@ export interface SessionRow {
   reviews_session_id: number | null;
   worktree_key: string | null;
   lost_at: number | null;
+  // Claude agent fields — null when claude CLI not installed or session not managed by Claude Code
+  claude_session_id: string | null;
+  claude_status: string | null;
+  effort_level: string | null;
+  pr_url: string | null;
+  current_activity: string | null;
 }
 
 export const sessions = writable<SessionRow[]>([]);
