@@ -9,6 +9,7 @@
     restartSession,
     recreateSession,
     dismissGhostSession,
+    peekSession,
     type SessionRow,
   } from './sessions';
   import { selectedSession, selectSession } from './selection';
@@ -369,6 +370,28 @@
     if (!r.ok) actionError = r.error.message;
   }
 
+  // Per-session peek panel state: row id → log text | "loading" | null
+  let peekState = $state<Record<number, string | "loading" | null>>({});
+
+  async function doPeek(sess: SessionRow) {
+    if (!sess.claude_session_id) return;
+    peekState[sess.id] = "loading";
+    try {
+      const result = await peekSession(sess.host_alias, sess.claude_session_id);
+      if (result.ok) {
+        peekState[sess.id] = result.value || "(no output yet)";
+      } else {
+        peekState[sess.id] = "Error: " + result.error.message;
+      }
+    } catch (e: unknown) {
+      peekState[sess.id] = "Error: " + (e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function closePeek(sessId: number) {
+    peekState[sessId] = null;
+  }
+
   async function doDismissGhost(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
     actionError = null;
@@ -511,6 +534,15 @@
             >PR↗</a>
           {/if}
           <div class="row-actions">
+            {#if sess.claude_session_id}
+              <button
+                class="icon-btn small peek-btn"
+                data-testid="peek-session"
+                title="Peek at session logs"
+                onclick={(e) => { e.stopPropagation(); doPeek(sess); }}
+                aria-label="Peek"
+              >📋</button>
+            {/if}
             <button class="icon-btn small" onclick={(e) => doRestart(sess, e)} title="Restart claude in this session" aria-label="Restart">↻</button>
             <button class="icon-btn small" onclick={(e) => beginRename(sess, e)} title="Rename session" aria-label="Rename">✎</button>
             <button class="icon-btn small danger" onclick={(e) => askKill(sess, e)} title="Kill session" aria-label="Kill">×</button>
@@ -520,6 +552,19 @@
     </div>
     {#if isRenaming && renameError}
       <p class="err inline-err">{renameError}</p>
+    {/if}
+    {#if peekState[sess.id] !== undefined && peekState[sess.id] !== null}
+      <div class="peek-panel" data-testid="peek-panel">
+        <div class="peek-header">
+          <span>Logs — {sess.tmux_name}</span>
+          <button onclick={() => closePeek(sess.id)} class="peek-close">✕</button>
+        </div>
+        {#if peekState[sess.id] === "loading"}
+          <p class="peek-loading">Loading…</p>
+        {:else}
+          <pre class="peek-output">{peekState[sess.id]}</pre>
+        {/if}
+      </div>
     {/if}
   {/snippet}
 
@@ -1085,4 +1130,44 @@
     cursor: pointer;
   }
   .picker-item:hover { background: var(--bg-pane); }
+
+  .peek-btn {
+    opacity: 0.6;
+  }
+  .peek-btn:hover { opacity: 1; }
+  .peek-panel {
+    background: var(--color-surface-2, #1e1e2e);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    margin: 2px 8px 4px 8px;
+    padding: 8px;
+    font-size: 12px;
+  }
+  .peek-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+    font-weight: 600;
+  }
+  .peek-close {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--fg-muted);
+  }
+  .peek-loading {
+    color: var(--fg-muted);
+    font-style: italic;
+    margin: 0;
+  }
+  .peek-output {
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 200px;
+    overflow-y: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    margin: 0;
+  }
 </style>
