@@ -18,3 +18,12 @@ pub async fn refresh_projects(
 ) -> Result<Vec<ProjectTreeRow>, IpcError> {
     projects::refresh_projects(&store).await
 }
+
+#[tauri::command]
+pub async fn recreate_worktree(
+    args: crate::service::sessions::RecreateWorktreeArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<crate::ssh::SshClient>>,
+) -> Result<crate::store::WorktreeRow, IpcError> {
+    crate::service::sessions::recreate_worktree(args, &store, &ssh).await
+}

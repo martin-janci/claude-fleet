@@ -487,6 +487,7 @@ impl Store {
 
     /// Resolve a worktree id to `(project base_path, name, branch, project_id)`
     /// for the Recreate action.
+    #[allow(clippy::type_complexity)]
     pub fn worktree_recreate_info(
         &self,
         id: i64,
