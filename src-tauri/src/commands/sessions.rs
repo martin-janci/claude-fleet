@@ -70,9 +70,10 @@ pub async fn restart_session(
 #[tauri::command]
 pub async fn send_prompt(
     args: SendPromptArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    sessions::send_prompt(args, &ssh).await
+    sessions::send_prompt(args, &store, &ssh).await
 }
 
 #[tauri::command]

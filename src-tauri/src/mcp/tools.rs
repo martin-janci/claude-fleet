@@ -210,6 +210,14 @@ pub struct SessionIdParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionHistoryParams {
+    /// Fleet session id (from list_sessions).
+    pub session_id: i64,
+    /// Maximum number of (newest-first) events to return. Defaults to 50.
+    pub limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RecreateSessionParams {
     /// Fleet session id (from list_sessions).
     pub session_id: i64,
@@ -589,7 +597,7 @@ impl FleetTools {
             prompt: p.prompt,
             submit: p.submit,
         };
-        sessions::send_prompt(args, &self.ssh)
+        sessions::send_prompt(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
         Ok(CallToolResult::success(vec![text_content(
@@ -645,6 +653,28 @@ impl FleetTools {
             )]));
         }
         ok_json(&text)
+    }
+
+    #[tool(
+        description = "Return the recorded event timeline for a session (status \
+        changes, prompts, stuck, kills). Newest-first; pass `limit` to cap \
+        (default 50). Returns the events as JSON."
+    )]
+    async fn session_history(
+        &self,
+        Parameters(p): Parameters<SessionHistoryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("session_history", &format!("session_id={}", p.session_id));
+        let limit = p.limit.unwrap_or(50);
+        let events = {
+            let s = self
+                .store
+                .lock()
+                .map_err(|_| to_mcp_err(IpcError::new("E_LOCK", "store mutex poisoned")))?;
+            s.list_session_events(p.session_id, limit)
+                .map_err(to_mcp_err)?
+        };
+        ok_json(&events)
     }
 
     #[tool(

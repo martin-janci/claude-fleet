@@ -80,6 +80,14 @@ fn reconcile_write_one_host(
         Ok(live) => {
             let mut keep: Vec<String> = Vec::with_capacity(live.len());
             let mut sessions: Vec<ReconcileSession> = Vec::with_capacity(live.len());
+            // ── Task G: reconcile transition-detection (event timeline) ──
+            // Per session, the (kind, detail) events whose stored value differs
+            // from the about-to-be-upserted value. Collected DURING the loop
+            // (so we can read the prior row before the upsert overwrites it) and
+            // flushed AFTER apply_host_reconcile commits — at which point we can
+            // resolve each tmux_name to its session id. Keyed by tmux_name.
+            // (Task H builds on this: keep it self-contained here.)
+            let mut pending_events: Vec<(String, &'static str, Option<String>)> = Vec::new();
             for sess in live {
                 keep.push(sess.name.clone());
                 let project_id = find_project_id_for_path(projects, &host.alias, &sess.path);
@@ -108,6 +116,25 @@ fn reconcile_write_one_host(
                 // the status derived from the pane tail only when it is absent.
                 let claude_status = agent_status
                     .or_else(|| pane.and_then(|p| p.derived_status).map(|s| s.to_string()));
+                let stuck_kind = pane.and_then(|p| p.stuck.map(|k| k.as_str().to_string()));
+                // Transition-detection: compare the PRIOR stored row (read here,
+                // before the upsert below overwrites it) against the new values
+                // and queue an event when claude_status / stuck_kind changed.
+                // Append-only + best-effort: a read failure just skips detection.
+                if let Ok(Some(prior)) = s.get_session(&sess.name, &host.alias) {
+                    if prior.claude_status != claude_status {
+                        pending_events.push((
+                            sess.name.clone(),
+                            "status_change",
+                            claude_status.clone(),
+                        ));
+                    }
+                    // A newly-set (or changed) stuck_kind is the alert-worthy
+                    // event; clearing it back to None is not recorded.
+                    if prior.stuck_kind != stuck_kind && stuck_kind.is_some() {
+                        pending_events.push((sess.name.clone(), "stuck", stuck_kind.clone()));
+                    }
+                }
                 sessions.push(ReconcileSession {
                     tmux_name: &sess.name,
                     project_id,
@@ -121,7 +148,7 @@ fn reconcile_write_one_host(
                     pr_url: None,       // not in claude agents --json; reserved for future
                     current_activity: pane.and_then(|p| p.activity.clone()),
                     context_pct: pane.and_then(|p| p.context_pct),
-                    stuck_kind: pane.and_then(|p| p.stuck.map(|k| k.as_str().to_string())),
+                    stuck_kind,
                 });
             }
             s.apply_host_reconcile(HostReconcile {
@@ -133,6 +160,20 @@ fn reconcile_write_one_host(
                 sessions: &sessions,
                 keep: &keep,
             })?;
+            // Task G: flush queued transition events now that the upsert has
+            // committed and each tmux_name resolves to a session id. Append-only
+            // and best-effort — a failed insert is logged and skipped, never
+            // blocking reconcile.
+            for (tmux_name, kind, detail) in &pending_events {
+                if let Ok(Some(row)) = s.get_session(tmux_name, &host.alias) {
+                    if let Err(e) = s.insert_session_event(row.id, kind, detail.as_deref()) {
+                        eprintln!(
+                            "[reconcile] session_event insert failed for {}/{tmux_name}: {e}",
+                            host.alias
+                        );
+                    }
+                }
+            }
             // SECOND pass: background (`claude --bg`) agents that matched NO tmux
             // session are never in `keep` and would otherwise be invisible.
             // Surface each as a synthetic `kind='bg'` SessionRow so it appears in
@@ -909,6 +950,12 @@ pub async fn kill_session(
     };
     let tmux = exec_for(&args.host_alias, ssh);
     tmux.kill_session(&args.name).await?;
+    // Task G: record the kill before reconcile reaps the row. Best-effort.
+    if let Ok(s) = store.lock() {
+        if let Err(e) = s.insert_session_event(id, "killed", None) {
+            eprintln!("[event] insert killed failed for session {id}: {e}");
+        }
+    }
     reconcile_one_host(store, ssh, &args.host_alias).await?;
     Ok(id)
 }
@@ -1038,6 +1085,7 @@ pub struct SendPromptArgs {
 }
 
 async fn send_prompt_inner(
+    store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
     host_alias: &str,
     tmux_name: &str,
@@ -1070,11 +1118,52 @@ async fn send_prompt_inner(
             String::from_utf8_lossy(&out.stderr).trim().to_string(),
         ));
     }
+    // Task G: record the prompt on the session's timeline (detail truncated to
+    // ~120 chars). Append-only + best-effort: never fail the send on this.
+    record_session_event(store, host_alias, tmux_name, "prompt_sent", {
+        let truncated: String = prompt.chars().take(120).collect();
+        Some(truncated)
+    });
     Ok(())
 }
 
-pub async fn send_prompt(args: SendPromptArgs, ssh: &Arc<SshClient>) -> Result<(), IpcError> {
+/// Append one event to a session's timeline, resolving the row by
+/// (tmux_name, host). Best-effort: every failure (lock poisoned, row missing,
+/// SQL error) is logged and swallowed so it can never block the mutation that
+/// produced the event. Shared by send_prompt / kill / recreate. (Task G;
+/// reconcile uses an inlined variant because it already holds the lock.)
+fn record_session_event(
+    store: &Mutex<Store>,
+    host_alias: &str,
+    tmux_name: &str,
+    kind: &str,
+    detail: Option<String>,
+) {
+    let s = match store.lock() {
+        Ok(s) => s,
+        Err(_) => {
+            eprintln!("[event] store mutex poisoned recording {kind} for {host_alias}/{tmux_name}");
+            return;
+        }
+    };
+    match s.get_session(tmux_name, host_alias) {
+        Ok(Some(row)) => {
+            if let Err(e) = s.insert_session_event(row.id, kind, detail.as_deref()) {
+                eprintln!("[event] insert {kind} failed for {host_alias}/{tmux_name}: {e}");
+            }
+        }
+        Ok(None) => {} // no row yet (e.g. brand-new session) — nothing to attach to
+        Err(e) => eprintln!("[event] lookup failed for {host_alias}/{tmux_name}: {e}"),
+    }
+}
+
+pub async fn send_prompt(
+    args: SendPromptArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<(), IpcError> {
     send_prompt_inner(
+        store,
         ssh,
         &args.host_alias,
         &args.tmux_name,
@@ -1186,8 +1275,15 @@ pub async fn spawn_review(
     // If seeding the prompt fails (e.g. cl wasn't ready yet), DON'T discard the
     // session — return it anyway so the user can type the review prompt manually
     // in the terminal. Log the failure for diagnostics.
-    if let Err(e) =
-        send_prompt_inner(ssh, &source.host_alias, &review_name, &args.prompt, true).await
+    if let Err(e) = send_prompt_inner(
+        store,
+        ssh,
+        &source.host_alias,
+        &review_name,
+        &args.prompt,
+        true,
+    )
+    .await
     {
         eprintln!("spawn_review: seeding prompt to {review_name} failed (session is live, seed manually): {e:?}");
     }
@@ -1269,11 +1365,22 @@ pub async fn recreate_session(
         .await?;
 
     // Mark the row live again and return it.
-    let row = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?
-        .restore_session(sess.id)?
-        .ok_or_else(|| IpcError::new("E_INTERNAL", "session vanished after restore"))?;
+    let row = {
+        let s = store
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let row = s
+            .restore_session(sess.id)?
+            .ok_or_else(|| IpcError::new("E_INTERNAL", "session vanished after restore"))?;
+        // Task G: record the recreate on the (preserved) row. Best-effort.
+        if let Err(e) = s.insert_session_event(sess.id, "recreated", None) {
+            eprintln!(
+                "[event] insert recreated failed for session {}: {e}",
+                sess.id
+            );
+        }
+        row
+    };
     Ok(row)
 }
 
