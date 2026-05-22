@@ -7,15 +7,15 @@ import { tick } from 'svelte';
 const fakeProjects = [
   {
     project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: Math.floor(Date.now() / 1000) - 60 },
-    worktrees: [{ id: 11, project_id: 1, name: 'main', path: '/r/cf', branch: 'main' }],
+    worktrees: [{ id: 11, project_id: 1, name: 'main', path: '/r/cf', branch: 'main', missing_since: null }],
   },
   {
     project: { id: 2, owner: 'papayapos', repo: 'pos-frontend', base_path: '/r/pf', last_session_at: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 14 },
-    worktrees: [{ id: 21, project_id: 2, name: 'main', path: '/r/pf', branch: 'main' }],
+    worktrees: [{ id: 21, project_id: 2, name: 'main', path: '/r/pf', branch: 'main', missing_since: null }],
   },
   {
     project: { id: 3, owner: 'martin-janci', repo: 'phone-manager', base_path: '/r/pm', last_session_at: null },
-    worktrees: [{ id: 31, project_id: 3, name: 'main', path: '/r/pm', branch: 'main' }],
+    worktrees: [{ id: 31, project_id: 3, name: 'main', path: '/r/pm', branch: 'main', missing_since: null }],
   },
 ];
 
@@ -130,9 +130,9 @@ describe('Sidebar (sessions-grouped view)', () => {
       {
         project: { id: 1, owner: 'o', repo: 'r', base_path: '/x', last_session_at: 0 },
         worktrees: [
-          { id: 11, project_id: 1, name: 'main', path: '/x', branch: 'main' },
-          { id: 12, project_id: 1, name: 'feature-x', path: '/x/.worktrees/feature-x', branch: 'feature-x' },
-          { id: 13, project_id: 1, name: 'bugfix', path: '/x/.worktrees/bugfix', branch: 'bugfix' },
+          { id: 11, project_id: 1, name: 'main', path: '/x', branch: 'main', missing_since: null },
+          { id: 12, project_id: 1, name: 'feature-x', path: '/x/.worktrees/feature-x', branch: 'feature-x', missing_since: null },
+          { id: 13, project_id: 1, name: 'bugfix', path: '/x/.worktrees/bugfix', branch: 'bugfix', missing_since: null },
         ],
       },
     ];
@@ -274,7 +274,7 @@ describe('Sidebar (sessions-grouped view)', () => {
       ...fakeProjects,
       {
         project: { id: 4, owner: 'otherperson', repo: 'claude-fleet', base_path: '/x/cf', last_session_at: null },
-        worktrees: [{ id: 41, project_id: 4, name: 'main', path: '/x/cf', branch: 'main' }],
+        worktrees: [{ id: 41, project_id: 4, name: 'main', path: '/x/cf', branch: 'main', missing_since: null }],
       },
     ];
     mockBackend(colliding, [sessionFor(1, 'dev-a'), sessionFor(4, 'dev-b')]);
@@ -559,7 +559,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     for (let p = 1; p <= 25; p++) {
       projs.push({
         project: { id: p, owner: 'o', repo: `r${p}`, base_path: `/r/${p}`, last_session_at: Date.now() / 1000 },
-        worktrees: [{ id: p * 10, project_id: p, name: 'main', path: `/r/${p}`, branch: 'main' }],
+        worktrees: [{ id: p * 10, project_id: p, name: 'main', path: `/r/${p}`, branch: 'main', missing_since: null }],
       });
       for (let i = 0; i < 20; i++) {
         sess.push({

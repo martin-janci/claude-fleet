@@ -22,7 +22,7 @@ beforeEach(() => {
 
 const project = {
   project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: null },
-  worktrees: [{ id: 11, project_id: 1, name: 'main', path: '/r/cf', branch: 'main' }],
+  worktrees: [{ id: 11, project_id: 1, name: 'main', path: '/r/cf', branch: 'main', missing_since: null }],
 };
 
 describe('NewSessionDialog', () => {
