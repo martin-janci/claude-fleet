@@ -1481,6 +1481,17 @@ mod tests {
             recreate_pane_command("work", None),
             crate::tmux::pane_command_for(None)
         );
+        // A corrupt/non-UUID stored id must NOT inject — it degrades to the
+        // --continue form (same as no id).
+        assert_eq!(
+            recreate_pane_command("work", Some("not-a-uuid; rm -rf /")),
+            crate::tmux::pane_command_for(None)
+        );
+        // "review" is a non-shell kind → same resume behavior as "work".
+        assert_eq!(
+            recreate_pane_command("review", Some(id)),
+            crate::tmux::pane_command_for(Some(id))
+        );
     }
 
     #[test]
