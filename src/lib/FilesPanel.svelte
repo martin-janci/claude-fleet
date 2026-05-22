@@ -6,12 +6,13 @@
     type ChangedFile,
     type RepoTree,
   } from './files';
-  import { repoLog, repoCommit, type Commit, type CommitDetail } from './history';
+  import { repoLog, repoCommit, repoBranches, type Commit, type CommitDetail, type Branch } from './history';
   import { readPref, writePref } from './prefs';
   import FileList from './FileList.svelte';
   import FileViewer from './FileViewer.svelte';
   import Resizer from './Resizer.svelte';
   import CommitGraph from './CommitGraph.svelte';
+  import BranchList from './BranchList.svelte';
 
   let { session }: { session: SessionRow } = $props();
 
@@ -29,6 +30,8 @@
 
   // History state
   let commits = $state<Commit[]>([]);
+  // Branches state
+  let branches = $state<Branch[]>([]);
   let historyLoaded = false;
   let logSkip = 0;
   let allBranches = $state(true);
@@ -62,6 +65,7 @@
     commits = [];
     historyLoaded = false;
     openCommit = null;
+    branches = [];
     void loadChanges();
   });
 
@@ -120,8 +124,19 @@
 
   function backToGraph(): void { openCommit = null; selectedPath = null; }
 
-  function loadBranches(): void {} // replaced in Task 11
+  async function loadBranches(): Promise<void> {
+    const sid = session.id;
+    loading = true;
+    error = null;
+    const r = await repoBranches(sid);
+    if (sid !== session.id) return;
+    loading = false;
+    if (r.ok) branches = r.value;
+    else error = r.error.message;
+  }
   function promptCreateBranch(_hash: string | null): void {} // replaced in Task 13
+  function confirmCheckout(_name: string): void {} // replaced in Task 13
+  function confirmDeleteBranch(_name: string): void {} // replaced in Task 13
   function confirmCheckoutCommit(_hash: string): void {} // replaced in Task 13
 
   function onMode(m: typeof mode): void {
@@ -188,7 +203,16 @@
       </div>
     </div>
   {:else if mode === 'branches'}
-    <div class="full-col" data-testid="branches-view"></div>
+    <div class="full-col" data-testid="branches-view">
+      <BranchList
+        {branches}
+        {loading}
+        {error}
+        onCheckout={(n) => confirmCheckout(n)}
+        onDelete={(n) => confirmDeleteBranch(n)}
+        onNew={() => promptCreateBranch(null)}
+      />
+    </div>
   {:else}
     <div class="files-panel" data-testid="files-panel" style="--list-px: {listPx}px">
       <div class="list-col">
