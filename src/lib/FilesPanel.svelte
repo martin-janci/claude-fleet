@@ -6,7 +6,7 @@
     type ChangedFile,
     type RepoTree,
   } from './files';
-  import { repoLog, repoCommit, repoBranches, repoCheckout, repoCheckoutCommit, repoCreateBranch, repoDeleteBranch, type Commit, type CommitDetail, type Branch } from './history';
+  import { repoLog, repoCommit, repoBranches, repoCheckout, repoCheckoutCommit, repoCreateBranch, repoDeleteBranch, repoStage, repoUnstage, repoCommitCreate, type Commit, type CommitDetail, type Branch } from './history';
   import type { Result } from './result';
   import { readPref, writePref } from './prefs';
   import FileList from './FileList.svelte';
@@ -165,6 +165,15 @@
     );
   }
 
+  function stageToggle(path: string, staged: boolean): void {
+    const p = staged ? repoStage(session.id, [path]) : repoUnstage(session.id, [path]);
+    void runAction(p, () => loadChanges());
+  }
+
+  function commitStaged(message: string): void {
+    void runAction(repoCommitCreate(session.id, message), () => { loadChanges(); reloadKey++; });
+  }
+
   function onMode(m: typeof mode): void {
     mode = m;
     error = null;
@@ -258,7 +267,7 @@
             {onSelect}
           />
         {:else}
-          <FileList {mode} {changes} {tree} {loading} {error} {selectedPath} {onSelect} />
+          <FileList {mode} {changes} {tree} {loading} {error} {selectedPath} {onSelect} enableStaging={true} onStageToggle={stageToggle} onCommit={commitStaged} />
         {/if}
       </div>
       <Resizer id="files-list" onresize={onResize} />

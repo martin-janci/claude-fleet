@@ -61,6 +61,9 @@
     error,
     selectedPath,
     onSelect,
+    onStageToggle,
+    onCommit,
+    enableStaging = false,
   }: {
     mode: 'changes' | 'tree' | 'history' | 'branches';
     changes: ChangedFile[];
@@ -69,11 +72,17 @@
     error: string | null;
     selectedPath: string | null;
     onSelect: (path: string, status: string | undefined) => void;
+    onStageToggle?: (path: string, staged: boolean) => void;
+    onCommit?: (message: string) => void;
+    enableStaging?: boolean;
   } = $props();
 
   let filter = $state('');
+  let commitMsg = $state('');
   // Folder expand state — keyed by dir path. Plain object so $state proxies it.
   let expanded = $state<Record<string, boolean>>({});
+
+  const stagedCount = $derived(changes.filter((c) => c.staged).length);
 
   const statusByPath = $derived(new Map(changes.map((c) => [c.path, c.status])));
 
@@ -119,17 +128,28 @@
         <p class="hint">{changes.length === 0 ? 'No changes.' : 'No matches.'}</p>
       {:else}
         {#each filteredChanges as c (c.path)}
-          <button
-            class="row file"
-            class:sel={selectedPath === c.path}
-            onclick={() => onSelect(c.path, c.status)}
-            title={c.orig_path ? `${c.orig_path} → ${c.path}` : c.path}
-          >
-            <span class="badge {BADGE[c.status]?.cls ?? 'b-mod'}"
-              >{BADGE[c.status]?.letter ?? '•'}</span
+          <div class="row-wrap">
+            {#if enableStaging}
+              <input
+                type="checkbox"
+                class="stage"
+                checked={c.staged}
+                title={c.staged ? 'Unstage' : 'Stage'}
+                onclick={(e) => { e.stopPropagation(); onStageToggle?.(c.path, !c.staged); }}
+              />
+            {/if}
+            <button
+              class="row file"
+              class:sel={selectedPath === c.path}
+              onclick={() => onSelect(c.path, c.status)}
+              title={c.orig_path ? `${c.orig_path} → ${c.path}` : c.path}
             >
-            <span class="name">{c.path}</span>
-          </button>
+              <span class="badge {BADGE[c.status]?.cls ?? 'b-mod'}"
+                >{BADGE[c.status]?.letter ?? '•'}</span
+              >
+              <span class="name">{c.path}</span>
+            </button>
+          </div>
         {/each}
       {/if}
     {:else if filterLc !== ''}
@@ -159,6 +179,15 @@
       <p class="hint">Listing truncated at 20000 files.</p>
     {/if}
   </div>
+  {#if enableStaging && mode === 'changes'}
+    <div class="commit-footer">
+      <textarea bind:value={commitMsg} placeholder="Commit message…" rows={2}></textarea>
+      <button
+        disabled={stagedCount === 0 || commitMsg.trim() === ''}
+        onclick={() => { onCommit?.(commitMsg.trim()); commitMsg = ''; }}
+      >Commit {stagedCount} file{stagedCount === 1 ? '' : 's'}</button>
+    </div>
+  {/if}
 </div>
 
 {#snippet treeRow(node: TreeNode, depth: number)}
@@ -289,5 +318,56 @@
   .b-cnf {
     background: color-mix(in srgb, #db6d28 32%, transparent);
     color: #db6d28;
+  }
+  .row-wrap {
+    display: flex;
+    align-items: center;
+  }
+  .row-wrap .row {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .stage {
+    flex: 0 0 auto;
+    margin: 0 0.1rem 0 0.4rem;
+    cursor: pointer;
+    accent-color: var(--accent);
+  }
+  .commit-footer {
+    border-top: 1px solid var(--border);
+    padding: 0.4rem 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    flex: 0 0 auto;
+  }
+  .commit-footer textarea {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--fg);
+    font-size: 0.78rem;
+    font-family: inherit;
+    resize: vertical;
+    padding: 0.25rem 0.4rem;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .commit-footer button {
+    background: color-mix(in srgb, var(--accent) 18%, var(--bg-pane));
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    color: var(--fg);
+    cursor: pointer;
+    font-size: 0.78rem;
+    padding: 0.25rem 0.5rem;
+    text-align: center;
+  }
+  .commit-footer button:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 30%, var(--bg-pane));
+  }
+  .commit-footer button:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
 </style>
