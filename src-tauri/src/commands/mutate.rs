@@ -155,6 +155,160 @@ pub async fn repo_delete_branch(
     Ok(())
 }
 
+#[derive(Deserialize)]
+pub struct StageArgs {
+    pub session_id: i64,
+    pub paths: Vec<String>,
+}
+
+/// Stage the given worktree paths (`git add --`).
+#[tauri::command]
+pub async fn repo_stage(
+    args: StageArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<(), IpcError> {
+    for p in &args.paths {
+        crate::validate::repo_rel_path(p)?;
+    }
+    if args.paths.is_empty() {
+        return Ok(());
+    }
+    let (host, name) = session_target(&store, args.session_id)?;
+    let quoted: Vec<String> = args.paths.iter().map(|p| shq(p)).collect();
+    let body = format!("git -C \"$root\" add -- {}", quoted.join(" "));
+    let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
+    if !out.status.success() {
+        return Err(repo_err(&out));
+    }
+    Ok(())
+}
+
+/// Unstage the given paths (`git restore --staged --`).
+#[tauri::command]
+pub async fn repo_unstage(
+    args: StageArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<(), IpcError> {
+    for p in &args.paths {
+        crate::validate::repo_rel_path(p)?;
+    }
+    if args.paths.is_empty() {
+        return Ok(());
+    }
+    let (host, name) = session_target(&store, args.session_id)?;
+    let quoted: Vec<String> = args.paths.iter().map(|p| shq(p)).collect();
+    let body = format!("git -C \"$root\" restore --staged -- {}", quoted.join(" "));
+    let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
+    if !out.status.success() {
+        return Err(repo_err(&out));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct CommitCreateArgs {
+    pub session_id: i64,
+    pub message: String,
+    pub amend: bool,
+}
+
+/// Commit the staged changes. An empty message is rejected.
+#[tauri::command]
+pub async fn repo_commit_create(
+    args: CommitCreateArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<(), IpcError> {
+    if args.message.trim().is_empty() {
+        return Err(IpcError::new(
+            "E_INVALID",
+            "commit message must not be empty",
+        ));
+    }
+    let (host, name) = session_target(&store, args.session_id)?;
+    let amend = if args.amend { " --amend" } else { "" };
+    let body = format!("git -C \"$root\" commit{amend} -m {}", shq(&args.message));
+    let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
+    if !out.status.success() {
+        return Err(repo_err(&out));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct SessionIdArgs {
+    pub session_id: i64,
+}
+
+/// `git fetch` (all remotes).
+#[tauri::command]
+pub async fn repo_fetch(
+    args: SessionIdArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<(), IpcError> {
+    let (host, name) = session_target(&store, args.session_id)?;
+    let out = run_in_repo(
+        &ssh,
+        &host,
+        &repo_script(&name, "git -C \"$root\" fetch --all --prune"),
+    )
+    .await?;
+    if !out.status.success() {
+        return Err(repo_err(&out));
+    }
+    Ok(())
+}
+
+/// `git pull --ff-only` (refuse to create a merge commit silently).
+#[tauri::command]
+pub async fn repo_pull(
+    args: SessionIdArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<(), IpcError> {
+    let (host, name) = session_target(&store, args.session_id)?;
+    let out = run_in_repo(
+        &ssh,
+        &host,
+        &repo_script(&name, "git -C \"$root\" pull --ff-only"),
+    )
+    .await?;
+    if !out.status.success() {
+        return Err(repo_err(&out));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct PushArgs {
+    pub session_id: i64,
+    pub set_upstream: bool,
+}
+
+/// `git push`; with `set_upstream`, push the current branch and set upstream.
+#[tauri::command]
+pub async fn repo_push(
+    args: PushArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<(), IpcError> {
+    let (host, name) = session_target(&store, args.session_id)?;
+    let body = if args.set_upstream {
+        "b=\"$(git -C \"$root\" rev-parse --abbrev-ref HEAD)\"; git -C \"$root\" push -u origin \"$b\""
+            .to_string()
+    } else {
+        "git -C \"$root\" push".to_string()
+    };
+    let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
+    if !out.status.success() {
+        return Err(repo_err(&out));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
