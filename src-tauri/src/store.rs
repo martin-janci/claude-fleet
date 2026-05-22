@@ -1051,44 +1051,6 @@ impl Store {
         Ok(())
     }
 
-    fn delete_sessions_not_in_in_tx(
-        tx: &rusqlite::Transaction,
-        host_alias: &str,
-        keep_names: &[String],
-        out: &mut Vec<RowChange>,
-    ) -> Result<usize, rusqlite::Error> {
-        // `DELETE ... RETURNING id` — the delete and the deleted-id collection
-        // are one statement (no separate SELECT-then-DELETE pass, and no
-        // TOCTOU between them).
-        let ids_to_delete: Vec<i64> = if keep_names.is_empty() {
-            let mut stmt =
-                tx.prepare_cached("DELETE FROM sessions WHERE host_alias=?1 RETURNING id")?;
-            let ids = stmt
-                .query_map(rusqlite::params![host_alias], |r| r.get::<_, i64>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ids
-        } else {
-            let placeholders = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let sql = format!(
-                "DELETE FROM sessions WHERE host_alias=?1 AND tmux_name NOT IN ({placeholders}) RETURNING id"
-            );
-            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
-            for n in keep_names {
-                params.push(n);
-            }
-            let mut stmt = tx.prepare(&sql)?;
-            let ids = stmt
-                .query_map(params.as_slice(), |r| r.get::<_, i64>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ids
-        };
-
-        for id in &ids_to_delete {
-            out.push(RowChange::SessionKilled(*id));
-        }
-        Ok(ids_to_delete.len())
-    }
-
     /// Phase 1: sessions not in `keep_names` that are currently live (`status !=
     /// 'ghost'`) are soft-deleted by setting `status='ghost'` and `lost_at=now`.
     /// Phase 2: sessions that are already ghost (from a previous cycle) and still
