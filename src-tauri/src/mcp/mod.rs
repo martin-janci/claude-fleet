@@ -116,11 +116,19 @@ pub async fn start(
 
         let token = Arc::new(token);
 
-        // Bearer-auth applies ONLY to /mcp routes.
+        // Bearer-auth applies ONLY to the /mcp route. The MCP streamable-HTTP
+        // service is mounted with `route_service` at the exact `/mcp` path —
+        // NOT `nest_service("/", …)` under `nest("/mcp", …)`. axum 0.8 panics on
+        // nesting a service at the root ("Nesting at the root is no longer
+        // supported"); that panic fired inside the spawned serve task *after*
+        // the listener had bound, so `start` returned Ok and the UI showed the
+        // server "running" while nothing was actually accepting connections.
+        // Remote hosts then saw their reverse-tunnelled requests closed mid-
+        // handshake ("socket connection was closed unexpectedly").
         let mcp_token = Arc::clone(&token);
         let mcp_router =
             axum::Router::new()
-                .nest_service("/", service)
+                .route_service("/mcp", service)
                 .layer(axum::middleware::from_fn(
                     move |request: axum::extract::Request, next: axum::middleware::Next| {
                         let token = Arc::clone(&mcp_token);
@@ -143,12 +151,10 @@ pub async fn start(
             token: Arc::clone(&token),
         };
         let hook_router = axum::Router::new()
-            .route("/", axum::routing::post(hooks::handle_hook))
+            .route("/hook", axum::routing::post(hooks::handle_hook))
             .with_state(hook_state);
 
-        let app = axum::Router::new()
-            .nest("/mcp", mcp_router)
-            .nest("/hook", hook_router);
+        let app = mcp_router.merge(hook_router);
 
         eprintln!("[mcp] control API listening on http://{addr}/mcp");
         let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
@@ -174,6 +180,101 @@ mod tests {
         assert_eq!(a.len(), 64, "256-bit token = 64 hex chars");
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b, "tokens must be drawn fresh each call");
+    }
+
+    /// Regression: the serve task must build a router that actually accepts
+    /// requests on `/mcp`. The previous `Router::new().nest_service("/", svc)`
+    /// under `nest("/mcp", …)` panicked at construction in axum 0.8 ("Nesting at
+    /// the root is no longer supported"), so the listener bound but nothing
+    /// served — remote tunnelled clients saw the socket close mid-handshake.
+    /// This boots the real routing shape (a dummy stands in for the rmcp
+    /// service) and checks that `/mcp` routes through, gated by the bearer
+    /// token, and that `/hook` stays un-gated.
+    #[tokio::test]
+    async fn mcp_route_serves_and_is_token_gated() {
+        use axum::routing::{any, post};
+        use std::net::Ipv4Addr;
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let token = Arc::new("s3cret".to_string());
+        let mcp_token = Arc::clone(&token);
+        let app = axum::Router::new()
+            .route_service("/mcp", any(|| async { "MCP_OK" }))
+            .layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let token = Arc::clone(&mcp_token);
+                    async move {
+                        match auth::check_request(request.headers(), &token) {
+                            Ok(()) => Ok(next.run(request).await),
+                            Err(status) => Err(status),
+                        }
+                    }
+                },
+            ))
+            .merge(axum::Router::new().route("/hook", post(|| async { "HOOK_OK" })));
+
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        async fn round_trip(addr: std::net::SocketAddr, req: &str) -> String {
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            s.write_all(req.as_bytes()).await.unwrap();
+            let mut buf = Vec::new();
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+                let mut tmp = [0u8; 4096];
+                loop {
+                    match s.read(&mut tmp).await {
+                        Ok(0) => break,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        Err(_) => break,
+                    }
+                }
+            })
+            .await;
+            String::from_utf8_lossy(&buf).into_owned()
+        }
+
+        let post = |path: &str, auth: Option<&str>| {
+            let mut h = format!(
+                "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: application/json, \
+                 text/event-stream\r\nContent-Type: application/json\r\nContent-Length: \
+                 2\r\nConnection: close\r\n"
+            );
+            if let Some(a) = auth {
+                h.push_str(&format!("Authorization: Bearer {a}\r\n"));
+            }
+            h.push_str("\r\n{}");
+            h
+        };
+
+        // Valid token reaches the mounted service (proves /mcp routes, no panic).
+        let ok = round_trip(addr, &post("/mcp", Some("s3cret"))).await;
+        assert!(ok.contains("200 OK"), "expected 200 on /mcp, got:\n{ok}");
+        assert!(
+            ok.contains("MCP_OK"),
+            "request did not reach service:\n{ok}"
+        );
+
+        // Missing/wrong token is rejected with 401 — not a dropped connection.
+        let unauth = round_trip(addr, &post("/mcp", None)).await;
+        assert!(
+            unauth.contains("401"),
+            "expected 401 without token, got:\n{unauth}"
+        );
+
+        // /hook is reachable and NOT behind the bearer layer.
+        let hook = round_trip(addr, &post("/hook", None)).await;
+        assert!(
+            hook.contains("200 OK") && hook.contains("HOOK_OK"),
+            "expected /hook to serve un-gated, got:\n{hook}"
+        );
     }
 
     #[test]
