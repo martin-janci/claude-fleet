@@ -307,6 +307,23 @@ pub fn pane_command() -> &'static str {
     "cl --continue || cl; exec ${SHELL:-/bin/zsh} -l"
 }
 
+/// The pane command for a Claude ("work"/"review") session. With a known
+/// session id: resume it, else create it under that id, else a bare `cl` — an
+/// idempotent create-or-resume. Without an id (legacy rows): today's
+/// most-recent-for-cwd behavior. The id is single-quoted; callers validate it
+/// with `validate::claude_session_id` before passing it in.
+// Callers are added in subsequent tasks; suppress the dead_code lint until then.
+#[allow(dead_code)]
+pub fn pane_command_for(claude_session_id: Option<&str>) -> String {
+    let tail = "exec ${SHELL:-/bin/zsh} -l";
+    match claude_session_id {
+        Some(id) => {
+            format!("cl --resume '{id}' 2>/dev/null || cl --session-id '{id}' || cl; {tail}")
+        }
+        None => format!("cl --continue || cl; {tail}"),
+    }
+}
+
 /// Pane command for a plain shell session (`kind = "shell"`). Runs an
 /// interactive login shell in a loop so the pane — and therefore the tmux
 /// session — survives the user typing `exit`; a fresh shell respawns instead.
@@ -548,5 +565,25 @@ mod tests {
     #[test]
     fn shell_quote_handles_paths_with_spaces() {
         assert_eq!(shell_quote("/tmp/with space"), "'/tmp/with space'");
+    }
+
+    #[test]
+    fn pane_command_for_resumes_or_creates_with_id() {
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        let cmd = pane_command_for(Some(id));
+        assert!(cmd.contains(&format!("cl --resume '{id}'")), "got: {cmd}");
+        assert!(
+            cmd.contains(&format!("cl --session-id '{id}'")),
+            "got: {cmd}"
+        );
+        assert!(cmd.contains("|| cl;"), "bare fallback missing: {cmd}");
+        assert!(cmd.contains("exec ${SHELL"), "got: {cmd}");
+    }
+
+    #[test]
+    fn pane_command_for_none_uses_continue() {
+        let cmd = pane_command_for(None);
+        assert!(cmd.contains("cl --continue || cl;"), "got: {cmd}");
+        assert!(!cmd.contains("--session-id"), "got: {cmd}");
     }
 }
