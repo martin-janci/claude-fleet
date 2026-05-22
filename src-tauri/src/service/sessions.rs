@@ -1220,6 +1220,9 @@ mod tests {
             async fn bare_new_session(&self, _name: &str) -> Result<(), IpcError> {
                 Ok(())
             }
+            async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
+                vec![]
+            }
         }
 
         // Spawn 3 tasks with sleeps 50ms, 500ms, 50ms.
@@ -1342,6 +1345,9 @@ mod tests {
             }
             async fn bare_new_session(&self, _: &str) -> Result<(), IpcError> {
                 Ok(())
+            }
+            async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
+                vec![]
             }
         }
 
