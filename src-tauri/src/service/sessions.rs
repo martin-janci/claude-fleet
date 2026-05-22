@@ -956,12 +956,10 @@ pub async fn spawn_review(
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 pub struct RecreateSessionArgs {
     pub session_id: i64,
 }
 
-#[allow(dead_code)]
 pub async fn recreate_session(
     args: RecreateSessionArgs,
     store: &Mutex<Store>,
@@ -1007,12 +1005,10 @@ pub async fn recreate_session(
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 pub struct DismissGhostSessionArgs {
     pub session_id: i64,
 }
 
-#[allow(dead_code)]
 pub fn dismiss_ghost_session(
     args: DismissGhostSessionArgs,
     store: &Mutex<Store>,
