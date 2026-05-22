@@ -62,7 +62,6 @@ pub struct PurgeProjectArgs {
 
 pub async fn new_bg_session(
     args: NewBgSessionArgs,
-    _store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
 ) -> Result<NewBgSessionResult, IpcError> {
     args.validate()?;
