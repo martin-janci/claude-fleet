@@ -956,9 +956,6 @@ pub async fn spawn_review(
         .ok_or_else(|| IpcError::new("E_INTERNAL", "review row missing after tag"))
 }
 
-// Called by `recreate_session` (added in the next commit). The lint can't see
-// the caller yet; the allow is removed when recreate_session starts using it.
-#[allow(dead_code)]
 /// The pane command to relaunch when (re)creating a session of `kind`.
 /// `shell` → a bare shell (the original custom start command isn't persisted,
 /// matching `restart_session`); anything else → the Claude REPL.
@@ -980,23 +977,17 @@ pub async fn recreate_session(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<SessionRow, IpcError> {
-    // Load session and validate it is a ghost.
-    let (sess, host) = {
+    // Snapshot the session, gate on host reachability, and resolve the rebuild
+    // cwd + launch command — all under one brief lock, before any tmux call.
+    // Works for both `running` sessions (eating RAM / wedged → nuke & rebuild)
+    // and `ghost` sessions (lost from tmux → bring back in the right worktree).
+    let (sess, cwd, pane_cmd) = {
         let s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
         let sess = s
             .get_session_by_id(args.session_id)?
             .ok_or_else(|| IpcError::new("E_NOTFOUND", "session not found"))?;
-        if sess.status != "ghost" {
-            return Err(IpcError::new(
-                "E_INVALID_STATE",
-                format!(
-                    "session {} is not a ghost (status={})",
-                    sess.id, sess.status
-                ),
-            ));
-        }
         let host = s
             .get_host_row(&sess.host_alias)?
             .ok_or_else(|| IpcError::new("E_NOTFOUND", "host not found"))?;
@@ -1006,14 +997,23 @@ pub async fn recreate_session(
                 format!("host {} is not reachable", host.alias),
             ));
         }
-        (sess, host)
+        let cwd = resolve_session_cwd(&s, &sess)?;
+        let pane_cmd = recreate_pane_command(&sess.kind);
+        (sess, cwd, pane_cmd)
     };
 
-    // Create the bare tmux session on the host.
-    let tmux = exec_for(&host.alias, ssh);
-    tmux.bare_new_session(&sess.tmux_name).await?;
+    let tmux = exec_for(&sess.host_alias, ssh);
+    // Tear down any live session first (frees the old process tree / wedged
+    // session). A ghost has no live session, so tolerate "no such session":
+    // we ignore the kill result and rely on new_session below to fail loudly
+    // if the old session unexpectedly survived (it would report a duplicate).
+    let _ = tmux.kill_session(&sess.tmux_name).await;
+    // Rebuild fresh in the worktree with the kind-appropriate command — the
+    // same primitive new_session() uses.
+    tmux.new_session(&sess.tmux_name, std::path::Path::new(&cwd), &pane_cmd)
+        .await?;
 
-    // Restore the DB row and return it.
+    // Mark the row live again and return it.
     let row = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?
@@ -1232,9 +1232,6 @@ mod tests {
             async fn capture_pane(&self, _name: &str) -> Result<String, IpcError> {
                 Ok(String::new())
             }
-            async fn bare_new_session(&self, _name: &str) -> Result<(), IpcError> {
-                Ok(())
-            }
         }
 
         // Spawn 3 tasks with sleeps 50ms, 500ms, 50ms.
@@ -1354,9 +1351,6 @@ mod tests {
                 } else {
                     Ok("│ > ".into())
                 }
-            }
-            async fn bare_new_session(&self, _: &str) -> Result<(), IpcError> {
-                Ok(())
             }
         }
 
@@ -1628,12 +1622,27 @@ mod ghost_tests {
     use crate::store::Store;
 
     #[test]
-    fn recreate_session_rejects_non_ghost() {
+    fn recreate_session_errors_when_session_missing() {
+        let store = std::sync::Mutex::new(Store::open_in_memory().unwrap());
+        let args = RecreateSessionArgs { session_id: 999 };
+        let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt
+            .block_on(recreate_session(args, &store, &ssh))
+            .unwrap_err();
+        assert_eq!(err.code, "E_NOTFOUND");
+    }
+
+    #[test]
+    fn recreate_session_errors_when_host_offline() {
         let store = std::sync::Mutex::new(Store::open_in_memory().unwrap());
         {
             let s = store.lock().unwrap();
             s.upsert_host("local").unwrap();
             s.upsert_session("dev", "local", None, None, 1, 1, "running", None)
+                .unwrap();
+            s.conn_ref()
+                .execute("UPDATE hosts SET reachable=0 WHERE alias='local'", [])
                 .unwrap();
         }
         let id = store
@@ -1646,9 +1655,10 @@ mod ghost_tests {
         let args = RecreateSessionArgs { session_id: id };
         let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(recreate_session(args, &store, &ssh));
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code, "E_INVALID_STATE");
+        let err = rt
+            .block_on(recreate_session(args, &store, &ssh))
+            .unwrap_err();
+        assert_eq!(err.code, "E_HOST_OFFLINE");
     }
 
     #[test]
