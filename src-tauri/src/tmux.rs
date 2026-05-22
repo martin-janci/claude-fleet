@@ -1,5 +1,5 @@
 use crate::ipc_error::IpcError;
-use crate::shell::quote as shell_quote;
+use crate::shell::quote;
 use async_trait::async_trait;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -113,11 +113,11 @@ impl RemoteTmux {
     /// tokenizes, so any spaces in `<script>` would break `bash -c` (it
     /// would get just the first token as the script and everything else as
     /// positional args). We therefore single-quote the WHOLE script via
-    /// `shell_quote` so it crosses the ssh boundary as one shell word.
-    /// `shell_quote` already escapes the embedded `'` characters used by
+    /// `quote` so it crosses the ssh boundary as one shell word.
+    /// `quote` already escapes the embedded `'` characters used by
     /// per-arg quoting inside `script`.
     async fn remote_bash(&self, script: &str) -> Result<std::process::Output, IpcError> {
-        let quoted = shell_quote(script);
+        let quoted = quote(script);
         self.client
             .run(
                 &self.host,
@@ -152,16 +152,16 @@ impl TmuxExec for RemoteTmux {
         // Build the `tmux new-session` command identically to LocalTmux but
         // shell-escape arguments since we're sending a single script string.
         let mut script = String::from("tmux new-session -d");
-        script.push_str(&format!(" -s {}", shell_quote(name)));
-        script.push_str(&format!(" -c {}", shell_quote(&cwd.to_string_lossy())));
+        script.push_str(&format!(" -s {}", quote(name)));
+        script.push_str(&format!(" -c {}", quote(&cwd.to_string_lossy())));
         // Forward env explicitly — remote sshd typically doesn't pass LANG.
         script.push_str(" -e COLORTERM=truecolor -e TERM=xterm-256color");
         script.push_str(&format!(
             " -e LANG={}",
-            shell_quote(&std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".into()))
+            quote(&std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".into()))
         ));
         script.push(' ');
-        script.push_str(&shell_quote(pane_cmd));
+        script.push_str(&quote(pane_cmd));
         let output = self.remote_bash(&script).await?;
         if output.status.success() {
             Ok(())
@@ -174,7 +174,7 @@ impl TmuxExec for RemoteTmux {
     }
 
     async fn kill_session(&self, name: &str) -> Result<(), IpcError> {
-        let script = format!("tmux kill-session -t {}", shell_quote(name));
+        let script = format!("tmux kill-session -t {}", quote(name));
         let output = self.remote_bash(&script).await?;
         if output.status.success() {
             Ok(())
@@ -203,11 +203,7 @@ impl TmuxExec for RemoteTmux {
         if trimmed == old {
             return Ok(());
         }
-        let script = format!(
-            "tmux rename-session -t {} {}",
-            shell_quote(old),
-            shell_quote(trimmed)
-        );
+        let script = format!("tmux rename-session -t {} {}", quote(old), quote(trimmed));
         let output = self.remote_bash(&script).await?;
         if output.status.success() {
             Ok(())
@@ -222,8 +218,8 @@ impl TmuxExec for RemoteTmux {
     async fn restart_session(&self, name: &str, pane_cmd: &str) -> Result<(), IpcError> {
         let script = format!(
             "tmux respawn-pane -k -t {}: {}",
-            shell_quote(name),
-            shell_quote(pane_cmd)
+            quote(name),
+            quote(pane_cmd)
         );
         let output = self.remote_bash(&script).await?;
         if output.status.success() {
@@ -237,7 +233,7 @@ impl TmuxExec for RemoteTmux {
     }
 
     async fn capture_pane(&self, name: &str) -> Result<String, IpcError> {
-        let script = format!("tmux capture-pane -t {} -p", shell_quote(name));
+        let script = format!("tmux capture-pane -t {} -p", quote(name));
         let output = self.remote_bash(&script).await?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -250,8 +246,8 @@ impl TmuxExec for RemoteTmux {
         let start = scrollback_start(lines);
         let script = format!(
             "tmux capture-pane -t {} -S {} -p",
-            shell_quote(name),
-            shell_quote(&start),
+            quote(name),
+            quote(&start),
         );
         let output = self.remote_bash(&script).await?;
         if output.status.success() {
@@ -381,7 +377,7 @@ pub fn pane_command_for(claude_session_id: Option<&str>) -> String {
 /// the env tmux injected via `-e`), its exit code is printed, and then the
 /// pane drops to the respawning interactive shell — so the output stays
 /// visible. `start_command` is the user's raw text; the remote transport
-/// layer (`shell_quote`) escapes the whole pane command as one shell word.
+/// layer (`quote`) escapes the whole pane command as one shell word.
 pub fn shell_pane_command(start_command: Option<&str>) -> String {
     let respawn = "while :; do ${SHELL:-/bin/zsh} -l; done";
     match start_command {
@@ -604,22 +600,6 @@ mod tests {
         assert!(rename_session("a", "has space").await.is_err());
         assert!(rename_session("a", "has.dot").await.is_err());
         assert!(rename_session("a", "has:colon").await.is_err());
-    }
-
-    #[test]
-    fn shell_quote_wraps_basic_strings_in_single_quotes() {
-        assert_eq!(shell_quote("foo"), "'foo'");
-        assert_eq!(shell_quote("dev-foo"), "'dev-foo'");
-    }
-
-    #[test]
-    fn shell_quote_escapes_embedded_single_quotes() {
-        assert_eq!(shell_quote("don't"), "'don'\\''t'");
-    }
-
-    #[test]
-    fn shell_quote_handles_paths_with_spaces() {
-        assert_eq!(shell_quote("/tmp/with space"), "'/tmp/with space'");
     }
 
     #[test]

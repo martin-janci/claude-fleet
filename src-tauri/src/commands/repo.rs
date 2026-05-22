@@ -6,7 +6,7 @@
 //! (`shell::quote`); frontend paths/refs/hashes are additionally validated.
 
 use crate::ipc_error::IpcError;
-use crate::shell::quote as shq;
+use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::Store;
 use std::sync::{Arc, Mutex};
@@ -41,7 +41,7 @@ pub fn repo_script(tmux_name: &str, body: &str) -> String {
          p=\"$(tmux display-message -t {name} -p '#{{pane_current_path}}')\"\n\
          root=\"$(git -C \"$p\" rev-parse --show-toplevel)\"\n\
          {body}",
-        name = shq(tmux_name),
+        name = quote(tmux_name),
     )
 }
 
@@ -61,7 +61,7 @@ pub async fn run_in_repo(
     } else {
         ssh.run(
             host,
-            &["bash", "-lc", &shq(script)],
+            &["bash", "-lc", &quote(script)],
             Duration::from_secs(REPO_TIMEOUT_SECS),
         )
         .await

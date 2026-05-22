@@ -1,6 +1,6 @@
 use crate::cancel::{CancelGuard, CancellationRegistry};
 use crate::ipc_error::IpcError;
-use crate::shell::quote as shq;
+use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::{HostReconcile, HostRow, ProjectRow, ReconcileSession, SessionRow, Store};
 use crate::tmux::{LocalTmux, RemoteTmux, TmuxExec};
@@ -404,8 +404,8 @@ async fn ensure_remote_project(
     let mut script = String::new();
     script.push_str(&format!(
         "if [ ! -d {root}/.git ]; then mkdir -p $(dirname {root}) && git clone {url} {root}; fi",
-        root = shq(project_root),
-        url = shq(&clone_url),
+        root = quote(project_root),
+        url = quote(&clone_url),
     ));
     if let Some((wt_name, branch)) = worktree {
         if wt_name != "main" {
@@ -414,10 +414,10 @@ async fn ensure_remote_project(
             let branch = branch.unwrap_or(wt_name);
             script.push_str(&format!(
                 " && if [ ! -d {abs} ]; then cd {root} && git worktree add {rel} {br}; fi",
-                abs = shq(&wt_abs),
-                root = shq(project_root),
-                rel = shq(&wt_rel),
-                br = shq(branch),
+                abs = quote(&wt_abs),
+                root = quote(project_root),
+                rel = quote(&wt_rel),
+                br = quote(branch),
             ));
         }
     }
@@ -428,9 +428,9 @@ async fn ensure_remote_project(
     // word. ssh concatenates the trailing args with spaces and the remote
     // LOGIN shell (often zsh) re-tokenizes them — without quoting, the
     // `if ...; then ...; fi` splits at `;` and orphans `then` ("zsh: parse
-    // error near then"). `shq` escapes the inner single-quotes from the path
+    // error near then"). `quote` escapes the inner single-quotes from the path
     // interpolation above.
-    let quoted = shq(&script);
+    let quoted = quote(&script);
     let out = ssh
         .run_cancellable(
             host,
@@ -479,8 +479,8 @@ fn worktree_add_script(root: &str, name: &str) -> String {
          git worktree add \"$wt\" -b \"$name\" \"$def\" 1>&2\n\
          fi\n\
          ( cd \"$wt\" && pwd )\n",
-        root = shq(root),
-        name = shq(name),
+        root = quote(root),
+        name = quote(name),
     )
 }
 
@@ -609,7 +609,7 @@ async fn new_session_inner(
             let script = worktree_add_script(&project_root, name);
             // Quote the whole script so it survives the ssh argv-join +
             // remote login-shell re-tokenization (see ensure_remote_project).
-            let quoted = shq(&script);
+            let quoted = quote(&script);
             let out = ssh
                 .run_cancellable(
                     &args.host_alias,
@@ -829,8 +829,12 @@ pub async fn restart_session(
 ///   2. send-keys -t <name> Enter         (real Enter to submit)
 pub fn build_send_commands(tmux_name: &str, prompt: &str) -> Vec<String> {
     vec![
-        format!("tmux send-keys -t {} -l {}", shq(tmux_name), shq(prompt)),
-        format!("tmux send-keys -t {} Enter", shq(tmux_name)),
+        format!(
+            "tmux send-keys -t {} -l {}",
+            quote(tmux_name),
+            quote(prompt)
+        ),
+        format!("tmux send-keys -t {} Enter", quote(tmux_name)),
     ]
 }
 
@@ -862,7 +866,7 @@ async fn send_prompt_inner(
     } else {
         ssh.run(
             host_alias,
-            &["bash", "-lc", &shq(&script)],
+            &["bash", "-lc", &quote(&script)],
             std::time::Duration::from_secs(10),
         )
         .await?
@@ -1169,17 +1173,6 @@ mod tests {
     }
 
     #[test]
-    fn shq_wraps_basic_strings() {
-        assert_eq!(shq("foo"), "'foo'");
-        assert_eq!(shq("/home/mjanci"), "'/home/mjanci'");
-    }
-
-    #[test]
-    fn shq_escapes_embedded_single_quotes() {
-        assert_eq!(shq("don't"), "'don'\\''t'");
-    }
-
-    #[test]
     fn upsert_session_preserves_account_uuid_when_passed_existing_value() {
         use crate::store::{AccountRow, Store};
         let s = Store::open_in_memory().unwrap();
@@ -1241,7 +1234,7 @@ mod tests {
     #[test]
     fn build_send_commands_escapes_embedded_quotes() {
         let cmds = build_send_commands("dev-foo", "it's a test");
-        // shell_quote_str uses the '\''..  dance for embedded singles.
+        // quote uses the '\''..  dance for embedded singles.
         assert!(cmds[0].contains("'it'\\''s a test'"));
     }
 
@@ -1705,12 +1698,12 @@ mod tests {
 
         // QUOTED (the fix): crosses as one word, bash runs the whole script.
         let quoted = Command::new("sh")
-            .args(["-c", &format!("bash -lc {}", shq(script))])
+            .args(["-c", &format!("bash -lc {}", quote(script))])
             .output()
             .expect("sh");
         assert!(
             quoted.status.success(),
-            "shq'd script must run cleanly: {}",
+            "quote'd script must run cleanly: {}",
             String::from_utf8_lossy(&quoted.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&quoted.stdout).trim(), "OK");

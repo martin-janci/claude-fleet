@@ -2,7 +2,7 @@
 
 use crate::ipc_error::IpcError;
 use crate::service::tunnel::TunnelSupervisor;
-use crate::shell::quote as shq;
+use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::Store;
 use std::sync::{Arc, Mutex};
@@ -175,10 +175,10 @@ pub async fn read_host_file(
         let expanded = expand_home_local(path)?;
         return Ok(std::fs::read_to_string(&expanded).unwrap_or_default());
     }
-    // Outer `shq` makes the whole script cross the SSH boundary as ONE shell
+    // Outer `quote` makes the whole script cross the SSH boundary as ONE shell
     // word — ssh space-joins argv, so an unquoted multi-word script would be
     // re-split by the remote login shell (mirrors claude_cli.rs).
-    let script = shq(&remote_read_script(path));
+    let script = quote(&remote_read_script(path));
     let out = ssh
         .run(host, &["bash", "-lc", &script], PROVISION_TIMEOUT)
         .await?;
@@ -204,7 +204,7 @@ pub async fn write_host_file(
             .map_err(|e| IpcError::new("E_PROVISION", format!("write {epath}: {e}")))?;
         return Ok(());
     }
-    let script = shq(&remote_write_script(dir, path, content));
+    let script = quote(&remote_write_script(dir, path, content));
     let out = ssh
         .run(host, &["bash", "-lc", &script], PROVISION_TIMEOUT)
         .await?;
@@ -221,14 +221,14 @@ pub async fn write_host_file(
 }
 
 /// Render a path as a token for a remote `bash -lc` script. A leading `~/` is
-/// emitted as `"$HOME"/<rest>` so the home dir expands on the remote — `shq`
+/// emitted as `"$HOME"/<rest>` so the home dir expands on the remote — `quote`
 /// would single-quote `~` and defeat tilde expansion, creating a literal `~`
-/// directory. `$HOME` is double-quoted (literal through the outer `shq`, then
-/// expanded by the remote `bash`); the rest of the path is `shq`-quoted inert.
+/// directory. `$HOME` is double-quoted (literal through the outer `quote`, then
+/// expanded by the remote `bash`); the rest of the path is `quote`-quoted inert.
 fn remote_path(path: &str) -> String {
     match path.strip_prefix("~/") {
-        Some(rest) => format!("\"$HOME\"/{}", shq(rest)),
-        None => shq(path),
+        Some(rest) => format!("\"$HOME\"/{}", quote(rest)),
+        None => quote(path),
     }
 }
 
@@ -242,7 +242,7 @@ fn remote_write_script(dir: &str, path: &str, content: &str) -> String {
     format!(
         "mkdir -p {} && printf '%s' {} > {}",
         remote_path(dir),
-        shq(content),
+        quote(content),
         remote_path(path)
     )
 }

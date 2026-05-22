@@ -5,7 +5,7 @@
 //! under ~/.claude-fleet/uploads/<session>/).
 
 use crate::ipc_error::IpcError;
-use crate::shell::quote as shq;
+use crate::shell::quote;
 use crate::ssh::SshClient;
 use serde::Deserialize;
 use std::path::Path;
@@ -76,7 +76,7 @@ pub async fn upload_to_session(
         }
     } else {
         let mkdir = ssh
-            .run(&args.host_alias, &["mkdir", "-p", &shq(&dir)], timeout)
+            .run(&args.host_alias, &["mkdir", "-p", &quote(&dir)], timeout)
             .await?;
         if !mkdir.status.success() {
             return Err(IpcError::new(

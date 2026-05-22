@@ -47,4 +47,34 @@ mod tests {
         assert_eq!(quote("$(evil)"), "'$(evil)'");
         assert_eq!(quote("`evil`"), "'`evil`'");
     }
+
+    #[test]
+    fn quote_round_trips_through_bash() {
+        for raw in [
+            "plain",
+            "with space",
+            "single'quote",
+            "double\"quote",
+            "new\nline",
+            "$(cmd)",
+            "`backtick`",
+            "semi;colon",
+            "a && b",
+            "glob*",
+            "tab\tchar",
+            "emoji 🦀",
+        ] {
+            let cmd = format!("printf %s {}", quote(raw));
+            let out = std::process::Command::new("bash")
+                .args(["-c", &cmd])
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "bash failed for {raw:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                raw,
+                "mismatch for {raw:?}"
+            );
+        }
+    }
 }

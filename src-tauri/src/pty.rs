@@ -1,5 +1,5 @@
 use crate::ipc_error::IpcError;
-use crate::shell::quote as shell_escape;
+use crate::shell::quote;
 use crate::ssh::SshClient;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
@@ -146,12 +146,12 @@ pub fn pty_open(
             // crosses the ssh boundary as a single shell word; otherwise the
             // remote bash receives `LANG=...` as its -c argument and never
             // runs tmux attach. (Same fix shape as RemoteTmux::remote_bash
-            // in tmux.rs.) `shell_escape(&session_name)` keeps its inner
+            // in tmux.rs.) `quote(&session_name)` keeps its inner
             // quoting; the outer wrap escapes those single quotes via the
             // canonical `'\''` dance.
-            &shell_escape(&format!(
+            &quote(&format!(
                 "LANG=${{LANG:-en_US.UTF-8}} LC_ALL=${{LC_ALL:-en_US.UTF-8}} COLORTERM=truecolor TERM=xterm-256color tmux attach -t {}",
-                shell_escape(&args.session_name)
+                quote(&args.session_name)
             )),
         ]);
         c

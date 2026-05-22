@@ -4,7 +4,7 @@
 use crate::commands::files::{classify, ChangedFile, FileDiff};
 use crate::commands::repo::{diff_from_bytes, repo_err, repo_script, run_in_repo, session_target};
 use crate::ipc_error::IpcError;
-use crate::shell::quote as shq;
+use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
@@ -167,7 +167,7 @@ pub async fn repo_log_impl(
     let body = format!(
         "git -C \"$root\" log {all} --date=iso-strict {fmt} --max-count={limit} --skip={skip}",
         all = all,
-        fmt = shq(LOG_FORMAT),
+        fmt = quote(LOG_FORMAT),
         limit = limit,
         skip = args.skip,
     );
@@ -258,7 +258,7 @@ pub async fn repo_branches_impl(
     // "syntax error near unexpected token `('".
     let body = format!(
         "git -C \"$root\" for-each-ref {fmt} refs/heads refs/remotes",
-        fmt = shq(BRANCH_FORMAT),
+        fmt = quote(BRANCH_FORMAT),
     );
     let script = repo_script(&name, &body);
     let out = run_in_repo(ssh, &host, &script).await?;
@@ -332,7 +332,7 @@ pub async fn repo_commit_impl(
 ) -> Result<CommitDetail, IpcError> {
     crate::validate::commit_hash(&args.hash)?;
     let (host, name) = session_target(store, args.session_id)?;
-    let h = shq(&args.hash);
+    let h = quote(&args.hash);
     // Two git calls: metadata (US-separated) then NUL name-status. `set -e`
     // (from repo_script) aborts on a bad hash.
     let body = format!(
@@ -393,8 +393,8 @@ pub async fn repo_commit_diff_impl(
     let (host, name) = session_target(store, args.session_id)?;
     let body = format!(
         "git -C \"$root\" show --first-parent --format= {h} -- {p}",
-        h = shq(&args.hash),
-        p = shq(&args.path),
+        h = quote(&args.hash),
+        p = quote(&args.path),
     );
     let script = repo_script(&name, &body);
     let out = run_in_repo(ssh, &host, &script).await?;

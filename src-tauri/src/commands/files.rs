@@ -16,7 +16,7 @@ use crate::commands::repo::{
     MAX_TREE_ENTRIES,
 };
 use crate::ipc_error::IpcError;
-use crate::shell::quote as shq;
+use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
@@ -228,7 +228,7 @@ pub async fn repo_file_impl(
         "f=\"$root\"/{path}\n\
          if [ -d \"$f\" ]; then echo cf-is-dir >&2; exit 9; fi\n\
          head -c {cap} -- \"$f\"",
-        path = shq(&args.path),
+        path = quote(&args.path),
         cap = MAX_FILE_BYTES + 1,
     );
     let script = repo_script(&name, &body);
@@ -284,7 +284,7 @@ pub async fn repo_diff_impl(
 ) -> Result<FileDiff, IpcError> {
     crate::validate::repo_rel_path(&args.path)?;
     let (host, name) = session_target(store, args.session_id)?;
-    let quoted = shq(&args.path);
+    let quoted = quote(&args.path);
 
     // Tracked diff vs HEAD. A repo with no commits yet has no HEAD — `git
     // diff HEAD` would abort with "bad revision", so skip it when HEAD is

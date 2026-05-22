@@ -6,7 +6,7 @@
 
 use crate::commands::repo::{repo_err, repo_script, run_in_repo, session_target};
 use crate::ipc_error::IpcError;
-use crate::shell::quote as shq;
+use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::Store;
 use serde::Deserialize;
@@ -46,7 +46,7 @@ pub async fn repo_checkout(
             "worktree has uncommitted changes — the agent may have work in progress",
         ));
     }
-    let body = format!("git -C \"$root\" checkout {}", shq(&args.branch));
+    let body = format!("git -C \"$root\" checkout {}", quote(&args.branch));
     let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
     if !out.status.success() {
         return Err(repo_err(&out));
@@ -80,7 +80,7 @@ pub async fn repo_checkout_commit(
             "worktree has uncommitted changes — the agent may have work in progress",
         ));
     }
-    let body = format!("git -C \"$root\" checkout {}", shq(&args.hash));
+    let body = format!("git -C \"$root\" checkout {}", quote(&args.hash));
     let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
     if !out.status.success() {
         return Err(repo_err(&out));
@@ -115,14 +115,14 @@ pub async fn repo_create_branch(
     let sp = args
         .start_point
         .as_ref()
-        .map(|s| format!(" {}", shq(s)))
+        .map(|s| format!(" {}", quote(s)))
         .unwrap_or_default();
     let verb = if args.checkout {
         "checkout -b"
     } else {
         "branch"
     };
-    let body = format!("git -C \"$root\" {verb} {}{sp}", shq(&args.name));
+    let body = format!("git -C \"$root\" {verb} {}{sp}", quote(&args.name));
     let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
     if !out.status.success() {
         return Err(repo_err(&out));
@@ -147,7 +147,7 @@ pub async fn repo_delete_branch(
     crate::validate::git_ref(&args.name)?;
     let (host, name) = session_target(&store, args.session_id)?;
     let flag = if args.force { "-D" } else { "-d" };
-    let body = format!("git -C \"$root\" branch {flag} {}", shq(&args.name));
+    let body = format!("git -C \"$root\" branch {flag} {}", quote(&args.name));
     let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
     if !out.status.success() {
         return Err(repo_err(&out));
@@ -175,7 +175,7 @@ pub async fn repo_stage(
         return Ok(());
     }
     let (host, name) = session_target(&store, args.session_id)?;
-    let quoted: Vec<String> = args.paths.iter().map(|p| shq(p)).collect();
+    let quoted: Vec<String> = args.paths.iter().map(|p| quote(p)).collect();
     let body = format!("git -C \"$root\" add -- {}", quoted.join(" "));
     let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
     if !out.status.success() {
@@ -198,7 +198,7 @@ pub async fn repo_unstage(
         return Ok(());
     }
     let (host, name) = session_target(&store, args.session_id)?;
-    let quoted: Vec<String> = args.paths.iter().map(|p| shq(p)).collect();
+    let quoted: Vec<String> = args.paths.iter().map(|p| quote(p)).collect();
     let body = format!("git -C \"$root\" restore --staged -- {}", quoted.join(" "));
     let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
     if !out.status.success() {
@@ -229,7 +229,7 @@ pub async fn repo_commit_create(
     }
     let (host, name) = session_target(&store, args.session_id)?;
     let amend = if args.amend { " --amend" } else { "" };
-    let body = format!("git -C \"$root\" commit{amend} -m {}", shq(&args.message));
+    let body = format!("git -C \"$root\" commit{amend} -m {}", quote(&args.message));
     let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
     if !out.status.success() {
         return Err(repo_err(&out));

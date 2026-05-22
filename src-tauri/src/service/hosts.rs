@@ -4,7 +4,7 @@
 
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::IpcError;
-use crate::shell::quote as shq;
+use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::ssh_config::{self, SshHost};
 use crate::store::{HostRow, Store};
@@ -236,7 +236,7 @@ async fn probe(
 /// `oauthAccount` from `~/.claude.json` in one SSH round trip, with the three
 /// sections separated by a literal `---`. Each section is independently
 /// guarded (`|| true`) so a missing tool/file degrades to an empty section
-/// rather than failing the whole probe. MUST be `shq`'d before it's handed to
+/// rather than failing the whole probe. MUST be `quote`'d before it's handed to
 /// `bash -lc` over ssh (see `probe_with_token`).
 const PROBE_SCRIPT: &str = r#"tmux -V 2>/dev/null || true
 echo ---
@@ -261,9 +261,9 @@ async fn probe_with_token(
     // remaining lines run in the login shell, not under `bash -lc`, so the
     // probe came back degraded/partial (the tmux-version section came back
     // empty; depending on the remote login shell other sections can drop too).
-    // `shq` also escapes the inner single-quotes of the embedded python3
+    // `quote` also escapes the inner single-quotes of the embedded python3
     // one-liner. Same fix as `ensure_remote_project` in commands/sessions.rs.
-    let quoted = shq(PROBE_SCRIPT);
+    let quoted = quote(PROBE_SCRIPT);
     let out = ssh
         .run_cancellable(
             host,
@@ -494,7 +494,7 @@ mod tests {
         // ~/.claude.json are present, so it holds on CI too.
         use std::process::Command;
         let out = Command::new("sh")
-            .args(["-c", &format!("bash -lc {}", shq(PROBE_SCRIPT))])
+            .args(["-c", &format!("bash -lc {}", quote(PROBE_SCRIPT))])
             .output()
             .expect("run sh");
         assert!(
@@ -511,7 +511,7 @@ mod tests {
 
     #[test]
     fn probe_script_must_be_quoted_to_survive_login_shell_retokenization() {
-        // Why `probe_with_token` must `shq` the script: a RAW multi-line
+        // Why `probe_with_token` must `quote` the script: a RAW multi-line
         // `bash -lc <script>` is re-tokenized by the (remote login) shell —
         // only the first word stays the bash program, its operands are eaten as
         // $0/$1, and later lines run in the login shell, not under `bash -lc`.
@@ -544,7 +544,7 @@ mod tests {
         // QUOTED (the fix): the whole script crosses as one word; bash runs it
         // intact and section 1 keeps its content.
         let quoted = Command::new("sh")
-            .args(["-c", &format!("bash -lc {}", shq(script))])
+            .args(["-c", &format!("bash -lc {}", quote(script))])
             .output()
             .expect("run sh quoted");
         assert!(
@@ -559,7 +559,7 @@ mod tests {
     #[ignore = "requires network + a reachable 'mefistos' ssh host with claude logged in"]
     async fn probe_mefistos_end_to_end() {
         // Exercises the REAL probe path (probe → ssh `bash -lc` → mefistos).
-        // Before the shq fix the multi-line script was re-tokenized by the
+        // Before the quoting fix the multi-line script was re-tokenized by the
         // remote login shell, so the first line collapsed to `bash -lc tmux`
         // (with `-V` swallowed as $0) and the tmux version came back empty —
         // a degraded/partial probe. After the fix the whole script runs as one
@@ -571,10 +571,10 @@ mod tests {
         eprintln!("reachable={reachable} claude={claude_v:?} tmux={tmux_v:?} account={account:?}");
         assert!(reachable, "mefistos must be reachable");
         // The tmux version is the field the re-tokenization bug dropped — it
-        // must be present once the script is `shq`'d.
+        // must be present once the script is `quote`'d.
         assert!(
             tmux_v.is_some(),
-            "tmux version must parse (was empty before the shq fix)"
+            "tmux version must parse (was empty before the quoting fix)"
         );
         assert!(claude_v.is_some(), "claude version must parse");
         let acct = account.expect("oauthAccount must parse");
