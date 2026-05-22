@@ -161,6 +161,16 @@ pub struct SessionIdParams {
     pub session_id: i64,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct NewBgSessionParams {
+    /// Host alias to launch the background session on.
+    pub host_alias: String,
+    /// Display name for the session (also its tmux/agent name).
+    pub name: String,
+    /// Initial prompt for the headless Claude session.
+    pub prompt: String,
+}
+
 // --- tools -----------------------------------------------------------------
 
 #[tool_router]
@@ -508,6 +518,70 @@ impl FleetTools {
         .await
         .map_err(to_mcp_err)?;
         ok_json(&logs)
+    }
+
+    #[tool(description = "Recreate a session: kill its tmux session and rebuild \
+        it fresh in the same worktree, resuming the same Claude conversation. \
+        Works for running or ghost sessions. Returns the session row as JSON.")]
+    async fn recreate_session(
+        &self,
+        Parameters(p): Parameters<SessionIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("recreate_session", &format!("session_id={}", p.session_id));
+        let row = sessions::recreate_session(
+            sessions::RecreateSessionArgs {
+                session_id: p.session_id,
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
+    #[tool(description = "Dismiss a ghost session (lost from tmux): permanently \
+        delete its row. Errors if the session is not a ghost.")]
+    async fn dismiss_ghost_session(
+        &self,
+        Parameters(p): Parameters<SessionIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "dismiss_ghost_session",
+            &format!("session_id={}", p.session_id),
+        );
+        sessions::dismiss_ghost_session(
+            sessions::DismissGhostSessionArgs {
+                session_id: p.session_id,
+            },
+            &self.store,
+        )
+        .map_err(to_mcp_err)?;
+        ok_json(&serde_json::json!({ "dismissed": p.session_id }))
+    }
+
+    #[tool(description = "Launch a supervised headless (background) Claude \
+        session on a host with an initial prompt. Returns the new Claude \
+        session id as JSON; track progress with peek_session.")]
+    async fn new_bg_session(
+        &self,
+        Parameters(p): Parameters<NewBgSessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "new_bg_session",
+            &format!("host={} name={}", p.host_alias, p.name),
+        );
+        let res = crate::service::bg_sessions::new_bg_session(
+            crate::service::bg_sessions::NewBgSessionArgs {
+                host_alias: p.host_alias,
+                name: p.name,
+                prompt: p.prompt,
+            },
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&res)
     }
 }
 
