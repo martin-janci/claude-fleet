@@ -53,11 +53,34 @@ fn to_mcp_err(e: IpcError) -> McpError {
     McpError::internal_error(format!("{}: {}", e.code, e.message), None)
 }
 
+/// Substituted for an otherwise-empty text block. The Anthropic API rejects
+/// empty text content outright ("text content blocks must be non-empty"), and
+/// when prompt caching tags such a block the request fails harder still
+/// ("cache_control cannot be set for empty text blocks"). Tool results flow
+/// into the calling session's conversation as `tool_result` blocks, so an
+/// empty/whitespace-only result would surface there as an empty text block and
+/// poison that session's next API call. We never emit one — this sentinel keeps
+/// every block non-empty.
+const EMPTY_RESULT_PLACEHOLDER: &str = "(no output)";
+
+/// Build a text content block guaranteed to be non-empty. Empty or
+/// whitespace-only text is replaced with [`EMPTY_RESULT_PLACEHOLDER`]. Every
+/// tool result must go through here (directly or via [`ok_json`]) so the fleet
+/// never hands a Claude session an empty text block to serialize.
+fn text_content(text: impl Into<String>) -> Content {
+    let text = text.into();
+    if text.trim().is_empty() {
+        Content::text(EMPTY_RESULT_PLACEHOLDER)
+    } else {
+        Content::text(text)
+    }
+}
+
 /// Serialize a successful result to pretty JSON wrapped in a tool result.
 fn ok_json<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpError> {
     let json = serde_json::to_string_pretty(value)
         .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
-    Ok(CallToolResult::success(vec![Content::text(json)]))
+    Ok(CallToolResult::success(vec![text_content(json)]))
 }
 
 // --- tool parameter structs ------------------------------------------------
@@ -478,7 +501,7 @@ impl FleetTools {
         sessions::send_prompt(args, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![text_content(
             "prompt delivered",
         )]))
     }
@@ -521,6 +544,15 @@ impl FleetTools {
         )
         .await
         .map_err(to_mcp_err)?;
+        // A blank pane (fresh/cleared session) yields empty output. Returning it
+        // verbatim would put an empty text block into the caller's conversation;
+        // say so explicitly instead. `text_content` is the backstop for any
+        // residual whitespace-only capture.
+        if text.trim().is_empty() {
+            return Ok(CallToolResult::success(vec![text_content(
+                "(session pane is empty — nothing to capture)",
+            )]));
+        }
         ok_json(&text)
     }
 
@@ -854,5 +886,48 @@ impl ServerHandler for FleetTools {
                  fleet state, new_session to spawn one, and send_prompt to steer it."
                     .to_string(),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_of(c: &Content) -> &str {
+        c.as_text().expect("text content").text.as_str()
+    }
+
+    #[test]
+    fn text_content_substitutes_for_empty_and_whitespace() {
+        assert_eq!(text_of(&text_content("")), EMPTY_RESULT_PLACEHOLDER);
+        assert_eq!(text_of(&text_content("   ")), EMPTY_RESULT_PLACEHOLDER);
+        assert_eq!(text_of(&text_content("\n\t  \n")), EMPTY_RESULT_PLACEHOLDER);
+    }
+
+    #[test]
+    fn text_content_preserves_real_text() {
+        assert_eq!(text_of(&text_content("hello")), "hello");
+        // Surrounding whitespace is kept once there is real content.
+        assert_eq!(text_of(&text_content("  hi  ")), "  hi  ");
+    }
+
+    #[test]
+    fn ok_json_never_emits_an_empty_text_block() {
+        // Even degenerate values must serialize to a non-empty text block, so a
+        // tool result can never poison the caller's conversation with an empty
+        // block (which the Anthropic API rejects, fatally so under caching).
+        for r in [
+            ok_json(&"").unwrap(),
+            ok_json(&String::new()).unwrap(),
+            ok_json(&serde_json::json!(null)).unwrap(),
+            ok_json(&Vec::<i32>::new()).unwrap(),
+        ] {
+            let block = &r.content[0];
+            assert!(
+                !text_of(block).trim().is_empty(),
+                "ok_json produced an empty text block: {:?}",
+                text_of(block)
+            );
+        }
     }
 }
