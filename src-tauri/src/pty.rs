@@ -41,15 +41,37 @@ impl PtyState {
     }
 
     pub(crate) fn close(&mut self) {
-        // Drop writer first so the slave EOFs; then kill child to make sure
-        // the reader thread terminates. Clear the buffer so a subsequent open
-        // doesn't deliver stale bytes from the previous session.
-        self.writer.take();
-        self.master.take();
+        // Terminate the child with SIGKILL BEFORE tearing down the pty fds.
+        //
+        // The child is the local `tmux attach`, or — for a remote host — the
+        // `ssh -tt … tmux attach` that runs it. portable-pty's Child::kill()
+        // sends SIGHUP, not SIGKILL. At this point our reader thread still holds
+        // a cloned master fd, so the pty is still LIVE when that SIGHUP lands —
+        // which lets `ssh -tt` do a *graceful* shutdown and relay a trailing
+        // newline down its pty to the remote tmux pane. That stray `\n` is
+        // delivered into the attached app's (claude's) input on every detach /
+        // session-switch / deselect — the long-standing "new line on switch"
+        // bug. SIGKILL gives the child no chance to relay anything; the ssh
+        // channel and remote tty then tear down on their own and tmux detaches
+        // our client cleanly.
         if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
+            match child.process_id() {
+                Some(pid) => {
+                    let _ = std::process::Command::new("kill")
+                        .args(["-KILL", &pid.to_string()])
+                        .status();
+                }
+                // No pid (already exited / unsupported): fall back to SIGHUP.
+                None => {
+                    let _ = child.kill();
+                }
+            }
             let _ = child.wait();
         }
+        // Now the child is gone, drop our fds and let the reader thread observe
+        // EOF. Clear the buffer so a subsequent open delivers no stale bytes.
+        self.writer.take();
+        self.master.take();
         if let Ok(mut b) = self.buffer.lock() {
             b.clear();
         }
