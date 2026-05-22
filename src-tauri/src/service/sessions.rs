@@ -52,7 +52,15 @@ fn reconcile_write_one_host(
                     .get_session_account(&host.alias, &sess.name)?
                     .or_else(|| host.account_uuid.clone());
                 let worktree_key = worktree_key_for_path(&sess.path.to_string_lossy());
-                let agent = crate::claude_agents::find_by_name(agent_rows, &sess.name);
+                // Match the running Claude agent by name (sessions launched
+                // with `--name <tmux_name>`) or, for older sessions without a
+                // name, by a unique cwd — so `recreate`/`restart` can resume
+                // the exact conversation instead of "most recent for the cwd".
+                let agent = crate::claude_agents::find_for_session(
+                    agent_rows,
+                    &sess.name,
+                    &sess.path.to_string_lossy(),
+                );
                 sessions.push(ReconcileSession {
                     tmux_name: &sess.name,
                     project_id,

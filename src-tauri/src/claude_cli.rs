@@ -50,7 +50,21 @@ pub async fn claude_bg(
     Ok(parse_session_id_from_bg_output(&output))
 }
 
-/// Run `claude logs <session_id>` on `host_alias`.
+/// `claude logs <id>` only knows about background *jobs*. For an interactive
+/// session (which has a resumable `claude_session_id` but no background job),
+/// it fails with "No job matching '<id>'…". Detect that so `claude_logs` can
+/// degrade to a friendly message instead of surfacing it as an error.
+fn is_no_running_job(stderr: &str) -> bool {
+    stderr.contains("No job matching")
+}
+
+/// Message shown when peeking a session that isn't a background job.
+const NO_BG_LOGS_MSG: &str =
+    "No background logs — this is an interactive session. Resume it by opening the session.";
+
+/// Run `claude logs <session_id>` on `host_alias`. Interactive sessions have a
+/// resumable id but no background job, so a "No job matching" failure is
+/// reported as an informational message rather than an error.
 pub async fn claude_logs(
     ssh: &Arc<SshClient>,
     host_alias: &str,
@@ -58,7 +72,11 @@ pub async fn claude_logs(
 ) -> Result<String, IpcError> {
     let quoted_id = quote(session_id);
     let script = format!("claude logs {quoted_id}");
-    run_claude_script(ssh, host_alias, &script, CLAUDE_TIMEOUT).await
+    match run_claude_script(ssh, host_alias, &script, CLAUDE_TIMEOUT).await {
+        Ok(out) => Ok(out),
+        Err(e) if is_no_running_job(&e.message) => Ok(NO_BG_LOGS_MSG.to_string()),
+        Err(e) => Err(e),
+    }
 }
 
 /// Run `claude project purge <project_path> --yes` on `host_alias`.
@@ -137,6 +155,15 @@ async fn run_claude_script(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_no_running_job_detects_interactive_session() {
+        assert!(is_no_running_job(
+            "No job matching '7e3f6059-3604-482c-a8a1-265d12fe5533'. Run 'claude agents' to list running sessions."
+        ));
+        assert!(!is_no_running_job("some other error"));
+        assert!(!is_no_running_job(""));
+    }
 
     #[test]
     fn parse_bg_output_extracts_session_id() {
