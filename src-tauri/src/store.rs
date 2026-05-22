@@ -466,6 +466,24 @@ impl Store {
         Ok(())
     }
 
+    /// Delete a project and all its associated sessions and worktrees.
+    /// Called after `claude project purge` removes Claude's state on the remote machine.
+    pub fn delete_project(&self, project_id: i64) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "DELETE FROM sessions WHERE project_id = ?1",
+            rusqlite::params![project_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM worktrees WHERE project_id = ?1",
+            rusqlite::params![project_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM projects WHERE id = ?1",
+            rusqlite::params![project_id],
+        )?;
+        Ok(())
+    }
+
     pub fn conn_ref(&self) -> &rusqlite::Connection {
         &self.conn
     }
