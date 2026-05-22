@@ -25,6 +25,8 @@ pub trait TmuxExec: Send + Sync {
     async fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError>;
     async fn restart_session(&self, name: &str, pane_cmd: &str) -> Result<(), IpcError>;
     async fn capture_pane(&self, name: &str) -> Result<String, IpcError>;
+    /// Capture the pane plus `lines` rows of scrollback history.
+    async fn capture_pane_scrollback(&self, name: &str, lines: u32) -> Result<String, IpcError>;
     /// Run `claude agents --json` on this host and return parsed session info.
     /// Returns an empty vec if claude CLI is not installed or the command fails —
     /// the fleet treats missing Claude agent data as degraded-gracefully.
@@ -65,6 +67,19 @@ impl TmuxExec for LocalTmux {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
             // Non-existent pane: return empty so the poller keeps waiting.
+            Ok(String::new())
+        }
+    }
+    async fn capture_pane_scrollback(&self, name: &str, lines: u32) -> Result<String, IpcError> {
+        let start = scrollback_start(lines);
+        let output = tokio::process::Command::new("tmux")
+            .args(["capture-pane", "-t", name, "-S", &start, "-p"])
+            .output()
+            .await
+            .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        } else {
             Ok(String::new())
         }
     }
@@ -231,6 +246,21 @@ impl TmuxExec for RemoteTmux {
             Ok(String::new())
         }
     }
+    async fn capture_pane_scrollback(&self, name: &str, lines: u32) -> Result<String, IpcError> {
+        let start = scrollback_start(lines);
+        let script = format!(
+            "tmux capture-pane -t {} -S {} -p",
+            shell_quote(name),
+            shell_quote(&start),
+        );
+        let output = self.remote_bash(&script).await?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        } else {
+            // Non-existent pane: return empty so the poller keeps waiting.
+            Ok(String::new())
+        }
+    }
     async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
         let script = "claude agents --json 2>/dev/null || echo '[]'";
         let output = self.remote_bash(script).await.ok();
@@ -320,6 +350,11 @@ fn parse_sessions(input: &str) -> Vec<TmuxSession> {
             })
         })
         .collect()
+}
+
+/// tmux `-S` start offset for `lines` rows of scrollback (a negative count).
+pub(crate) fn scrollback_start(lines: u32) -> String {
+    format!("-{lines}")
 }
 
 /// The pane command for a Claude ("work"/"review") session. With a known
@@ -465,6 +500,12 @@ pub async fn kill_session(name: &str) -> Result<(), IpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrollback_start_is_negative_lines() {
+        assert_eq!(scrollback_start(120), "-120");
+        assert_eq!(scrollback_start(0), "-0");
+    }
 
     #[test]
     fn parse_two_sessions() {

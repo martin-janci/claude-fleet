@@ -147,6 +147,68 @@ pub struct SpawnReviewParams {
     pub prompt: String,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct CaptureSessionParams {
+    /// Fleet session id (from list_sessions).
+    pub session_id: i64,
+    /// Rows of scrollback history to include; omit for just the visible pane.
+    pub scrollback_lines: Option<u32>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionIdParams {
+    /// Fleet session id (from list_sessions).
+    pub session_id: i64,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct NewBgSessionParams {
+    /// Host alias to launch the background session on.
+    pub host_alias: String,
+    /// Display name for the session (also its tmux/agent name).
+    pub name: String,
+    /// Initial prompt for the headless Claude session.
+    pub prompt: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RepoPathParams {
+    /// Fleet session id (from list_sessions).
+    pub session_id: i64,
+    /// Worktree-relative file path.
+    pub path: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RepoLogParams {
+    /// Fleet session id.
+    pub session_id: i64,
+    /// Show all branches/refs (default true) instead of just HEAD.
+    pub all: Option<bool>,
+    /// Max commits to return (default 200).
+    pub limit: Option<u32>,
+    /// Commits to skip (pagination).
+    pub skip: Option<u32>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RepoCommitParams {
+    /// Fleet session id.
+    pub session_id: i64,
+    /// Commit hash.
+    pub hash: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RepoCommitDiffParams {
+    /// Fleet session id.
+    pub session_id: i64,
+    /// Commit hash.
+    pub hash: String,
+    /// Worktree-relative file path.
+    pub path: String,
+}
+
 // --- tools -----------------------------------------------------------------
 
 #[tool_router]
@@ -438,6 +500,302 @@ impl FleetTools {
             .await
             .map_err(to_mcp_err)?;
         ok_json(&row)
+    }
+
+    #[tool(description = "Capture a session's terminal output — the visible \
+        tmux pane, or include scrollback history. Use after send_prompt to read \
+        the session's reply. Returns the pane text.")]
+    async fn capture_session(
+        &self,
+        Parameters(p): Parameters<CaptureSessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("capture_session", &format!("session_id={}", p.session_id));
+        let text = sessions::capture_session_output(
+            p.session_id,
+            &self.store,
+            &self.ssh,
+            p.scrollback_lines,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&text)
+    }
+
+    #[tool(
+        description = "Peek at a session's background Claude logs. Returns an \
+        informational message for interactive sessions with no background job."
+    )]
+    async fn peek_session(
+        &self,
+        Parameters(p): Parameters<SessionIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("peek_session", &format!("session_id={}", p.session_id));
+        let (host_alias, claude_id) = {
+            let s = self
+                .store
+                .lock()
+                .map_err(|_| to_mcp_err(IpcError::new("E_LOCK", "store mutex poisoned")))?;
+            let row = s
+                .get_session_by_id(p.session_id)
+                .map_err(|e| to_mcp_err(IpcError::from(e)))?
+                .ok_or_else(|| to_mcp_err(IpcError::new("E_NOTFOUND", "session not found")))?;
+            (row.host_alias, row.claude_session_id)
+        };
+        let Some(claude_id) = claude_id else {
+            return ok_json(
+                &"This session has no Claude session id yet — nothing to peek.".to_string(),
+            );
+        };
+        let logs = crate::service::bg_sessions::peek_session(
+            crate::service::bg_sessions::PeekSessionArgs {
+                host_alias,
+                claude_session_id: claude_id,
+            },
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&logs)
+    }
+
+    #[tool(description = "Recreate a session: kill its tmux session and rebuild \
+        it fresh in the same worktree, resuming the same Claude conversation. \
+        Works for running or ghost sessions. Returns the session row as JSON.")]
+    async fn recreate_session(
+        &self,
+        Parameters(p): Parameters<SessionIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("recreate_session", &format!("session_id={}", p.session_id));
+        let row = sessions::recreate_session(
+            sessions::RecreateSessionArgs {
+                session_id: p.session_id,
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
+    #[tool(description = "Dismiss a ghost session (lost from tmux): permanently \
+        delete its row. Errors if the session is not a ghost.")]
+    async fn dismiss_ghost_session(
+        &self,
+        Parameters(p): Parameters<SessionIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "dismiss_ghost_session",
+            &format!("session_id={}", p.session_id),
+        );
+        sessions::dismiss_ghost_session(
+            sessions::DismissGhostSessionArgs {
+                session_id: p.session_id,
+            },
+            &self.store,
+        )
+        .map_err(to_mcp_err)?;
+        ok_json(&serde_json::json!({ "dismissed": p.session_id }))
+    }
+
+    #[tool(description = "Launch a supervised headless (background) Claude \
+        session on a host with an initial prompt. Returns the new Claude \
+        session id as JSON; track progress with peek_session.")]
+    async fn new_bg_session(
+        &self,
+        Parameters(p): Parameters<NewBgSessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "new_bg_session",
+            &format!("host={} name={}", p.host_alias, p.name),
+        );
+        let res = crate::service::bg_sessions::new_bg_session(
+            crate::service::bg_sessions::NewBgSessionArgs {
+                host_alias: p.host_alias,
+                name: p.name,
+                prompt: p.prompt,
+            },
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&res)
+    }
+
+    #[tool(description = "List a session's changed files (git status) in its \
+        worktree. Returns JSON array of changed files.")]
+    async fn repo_changes(
+        &self,
+        Parameters(p): Parameters<SessionIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("repo_changes", &format!("session_id={}", p.session_id));
+        let v = crate::commands::files::repo_changes_impl(
+            crate::commands::files::SessionIdArgs {
+                session_id: p.session_id,
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&v)
+    }
+
+    #[tool(description = "List a session's worktree files (tracked + untracked, \
+        gitignore respected). Returns JSON {entries, truncated}.")]
+    async fn repo_tree(
+        &self,
+        Parameters(p): Parameters<SessionIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("repo_tree", &format!("session_id={}", p.session_id));
+        let v = crate::commands::files::repo_tree_impl(
+            crate::commands::files::SessionIdArgs {
+                session_id: p.session_id,
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&v)
+    }
+
+    #[tool(description = "Read one worktree file's contents (capped). Returns \
+        JSON {path, content, truncated, binary, size}.")]
+    async fn repo_file(
+        &self,
+        Parameters(p): Parameters<RepoPathParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "repo_file",
+            &format!("session_id={} path={}", p.session_id, p.path),
+        );
+        let v = crate::commands::files::repo_file_impl(
+            crate::commands::files::RepoFileArgs {
+                session_id: p.session_id,
+                path: p.path,
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&v)
+    }
+
+    #[tool(description = "Unified diff for one worktree file vs HEAD (untracked \
+        files render as all-added). Returns JSON {path, diff, binary, truncated}.")]
+    async fn repo_diff(
+        &self,
+        Parameters(p): Parameters<RepoPathParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "repo_diff",
+            &format!("session_id={} path={}", p.session_id, p.path),
+        );
+        let v = crate::commands::files::repo_diff_impl(
+            crate::commands::files::RepoFileArgs {
+                session_id: p.session_id,
+                path: p.path,
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&v)
+    }
+
+    #[tool(description = "Commit log (branch graph) for a session's worktree. \
+        all=true (default) includes every branch. Returns JSON array of commits \
+        with parents + ref decorations.")]
+    async fn repo_log(
+        &self,
+        Parameters(p): Parameters<RepoLogParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("repo_log", &format!("session_id={}", p.session_id));
+        let v = crate::commands::history::repo_log_impl(
+            crate::commands::history::RepoLogArgs {
+                session_id: p.session_id,
+                all: p.all.unwrap_or(true),
+                limit: p.limit.unwrap_or(0),
+                skip: p.skip.unwrap_or(0),
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&v)
+    }
+
+    #[tool(description = "List local + remote branches for a session's worktree \
+        with ahead/behind. Returns JSON array.")]
+    async fn repo_branches(
+        &self,
+        Parameters(p): Parameters<SessionIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("repo_branches", &format!("session_id={}", p.session_id));
+        let v = crate::commands::history::repo_branches_impl(
+            crate::commands::files::SessionIdArgs {
+                session_id: p.session_id,
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&v)
+    }
+
+    #[tool(description = "One commit's metadata + changed files. Returns JSON \
+        {hash, subject, body, author, date, files}.")]
+    async fn repo_commit(
+        &self,
+        Parameters(p): Parameters<RepoCommitParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "repo_commit",
+            &format!("session_id={} hash={}", p.session_id, p.hash),
+        );
+        let v = crate::commands::history::repo_commit_impl(
+            crate::commands::history::RepoCommitArgs {
+                session_id: p.session_id,
+                hash: p.hash,
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&v)
+    }
+
+    #[tool(description = "Diff of one file within a commit. Returns JSON \
+        {path, diff, binary, truncated}.")]
+    async fn repo_commit_diff(
+        &self,
+        Parameters(p): Parameters<RepoCommitDiffParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "repo_commit_diff",
+            &format!(
+                "session_id={} hash={} path={}",
+                p.session_id, p.hash, p.path
+            ),
+        );
+        let v = crate::commands::history::repo_commit_diff_impl(
+            crate::commands::history::RepoCommitDiffArgs {
+                session_id: p.session_id,
+                hash: p.hash,
+                path: p.path,
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&v)
     }
 }
 

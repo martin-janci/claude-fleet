@@ -75,12 +75,18 @@ mod tests {
         ];
         // Exact name match wins, even if cwd differs.
         assert_eq!(
-            find_for_session(&rows, "dev-x", "/zzz").unwrap().session_id.as_deref(),
+            find_for_session(&rows, "dev-x", "/zzz")
+                .unwrap()
+                .session_id
+                .as_deref(),
             Some("byname")
         );
         // No name match → unique cwd match.
         assert_eq!(
-            find_for_session(&rows, "no-name", "/b").unwrap().session_id.as_deref(),
+            find_for_session(&rows, "no-name", "/b")
+                .unwrap()
+                .session_id
+                .as_deref(),
             Some("bycwd")
         );
         // Ambiguous cwd (two agents) → None (refuse to guess).

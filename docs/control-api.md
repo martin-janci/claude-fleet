@@ -66,6 +66,34 @@ tools.
 | `send_prompt` | Deliver a prompt to a running session's Claude REPL. |
 | `spawn_review` | Spawn a review session in another session's worktree. |
 
+**Read session output**
+
+| Tool | What it does |
+|---|---|
+| `capture_session` | Capture a session's terminal output — the visible tmux pane, or include scrollback history. |
+| `peek_session` | Peek at a session's background Claude logs. |
+
+**Session lifecycle**
+
+| Tool | What it does |
+|---|---|
+| `recreate_session` | Recreate a session: kill its tmux session and rebuild it fresh in the same worktree, resuming the same Claude conversation. |
+| `dismiss_ghost_session` | Dismiss a ghost session (lost from tmux): permanently delete its row. |
+| `new_bg_session` | Launch a supervised headless (background) Claude session on a host with an initial prompt. |
+
+**Files & git (read-only)**
+
+| Tool | What it does |
+|---|---|
+| `repo_changes` | List a session's changed files (git status) in its worktree. |
+| `repo_tree` | List a session's worktree files (tracked + untracked, gitignore respected). |
+| `repo_file` | Read one worktree file's contents (capped). |
+| `repo_diff` | Unified diff for one worktree file vs HEAD (untracked files render as all-added). |
+| `repo_log` | Commit log (branch graph) for a session's worktree. |
+| `repo_branches` | List local + remote branches for a session's worktree with ahead/behind. |
+| `repo_commit` | One commit's metadata + changed files. |
+| `repo_commit_diff` | Diff of one file within a commit. |
+
 A typical loop: `list_sessions` to see state → `new_session` to spawn one →
 `send_prompt` to steer it.
 

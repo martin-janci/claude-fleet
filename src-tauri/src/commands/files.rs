@@ -135,6 +135,25 @@ pub struct SessionIdArgs {
     pub session_id: i64,
 }
 
+/// `git status` for a session's worktree — reusable logic called by the Tauri
+/// command and (later) MCP tools.
+pub async fn repo_changes_impl(
+    args: SessionIdArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<Vec<ChangedFile>, IpcError> {
+    let (host, name) = session_target(store, args.session_id)?;
+    let script = repo_script(
+        &name,
+        "git -C \"$root\" status --porcelain=v1 -z --untracked-files=all",
+    );
+    let out = run_in_repo(ssh, &host, &script).await?;
+    if !out.status.success() {
+        return Err(repo_err(&out));
+    }
+    Ok(parse_status_z(&out.stdout))
+}
+
 /// `git status` for a session's worktree.
 #[tauri::command]
 pub async fn repo_changes(
@@ -142,31 +161,22 @@ pub async fn repo_changes(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<Vec<ChangedFile>, IpcError> {
-    let (host, name) = session_target(&store, args.session_id)?;
-    let script = repo_script(
-        &name,
-        "git -C \"$root\" status --porcelain=v1 -z --untracked-files=all",
-    );
-    let out = run_in_repo(&ssh, &host, &script).await?;
-    if !out.status.success() {
-        return Err(repo_err(&out));
-    }
-    Ok(parse_status_z(&out.stdout))
+    repo_changes_impl(args, &store, &ssh).await
 }
 
-/// Flat worktree listing (tracked + untracked, gitignore respected).
-#[tauri::command]
-pub async fn repo_tree(
+/// Flat worktree listing (tracked + untracked, gitignore respected) — reusable
+/// logic called by the Tauri command and (later) MCP tools.
+pub async fn repo_tree_impl(
     args: SessionIdArgs,
-    store: State<'_, Arc<Mutex<Store>>>,
-    ssh: State<'_, Arc<SshClient>>,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
 ) -> Result<RepoTree, IpcError> {
-    let (host, name) = session_target(&store, args.session_id)?;
+    let (host, name) = session_target(store, args.session_id)?;
     let script = repo_script(
         &name,
         "git -C \"$root\" ls-files -z --cached --others --exclude-standard",
     );
-    let out = run_in_repo(&ssh, &host, &script).await?;
+    let out = run_in_repo(ssh, &host, &script).await?;
     if !out.status.success() {
         return Err(repo_err(&out));
     }
@@ -185,21 +195,31 @@ pub async fn repo_tree(
     Ok(RepoTree { entries, truncated })
 }
 
+/// Flat worktree listing (tracked + untracked, gitignore respected).
+#[tauri::command]
+pub async fn repo_tree(
+    args: SessionIdArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<RepoTree, IpcError> {
+    repo_tree_impl(args, &store, &ssh).await
+}
+
 #[derive(Deserialize)]
 pub struct RepoFileArgs {
     pub session_id: i64,
     pub path: String,
 }
 
-/// Read one worktree file's content (capped at `MAX_FILE_BYTES`).
-#[tauri::command]
-pub async fn repo_file(
+/// Read one worktree file's content (capped at `MAX_FILE_BYTES`) — reusable
+/// logic called by the Tauri command and (later) MCP tools.
+pub async fn repo_file_impl(
     args: RepoFileArgs,
-    store: State<'_, Arc<Mutex<Store>>>,
-    ssh: State<'_, Arc<SshClient>>,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
 ) -> Result<FileContent, IpcError> {
     crate::validate::repo_rel_path(&args.path)?;
-    let (host, name) = session_target(&store, args.session_id)?;
+    let (host, name) = session_target(store, args.session_id)?;
     // Read one byte past the cap so we can tell "exactly cap" from "truncated".
     let body = format!(
         "head -c {} -- \"$root\"/{}",
@@ -207,7 +227,7 @@ pub async fn repo_file(
         shq(&args.path),
     );
     let script = repo_script(&name, &body);
-    let out = run_in_repo(&ssh, &host, &script).await?;
+    let out = run_in_repo(ssh, &host, &script).await?;
     if !out.status.success() {
         return Err(repo_err(&out));
     }
@@ -232,17 +252,27 @@ pub async fn repo_file(
     })
 }
 
-/// Unified diff for one worktree file. Tracked changes diff against `HEAD`;
-/// an untracked file falls back to `git diff --no-index` against `/dev/null`
-/// so it still renders as an all-added diff.
+/// Read one worktree file's content (capped at `MAX_FILE_BYTES`).
 #[tauri::command]
-pub async fn repo_diff(
+pub async fn repo_file(
     args: RepoFileArgs,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
+) -> Result<FileContent, IpcError> {
+    repo_file_impl(args, &store, &ssh).await
+}
+
+/// Unified diff for one worktree file — reusable logic called by the Tauri
+/// command and (later) MCP tools. Tracked changes diff against `HEAD`; an
+/// untracked file falls back to `git diff --no-index` against `/dev/null` so
+/// it still renders as an all-added diff.
+pub async fn repo_diff_impl(
+    args: RepoFileArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
 ) -> Result<FileDiff, IpcError> {
     crate::validate::repo_rel_path(&args.path)?;
-    let (host, name) = session_target(&store, args.session_id)?;
+    let (host, name) = session_target(store, args.session_id)?;
     let quoted = shq(&args.path);
 
     // Tracked diff vs HEAD. A repo with no commits yet has no HEAD — `git
@@ -256,7 +286,7 @@ pub async fn repo_diff(
              git -C \"$root\" diff HEAD -- {quoted}; fi"
         ),
     );
-    let out = run_in_repo(&ssh, &host, &script).await?;
+    let out = run_in_repo(ssh, &host, &script).await?;
     if !out.status.success() {
         return Err(repo_err(&out));
     }
@@ -266,7 +296,7 @@ pub async fn repo_diff(
     if raw.iter().all(|b| b.is_ascii_whitespace()) {
         let body = format!("git -C \"$root\" diff --no-index -- /dev/null {quoted} || true");
         let script = repo_script(&name, &body);
-        let fallback = run_in_repo(&ssh, &host, &script).await?;
+        let fallback = run_in_repo(ssh, &host, &script).await?;
         if fallback.status.success() {
             raw = fallback.stdout;
         }
@@ -279,6 +309,18 @@ pub async fn repo_diff(
         binary,
         truncated,
     })
+}
+
+/// Unified diff for one worktree file. Tracked changes diff against `HEAD`;
+/// an untracked file falls back to `git diff --no-index` against `/dev/null`
+/// so it still renders as an all-added diff.
+#[tauri::command]
+pub async fn repo_diff(
+    args: RepoFileArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<FileDiff, IpcError> {
+    repo_diff_impl(args, &store, &ssh).await
 }
 
 #[cfg(test)]
