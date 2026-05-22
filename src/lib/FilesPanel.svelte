@@ -206,11 +206,9 @@
             {error}
             {selectedPath}
             {onSelect}
-            onMode={() => {}}
-            onRefresh={() => openCommitDetail(openCommit!.hash)}
           />
         {:else}
-          <FileList {mode} {changes} {tree} {loading} {error} {selectedPath} {onSelect} {onMode} {onRefresh} />
+          <FileList {mode} {changes} {tree} {loading} {error} {selectedPath} {onSelect} />
         {/if}
       </div>
       <Resizer id="files-list" onresize={onResize} />
@@ -289,7 +287,13 @@
     width: 100%;
     overflow: hidden;
   }
-  .list-col,
+  .list-col {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    height: 100%;
+    overflow: hidden;
+  }
   .viewer-col {
     min-width: 0;
     height: 100%;

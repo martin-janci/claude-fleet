@@ -61,8 +61,6 @@
     error,
     selectedPath,
     onSelect,
-    onMode,
-    onRefresh,
   }: {
     mode: 'changes' | 'tree' | 'history' | 'branches';
     changes: ChangedFile[];
@@ -71,8 +69,6 @@
     error: string | null;
     selectedPath: string | null;
     onSelect: (path: string, status: string | undefined) => void;
-    onMode: (m: 'changes' | 'tree' | 'history' | 'branches') => void;
-    onRefresh: () => void;
   } = $props();
 
   let filter = $state('');
@@ -197,6 +193,8 @@
   .list {
     display: flex;
     flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
     height: 100%;
     border-right: 1px solid var(--border);
     min-width: 0;
