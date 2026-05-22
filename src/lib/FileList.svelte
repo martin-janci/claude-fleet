@@ -213,7 +213,7 @@
     <button
       class="row file"
       class:sel={selectedPath === node.path}
-      style="padding-left: {0.4 + depth * 0.85 + 0.95}rem"
+      style="padding-left: {0.4 + depth * 0.85 + 1.35}rem"
       onclick={() => onSelect(node.path, statusByPath.get(node.path))}
       title={node.path}
     >
@@ -293,6 +293,7 @@
   .ficon {
     flex: 0 0 auto;
     width: 1.2rem;
+    overflow: hidden;
     text-align: center;
     font-size: 0.82rem;
     line-height: 1;

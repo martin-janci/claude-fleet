@@ -1,10 +1,11 @@
 // highlight.ts — a tiny, dependency-free syntax highlighter.
 //
-// This is deliberately *not* a real parser. It is a single-pass character
-// scanner that colours comments, strings, numbers and a per-language keyword
-// set — enough to make a file readable in the viewer. Edge cases (regex
-// literals, nested template expressions, here-docs) are intentionally not
-// handled; the goal is a useful approximation, not correctness.
+// This is deliberately *not* a real parser. The C-family languages get a
+// single-pass character scanner that colours comments, strings, numbers and a
+// per-language keyword set; Markdown and HTML get their own structural passes.
+// It is enough to make a file readable in the viewer. Edge cases (regex
+// literals, nested template expressions, here-docs, embedded <script> blocks)
+// are intentionally not handled — the goal is a useful approximation.
 
 export type TokClass = 'kw' | 'str' | 'com' | 'num' | 'txt' | 'head' | 'code';
 
@@ -52,6 +53,13 @@ const SHELL = words(
     'return local export readonly declare set unset source alias',
 );
 
+// CSS has no real keywords; this colours common global values and at-rule
+// names. Hyphenated values (e.g. font-face) are not matched as one word.
+const CSS = words(
+  'important inherit initial unset revert none auto inline block flex grid ' +
+    'absolute relative fixed static sticky media supports keyframes import from to',
+);
+
 const LANGS: Record<string, LangCfg> = {
   clike: {
     line: '//',
@@ -63,8 +71,7 @@ const LANGS: Record<string, LangCfg> = {
   python: { line: '#', strings: ['"', "'"], triple: true, keywords: PY },
   shell: { line: '#', strings: ['"', "'"], keywords: SHELL },
   yaml: { line: '#', strings: ['"', "'"], keywords: words('true false null yes no on off') },
-  css: { blockOpen: '/*', blockClose: '*/', strings: ['"', "'"], keywords: new Set() },
-  html: { blockOpen: '<!--', blockClose: '-->', strings: ['"', "'"], keywords: new Set() },
+  css: { blockOpen: '/*', blockClose: '*/', strings: ['"', "'"], keywords: CSS },
   json: { strings: ['"'], keywords: words('true false null') },
 };
 
@@ -98,22 +105,50 @@ export function langForPath(path: string | null | undefined): string {
   return EXT[base.slice(dot + 1)] ?? '';
 }
 
+// A sink that accumulates tokens into per-line arrays, splitting any text it
+// is given on newlines so a multi-line comment or string spans rows correctly.
+function newLineSink(): {
+  push: (text: string, cls: TokClass) => void;
+  done: () => Tok[][];
+} {
+  const lines: Tok[][] = [];
+  let cur: Tok[] = [];
+  return {
+    push(text: string, cls: TokClass): void {
+      const parts = text.split('\n');
+      for (let i = 0; i < parts.length; i++) {
+        if (i > 0) {
+          lines.push(cur);
+          cur = [];
+        }
+        if (parts[i] !== '') cur.push({ text: parts[i], cls });
+      }
+    },
+    done(): Tok[][] {
+      lines.push(cur);
+      return lines;
+    },
+  };
+}
+
 // Colour inline Markdown spans (code, emphasis, links) within one line,
 // appending tokens to `out`. Spans are not nested — the first match wins.
+// Underscore emphasis requires non-word boundaries so `snake_case` identifiers
+// in prose are left alone (matching CommonMark's intraword `_` rule).
 function mdInline(s: string, out: Tok[]): void {
   const re =
-    /(`+)([^`]*?)\1|(\*\*|__)(.+?)\3|(\*|_)(.+?)\5|(!?)\[([^\]]*)\]\(([^)]*)\)/g;
+    /(`+)([^`]*?)\1|(\*\*[^*]+?\*\*|\*[^*\s][^*]*?\*)|(?<![\w])(__?[^_]+?__?)(?![\w])|(!?)\[([^\]]*)\]\(([^)]*)\)/g;
   let last = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(s)) !== null) {
     if (m.index > last) out.push({ text: s.slice(last, m.index), cls: 'txt' });
     if (m[1] !== undefined) {
       out.push({ text: m[0], cls: 'code' }); // `inline code`
-    } else if (m[3] !== undefined || m[5] !== undefined) {
-      out.push({ text: m[0], cls: 'kw' }); // **bold** / *italic*
+    } else if (m[3] !== undefined || m[4] !== undefined) {
+      out.push({ text: m[0], cls: 'kw' }); // **bold** / *italic* / _emphasis_
     } else {
-      out.push({ text: `${m[7]}[${m[8]}]`, cls: 'str' }); // [link text]
-      out.push({ text: `(${m[9]})`, cls: 'com' }); // (url)
+      out.push({ text: `${m[5]}[${m[6]}]`, cls: 'str' }); // [link text]
+      out.push({ text: `(${m[7]})`, cls: 'com' }); // (url)
     }
     last = re.lastIndex;
   }
@@ -163,6 +198,59 @@ function highlightMarkdown(content: string): Tok[][] {
   return lines;
 }
 
+// HTML/XML/SVG (and Svelte/Vue templates): colour tags and comments, with
+// attribute string values picked out. Text content is left plain — crucially
+// a stray `'` or `"` there is not mistaken for a string. Embedded <script> and
+// <style> bodies are not descended into.
+function highlightHtml(content: string): Tok[][] {
+  const { push, done } = newLineSink();
+  const n = content.length;
+  let i = 0;
+  let textStart = 0;
+  const flushText = (upto: number): void => {
+    if (upto > textStart) push(content.slice(textStart, upto), 'txt');
+  };
+
+  while (i < n) {
+    if (content.startsWith('<!--', i)) {
+      flushText(i);
+      const close = content.indexOf('-->', i + 4);
+      const j = close === -1 ? n : close + 3;
+      push(content.slice(i, j), 'com');
+      i = textStart = j;
+      continue;
+    }
+
+    // A `<` only opens a tag when followed by a tag-ish char, so `a < b` in
+    // text content is not swallowed.
+    if (content[i] === '<' && i + 1 < n && /[A-Za-z/!?]/.test(content[i + 1])) {
+      flushText(i);
+      let j = i;
+      let segStart = i;
+      while (j < n && content[j] !== '>') {
+        const c = content[j];
+        if (c === '"' || c === "'") {
+          push(content.slice(segStart, j), 'kw');
+          const close = content.indexOf(c, j + 1);
+          const end = close === -1 ? n : close + 1;
+          push(content.slice(j, end), 'str'); // attribute value
+          j = segStart = end;
+          continue;
+        }
+        j++;
+      }
+      const tagEnd = j < n ? j + 1 : n; // include the closing `>`
+      push(content.slice(segStart, tagEnd), 'kw');
+      i = textStart = tagEnd;
+      continue;
+    }
+
+    i++;
+  }
+  flushText(n);
+  return done();
+}
+
 /**
  * Tokenise `content` for `lang` (a key from {@link langForPath}). Returns one
  * token array per source line; an empty array is an empty line. An unknown
@@ -170,28 +258,16 @@ function highlightMarkdown(content: string): Tok[][] {
  */
 export function highlight(content: string, lang: string): Tok[][] {
   if (lang === 'md') return highlightMarkdown(content);
-
-  const lines: Tok[][] = [];
-  let cur: Tok[] = [];
-  // Append `text` (which may contain newlines) as `cls` tokens, breaking the
-  // current line wherever a newline appears.
-  const push = (text: string, cls: TokClass): void => {
-    const parts = text.split('\n');
-    for (let i = 0; i < parts.length; i++) {
-      if (i > 0) {
-        lines.push(cur);
-        cur = [];
-      }
-      if (parts[i] !== '') cur.push({ text: parts[i], cls });
-    }
-  };
+  if (lang === 'html') return highlightHtml(content);
 
   const cfg = LANGS[lang];
   if (!cfg) {
-    for (const ln of content.split('\n')) lines.push(ln === '' ? [] : [{ text: ln, cls: 'txt' }]);
-    return lines;
+    return content
+      .split('\n')
+      .map((ln) => (ln === '' ? [] : [{ text: ln, cls: 'txt' as TokClass }]));
   }
 
+  const { push, done } = newLineSink();
   const kw = cfg.keywords;
   const word = /[A-Za-z_$][\w$]*|\d[\w.]*/g;
   // Split a run of non-comment, non-string text into identifier/number tokens.
@@ -270,6 +346,5 @@ export function highlight(content: string, lang: string): Tok[][] {
     i++;
   }
   flush(n);
-  lines.push(cur);
-  return lines;
+  return done();
 }

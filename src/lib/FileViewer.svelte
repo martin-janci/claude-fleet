@@ -189,7 +189,7 @@
             {#each hlLines as toks, i}
               <div class="frow">
                 <span class="fno">{i + 1}</span><span class="ftext"
-                  >{#each toks as t}<span class={t.cls}>{t.text}</span>{:else}&nbsp;{/each}</span
+                  >{#each toks as t}{#if t.cls === 'txt'}{t.text}{:else}<span class={t.cls}>{t.text}</span>{/if}{:else}&nbsp;{/each}</span
                 >
               </div>
             {/each}
@@ -292,21 +292,20 @@
   .ftext {
     flex: 1 1 auto;
   }
-  /* Syntax token colours (One Dark palette). Comments use the theme's
-     muted colour so they track light/dark; the rest are fixed tints, in
-     keeping with DiffView's hard-coded add/del colours. */
+  /* Syntax token colours. All are theme variables (see app.css) so they
+     keep their contrast on both the light and dark themes. */
   .ftext .com {
     color: var(--fg-muted);
     font-style: italic;
   }
   .ftext .kw {
-    color: #c678dd;
+    color: var(--syn-kw);
   }
   .ftext .str {
-    color: #98c379;
+    color: var(--syn-str);
   }
   .ftext .num {
-    color: #d19a66;
+    color: var(--syn-num);
   }
   /* Markdown: headings and code spans/fences. */
   .ftext .head {
@@ -314,6 +313,6 @@
     font-weight: 700;
   }
   .ftext .code {
-    color: #56b6c2;
+    color: var(--syn-code);
   }
 </style>

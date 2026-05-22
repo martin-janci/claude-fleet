@@ -46,6 +46,30 @@ describe('highlight', () => {
     expect(last.some((t) => t.cls === 'kw' && t.text === '**b**')).toBe(true);
   });
 
+  it('leaves intraword underscores in Markdown prose alone', () => {
+    const [row] = highlight('the file_name_here field', 'md');
+    expect(row.every((t) => t.cls === 'txt')).toBe(true);
+  });
+
+  it('still emphasises bounded Markdown underscores', () => {
+    const [row] = highlight('an _emphasised_ word', 'md');
+    expect(row.some((t) => t.cls === 'kw' && t.text === '_emphasised_')).toBe(true);
+  });
+
+  it('highlights HTML tags, attribute values and comments', () => {
+    const [row] = highlight('<a href="x">hi</a><!-- c -->', 'html');
+    const of = (c: string) => row.filter((t) => t.cls === c).map((t) => t.text);
+    expect(of('kw')).toContain('<a href=');
+    expect(of('str')).toContain('"x"');
+    expect(of('txt')).toContain('hi');
+    expect(of('com')).toContain('<!-- c -->');
+  });
+
+  it('does not treat a stray < in HTML text as a tag', () => {
+    const [row] = highlight('1 < 2 and 3 > 2', 'html');
+    expect(row).toEqual([{ text: '1 < 2 and 3 > 2', cls: 'txt' }]);
+  });
+
   it('falls back to plain text for unknown languages', () => {
     expect(highlight('hello world', '')).toEqual([[{ text: 'hello world', cls: 'txt' }]]);
   });

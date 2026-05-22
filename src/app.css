@@ -1,3 +1,5 @@
+/* --syn-* are the file-viewer syntax-highlight token colours: One Light on
+   the light theme, One Dark on the dark theme, so each keeps its contrast. */
 :root {
   --bg: #ffffff;
   --bg-pane: #fafafa;
@@ -5,6 +7,10 @@
   --fg-muted: #6b6b6b;
   --border: #e5e5e5;
   --accent: #2563eb;
+  --syn-kw: #a626a4;
+  --syn-str: #50a14f;
+  --syn-num: #b76b01;
+  --syn-code: #0184bc;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -15,6 +21,10 @@
     --fg-muted: #999999;
     --border: #262626;
     --accent: #60a5fa;
+    --syn-kw: #c678dd;
+    --syn-str: #98c379;
+    --syn-num: #d19a66;
+    --syn-code: #56b6c2;
   }
 }
 
@@ -25,6 +35,10 @@
   --fg-muted: #6b6b6b;
   --border: #e5e5e5;
   --accent: #2563eb;
+  --syn-kw: #a626a4;
+  --syn-str: #50a14f;
+  --syn-num: #b76b01;
+  --syn-code: #0184bc;
 }
 
 :root[data-theme='dark'] {
@@ -34,6 +48,10 @@
   --fg-muted: #999999;
   --border: #262626;
   --accent: #60a5fa;
+  --syn-kw: #c678dd;
+  --syn-str: #98c379;
+  --syn-num: #d19a66;
+  --syn-code: #56b6c2;
 }
 
 html, body, #app {
