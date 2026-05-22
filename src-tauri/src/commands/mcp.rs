@@ -137,6 +137,7 @@ pub async fn mcp_configure(
             Arc::clone(&store),
             Arc::clone(&ssh),
             Arc::clone(&reg),
+            Arc::clone(&tunnels),
             port,
             token,
         )

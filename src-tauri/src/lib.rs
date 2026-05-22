@@ -177,6 +177,7 @@ fn maybe_start_mcp(
     store: &std::sync::Arc<Mutex<Store>>,
     ssh: &std::sync::Arc<ssh::SshClient>,
     reg: &std::sync::Arc<cancel::CancellationRegistry>,
+    tunnels: &std::sync::Arc<crate::service::tunnel::TunnelSupervisor>,
 ) {
     use tauri::Manager;
     let (enabled, port, token) = {
@@ -216,6 +217,7 @@ fn maybe_start_mcp(
         std::sync::Arc::clone(store),
         std::sync::Arc::clone(ssh),
         std::sync::Arc::clone(reg),
+        std::sync::Arc::clone(tunnels),
         port,
         token,
     ));
@@ -261,6 +263,7 @@ pub fn run() {
     let reg_for_setup = std::sync::Arc::clone(&reg);
     let tunnels = std::sync::Arc::new(crate::service::tunnel::TunnelSupervisor::new());
     let tunnels_for_exit = std::sync::Arc::clone(&tunnels);
+    let tunnels_for_setup = std::sync::Arc::clone(&tunnels);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -288,7 +291,13 @@ pub fn run() {
             app.manage(Mutex::new(mcp::McpRuntime::default()));
             // Start the MCP control API if the user has enabled it (off by
             // default). Reuses the same Store / SshClient / registry as the UI.
-            maybe_start_mcp(app.handle(), &store, &ssh_client_for_setup, &reg_for_setup);
+            maybe_start_mcp(
+                app.handle(),
+                &store,
+                &ssh_client_for_setup,
+                &reg_for_setup,
+                &tunnels_for_setup,
+            );
             Ok(())
         })
         .manage(Mutex::new(PtyState::new()))
