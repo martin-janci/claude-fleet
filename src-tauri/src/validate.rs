@@ -127,7 +127,6 @@ pub fn commit_hash(value: &str) -> Result<(), IpcError> {
 /// `8-4-4-4-12` hex). The app generates these as UUIDv4 and interpolates them
 /// into the pane launch command, so this guards a tampered DB value from
 /// injecting shell. Anything not matching the exact shape is rejected.
-#[allow(dead_code)] // wired up in the recreate/restart launch path
 pub fn claude_session_id(value: &str) -> Result<(), IpcError> {
     let groups = [8usize, 4, 4, 4, 12];
     let parts: Vec<&str> = value.split('-').collect();

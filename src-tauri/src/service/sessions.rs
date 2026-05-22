@@ -776,21 +776,16 @@ pub async fn restart_session(
     crate::validate::tmux_name(&args.name)?;
     // Respawn the pane with the command matching the session's kind so a
     // restarted shell session comes back as a shell, not a Claude pane.
-    let is_shell = {
+    let (kind, claude_id) = {
         let s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-        s.get_session(&args.name, &args.host_alias)?
-            .map(|r| r.kind == "shell")
-            .unwrap_or(false)
+        match s.get_session(&args.name, &args.host_alias)? {
+            Some(r) => (r.kind, r.claude_session_id),
+            None => ("work".to_string(), None),
+        }
     };
-    // Restart respawns a bare shell — the original start command isn't
-    // persisted, and a restart is a recovery action, not a re-run.
-    let pane_cmd: String = if is_shell {
-        crate::tmux::shell_pane_command(None)
-    } else {
-        crate::tmux::pane_command().to_string()
-    };
+    let pane_cmd: String = recreate_pane_command(&kind, claude_id.as_deref());
     let tmux = exec_for(&args.host_alias, ssh);
     tmux.restart_session(&args.name, &pane_cmd).await?;
     reconcile_one_host(store, ssh, &args.host_alias).await?;
@@ -978,15 +973,16 @@ pub async fn spawn_review(
         .ok_or_else(|| IpcError::new("E_INTERNAL", "review row missing after tag"))
 }
 
-/// The pane command to relaunch when (re)creating a session of `kind`.
-/// `shell` → a bare shell (the original custom start command isn't persisted,
-/// matching `restart_session`); anything else → the Claude REPL.
-fn recreate_pane_command(kind: &str) -> String {
+/// The pane command to relaunch when (re)creating a session. `shell` → a bare
+/// shell; otherwise resume the session's own Claude id (or `--continue` for a
+/// legacy session with no stored id). A stored id is validated before use so a
+/// tampered DB value can't inject shell — an invalid id degrades to `None`.
+fn recreate_pane_command(kind: &str, claude_session_id: Option<&str>) -> String {
     if kind == "shell" {
-        crate::tmux::shell_pane_command(None)
-    } else {
-        crate::tmux::pane_command().to_string()
+        return crate::tmux::shell_pane_command(None);
     }
+    let id = claude_session_id.filter(|id| crate::validate::claude_session_id(id).is_ok());
+    crate::tmux::pane_command_for(id)
 }
 
 #[derive(Deserialize)]
@@ -1020,7 +1016,7 @@ pub async fn recreate_session(
             ));
         }
         let cwd = resolve_session_cwd(&s, &sess)?;
-        let pane_cmd = recreate_pane_command(&sess.kind);
+        let pane_cmd = recreate_pane_command(&sess.kind, sess.claude_session_id.as_deref());
         (sess, cwd, pane_cmd)
     };
 
@@ -1471,20 +1467,19 @@ mod tests {
     }
 
     #[test]
-    fn recreate_pane_command_matches_kind() {
-        // Shell sessions come back as a bare shell (start command isn't
-        // persisted); everything else (work/review) relaunches the REPL.
+    fn recreate_pane_command_matches_kind_and_id() {
+        let id = "550e8400-e29b-41d4-a716-446655440000";
         assert_eq!(
-            recreate_pane_command("shell"),
+            recreate_pane_command("shell", Some(id)),
             crate::tmux::shell_pane_command(None)
         );
         assert_eq!(
-            recreate_pane_command("work"),
-            crate::tmux::pane_command().to_string()
+            recreate_pane_command("work", Some(id)),
+            crate::tmux::pane_command_for(Some(id))
         );
         assert_eq!(
-            recreate_pane_command("review"),
-            crate::tmux::pane_command().to_string()
+            recreate_pane_command("work", None),
+            crate::tmux::pane_command_for(None)
         );
     }
 
