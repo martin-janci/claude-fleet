@@ -6,7 +6,8 @@
     type ChangedFile,
     type RepoTree,
   } from './files';
-  import { repoLog, repoCommit, repoBranches, type Commit, type CommitDetail, type Branch } from './history';
+  import { repoLog, repoCommit, repoBranches, repoCheckout, repoCheckoutCommit, repoCreateBranch, repoDeleteBranch, type Commit, type CommitDetail, type Branch } from './history';
+  import type { Result } from './result';
   import { readPref, writePref } from './prefs';
   import FileList from './FileList.svelte';
   import FileViewer from './FileViewer.svelte';
@@ -134,10 +135,35 @@
     if (r.ok) branches = r.value;
     else error = r.error.message;
   }
-  function promptCreateBranch(_hash: string | null): void {} // replaced in Task 13
-  function confirmCheckout(_name: string): void {} // replaced in Task 13
-  function confirmDeleteBranch(_name: string): void {} // replaced in Task 13
-  function confirmCheckoutCommit(_hash: string): void {} // replaced in Task 13
+  async function runAction(p: Promise<Result<unknown>>, after: () => void): Promise<void> {
+    const r = await p;
+    if (r.ok) { after(); }
+    else { error = r.error.message; }
+  }
+
+  function confirmCheckout(branch: string): void {
+    void runAction(repoCheckout(session.id, branch), () => { loadBranches(); reloadKey++; });
+  }
+
+  function confirmCheckoutCommit(hash: string): void {
+    if (!confirm(`Checkout ${hash.slice(0, 8)} as a detached HEAD? The agent's branch will change.`)) return;
+    void runAction(repoCheckoutCommit(session.id, hash), () => { onRefresh(); });
+  }
+
+  function confirmDeleteBranch(name: string): void {
+    if (!confirm(`Delete branch "${name}"?`)) return;
+    void runAction(repoDeleteBranch(session.id, name, false), () => loadBranches());
+  }
+
+  function promptCreateBranch(startPoint: string | null): void {
+    const name = prompt('New branch name:')?.trim();
+    if (!name) return;
+    const checkout = confirm('Check out the new branch now?');
+    void runAction(
+      repoCreateBranch(session.id, name, { startPoint, checkout }),
+      () => { loadBranches(); if (mode === 'history') loadHistory(); },
+    );
+  }
 
   function onMode(m: typeof mode): void {
     mode = m;
