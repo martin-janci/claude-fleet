@@ -880,6 +880,148 @@ pub async fn send_prompt(args: SendPromptArgs, ssh: &Arc<SshClient>) -> Result<(
     send_prompt_inner(ssh, &args.host_alias, &args.tmux_name, &args.prompt).await
 }
 
+// --- broadcast_prompt (fan-out to matching work sessions) ------------------
+
+/// Filter narrowing which work sessions a broadcast targets. Any field left
+/// `None` is not constrained. `status` compares against a session's
+/// `claude_status`.
+#[derive(Debug, Default, Clone)]
+pub struct BroadcastFilter {
+    pub host: Option<String>,
+    pub project_id: Option<i64>,
+    pub status: Option<String>,
+}
+
+/// PURE selector: pick the session ids a broadcast should target.
+///
+/// Rules:
+///   - only `kind == "work"` sessions are eligible;
+///   - the host/project_id/status filters are applied only when set
+///     (status compares against `claude_status`);
+///   - the controller `(host_alias, tmux_name)`, when known, is excluded so a
+///     broadcast never fans back into the session driving it.
+pub fn select_targets(
+    sessions: &[SessionRow],
+    f: &BroadcastFilter,
+    controller: Option<&(String, String)>,
+) -> Vec<i64> {
+    sessions
+        .iter()
+        .filter(|s| s.kind == "work")
+        .filter(|s| match &f.host {
+            Some(h) => &s.host_alias == h,
+            None => true,
+        })
+        .filter(|s| match f.project_id {
+            Some(pid) => s.project_id == Some(pid),
+            None => true,
+        })
+        .filter(|s| match &f.status {
+            Some(st) => s.claude_status.as_deref() == Some(st.as_str()),
+            None => true,
+        })
+        .filter(|s| match controller {
+            Some((host, tmux)) => !(&s.host_alias == host && &s.tmux_name == tmux),
+            None => true,
+        })
+        .map(|s| s.id)
+        .collect()
+}
+
+/// Per-session outcome of a broadcast.
+#[derive(serde::Serialize)]
+pub struct BroadcastResult {
+    pub session_id: i64,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Serializable summary returned by [`broadcast_prompt`].
+#[derive(serde::Serialize)]
+pub struct BroadcastSummary {
+    pub sent: u32,
+    pub failed: u32,
+    pub results: Vec<BroadcastResult>,
+}
+
+/// Fan the same `prompt` out to every work session matching `filter`,
+/// excluding the controller. Resolves targets via [`select_targets`] (reading
+/// the controller from the store), then delivers via the existing
+/// [`send_prompt`] per target, collecting one result each.
+///
+/// `submit` mirrors `send_prompt`'s submit semantics (Enter after the literal
+/// text). It is threaded through for API parity; the current delivery path
+/// always submits, so today it is accepted and ignored when `true` (the
+/// default). It is kept in the signature so a future no-submit `send_prompt`
+/// can wire straight through without a signature change.
+pub async fn broadcast_prompt(
+    filter: BroadcastFilter,
+    prompt: String,
+    _submit: bool,
+    store: &Arc<Mutex<Store>>,
+    ssh: &Arc<SshClient>,
+) -> Result<BroadcastSummary, IpcError> {
+    // Snapshot sessions + resolve the controller while holding the guard, then
+    // drop it before any `.await` (never hold the mutex across await).
+    let (sessions, controller) = {
+        let s = store.lock().expect("store mutex poisoned");
+        let sessions = s
+            .list_all_sessions()
+            .map_err(|e| IpcError::new("E_DB", format!("list sessions for broadcast: {e}")))?;
+        // The controller concept is resolved from the store when available.
+        // Until a controller is recorded, no session is excluded on that basis.
+        let controller = resolve_controller(&s);
+        (sessions, controller)
+    };
+
+    let targets = select_targets(&sessions, &filter, controller.as_ref());
+
+    // Map session id -> (host_alias, tmux_name) for delivery.
+    let mut results: Vec<BroadcastResult> = Vec::with_capacity(targets.len());
+    let mut sent: u32 = 0;
+    let mut failed: u32 = 0;
+    for sid in targets {
+        let Some(row) = sessions.iter().find(|s| s.id == sid) else {
+            continue;
+        };
+        let res = send_prompt_inner(ssh, &row.host_alias, &row.tmux_name, &prompt).await;
+        match res {
+            Ok(()) => {
+                sent += 1;
+                results.push(BroadcastResult {
+                    session_id: sid,
+                    ok: true,
+                    error: None,
+                });
+            }
+            Err(e) => {
+                failed += 1;
+                results.push(BroadcastResult {
+                    session_id: sid,
+                    ok: false,
+                    error: Some(format!("{}: {}", e.code, e.message)),
+                });
+            }
+        }
+    }
+
+    Ok(BroadcastSummary {
+        sent,
+        failed,
+        results,
+    })
+}
+
+/// Best-effort controller lookup. Wave 1 introduces a recorded controller
+/// `(host_alias, tmux_name)` in the store; this worktree's `Store` does not yet
+/// expose a `get_controller` accessor, so we degrade to "no controller known"
+/// (no exclusion). Centralized here so wiring the real accessor is a one-line
+/// change without touching `broadcast_prompt`'s body.
+fn resolve_controller(_store: &Store) -> Option<(String, String)> {
+    None
+}
+
 /// Resolve the cwd a session should (re)open in. Order: the session's worktree
 /// path (by `worktree_id`) → its project `base_path` → error. Used by both
 /// `spawn_review` and `recreate_session`.
@@ -1109,6 +1251,116 @@ pub async fn capture_session_output(
 mod tests {
     use super::*;
     use crate::store::Store;
+
+    /// Build a `SessionRow` with sensible defaults for selector tests.
+    fn row(
+        id: i64,
+        host: &str,
+        tmux: &str,
+        kind: &str,
+        project_id: Option<i64>,
+        claude_status: Option<&str>,
+    ) -> SessionRow {
+        SessionRow {
+            id,
+            tmux_name: tmux.into(),
+            host_alias: host.into(),
+            project_id,
+            worktree_id: None,
+            created_at: 0,
+            last_activity_at: 0,
+            status: "running".into(),
+            notes: None,
+            account_uuid: None,
+            kind: kind.into(),
+            reviews_session_id: None,
+            worktree_key: None,
+            lost_at: None,
+            claude_session_id: None,
+            claude_status: claude_status.map(|s| s.to_string()),
+            effort_level: None,
+            pr_url: None,
+            current_activity: None,
+        }
+    }
+
+    fn sample_sessions() -> Vec<SessionRow> {
+        vec![
+            row(1, "mac", "work-a", "work", Some(10), Some("idle")),
+            row(2, "mac", "work-b", "work", Some(10), Some("running")),
+            row(3, "mefistos", "work-c", "work", Some(20), Some("idle")),
+            // non-work session must always be excluded
+            row(4, "mac", "review-a", "review", Some(10), Some("idle")),
+        ]
+    }
+
+    #[test]
+    fn select_targets_filters_by_host() {
+        let s = sample_sessions();
+        let f = BroadcastFilter {
+            host: Some("mac".into()),
+            ..Default::default()
+        };
+        assert_eq!(select_targets(&s, &f, None), vec![1, 2]);
+    }
+
+    #[test]
+    fn select_targets_filters_by_status() {
+        let s = sample_sessions();
+        let f = BroadcastFilter {
+            status: Some("idle".into()),
+            ..Default::default()
+        };
+        // session 4 is idle but kind=review, so excluded.
+        assert_eq!(select_targets(&s, &f, None), vec![1, 3]);
+    }
+
+    #[test]
+    fn select_targets_filters_by_project() {
+        let s = sample_sessions();
+        let f = BroadcastFilter {
+            project_id: Some(20),
+            ..Default::default()
+        };
+        assert_eq!(select_targets(&s, &f, None), vec![3]);
+    }
+
+    #[test]
+    fn select_targets_filters_combined() {
+        let s = sample_sessions();
+        let f = BroadcastFilter {
+            host: Some("mac".into()),
+            project_id: Some(10),
+            status: Some("running".into()),
+        };
+        assert_eq!(select_targets(&s, &f, None), vec![2]);
+    }
+
+    #[test]
+    fn select_targets_excludes_non_work() {
+        let s = sample_sessions();
+        // No filters: every work session, never the review one (id 4).
+        let f = BroadcastFilter::default();
+        assert_eq!(select_targets(&s, &f, None), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn select_targets_excludes_controller() {
+        let s = sample_sessions();
+        let f = BroadcastFilter::default();
+        let controller = ("mac".to_string(), "work-a".to_string());
+        // session 1 is the controller and must be dropped.
+        assert_eq!(select_targets(&s, &f, Some(&controller)), vec![2, 3]);
+    }
+
+    #[test]
+    fn select_targets_controller_only_matches_on_both_host_and_tmux() {
+        let s = sample_sessions();
+        let f = BroadcastFilter::default();
+        // Same tmux name on a different host must NOT be excluded.
+        let controller = ("mefistos".to_string(), "work-a".to_string());
+        assert_eq!(select_targets(&s, &f, Some(&controller)), vec![1, 2, 3]);
+    }
 
     #[test]
     fn extracts_owner_repo_from_macos_path() {
