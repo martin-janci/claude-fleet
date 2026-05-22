@@ -31,6 +31,11 @@ impl NewBgSessionArgs {
 #[derive(Debug, Serialize)]
 pub struct NewBgSessionResult {
     pub claude_session_id: Option<String>,
+    /// Populated when `claude --bg` ran but no session id could be parsed from
+    /// its output — the session may still be live, but the fleet can't track
+    /// it by id (and thus can't `peek` it). Surfaced so the caller can warn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,7 +72,26 @@ pub async fn new_bg_session(
     args.validate()?;
     let claude_session_id =
         claude_cli::claude_bg(ssh, &args.host_alias, &args.name, &args.prompt).await?;
-    Ok(NewBgSessionResult { claude_session_id })
+    Ok(bg_session_result(claude_session_id))
+}
+
+/// Warning surfaced when `claude --bg` succeeded but its output didn't yield a
+/// parseable session id.
+pub const BG_NO_ID_WARNING: &str = "could not parse session id from claude --bg output";
+
+/// Build the `new_bg_session` result, attaching a warning when no session id
+/// was parsed. Pure so the warn-on-null decision is unit-testable without the
+/// (SSH/local) `claude --bg` exec.
+fn bg_session_result(claude_session_id: Option<String>) -> NewBgSessionResult {
+    let warning = if claude_session_id.is_none() {
+        Some(BG_NO_ID_WARNING.to_string())
+    } else {
+        None
+    };
+    NewBgSessionResult {
+        claude_session_id,
+        warning,
+    }
 }
 
 pub async fn peek_session(args: PeekSessionArgs, ssh: &Arc<SshClient>) -> Result<String, IpcError> {
@@ -120,6 +144,20 @@ mod tests {
             prompt: "Do the thing".into(),
         };
         assert!(args.validate().is_err());
+    }
+
+    #[test]
+    fn bg_session_result_warns_when_id_missing() {
+        let res = bg_session_result(None);
+        assert!(res.claude_session_id.is_none());
+        assert_eq!(res.warning.as_deref(), Some(BG_NO_ID_WARNING));
+    }
+
+    #[test]
+    fn bg_session_result_no_warning_when_id_present() {
+        let res = bg_session_result(Some("abc-123".into()));
+        assert_eq!(res.claude_session_id.as_deref(), Some("abc-123"));
+        assert!(res.warning.is_none());
     }
 
     #[test]

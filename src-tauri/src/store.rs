@@ -782,6 +782,62 @@ impl Store {
         Ok(id)
     }
 
+    /// Upsert a synthetic `kind='bg'` session for a `claude --bg` agent that has
+    /// NO matching tmux session. The sentinel `tmux_name` (`bg:<sessionId>`)
+    /// keeps it unique under the `(host_alias, tmux_name)` constraint and signals
+    /// to the UI that there is no tmux pane to attach. Refreshes the live
+    /// `claude_status` on every reconcile; the row's `kind='bg'` exempts it from
+    /// ghost cleanup (it is never in the tmux `keep` set).
+    pub fn upsert_bg_session(
+        &self,
+        host_alias: &str,
+        tmux_name: &str,
+        project_id: Option<i64>,
+        claude_session_id: &str,
+        claude_status: Option<&str>,
+        last_activity_at: i64,
+    ) -> Result<i64, rusqlite::Error> {
+        let existing_id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
+                rusqlite::params![tmux_name, host_alias],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let id: i64 = self.conn.query_row(
+            "INSERT INTO sessions (tmux_name, host_alias, project_id, worktree_id,
+                                   created_at, last_activity_at, status, kind,
+                                   claude_session_id, claude_status)
+             VALUES (?1, ?2, ?3, NULL, ?4, ?4, 'running', 'bg', ?5, ?6)
+             ON CONFLICT(host_alias, tmux_name) DO UPDATE SET
+               project_id=COALESCE(excluded.project_id, project_id),
+               last_activity_at=excluded.last_activity_at,
+               kind='bg',
+               claude_session_id=COALESCE(excluded.claude_session_id, claude_session_id),
+               claude_status=COALESCE(excluded.claude_status, claude_status)
+             RETURNING id",
+            rusqlite::params![
+                tmux_name,
+                host_alias,
+                project_id,
+                last_activity_at,
+                claude_session_id,
+                claude_status
+            ],
+            |row| row.get(0),
+        )?;
+        if let Some(row) = self.get_session(tmux_name, host_alias)? {
+            if existing_id.is_none() {
+                self.bus.session_created(&row);
+            } else {
+                self.bus.session_updated(&row);
+            }
+        }
+        Ok(id)
+    }
+
     pub fn get_session_account(
         &self,
         host_alias: &str,
@@ -1183,6 +1239,11 @@ impl Store {
     /// 'ghost'`) are soft-deleted by setting `status='ghost'` and `lost_at=now`.
     /// Phase 2: sessions that are already ghost (from a previous cycle) and still
     /// not in `keep_names` are hard-deleted.
+    ///
+    /// `kind='bg'` rows are EXCLUDED from both phases: background (`claude --bg`)
+    /// sessions are never tmux sessions, so they can never appear in
+    /// `keep_names`. Ghosting them on every reconcile would be wrong — they're
+    /// surfaced from `claude agents --json`, not from tmux.
     fn ghost_and_clean_sessions_in_tx(
         tx: &rusqlite::Transaction,
         host_alias: &str,
@@ -1193,8 +1254,9 @@ impl Store {
         // ── Phase 2 prep: collect already-ghost IDs BEFORE Phase 1 modifies rows
         // so that sessions newly ghosted in Phase 1 are not immediately deleted.
         let pre_ghost_ids: Vec<i64> = if keep_names.is_empty() {
-            let mut stmt = tx
-                .prepare_cached("SELECT id FROM sessions WHERE host_alias=?1 AND status='ghost'")?;
+            let mut stmt = tx.prepare_cached(
+                "SELECT id FROM sessions WHERE host_alias=?1 AND status='ghost' AND kind!='bg'",
+            )?;
             let ids = stmt
                 .query_map(rusqlite::params![host_alias], |r| r.get(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1203,7 +1265,7 @@ impl Store {
             let phs = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!(
                 "SELECT id FROM sessions
-                 WHERE host_alias=?1 AND status='ghost' AND tmux_name NOT IN ({phs})"
+                 WHERE host_alias=?1 AND status='ghost' AND kind!='bg' AND tmux_name NOT IN ({phs})"
             );
             let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
             for n in keep_names {
@@ -1220,7 +1282,7 @@ impl Store {
         let ghost_ids: Vec<i64> = if keep_names.is_empty() {
             let mut stmt = tx.prepare_cached(
                 "UPDATE sessions SET status='ghost', lost_at=?1
-                 WHERE host_alias=?2 AND status!='ghost'
+                 WHERE host_alias=?2 AND status!='ghost' AND kind!='bg'
                  RETURNING id",
             )?;
             let ids = stmt
@@ -1231,7 +1293,7 @@ impl Store {
             let phs = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!(
                 "UPDATE sessions SET status='ghost', lost_at=?1
-                 WHERE host_alias=?2 AND status!='ghost' AND tmux_name NOT IN ({phs})
+                 WHERE host_alias=?2 AND status!='ghost' AND kind!='bg' AND tmux_name NOT IN ({phs})
                  RETURNING id"
             );
             let mut params: Vec<&dyn rusqlite::ToSql> = vec![&now, &host_alias];
@@ -2502,6 +2564,76 @@ mod tests {
         assert!(
             evts.iter().any(|e| e.starts_with("project:updated:")),
             "expected project:updated; got: {evts:?}"
+        );
+    }
+
+    #[test]
+    fn bg_session_survives_reconcile_with_empty_tmux() {
+        // A `kind='bg'` row is never a tmux session, so it never appears in the
+        // `keep` set. Ghost cleanup must NOT reap it — even when the host's tmux
+        // list is empty and a normal (work) row gets ghosted.
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        // A bg row + a normal work row.
+        store
+            .upsert_bg_session(
+                "alpha",
+                "bg:sess-uuid-1",
+                None,
+                "sess-uuid-1",
+                Some("working"),
+                100,
+            )
+            .unwrap();
+        store
+            .upsert_session("work-a", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+
+        // Reconcile with NO live tmux sessions (empty keep).
+        store
+            .apply_host_reconcile(HostReconcile {
+                alias: "alpha",
+                reachable: true,
+                claude_version: None,
+                tmux_version: None,
+                last_pinged_at: 1,
+                sessions: &[],
+                keep: &[],
+            })
+            .expect("reconcile ok");
+
+        let rows = store.list_sessions_for_host("alpha").unwrap();
+        let bg = rows
+            .iter()
+            .find(|r| r.tmux_name == "bg:sess-uuid-1")
+            .expect("bg row must survive");
+        assert_eq!(bg.kind, "bg");
+        assert_eq!(bg.status, "running", "bg row must NOT be ghosted");
+        assert_eq!(bg.claude_session_id.as_deref(), Some("sess-uuid-1"));
+        // The plain work row, in contrast, gets ghosted.
+        let work = rows.iter().find(|r| r.tmux_name == "work-a").unwrap();
+        assert_eq!(work.status, "ghost", "work row IS ghosted when not in tmux");
+
+        // A SECOND reconcile (the bg row is now an old row) still doesn't reap
+        // it via the Phase-2 hard-delete.
+        store
+            .apply_host_reconcile(HostReconcile {
+                alias: "alpha",
+                reachable: true,
+                claude_version: None,
+                tmux_version: None,
+                last_pinged_at: 2,
+                sessions: &[],
+                keep: &[],
+            })
+            .expect("reconcile ok");
+        assert!(
+            store
+                .list_sessions_for_host("alpha")
+                .unwrap()
+                .iter()
+                .any(|r| r.tmux_name == "bg:sess-uuid-1"),
+            "bg row must survive repeated reconciles"
         );
     }
 

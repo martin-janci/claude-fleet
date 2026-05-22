@@ -16,7 +16,14 @@ const CLAUDE_TIMEOUT: Duration = Duration::from_secs(30);
 const CLAUDE_BG_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Extract the Claude session ID from `claude --bg` stdout.
-/// The CLI prints a line like `Session ID: <id>` or `session: <id>`.
+///
+/// Tries, in order:
+///   1. A line beginning with `session id:` / `session:` (case-insensitive) —
+///      take the first whitespace-delimited token after the prefix.
+///   2. As a last resort, scan the WHOLE output for a bare UUID
+///      (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`). This rescues boxed/banner
+///      output where the id is printed inside a drawn frame with no `session:`
+///      prefix on its own line.
 pub fn parse_session_id_from_bg_output(output: &str) -> Option<String> {
     for line in output.lines() {
         let lower = line.to_lowercase();
@@ -27,12 +34,20 @@ pub fn parse_session_id_from_bg_output(output: &str) -> Option<String> {
         } else {
             continue;
         };
-        let token = line[prefix_len..].split_whitespace().next()?;
-        if !token.is_empty() {
-            return Some(token.to_string());
+        if let Some(token) = line[prefix_len..].split_whitespace().next() {
+            if !token.is_empty() {
+                return Some(token.to_string());
+            }
         }
     }
-    None
+    // Last resort: a bare UUID anywhere in the output.
+    static UUID_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+        )
+        .expect("static regex")
+    });
+    UUID_RE.find(output).map(|m| m.as_str().to_string())
 }
 
 /// Launch `claude --bg --name <name> <prompt>` on `host_alias`.
@@ -183,6 +198,29 @@ mod tests {
         let output = "session: xyz-789\n";
         let id = parse_session_id_from_bg_output(output);
         assert_eq!(id, Some("xyz-789".to_string()));
+    }
+
+    #[test]
+    fn parse_bg_output_extracts_bare_uuid_from_banner() {
+        // Boxed/banner output with NO `session:` prefix — only a bare UUID
+        // drawn inside a frame. The last-resort scan must still find it.
+        let output = "\
+╭──────────────────────────────────────────────╮
+│  Background session started                    │
+│  7e3f6059-3604-482c-a8a1-265d12fe5533          │
+╰──────────────────────────────────────────────╯
+";
+        let id = parse_session_id_from_bg_output(output);
+        assert_eq!(id, Some("7e3f6059-3604-482c-a8a1-265d12fe5533".to_string()));
+    }
+
+    #[test]
+    fn parse_bg_output_prefix_wins_over_bare_uuid() {
+        // When BOTH a prefixed line and a stray UUID are present, the explicit
+        // `Session ID:` prefix takes precedence over the last-resort scan.
+        let output = "noise 11111111-2222-3333-4444-555555555555\nSession ID: the-real-id\n";
+        let id = parse_session_id_from_bg_output(output);
+        assert_eq!(id, Some("the-real-id".to_string()));
     }
 
     #[test]
