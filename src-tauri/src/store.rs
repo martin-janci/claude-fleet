@@ -1089,6 +1089,106 @@ impl Store {
         Ok(ids_to_delete.len())
     }
 
+    /// Phase 1: sessions not in `keep_names` that are currently live (`status !=
+    /// 'ghost'`) are soft-deleted by setting `status='ghost'` and `lost_at=now`.
+    /// Phase 2: sessions that are already ghost (from a previous cycle) and still
+    /// not in `keep_names` are hard-deleted.
+    fn ghost_and_clean_sessions_in_tx(
+        tx: &rusqlite::Transaction,
+        host_alias: &str,
+        keep_names: &[String],
+        now: i64,
+        out: &mut Vec<RowChange>,
+    ) -> Result<(), rusqlite::Error> {
+        // ── Phase 2 prep: collect already-ghost IDs BEFORE Phase 1 modifies rows
+        // so that sessions newly ghosted in Phase 1 are not immediately deleted.
+        let pre_ghost_ids: Vec<i64> = if keep_names.is_empty() {
+            let mut stmt = tx.prepare_cached(
+                "SELECT id FROM sessions WHERE host_alias=?1 AND status='ghost'",
+            )?;
+            let ids = stmt
+                .query_map(rusqlite::params![host_alias], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ids
+        } else {
+            let phs = keep_names
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT id FROM sessions
+                 WHERE host_alias=?1 AND status='ghost' AND tmux_name NOT IN ({phs})"
+            );
+            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
+            for n in keep_names {
+                params.push(n);
+            }
+            let mut stmt = tx.prepare(&sql)?;
+            let ids = stmt
+                .query_map(params.as_slice(), |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ids
+        };
+
+        // ── Phase 1: ghost live sessions not in keep ──────────────────────────
+        let ghost_ids: Vec<i64> = if keep_names.is_empty() {
+            let mut stmt = tx.prepare_cached(
+                "UPDATE sessions SET status='ghost', lost_at=?1
+                 WHERE host_alias=?2 AND status!='ghost'
+                 RETURNING id",
+            )?;
+            let ids = stmt
+                .query_map(rusqlite::params![now, host_alias], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ids
+        } else {
+            let phs = keep_names
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "UPDATE sessions SET status='ghost', lost_at=?1
+                 WHERE host_alias=?2 AND status!='ghost' AND tmux_name NOT IN ({phs})
+                 RETURNING id"
+            );
+            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&now, &host_alias];
+            for n in keep_names {
+                params.push(n);
+            }
+            let mut stmt = tx.prepare(&sql)?;
+            let ids = stmt
+                .query_map(params.as_slice(), |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ids
+        };
+
+        for id in &ghost_ids {
+            if let Some(row) = fetch_session_by_id(tx, *id)? {
+                out.push(RowChange::SessionUpdated(row));
+            }
+        }
+
+        // ── Phase 2: hard-delete sessions that were already ghost before this cycle
+        if !pre_ghost_ids.is_empty() {
+            let phs = pre_ghost_ids
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!("DELETE FROM sessions WHERE id IN ({phs})");
+            let params: Vec<&dyn rusqlite::ToSql> =
+                pre_ghost_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+            tx.execute(&sql, params.as_slice())?;
+            for id in &pre_ghost_ids {
+                out.push(RowChange::SessionKilled(*id));
+            }
+        }
+
+        Ok(())
+    }
+
     /// One probed/live session to apply during a reconcile write-burst, with
     /// its `(project_id, account_uuid)` ALREADY resolved by the caller (those
     /// are reads — `find_project_id_for_path` / `get_session_account` — and
@@ -1136,7 +1236,11 @@ impl Store {
                 for (pid, ts) in project_touch {
                     Self::touch_project_last_session_at_in_tx(tx, pid, ts, &mut out)?;
                 }
-                Self::delete_sessions_not_in_in_tx(tx, spec.alias, spec.keep, &mut out)?;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                Self::ghost_and_clean_sessions_in_tx(tx, spec.alias, spec.keep, now, &mut out)?;
             }
             Ok(out)
         })?;
@@ -2141,18 +2245,23 @@ mod tests {
             })
             .expect("reconcile ok");
 
-        // (a) rows persisted: stale gone, two live, host probe updated.
-        let names: Vec<String> = store
+        // (a) rows persisted: stale ghosted, two live, host probe updated.
+        let live: Vec<String> = store
             .list_sessions_for_host("alpha")
             .unwrap()
             .into_iter()
+            .filter(|r| r.status != "ghost")
             .map(|r| r.tmux_name)
             .collect();
-        assert_eq!(
-            names,
-            vec!["fresh", "keep-existing"],
-            "stale pruned, two live"
-        );
+        assert_eq!(live, vec!["fresh", "keep-existing"], "two live sessions");
+        let ghosts: Vec<String> = store
+            .list_sessions_for_host("alpha")
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.status == "ghost")
+            .map(|r| r.tmux_name)
+            .collect();
+        assert_eq!(ghosts, vec!["stale"], "stale is now ghost");
         let host = store
             .list_hosts()
             .unwrap()
@@ -2179,8 +2288,8 @@ mod tests {
             "expected a create for fresh; got: {evts:?}"
         );
         assert!(
-            evts.contains(&format!("session:killed:{stale_id}")),
-            "got: {evts:?}"
+            evts.contains(&format!("session:updated:{stale_id}")),
+            "stale becomes ghost (session:updated); got: {evts:?}"
         );
         assert!(
             evts.iter().any(|e| e.starts_with("project:updated:")),
@@ -2261,6 +2370,67 @@ mod tests {
         assert!(
             bus.take().is_empty(),
             "no event may fire for a rolled-back batch"
+        );
+    }
+
+    #[test]
+    fn reconcile_ghosts_sessions_on_first_empty_probe_then_deletes_on_second() {
+        let (mut store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        store
+            .upsert_session("s1", "alpha", None, None, 1, 10, "running", None)
+            .unwrap();
+        let s1_id = store.get_session("s1", "alpha").unwrap().unwrap().id;
+        bus.take(); // drain setup events
+
+        // First reachable probe with no sessions — s1 should become ghost
+        store
+            .apply_host_reconcile(HostReconcile {
+                alias: "alpha",
+                reachable: true,
+                claude_version: None,
+                tmux_version: None,
+                last_pinged_at: 100,
+                sessions: &[],
+                keep: &[],
+            })
+            .unwrap();
+
+        let s1 = store.get_session_by_id(s1_id).unwrap().unwrap();
+        assert_eq!(s1.status, "ghost", "first empty probe should ghost s1");
+        assert!(s1.lost_at.is_some(), "lost_at must be set");
+
+        let evts = bus.take();
+        assert!(
+            evts.iter().any(|e| e.starts_with("session:updated:")),
+            "ghost transition should emit session:updated; got: {evts:?}"
+        );
+        assert!(
+            !evts.iter().any(|e| e.starts_with("session:killed:")),
+            "no kill event on first cycle; got: {evts:?}"
+        );
+
+        // Second reachable probe with no sessions — ghost s1 should be deleted
+        store
+            .apply_host_reconcile(HostReconcile {
+                alias: "alpha",
+                reachable: true,
+                claude_version: None,
+                tmux_version: None,
+                last_pinged_at: 200,
+                sessions: &[],
+                keep: &[],
+            })
+            .unwrap();
+
+        assert!(
+            store.get_session_by_id(s1_id).unwrap().is_none(),
+            "second empty probe should hard-delete the ghost"
+        );
+        let evts2 = bus.take();
+        assert!(
+            evts2.contains(&format!("session:killed:{s1_id}")),
+            "second cycle must emit session:killed; got: {evts2:?}"
         );
     }
 }
