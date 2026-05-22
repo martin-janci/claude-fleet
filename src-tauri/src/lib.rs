@@ -83,11 +83,7 @@ fn kill_other_instances() {
     };
 
     let mut sys = System::new();
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::nothing(),
-    );
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
 
     // Collect (pid, exe file name) for every process sysinfo can see.
     let procs: Vec<(u32, String)> = sys
@@ -103,8 +99,10 @@ fn kill_other_instances() {
         })
         .collect();
 
-    let proc_refs: Vec<(u32, &str)> =
-        procs.iter().map(|(pid, name)| (*pid, name.as_str())).collect();
+    let proc_refs: Vec<(u32, &str)> = procs
+        .iter()
+        .map(|(pid, name)| (*pid, name.as_str()))
+        .collect();
     let targets = instances_to_kill(&proc_refs, my_pid, &my_name);
     if targets.is_empty() {
         return;
@@ -566,11 +564,7 @@ mod path_backfill_tests {
 
     #[test]
     fn instances_to_kill_ignores_other_names() {
-        let procs = [
-            (100u32, "claude-fleet"),
-            (200u32, "node"),
-            (300u32, "tmux"),
-        ];
+        let procs = [(100u32, "claude-fleet"), (200u32, "node"), (300u32, "tmux")];
         assert!(instances_to_kill(&procs, 100, "claude-fleet").is_empty());
     }
 

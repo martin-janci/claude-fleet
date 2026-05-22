@@ -393,10 +393,18 @@ mod tests {
     fn has_tmux_clipboard_detects_setting() {
         assert!(!super::has_tmux_clipboard_setting(""));
         assert!(!super::has_tmux_clipboard_setting("set -g mouse on\n"));
-        assert!(super::has_tmux_clipboard_setting("set -g set-clipboard on\n"));
-        assert!(super::has_tmux_clipboard_setting("set-option -g set-clipboard on\n"));
-        assert!(super::has_tmux_clipboard_setting("  set -g set-clipboard external\n"));
+        assert!(super::has_tmux_clipboard_setting(
+            "set -g set-clipboard on\n"
+        ));
+        assert!(super::has_tmux_clipboard_setting(
+            "set-option -g set-clipboard on\n"
+        ));
+        assert!(super::has_tmux_clipboard_setting(
+            "  set -g set-clipboard external\n"
+        ));
         // Comments don't count
-        assert!(!super::has_tmux_clipboard_setting("# set -g set-clipboard on\n"));
+        assert!(!super::has_tmux_clipboard_setting(
+            "# set -g set-clipboard on\n"
+        ));
     }
 }
