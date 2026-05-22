@@ -143,17 +143,17 @@
   }
 
   function confirmCheckout(branch: string): void {
-    void runAction(repoCheckout(session.id, branch), () => { loadBranches(); reloadKey++; });
+    void runAction(repoCheckout(session.id, branch), () => { loadBranches(); historyLoaded = false; reloadKey++; });
   }
 
   function confirmCheckoutCommit(hash: string): void {
     if (!confirm(`Checkout ${hash.slice(0, 8)} as a detached HEAD? The agent's branch will change.`)) return;
-    void runAction(repoCheckoutCommit(session.id, hash), () => { onRefresh(); });
+    void runAction(repoCheckoutCommit(session.id, hash), () => { historyLoaded = false; onRefresh(); });
   }
 
   function confirmDeleteBranch(name: string): void {
     if (!confirm(`Delete branch "${name}"?`)) return;
-    void runAction(repoDeleteBranch(session.id, name, false), () => loadBranches());
+    void runAction(repoDeleteBranch(session.id, name, false), () => { loadBranches(); historyLoaded = false; });
   }
 
   function promptCreateBranch(startPoint: string | null): void {
@@ -162,7 +162,7 @@
     const checkout = confirm('Check out the new branch now?');
     void runAction(
       repoCreateBranch(session.id, name, { startPoint, checkout }),
-      () => { loadBranches(); if (mode === 'history') loadHistory(); },
+      () => { loadBranches(); if (mode === 'history') loadHistory(); else historyLoaded = false; },
     );
   }
 
@@ -172,7 +172,7 @@
   }
 
   function commitStaged(message: string): void {
-    void runAction(repoCommitCreate(session.id, message), () => { loadChanges(); reloadKey++; });
+    void runAction(repoCommitCreate(session.id, message), () => { loadChanges(); historyLoaded = false; reloadKey++; });
   }
 
   function onMode(m: typeof mode): void {
@@ -234,7 +234,7 @@
             onCheckoutCommit={(h) => confirmCheckoutCommit(h)}
           />
           {#if commits.length > 0}
-            <button class="more" onclick={() => loadHistory(false)}>Load more</button>
+            <button class="more" disabled={loading} onclick={() => loadHistory(false)}>Load more</button>
           {/if}
         {/if}
       </div>
