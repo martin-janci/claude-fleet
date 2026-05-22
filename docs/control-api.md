@@ -94,8 +94,49 @@ tools.
 | `repo_commit` | One commit's metadata + changed files. |
 | `repo_commit_diff` | Diff of one file within a commit. |
 
+**Host provisioning**
+
+| Tool | What it does |
+|---|---|
+| `provision_hosts` | Install the fleet-control skill + MCP server entry on every reachable host and start reverse SSH tunnels for remote hosts. |
+
 A typical loop: `list_sessions` to see state → `new_session` to spawn one →
 `send_prompt` to steer it.
+
+## Provisioning hosts
+
+`provision_hosts` (also reachable via Settings → Control API → **Provision hosts**) makes a Claude on every managed host able to drive the fleet. For each non-hidden, reachable host it performs three steps:
+
+1. **Skill** — writes `~/.claude/skills/claude-fleet-control/SKILL.md` on that host. Claude picks up skills from this directory live, without a restart.
+2. **`~/.claude.json` entry** — reads the host's `~/.claude.json`, merges an `mcpServers.claude-fleet` entry (preserving all sibling keys), backs the original up to `~/.claude.json.fleet-bak`, then writes the updated file. The entry added is:
+   ```json
+   {
+     "type": "http",
+     "url": "http://127.0.0.1:<port>/mcp",
+     "headers": { "Authorization": "Bearer <token>" }
+   }
+   ```
+3. **Reverse SSH tunnel** (remote hosts only) — starts an `ssh -R` tunnel so the remote host's `127.0.0.1:<port>` is forwarded to the central machine's MCP server. The server stays bound to `127.0.0.1` on the central machine; remote hosts reach it only through this authenticated tunnel.
+
+**After provisioning, each host must restart Claude** to load the MCP server (the skill file is picked up live, but the MCP server entry requires a restart).
+
+### Per-host results
+
+Each call returns a status for every non-hidden host:
+
+| Status | Meaning |
+|---|---|
+| `provisioned` | All three steps succeeded; tunnel established (remote hosts). |
+| `skipped` | Host was unreachable at the time of the call; no changes made. |
+| `failed` | One of the steps returned an error (see `detail`). |
+
+Per-host failures do not abort provisioning of other hosts.
+
+### Notes
+
+- If `~/.claude.json` is missing or empty the file is created from scratch; if it exists and is not valid JSON provisioning fails for that host (before any write).
+- Re-running `provision_hosts` is safe: the skill is overwritten in place and the `claude-fleet` entry is replaced while all other `mcpServers` keys are preserved.
+- Disabling the control API tears down all reverse tunnels. Re-enabling it re-establishes them automatically for already-provisioned remote hosts.
 
 ## Security
 
