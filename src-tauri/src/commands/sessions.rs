@@ -8,6 +8,7 @@ use crate::service::sessions::{
     self, DismissGhostSessionArgs, KillSessionArgs, NewSessionArgs, RecreateSessionArgs,
     RelatedSessionsArgs, RenameSessionArgs, RestartSessionArgs, SendPromptArgs, SpawnReviewArgs,
 };
+use crate::service::bg_sessions::{self, NewBgSessionArgs, PeekSessionArgs, PurgeProjectArgs};
 use crate::ssh::SshClient;
 use crate::store::{SessionRow, Store};
 use std::sync::{Arc, Mutex};
@@ -98,4 +99,32 @@ pub fn dismiss_ghost_session(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<(), IpcError> {
     sessions::dismiss_ghost_session(args, &store)
+}
+
+/// Launch a Claude background session on the given host.
+#[tauri::command]
+pub async fn new_bg_session(
+    args: NewBgSessionArgs,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<bg_sessions::NewBgSessionResult, IpcError> {
+    bg_sessions::new_bg_session(args, &ssh).await
+}
+
+/// Fetch recent log output from a background Claude session without opening a PTY.
+#[tauri::command]
+pub async fn peek_session(
+    args: PeekSessionArgs,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<String, IpcError> {
+    bg_sessions::peek_session(args, &ssh).await
+}
+
+/// Delete all Claude Code state for a project and remove it from the fleet database.
+#[tauri::command]
+pub async fn purge_project(
+    args: PurgeProjectArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<(), IpcError> {
+    bg_sessions::purge_project(args, &store, &ssh).await
 }
