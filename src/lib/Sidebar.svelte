@@ -401,6 +401,7 @@
       case 'blocked': return '#f0b429';   // yellow — needs input
       case 'completed': return '#6c8ebf'; // blue — done
       case 'failed': return '#e64a4a';    // red
+      case 'stopped': return '#888';      // grey — stopped by hook or user
       case 'idle': return '#888';         // grey
       default: return 'transparent';
     }
@@ -412,6 +413,7 @@
       case 'blocked': return '⏸ blocked';
       case 'completed': return '✓ done';
       case 'failed': return '✗ failed';
+      case 'stopped': return '■ stopped';
       case 'idle': return '· idle';
       default: return '';
     }
