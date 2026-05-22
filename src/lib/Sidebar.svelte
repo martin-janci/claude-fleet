@@ -73,6 +73,7 @@
   // first call's await).
   let committingRename = false;
   let pendingKill: SessionRow | null = $state(null);
+  let pendingRecreate: SessionRow | null = $state(null);
   // Projects intentionally collapsed by the user. Anything not in this set
   // is open by default — most users have one or two projects and want to
   // see their sessions immediately.
@@ -362,6 +363,36 @@
     pendingKill = null;
   }
 
+  function askRecreate(sess: SessionRow, e?: Event) {
+    e?.stopPropagation();
+    pendingRecreate = sess;
+    actionError = null;
+  }
+
+  function cancelRecreate() {
+    pendingRecreate = null;
+  }
+
+  async function confirmRecreate() {
+    if (!pendingRecreate) return;
+    const sess = pendingRecreate;
+    pendingRecreate = null;
+    const r = await recreateSession(sess.id);
+    if (!r.ok) {
+      actionError = r.error.message;
+      return;
+    }
+    // kill-session severed the PTY; the tmux_name is unchanged so TerminalView
+    // won't auto-reopen. Force a re-attach when this session is selected by
+    // dropping and (after the close effect runs) restoring the selection.
+    const cur = $selectedSession;
+    if (cur && cur.tmux_name === sess.tmux_name) {
+      selectSession(null);
+      await tick();
+      selectSession(r.value);
+    }
+  }
+
   async function doRecreate(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
     actionError = null;
@@ -469,6 +500,16 @@
           <div class="row-actions">
             <button class="icon-btn small" onclick={(e) => doRestart(sess, e)} title="Restart claude in this session" aria-label="Restart">↻</button>
             <button class="icon-btn small" onclick={(e) => beginRename(sess, e)} title="Rename session" aria-label="Rename">✎</button>
+            <button
+              class="icon-btn small"
+              data-testid="recreate-live"
+              onclick={(e) => askRecreate(sess, e)}
+              disabled={!hostIsReachable(sess.host_alias)}
+              title={hostIsReachable(sess.host_alias)
+                ? 'Recreate: kill the tmux session and start it fresh in the same worktree'
+                : 'Host is offline'}
+              aria-label="Recreate"
+            >♻</button>
             <button class="icon-btn small danger" onclick={(e) => askKill(sess, e)} title="Kill session" aria-label="Kill">×</button>
           </div>
         {/if}
@@ -644,6 +685,7 @@
   if (e.key !== 'Escape') return;
   if (dialogProject) onCancel();
   else if (pendingKill) cancelKill();
+  else if (pendingRecreate) cancelRecreate();
   else if (showProjectPicker) showProjectPicker = false;
 }} />
 
@@ -663,6 +705,23 @@
       <div class="actions">
         <button onclick={cancelKill}>Cancel</button>
         <button class="danger" onclick={confirmKill} data-testid="confirm-kill">Kill</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if pendingRecreate}
+  <div class="modal-backdrop" onclick={cancelRecreate} role="presentation">
+    <div class="confirm" onclick={(e) => e.stopPropagation()} role="presentation">
+      <h3>Recreate session?</h3>
+      <p>
+        This kills the tmux session <code>{pendingRecreate.tmux_name}</code> and the
+        running claude state inside it, then starts a fresh session in the same
+        worktree. Continue?
+      </p>
+      <div class="actions">
+        <button onclick={cancelRecreate}>Cancel</button>
+        <button class="danger" onclick={confirmRecreate} data-testid="confirm-recreate">Recreate</button>
       </div>
     </div>
   </div>
