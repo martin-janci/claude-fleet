@@ -26,6 +26,7 @@ const sampleSession = {
   kind: 'work',
   reviews_session_id: null,
   worktree_key: null,
+  lost_at: null,
 };
 
 beforeEach(() => {
