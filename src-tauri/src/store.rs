@@ -78,6 +78,16 @@ pub struct AccountRow {
     pub last_seen_at: Option<i64>,
 }
 
+/// One row of the append-only per-session event timeline (migration 013).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionEvent {
+    pub id: i64,
+    pub session_id: i64,
+    pub at: i64,
+    pub kind: String,
+    pub detail: Option<String>,
+}
+
 /// One live session to upsert during a reconcile write-burst. `project_id`,
 /// `account_uuid`, and `worktree_key` are PRE-RESOLVED by the caller (they
 /// require reads — `find_project_id_for_path` / `get_session_account` /
@@ -225,6 +235,11 @@ impl Store {
             ))?;
             tx.commit()?;
         }
+        if v < 13 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../migrations/013_session_events.sql"))?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -243,6 +258,63 @@ impl Store {
             .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
                 row.get(0)
             })
+    }
+
+    /// Append one row to the per-session event timeline (migration 013). The
+    /// timeline is append-only; callers must treat a write failure as
+    /// non-fatal (log + continue) so it can never block the mutation that
+    /// produced the event.
+    pub fn insert_session_event(
+        &self,
+        session_id: i64,
+        kind: &str,
+        detail: Option<&str>,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.conn
+            .execute(
+                "INSERT INTO session_events (session_id, at, kind, detail) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![session_id, at, kind, detail],
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        Ok(())
+    }
+
+    /// Return the newest-first event timeline for a session, capped at `limit`.
+    /// Ordering is `at DESC, id DESC` so events inserted within the same second
+    /// still come back in insertion order (newest first).
+    pub fn list_session_events(
+        &self,
+        session_id: i64,
+        limit: i64,
+    ) -> Result<Vec<SessionEvent>, crate::ipc_error::IpcError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, session_id, at, kind, detail FROM session_events \
+                 WHERE session_id = ?1 ORDER BY at DESC, id DESC LIMIT ?2",
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        let rows = stmt
+            .query_map(rusqlite::params![session_id, limit], |row| {
+                Ok(SessionEvent {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    at: row.get(2)?,
+                    kind: row.get(3)?,
+                    detail: row.get(4)?,
+                })
+            })
+            .map_err(crate::ipc_error::IpcError::from)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(crate::ipc_error::IpcError::from)?);
+        }
+        Ok(out)
     }
 
     /// Read a value from the key/value `settings` table. `None` if absent.
@@ -1705,6 +1777,7 @@ mod tests {
         "handoffs",
         "settings",
         "schema_version",
+        "session_events",
     ];
 
     #[test]
@@ -1719,7 +1792,41 @@ mod tests {
     fn migrate_is_idempotent() {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
-        assert_eq!(store.schema_version().expect("version"), 12);
+        assert_eq!(store.schema_version().expect("version"), 13);
+    }
+
+    #[test]
+    fn session_events_insert_then_list_newest_first_with_limit() {
+        let s = Store::open_in_memory().expect("open");
+        // Insert several events for session 7 (and a decoy for another session).
+        s.insert_session_event(7, "status_change", Some("working"))
+            .unwrap();
+        s.insert_session_event(7, "prompt_sent", Some("hello"))
+            .unwrap();
+        s.insert_session_event(7, "stuck", Some("auth_menu"))
+            .unwrap();
+        s.insert_session_event(99, "killed", None).unwrap();
+
+        // Newest-first (at DESC, id DESC): same-second inserts come back in
+        // reverse insertion order.
+        let all = s.list_session_events(7, 50).unwrap();
+        assert_eq!(all.len(), 3, "decoy session 99 must be excluded");
+        assert_eq!(all[0].kind, "stuck");
+        assert_eq!(all[0].detail.as_deref(), Some("auth_menu"));
+        assert_eq!(all[1].kind, "prompt_sent");
+        assert_eq!(all[2].kind, "status_change");
+        assert_eq!(all[2].session_id, 7);
+
+        // Limit caps the result to the newest N.
+        let limited = s.list_session_events(7, 2).unwrap();
+        assert_eq!(limited.len(), 2);
+        assert_eq!(limited[0].kind, "stuck");
+        assert_eq!(limited[1].kind, "prompt_sent");
+
+        // NULL detail round-trips.
+        let other = s.list_session_events(99, 50).unwrap();
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].detail, None);
     }
 
     #[test]
@@ -1870,7 +1977,7 @@ mod tests {
     #[test]
     fn schema_version_is_seven_after_migration() {
         let s = Store::open_in_memory().expect("open");
-        assert_eq!(s.schema_version().expect("version"), 12);
+        assert_eq!(s.schema_version().expect("version"), 13);
     }
 
     #[test]
@@ -2487,7 +2594,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 12, "schema_version should be 12 after migration");
+        assert_eq!(v, 13, "schema_version should be 13 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store
