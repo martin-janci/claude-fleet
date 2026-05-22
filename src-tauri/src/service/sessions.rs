@@ -84,6 +84,12 @@ fn reconcile_write_one_host(
                 sessions: &sessions,
                 keep: &keep,
             })?;
+            // SECOND pass: background (`claude --bg`) agents that matched NO tmux
+            // session are never in `keep` and would otherwise be invisible.
+            // Surface each as a synthetic `kind='bg'` SessionRow so it appears in
+            // `list_sessions`. These rows are exempt from ghost cleanup (they're
+            // never tmux sessions) — see `ghost_and_clean_sessions_in_tx`.
+            reconcile_bg_agents(s, &host.alias, live, projects, agent_rows)?;
         }
         Err(_e) => {
             // Mark host unreachable; surface last-known sessions so the UI
@@ -97,6 +103,67 @@ fn reconcile_write_one_host(
                 sessions: &[],
                 keep: &[],
             })?;
+        }
+    }
+    Ok(())
+}
+
+/// Select the `claude --bg` agents that did NOT correlate to any live tmux
+/// session — i.e. real background sessions that have no pane. An agent counts
+/// as "matched" if `find_for_session` would resolve some tmux session to it
+/// (by name or unique cwd). Agents without a `session_id` are skipped (we can't
+/// build a stable sentinel / track them). Pure so it's unit-testable.
+fn unmatched_bg_agents<'a>(
+    live: &[crate::tmux::TmuxSession],
+    agents: &'a [crate::claude_agents::ClaudeAgentRow],
+) -> Vec<&'a crate::claude_agents::ClaudeAgentRow> {
+    // Collect the set of agent session_ids that a tmux session resolved to.
+    let mut matched: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for sess in live {
+        if let Some(agent) =
+            crate::claude_agents::find_for_session(agents, &sess.name, &sess.path.to_string_lossy())
+        {
+            if let Some(id) = agent.session_id.as_deref() {
+                matched.insert(id.to_string());
+            }
+        }
+    }
+    agents
+        .iter()
+        .filter(|a| match a.session_id.as_deref() {
+            Some(id) => !matched.contains(id),
+            None => false,
+        })
+        .collect()
+}
+
+/// Upsert a synthetic `kind='bg'` SessionRow for every background agent that has
+/// no tmux session (the reconcile "second pass"). Per-agent write failures are
+/// logged and skipped so one bad row can't abort the others.
+fn reconcile_bg_agents(
+    s: &Store,
+    host_alias: &str,
+    live: &[crate::tmux::TmuxSession],
+    projects: &[ProjectRow],
+    agents: &[crate::claude_agents::ClaudeAgentRow],
+) -> Result<(), IpcError> {
+    for agent in unmatched_bg_agents(live, agents) {
+        let Some(session_id) = agent.session_id.as_deref() else {
+            continue;
+        };
+        let tmux_name = format!("bg:{session_id}");
+        let project_id = agent.cwd.as_deref().and_then(|cwd| {
+            find_project_id_for_path(projects, host_alias, std::path::Path::new(cwd))
+        });
+        if let Err(e) = s.upsert_bg_session(
+            host_alias,
+            &tmux_name,
+            project_id,
+            session_id,
+            agent.status.as_deref(),
+            now_unix(),
+        ) {
+            eprintln!("[reconcile] bg upsert failed for {host_alias}/{session_id}: {e}");
         }
     }
     Ok(())
@@ -1163,6 +1230,77 @@ mod tests {
     fn returns_none_when_not_github_com_layout() {
         assert_eq!(extract_owner_repo("/tmp/random/repo"), None);
         assert_eq!(extract_owner_repo("/home/x/projects/gitlab.com/a/b"), None);
+    }
+
+    fn agent(
+        session_id: &str,
+        name: Option<&str>,
+        cwd: Option<&str>,
+    ) -> crate::claude_agents::ClaudeAgentRow {
+        crate::claude_agents::ClaudeAgentRow {
+            session_id: Some(session_id.into()),
+            name: name.map(Into::into),
+            status: Some("working".into()),
+            cwd: cwd.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn unmatched_bg_agents_selects_agents_with_no_tmux_session() {
+        // No tmux sessions at all → every agent (with an id) is unmatched.
+        let agents = vec![
+            agent("bg-1", Some("bg-job-1"), Some("/a")),
+            agent("bg-2", None, Some("/b")),
+        ];
+        let unmatched = unmatched_bg_agents(&[], &agents);
+        assert_eq!(unmatched.len(), 2);
+
+        // A tmux session whose name matches an agent → that agent is matched
+        // (excluded), the other remains unmatched.
+        let live = vec![crate::tmux::TmuxSession {
+            name: "bg-job-1".into(),
+            created: 1,
+            last_activity: 1,
+            attached: false,
+            path: std::path::PathBuf::from("/a"),
+        }];
+        let unmatched = unmatched_bg_agents(&live, &agents);
+        let ids: Vec<&str> = unmatched
+            .iter()
+            .map(|a| a.session_id.as_deref().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["bg-2"], "only the unmatched agent remains");
+    }
+
+    #[test]
+    fn unmatched_bg_agents_skips_agents_without_session_id() {
+        let agents = vec![crate::claude_agents::ClaudeAgentRow {
+            session_id: None,
+            name: Some("ghosty".into()),
+            status: None,
+            cwd: None,
+        }];
+        assert!(unmatched_bg_agents(&[], &agents).is_empty());
+    }
+
+    #[test]
+    fn reconcile_bg_agents_upserts_bg_session_row() {
+        // Feed agent rows + an EMPTY tmux list → expect a `bg` SessionRow.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let agents = vec![agent("bg-uuid-1", Some("my-bg-job"), Some("/tmp/proj"))];
+
+        reconcile_bg_agents(&s, "local", &[], &[], &agents).unwrap();
+
+        let rows = s.list_sessions_for_host("local").unwrap();
+        let bg = rows
+            .iter()
+            .find(|r| r.tmux_name == "bg:bg-uuid-1")
+            .expect("a bg SessionRow must be present");
+        assert_eq!(bg.kind, "bg");
+        assert_eq!(bg.claude_session_id.as_deref(), Some("bg-uuid-1"));
+        assert_eq!(bg.claude_status.as_deref(), Some("working"));
+        assert_eq!(bg.status, "running");
     }
 
     #[test]
