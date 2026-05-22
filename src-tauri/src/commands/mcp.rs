@@ -212,6 +212,15 @@ pub fn build_hook_config(url: &str) -> String {
     serde_json::to_string_pretty(&v).unwrap()
 }
 
+/// Build the fail-silent hook curl. A down/refused server must produce no
+/// stdout/stderr (no pane noise) and exit 0 so Claude doesn't surface it.
+fn hook_curl_command(port: u16, token: &str) -> String {
+    format!(
+        "curl --connect-timeout 1 --max-time 2 -s -o /dev/null \
+         'http://127.0.0.1:{port}/hook?token={token}' 2>/dev/null || true"
+    )
+}
+
 /// Install (or update) the fleet hook in the local `~/.claude/settings.json`.
 ///
 /// Reads the current port+token from the store, constructs the hook URL,
@@ -262,6 +271,7 @@ pub fn install_fleet_hook(
     }
 
     let hook_url = format!("http://127.0.0.1:{port}/hook?token={token}");
+    let hook_command = hook_curl_command(port, &token);
 
     let settings_path = dirs::home_dir()
         .ok_or_else(|| IpcError::new("E_HOME", "cannot determine home directory"))?
@@ -294,9 +304,15 @@ pub fn install_fleet_hook(
                     let hooks_arr = block.get("hooks").and_then(|h| h.as_array());
                     hooks_arr.is_none_or(|hs| {
                         !hs.iter().any(|h| {
-                            h.get("url")
+                            let url_match = h
+                                .get("url")
                                 .and_then(|u| u.as_str())
-                                .is_some_and(|u| u.starts_with(&fleet_prefix))
+                                .is_some_and(|u| u.starts_with(&fleet_prefix));
+                            let cmd_match = h
+                                .get("command")
+                                .and_then(|c| c.as_str())
+                                .is_some_and(|c| c.contains(&fleet_prefix));
+                            url_match || cmd_match
                         })
                     })
                 })
@@ -307,14 +323,14 @@ pub fn install_fleet_hook(
     let mut stop_arr = strip_fleet(hooks.get("Stop").unwrap_or(&serde_json::json!([])));
     stop_arr.as_array_mut().unwrap().push(serde_json::json!({
         "matcher": "",
-        "hooks": [{ "type": "http", "url": hook_url }]
+        "hooks": [{ "type": "command", "command": hook_command.clone() }]
     }));
     hooks.insert("Stop".into(), stop_arr);
 
     let mut ptu_arr = strip_fleet(hooks.get("PostToolUse").unwrap_or(&serde_json::json!([])));
     ptu_arr.as_array_mut().unwrap().push(serde_json::json!({
         "matcher": "WorktreeCreate",
-        "hooks": [{ "type": "http", "url": hook_url }]
+        "hooks": [{ "type": "command", "command": hook_command }]
     }));
     hooks.insert("PostToolUse".into(), ptu_arr);
 
@@ -345,5 +361,14 @@ mod tests {
         assert!(v["hooks"]["PostToolUse"].is_array());
         let url = v["hooks"]["Stop"][0]["hooks"][0]["url"].as_str().unwrap();
         assert!(url.contains("4180"));
+    }
+
+    #[test]
+    fn hook_curl_is_fail_silent() {
+        let c = hook_curl_command(4180, "tok");
+        assert!(c.contains("--connect-timeout 1"));
+        assert!(c.contains("-s -o /dev/null"));
+        assert!(c.ends_with("|| true"));
+        assert!(c.contains("2>/dev/null"));
     }
 }
