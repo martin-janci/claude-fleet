@@ -394,6 +394,28 @@
     const diffDays = Math.floor(diffHours / 24);
     return `${diffDays}d ago`;
   }
+
+  function claudeStatusColor(status: string | null): string {
+    switch (status) {
+      case 'working': return '#50c86e';   // green — active
+      case 'blocked': return '#f0b429';   // yellow — needs input
+      case 'completed': return '#6c8ebf'; // blue — done
+      case 'failed': return '#e64a4a';    // red
+      case 'idle': return '#888';         // grey
+      default: return 'transparent';
+    }
+  }
+
+  function claudeStatusLabel(status: string | null): string {
+    switch (status) {
+      case 'working': return '⚡ working';
+      case 'blocked': return '⏸ blocked';
+      case 'completed': return '✓ done';
+      case 'failed': return '✗ failed';
+      case 'idle': return '· idle';
+      default: return '';
+    }
+  }
 </script>
 
 <div class="sidebar" data-testid="sidebar-tree">
@@ -466,6 +488,26 @@
           {/if}
           <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
           <span class="sess-name">{sess.tmux_name}</span>
+          {#if sess.claude_status}
+            <span
+              class="claude-chip"
+              style="background: {claudeStatusColor(sess.claude_status)}22; color: {claudeStatusColor(sess.claude_status)}; border-color: {claudeStatusColor(sess.claude_status)}44;"
+              title="Claude: {sess.claude_status}{sess.current_activity ? ' — ' + sess.current_activity : ''}"
+            >{claudeStatusLabel(sess.claude_status)}</span>
+          {/if}
+          {#if sess.effort_level}
+            <span class="effort-badge" title="Effort: {sess.effort_level}">{sess.effort_level}</span>
+          {/if}
+          {#if sess.pr_url}
+            <a
+              class="pr-link"
+              href={sess.pr_url}
+              onclick={(e) => e.stopPropagation()}
+              title="Open pull request"
+              target="_blank"
+              rel="noreferrer"
+            >PR↗</a>
+          {/if}
           <div class="row-actions">
             <button class="icon-btn small" onclick={(e) => doRestart(sess, e)} title="Restart claude in this session" aria-label="Restart">↻</button>
             <button class="icon-btn small" onclick={(e) => beginRename(sess, e)} title="Rename session" aria-label="Rename">✎</button>
@@ -875,6 +917,33 @@
     padding-right: 0.25rem;
     white-space: nowrap;
   }
+
+  .claude-chip {
+    font-size: 0.65rem;
+    padding: 0.05rem 0.3rem;
+    border-radius: 3px;
+    border: 1px solid;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .effort-badge {
+    font-size: 0.6rem;
+    padding: 0.05rem 0.25rem;
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--fg) 10%, transparent);
+    color: var(--fg-muted);
+    flex-shrink: 0;
+    white-space: nowrap;
+    text-transform: uppercase;
+  }
+  .pr-link {
+    font-size: 0.65rem;
+    color: var(--accent);
+    text-decoration: none;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .pr-link:hover { text-decoration: underline; }
 
   .sess-name {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
