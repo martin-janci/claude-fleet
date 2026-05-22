@@ -179,6 +179,36 @@ pub struct RepoPathParams {
     pub path: String,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RepoLogParams {
+    /// Fleet session id.
+    pub session_id: i64,
+    /// Show all branches/refs (default true) instead of just HEAD.
+    pub all: Option<bool>,
+    /// Max commits to return (default 200).
+    pub limit: Option<u32>,
+    /// Commits to skip (pagination).
+    pub skip: Option<u32>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RepoCommitParams {
+    /// Fleet session id.
+    pub session_id: i64,
+    /// Commit hash.
+    pub hash: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RepoCommitDiffParams {
+    /// Fleet session id.
+    pub session_id: i64,
+    /// Commit hash.
+    pub hash: String,
+    /// Worktree-relative file path.
+    pub path: String,
+}
+
 // --- tools -----------------------------------------------------------------
 
 #[tool_router]
@@ -666,6 +696,98 @@ impl FleetTools {
         let v = crate::commands::files::repo_diff_impl(
             crate::commands::files::RepoFileArgs {
                 session_id: p.session_id,
+                path: p.path,
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&v)
+    }
+
+    #[tool(description = "Commit log (branch graph) for a session's worktree. \
+        all=true (default) includes every branch. Returns JSON array of commits \
+        with parents + ref decorations.")]
+    async fn repo_log(
+        &self,
+        Parameters(p): Parameters<RepoLogParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("repo_log", &format!("session_id={}", p.session_id));
+        let v = crate::commands::history::repo_log_impl(
+            crate::commands::history::RepoLogArgs {
+                session_id: p.session_id,
+                all: p.all.unwrap_or(true),
+                limit: p.limit.unwrap_or(0),
+                skip: p.skip.unwrap_or(0),
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&v)
+    }
+
+    #[tool(description = "List local + remote branches for a session's worktree \
+        with ahead/behind. Returns JSON array.")]
+    async fn repo_branches(
+        &self,
+        Parameters(p): Parameters<SessionIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("repo_branches", &format!("session_id={}", p.session_id));
+        let v = crate::commands::history::repo_branches_impl(
+            crate::commands::files::SessionIdArgs {
+                session_id: p.session_id,
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&v)
+    }
+
+    #[tool(description = "One commit's metadata + changed files. Returns JSON \
+        {hash, subject, body, author, date, files}.")]
+    async fn repo_commit(
+        &self,
+        Parameters(p): Parameters<RepoCommitParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "repo_commit",
+            &format!("session_id={} hash={}", p.session_id, p.hash),
+        );
+        let v = crate::commands::history::repo_commit_impl(
+            crate::commands::history::RepoCommitArgs {
+                session_id: p.session_id,
+                hash: p.hash,
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&v)
+    }
+
+    #[tool(description = "Diff of one file within a commit. Returns JSON \
+        {path, diff, binary, truncated}.")]
+    async fn repo_commit_diff(
+        &self,
+        Parameters(p): Parameters<RepoCommitDiffParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "repo_commit_diff",
+            &format!(
+                "session_id={} hash={} path={}",
+                p.session_id, p.hash, p.path
+            ),
+        );
+        let v = crate::commands::history::repo_commit_diff_impl(
+            crate::commands::history::RepoCommitDiffArgs {
+                session_id: p.session_id,
+                hash: p.hash,
                 path: p.path,
             },
             &self.store,
