@@ -875,8 +875,9 @@ impl Store {
         Ok(())
     }
 
-    /// Transition a ghost session back to running. Called after `bare_new_session`
-    /// successfully recreates the tmux session on the host.
+    /// Transition a session back to running (clears `lost_at`). Called by the
+    /// `recreate_session` flow after `new_session` rebuilds the tmux session on
+    /// the host — for both ghost and live (RAM/wedged) recreates.
     pub fn restore_session(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
         self.conn.execute(
             "UPDATE sessions SET status='running', lost_at=NULL WHERE id=?1",
