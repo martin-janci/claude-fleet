@@ -5,6 +5,8 @@ use crate::ipc_error::IpcError;
 /// Merge the claude-fleet HTTP MCP server entry into a host's `~/.claude.json`
 /// content, preserving every existing key. Returns the new JSON (pretty).
 /// Errors if `existing` is non-empty and not valid JSON.
+// Caller (`provision_one`) lands in a later task; remove this allow then.
+#[allow(dead_code)]
 pub fn merge_mcp_entry(existing: &str, url: &str, token: &str) -> Result<String, IpcError> {
     let mut root: serde_json::Value = if existing.trim().is_empty() {
         serde_json::json!({})
