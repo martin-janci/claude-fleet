@@ -44,6 +44,13 @@ export async function mcpConfigure(opts: {
   });
 }
 
+/** Install the fleet hook on the given host so it notifies fleet on session events. */
+export async function installFleetHook(hostAlias: string): Promise<string> {
+  const r = await invokeCmd<string>('install_fleet_hook', { args: { host_alias: hostAlias } });
+  if (r.ok) return r.value;
+  throw r.error;
+}
+
 /** Build the ready-to-paste MCP client config for an HTTP transport. */
 export function mcpClientConfig(status: McpStatus): string {
   return JSON.stringify(
