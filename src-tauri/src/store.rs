@@ -27,6 +27,7 @@ pub struct WorktreeRow {
     pub name: String,
     pub path: String,
     pub branch: Option<String>,
+    pub missing_since: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -187,6 +188,11 @@ impl Store {
             tx.execute_batch(include_str!("../migrations/008_ghost_sessions.sql"))?;
             tx.commit()?;
         }
+        if v < 9 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../migrations/009_worktree_missing.sql"))?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -252,7 +258,7 @@ impl Store {
 
     fn get_worktree(&self, id: i64) -> Result<Option<WorktreeRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, project_id, name, path, branch FROM worktrees WHERE id=?1",
+            "SELECT id, project_id, name, path, branch, missing_since FROM worktrees WHERE id=?1",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![id], |row| {
             Ok(WorktreeRow {
@@ -261,6 +267,7 @@ impl Store {
                 name: row.get(2)?,
                 path: row.get(3)?,
                 branch: row.get(4)?,
+                missing_since: row.get(5)?,
             })
         })?;
         match rows.next() {
@@ -319,7 +326,7 @@ impl Store {
     ) -> Result<Vec<crate::service::projects::ProjectTreeRow>, crate::ipc_error::IpcError> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT p.id, p.owner, p.repo, p.base_path, p.last_session_at,
-                    w.id, w.project_id, w.name, w.path, w.branch
+                    w.id, w.project_id, w.name, w.path, w.branch, w.missing_since
              FROM projects p
              LEFT JOIN worktrees w ON w.project_id = p.id
              ORDER BY
@@ -340,12 +347,13 @@ impl Store {
                 row.get::<_, Option<String>>(7)?,
                 row.get::<_, Option<String>>(8)?,
                 row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<i64>>(10)?,
             ))
         })?;
         let mut out: Vec<crate::service::projects::ProjectTreeRow> = Vec::new();
         let mut last_pid: Option<i64> = None;
         for r in rows {
-            let (pid, owner, repo, base, last, wid, _wpid, wname, wpath, wbranch) = r?;
+            let (pid, owner, repo, base, last, wid, _wpid, wname, wpath, wbranch, wmissing) = r?;
             if last_pid != Some(pid) {
                 out.push(crate::service::projects::ProjectTreeRow {
                     project: ProjectRow {
@@ -366,6 +374,7 @@ impl Store {
                     name: wname,
                     path: wpath,
                     branch: wbranch,
+                    missing_since: wmissing,
                 });
             }
         }
@@ -381,7 +390,8 @@ impl Store {
     ) -> Result<i64, rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO worktrees (project_id, name, path, branch) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(project_id, name) DO UPDATE SET path=excluded.path, branch=excluded.branch",
+             ON CONFLICT(project_id, name) DO UPDATE SET
+               path=excluded.path, branch=excluded.branch, missing_since=NULL",
             rusqlite::params![project_id, name, path, branch],
         )?;
         let id: i64 = self.conn.query_row(
@@ -400,7 +410,7 @@ impl Store {
         project_id: i64,
     ) -> Result<Vec<WorktreeRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, project_id, name, path, branch FROM worktrees WHERE project_id=?1 ORDER BY name",
+            "SELECT id, project_id, name, path, branch, missing_since FROM worktrees WHERE project_id=?1 ORDER BY name",
         )?;
         let rows = stmt.query_map(rusqlite::params![project_id], |row| {
             Ok(WorktreeRow {
@@ -409,6 +419,7 @@ impl Store {
                 name: row.get(2)?,
                 path: row.get(3)?,
                 branch: row.get(4)?,
+                missing_since: row.get(5)?,
             })
         })?;
         rows.collect()
@@ -1413,7 +1424,7 @@ mod tests {
     fn migrate_is_idempotent() {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
-        assert_eq!(store.schema_version().expect("version"), 8);
+        assert_eq!(store.schema_version().expect("version"), 9);
     }
 
     #[test]
@@ -1471,6 +1482,15 @@ mod tests {
             .map(|w| w.name)
             .collect();
         assert_eq!(names, vec!["feature-x", "main"]);
+    }
+
+    #[test]
+    fn worktree_missing_since_defaults_null_and_roundtrips() {
+        let store = Store::open_in_memory().unwrap();
+        let pid = store.upsert_project("o", "r", "/tmp/r").unwrap();
+        let id = store.upsert_worktree(pid, "feat", "/tmp/r/.worktrees/feat", Some("feat")).unwrap();
+        let wt = store.get_worktree(id).unwrap().unwrap();
+        assert_eq!(wt.missing_since, None);
     }
 
     #[test]
@@ -1545,9 +1565,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_seven_after_migration() {
+    fn schema_version_is_nine_after_migration() {
         let s = Store::open_in_memory().expect("open");
-        assert_eq!(s.schema_version().expect("version"), 8);
+        assert_eq!(s.schema_version().expect("version"), 9);
     }
 
     #[test]
@@ -2155,7 +2175,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 8, "schema_version should be 8 after migration");
+        assert_eq!(v, 9, "schema_version should be 9 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store
