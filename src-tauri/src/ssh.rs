@@ -22,7 +22,7 @@
 
 use crate::ipc_error::IpcError;
 use dashmap::DashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::Arc;
 use std::time::Duration;
@@ -215,6 +215,46 @@ impl SshClient {
                 Ok(Output { status, stdout, stderr })
             }
         }
+    }
+
+    /// Upload a local file to `remote_path` on `host` by piping its bytes into
+    /// `cat > <quoted path>` over the ControlMaster. The remote parent
+    /// directory must already exist (caller `mkdir -p`s it). Returns Err on a
+    /// non-zero ssh/cat exit. Uses the same `-o` muxing as `run`.
+    pub async fn upload_file(
+        &self,
+        host: &str,
+        local_path: &Path,
+        remote_path: &str,
+        timeout: Duration,
+    ) -> Result<(), IpcError> {
+        self.inner.seen.insert(host.to_string(), ());
+        let file = std::fs::File::open(local_path).map_err(|e| {
+            IpcError::new("E_UPLOAD", format!("open {}: {e}", local_path.display()))
+        })?;
+        let mut cmd = tokio::process::Command::new("ssh");
+        for opt in self.mux_opts(host, timeout) {
+            cmd.arg(opt);
+        }
+        // Single remote word: the remote login shell runs `cat > 'path'`,
+        // reading the piped file from stdin. Path is single-quoted.
+        let remote_cmd = format!("cat > {}", crate::shell::quote(remote_path));
+        cmd.arg("--").arg(host).arg(&remote_cmd);
+        cmd.stdin(std::process::Stdio::from(file));
+        let out = cmd
+            .output()
+            .await
+            .map_err(|e| IpcError::new("E_UPLOAD", format!("ssh {host}: {e}")))?;
+        if !out.status.success() {
+            return Err(IpcError::new(
+                "E_UPLOAD",
+                format!(
+                    "upload to {host} failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+            ));
+        }
+        Ok(())
     }
 
     /// Tell every touched host's master to exit. Called from Tauri on_exit so

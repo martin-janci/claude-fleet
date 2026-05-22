@@ -1,8 +1,10 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { selectedSession } from './selection';
   import { Screen, rowToRuns, colorToCss, encodeMouse, type Run } from './ansi';
+  import { trimSelectionText, sanitizePaste, framePaste } from './clipboard';
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -38,6 +40,11 @@
   let drainTimer: ReturnType<typeof setTimeout> | null = null;
   let drainDelay = DRAIN_MIN_MS;
   let currentSession: string | null = $state(null);
+  let currentHost: string | null = $state(null);
+  /** Drop-overlay state: shown while a drag is over the grid, switched to a
+   *  spinner during the upload. */
+  let dragOver = $state(false);
+  let uploading = $state(false);
   let openError: string | null = $state(null);
   let ptyOpen = false;
   let lastCols = $state(0);
@@ -83,7 +90,57 @@
     void invoke('pty_write', { args: { data } }).catch(() => {});
   }
 
+  /** Send text to the PTY as a paste: strip any embedded paste-end marker,
+   *  then frame in bracketed-paste markers if the app requested mode 2004.
+   *  Shared by Cmd+V and the drag-drop path. */
+  function sendPaste(text: string) {
+    if (!ptyOpen) return;
+    const clean = sanitizePaste(text);
+    if (clean === '') return;
+    const framed = framePaste(clean, screen?.bracketedPaste ?? false);
+    void invoke('pty_write', { args: { data: framed } }).catch(() => {});
+    bumpDrain();
+  }
+
+  /** Is a physical-pixel point inside the terminal grid? */
+  function pointOverGrid(px: number, py: number): boolean {
+    if (!container) return false;
+    const dpr = window.devicePixelRatio || 1;
+    const r = container.getBoundingClientRect();
+    const x = px / dpr;
+    const y = py / dpr;
+    return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+  }
+
+  /** Build the prompt text for a set of uploaded remote paths: space-joined,
+   *  POSIX single-quoted (embedded quotes escaped as '\'') when a path
+   *  contains whitespace or a quote, trailing space so the user can keep
+   *  typing. */
+  function pathsToPasteText(paths: string[]): string {
+    return (
+      paths
+        .map((p) => (/[\s']/.test(p) ? `'${p.replace(/'/g, "'\\''")}'` : p))
+        .join(' ') + ' '
+    );
+  }
+
+  async function handleDrop(paths: string[]) {
+    if (!ptyOpen || !currentSession || !currentHost || paths.length === 0) return;
+    uploading = true;
+    try {
+      const remote = await invoke<string[]>('upload_to_session', {
+        args: { host_alias: currentHost, session_name: currentSession, local_paths: paths },
+      });
+      if (remote.length > 0) sendPaste(pathsToPasteText(remote));
+    } catch (e) {
+      openError = describeError(e);
+    } finally {
+      uploading = false;
+    }
+  }
+
   function onWheel(e: WheelEvent) {
+    if (e.altKey) return;
     if (!ptyOpen || !screen || !screen.mouseEnabled) return;
     e.preventDefault();
     // Normalize the delta to pixels across deltaMode (0=px, 1=lines, 2=pages)
@@ -111,6 +168,10 @@
   }
 
   function onMousedown(e: MouseEvent) {
+    // Option (Alt) held → let the browser do a native text selection instead
+    // of forwarding the click to the app, so the user can copy while mouse
+    // reporting is on.
+    if (e.altKey) return;
     if (!ptyOpen || !screen || !screen.mouseEnabled) return;
     // Only forward left (0), middle (1), right (2).
     if (e.button > 2) return;
@@ -166,6 +227,19 @@
     removeWindowListeners?.();
   }
 
+  /** After a mouse-up, if the user selected text inside the grid, copy it to
+   *  the clipboard automatically (iTerm "copy on select"). The selection is
+   *  left highlighted. Trailing whitespace per line is trimmed because rows
+   *  are space-padded to the full width. */
+  function onGridMouseup() {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !container) return;
+    if (!container.contains(sel.anchorNode) && !container.contains(sel.focusNode)) return;
+    const text = trimSelectionText(sel.toString());
+    if (text.trim() === '') return;
+    void navigator.clipboard.writeText(text).catch(() => {});
+  }
+
   $effect(() => {
     const sess = $selectedSession;
     if (!sess) {
@@ -184,6 +258,35 @@
     if (container && $selectedSession && currentSession !== $selectedSession.tmux_name) {
       void openTerm();
     }
+  });
+
+  // Native (OS-level) drag-drop. HTML5 drop in WKWebView can't expose real
+  // file paths, so we use Tauri's window event, which does. We only act on
+  // drops that land over the grid.
+  $effect(() => {
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const p = event.payload;
+        if (p.type === 'enter' || p.type === 'over') {
+          dragOver = pointOverGrid(p.position.x, p.position.y);
+        } else if (p.type === 'leave') {
+          dragOver = false;
+        } else if (p.type === 'drop') {
+          const over = pointOverGrid(p.position.x, p.position.y);
+          dragOver = false;
+          if (over) void handleDrop(p.paths);
+        }
+      })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   });
 
   /** Reentrancy guard. The two $effects above can both call openTerm() for
@@ -235,6 +338,7 @@
         },
       });
       currentSession = sess.tmux_name;
+      currentHost = sess.host_alias;
       ptyOpen = true;
     } catch (e) {
       openError = describeError(e);
@@ -412,6 +516,13 @@
     // While an IME / dead-key composition is in progress the keydowns are
     // part of composing — the finished text arrives via compositionend.
     if (e.isComposing) return;
+    // Cmd+V / Ctrl+V → read the clipboard and paste into the PTY. A non-editable
+    // <div> doesn't fire a native paste event, so we read the clipboard here.
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'v') {
+      e.preventDefault();
+      void navigator.clipboard.readText().then((t) => sendPaste(t)).catch(() => {});
+      return;
+    }
     const bytes = keyToBytes(e);
     if (bytes === null) return;
     e.preventDefault();
@@ -583,6 +694,7 @@
       oncompositionend={onCompositionEnd}
       onwheel={onWheel}
       onmousedown={onMousedown}
+      onmouseup={onGridMouseup}
       data-testid="terminal-host"
     >
       <!-- Hidden 1ch×1lh probe used once to measure font metrics. We can't
@@ -603,6 +715,11 @@
           aria-hidden="true"
           data-testid="terminal-cursor"
         ></div>
+      {/if}
+      {#if dragOver || uploading}
+        <div class="drop-overlay" data-testid="terminal-drop-overlay">
+          {uploading ? 'Uploading…' : `Drop files to upload to ${currentHost ?? 'host'}`}
+        </div>
       {/if}
     </div>
     {#if openError}
@@ -695,6 +812,8 @@
     flex: 1 1 auto;
     min-height: 0;
     min-width: 0;
+    user-select: text;
+    -webkit-user-select: text;
     background: #0a0a0a;
     color: #e8e8e8;
     overflow: hidden;
@@ -733,6 +852,19 @@
   }
   @keyframes cf-cursor-blink {
     50% { opacity: 0; }
+  }
+  .drop-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 4;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(20, 30, 50, 0.55);
+    border: 2px dashed var(--accent, #4f8fff);
+    color: #e8e8e8;
+    font-size: 0.95rem;
+    pointer-events: none;
   }
   .measure {
     position: absolute;
