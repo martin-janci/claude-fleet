@@ -844,22 +844,23 @@ pub async fn send_prompt(args: SendPromptArgs, ssh: &Arc<SshClient>) -> Result<(
     send_prompt_inner(ssh, &args.host_alias, &args.tmux_name, &args.prompt).await
 }
 
-/// Resolve the cwd a review should open in. Order: source's worktree path
-/// (by worktree_id) → source's project base_path → error.
-fn resolve_review_cwd(s: &Store, source: &crate::store::SessionRow) -> Result<String, IpcError> {
-    if let Some(wt_id) = source.worktree_id {
+/// Resolve the cwd a session should (re)open in. Order: the session's worktree
+/// path (by `worktree_id`) → its project `base_path` → error. Used by both
+/// `spawn_review` and `recreate_session`.
+fn resolve_session_cwd(s: &Store, row: &crate::store::SessionRow) -> Result<String, IpcError> {
+    if let Some(wt_id) = row.worktree_id {
         if let Some(path) = s.worktree_path(wt_id)? {
             return Ok(path);
         }
     }
-    if let Some(pid) = source.project_id {
+    if let Some(pid) = row.project_id {
         if let Some(base) = s.project_base_path(pid)? {
             return Ok(base);
         }
     }
     Err(IpcError::new(
-        "E_INVALID",
-        "cannot determine a worktree path to review for this session",
+        "E_NOREPO",
+        "cannot determine a worktree path for this session",
     ))
 }
 
@@ -904,7 +905,7 @@ pub async fn spawn_review(
         let source = s
             .get_session_by_id(args.source_session_id)?
             .ok_or_else(|| IpcError::new("E_NOTFOUND", "source session not found"))?;
-        let cwd = resolve_review_cwd(&s, &source)?;
+        let cwd = resolve_session_cwd(&s, &source)?;
         (source, cwd)
     };
 
@@ -1357,7 +1358,19 @@ mod tests {
     }
 
     #[test]
-    fn resolve_review_cwd_prefers_worktree_then_project_then_errors() {
+    fn resolve_session_cwd_prefers_worktree_then_project_then_errors() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        // A session with neither worktree nor project → E_NOREPO.
+        s.upsert_session("dev", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let row = s.get_session("dev", "local").unwrap().unwrap();
+        let err = resolve_session_cwd(&s, &row).unwrap_err();
+        assert_eq!(err.code, "E_NOREPO");
+    }
+
+    #[test]
+    fn resolve_session_cwd_with_worktree_and_project_and_neither() {
         let store = Store::open_in_memory().expect("store");
         store.upsert_host("alpha").unwrap();
         // Project with a base_path, and a worktree under it.
@@ -1370,19 +1383,19 @@ mod tests {
             .upsert_session("s1", "alpha", Some(pid), Some(wid), 1, 1, "running", None)
             .unwrap();
         let row1 = store.get_session_by_id(s1).unwrap().unwrap();
-        assert_eq!(resolve_review_cwd(&store, &row1).unwrap(), "/base/r/main");
+        assert_eq!(resolve_session_cwd(&store, &row1).unwrap(), "/base/r/main");
         // Session with project but no worktree → project base.
         let s2 = store
             .upsert_session("s2", "alpha", Some(pid), None, 1, 1, "running", None)
             .unwrap();
         let row2 = store.get_session_by_id(s2).unwrap().unwrap();
-        assert_eq!(resolve_review_cwd(&store, &row2).unwrap(), "/base/r");
+        assert_eq!(resolve_session_cwd(&store, &row2).unwrap(), "/base/r");
         // Session with neither → error.
         let s3 = store
             .upsert_session("s3", "alpha", None, None, 1, 1, "running", None)
             .unwrap();
         let row3 = store.get_session_by_id(s3).unwrap().unwrap();
-        assert!(resolve_review_cwd(&store, &row3).is_err());
+        assert!(resolve_session_cwd(&store, &row3).is_err());
     }
 
     #[test]
