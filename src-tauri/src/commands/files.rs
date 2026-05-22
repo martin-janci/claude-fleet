@@ -220,15 +220,26 @@ pub async fn repo_file_impl(
 ) -> Result<FileContent, IpcError> {
     crate::validate::repo_rel_path(&args.path)?;
     let (host, name) = session_target(store, args.session_id)?;
+    // `git ls-files --others` reports an embedded git repo (e.g. a nested
+    // worktree) as a single directory entry; running `head` on it would leak
+    // a raw "Is a directory" error. Detect that first and report it cleanly.
     // Read one byte past the cap so we can tell "exactly cap" from "truncated".
     let body = format!(
-        "head -c {} -- \"$root\"/{}",
-        MAX_FILE_BYTES + 1,
-        shq(&args.path),
+        "f=\"$root\"/{path}\n\
+         if [ -d \"$f\" ]; then echo cf-is-dir >&2; exit 9; fi\n\
+         head -c {cap} -- \"$f\"",
+        path = shq(&args.path),
+        cap = MAX_FILE_BYTES + 1,
     );
     let script = repo_script(&name, &body);
     let out = run_in_repo(ssh, &host, &script).await?;
     if !out.status.success() {
+        if String::from_utf8_lossy(&out.stderr).contains("cf-is-dir") {
+            return Err(IpcError::new(
+                "E_REPO",
+                format!("{} is a directory, not a file", args.path),
+            ));
+        }
         return Err(repo_err(&out));
     }
     let bytes = out.stdout;
