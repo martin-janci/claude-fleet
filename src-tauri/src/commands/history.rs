@@ -147,15 +147,15 @@ pub struct RepoLogArgs {
     pub skip: u32,
 }
 
-/// Commit log for a session's worktree. `all` includes every ref so the
-/// frontend can draw a branch tree; otherwise it's HEAD's history.
-#[tauri::command]
-pub async fn repo_log(
+/// Commit log for a session's worktree — reusable logic called by the Tauri
+/// command and (later) MCP tools. `all` includes every ref so the frontend
+/// can draw a branch tree; otherwise it's HEAD's history.
+pub async fn repo_log_impl(
     args: RepoLogArgs,
-    store: State<'_, Arc<Mutex<Store>>>,
-    ssh: State<'_, Arc<SshClient>>,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
 ) -> Result<Vec<Commit>, IpcError> {
-    let (host, name) = session_target(&store, args.session_id)?;
+    let (host, name) = session_target(store, args.session_id)?;
     let limit = if args.limit == 0 {
         LOG_DEFAULT_LIMIT
     } else {
@@ -172,11 +172,21 @@ pub async fn repo_log(
         skip = args.skip,
     );
     let script = repo_script(&name, &body);
-    let out = run_in_repo(&ssh, &host, &script).await?;
+    let out = run_in_repo(ssh, &host, &script).await?;
     if !out.status.success() {
         return Err(repo_err(&out));
     }
     Ok(parse_log(&out.stdout))
+}
+
+/// Commit log for a session's worktree.
+#[tauri::command]
+pub async fn repo_log(
+    args: RepoLogArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<Vec<Commit>, IpcError> {
+    repo_log_impl(args, &store, &ssh).await
 }
 
 const BRANCH_FORMAT: &str =
@@ -235,14 +245,14 @@ fn parse_branches(raw: &[u8]) -> Vec<Branch> {
     out
 }
 
-/// Local + remote branches for a session's worktree.
-#[tauri::command]
-pub async fn repo_branches(
+/// Local + remote branches for a session's worktree — reusable logic called by
+/// the Tauri command and (later) MCP tools.
+pub async fn repo_branches_impl(
     args: crate::commands::files::SessionIdArgs,
-    store: State<'_, Arc<Mutex<Store>>>,
-    ssh: State<'_, Arc<SshClient>>,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
 ) -> Result<Vec<Branch>, IpcError> {
-    let (host, name) = session_target(&store, args.session_id)?;
+    let (host, name) = session_target(store, args.session_id)?;
     // `BRANCH_FORMAT` contains `%(refname)` etc. — the parens are shell
     // metacharacters, so it MUST be quoted or bash aborts the line with
     // "syntax error near unexpected token `('".
@@ -251,11 +261,21 @@ pub async fn repo_branches(
         fmt = shq(BRANCH_FORMAT),
     );
     let script = repo_script(&name, &body);
-    let out = run_in_repo(&ssh, &host, &script).await?;
+    let out = run_in_repo(ssh, &host, &script).await?;
     if !out.status.success() {
         return Err(repo_err(&out));
     }
     Ok(parse_branches(&out.stdout))
+}
+
+/// Local + remote branches for a session's worktree.
+#[tauri::command]
+pub async fn repo_branches(
+    args: crate::commands::files::SessionIdArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<Vec<Branch>, IpcError> {
+    repo_branches_impl(args, &store, &ssh).await
 }
 
 /// Parse `git show/diff-tree --name-status -z` output into `ChangedFile`s.
@@ -303,15 +323,15 @@ pub struct RepoCommitArgs {
     pub hash: String,
 }
 
-/// One commit's metadata + the files it changed (first-parent for merges).
-#[tauri::command]
-pub async fn repo_commit(
+/// One commit's metadata + the files it changed (first-parent for merges) —
+/// reusable logic called by the Tauri command and (later) MCP tools.
+pub async fn repo_commit_impl(
     args: RepoCommitArgs,
-    store: State<'_, Arc<Mutex<Store>>>,
-    ssh: State<'_, Arc<SshClient>>,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
 ) -> Result<CommitDetail, IpcError> {
     crate::validate::commit_hash(&args.hash)?;
-    let (host, name) = session_target(&store, args.session_id)?;
+    let (host, name) = session_target(store, args.session_id)?;
     let h = shq(&args.hash);
     // Two git calls: metadata (US-separated) then NUL name-status. `set -e`
     // (from repo_script) aborts on a bad hash.
@@ -322,7 +342,7 @@ pub async fn repo_commit(
          git -C \"$root\" show --first-parent --name-status -z --pretty=format: {h}"
     );
     let script = repo_script(&name, &body);
-    let out = run_in_repo(&ssh, &host, &script).await?;
+    let out = run_in_repo(ssh, &host, &script).await?;
     if !out.status.success() {
         return Err(repo_err(&out));
     }
@@ -344,6 +364,16 @@ pub async fn repo_commit(
     Ok(detail)
 }
 
+/// One commit's metadata + the files it changed (first-parent for merges).
+#[tauri::command]
+pub async fn repo_commit(
+    args: RepoCommitArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<CommitDetail, IpcError> {
+    repo_commit_impl(args, &store, &ssh).await
+}
+
 #[derive(Deserialize)]
 pub struct RepoCommitDiffArgs {
     pub session_id: i64,
@@ -351,24 +381,23 @@ pub struct RepoCommitDiffArgs {
     pub path: String,
 }
 
-/// A single file's diff *within* a commit (first-parent for merges), so the
-/// existing DiffView can render it.
-#[tauri::command]
-pub async fn repo_commit_diff(
+/// A single file's diff *within* a commit (first-parent for merges) — reusable
+/// logic called by the Tauri command and (later) MCP tools.
+pub async fn repo_commit_diff_impl(
     args: RepoCommitDiffArgs,
-    store: State<'_, Arc<Mutex<Store>>>,
-    ssh: State<'_, Arc<SshClient>>,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
 ) -> Result<FileDiff, IpcError> {
     crate::validate::commit_hash(&args.hash)?;
     crate::validate::repo_rel_path(&args.path)?;
-    let (host, name) = session_target(&store, args.session_id)?;
+    let (host, name) = session_target(store, args.session_id)?;
     let body = format!(
         "git -C \"$root\" show --first-parent --format= {h} -- {p}",
         h = shq(&args.hash),
         p = shq(&args.path),
     );
     let script = repo_script(&name, &body);
-    let out = run_in_repo(&ssh, &host, &script).await?;
+    let out = run_in_repo(ssh, &host, &script).await?;
     if !out.status.success() {
         return Err(repo_err(&out));
     }
@@ -379,6 +408,17 @@ pub async fn repo_commit_diff(
         binary,
         truncated,
     })
+}
+
+/// A single file's diff *within* a commit (first-parent for merges), so the
+/// existing DiffView can render it.
+#[tauri::command]
+pub async fn repo_commit_diff(
+    args: RepoCommitDiffArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<FileDiff, IpcError> {
+    repo_commit_diff_impl(args, &store, &ssh).await
 }
 
 #[cfg(test)]
