@@ -147,6 +147,20 @@ pub struct SpawnReviewParams {
     pub prompt: String,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct CaptureSessionParams {
+    /// Fleet session id (from list_sessions).
+    pub session_id: i64,
+    /// Rows of scrollback history to include; omit for just the visible pane.
+    pub scrollback_lines: Option<u32>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionIdParams {
+    /// Fleet session id (from list_sessions).
+    pub session_id: i64,
+}
+
 // --- tools -----------------------------------------------------------------
 
 #[tool_router]
@@ -438,6 +452,62 @@ impl FleetTools {
             .await
             .map_err(to_mcp_err)?;
         ok_json(&row)
+    }
+
+    #[tool(description = "Capture a session's terminal output — the visible \
+        tmux pane, or include scrollback history. Use after send_prompt to read \
+        the session's reply. Returns the pane text.")]
+    async fn capture_session(
+        &self,
+        Parameters(p): Parameters<CaptureSessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("capture_session", &format!("session_id={}", p.session_id));
+        let text = sessions::capture_session_output(
+            p.session_id,
+            &self.store,
+            &self.ssh,
+            p.scrollback_lines,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&text)
+    }
+
+    #[tool(
+        description = "Peek at a session's background Claude logs. Returns an \
+        informational message for interactive sessions with no background job."
+    )]
+    async fn peek_session(
+        &self,
+        Parameters(p): Parameters<SessionIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("peek_session", &format!("session_id={}", p.session_id));
+        let (host_alias, claude_id) = {
+            let s = self
+                .store
+                .lock()
+                .map_err(|_| to_mcp_err(IpcError::new("E_LOCK", "store mutex poisoned")))?;
+            let row = s
+                .get_session_by_id(p.session_id)
+                .map_err(|e| to_mcp_err(IpcError::from(e)))?
+                .ok_or_else(|| to_mcp_err(IpcError::new("E_NOTFOUND", "session not found")))?;
+            (row.host_alias, row.claude_session_id)
+        };
+        let Some(claude_id) = claude_id else {
+            return ok_json(
+                &"This session has no Claude session id yet — nothing to peek.".to_string(),
+            );
+        };
+        let logs = crate::service::bg_sessions::peek_session(
+            crate::service::bg_sessions::PeekSessionArgs {
+                host_alias,
+                claude_session_id: claude_id,
+            },
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&logs)
     }
 }
 

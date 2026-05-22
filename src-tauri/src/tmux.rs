@@ -26,9 +26,6 @@ pub trait TmuxExec: Send + Sync {
     async fn restart_session(&self, name: &str, pane_cmd: &str) -> Result<(), IpcError>;
     async fn capture_pane(&self, name: &str) -> Result<String, IpcError>;
     /// Capture the pane plus `lines` rows of scrollback history.
-    // Used by capture_session_output in service/sessions.rs; the MCP tool that
-    // calls it lands in the next task — suppress the interim dead-code lint.
-    #[allow(dead_code)]
     async fn capture_pane_scrollback(&self, name: &str, lines: u32) -> Result<String, IpcError>;
     /// Run `claude agents --json` on this host and return parsed session info.
     /// Returns an empty vec if claude CLI is not installed or the command fails —
@@ -356,9 +353,6 @@ fn parse_sessions(input: &str) -> Vec<TmuxSession> {
 }
 
 /// tmux `-S` start offset for `lines` rows of scrollback (a negative count).
-// Used by capture_pane_scrollback impls; allow here because the trait method
-// itself is marked dead_code until the MCP tool lands in the next task.
-#[allow(dead_code)]
 pub(crate) fn scrollback_start(lines: u32) -> String {
     format!("-{lines}")
 }

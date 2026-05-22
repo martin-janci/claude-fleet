@@ -1091,8 +1091,6 @@ pub fn dismiss_ghost_session(
 
 /// Capture a session's terminal output. `scrollback_lines = None` returns the
 /// visible pane; `Some(n)` includes `n` rows of scrollback history.
-// Called by the MCP tool in the next task; suppress interim dead-code lint.
-#[allow(dead_code)]
 pub async fn capture_session_output(
     session_id: i64,
     store: &Mutex<Store>,
