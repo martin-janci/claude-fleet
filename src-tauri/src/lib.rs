@@ -1,5 +1,6 @@
 mod cancel;
 mod claude_agents;
+mod claude_cli;
 mod commands;
 mod events;
 mod ipc_error;
