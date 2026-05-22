@@ -1,0 +1,169 @@
+//! Mutating git commands for the Files tab: checkout, branch create/delete,
+//! stage/commit, and remote sync. Reuses the shared plumbing in `repo.rs`.
+//! Branch names go through `validate::git_ref`, hashes through
+//! `validate::commit_hash`, paths through `validate::repo_rel_path`; every
+//! interpolated value is shell-quoted.
+
+use crate::commands::repo::{repo_err, repo_script, run_in_repo, session_target};
+use crate::ipc_error::IpcError;
+use crate::shell::quote as shq;
+use crate::ssh::SshClient;
+use crate::store::Store;
+use serde::Deserialize;
+use std::sync::{Arc, Mutex};
+use tauri::State;
+
+/// True when `git status --porcelain` output indicates a dirty worktree.
+fn is_dirty(porcelain: &[u8]) -> bool {
+    !String::from_utf8_lossy(porcelain).trim().is_empty()
+}
+
+#[derive(Deserialize)]
+pub struct CheckoutArgs {
+    pub session_id: i64,
+    pub branch: String,
+}
+
+/// Checkout a branch. Refuses (E_DIRTY) when the worktree has uncommitted
+/// changes — the agent may be mid-edit. Never `--force`.
+#[tauri::command]
+pub async fn repo_checkout(
+    args: CheckoutArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<(), IpcError> {
+    crate::validate::git_ref(&args.branch)?;
+    let (host, name) = session_target(&store, args.session_id)?;
+    // Guard: check dirty first.
+    let status = repo_script(&name, "git -C \"$root\" status --porcelain");
+    let so = run_in_repo(&ssh, &host, &status).await?;
+    if !so.status.success() {
+        return Err(repo_err(&so));
+    }
+    if is_dirty(&so.stdout) {
+        return Err(IpcError::new(
+            "E_DIRTY",
+            "worktree has uncommitted changes — the agent may have work in progress",
+        ));
+    }
+    let body = format!("git -C \"$root\" checkout {}", shq(&args.branch));
+    let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
+    if !out.status.success() {
+        return Err(repo_err(&out));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct CheckoutCommitArgs {
+    pub session_id: i64,
+    pub hash: String,
+}
+
+/// Checkout a commit (detached HEAD). Same dirty guard as `repo_checkout`.
+#[tauri::command]
+pub async fn repo_checkout_commit(
+    args: CheckoutCommitArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<(), IpcError> {
+    crate::validate::commit_hash(&args.hash)?;
+    let (host, name) = session_target(&store, args.session_id)?;
+    let status = repo_script(&name, "git -C \"$root\" status --porcelain");
+    let so = run_in_repo(&ssh, &host, &status).await?;
+    if !so.status.success() {
+        return Err(repo_err(&so));
+    }
+    if is_dirty(&so.stdout) {
+        return Err(IpcError::new(
+            "E_DIRTY",
+            "worktree has uncommitted changes — the agent may have work in progress",
+        ));
+    }
+    let body = format!("git -C \"$root\" checkout {}", shq(&args.hash));
+    let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
+    if !out.status.success() {
+        return Err(repo_err(&out));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct CreateBranchArgs {
+    pub session_id: i64,
+    pub name: String,
+    pub start_point: Option<String>,
+    pub checkout: bool,
+}
+
+/// Create a branch from HEAD or a start point (branch name or commit hash),
+/// optionally checking it out.
+#[tauri::command]
+pub async fn repo_create_branch(
+    args: CreateBranchArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<(), IpcError> {
+    crate::validate::git_ref(&args.name)?;
+    // A start point may be a ref or a hash — accept either, validated.
+    if let Some(sp) = &args.start_point {
+        if crate::validate::commit_hash(sp).is_err() {
+            crate::validate::git_ref(sp)?;
+        }
+    }
+    let (host, name) = session_target(&store, args.session_id)?;
+    let sp = args
+        .start_point
+        .as_ref()
+        .map(|s| format!(" {}", shq(s)))
+        .unwrap_or_default();
+    let verb = if args.checkout {
+        "checkout -b"
+    } else {
+        "branch"
+    };
+    let body = format!("git -C \"$root\" {verb} {}{sp}", shq(&args.name));
+    let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
+    if !out.status.success() {
+        return Err(repo_err(&out));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct DeleteBranchArgs {
+    pub session_id: i64,
+    pub name: String,
+    pub force: bool,
+}
+
+/// Delete a local branch (`-d`, or `-D` when `force`).
+#[tauri::command]
+pub async fn repo_delete_branch(
+    args: DeleteBranchArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<(), IpcError> {
+    crate::validate::git_ref(&args.name)?;
+    let (host, name) = session_target(&store, args.session_id)?;
+    let flag = if args.force { "-D" } else { "-d" };
+    let body = format!("git -C \"$root\" branch {flag} {}", shq(&args.name));
+    let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
+    if !out.status.success() {
+        return Err(repo_err(&out));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_dirty_detects_changes() {
+        assert!(!is_dirty(b""));
+        assert!(!is_dirty(b"   \n"));
+        assert!(is_dirty(b" M src/x.rs\n"));
+        assert!(is_dirty(b"?? new.txt\n"));
+    }
+}
