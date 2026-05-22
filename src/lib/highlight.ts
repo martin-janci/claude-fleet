@@ -62,6 +62,7 @@ const LANGS: Record<string, LangCfg> = {
   },
   python: { line: '#', strings: ['"', "'"], triple: true, keywords: PY },
   shell: { line: '#', strings: ['"', "'"], keywords: SHELL },
+  yaml: { line: '#', strings: ['"', "'"], keywords: words('true false null yes no on off') },
   css: { blockOpen: '/*', blockClose: '*/', strings: ['"', "'"], keywords: new Set() },
   html: { blockOpen: '<!--', blockClose: '-->', strings: ['"', "'"], keywords: new Set() },
   json: { strings: ['"'], keywords: words('true false null') },
@@ -78,6 +79,7 @@ const EXT: Record<string, string> = {
   css: 'css', scss: 'css', sass: 'css', less: 'css',
   html: 'html', htm: 'html', xml: 'html', svg: 'html', vue: 'html', svelte: 'html',
   json: 'json', jsonc: 'json',
+  yaml: 'yaml', yml: 'yaml', toml: 'yaml',
 };
 
 const NAME: Record<string, string> = {
