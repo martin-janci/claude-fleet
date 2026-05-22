@@ -955,6 +955,80 @@ pub async fn spawn_review(
         .ok_or_else(|| IpcError::new("E_INTERNAL", "review row missing after tag"))
 }
 
+#[derive(Deserialize)]
+pub struct RecreateSessionArgs {
+    pub session_id: i64,
+}
+
+pub async fn recreate_session(
+    args: RecreateSessionArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<SessionRow, IpcError> {
+    // Load session and validate it is a ghost.
+    let (sess, host) = {
+        let s = store
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let sess = s
+            .get_session_by_id(args.session_id)?
+            .ok_or_else(|| IpcError::new("E_NOTFOUND", "session not found"))?;
+        if sess.status != "ghost" {
+            return Err(IpcError::new(
+                "E_INVALID_STATE",
+                format!("session {} is not a ghost (status={})", sess.id, sess.status),
+            ));
+        }
+        let host = s
+            .get_host_row(&sess.host_alias)?
+            .ok_or_else(|| IpcError::new("E_NOTFOUND", "host not found"))?;
+        if !host.reachable {
+            return Err(IpcError::new(
+                "E_HOST_OFFLINE",
+                format!("host {} is not reachable", host.alias),
+            ));
+        }
+        (sess, host)
+    };
+
+    // Create the bare tmux session on the host.
+    let tmux = exec_for(&host.alias, ssh);
+    tmux.bare_new_session(&sess.tmux_name).await?;
+
+    // Restore the DB row and return it.
+    let row = store
+        .lock()
+        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?
+        .restore_session(sess.id)?
+        .ok_or_else(|| IpcError::new("E_INTERNAL", "session vanished after restore"))?;
+    Ok(row)
+}
+
+#[derive(Deserialize)]
+pub struct DismissGhostSessionArgs {
+    pub session_id: i64,
+}
+
+pub fn dismiss_ghost_session(
+    args: DismissGhostSessionArgs,
+    store: &Mutex<Store>,
+) -> Result<(), IpcError> {
+    let s = store
+        .lock()
+        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let sess = s
+        .get_session_by_id(args.session_id)?
+        .ok_or_else(|| IpcError::new("E_NOTFOUND", "session not found"))?;
+    if sess.status != "ghost" {
+        return Err(IpcError::new(
+            "E_INVALID_STATE",
+            format!("session {} is not a ghost (status={})", sess.id, sess.status),
+        ));
+    }
+    s.delete_session(sess.id)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1137,6 +1211,9 @@ mod tests {
             async fn capture_pane(&self, _name: &str) -> Result<String, IpcError> {
                 Ok(String::new())
             }
+            async fn bare_new_session(&self, _name: &str) -> Result<(), IpcError> {
+                Ok(())
+            }
         }
 
         // Spawn 3 tasks with sleeps 50ms, 500ms, 50ms.
@@ -1256,6 +1333,9 @@ mod tests {
                 } else {
                     Ok("│ > ".into())
                 }
+            }
+            async fn bare_new_session(&self, _: &str) -> Result<(), IpcError> {
+                Ok(())
             }
         }
 
@@ -1488,5 +1568,94 @@ mod tests {
             String::from_utf8_lossy(&quoted.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&quoted.stdout).trim(), "OK");
+    }
+}
+
+#[cfg(test)]
+mod ghost_tests {
+    use super::*;
+    use crate::store::Store;
+
+    #[test]
+    fn recreate_session_rejects_non_ghost() {
+        let store = std::sync::Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            s.upsert_session("dev", "local", None, None, 1, 1, "running", None)
+                .unwrap();
+        }
+        let id = store
+            .lock()
+            .unwrap()
+            .get_session("dev", "local")
+            .unwrap()
+            .unwrap()
+            .id;
+        let args = RecreateSessionArgs { session_id: id };
+        let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(recreate_session(args, &store, &ssh));
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, "E_INVALID_STATE");
+    }
+
+    #[test]
+    fn dismiss_ghost_rejects_non_ghost() {
+        let store = std::sync::Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            s.upsert_session("dev", "local", None, None, 1, 1, "running", None)
+                .unwrap();
+        }
+        let id = store
+            .lock()
+            .unwrap()
+            .get_session("dev", "local")
+            .unwrap()
+            .unwrap()
+            .id;
+        let args = DismissGhostSessionArgs { session_id: id };
+        let result = dismiss_ghost_session(args, &store);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, "E_INVALID_STATE");
+    }
+
+    #[test]
+    fn dismiss_ghost_deletes_ghost_session() {
+        let store = std::sync::Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            s.upsert_session("dev", "local", None, None, 1, 1, "running", None)
+                .unwrap();
+        }
+        let id = store
+            .lock()
+            .unwrap()
+            .get_session("dev", "local")
+            .unwrap()
+            .unwrap()
+            .id;
+        // Manually ghost it
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET status='ghost', lost_at=999 WHERE id=?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        let args = DismissGhostSessionArgs { session_id: id };
+        let result = dismiss_ghost_session(args, &store);
+        assert!(result.is_ok());
+        assert!(store
+            .lock()
+            .unwrap()
+            .get_session_by_id(id)
+            .unwrap()
+            .is_none());
     }
 }
