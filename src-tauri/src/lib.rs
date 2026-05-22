@@ -52,6 +52,19 @@ fn compute_backfilled_path(
     Some(new_parts.join(":"))
 }
 
+/// Pure: given the running processes as `(pid, exe_file_name)` pairs, our own
+/// pid and our own exe file name, return the pids of *other* instances of this
+/// app — same executable file name, different pid. Lifted out of
+/// `kill_other_instances` so the decision is unit-testable without touching
+/// real processes.
+fn instances_to_kill(procs: &[(u32, &str)], my_pid: u32, my_name: &str) -> Vec<u32> {
+    procs
+        .iter()
+        .filter(|(pid, name)| *pid != my_pid && *name == my_name)
+        .map(|(pid, _)| *pid)
+        .collect()
+}
+
 /// Run the user's login shell once and adopt several env vars that a
 /// Finder-launched GUI app does not inherit by default:
 ///
@@ -456,5 +469,33 @@ mod path_backfill_tests {
         // Plain POSIX C locale isn't UTF-8 — we should still backfill.
         assert!(needs_locale_backfill("C", "C", "C"));
         assert!(needs_locale_backfill("POSIX", "POSIX", ""));
+    }
+
+    #[test]
+    fn instances_to_kill_excludes_self_even_with_matching_name() {
+        let procs = [(100u32, "claude-fleet")];
+        assert!(instances_to_kill(&procs, 100, "claude-fleet").is_empty());
+    }
+
+    #[test]
+    fn instances_to_kill_picks_other_same_named_process() {
+        let procs = [(100u32, "claude-fleet"), (200u32, "claude-fleet")];
+        assert_eq!(instances_to_kill(&procs, 100, "claude-fleet"), vec![200]);
+    }
+
+    #[test]
+    fn instances_to_kill_ignores_other_names() {
+        let procs = [
+            (100u32, "claude-fleet"),
+            (200u32, "node"),
+            (300u32, "tmux"),
+        ];
+        assert!(instances_to_kill(&procs, 100, "claude-fleet").is_empty());
+    }
+
+    #[test]
+    fn instances_to_kill_handles_empty_list() {
+        let procs: [(u32, &str); 0] = [];
+        assert!(instances_to_kill(&procs, 100, "claude-fleet").is_empty());
     }
 }
