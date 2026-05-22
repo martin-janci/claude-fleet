@@ -165,11 +165,14 @@
 
   // --- Memoised indices (rebuilt once per $sessions change, not per row) ---
 
-  // Map: project_id → all sessions for that project (unfiltered by host)
-  const sessionsByProject = $derived.by(() => {
+  // Map: project_id → sessions filtered by current hostFilter. This derived
+  // value is read directly in the template so Svelte tracks it reactively —
+  // using a plain function via {@const} doesn't establish the dependency.
+  const filteredSessionsByProject = $derived.by(() => {
     const m = new Map<number, SessionRow[]>();
     for (const s of $sessions) {
       if (s.project_id == null) continue;
+      if ($hostFilter !== 'all' && s.host_alias !== $hostFilter) continue;
       if (!m.has(s.project_id)) m.set(s.project_id, []);
       m.get(s.project_id)!.push(s);
     }
@@ -193,9 +196,7 @@
   });
 
   function sessionsForProject(projectId: number): SessionRow[] {
-    const all = sessionsByProject.get(projectId) ?? [];
-    if ($hostFilter === 'all') return all;
-    return all.filter((s) => s.host_alias === $hostFilter);
+    return filteredSessionsByProject.get(projectId) ?? [];
   }
 
   function relatedCountFor(sess: SessionRow): number {
@@ -733,7 +734,7 @@
     {#if filtered.length > 0}
       <ul class="tree">
         {#each filtered as row (row.project.id)}
-          {@const projectSessions = sessionsForProject(row.project.id)}
+          {@const projectSessions = filteredSessionsByProject.get(row.project.id) ?? []}
           {@const isCollapsed = collapsed.has(row.project.id)}
           <li class="proj">
             <div
