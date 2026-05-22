@@ -50,6 +50,8 @@ pub struct SessionRow {
     pub effort_level: Option<String>,
     pub pr_url: Option<String>,
     pub current_activity: Option<String>,
+    pub context_pct: Option<f64>,
+    pub stuck_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -93,6 +95,8 @@ pub struct ReconcileSession<'a> {
     pub effort_level: Option<String>,
     pub pr_url: Option<String>,
     pub current_activity: Option<String>,
+    pub context_pct: Option<f64>,
+    pub stuck_kind: Option<String>,
 }
 
 /// All inputs for applying one host's probe result atomically. Consumed by
@@ -212,6 +216,13 @@ impl Store {
         if v < 11 {
             let tx = self.conn.unchecked_transaction()?;
             tx.execute_batch(include_str!("../migrations/011_host_provisioned.sql"))?;
+            tx.commit()?;
+        }
+        if v < 12 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!(
+                "../migrations/012_session_context_pressure.sql"
+            ))?;
             tx.commit()?;
         }
         Ok(())
@@ -863,7 +874,8 @@ impl Store {
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                     worktree_key, lost_at,
-                    claude_session_id, claude_status, effort_level, pr_url, current_activity
+                    claude_session_id, claude_status, effort_level, pr_url, current_activity,
+                    context_pct, stuck_kind
              FROM sessions WHERE host_alias=?1 ORDER BY last_activity_at DESC",
         )?;
         let rows = stmt.query_map(rusqlite::params![host_alias], |row| {
@@ -887,6 +899,8 @@ impl Store {
                 effort_level: row.get(16)?,
                 pr_url: row.get(17)?,
                 current_activity: row.get(18)?,
+                context_pct: row.get(19)?,
+                stuck_kind: row.get(20)?,
             })
         })?;
         rows.collect()
@@ -899,7 +913,8 @@ impl Store {
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                     worktree_key, lost_at,
-                    claude_session_id, claude_status, effort_level, pr_url, current_activity
+                    claude_session_id, claude_status, effort_level, pr_url, current_activity,
+                    context_pct, stuck_kind
              FROM sessions ORDER BY last_activity_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -923,6 +938,8 @@ impl Store {
                 effort_level: row.get(16)?,
                 pr_url: row.get(17)?,
                 current_activity: row.get(18)?,
+                context_pct: row.get(19)?,
+                stuck_kind: row.get(20)?,
             })
         })?;
         rows.collect()
@@ -951,7 +968,8 @@ impl Store {
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                     worktree_key, lost_at,
-                    claude_session_id, claude_status, effort_level, pr_url, current_activity
+                    claude_session_id, claude_status, effort_level, pr_url, current_activity,
+                    context_pct, stuck_kind
              FROM sessions
              WHERE project_id=?1 AND worktree_key=?2 AND id<>?3
              ORDER BY host_alias ASC, tmux_name ASC",
@@ -977,6 +995,8 @@ impl Store {
                 effort_level: row.get(16)?,
                 pr_url: row.get(17)?,
                 current_activity: row.get(18)?,
+                context_pct: row.get(19)?,
+                stuck_kind: row.get(20)?,
             })
         })?;
         rows.collect()
@@ -1164,6 +1184,8 @@ impl Store {
         effort_level: Option<&str>,
         pr_url: Option<&str>,
         current_activity: Option<&str>,
+        context_pct: Option<f64>,
+        stuck_kind: Option<&str>,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
         // Check existence before the write so we can distinguish created vs updated.
@@ -1179,8 +1201,9 @@ impl Store {
             "INSERT INTO sessions (tmux_name, host_alias, project_id, worktree_id,
                                    created_at, last_activity_at, status, account_uuid,
                                    worktree_key, lost_at,
-                                   claude_session_id, claude_status, effort_level, pr_url, current_activity)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8, NULL, ?9, ?10, ?11, ?12, ?13)
+                                   claude_session_id, claude_status, effort_level, pr_url, current_activity,
+                                   context_pct, stuck_kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8, NULL, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(host_alias, tmux_name) DO UPDATE SET
                project_id=excluded.project_id,
                last_activity_at=excluded.last_activity_at,
@@ -1192,7 +1215,9 @@ impl Store {
                claude_status=COALESCE(excluded.claude_status, claude_status),
                effort_level=COALESCE(excluded.effort_level, effort_level),
                pr_url=COALESCE(excluded.pr_url, pr_url),
-               current_activity=COALESCE(excluded.current_activity, current_activity)",
+               current_activity=COALESCE(excluded.current_activity, current_activity),
+               context_pct=COALESCE(excluded.context_pct, context_pct),
+               stuck_kind=COALESCE(excluded.stuck_kind, stuck_kind)",
             rusqlite::params![
                 tmux_name,
                 host_alias,
@@ -1206,7 +1231,9 @@ impl Store {
                 claude_status,
                 effort_level,
                 pr_url,
-                current_activity
+                current_activity,
+                context_pct,
+                stuck_kind
             ],
         )?;
         if let Some(row) = fetch_session(tx, tmux_name, host_alias)? {
@@ -1375,6 +1402,8 @@ impl Store {
                         sess.effort_level.as_deref(),
                         sess.pr_url.as_deref(),
                         sess.current_activity.as_deref(),
+                        sess.context_pct,
+                        sess.stuck_kind.as_deref(),
                         &mut out,
                     )?;
                     if let Some(pid) = sess.project_id {
@@ -1478,7 +1507,8 @@ impl Store {
                 "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                         last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                         worktree_key, lost_at,
-                        claude_session_id, claude_status, effort_level, pr_url, current_activity
+                        claude_session_id, claude_status, effort_level, pr_url, current_activity,
+                    context_pct, stuck_kind
                  FROM sessions WHERE claude_session_id = ?1",
             )
             .map_err(crate::ipc_error::IpcError::from)?;
@@ -1503,6 +1533,8 @@ impl Store {
                 effort_level: row.get(16)?,
                 pr_url: row.get(17)?,
                 current_activity: row.get(18)?,
+                context_pct: row.get(19)?,
+                stuck_kind: row.get(20)?,
             })
         })
         .map_err(crate::ipc_error::IpcError::from)
@@ -1525,7 +1557,8 @@ fn fetch_session(
         "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                 last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                 worktree_key, lost_at,
-                claude_session_id, claude_status, effort_level, pr_url, current_activity
+                claude_session_id, claude_status, effort_level, pr_url, current_activity,
+                    context_pct, stuck_kind
          FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
     )?;
     let mut rows = stmt.query_map(rusqlite::params![tmux_name, host_alias], |row| {
@@ -1549,6 +1582,8 @@ fn fetch_session(
             effort_level: row.get(16)?,
             pr_url: row.get(17)?,
             current_activity: row.get(18)?,
+            context_pct: row.get(19)?,
+            stuck_kind: row.get(20)?,
         })
     })?;
     match rows.next() {
@@ -1562,7 +1597,8 @@ fn fetch_session_by_id(conn: &Connection, id: i64) -> Result<Option<SessionRow>,
         "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                 last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                 worktree_key, lost_at,
-                claude_session_id, claude_status, effort_level, pr_url, current_activity
+                claude_session_id, claude_status, effort_level, pr_url, current_activity,
+                    context_pct, stuck_kind
          FROM sessions WHERE id=?1",
     )?;
     let mut rows = stmt.query_map(rusqlite::params![id], |row| {
@@ -1586,6 +1622,8 @@ fn fetch_session_by_id(conn: &Connection, id: i64) -> Result<Option<SessionRow>,
             effort_level: row.get(16)?,
             pr_url: row.get(17)?,
             current_activity: row.get(18)?,
+            context_pct: row.get(19)?,
+            stuck_kind: row.get(20)?,
         })
     })?;
     match rows.next() {
@@ -1664,7 +1702,7 @@ mod tests {
     fn migrate_is_idempotent() {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
-        assert_eq!(store.schema_version().expect("version"), 11);
+        assert_eq!(store.schema_version().expect("version"), 12);
     }
 
     #[test]
@@ -1798,7 +1836,7 @@ mod tests {
     #[test]
     fn schema_version_is_seven_after_migration() {
         let s = Store::open_in_memory().expect("open");
-        assert_eq!(s.schema_version().expect("version"), 11);
+        assert_eq!(s.schema_version().expect("version"), 12);
     }
 
     #[test]
@@ -2415,7 +2453,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 11, "schema_version should be 11 after migration");
+        assert_eq!(v, 12, "schema_version should be 12 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store
@@ -2486,6 +2524,8 @@ mod tests {
                 effort_level: None,
                 pr_url: None,
                 current_activity: None,
+                context_pct: None,
+                stuck_kind: None,
             },
             // brand new → create
             ReconcileSession {
@@ -2500,6 +2540,8 @@ mod tests {
                 effort_level: None,
                 pr_url: None,
                 current_activity: None,
+                context_pct: None,
+                stuck_kind: None,
             },
         ];
         let keep = vec!["keep-existing".to_string(), "fresh".to_string()];
@@ -2670,6 +2712,8 @@ mod tests {
                 effort_level: None,
                 pr_url: None,
                 current_activity: None,
+                context_pct: None,
+                stuck_kind: None,
             },
             ReconcileSession {
                 tmux_name: "bad",
@@ -2683,6 +2727,8 @@ mod tests {
                 effort_level: None,
                 pr_url: None,
                 current_activity: None,
+                context_pct: None,
+                stuck_kind: None,
             },
         ];
         let keep = vec!["good".to_string(), "bad".to_string()];

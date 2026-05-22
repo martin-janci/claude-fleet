@@ -12,6 +12,7 @@ pub mod bg_sessions;
 pub mod health;
 pub mod hooks;
 pub mod hosts;
+pub mod pane_intel;
 pub mod projects;
 pub mod provision;
 pub mod sessions;
