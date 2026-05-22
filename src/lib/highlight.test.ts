@@ -59,7 +59,8 @@ describe('highlight', () => {
   it('highlights HTML tags, attribute values and comments', () => {
     const [row] = highlight('<a href="x">hi</a><!-- c -->', 'html');
     const of = (c: string) => row.filter((t) => t.cls === c).map((t) => t.text);
-    expect(of('kw')).toContain('<a href=');
+    expect(of('kw')).toContain('<a'); // tag name, not the attribute
+    expect(of('txt')).toContain(' href='); // attribute name stays plain
     expect(of('str')).toContain('"x"');
     expect(of('txt')).toContain('hi');
     expect(of('com')).toContain('<!-- c -->');

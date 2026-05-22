@@ -212,37 +212,45 @@ function highlightHtml(content: string): Tok[][] {
   };
 
   while (i < n) {
-    if (content.startsWith('<!--', i)) {
-      flushText(i);
-      const close = content.indexOf('-->', i + 4);
-      const j = close === -1 ? n : close + 3;
-      push(content.slice(i, j), 'com');
-      i = textStart = j;
-      continue;
-    }
-
-    // A `<` only opens a tag when followed by a tag-ish char, so `a < b` in
-    // text content is not swallowed.
-    if (content[i] === '<' && i + 1 < n && /[A-Za-z/!?]/.test(content[i + 1])) {
-      flushText(i);
-      let j = i;
-      let segStart = i;
-      while (j < n && content[j] !== '>') {
-        const c = content[j];
-        if (c === '"' || c === "'") {
-          push(content.slice(segStart, j), 'kw');
-          const close = content.indexOf(c, j + 1);
-          const end = close === -1 ? n : close + 1;
-          push(content.slice(j, end), 'str'); // attribute value
-          j = segStart = end;
-          continue;
-        }
-        j++;
+    if (content[i] === '<') {
+      if (content.startsWith('<!--', i)) {
+        flushText(i);
+        const close = content.indexOf('-->', i + 4);
+        const j = close === -1 ? n : close + 3;
+        push(content.slice(i, j), 'com');
+        i = textStart = j;
+        continue;
       }
-      const tagEnd = j < n ? j + 1 : n; // include the closing `>`
-      push(content.slice(segStart, tagEnd), 'kw');
-      i = textStart = tagEnd;
-      continue;
+
+      // A `<` only opens a tag when followed by a tag-ish char, so `a < b`
+      // in text content is not swallowed.
+      if (i + 1 < n && /[A-Za-z/!?]/.test(content[i + 1])) {
+        flushText(i);
+        let j = i + 1;
+        if (content[j] === '/') j++;
+        while (j < n && /[\w:.-]/.test(content[j])) j++;
+        push(content.slice(i, j), 'kw'); // `<tag` or `</tag`
+
+        // Attribute names stay plain; only quoted values are coloured.
+        let plain = j;
+        while (j < n && content[j] !== '>') {
+          const c = content[j];
+          if (c === '"' || c === "'") {
+            if (j > plain) push(content.slice(plain, j), 'txt');
+            const close = content.indexOf(c, j + 1);
+            const end = close === -1 ? n : close + 1;
+            push(content.slice(j, end), 'str'); // attribute value
+            j = plain = end;
+            continue;
+          }
+          j++;
+        }
+        if (j > plain) push(content.slice(plain, j), 'txt');
+        const tagEnd = j < n ? j + 1 : n;
+        push(content.slice(j, tagEnd), 'kw'); // closing `>`
+        i = textStart = tagEnd;
+        continue;
+      }
     }
 
     i++;
