@@ -181,6 +181,11 @@ impl Store {
             tx.execute_batch(include_str!("../migrations/007_indexes.sql"))?;
             tx.commit()?;
         }
+        if v < 8 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../migrations/008_ghost_sessions.sql"))?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -1319,7 +1324,7 @@ mod tests {
     fn migrate_is_idempotent() {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
-        assert_eq!(store.schema_version().expect("version"), 7);
+        assert_eq!(store.schema_version().expect("version"), 8);
     }
 
     #[test]
@@ -1453,7 +1458,7 @@ mod tests {
     #[test]
     fn schema_version_is_seven_after_migration() {
         let s = Store::open_in_memory().expect("open");
-        assert_eq!(s.schema_version().expect("version"), 7);
+        assert_eq!(s.schema_version().expect("version"), 8);
     }
 
     #[test]
@@ -2023,6 +2028,30 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, "work");
         assert_eq!(rows[0].reviews_session_id, None);
+    }
+
+    #[test]
+    fn migration_008_adds_lost_at_column() {
+        let store = Store::open_in_memory().expect("store");
+        let v: i64 = store
+            .conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 8, "schema_version should be 8 after migration");
+        // Column exists and defaults to NULL
+        store.upsert_host("alpha").unwrap();
+        store
+            .upsert_session("s1", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        let lost: Option<i64> = store
+            .conn
+            .query_row(
+                "SELECT lost_at FROM sessions WHERE tmux_name='s1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(lost, None, "lost_at should be NULL for a fresh session");
     }
 
     #[test]
