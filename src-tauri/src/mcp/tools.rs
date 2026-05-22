@@ -83,6 +83,16 @@ fn ok_json<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpError> {
     Ok(CallToolResult::success(vec![text_content(json)]))
 }
 
+/// A `SessionRow` augmented with the controller flag for the `list_sessions`
+/// MCP output. `#[serde(flatten)]` keeps every original SessionRow field at the
+/// top level, so adding `is_controller` does not break existing consumers.
+#[derive(serde::Serialize)]
+struct SessionWithController {
+    is_controller: bool,
+    #[serde(flatten)]
+    row: crate::store::SessionRow,
+}
+
 // --- tool parameter structs ------------------------------------------------
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -133,6 +143,9 @@ pub struct KillSessionParams {
     pub host_alias: String,
     /// tmux session name to kill.
     pub name: String,
+    /// Kill even if this is the registered fleet controller. Default false.
+    #[serde(default)]
+    pub force: bool,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -151,6 +164,9 @@ pub struct RestartSessionParams {
     pub host_alias: String,
     /// tmux session name to restart.
     pub name: String,
+    /// Restart even if this is the registered fleet controller. Default false.
+    #[serde(default)]
+    pub force: bool,
 }
 
 fn default_true() -> bool {
@@ -191,6 +207,23 @@ pub struct CaptureSessionParams {
 pub struct SessionIdParams {
     /// Fleet session id (from list_sessions).
     pub session_id: i64,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RecreateSessionParams {
+    /// Fleet session id (from list_sessions).
+    pub session_id: i64,
+    /// Recreate even if this is the registered fleet controller. Default false.
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RegisterSelfParams {
+    /// Host alias of the calling (controller) session.
+    pub host_alias: String,
+    /// tmux session name of the calling (controller) session.
+    pub tmux_name: String,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -376,14 +409,36 @@ impl FleetTools {
     // ---- sessions ----
 
     #[tool(description = "Reconcile and list all tmux sessions across every \
-        reachable host. This is the primary way to see fleet state. JSON.")]
+        reachable host. This is the primary way to see fleet state. Each row \
+        carries an is_controller flag (true for the registered controller \
+        session). JSON.")]
     async fn list_sessions(&self) -> Result<CallToolResult, McpError> {
         audit("list_sessions", "");
-        ok_json(
-            &sessions::list_sessions(&self.store, &self.ssh)
-                .await
-                .map_err(to_mcp_err)?,
-        )
+        let rows = sessions::list_sessions(&self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        // Tag each row with whether it is the registered controller, comparing
+        // (host_alias, tmux_name) against the stored controller. The flag is a
+        // wrapper field — every original SessionRow field is preserved via
+        // `#[serde(flatten)]`, so existing consumers are unaffected.
+        let controller = {
+            let s = self
+                .store
+                .lock()
+                .map_err(|_| McpError::internal_error("E_LOCK: store mutex poisoned", None))?;
+            s.get_controller()
+                .map_err(|e| to_mcp_err(IpcError::from(e)))?
+        };
+        let tagged: Vec<SessionWithController> = rows
+            .into_iter()
+            .map(|row| {
+                let is_controller = controller
+                    .as_ref()
+                    .is_some_and(|(h, t)| *h == row.host_alias && *t == row.tmux_name);
+                SessionWithController { is_controller, row }
+            })
+            .collect();
+        ok_json(&tagged)
     }
 
     #[tool(description = "List sessions related to a given session — those \
@@ -397,6 +452,29 @@ impl FleetTools {
             session_id: p.session_id,
         };
         ok_json(&sessions::related_sessions(args, &self.store).map_err(to_mcp_err)?)
+    }
+
+    #[tool(description = "Mark the calling session as the fleet controller; \
+        kill/recreate/restart refuse to target it without force.")]
+    async fn register_self(
+        &self,
+        Parameters(p): Parameters<RegisterSelfParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "register_self",
+            &format!("host={} tmux={}", p.host_alias, p.tmux_name),
+        );
+        {
+            let s = self
+                .store
+                .lock()
+                .map_err(|_| McpError::internal_error("E_LOCK: store mutex poisoned", None))?;
+            s.set_controller(&p.host_alias, &p.tmux_name)
+                .map_err(|e| to_mcp_err(IpcError::from(e)))?;
+        }
+        ok_json(&serde_json::json!({
+            "controller": { "host_alias": p.host_alias, "tmux_name": p.tmux_name }
+        }))
     }
 
     #[tool(description = "Create a new Claude Code tmux session on a host, in \
@@ -442,6 +520,7 @@ impl FleetTools {
         let args = sessions::KillSessionArgs {
             host_alias: p.host_alias,
             name: p.name,
+            force: p.force,
         };
         let id = sessions::kill_session(args, &self.store, &self.ssh)
             .await
@@ -483,6 +562,7 @@ impl FleetTools {
         let args = sessions::RestartSessionArgs {
             host_alias: p.host_alias,
             name: p.name,
+            force: p.force,
         };
         let row = sessions::restart_session(args, &self.store, &self.ssh)
             .await
@@ -609,12 +689,13 @@ impl FleetTools {
         Works for running or ghost sessions. Returns the session row as JSON.")]
     async fn recreate_session(
         &self,
-        Parameters(p): Parameters<SessionIdParams>,
+        Parameters(p): Parameters<RecreateSessionParams>,
     ) -> Result<CallToolResult, McpError> {
         audit("recreate_session", &format!("session_id={}", p.session_id));
         let row = sessions::recreate_session(
             sessions::RecreateSessionArgs {
                 session_id: p.session_id,
+                force: p.force,
             },
             &self.store,
             &self.ssh,

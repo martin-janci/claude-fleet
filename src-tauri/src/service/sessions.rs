@@ -844,10 +844,42 @@ async fn new_session_inner(
     Ok(row)
 }
 
+/// Refuse to operate on the registered controller session unless `force`.
+///
+/// Returns `Err(E_SELF_TARGET)` when `(host, name)` equals the registered
+/// controller `(host, tmux_name)` and `force` is false. Always `Ok` when no
+/// controller is registered, the target is a different session, or `force` is
+/// set. Pure — the caller reads the controller from the store first.
+pub fn guard_not_controller(
+    controller: Option<&(String, String)>,
+    host: &str,
+    name: &str,
+    force: bool,
+) -> Result<(), IpcError> {
+    if force {
+        return Ok(());
+    }
+    if let Some((c_host, c_name)) = controller {
+        if c_host == host && c_name == name {
+            return Err(IpcError::new(
+                "E_SELF_TARGET",
+                format!(
+                    "{name} on {host} is the registered fleet controller; \
+                     pass force=true to target it anyway"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 pub struct KillSessionArgs {
     pub host_alias: String,
     pub name: String,
+    /// Override the controller self-target guard.
+    #[serde(default)]
+    pub force: bool,
 }
 
 pub async fn kill_session(
@@ -857,11 +889,18 @@ pub async fn kill_session(
 ) -> Result<i64, IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
     crate::validate::tmux_name(&args.name)?;
-    // Look up id BEFORE killing so we can return it after.
+    // Look up id BEFORE killing so we can return it after. Read the controller
+    // under the same lock and refuse to nuke ourselves unless forced.
     let id = {
         let s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        guard_not_controller(
+            s.get_controller()?.as_ref(),
+            &args.host_alias,
+            &args.name,
+            args.force,
+        )?;
         s.get_session(&args.name, &args.host_alias)?
             .map(|r| r.id)
             .ok_or_else(|| {
@@ -913,6 +952,9 @@ pub async fn rename_session(
 pub struct RestartSessionArgs {
     pub host_alias: String,
     pub name: String,
+    /// Override the controller self-target guard.
+    #[serde(default)]
+    pub force: bool,
 }
 
 pub async fn restart_session(
@@ -923,11 +965,19 @@ pub async fn restart_session(
     crate::validate::host_alias(&args.host_alias)?;
     crate::validate::tmux_name(&args.name)?;
     // Respawn the pane with the command matching the session's kind so a
-    // restarted shell session comes back as a shell, not a Claude pane.
+    // restarted shell session comes back as a shell, not a Claude pane. Read
+    // the controller under the same lock and refuse to restart ourselves
+    // unless forced.
     let (kind, claude_id) = {
         let s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        guard_not_controller(
+            s.get_controller()?.as_ref(),
+            &args.host_alias,
+            &args.name,
+            args.force,
+        )?;
         match s.get_session(&args.name, &args.host_alias)? {
             Some(r) => (r.kind, r.claude_session_id),
             None => ("work".to_string(), None),
@@ -1165,6 +1215,9 @@ fn recreate_pane_command(kind: &str, claude_session_id: Option<&str>) -> String 
 #[derive(Deserialize)]
 pub struct RecreateSessionArgs {
     pub session_id: i64,
+    /// Override the controller self-target guard.
+    #[serde(default)]
+    pub force: bool,
 }
 
 pub async fn recreate_session(
@@ -1183,6 +1236,13 @@ pub async fn recreate_session(
         let sess = s
             .get_session_by_id(args.session_id)?
             .ok_or_else(|| IpcError::new("E_NOTFOUND", "session not found"))?;
+        // Refuse to nuke-and-rebuild ourselves unless forced.
+        guard_not_controller(
+            s.get_controller()?.as_ref(),
+            &sess.host_alias,
+            &sess.tmux_name,
+            args.force,
+        )?;
         let host = s
             .get_host_row(&sess.host_alias)?
             .ok_or_else(|| IpcError::new("E_NOTFOUND", "host not found"))?;
@@ -1265,6 +1325,34 @@ pub async fn capture_session_output(
 mod tests {
     use super::*;
     use crate::store::Store;
+
+    #[test]
+    fn guard_blocks_self_target_without_force() {
+        let ctrl = ("mac".to_string(), "dev-fleet".to_string());
+        let err =
+            guard_not_controller(Some(&ctrl), "mac", "dev-fleet", false).expect_err("should block");
+        assert_eq!(err.code, "E_SELF_TARGET");
+    }
+
+    #[test]
+    fn guard_allows_self_target_with_force() {
+        let ctrl = ("mac".to_string(), "dev-fleet".to_string());
+        assert!(guard_not_controller(Some(&ctrl), "mac", "dev-fleet", true).is_ok());
+    }
+
+    #[test]
+    fn guard_allows_non_controller_target() {
+        let ctrl = ("mac".to_string(), "dev-fleet".to_string());
+        // different name
+        assert!(guard_not_controller(Some(&ctrl), "mac", "other", false).is_ok());
+        // different host
+        assert!(guard_not_controller(Some(&ctrl), "mefistos", "dev-fleet", false).is_ok());
+    }
+
+    #[test]
+    fn guard_allows_when_no_controller_registered() {
+        assert!(guard_not_controller(None, "mac", "dev-fleet", false).is_ok());
+    }
 
     #[test]
     fn extracts_owner_repo_from_macos_path() {
@@ -1962,7 +2050,10 @@ mod ghost_tests {
     #[test]
     fn recreate_session_errors_when_session_missing() {
         let store = std::sync::Mutex::new(Store::open_in_memory().unwrap());
-        let args = RecreateSessionArgs { session_id: 999 };
+        let args = RecreateSessionArgs {
+            session_id: 999,
+            force: false,
+        };
         let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
         let rt = tokio::runtime::Runtime::new().unwrap();
         let err = rt
@@ -1990,7 +2081,10 @@ mod ghost_tests {
             .unwrap()
             .unwrap()
             .id;
-        let args = RecreateSessionArgs { session_id: id };
+        let args = RecreateSessionArgs {
+            session_id: id,
+            force: false,
+        };
         let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
         let rt = tokio::runtime::Runtime::new().unwrap();
         let err = rt
