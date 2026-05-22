@@ -44,6 +44,7 @@ pub struct SessionRow {
     pub kind: String,
     pub reviews_session_id: Option<i64>,
     pub worktree_key: Option<String>,
+    pub lost_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -739,7 +740,7 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                    worktree_key
+                    worktree_key, lost_at
              FROM sessions WHERE host_alias=?1 ORDER BY last_activity_at DESC",
         )?;
         let rows = stmt.query_map(rusqlite::params![host_alias], |row| {
@@ -757,6 +758,7 @@ impl Store {
                 kind: row.get(10)?,
                 reviews_session_id: row.get(11)?,
                 worktree_key: row.get(12)?,
+                lost_at: row.get(13)?,
             })
         })?;
         rows.collect()
@@ -768,7 +770,7 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                    worktree_key
+                    worktree_key, lost_at
              FROM sessions ORDER BY last_activity_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -786,6 +788,7 @@ impl Store {
                 kind: row.get(10)?,
                 reviews_session_id: row.get(11)?,
                 worktree_key: row.get(12)?,
+                lost_at: row.get(13)?,
             })
         })?;
         rows.collect()
@@ -813,7 +816,7 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                    worktree_key
+                    worktree_key, lost_at
              FROM sessions
              WHERE project_id=?1 AND worktree_key=?2 AND id<>?3
              ORDER BY host_alias ASC, tmux_name ASC",
@@ -833,6 +836,7 @@ impl Store {
                 kind: row.get(10)?,
                 reviews_session_id: row.get(11)?,
                 worktree_key: row.get(12)?,
+                lost_at: row.get(13)?,
             })
         })?;
         rows.collect()
@@ -872,33 +876,7 @@ impl Store {
     }
 
     pub fn get_session_by_id(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
-                    last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                    worktree_key
-             FROM sessions WHERE id = ?1",
-        )?;
-        let mut rows = stmt.query_map(rusqlite::params![id], |row| {
-            Ok(SessionRow {
-                id: row.get(0)?,
-                tmux_name: row.get(1)?,
-                host_alias: row.get(2)?,
-                project_id: row.get(3)?,
-                worktree_id: row.get(4)?,
-                created_at: row.get(5)?,
-                last_activity_at: row.get(6)?,
-                status: row.get(7)?,
-                notes: row.get(8)?,
-                account_uuid: row.get(9)?,
-                kind: row.get(10)?,
-                reviews_session_id: row.get(11)?,
-                worktree_key: row.get(12)?,
-            })
-        })?;
-        match rows.next() {
-            Some(r) => Ok(Some(r?)),
-            None => Ok(None),
-        }
+        fetch_session_by_id(&self.conn, id)
     }
 
     pub fn worktree_path(&self, id: i64) -> Result<Option<String>, rusqlite::Error> {
@@ -1033,7 +1011,8 @@ impl Store {
                last_activity_at=excluded.last_activity_at,
                status=excluded.status,
                account_uuid=excluded.account_uuid,
-               worktree_key=excluded.worktree_key",
+               worktree_key=excluded.worktree_key,
+               lost_at=NULL",
             rusqlite::params![
                 tmux_name,
                 host_alias,
@@ -1229,7 +1208,7 @@ fn fetch_session(
     let mut stmt = conn.prepare_cached(
         "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                 last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                worktree_key
+                worktree_key, lost_at
          FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
     )?;
     let mut rows = stmt.query_map(rusqlite::params![tmux_name, host_alias], |row| {
@@ -1247,6 +1226,41 @@ fn fetch_session(
             kind: row.get(10)?,
             reviews_session_id: row.get(11)?,
             worktree_key: row.get(12)?,
+            lost_at: row.get(13)?,
+        })
+    })?;
+    match rows.next() {
+        Some(r) => Ok(Some(r?)),
+        None => Ok(None),
+    }
+}
+
+fn fetch_session_by_id(
+    conn: &Connection,
+    id: i64,
+) -> Result<Option<SessionRow>, rusqlite::Error> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
+                last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
+                worktree_key, lost_at
+         FROM sessions WHERE id=?1",
+    )?;
+    let mut rows = stmt.query_map(rusqlite::params![id], |row| {
+        Ok(SessionRow {
+            id: row.get(0)?,
+            tmux_name: row.get(1)?,
+            host_alias: row.get(2)?,
+            project_id: row.get(3)?,
+            worktree_id: row.get(4)?,
+            created_at: row.get(5)?,
+            last_activity_at: row.get(6)?,
+            status: row.get(7)?,
+            notes: row.get(8)?,
+            account_uuid: row.get(9)?,
+            kind: row.get(10)?,
+            reviews_session_id: row.get(11)?,
+            worktree_key: row.get(12)?,
+            lost_at: row.get(13)?,
         })
     })?;
     match rows.next() {
