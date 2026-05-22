@@ -255,6 +255,23 @@ impl Store {
         Ok(())
     }
 
+    /// Record which session is the fleet controller (the calling session that
+    /// must not kill/recreate/restart itself without `force`). Stored as two
+    /// keys in the `settings` table.
+    pub fn set_controller(&self, host: &str, tmux_name: &str) -> Result<()> {
+        self.set_setting("controller.host", host)?;
+        self.set_setting("controller.tmux", tmux_name)?;
+        Ok(())
+    }
+
+    /// Read the registered controller as `(host, tmux_name)`. `None` unless
+    /// both keys are present.
+    pub fn get_controller(&self) -> Result<Option<(String, String)>> {
+        let host = self.get_setting("controller.host")?;
+        let tmux = self.get_setting("controller.tmux")?;
+        Ok(host.zip(tmux))
+    }
+
     // ---- Private fetch helpers used after writes to produce emit payloads ----
     //
     // The row-mapping SQL lives in free `fetch_*` functions that take a bare
@@ -1603,6 +1620,23 @@ mod tests {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
         assert_eq!(store.schema_version().expect("version"), 11);
+    }
+
+    #[test]
+    fn controller_set_get_roundtrip() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.get_controller().unwrap(), None, "unset is None");
+        s.set_controller("mac", "dev-fleet").unwrap();
+        assert_eq!(
+            s.get_controller().unwrap(),
+            Some(("mac".to_string(), "dev-fleet".to_string()))
+        );
+        // overwrite
+        s.set_controller("mefistos", "ctrl").unwrap();
+        assert_eq!(
+            s.get_controller().unwrap(),
+            Some(("mefistos".to_string(), "ctrl".to_string()))
+        );
     }
 
     #[test]
