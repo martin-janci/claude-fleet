@@ -9,6 +9,7 @@
   } from './files';
   import { repoCommitDiff } from './history';
   import DiffView from './DiffView.svelte';
+  import { highlight, langForPath } from './highlight';
 
   let {
     session,
@@ -132,7 +133,11 @@
     }
   }
 
-  const fileLines = $derived(file ? file.content.split('\n') : []);
+  // Tokenised file body, one token row per line. Keyed off the path's
+  // extension; binary files never reach here.
+  const hlLines = $derived(
+    file && !file.binary ? highlight(file.content, langForPath(path)) : [],
+  );
 </script>
 
 <div class="viewer" data-testid="file-viewer">
@@ -181,9 +186,11 @@
             <p class="hint">File truncated (over 512 KiB).</p>
           {/if}
           <div class="file">
-            {#each fileLines as line, i}
+            {#each hlLines as toks, i}
               <div class="frow">
-                <span class="fno">{i + 1}</span><span class="ftext">{line || ' '}</span>
+                <span class="fno">{i + 1}</span><span class="ftext"
+                  >{#each toks as t}<span class={t.cls}>{t.text}</span>{:else}&nbsp;{/each}</span
+                >
               </div>
             {/each}
           </div>
@@ -284,5 +291,21 @@
   }
   .ftext {
     flex: 1 1 auto;
+  }
+  /* Syntax token colours (One Dark palette). Comments use the theme's
+     muted colour so they track light/dark; the rest are fixed tints, in
+     keeping with DiffView's hard-coded add/del colours. */
+  .ftext .com {
+    color: var(--fg-muted);
+    font-style: italic;
+  }
+  .ftext .kw {
+    color: #c678dd;
+  }
+  .ftext .str {
+    color: #98c379;
+  }
+  .ftext .num {
+    color: #d19a66;
   }
 </style>

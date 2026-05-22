@@ -1,5 +1,6 @@
 <script lang="ts" module>
   import type { ChangedFile, RepoTree } from './files';
+  import { fileIcon, folderIcon } from './fileicons';
 
   interface TreeNode {
     name: string;
@@ -147,6 +148,7 @@
               <span class="badge {BADGE[c.status]?.cls ?? 'b-mod'}"
                 >{BADGE[c.status]?.letter ?? '•'}</span
               >
+              <span class="ficon">{fileIcon(c.path)}</span>
               <span class="name">{c.path}</span>
             </button>
           </div>
@@ -164,6 +166,7 @@
             onclick={() => onSelect(path, statusByPath.get(path))}
             title={path}
           >
+            <span class="ficon">{fileIcon(path)}</span>
             <span class="name">{path}</span>
           </button>
         {/each}
@@ -198,6 +201,7 @@
       onclick={() => toggle(node.path)}
     >
       <span class="caret">{expanded[node.path] ? '▾' : '▸'}</span>
+      <span class="ficon">{folderIcon(expanded[node.path])}</span>
       <span class="name">{node.name}</span>
     </button>
     {#if expanded[node.path]}
@@ -213,6 +217,7 @@
       onclick={() => onSelect(node.path, statusByPath.get(node.path))}
       title={node.path}
     >
+      <span class="ficon">{fileIcon(node.name)}</span>
       <span class="name">{node.name}</span>
     </button>
   {/if}
@@ -262,7 +267,7 @@
     color: var(--fg);
     cursor: pointer;
     font-size: 0.78rem;
-    padding: 0.18rem 0.4rem;
+    padding: 0.34rem 0.4rem;
     text-align: left;
   }
   .row:hover {
@@ -284,6 +289,13 @@
     width: 0.95rem;
     color: var(--fg-muted);
     font-size: 0.7rem;
+  }
+  .ficon {
+    flex: 0 0 auto;
+    width: 1.2rem;
+    text-align: center;
+    font-size: 0.82rem;
+    line-height: 1;
   }
   .badge {
     flex: 0 0 auto;
