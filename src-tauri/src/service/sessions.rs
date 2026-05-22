@@ -824,18 +824,31 @@ pub async fn restart_session(
     })
 }
 
-/// Build the two tmux invocations that together send a prompt to a session:
-///   1. send-keys -t <name> -l <prompt>   (literal, no key-name translation)
-///   2. send-keys -t <name> Enter         (real Enter to submit)
-pub fn build_send_commands(tmux_name: &str, prompt: &str) -> Vec<String> {
-    vec![
-        format!(
-            "tmux send-keys -t {} -l {}",
-            quote(tmux_name),
-            quote(prompt)
-        ),
-        format!("tmux send-keys -t {} Enter", quote(tmux_name)),
-    ]
+/// Build the tmux invocations that together send a prompt to a session:
+///   1. send-keys -t <name> -l <body>   (literal, no key-name translation;
+///      a single trailing newline is stripped so internal newlines stay as
+///      soft newlines and a stray trailing one can't pre-submit the body)
+///   2. (when `submit`) a short settle so the REPL flushes the literal paste
+///   3. (when `submit`) send-keys -t <name> Enter   (one real Enter to submit)
+///
+/// With `submit = false` the body is staged in the REPL but not submitted.
+pub fn build_send_commands(tmux_name: &str, prompt: &str, submit: bool) -> Vec<String> {
+    let body = prompt.strip_suffix('\n').unwrap_or(prompt);
+    let mut cmds = vec![format!(
+        "tmux send-keys -t {} -l {}",
+        quote(tmux_name),
+        quote(body)
+    )];
+    if submit {
+        // settle so the REPL flushes the literal paste before the submit key
+        cmds.push("sleep 0.15".to_string());
+        cmds.push(format!("tmux send-keys -t {} Enter", quote(tmux_name)));
+    }
+    cmds
+}
+
+fn default_submit() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -843,6 +856,8 @@ pub struct SendPromptArgs {
     pub host_alias: String,
     pub tmux_name: String,
     pub prompt: String,
+    #[serde(default = "default_submit")]
+    pub submit: bool,
 }
 
 async fn send_prompt_inner(
@@ -850,13 +865,14 @@ async fn send_prompt_inner(
     host_alias: &str,
     tmux_name: &str,
     prompt: &str,
+    submit: bool,
 ) -> Result<(), IpcError> {
     crate::validate::host_alias(host_alias)?;
     crate::validate::tmux_name(tmux_name)?;
-    // Both send-keys commands in ONE shell invocation joined with `&&` (so a
+    // The send-keys commands run in ONE shell invocation joined with `&&` (so a
     // failed literal-text send doesn't still fire Enter) — one round-trip
     // instead of two.
-    let script = build_send_commands(tmux_name, prompt).join(" && ");
+    let script = build_send_commands(tmux_name, prompt, submit).join(" && ");
     let out = if host_alias == "local" {
         tokio::process::Command::new("bash")
             .args(["-c", &script])
@@ -881,7 +897,14 @@ async fn send_prompt_inner(
 }
 
 pub async fn send_prompt(args: SendPromptArgs, ssh: &Arc<SshClient>) -> Result<(), IpcError> {
-    send_prompt_inner(ssh, &args.host_alias, &args.tmux_name, &args.prompt).await
+    send_prompt_inner(
+        ssh,
+        &args.host_alias,
+        &args.tmux_name,
+        &args.prompt,
+        args.submit,
+    )
+    .await
 }
 
 /// Resolve the cwd a session should (re)open in. Order: the session's worktree
@@ -986,7 +1009,9 @@ pub async fn spawn_review(
     // If seeding the prompt fails (e.g. cl wasn't ready yet), DON'T discard the
     // session — return it anyway so the user can type the review prompt manually
     // in the terminal. Log the failure for diagnostics.
-    if let Err(e) = send_prompt_inner(ssh, &source.host_alias, &review_name, &args.prompt).await {
+    if let Err(e) =
+        send_prompt_inner(ssh, &source.host_alias, &review_name, &args.prompt, true).await
+    {
         eprintln!("spawn_review: seeding prompt to {review_name} failed (session is live, seed manually): {e:?}");
     }
 
@@ -1223,25 +1248,46 @@ mod tests {
 
     #[test]
     fn build_send_commands_emits_literal_text_then_enter() {
-        let cmds = build_send_commands("dev-foo", "hello world");
-        assert_eq!(cmds.len(), 2);
+        let cmds = build_send_commands("dev-foo", "hello world", true);
+        assert_eq!(cmds.len(), 3);
         assert!(cmds[0].starts_with("tmux send-keys -t "));
         assert!(cmds[0].contains(" -l "));
         assert!(cmds[0].contains("'hello world'"));
-        assert!(cmds[1].ends_with(" Enter"));
+        assert!(cmds.last().unwrap().ends_with(" Enter"));
     }
 
     #[test]
     fn build_send_commands_escapes_embedded_quotes() {
-        let cmds = build_send_commands("dev-foo", "it's a test");
+        let cmds = build_send_commands("dev-foo", "it's a test", true);
         // quote uses the '\''..  dance for embedded singles.
         assert!(cmds[0].contains("'it'\\''s a test'"));
     }
 
     #[test]
     fn build_send_commands_quotes_session_name_with_dashes() {
-        let cmds = build_send_commands("dev-with-dashes", "x");
+        let cmds = build_send_commands("dev-with-dashes", "x", true);
         assert!(cmds[0].contains("'dev-with-dashes'"));
+    }
+
+    #[test]
+    fn send_commands_strip_trailing_newline_and_submit_once() {
+        let cmds = build_send_commands("dev-x", "line1\nline2\n", true);
+        // body preserves the internal newline, trailing newline stripped
+        assert!(cmds
+            .iter()
+            .any(|c| c.contains("-l") && c.contains("line1") && c.contains("line2")));
+        // the literal body must not carry the trailing newline
+        assert!(!cmds.iter().any(|c| c.contains("line2\n")));
+        // exactly one Enter/submit, with a settle before it
+        let enters = cmds.iter().filter(|c| c.ends_with("Enter")).count();
+        assert_eq!(enters, 1);
+        assert!(cmds.iter().any(|c| c.contains("sleep")));
+    }
+
+    #[test]
+    fn send_commands_no_submit_when_submit_false() {
+        let cmds = build_send_commands("dev-x", "stage me", false);
+        assert!(cmds.iter().all(|c| !c.ends_with("Enter")));
     }
 
     #[tokio::test]
