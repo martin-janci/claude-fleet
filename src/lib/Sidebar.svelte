@@ -31,8 +31,8 @@
   // hide the whole sidebar to make room for the terminal.
   let { onCollapse }: { onCollapse?: () => void } = $props();
 
-  type Recency = 'all' | '1d' | '7d' | '30d';
-  const RECENCY_VALUES: readonly Recency[] = ['all', '1d', '7d', '30d'];
+  type Recency = 'all' | '8h' | '1d' | '3d' | '7d' | '30d';
+  const RECENCY_VALUES: readonly Recency[] = ['all', '8h', '1d', '3d', '7d', '30d'];
   function isRecency(v: unknown): v is Recency {
     return typeof v === 'string' && (RECENCY_VALUES as readonly string[]).includes(v);
   }
@@ -99,11 +99,9 @@
 
   const RECENCY_WINDOW: Record<Recency, number | null> = {
     all: null,
-    // "1d" = active within the last 24h. User-requested replacement of the
-    // older "today" pill — the latter was confusing because it didn't behave
-    // like a calendar day (it was a 24h sliding window). Same numeric value
-    // here, clearer label.
+    '8h': 60 * 60 * 8,
     '1d': 60 * 60 * 24,
+    '3d': 60 * 60 * 24 * 3,
     '7d': 60 * 60 * 24 * 7,
     '30d': 60 * 60 * 24 * 30,
   };
