@@ -1,6 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { performance } from 'node:perf_hooks';
 import { tick } from 'svelte';
 
 // Three sample projects. Sessions are attached per-test so we can verify

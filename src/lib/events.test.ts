@@ -18,7 +18,7 @@ import { subscribeToRowEvents } from './events';
 
 describe('subscribeToRowEvents', () => {
   beforeEach(() => {
-    (emit as ReturnType<typeof vi.fn>).mockClear();
+    vi.mocked(emit).mockClear();
   });
 
   it('fires onSessionCreated when session:created is emitted', async () => {
@@ -26,7 +26,7 @@ describe('subscribeToRowEvents', () => {
     await subscribeToRowEvents({
       onSessionCreated: (row) => seen.push(row.id),
     });
-    await (emit as ReturnType<typeof vi.fn>)('session:created', {
+    await vi.mocked(emit)('session:created', {
       id: 42,
       tmux_name: 't',
       host_alias: 'h',
@@ -49,7 +49,7 @@ describe('subscribeToRowEvents', () => {
     await subscribeToRowEvents({
       onSessionKilled: (p) => killed.push(p.id),
     });
-    await (emit as ReturnType<typeof vi.fn>)('session:killed', { id: 99 });
+    await vi.mocked(emit)('session:killed', { id: 99 });
     expect(killed).toEqual([99]);
   });
 
@@ -59,7 +59,7 @@ describe('subscribeToRowEvents', () => {
       onSessionCreated: (row) => seen.push(row.id),
     });
     unlisten();
-    await (emit as ReturnType<typeof vi.fn>)('session:created', {
+    await vi.mocked(emit)('session:created', {
       id: 1, tmux_name: 't', host_alias: 'h',
       project_id: null, worktree_id: null,
       created_at: 0, last_activity_at: 0,
@@ -79,7 +79,7 @@ describe('subscribeToRowEvents → store integration', () => {
       onSessionCreated: mergeSession,
       onSessionKilled: (p) => removeSession(p.id),
     });
-    await (emit as ReturnType<typeof vi.fn>)('session:created', {
+    await vi.mocked(emit)('session:created', {
       id: 7,
       tmux_name: 'dev-test',
       host_alias: 'local',
@@ -96,7 +96,7 @@ describe('subscribeToRowEvents → store integration', () => {
     });
     const { get } = await import('svelte/store');
     expect(get(sessions).map((s) => s.id)).toEqual([7]);
-    await (emit as ReturnType<typeof vi.fn>)('session:killed', { id: 7 });
+    await vi.mocked(emit)('session:killed', { id: 7 });
     expect(get(sessions)).toEqual([]);
   });
 });
