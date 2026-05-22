@@ -1,6 +1,10 @@
 .DS_Store
 node_modules
 /dist
+
+# This project uses pnpm; reject stray npm/yarn lockfiles.
+package-lock.json
+yarn.lock
 .env
 .env.*
 !.env.example
