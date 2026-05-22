@@ -1,4 +1,5 @@
 mod cancel;
+mod claude_agents;
 mod commands;
 mod events;
 mod ipc_error;
