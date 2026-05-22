@@ -51,6 +51,11 @@ fn reconcile_write_one_host(
                     last_activity_at: sess.last_activity,
                     account_uuid,
                     worktree_key,
+                    claude_session_id: None, // filled by claude_agents lookup in Task 5
+                    claude_status: None,
+                    effort_level: None,
+                    pr_url: None,
+                    current_activity: None,
                 });
             }
             s.apply_host_reconcile(HostReconcile {
