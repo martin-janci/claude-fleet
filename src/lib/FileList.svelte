@@ -64,14 +64,14 @@
     onMode,
     onRefresh,
   }: {
-    mode: 'changes' | 'tree';
+    mode: 'changes' | 'tree' | 'history' | 'branches';
     changes: ChangedFile[];
     tree: RepoTree | null;
     loading: boolean;
     error: string | null;
     selectedPath: string | null;
     onSelect: (path: string, status: string | undefined) => void;
-    onMode: (m: 'changes' | 'tree') => void;
+    onMode: (m: 'changes' | 'tree' | 'history' | 'branches') => void;
     onRefresh: () => void;
   } = $props();
 
@@ -105,16 +105,6 @@
 </script>
 
 <div class="list" data-testid="file-list">
-  <div class="head">
-    <div class="modes">
-      <button class:active={mode === 'changes'} onclick={() => onMode('changes')}
-        >Changed</button
-      >
-      <button class:active={mode === 'tree'} onclick={() => onMode('tree')}>All files</button>
-    </div>
-    <button class="refresh" title="Refresh" aria-label="Refresh" onclick={onRefresh}>↻</button>
-  </div>
-
   <input
     class="filter"
     type="text"
@@ -211,56 +201,8 @@
     border-right: 1px solid var(--border);
     min-width: 0;
   }
-  .head {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    padding: 0.35rem 0.5rem;
-    flex: 0 0 auto;
-  }
-  .modes {
-    display: flex;
-    flex: 1 1 auto;
-  }
-  .modes button {
-    flex: 1 1 0;
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--fg-muted);
-    cursor: pointer;
-    font-size: 0.72rem;
-    padding: 0.2rem 0.4rem;
-  }
-  .modes button:first-child {
-    border-radius: 4px 0 0 4px;
-  }
-  .modes button:last-child {
-    border-radius: 0 4px 4px 0;
-    border-left: none;
-  }
-  .modes button.active {
-    background: color-mix(in srgb, var(--accent) 18%, var(--bg-pane));
-    color: var(--fg);
-    border-color: var(--accent);
-  }
-  .refresh {
-    flex: 0 0 auto;
-    background: transparent;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    color: var(--fg-muted);
-    cursor: pointer;
-    font-size: 0.85rem;
-    width: 1.7rem;
-    height: 1.6rem;
-    padding: 0;
-  }
-  .refresh:hover {
-    color: var(--fg);
-    border-color: var(--accent);
-  }
   .filter {
-    margin: 0 0.5rem 0.35rem;
+    margin: 0.35rem 0.5rem 0.35rem;
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 4px;
