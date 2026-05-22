@@ -10,8 +10,8 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: ['./vitest.setup.ts'],
-    // `.worktrees/` holds git worktrees (full repo copies) — never run their
-    // duplicate test suites as part of this project's run.
-    exclude: ['**/node_modules/**', '**/.worktrees/**', '**/target/**'],
+    // `.worktrees/` and `.claude/worktrees/` hold git worktrees (full repo
+    // copies) — never run their duplicate test suites as part of this run.
+    exclude: ['**/node_modules/**', '**/.worktrees/**', '**/.claude/worktrees/**', '**/target/**'],
   },
 });
