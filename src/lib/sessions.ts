@@ -190,3 +190,41 @@ export async function dismissGhostSession(sessionId: number): Promise<Result<voi
   if (r.ok) removeSession(sessionId);
   return r;
 }
+
+// ─── background sessions ─────────────────────────────────────────────────────
+
+export interface NewBgSessionResult {
+  claude_session_id: string | null;
+}
+
+/** Launch a supervised Claude background session on `hostAlias`. */
+export async function newBgSession(
+  hostAlias: string,
+  name: string,
+  prompt: string,
+): Promise<Result<NewBgSessionResult>> {
+  return invokeCmd<NewBgSessionResult>('new_bg_session', {
+    args: { host_alias: hostAlias, name, prompt },
+  });
+}
+
+/** Fetch recent log output from a background Claude session (no PTY). */
+export async function peekSession(
+  hostAlias: string,
+  claudeSessionId: string,
+): Promise<Result<string>> {
+  return invokeCmd<string>('peek_session', {
+    args: { host_alias: hostAlias, claude_session_id: claudeSessionId },
+  });
+}
+
+/** Delete all Claude Code state for a project and remove it from the DB. */
+export async function purgeProject(
+  hostAlias: string,
+  projectPath: string,
+  projectId: number,
+): Promise<Result<void>> {
+  return invokeCmd<void>('purge_project', {
+    args: { host_alias: hostAlias, project_path: projectPath, project_id: projectId },
+  });
+}
