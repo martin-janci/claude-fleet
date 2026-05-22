@@ -96,9 +96,7 @@ mod tests {
     use std::sync::Arc;
 
     fn make_store() -> Arc<Mutex<Store>> {
-        Arc::new(Mutex::new(
-            Store::open_in_memory().unwrap(),
-        ))
+        Arc::new(Mutex::new(Store::open_in_memory().unwrap()))
     }
 
     fn make_payload(event: &str, session_id: &str) -> HookPayload {
@@ -143,11 +141,29 @@ mod tests {
     #[test]
     fn find_project_id_for_path_longest_prefix_wins() {
         let projects = vec![
-            ProjectRow { id: 1, owner: "o".into(), repo: "r".into(), base_path: "/home/u/proj".into(), last_session_at: None },
-            ProjectRow { id: 2, owner: "o".into(), repo: "r2".into(), base_path: "/home/u/proj/sub".into(), last_session_at: None },
+            ProjectRow {
+                id: 1,
+                owner: "o".into(),
+                repo: "r".into(),
+                base_path: "/home/u/proj".into(),
+                last_session_at: None,
+            },
+            ProjectRow {
+                id: 2,
+                owner: "o".into(),
+                repo: "r2".into(),
+                base_path: "/home/u/proj/sub".into(),
+                last_session_at: None,
+            },
         ];
-        assert_eq!(find_project_id_for_path(&projects, "/home/u/proj/sub/.worktrees/feat"), Some(2));
-        assert_eq!(find_project_id_for_path(&projects, "/home/u/proj/.worktrees/feat"), Some(1));
+        assert_eq!(
+            find_project_id_for_path(&projects, "/home/u/proj/sub/.worktrees/feat"),
+            Some(2)
+        );
+        assert_eq!(
+            find_project_id_for_path(&projects, "/home/u/proj/.worktrees/feat"),
+            Some(1)
+        );
         assert_eq!(find_project_id_for_path(&projects, "/other/path"), None);
     }
 

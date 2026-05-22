@@ -153,6 +153,8 @@ pub async fn mcp_configure(
 // ---------------------------------------------------------------------------
 
 /// Build the hook entry array for one event type.
+// Part of the hook-endpoint feature; wired up in a follow-up — used by tests today.
+#[allow(dead_code)]
 fn build_hook_block(url: &str, matcher: &str) -> serde_json::Value {
     serde_json::json!([{
         "matcher": matcher,
@@ -161,6 +163,8 @@ fn build_hook_block(url: &str, matcher: &str) -> serde_json::Value {
 }
 
 /// Build the full settings fragment (for tests only; real command merges into file).
+// Part of the hook-endpoint feature; wired up in a follow-up — used by tests today.
+#[allow(dead_code)]
 pub fn build_hook_config(url: &str) -> String {
     let v = serde_json::json!({
         "hooks": {
@@ -251,11 +255,11 @@ pub fn install_fleet_hook(
                 .into_iter()
                 .filter(|block| {
                     let hooks_arr = block.get("hooks").and_then(|h| h.as_array());
-                    hooks_arr.map_or(true, |hs| {
+                    hooks_arr.is_none_or(|hs| {
                         !hs.iter().any(|h| {
                             h.get("url")
                                 .and_then(|u| u.as_str())
-                                .map_or(false, |u| u.starts_with(&fleet_prefix))
+                                .is_some_and(|u| u.starts_with(&fleet_prefix))
                         })
                     })
                 })

@@ -117,23 +117,24 @@ pub async fn start(
 
         // Bearer-auth applies ONLY to /mcp routes.
         let mcp_token = Arc::clone(&token);
-        let mcp_router = axum::Router::new()
-            .nest_service("/", service)
-            .layer(axum::middleware::from_fn(
-                move |request: axum::extract::Request, next: axum::middleware::Next| {
-                    let token = Arc::clone(&mcp_token);
-                    async move {
-                        // DNS-rebinding defense + bearer token, in that order.
-                        match auth::check_request(request.headers(), &token) {
-                            Ok(()) => Ok(next.run(request).await),
-                            Err(status) => {
-                                eprintln!("[mcp] rejected request: {status}");
-                                Err(status)
+        let mcp_router =
+            axum::Router::new()
+                .nest_service("/", service)
+                .layer(axum::middleware::from_fn(
+                    move |request: axum::extract::Request, next: axum::middleware::Next| {
+                        let token = Arc::clone(&mcp_token);
+                        async move {
+                            // DNS-rebinding defense + bearer token, in that order.
+                            match auth::check_request(request.headers(), &token) {
+                                Ok(()) => Ok(next.run(request).await),
+                                Err(status) => {
+                                    eprintln!("[mcp] rejected request: {status}");
+                                    Err(status)
+                                }
                             }
                         }
-                    }
-                },
-            ));
+                    },
+                ));
 
         // /hook validates token via ?token= query param inside the handler.
         let hook_state = hooks::HookState {

@@ -62,8 +62,8 @@ fn reconcile_write_one_host(
                     worktree_key,
                     claude_session_id: agent.and_then(|a| a.session_id.clone()),
                     claude_status: agent.and_then(|a| a.status.clone()),
-                    effort_level: None,  // not in claude agents --json; reserved for future
-                    pr_url: None,        // not in claude agents --json; reserved for future
+                    effort_level: None, // not in claude agents --json; reserved for future
+                    pr_url: None,       // not in claude agents --json; reserved for future
                     current_activity: None,
                 });
             }
@@ -1263,9 +1263,6 @@ mod tests {
             async fn capture_pane(&self, _name: &str) -> Result<String, IpcError> {
                 Ok(String::new())
             }
-            async fn bare_new_session(&self, _name: &str) -> Result<(), IpcError> {
-                Ok(())
-            }
             async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
                 vec![]
             }
@@ -1388,9 +1385,6 @@ mod tests {
                 } else {
                     Ok("│ > ".into())
                 }
-            }
-            async fn bare_new_session(&self, _: &str) -> Result<(), IpcError> {
-                Ok(())
             }
             async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
                 vec![]

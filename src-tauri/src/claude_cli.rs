@@ -27,7 +27,7 @@ pub fn parse_session_id_from_bg_output(output: &str) -> Option<String> {
         } else {
             continue;
         };
-        let token = line[prefix_len..].trim().split_whitespace().next()?;
+        let token = line[prefix_len..].split_whitespace().next()?;
         if !token.is_empty() {
             return Some(token.to_string());
         }
@@ -89,7 +89,12 @@ async fn run_claude_script(
                 .output(),
         )
         .await
-        .map_err(|_| IpcError::new("E_TIMEOUT", format!("claude CLI timed out after {:.0}s", timeout.as_secs_f64())))?
+        .map_err(|_| {
+            IpcError::new(
+                "E_TIMEOUT",
+                format!("claude CLI timed out after {:.0}s", timeout.as_secs_f64()),
+            )
+        })?
         .map_err(|e| IpcError::new("E_SPAWN", format!("spawn bash: {e}")))?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -111,11 +116,7 @@ async fn run_claude_script(
         // as a single shell word.
         let quoted_script = quote(script);
         let output = ssh
-            .run(
-                host_alias,
-                &["bash", "-lc", &quoted_script],
-                timeout,
-            )
+            .run(host_alias, &["bash", "-lc", &quoted_script], timeout)
             .await?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())

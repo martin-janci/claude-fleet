@@ -26,6 +26,8 @@ pub struct HookState {
 /// All fields are optional: Claude Code sends different subsets depending on
 /// the hook event type. `deny_unknown_fields` is intentionally absent — future
 /// Claude Code versions may add fields and we should ignore them gracefully.
+// Some fields are deserialized from the hook payload but not yet read.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct HookPayload {
     pub session_id: Option<String>,

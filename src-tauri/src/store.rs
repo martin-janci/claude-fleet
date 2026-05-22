@@ -474,7 +474,10 @@ impl Store {
     /// Delete a project and all its associated sessions and worktrees atomically.
     /// Called after `claude project purge` removes Claude's state on the remote machine.
     pub fn delete_project(&self, project_id: i64) -> Result<(), crate::ipc_error::IpcError> {
-        let tx = self.conn.unchecked_transaction().map_err(crate::ipc_error::IpcError::from)?;
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(crate::ipc_error::IpcError::from)?;
         tx.execute(
             "DELETE FROM sessions WHERE project_id = ?1",
             rusqlite::params![project_id],

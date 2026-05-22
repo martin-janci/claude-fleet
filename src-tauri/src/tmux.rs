@@ -25,9 +25,6 @@ pub trait TmuxExec: Send + Sync {
     async fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError>;
     async fn restart_session(&self, name: &str, pane_cmd: &str) -> Result<(), IpcError>;
     async fn capture_pane(&self, name: &str) -> Result<String, IpcError>;
-    /// Create a detached session with the given name and no initial command.
-    /// Returns `Ok(())` if the session was created or already exists.
-    async fn bare_new_session(&self, name: &str) -> Result<(), IpcError>;
     /// Run `claude agents --json` on this host and return parsed session info.
     /// Returns an empty vec if claude CLI is not installed or the command fails —
     /// the fleet treats missing Claude agent data as degraded-gracefully.
@@ -70,21 +67,6 @@ impl TmuxExec for LocalTmux {
             // Non-existent pane: return empty so the poller keeps waiting.
             Ok(String::new())
         }
-    }
-    async fn bare_new_session(&self, name: &str) -> Result<(), IpcError> {
-        let output = tokio::process::Command::new("tmux")
-            .args(["new-session", "-d", "-s", name])
-            .output()
-            .await
-            .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
-        if output.status.success() {
-            return Ok(());
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("duplicate session") {
-            return Ok(());
-        }
-        Err(IpcError::new("E_TMUX", stderr.trim()))
     }
     async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
         let output = tokio::process::Command::new("claude")
@@ -248,18 +230,6 @@ impl TmuxExec for RemoteTmux {
             // Non-existent pane: return empty so the poller keeps waiting.
             Ok(String::new())
         }
-    }
-    async fn bare_new_session(&self, name: &str) -> Result<(), IpcError> {
-        let script = format!("tmux new-session -d -s {}", shell_quote(name));
-        let output = self.remote_bash(&script).await?;
-        if output.status.success() {
-            return Ok(());
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("duplicate session") {
-            return Ok(());
-        }
-        Err(IpcError::new("E_TMUX", stderr.trim()))
     }
     async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
         let script = "claude agents --json 2>/dev/null || echo '[]'";

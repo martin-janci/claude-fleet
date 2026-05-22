@@ -4,11 +4,11 @@
 
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::IpcError;
+use crate::service::bg_sessions::{self, NewBgSessionArgs, PeekSessionArgs, PurgeProjectArgs};
 use crate::service::sessions::{
     self, DismissGhostSessionArgs, KillSessionArgs, NewSessionArgs, RecreateSessionArgs,
     RelatedSessionsArgs, RenameSessionArgs, RestartSessionArgs, SendPromptArgs, SpawnReviewArgs,
 };
-use crate::service::bg_sessions::{self, NewBgSessionArgs, PeekSessionArgs, PurgeProjectArgs};
 use crate::ssh::SshClient;
 use crate::store::{SessionRow, Store};
 use std::sync::{Arc, Mutex};

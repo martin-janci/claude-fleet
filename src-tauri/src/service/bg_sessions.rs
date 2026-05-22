@@ -70,10 +70,7 @@ pub async fn new_bg_session(
     Ok(NewBgSessionResult { claude_session_id })
 }
 
-pub async fn peek_session(
-    args: PeekSessionArgs,
-    ssh: &Arc<SshClient>,
-) -> Result<String, IpcError> {
+pub async fn peek_session(args: PeekSessionArgs, ssh: &Arc<SshClient>) -> Result<String, IpcError> {
     args.validate()?;
     claude_cli::claude_logs(ssh, &args.host_alias, &args.claude_session_id).await
 }

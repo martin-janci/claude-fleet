@@ -57,7 +57,8 @@ mod tests {
 
     #[test]
     fn parse_row_missing_optional_fields() {
-        let json = r#"[{"pid":999,"cwd":"/tmp","kind":"session","startedAt":"2026-05-22T10:00:00Z"}]"#;
+        let json =
+            r#"[{"pid":999,"cwd":"/tmp","kind":"session","startedAt":"2026-05-22T10:00:00Z"}]"#;
         let rows = parse_claude_agents_json(json);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].session_id, None);
@@ -68,8 +69,18 @@ mod tests {
     #[test]
     fn find_by_name_matches() {
         let rows = vec![
-            ClaudeAgentRow { session_id: Some("s1".into()), name: Some("alpha".into()), status: Some("working".into()), cwd: None },
-            ClaudeAgentRow { session_id: Some("s2".into()), name: Some("beta".into()), status: Some("blocked".into()), cwd: None },
+            ClaudeAgentRow {
+                session_id: Some("s1".into()),
+                name: Some("alpha".into()),
+                status: Some("working".into()),
+                cwd: None,
+            },
+            ClaudeAgentRow {
+                session_id: Some("s2".into()),
+                name: Some("beta".into()),
+                status: Some("blocked".into()),
+                cwd: None,
+            },
         ];
         let hit = find_by_name(&rows, "beta").unwrap();
         assert_eq!(hit.session_id.as_deref(), Some("s2"));
