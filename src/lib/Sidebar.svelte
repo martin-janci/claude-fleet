@@ -373,7 +373,11 @@
     e?.stopPropagation();
     actionError = null;
     const r = await dismissGhostSession(sess.id);
-    if (!r.ok) actionError = r.error.message;
+    if (!r.ok) {
+      actionError = r.error.message;
+      return;
+    }
+    forgetSessionUi(sess.host_alias, sess.tmux_name);
   }
 
   function hostIsReachable(alias: string): boolean {
@@ -403,9 +407,9 @@
       data-testid="sess-row"
       role="button"
       tabindex="0"
-      ondblclick={(e) => beginRename(sess, e)}
-      onclick={() => !isRenaming && onSelectSession(sess)}
-      onkeydown={(e) => !isRenaming && onKeySession(e, sess)}
+      ondblclick={(e) => sess.status !== 'ghost' && beginRename(sess, e)}
+      onclick={() => !isRenaming && sess.status !== 'ghost' && onSelectSession(sess)}
+      onkeydown={(e) => !isRenaming && sess.status !== 'ghost' && onKeySession(e, sess)}
     >
       {#if isRenaming}
         <input
@@ -429,6 +433,7 @@
           <div class="row-actions">
             <button
               class="icon-btn small"
+              data-testid="ghost-recreate"
               onclick={(e) => doRecreate(sess, e)}
               disabled={!hostIsReachable(sess.host_alias)}
               title={hostIsReachable(sess.host_alias) ? 'Recreate tmux session' : 'Host is offline'}
@@ -436,6 +441,7 @@
             >↺</button>
             <button
               class="icon-btn small danger"
+              data-testid="ghost-dismiss"
               onclick={(e) => doDismissGhost(sess, e)}
               title="Dismiss ghost session"
               aria-label="Dismiss"
