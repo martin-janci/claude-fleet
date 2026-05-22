@@ -1089,6 +1089,24 @@ pub fn dismiss_ghost_session(
     Ok(())
 }
 
+/// Capture a session's terminal output. `scrollback_lines = None` returns the
+/// visible pane; `Some(n)` includes `n` rows of scrollback history.
+// Called by the MCP tool in the next task; suppress interim dead-code lint.
+#[allow(dead_code)]
+pub async fn capture_session_output(
+    session_id: i64,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    scrollback_lines: Option<u32>,
+) -> Result<String, IpcError> {
+    let (host, name) = crate::commands::repo::session_target(store, session_id)?;
+    let tmux = exec_for(&host, ssh);
+    match scrollback_lines {
+        Some(n) => tmux.capture_pane_scrollback(&name, n).await,
+        None => tmux.capture_pane(&name).await,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1271,6 +1289,13 @@ mod tests {
             async fn capture_pane(&self, _name: &str) -> Result<String, IpcError> {
                 Ok(String::new())
             }
+            async fn capture_pane_scrollback(
+                &self,
+                _name: &str,
+                _lines: u32,
+            ) -> Result<String, IpcError> {
+                Ok(String::new())
+            }
             async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
                 vec![]
             }
@@ -1393,6 +1418,13 @@ mod tests {
                 } else {
                     Ok("│ > ".into())
                 }
+            }
+            async fn capture_pane_scrollback(
+                &self,
+                _name: &str,
+                _lines: u32,
+            ) -> Result<String, IpcError> {
+                Ok(String::new())
             }
             async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
                 vec![]
