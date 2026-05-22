@@ -405,6 +405,111 @@ impl Store {
         Ok(id)
     }
 
+    /// Look a worktree up by its `(project_id, name)` key — used by the refresh
+    /// reconcile to read the current `missing_since` before deciding phase.
+    pub fn get_worktree_by_name(
+        &self,
+        project_id: i64,
+        name: &str,
+    ) -> Result<Option<WorktreeRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, project_id, name, path, branch, missing_since
+             FROM worktrees WHERE project_id=?1 AND name=?2",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![project_id, name], |row| {
+            Ok(WorktreeRow {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                name: row.get(2)?,
+                path: row.get(3)?,
+                branch: row.get(4)?,
+                missing_since: row.get(5)?,
+            })
+        })?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Phase 1: stamp `missing_since` only if not already set (so the original
+    /// observation time is preserved across refresh cycles). Emits the updated
+    /// row so the UI can show the "missing" badge.
+    pub fn mark_worktree_missing(
+        &self,
+        project_id: i64,
+        name: &str,
+        now: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE worktrees SET missing_since=?3
+             WHERE project_id=?1 AND name=?2 AND missing_since IS NULL",
+            rusqlite::params![project_id, name, now],
+        )?;
+        if let Some(row) = self.get_worktree_by_name(project_id, name)? {
+            self.bus.worktree_updated(&row);
+        }
+        Ok(())
+    }
+
+    /// Phase 2: the worktree is still gone — ghost its live sessions
+    /// (status='ghost', lost_at=now) and delete the worktree row. Caller runs
+    /// `git worktree prune` off-lock to clear git's own registration.
+    pub fn prune_missing_worktree(&self, id: i64, now: i64) -> Result<(), rusqlite::Error> {
+        let session_ids: Vec<i64> = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT id FROM sessions WHERE worktree_id=?1 AND status!='ghost'",
+            )?;
+            let ids = stmt
+                .query_map(rusqlite::params![id], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ids
+        };
+        for sid in &session_ids {
+            self.conn.execute(
+                "UPDATE sessions SET status='ghost', lost_at=?2 WHERE id=?1",
+                rusqlite::params![sid, now],
+            )?;
+            if let Some(row) = self.get_session_by_id(*sid)? {
+                self.bus.session_updated(&row);
+            }
+        }
+        // NULL out worktree_id on all sessions (live and ghost) that still
+        // reference this worktree so the FK does not block the DELETE.
+        self.conn.execute(
+            "UPDATE sessions SET worktree_id=NULL WHERE worktree_id=?1",
+            rusqlite::params![id],
+        )?;
+        self.conn
+            .execute("DELETE FROM worktrees WHERE id=?1", rusqlite::params![id])?;
+        Ok(())
+    }
+
+    /// Resolve a worktree id to `(project base_path, name, branch, project_id)`
+    /// for the Recreate action.
+    pub fn worktree_recreate_info(
+        &self,
+        id: i64,
+    ) -> Result<Option<(String, String, Option<String>, i64)>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT p.base_path, w.name, w.branch, w.project_id
+             FROM worktrees w JOIN projects p ON p.id = w.project_id
+             WHERE w.id=?1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        match rows.next() {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
     pub fn list_worktrees_for_project(
         &self,
         project_id: i64,
@@ -2391,6 +2496,37 @@ mod tests {
             bus.take().is_empty(),
             "no event may fire for a rolled-back batch"
         );
+    }
+
+    #[test]
+    fn mark_and_prune_missing_worktree_ghosts_sessions() {
+        let store = Store::open_in_memory().unwrap();
+        let pid = store.upsert_project("o", "r", "/tmp/r").unwrap();
+        let wid = store.upsert_worktree(pid, "feat", "/tmp/r/.worktrees/feat", Some("feat")).unwrap();
+        // A live session attached to this worktree.
+        store.upsert_host("local").unwrap();
+        let sid = store
+            .upsert_session("sess-feat", "local", Some(pid), Some(wid), 1, 1, "running", None)
+            .unwrap();
+
+        // get_worktree_by_name finds it; not yet missing.
+        let found = store.get_worktree_by_name(pid, "feat").unwrap().unwrap();
+        assert_eq!(found.id, wid);
+        assert_eq!(found.missing_since, None);
+
+        // Phase 1: mark missing.
+        store.mark_worktree_missing(pid, "feat", 1234).unwrap();
+        assert_eq!(store.get_worktree(wid).unwrap().unwrap().missing_since, Some(1234));
+        // mark again is a no-op (does not overwrite the original timestamp).
+        store.mark_worktree_missing(pid, "feat", 9999).unwrap();
+        assert_eq!(store.get_worktree(wid).unwrap().unwrap().missing_since, Some(1234));
+
+        // Phase 2: prune — row gone, session ghosted.
+        store.prune_missing_worktree(wid, 5678).unwrap();
+        assert!(store.get_worktree(wid).unwrap().is_none());
+        let sess = store.get_session_by_id(sid).unwrap().unwrap();
+        assert_eq!(sess.status, "ghost");
+        assert_eq!(sess.lost_at, Some(5678));
     }
 
     #[test]
