@@ -1137,6 +1137,9 @@ mod tests {
             async fn capture_pane(&self, _name: &str) -> Result<String, IpcError> {
                 Ok(String::new())
             }
+            async fn bare_new_session(&self, _name: &str) -> Result<(), IpcError> {
+                Ok(())
+            }
         }
 
         // Spawn 3 tasks with sleeps 50ms, 500ms, 50ms.
@@ -1256,6 +1259,9 @@ mod tests {
                 } else {
                     Ok("│ > ".into())
                 }
+            }
+            async fn bare_new_session(&self, _: &str) -> Result<(), IpcError> {
+                Ok(())
             }
         }
 
