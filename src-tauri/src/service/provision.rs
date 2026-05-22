@@ -15,6 +15,7 @@ const SKILL_DIR: &str = "~/.claude/skills/claude-fleet-control";
 const SKILL_PATH: &str = "~/.claude/skills/claude-fleet-control/SKILL.md";
 const CLAUDE_JSON: &str = "~/.claude.json";
 const CLAUDE_DIR: &str = "~/.claude";
+const TMUX_CONF: &str = "~/.tmux.conf";
 
 /// Install the skill + merge the MCP entry on one host. `url` is the MCP
 /// endpoint that host should use. Reads `~/.claude.json`, merges (preserving
@@ -41,7 +42,42 @@ pub async fn provision_one(
         .await?;
     }
     write_host_file(ssh, host, CLAUDE_DIR, CLAUDE_JSON, &merged).await?;
+    // 3. Ensure tmux clipboard passthrough for OSC 52.
+    provision_tmux_clipboard(ssh, host).await?;
     Ok(())
+}
+
+/// Ensure `~/.tmux.conf` has `set -g set-clipboard on` for OSC 52 passthrough.
+/// Appends the setting if not already present; creates the file if missing.
+pub async fn provision_tmux_clipboard(ssh: &Arc<SshClient>, host: &str) -> Result<(), IpcError> {
+    let existing = read_host_file(ssh, host, TMUX_CONF).await?;
+    if has_tmux_clipboard_setting(&existing) {
+        return Ok(());
+    }
+    let home_dir = if host == "local" {
+        std::env::var("HOME").unwrap_or_default()
+    } else {
+        "~".to_string()
+    };
+    let dir = &home_dir;
+    let addition = "\n# Enable OSC 52 clipboard (added by claude-fleet)\nset -g set-clipboard on\n";
+    let merged = format!("{}{}", existing.trim_end(), addition);
+    write_host_file(ssh, host, dir, TMUX_CONF, &merged).await
+}
+
+/// Check if tmux.conf already has a set-clipboard directive.
+fn has_tmux_clipboard_setting(content: &str) -> bool {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        // Match: set -g set-clipboard, set-option -g set-clipboard, etc.
+        if trimmed.contains("set-clipboard") {
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -351,5 +387,16 @@ mod tests {
             "/Users/test/.claude.json"
         );
         assert_eq!(super::expand_home_local("/abs/path").unwrap(), "/abs/path");
+    }
+
+    #[test]
+    fn has_tmux_clipboard_detects_setting() {
+        assert!(!super::has_tmux_clipboard_setting(""));
+        assert!(!super::has_tmux_clipboard_setting("set -g mouse on\n"));
+        assert!(super::has_tmux_clipboard_setting("set -g set-clipboard on\n"));
+        assert!(super::has_tmux_clipboard_setting("set-option -g set-clipboard on\n"));
+        assert!(super::has_tmux_clipboard_setting("  set -g set-clipboard external\n"));
+        // Comments don't count
+        assert!(!super::has_tmux_clipboard_setting("# set -g set-clipboard on\n"));
     }
 }
