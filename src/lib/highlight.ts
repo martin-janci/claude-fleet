@@ -6,7 +6,7 @@
 // literals, nested template expressions, here-docs) are intentionally not
 // handled; the goal is a useful approximation, not correctness.
 
-export type TokClass = 'kw' | 'str' | 'com' | 'num' | 'txt';
+export type TokClass = 'kw' | 'str' | 'com' | 'num' | 'txt' | 'head' | 'code';
 
 export interface Tok {
   text: string;
@@ -80,6 +80,7 @@ const EXT: Record<string, string> = {
   html: 'html', htm: 'html', xml: 'html', svg: 'html', vue: 'html', svelte: 'html',
   json: 'json', jsonc: 'json',
   yaml: 'yaml', yml: 'yaml', toml: 'yaml',
+  md: 'md', markdown: 'md', mdx: 'md',
 };
 
 const NAME: Record<string, string> = {
@@ -97,12 +98,79 @@ export function langForPath(path: string | null | undefined): string {
   return EXT[base.slice(dot + 1)] ?? '';
 }
 
+// Colour inline Markdown spans (code, emphasis, links) within one line,
+// appending tokens to `out`. Spans are not nested — the first match wins.
+function mdInline(s: string, out: Tok[]): void {
+  const re =
+    /(`+)([^`]*?)\1|(\*\*|__)(.+?)\3|(\*|_)(.+?)\5|(!?)\[([^\]]*)\]\(([^)]*)\)/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(s)) !== null) {
+    if (m.index > last) out.push({ text: s.slice(last, m.index), cls: 'txt' });
+    if (m[1] !== undefined) {
+      out.push({ text: m[0], cls: 'code' }); // `inline code`
+    } else if (m[3] !== undefined || m[5] !== undefined) {
+      out.push({ text: m[0], cls: 'kw' }); // **bold** / *italic*
+    } else {
+      out.push({ text: `${m[7]}[${m[8]}]`, cls: 'str' }); // [link text]
+      out.push({ text: `(${m[9]})`, cls: 'com' }); // (url)
+    }
+    last = re.lastIndex;
+  }
+  if (last < s.length) out.push({ text: s.slice(last), cls: 'txt' });
+}
+
+// Markdown is structural rather than token-based, so it gets a dedicated
+// line-oriented pass instead of the generic scanner.
+function highlightMarkdown(content: string): Tok[][] {
+  const lines: Tok[][] = [];
+  let inFence = false;
+  for (const raw of content.split('\n')) {
+    if (/^\s*(```|~~~)/.test(raw)) {
+      inFence = !inFence;
+      lines.push([{ text: raw, cls: 'code' }]);
+      continue;
+    }
+    if (inFence) {
+      lines.push(raw === '' ? [] : [{ text: raw, cls: 'code' }]);
+      continue;
+    }
+    if (raw === '') {
+      lines.push([]);
+      continue;
+    }
+    if (/^\s{0,3}#{1,6}(\s|$)/.test(raw)) {
+      lines.push([{ text: raw, cls: 'head' }]); // # heading
+      continue;
+    }
+    if (/^\s{0,3}>/.test(raw)) {
+      lines.push([{ text: raw, cls: 'com' }]); // > blockquote
+      continue;
+    }
+    const toks: Tok[] = [];
+    // A list marker (-, *, +, 1.) is keyword-coloured; the rest is inline.
+    const marker = raw.match(/^(\s*)([-*+]|\d+[.)])(\s+)/);
+    if (marker) {
+      if (marker[1]) toks.push({ text: marker[1], cls: 'txt' });
+      toks.push({ text: marker[2], cls: 'kw' });
+      toks.push({ text: marker[3], cls: 'txt' });
+      mdInline(raw.slice(marker[0].length), toks);
+    } else {
+      mdInline(raw, toks);
+    }
+    lines.push(toks);
+  }
+  return lines;
+}
+
 /**
  * Tokenise `content` for `lang` (a key from {@link langForPath}). Returns one
  * token array per source line; an empty array is an empty line. An unknown
  * `lang` yields a single plain-text token per line.
  */
 export function highlight(content: string, lang: string): Tok[][] {
+  if (lang === 'md') return highlightMarkdown(content);
+
   const lines: Tok[][] = [];
   let cur: Tok[] = [];
   // Append `text` (which may contain newlines) as `cls` tokens, breaking the

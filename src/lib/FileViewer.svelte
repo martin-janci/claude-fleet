@@ -308,4 +308,12 @@
   .ftext .num {
     color: #d19a66;
   }
+  /* Markdown: headings and code spans/fences. */
+  .ftext .head {
+    color: var(--accent);
+    font-weight: 700;
+  }
+  .ftext .code {
+    color: #56b6c2;
+  }
 </style>

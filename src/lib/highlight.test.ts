@@ -36,6 +36,16 @@ describe('highlight', () => {
     expect(row.some((t) => t.cls === 'num' && t.text === '42')).toBe(true);
   });
 
+  it('highlights Markdown headings, code fences and inline spans', () => {
+    const rows = highlight('# Title\n\n```\ncode\n```\n- a `x` **b**', 'md');
+    expect(rows[0]).toEqual([{ text: '# Title', cls: 'head' }]);
+    expect(rows[3]).toEqual([{ text: 'code', cls: 'code' }]);
+    const last = rows[rows.length - 1];
+    expect(last.some((t) => t.cls === 'kw' && t.text === '-')).toBe(true);
+    expect(last.some((t) => t.cls === 'code' && t.text === '`x`')).toBe(true);
+    expect(last.some((t) => t.cls === 'kw' && t.text === '**b**')).toBe(true);
+  });
+
   it('falls back to plain text for unknown languages', () => {
     expect(highlight('hello world', '')).toEqual([[{ text: 'hello world', cls: 'txt' }]]);
   });
