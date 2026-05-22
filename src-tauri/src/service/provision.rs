@@ -139,7 +139,10 @@ pub async fn read_host_file(
         let expanded = expand_home_local(path)?;
         return Ok(std::fs::read_to_string(&expanded).unwrap_or_default());
     }
-    let script = format!("cat {} 2>/dev/null || true", shq(path));
+    // Outer `shq` makes the whole script cross the SSH boundary as ONE shell
+    // word — ssh space-joins argv, so an unquoted multi-word script would be
+    // re-split by the remote login shell (mirrors claude_cli.rs).
+    let script = shq(&remote_read_script(path));
     let out = ssh
         .run(host, &["bash", "-lc", &script], PROVISION_TIMEOUT)
         .await?;
@@ -165,12 +168,7 @@ pub async fn write_host_file(
             .map_err(|e| IpcError::new("E_PROVISION", format!("write {epath}: {e}")))?;
         return Ok(());
     }
-    let script = format!(
-        "mkdir -p {} && printf '%s' {} > {}",
-        shq(dir),
-        shq(content),
-        shq(path)
-    );
+    let script = shq(&remote_write_script(dir, path, content));
     let out = ssh
         .run(host, &["bash", "-lc", &script], PROVISION_TIMEOUT)
         .await?;
@@ -184,6 +182,33 @@ pub async fn write_host_file(
         ));
     }
     Ok(())
+}
+
+/// Render a path as a token for a remote `bash -lc` script. A leading `~/` is
+/// emitted as `"$HOME"/<rest>` so the home dir expands on the remote — `shq`
+/// would single-quote `~` and defeat tilde expansion, creating a literal `~`
+/// directory. `$HOME` is double-quoted (literal through the outer `shq`, then
+/// expanded by the remote `bash`); the rest of the path is `shq`-quoted inert.
+fn remote_path(path: &str) -> String {
+    match path.strip_prefix("~/") {
+        Some(rest) => format!("\"$HOME\"/{}", shq(rest)),
+        None => shq(path),
+    }
+}
+
+/// Remote `bash -lc` script body that reads `path` (missing file → empty stdout).
+fn remote_read_script(path: &str) -> String {
+    format!("cat {} 2>/dev/null || true", remote_path(path))
+}
+
+/// Remote `bash -lc` script body that creates `dir` then writes `content` to `path`.
+fn remote_write_script(dir: &str, path: &str, content: &str) -> String {
+    format!(
+        "mkdir -p {} && printf '%s' {} > {}",
+        remote_path(dir),
+        shq(content),
+        remote_path(path)
+    )
 }
 
 /// Expand a leading `~/` against the LOCAL home dir.
@@ -282,6 +307,40 @@ mod tests {
     #[test]
     fn merge_rejects_invalid_json() {
         assert!(merge_mcp_entry("not json", "u", "t").is_err());
+    }
+
+    #[test]
+    fn remote_path_expands_home_not_quotes_tilde() {
+        // `~/` must become an expandable `$HOME` token, NOT a single-quoted
+        // literal `~` (which the remote would treat as a directory named `~`).
+        let t = remote_path("~/.claude/skills/claude-fleet-control");
+        assert_eq!(t, "\"$HOME\"/'.claude/skills/claude-fleet-control'");
+        assert!(!t.starts_with("'~"));
+        // Absolute paths are quoted whole.
+        assert_eq!(remote_path("/etc/hosts"), "'/etc/hosts'");
+    }
+
+    #[test]
+    fn remote_read_script_targets_home() {
+        assert_eq!(
+            remote_read_script("~/.claude.json"),
+            "cat \"$HOME\"/'.claude.json' 2>/dev/null || true"
+        );
+    }
+
+    #[test]
+    fn remote_write_script_mkdirs_and_writes_under_home() {
+        let s = remote_write_script("~/.claude", "~/.claude.json", "{\"a\":1}");
+        assert_eq!(
+            s,
+            "mkdir -p \"$HOME\"/'.claude' && printf '%s' '{\"a\":1}' > \"$HOME\"/'.claude.json'"
+        );
+        // The whole script survives the SSH boundary as one shell word once
+        // wrapped — outer quote leaves the inner `"$HOME"` intact for the
+        // remote bash to expand.
+        let quoted = crate::shell::quote(&s);
+        assert!(quoted.starts_with('\'') && quoted.ends_with('\''));
+        assert!(quoted.contains("\"$HOME\""));
     }
 
     #[test]
