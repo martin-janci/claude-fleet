@@ -1328,13 +1328,60 @@ impl Store {
         claude_session_id: &str,
         status: &str,
     ) -> Result<(), crate::ipc_error::IpcError> {
-        self.conn
+        let changed = self
+            .conn
             .execute(
                 "UPDATE sessions SET claude_status = ?1 WHERE claude_session_id = ?2",
                 rusqlite::params![status, claude_session_id],
             )
             .map_err(crate::ipc_error::IpcError::from)?;
+        if changed > 0 {
+            // Emit session_updated so the frontend patches the row in real-time.
+            if let Ok(row) = self.fetch_session_by_claude_id(claude_session_id) {
+                self.bus.session_updated(&row);
+            }
+        }
         Ok(())
+    }
+
+    fn fetch_session_by_claude_id(
+        &self,
+        claude_session_id: &str,
+    ) -> Result<SessionRow, crate::ipc_error::IpcError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
+                        last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
+                        worktree_key, lost_at,
+                        claude_session_id, claude_status, effort_level, pr_url, current_activity
+                 FROM sessions WHERE claude_session_id = ?1",
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        stmt.query_row(rusqlite::params![claude_session_id], |row| {
+            Ok(SessionRow {
+                id: row.get(0)?,
+                tmux_name: row.get(1)?,
+                host_alias: row.get(2)?,
+                project_id: row.get(3)?,
+                worktree_id: row.get(4)?,
+                created_at: row.get(5)?,
+                last_activity_at: row.get(6)?,
+                status: row.get(7)?,
+                notes: row.get(8)?,
+                account_uuid: row.get(9)?,
+                kind: row.get(10)?,
+                reviews_session_id: row.get(11)?,
+                worktree_key: row.get(12)?,
+                lost_at: row.get(13)?,
+                claude_session_id: row.get(14)?,
+                claude_status: row.get(15)?,
+                effort_level: row.get(16)?,
+                pr_url: row.get(17)?,
+                current_activity: row.get(18)?,
+            })
+        })
+        .map_err(crate::ipc_error::IpcError::from)
     }
 }
 

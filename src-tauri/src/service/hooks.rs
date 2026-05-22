@@ -71,9 +71,21 @@ fn apply_worktree_hook(store: &Arc<Mutex<Store>>, payload: &HookPayload) -> Resu
 fn find_project_id_for_path(projects: &[ProjectRow], worktree_path: &str) -> Option<i64> {
     projects
         .iter()
-        .filter(|p| worktree_path.starts_with(&p.base_path))
+        .filter(|p| is_path_prefix(&p.base_path, worktree_path))
         .max_by_key(|p| p.base_path.len())
         .map(|p| p.id)
+}
+
+/// True iff `base` is a path-component prefix of `path`.
+/// Prevents "/home/u/proj" from matching "/home/u/project/...".
+fn is_path_prefix(base: &str, path: &str) -> bool {
+    if path == base {
+        return true;
+    }
+    match path.strip_prefix(base) {
+        Some(rest) => rest.starts_with('/'),
+        None => false,
+    }
 }
 
 #[cfg(test)]
@@ -137,5 +149,26 @@ mod tests {
         assert_eq!(find_project_id_for_path(&projects, "/home/u/proj/sub/.worktrees/feat"), Some(2));
         assert_eq!(find_project_id_for_path(&projects, "/home/u/proj/.worktrees/feat"), Some(1));
         assert_eq!(find_project_id_for_path(&projects, "/other/path"), None);
+    }
+
+    #[test]
+    fn find_project_id_rejects_partial_dirname_match() {
+        let projects = vec![ProjectRow {
+            id: 1,
+            owner: "o".into(),
+            repo: "r".into(),
+            base_path: "/home/u/proj".into(),
+            last_session_at: None,
+        }];
+        // "/home/u/project/..." must NOT match "/home/u/proj"
+        assert_eq!(
+            find_project_id_for_path(&projects, "/home/u/project/.worktrees/feat"),
+            None
+        );
+        // Exact prefix with separator must still match
+        assert_eq!(
+            find_project_id_for_path(&projects, "/home/u/proj/.worktrees/feat"),
+            Some(1)
+        );
     }
 }
