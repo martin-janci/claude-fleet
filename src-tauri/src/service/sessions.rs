@@ -956,6 +956,20 @@ pub async fn spawn_review(
         .ok_or_else(|| IpcError::new("E_INTERNAL", "review row missing after tag"))
 }
 
+// Called by `recreate_session` (added in the next commit). The lint can't see
+// the caller yet; the allow is removed when recreate_session starts using it.
+#[allow(dead_code)]
+/// The pane command to relaunch when (re)creating a session of `kind`.
+/// `shell` → a bare shell (the original custom start command isn't persisted,
+/// matching `restart_session`); anything else → the Claude REPL.
+fn recreate_pane_command(kind: &str) -> String {
+    if kind == "shell" {
+        crate::tmux::shell_pane_command(None)
+    } else {
+        crate::tmux::pane_command().to_string()
+    }
+}
+
 #[derive(Deserialize)]
 pub struct RecreateSessionArgs {
     pub session_id: i64,
@@ -1438,6 +1452,24 @@ mod tests {
     fn worktree_key_non_repo_path_is_none() {
         assert_eq!(worktree_key_for_path("/tmp/whatever"), None);
         assert_eq!(worktree_key_for_path("/Users/x/Documents"), None);
+    }
+
+    #[test]
+    fn recreate_pane_command_matches_kind() {
+        // Shell sessions come back as a bare shell (start command isn't
+        // persisted); everything else (work/review) relaunches the REPL.
+        assert_eq!(
+            recreate_pane_command("shell"),
+            crate::tmux::shell_pane_command(None)
+        );
+        assert_eq!(
+            recreate_pane_command("work"),
+            crate::tmux::pane_command().to_string()
+        );
+        assert_eq!(
+            recreate_pane_command("review"),
+            crate::tmux::pane_command().to_string()
+        );
     }
 
     #[test]
