@@ -1084,19 +1084,14 @@ impl Store {
         // ── Phase 2 prep: collect already-ghost IDs BEFORE Phase 1 modifies rows
         // so that sessions newly ghosted in Phase 1 are not immediately deleted.
         let pre_ghost_ids: Vec<i64> = if keep_names.is_empty() {
-            let mut stmt = tx.prepare_cached(
-                "SELECT id FROM sessions WHERE host_alias=?1 AND status='ghost'",
-            )?;
+            let mut stmt = tx
+                .prepare_cached("SELECT id FROM sessions WHERE host_alias=?1 AND status='ghost'")?;
             let ids = stmt
                 .query_map(rusqlite::params![host_alias], |r| r.get(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             ids
         } else {
-            let phs = keep_names
-                .iter()
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(",");
+            let phs = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!(
                 "SELECT id FROM sessions
                  WHERE host_alias=?1 AND status='ghost' AND tmux_name NOT IN ({phs})"
@@ -1124,11 +1119,7 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             ids
         } else {
-            let phs = keep_names
-                .iter()
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(",");
+            let phs = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!(
                 "UPDATE sessions SET status='ghost', lost_at=?1
                  WHERE host_alias=?2 AND status!='ghost' AND tmux_name NOT IN ({phs})
@@ -1159,8 +1150,10 @@ impl Store {
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!("DELETE FROM sessions WHERE id IN ({phs})");
-            let params: Vec<&dyn rusqlite::ToSql> =
-                pre_ghost_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+            let params: Vec<&dyn rusqlite::ToSql> = pre_ghost_ids
+                .iter()
+                .map(|id| id as &dyn rusqlite::ToSql)
+                .collect();
             tx.execute(&sql, params.as_slice())?;
             for id in &pre_ghost_ids {
                 out.push(RowChange::SessionKilled(*id));
@@ -1320,10 +1313,7 @@ fn fetch_session(
     }
 }
 
-fn fetch_session_by_id(
-    conn: &Connection,
-    id: i64,
-) -> Result<Option<SessionRow>, rusqlite::Error> {
+fn fetch_session_by_id(conn: &Connection, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                 last_activity_at, status, notes, account_uuid, kind, reviews_session_id,

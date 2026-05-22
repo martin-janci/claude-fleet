@@ -976,7 +976,10 @@ pub async fn recreate_session(
         if sess.status != "ghost" {
             return Err(IpcError::new(
                 "E_INVALID_STATE",
-                format!("session {} is not a ghost (status={})", sess.id, sess.status),
+                format!(
+                    "session {} is not a ghost (status={})",
+                    sess.id, sess.status
+                ),
             ));
         }
         let host = s
@@ -1022,7 +1025,10 @@ pub fn dismiss_ghost_session(
     if sess.status != "ghost" {
         return Err(IpcError::new(
             "E_INVALID_STATE",
-            format!("session {} is not a ghost (status={})", sess.id, sess.status),
+            format!(
+                "session {} is not a ghost (status={})",
+                sess.id, sess.status
+            ),
         ));
     }
     s.delete_session(sess.id)?;

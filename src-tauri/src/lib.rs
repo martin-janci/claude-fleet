@@ -308,7 +308,6 @@ pub fn run() {
             commands::files::repo_tree,
             commands::files::repo_file,
             commands::files::repo_diff,
-
             commands::upload::upload_to_session,
             commands::history::repo_log,
             commands::history::repo_branches,
