@@ -1594,7 +1594,9 @@ mod tests {
     fn worktree_missing_since_defaults_null_and_roundtrips() {
         let store = Store::open_in_memory().unwrap();
         let pid = store.upsert_project("o", "r", "/tmp/r").unwrap();
-        let id = store.upsert_worktree(pid, "feat", "/tmp/r/.worktrees/feat", Some("feat")).unwrap();
+        let id = store
+            .upsert_worktree(pid, "feat", "/tmp/r/.worktrees/feat", Some("feat"))
+            .unwrap();
         let wt = store.get_worktree(id).unwrap().unwrap();
         assert_eq!(wt.missing_since, None);
     }
@@ -2503,11 +2505,22 @@ mod tests {
     fn mark_and_prune_missing_worktree_ghosts_sessions() {
         let store = Store::open_in_memory().unwrap();
         let pid = store.upsert_project("o", "r", "/tmp/r").unwrap();
-        let wid = store.upsert_worktree(pid, "feat", "/tmp/r/.worktrees/feat", Some("feat")).unwrap();
+        let wid = store
+            .upsert_worktree(pid, "feat", "/tmp/r/.worktrees/feat", Some("feat"))
+            .unwrap();
         // A live session attached to this worktree.
         store.upsert_host("local").unwrap();
         let sid = store
-            .upsert_session("sess-feat", "local", Some(pid), Some(wid), 1, 1, "running", None)
+            .upsert_session(
+                "sess-feat",
+                "local",
+                Some(pid),
+                Some(wid),
+                1,
+                1,
+                "running",
+                None,
+            )
             .unwrap();
 
         // get_worktree_by_name finds it; not yet missing.
@@ -2517,10 +2530,16 @@ mod tests {
 
         // Phase 1: mark missing.
         store.mark_worktree_missing(pid, "feat", 1234).unwrap();
-        assert_eq!(store.get_worktree(wid).unwrap().unwrap().missing_since, Some(1234));
+        assert_eq!(
+            store.get_worktree(wid).unwrap().unwrap().missing_since,
+            Some(1234)
+        );
         // mark again is a no-op (does not overwrite the original timestamp).
         store.mark_worktree_missing(pid, "feat", 9999).unwrap();
-        assert_eq!(store.get_worktree(wid).unwrap().unwrap().missing_since, Some(1234));
+        assert_eq!(
+            store.get_worktree(wid).unwrap().unwrap().missing_since,
+            Some(1234)
+        );
 
         // Phase 2: prune — row gone, session ghosted.
         store.prune_missing_worktree(wid, 5678).unwrap();

@@ -148,7 +148,13 @@ mod tests {
     use tempfile::TempDir;
 
     fn git(dir: &std::path::Path, args: &[&str]) {
-        let ok = Command::new("git").arg("-C").arg(dir).args(args).status().unwrap().success();
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .unwrap()
+            .success();
         assert!(ok, "git {args:?} failed");
     }
 
@@ -158,9 +164,25 @@ mod tests {
         let repo = base.path().join("owner").join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-q"]);
-        git(&repo, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "init"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "init",
+            ],
+        );
         let wt = repo.join(".worktrees").join("feat");
-        git(&repo, &["worktree", "add", wt.to_str().unwrap(), "-b", "feat"]);
+        git(
+            &repo,
+            &["worktree", "add", wt.to_str().unwrap(), "-b", "feat"],
+        );
         std::fs::remove_dir_all(&wt).unwrap();
 
         std::env::set_var("CLAUDE_FLEET_PROJECTS_BASE", base.path());
@@ -169,7 +191,11 @@ mod tests {
         // Refresh #1: worktree dir gone → marked missing (row kept).
         refresh_projects(&store).await.unwrap();
         let tree = list_projects(&store).unwrap();
-        let feat = tree[0].worktrees.iter().find(|w| w.name == "feat").expect("feat present after refresh 1");
+        let feat = tree[0]
+            .worktrees
+            .iter()
+            .find(|w| w.name == "feat")
+            .expect("feat present after refresh 1");
         assert!(feat.missing_since.is_some());
 
         // Refresh #2: still missing → pruned (row gone).

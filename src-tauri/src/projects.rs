@@ -86,7 +86,12 @@ fn parse_worktree_porcelain(input: &str, main_path: &Path) -> Vec<DiscoveredWork
     for line in input.lines() {
         if let Some(rest) = line.strip_prefix("worktree ") {
             if let Some(path) = cur_path.take() {
-                out.push(make_worktree(path, cur_branch.take(), cur_prunable, main_path));
+                out.push(make_worktree(
+                    path,
+                    cur_branch.take(),
+                    cur_prunable,
+                    main_path,
+                ));
             }
             cur_path = Some(PathBuf::from(rest));
             cur_branch = None;

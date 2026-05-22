@@ -2,7 +2,9 @@ use crate::cancel::{CancelGuard, CancellationRegistry};
 use crate::ipc_error::IpcError;
 use crate::shell::quote as shq;
 use crate::ssh::SshClient;
-use crate::store::{HostReconcile, HostRow, ProjectRow, ReconcileSession, SessionRow, Store, WorktreeRow};
+use crate::store::{
+    HostReconcile, HostRow, ProjectRow, ReconcileSession, SessionRow, Store, WorktreeRow,
+};
 use crate::tmux::{LocalTmux, RemoteTmux, TmuxExec};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -1630,10 +1632,26 @@ mod tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let git = |args: &[&str]| {
-            assert!(Command::new("git").arg("-C").arg(&repo).args(args).status().unwrap().success());
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
         };
         git(&["init", "-q"]);
-        git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "init"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "init",
+        ]);
         let wt = repo.join(".worktrees").join("feat");
         git(&["worktree", "add", wt.to_str().unwrap(), "-b", "feat"]);
         std::fs::remove_dir_all(&wt).unwrap();
@@ -1642,8 +1660,12 @@ mod tests {
         let store = std::sync::Mutex::new(crate::store::Store::open_in_memory().unwrap());
         let wid = {
             let s = store.lock().unwrap();
-            let pid = s.upsert_project("o", "repo", repo.to_str().unwrap()).unwrap();
-            let wid = s.upsert_worktree(pid, "feat", wt.to_str().unwrap(), Some("feat")).unwrap();
+            let pid = s
+                .upsert_project("o", "repo", repo.to_str().unwrap())
+                .unwrap();
+            let wid = s
+                .upsert_worktree(pid, "feat", wt.to_str().unwrap(), Some("feat"))
+                .unwrap();
             s.mark_worktree_missing(pid, "feat", 111).unwrap();
             wid
         };
