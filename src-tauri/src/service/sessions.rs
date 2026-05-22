@@ -639,10 +639,17 @@ async fn new_session_inner(
     // A "shell" session runs a plain login shell in the pane instead of
     // Claude Code. Any other value (incl. None) is treated as a "work" session.
     let is_shell = args.kind.as_deref() == Some("shell");
+    // Work/review sessions get an app-minted Claude session id so a later
+    // recreate/restart resumes THIS conversation, not "most recent for the cwd".
+    let claude_id: Option<String> = if is_shell {
+        None
+    } else {
+        Some(uuid::Uuid::new_v4().to_string())
+    };
     let pane_cmd: String = if is_shell {
         crate::tmux::shell_pane_command(args.start_command.as_deref())
     } else {
-        crate::tmux::pane_command().to_string()
+        crate::tmux::pane_command_for(claude_id.as_deref())
     };
 
     let tmux = exec_for(&args.host_alias, ssh);
@@ -672,6 +679,19 @@ async fn new_session_inner(
         return s
             .get_session(&args.name, &args.host_alias)?
             .ok_or_else(|| IpcError::new("E_INTERNAL", "session vanished after kind tag"));
+    }
+    // Persist the minted Claude session id. Soft-fail: the session is live; a
+    // failed write just means a future recreate falls back to `cl --continue`.
+    let mut row = row;
+    if let Some(ref cid) = claude_id {
+        if let Err(e) = s.set_claude_session_id(row.id, cid) {
+            eprintln!(
+                "new_session: storing claude_session_id for {} failed: {e:?}",
+                args.name
+            );
+        } else {
+            row.claude_session_id = Some(cid.clone());
+        }
     }
     Ok(row)
 }
@@ -913,11 +933,12 @@ pub async fn spawn_review(
     //    A review runs Claude Code — same pane command as any "work" session.
     let short = format!("{:x}", now_unix() & 0xfffff);
     let review_name = format!("{}--review-{}", source.tmux_name, short);
+    let claude_id = uuid::Uuid::new_v4().to_string();
     let tmux = exec_for(&source.host_alias, ssh);
     tmux.new_session(
         &review_name,
         std::path::Path::new(&cwd),
-        crate::tmux::pane_command(),
+        &crate::tmux::pane_command_for(Some(&claude_id)),
     )
     .await?;
 
@@ -935,6 +956,7 @@ pub async fn spawn_review(
             .find(|r| r.tmux_name == review_name)
             .ok_or_else(|| IpcError::new("E_INTERNAL", "review session vanished after spawn"))?;
         s.set_session_kind(row.id, "review", Some(source.id))?;
+        let _ = s.set_claude_session_id(row.id, &claude_id);
         row.id
     };
 

@@ -42,6 +42,7 @@ rmcp = { version = "1", features = [
 ] }
 axum = "0.8"
 rand = "0.10"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"

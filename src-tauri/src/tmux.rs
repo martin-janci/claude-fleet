@@ -312,8 +312,6 @@ pub fn pane_command() -> &'static str {
 /// idempotent create-or-resume. Without an id (legacy rows): today's
 /// most-recent-for-cwd behavior. The id is single-quoted; callers validate it
 /// with `validate::claude_session_id` before passing it in.
-// Callers are added in subsequent tasks; suppress the dead_code lint until then.
-#[allow(dead_code)]
 pub fn pane_command_for(claude_session_id: Option<&str>) -> String {
     let tail = "exec ${SHELL:-/bin/zsh} -l";
     match claude_session_id {
