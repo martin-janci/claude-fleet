@@ -9,22 +9,27 @@ use crate::ssh::SshClient;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Timeout for `claude logs` and `claude project purge` (fast local operations).
 const CLAUDE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Timeout for `claude --bg` (involves Anthropic API handshake + session setup).
+const CLAUDE_BG_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Extract the Claude session ID from `claude --bg` stdout.
 /// The CLI prints a line like `Session ID: <id>` or `session: <id>`.
 pub fn parse_session_id_from_bg_output(output: &str) -> Option<String> {
     for line in output.lines() {
         let lower = line.to_lowercase();
-        if let Some(rest) = lower
-            .strip_prefix("session id:")
-            .or_else(|| lower.strip_prefix("session:"))
-        {
-            let token = rest.trim().split_whitespace().next()?;
-            if !token.is_empty() {
-                let start = line.to_lowercase().find(token)?;
-                return Some(line[start..start + token.len()].to_string());
-            }
+        let prefix_len = if lower.starts_with("session id:") {
+            "session id:".len()
+        } else if lower.starts_with("session:") {
+            "session:".len()
+        } else {
+            continue;
+        };
+        let token = line[prefix_len..].trim().split_whitespace().next()?;
+        if !token.is_empty() {
+            return Some(token.to_string());
         }
     }
     None
@@ -41,7 +46,7 @@ pub async fn claude_bg(
     let quoted_name = quote(name);
     let quoted_prompt = quote(prompt);
     let script = format!("claude --bg --name {quoted_name} {quoted_prompt}");
-    let output = run_claude_script(ssh, host_alias, &script).await?;
+    let output = run_claude_script(ssh, host_alias, &script, CLAUDE_BG_TIMEOUT).await?;
     Ok(parse_session_id_from_bg_output(&output))
 }
 
@@ -53,7 +58,7 @@ pub async fn claude_logs(
 ) -> Result<String, IpcError> {
     let quoted_id = quote(session_id);
     let script = format!("claude logs {quoted_id}");
-    run_claude_script(ssh, host_alias, &script).await
+    run_claude_script(ssh, host_alias, &script, CLAUDE_TIMEOUT).await
 }
 
 /// Run `claude project purge <project_path> --yes` on `host_alias`.
@@ -64,7 +69,7 @@ pub async fn claude_purge_project(
 ) -> Result<(), IpcError> {
     let quoted_path = quote(project_path);
     let script = format!("claude project purge {quoted_path} --yes");
-    run_claude_script(ssh, host_alias, &script).await?;
+    run_claude_script(ssh, host_alias, &script, CLAUDE_TIMEOUT).await?;
     Ok(())
 }
 
@@ -74,6 +79,7 @@ async fn run_claude_script(
     ssh: &Arc<SshClient>,
     host_alias: &str,
     script: &str,
+    timeout: Duration,
 ) -> Result<String, IpcError> {
     if host_alias == "local" {
         let output = tokio::process::Command::new("bash")
@@ -104,7 +110,7 @@ async fn run_claude_script(
             .run(
                 host_alias,
                 &["bash", "-lc", &quoted_script],
-                CLAUDE_TIMEOUT,
+                timeout,
             )
             .await?;
         if output.status.success() {
@@ -145,5 +151,13 @@ mod tests {
         let output = "session: xyz-789\n";
         let id = parse_session_id_from_bg_output(output);
         assert_eq!(id, Some("xyz-789".to_string()));
+    }
+
+    #[test]
+    fn parse_bg_output_session_id_matching_prefix_text() {
+        // "session" appears in both prefix AND value — must return the VALUE
+        let output = "Session ID: session-abc-123\n";
+        let id = parse_session_id_from_bg_output(output);
+        assert_eq!(id, Some("session-abc-123".to_string()));
     }
 }
