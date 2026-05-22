@@ -187,6 +187,11 @@ impl Store {
             tx.execute_batch(include_str!("../migrations/008_ghost_sessions.sql"))?;
             tx.commit()?;
         }
+        if v < 9 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../migrations/009_claude_agent_fields.sql"))?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -1413,7 +1418,7 @@ mod tests {
     fn migrate_is_idempotent() {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
-        assert_eq!(store.schema_version().expect("version"), 8);
+        assert_eq!(store.schema_version().expect("version"), 9);
     }
 
     #[test]
@@ -1547,7 +1552,7 @@ mod tests {
     #[test]
     fn schema_version_is_seven_after_migration() {
         let s = Store::open_in_memory().expect("open");
-        assert_eq!(s.schema_version().expect("version"), 8);
+        assert_eq!(s.schema_version().expect("version"), 9);
     }
 
     #[test]
@@ -2155,7 +2160,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 8, "schema_version should be 8 after migration");
+        assert_eq!(v, 9, "schema_version should be 9 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store
