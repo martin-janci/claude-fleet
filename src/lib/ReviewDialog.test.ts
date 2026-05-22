@@ -12,7 +12,7 @@ const source: SessionRow = {
   id: 1, tmux_name: 'dev-source', host_alias: 'local',
   project_id: 1, worktree_id: 10, created_at: 1, last_activity_at: 1,
   status: 'running', notes: null, account_uuid: null, kind: 'work', reviews_session_id: null,
-  worktree_key: 'main', lost_at: null,
+  worktree_key: 'main', lost_at: null, claude_session_id: null,
 };
 
 beforeEach(() => { (mockedInvoke as ReturnType<typeof vi.fn>).mockReset(); });
