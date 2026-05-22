@@ -334,6 +334,7 @@ pub fn run() {
             commands::hosts::hide_host,
             commands::mcp::mcp_status,
             commands::mcp::mcp_configure,
+            commands::mcp::install_fleet_hook,
             pty::pty_open,
             pty::pty_write,
             pty::pty_resize,
