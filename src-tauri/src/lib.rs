@@ -65,6 +65,83 @@ fn instances_to_kill(procs: &[(u32, &str)], my_pid: u32, my_name: &str) -> Vec<u
         .collect()
 }
 
+/// Terminate every other running instance of this app before we open the DB or
+/// bind the MCP port. Matches by executable file name, so it catches *all*
+/// builds (dev `target/debug/claude-fleet`, release bundle, other worktrees).
+/// SIGTERM first so the other instance can release its SSH ControlMasters and
+/// flush SQLite, then SIGKILL any straggler after a short grace window.
+fn kill_other_instances() {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System};
+
+    let my_pid = std::process::id();
+    let my_name = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+    let Some(my_name) = my_name else {
+        eprintln!("[startup] could not resolve own exe name; skipping instance reaper");
+        return;
+    };
+
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+
+    // Collect (pid, exe file name) for every process sysinfo can see.
+    let procs: Vec<(u32, String)> = sys
+        .processes()
+        .iter()
+        .map(|(pid, proc_)| {
+            let name = proc_
+                .exe()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| proc_.name().to_string_lossy().into_owned());
+            (pid.as_u32(), name)
+        })
+        .collect();
+
+    let proc_refs: Vec<(u32, &str)> =
+        procs.iter().map(|(pid, name)| (*pid, name.as_str())).collect();
+    let targets = instances_to_kill(&proc_refs, my_pid, &my_name);
+    if targets.is_empty() {
+        return;
+    }
+
+    for pid in &targets {
+        if let Some(proc_) = sys.process(Pid::from_u32(*pid)) {
+            proc_.kill_with(Signal::Term);
+            eprintln!("[startup] sent SIGTERM to prior instance pid {pid}");
+        }
+    }
+
+    // Poll up to ~500ms for graceful exit.
+    for _ in 0..10 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        if targets
+            .iter()
+            .all(|pid| sys.process(Pid::from_u32(*pid)).is_none())
+        {
+            return;
+        }
+    }
+
+    // SIGKILL whatever is left.
+    for pid in &targets {
+        if let Some(proc_) = sys.process(Pid::from_u32(*pid)) {
+            proc_.kill();
+            eprintln!("[startup] SIGKILLed unresponsive prior instance pid {pid}");
+        }
+    }
+}
+
 /// Run the user's login shell once and adopt several env vars that a
 /// Finder-launched GUI app does not inherit by default:
 ///
@@ -249,6 +326,10 @@ fn maybe_start_mcp(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Win the singleton race before opening the DB or binding the MCP port:
+    // kill any other running instance of this app (any build).
+    kill_other_instances();
+
     // Layered env recovery for Finder-launched apps:
     //   1. Import the user's full login-shell env (PATH + locale). PATH
     //      catches Homebrew/dotfiles/etc.; LANG/LC_ALL/LC_CTYPE prevent
