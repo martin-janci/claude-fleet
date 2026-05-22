@@ -162,10 +162,12 @@ pub async fn repo_log(
         args.limit.min(2000)
     };
     let all = if args.all { "--all" } else { "" };
+    // Quote the format string for the same reason as `repo_branches`: keep any
+    // shell metacharacter in the `--pretty=format:` value inert.
     let body = format!(
         "git -C \"$root\" log {all} --date=iso-strict {fmt} --max-count={limit} --skip={skip}",
         all = all,
-        fmt = LOG_FORMAT,
+        fmt = shq(LOG_FORMAT),
         limit = limit,
         skip = args.skip,
     );
@@ -241,9 +243,12 @@ pub async fn repo_branches(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<Vec<Branch>, IpcError> {
     let (host, name) = session_target(&store, args.session_id)?;
+    // `BRANCH_FORMAT` contains `%(refname)` etc. — the parens are shell
+    // metacharacters, so it MUST be quoted or bash aborts the line with
+    // "syntax error near unexpected token `('".
     let body = format!(
         "git -C \"$root\" for-each-ref {fmt} refs/heads refs/remotes",
-        fmt = BRANCH_FORMAT,
+        fmt = shq(BRANCH_FORMAT),
     );
     let script = repo_script(&name, &body);
     let out = run_in_repo(&ssh, &host, &script).await?;
