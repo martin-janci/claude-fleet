@@ -171,6 +171,14 @@ pub struct NewBgSessionParams {
     pub prompt: String,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RepoPathParams {
+    /// Fleet session id (from list_sessions).
+    pub session_id: i64,
+    /// Worktree-relative file path.
+    pub path: String,
+}
+
 // --- tools -----------------------------------------------------------------
 
 #[tool_router]
@@ -582,6 +590,90 @@ impl FleetTools {
         .await
         .map_err(to_mcp_err)?;
         ok_json(&res)
+    }
+
+    #[tool(description = "List a session's changed files (git status) in its \
+        worktree. Returns JSON array of changed files.")]
+    async fn repo_changes(
+        &self,
+        Parameters(p): Parameters<SessionIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("repo_changes", &format!("session_id={}", p.session_id));
+        let v = crate::commands::files::repo_changes_impl(
+            crate::commands::files::SessionIdArgs {
+                session_id: p.session_id,
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&v)
+    }
+
+    #[tool(description = "List a session's worktree files (tracked + untracked, \
+        gitignore respected). Returns JSON {entries, truncated}.")]
+    async fn repo_tree(
+        &self,
+        Parameters(p): Parameters<SessionIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("repo_tree", &format!("session_id={}", p.session_id));
+        let v = crate::commands::files::repo_tree_impl(
+            crate::commands::files::SessionIdArgs {
+                session_id: p.session_id,
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&v)
+    }
+
+    #[tool(description = "Read one worktree file's contents (capped). Returns \
+        JSON {path, content, truncated, binary, size}.")]
+    async fn repo_file(
+        &self,
+        Parameters(p): Parameters<RepoPathParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "repo_file",
+            &format!("session_id={} path={}", p.session_id, p.path),
+        );
+        let v = crate::commands::files::repo_file_impl(
+            crate::commands::files::RepoFileArgs {
+                session_id: p.session_id,
+                path: p.path,
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&v)
+    }
+
+    #[tool(description = "Unified diff for one worktree file vs HEAD (untracked \
+        files render as all-added). Returns JSON {path, diff, binary, truncated}.")]
+    async fn repo_diff(
+        &self,
+        Parameters(p): Parameters<RepoPathParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "repo_diff",
+            &format!("session_id={} path={}", p.session_id, p.path),
+        );
+        let v = crate::commands::files::repo_diff_impl(
+            crate::commands::files::RepoFileArgs {
+                session_id: p.session_id,
+                path: p.path,
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&v)
     }
 }
 
