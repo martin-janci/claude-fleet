@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { hosts, probeHost, deleteHost, hideHost } from './hosts';
   import { accounts, type AccountRow } from './accounts';
-  import { mcpStatus, mcpConfigure, mcpClientConfig, installFleetHook, type McpStatus } from './mcp';
+  import { mcpStatus, mcpConfigure, mcpClientConfig, installFleetHook, provisionHosts, type McpStatus, type HostProvisionResult } from './mcp';
   import AddHostPicker from './AddHostPicker.svelte';
 
   let { onClose }: { onClose: () => void } = $props();
@@ -126,6 +126,24 @@
       hookInstallError = err.message ?? String(e);
     } finally {
       installingHook = false;
+    }
+  }
+
+  // --- Provision hosts ---
+  let provisionResults = $state<HostProvisionResult[] | null>(null);
+  let provisionBusy = $state(false);
+  let provisionError: string | null = $state(null);
+
+  async function doProvisionHosts() {
+    provisionBusy = true;
+    provisionError = null;
+    provisionResults = null;
+    const r = await provisionHosts();
+    provisionBusy = false;
+    if (r.ok && r.value) {
+      provisionResults = r.value;
+    } else if (!r.ok) {
+      provisionError = r.error.message;
     }
   }
 </script>
@@ -293,6 +311,51 @@
           {/if}
           {#if hookInstallError}
             <p class="hook-err">{hookInstallError}</p>
+          {/if}
+        </div>
+
+        <div class="hook-section">
+          <p class="hook-desc">
+            Push the MCP server config to every host so agents can connect to
+            the control API.
+          </p>
+          <button
+            class="hook-btn"
+            onclick={doProvisionHosts}
+            disabled={provisionBusy || !mcp.enabled}
+            data-testid="provision-hosts"
+          >
+            {provisionBusy ? "Provisioning…" : "Provision hosts"}
+          </button>
+          {#if provisionError}
+            <p class="hook-err">{provisionError}</p>
+          {/if}
+          {#if provisionResults}
+            <table class="provision-table">
+              <thead>
+                <tr>
+                  <th>Host</th>
+                  <th>Status</th>
+                  <th>Detail</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each provisionResults as row (row.host)}
+                  <tr>
+                    <td class="alias">{row.host}</td>
+                    <td>
+                      <span class="status status-{row.status === 'provisioned' ? 'on' : row.status === 'failed' ? 'off' : 'neutral'}">
+                        {row.status}
+                      </span>
+                    </td>
+                    <td class="provision-detail">{row.detail ?? '—'}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+            <p class="hook-desc provision-note">
+              Restart Claude on each host to load the server (the skill is picked up live).
+            </p>
           {/if}
         </div>
       {/if}
@@ -537,5 +600,37 @@
     margin: 0;
     font-size: 12px;
     color: var(--color-error, #f44336);
+  }
+
+  .provision-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+    margin-top: 0.3rem;
+  }
+  .provision-table th {
+    text-align: left;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--fg-muted);
+    padding: 0.3rem 0.4rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .provision-table td {
+    padding: 0.35rem 0.4rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .provision-detail {
+    color: var(--fg-muted);
+    font-size: 0.78rem;
+  }
+  .status-neutral {
+    background: rgba(127, 127, 127, 0.15);
+    color: var(--fg-muted);
+  }
+  .provision-note {
+    margin-top: 0.4rem;
+    font-style: italic;
   }
 </style>

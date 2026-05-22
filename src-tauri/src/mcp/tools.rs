@@ -28,6 +28,7 @@ pub struct FleetTools {
     store: Arc<Mutex<Store>>,
     ssh: Arc<SshClient>,
     reg: Arc<CancellationRegistry>,
+    tunnels: Arc<crate::service::tunnel::TunnelSupervisor>,
     // Consumed by the `#[tool_router]` / `#[tool_handler]` macro-generated
     // dispatch; the field itself reads as dead to the lint.
     #[allow(dead_code)]
@@ -217,11 +218,13 @@ impl FleetTools {
         store: Arc<Mutex<Store>>,
         ssh: Arc<SshClient>,
         reg: Arc<CancellationRegistry>,
+        tunnels: Arc<crate::service::tunnel::TunnelSupervisor>,
     ) -> Self {
         Self {
             store,
             ssh,
             reg,
+            tunnels,
             tool_router: Self::tool_router(),
         }
     }
@@ -796,6 +799,46 @@ impl FleetTools {
         .await
         .map_err(to_mcp_err)?;
         ok_json(&v)
+    }
+
+    #[tool(description = "Install the claude-fleet-control skill and register \
+        this fleet's MCP server into every reachable host's Claude config \
+        (~/.claude.json), with a reverse SSH tunnel for remote hosts. Returns a \
+        per-host status list. Each host must restart Claude to load the server.")]
+    async fn provision_hosts(&self) -> Result<CallToolResult, McpError> {
+        audit("provision_hosts", "");
+        let (port, token) = {
+            let s = self
+                .store
+                .lock()
+                .map_err(|_| to_mcp_err(IpcError::new("E_LOCK", "store mutex poisoned")))?;
+            let port = s
+                .get_setting(crate::mcp::SETTING_PORT)
+                .map_err(|e| to_mcp_err(IpcError::from(e)))?
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(crate::mcp::DEFAULT_PORT);
+            let token = s
+                .get_setting(crate::mcp::SETTING_TOKEN)
+                .map_err(|e| to_mcp_err(IpcError::from(e)))?
+                .unwrap_or_default();
+            (port, token)
+        };
+        if token.is_empty() {
+            return Err(to_mcp_err(IpcError::new(
+                "E_PROVISION",
+                "control API has no token yet",
+            )));
+        }
+        let res = crate::service::provision::provision_hosts(
+            &self.store,
+            &self.ssh,
+            &self.tunnels,
+            port,
+            &token,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&res)
     }
 }
 

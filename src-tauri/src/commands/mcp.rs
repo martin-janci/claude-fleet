@@ -89,6 +89,7 @@ pub async fn mcp_configure(
     ssh: State<'_, Arc<SshClient>>,
     reg: State<'_, Arc<CancellationRegistry>>,
     runtime: State<'_, Mutex<McpRuntime>>,
+    tunnels: State<'_, Arc<crate::service::tunnel::TunnelSupervisor>>,
 ) -> Result<McpStatus, IpcError> {
     // 1. Persist the requested settings.
     {
@@ -109,6 +110,9 @@ pub async fn mcp_configure(
     {
         let mut rt = runtime.lock().map_err(|_| lock_err())?;
         rt.stop();
+    }
+    if !args.enabled {
+        tunnels.stop_all();
     }
 
     // 3. If enabled, (re)start with the persisted port + token.
@@ -133,19 +137,52 @@ pub async fn mcp_configure(
             Arc::clone(&store),
             Arc::clone(&ssh),
             Arc::clone(&reg),
+            Arc::clone(&tunnels),
             port,
             token,
         )
         .await;
         let mut rt = runtime.lock().map_err(|_| lock_err())?;
         match result {
-            Ok(shutdown) => rt.set_running(shutdown),
+            Ok(shutdown) => {
+                // Re-establish tunnels for already-provisioned hosts (best-effort).
+                if let Err(e) =
+                    crate::service::provision::reestablish_tunnels(&store, &tunnels, port)
+                {
+                    eprintln!("[mcp] reestablish_tunnels: {e}");
+                }
+                rt.set_running(shutdown);
+            }
             Err(e) => rt.set_error(e),
         }
     }
 
     // 4. Return the resulting status.
     status(&store, &runtime)
+}
+
+#[tauri::command]
+pub async fn provision_hosts(
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+    tunnels: State<'_, Arc<crate::service::tunnel::TunnelSupervisor>>,
+) -> Result<Vec<crate::service::provision::HostProvisionResult>, IpcError> {
+    let (port, token) = {
+        let s = store.lock().map_err(|_| lock_err())?;
+        let port = s
+            .get_setting(mcp::SETTING_PORT)?
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(mcp::DEFAULT_PORT);
+        let token = s.get_setting(mcp::SETTING_TOKEN)?.unwrap_or_default();
+        (port, token)
+    };
+    if token.is_empty() {
+        return Err(IpcError::new(
+            "E_PROVISION",
+            "enable the control API first (no token yet)",
+        ));
+    }
+    crate::service::provision::provision_hosts(&store, &ssh, &tunnels, port, &token).await
 }
 
 // ---------------------------------------------------------------------------

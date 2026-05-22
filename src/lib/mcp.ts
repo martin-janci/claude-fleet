@@ -51,6 +51,16 @@ export async function installFleetHook(hostAlias: string): Promise<string> {
   throw r.error;
 }
 
+export interface HostProvisionResult {
+  host: string;
+  status: string; // provisioned | skipped | failed
+  detail: string | null;
+}
+
+export function provisionHosts(): Promise<Result<HostProvisionResult[]>> {
+  return invokeCmd<HostProvisionResult[]>('provision_hosts');
+}
+
 /** Build the ready-to-paste MCP client config for an HTTP transport. */
 export function mcpClientConfig(status: McpStatus): string {
   return JSON.stringify(

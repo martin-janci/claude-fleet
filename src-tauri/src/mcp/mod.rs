@@ -91,6 +91,7 @@ pub async fn start(
     store: Arc<Mutex<Store>>,
     ssh: Arc<SshClient>,
     reg: Arc<CancellationRegistry>,
+    tunnels: Arc<crate::service::tunnel::TunnelSupervisor>,
     port: u16,
     token: String,
 ) -> Result<CancellationToken, String> {
@@ -105,7 +106,7 @@ pub async fn start(
     let serve_shutdown = shutdown.clone();
     tauri::async_runtime::spawn(async move {
         let hook_store = Arc::clone(&store);
-        let tools = FleetTools::new(store, ssh, reg);
+        let tools = FleetTools::new(store, ssh, reg, tunnels);
         let service = StreamableHttpService::new(
             move || Ok(tools.clone()),
             LocalSessionManager::default().into(),
