@@ -145,6 +145,39 @@ describe('NewSessionDialog', () => {
     spy.mockRestore();
   });
 
+  it('does not default-select a missing worktree', async () => {
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({
+      ok: true,
+      value: {
+        id: 5, tmux_name: 'dev-martin-janci-claude-fleet--feat-b', host_alias: 'local',
+        project_id: 1, worktree_id: 2, created_at: 1, last_activity_at: 1,
+        status: 'running', notes: null, account_uuid: null, kind: 'work',
+        reviews_session_id: null, worktree_key: null, lost_at: null,
+      },
+    });
+
+    const projectWithMissing = {
+      project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: null },
+      worktrees: [
+        { id: 1, project_id: 1, name: 'main', path: '/r/cf', branch: 'main', missing_since: 111 },
+        { id: 2, project_id: 1, name: 'feat-b', path: '/r/cf/feat-b', branch: 'feat-b', missing_since: null },
+      ],
+    };
+
+    render(NewSessionDialog, { props: { project: projectWithMissing, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+
+    // Click Create without changing anything — the default selection is observable via worktree_id
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+
+    try {
+      expect(spy.mock.calls[0][0].worktree_id).toBe(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('a start command typed in Shell mode is passed as start_command', async () => {
     const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({
       ok: true,
