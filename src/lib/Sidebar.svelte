@@ -7,6 +7,8 @@
     killSession,
     renameSession,
     restartSession,
+    recreateSession,
+    dismissGhostSession,
     type SessionRow,
   } from './sessions';
   import { selectedSession, selectSession } from './selection';
@@ -15,7 +17,7 @@
   import { theme, cycleTheme } from './theme';
   import NewSessionDialog from './NewSessionDialog.svelte';
   import SettingsDialog from './SettingsDialog.svelte';
-  import { hosts, hostFilter } from './hosts';
+  import { hosts, hostFilter, hostByAlias } from './hosts';
   import { accounts, type AccountRow } from './accounts';
 
   let showSettings = $state(false);
@@ -359,6 +361,35 @@
   function cancelKill() {
     pendingKill = null;
   }
+
+  async function doRecreate(sess: SessionRow, e?: Event) {
+    e?.stopPropagation();
+    actionError = null;
+    const r = await recreateSession(sess.id);
+    if (!r.ok) actionError = r.error.message;
+  }
+
+  async function doDismissGhost(sess: SessionRow, e?: Event) {
+    e?.stopPropagation();
+    actionError = null;
+    const r = await dismissGhostSession(sess.id);
+    if (!r.ok) actionError = r.error.message;
+  }
+
+  function hostIsReachable(alias: string): boolean {
+    return $hostByAlias.get(alias)?.reachable ?? false;
+  }
+
+  function timeAgo(unixSecs: number): string {
+    const diffMs = Date.now() - unixSecs * 1000;
+    const diffMins = Math.floor(diffMs / 60_000);
+    if (diffMins < 1) return 'just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    const diffHours = Math.floor(diffMins / 60);
+    if (diffHours < 24) return `${diffHours}h ago`;
+    const diffDays = Math.floor(diffHours / 24);
+    return `${diffDays}d ago`;
+  }
 </script>
 
 <div class="sidebar" data-testid="sidebar-tree">
@@ -386,29 +417,55 @@
           onblur={commitRename}
         />
       {:else}
-        <span class="status-dot status-{sess.status}" title={sess.status} aria-hidden="true"></span>
-        {#if relatedCountFor(sess) > 0}
-          <span
-            class="related-badge"
-            data-testid="related-badge"
-            role="img"
-            title="{relatedCountFor(sess)} related session(s)"
-            aria-label="{relatedCountFor(sess)} related sessions"
-          >🔗{relatedCountFor(sess)}</span>
+        {#if sess.status === 'ghost'}
+          <span class="status-dot status-ghost" title="ghost — session lost" aria-hidden="true"></span>
+          <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
+          <span class="sess-name">{sess.tmux_name}</span>
+          {#if sess.lost_at}
+            <span class="lost-at" title="Lost at {new Date(sess.lost_at * 1000).toLocaleString()}">
+              lost {timeAgo(sess.lost_at)}
+            </span>
+          {/if}
+          <div class="row-actions">
+            <button
+              class="icon-btn small"
+              onclick={(e) => doRecreate(sess, e)}
+              disabled={!hostIsReachable(sess.host_alias)}
+              title={hostIsReachable(sess.host_alias) ? 'Recreate tmux session' : 'Host is offline'}
+              aria-label="Recreate"
+            >↺</button>
+            <button
+              class="icon-btn small danger"
+              onclick={(e) => doDismissGhost(sess, e)}
+              title="Dismiss ghost session"
+              aria-label="Dismiss"
+            >×</button>
+          </div>
+        {:else}
+          <span class="status-dot status-{sess.status}" title={sess.status} aria-hidden="true"></span>
+          {#if relatedCountFor(sess) > 0}
+            <span
+              class="related-badge"
+              data-testid="related-badge"
+              role="img"
+              title="{relatedCountFor(sess)} related session(s)"
+              aria-label="{relatedCountFor(sess)} related sessions"
+            >🔗{relatedCountFor(sess)}</span>
+          {/if}
+          {#if sess.kind === 'review'}
+            <span class="review-badge" role="img" title="review session" aria-label="review session">🔍</span>
+          {/if}
+          {#if sess.kind === 'shell'}
+            <span class="shell-badge" title="shell session">▶</span>
+          {/if}
+          <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
+          <span class="sess-name">{sess.tmux_name}</span>
+          <div class="row-actions">
+            <button class="icon-btn small" onclick={(e) => doRestart(sess, e)} title="Restart claude in this session" aria-label="Restart">↻</button>
+            <button class="icon-btn small" onclick={(e) => beginRename(sess, e)} title="Rename session" aria-label="Rename">✎</button>
+            <button class="icon-btn small danger" onclick={(e) => askKill(sess, e)} title="Kill session" aria-label="Kill">×</button>
+          </div>
         {/if}
-        {#if sess.kind === 'review'}
-          <span class="review-badge" role="img" title="review session" aria-label="review session">🔍</span>
-        {/if}
-        {#if sess.kind === 'shell'}
-          <span class="shell-badge" title="shell session">▶</span>
-        {/if}
-        <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
-        <span class="sess-name">{sess.tmux_name}</span>
-        <div class="row-actions">
-          <button class="icon-btn small" onclick={(e) => doRestart(sess, e)} title="Restart claude in this session" aria-label="Restart">↻</button>
-          <button class="icon-btn small" onclick={(e) => beginRename(sess, e)} title="Rename session" aria-label="Rename">✎</button>
-          <button class="icon-btn small danger" onclick={(e) => askKill(sess, e)} title="Kill session" aria-label="Kill">×</button>
-        </div>
       {/if}
     </div>
     {#if isRenaming && renameError}
@@ -804,6 +861,14 @@
   .status-dot.status-running { background: rgb(80, 200, 110); }
   .status-dot.status-frozen { background: rgb(140, 180, 240); }
   .status-dot.status-orphan { background: rgb(220, 130, 130); }
+  .status-dot.status-ghost { background: rgb(160, 120, 200); opacity: 0.55; }
+  .lost-at {
+    font-size: 0.7em;
+    opacity: 0.6;
+    margin-left: auto;
+    padding-right: 0.25rem;
+    white-space: nowrap;
+  }
 
   .sess-name {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
