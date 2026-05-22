@@ -844,22 +844,23 @@ pub async fn send_prompt(args: SendPromptArgs, ssh: &Arc<SshClient>) -> Result<(
     send_prompt_inner(ssh, &args.host_alias, &args.tmux_name, &args.prompt).await
 }
 
-/// Resolve the cwd a review should open in. Order: source's worktree path
-/// (by worktree_id) → source's project base_path → error.
-fn resolve_review_cwd(s: &Store, source: &crate::store::SessionRow) -> Result<String, IpcError> {
-    if let Some(wt_id) = source.worktree_id {
+/// Resolve the cwd a session should (re)open in. Order: the session's worktree
+/// path (by `worktree_id`) → its project `base_path` → error. Used by both
+/// `spawn_review` and `recreate_session`.
+fn resolve_session_cwd(s: &Store, row: &crate::store::SessionRow) -> Result<String, IpcError> {
+    if let Some(wt_id) = row.worktree_id {
         if let Some(path) = s.worktree_path(wt_id)? {
             return Ok(path);
         }
     }
-    if let Some(pid) = source.project_id {
+    if let Some(pid) = row.project_id {
         if let Some(base) = s.project_base_path(pid)? {
             return Ok(base);
         }
     }
     Err(IpcError::new(
-        "E_INVALID",
-        "cannot determine a worktree path to review for this session",
+        "E_NOREPO",
+        "cannot determine a worktree path for this session",
     ))
 }
 
@@ -904,7 +905,7 @@ pub async fn spawn_review(
         let source = s
             .get_session_by_id(args.source_session_id)?
             .ok_or_else(|| IpcError::new("E_NOTFOUND", "source session not found"))?;
-        let cwd = resolve_review_cwd(&s, &source)?;
+        let cwd = resolve_session_cwd(&s, &source)?;
         (source, cwd)
     };
 
@@ -955,6 +956,17 @@ pub async fn spawn_review(
         .ok_or_else(|| IpcError::new("E_INTERNAL", "review row missing after tag"))
 }
 
+/// The pane command to relaunch when (re)creating a session of `kind`.
+/// `shell` → a bare shell (the original custom start command isn't persisted,
+/// matching `restart_session`); anything else → the Claude REPL.
+fn recreate_pane_command(kind: &str) -> String {
+    if kind == "shell" {
+        crate::tmux::shell_pane_command(None)
+    } else {
+        crate::tmux::pane_command().to_string()
+    }
+}
+
 #[derive(Deserialize)]
 pub struct RecreateSessionArgs {
     pub session_id: i64,
@@ -965,23 +977,17 @@ pub async fn recreate_session(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<SessionRow, IpcError> {
-    // Load session and validate it is a ghost.
-    let (sess, host) = {
+    // Snapshot the session, gate on host reachability, and resolve the rebuild
+    // cwd + launch command — all under one brief lock, before any tmux call.
+    // Works for both `running` sessions (eating RAM / wedged → nuke & rebuild)
+    // and `ghost` sessions (lost from tmux → bring back in the right worktree).
+    let (sess, cwd, pane_cmd) = {
         let s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
         let sess = s
             .get_session_by_id(args.session_id)?
             .ok_or_else(|| IpcError::new("E_NOTFOUND", "session not found"))?;
-        if sess.status != "ghost" {
-            return Err(IpcError::new(
-                "E_INVALID_STATE",
-                format!(
-                    "session {} is not a ghost (status={})",
-                    sess.id, sess.status
-                ),
-            ));
-        }
         let host = s
             .get_host_row(&sess.host_alias)?
             .ok_or_else(|| IpcError::new("E_NOTFOUND", "host not found"))?;
@@ -991,14 +997,23 @@ pub async fn recreate_session(
                 format!("host {} is not reachable", host.alias),
             ));
         }
-        (sess, host)
+        let cwd = resolve_session_cwd(&s, &sess)?;
+        let pane_cmd = recreate_pane_command(&sess.kind);
+        (sess, cwd, pane_cmd)
     };
 
-    // Create the bare tmux session on the host.
-    let tmux = exec_for(&host.alias, ssh);
-    tmux.bare_new_session(&sess.tmux_name).await?;
+    let tmux = exec_for(&sess.host_alias, ssh);
+    // Tear down any live session first (frees the old process tree / wedged
+    // session). A ghost has no live session, so tolerate "no such session":
+    // we ignore the kill result and rely on new_session below to fail loudly
+    // if the old session unexpectedly survived (it would report a duplicate).
+    let _ = tmux.kill_session(&sess.tmux_name).await;
+    // Rebuild fresh in the worktree with the kind-appropriate command — the
+    // same primitive new_session() uses.
+    tmux.new_session(&sess.tmux_name, std::path::Path::new(&cwd), &pane_cmd)
+        .await?;
 
-    // Restore the DB row and return it.
+    // Mark the row live again and return it.
     let row = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?
@@ -1217,9 +1232,6 @@ mod tests {
             async fn capture_pane(&self, _name: &str) -> Result<String, IpcError> {
                 Ok(String::new())
             }
-            async fn bare_new_session(&self, _name: &str) -> Result<(), IpcError> {
-                Ok(())
-            }
         }
 
         // Spawn 3 tasks with sleeps 50ms, 500ms, 50ms.
@@ -1340,9 +1352,6 @@ mod tests {
                     Ok("│ > ".into())
                 }
             }
-            async fn bare_new_session(&self, _: &str) -> Result<(), IpcError> {
-                Ok(())
-            }
         }
 
         let calls = StdArc::new(AtomicU32::new(0));
@@ -1357,7 +1366,19 @@ mod tests {
     }
 
     #[test]
-    fn resolve_review_cwd_prefers_worktree_then_project_then_errors() {
+    fn resolve_session_cwd_prefers_worktree_then_project_then_errors() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        // A session with neither worktree nor project → E_NOREPO.
+        s.upsert_session("dev", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let row = s.get_session("dev", "local").unwrap().unwrap();
+        let err = resolve_session_cwd(&s, &row).unwrap_err();
+        assert_eq!(err.code, "E_NOREPO");
+    }
+
+    #[test]
+    fn resolve_session_cwd_with_worktree_and_project_and_neither() {
         let store = Store::open_in_memory().expect("store");
         store.upsert_host("alpha").unwrap();
         // Project with a base_path, and a worktree under it.
@@ -1370,19 +1391,19 @@ mod tests {
             .upsert_session("s1", "alpha", Some(pid), Some(wid), 1, 1, "running", None)
             .unwrap();
         let row1 = store.get_session_by_id(s1).unwrap().unwrap();
-        assert_eq!(resolve_review_cwd(&store, &row1).unwrap(), "/base/r/main");
+        assert_eq!(resolve_session_cwd(&store, &row1).unwrap(), "/base/r/main");
         // Session with project but no worktree → project base.
         let s2 = store
             .upsert_session("s2", "alpha", Some(pid), None, 1, 1, "running", None)
             .unwrap();
         let row2 = store.get_session_by_id(s2).unwrap().unwrap();
-        assert_eq!(resolve_review_cwd(&store, &row2).unwrap(), "/base/r");
+        assert_eq!(resolve_session_cwd(&store, &row2).unwrap(), "/base/r");
         // Session with neither → error.
         let s3 = store
             .upsert_session("s3", "alpha", None, None, 1, 1, "running", None)
             .unwrap();
         let row3 = store.get_session_by_id(s3).unwrap().unwrap();
-        assert!(resolve_review_cwd(&store, &row3).is_err());
+        assert!(resolve_session_cwd(&store, &row3).is_err());
     }
 
     #[test]
@@ -1425,6 +1446,24 @@ mod tests {
     fn worktree_key_non_repo_path_is_none() {
         assert_eq!(worktree_key_for_path("/tmp/whatever"), None);
         assert_eq!(worktree_key_for_path("/Users/x/Documents"), None);
+    }
+
+    #[test]
+    fn recreate_pane_command_matches_kind() {
+        // Shell sessions come back as a bare shell (start command isn't
+        // persisted); everything else (work/review) relaunches the REPL.
+        assert_eq!(
+            recreate_pane_command("shell"),
+            crate::tmux::shell_pane_command(None)
+        );
+        assert_eq!(
+            recreate_pane_command("work"),
+            crate::tmux::pane_command().to_string()
+        );
+        assert_eq!(
+            recreate_pane_command("review"),
+            crate::tmux::pane_command().to_string()
+        );
     }
 
     #[test]
@@ -1583,12 +1622,27 @@ mod ghost_tests {
     use crate::store::Store;
 
     #[test]
-    fn recreate_session_rejects_non_ghost() {
+    fn recreate_session_errors_when_session_missing() {
+        let store = std::sync::Mutex::new(Store::open_in_memory().unwrap());
+        let args = RecreateSessionArgs { session_id: 999 };
+        let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt
+            .block_on(recreate_session(args, &store, &ssh))
+            .unwrap_err();
+        assert_eq!(err.code, "E_NOTFOUND");
+    }
+
+    #[test]
+    fn recreate_session_errors_when_host_offline() {
         let store = std::sync::Mutex::new(Store::open_in_memory().unwrap());
         {
             let s = store.lock().unwrap();
             s.upsert_host("local").unwrap();
             s.upsert_session("dev", "local", None, None, 1, 1, "running", None)
+                .unwrap();
+            s.conn_ref()
+                .execute("UPDATE hosts SET reachable=0 WHERE alias='local'", [])
                 .unwrap();
         }
         let id = store
@@ -1601,9 +1655,10 @@ mod ghost_tests {
         let args = RecreateSessionArgs { session_id: id };
         let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(recreate_session(args, &store, &ssh));
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code, "E_INVALID_STATE");
+        let err = rt
+            .block_on(recreate_session(args, &store, &ssh))
+            .unwrap_err();
+        assert_eq!(err.code, "E_HOST_OFFLINE");
     }
 
     #[test]

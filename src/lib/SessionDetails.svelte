@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { sessions, type SessionRow } from './sessions';
-  import { killSession, renameSession, restartSession } from './sessions';
+  import { killSession, renameSession, restartSession, recreateSession } from './sessions';
   import { projectById } from './projects';
   import { selectSession, clearSelection } from './selection';
   import { hostByAlias } from './hosts';
@@ -138,6 +138,7 @@
   );
 
   let confirmingKill = $state(false);
+  let confirmingRecreate = $state(false);
   function askKill() {
     confirmingKill = true;
     actionError = null;
@@ -153,6 +154,29 @@
     } else {
       actionError = r.error.message;
     }
+  }
+
+  function askRecreate() {
+    confirmingRecreate = true;
+    actionError = null;
+  }
+
+  function cancelRecreate() {
+    confirmingRecreate = false;
+  }
+
+  async function doRecreate() {
+    confirmingRecreate = false;
+    const r = await recreateSession(session.id);
+    if (!r.ok) {
+      actionError = r.error.message;
+      return;
+    }
+    // kill-session severed the PTY; same tmux_name won't auto-reopen. This
+    // panel shows the selected session, so force a re-attach.
+    selectSession(null);
+    await tick();
+    selectSession(r.value);
   }
 </script>
 
@@ -286,6 +310,9 @@
     <button class="ghost" onclick={() => (reviewOpen = true)} data-testid="open-review">
       🔍 Review
     </button>
+    <button class="ghost" onclick={askRecreate} data-testid="recreate-from-details">
+      ♻ Recreate
+    </button>
     <button class="danger" onclick={askKill} data-testid="kill-from-details">
       Kill session
     </button>
@@ -308,6 +335,19 @@
       <div class="confirm-actions">
         <button onclick={cancelKill}>Cancel</button>
         <button class="danger" onclick={doKill} data-testid="confirm-kill-details">Kill</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if confirmingRecreate}
+  <div class="modal-backdrop" onclick={cancelRecreate} role="presentation">
+    <div class="confirm" onclick={(e) => e.stopPropagation()} role="presentation">
+      <h3>Recreate session?</h3>
+      <p>This kills the tmux session <code>{session.tmux_name}</code> and the running claude state inside it, then starts a fresh session in the same worktree. Continue?</p>
+      <div class="confirm-actions">
+        <button onclick={cancelRecreate}>Cancel</button>
+        <button class="danger" onclick={doRecreate} data-testid="confirm-recreate-details">Recreate</button>
       </div>
     </div>
   </div>
