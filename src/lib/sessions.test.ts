@@ -6,7 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { sessions, loadSessions, killSession, renameSession, restartSession, newSessionAbortable } from './sessions';
+import { sessions, loadSessions, killSession, renameSession, restartSession, newSessionAbortable, newBgSession, peekSession, purgeProject } from './sessions';
 
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
@@ -14,7 +14,7 @@ beforeEach(() => {
 });
 
 const sample = [
-  { id: 1, tmux_name: 'dev-foo', host_alias: 'local', project_id: null, worktree_id: null, created_at: 1, last_activity_at: 2, status: 'running', notes: null, account_uuid: null, kind: 'work', reviews_session_id: null, worktree_key: null, lost_at: null, claude_session_id: null },
+  { id: 1, tmux_name: 'dev-foo', host_alias: 'local', project_id: null, worktree_id: null, created_at: 1, last_activity_at: 2, status: 'running', notes: null, account_uuid: null, kind: 'work', reviews_session_id: null, worktree_key: null, lost_at: null, claude_session_id: null, claude_status: null, effort_level: null, pr_url: null, current_activity: null },
 ];
 
 describe('sessions store', () => {
@@ -89,5 +89,44 @@ describe('sessions store', () => {
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe('E_CANCELLED');
+  });
+});
+
+describe('newBgSession', () => {
+  it('calls new_bg_session with correct args and returns result', async () => {
+    const payload = { claude_session_id: 'abc-123' };
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(payload);
+    const r = await newBgSession('local', 'my-session', 'Do the thing');
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value).toEqual(payload);
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
+      'new_bg_session',
+      { args: { host_alias: 'local', name: 'my-session', prompt: 'Do the thing' } },
+    ]);
+  });
+});
+
+describe('peekSession', () => {
+  it('calls peek_session with correct args and returns log output', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce('log output here');
+    const r = await peekSession('local', 'sess-id-456');
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value).toBe('log output here');
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
+      'peek_session',
+      { args: { host_alias: 'local', claude_session_id: 'sess-id-456' } },
+    ]);
+  });
+});
+
+describe('purgeProject', () => {
+  it('calls purge_project with correct args', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    const r = await purgeProject('local', '/home/user/my-project', 42);
+    expect(r.ok).toBe(true);
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
+      'purge_project',
+      { args: { host_alias: 'local', project_path: '/home/user/my-project', project_id: 42 } },
+    ]);
   });
 });

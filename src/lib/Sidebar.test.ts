@@ -37,6 +37,10 @@ function sessionFor(projectId: number | null, name = `dev-${projectId ?? 'orphan
     worktree_key: 'main',
     lost_at: null,
     claude_session_id: null,
+    claude_status: null,
+    effort_level: null,
+    pr_url: null,
+    current_activity: null,
   };
 }
 
@@ -579,6 +583,10 @@ describe('Sidebar (sessions-grouped view)', () => {
           worktree_key: 'main',
           lost_at: null,
           claude_session_id: null,
+          claude_status: null,
+          effort_level: null,
+          pr_url: null,
+          current_activity: null,
         });
       }
     }

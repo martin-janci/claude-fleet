@@ -1,4 +1,6 @@
 mod cancel;
+mod claude_agents;
+mod claude_cli;
 mod commands;
 mod events;
 mod ipc_error;
@@ -304,6 +306,9 @@ pub fn run() {
             commands::sessions::spawn_review,
             commands::sessions::recreate_session,
             commands::sessions::dismiss_ghost_session,
+            commands::sessions::new_bg_session,
+            commands::sessions::peek_session,
+            commands::sessions::purge_project,
             commands::files::repo_changes,
             commands::files::repo_tree,
             commands::files::repo_file,
@@ -333,6 +338,7 @@ pub fn run() {
             commands::hosts::hide_host,
             commands::mcp::mcp_status,
             commands::mcp::mcp_configure,
+            commands::mcp::install_fleet_hook,
             pty::pty_open,
             pty::pty_write,
             pty::pty_resize,

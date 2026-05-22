@@ -28,6 +28,10 @@ const source: SessionRow = {
   worktree_key: 'main',
   lost_at: null,
   claude_session_id: null,
+  claude_status: null,
+  effort_level: null,
+  pr_url: null,
+  current_activity: null,
 };
 
 const sibling: SessionRow = {
@@ -46,6 +50,10 @@ const sibling: SessionRow = {
   worktree_key: 'main',
   lost_at: null,
   claude_session_id: null,
+  claude_status: null,
+  effort_level: null,
+  pr_url: null,
+  current_activity: null,
 };
 
 const unrelated: SessionRow = {
@@ -64,6 +72,10 @@ const unrelated: SessionRow = {
   worktree_key: 'main',
   lost_at: null,
   claude_session_id: null,
+  claude_status: null,
+  effort_level: null,
+  pr_url: null,
+  current_activity: null,
 };
 
 beforeEach(() => {
@@ -150,6 +162,10 @@ describe('PromptComposer', () => {
       worktree_key: 'main',
       lost_at: null,
       claude_session_id: null,
+      claude_status: null,
+      effort_level: null,
+      pr_url: null,
+      current_activity: null,
     }));
     sessions.set([source, ...sibs]);
     render(PromptComposer, { props: { source, onClose: () => {} } });

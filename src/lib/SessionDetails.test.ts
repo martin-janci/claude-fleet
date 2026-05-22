@@ -28,6 +28,10 @@ const sampleSession = {
   worktree_key: null,
   lost_at: null,
   claude_session_id: null,
+  claude_status: null,
+  effort_level: null,
+  pr_url: null,
+  current_activity: null,
 };
 
 beforeEach(() => {

@@ -8,7 +8,9 @@
 //! `&Arc<CancellationRegistry>`) rather than `tauri::State`, so they carry no
 //! dependency on the Tauri runtime and are directly unit-testable.
 
+pub mod bg_sessions;
 pub mod health;
+pub mod hooks;
 pub mod hosts;
 pub mod projects;
 pub mod sessions;

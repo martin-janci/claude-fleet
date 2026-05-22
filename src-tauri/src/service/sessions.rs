@@ -9,6 +9,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
+/// Per-host probe result tuple: (host, tmux sessions, claude agents).
+type HostProbeResult = (
+    HostRow,
+    Result<Vec<crate::tmux::TmuxSession>, IpcError>,
+    Vec<crate::claude_agents::ClaudeAgentRow>,
+);
+
 fn exec_for(host: &str, ssh: &Arc<SshClient>) -> Box<dyn TmuxExec> {
     if host == "local" {
         Box::new(LocalTmux)
@@ -29,6 +36,7 @@ fn reconcile_write_one_host(
     host: &HostRow,
     res: &Result<Vec<crate::tmux::TmuxSession>, IpcError>,
     projects: &[ProjectRow],
+    agent_rows: &[crate::claude_agents::ClaudeAgentRow],
 ) -> Result<(), IpcError> {
     match res {
         Ok(live) => {
@@ -44,6 +52,7 @@ fn reconcile_write_one_host(
                     .get_session_account(&host.alias, &sess.name)?
                     .or_else(|| host.account_uuid.clone());
                 let worktree_key = worktree_key_for_path(&sess.path.to_string_lossy());
+                let agent = crate::claude_agents::find_by_name(agent_rows, &sess.name);
                 sessions.push(ReconcileSession {
                     tmux_name: &sess.name,
                     project_id,
@@ -51,6 +60,11 @@ fn reconcile_write_one_host(
                     last_activity_at: sess.last_activity,
                     account_uuid,
                     worktree_key,
+                    claude_session_id: agent.and_then(|a| a.session_id.clone()),
+                    claude_status: agent.and_then(|a| a.status.clone()),
+                    effort_level: None,  // not in claude agents --json; reserved for future
+                    pr_url: None,        // not in claude agents --json; reserved for future
+                    current_activity: None,
                 });
             }
             s.apply_host_reconcile(HostReconcile {
@@ -107,18 +121,19 @@ async fn reconcile_sessions(
         let ssh_arc = Arc::clone(ssh);
         set.spawn(async move {
             let tmux = exec_for(&host.alias, &ssh_arc);
-            let result = tmux.list_sessions().await;
-            (host, result)
+            let tmux_result = tmux.list_sessions().await;
+            let agent_rows = tmux.list_claude_agents().await;
+            (host, tmux_result, agent_rows)
         });
     }
 
     // Collect per-host probe results. Join errors (task panics) are logged
     // and skipped — they don't abort the rest of reconcile.
-    let mut probed: Vec<(HostRow, Result<Vec<crate::tmux::TmuxSession>, IpcError>)> = Vec::new();
+    let mut probed: Vec<HostProbeResult> = Vec::new();
     while let Some(join) = set.join_next().await {
         match join {
-            Ok((host, res)) => probed.push((host, res)),
-            Err(e) => eprintln!("reconcile join error: {e}"),
+            Ok((host, res, agent_rows)) => probed.push((host, res, agent_rows)),
+            Err(e) => eprintln!("[reconcile] probe task panicked: {e}"),
         }
     }
 
@@ -136,16 +151,13 @@ async fn reconcile_sessions(
         // rather than re-querying inside `find_project_id_for_path` per session.
         let projects = s.list_projects()?;
 
-        for (host, res) in &probed {
+        for (host, res, agent_rows) in &probed {
             // Per-host isolation: one host's DB write failure (e.g. an FK
             // violation on a stale account_uuid) must NOT abort reconcile for
             // every other host. apply_host_reconcile is transactional, so a
             // failed host rolls back cleanly; we log it and carry on.
-            if let Err(e) = reconcile_write_one_host(&mut s, host, res, &projects) {
-                eprintln!(
-                    "reconcile: write for host {} failed: {}",
-                    host.alias, e.message
-                );
+            if let Err(e) = reconcile_write_one_host(&mut s, host, res, &projects, agent_rows) {
+                eprintln!("[reconcile] write failed for {}: {e}", host.alias);
             }
         }
     }
@@ -177,6 +189,7 @@ async fn reconcile_one_host(
     // 2. Probe off-lock.
     let tmux = exec_for(&host.alias, ssh);
     let result = tmux.list_sessions().await;
+    let agent_rows = tmux.list_claude_agents().await;
 
     // 3. Apply writes under one brief lock, via the SAME per-host write path
     //    as the multi-host reconcile (single transaction + emit-after-commit).
@@ -184,7 +197,7 @@ async fn reconcile_one_host(
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
     let projects = s.list_projects()?;
-    reconcile_write_one_host(&mut s, &host, &result, &projects)
+    reconcile_write_one_host(&mut s, &host, &result, &projects, &agent_rows)
 }
 
 fn now_unix() -> i64 {
@@ -1250,6 +1263,12 @@ mod tests {
             async fn capture_pane(&self, _name: &str) -> Result<String, IpcError> {
                 Ok(String::new())
             }
+            async fn bare_new_session(&self, _name: &str) -> Result<(), IpcError> {
+                Ok(())
+            }
+            async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
+                vec![]
+            }
         }
 
         // Spawn 3 tasks with sleeps 50ms, 500ms, 50ms.
@@ -1369,6 +1388,12 @@ mod tests {
                 } else {
                     Ok("│ > ".into())
                 }
+            }
+            async fn bare_new_session(&self, _: &str) -> Result<(), IpcError> {
+                Ok(())
+            }
+            async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
+                vec![]
             }
         }
 
@@ -1502,6 +1527,22 @@ mod tests {
             worktree_key_for_path("/Users/x/projects/github.com/o/r/.claude/worktrees/"),
             Some("main".to_string())
         );
+    }
+
+    #[test]
+    fn reconcile_writes_claude_session_id_when_name_matches() {
+        use crate::claude_agents::ClaudeAgentRow;
+        // Build a fake agent row with name = "my-session"
+        let agent_rows = vec![ClaudeAgentRow {
+            session_id: Some("abc123".into()),
+            name: Some("my-session".into()),
+            status: Some("working".into()),
+            cwd: None,
+        }];
+        let hit = crate::claude_agents::find_by_name(&agent_rows, "my-session");
+        assert_eq!(hit.unwrap().session_id.as_deref(), Some("abc123"));
+        let miss = crate::claude_agents::find_by_name(&agent_rows, "other");
+        assert!(miss.is_none());
     }
 
     // ── worktree_add_script unit tests ────────────────────────────────────────

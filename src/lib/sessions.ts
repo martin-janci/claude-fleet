@@ -16,7 +16,12 @@ export interface SessionRow {
   reviews_session_id: number | null;
   worktree_key: string | null;
   lost_at: number | null;
+  // Claude agent fields — null when claude CLI not installed or session not managed by Claude Code
   claude_session_id: string | null;
+  claude_status: string | null;
+  effort_level: string | null;
+  pr_url: string | null;
+  current_activity: string | null;
 }
 
 export const sessions = writable<SessionRow[]>([]);
@@ -184,4 +189,42 @@ export async function dismissGhostSession(sessionId: number): Promise<Result<voi
   });
   if (r.ok) removeSession(sessionId);
   return r;
+}
+
+// ─── background sessions ─────────────────────────────────────────────────────
+
+export interface NewBgSessionResult {
+  claude_session_id: string | null;
+}
+
+/** Launch a supervised Claude background session on `hostAlias`. */
+export async function newBgSession(
+  hostAlias: string,
+  name: string,
+  prompt: string,
+): Promise<Result<NewBgSessionResult>> {
+  return invokeCmd<NewBgSessionResult>('new_bg_session', {
+    args: { host_alias: hostAlias, name, prompt },
+  });
+}
+
+/** Fetch recent log output from a background Claude session (no PTY). */
+export async function peekSession(
+  hostAlias: string,
+  claudeSessionId: string,
+): Promise<Result<string>> {
+  return invokeCmd<string>('peek_session', {
+    args: { host_alias: hostAlias, claude_session_id: claudeSessionId },
+  });
+}
+
+/** Delete all Claude Code state for a project and remove it from the DB. */
+export async function purgeProject(
+  hostAlias: string,
+  projectPath: string,
+  projectId: number,
+): Promise<Result<void>> {
+  return invokeCmd<void>('purge_project', {
+    args: { host_alias: hostAlias, project_path: projectPath, project_id: projectId },
+  });
 }

@@ -46,6 +46,10 @@ pub struct SessionRow {
     pub worktree_key: Option<String>,
     pub lost_at: Option<i64>,
     pub claude_session_id: Option<String>,
+    pub claude_status: Option<String>,
+    pub effort_level: Option<String>,
+    pub pr_url: Option<String>,
+    pub current_activity: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -82,6 +86,12 @@ pub struct ReconcileSession<'a> {
     pub last_activity_at: i64,
     pub account_uuid: Option<String>,
     pub worktree_key: Option<String>,
+    // NEW — from claude agents --json:
+    pub claude_session_id: Option<String>,
+    pub claude_status: Option<String>,
+    pub effort_level: Option<String>,
+    pub pr_url: Option<String>,
+    pub current_activity: Option<String>,
 }
 
 /// All inputs for applying one host's probe result atomically. Consumed by
@@ -191,6 +201,11 @@ impl Store {
         if v < 9 {
             let tx = self.conn.unchecked_transaction()?;
             tx.execute_batch(include_str!("../migrations/009_session_claude_id.sql"))?;
+            tx.commit()?;
+        }
+        if v < 10 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../migrations/010_claude_agent_fields.sql"))?;
             tx.commit()?;
         }
         Ok(())
@@ -453,6 +468,29 @@ impl Store {
         if let Some(row) = self.get_project(project_id)? {
             self.bus.project_updated(&row);
         }
+        Ok(())
+    }
+
+    /// Delete a project and all its associated sessions and worktrees atomically.
+    /// Called after `claude project purge` removes Claude's state on the remote machine.
+    pub fn delete_project(&self, project_id: i64) -> Result<(), crate::ipc_error::IpcError> {
+        let tx = self.conn.unchecked_transaction().map_err(crate::ipc_error::IpcError::from)?;
+        tx.execute(
+            "DELETE FROM sessions WHERE project_id = ?1",
+            rusqlite::params![project_id],
+        )
+        .map_err(crate::ipc_error::IpcError::from)?;
+        tx.execute(
+            "DELETE FROM worktrees WHERE project_id = ?1",
+            rusqlite::params![project_id],
+        )
+        .map_err(crate::ipc_error::IpcError::from)?;
+        tx.execute(
+            "DELETE FROM projects WHERE id = ?1",
+            rusqlite::params![project_id],
+        )
+        .map_err(crate::ipc_error::IpcError::from)?;
+        tx.commit().map_err(crate::ipc_error::IpcError::from)?;
         Ok(())
     }
 
@@ -746,7 +784,8 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                    worktree_key, lost_at, claude_session_id
+                    worktree_key, lost_at,
+                    claude_session_id, claude_status, effort_level, pr_url, current_activity
              FROM sessions WHERE host_alias=?1 ORDER BY last_activity_at DESC",
         )?;
         let rows = stmt.query_map(rusqlite::params![host_alias], |row| {
@@ -766,6 +805,10 @@ impl Store {
                 worktree_key: row.get(12)?,
                 lost_at: row.get(13)?,
                 claude_session_id: row.get(14)?,
+                claude_status: row.get(15)?,
+                effort_level: row.get(16)?,
+                pr_url: row.get(17)?,
+                current_activity: row.get(18)?,
             })
         })?;
         rows.collect()
@@ -777,7 +820,8 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                    worktree_key, lost_at, claude_session_id
+                    worktree_key, lost_at,
+                    claude_session_id, claude_status, effort_level, pr_url, current_activity
              FROM sessions ORDER BY last_activity_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -797,6 +841,10 @@ impl Store {
                 worktree_key: row.get(12)?,
                 lost_at: row.get(13)?,
                 claude_session_id: row.get(14)?,
+                claude_status: row.get(15)?,
+                effort_level: row.get(16)?,
+                pr_url: row.get(17)?,
+                current_activity: row.get(18)?,
             })
         })?;
         rows.collect()
@@ -824,7 +872,8 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                    worktree_key, lost_at, claude_session_id
+                    worktree_key, lost_at,
+                    claude_session_id, claude_status, effort_level, pr_url, current_activity
              FROM sessions
              WHERE project_id=?1 AND worktree_key=?2 AND id<>?3
              ORDER BY host_alias ASC, tmux_name ASC",
@@ -846,6 +895,10 @@ impl Store {
                 worktree_key: row.get(12)?,
                 lost_at: row.get(13)?,
                 claude_session_id: row.get(14)?,
+                claude_status: row.get(15)?,
+                effort_level: row.get(16)?,
+                pr_url: row.get(17)?,
+                current_activity: row.get(18)?,
             })
         })?;
         rows.collect()
@@ -1026,9 +1079,13 @@ impl Store {
         worktree_id: Option<i64>,
         created_at: i64,
         last_activity_at: i64,
-        status: &str,
         account_uuid: Option<&str>,
         worktree_key: Option<&str>,
+        claude_session_id: Option<&str>,
+        claude_status: Option<&str>,
+        effort_level: Option<&str>,
+        pr_url: Option<&str>,
+        current_activity: Option<&str>,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
         // Check existence before the write so we can distinguish created vs updated.
@@ -1043,16 +1100,21 @@ impl Store {
         tx.execute(
             "INSERT INTO sessions (tmux_name, host_alias, project_id, worktree_id,
                                    created_at, last_activity_at, status, account_uuid,
-                                   worktree_key)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                                   worktree_key, lost_at,
+                                   claude_session_id, claude_status, effort_level, pr_url, current_activity)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8, NULL, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(host_alias, tmux_name) DO UPDATE SET
                project_id=excluded.project_id,
-               worktree_id=excluded.worktree_id,
                last_activity_at=excluded.last_activity_at,
-               status=excluded.status,
-               account_uuid=excluded.account_uuid,
-               worktree_key=excluded.worktree_key,
-               lost_at=NULL",
+               account_uuid=COALESCE(excluded.account_uuid, account_uuid),
+               worktree_key=COALESCE(excluded.worktree_key, worktree_key),
+               status=CASE WHEN status='ghost' THEN 'running' ELSE status END,
+               lost_at=NULL,
+               claude_session_id=COALESCE(excluded.claude_session_id, claude_session_id),
+               claude_status=COALESCE(excluded.claude_status, claude_status),
+               effort_level=COALESCE(excluded.effort_level, effort_level),
+               pr_url=COALESCE(excluded.pr_url, pr_url),
+               current_activity=COALESCE(excluded.current_activity, current_activity)",
             rusqlite::params![
                 tmux_name,
                 host_alias,
@@ -1060,9 +1122,13 @@ impl Store {
                 worktree_id,
                 created_at,
                 last_activity_at,
-                status,
                 account_uuid,
-                worktree_key
+                worktree_key,
+                claude_session_id,
+                claude_status,
+                effort_level,
+                pr_url,
+                current_activity
             ],
         )?;
         if let Some(row) = fetch_session(tx, tmux_name, host_alias)? {
@@ -1218,9 +1284,13 @@ impl Store {
                         None,
                         sess.created_at,
                         sess.last_activity_at,
-                        "running",
                         sess.account_uuid.as_deref(),
                         sess.worktree_key.as_deref(),
+                        sess.claude_session_id.as_deref(),
+                        sess.claude_status.as_deref(),
+                        sess.effort_level.as_deref(),
+                        sess.pr_url.as_deref(),
+                        sess.current_activity.as_deref(),
                         &mut out,
                     )?;
                     if let Some(pid) = sess.project_id {
@@ -1290,6 +1360,69 @@ impl Store {
         }
         Ok(ids_to_delete.len())
     }
+
+    /// Update `claude_status` for the session whose `claude_session_id` matches.
+    /// No-ops silently when no row matches (hook arrived before reconcile enriched it).
+    pub fn set_claude_status_by_session_id(
+        &self,
+        claude_session_id: &str,
+        status: &str,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE sessions SET claude_status = ?1 WHERE claude_session_id = ?2",
+                rusqlite::params![status, claude_session_id],
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        if changed > 0 {
+            // Emit session_updated so the frontend patches the row in real-time.
+            if let Ok(row) = self.fetch_session_by_claude_id(claude_session_id) {
+                self.bus.session_updated(&row);
+            }
+        }
+        Ok(())
+    }
+
+    fn fetch_session_by_claude_id(
+        &self,
+        claude_session_id: &str,
+    ) -> Result<SessionRow, crate::ipc_error::IpcError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
+                        last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
+                        worktree_key, lost_at,
+                        claude_session_id, claude_status, effort_level, pr_url, current_activity
+                 FROM sessions WHERE claude_session_id = ?1",
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        stmt.query_row(rusqlite::params![claude_session_id], |row| {
+            Ok(SessionRow {
+                id: row.get(0)?,
+                tmux_name: row.get(1)?,
+                host_alias: row.get(2)?,
+                project_id: row.get(3)?,
+                worktree_id: row.get(4)?,
+                created_at: row.get(5)?,
+                last_activity_at: row.get(6)?,
+                status: row.get(7)?,
+                notes: row.get(8)?,
+                account_uuid: row.get(9)?,
+                kind: row.get(10)?,
+                reviews_session_id: row.get(11)?,
+                worktree_key: row.get(12)?,
+                lost_at: row.get(13)?,
+                claude_session_id: row.get(14)?,
+                claude_status: row.get(15)?,
+                effort_level: row.get(16)?,
+                pr_url: row.get(17)?,
+                current_activity: row.get(18)?,
+            })
+        })
+        .map_err(crate::ipc_error::IpcError::from)
+    }
 }
 
 // ---- Connection-level row fetch helpers ----
@@ -1307,7 +1440,8 @@ fn fetch_session(
     let mut stmt = conn.prepare_cached(
         "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                 last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                worktree_key, lost_at, claude_session_id
+                worktree_key, lost_at,
+                claude_session_id, claude_status, effort_level, pr_url, current_activity
          FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
     )?;
     let mut rows = stmt.query_map(rusqlite::params![tmux_name, host_alias], |row| {
@@ -1327,6 +1461,10 @@ fn fetch_session(
             worktree_key: row.get(12)?,
             lost_at: row.get(13)?,
             claude_session_id: row.get(14)?,
+            claude_status: row.get(15)?,
+            effort_level: row.get(16)?,
+            pr_url: row.get(17)?,
+            current_activity: row.get(18)?,
         })
     })?;
     match rows.next() {
@@ -1339,7 +1477,8 @@ fn fetch_session_by_id(conn: &Connection, id: i64) -> Result<Option<SessionRow>,
     let mut stmt = conn.prepare_cached(
         "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                 last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                worktree_key, lost_at, claude_session_id
+                worktree_key, lost_at,
+                claude_session_id, claude_status, effort_level, pr_url, current_activity
          FROM sessions WHERE id=?1",
     )?;
     let mut rows = stmt.query_map(rusqlite::params![id], |row| {
@@ -1359,6 +1498,10 @@ fn fetch_session_by_id(conn: &Connection, id: i64) -> Result<Option<SessionRow>,
             worktree_key: row.get(12)?,
             lost_at: row.get(13)?,
             claude_session_id: row.get(14)?,
+            claude_status: row.get(15)?,
+            effort_level: row.get(16)?,
+            pr_url: row.get(17)?,
+            current_activity: row.get(18)?,
         })
     })?;
     match rows.next() {
@@ -2244,6 +2387,11 @@ mod tests {
                 last_activity_at: 50,
                 account_uuid: None,
                 worktree_key: Some("main".to_string()),
+                claude_session_id: None,
+                claude_status: None,
+                effort_level: None,
+                pr_url: None,
+                current_activity: None,
             },
             // brand new → create
             ReconcileSession {
@@ -2253,6 +2401,11 @@ mod tests {
                 last_activity_at: 60,
                 account_uuid: None,
                 worktree_key: Some("main".to_string()),
+                claude_session_id: None,
+                claude_status: None,
+                effort_level: None,
+                pr_url: None,
+                current_activity: None,
             },
         ];
         let keep = vec!["keep-existing".to_string(), "fresh".to_string()];
@@ -2348,6 +2501,11 @@ mod tests {
                 last_activity_at: 1,
                 account_uuid: None,
                 worktree_key: None,
+                claude_session_id: None,
+                claude_status: None,
+                effort_level: None,
+                pr_url: None,
+                current_activity: None,
             },
             ReconcileSession {
                 tmux_name: "bad",
@@ -2356,6 +2514,11 @@ mod tests {
                 last_activity_at: 1,
                 account_uuid: None,
                 worktree_key: None,
+                claude_session_id: None,
+                claude_status: None,
+                effort_level: None,
+                pr_url: None,
+                current_activity: None,
             },
         ];
         let keep = vec!["good".to_string(), "bad".to_string()];

@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { hosts, probeHost, deleteHost, hideHost } from './hosts';
   import { accounts, type AccountRow } from './accounts';
-  import { mcpStatus, mcpConfigure, mcpClientConfig, type McpStatus } from './mcp';
+  import { mcpStatus, mcpConfigure, mcpClientConfig, installFleetHook, type McpStatus } from './mcp';
   import AddHostPicker from './AddHostPicker.svelte';
 
   let { onClose }: { onClose: () => void } = $props();
@@ -108,6 +108,25 @@
     const r = await hideHost(alias, hidden);
     busy = null;
     if (!r.ok) error = r.error.message;
+  }
+
+  // --- Install fleet hook ---
+  let hookInstallMsg = $state<string | null>(null);
+  let hookInstallError = $state<string | null>(null);
+  let installingHook = $state(false);
+
+  async function doInstallHook() {
+    installingHook = true;
+    hookInstallMsg = null;
+    hookInstallError = null;
+    try {
+      hookInstallMsg = await installFleetHook('local');
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      hookInstallError = err.message ?? String(e);
+    } finally {
+      installingHook = false;
+    }
   }
 </script>
 
@@ -255,6 +274,27 @@
           <pre>{configBlock}</pre>
           <button onclick={() => copyText(configBlock)}>Copy config</button>
         </details>
+
+        <div class="hook-section">
+          <p class="hook-desc">
+            Install a real-time hook so local Claude Code sessions notify fleet
+            immediately on stop or worktree creation.
+          </p>
+          <button
+            class="hook-btn"
+            onclick={doInstallHook}
+            disabled={installingHook || !mcp.running}
+            data-testid="install-fleet-hook"
+          >
+            {installingHook ? "Installing…" : "Install Hook (local)"}
+          </button>
+          {#if hookInstallMsg}
+            <p class="hook-ok">{hookInstallMsg}</p>
+          {/if}
+          {#if hookInstallError}
+            <p class="hook-err">{hookInstallError}</p>
+          {/if}
+        </div>
       {/if}
       {#if mcpError}<p class="err">{mcpError}</p>{/if}
     </section>
@@ -463,4 +503,39 @@
     border-radius: 4px;
   }
   .mcp-config button:hover { border-color: var(--accent); }
+
+  .hook-section {
+    margin-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .hook-desc {
+    margin: 0;
+    font-size: 12px;
+    color: var(--text-secondary, #888);
+  }
+  .hook-btn {
+    align-self: flex-start;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--fg);
+    cursor: pointer;
+    padding: 0.18rem 0.5rem;
+    font-size: 0.78rem;
+    border-radius: 4px;
+  }
+  .hook-btn:hover:not(:disabled) { border-color: var(--accent); }
+  .hook-btn:disabled { opacity: 0.5; cursor: default; }
+  .hook-ok {
+    margin: 0;
+    font-size: 12px;
+    color: var(--color-success, #4caf50);
+    white-space: pre-wrap;
+  }
+  .hook-err {
+    margin: 0;
+    font-size: 12px;
+    color: var(--color-error, #f44336);
+  }
 </style>

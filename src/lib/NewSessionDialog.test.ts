@@ -44,7 +44,7 @@ describe('NewSessionDialog', () => {
   it('clicking a host pick + Create sends host_alias to new_session', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
       if (cmd === 'new_session') {
-        return { id: 99, tmux_name: 'dev-foo', host_alias: 'mefistos', project_id: 1, worktree_id: null, created_at: 1, last_activity_at: 1, status: 'running', notes: null, account_uuid: null, kind: 'work', reviews_session_id: null, worktree_key: null, lost_at: null };
+        return { id: 99, tmux_name: 'dev-foo', host_alias: 'mefistos', project_id: 1, worktree_id: null, created_at: 1, last_activity_at: 1, status: 'running', notes: null, account_uuid: null, kind: 'work', reviews_session_id: null, worktree_key: null, lost_at: null, claude_session_id: null, claude_status: null, effort_level: null, pr_url: null, current_activity: null };
       }
       if (cmd === 'list_sessions') return [];
       return null;
@@ -78,6 +78,10 @@ describe('NewSessionDialog', () => {
         worktree_key: null,
         lost_at: null,
         claude_session_id: null,
+        claude_status: null,
+        effort_level: null,
+        pr_url: null,
+        current_activity: null,
       },
     });
 
@@ -113,7 +117,8 @@ describe('NewSessionDialog', () => {
         id: 1, tmux_name: 'dev-martin-janci-claude-fleet', host_alias: 'local',
         project_id: 1, worktree_id: 11, created_at: 1, last_activity_at: 1,
         status: 'running', notes: null, account_uuid: null, kind: 'work',
-        reviews_session_id: null, worktree_key: null, lost_at: null, claude_session_id: null,
+        reviews_session_id: null, worktree_key: null, lost_at: null,
+        claude_session_id: null, claude_status: null, effort_level: null, pr_url: null, current_activity: null,
       },
     });
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
@@ -131,7 +136,8 @@ describe('NewSessionDialog', () => {
         id: 2, tmux_name: 'dev-martin-janci-claude-fleet-term', host_alias: 'local',
         project_id: 1, worktree_id: 11, created_at: 1, last_activity_at: 1,
         status: 'running', notes: null, account_uuid: null, kind: 'shell',
-        reviews_session_id: null, worktree_key: null, lost_at: null, claude_session_id: null,
+        reviews_session_id: null, worktree_key: null, lost_at: null,
+        claude_session_id: null, claude_status: null, effort_level: null, pr_url: null, current_activity: null,
       },
     });
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
@@ -153,7 +159,8 @@ describe('NewSessionDialog', () => {
         id: 3, tmux_name: 'dev-martin-janci-claude-fleet-term', host_alias: 'local',
         project_id: 1, worktree_id: 11, created_at: 1, last_activity_at: 1,
         status: 'running', notes: null, account_uuid: null, kind: 'shell',
-        reviews_session_id: null, worktree_key: null, lost_at: null, claude_session_id: null,
+        reviews_session_id: null, worktree_key: null, lost_at: null,
+        claude_session_id: null, claude_status: null, effort_level: null, pr_url: null, current_activity: null,
       },
     });
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });

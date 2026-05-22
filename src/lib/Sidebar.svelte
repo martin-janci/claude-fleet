@@ -9,8 +9,12 @@
     restartSession,
     recreateSession,
     dismissGhostSession,
+    peekSession,
+    newBgSession,
+    purgeProject,
     type SessionRow,
   } from './sessions';
+  import { type ProjectRow } from './projects';
   import { selectedSession, selectSession } from './selection';
   import { forgetSessionUi, migrateSessionUi } from './session_ui';
   import { readPref, writePref } from './prefs';
@@ -400,6 +404,28 @@
     if (!r.ok) actionError = r.error.message;
   }
 
+  // Per-session peek panel state: row id → log text | "loading" | null
+  let peekState = $state<Record<number, string | "loading" | null>>({});
+
+  async function doPeek(sess: SessionRow) {
+    if (!sess.claude_session_id) return;
+    peekState[sess.id] = "loading";
+    try {
+      const result = await peekSession(sess.host_alias, sess.claude_session_id);
+      if (result.ok) {
+        peekState[sess.id] = result.value || "(no output yet)";
+      } else {
+        peekState[sess.id] = "Error: " + result.error.message;
+      }
+    } catch (e: unknown) {
+      peekState[sess.id] = "Error: " + (e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function closePeek(sessId: number) {
+    peekState[sessId] = null;
+  }
+
   async function doDismissGhost(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
     actionError = null;
@@ -415,6 +441,54 @@
     return $hostByAlias.get(alias)?.reachable ?? false;
   }
 
+  // --- New BG Session modal ---
+  let showBgModal = $state(false);
+  let bgModalHost = $state('local');
+  let bgModalName = $state('');
+  let bgModalPrompt = $state('');
+  let bgModalError = $state<string | null>(null);
+  let bgModalLoading = $state(false);
+
+  async function doNewBgSession() {
+    bgModalError = null;
+    bgModalLoading = true;
+    try {
+      const result = await newBgSession(bgModalHost, bgModalName, bgModalPrompt);
+      if (result.ok) {
+        showBgModal = false;
+        bgModalName = '';
+        bgModalPrompt = '';
+      } else {
+        bgModalError = result.error.message;
+      }
+    } catch (e: unknown) {
+      bgModalError = e instanceof Error ? e.message : String(e);
+    } finally {
+      bgModalLoading = false;
+    }
+  }
+
+  // --- Purge Project ---
+  let pendingPurge: ProjectRow | null = $state(null);
+
+  async function confirmPurge() {
+    if (!pendingPurge) return;
+    const project = pendingPurge;
+    pendingPurge = null;
+    const result = await purgeProject('local', project.base_path, project.id);
+    if (!result.ok) {
+      actionError = 'Purge failed: ' + result.error.message;
+    } else {
+      // Refresh stores since the backend doesn't emit row-level events for project deletion
+      await loadSessions();
+      await refreshProjects();
+    }
+  }
+
+  function cancelPurge() {
+    pendingPurge = null;
+  }
+
   function timeAgo(unixSecs: number): string {
     const diffMs = Date.now() - unixSecs * 1000;
     const diffMins = Math.floor(diffMs / 60_000);
@@ -424,6 +498,30 @@
     if (diffHours < 24) return `${diffHours}h ago`;
     const diffDays = Math.floor(diffHours / 24);
     return `${diffDays}d ago`;
+  }
+
+  function claudeStatusColor(status: string | null): string {
+    switch (status) {
+      case 'working': return '#50c86e';   // green — active
+      case 'blocked': return '#f0b429';   // yellow — needs input
+      case 'completed': return '#6c8ebf'; // blue — done
+      case 'failed': return '#e64a4a';    // red
+      case 'stopped': return '#888';      // grey — stopped by hook or user
+      case 'idle': return '#888';         // grey
+      default: return 'transparent';
+    }
+  }
+
+  function claudeStatusLabel(status: string | null): string {
+    switch (status) {
+      case 'working': return '⚡ working';
+      case 'blocked': return '⏸ blocked';
+      case 'completed': return '✓ done';
+      case 'failed': return '✗ failed';
+      case 'stopped': return '■ stopped';
+      case 'idle': return '· idle';
+      default: return '';
+    }
   }
 </script>
 
@@ -497,7 +595,36 @@
           {/if}
           <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
           <span class="sess-name">{sess.tmux_name}</span>
+          {#if sess.claude_status}
+            <span
+              class="claude-chip"
+              style="background: {claudeStatusColor(sess.claude_status)}22; color: {claudeStatusColor(sess.claude_status)}; border-color: {claudeStatusColor(sess.claude_status)}44;"
+              title="Claude: {sess.claude_status}{sess.current_activity ? ' — ' + sess.current_activity : ''}"
+            >{claudeStatusLabel(sess.claude_status)}</span>
+          {/if}
+          {#if sess.effort_level}
+            <span class="effort-badge" title="Effort: {sess.effort_level}">{sess.effort_level}</span>
+          {/if}
+          {#if sess.pr_url}
+            <a
+              class="pr-link"
+              href={sess.pr_url}
+              onclick={(e) => e.stopPropagation()}
+              title="Open pull request"
+              target="_blank"
+              rel="noreferrer"
+            >PR↗</a>
+          {/if}
           <div class="row-actions">
+            {#if sess.claude_session_id && sess.status !== 'ghost'}
+              <button
+                class="icon-btn small peek-btn"
+                data-testid="peek-session"
+                title="Peek at session logs"
+                onclick={(e) => { e.stopPropagation(); doPeek(sess); }}
+                aria-label="Peek"
+              >📋</button>
+            {/if}
             <button class="icon-btn small" onclick={(e) => doRestart(sess, e)} title="Restart claude in this session" aria-label="Restart">↻</button>
             <button class="icon-btn small" onclick={(e) => beginRename(sess, e)} title="Rename session" aria-label="Rename">✎</button>
             <button
@@ -517,6 +644,19 @@
     </div>
     {#if isRenaming && renameError}
       <p class="err inline-err">{renameError}</p>
+    {/if}
+    {#if peekState[sess.id] !== undefined && peekState[sess.id] !== null}
+      <div class="peek-panel" data-testid="peek-panel">
+        <div class="peek-header">
+          <span>Logs — {sess.tmux_name}</span>
+          <button onclick={() => closePeek(sess.id)} class="peek-close">✕</button>
+        </div>
+        {#if peekState[sess.id] === "loading"}
+          <p class="peek-loading">Loading…</p>
+        {:else}
+          <pre class="peek-output">{peekState[sess.id]}</pre>
+        {/if}
+      </div>
     {/if}
   {/snippet}
 
@@ -620,6 +760,13 @@
               >
                 +
               </button>
+              <button
+                class="icon-btn small purge-btn"
+                title="Purge Claude Code project state (irreversible)"
+                onclick={(e) => { e.stopPropagation(); pendingPurge = row.project; }}
+                data-testid="purge-project"
+                aria-label="Purge project"
+              >🗑️</button>
             </div>
 
             {#if !isCollapsed}
@@ -649,13 +796,21 @@
   </div>
 
   <footer class="sidebar-footer" data-testid="sidebar-chrome-bottom">
-    <button
-      class="new-btn"
-      onclick={() => (showProjectPicker = !showProjectPicker)}
-      data-testid="new-session-footer"
-    >
-      + New session
-    </button>
+    <div class="footer-row">
+      <button
+        class="new-btn"
+        onclick={() => (showProjectPicker = !showProjectPicker)}
+        data-testid="new-session-footer"
+      >
+        + New session
+      </button>
+      <button
+        class="icon-btn"
+        title="Launch a supervised Claude background session"
+        onclick={() => (showBgModal = true)}
+        data-testid="new-bg-session-btn"
+      >⚡</button>
+    </div>
     <button
       class="theme-toggle"
       onclick={cycleTheme}
@@ -686,6 +841,8 @@
   if (dialogProject) onCancel();
   else if (pendingKill) cancelKill();
   else if (pendingRecreate) cancelRecreate();
+  else if (pendingPurge) cancelPurge();
+  else if (showBgModal) showBgModal = false;
   else if (showProjectPicker) showProjectPicker = false;
 }} />
 
@@ -729,6 +886,67 @@
 
 {#if showSettings}
   <SettingsDialog onClose={() => (showSettings = false)} />
+{/if}
+
+{#if pendingPurge}
+  <div class="modal-backdrop" onclick={cancelPurge} role="presentation">
+    <div class="confirm" onclick={(e) => e.stopPropagation()} role="presentation">
+      <h3>Purge project?</h3>
+      <p>This will permanently delete all Claude Code state for <code>{pendingPurge.repo}</code>. This is irreversible.</p>
+      <div class="actions">
+        <button onclick={cancelPurge}>Cancel</button>
+        <button class="danger" onclick={confirmPurge} data-testid="confirm-purge">Purge</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if showBgModal}
+  <div class="modal-backdrop" onclick={() => (showBgModal = false)} role="presentation">
+    <div class="modal" onclick={(e) => e.stopPropagation()} data-testid="bg-session-modal" role="presentation">
+      <h3>New Background Session</h3>
+      <label class="modal-field">
+        <span>Host</span>
+        <select bind:value={bgModalHost}>
+          {#each $hosts as host (host.alias)}
+            <option value={host.alias}>{host.alias}</option>
+          {/each}
+        </select>
+      </label>
+      <label class="modal-field">
+        <span>Session name</span>
+        <input
+          type="text"
+          bind:value={bgModalName}
+          placeholder="e.g. fix-auth-bug"
+          data-testid="bg-session-name"
+        />
+      </label>
+      <label class="modal-field">
+        <span>Initial prompt</span>
+        <textarea
+          bind:value={bgModalPrompt}
+          rows="4"
+          placeholder="What should Claude work on?"
+          data-testid="bg-session-prompt"
+        ></textarea>
+      </label>
+      {#if bgModalError}
+        <p class="err">{bgModalError}</p>
+      {/if}
+      <div class="modal-actions">
+        <button onclick={() => (showBgModal = false)}>Cancel</button>
+        <button
+          class="btn-primary"
+          onclick={doNewBgSession}
+          disabled={bgModalLoading || !bgModalName.trim() || !bgModalPrompt.trim()}
+          data-testid="bg-session-submit"
+        >
+          {bgModalLoading ? 'Launching…' : 'Launch'}
+        </button>
+      </div>
+    </div>
+  </div>
 {/if}
 
 <style>
@@ -935,6 +1153,33 @@
     white-space: nowrap;
   }
 
+  .claude-chip {
+    font-size: 0.65rem;
+    padding: 0.05rem 0.3rem;
+    border-radius: 3px;
+    border: 1px solid;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .effort-badge {
+    font-size: 0.6rem;
+    padding: 0.05rem 0.25rem;
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--fg) 10%, transparent);
+    color: var(--fg-muted);
+    flex-shrink: 0;
+    white-space: nowrap;
+    text-transform: uppercase;
+  }
+  .pr-link {
+    font-size: 0.65rem;
+    color: var(--accent);
+    text-decoration: none;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .pr-link:hover { text-decoration: underline; }
+
   .sess-name {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.8rem;
@@ -1022,8 +1267,13 @@
     flex-direction: column;
     gap: 0.3rem;
   }
+  .footer-row {
+    display: flex;
+    gap: 0.3rem;
+    align-items: center;
+  }
   .new-btn {
-    width: 100%;
+    flex: 1;
     text-align: left;
     font-size: 0.85rem;
     padding: 0.4rem 0.6rem;
@@ -1034,6 +1284,16 @@
     cursor: pointer;
   }
   .new-btn:hover { border-color: var(--accent); background: var(--bg-pane); }
+
+  .purge-btn {
+    opacity: 0;
+    transition: opacity 0.15s;
+    color: var(--color-error, #f44336);
+  }
+  .proj-row:hover .purge-btn {
+    opacity: 0.6;
+  }
+  .purge-btn:hover { opacity: 1 !important; }
   .theme-toggle {
     width: 100%;
     text-align: left;
@@ -1073,4 +1333,96 @@
     cursor: pointer;
   }
   .picker-item:hover { background: var(--bg-pane); }
+
+  .peek-btn {
+    opacity: 0.6;
+  }
+  .peek-btn:hover { opacity: 1; }
+  .peek-panel {
+    background: var(--color-surface-2, #1e1e2e);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    margin: 2px 8px 4px 8px;
+    padding: 8px;
+    font-size: 12px;
+  }
+  .peek-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+    font-weight: 600;
+  }
+  .peek-close {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--fg-muted);
+  }
+  .peek-loading {
+    color: var(--fg-muted);
+    font-style: italic;
+    margin: 0;
+  }
+  .peek-output {
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 200px;
+    overflow-y: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    margin: 0;
+  }
+
+  .modal {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    min-width: 320px;
+    max-width: 480px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    color: var(--fg);
+  }
+  .modal h3 { margin: 0; font-size: 0.95rem; }
+  .modal-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+  }
+  .modal-field input,
+  .modal-field select,
+  .modal-field textarea {
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-pane);
+    color: var(--fg);
+    font-family: inherit;
+    font-size: 12px;
+  }
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 4px;
+  }
+  .modal-actions button {
+    font-size: 0.85rem;
+    padding: 0.3rem 0.8rem;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--fg);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .btn-primary {
+    color: var(--accent) !important;
+    border-color: var(--accent) !important;
+  }
+  .btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 14%, transparent) !important; }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

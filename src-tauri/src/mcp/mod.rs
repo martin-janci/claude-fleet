@@ -6,6 +6,7 @@
 //! carry a bearer token. See `docs/specs/2026-05-21-control-api-mcp-design.md`.
 
 mod auth;
+pub mod hooks;
 mod tools;
 
 use crate::cancel::CancellationRegistry;
@@ -103,6 +104,7 @@ pub async fn start(
     let shutdown = CancellationToken::new();
     let serve_shutdown = shutdown.clone();
     tauri::async_runtime::spawn(async move {
+        let hook_store = Arc::clone(&store);
         let tools = FleetTools::new(store, ssh, reg);
         let service = StreamableHttpService::new(
             move || Ok(tools.clone()),
@@ -112,24 +114,39 @@ pub async fn start(
         );
 
         let token = Arc::new(token);
-        let app =
-            axum::Router::new()
-                .nest_service("/mcp", service)
-                .layer(axum::middleware::from_fn(
-                    move |request: axum::extract::Request, next: axum::middleware::Next| {
-                        let token = Arc::clone(&token);
-                        async move {
-                            // DNS-rebinding defense + bearer token, in that order.
-                            match auth::check_request(request.headers(), &token) {
-                                Ok(()) => Ok(next.run(request).await),
-                                Err(status) => {
-                                    eprintln!("[mcp] rejected request: {status}");
-                                    Err(status)
-                                }
+
+        // Bearer-auth applies ONLY to /mcp routes.
+        let mcp_token = Arc::clone(&token);
+        let mcp_router = axum::Router::new()
+            .nest_service("/", service)
+            .layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let token = Arc::clone(&mcp_token);
+                    async move {
+                        // DNS-rebinding defense + bearer token, in that order.
+                        match auth::check_request(request.headers(), &token) {
+                            Ok(()) => Ok(next.run(request).await),
+                            Err(status) => {
+                                eprintln!("[mcp] rejected request: {status}");
+                                Err(status)
                             }
                         }
-                    },
-                ));
+                    }
+                },
+            ));
+
+        // /hook validates token via ?token= query param inside the handler.
+        let hook_state = hooks::HookState {
+            store: hook_store,
+            token: Arc::clone(&token),
+        };
+        let hook_router = axum::Router::new()
+            .route("/", axum::routing::post(hooks::handle_hook))
+            .with_state(hook_state);
+
+        let app = axum::Router::new()
+            .nest("/mcp", mcp_router)
+            .nest("/hook", hook_router);
 
         eprintln!("[mcp] control API listening on http://{addr}/mcp");
         let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
