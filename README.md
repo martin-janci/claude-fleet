@@ -20,6 +20,12 @@ A native cross-platform desktop app for managing long-lived [Claude Code](https:
 - **Terminal pane** — a custom ANSI screen-buffer renderer (not xterm.js — see
   `src/lib/ansi.ts` for why) shows the attached session live.
 - **Prompt transfer** — send a prompt to one or many sessions at once.
+- **Files, history & branches** — per-session worktree browser: changed files
+  with inline diffs, a full file tree, an interactive commit graph (branch
+  tree, all branches), and a branch list. Git actions run in the session's
+  worktree: stage & commit, checkout branch/commit, create/delete branch, and
+  fetch/pull/push. Checkout is guarded against a dirty worktree so it can't
+  clobber the agent's in-progress work.
 - **Event-driven UI** — backend mutations emit row events; the frontend patches
   its stores in place rather than re-fetching.
 

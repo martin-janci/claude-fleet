@@ -6,16 +6,21 @@
     type ChangedFile,
     type RepoTree,
   } from './files';
+  import { repoLog, repoCommit, repoBranches, repoCheckout, repoCheckoutCommit, repoCreateBranch, repoDeleteBranch, repoStage, repoUnstage, repoCommitCreate, type Commit, type CommitDetail, type Branch } from './history';
+  import type { Result } from './result';
   import { readPref, writePref } from './prefs';
   import FileList from './FileList.svelte';
   import FileViewer from './FileViewer.svelte';
   import Resizer from './Resizer.svelte';
+  import CommitGraph from './CommitGraph.svelte';
+  import BranchList from './BranchList.svelte';
+  import RemoteToolbar from './RemoteToolbar.svelte';
 
   let { session }: { session: SessionRow } = $props();
 
   const isNumber = (v: unknown): v is number => typeof v === 'number';
 
-  let mode = $state<'changes' | 'tree'>('changes');
+  let mode = $state<'changes' | 'tree' | 'history' | 'branches'>('changes');
   let changes = $state<ChangedFile[]>([]);
   let tree = $state<RepoTree | null>(null);
   let loading = $state(false);
@@ -24,6 +29,15 @@
   let treeLoaded = false;
   // Bumped on Refresh — invalidates FileViewer's content/diff caches.
   let reloadKey = $state(0);
+
+  // History state
+  let commits = $state<Commit[]>([]);
+  // Branches state
+  let branches = $state<Branch[]>([]);
+  let historyLoaded = false;
+  let logSkip = 0;
+  let allBranches = $state(true);
+  let openCommit = $state<CommitDetail | null>(null);
 
   let listPx = $state(readPref('layout.files-list', 280, isNumber));
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -50,6 +64,10 @@
     tree = null;
     treeLoaded = false;
     selectedPath = null;
+    commits = [];
+    historyLoaded = false;
+    openCommit = null;
+    branches = [];
     void loadChanges();
   });
 
@@ -81,15 +99,96 @@
     }
   }
 
-  function onMode(m: 'changes' | 'tree'): void {
+  async function loadHistory(reset = true): Promise<void> {
+    const sid = session.id;
+    loading = true;
+    error = null;
+    if (reset) { logSkip = 0; commits = []; }
+    const r = await repoLog(sid, { all: allBranches, skip: logSkip });
+    if (sid !== session.id) return;
+    loading = false;
+    if (r.ok) {
+      commits = reset ? r.value : [...commits, ...r.value];
+      historyLoaded = true;
+      logSkip = commits.length;
+    } else {
+      error = r.error.message;
+    }
+  }
+
+  async function openCommitDetail(hash: string): Promise<void> {
+    const sid = session.id;
+    const r = await repoCommit(sid, hash);
+    if (sid !== session.id) return;
+    if (r.ok) { openCommit = r.value; selectedPath = r.value.files[0]?.path ?? null; }
+    else error = r.error.message;
+  }
+
+  function backToGraph(): void { openCommit = null; selectedPath = null; }
+
+  async function loadBranches(): Promise<void> {
+    const sid = session.id;
+    loading = true;
+    error = null;
+    const r = await repoBranches(sid);
+    if (sid !== session.id) return;
+    loading = false;
+    if (r.ok) branches = r.value;
+    else error = r.error.message;
+  }
+  async function runAction(p: Promise<Result<unknown>>, after: () => void): Promise<void> {
+    const r = await p;
+    if (r.ok) { after(); }
+    else { error = r.error.message; }
+  }
+
+  function confirmCheckout(branch: string): void {
+    void runAction(repoCheckout(session.id, branch), () => { loadBranches(); historyLoaded = false; reloadKey++; });
+  }
+
+  function confirmCheckoutCommit(hash: string): void {
+    if (!confirm(`Checkout ${hash.slice(0, 8)} as a detached HEAD? The agent's branch will change.`)) return;
+    void runAction(repoCheckoutCommit(session.id, hash), () => { historyLoaded = false; onRefresh(); });
+  }
+
+  function confirmDeleteBranch(name: string): void {
+    if (!confirm(`Delete branch "${name}"?`)) return;
+    void runAction(repoDeleteBranch(session.id, name, false), () => { loadBranches(); historyLoaded = false; });
+  }
+
+  function promptCreateBranch(startPoint: string | null): void {
+    const name = prompt('New branch name:')?.trim();
+    if (!name) return;
+    const checkout = confirm('Check out the new branch now?');
+    void runAction(
+      repoCreateBranch(session.id, name, { startPoint, checkout }),
+      () => { loadBranches(); if (mode === 'history') loadHistory(); else historyLoaded = false; },
+    );
+  }
+
+  function stageToggle(path: string, staged: boolean): void {
+    const p = staged ? repoStage(session.id, [path]) : repoUnstage(session.id, [path]);
+    void runAction(p, () => loadChanges());
+  }
+
+  function commitStaged(message: string): void {
+    void runAction(repoCommitCreate(session.id, message), () => { loadChanges(); historyLoaded = false; reloadKey++; });
+  }
+
+  function onMode(m: typeof mode): void {
     mode = m;
     error = null;
+    openCommit = null;
     if (m === 'tree' && !treeLoaded) void loadTree();
+    if (m === 'history' && !historyLoaded) void loadHistory();
+    if (m === 'branches') void loadBranches();
   }
 
   function onRefresh(): void {
     if (mode === 'changes') void loadChanges();
-    else void loadTree();
+    else if (mode === 'tree') void loadTree();
+    else if (mode === 'history') void loadHistory();
+    else void loadBranches();
     reloadKey++;
   }
 
@@ -102,39 +201,257 @@
   }
 </script>
 
-<div class="files-panel" data-testid="files-panel" style="--list-px: {listPx}px">
-  <div class="list-col">
-    <FileList
-      {mode}
-      {changes}
-      {tree}
-      {loading}
-      {error}
-      {selectedPath}
-      {onSelect}
-      {onMode}
-      {onRefresh}
-    />
+<div class="panel-wrap">
+  <!-- Shared mode toggle header, always visible -->
+  <div class="panel-header">
+    <div class="modes">
+      <button class:active={mode === 'changes'} onclick={() => onMode('changes')}>Changed</button>
+      <button class:active={mode === 'tree'} onclick={() => onMode('tree')}>All files</button>
+      <button class:active={mode === 'history'} onclick={() => onMode('history')}>History</button>
+      <button class:active={mode === 'branches'} onclick={() => onMode('branches')}>Branches</button>
+    </div>
+    <button class="refresh" title="Refresh" aria-label="Refresh" onclick={onRefresh}>↻</button>
   </div>
-  <Resizer id="files-list" onresize={onResize} />
-  <div class="viewer-col">
-    <FileViewer {session} path={selectedPath} status={selectedStatus} {reloadKey} />
-  </div>
+
+  <!-- Mode-aware body -->
+  {#if mode === 'history' && !openCommit}
+    <div class="full-col" data-testid="history-view">
+      <div class="hbar hbar-row">
+        <label><input type="checkbox" bind:checked={allBranches} onchange={() => loadHistory()} /> All branches</label>
+        <RemoteToolbar {session} ondone={onRefresh} />
+      </div>
+      <div class="hscroll">
+        {#if loading && commits.length === 0}
+          <p class="hint">Loading…</p>
+        {:else if error}
+          <p class="hint err">{error}</p>
+        {:else}
+          <CommitGraph
+            {commits}
+            selected={null}
+            onSelect={(h) => openCommitDetail(h)}
+            onCreateBranch={(h) => promptCreateBranch(h)}
+            onCheckoutCommit={(h) => confirmCheckoutCommit(h)}
+          />
+          {#if commits.length > 0}
+            <button class="more" disabled={loading} onclick={() => loadHistory(false)}>Load more</button>
+          {/if}
+        {/if}
+      </div>
+    </div>
+  {:else if mode === 'branches'}
+    <div class="full-col" data-testid="branches-view">
+      <div class="hbar hbar-row">
+        <RemoteToolbar {session} ondone={onRefresh} />
+      </div>
+      <div class="branch-scroll">
+        <BranchList
+          {branches}
+          {loading}
+          {error}
+          onCheckout={(n) => confirmCheckout(n)}
+          onDelete={(n) => confirmDeleteBranch(n)}
+          onNew={() => promptCreateBranch(null)}
+        />
+      </div>
+    </div>
+  {:else}
+    <div class="files-panel" data-testid="files-panel" style="--list-px: {listPx}px">
+      <div class="list-col">
+        {#if openCommit}
+          <div class="commit-head">
+            <button class="back" onclick={backToGraph}>← Back to graph</button>
+            <div class="csub">{openCommit.subject}</div>
+            <div class="cmeta">{openCommit.author} · {openCommit.hash.slice(0, 8)}</div>
+          </div>
+          <FileList
+            mode="changes"
+            changes={openCommit.files}
+            tree={null}
+            {loading}
+            {error}
+            {selectedPath}
+            {onSelect}
+          />
+        {:else}
+          <FileList {mode} {changes} {tree} {loading} {error} {selectedPath} {onSelect} enableStaging={true} onStageToggle={stageToggle} onCommit={commitStaged} />
+        {/if}
+      </div>
+      <Resizer id="files-list" onresize={onResize} />
+      <div class="viewer-col">
+        <FileViewer {session} path={selectedPath} status={selectedStatus} {reloadKey} commit={openCommit?.hash ?? null} />
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
-  .files-panel {
-    display: grid;
-    grid-template-columns: var(--list-px) 4px 1fr;
+  .panel-wrap {
+    display: flex;
+    flex-direction: column;
     height: 100%;
     width: 100%;
     background: var(--bg);
     overflow: hidden;
   }
-  .list-col,
+  .panel-header {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.35rem 0.5rem;
+    flex: 0 0 auto;
+    border-bottom: 1px solid var(--border);
+  }
+  .modes {
+    display: flex;
+    flex: 1 1 auto;
+  }
+  .modes button {
+    flex: 1 1 0;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--fg-muted);
+    cursor: pointer;
+    font-size: 0.72rem;
+    padding: 0.2rem 0.4rem;
+  }
+  .modes button:first-child {
+    border-radius: 4px 0 0 4px;
+  }
+  .modes button:not(:first-child) {
+    border-left: none;
+  }
+  .modes button:last-child {
+    border-radius: 0 4px 4px 0;
+  }
+  .modes button.active {
+    background: color-mix(in srgb, var(--accent) 18%, var(--bg-pane));
+    color: var(--fg);
+    border-color: var(--accent);
+  }
+  .refresh {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--fg-muted);
+    cursor: pointer;
+    font-size: 0.85rem;
+    width: 1.7rem;
+    height: 1.6rem;
+    padding: 0;
+  }
+  .refresh:hover {
+    color: var(--fg);
+    border-color: var(--accent);
+  }
+  .files-panel {
+    display: grid;
+    grid-template-columns: var(--list-px) 4px 1fr;
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    overflow: hidden;
+  }
+  .list-col {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    height: 100%;
+    overflow: hidden;
+  }
   .viewer-col {
     min-width: 0;
     height: 100%;
     overflow: hidden;
+  }
+  .full-col {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .hbar {
+    padding: 0.3rem 0.6rem;
+    font-size: 0.78rem;
+    flex: 0 0 auto;
+    border-bottom: 1px solid var(--border);
+    color: var(--fg-muted);
+  }
+  .hbar label {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    cursor: pointer;
+  }
+  .hbar-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .branch-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .hscroll {
+    flex: 1 1 auto;
+    overflow: auto;
+    min-height: 0;
+  }
+  .hint {
+    color: var(--fg-muted);
+    font-size: 0.82rem;
+    padding: 0.5rem 0.7rem;
+    margin: 0;
+  }
+  .hint.err {
+    color: #e64a4a;
+  }
+  .more {
+    display: block;
+    width: 100%;
+    background: transparent;
+    border: none;
+    border-top: 1px solid var(--border);
+    color: var(--fg-muted);
+    cursor: pointer;
+    font-size: 0.78rem;
+    padding: 0.4rem 0.7rem;
+    text-align: center;
+  }
+  .more:hover {
+    color: var(--fg);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+  .commit-head {
+    padding: 0.4rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+    flex: 0 0 auto;
+  }
+  .back {
+    background: transparent;
+    border: none;
+    color: var(--fg-muted);
+    cursor: pointer;
+    font-size: 0.72rem;
+    padding: 0;
+    margin-bottom: 0.2rem;
+  }
+  .back:hover {
+    color: var(--fg);
+  }
+  .csub {
+    font-size: 0.78rem;
+    color: var(--fg);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .cmeta {
+    font-size: 0.7rem;
+    color: var(--fg-muted);
+    margin-top: 0.1rem;
   }
 </style>

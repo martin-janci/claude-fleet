@@ -1,7 +1,10 @@
 pub mod files;
 pub mod health;
+pub mod history;
 pub mod hosts;
 pub mod mcp;
+pub mod mutate;
 pub mod projects;
+pub mod repo;
 pub mod sessions;
 pub mod upload;

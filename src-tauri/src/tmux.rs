@@ -25,6 +25,9 @@ pub trait TmuxExec: Send + Sync {
     async fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError>;
     async fn restart_session(&self, name: &str, pane_cmd: &str) -> Result<(), IpcError>;
     async fn capture_pane(&self, name: &str) -> Result<String, IpcError>;
+    /// Create a detached session with the given name and no initial command.
+    /// Returns `Ok(())` if the session was created or already exists.
+    async fn bare_new_session(&self, name: &str) -> Result<(), IpcError>;
 }
 
 pub struct LocalTmux;
@@ -63,6 +66,21 @@ impl TmuxExec for LocalTmux {
             // Non-existent pane: return empty so the poller keeps waiting.
             Ok(String::new())
         }
+    }
+    async fn bare_new_session(&self, name: &str) -> Result<(), IpcError> {
+        let output = tokio::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", name])
+            .output()
+            .await
+            .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("duplicate session") {
+            return Ok(());
+        }
+        Err(IpcError::new("E_TMUX", stderr.trim()))
     }
 }
 
@@ -214,6 +232,18 @@ impl TmuxExec for RemoteTmux {
             // Non-existent pane: return empty so the poller keeps waiting.
             Ok(String::new())
         }
+    }
+    async fn bare_new_session(&self, name: &str) -> Result<(), IpcError> {
+        let script = format!("tmux new-session -d -s {}", shell_quote(name));
+        let output = self.remote_bash(&script).await?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("duplicate session") {
+            return Ok(());
+        }
+        Err(IpcError::new("E_TMUX", stderr.trim()))
     }
 }
 

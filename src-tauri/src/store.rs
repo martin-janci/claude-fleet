@@ -44,6 +44,7 @@ pub struct SessionRow {
     pub kind: String,
     pub reviews_session_id: Option<i64>,
     pub worktree_key: Option<String>,
+    pub lost_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -179,6 +180,11 @@ impl Store {
         if v < 7 {
             let tx = self.conn.unchecked_transaction()?;
             tx.execute_batch(include_str!("../migrations/007_indexes.sql"))?;
+            tx.commit()?;
+        }
+        if v < 8 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../migrations/008_ghost_sessions.sql"))?;
             tx.commit()?;
         }
         Ok(())
@@ -734,7 +740,7 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                    worktree_key
+                    worktree_key, lost_at
              FROM sessions WHERE host_alias=?1 ORDER BY last_activity_at DESC",
         )?;
         let rows = stmt.query_map(rusqlite::params![host_alias], |row| {
@@ -752,6 +758,7 @@ impl Store {
                 kind: row.get(10)?,
                 reviews_session_id: row.get(11)?,
                 worktree_key: row.get(12)?,
+                lost_at: row.get(13)?,
             })
         })?;
         rows.collect()
@@ -763,7 +770,7 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                    worktree_key
+                    worktree_key, lost_at
              FROM sessions ORDER BY last_activity_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -781,6 +788,7 @@ impl Store {
                 kind: row.get(10)?,
                 reviews_session_id: row.get(11)?,
                 worktree_key: row.get(12)?,
+                lost_at: row.get(13)?,
             })
         })?;
         rows.collect()
@@ -808,7 +816,7 @@ impl Store {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                    worktree_key
+                    worktree_key, lost_at
              FROM sessions
              WHERE project_id=?1 AND worktree_key=?2 AND id<>?3
              ORDER BY host_alias ASC, tmux_name ASC",
@@ -828,6 +836,7 @@ impl Store {
                 kind: row.get(10)?,
                 reviews_session_id: row.get(11)?,
                 worktree_key: row.get(12)?,
+                lost_at: row.get(13)?,
             })
         })?;
         rows.collect()
@@ -866,34 +875,26 @@ impl Store {
         Ok(())
     }
 
-    pub fn get_session_by_id(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
-                    last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                    worktree_key
-             FROM sessions WHERE id = ?1",
+    /// Transition a ghost session back to running. Called after `bare_new_session`
+    /// successfully recreates the tmux session on the host.
+    pub fn restore_session(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET status='running', lost_at=NULL WHERE id=?1",
+            rusqlite::params![id],
         )?;
-        let mut rows = stmt.query_map(rusqlite::params![id], |row| {
-            Ok(SessionRow {
-                id: row.get(0)?,
-                tmux_name: row.get(1)?,
-                host_alias: row.get(2)?,
-                project_id: row.get(3)?,
-                worktree_id: row.get(4)?,
-                created_at: row.get(5)?,
-                last_activity_at: row.get(6)?,
-                status: row.get(7)?,
-                notes: row.get(8)?,
-                account_uuid: row.get(9)?,
-                kind: row.get(10)?,
-                reviews_session_id: row.get(11)?,
-                worktree_key: row.get(12)?,
-            })
-        })?;
-        match rows.next() {
-            Some(r) => Ok(Some(r?)),
-            None => Ok(None),
+        let row = fetch_session_by_id(&self.conn, id)?;
+        if let Some(ref r) = row {
+            self.bus.session_updated(r);
         }
+        Ok(row)
+    }
+
+    pub fn get_session_by_id(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
+        fetch_session_by_id(&self.conn, id)
+    }
+
+    pub fn get_host_row(&self, alias: &str) -> Result<Option<HostRow>, rusqlite::Error> {
+        fetch_host(&self.conn, alias)
     }
 
     pub fn worktree_path(&self, id: i64) -> Result<Option<String>, rusqlite::Error> {
@@ -954,7 +955,8 @@ impl Store {
     // The public `update_host_probe` / `upsert_session` /
     // `touch_project_last_session_at` / `delete_sessions_not_in` methods are
     // intentionally left untouched — direct (non-reconcile) callers keep
-    // emitting immediately.
+    // emitting immediately. Note: `ghost_and_clean_sessions_in_tx` has no
+    // public twin by design — reconcile is the only caller.
     //
     // MAINTENANCE: each `*_in_tx` helper deliberately mirrors the SQL of its
     // public twin (same column lists, same upsert ON CONFLICT clause, same
@@ -1028,7 +1030,8 @@ impl Store {
                last_activity_at=excluded.last_activity_at,
                status=excluded.status,
                account_uuid=excluded.account_uuid,
-               worktree_key=excluded.worktree_key",
+               worktree_key=excluded.worktree_key,
+               lost_at=NULL",
             rusqlite::params![
                 tmux_name,
                 host_alias,
@@ -1067,26 +1070,31 @@ impl Store {
         Ok(())
     }
 
-    fn delete_sessions_not_in_in_tx(
+    /// Phase 1: sessions not in `keep_names` that are currently live (`status !=
+    /// 'ghost'`) are soft-deleted by setting `status='ghost'` and `lost_at=now`.
+    /// Phase 2: sessions that are already ghost (from a previous cycle) and still
+    /// not in `keep_names` are hard-deleted.
+    fn ghost_and_clean_sessions_in_tx(
         tx: &rusqlite::Transaction,
         host_alias: &str,
         keep_names: &[String],
+        now: i64,
         out: &mut Vec<RowChange>,
-    ) -> Result<usize, rusqlite::Error> {
-        // `DELETE ... RETURNING id` — the delete and the deleted-id collection
-        // are one statement (no separate SELECT-then-DELETE pass, and no
-        // TOCTOU between them).
-        let ids_to_delete: Vec<i64> = if keep_names.is_empty() {
-            let mut stmt =
-                tx.prepare_cached("DELETE FROM sessions WHERE host_alias=?1 RETURNING id")?;
+    ) -> Result<(), rusqlite::Error> {
+        // ── Phase 2 prep: collect already-ghost IDs BEFORE Phase 1 modifies rows
+        // so that sessions newly ghosted in Phase 1 are not immediately deleted.
+        let pre_ghost_ids: Vec<i64> = if keep_names.is_empty() {
+            let mut stmt = tx
+                .prepare_cached("SELECT id FROM sessions WHERE host_alias=?1 AND status='ghost'")?;
             let ids = stmt
-                .query_map(rusqlite::params![host_alias], |r| r.get::<_, i64>(0))?
+                .query_map(rusqlite::params![host_alias], |r| r.get(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             ids
         } else {
-            let placeholders = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let phs = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!(
-                "DELETE FROM sessions WHERE host_alias=?1 AND tmux_name NOT IN ({placeholders}) RETURNING id"
+                "SELECT id FROM sessions
+                 WHERE host_alias=?1 AND status='ghost' AND tmux_name NOT IN ({phs})"
             );
             let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
             for n in keep_names {
@@ -1094,15 +1102,65 @@ impl Store {
             }
             let mut stmt = tx.prepare(&sql)?;
             let ids = stmt
-                .query_map(params.as_slice(), |r| r.get::<_, i64>(0))?
+                .query_map(params.as_slice(), |r| r.get(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             ids
         };
 
-        for id in &ids_to_delete {
-            out.push(RowChange::SessionKilled(*id));
+        // ── Phase 1: ghost live sessions not in keep ──────────────────────────
+        let ghost_ids: Vec<i64> = if keep_names.is_empty() {
+            let mut stmt = tx.prepare_cached(
+                "UPDATE sessions SET status='ghost', lost_at=?1
+                 WHERE host_alias=?2 AND status!='ghost'
+                 RETURNING id",
+            )?;
+            let ids = stmt
+                .query_map(rusqlite::params![now, host_alias], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ids
+        } else {
+            let phs = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "UPDATE sessions SET status='ghost', lost_at=?1
+                 WHERE host_alias=?2 AND status!='ghost' AND tmux_name NOT IN ({phs})
+                 RETURNING id"
+            );
+            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&now, &host_alias];
+            for n in keep_names {
+                params.push(n);
+            }
+            let mut stmt = tx.prepare(&sql)?;
+            let ids = stmt
+                .query_map(params.as_slice(), |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ids
+        };
+
+        for id in &ghost_ids {
+            if let Some(row) = fetch_session_by_id(tx, *id)? {
+                out.push(RowChange::SessionUpdated(row));
+            }
         }
-        Ok(ids_to_delete.len())
+
+        // ── Phase 2: hard-delete sessions that were already ghost before this cycle
+        if !pre_ghost_ids.is_empty() {
+            let phs = pre_ghost_ids
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!("DELETE FROM sessions WHERE id IN ({phs})");
+            let params: Vec<&dyn rusqlite::ToSql> = pre_ghost_ids
+                .iter()
+                .map(|id| id as &dyn rusqlite::ToSql)
+                .collect();
+            tx.execute(&sql, params.as_slice())?;
+            for id in &pre_ghost_ids {
+                out.push(RowChange::SessionKilled(*id));
+            }
+        }
+
+        Ok(())
     }
 
     /// One probed/live session to apply during a reconcile write-burst, with
@@ -1152,7 +1210,11 @@ impl Store {
                 for (pid, ts) in project_touch {
                     Self::touch_project_last_session_at_in_tx(tx, pid, ts, &mut out)?;
                 }
-                Self::delete_sessions_not_in_in_tx(tx, spec.alias, spec.keep, &mut out)?;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                Self::ghost_and_clean_sessions_in_tx(tx, spec.alias, spec.keep, now, &mut out)?;
             }
             Ok(out)
         })?;
@@ -1224,7 +1286,7 @@ fn fetch_session(
     let mut stmt = conn.prepare_cached(
         "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
                 last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                worktree_key
+                worktree_key, lost_at
          FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
     )?;
     let mut rows = stmt.query_map(rusqlite::params![tmux_name, host_alias], |row| {
@@ -1242,6 +1304,38 @@ fn fetch_session(
             kind: row.get(10)?,
             reviews_session_id: row.get(11)?,
             worktree_key: row.get(12)?,
+            lost_at: row.get(13)?,
+        })
+    })?;
+    match rows.next() {
+        Some(r) => Ok(Some(r?)),
+        None => Ok(None),
+    }
+}
+
+fn fetch_session_by_id(conn: &Connection, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
+                last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
+                worktree_key, lost_at
+         FROM sessions WHERE id=?1",
+    )?;
+    let mut rows = stmt.query_map(rusqlite::params![id], |row| {
+        Ok(SessionRow {
+            id: row.get(0)?,
+            tmux_name: row.get(1)?,
+            host_alias: row.get(2)?,
+            project_id: row.get(3)?,
+            worktree_id: row.get(4)?,
+            created_at: row.get(5)?,
+            last_activity_at: row.get(6)?,
+            status: row.get(7)?,
+            notes: row.get(8)?,
+            account_uuid: row.get(9)?,
+            kind: row.get(10)?,
+            reviews_session_id: row.get(11)?,
+            worktree_key: row.get(12)?,
+            lost_at: row.get(13)?,
         })
     })?;
     match rows.next() {
@@ -1319,7 +1413,7 @@ mod tests {
     fn migrate_is_idempotent() {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
-        assert_eq!(store.schema_version().expect("version"), 7);
+        assert_eq!(store.schema_version().expect("version"), 8);
     }
 
     #[test]
@@ -1453,7 +1547,7 @@ mod tests {
     #[test]
     fn schema_version_is_seven_after_migration() {
         let s = Store::open_in_memory().expect("open");
-        assert_eq!(s.schema_version().expect("version"), 7);
+        assert_eq!(s.schema_version().expect("version"), 8);
     }
 
     #[test]
@@ -2013,6 +2107,35 @@ mod tests {
     }
 
     #[test]
+    fn restore_session_clears_ghost_status_and_lost_at() {
+        let (store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        store
+            .upsert_session("s1", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        let id = store.get_session("s1", "alpha").unwrap().unwrap().id;
+        // Manually ghost it
+        store
+            .conn
+            .execute(
+                "UPDATE sessions SET status='ghost', lost_at=999 WHERE id=?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        bus.take(); // drain
+
+        let row = store.restore_session(id).unwrap().expect("row must exist");
+        assert_eq!(row.status, "running");
+        assert_eq!(row.lost_at, None);
+
+        let evts = bus.take();
+        assert!(
+            evts.iter().any(|e| e.starts_with("session:updated:")),
+            "restore must emit session:updated; got: {evts:?}"
+        );
+    }
+
+    #[test]
     fn migration_005_adds_kind_and_reviews_columns_with_defaults() {
         let store = Store::open_in_memory().expect("store");
         store.upsert_host("alpha").unwrap();
@@ -2023,6 +2146,30 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, "work");
         assert_eq!(rows[0].reviews_session_id, None);
+    }
+
+    #[test]
+    fn migration_008_adds_lost_at_column() {
+        let store = Store::open_in_memory().expect("store");
+        let v: i64 = store
+            .conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 8, "schema_version should be 8 after migration");
+        // Column exists and defaults to NULL
+        store.upsert_host("alpha").unwrap();
+        store
+            .upsert_session("s1", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        let lost: Option<i64> = store
+            .conn
+            .query_row(
+                "SELECT lost_at FROM sessions WHERE tmux_name='s1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(lost, None, "lost_at should be NULL for a fresh session");
     }
 
     #[test]
@@ -2098,18 +2245,23 @@ mod tests {
             })
             .expect("reconcile ok");
 
-        // (a) rows persisted: stale gone, two live, host probe updated.
-        let names: Vec<String> = store
+        // (a) rows persisted: stale ghosted, two live, host probe updated.
+        let live: Vec<String> = store
             .list_sessions_for_host("alpha")
             .unwrap()
             .into_iter()
+            .filter(|r| r.status != "ghost")
             .map(|r| r.tmux_name)
             .collect();
-        assert_eq!(
-            names,
-            vec!["fresh", "keep-existing"],
-            "stale pruned, two live"
-        );
+        assert_eq!(live, vec!["fresh", "keep-existing"], "two live sessions");
+        let ghosts: Vec<String> = store
+            .list_sessions_for_host("alpha")
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.status == "ghost")
+            .map(|r| r.tmux_name)
+            .collect();
+        assert_eq!(ghosts, vec!["stale"], "stale is now ghost");
         let host = store
             .list_hosts()
             .unwrap()
@@ -2136,8 +2288,8 @@ mod tests {
             "expected a create for fresh; got: {evts:?}"
         );
         assert!(
-            evts.contains(&format!("session:killed:{stale_id}")),
-            "got: {evts:?}"
+            evts.contains(&format!("session:updated:{stale_id}")),
+            "stale becomes ghost (session:updated); got: {evts:?}"
         );
         assert!(
             evts.iter().any(|e| e.starts_with("project:updated:")),
@@ -2218,6 +2370,67 @@ mod tests {
         assert!(
             bus.take().is_empty(),
             "no event may fire for a rolled-back batch"
+        );
+    }
+
+    #[test]
+    fn reconcile_ghosts_sessions_on_first_empty_probe_then_deletes_on_second() {
+        let (mut store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        store
+            .upsert_session("s1", "alpha", None, None, 1, 10, "running", None)
+            .unwrap();
+        let s1_id = store.get_session("s1", "alpha").unwrap().unwrap().id;
+        bus.take(); // drain setup events
+
+        // First reachable probe with no sessions — s1 should become ghost
+        store
+            .apply_host_reconcile(HostReconcile {
+                alias: "alpha",
+                reachable: true,
+                claude_version: None,
+                tmux_version: None,
+                last_pinged_at: 100,
+                sessions: &[],
+                keep: &[],
+            })
+            .unwrap();
+
+        let s1 = store.get_session_by_id(s1_id).unwrap().unwrap();
+        assert_eq!(s1.status, "ghost", "first empty probe should ghost s1");
+        assert!(s1.lost_at.is_some(), "lost_at must be set");
+
+        let evts = bus.take();
+        assert!(
+            evts.iter().any(|e| e.starts_with("session:updated:")),
+            "ghost transition should emit session:updated; got: {evts:?}"
+        );
+        assert!(
+            !evts.iter().any(|e| e.starts_with("session:killed:")),
+            "no kill event on first cycle; got: {evts:?}"
+        );
+
+        // Second reachable probe with no sessions — ghost s1 should be deleted
+        store
+            .apply_host_reconcile(HostReconcile {
+                alias: "alpha",
+                reachable: true,
+                claude_version: None,
+                tmux_version: None,
+                last_pinged_at: 200,
+                sessions: &[],
+                keep: &[],
+            })
+            .unwrap();
+
+        assert!(
+            store.get_session_by_id(s1_id).unwrap().is_none(),
+            "second empty probe should hard-delete the ghost"
+        );
+        let evts2 = bus.take();
+        assert!(
+            evts2.contains(&format!("session:killed:{s1_id}")),
+            "second cycle must emit session:killed; got: {evts2:?}"
         );
     }
 }
