@@ -9,12 +9,49 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
-/// Per-host probe result tuple: (host, tmux sessions, claude agents).
+/// Number of pane lines captured per work session for the reconcile intel
+/// probe. Eight lines covers the REPL footer (status bar / context %) plus the
+/// last tool line or prompt without dragging in scrollback.
+const PANE_TAIL_LINES: u32 = 8;
+
+/// Map of `tmux_name` → analyzed pane intel, gathered off-lock during a host
+/// probe. A name absent from the map (capture failed) leaves the session's
+/// intel fields untouched (COALESCE in the upsert preserves prior values).
+type PaneIntelMap = std::collections::HashMap<String, crate::service::pane_intel::PaneIntel>;
+
+/// Per-host probe result tuple: (host, tmux sessions, claude agents, pane intel).
 type HostProbeResult = (
     HostRow,
     Result<Vec<crate::tmux::TmuxSession>, IpcError>,
     Vec<crate::claude_agents::ClaudeAgentRow>,
+    PaneIntelMap,
 );
+
+/// Capture and analyze the pane tail for every live session on a host. Runs
+/// off-lock inside the probe task. A failed capture for one session is skipped
+/// (no map entry) rather than aborting — reconcile must be robust to a session
+/// whose pane just vanished.
+async fn capture_pane_intel(
+    tmux: &dyn TmuxExec,
+    sessions: &[crate::tmux::TmuxSession],
+) -> PaneIntelMap {
+    let mut map = PaneIntelMap::new();
+    for sess in sessions {
+        match tmux
+            .capture_pane_scrollback(&sess.name, PANE_TAIL_LINES)
+            .await
+        {
+            Ok(tail) if !tail.is_empty() => {
+                map.insert(
+                    sess.name.clone(),
+                    crate::service::pane_intel::analyze(&tail),
+                );
+            }
+            _ => {}
+        }
+    }
+    map
+}
 
 fn exec_for(host: &str, ssh: &Arc<SshClient>) -> Box<dyn TmuxExec> {
     if host == "local" {
@@ -37,6 +74,7 @@ fn reconcile_write_one_host(
     res: &Result<Vec<crate::tmux::TmuxSession>, IpcError>,
     projects: &[ProjectRow],
     agent_rows: &[crate::claude_agents::ClaudeAgentRow],
+    intel: &PaneIntelMap,
 ) -> Result<(), IpcError> {
     match res {
         Ok(live) => {
@@ -61,6 +99,15 @@ fn reconcile_write_one_host(
                     &sess.name,
                     &sess.path.to_string_lossy(),
                 );
+                // Pane-tail intel from the off-lock probe (may be absent if the
+                // capture failed — then all four intel fields stay None and the
+                // upsert's COALESCE preserves the session's prior values).
+                let pane = intel.get(&sess.name);
+                let agent_status = agent.and_then(|a| a.status.clone());
+                // Prefer the authoritative `claude agents` status; fall back to
+                // the status derived from the pane tail only when it is absent.
+                let claude_status = agent_status
+                    .or_else(|| pane.and_then(|p| p.derived_status).map(|s| s.to_string()));
                 sessions.push(ReconcileSession {
                     tmux_name: &sess.name,
                     project_id,
@@ -69,10 +116,12 @@ fn reconcile_write_one_host(
                     account_uuid,
                     worktree_key,
                     claude_session_id: agent.and_then(|a| a.session_id.clone()),
-                    claude_status: agent.and_then(|a| a.status.clone()),
+                    claude_status,
                     effort_level: None, // not in claude agents --json; reserved for future
                     pr_url: None,       // not in claude agents --json; reserved for future
-                    current_activity: None,
+                    current_activity: pane.and_then(|p| p.activity.clone()),
+                    context_pct: pane.and_then(|p| p.context_pct),
+                    stuck_kind: pane.and_then(|p| p.stuck.map(|k| k.as_str().to_string())),
                 });
             }
             s.apply_host_reconcile(HostReconcile {
@@ -131,7 +180,12 @@ async fn reconcile_sessions(
             let tmux = exec_for(&host.alias, &ssh_arc);
             let tmux_result = tmux.list_sessions().await;
             let agent_rows = tmux.list_claude_agents().await;
-            (host, tmux_result, agent_rows)
+            // One pane-tail read per live session, parsed into reconcile intel.
+            let intel = match &tmux_result {
+                Ok(live) => capture_pane_intel(tmux.as_ref(), live).await,
+                Err(_) => PaneIntelMap::new(),
+            };
+            (host, tmux_result, agent_rows, intel)
         });
     }
 
@@ -140,7 +194,7 @@ async fn reconcile_sessions(
     let mut probed: Vec<HostProbeResult> = Vec::new();
     while let Some(join) = set.join_next().await {
         match join {
-            Ok((host, res, agent_rows)) => probed.push((host, res, agent_rows)),
+            Ok((host, res, agent_rows, intel)) => probed.push((host, res, agent_rows, intel)),
             Err(e) => eprintln!("[reconcile] probe task panicked: {e}"),
         }
     }
@@ -159,12 +213,14 @@ async fn reconcile_sessions(
         // rather than re-querying inside `find_project_id_for_path` per session.
         let projects = s.list_projects()?;
 
-        for (host, res, agent_rows) in &probed {
+        for (host, res, agent_rows, intel) in &probed {
             // Per-host isolation: one host's DB write failure (e.g. an FK
             // violation on a stale account_uuid) must NOT abort reconcile for
             // every other host. apply_host_reconcile is transactional, so a
             // failed host rolls back cleanly; we log it and carry on.
-            if let Err(e) = reconcile_write_one_host(&mut s, host, res, &projects, agent_rows) {
+            if let Err(e) =
+                reconcile_write_one_host(&mut s, host, res, &projects, agent_rows, intel)
+            {
                 eprintln!("[reconcile] write failed for {}: {e}", host.alias);
             }
         }
@@ -198,6 +254,10 @@ async fn reconcile_one_host(
     let tmux = exec_for(&host.alias, ssh);
     let result = tmux.list_sessions().await;
     let agent_rows = tmux.list_claude_agents().await;
+    let intel = match &result {
+        Ok(live) => capture_pane_intel(tmux.as_ref(), live).await,
+        Err(_) => PaneIntelMap::new(),
+    };
 
     // 3. Apply writes under one brief lock, via the SAME per-host write path
     //    as the multi-host reconcile (single transaction + emit-after-commit).
@@ -205,7 +265,7 @@ async fn reconcile_one_host(
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
     let projects = s.list_projects()?;
-    reconcile_write_one_host(&mut s, &host, &result, &projects, &agent_rows)
+    reconcile_write_one_host(&mut s, &host, &result, &projects, &agent_rows, &intel)
 }
 
 fn now_unix() -> i64 {
