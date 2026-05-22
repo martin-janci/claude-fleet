@@ -7,6 +7,7 @@
     type FileContent,
     type FileDiff,
   } from './files';
+  import { repoCommitDiff } from './history';
   import DiffView from './DiffView.svelte';
 
   let {
@@ -14,12 +15,15 @@
     path,
     status,
     reloadKey,
+    commit = null,
   }: {
     session: SessionRow;
     path: string | null;
     status: string | undefined;
     /** Bumped by the panel on Refresh — invalidates the viewer caches. */
     reloadKey: number;
+    /** When set, show this file's diff *within* the commit, not the worktree. */
+    commit?: string | null;
   } = $props();
 
   type View = 'diff' | 'file';
@@ -34,7 +38,7 @@
   // a different session never serves stale content.
   const diffCache = new Map<string, FileDiff>();
   const fileCache = new Map<string, FileContent>();
-  const cacheKey = (sid: number, p: string) => `${sid}:${reloadKey}:${p}`;
+  const cacheKey = (sid: number, p: string) => `${sid}:${reloadKey}:${commit ?? 'wt'}:${p}`;
 
   // Cap each cache: a long session-hopping run could otherwise pin many
   // large (up to 512 KiB) file bodies in memory for the panel's lifetime.
@@ -64,7 +68,7 @@
   $effect(() => {
     if (path !== lastPath) {
       lastPath = path;
-      view = canDiff ? 'diff' : 'file';
+      view = commit ? 'diff' : canDiff ? 'diff' : 'file';
     }
   });
 
@@ -97,7 +101,9 @@
         return;
       }
       loading = true;
-      const r = await repoDiff(sid, p);
+      const r = commit
+        ? await repoCommitDiff(sid, commit, p)
+        : await repoDiff(sid, p);
       // A newer load (selection, view flip, or session switch) superseded us.
       if (token !== loadSeq) return;
       loading = false;
@@ -142,7 +148,12 @@
           title={canDiff ? 'Show diff' : 'No diff — file is untracked'}
           onclick={() => (view = 'diff')}>Diff</button
         >
-        <button class:active={view === 'file'} onclick={() => (view = 'file')}>File</button>
+        <button
+          class:active={view === 'file'}
+          disabled={commit !== null}
+          title={commit !== null ? 'Viewing a commit — working-tree file not shown' : 'Show file'}
+          onclick={() => (view = 'file')}>File</button
+        >
       </div>
     </header>
 
