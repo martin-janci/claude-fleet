@@ -25,6 +25,8 @@ export interface FileContent {
   content: string;
   truncated: boolean;
   binary: boolean;
+  /** True when the path is a directory (e.g. an embedded git repo). */
+  is_dir: boolean;
   /** Byte size when fully read; null when truncated. */
   size: number | null;
 }
