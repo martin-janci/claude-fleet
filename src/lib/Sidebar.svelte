@@ -447,6 +447,10 @@
     const result = await purgeProject('local', project.base_path, project.id);
     if (!result.ok) {
       actionError = 'Purge failed: ' + result.error.message;
+    } else {
+      // Refresh stores since the backend doesn't emit row-level events for project deletion
+      await loadSessions();
+      await refreshProjects();
     }
   }
 

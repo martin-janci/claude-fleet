@@ -82,11 +82,15 @@ async fn run_claude_script(
     timeout: Duration,
 ) -> Result<String, IpcError> {
     if host_alias == "local" {
-        let output = tokio::process::Command::new("bash")
-            .args(["-lc", script])
-            .output()
-            .await
-            .map_err(|e| IpcError::new("E_SPAWN", format!("spawn bash: {e}")))?;
+        let output = tokio::time::timeout(
+            timeout,
+            tokio::process::Command::new("bash")
+                .args(["-lc", script])
+                .output(),
+        )
+        .await
+        .map_err(|_| IpcError::new("E_TIMEOUT", format!("claude CLI timed out after {:.0}s", timeout.as_secs_f64())))?
+        .map_err(|e| IpcError::new("E_SPAWN", format!("spawn bash: {e}")))?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
