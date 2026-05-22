@@ -1,9 +1,11 @@
 //! Provision a host's Claude with the fleet-control skill + MCP server entry.
 
 use crate::ipc_error::IpcError;
+use crate::service::tunnel::TunnelSupervisor;
 use crate::shell::quote as shq;
 use crate::ssh::SshClient;
-use std::sync::Arc;
+use crate::store::Store;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const PROVISION_TIMEOUT: Duration = Duration::from_secs(15);
@@ -17,8 +19,6 @@ const CLAUDE_DIR: &str = "~/.claude";
 /// Install the skill + merge the MCP entry on one host. `url` is the MCP
 /// endpoint that host should use. Reads `~/.claude.json`, merges (preserving
 /// siblings), backs it up, writes it back. Parse errors abort BEFORE any write.
-// called by provision_hosts in the next task; remove this allow then.
-#[allow(dead_code)]
 pub async fn provision_one(
     ssh: &Arc<SshClient>,
     host: &str,
@@ -41,6 +41,94 @@ pub async fn provision_one(
         .await?;
     }
     write_host_file(ssh, host, CLAUDE_DIR, CLAUDE_JSON, &merged).await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostProvisionResult {
+    pub host: String,
+    /// "provisioned" | "skipped" | "failed"
+    pub status: String,
+    pub detail: Option<String>,
+}
+
+/// Provision every non-hidden host. `local` gets a direct localhost URL + no
+/// tunnel; remote hosts get the reverse tunnel + a localhost:<mcp_port> URL.
+/// Per-host failures never abort the others.
+// wired into the provision_hosts command + mcp_configure in the next task; remove then.
+#[allow(dead_code)]
+pub async fn provision_hosts(
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    tunnels: &Arc<TunnelSupervisor>,
+    mcp_port: u16,
+    token: &str,
+) -> Result<Vec<HostProvisionResult>, IpcError> {
+    let hosts = {
+        let s = store
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        s.list_hosts()?
+    };
+    let mut results = Vec::new();
+    for h in hosts {
+        if h.hidden {
+            continue;
+        }
+        if h.alias != "local" && !h.reachable {
+            results.push(HostProvisionResult {
+                host: h.alias,
+                status: "skipped".into(),
+                detail: Some("unreachable".into()),
+            });
+            continue;
+        }
+        let url = format!("http://127.0.0.1:{mcp_port}/mcp");
+        match provision_one(ssh, &h.alias, &url, token).await {
+            Ok(()) => {
+                if h.alias != "local" {
+                    tunnels.ensure(&h.alias, mcp_port, mcp_port);
+                }
+                if let Ok(s) = store.lock() {
+                    let _ = s.set_host_provisioned(&h.alias, true);
+                }
+                results.push(HostProvisionResult {
+                    host: h.alias,
+                    status: "provisioned".into(),
+                    detail: Some("restart Claude on this host to load the MCP server".into()),
+                });
+            }
+            Err(e) => results.push(HostProvisionResult {
+                host: h.alias,
+                status: "failed".into(),
+                detail: Some(e.message),
+            }),
+        }
+    }
+    Ok(results)
+}
+
+/// Re-establish tunnels for already-provisioned remote hosts (app start / MCP
+/// re-enable). Does NOT re-write config.
+// wired into the provision_hosts command + mcp_configure in the next task; remove then.
+#[allow(dead_code)]
+pub fn reestablish_tunnels(
+    store: &Mutex<Store>,
+    tunnels: &Arc<TunnelSupervisor>,
+    mcp_port: u16,
+) -> Result<(), IpcError> {
+    let hosts = {
+        store
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?
+            .list_hosts()?
+    };
+    for h in hosts {
+        if h.provisioned && h.alias != "local" && !h.hidden {
+            tunnels.ensure(&h.alias, mcp_port, mcp_port);
+        }
+    }
     Ok(())
 }
 
