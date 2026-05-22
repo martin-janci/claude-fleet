@@ -312,6 +312,9 @@
     lastCols = dim.cols;
     lastRows = dim.rows;
     screen = new Screen(dim.rows, dim.cols);
+    screen.onClipboard = (text) => {
+      void navigator.clipboard.writeText(text).catch(() => {});
+    };
     renderVersion++;
 
     resizeObserver = new ResizeObserver(() => {

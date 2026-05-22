@@ -225,6 +225,10 @@ export class Screen {
   get mouseAnyMotion(): boolean { return this._mouse1003; }
   get mouseSgr(): boolean { return this._mouse1006; }
 
+  /** Callback invoked when the remote sends an OSC 52 clipboard sequence.
+   *  The argument is the decoded text to copy. Set by the component. */
+  onClipboard: ((text: string) => void) | null = null;
+
   constructor(rows: number, cols: number) {
     this.rows = Math.max(1, rows);
     this.cols = Math.max(1, cols);
@@ -476,15 +480,21 @@ export class Screen {
     if (intro === ']') {
       // OSC: ESC ] ... BEL  or  ESC ] ... ESC \
       let end = start + 2;
+      let termLen = 0;
       while (end < s.length) {
         const ch = s.charCodeAt(end);
-        if (ch === 0x07) return end - start + 1;
+        if (ch === 0x07) { termLen = 1; break; }
         if (ch === 0x1b && end + 1 < s.length && s.charCodeAt(end + 1) === 0x5c) {
-          return end - start + 2;
+          termLen = 2;
+          break;
         }
         end++;
       }
-      return -1; // incomplete OSC
+      if (termLen === 0) return -1; // incomplete OSC
+      // Extract and handle the OSC payload (between ESC ] and terminator)
+      const payload = s.slice(start + 2, end);
+      this.applyOsc(payload);
+      return end - start + termLen;
     }
     if (intro === '(' || intro === ')') {
       // SCS — designate a charset into G0 (intro='(') or G1 (intro=')'):
@@ -505,6 +515,25 @@ export class Screen {
     }
     // Unknown / unsupported single-char ESC — drop.
     return 2;
+  }
+
+  /** Handle an OSC (Operating System Command) sequence payload.
+   *  OSC 52 sets the system clipboard — tmux and other apps use this. */
+  private applyOsc(payload: string): void {
+    // OSC 52 format: "52;<selection>;<base64-data>"
+    // <selection> is 'c' (clipboard), 'p' (primary), 's' (secondary), etc.
+    // We accept any selection and copy to the system clipboard.
+    if (!payload.startsWith('52;')) return;
+    const parts = payload.slice(3).split(';');
+    if (parts.length < 2) return;
+    const b64 = parts[1];
+    if (!b64 || b64 === '?') return; // '?' is a query, not a set
+    try {
+      const text = atob(b64);
+      if (this.onClipboard) this.onClipboard(text);
+    } catch {
+      // Invalid base64 — ignore
+    }
   }
 
   private fullReset(): void {
