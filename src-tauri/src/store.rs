@@ -1320,6 +1320,22 @@ impl Store {
         }
         Ok(ids_to_delete.len())
     }
+
+    /// Update `claude_status` for the session whose `claude_session_id` matches.
+    /// No-ops silently when no row matches (hook arrived before reconcile enriched it).
+    pub fn set_claude_status_by_session_id(
+        &self,
+        claude_session_id: &str,
+        status: &str,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        self.conn
+            .execute(
+                "UPDATE sessions SET claude_status = ?1 WHERE claude_session_id = ?2",
+                rusqlite::params![status, claude_session_id],
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        Ok(())
+    }
 }
 
 // ---- Connection-level row fetch helpers ----
