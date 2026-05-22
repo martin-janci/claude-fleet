@@ -9,6 +9,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
+/// Per-host probe result tuple: (host, tmux sessions, claude agents).
+type HostProbeResult = (
+    HostRow,
+    Result<Vec<crate::tmux::TmuxSession>, IpcError>,
+    Vec<crate::claude_agents::ClaudeAgentRow>,
+);
+
 fn exec_for(host: &str, ssh: &Arc<SshClient>) -> Box<dyn TmuxExec> {
     if host == "local" {
         Box::new(LocalTmux)
@@ -122,7 +129,7 @@ async fn reconcile_sessions(
 
     // Collect per-host probe results. Join errors (task panics) are logged
     // and skipped — they don't abort the rest of reconcile.
-    let mut probed: Vec<(HostRow, Result<Vec<crate::tmux::TmuxSession>, IpcError>, Vec<crate::claude_agents::ClaudeAgentRow>)> = Vec::new();
+    let mut probed: Vec<HostProbeResult> = Vec::new();
     while let Some(join) = set.join_next().await {
         match join {
             Ok((host, res, agent_rows)) => probed.push((host, res, agent_rows)),
