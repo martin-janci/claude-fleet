@@ -534,7 +534,7 @@
             >PR↗</a>
           {/if}
           <div class="row-actions">
-            {#if sess.claude_session_id}
+            {#if sess.claude_session_id && sess.status !== 'ghost'}
               <button
                 class="icon-btn small peek-btn"
                 data-testid="peek-session"
