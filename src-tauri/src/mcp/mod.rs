@@ -6,6 +6,7 @@
 //! carry a bearer token. See `docs/specs/2026-05-21-control-api-mcp-design.md`.
 
 mod auth;
+pub mod hooks;
 mod tools;
 
 use crate::cancel::CancellationRegistry;

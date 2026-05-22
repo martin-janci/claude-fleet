@@ -9,6 +9,7 @@
 //! dependency on the Tauri runtime and are directly unit-testable.
 
 pub mod health;
+pub mod hooks;
 pub mod hosts;
 pub mod projects;
 pub mod sessions;
