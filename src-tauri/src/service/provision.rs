@@ -8,10 +8,44 @@ use std::time::Duration;
 
 const PROVISION_TIMEOUT: Duration = Duration::from_secs(15);
 
+const FLEET_SKILL: &str = include_str!("../../../skills/claude-fleet-control/SKILL.md");
+const SKILL_DIR: &str = "~/.claude/skills/claude-fleet-control";
+const SKILL_PATH: &str = "~/.claude/skills/claude-fleet-control/SKILL.md";
+const CLAUDE_JSON: &str = "~/.claude.json";
+const CLAUDE_DIR: &str = "~/.claude";
+
+/// Install the skill + merge the MCP entry on one host. `url` is the MCP
+/// endpoint that host should use. Reads `~/.claude.json`, merges (preserving
+/// siblings), backs it up, writes it back. Parse errors abort BEFORE any write.
+// called by provision_hosts in the next task; remove this allow then.
+#[allow(dead_code)]
+pub async fn provision_one(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    url: &str,
+    token: &str,
+) -> Result<(), IpcError> {
+    // 1. Skill (live-discovered, no restart).
+    write_host_file(ssh, host, SKILL_DIR, SKILL_PATH, FLEET_SKILL).await?;
+    // 2. MCP entry: read → merge (preserve siblings) → back up → write.
+    let existing = read_host_file(ssh, host, CLAUDE_JSON).await?;
+    let merged = merge_mcp_entry(&existing, url, token)?; // errors before any write
+    if !existing.trim().is_empty() {
+        write_host_file(
+            ssh,
+            host,
+            CLAUDE_DIR,
+            &format!("{CLAUDE_JSON}.fleet-bak"),
+            &existing,
+        )
+        .await?;
+    }
+    write_host_file(ssh, host, CLAUDE_DIR, CLAUDE_JSON, &merged).await?;
+    Ok(())
+}
+
 /// Read a file from a host. `local` → `std::fs`; remote → `cat` over SSH.
 /// Missing file → `Ok(String::new())` (caller treats as empty config).
-// called by provision_one in the next task; remove the allow then.
-#[allow(dead_code)]
 pub async fn read_host_file(
     ssh: &Arc<SshClient>,
     host: &str,
@@ -31,8 +65,6 @@ pub async fn read_host_file(
 /// Write a file to a host (creating parent dirs). `local` → fs; remote → a
 /// shell that `mkdir -p`s the parent and `printf '%s'`s the (shell-quoted)
 /// content to `path`. `dir` is the parent dir; `path` the file.
-// called by provision_one in the next task; remove the allow then.
-#[allow(dead_code)]
 pub async fn write_host_file(
     ssh: &Arc<SshClient>,
     host: &str,
@@ -84,8 +116,6 @@ fn expand_home_local(path: &str) -> Result<String, IpcError> {
 /// Merge the claude-fleet HTTP MCP server entry into a host's `~/.claude.json`
 /// content, preserving every existing key. Returns the new JSON (pretty).
 /// Errors if `existing` is non-empty and not valid JSON.
-// Caller (`provision_one`) lands in a later task; remove this allow then.
-#[allow(dead_code)]
 pub fn merge_mcp_entry(existing: &str, url: &str, token: &str) -> Result<String, IpcError> {
     let mut root: serde_json::Value = if existing.trim().is_empty() {
         serde_json::json!({})
