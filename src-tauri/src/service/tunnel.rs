@@ -28,12 +28,10 @@ pub fn tunnel_argv(host: &str, remote_port: u16, mcp_port: u16) -> Vec<String> {
 /// `Arc<TunnelSupervisor>`. Each task loops: spawn `ssh -R … host`, await exit,
 /// and (unless aborted) restart after a capped backoff.
 #[derive(Default)]
-#[allow(dead_code)] // wired into Tauri state + mcp_configure in a later task
 pub struct TunnelSupervisor {
     tasks: Mutex<HashMap<String, JoinHandle<()>>>,
 }
 
-#[allow(dead_code)] // methods wired into Tauri state + mcp_configure in a later task
 impl TunnelSupervisor {
     pub fn new() -> Self {
         Self::default()
@@ -64,6 +62,7 @@ impl TunnelSupervisor {
     }
 
     /// Stop a single host's tunnel.
+    #[allow(dead_code)]
     pub fn stop(&self, host: &str) {
         if let Some(h) = self.tasks.lock().unwrap().remove(host) {
             h.abort();

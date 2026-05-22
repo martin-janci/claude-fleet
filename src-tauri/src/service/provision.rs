@@ -56,8 +56,6 @@ pub struct HostProvisionResult {
 /// Provision every non-hidden host. `local` gets a direct localhost URL + no
 /// tunnel; remote hosts get the reverse tunnel + a localhost:<mcp_port> URL.
 /// Per-host failures never abort the others.
-// wired into the provision_hosts command + mcp_configure in the next task; remove then.
-#[allow(dead_code)]
 pub async fn provision_hosts(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
@@ -111,8 +109,6 @@ pub async fn provision_hosts(
 
 /// Re-establish tunnels for already-provisioned remote hosts (app start / MCP
 /// re-enable). Does NOT re-write config.
-// wired into the provision_hosts command + mcp_configure in the next task; remove then.
-#[allow(dead_code)]
 pub fn reestablish_tunnels(
     store: &Mutex<Store>,
     tunnels: &Arc<TunnelSupervisor>,
