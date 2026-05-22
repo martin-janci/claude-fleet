@@ -302,6 +302,8 @@ pub fn run() {
             commands::sessions::restart_session,
             commands::sessions::send_prompt,
             commands::sessions::spawn_review,
+            commands::sessions::recreate_session,
+            commands::sessions::dismiss_ghost_session,
             commands::files::repo_changes,
             commands::files::repo_tree,
             commands::files::repo_file,

@@ -5,8 +5,8 @@
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::IpcError;
 use crate::service::sessions::{
-    self, KillSessionArgs, NewSessionArgs, RelatedSessionsArgs, RenameSessionArgs,
-    RestartSessionArgs, SendPromptArgs, SpawnReviewArgs,
+    self, DismissGhostSessionArgs, KillSessionArgs, NewSessionArgs, RecreateSessionArgs,
+    RelatedSessionsArgs, RenameSessionArgs, RestartSessionArgs, SendPromptArgs, SpawnReviewArgs,
 };
 use crate::ssh::SshClient;
 use crate::store::{SessionRow, Store};
@@ -81,4 +81,21 @@ pub async fn spawn_review(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SessionRow, IpcError> {
     sessions::spawn_review(args, &store, &ssh).await
+}
+
+#[tauri::command]
+pub async fn recreate_session(
+    args: RecreateSessionArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<SessionRow, IpcError> {
+    sessions::recreate_session(args, &store, &ssh).await
+}
+
+#[tauri::command]
+pub fn dismiss_ghost_session(
+    args: DismissGhostSessionArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<(), IpcError> {
+    sessions::dismiss_ghost_session(args, &store)
 }
