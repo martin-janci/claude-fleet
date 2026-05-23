@@ -232,6 +232,50 @@ pub struct SessionHistoryParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SendMessageParams {
+    /// Caller's fleet session id (the sender). Recorded on the inbox row and
+    /// included in the pane-delivery header so the recipient can see who
+    /// sent it.
+    pub from_session_id: i64,
+    /// Recipient's fleet session id.
+    pub to_session_id: i64,
+    /// Message body. Free text; the recipient sees it verbatim.
+    pub body: String,
+    /// Optional tag — `message` (default), `task`, `reply`, `alert`, …
+    pub kind: Option<String>,
+    /// When true, also type the message into the recipient's tmux pane with
+    /// a `[msg #id from name@host]:` header. The inbox row is written
+    /// regardless.
+    #[serde(default)]
+    pub deliver: bool,
+    /// When `deliver`, whether to press Enter after the literal text.
+    /// Defaults to true.
+    #[serde(default = "default_true")]
+    pub submit: bool,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct InboxParams {
+    /// Whose inbox to read (the caller's own session id).
+    pub session_id: i64,
+    /// Only return rows with `read_at IS NULL`. Defaults to false.
+    #[serde(default)]
+    pub unread_only: bool,
+    /// Maximum messages to return, newest-first. Defaults to 50.
+    pub limit: Option<i64>,
+    /// Mark the returned unread rows as read. Defaults to true — typical
+    /// "list and consume" pull. Pass false to peek.
+    #[serde(default = "default_true")]
+    pub mark_read: bool,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct PeerStatusParams {
+    /// Peer's fleet session id (from list_sessions).
+    pub session_id: i64,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RecreateSessionParams {
     /// Fleet session id (from list_sessions).
     pub session_id: i64,
@@ -715,6 +759,81 @@ impl FleetTools {
                 .map_err(to_mcp_err)?
         };
         ok_json(&events)
+    }
+
+    #[tool(
+        description = "Send a peer-to-peer message from one session to another. \
+        The message is persisted to the recipient's inbox (read with `inbox`); \
+        set `deliver: true` to ALSO type the message into the recipient's tmux \
+        pane with a `[msg #id from name@host]:` header. The inbox row is the \
+        source of truth — it lands even if the pane delivery fails. Returns \
+        JSON with the new message id and the delivery outcome."
+    )]
+    async fn send_message(
+        &self,
+        Parameters(p): Parameters<SendMessageParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // Body intentionally not logged.
+        audit(
+            "send_message",
+            &format!(
+                "from={} to={} kind={:?} deliver={}",
+                p.from_session_id, p.to_session_id, p.kind, p.deliver
+            ),
+        );
+        let args = crate::service::messages::SendMessageArgs {
+            from_session_id: p.from_session_id,
+            to_session_id: p.to_session_id,
+            body: p.body,
+            kind: p.kind,
+            deliver: p.deliver,
+            submit: p.submit,
+        };
+        let result = crate::service::messages::send_message(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&result)
+    }
+
+    #[tool(description = "Read the caller session's inbox. Returns the messages \
+        sent TO `session_id`, newest-first; `unread_only` filters and \
+        `mark_read` (default true) flips the returned unread rows to read. \
+        Pass `mark_read: false` to peek without consuming.")]
+    async fn inbox(
+        &self,
+        Parameters(p): Parameters<InboxParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "inbox",
+            &format!(
+                "session_id={} unread_only={} mark_read={}",
+                p.session_id, p.unread_only, p.mark_read
+            ),
+        );
+        let limit = p.limit.unwrap_or(50);
+        let msgs = crate::service::messages::list_inbox(
+            p.session_id,
+            p.unread_only,
+            limit,
+            p.mark_read,
+            &self.store,
+        )
+        .map_err(to_mcp_err)?;
+        ok_json(&msgs)
+    }
+
+    #[tool(description = "What is a peer session currently doing? Returns the \
+        reconcile-derived `claude_status`, `current_activity`, `stuck_kind`, \
+        and `context_pct` for one session, plus its host/name/status. Useful \
+        before sending a message or broadcasting work.")]
+    async fn peer_status(
+        &self,
+        Parameters(p): Parameters<PeerStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("peer_status", &format!("session_id={}", p.session_id));
+        let status =
+            crate::service::messages::peer_status(p.session_id, &self.store).map_err(to_mcp_err)?;
+        ok_json(&status)
     }
 
     #[tool(

@@ -81,6 +81,14 @@ tools.
 | `dismiss_ghost_session` | Dismiss a ghost session (lost from tmux): permanently delete its row. |
 | `new_bg_session` | Launch a supervised headless (background) Claude session on a host with an initial prompt. |
 
+**Peer-to-peer messaging**
+
+| Tool | What it does |
+|---|---|
+| `send_message` | Send a message from one session's id to another's. Persisted to the recipient's inbox; set `deliver: true` to ALSO type it into the recipient's pane with a `[msg #id from name@host]:` header. |
+| `inbox` | Read the caller's inbox. Returns messages addressed to `session_id`, newest-first; `unread_only` filters and `mark_read` (default true) consumes them. |
+| `peer_status` | What is a peer doing right now? Returns its `claude_status`, `current_activity`, `stuck_kind`, and `context_pct` — no need to capture and parse the pane. |
+
 **Files & git (read-only)**
 
 | Tool | What it does |

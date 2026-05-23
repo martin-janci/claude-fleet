@@ -88,6 +88,21 @@ pub struct SessionEvent {
     pub detail: Option<String>,
 }
 
+/// One inter-session message (migration 015). The store is the source of
+/// truth; pane delivery, if requested, happens separately and best-effort.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionMessage {
+    pub id: i64,
+    pub from_session_id: i64,
+    pub to_session_id: i64,
+    pub body: String,
+    pub kind: String,
+    pub sent_at: i64,
+    /// Unix-epoch second the recipient first listed this message, or `None`
+    /// when still unread.
+    pub read_at: Option<i64>,
+}
+
 /// One live session to upsert during a reconcile write-burst. `project_id`,
 /// `account_uuid`, and `worktree_key` are PRE-RESOLVED by the caller (they
 /// require reads — `find_project_id_for_path` / `get_session_account` /
@@ -250,6 +265,11 @@ impl Store {
             tx.execute_batch(include_str!("../migrations/014_last_reconciled_at.sql"))?;
             tx.commit()?;
         }
+        if v < 15 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../migrations/015_session_messages.sql"))?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -325,6 +345,105 @@ impl Store {
             out.push(r.map_err(crate::ipc_error::IpcError::from)?);
         }
         Ok(out)
+    }
+
+    /// Insert one inter-session message (migration 015). `sent_at` is stamped
+    /// here as the current unix epoch. Returns the new row id so the caller
+    /// can include it in the pane-delivery header.
+    pub fn insert_message(
+        &self,
+        from_session_id: i64,
+        to_session_id: i64,
+        body: &str,
+        kind: &str,
+    ) -> Result<i64, crate::ipc_error::IpcError> {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.conn
+            .execute(
+                "INSERT INTO session_messages \
+                   (from_session_id, to_session_id, body, kind, sent_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![from_session_id, to_session_id, body, kind, at],
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Newest-first messages addressed to `to_session_id`, capped at `limit`.
+    /// When `unread_only`, only rows whose `read_at IS NULL` are returned.
+    pub fn list_inbox(
+        &self,
+        to_session_id: i64,
+        unread_only: bool,
+        limit: i64,
+    ) -> Result<Vec<SessionMessage>, crate::ipc_error::IpcError> {
+        let sql = if unread_only {
+            "SELECT id, from_session_id, to_session_id, body, kind, sent_at, read_at \
+             FROM session_messages \
+             WHERE to_session_id = ?1 AND read_at IS NULL \
+             ORDER BY sent_at DESC, id DESC LIMIT ?2"
+        } else {
+            "SELECT id, from_session_id, to_session_id, body, kind, sent_at, read_at \
+             FROM session_messages \
+             WHERE to_session_id = ?1 \
+             ORDER BY sent_at DESC, id DESC LIMIT ?2"
+        };
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(crate::ipc_error::IpcError::from)?;
+        let rows = stmt
+            .query_map(rusqlite::params![to_session_id, limit], |row| {
+                Ok(SessionMessage {
+                    id: row.get(0)?,
+                    from_session_id: row.get(1)?,
+                    to_session_id: row.get(2)?,
+                    body: row.get(3)?,
+                    kind: row.get(4)?,
+                    sent_at: row.get(5)?,
+                    read_at: row.get(6)?,
+                })
+            })
+            .map_err(crate::ipc_error::IpcError::from)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(crate::ipc_error::IpcError::from)?);
+        }
+        Ok(out)
+    }
+
+    /// Mark a set of inbox messages as read. Only rows whose `to_session_id`
+    /// matches `recipient` are updated — never mark someone else's mail.
+    /// Returns the number of rows that flipped from unread to read.
+    pub fn mark_messages_read(
+        &self,
+        ids: &[i64],
+        recipient: i64,
+    ) -> Result<usize, crate::ipc_error::IpcError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "UPDATE session_messages SET read_at = ?1 \
+             WHERE to_session_id = ?2 AND read_at IS NULL AND id IN ({placeholders})",
+        );
+        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&at, &recipient];
+        for id in ids {
+            params.push(id);
+        }
+        let n = self
+            .conn
+            .execute(sql.as_str(), rusqlite::params_from_iter(params))
+            .map_err(crate::ipc_error::IpcError::from)?;
+        Ok(n)
     }
 
     /// Read a value from the key/value `settings` table. `None` if absent.
@@ -1822,6 +1941,7 @@ mod tests {
         "settings",
         "schema_version",
         "session_events",
+        "session_messages",
     ];
 
     #[test]
@@ -1836,7 +1956,7 @@ mod tests {
     fn migrate_is_idempotent() {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
-        assert_eq!(store.schema_version().expect("version"), 14);
+        assert_eq!(store.schema_version().expect("version"), 15);
     }
 
     #[test]
@@ -1871,6 +1991,38 @@ mod tests {
         let other = s.list_session_events(99, 50).unwrap();
         assert_eq!(other.len(), 1);
         assert_eq!(other[0].detail, None);
+    }
+
+    #[test]
+    fn session_messages_inbox_roundtrip_and_mark_read() {
+        let s = Store::open_in_memory().expect("open");
+        // Two messages to session 5, one decoy to session 9.
+        let m1 = s.insert_message(1, 5, "hello", "message").unwrap();
+        let m2 = s.insert_message(2, 5, "second", "task").unwrap();
+        s.insert_message(1, 9, "noise", "message").unwrap();
+
+        // list_inbox returns newest-first and excludes the decoy.
+        let all = s.list_inbox(5, false, 50).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].id, m2);
+        assert_eq!(all[0].body, "second");
+        assert_eq!(all[0].kind, "task");
+        assert_eq!(all[1].id, m1);
+        assert!(all.iter().all(|m| m.read_at.is_none()));
+
+        // unread_only filter and limit.
+        let unread = s.list_inbox(5, true, 1).unwrap();
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].id, m2);
+
+        // Mark only one as read; the other stays unread. A mismatched
+        // recipient cannot mark someone else's mail.
+        let updated = s.mark_messages_read(&[m1, m2], 5).unwrap();
+        assert_eq!(updated, 2);
+        let again = s.list_inbox(5, true, 50).unwrap();
+        assert!(again.is_empty(), "all unread were marked");
+        let foreign = s.mark_messages_read(&[m1], 9).unwrap();
+        assert_eq!(foreign, 0, "wrong recipient cannot mark");
     }
 
     #[test]
@@ -2021,7 +2173,7 @@ mod tests {
     #[test]
     fn schema_version_is_seven_after_migration() {
         let s = Store::open_in_memory().expect("open");
-        assert_eq!(s.schema_version().expect("version"), 14);
+        assert_eq!(s.schema_version().expect("version"), 15);
     }
 
     #[test]
@@ -2638,7 +2790,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 14, "schema_version should be 14 after migration");
+        assert_eq!(v, 15, "schema_version should be 15 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store
