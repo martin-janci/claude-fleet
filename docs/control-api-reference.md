@@ -95,9 +95,9 @@ Parameters: `host_alias`, `name`, `prompt`
 
 ### `new_session`
 
-Create a new Claude Code tmux session on a host, in the given project (and optional worktree). Auto-clones the repo on remote hosts if missing. Returns the new session row as JSON.
+Create a new Claude Code tmux session on a host, in the given project (and optional worktree). Pass new_worktree to create a fresh worktree+branch, optionally choosing its base_branch (defaults to the repo's default branch). Auto-clones the repo on remote hosts if missing. Returns the new session row as JSON.
 
-Parameters: `host_alias`, `name`, `project_id`, `worktree_id`
+Parameters: `base_branch`, `host_alias`, `name`, `new_worktree`, `project_id`, `worktree_id`
 
 ### `peek_session`
 

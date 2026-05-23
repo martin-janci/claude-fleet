@@ -11,3 +11,6 @@ yarn.lock
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .superpowers/
+
+# git worktrees created under the repo (not part of the tree)
+.worktrees/

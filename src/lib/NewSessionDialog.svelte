@@ -44,6 +44,9 @@
 
   let chosenWorktreeId = $state<number | null>(untrack(() => project.worktrees[0]?.id ?? null));
   let newWorktreeName = $state<string>('');
+  // Base branch to fork the new worktree from. Empty = the repo's default
+  // branch (the backend falls back to default if the named branch is missing).
+  let baseBranch = $state<string>('');
   let name = $state(untrack(() => defaultName(project.worktrees[0] ?? null)));
 
   // Re-derive the tmux name when the kind toggles so the `-sh` suffix tracks it.
@@ -63,6 +66,7 @@
   function onPickWorktree(id: number) {
     chosenWorktreeId = id;
     newWorktreeName = '';
+    baseBranch = '';
     const wt = project.worktrees.find((w) => w.id === id) ?? null;
     name = defaultName(wt);
   }
@@ -70,6 +74,7 @@
   function onPickNew() {
     chosenWorktreeId = null;
     newWorktreeName = '';
+    baseBranch = '';
     name = defaultNameForNew('');
   }
 
@@ -100,6 +105,7 @@
         worktree_id: inNewMode ? null : chosenWorktreeId,
         name: name.trim(),
         new_worktree: inNewMode ? newWorktreeName.trim() || null : null,
+        base_branch: inNewMode ? baseBranch.trim() || null : null,
         kind: chosenKind,
         start_command:
           chosenKind === 'shell' ? startCommand.trim() || null : null,
@@ -198,6 +204,13 @@
       value={newWorktreeName}
       oninput={(e) => onNewWorktreeNameInput((e.target as HTMLInputElement).value)}
       placeholder="feat-my-feature"
+    />
+    <label for="new-wt-base">base branch</label>
+    <input
+      id="new-wt-base"
+      data-testid="new-worktree-base"
+      bind:value={baseBranch}
+      placeholder="default branch"
     />
   {/if}
 

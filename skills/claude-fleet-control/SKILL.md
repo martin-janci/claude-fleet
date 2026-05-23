@@ -50,6 +50,17 @@ Useful fields visible in the default summary:
 Orient with `fleet_health` / `list_hosts` / `list_projects` when you don't yet
 know what exists.
 
+## Spawning a session — `new_session`
+
+`new_session { host_alias, project_id, name }` starts a session in an existing
+project — add `worktree_id` to land in a specific worktree, or omit it for the
+project root. To start work on a **fresh branch**, pass
+`new_worktree: "<branch>"` instead of `worktree_id`: it creates a new git
+worktree + branch. By default the branch forks from the repo's **default
+branch**; pass `base_branch: "dev"` to fork from another branch (it falls back
+to the default branch if `dev` doesn't exist on that host). Remote hosts
+auto-clone the repo if it's missing.
+
 ## Identifying yourself — `register_self`
 
 Before doing any session lifecycle work, call **`register_self { host_alias,

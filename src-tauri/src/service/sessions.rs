@@ -530,6 +530,11 @@ pub struct NewSessionArgs {
     pub name: String,
     pub call_id: Option<u64>,
     pub new_worktree: Option<String>,
+    /// Branch to fork a new worktree from. `None` / empty = the repo's default
+    /// branch. Only consulted when `new_worktree` is set. Resolution falls back
+    /// to the default branch if the named branch isn't found (see
+    /// `worktree_add_script`).
+    pub base_branch: Option<String>,
     /// Session kind: `"work"` (default) runs Claude Code in the pane;
     /// `"shell"` runs a plain interactive login shell.
     pub kind: Option<String>,
@@ -683,11 +688,20 @@ async fn ensure_remote_project(
 /// if the worktree dir already exists it's reused. Git's chatter goes to
 /// stderr; the ONLY stdout is the absolute path of the worktree (last line),
 /// which the caller uses as the tmux cwd.
-fn worktree_add_script(root: &str, name: &str) -> String {
+fn worktree_add_script(root: &str, name: &str, base: Option<&str>) -> String {
+    // Requested base branch, shell-quoted; empty string when unset (= default
+    // branch). The shell var is `basebr` to avoid colliding with `base`, which
+    // already names the worktree *directory* (.worktrees vs .claude/worktrees).
+    let basebr = base
+        .map(|b| b.trim())
+        .filter(|b| !b.is_empty())
+        .map(quote)
+        .unwrap_or_else(|| "''".to_string());
     format!(
         "set -e\n\
          cd {root}\n\
          name={name}\n\
+         basebr={basebr}\n\
          if [ -d .worktrees ]; then base=.worktrees\n\
          elif [ -d .claude/worktrees ]; then base=.claude/worktrees\n\
          else base=.worktrees\n\
@@ -696,7 +710,11 @@ fn worktree_add_script(root: &str, name: &str) -> String {
          if [ ! -e \"$wt\" ]; then\n\
          def=\"$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')\"\n\
          [ -z \"$def\" ] && def=\"$(git rev-parse --abbrev-ref HEAD 2>/dev/null)\"\n\
-         git worktree add \"$wt\" -b \"$name\" \"$def\" 1>&2\n\
+         if [ -n \"$basebr\" ] && git show-ref --verify --quiet \"refs/heads/$basebr\"; then start=\"$basebr\"\n\
+         elif [ -n \"$basebr\" ] && git show-ref --verify --quiet \"refs/remotes/origin/$basebr\"; then start=\"origin/$basebr\"\n\
+         else start=\"$def\"\n\
+         fi\n\
+         git worktree add \"$wt\" -b \"$name\" \"$start\" 1>&2\n\
          fi\n\
          ( cd \"$wt\" && pwd )\n",
         root = quote(root),
@@ -704,8 +722,12 @@ fn worktree_add_script(root: &str, name: &str) -> String {
     )
 }
 
-async fn create_worktree_local(root: &str, name: &str) -> Result<String, IpcError> {
-    let script = worktree_add_script(root, name);
+async fn create_worktree_local(
+    root: &str,
+    name: &str,
+    base: Option<&str>,
+) -> Result<String, IpcError> {
+    let script = worktree_add_script(root, name, base);
     let out = tokio::process::Command::new("bash")
         .args(["-lc", &script])
         .output()
@@ -784,7 +806,9 @@ async fn new_session_inner(
                     stmt.query_row(rusqlite::params![args.project_id], |r| r.get(0))?;
                 row
             };
-            PathBuf::from(create_worktree_local(&base_path, name).await?)
+            PathBuf::from(
+                create_worktree_local(&base_path, name, args.base_branch.as_deref()).await?,
+            )
         } else {
             let s = store
                 .lock()
@@ -826,7 +850,7 @@ async fn new_session_inner(
                 token.clone(),
             )
             .await?;
-            let script = worktree_add_script(&project_root, name);
+            let script = worktree_add_script(&project_root, name, args.base_branch.as_deref());
             // Quote the whole script so it survives the ssh argv-join +
             // remote login-shell re-tokenization (see ensure_remote_project).
             let quoted = quote(&script);
@@ -2652,8 +2676,12 @@ mod tests {
 
     #[test]
     fn worktree_add_script_contains_expected_fragments() {
-        let script = worktree_add_script("/repo/root", "feat-x");
+        let script = worktree_add_script("/repo/root", "feat-x", None);
         assert!(script.contains("cd '/repo/root'"), "cd root: {script}");
+        assert!(
+            script.contains("basebr=''"),
+            "empty base when None: {script}"
+        );
         assert!(
             script.contains("name='feat-x'"),
             "name assignment: {script}"
@@ -2671,6 +2699,39 @@ mod tests {
         assert!(
             script.contains("refs/remotes/origin/HEAD"),
             "default branch detection: {script}"
+        );
+    }
+
+    #[test]
+    fn worktree_add_script_resolves_requested_base_with_default_fallback() {
+        let script = worktree_add_script("/repo/root", "feat-x", Some("dev"));
+        // Requested base is captured, shell-quoted.
+        assert!(script.contains("basebr='dev'"), "base captured: {script}");
+        // Resolution: prefer a local branch, then origin/<base>, else fall
+        // back to the default branch ($def).
+        assert!(
+            script.contains("refs/heads/$basebr"),
+            "local branch check: {script}"
+        );
+        assert!(
+            script.contains("refs/remotes/origin/$basebr"),
+            "origin fallback check: {script}"
+        );
+        // The worktree is created from the resolved start point, not a literal
+        // "$def" — so the default-branch arg must now be the resolved $start.
+        assert!(
+            script.contains("git worktree add \"$wt\" -b \"$name\" \"$start\""),
+            "forks from resolved start point: {script}"
+        );
+    }
+
+    #[test]
+    fn worktree_add_script_blank_base_normalizes_to_default() {
+        // Whitespace-only base is treated as "unset" → empty basebr → default.
+        let script = worktree_add_script("/repo/root", "feat-x", Some("  "));
+        assert!(
+            script.contains("basebr=''"),
+            "blank base is empty: {script}"
         );
     }
 
@@ -2725,7 +2786,7 @@ mod tests {
             .expect("git commit");
 
         // call create_worktree_local
-        let result = create_worktree_local(repo_str, "feat-x").await;
+        let result = create_worktree_local(repo_str, "feat-x", None).await;
         assert!(result.is_ok(), "first call failed: {:?}", result);
         let wt_path = result.unwrap();
         assert!(
@@ -2738,7 +2799,7 @@ mod tests {
         );
 
         // second call — idempotent
-        let result2 = create_worktree_local(repo_str, "feat-x").await;
+        let result2 = create_worktree_local(repo_str, "feat-x", None).await;
         assert!(
             result2.is_ok(),
             "second (idempotent) call failed: {:?}",

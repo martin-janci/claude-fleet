@@ -227,6 +227,16 @@ pub struct NewSessionParams {
     pub worktree_id: Option<i64>,
     /// tmux session name to create.
     pub name: String,
+    /// Create a NEW worktree with this branch/worktree name instead of using an
+    /// existing one. Mutually exclusive with `worktree_id`. Omit to attach to
+    /// the project root or `worktree_id`.
+    #[serde(default)]
+    pub new_worktree: Option<String>,
+    /// Branch to fork the new worktree from (only with `new_worktree`).
+    /// Omit / empty = the repo's default branch; falls back to the default
+    /// branch if the named branch isn't found on the host.
+    #[serde(default)]
+    pub base_branch: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -710,8 +720,10 @@ impl FleetTools {
     }
 
     #[tool(description = "Create a new Claude Code tmux session on a host, in \
-        the given project (and optional worktree). Auto-clones the repo on \
-        remote hosts if missing. Returns the new session row as JSON.")]
+        the given project (and optional worktree). Pass new_worktree to create \
+        a fresh worktree+branch, optionally choosing its base_branch (defaults \
+        to the repo's default branch). Auto-clones the repo on remote hosts if \
+        missing. Returns the new session row as JSON.")]
     async fn new_session(
         &self,
         Parameters(p): Parameters<NewSessionParams>,
@@ -726,10 +738,10 @@ impl FleetTools {
             worktree_id: p.worktree_id,
             name: p.name,
             call_id: None,
-            // v1 of the MCP surface spawns a normal Claude session in an
-            // existing project/worktree; new-branch and shell kinds are not
-            // exposed yet.
-            new_worktree: None,
+            new_worktree: p.new_worktree,
+            base_branch: p.base_branch,
+            // Shell-kind sessions and per-start commands are not exposed on the
+            // MCP surface yet; the GUI is the only path for those.
             kind: None,
             start_command: None,
         };

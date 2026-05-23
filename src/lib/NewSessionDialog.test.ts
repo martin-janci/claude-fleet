@@ -107,8 +107,62 @@ describe('NewSessionDialog', () => {
     const callArgs = newSessionAbortableSpy.mock.calls[0][0];
     expect(callArgs.new_worktree).toBe('feat-test');
     expect(callArgs.worktree_id).toBeNull();
+    // No base branch typed → defaults to the repo default (null).
+    expect(callArgs.base_branch).toBeNull();
 
     newSessionAbortableSpy.mockRestore();
+  });
+
+  it('typing a base branch in new-worktree mode passes base_branch', async () => {
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({
+      ok: true,
+      value: {
+        id: 43,
+        tmux_name: 'dev-martin-janci-claude-fleet--feat-test',
+        host_alias: 'local',
+        project_id: 1,
+        worktree_id: null,
+        created_at: 1,
+        last_activity_at: 1,
+        status: 'running',
+        notes: null,
+        account_uuid: null,
+        kind: 'work',
+        reviews_session_id: null,
+        worktree_key: null,
+        lost_at: null,
+        claude_session_id: null,
+        claude_status: null,
+        effort_level: null,
+        pr_url: null,
+        current_activity: null,
+        friendly_name: null,
+      },
+    });
+
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+
+    await fireEvent.click(screen.getByTestId('new-worktree-chip'));
+    await tick();
+    await fireEvent.input(screen.getByTestId('new-worktree-name'), {
+      target: { value: 'feat-test' },
+    });
+    await tick();
+
+    // The base-branch input is only present in new-worktree mode.
+    await fireEvent.input(screen.getByTestId('new-worktree-base'), {
+      target: { value: 'dev' },
+    });
+    await tick();
+
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+
+    expect(spy).toHaveBeenCalledOnce();
+    expect(spy.mock.calls[0][0].base_branch).toBe('dev');
+
+    spy.mockRestore();
   });
 
   it('defaults to a "work" session', async () => {

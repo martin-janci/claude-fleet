@@ -94,13 +94,19 @@ worktree's absolute path.
 
 ### 4. MCP control API (parity)
 
-- The `new_session` MCP tool (`src-tauri/src/mcp/tools.rs`) gains an optional
-  `base_branch` param, documented as "branch to fork a new worktree from;
-  defaults to the repo's default branch; ignored unless creating a new
-  worktree."
+The MCP `new_session` tool previously hard-coded `new_worktree: None`, so it
+could only attach to an existing project/worktree — `base_branch` alone would
+have been a silently-ignored no-op. Real parity therefore exposes the
+prerequisite capability too:
+
+- `NewSessionParams` (`src-tauri/src/mcp/tools.rs`) gains **`new_worktree`** and
+  **`base_branch`** (both `Option<String>`, `#[serde(default)]`), wired into
+  `NewSessionArgs`. The tool description documents new-worktree creation.
+- `kind` / `start_command` (shell sessions) remain GUI-only — out of scope.
 - Regenerate `docs/control-api-reference.md`
   (`REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_current`)
-  or CI fails.
+  or CI fails. A `doc_gen` contract test asserts the rendered `new_session`
+  entry lists both `new_worktree` and `base_branch`.
 
 ## Testing
 

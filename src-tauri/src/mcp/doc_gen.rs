@@ -99,6 +99,30 @@ mod tests {
     }
 
     #[test]
+    fn new_session_exposes_worktree_creation_params() {
+        let md = render_reference();
+        // MCP parity with the GUI: new_session must let a caller create a new
+        // worktree (`new_worktree`) and choose the branch it forks from
+        // (`base_branch`), not just attach to an existing project/worktree.
+        let section = md
+            .split("### `new_session`")
+            .nth(1)
+            .expect("new_session section present");
+        let params = section
+            .lines()
+            .find(|l| l.starts_with("Parameters:"))
+            .expect("new_session parameters line");
+        assert!(
+            params.contains("new_worktree"),
+            "new_worktree param missing: {params}"
+        );
+        assert!(
+            params.contains("base_branch"),
+            "base_branch param missing: {params}"
+        );
+    }
+
+    #[test]
     fn reference_is_current() {
         let expected = render_reference();
         let path = doc_path();

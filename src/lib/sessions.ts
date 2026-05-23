@@ -106,6 +106,8 @@ export interface NewSessionArgs {
   worktree_id: number | null;
   name: string;
   new_worktree?: string | null;
+  /** Branch to fork a new worktree from; null/empty = repo default branch. */
+  base_branch?: string | null;
   /** "work" (default) runs Claude Code; "shell" runs a plain login shell. */
   kind?: 'work' | 'shell';
   /** Optional command run on start for a shell session (null = bare shell). */
