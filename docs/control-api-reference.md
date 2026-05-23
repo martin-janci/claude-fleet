@@ -234,6 +234,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::health::health_check`
 - `commands::projects::list_projects`
 - `commands::projects::refresh_projects`
+- `commands::projects::recreate_worktree`
 - `commands::sessions::list_sessions`
 - `commands::sessions::related_sessions`
 - `commands::sessions::new_session`

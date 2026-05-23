@@ -732,9 +732,9 @@ fn worktree_recreate_script(root: &str, name: &str, branch: &str) -> String {
          fi\n\
          fi\n\
          ( cd \"$wt\" && pwd )\n",
-        root = shq(root),
-        name = shq(name),
-        branch = shq(branch),
+        root = quote(root),
+        name = quote(name),
+        branch = quote(branch),
     )
 }
 
