@@ -159,7 +159,7 @@
   // deselecting one drops back to the terminal automatically.
   let filesMode = $state(false);
   $effect(() => {
-    if (!$selectedSession) filesMode = false;
+    if (!$selectedSession || $selectedSession.kind === 'bg') filesMode = false;
   });
   function showTerminal() {
     filesMode = false;
@@ -260,14 +260,23 @@
         class:active={filesMode}
         role="tab"
         aria-selected={filesMode}
-        disabled={!$selectedSession}
-        title={$selectedSession ? 'Browse the session worktree' : 'Select a session first'}
+        disabled={!$selectedSession || $selectedSession.kind === 'bg'}
+        title={!$selectedSession
+          ? 'Select a session first'
+          : $selectedSession.kind === 'bg'
+            ? 'Not available for background sessions'
+            : 'Browse the session worktree'}
         onclick={showFiles}
         data-testid="tab-files">Files</button
       >
     </div>
     <div class="right-body">
       {#if $selectedSession?.kind === 'bg'}
+        <!-- Background sessions have no PTY. We intentionally do NOT mount
+             TerminalView here so pty_open is never attempted (it would error
+             with "no tmux"). The tradeoff: selecting a bg session unmounts the
+             terminal, so returning to a normal session reconnects its PTY.
+             Acceptable — bg agents run unattended and are rarely interleaved. -->
         <div class="view-slot">
           <BgSessionPanel session={$selectedSession} />
         </div>
