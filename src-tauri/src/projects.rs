@@ -15,6 +15,9 @@ pub struct DiscoveredWorktree {
     pub name: String,
     pub path: PathBuf,
     pub branch: Option<String>,
+    /// True when `git worktree list` flagged this entry `prunable` — its
+    /// working tree is gone or unusable.
+    pub is_prunable: bool,
 }
 
 /// Walks `base/<owner>/<repo>` two levels deep and returns every directory
@@ -79,23 +82,38 @@ fn parse_worktree_porcelain(input: &str, main_path: &Path) -> Vec<DiscoveredWork
     let mut out = Vec::new();
     let mut cur_path: Option<PathBuf> = None;
     let mut cur_branch: Option<String> = None;
+    let mut cur_prunable = false;
     for line in input.lines() {
         if let Some(rest) = line.strip_prefix("worktree ") {
             if let Some(path) = cur_path.take() {
-                out.push(make_worktree(path, cur_branch.take(), main_path));
+                out.push(make_worktree(
+                    path,
+                    cur_branch.take(),
+                    cur_prunable,
+                    main_path,
+                ));
             }
             cur_path = Some(PathBuf::from(rest));
+            cur_branch = None;
+            cur_prunable = false;
         } else if let Some(rest) = line.strip_prefix("branch ") {
             cur_branch = Some(rest.trim_start_matches("refs/heads/").to_string());
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            cur_prunable = true;
         }
     }
     if let Some(path) = cur_path {
-        out.push(make_worktree(path, cur_branch, main_path));
+        out.push(make_worktree(path, cur_branch, cur_prunable, main_path));
     }
     out
 }
 
-fn make_worktree(path: PathBuf, branch: Option<String>, main_path: &Path) -> DiscoveredWorktree {
+fn make_worktree(
+    path: PathBuf,
+    branch: Option<String>,
+    is_prunable: bool,
+    main_path: &Path,
+) -> DiscoveredWorktree {
     let name = if path == main_path {
         "main".to_string()
     } else {
@@ -103,7 +121,12 @@ fn make_worktree(path: PathBuf, branch: Option<String>, main_path: &Path) -> Dis
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "unknown".to_string())
     };
-    DiscoveredWorktree { name, path, branch }
+    DiscoveredWorktree {
+        name,
+        path,
+        branch,
+        is_prunable,
+    }
 }
 
 #[cfg(test)]
@@ -180,5 +203,20 @@ branch refs/heads/bugfix
         assert_eq!(wts[1].name, "feature-x");
         assert_eq!(wts[2].name, "bugfix");
         assert_eq!(wts[1].branch.as_deref(), Some("feature-x"));
+    }
+
+    #[test]
+    fn parse_marks_prunable_worktree() {
+        let main = Path::new("/repo");
+        let input = "worktree /repo\nHEAD aaaa\nbranch refs/heads/main\n\n\
+                     worktree /repo/.worktrees/gone\nHEAD bbbb\nbranch refs/heads/gone\n\
+                     prunable gitdir file points to non-existent location\n\n";
+        let wts = parse_worktree_porcelain(input, main);
+        assert_eq!(wts.len(), 2);
+        assert_eq!(wts[0].name, "main");
+        assert!(!wts[0].is_prunable);
+        assert_eq!(wts[1].name, "gone");
+        assert!(wts[1].is_prunable);
+        assert_eq!(wts[1].branch.as_deref(), Some("gone"));
     }
 }

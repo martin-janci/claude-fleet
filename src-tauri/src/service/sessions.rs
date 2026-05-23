@@ -2,7 +2,9 @@ use crate::cancel::{CancelGuard, CancellationRegistry};
 use crate::ipc_error::IpcError;
 use crate::shell::quote;
 use crate::ssh::SshClient;
-use crate::store::{HostReconcile, HostRow, ProjectRow, ReconcileSession, SessionRow, Store};
+use crate::store::{
+    HostReconcile, HostRow, ProjectRow, ReconcileSession, SessionRow, Store, WorktreeRow,
+};
 use crate::tmux::{LocalTmux, RemoteTmux, TmuxExec};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -701,6 +703,38 @@ fn worktree_add_script(root: &str, name: &str) -> String {
          ( cd \"$wt\" && pwd )\n",
         root = quote(root),
         name = quote(name),
+    )
+}
+
+/// Recreate a worktree at `<base>/<name>` for `branch`. Unlike
+/// `worktree_add_script`, this attaches an EXISTING branch (the branch usually
+/// survives when only the worktree directory was deleted); it falls back to
+/// creating the branch if it's gone too.
+fn worktree_recreate_script(root: &str, name: &str, branch: &str) -> String {
+    format!(
+        "set -e\n\
+         cd {root}\n\
+         name={name}\n\
+         branch={branch}\n\
+         if [ -d .worktrees ]; then base=.worktrees\n\
+         elif [ -d .claude/worktrees ]; then base=.claude/worktrees\n\
+         else base=.worktrees\n\
+         fi\n\
+         wt=\"$base/$name\"\n\
+         git worktree prune 1>&2 || true\n\
+         if [ ! -e \"$wt\" ]; then\n\
+         if git show-ref --verify --quiet \"refs/heads/$branch\"; then\n\
+         git worktree add \"$wt\" \"$branch\" 1>&2\n\
+         else\n\
+         def=\"$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')\"\n\
+         [ -z \"$def\" ] && def=\"$(git rev-parse --abbrev-ref HEAD 2>/dev/null)\"\n\
+         git worktree add \"$wt\" -b \"$branch\" \"$def\" 1>&2\n\
+         fi\n\
+         fi\n\
+         ( cd \"$wt\" && pwd )\n",
+        root = shq(root),
+        name = shq(name),
+        branch = shq(branch),
     )
 }
 
@@ -1742,6 +1776,54 @@ pub async fn recreate_session(
 }
 
 #[derive(Deserialize)]
+pub struct RecreateWorktreeArgs {
+    pub worktree_id: i64,
+}
+
+/// Recreate a missing worktree on disk from its stored path/branch, then clear
+/// its `missing_since` flag. Local-only (worktree discovery is local).
+pub async fn recreate_worktree(
+    args: RecreateWorktreeArgs,
+    store: &Mutex<Store>,
+    _ssh: &Arc<SshClient>,
+) -> Result<WorktreeRow, IpcError> {
+    let (base_path, name, branch, project_id) = {
+        let s = store
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        s.worktree_recreate_info(args.worktree_id)?
+            .ok_or_else(|| IpcError::new("E_NOTFOUND", "worktree not found"))?
+    };
+    crate::validate::path_component("name", &name)?;
+    let branch_name = branch.clone().unwrap_or_else(|| name.clone());
+    crate::validate::git_ref(&branch_name)?;
+
+    let script = worktree_recreate_script(&base_path, &name, &branch_name);
+    let out = tokio::process::Command::new("bash")
+        .args(["-lc", &script])
+        .output()
+        .await
+        .map_err(|e| IpcError::new("E_GIT_SETUP", format!("bash: {e}")))?;
+    if !out.status.success() {
+        return Err(IpcError::new(
+            "E_GIT_SETUP",
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    let row = {
+        let s = store
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        s.upsert_worktree(project_id, &name, &path, branch.as_deref())?;
+        s.get_worktree_by_name(project_id, &name)?
+            .ok_or_else(|| IpcError::new("E_INTERNAL", "worktree vanished after recreate"))?
+    };
+    Ok(row)
+}
+
+#[derive(Deserialize)]
 pub struct DismissGhostSessionArgs {
     pub session_id: i64,
 }
@@ -2748,6 +2830,59 @@ mod tests {
 
         // cleanup
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn recreate_worktree_rebuilds_dir_and_clears_missing() {
+        use std::process::Command;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "init",
+        ]);
+        let wt = repo.join(".worktrees").join("feat");
+        git(&["worktree", "add", wt.to_str().unwrap(), "-b", "feat"]);
+        std::fs::remove_dir_all(&wt).unwrap();
+        git(&["worktree", "prune"]);
+
+        let store = std::sync::Mutex::new(crate::store::Store::open_in_memory().unwrap());
+        let wid = {
+            let s = store.lock().unwrap();
+            let pid = s
+                .upsert_project("o", "repo", repo.to_str().unwrap())
+                .unwrap();
+            let wid = s
+                .upsert_worktree(pid, "feat", wt.to_str().unwrap(), Some("feat"))
+                .unwrap();
+            s.mark_worktree_missing(pid, "feat", 111).unwrap();
+            wid
+        };
+
+        let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
+        let row = recreate_worktree(RecreateWorktreeArgs { worktree_id: wid }, &store, &ssh)
+            .await
+            .unwrap();
+        assert!(wt.exists(), "worktree dir recreated");
+        assert_eq!(row.missing_since, None);
     }
 
     #[test]

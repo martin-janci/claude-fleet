@@ -5,24 +5,34 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { projects, refreshProjects } from './projects';
+import { projects, refreshProjects, mergeWorktree } from './projects';
 import { get } from 'svelte/store';
 
 const fake = [
   {
     project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: null },
     worktrees: [
-      { id: 11, project_id: 1, name: 'main', path: '/r/cf', branch: 'main' },
+      { id: 11, project_id: 1, name: 'main', path: '/r/cf', branch: 'main', missing_since: null },
     ],
   },
   {
     project: { id: 2, owner: 'papayapos', repo: 'pos-frontend', base_path: '/r/pf', last_session_at: 1716120000 },
     worktrees: [
-      { id: 21, project_id: 2, name: 'main', path: '/r/pf', branch: 'main' },
-      { id: 22, project_id: 2, name: 'feature-x', path: '/r/pf/.worktrees/feature-x', branch: 'feature-x' },
+      { id: 21, project_id: 2, name: 'main', path: '/r/pf', branch: 'main', missing_since: null },
+      { id: 22, project_id: 2, name: 'feature-x', path: '/r/pf/.worktrees/feature-x', branch: 'feature-x', missing_since: null },
     ],
   },
 ];
+
+it('mergeWorktree carries missing_since onto the worktree', () => {
+  projects.set([
+    { project: { id: 1, owner: 'o', repo: 'r', base_path: '/r', last_session_at: null },
+      worktrees: [{ id: 9, project_id: 1, name: 'feat', path: '/r/.worktrees/feat', branch: 'feat', missing_since: null }] },
+  ]);
+  mergeWorktree({ id: 9, project_id: 1, name: 'feat', path: '/r/.worktrees/feat', branch: 'feat', missing_since: 1234 });
+  const wt = get(projects)[0].worktrees.find((w) => w.id === 9)!;
+  expect(wt.missing_since).toBe(1234);
+});
 
 describe('projects store', () => {
   it('refreshProjects populates the store on Ok', async () => {

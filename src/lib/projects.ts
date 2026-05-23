@@ -15,6 +15,8 @@ export interface WorktreeRow {
   name: string;
   path: string;
   branch: string | null;
+  /** Unix seconds since the worktree dir was first seen missing; null = present. */
+  missing_since: number | null;
 }
 
 export interface ProjectTreeRow {
@@ -37,6 +39,10 @@ export async function refreshProjects(): Promise<Result<ProjectTreeRow[]>> {
   const r = await invokeCmd<ProjectTreeRow[]>('refresh_projects');
   if (r.ok) projects.set(r.value);
   return r;
+}
+
+export function recreateWorktree(worktreeId: number): Promise<Result<WorktreeRow>> {
+  return invokeCmd<WorktreeRow>('recreate_worktree', { args: { worktree_id: worktreeId } });
 }
 
 export async function bootstrapProjects(): Promise<void> {

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { selectedProject } from './selection';
   import { sessions } from './sessions';
+  import { recreateWorktree } from './projects';
 
   function formatRelative(unix: number | null): string {
     if (unix === null) return 'never';
@@ -41,6 +42,16 @@
             <li>
               <span class="mono">{wt.name}</span>
               {#if wt.branch && wt.branch !== wt.name}<span class="branch"> · {wt.branch}</span>{/if}
+              {#if wt.missing_since}
+                <span class="wt-missing" data-testid="worktree-missing">missing</span>
+                <button
+                  class="wt-recreate"
+                  data-testid="worktree-recreate"
+                  onclick={() => void recreateWorktree(wt.id)}
+                >
+                  Recreate
+                </button>
+              {/if}
               <div class="sub-path">{wt.path}</div>
             </li>
           {/each}
@@ -106,4 +117,23 @@
     color: var(--fg-muted);
   }
   .empty { color: var(--fg-muted); font-size: 0.9rem; }
+  .wt-missing {
+    margin-left: 0.4rem;
+    font-size: 0.7rem;
+    color: #e0a020;
+    border: 1px solid #e0a020;
+    border-radius: 3px;
+    padding: 0 0.3rem;
+  }
+  .wt-recreate {
+    margin-left: 0.4rem;
+    font-size: 0.7rem;
+    padding: 0.05rem 0.4rem;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--fg-muted);
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .wt-recreate:hover { color: var(--fg); border-color: var(--accent); }
 </style>

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import type { ProjectTreeRow, WorktreeRow } from './projects';
+  import { recreateWorktree } from './projects';
   import { newSessionAbortable, type SessionRow } from './sessions';
   import { hosts } from './hosts';
   import { readPref, writePref } from './prefs';
@@ -42,9 +43,15 @@
     return `${base}--${newName.trim()}${suffix}`;
   }
 
-  let chosenWorktreeId = $state<number | null>(untrack(() => project.worktrees[0]?.id ?? null));
+  let chosenWorktreeId = $state<number | null>(untrack(() => {
+    const present = project.worktrees.find((w) => !w.missing_since);
+    return (present ?? project.worktrees[0])?.id ?? null;
+  }));
   let newWorktreeName = $state<string>('');
-  let name = $state(untrack(() => defaultName(project.worktrees[0] ?? null)));
+  let name = $state(untrack(() => {
+    const present = project.worktrees.find((w) => !w.missing_since);
+    return defaultName(present ?? project.worktrees[0] ?? null);
+  }));
 
   // Re-derive the tmux name when the kind toggles so the `-sh` suffix tracks it.
   function onPickKind(kind: 'work' | 'shell') {
@@ -179,6 +186,10 @@
       >
         {wt.name}
       </button>
+      {#if wt.missing_since}
+        <span class="chip-missing" data-testid="nsd-worktree-missing">missing</span>
+        <button type="button" data-testid="nsd-worktree-recreate" onclick={() => void recreateWorktree(wt.id)}>Recreate</button>
+      {/if}
     {/each}
     <button
       class="wt-pick wt-new"
@@ -252,6 +263,15 @@
   }
   .wt-pick.active { color: var(--fg); border-color: var(--accent); }
   .wt-new { font-style: italic; }
+  .chip-missing {
+    font-size: 0.65rem;
+    padding: 0.1rem 0.35rem;
+    background: #7a5a0022;
+    color: #b8860b;
+    border-radius: 999px;
+    border: 1px solid #b8860b55;
+    align-self: center;
+  }
   .host-row { display: flex; gap: 0.3rem; flex-wrap: wrap; }
   .host-pick {
     font-size: 0.75rem;

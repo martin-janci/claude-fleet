@@ -226,7 +226,7 @@ mod tests {
         let h = health_from_store(&s);
         assert_eq!(h.version, env!("CARGO_PKG_VERSION"));
         assert!(h.db_ready);
-        assert_eq!(h.schema_version, 16);
+        assert_eq!(h.schema_version, 17);
         // Empty store → empty roll-up.
         assert_eq!(h.sessions_total, 0);
         assert_eq!(h.hosts_total, 0);
