@@ -83,6 +83,37 @@ fn ok_json<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpError> {
     Ok(CallToolResult::success(vec![text_content(json)]))
 }
 
+/// Compact JSON with all `null` fields recursively removed. Used by
+/// list-style tools whose rows carry many `Option<>` columns — pretty-printing
+/// plus `"field": null` repetitions blows past MCP token caps on big fleets.
+/// Stripping nulls at the MCP boundary (rather than via `#[serde(skip)]` on
+/// the row struct) keeps the Tauri event bus's value→null clearing intact.
+fn ok_json_compact<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpError> {
+    let mut v = serde_json::to_value(value)
+        .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
+    strip_nulls(&mut v);
+    let json = serde_json::to_string(&v)
+        .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
+    Ok(CallToolResult::success(vec![text_content(json)]))
+}
+
+fn strip_nulls(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(map) => {
+            map.retain(|_, val| !val.is_null());
+            for val in map.values_mut() {
+                strip_nulls(val);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for val in arr.iter_mut() {
+                strip_nulls(val);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// A `SessionRow` augmented with the controller flag for the `list_sessions`
 /// MCP output. `#[serde(flatten)]` keeps every original SessionRow field at the
 /// top level, so adding `is_controller` does not break existing consumers.
@@ -91,6 +122,41 @@ struct SessionWithController {
     is_controller: bool,
     #[serde(flatten)]
     row: crate::store::SessionRow,
+}
+
+/// Slim row returned by `list_sessions` when `summary: true` (the default).
+/// Trimmed to the fields a triage UI/agent actually needs to pick which session
+/// to drill into; callers fetch full state via `peek_session` / `related_sessions`
+/// or by re-calling with `summary: false`.
+#[derive(serde::Serialize)]
+struct SessionSummary {
+    id: i64,
+    host_alias: String,
+    tmux_name: String,
+    project_id: Option<i64>,
+    worktree_id: Option<i64>,
+    status: String,
+    claude_status: Option<String>,
+    stuck_kind: Option<String>,
+    lost_at: Option<i64>,
+    is_controller: bool,
+}
+
+impl From<SessionWithController> for SessionSummary {
+    fn from(s: SessionWithController) -> Self {
+        Self {
+            id: s.row.id,
+            host_alias: s.row.host_alias,
+            tmux_name: s.row.tmux_name,
+            project_id: s.row.project_id,
+            worktree_id: s.row.worktree_id,
+            status: s.row.status,
+            claude_status: s.row.claude_status,
+            stuck_kind: s.row.stuck_kind,
+            lost_at: s.row.lost_at,
+            is_controller: s.is_controller,
+        }
+    }
 }
 
 // --- tool parameter structs ------------------------------------------------
@@ -122,6 +188,32 @@ pub struct HideHostParams {
 pub struct RelatedSessionsParams {
     /// The session id to find siblings of (same project + worktree).
     pub session_id: i64,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ListSessionsParams {
+    /// Only return sessions on this host alias.
+    #[serde(default)]
+    pub host_alias: Option<String>,
+    /// Only return sessions in this project id.
+    #[serde(default)]
+    pub project_id: Option<i64>,
+    /// Only return sessions whose store-level `status` equals this (e.g.
+    /// "alive", "dead").
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Only return sessions whose `claude_status` equals this (e.g. "idle",
+    /// "working", "stuck", "awaiting_input").
+    #[serde(default)]
+    pub claude_status: Option<String>,
+    /// Include lost sessions (those with a non-null `lost_at`). Default false.
+    #[serde(default)]
+    pub include_lost: bool,
+    /// Return slim rows (id, host_alias, tmux_name, project_id, worktree_id,
+    /// status, claude_status, stuck_kind, lost_at, is_controller). Default
+    /// true to keep responses inside MCP token caps; set false for full rows.
+    #[serde(default = "default_true")]
+    pub summary: bool,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -474,19 +566,27 @@ impl FleetTools {
 
     // ---- sessions ----
 
-    #[tool(description = "Reconcile and list all tmux sessions across every \
-        reachable host. This is the primary way to see fleet state. Each row \
-        carries an is_controller flag (true for the registered controller \
-        session). JSON.")]
-    async fn list_sessions(&self) -> Result<CallToolResult, McpError> {
-        audit("list_sessions", "");
+    #[tool(description = "Reconcile and list tmux sessions across reachable \
+        hosts. Returns slim summary rows by default (id, host_alias, \
+        tmux_name, project_id, worktree_id, status, claude_status, \
+        stuck_kind, lost_at, is_controller) to fit MCP token caps on large \
+        fleets — pass summary=false for full SessionRow. Optional filters: \
+        host_alias, project_id, status, claude_status, include_lost (default \
+        false drops sessions with a non-null lost_at). JSON.")]
+    async fn list_sessions(
+        &self,
+        Parameters(p): Parameters<ListSessionsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "list_sessions",
+            &format!(
+                "host={:?} project={:?} status={:?} claude_status={:?} include_lost={} summary={}",
+                p.host_alias, p.project_id, p.status, p.claude_status, p.include_lost, p.summary,
+            ),
+        );
         let rows = sessions::list_sessions(&self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
-        // Tag each row with whether it is the registered controller, comparing
-        // (host_alias, tmux_name) against the stored controller. The flag is a
-        // wrapper field — every original SessionRow field is preserved via
-        // `#[serde(flatten)]`, so existing consumers are unaffected.
         let controller = {
             let s = self
                 .store
@@ -495,16 +595,47 @@ impl FleetTools {
             s.get_controller()
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?
         };
-        let tagged: Vec<SessionWithController> = rows
+        let tagged = rows
             .into_iter()
+            .filter(|row| {
+                if !p.include_lost && row.lost_at.is_some() {
+                    return false;
+                }
+                if let Some(h) = &p.host_alias {
+                    if &row.host_alias != h {
+                        return false;
+                    }
+                }
+                if let Some(pid) = p.project_id {
+                    if row.project_id != Some(pid) {
+                        return false;
+                    }
+                }
+                if let Some(st) = &p.status {
+                    if &row.status != st {
+                        return false;
+                    }
+                }
+                if let Some(cs) = &p.claude_status {
+                    if row.claude_status.as_deref() != Some(cs.as_str()) {
+                        return false;
+                    }
+                }
+                true
+            })
             .map(|row| {
                 let is_controller = controller
                     .as_ref()
                     .is_some_and(|(h, t)| *h == row.host_alias && *t == row.tmux_name);
                 SessionWithController { is_controller, row }
-            })
-            .collect();
-        ok_json(&tagged)
+            });
+        if p.summary {
+            let slim: Vec<SessionSummary> = tagged.map(SessionSummary::from).collect();
+            ok_json_compact(&slim)
+        } else {
+            let full: Vec<SessionWithController> = tagged.collect();
+            ok_json_compact(&full)
+        }
     }
 
     #[tool(description = "List sessions related to a given session — those \
@@ -1190,6 +1321,35 @@ mod tests {
         assert_eq!(text_of(&text_content("hello")), "hello");
         // Surrounding whitespace is kept once there is real content.
         assert_eq!(text_of(&text_content("  hi  ")), "  hi  ");
+    }
+
+    #[test]
+    fn strip_nulls_drops_nulls_recursively() {
+        let mut v = serde_json::json!({
+            "a": 1,
+            "b": null,
+            "nested": { "x": null, "y": "keep" },
+            "arr": [{ "k": null, "v": 2 }, { "k": "kept", "v": null }],
+        });
+        strip_nulls(&mut v);
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "a": 1,
+                "nested": { "y": "keep" },
+                "arr": [{ "v": 2 }, { "k": "kept" }],
+            })
+        );
+    }
+
+    #[test]
+    fn ok_json_compact_is_compact_and_strips_nulls() {
+        let v = serde_json::json!({ "a": 1, "b": null, "c": [1, 2] });
+        let r = ok_json_compact(&v).unwrap();
+        let text = text_of(&r.content[0]);
+        assert!(!text.contains('\n'), "expected compact JSON, got: {text}");
+        assert!(!text.contains("null"), "null fields must be stripped: {text}");
+        assert!(text.contains("\"a\":1"));
     }
 
     #[test]
