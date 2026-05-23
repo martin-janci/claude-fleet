@@ -32,7 +32,7 @@ const sampleSession = {
   effort_level: null,
   pr_url: null,
   current_activity: null,
-  friendly_name: null,
+  friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null,
 };
 
 beforeEach(() => {

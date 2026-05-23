@@ -56,6 +56,10 @@ pub struct SessionRow {
     /// MCP tool (migration 016). The sidebar shows this when the user's
     /// "friendly names" toggle is on; falls back to `tmux_name` when NULL.
     pub friendly_name: Option<String>,
+    pub safe_kill_state: Option<String>,
+    pub safe_kill_nonce: Option<String>,
+    pub safe_kill_detail: Option<String>,
+    pub safe_kill_requested_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -277,6 +281,11 @@ impl Store {
         if v < 16 {
             let tx = self.conn.unchecked_transaction()?;
             tx.execute_batch(include_str!("../migrations/016_session_friendly_name.sql"))?;
+            tx.commit()?;
+        }
+        if v < 17 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../migrations/017_safe_kill.sql"))?;
             tx.commit()?;
         }
         Ok(())
@@ -677,6 +686,51 @@ impl Store {
             })
         })?;
         rows.collect()
+    }
+
+    /// Hard-delete one worktree row by id. Emits `worktree:removed`. Returns
+    /// the row that was removed (or `None` if it didn't exist).
+    ///
+    /// Does NOT touch sessions referencing this worktree; the caller is
+    /// expected to have checked for live occupants first (see
+    /// `service::worktrees::delete_worktree`). Dead/ghost session rows that
+    /// still point here have their `worktree_id` cleared so the FK stays
+    /// consistent.
+    pub fn delete_worktree(&self, id: i64) -> Result<Option<WorktreeRow>, rusqlite::Error> {
+        let Some(row) = self.get_worktree(id)? else {
+            return Ok(None);
+        };
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE sessions SET worktree_id=NULL WHERE worktree_id=?1",
+            rusqlite::params![id],
+        )?;
+        tx.execute("DELETE FROM worktrees WHERE id=?1", rusqlite::params![id])?;
+        tx.commit()?;
+        self.bus.worktree_removed(id);
+        Ok(Some(row))
+    }
+
+    /// Return the names + hosts of alive (non-ghost, non-dead) sessions
+    /// currently attached to a worktree id. Empty when the worktree is free.
+    pub fn alive_sessions_for_worktree(
+        &self,
+        worktree_id: i64,
+    ) -> Result<Vec<(String, String)>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT host_alias, tmux_name
+               FROM sessions
+              WHERE worktree_id=?1 AND status='running' AND lost_at IS NULL
+              ORDER BY host_alias, tmux_name",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![worktree_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect()
+    }
+
+    pub fn get_worktree_row(&self, id: i64) -> Result<Option<WorktreeRow>, rusqlite::Error> {
+        self.get_worktree(id)
     }
 
     pub fn delete_worktrees_not_in(
@@ -1102,7 +1156,8 @@ impl Store {
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                     worktree_key, lost_at,
                     claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind, friendly_name
+                    context_pct, stuck_kind, friendly_name,
+                    safe_kill_state, safe_kill_nonce, safe_kill_detail, safe_kill_requested_at
              FROM sessions WHERE host_alias=?1 ORDER BY last_activity_at DESC",
         )?;
         let rows = stmt.query_map(rusqlite::params![host_alias], |row| {
@@ -1129,6 +1184,10 @@ impl Store {
                 context_pct: row.get(19)?,
                 stuck_kind: row.get(20)?,
                 friendly_name: row.get(21)?,
+                safe_kill_state: row.get(22)?,
+                safe_kill_nonce: row.get(23)?,
+                safe_kill_detail: row.get(24)?,
+                safe_kill_requested_at: row.get(25)?,
             })
         })?;
         rows.collect()
@@ -1142,7 +1201,8 @@ impl Store {
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                     worktree_key, lost_at,
                     claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind, friendly_name
+                    context_pct, stuck_kind, friendly_name,
+                    safe_kill_state, safe_kill_nonce, safe_kill_detail, safe_kill_requested_at
              FROM sessions ORDER BY last_activity_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -1169,6 +1229,10 @@ impl Store {
                 context_pct: row.get(19)?,
                 stuck_kind: row.get(20)?,
                 friendly_name: row.get(21)?,
+                safe_kill_state: row.get(22)?,
+                safe_kill_nonce: row.get(23)?,
+                safe_kill_detail: row.get(24)?,
+                safe_kill_requested_at: row.get(25)?,
             })
         })?;
         rows.collect()
@@ -1198,7 +1262,8 @@ impl Store {
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                     worktree_key, lost_at,
                     claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind, friendly_name
+                    context_pct, stuck_kind, friendly_name,
+                    safe_kill_state, safe_kill_nonce, safe_kill_detail, safe_kill_requested_at
              FROM sessions
              WHERE project_id=?1 AND worktree_key=?2 AND id<>?3
              ORDER BY host_alias ASC, tmux_name ASC",
@@ -1227,6 +1292,10 @@ impl Store {
                 context_pct: row.get(19)?,
                 stuck_kind: row.get(20)?,
                 friendly_name: row.get(21)?,
+                safe_kill_state: row.get(22)?,
+                safe_kill_nonce: row.get(23)?,
+                safe_kill_detail: row.get(24)?,
+                safe_kill_requested_at: row.get(25)?,
             })
         })?;
         rows.collect()
@@ -1293,6 +1362,72 @@ impl Store {
             return Ok(None);
         }
         let row = fetch_session(&self.conn, tmux_name, host_alias)?;
+        if let Some(ref r) = row {
+            self.bus.session_updated(r);
+        }
+        Ok(row)
+    }
+
+    /// Mark a safe-kill request: stamp state="requested", store the nonce we
+    /// embedded in the prompt, and clear any prior failure detail. Emits
+    /// session_updated.
+    pub fn set_safe_kill_requested(
+        &self,
+        id: i64,
+        nonce: &str,
+        requested_at: i64,
+    ) -> Result<Option<SessionRow>, rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions
+                SET safe_kill_state='requested',
+                    safe_kill_nonce=?1,
+                    safe_kill_detail=NULL,
+                    safe_kill_requested_at=?2
+              WHERE id=?3",
+            rusqlite::params![nonce, requested_at, id],
+        )?;
+        let row = fetch_session_by_id(&self.conn, id)?;
+        if let Some(ref r) = row {
+            self.bus.session_updated(r);
+        }
+        Ok(row)
+    }
+
+    /// Transition a safe-kill request to its terminal state ("ready" or
+    /// "failed") and store the optional failure detail. Emits session_updated.
+    pub fn set_safe_kill_outcome(
+        &self,
+        id: i64,
+        state: &str,
+        detail: Option<&str>,
+    ) -> Result<Option<SessionRow>, rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions
+                SET safe_kill_state=?1,
+                    safe_kill_detail=?2
+              WHERE id=?3",
+            rusqlite::params![state, detail, id],
+        )?;
+        let row = fetch_session_by_id(&self.conn, id)?;
+        if let Some(ref r) = row {
+            self.bus.session_updated(r);
+        }
+        Ok(row)
+    }
+
+    /// Clear the safe-kill state (used when the user cancels or retries a
+    /// failed attempt). Emits session_updated.
+    pub fn clear_safe_kill(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions
+                SET safe_kill_state=NULL,
+                    safe_kill_nonce=NULL,
+                    safe_kill_detail=NULL,
+                    safe_kill_requested_at=NULL
+              WHERE id=?1",
+            rusqlite::params![id],
+        )?;
+        let row = fetch_session_by_id(&self.conn, id)?;
         if let Some(ref r) = row {
             self.bus.session_updated(r);
         }
@@ -1797,6 +1932,27 @@ impl Store {
         Ok(())
     }
 
+    /// Lookup helper: returns `None` rather than erroring when no row matches.
+    /// Used by the safe-kill flow (Stop hook may arrive before reconcile
+    /// enriched the row).
+    pub fn get_session_by_claude_id(
+        &self,
+        claude_session_id: &str,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        match self.fetch_session_by_claude_id(claude_session_id) {
+            Ok(row) => Ok(Some(row)),
+            Err(e) => {
+                // `query_row` returns this exact rusqlite error when zero rows
+                // matched. Treat it as a clean miss.
+                if e.message.contains("Query returned no rows") {
+                    Ok(None)
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
     fn fetch_session_by_claude_id(
         &self,
         claude_session_id: &str,
@@ -1808,7 +1964,8 @@ impl Store {
                         last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                         worktree_key, lost_at,
                         claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind, friendly_name
+                    context_pct, stuck_kind, friendly_name,
+                    safe_kill_state, safe_kill_nonce, safe_kill_detail, safe_kill_requested_at
                  FROM sessions WHERE claude_session_id = ?1",
             )
             .map_err(crate::ipc_error::IpcError::from)?;
@@ -1836,6 +1993,10 @@ impl Store {
                 context_pct: row.get(19)?,
                 stuck_kind: row.get(20)?,
                 friendly_name: row.get(21)?,
+                safe_kill_state: row.get(22)?,
+                safe_kill_nonce: row.get(23)?,
+                safe_kill_detail: row.get(24)?,
+                safe_kill_requested_at: row.get(25)?,
             })
         })
         .map_err(crate::ipc_error::IpcError::from)
@@ -1859,7 +2020,8 @@ fn fetch_session(
                 last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                 worktree_key, lost_at,
                 claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind, friendly_name
+                    context_pct, stuck_kind, friendly_name,
+                    safe_kill_state, safe_kill_nonce, safe_kill_detail, safe_kill_requested_at
          FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
     )?;
     let mut rows = stmt.query_map(rusqlite::params![tmux_name, host_alias], |row| {
@@ -1886,6 +2048,10 @@ fn fetch_session(
             context_pct: row.get(19)?,
             stuck_kind: row.get(20)?,
             friendly_name: row.get(21)?,
+            safe_kill_state: row.get(22)?,
+            safe_kill_nonce: row.get(23)?,
+            safe_kill_detail: row.get(24)?,
+            safe_kill_requested_at: row.get(25)?,
         })
     })?;
     match rows.next() {
@@ -1900,7 +2066,8 @@ fn fetch_session_by_id(conn: &Connection, id: i64) -> Result<Option<SessionRow>,
                 last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                 worktree_key, lost_at,
                 claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind, friendly_name
+                    context_pct, stuck_kind, friendly_name,
+                    safe_kill_state, safe_kill_nonce, safe_kill_detail, safe_kill_requested_at
          FROM sessions WHERE id=?1",
     )?;
     let mut rows = stmt.query_map(rusqlite::params![id], |row| {
@@ -1927,6 +2094,10 @@ fn fetch_session_by_id(conn: &Connection, id: i64) -> Result<Option<SessionRow>,
             context_pct: row.get(19)?,
             stuck_kind: row.get(20)?,
             friendly_name: row.get(21)?,
+            safe_kill_state: row.get(22)?,
+            safe_kill_nonce: row.get(23)?,
+            safe_kill_detail: row.get(24)?,
+            safe_kill_requested_at: row.get(25)?,
         })
     })?;
     match rows.next() {
@@ -2007,7 +2178,7 @@ mod tests {
     fn migrate_is_idempotent() {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
-        assert_eq!(store.schema_version().expect("version"), 16);
+        assert_eq!(store.schema_version().expect("version"), 17);
     }
 
     #[test]
@@ -2224,7 +2395,7 @@ mod tests {
     #[test]
     fn schema_version_is_seven_after_migration() {
         let s = Store::open_in_memory().expect("open");
-        assert_eq!(s.schema_version().expect("version"), 16);
+        assert_eq!(s.schema_version().expect("version"), 17);
     }
 
     #[test]
@@ -2841,7 +3012,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 16, "schema_version should be 16 after migration");
+        assert_eq!(v, 17, "schema_version should be 17 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store

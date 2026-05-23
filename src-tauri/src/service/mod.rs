@@ -16,5 +16,7 @@ pub mod messages;
 pub mod pane_intel;
 pub mod projects;
 pub mod provision;
+pub mod safe_kill;
 pub mod sessions;
 pub mod tunnel;
+pub mod worktrees;

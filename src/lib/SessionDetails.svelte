@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { sessions, type SessionRow } from './sessions';
-  import { killSession, renameSession, restartSession, recreateSession } from './sessions';
+  import { killSession, renameSession, restartSession, recreateSession, safeKillSession } from './sessions';
   import { projectById } from './projects';
   import { selectSession, clearSelection } from './selection';
   import { hostByAlias } from './hosts';
@@ -138,7 +138,21 @@
   );
 
   let confirmingKill = $state(false);
+  let confirmingSafeKill = $state(false);
   let confirmingRecreate = $state(false);
+
+  function askSafeKill() {
+    confirmingSafeKill = true;
+    actionError = null;
+  }
+  function cancelSafeKill() {
+    confirmingSafeKill = false;
+  }
+  async function doSafeKill() {
+    confirmingSafeKill = false;
+    const r = await safeKillSession(session.host_alias, session.tmux_name);
+    if (!r.ok) actionError = r.error.message;
+  }
   function askKill() {
     confirmingKill = true;
     actionError = null;
@@ -313,10 +327,31 @@
     <button class="ghost" onclick={askRecreate} data-testid="recreate-from-details">
       ♻ Recreate
     </button>
+    {#if session.kind !== 'shell' && session.status === 'running' && session.safe_kill_state !== 'requested'}
+      <button class="ghost" onclick={askSafeKill} data-testid="safe-kill-from-details">
+        ⏏ Safe remove
+      </button>
+    {/if}
     <button class="danger" onclick={askKill} data-testid="kill-from-details">
       Kill session
     </button>
   </section>
+
+  {#if session.safe_kill_state === 'requested'}
+    <p class="safe-kill-pill pending" data-testid="safe-kill-pending">
+      Safe-remove in progress: asked Claude to commit + push. Will delete the
+      worktree and kill the session once it reports back.
+    </p>
+  {:else if session.safe_kill_state === 'failed'}
+    <p class="safe-kill-pill failed" data-testid="safe-kill-failed">
+      Safe-remove failed: {session.safe_kill_detail ?? 'no reason given'}.
+      Resolve in the session, then retry, or use <strong>Kill session</strong>.
+    </p>
+  {:else if session.safe_kill_state === 'ready'}
+    <p class="safe-kill-pill ready" data-testid="safe-kill-ready">
+      Safe-remove ready — finalizing.
+    </p>
+  {/if}
 </article>
 
 {#if composerOpen}
@@ -335,6 +370,25 @@
       <div class="confirm-actions">
         <button onclick={cancelKill}>Cancel</button>
         <button class="danger" onclick={doKill} data-testid="confirm-kill-details">Kill</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if confirmingSafeKill}
+  <div class="modal-backdrop" onclick={cancelSafeKill} role="presentation">
+    <div class="confirm" onclick={(e) => e.stopPropagation()} role="presentation">
+      <h3>Safe remove?</h3>
+      <p>
+        Fleet will ask Claude to make sure all work in <code>{session.tmux_name}</code> is
+        committed and pushed to <code>main</code> or in a PR. When Claude reports
+        success and the worktree is clean, fleet deletes the worktree and kills
+        the session. If Claude can't safely persist the work, the session stays
+        alive and you can resolve manually.
+      </p>
+      <div class="confirm-actions">
+        <button onclick={cancelSafeKill}>Cancel</button>
+        <button onclick={doSafeKill} data-testid="confirm-safe-kill-details">Start safe remove</button>
       </div>
     </div>
   </div>
@@ -475,6 +529,29 @@
   .danger:hover { background: rgba(230, 74, 74, 0.1); }
 
   .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
+
+  .safe-kill-pill {
+    margin: 0;
+    padding: 0.4rem 0.6rem;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    line-height: 1.35;
+  }
+  .safe-kill-pill.pending {
+    background: rgba(110, 160, 230, 0.14);
+    color: rgba(140, 180, 240, 1);
+    border: 1px solid rgba(110, 160, 230, 0.4);
+  }
+  .safe-kill-pill.failed {
+    background: rgba(230, 74, 74, 0.12);
+    color: #e64a4a;
+    border: 1px solid rgba(230, 74, 74, 0.4);
+  }
+  .safe-kill-pill.ready {
+    background: rgba(60, 180, 90, 0.15);
+    color: rgba(80, 200, 110, 1);
+    border: 1px solid rgba(60, 180, 90, 0.4);
+  }
 
   .link {
     background: transparent;

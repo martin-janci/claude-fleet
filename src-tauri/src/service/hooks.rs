@@ -4,6 +4,7 @@
 
 use crate::ipc_error::IpcError;
 use crate::mcp::hooks::HookPayload;
+use crate::ssh::SshClient;
 use crate::store::{ProjectRow, Store};
 use std::sync::{Arc, Mutex};
 
@@ -13,9 +14,13 @@ fn lock_err() -> IpcError {
 
 /// Dispatch a hook event to the appropriate handler.
 /// Unknown events are silently ignored.
-pub fn apply_hook(store: &Arc<Mutex<Store>>, payload: &HookPayload) -> Result<(), IpcError> {
+pub fn apply_hook(
+    store: &Arc<Mutex<Store>>,
+    ssh: &Arc<SshClient>,
+    payload: &HookPayload,
+) -> Result<(), IpcError> {
     match payload.hook_event_name.as_deref() {
-        Some("Stop") => apply_stop_hook(store, payload),
+        Some("Stop") => apply_stop_hook(store, ssh, payload),
         Some("PostToolUse") if payload.tool_name.as_deref() == Some("WorktreeCreate") => {
             apply_worktree_hook(store, payload)
         }
@@ -31,13 +36,38 @@ pub fn apply_hook(store: &Arc<Mutex<Store>>, payload: &HookPayload) -> Result<()
 /// "idle", not "stopped": stamping "stopped" here made every normal
 /// turn-completion mark the session stopped, and reconcile's pane heuristic
 /// never produced "stopped" to clear it, so sessions hung in "stopped".
-fn apply_stop_hook(store: &Arc<Mutex<Store>>, payload: &HookPayload) -> Result<(), IpcError> {
+fn apply_stop_hook(
+    store: &Arc<Mutex<Store>>,
+    ssh: &Arc<SshClient>,
+    payload: &HookPayload,
+) -> Result<(), IpcError> {
     let session_id = match &payload.session_id {
         Some(id) => id.clone(),
         None => return Ok(()),
     };
-    let s = store.lock().map_err(|_| lock_err())?;
-    s.set_claude_status_by_session_id(&session_id, "idle")
+    // Snapshot whether a safe-kill is in flight BEFORE we update status —
+    // if it is, we spawn the marker check off the hook handler so the HTTP
+    // response returns fast (the work involves pane capture + SSH).
+    let safe_kill_in_flight = {
+        let s = store.lock().map_err(|_| lock_err())?;
+        let in_flight = s
+            .get_session_by_claude_id(&session_id)
+            .ok()
+            .flatten()
+            .map(|r| r.safe_kill_state.as_deref() == Some("requested"))
+            .unwrap_or(false);
+        s.set_claude_status_by_session_id(&session_id, "idle")?;
+        in_flight
+    };
+    if safe_kill_in_flight {
+        let store = Arc::clone(store);
+        let ssh = Arc::clone(ssh);
+        let sid = session_id.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::service::safe_kill::handle_stop_marker_check(store, ssh, sid).await;
+        });
+    }
+    Ok(())
 }
 
 /// Auto-register a worktree created by Claude Code's WorktreeCreate tool.
@@ -98,11 +128,16 @@ fn is_path_prefix(base: &str, path: &str) -> bool {
 mod tests {
     use super::*;
     use crate::mcp::hooks::HookPayload;
+    use crate::ssh::SshClient;
     use crate::store::Store;
     use std::sync::Arc;
 
     fn make_store() -> Arc<Mutex<Store>> {
         Arc::new(Mutex::new(Store::open_in_memory().unwrap()))
+    }
+
+    fn make_ssh() -> Arc<SshClient> {
+        Arc::new(SshClient::new())
     }
 
     fn make_payload(event: &str, session_id: &str) -> HookPayload {
@@ -120,7 +155,7 @@ mod tests {
     fn stop_hook_on_unknown_session_is_noop() {
         let store = make_store();
         let payload = make_payload("Stop", "no-such-id");
-        assert!(apply_hook(&store, &payload).is_ok());
+        assert!(apply_hook(&store, &make_ssh(), &payload).is_ok());
     }
 
     #[test]
@@ -139,7 +174,7 @@ mod tests {
             s.set_claude_status_by_session_id("uuid-1", "working")
                 .unwrap();
         }
-        apply_hook(&store, &make_payload("Stop", "uuid-1")).unwrap();
+        apply_hook(&store, &make_ssh(), &make_payload("Stop", "uuid-1")).unwrap();
         let s = store.lock().unwrap();
         let row = s.get_session("sess", "local").unwrap().unwrap();
         assert_eq!(row.claude_status.as_deref(), Some("idle"));
@@ -149,7 +184,7 @@ mod tests {
     fn unknown_event_is_noop() {
         let store = make_store();
         let payload = make_payload("UserPromptSubmit", "s1");
-        assert!(apply_hook(&store, &payload).is_ok());
+        assert!(apply_hook(&store, &make_ssh(), &payload).is_ok());
     }
 
     #[test]
@@ -163,7 +198,7 @@ mod tests {
             tool_response: None,
             cwd: None,
         };
-        assert!(apply_hook(&store, &payload).is_ok());
+        assert!(apply_hook(&store, &make_ssh(), &payload).is_ok());
     }
 
     #[test]

@@ -108,6 +108,7 @@ pub async fn start(
     let serve_shutdown = shutdown.clone();
     tauri::async_runtime::spawn(async move {
         let hook_store = Arc::clone(&store);
+        let hook_ssh = Arc::clone(&ssh);
         let tools = FleetTools::new(store, ssh, reg, tunnels);
         let service = StreamableHttpService::new(
             move || Ok(tools.clone()),
@@ -150,6 +151,7 @@ pub async fn start(
         // /hook validates token via ?token= query param inside the handler.
         let hook_state = hooks::HookState {
             store: hook_store,
+            ssh: hook_ssh,
             token: Arc::clone(&token),
         };
         let hook_router = axum::Router::new()

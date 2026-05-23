@@ -14,6 +14,7 @@ export type RowEventHandlers = {
   onAccountUpserted?: (row: AccountRow) => void;
   onProjectUpdated?: (row: ProjectRow) => void;
   onWorktreeUpdated?: (row: WorktreeRow) => void;
+  onWorktreeRemoved?: (payload: { id: number }) => void;
 };
 
 /**
@@ -43,6 +44,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub<AccountRow>('account:upserted', handlers.onAccountUpserted),
     sub<ProjectRow>('project:updated', handlers.onProjectUpdated),
     sub<WorktreeRow>('worktree:updated', handlers.onWorktreeUpdated),
+    sub<{ id: number }>('worktree:removed', handlers.onWorktreeRemoved),
   ]);
   return () => {
     for (const u of unlisteners) u?.();

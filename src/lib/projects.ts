@@ -84,3 +84,45 @@ export function mergeWorktree(row: WorktreeRow): void {
     return next;
   });
 }
+
+export function removeWorktree(id: number): void {
+  projects.update((arr) =>
+    arr.map((entry) => {
+      if (!entry.worktrees?.some((w) => w.id === id)) return entry;
+      return { ...entry, worktrees: entry.worktrees.filter((w) => w.id !== id) };
+    }),
+  );
+}
+
+export interface WorktreeOccupant {
+  host_alias: string;
+  tmux_name: string;
+}
+
+export interface WorktreeOccupancy {
+  worktree: WorktreeRow;
+  occupants: WorktreeOccupant[];
+}
+
+/** List every worktree fleet knows about, each tagged with the alive Claude
+ *  sessions currently using it. Pass `projectId` to scope to one project. */
+export async function listWorktreeOccupancy(
+  projectId: number | null = null,
+): Promise<Result<WorktreeOccupancy[]>> {
+  return invokeCmd<WorktreeOccupancy[]>('list_worktrees', {
+    args: { project_id: projectId },
+  });
+}
+
+/** Delete a git worktree on its host and drop the fleet row. The backend
+ *  refuses (`E_WORKTREE_BUSY`) when an alive session uses it unless `force`. */
+export async function deleteWorktree(
+  worktreeId: number,
+  force = false,
+): Promise<Result<void>> {
+  const r = await invokeCmd<void>('delete_worktree', {
+    args: { worktree_id: worktreeId, force },
+  });
+  if (r.ok) removeWorktree(worktreeId);
+  return r;
+}

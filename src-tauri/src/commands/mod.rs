@@ -8,3 +8,4 @@ pub mod projects;
 pub mod repo;
 pub mod sessions;
 pub mod upload;
+pub mod worktrees;

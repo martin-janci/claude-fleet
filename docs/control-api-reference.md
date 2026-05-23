@@ -25,6 +25,12 @@ Capture a session's terminal output — the visible tmux pane, or include scroll
 
 Parameters: `scrollback_lines`, `session_id`
 
+### `delete_worktree`
+
+Delete a git worktree on its host (runs `git worktree remove`, no --force) and drop fleet's row for it. Refuses if any alive Claude session points at the worktree, unless `force=true` is passed. Returns errors `E_WORKTREE_BUSY` (occupied), `E_NOTFOUND` (no such row), `E_GIT` (git refused — usually a dirty working tree).
+
+Parameters: `force`, `worktree_id`
+
 ### `discover_hosts`
 
 Discover SSH hosts from the user's ~/.ssh/config. These are candidates for add_host. Returns JSON.
@@ -74,6 +80,12 @@ List all discovered projects with their worktrees. Returns JSON.
 Reconcile and list tmux sessions across reachable hosts. Returns slim summary rows by default (id, host_alias, tmux_name, project_id, worktree_id, status, claude_status, stuck_kind, lost_at, is_controller) to fit MCP token caps on large fleets — pass summary=false for full SessionRow. Optional filters: host_alias, project_id, status, claude_status, include_lost (default false drops sessions with a non-null lost_at). JSON.
 
 Parameters: `claude_status`, `host_alias`, `include_lost`, `project_id`, `status`, `summary`
+
+### `list_worktrees`
+
+List git worktrees fleet knows about, each tagged with its alive-session occupants. An empty `occupants` array means the worktree is free to delete via `delete_worktree`. Optionally filter to one project.
+
+Parameters: `project_id`
 
 ### `new_bg_session`
 
@@ -197,6 +209,12 @@ Restart a tmux session (kill and recreate it in the same place). Returns the upd
 
 Parameters: `force`, `host_alias`, `name`
 
+### `safe_kill_session`
+
+Ask a running Claude session to safely persist all its work (commit + push to main, or commit on a feature branch with an open PR) before fleet deletes its worktree and kills the tmux session. Sends a marker-baked prompt and arms a Stop-hook listener; the actual deletion happens only after Claude emits the SAFE_REMOVE_READY marker AND fleet's own dirty-tree check passes. Returns the updated session row with `safe_kill_state=requested`; subsequent transitions ('ready', 'failed') arrive via session row events.
+
+Parameters: `host_alias`, `tmux_name`
+
 ### `send_message`
 
 Send a peer-to-peer message from one session to another. The message is persisted to the recipient's inbox (read with `inbox`); set `deliver: true` to ALSO type the message into the recipient's tmux pane with a `[msg #id from name@host]:` header. The inbox row is the source of truth — it lands even if the pane delivery fails. Returns JSON with the new message id and the delivery outcome.
@@ -238,6 +256,9 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::related_sessions`
 - `commands::sessions::new_session`
 - `commands::sessions::kill_session`
+- `commands::sessions::safe_kill_session`
+- `commands::worktrees::list_worktrees`
+- `commands::worktrees::delete_worktree`
 - `commands::sessions::rename_session`
 - `commands::sessions::set_session_friendly_name`
 - `commands::sessions::restart_session`

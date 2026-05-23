@@ -1822,6 +1822,10 @@ mod tests {
             context_pct: None,
             stuck_kind: None,
             friendly_name: None,
+            safe_kill_state: None,
+            safe_kill_nonce: None,
+            safe_kill_detail: None,
+            safe_kill_requested_at: None,
         }
     }
 
