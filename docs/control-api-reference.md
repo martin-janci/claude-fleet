@@ -71,7 +71,9 @@ List all discovered projects with their worktrees. Returns JSON.
 
 ### `list_sessions`
 
-Reconcile and list all tmux sessions across every reachable host. This is the primary way to see fleet state. Each row carries an is_controller flag (true for the registered controller session). JSON.
+Reconcile and list tmux sessions across reachable hosts. Returns slim summary rows by default (id, host_alias, tmux_name, project_id, worktree_id, status, claude_status, stuck_kind, lost_at, is_controller) to fit MCP token caps on large fleets — pass summary=false for full SessionRow. Optional filters: host_alias, project_id, status, claude_status, include_lost (default false drops sessions with a non-null lost_at). JSON.
+
+Parameters: `claude_status`, `host_alias`, `include_lost`, `project_id`, `status`, `summary`
 
 ### `new_bg_session`
 
@@ -213,6 +215,12 @@ Return the recorded event timeline for a session (status changes, prompts, stuck
 
 Parameters: `limit`, `session_id`
 
+### `set_friendly_name`
+
+Set the session's friendly display name (the sidebar shows this when the user toggles friendly names on). Intended to be called once per task by the in-session agent — keep it short (3–6 words) and human-readable. Pass an empty string to clear. Returns the updated session row as JSON.
+
+Parameters: `friendly_name`, `host_alias`, `tmux_name`
+
 ### `spawn_review`
 
 Spawn a review session: a new Claude session in the source session's worktree, seeded with a review prompt. Returns the new review session row as JSON.
@@ -231,6 +239,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::new_session`
 - `commands::sessions::kill_session`
 - `commands::sessions::rename_session`
+- `commands::sessions::set_session_friendly_name`
 - `commands::sessions::restart_session`
 - `commands::sessions::send_prompt`
 - `commands::sessions::spawn_review`
