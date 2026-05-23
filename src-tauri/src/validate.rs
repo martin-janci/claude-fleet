@@ -219,6 +219,35 @@ pub fn tmux_name(value: &str) -> Result<(), IpcError> {
     Ok(())
 }
 
+/// Validate a tmux session name used as a **lookup key**, not a creation
+/// value. Mirrors `tmux_name` but additionally allows `:` so synthetic
+/// `bg:<uuid>` rows (background `claude --bg` agents that have no tmux pane —
+/// see `Store::upsert_bg_session`) can be addressed. Still rejects whitespace,
+/// control characters, `.`, and a leading `-` — none of those appear in any
+/// row claude-fleet actually inserts, so a value containing them can only be
+/// a malformed/hostile caller.
+pub fn tmux_name_lookup(value: &str) -> Result<(), IpcError> {
+    if value.is_empty() {
+        return Err(IpcError::new("E_INVALID", "session name must not be empty"));
+    }
+    if value.starts_with('-') {
+        return Err(IpcError::new(
+            "E_INVALID",
+            "session name must not start with '-'",
+        ));
+    }
+    if value
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || c == '.')
+    {
+        return Err(IpcError::new(
+            "E_INVALID",
+            "session name must not contain whitespace, control characters, or '.'",
+        ));
+    }
+    Ok(())
+}
+
 /// Validate a session friendly-name (display label set by the in-session
 /// agent via MCP). Display-only, but still passes through `serde_json` and
 /// the row event bus — reject control chars and cap length so a runaway
@@ -338,6 +367,31 @@ mod tests {
         assert!(tmux_name("has:colon").is_err());
         assert!(tmux_name("-leading").is_err());
         assert!(tmux_name("").is_err());
+    }
+
+    #[test]
+    fn tmux_name_lookup_accepts_bg_uuid_rows() {
+        // The canonical `bg:<uuid>` form from `upsert_bg_session` — must pass.
+        assert!(
+            tmux_name_lookup("bg:550e8400-e29b-41d4-a716-446655440000").is_ok(),
+            "bg: synthetic rows must be addressable"
+        );
+        // Plain (non-bg) names still pass — this validator is a superset of
+        // `tmux_name` for lookups, not a separate dialect.
+        assert!(tmux_name_lookup("dev-foo").is_ok());
+        assert!(tmux_name_lookup("dev-martin-janci-claude-fleet--feat-test").is_ok());
+    }
+
+    #[test]
+    fn tmux_name_lookup_keeps_the_other_safety_checks() {
+        // Whitespace, control chars, '.', leading '-', and empty are all
+        // still rejected — only the ':' restriction was relaxed.
+        assert!(tmux_name_lookup("").is_err());
+        assert!(tmux_name_lookup("-leading").is_err());
+        assert!(tmux_name_lookup("has space").is_err());
+        assert!(tmux_name_lookup("has\ttab").is_err());
+        assert!(tmux_name_lookup("has.dot").is_err());
+        assert!(tmux_name_lookup("has\nnewline").is_err());
     }
 
     #[test]

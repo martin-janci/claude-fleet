@@ -1052,7 +1052,11 @@ pub fn set_session_friendly_name(
     store: &Mutex<Store>,
 ) -> Result<SessionRow, IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
-    crate::validate::tmux_name(&args.tmux_name)?;
+    // Lookup-mode validator: must accept the synthetic `bg:<uuid>` form used
+    // by background-agent rows, which the create-mode `tmux_name` validator
+    // rejects (tmux forbids `:` when creating a session, but we're only
+    // addressing an existing row here, never spawning tmux).
+    crate::validate::tmux_name_lookup(&args.tmux_name)?;
     crate::validate::friendly_name(&args.friendly_name)?;
     let trimmed = args.friendly_name.trim();
     let value = if trimmed.is_empty() {
@@ -2694,6 +2698,31 @@ mod ghost_tests {
         let row = set_session_friendly_name(set_friendly_args("h", "dev-x", ""), &store)
             .expect("clear empty");
         assert!(row.friendly_name.is_none());
+    }
+
+    #[test]
+    fn set_friendly_name_works_on_bg_session_rows() {
+        // Regression: synthetic bg rows have `tmux_name = "bg:<uuid>"`, which
+        // contains ':'. The create-mode `tmux_name` validator rejects ':',
+        // so the lookup-mode `tmux_name_lookup` validator must be used here
+        // — otherwise every bg agent fails with E_INVALID at the MCP layer.
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let bg_name = format!("bg:{uuid}");
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            s.upsert_bg_session("local", &bg_name, None, uuid, Some("working"), 1)
+                .unwrap();
+        }
+        let row = set_session_friendly_name(
+            set_friendly_args("local", &bg_name, "review hardening spec"),
+            &store,
+        )
+        .expect("bg row must be addressable");
+        assert_eq!(row.tmux_name, bg_name);
+        assert_eq!(row.kind, "bg");
+        assert_eq!(row.friendly_name.as_deref(), Some("review hardening spec"));
     }
 
     #[test]
