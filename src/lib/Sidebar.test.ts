@@ -52,7 +52,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import { get } from 'svelte/store';
 import Sidebar from './Sidebar.svelte';
 import { projects, bootstrapProjects } from './projects';
-import { sessions, bootstrapSessions, type SessionRow } from './sessions';
+import { sessions, bootstrapSessions, showBgAgents, type SessionRow } from './sessions';
 import { selectedSession, selectSession } from './selection';
 import { hosts, bootstrapHosts, hostFilter } from './hosts';
 import { accounts, bootstrapAccounts } from './accounts';
@@ -93,6 +93,7 @@ beforeEach(() => {
   hosts.set([]);
   accounts.set([]);
   hostFilter.set('all');
+  showBgAgents.set(true);
   selectSession(null);
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
   // Wipe persisted prefs so one test's recency choice doesn't leak into
@@ -556,6 +557,23 @@ describe('Sidebar (sessions-grouped view)', () => {
     render(Sidebar);
     await tick(); await tick();
     expect(screen.getByText('🔍')).toBeInTheDocument();
+  });
+
+  describe('background-session filter', () => {
+    it('hides bg sessions when showBgAgents is false, shows them when true', async () => {
+      const normal = sessionFor(1, 'dev-1');           // kind: 'work'
+      const bg = { ...sessionFor(1, 'bg:abc'), kind: 'bg' };
+      mockBackend(fakeProjects, [normal, bg]);
+      showBgAgents.set(true);
+      render(Sidebar);
+      await tick(); await tick();
+      expect(screen.queryByText('bg:abc')).not.toBeNull();
+
+      showBgAgents.set(false);
+      await tick(); await tick();
+      expect(screen.queryByText('bg:abc')).toBeNull();
+      expect(screen.queryByText('dev-1')).not.toBeNull();
+    });
   });
 
   it('renders 500 sessions across 25 projects without quadratic blow-up', async () => {
