@@ -14,8 +14,12 @@
   async function fetchLogs() {
     const id = session.claude_session_id;
     if (!id) return;
+    const sessionId = session.id;
     loading = true;
     const r = await peekSession(session.host_alias, id);
+    // The session prop may have changed while the fetch was in flight; if so,
+    // discard this result so we never show a stale transcript for the wrong session.
+    if (session.id !== sessionId) return;
     loading = false;
     if (r.ok) {
       logs = r.value;
@@ -35,6 +39,7 @@
     if (timer) clearInterval(timer);
     logs = '';
     logError = null;
+    loading = false;
     if (!id) return;
     void fetchLogs();
     timer = setInterval(() => void fetchLogs(), POLL_MS);
@@ -53,6 +58,7 @@
     <button
       class="refresh"
       data-testid="bg-refresh"
+      aria-label="Refresh logs"
       disabled={!session.claude_session_id || loading}
       onclick={() => void fetchLogs()}
     >↻ Refresh</button>

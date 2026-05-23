@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/svelte';
+import { render, screen, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { tick } from 'svelte';
 
@@ -37,5 +37,21 @@ describe('BgSessionPanel', () => {
     await tick(); await tick();
     expect(screen.getByText(/no logs available yet/i)).toBeTruthy();
     expect(mockedInvoke).not.toHaveBeenCalled();
+  });
+
+  it('keeps the last good transcript and shows an error when a later fetch fails', async () => {
+    const invokeMock = mockedInvoke as ReturnType<typeof vi.fn>;
+    // First fetch (on mount) succeeds, second (manual refresh) fails.
+    invokeMock.mockResolvedValueOnce('good transcript');
+    render(BgSessionPanel, { session: bgSession() });
+    expect(await screen.findByText(/good transcript/)).toBeTruthy();
+
+    invokeMock.mockRejectedValueOnce(new Error('boom'));
+    await fireEvent.click(screen.getByTestId('bg-refresh'));
+
+    // Last good transcript is still shown...
+    expect(screen.getByText(/good transcript/)).toBeTruthy();
+    // ...and an inline error is surfaced.
+    expect(await screen.findByTestId('bg-log-error')).toBeTruthy();
   });
 });
