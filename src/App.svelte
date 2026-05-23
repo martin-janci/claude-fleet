@@ -13,7 +13,7 @@
   import { bootstrapAccounts, mergeAccount } from './lib/accounts';
   import { subscribeToRowEvents } from './lib/events';
   import type { UnlistenFn } from '@tauri-apps/api/event';
-  import { selectedSession } from './lib/selection';
+  import { selectedSession, restoreLastSession } from './lib/selection';
   import { loadSessionUi, saveSessionUi, DEFAULT_UI } from './lib/session_ui';
   import { readPref, writePref } from './lib/prefs';
 
@@ -101,6 +101,8 @@
       bootstrapHosts(),
       bootstrapAccounts(),
     ]);
+    // Sessions are loaded now — re-open the one the user last had selected.
+    restoreLastSession();
     unlistenEvents = await subscribeToRowEvents({
       onSessionCreated: mergeSession,
       onSessionUpdated: mergeSession,
