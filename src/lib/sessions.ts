@@ -1,5 +1,6 @@
 import { writable } from 'svelte/store';
 import { invokeCmd, invokeCmdAbortable, type Result } from './result';
+import { readPref, writePref } from './prefs';
 
 export interface SessionRow {
   id: number;
@@ -25,6 +26,12 @@ export interface SessionRow {
 }
 
 export const sessions = writable<SessionRow[]>([]);
+
+// Sidebar filter — when false, background (`kind === 'bg'`) sessions are
+// hidden from the tree. Defaults to true (shown). Persisted across restarts.
+const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
+export const showBgAgents = writable<boolean>(readPref('show-bg-agents', true, isBool));
+showBgAgents.subscribe((v) => writePref('show-bg-agents', v));
 
 export async function loadSessions(): Promise<Result<SessionRow[]>> {
   const r = await invokeCmd<SessionRow[]>('list_sessions');

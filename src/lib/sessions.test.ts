@@ -6,7 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { sessions, loadSessions, killSession, renameSession, restartSession, newSessionAbortable, newBgSession, peekSession, purgeProject } from './sessions';
+import { sessions, loadSessions, killSession, renameSession, restartSession, newSessionAbortable, newBgSession, peekSession, purgeProject, showBgAgents } from './sessions';
 
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
@@ -128,5 +128,14 @@ describe('purgeProject', () => {
       'purge_project',
       { args: { host_alias: 'local', project_path: '/home/user/my-project', project_id: 42 } },
     ]);
+  });
+});
+
+describe('showBgAgents', () => {
+  it('defaults to true and persists changes to localStorage', () => {
+    localStorage.clear();
+    expect(get(showBgAgents)).toBe(true);
+    showBgAgents.set(false);
+    expect(localStorage.getItem('cf:pref:show-bg-agents')).toBe('false');
   });
 });
