@@ -339,4 +339,24 @@ mod tests {
         assert!(tmux_name("-leading").is_err());
         assert!(tmux_name("").is_err());
     }
+
+    #[test]
+    fn friendly_name_accepts_normal_labels_and_empty() {
+        assert!(friendly_name("").is_ok()); // empty is "clear"
+        assert!(friendly_name("   ").is_ok()); // whitespace = clear at service layer
+        assert!(friendly_name("add friendly name to sessions").is_ok());
+        assert!(friendly_name("fix: login redirect (issue #42)").is_ok());
+        // Unicode counted by chars(), not bytes — a 40-emoji label is fine.
+        assert!(friendly_name(&"🏷".repeat(40)).is_ok());
+        // Exactly 80 chars is the cap.
+        assert!(friendly_name(&"a".repeat(80)).is_ok());
+    }
+
+    #[test]
+    fn friendly_name_rejects_too_long_and_control_chars() {
+        assert!(friendly_name(&"a".repeat(81)).is_err());
+        assert!(friendly_name("line one\nline two").is_err()); // \n is control
+        assert!(friendly_name("with\ttab").is_err());
+        assert!(friendly_name("bell\x07").is_err());
+    }
 }

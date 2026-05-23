@@ -2637,4 +2637,94 @@ mod ghost_tests {
             .unwrap()
             .is_none());
     }
+
+    fn set_friendly_args(host: &str, tmux: &str, label: &str) -> SetFriendlyNameArgs {
+        SetFriendlyNameArgs {
+            host_alias: host.into(),
+            tmux_name: tmux.into(),
+            friendly_name: label.into(),
+        }
+    }
+
+    #[test]
+    fn set_friendly_name_round_trips_through_store() {
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("h").unwrap();
+            s.upsert_session("dev-x", "h", None, None, 1, 1, "running", None)
+                .unwrap();
+        }
+        let row =
+            set_session_friendly_name(set_friendly_args("h", "dev-x", "fix login bug"), &store)
+                .expect("update");
+        assert_eq!(row.friendly_name.as_deref(), Some("fix login bug"));
+        // Persisted, not just returned.
+        let stored = store
+            .lock()
+            .unwrap()
+            .get_session("dev-x", "h")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.friendly_name.as_deref(), Some("fix login bug"));
+    }
+
+    #[test]
+    fn set_friendly_name_trims_and_whitespace_clears() {
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("h").unwrap();
+            s.upsert_session("dev-x", "h", None, None, 1, 1, "running", None)
+                .unwrap();
+            // Seed an existing label so we can prove the clear path actually nulls it.
+            s.set_friendly_name("h", "dev-x", Some("old label"))
+                .unwrap();
+        }
+        // Padding around real content is trimmed.
+        let row =
+            set_session_friendly_name(set_friendly_args("h", "dev-x", "  trimmed label  "), &store)
+                .expect("update");
+        assert_eq!(row.friendly_name.as_deref(), Some("trimmed label"));
+        // Whitespace-only input clears.
+        let row = set_session_friendly_name(set_friendly_args("h", "dev-x", "   "), &store)
+            .expect("clear");
+        assert!(row.friendly_name.is_none());
+        // Empty input also clears.
+        let row = set_session_friendly_name(set_friendly_args("h", "dev-x", ""), &store)
+            .expect("clear empty");
+        assert!(row.friendly_name.is_none());
+    }
+
+    #[test]
+    fn set_friendly_name_returns_not_found_when_row_absent() {
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("h").unwrap();
+            // No session inserted.
+        }
+        let err = set_session_friendly_name(set_friendly_args("h", "ghost", "x"), &store)
+            .expect_err("absent row");
+        assert_eq!(err.code, "E_NOTFOUND");
+    }
+
+    #[test]
+    fn set_friendly_name_rejects_invalid_input() {
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("h").unwrap();
+            s.upsert_session("dev-x", "h", None, None, 1, 1, "running", None)
+                .unwrap();
+        }
+        // Control char rejected by validate::friendly_name.
+        let err = set_session_friendly_name(set_friendly_args("h", "dev-x", "bad\nlabel"), &store)
+            .expect_err("control char");
+        assert_eq!(err.code, "E_INVALID");
+        // Bad host alias rejected before any UPDATE.
+        let err = set_session_friendly_name(set_friendly_args("-evil", "dev-x", "x"), &store)
+            .expect_err("bad alias");
+        assert_eq!(err.code, "E_INVALID");
+    }
 }
