@@ -1289,7 +1289,7 @@ pub struct BroadcastSummary {
 pub async fn broadcast_prompt(
     filter: BroadcastFilter,
     prompt: String,
-    _submit: bool,
+    submit: bool,
     store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
 ) -> Result<BroadcastSummary, IpcError> {
@@ -1316,7 +1316,8 @@ pub async fn broadcast_prompt(
         let Some(row) = sessions.iter().find(|s| s.id == sid) else {
             continue;
         };
-        let res = send_prompt_inner(ssh, &row.host_alias, &row.tmux_name, &prompt).await;
+        let res =
+            send_prompt_inner(store, ssh, &row.host_alias, &row.tmux_name, &prompt, submit).await;
         match res {
             Ok(()) => {
                 sent += 1;
@@ -1344,13 +1345,12 @@ pub async fn broadcast_prompt(
     })
 }
 
-/// Best-effort controller lookup. Wave 1 introduces a recorded controller
-/// `(host_alias, tmux_name)` in the store; this worktree's `Store` does not yet
-/// expose a `get_controller` accessor, so we degrade to "no controller known"
-/// (no exclusion). Centralized here so wiring the real accessor is a one-line
-/// change without touching `broadcast_prompt`'s body.
-fn resolve_controller(_store: &Store) -> Option<(String, String)> {
-    None
+/// Best-effort controller lookup. The recorded controller `(host_alias,
+/// tmux_name)` lives in the store (Task D); broadcast excludes it so a fan-out
+/// never steers the controller session into itself. Degrades to "no controller
+/// known" (no exclusion) on any store error.
+fn resolve_controller(store: &Store) -> Option<(String, String)> {
+    store.get_controller().ok().flatten()
 }
 
 /// Resolve the cwd a session should (re)open in. Order: the session's worktree
@@ -1642,6 +1642,8 @@ mod tests {
             effort_level: None,
             pr_url: None,
             current_activity: None,
+            context_pct: None,
+            stuck_kind: None,
         }
     }
 
