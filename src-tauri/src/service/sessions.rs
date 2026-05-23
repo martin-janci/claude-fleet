@@ -1357,9 +1357,11 @@ fn resolve_controller(store: &Store) -> Option<(String, String)> {
     store.get_controller().ok().flatten()
 }
 
-/// Resolve the cwd a session should (re)open in. Order: the session's worktree
-/// path (by `worktree_id`) → its project `base_path` → error. Used by both
-/// `spawn_review` and `recreate_session`.
+/// Resolve the cwd a session should (re)open in for a LOCAL host. Order: the
+/// session's worktree path (by `worktree_id`) → its project `base_path` →
+/// error. Remote hosts must go through [`cwd_source_for_session`] /
+/// [`resolve_cwd_source`] instead — the local paths in this table do not
+/// exist on the remote machine.
 fn resolve_session_cwd(s: &Store, row: &crate::store::SessionRow) -> Result<String, IpcError> {
     if let Some(wt_id) = row.worktree_id {
         if let Some(path) = s.worktree_path(wt_id)? {
@@ -1375,6 +1377,70 @@ fn resolve_session_cwd(s: &Store, row: &crate::store::SessionRow) -> Result<Stri
         "E_NOREPO",
         "cannot determine a worktree path for this session",
     ))
+}
+
+/// Per-host cwd resolution input, captured under the store lock before any
+/// async work. For `local` we already have the absolute path; for remote we
+/// keep the (owner, repo, worktree-name) tuple and only translate to a path
+/// once `ssh.remote_home` resolves off-lock.
+#[cfg_attr(test, derive(Debug))]
+enum CwdSource {
+    Local(String),
+    Remote {
+        owner: String,
+        repo: String,
+        wt_name: Option<String>,
+    },
+}
+
+/// Pick the cwd-resolution strategy for `row` while holding the store lock.
+/// Falls back from worktree → project root (matching the local resolver) when
+/// the worktree row is missing.
+fn cwd_source_for_session(
+    s: &Store,
+    row: &crate::store::SessionRow,
+) -> Result<CwdSource, IpcError> {
+    if row.host_alias == "local" {
+        return Ok(CwdSource::Local(resolve_session_cwd(s, row)?));
+    }
+    let pid = row.project_id.ok_or_else(|| {
+        IpcError::new(
+            "E_NOREPO",
+            "cannot determine a remote path: session has no project",
+        )
+    })?;
+    let (owner, repo) = fetch_owner_repo(s, pid)?;
+    let wt_name = match row.worktree_id {
+        Some(wid) => s.worktree_name(wid)?,
+        None => None,
+    };
+    Ok(CwdSource::Remote {
+        owner,
+        repo,
+        wt_name,
+    })
+}
+
+/// Off-lock half of host-aware cwd resolution: for remote sources, look up
+/// the remote `$HOME` and assemble the project (or worktree) path using the
+/// same convention `new_session` uses. Local sources pass straight through.
+async fn resolve_cwd_source(
+    src: CwdSource,
+    host_alias: &str,
+    ssh: &Arc<SshClient>,
+) -> Result<String, IpcError> {
+    match src {
+        CwdSource::Local(p) => Ok(p),
+        CwdSource::Remote {
+            owner,
+            repo,
+            wt_name,
+        } => {
+            let home = ssh.remote_home(host_alias).await?;
+            let (_root, cwd) = remote_project_path(&home, &owner, &repo, wt_name.as_deref());
+            Ok(cwd)
+        }
+    }
 }
 
 /// Poll the tmux pane until `cl`'s REPL prompt appears, up to ~6s. Returns
@@ -1410,17 +1476,19 @@ pub async fn spawn_review(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<crate::store::SessionRow, IpcError> {
-    // 1. Snapshot source + resolve cwd under a brief lock.
-    let (source, cwd) = {
+    // 1. Snapshot source + capture cwd-resolution inputs under a brief lock.
+    //    For remote hosts the cwd is finalized off-lock via `ssh.remote_home`.
+    let (source, cwd_src) = {
         let s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
         let source = s
             .get_session_by_id(args.source_session_id)?
             .ok_or_else(|| IpcError::new("E_NOTFOUND", "source session not found"))?;
-        let cwd = resolve_session_cwd(&s, &source)?;
-        (source, cwd)
+        let cwd_src = cwd_source_for_session(&s, &source)?;
+        (source, cwd_src)
     };
+    let cwd = resolve_cwd_source(cwd_src, &source.host_alias, ssh).await?;
 
     // 2. Spawn the review tmux session (off-lock).
     //    A review runs Claude Code — same pane command as any "work" session.
@@ -1505,11 +1573,11 @@ pub async fn recreate_session(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<SessionRow, IpcError> {
-    // Snapshot the session, gate on host reachability, and resolve the rebuild
-    // cwd + launch command — all under one brief lock, before any tmux call.
-    // Works for both `running` sessions (eating RAM / wedged → nuke & rebuild)
-    // and `ghost` sessions (lost from tmux → bring back in the right worktree).
-    let (sess, cwd, pane_cmd) = {
+    // Snapshot the session, gate on host reachability, and capture cwd-resolution
+    // inputs — all under one brief lock, before any tmux/ssh call. For remote
+    // hosts the cwd is finalized off-lock (needs `ssh.remote_home`), because the
+    // local DB path is meaningless on the other machine.
+    let (sess, cwd_src, pane_cmd) = {
         let s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
@@ -1532,10 +1600,11 @@ pub async fn recreate_session(
                 format!("host {} is not reachable", host.alias),
             ));
         }
-        let cwd = resolve_session_cwd(&s, &sess)?;
+        let cwd_src = cwd_source_for_session(&s, &sess)?;
         let pane_cmd = recreate_pane_command(&sess.kind, sess.claude_session_id.as_deref());
-        (sess, cwd, pane_cmd)
+        (sess, cwd_src, pane_cmd)
     };
+    let cwd = resolve_cwd_source(cwd_src, &sess.host_alias, ssh).await?;
 
     let tmux = exec_for(&sess.host_alias, ssh);
     // Tear down any live session first (frees the old process tree / wedged
@@ -2207,6 +2276,87 @@ mod tests {
             .unwrap();
         let row3 = store.get_session_by_id(s3).unwrap().unwrap();
         assert!(resolve_session_cwd(&store, &row3).is_err());
+    }
+
+    #[test]
+    fn cwd_source_local_uses_db_path_remote_uses_owner_repo() {
+        let store = Store::open_in_memory().expect("store");
+        store.upsert_host("local").unwrap();
+        store.upsert_host("mefistos").unwrap();
+        let pid = store.upsert_project("acme", "repo", "/base/repo").unwrap();
+        let wid = store
+            .upsert_worktree(pid, "feat-x", "/base/repo/.claude/worktrees/feat-x", None)
+            .unwrap();
+
+        // LOCAL: takes the worktree's stored path verbatim.
+        let lid = store
+            .upsert_session(
+                "dev",
+                "local",
+                Some(pid),
+                Some(wid),
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+        let local_row = store.get_session_by_id(lid).unwrap().unwrap();
+        match cwd_source_for_session(&store, &local_row).unwrap() {
+            CwdSource::Local(p) => assert_eq!(p, "/base/repo/.claude/worktrees/feat-x"),
+            CwdSource::Remote { .. } => panic!("expected Local for host=local"),
+        }
+
+        // REMOTE: captures (owner, repo, wt_name) — the local DB path is
+        // unusable on the remote machine and must NOT leak into the cwd.
+        let rid = store
+            .upsert_session(
+                "dev",
+                "mefistos",
+                Some(pid),
+                Some(wid),
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+        let remote_row = store.get_session_by_id(rid).unwrap().unwrap();
+        match cwd_source_for_session(&store, &remote_row).unwrap() {
+            CwdSource::Remote {
+                owner,
+                repo,
+                wt_name,
+            } => {
+                assert_eq!(owner, "acme");
+                assert_eq!(repo, "repo");
+                assert_eq!(wt_name.as_deref(), Some("feat-x"));
+            }
+            CwdSource::Local(_) => panic!("expected Remote for non-local host"),
+        }
+
+        // REMOTE without worktree → wt_name = None, so remote_project_path
+        // returns the project root.
+        let rid2 = store
+            .upsert_session("dev2", "mefistos", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
+        let remote_row2 = store.get_session_by_id(rid2).unwrap().unwrap();
+        match cwd_source_for_session(&store, &remote_row2).unwrap() {
+            CwdSource::Remote { wt_name, .. } => assert!(wt_name.is_none()),
+            CwdSource::Local(_) => panic!("expected Remote for non-local host"),
+        }
+    }
+
+    #[test]
+    fn cwd_source_remote_without_project_errors() {
+        let store = Store::open_in_memory().expect("store");
+        store.upsert_host("mefistos").unwrap();
+        let id = store
+            .upsert_session("orphan", "mefistos", None, None, 1, 1, "running", None)
+            .unwrap();
+        let row = store.get_session_by_id(id).unwrap().unwrap();
+        let err = cwd_source_for_session(&store, &row).unwrap_err();
+        assert_eq!(err.code, "E_NOREPO");
     }
 
     #[test]
