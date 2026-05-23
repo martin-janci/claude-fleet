@@ -1420,13 +1420,18 @@ fn resolve_session_cwd(s: &Store, row: &crate::store::SessionRow) -> Result<Stri
             return Ok(path);
         }
     }
-    // Sessions discovered by reconcile carry only `worktree_key` (derived from
-    // their live cwd), never `worktree_id` — reconcile does not resolve the FK.
-    // Honor the key so a session living in a worktree is recreated there, not
-    // at the repo root. The worktrees table is keyed by (project_id, name), and
-    // `worktree_key` is exactly that name.
+    let base = match row.project_id {
+        Some(pid) => s.project_base_path(pid)?,
+        None => None,
+    };
+    // Sessions discovered by reconcile carry only `worktree_key` (the worktree
+    // dir name, derived from their live cwd), never `worktree_id` — reconcile
+    // does not resolve the FK. Honor the key so a session in a worktree is
+    // recreated there, not at the repo root.
     if let (Some(pid), Some(key)) = (row.project_id, row.worktree_key.as_deref()) {
         if key != "main" {
+            // 1. The worktrees table is authoritative (and handles non-standard
+            //    locations) — when it is fresh.
             if let Some(path) = s
                 .list_worktrees_for_project(pid)?
                 .into_iter()
@@ -1435,17 +1440,39 @@ fn resolve_session_cwd(s: &Store, row: &crate::store::SessionRow) -> Result<Stri
             {
                 return Ok(path);
             }
+            // 2. The table is only refreshed by `refresh_projects`, so a
+            //    just-created worktree (the common recreate case) may be absent.
+            //    Reconstruct from the on-disk standard layouts under the base.
+            if let Some(ref base) = base {
+                if let Some(path) =
+                    worktree_path_on_disk(base, key, |p| std::path::Path::new(p).exists())
+                {
+                    return Ok(path);
+                }
+            }
         }
     }
-    if let Some(pid) = row.project_id {
-        if let Some(base) = s.project_base_path(pid)? {
-            return Ok(base);
-        }
+    if let Some(base) = base {
+        return Ok(base);
     }
     Err(IpcError::new(
         "E_NOREPO",
         "cannot determine a worktree path for this session",
     ))
+}
+
+/// Reconstruct a local worktree's path from the project `base` and its dir
+/// name `key`, trying the two layouts the ecosystem uses (`.claude/worktrees/`
+/// then `.worktrees/`). Returns the first that `exists`. Used as a fallback
+/// when the worktrees table has not been refreshed since the worktree was made.
+fn worktree_path_on_disk(base: &str, key: &str, exists: impl Fn(&str) -> bool) -> Option<String> {
+    for layout in [".claude/worktrees", ".worktrees"] {
+        let candidate = format!("{base}/{layout}/{key}");
+        if exists(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Per-host cwd resolution input, captured under the store lock before any
@@ -2385,6 +2412,24 @@ mod tests {
         let mut ru = row(3, "local", "dev3", "work", Some(pid), Some("idle"));
         ru.worktree_key = Some("gone".into());
         assert_eq!(resolve_session_cwd(&store, &ru).unwrap(), "/base/r");
+    }
+
+    #[test]
+    fn worktree_path_on_disk_tries_both_layouts() {
+        let base = "/base/r";
+        // `.worktrees/<key>` layout (the case the stale-table bug hit).
+        let only_dot_worktrees = worktree_path_on_disk(base, "test-worktree", |p| {
+            p == "/base/r/.worktrees/test-worktree"
+        });
+        assert_eq!(
+            only_dot_worktrees.as_deref(),
+            Some("/base/r/.worktrees/test-worktree")
+        );
+        // `.claude/worktrees/<key>` is preferred when both exist.
+        let both = worktree_path_on_disk(base, "feat", |_| true);
+        assert_eq!(both.as_deref(), Some("/base/r/.claude/worktrees/feat"));
+        // Neither present → None (caller falls back to the repo root).
+        assert_eq!(worktree_path_on_disk(base, "gone", |_| false), None);
     }
 
     #[test]
