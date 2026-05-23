@@ -731,6 +731,7 @@
         class="pill"
         class:active={$showBgAgents}
         data-testid="bg-toggle"
+        aria-pressed={$showBgAgents}
         title={$showBgAgents ? 'Hide background agents' : 'Show background agents'}
         onclick={() => showBgAgents.update((v) => !v)}
       >
@@ -1030,6 +1031,7 @@
   .icon-btn.danger:hover { color: #e64a4a; border-color: #e64a4a; }
 
   .recency { display: flex; gap: 0.25rem; }
+  .bg-toggle { display: flex; gap: 0.25rem; }
   .pill {
     font-size: 0.7rem;
     padding: 0.15rem 0.55rem;

@@ -568,6 +568,7 @@ describe('Sidebar (sessions-grouped view)', () => {
       render(Sidebar);
       await tick(); await tick();
       expect(screen.queryByText('bg:abc')).not.toBeNull();
+      expect(screen.queryByText('🤖')).not.toBeNull();
 
       showBgAgents.set(false);
       await tick(); await tick();
