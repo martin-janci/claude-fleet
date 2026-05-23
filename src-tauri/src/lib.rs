@@ -366,14 +366,25 @@ fn maybe_start_mcp(
             fresh
         }
     };
-    let result = tauri::async_runtime::block_on(mcp::start(
-        std::sync::Arc::clone(store),
-        std::sync::Arc::clone(ssh),
-        std::sync::Arc::clone(reg),
-        std::sync::Arc::clone(tunnels),
-        port,
-        token,
-    ));
+    let result = tauri::async_runtime::block_on(async {
+        let r = mcp::start(
+            std::sync::Arc::clone(store),
+            std::sync::Arc::clone(ssh),
+            std::sync::Arc::clone(reg),
+            std::sync::Arc::clone(tunnels),
+            port,
+            token,
+        )
+        .await;
+        if r.is_ok() {
+            if let Err(e) =
+                crate::service::provision::reestablish_tunnels(store, tunnels, port)
+            {
+                eprintln!("[mcp] reestablish_tunnels: {e}");
+            }
+        }
+        r
+    });
     if let Some(runtime) = app.try_state::<Mutex<mcp::McpRuntime>>() {
         if let Ok(mut rt) = runtime.lock() {
             match result {
