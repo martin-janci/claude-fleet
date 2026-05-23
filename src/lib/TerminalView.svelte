@@ -730,7 +730,29 @@
     {/if}
   </div>
 {:else}
-  <p class="empty" data-testid="terminal-empty">Select a session to attach a terminal.</p>
+  <div class="empty" data-testid="terminal-empty">
+    <!-- Stroke-only terminal-window icon: traffic lights + chevron prompt with
+         a cursor underscore. currentColor lets it ride the theme's muted fg. -->
+    <svg
+      class="empty-icon"
+      viewBox="0 0 64 64"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="6" y="10" width="52" height="44" rx="5" />
+      <line x1="6" y1="21" x2="58" y2="21" />
+      <circle cx="13" cy="15.5" r="1.2" fill="currentColor" stroke="none" />
+      <circle cx="17.5" cy="15.5" r="1.2" fill="currentColor" stroke="none" />
+      <circle cx="22" cy="15.5" r="1.2" fill="currentColor" stroke="none" />
+      <polyline points="16,32 22,38 16,44" />
+      <line x1="27" y1="44" x2="42" y2="44" />
+    </svg>
+    <p class="empty-msg">Select a session to attach a terminal.</p>
+  </div>
 {/if}
 
 <style>
@@ -880,7 +902,27 @@
     top: -1000px;
     left: -1000px;
   }
-  .empty { color: var(--fg-muted); font-size: 0.9rem; padding: 0.75rem; }
+  .empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1.1rem;
+    height: 100%;
+    width: 100%;
+    color: var(--fg-muted);
+    user-select: none;
+  }
+  .empty-icon {
+    width: 84px;
+    height: 84px;
+    opacity: 0.55;
+  }
+  .empty-msg {
+    margin: 0;
+    font-size: 0.95rem;
+    letter-spacing: 0.01em;
+  }
   .err {
     flex: 0 0 auto;
     color: #e64a4a;
