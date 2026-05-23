@@ -6,6 +6,7 @@
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
   import TerminalView from './lib/TerminalView.svelte';
+  import BgSessionPanel from './lib/BgSessionPanel.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
   import { loadProjects, bootstrapProjects, mergeProjectFromEvent, mergeWorktree } from './lib/projects';
   import { loadSessions, bootstrapSessions, mergeSession, removeSession } from './lib/sessions';
@@ -266,16 +267,22 @@
       >
     </div>
     <div class="right-body">
-      <!-- TerminalView stays mounted underneath so the PTY and its ANSI
-           buffer survive a Files-mode round trip — flipping back is instant
-           and never re-fits or reconnects the terminal. -->
-      <div class="view-slot">
-        <TerminalView />
-      </div>
-      {#if filesMode && $selectedSession}
-        <div class="view-slot overlay">
-          <FilesPanel session={$selectedSession} />
+      {#if $selectedSession?.kind === 'bg'}
+        <div class="view-slot">
+          <BgSessionPanel session={$selectedSession} />
         </div>
+      {:else}
+        <!-- TerminalView stays mounted underneath so the PTY and its ANSI
+             buffer survive a Files-mode round trip — flipping back is instant
+             and never re-fits or reconnects the terminal. -->
+        <div class="view-slot">
+          <TerminalView />
+        </div>
+        {#if filesMode && $selectedSession}
+          <div class="view-slot overlay">
+            <FilesPanel session={$selectedSession} />
+          </div>
+        {/if}
       {/if}
     </div>
   </div>
