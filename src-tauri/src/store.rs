@@ -240,6 +240,11 @@ impl Store {
             tx.execute_batch(include_str!("../migrations/013_session_events.sql"))?;
             tx.commit()?;
         }
+        if v < 14 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../migrations/014_last_reconciled_at.sql"))?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -1519,6 +1524,33 @@ impl Store {
         Ok(())
     }
 
+    /// Stamp `last_reconciled_at = at` on the sessions a reconcile pass just
+    /// observed live on `host_alias` (the `keep` set). This is the proactive
+    /// freshness marker the Wave-2 background tick (Task H) relies on so the
+    /// frontend can gray out rows whose host has gone quiet. Best-effort and
+    /// emit-free: it does not change any user-visible row field, so it neither
+    /// fires row events nor aborts reconcile on failure.
+    pub fn mark_sessions_reconciled(
+        &self,
+        host_alias: &str,
+        keep_names: &[String],
+        at: i64,
+    ) -> Result<usize, rusqlite::Error> {
+        if keep_names.is_empty() {
+            return Ok(0);
+        }
+        let placeholders = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "UPDATE sessions SET last_reconciled_at=?1 \
+             WHERE host_alias=?2 AND tmux_name IN ({placeholders})"
+        );
+        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&at, &host_alias];
+        for n in keep_names {
+            params.push(n);
+        }
+        self.conn.execute(&sql, params.as_slice())
+    }
+
     pub fn delete_session(&self, id: i64) -> Result<(), rusqlite::Error> {
         self.conn
             .execute("DELETE FROM sessions WHERE id=?1", rusqlite::params![id])?;
@@ -1792,7 +1824,7 @@ mod tests {
     fn migrate_is_idempotent() {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
-        assert_eq!(store.schema_version().expect("version"), 13);
+        assert_eq!(store.schema_version().expect("version"), 14);
     }
 
     #[test]
@@ -1977,7 +2009,7 @@ mod tests {
     #[test]
     fn schema_version_is_seven_after_migration() {
         let s = Store::open_in_memory().expect("open");
-        assert_eq!(s.schema_version().expect("version"), 13);
+        assert_eq!(s.schema_version().expect("version"), 14);
     }
 
     #[test]
@@ -2594,7 +2626,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 13, "schema_version should be 13 after migration");
+        assert_eq!(v, 14, "schema_version should be 14 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store
@@ -2609,6 +2641,52 @@ mod tests {
             )
             .unwrap();
         assert_eq!(lost, None, "lost_at should be NULL for a fresh session");
+    }
+
+    #[test]
+    fn mark_sessions_reconciled_stamps_only_kept_rows() {
+        // Task H freshness marker: the background tick stamps last_reconciled_at
+        // on every session it observed live (the keep set) and leaves the rest
+        // (and a fresh row's default) NULL.
+        let store = Store::open_in_memory().expect("store");
+        store.upsert_host("alpha").unwrap();
+        store
+            .upsert_session("kept", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store
+            .upsert_session("gone", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+
+        let updated = store
+            .mark_sessions_reconciled("alpha", &["kept".to_string()], 1234)
+            .expect("mark");
+        assert_eq!(updated, 1, "only the kept session is stamped");
+
+        let kept_at: Option<i64> = store
+            .conn
+            .query_row(
+                "SELECT last_reconciled_at FROM sessions WHERE tmux_name='kept'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept_at, Some(1234));
+
+        let gone_at: Option<i64> = store
+            .conn
+            .query_row(
+                "SELECT last_reconciled_at FROM sessions WHERE tmux_name='gone'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(gone_at, None, "non-kept session keeps NULL");
+
+        // Empty keep set is a no-op (no rows touched, no error).
+        let none = store
+            .mark_sessions_reconciled("alpha", &[], 9999)
+            .expect("empty keep");
+        assert_eq!(none, 0);
     }
 
     #[test]

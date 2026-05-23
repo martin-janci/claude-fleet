@@ -140,6 +140,65 @@ fn kill_other_instances() {
     }
 }
 
+/// Default cadence for the background reconcile tick when the
+/// `reconcile.interval_secs` setting is absent or unparseable.
+const DEFAULT_RECONCILE_INTERVAL_SECS: i64 = 20;
+
+/// Pure: resolve the reconcile-tick interval from the raw setting value.
+/// `None`/garbage falls back to the 20s default; an explicit `0` (or negative)
+/// disables the tick. Lifted out of `spawn_reconcile_tick` so the parse is
+/// unit-testable without a Store.
+fn read_reconcile_interval_secs(raw: Option<String>) -> i64 {
+    match raw {
+        Some(v) => v
+            .trim()
+            .parse::<i64>()
+            .unwrap_or(DEFAULT_RECONCILE_INTERVAL_SECS),
+        None => DEFAULT_RECONCILE_INTERVAL_SECS,
+    }
+}
+
+/// Spawn the proactive background reconcile loop (Task H). The interval is read
+/// once at startup from the `reconcile.interval_secs` setting; `0` disables the
+/// tick entirely (reconcile then stays pull-only). An async `try_lock` guard
+/// ensures a slow reconcile pass can never stack — if a tick fires while the
+/// prior pass is still running, it is skipped rather than queued.
+fn spawn_reconcile_tick(store: std::sync::Arc<Mutex<Store>>, ssh: std::sync::Arc<ssh::SshClient>) {
+    let interval_secs = {
+        let raw = store
+            .lock()
+            .ok()
+            .and_then(|s| s.get_setting("reconcile.interval_secs").ok().flatten());
+        read_reconcile_interval_secs(raw)
+    };
+    let Some(period) = service::sessions::reconcile_tick_interval(interval_secs) else {
+        eprintln!("[reconcile-tick] disabled (reconcile.interval_secs={interval_secs})");
+        return;
+    };
+    eprintln!("[reconcile-tick] enabled every {}s", period.as_secs());
+
+    // Overlap guard: a separate single-permit lock the tick must `try_lock`
+    // before reconciling, so a pass that runs longer than `period` causes the
+    // next tick to be skipped instead of queued.
+    let running = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(period);
+        // Drop missed ticks rather than firing them back-to-back after a slow
+        // pass (the default Burst behaviour would defeat the overlap guard).
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            let Ok(_guard) = running.try_lock() else {
+                eprintln!("[reconcile-tick] previous pass still running; skipping tick");
+                continue;
+            };
+            if let Err(e) = service::sessions::reconcile_now(&store, &ssh).await {
+                eprintln!("[reconcile-tick] reconcile failed: {e}");
+            }
+        }
+    });
+}
+
 /// Run the user's login shell once and adopt several env vars that a
 /// Finder-launched GUI app does not inherit by default:
 ///
@@ -390,6 +449,18 @@ pub fn run() {
                 &reg_for_setup,
                 &tunnels_for_setup,
             );
+            // Task H: proactive background reconcile tick. A `tokio::spawn`ed
+            // interval drives `service::sessions::reconcile_now` on the same
+            // managed Store/SshClient the commands use, so fleet state stays
+            // fresh without the UI having to poll. Reconcile is Tauri-free
+            // (events flow through the store's EventBus), so the loop needs no
+            // AppHandle. Interval comes from settings (`reconcile.interval_secs`,
+            // default 20; 0 disables). A `try_lock` guard skips a tick if the
+            // previous reconcile is still running so slow passes can't stack.
+            spawn_reconcile_tick(
+                std::sync::Arc::clone(&store),
+                std::sync::Arc::clone(&ssh_client_for_setup),
+            );
             Ok(())
         })
         .manage(Mutex::new(PtyState::new()))
@@ -548,6 +619,23 @@ mod path_backfill_tests {
         // Plain POSIX C locale isn't UTF-8 — we should still backfill.
         assert!(needs_locale_backfill("C", "C", "C"));
         assert!(needs_locale_backfill("POSIX", "POSIX", ""));
+    }
+
+    #[test]
+    fn reconcile_interval_defaults_when_absent_or_garbage() {
+        assert_eq!(read_reconcile_interval_secs(None), 20);
+        assert_eq!(read_reconcile_interval_secs(Some("nonsense".into())), 20);
+        assert_eq!(read_reconcile_interval_secs(Some("".into())), 20);
+    }
+
+    #[test]
+    fn reconcile_interval_honours_explicit_values() {
+        assert_eq!(read_reconcile_interval_secs(Some("5".into())), 5);
+        // Surrounding whitespace is trimmed before parsing.
+        assert_eq!(read_reconcile_interval_secs(Some(" 45 ".into())), 45);
+        // 0 is the documented "disabled" sentinel; surfaced verbatim so the
+        // tick-interval guard can turn it into None.
+        assert_eq!(read_reconcile_interval_secs(Some("0".into())), 0);
     }
 
     #[test]
