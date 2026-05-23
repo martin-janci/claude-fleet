@@ -41,6 +41,7 @@ function sessionFor(projectId: number | null, name = `dev-${projectId ?? 'orphan
     effort_level: null,
     pr_url: null,
     current_activity: null,
+    friendly_name: null,
   };
 }
 
@@ -606,6 +607,7 @@ describe('Sidebar (sessions-grouped view)', () => {
           effort_level: null,
           pr_url: null,
           current_activity: null,
+          friendly_name: null,
         });
       }
     }

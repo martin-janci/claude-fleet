@@ -32,6 +32,7 @@ const source: SessionRow = {
   effort_level: null,
   pr_url: null,
   current_activity: null,
+  friendly_name: null,
 };
 
 const sibling: SessionRow = {
@@ -54,6 +55,7 @@ const sibling: SessionRow = {
   effort_level: null,
   pr_url: null,
   current_activity: null,
+  friendly_name: null,
 };
 
 const unrelated: SessionRow = {
@@ -76,6 +78,7 @@ const unrelated: SessionRow = {
   effort_level: null,
   pr_url: null,
   current_activity: null,
+  friendly_name: null,
 };
 
 beforeEach(() => {
@@ -166,6 +169,7 @@ describe('PromptComposer', () => {
       effort_level: null,
       pr_url: null,
       current_activity: null,
+      friendly_name: null,
     }));
     sessions.set([source, ...sibs]);
     render(PromptComposer, { props: { source, onClose: () => {} } });

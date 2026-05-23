@@ -1038,6 +1038,48 @@ pub async fn rename_session(
 }
 
 #[derive(Deserialize)]
+pub struct SetFriendlyNameArgs {
+    pub host_alias: String,
+    pub tmux_name: String,
+    /// Empty / whitespace-only value clears the label.
+    pub friendly_name: String,
+}
+
+/// Set (or clear, on empty/whitespace) the session's display label. The agent
+/// running inside a tmux session calls this via MCP after picking up a task.
+pub fn set_session_friendly_name(
+    args: SetFriendlyNameArgs,
+    store: &Mutex<Store>,
+) -> Result<SessionRow, IpcError> {
+    crate::validate::host_alias(&args.host_alias)?;
+    // Lookup-mode validator: must accept the synthetic `bg:<uuid>` form used
+    // by background-agent rows, which the create-mode `tmux_name` validator
+    // rejects (tmux forbids `:` when creating a session, but we're only
+    // addressing an existing row here, never spawning tmux).
+    crate::validate::tmux_name_lookup(&args.tmux_name)?;
+    crate::validate::friendly_name(&args.friendly_name)?;
+    let trimmed = args.friendly_name.trim();
+    let value = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    };
+    let s = store
+        .lock()
+        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    s.set_friendly_name(&args.host_alias, &args.tmux_name, value)?
+        .ok_or_else(|| {
+            IpcError::new(
+                "E_NOTFOUND",
+                format!(
+                    "session {} not found on {}",
+                    args.tmux_name, args.host_alias
+                ),
+            )
+        })
+}
+
+#[derive(Deserialize)]
 pub struct RestartSessionArgs {
     pub host_alias: String,
     pub name: String,
@@ -1717,6 +1759,7 @@ mod tests {
             current_activity: None,
             context_pct: None,
             stuck_kind: None,
+            friendly_name: None,
         }
     }
 
@@ -2747,5 +2790,120 @@ mod ghost_tests {
             .get_session_by_id(id)
             .unwrap()
             .is_none());
+    }
+
+    fn set_friendly_args(host: &str, tmux: &str, label: &str) -> SetFriendlyNameArgs {
+        SetFriendlyNameArgs {
+            host_alias: host.into(),
+            tmux_name: tmux.into(),
+            friendly_name: label.into(),
+        }
+    }
+
+    #[test]
+    fn set_friendly_name_round_trips_through_store() {
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("h").unwrap();
+            s.upsert_session("dev-x", "h", None, None, 1, 1, "running", None)
+                .unwrap();
+        }
+        let row =
+            set_session_friendly_name(set_friendly_args("h", "dev-x", "fix login bug"), &store)
+                .expect("update");
+        assert_eq!(row.friendly_name.as_deref(), Some("fix login bug"));
+        // Persisted, not just returned.
+        let stored = store
+            .lock()
+            .unwrap()
+            .get_session("dev-x", "h")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.friendly_name.as_deref(), Some("fix login bug"));
+    }
+
+    #[test]
+    fn set_friendly_name_trims_and_whitespace_clears() {
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("h").unwrap();
+            s.upsert_session("dev-x", "h", None, None, 1, 1, "running", None)
+                .unwrap();
+            // Seed an existing label so we can prove the clear path actually nulls it.
+            s.set_friendly_name("h", "dev-x", Some("old label"))
+                .unwrap();
+        }
+        // Padding around real content is trimmed.
+        let row =
+            set_session_friendly_name(set_friendly_args("h", "dev-x", "  trimmed label  "), &store)
+                .expect("update");
+        assert_eq!(row.friendly_name.as_deref(), Some("trimmed label"));
+        // Whitespace-only input clears.
+        let row = set_session_friendly_name(set_friendly_args("h", "dev-x", "   "), &store)
+            .expect("clear");
+        assert!(row.friendly_name.is_none());
+        // Empty input also clears.
+        let row = set_session_friendly_name(set_friendly_args("h", "dev-x", ""), &store)
+            .expect("clear empty");
+        assert!(row.friendly_name.is_none());
+    }
+
+    #[test]
+    fn set_friendly_name_works_on_bg_session_rows() {
+        // Regression: synthetic bg rows have `tmux_name = "bg:<uuid>"`, which
+        // contains ':'. The create-mode `tmux_name` validator rejects ':',
+        // so the lookup-mode `tmux_name_lookup` validator must be used here
+        // — otherwise every bg agent fails with E_INVALID at the MCP layer.
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let bg_name = format!("bg:{uuid}");
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            s.upsert_bg_session("local", &bg_name, None, uuid, Some("working"), 1)
+                .unwrap();
+        }
+        let row = set_session_friendly_name(
+            set_friendly_args("local", &bg_name, "review hardening spec"),
+            &store,
+        )
+        .expect("bg row must be addressable");
+        assert_eq!(row.tmux_name, bg_name);
+        assert_eq!(row.kind, "bg");
+        assert_eq!(row.friendly_name.as_deref(), Some("review hardening spec"));
+    }
+
+    #[test]
+    fn set_friendly_name_returns_not_found_when_row_absent() {
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("h").unwrap();
+            // No session inserted.
+        }
+        let err = set_session_friendly_name(set_friendly_args("h", "ghost", "x"), &store)
+            .expect_err("absent row");
+        assert_eq!(err.code, "E_NOTFOUND");
+    }
+
+    #[test]
+    fn set_friendly_name_rejects_invalid_input() {
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("h").unwrap();
+            s.upsert_session("dev-x", "h", None, None, 1, 1, "running", None)
+                .unwrap();
+        }
+        // Control char rejected by validate::friendly_name.
+        let err = set_session_friendly_name(set_friendly_args("h", "dev-x", "bad\nlabel"), &store)
+            .expect_err("control char");
+        assert_eq!(err.code, "E_INVALID");
+        // Bad host alias rejected before any UPDATE.
+        let err = set_session_friendly_name(set_friendly_args("-evil", "dev-x", "x"), &store)
+            .expect_err("bad alias");
+        assert_eq!(err.code, "E_INVALID");
     }
 }
