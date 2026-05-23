@@ -21,6 +21,12 @@ pub const MAX_DIFF_BYTES: usize = 1024 * 1024;
 /// Largest worktree listing returned by `repo_tree`.
 pub const MAX_TREE_ENTRIES: usize = 20_000;
 
+/// Emitted on stderr by `repo_script` when the session's worktree directory no
+/// longer exists on disk (e.g. the git worktree was removed while the tmux
+/// session lives on). `repo_err` maps this to the `E_NO_WORKTREE` code so the
+/// frontend can show a clean "worktree gone" state instead of a raw git error.
+pub const NO_WORKTREE_SENTINEL: &str = "__CF_NO_WORKTREE__";
+
 /// Resolve a session id to its `(host_alias, tmux_name)`, validating both.
 pub fn session_target(store: &Mutex<Store>, session_id: i64) -> Result<(String, String), IpcError> {
     let s = store
@@ -39,9 +45,11 @@ pub fn repo_script(tmux_name: &str, body: &str) -> String {
     format!(
         "set -e\n\
          p=\"$(tmux display-message -t {name} -p '#{{pane_current_path}}')\"\n\
+         if [ ! -d \"$p\" ]; then printf '%s\\n' '{sentinel}' >&2; exit 3; fi\n\
          root=\"$(git -C \"$p\" rev-parse --show-toplevel)\"\n\
          {body}",
         name = quote(tmux_name),
+        sentinel = NO_WORKTREE_SENTINEL,
     )
 }
 
@@ -71,6 +79,9 @@ pub async fn run_in_repo(
 /// Turn a failed `Output` into an `E_REPO` error carrying stderr (or stdout).
 pub fn repo_err(out: &std::process::Output) -> IpcError {
     let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.contains(NO_WORKTREE_SENTINEL) {
+        return IpcError::new("E_NO_WORKTREE", "worktree directory no longer exists");
+    }
     let msg = if stderr.trim().is_empty() {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     } else {
@@ -118,6 +129,46 @@ mod tests {
         assert!(s.contains("#{pane_current_path}"), "got: {s}");
         assert!(s.contains("rev-parse --show-toplevel"), "got: {s}");
         assert!(s.trim_end().ends_with("git -C \"$root\" status"));
+    }
+
+    #[test]
+    fn repo_script_guards_missing_worktree_dir() {
+        let s = repo_script("dev-foo", "true");
+        // The dir check must run before the git call, and emit the sentinel.
+        assert!(s.contains("[ ! -d \"$p\" ]"), "got: {s}");
+        assert!(s.contains(NO_WORKTREE_SENTINEL), "got: {s}");
+        let guard = s.find("[ ! -d").unwrap();
+        let revparse = s.find("rev-parse").unwrap();
+        assert!(guard < revparse, "dir guard must precede rev-parse: {s}");
+    }
+
+    // `repo_err` ignores the exit status entirely (it only reads stderr/stdout),
+    // so any ExitStatus works; build one via the unix extension since
+    // `ExitStatus` has no portable public constructor.
+    #[cfg(unix)]
+    fn output_with_stderr(stderr: &[u8]) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(256), // exit code 1
+            stdout: Vec::new(),
+            stderr: stderr.to_vec(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repo_err_maps_sentinel_to_no_worktree() {
+        let out = output_with_stderr(format!("{NO_WORKTREE_SENTINEL}\n").as_bytes());
+        assert_eq!(repo_err(&out).code, "E_NO_WORKTREE");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repo_err_keeps_generic_repo_errors() {
+        let out = output_with_stderr(b"fatal: not a git repository\n");
+        let e = repo_err(&out);
+        assert_eq!(e.code, "E_REPO");
+        assert!(e.message.contains("not a git repository"));
     }
 
     #[test]

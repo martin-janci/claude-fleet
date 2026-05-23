@@ -59,3 +59,13 @@ export function repoDiff(sessionId: number, path: string): Promise<Result<FileDi
 export function hasDiff(status: string | undefined): boolean {
   return status !== undefined && status !== 'untracked';
 }
+
+/**
+ * True when a repo command failed because the session's worktree directory no
+ * longer exists on disk (backend `E_NO_WORKTREE`). The session may still be
+ * running, but its files can't be shown — callers should switch to a "worktree
+ * gone" state rather than surfacing the raw git error.
+ */
+export function isWorktreeGone(r: Result<unknown>): boolean {
+  return !r.ok && r.error.code === 'E_NO_WORKTREE';
+}

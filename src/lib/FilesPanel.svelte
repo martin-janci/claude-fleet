@@ -3,6 +3,7 @@
   import {
     repoChanges,
     repoTree,
+    isWorktreeGone,
     type ChangedFile,
     type RepoTree,
   } from './files';
@@ -25,6 +26,9 @@
   let tree = $state<RepoTree | null>(null);
   let loading = $state(false);
   let error = $state<string | null>(null);
+  // The worktree directory was deleted out from under a still-running session.
+  // When set, the body shows a calm placeholder instead of raw git errors.
+  let worktreeGone = $state(false);
   let selectedPath = $state<string | null>(null);
   let treeLoaded = false;
   // Bumped on Refresh — invalidates FileViewer's content/diff caches.
@@ -68,26 +72,45 @@
     historyLoaded = false;
     openCommit = null;
     branches = [];
+    worktreeGone = false;
     void loadChanges();
   });
+
+  // Route a failed repo call: a deleted worktree switches the panel to its
+  // placeholder (clearing now-stale listings); anything else surfaces inline.
+  function applyFailure(r: Extract<Result<unknown>, { ok: false }>): void {
+    if (isWorktreeGone(r)) {
+      worktreeGone = true;
+      changes = [];
+      tree = null;
+      commits = [];
+      branches = [];
+      selectedPath = null;
+      openCommit = null;
+    } else {
+      error = r.error.message;
+    }
+  }
 
   async function loadChanges(): Promise<void> {
     const sid = session.id;
     loading = true;
     error = null;
+    worktreeGone = false;
     const r = await repoChanges(sid);
     // The user switched sessions while this was in flight — the session
     // effect has already started a fresh load; drop this stale result.
     if (sid !== session.id) return;
     loading = false;
     if (r.ok) changes = r.value;
-    else error = r.error.message;
+    else applyFailure(r);
   }
 
   async function loadTree(): Promise<void> {
     const sid = session.id;
     loading = true;
     error = null;
+    worktreeGone = false;
     const r = await repoTree(sid);
     if (sid !== session.id) return;
     loading = false;
@@ -95,7 +118,7 @@
       tree = r.value;
       treeLoaded = true;
     } else {
-      error = r.error.message;
+      applyFailure(r);
     }
   }
 
@@ -103,6 +126,7 @@
     const sid = session.id;
     loading = true;
     error = null;
+    worktreeGone = false;
     if (reset) { logSkip = 0; commits = []; }
     const r = await repoLog(sid, { all: allBranches, skip: logSkip });
     if (sid !== session.id) return;
@@ -112,7 +136,7 @@
       historyLoaded = true;
       logSkip = commits.length;
     } else {
-      error = r.error.message;
+      applyFailure(r);
     }
   }
 
@@ -121,7 +145,7 @@
     const r = await repoCommit(sid, hash);
     if (sid !== session.id) return;
     if (r.ok) { openCommit = r.value; selectedPath = r.value.files[0]?.path ?? null; }
-    else error = r.error.message;
+    else applyFailure(r);
   }
 
   function backToGraph(): void { openCommit = null; selectedPath = null; }
@@ -130,16 +154,17 @@
     const sid = session.id;
     loading = true;
     error = null;
+    worktreeGone = false;
     const r = await repoBranches(sid);
     if (sid !== session.id) return;
     loading = false;
     if (r.ok) branches = r.value;
-    else error = r.error.message;
+    else applyFailure(r);
   }
   async function runAction(p: Promise<Result<unknown>>, after: () => void): Promise<void> {
     const r = await p;
     if (r.ok) { after(); }
-    else { error = r.error.message; }
+    else { applyFailure(r); }
   }
 
   function confirmCheckout(branch: string): void {
@@ -178,6 +203,7 @@
   function onMode(m: typeof mode): void {
     mode = m;
     error = null;
+    worktreeGone = false;
     openCommit = null;
     if (m === 'tree' && !treeLoaded) void loadTree();
     if (m === 'history' && !historyLoaded) void loadHistory();
@@ -214,7 +240,15 @@
   </div>
 
   <!-- Mode-aware body -->
-  {#if mode === 'history' && !openCommit}
+  {#if worktreeGone}
+    <div class="gone" data-testid="worktree-gone">
+      <p class="gone-title">This worktree no longer exists on disk.</p>
+      <p class="hint">
+        The session is still running, but its files can't be shown. Switch to the
+        Terminal, or pick another session. If the worktree was recreated, hit ↻ to retry.
+      </p>
+    </div>
+  {:else if mode === 'history' && !openCommit}
     <div class="full-col" data-testid="history-view">
       <div class="hbar hbar-row">
         <label><input type="checkbox" bind:checked={allBranches} onchange={() => loadHistory()} /> All branches</label>
@@ -408,6 +442,25 @@
   }
   .hint.err {
     color: #e64a4a;
+  }
+  .gone {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    padding: 1.5rem;
+    text-align: center;
+  }
+  .gone-title {
+    color: var(--fg);
+    font-size: 0.9rem;
+    font-weight: 600;
+    margin: 0;
+  }
+  .gone .hint {
+    max-width: 26rem;
   }
   .more {
     display: block;
