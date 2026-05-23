@@ -82,13 +82,20 @@ mod tests {
     fn extracts_some_commands() {
         let cmds = tauri_commands();
         assert!(cmds.contains(&"commands::sessions::list_sessions".to_string()));
-        assert!(cmds.len() > 20, "expected many commands, got {}", cmds.len());
+        assert!(
+            cmds.len() > 20,
+            "expected many commands, got {}",
+            cmds.len()
+        );
     }
 
     #[test]
     fn renders_known_tool() {
         let md = render_reference();
-        assert!(md.contains("### `list_sessions`"), "list_sessions tool missing");
+        assert!(
+            md.contains("### `list_sessions`"),
+            "list_sessions tool missing"
+        );
     }
 
     #[test]

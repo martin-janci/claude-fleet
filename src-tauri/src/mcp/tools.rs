@@ -1175,7 +1175,8 @@ impl ServerHandler for FleetTools {
 /// associated function.
 #[cfg(test)]
 impl FleetTools {
-    pub(crate) fn tool_router_for_doc() -> rmcp::handler::server::router::tool::ToolRouter<FleetTools> {
+    pub(crate) fn tool_router_for_doc(
+    ) -> rmcp::handler::server::router::tool::ToolRouter<FleetTools> {
         Self::tool_router()
     }
 }
