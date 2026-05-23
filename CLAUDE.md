@@ -6,7 +6,7 @@ Orientation for Claude Code working in this repository.
 
 `claude-fleet` — a Tauri 2 desktop app (Rust backend + Svelte 5 frontend) for
 managing long-lived Claude Code sessions running in tmux across multiple
-machines over SSH. ~15,900 LOC Rust, ~12,800 LOC frontend.
+machines over SSH. ~16,400 LOC Rust, ~12,900 LOC frontend.
 
 ## Build & test
 
@@ -53,7 +53,7 @@ REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_curren
   wrap the transport-agnostic logic in `service/`; SSH multiplexing in `ssh.rs`
   (per-host `ControlMaster`, async `tokio::process`); tmux command construction
   in `tmux.rs`; the single global PTY in `pty.rs`; SQLite in `store.rs`
-  (migrations `001`–`014`); the event bus in `events.rs`; cancellation registry
+  (migrations `001`–`015`); the event bus in `events.rs`; cancellation registry
   in `cancel.rs`.
 - **Control API** (`mcp/`): an embedded MCP server (off by default, localhost +
   bearer token) lets an AI assistant drive the fleet. Its tools call the same
