@@ -12,6 +12,7 @@
     peekSession,
     newBgSession,
     purgeProject,
+    showBgAgents,
     type SessionRow,
   } from './sessions';
   import { type ProjectRow } from './projects';
@@ -171,6 +172,7 @@
     for (const s of $sessions) {
       if (s.project_id == null) continue;
       if ($hostFilter !== 'all' && s.host_alias !== $hostFilter) continue;
+      if (!$showBgAgents && s.kind === 'bg') continue;
       if (!m.has(s.project_id)) m.set(s.project_id, []);
       m.get(s.project_id)!.push(s);
     }
@@ -206,7 +208,8 @@
     $sessions.filter(
       (s) =>
         s.project_id === null &&
-        ($hostFilter === 'all' || s.host_alias === $hostFilter),
+        ($hostFilter === 'all' || s.host_alias === $hostFilter) &&
+        ($showBgAgents || s.kind !== 'bg'),
     ),
   );
 
@@ -592,6 +595,9 @@
           {#if sess.kind === 'shell'}
             <span class="shell-badge" title="shell session">▶</span>
           {/if}
+          {#if sess.kind === 'bg'}
+            <span class="bg-badge" role="img" title="background agent" aria-label="background agent">🤖</span>
+          {/if}
           <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
           <span class="sess-name">{sess.tmux_name}</span>
           {#if sess.claude_status}
@@ -718,6 +724,19 @@
           {opt}
         </button>
       {/each}
+    </nav>
+
+    <nav class="bg-toggle" aria-label="background agents filter">
+      <button
+        class="pill"
+        class:active={$showBgAgents}
+        data-testid="bg-toggle"
+        aria-pressed={$showBgAgents}
+        title={$showBgAgents ? 'Hide background agents' : 'Show background agents'}
+        onclick={() => showBgAgents.update((v) => !v)}
+      >
+        🤖 bg {$showBgAgents ? 'on' : 'off'}
+      </button>
     </nav>
 
     {#if loadError}
@@ -1012,6 +1031,7 @@
   .icon-btn.danger:hover { color: #e64a4a; border-color: #e64a4a; }
 
   .recency { display: flex; gap: 0.25rem; }
+  .bg-toggle { display: flex; gap: 0.25rem; }
   .pill {
     font-size: 0.7rem;
     padding: 0.15rem 0.55rem;
@@ -1056,6 +1076,7 @@
 
   .review-badge { font-size: 0.7rem; margin-left: 0.2rem; }
   .shell-badge { font-size: 0.7rem; margin-left: 0.2rem; color: var(--fg-muted); }
+  .bg-badge { font-size: 0.7rem; margin-left: 0.2rem; }
 
   .scroller {
     flex: 1 1 auto;

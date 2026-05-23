@@ -6,6 +6,7 @@
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
   import TerminalView from './lib/TerminalView.svelte';
+  import BgSessionPanel from './lib/BgSessionPanel.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
   import { loadProjects, bootstrapProjects, mergeProjectFromEvent, mergeWorktree } from './lib/projects';
   import { loadSessions, bootstrapSessions, mergeSession, removeSession } from './lib/sessions';
@@ -160,7 +161,7 @@
   // deselecting one drops back to the terminal automatically.
   let filesMode = $state(false);
   $effect(() => {
-    if (!$selectedSession) filesMode = false;
+    if (!$selectedSession || $selectedSession.kind === 'bg') filesMode = false;
   });
   function showTerminal() {
     filesMode = false;
@@ -261,23 +262,38 @@
         class:active={filesMode}
         role="tab"
         aria-selected={filesMode}
-        disabled={!$selectedSession}
-        title={$selectedSession ? 'Browse the session worktree' : 'Select a session first'}
+        disabled={!$selectedSession || $selectedSession.kind === 'bg'}
+        title={!$selectedSession
+          ? 'Select a session first'
+          : $selectedSession.kind === 'bg'
+            ? 'Not available for background sessions'
+            : 'Browse the session worktree'}
         onclick={showFiles}
         data-testid="tab-files">Files</button
       >
     </div>
     <div class="right-body">
-      <!-- TerminalView stays mounted underneath so the PTY and its ANSI
-           buffer survive a Files-mode round trip — flipping back is instant
-           and never re-fits or reconnects the terminal. -->
-      <div class="view-slot">
-        <TerminalView />
-      </div>
-      {#if filesMode && $selectedSession}
-        <div class="view-slot overlay">
-          <FilesPanel session={$selectedSession} />
+      {#if $selectedSession?.kind === 'bg'}
+        <!-- Background sessions have no PTY. We intentionally do NOT mount
+             TerminalView here so pty_open is never attempted (it would error
+             with "no tmux"). The tradeoff: selecting a bg session unmounts the
+             terminal, so returning to a normal session reconnects its PTY.
+             Acceptable — bg agents run unattended and are rarely interleaved. -->
+        <div class="view-slot">
+          <BgSessionPanel session={$selectedSession} />
         </div>
+      {:else}
+        <!-- TerminalView stays mounted underneath so the PTY and its ANSI
+             buffer survive a Files-mode round trip — flipping back is instant
+             and never re-fits or reconnects the terminal. -->
+        <div class="view-slot">
+          <TerminalView />
+        </div>
+        {#if filesMode && $selectedSession}
+          <div class="view-slot overlay">
+            <FilesPanel session={$selectedSession} />
+          </div>
+        {/if}
       {/if}
     </div>
   </div>
