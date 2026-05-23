@@ -24,14 +24,27 @@ live tmux *screen*, not a clean transcript. So driving a session is a loop:
    spinner), wait and capture again. Repeat until you see Claude's input prompt
    box / a bare `>` with no activity (idle) or your task is done.
 
-Always get `session_id` from `list_sessions` first. Each row now carries the
-auto-derived fields the reconcile pass fills in — use them instead of
-capturing panes when you only need a quick read:
+Always get `session_id` from `list_sessions` first. By default it returns
+**slim summary rows** — id, host_alias, tmux_name, project_id, worktree_id,
+status, claude_status, stuck_kind, lost_at, is_controller — enough to pick a
+target without blowing past MCP token caps on a big fleet. To get the rich
+auto-derived fields:
 
+- `peer_status(session_id)` — adds `current_activity` (REPL footer line like
+  "Sketching") and `context_pct` (percent of context window used) for one
+  session in one call.
+- `list_sessions { summary: false }` — full `SessionRow` for every match
+  (`current_activity`, `context_pct`, `pr_url`, `notes`, …). Use sparingly.
+
+Scope the call with optional filters (any combination): `host_alias`,
+`project_id`, `status`, `claude_status`. **Ghosts are hidden by default** —
+pass `include_lost: true` to surface them (required before
+`recreate_session` can resurrect one).
+
+Useful fields visible in the default summary:
 - `claude_status` — `working` / `idle` / `stuck` / unknown
-- `current_activity` — REPL footer line ("Sketching", "Running test", …)
 - `stuck_kind` — `auth_menu` / `confirmation` / `none`
-- `context_pct` — percent of context window used
+- `lost_at` — non-null = ghost (lost from tmux)
 - `is_controller` — true on the calling session once you've registered (see below)
 
 Orient with `fleet_health` / `list_hosts` / `list_projects` when you don't yet
@@ -70,7 +83,7 @@ Climb only as far as needed; each step is more destructive:
 | `context_pct` near 100 — the conversation is full | `recreate_session` resumes the same Claude id in a fresh REPL |
 | REPL itself wedged, but tmux fine | `restart_session` — relaunches Claude in place |
 | Frozen / eating RAM / needs a clean slate | `recreate_session` — kills + rebuilds the tmux session in the same worktree, **resuming the same Claude conversation** |
-| Lost from tmux (ghost — `status: "ghost"` in `list_sessions`) | `recreate_session` to bring it back, or `dismiss_ghost_session` to drop it |
+| Lost from tmux (ghost — `status: "ghost"`; pass `include_lost: true` to see them in `list_sessions`) | `recreate_session` to bring it back, or `dismiss_ghost_session` to drop it |
 
 `recreate_session` is destructive (kills the running process) but preserves
 the conversation via session-id resume — prefer `send_prompt`/`restart` for
@@ -108,8 +121,9 @@ fields in one call:
 
 Use it before `send_message`/`send_prompt` to avoid pinging a peer that's
 mid-stream, and before `broadcast_prompt` to pick a real `status` filter.
-`list_sessions` carries the same fields if you want them for every session
-at once.
+For the same fields across every session, call `list_sessions { summary:
+false }` — the default summary mode omits `current_activity` and
+`context_pct` to keep responses inside MCP token caps.
 
 ## Peer-to-peer messaging — `send_message` + `inbox`
 
