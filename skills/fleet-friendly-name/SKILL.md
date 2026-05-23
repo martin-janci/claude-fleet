@@ -29,8 +29,12 @@ If unsure, prefer setting it. The sidebar falls back to `tmux_name` when
 
    The left side is `tmux_name`. The right side is your machine's short
    hostname — claude-fleet host aliases usually match it (e.g. `mefistos`,
-   `mac`, `hetzner`). If `set_friendly_name` returns `E_NOTFOUND`, retry with
-   `hostname` (no `-s`); if that also fails, see "Host alias mismatch" below.
+   `mac`, `hetzner`). If `set_friendly_name` returns `E_NOTFOUND`:
+   
+   - First retry with `hostname` (full, no `-s`).
+   - If still `E_NOTFOUND`, try `local` — sessions on the machine running
+     claude-fleet use this fixed alias instead of the hostname.
+   - If all three fail, see "Host alias mismatch" below.
 
 2. **Pick a 3–6 word label.** Imperative phrase, no quotes/punctuation, no
    ticket IDs or branch names. Examples:
@@ -59,20 +63,20 @@ Pass an empty string as `friendly_name` to clear it (the row falls back to
 
 ## Host alias mismatch
 
-If both `hostname -s` and `hostname` return `E_NOTFOUND`, this machine's
-claude-fleet host alias does not match either form. **Do not guess** — emit a
-single short notice to the user:
+If `hostname -s`, `hostname`, and `local` all return `E_NOTFOUND`, this
+machine's claude-fleet host alias does not match any of them. **Do not guess**
+— emit a single short notice to the user:
 
-> claude-fleet: this host's alias does not match `hostname`/`hostname -s`. Open
-> the claude-fleet app, find this host's alias in the host picker, and either
-> rename the host to match `hostname -s` or invoke `set_friendly_name` once
-> manually with the correct alias.
+> claude-fleet: this host's alias does not match `hostname -s`, `hostname`, or
+> `local`. Open the claude-fleet app, find this host's alias in the host
+> picker, and either rename it to match `hostname -s` or invoke
+> `set_friendly_name` once manually with the correct alias.
 
 Then stop. Do not retry blindly; the user fixes it once and the next session
 on this host works automatically.
 
 ## Token discipline
 
-This skill should add ≤ 4 tool calls per task pickup: one Bash to read
-identity, one MCP call, and at most one retry with the alternate hostname
-form. Do not list_sessions, do not capture panes, do not chat about the label.
+This skill should add ≤ 5 tool calls per task pickup: one Bash to read
+identity, one MCP call, and at most two retries (`hostname` then `local`).
+Do not list_sessions, do not capture panes, do not chat about the label.
