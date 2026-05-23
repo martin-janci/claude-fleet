@@ -416,19 +416,29 @@ fn extract_owner_repo(path: &str) -> Option<(String, String)> {
 
 /// Derive a portable worktree name from a session's cwd. Host-path-independent:
 ///   - <repo>/.claude/worktrees/<name>[/…]  → Some("<name>")
+///   - <repo>/.worktrees/<name>[/…]         → Some("<name>")
 ///   - <repo> root or any other subdir       → Some("main")
 ///   - path without a github.com repo segment → None (orphan)
+///
+/// Both worktree layouts are recognized: `worktree_add_script` and the
+/// ecosystem's `proj-clean` use `.worktrees/` *or* `.claude/worktrees/`, and a
+/// session living under either must key to its worktree name (not "main"), or
+/// recreate/restart would rebuild it at the repo root.
 fn worktree_key_for_path(path: &str) -> Option<String> {
     static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
         regex::Regex::new(r"/projects/github\.com/[^/]+/[^/]+(/.*)?$").expect("static regex")
     });
     let caps = RE.captures(path)?;
     let remainder = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-    if let Some(idx) = remainder.find("/.claude/worktrees/") {
-        let after = &remainder[idx + "/.claude/worktrees/".len()..];
-        if let Some(name) = after.split('/').next() {
-            if !name.is_empty() {
-                return Some(name.to_string());
+    // Check `.claude/worktrees/` first — it is the more specific marker, and
+    // `/.worktrees/` is not a substring of `/.claude/worktrees/`.
+    for marker in ["/.claude/worktrees/", "/.worktrees/"] {
+        if let Some(idx) = remainder.find(marker) {
+            let after = &remainder[idx + marker.len()..];
+            if let Some(name) = after.split('/').next() {
+                if !name.is_empty() {
+                    return Some(name.to_string());
+                }
             }
         }
     }
@@ -1410,6 +1420,23 @@ fn resolve_session_cwd(s: &Store, row: &crate::store::SessionRow) -> Result<Stri
             return Ok(path);
         }
     }
+    // Sessions discovered by reconcile carry only `worktree_key` (derived from
+    // their live cwd), never `worktree_id` — reconcile does not resolve the FK.
+    // Honor the key so a session living in a worktree is recreated there, not
+    // at the repo root. The worktrees table is keyed by (project_id, name), and
+    // `worktree_key` is exactly that name.
+    if let (Some(pid), Some(key)) = (row.project_id, row.worktree_key.as_deref()) {
+        if key != "main" {
+            if let Some(path) = s
+                .list_worktrees_for_project(pid)?
+                .into_iter()
+                .find(|w| w.name == key)
+                .map(|w| w.path)
+            {
+                return Ok(path);
+            }
+        }
+    }
     if let Some(pid) = row.project_id {
         if let Some(base) = s.project_base_path(pid)? {
             return Ok(base);
@@ -1452,9 +1479,17 @@ fn cwd_source_for_session(
         )
     })?;
     let (owner, repo) = fetch_owner_repo(s, pid)?;
+    // Like the local resolver: reconciled sessions only have `worktree_key`, so
+    // fall back to it when the FK is unset. `remote_project_path` maps a
+    // non-"main" name to `<repo>/.claude/worktrees/<name>`, matching how
+    // `new_session` creates remote worktrees.
     let wt_name = match row.worktree_id {
         Some(wid) => s.worktree_name(wid)?,
-        None => None,
+        None => row
+            .worktree_key
+            .as_deref()
+            .filter(|k| *k != "main")
+            .map(str::to_string),
     };
     Ok(CwdSource::Remote {
         owner,
@@ -2322,6 +2357,67 @@ mod tests {
     }
 
     #[test]
+    fn resolve_session_cwd_honors_worktree_key_when_id_missing() {
+        // Reproduces the recreate bug: reconcile sets `worktree_key` but never
+        // `worktree_id`, so a session in a worktree must still resolve to that
+        // worktree's path, not the repo root.
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_host("local").unwrap();
+        let pid = store.upsert_project("o", "r", "/base/r").unwrap();
+        store
+            .upsert_worktree(pid, "feat-x", "/base/r/.claude/worktrees/feat-x", None)
+            .unwrap();
+
+        // worktree_id is None (as after reconcile) but worktree_key points at it.
+        let mut r = row(1, "local", "dev", "work", Some(pid), Some("idle"));
+        r.worktree_key = Some("feat-x".into());
+        assert_eq!(
+            resolve_session_cwd(&store, &r).unwrap(),
+            "/base/r/.claude/worktrees/feat-x"
+        );
+
+        // worktree_key "main" → repo root.
+        let mut rm = row(2, "local", "dev2", "work", Some(pid), Some("idle"));
+        rm.worktree_key = Some("main".into());
+        assert_eq!(resolve_session_cwd(&store, &rm).unwrap(), "/base/r");
+
+        // Unknown key (worktree not in the table) → graceful fallback to root.
+        let mut ru = row(3, "local", "dev3", "work", Some(pid), Some("idle"));
+        ru.worktree_key = Some("gone".into());
+        assert_eq!(resolve_session_cwd(&store, &ru).unwrap(), "/base/r");
+    }
+
+    #[test]
+    fn cwd_source_remote_honors_worktree_key_when_id_missing() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_host("mefistos").unwrap();
+        let pid = store.upsert_project("acme", "repo", "/base/repo").unwrap();
+
+        let mut r = row(1, "mefistos", "dev", "work", Some(pid), Some("idle"));
+        r.worktree_key = Some("feat-x".into());
+        match cwd_source_for_session(&store, &r).unwrap() {
+            CwdSource::Remote {
+                owner,
+                repo,
+                wt_name,
+            } => {
+                assert_eq!(owner, "acme");
+                assert_eq!(repo, "repo");
+                assert_eq!(wt_name, Some("feat-x".to_string()));
+            }
+            CwdSource::Local(_) => panic!("expected Remote for host=mefistos"),
+        }
+
+        // "main" carries no worktree name → project root on the remote.
+        let mut rm = row(2, "mefistos", "dev2", "work", Some(pid), Some("idle"));
+        rm.worktree_key = Some("main".into());
+        match cwd_source_for_session(&store, &rm).unwrap() {
+            CwdSource::Remote { wt_name, .. } => assert_eq!(wt_name, None),
+            CwdSource::Local(_) => panic!("expected Remote for host=mefistos"),
+        }
+    }
+
+    #[test]
     fn cwd_source_local_uses_db_path_remote_uses_owner_repo() {
         let store = Store::open_in_memory().expect("store");
         store.upsert_host("local").unwrap();
@@ -2333,16 +2429,7 @@ mod tests {
 
         // LOCAL: takes the worktree's stored path verbatim.
         let lid = store
-            .upsert_session(
-                "dev",
-                "local",
-                Some(pid),
-                Some(wid),
-                1,
-                1,
-                "running",
-                None,
-            )
+            .upsert_session("dev", "local", Some(pid), Some(wid), 1, 1, "running", None)
             .unwrap();
         let local_row = store.get_session_by_id(lid).unwrap().unwrap();
         match cwd_source_for_session(&store, &local_row).unwrap() {
@@ -2427,6 +2514,20 @@ mod tests {
                 "/home/mjanci/projects/github.com/o/r/.claude/worktrees/feat-auth/src"
             ),
             Some("feat-auth".to_string())
+        );
+    }
+
+    #[test]
+    fn worktree_key_extracts_dot_worktrees_named_worktree() {
+        // The `.worktrees/` layout (no `.claude/` prefix) must also key to the
+        // worktree name — otherwise these sessions recreate at the repo root.
+        assert_eq!(
+            worktree_key_for_path("/Users/x/projects/github.com/o/r/.worktrees/changelog"),
+            Some("changelog".to_string())
+        );
+        assert_eq!(
+            worktree_key_for_path("/home/mjanci/projects/github.com/o/r/.worktrees/changelog/src"),
+            Some("changelog".to_string())
         );
     }
 
