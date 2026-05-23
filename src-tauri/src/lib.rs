@@ -181,7 +181,13 @@ fn spawn_reconcile_tick(store: std::sync::Arc<Mutex<Store>>, ssh: std::sync::Arc
     // before reconciling, so a pass that runs longer than `period` causes the
     // next tick to be skipped instead of queued.
     let running = std::sync::Arc::new(tokio::sync::Mutex::new(()));
-    tokio::spawn(async move {
+    // `tauri::async_runtime::spawn`, NOT bare `tokio::spawn`: this runs from the
+    // Tauri `setup` closure on the main thread (inside the macOS
+    // `did_finish_launching` callback), where no tokio runtime is entered. A
+    // bare `tokio::spawn` there panics ("no reactor running"), and because the
+    // callback can't unwind the panic aborts the process. The Tauri runtime
+    // handle works from any context (same reason the MCP server uses it).
+    tauri::async_runtime::spawn(async move {
         let mut ticker = tokio::time::interval(period);
         // Drop missed ticks rather than firing them back-to-back after a slow
         // pass (the default Burst behaviour would defeat the overlap guard).
@@ -449,8 +455,8 @@ pub fn run() {
                 &reg_for_setup,
                 &tunnels_for_setup,
             );
-            // Task H: proactive background reconcile tick. A `tokio::spawn`ed
-            // interval drives `service::sessions::reconcile_now` on the same
+            // Task H: proactive background reconcile tick. A Tauri-runtime
+            // spawned interval drives `service::sessions::reconcile_now` on the same
             // managed Store/SshClient the commands use, so fleet state stays
             // fresh without the UI having to poll. Reconcile is Tauri-free
             // (events flow through the store's EventBus), so the loop needs no
