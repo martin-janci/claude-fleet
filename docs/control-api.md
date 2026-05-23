@@ -113,10 +113,11 @@ A typical loop: `list_sessions` to see state → `new_session` to spawn one →
 
 ## Provisioning hosts
 
-`provision_hosts` (also reachable via Settings → Control API → **Provision hosts**) makes a Claude on every managed host able to drive the fleet. For each non-hidden, reachable host it performs three steps:
+`provision_hosts` (also reachable via Settings → Control API → **Provision hosts**) makes a Claude on every managed host able to drive the fleet. For each non-hidden, reachable host it performs four steps:
 
-1. **Skill** — writes `~/.claude/skills/claude-fleet-control/SKILL.md` on that host. Claude picks up skills from this directory live, without a restart.
-2. **`~/.claude.json` entry** — reads the host's `~/.claude.json`, merges an `mcpServers.claude-fleet` entry (preserving all sibling keys), backs the original up to `~/.claude.json.fleet-bak`, then writes the updated file. The entry added is:
+1. **Skills** — writes both `~/.claude/skills/claude-fleet-control/SKILL.md` and `~/.claude/skills/fleet-friendly-name/SKILL.md` on that host. Claude picks up skills from this directory live, without a restart. The fleet-friendly-name skill is the path agents use to set the session's sidebar label via the `set_friendly_name` MCP tool.
+2. **`~/.claude/CLAUDE.md` managed block** — appends (or refreshes in place) a sentinel-delimited block telling Claude to invoke fleet-friendly-name at every task start. Content outside the sentinels is the user's own and is preserved verbatim; the block is idempotent and only re-written when its body drifts.
+3. **`~/.claude.json` entry** — reads the host's `~/.claude.json`, merges an `mcpServers.claude-fleet` entry (preserving all sibling keys), backs the original up to `~/.claude.json.fleet-bak`, then writes the updated file. The entry added is:
    ```json
    {
      "type": "http",
@@ -124,9 +125,17 @@ A typical loop: `list_sessions` to see state → `new_session` to spawn one →
      "headers": { "Authorization": "Bearer <token>" }
    }
    ```
-3. **Reverse SSH tunnel** (remote hosts only) — starts an `ssh -R` tunnel so the remote host's `127.0.0.1:<port>` is forwarded to the central machine's MCP server. The server stays bound to `127.0.0.1` on the central machine; remote hosts reach it only through this authenticated tunnel.
+4. **Reverse SSH tunnel** (remote hosts only) — starts an `ssh -R` tunnel so the remote host's `127.0.0.1:<port>` is forwarded to the central machine's MCP server. The server stays bound to `127.0.0.1` on the central machine; remote hosts reach it only through this authenticated tunnel.
 
-**After provisioning, each host must restart Claude** to load the MCP server (the skill file is picked up live, but the MCP server entry requires a restart).
+**After provisioning, each host must restart Claude** to load the MCP server (skill files and CLAUDE.md are picked up live, but the MCP server entry requires a restart).
+
+### Host-alias mismatch (set_friendly_name returns `E_NOTFOUND`)
+
+The fleet-friendly-name skill discovers its session identity by running `tmux display-message -p '#S'` and `hostname -s` in the tmux session, then calls `set_friendly_name` with that `(tmux_name, host_alias)` pair. If both `hostname -s` and the full `hostname` return `E_NOTFOUND`, the claude-fleet alias for this machine does not match either value. To fix it:
+
+1. Open the claude-fleet app and find the offending row in **Settings → Hosts** (or the host picker).
+2. Either rename the host (the alias) to match `hostname -s` on that machine, or change the machine's hostname to match the alias. Aliases are arbitrary identifiers — pick whatever is least disruptive.
+3. The skill stops after the second `E_NOTFOUND` and emits a short notice to the user; it never retries blindly. Once the alias is fixed, the next task pickup on that host succeeds without further action.
 
 ### Per-host results
 

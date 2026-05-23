@@ -8,7 +8,8 @@ use crate::service::bg_sessions::{self, NewBgSessionArgs, PeekSessionArgs, Purge
 use crate::service::safe_kill::{self, SafeKillSessionArgs};
 use crate::service::sessions::{
     self, DismissGhostSessionArgs, KillSessionArgs, NewSessionArgs, RecreateSessionArgs,
-    RelatedSessionsArgs, RenameSessionArgs, RestartSessionArgs, SendPromptArgs, SpawnReviewArgs,
+    RelatedSessionsArgs, RenameSessionArgs, RestartSessionArgs, SendPromptArgs,
+    SetFriendlyNameArgs, SpawnReviewArgs,
 };
 use crate::ssh::SshClient;
 use crate::store::{SessionRow, Store};
@@ -66,6 +67,14 @@ pub async fn rename_session(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SessionRow, IpcError> {
     sessions::rename_session(args, &store, &ssh).await
+}
+
+#[tauri::command]
+pub fn set_session_friendly_name(
+    args: SetFriendlyNameArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    sessions::set_session_friendly_name(args, &store)
 }
 
 #[tauri::command]

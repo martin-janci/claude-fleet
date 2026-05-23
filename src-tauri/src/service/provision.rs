@@ -13,9 +13,35 @@ const PROVISION_TIMEOUT: Duration = Duration::from_secs(15);
 const FLEET_SKILL: &str = include_str!("../../../skills/claude-fleet-control/SKILL.md");
 const SKILL_DIR: &str = "~/.claude/skills/claude-fleet-control";
 const SKILL_PATH: &str = "~/.claude/skills/claude-fleet-control/SKILL.md";
+const FRIENDLY_NAME_SKILL: &str = include_str!("../../../skills/fleet-friendly-name/SKILL.md");
+const FRIENDLY_NAME_SKILL_DIR: &str = "~/.claude/skills/fleet-friendly-name";
+const FRIENDLY_NAME_SKILL_PATH: &str = "~/.claude/skills/fleet-friendly-name/SKILL.md";
 const CLAUDE_JSON: &str = "~/.claude.json";
 const CLAUDE_DIR: &str = "~/.claude";
+const CLAUDE_MD_PATH: &str = "~/.claude/CLAUDE.md";
 const TMUX_CONF: &str = "~/.tmux.conf";
+
+/// Sentinel-delimited block claude-fleet maintains in each host's
+/// `~/.claude/CLAUDE.md`. Idempotent: appended if absent, refreshed in place
+/// if the body changed, left alone if up to date. Anything outside the
+/// sentinels is the user's own content and untouched.
+const CLAUDE_MD_BEGIN: &str = "<!-- BEGIN claude-fleet managed (do not edit between sentinels) -->";
+const CLAUDE_MD_END: &str = "<!-- END claude-fleet managed -->";
+const CLAUDE_MD_BODY: &str = "## claude-fleet session labels
+
+If you are running inside a claude-fleet-managed tmux session and the
+`mcp__claude-fleet__set_friendly_name` tool is available, label this session
+at the start of every new task and whenever the task changes significantly.
+Use the **fleet-friendly-name** skill — it is the single, token-cheap path
+for this. Do not chat about the label; just set it.
+
+If `set_friendly_name` returns `E_NOTFOUND`, retry with the full `hostname`,
+then with the fixed alias `local` (sessions on the machine running
+claude-fleet itself are keyed under `local`, not the hostname). Only when all
+three — `hostname -s`, `hostname`, and `local` — return `E_NOTFOUND` does this
+machine's alias truly not match: emit a one-line notice to the user (the skill
+has the exact wording) and stop. The user fixes the alias once in the
+claude-fleet host picker.";
 
 /// Install the skill + merge the MCP entry on one host. `url` is the MCP
 /// endpoint that host should use. Reads `~/.claude.json`, merges (preserving
@@ -26,8 +52,21 @@ pub async fn provision_one(
     url: &str,
     token: &str,
 ) -> Result<(), IpcError> {
-    // 1. Skill (live-discovered, no restart).
+    // 1. Skills (live-discovered, no restart). Both ship from the repo so
+    //    every fleet host gets the same shared copy.
     write_host_file(ssh, host, SKILL_DIR, SKILL_PATH, FLEET_SKILL).await?;
+    write_host_file(
+        ssh,
+        host,
+        FRIENDLY_NAME_SKILL_DIR,
+        FRIENDLY_NAME_SKILL_PATH,
+        FRIENDLY_NAME_SKILL,
+    )
+    .await?;
+    // 1b. Global ~/.claude/CLAUDE.md — keep a managed block in sync so the
+    //     fleet-friendly-name skill is invoked on every task start without
+    //     the user editing CLAUDE.md by hand.
+    provision_claude_md(ssh, host).await?;
     // 2. MCP entry: read → merge (preserve siblings) → back up → write.
     let existing = read_host_file(ssh, host, CLAUDE_JSON).await?;
     let merged = merge_mcp_entry(&existing, url, token)?; // errors before any write
@@ -63,6 +102,52 @@ pub async fn provision_tmux_clipboard(ssh: &Arc<SshClient>, host: &str) -> Resul
     let addition = "\n# Enable OSC 52 clipboard (added by claude-fleet)\nset -g set-clipboard on\n";
     let merged = format!("{}{}", existing.trim_end(), addition);
     write_host_file(ssh, host, dir, TMUX_CONF, &merged).await
+}
+
+/// Ensure `~/.claude/CLAUDE.md` on `host` contains the claude-fleet managed
+/// block (sentinel-delimited). Idempotent: writes only when the block is
+/// missing or its body drifted. Everything outside the sentinels is the
+/// user's own content and is preserved verbatim.
+pub async fn provision_claude_md(ssh: &Arc<SshClient>, host: &str) -> Result<(), IpcError> {
+    let existing = read_host_file(ssh, host, CLAUDE_MD_PATH).await?;
+    let Some(merged) = merge_claude_md(&existing, CLAUDE_MD_BEGIN, CLAUDE_MD_END, CLAUDE_MD_BODY)
+    else {
+        return Ok(()); // already up to date
+    };
+    write_host_file(ssh, host, CLAUDE_DIR, CLAUDE_MD_PATH, &merged).await
+}
+
+/// Pure: merge the sentinel-delimited block into `existing`. Returns `None`
+/// when the block is already present and the body matches (no write needed);
+/// `Some(new)` with the updated content otherwise. New content is appended at
+/// EOF when the block is missing entirely.
+fn merge_claude_md(existing: &str, begin: &str, end: &str, body: &str) -> Option<String> {
+    let block = format!("{begin}\n{body}\n{end}");
+    if let Some(b) = existing.find(begin) {
+        if let Some(e_rel) = existing[b..].find(end) {
+            let e = b + e_rel + end.len();
+            let current = &existing[b..e];
+            if current == block {
+                return None;
+            }
+            let mut out = String::with_capacity(existing.len() + body.len());
+            out.push_str(&existing[..b]);
+            out.push_str(&block);
+            out.push_str(&existing[e..]);
+            return Some(out);
+        }
+        // Begin sentinel present but end missing — user damaged the block.
+        // Treat as "needs refresh" and append a fresh one rather than guess
+        // where the corrupted block ends.
+    }
+    let sep = if existing.is_empty() || existing.ends_with("\n\n") {
+        ""
+    } else if existing.ends_with('\n') {
+        "\n"
+    } else {
+        "\n\n"
+    };
+    Some(format!("{existing}{sep}{block}\n"))
 }
 
 /// Check if tmux.conf already has a set-clipboard directive.
@@ -406,5 +491,61 @@ mod tests {
         assert!(!super::has_tmux_clipboard_setting(
             "# set -g set-clipboard on\n"
         ));
+    }
+
+    const B: &str = "<!-- BEGIN -->";
+    const E: &str = "<!-- END -->";
+
+    #[test]
+    fn merge_claude_md_appends_when_block_missing() {
+        let out = super::merge_claude_md("# my notes\n", B, E, "body").unwrap();
+        assert!(out.starts_with("# my notes\n"));
+        assert!(out.contains(&format!("{B}\nbody\n{E}")));
+    }
+
+    #[test]
+    fn merge_claude_md_appends_to_empty_file() {
+        let out = super::merge_claude_md("", B, E, "body").unwrap();
+        assert_eq!(out, format!("{B}\nbody\n{E}\n"));
+    }
+
+    #[test]
+    fn merge_claude_md_is_idempotent_when_body_matches() {
+        let block = format!("{B}\nbody\n{E}");
+        let initial = format!("intro\n\n{block}\n");
+        assert!(super::merge_claude_md(&initial, B, E, "body").is_none());
+    }
+
+    #[test]
+    fn merge_claude_md_refreshes_when_body_drifted() {
+        let initial = format!("intro\n\n{B}\nold body\n{E}\n");
+        let out = super::merge_claude_md(&initial, B, E, "new body").unwrap();
+        assert!(out.contains(&format!("{B}\nnew body\n{E}")));
+        assert!(!out.contains("old body"));
+        assert!(out.starts_with("intro\n"));
+    }
+
+    #[test]
+    fn merge_claude_md_preserves_content_outside_sentinels() {
+        let initial = format!("before\n{B}\nold\n{E}\nafter\n");
+        let out = super::merge_claude_md(&initial, B, E, "new").unwrap();
+        assert!(out.starts_with("before\n"));
+        assert!(out.ends_with("after\n"));
+    }
+
+    #[test]
+    fn claude_md_body_documents_local_fallback() {
+        // Regression: the managed CLAUDE.md block must mirror the
+        // fleet-friendly-name skill's host-alias fallback. On the central
+        // host, sessions are keyed under the fixed alias `local`, never the OS
+        // hostname (see `claude_cli.rs`/`pty.rs`). Guidance that stops after
+        // `hostname -s` / `hostname` makes the in-session agent wrongly report
+        // an alias mismatch on that host, so the block MUST name `local` as
+        // the final fallback before giving up.
+        assert!(
+            super::CLAUDE_MD_BODY.contains("`local`"),
+            "managed CLAUDE.md block must document the `local` fallback so the \
+             central host (alias `local`) does not trip a false mismatch notice"
+        );
     }
 }

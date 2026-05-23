@@ -31,7 +31,8 @@ const source: SessionRow = {
   claude_status: null,
   effort_level: null,
   pr_url: null,
-  current_activity: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null,
+  current_activity: null,
+  friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null,
 };
 
 const sibling: SessionRow = {
@@ -53,7 +54,8 @@ const sibling: SessionRow = {
   claude_status: null,
   effort_level: null,
   pr_url: null,
-  current_activity: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null,
+  current_activity: null,
+  friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null,
 };
 
 const unrelated: SessionRow = {
@@ -75,7 +77,8 @@ const unrelated: SessionRow = {
   claude_status: null,
   effort_level: null,
   pr_url: null,
-  current_activity: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null,
+  current_activity: null,
+  friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null,
 };
 
 beforeEach(() => {
@@ -165,7 +168,8 @@ describe('PromptComposer', () => {
       claude_status: null,
       effort_level: null,
       pr_url: null,
-      current_activity: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null,
+      current_activity: null,
+      friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null,
     }));
     sessions.set([source, ...sibs]);
     render(PromptComposer, { props: { source, onClose: () => {} } });

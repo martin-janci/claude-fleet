@@ -275,6 +275,17 @@ pub struct RenameSessionParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SetFriendlyNameParams {
+    /// Host alias the session lives on.
+    pub host_alias: String,
+    /// tmux session name (the row's stable identity).
+    pub tmux_name: String,
+    /// 3–6 word human-readable label describing the current task.
+    /// Empty / whitespace clears the label.
+    pub friendly_name: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RestartSessionParams {
     /// Host alias the session lives on.
     pub host_alias: String,
@@ -838,6 +849,31 @@ impl FleetTools {
         ok_json(&row)
     }
 
+    #[tool(description = "Set the session's friendly display name (the \
+        sidebar shows this when the user toggles friendly names on). Intended \
+        to be called once per task by the in-session agent — keep it short \
+        (3–6 words) and human-readable. Pass an empty string to clear. \
+        Returns the updated session row as JSON.")]
+    async fn set_friendly_name(
+        &self,
+        Parameters(p): Parameters<SetFriendlyNameParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "set_friendly_name",
+            &format!(
+                "host={} tmux={} label={:?}",
+                p.host_alias, p.tmux_name, p.friendly_name
+            ),
+        );
+        let args = sessions::SetFriendlyNameArgs {
+            host_alias: p.host_alias,
+            tmux_name: p.tmux_name,
+            friendly_name: p.friendly_name,
+        };
+        let row = sessions::set_session_friendly_name(args, &self.store).map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
     #[tool(description = "Restart a tmux session (kill and recreate it in the \
         same place). Returns the updated session row as JSON.")]
     async fn restart_session(
@@ -1390,6 +1426,17 @@ impl ServerHandler for FleetTools {
                  fleet state, new_session to spawn one, and send_prompt to steer it."
                     .to_string(),
             )
+    }
+}
+
+/// Test-only: expose the macro-generated `tool_router()` so `doc_gen` can call
+/// `FleetTools::tool_router_for_doc()` without needing access to the private
+/// associated function.
+#[cfg(test)]
+impl FleetTools {
+    pub(crate) fn tool_router_for_doc(
+    ) -> rmcp::handler::server::router::tool::ToolRouter<FleetTools> {
+        Self::tool_router()
     }
 }
 

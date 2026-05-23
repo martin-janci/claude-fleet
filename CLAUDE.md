@@ -6,7 +6,7 @@ Orientation for Claude Code working in this repository.
 
 `claude-fleet` — a Tauri 2 desktop app (Rust backend + Svelte 5 frontend) for
 managing long-lived Claude Code sessions running in tmux across multiple
-machines over SSH. ~5,100 LOC Rust, ~6,600 LOC frontend.
+machines over SSH. ~16,400 LOC Rust, ~12,900 LOC frontend.
 
 ## Build & test
 
@@ -29,6 +29,19 @@ fail with `localStorage is undefined` — a pre-existing test-environment issue,
 not caused by app code. Verify against `main` before attributing a failure to
 your change.
 
+## Releasing
+
+Versions and `CHANGELOG.md` are automated by release-please from Conventional
+Commits — never bump versions by hand. See `docs/RELEASING.md`.
+
+`docs/control-api-reference.md` is generated from the MCP tool router. After
+editing any `#[tool(...)]` description or the `generate_handler!` list,
+regenerate it or CI fails:
+
+```bash
+REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_current
+```
+
 ## Architecture
 
 - **Frontend stores** (`src/lib/*.ts`) hold app state as Svelte 5 runes. Backend
@@ -40,7 +53,7 @@ your change.
   wrap the transport-agnostic logic in `service/`; SSH multiplexing in `ssh.rs`
   (per-host `ControlMaster`, async `tokio::process`); tmux command construction
   in `tmux.rs`; the single global PTY in `pty.rs`; SQLite in `store.rs`
-  (migrations `001`–`006`); the event bus in `events.rs`; cancellation registry
+  (migrations `001`–`015`); the event bus in `events.rs`; cancellation registry
   in `cancel.rs`.
 - **Control API** (`mcp/`): an embedded MCP server (off by default, localhost +
   bearer token) lets an AI assistant drive the fleet. Its tools call the same
@@ -63,8 +76,10 @@ your change.
 ## Status & known issues
 
 Iterations 1–4a are landed (multi-host, accounts, cross-host sessions, prompt
-transfer, async/events rework), plus the MCP control API. Handoff and Freeze
-from the original spec are not implemented. A full hardening review is in
+transfer, async/events rework), plus the MCP control API, background sessions,
+the background reconcile tick, fleet_health roll-up, and the persistent session
+event timeline (session_history). Handoff and Freeze from the original spec are
+not implemented. A full hardening review is in
 `docs/specs/2026-05-21-hardening-review.md` — consult it before touching SSH
 command construction, the PTY, migrations, or the optimistic-merge / event-bus
 paths.

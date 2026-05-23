@@ -52,6 +52,10 @@ pub struct SessionRow {
     pub current_activity: Option<String>,
     pub context_pct: Option<f64>,
     pub stuck_kind: Option<String>,
+    /// Display label set by the in-session agent via the `set_friendly_name`
+    /// MCP tool (migration 016). The sidebar shows this when the user's
+    /// "friendly names" toggle is on; falls back to `tmux_name` when NULL.
+    pub friendly_name: Option<String>,
     pub safe_kill_state: Option<String>,
     pub safe_kill_nonce: Option<String>,
     pub safe_kill_detail: Option<String>,
@@ -276,7 +280,12 @@ impl Store {
         }
         if v < 16 {
             let tx = self.conn.unchecked_transaction()?;
-            tx.execute_batch(include_str!("../migrations/016_safe_kill.sql"))?;
+            tx.execute_batch(include_str!("../migrations/016_session_friendly_name.sql"))?;
+            tx.commit()?;
+        }
+        if v < 17 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../migrations/017_safe_kill.sql"))?;
             tx.commit()?;
         }
         Ok(())
@@ -1147,7 +1156,7 @@ impl Store {
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                     worktree_key, lost_at,
                     claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind,
+                    context_pct, stuck_kind, friendly_name,
                     safe_kill_state, safe_kill_nonce, safe_kill_detail, safe_kill_requested_at
              FROM sessions WHERE host_alias=?1 ORDER BY last_activity_at DESC",
         )?;
@@ -1174,10 +1183,11 @@ impl Store {
                 current_activity: row.get(18)?,
                 context_pct: row.get(19)?,
                 stuck_kind: row.get(20)?,
-                safe_kill_state: row.get(21)?,
-                safe_kill_nonce: row.get(22)?,
-                safe_kill_detail: row.get(23)?,
-                safe_kill_requested_at: row.get(24)?,
+                friendly_name: row.get(21)?,
+                safe_kill_state: row.get(22)?,
+                safe_kill_nonce: row.get(23)?,
+                safe_kill_detail: row.get(24)?,
+                safe_kill_requested_at: row.get(25)?,
             })
         })?;
         rows.collect()
@@ -1191,7 +1201,7 @@ impl Store {
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                     worktree_key, lost_at,
                     claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind,
+                    context_pct, stuck_kind, friendly_name,
                     safe_kill_state, safe_kill_nonce, safe_kill_detail, safe_kill_requested_at
              FROM sessions ORDER BY last_activity_at DESC",
         )?;
@@ -1218,10 +1228,11 @@ impl Store {
                 current_activity: row.get(18)?,
                 context_pct: row.get(19)?,
                 stuck_kind: row.get(20)?,
-                safe_kill_state: row.get(21)?,
-                safe_kill_nonce: row.get(22)?,
-                safe_kill_detail: row.get(23)?,
-                safe_kill_requested_at: row.get(24)?,
+                friendly_name: row.get(21)?,
+                safe_kill_state: row.get(22)?,
+                safe_kill_nonce: row.get(23)?,
+                safe_kill_detail: row.get(24)?,
+                safe_kill_requested_at: row.get(25)?,
             })
         })?;
         rows.collect()
@@ -1251,7 +1262,7 @@ impl Store {
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                     worktree_key, lost_at,
                     claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind,
+                    context_pct, stuck_kind, friendly_name,
                     safe_kill_state, safe_kill_nonce, safe_kill_detail, safe_kill_requested_at
              FROM sessions
              WHERE project_id=?1 AND worktree_key=?2 AND id<>?3
@@ -1280,10 +1291,11 @@ impl Store {
                 current_activity: row.get(18)?,
                 context_pct: row.get(19)?,
                 stuck_kind: row.get(20)?,
-                safe_kill_state: row.get(21)?,
-                safe_kill_nonce: row.get(22)?,
-                safe_kill_detail: row.get(23)?,
-                safe_kill_requested_at: row.get(24)?,
+                friendly_name: row.get(21)?,
+                safe_kill_state: row.get(22)?,
+                safe_kill_nonce: row.get(23)?,
+                safe_kill_detail: row.get(24)?,
+                safe_kill_requested_at: row.get(25)?,
             })
         })?;
         rows.collect()
@@ -1331,6 +1343,29 @@ impl Store {
             self.bus.session_updated(&row);
         }
         Ok(())
+    }
+
+    /// Set the session's display label (migration 016). `None` clears it.
+    /// Emits `session_updated` so the sidebar patches in place.
+    pub fn set_friendly_name(
+        &self,
+        host_alias: &str,
+        tmux_name: &str,
+        friendly_name: Option<&str>,
+    ) -> Result<Option<SessionRow>, rusqlite::Error> {
+        let changed = self.conn.execute(
+            "UPDATE sessions SET friendly_name = ?1 \
+             WHERE host_alias = ?2 AND tmux_name = ?3",
+            rusqlite::params![friendly_name, host_alias, tmux_name],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let row = fetch_session(&self.conn, tmux_name, host_alias)?;
+        if let Some(ref r) = row {
+            self.bus.session_updated(r);
+        }
+        Ok(row)
     }
 
     /// Mark a safe-kill request: stamp state="requested", store the nonce we
@@ -1426,6 +1461,19 @@ impl Store {
         self.conn
             .query_row(
                 "SELECT path FROM worktrees WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    /// Worktree's logical name (the leaf used in remote
+    /// `~/projects/.../.claude/worktrees/<name>` paths). The on-host `path`
+    /// column is local-machine-only and unusable for remote rebuilds.
+    pub fn worktree_name(&self, id: i64) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT name FROM worktrees WHERE id = ?1",
                 rusqlite::params![id],
                 |row| row.get(0),
             )
@@ -1916,7 +1964,7 @@ impl Store {
                         last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                         worktree_key, lost_at,
                         claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind,
+                    context_pct, stuck_kind, friendly_name,
                     safe_kill_state, safe_kill_nonce, safe_kill_detail, safe_kill_requested_at
                  FROM sessions WHERE claude_session_id = ?1",
             )
@@ -1944,10 +1992,11 @@ impl Store {
                 current_activity: row.get(18)?,
                 context_pct: row.get(19)?,
                 stuck_kind: row.get(20)?,
-                safe_kill_state: row.get(21)?,
-                safe_kill_nonce: row.get(22)?,
-                safe_kill_detail: row.get(23)?,
-                safe_kill_requested_at: row.get(24)?,
+                friendly_name: row.get(21)?,
+                safe_kill_state: row.get(22)?,
+                safe_kill_nonce: row.get(23)?,
+                safe_kill_detail: row.get(24)?,
+                safe_kill_requested_at: row.get(25)?,
             })
         })
         .map_err(crate::ipc_error::IpcError::from)
@@ -1971,7 +2020,7 @@ fn fetch_session(
                 last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                 worktree_key, lost_at,
                 claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind,
+                    context_pct, stuck_kind, friendly_name,
                     safe_kill_state, safe_kill_nonce, safe_kill_detail, safe_kill_requested_at
          FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
     )?;
@@ -1998,10 +2047,11 @@ fn fetch_session(
             current_activity: row.get(18)?,
             context_pct: row.get(19)?,
             stuck_kind: row.get(20)?,
-            safe_kill_state: row.get(21)?,
-            safe_kill_nonce: row.get(22)?,
-            safe_kill_detail: row.get(23)?,
-            safe_kill_requested_at: row.get(24)?,
+            friendly_name: row.get(21)?,
+            safe_kill_state: row.get(22)?,
+            safe_kill_nonce: row.get(23)?,
+            safe_kill_detail: row.get(24)?,
+            safe_kill_requested_at: row.get(25)?,
         })
     })?;
     match rows.next() {
@@ -2016,7 +2066,7 @@ fn fetch_session_by_id(conn: &Connection, id: i64) -> Result<Option<SessionRow>,
                 last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                 worktree_key, lost_at,
                 claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind,
+                    context_pct, stuck_kind, friendly_name,
                     safe_kill_state, safe_kill_nonce, safe_kill_detail, safe_kill_requested_at
          FROM sessions WHERE id=?1",
     )?;
@@ -2043,10 +2093,11 @@ fn fetch_session_by_id(conn: &Connection, id: i64) -> Result<Option<SessionRow>,
             current_activity: row.get(18)?,
             context_pct: row.get(19)?,
             stuck_kind: row.get(20)?,
-            safe_kill_state: row.get(21)?,
-            safe_kill_nonce: row.get(22)?,
-            safe_kill_detail: row.get(23)?,
-            safe_kill_requested_at: row.get(24)?,
+            friendly_name: row.get(21)?,
+            safe_kill_state: row.get(22)?,
+            safe_kill_nonce: row.get(23)?,
+            safe_kill_detail: row.get(24)?,
+            safe_kill_requested_at: row.get(25)?,
         })
     })?;
     match rows.next() {
@@ -2127,7 +2178,7 @@ mod tests {
     fn migrate_is_idempotent() {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
-        assert_eq!(store.schema_version().expect("version"), 16);
+        assert_eq!(store.schema_version().expect("version"), 17);
     }
 
     #[test]
@@ -2344,7 +2395,7 @@ mod tests {
     #[test]
     fn schema_version_is_seven_after_migration() {
         let s = Store::open_in_memory().expect("open");
-        assert_eq!(s.schema_version().expect("version"), 16);
+        assert_eq!(s.schema_version().expect("version"), 17);
     }
 
     #[test]
@@ -2961,7 +3012,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 16, "schema_version should be 16 after migration");
+        assert_eq!(v, 17, "schema_version should be 17 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store

@@ -214,22 +214,30 @@ fn spawn_reconcile_tick(store: std::sync::Arc<Mutex<Store>>, ssh: std::sync::Arc
 ///     TUIs detect a non-UTF-8 terminal and render ASCII fallbacks
 ///     (`_` instead of `└` / `↑` / `█` etc.).
 ///
-/// One shell invocation prints the values delimited by `\x1f` (US sep) and
-/// terminated by `\x1e` (RS) per variable. We parse and call set_var on each
-/// non-empty value. Best-effort: any failure leaves the var unchanged.
+/// One shell invocation prints a sentinel, then each value `\x1e`-terminated.
+/// We parse and call set_var on each non-empty value. Best-effort: any failure
+/// leaves the var unchanged.
 fn import_login_shell_env() -> bool {
     let Ok(shell) = std::env::var("SHELL") else {
         return false;
     };
-    // Order MUST match VARS below.
+    // Order MUST match the positional parsing in `parse_login_env`.
     const VARS: &[&str] = &["PATH", "LANG", "LC_ALL", "LC_CTYPE"];
-    let script = VARS
-        .iter()
-        .map(|v| format!("printf '%s\\x1e' \"${v}\""))
-        .collect::<Vec<_>>()
-        .join("; ");
+    // Print a sentinel first so any banner/chatter the rc files emit to stdout
+    // is discarded, then each value `\x1e`-terminated.
+    let mut script = format!("printf '%s' '{ENV_DUMP_SENTINEL}'");
+    for v in VARS {
+        script.push_str(&format!("; printf '%s\\x1e' \"${v}\""));
+    }
+    // INTERACTIVE login shell (`-i -l`). Users put PATH additions, version-
+    // manager shims, and wrappers like `cl` in `.zshrc`/`.bashrc`, which are
+    // sourced ONLY for interactive shells. A non-interactive login shell
+    // (`-l -c`) sources just `.zprofile`/`.zlogin` and misses them — so a
+    // Finder-launched GUI app could not find `cl`, and every tmux pane failed
+    // with "cl: command not found". `-c` still runs our script and exits (no
+    // interactive prompt loop), so output stays clean.
     let Ok(output) = std::process::Command::new(&shell)
-        .args(["-l", "-c", &script])
+        .args(["-i", "-l", "-c", &script])
         .output()
     else {
         return false;
@@ -238,18 +246,39 @@ fn import_login_shell_env() -> bool {
         return false;
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut parts = stdout.split('\x1e');
     let mut any_set = false;
-    for var in VARS {
-        let Some(val) = parts.next() else { break };
-        let trimmed = val.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        std::env::set_var(var, trimmed);
+    for (var, val) in parse_login_env(&stdout, VARS) {
+        std::env::set_var(var, val);
         any_set = true;
     }
     any_set
+}
+
+/// Marker printed by [`import_login_shell_env`] immediately before the env
+/// values, so interactive-shell startup chatter (greetings, version-manager
+/// banners) printed to stdout is dropped during parsing.
+const ENV_DUMP_SENTINEL: &str = "__FLEET_ENV_BEGIN__";
+
+/// Parse the `printf` dump from [`import_login_shell_env`]: discard everything
+/// up to and including the sentinel, then read the `\x1e`-delimited values
+/// positionally against `vars`. Empty/whitespace values are skipped. If the
+/// sentinel is absent (degenerate shell), the whole output is parsed as a
+/// fallback.
+fn parse_login_env<'a>(stdout: &str, vars: &[&'a str]) -> Vec<(&'a str, String)> {
+    let body = stdout
+        .rsplit_once(ENV_DUMP_SENTINEL)
+        .map(|(_, after)| after)
+        .unwrap_or(stdout);
+    let mut parts = body.split('\x1e');
+    let mut out = Vec::new();
+    for var in vars {
+        let Some(val) = parts.next() else { break };
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            out.push((*var, trimmed.to_string()));
+        }
+    }
+    out
 }
 
 /// When launched from Finder (Spotlight, Dock, double-click), macOS hands the
@@ -494,6 +523,7 @@ pub fn run() {
             commands::worktrees::list_worktrees,
             commands::worktrees::delete_worktree,
             commands::sessions::rename_session,
+            commands::sessions::set_session_friendly_name,
             commands::sessions::restart_session,
             commands::sessions::send_prompt,
             commands::sessions::spawn_review,
@@ -678,5 +708,47 @@ mod path_backfill_tests {
     fn instances_to_kill_handles_empty_list() {
         let procs: [(u32, &str); 0] = [];
         assert!(instances_to_kill(&procs, 100, "claude-fleet").is_empty());
+    }
+
+    const VARS: &[&str] = &["PATH", "LANG", "LC_ALL", "LC_CTYPE"];
+
+    #[test]
+    fn parse_login_env_reads_values_positionally_and_skips_empty() {
+        let dump =
+            format!("{ENV_DUMP_SENTINEL}/opt/homebrew/bin:/usr/bin\x1een_US.UTF-8\x1e\x1e\x1e");
+        let got = parse_login_env(&dump, VARS);
+        assert_eq!(
+            got,
+            vec![
+                ("PATH", "/opt/homebrew/bin:/usr/bin".to_string()),
+                ("LANG", "en_US.UTF-8".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_login_env_discards_rc_chatter_before_sentinel() {
+        // An interactive .zshrc may print a banner / version-manager notice to
+        // stdout before our values; the sentinel must isolate the real dump.
+        let dump = format!(
+            "Welcome!\nfnm: using node v22\n{ENV_DUMP_SENTINEL}/Users/me/bin:/usr/bin\x1e\x1e\x1e\x1e"
+        );
+        assert_eq!(
+            parse_login_env(&dump, VARS),
+            vec![("PATH", "/Users/me/bin:/usr/bin".to_string())]
+        );
+    }
+
+    #[test]
+    fn parse_login_env_falls_back_when_sentinel_absent() {
+        // Degenerate shell that swallowed the sentinel: parse the whole output.
+        let dump = "/usr/bin\x1een_US.UTF-8\x1e\x1e\x1e";
+        assert_eq!(
+            parse_login_env(dump, VARS),
+            vec![
+                ("PATH", "/usr/bin".to_string()),
+                ("LANG", "en_US.UTF-8".to_string()),
+            ]
+        );
     }
 }

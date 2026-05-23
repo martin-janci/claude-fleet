@@ -17,4 +17,4 @@ ALTER TABLE sessions ADD COLUMN safe_kill_nonce TEXT;
 ALTER TABLE sessions ADD COLUMN safe_kill_detail TEXT;
 ALTER TABLE sessions ADD COLUMN safe_kill_requested_at INTEGER;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (16);
+INSERT OR IGNORE INTO schema_version (version) VALUES (17);

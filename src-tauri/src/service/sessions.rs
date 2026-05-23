@@ -416,19 +416,29 @@ fn extract_owner_repo(path: &str) -> Option<(String, String)> {
 
 /// Derive a portable worktree name from a session's cwd. Host-path-independent:
 ///   - <repo>/.claude/worktrees/<name>[/…]  → Some("<name>")
+///   - <repo>/.worktrees/<name>[/…]         → Some("<name>")
 ///   - <repo> root or any other subdir       → Some("main")
 ///   - path without a github.com repo segment → None (orphan)
+///
+/// Both worktree layouts are recognized: `worktree_add_script` and the
+/// ecosystem's `proj-clean` use `.worktrees/` *or* `.claude/worktrees/`, and a
+/// session living under either must key to its worktree name (not "main"), or
+/// recreate/restart would rebuild it at the repo root.
 fn worktree_key_for_path(path: &str) -> Option<String> {
     static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
         regex::Regex::new(r"/projects/github\.com/[^/]+/[^/]+(/.*)?$").expect("static regex")
     });
     let caps = RE.captures(path)?;
     let remainder = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-    if let Some(idx) = remainder.find("/.claude/worktrees/") {
-        let after = &remainder[idx + "/.claude/worktrees/".len()..];
-        if let Some(name) = after.split('/').next() {
-            if !name.is_empty() {
-                return Some(name.to_string());
+    // Check `.claude/worktrees/` first — it is the more specific marker, and
+    // `/.worktrees/` is not a substring of `/.claude/worktrees/`.
+    for marker in ["/.claude/worktrees/", "/.worktrees/"] {
+        if let Some(idx) = remainder.find(marker) {
+            let after = &remainder[idx + marker.len()..];
+            if let Some(name) = after.split('/').next() {
+                if !name.is_empty() {
+                    return Some(name.to_string());
+                }
             }
         }
     }
@@ -1038,6 +1048,48 @@ pub async fn rename_session(
 }
 
 #[derive(Deserialize)]
+pub struct SetFriendlyNameArgs {
+    pub host_alias: String,
+    pub tmux_name: String,
+    /// Empty / whitespace-only value clears the label.
+    pub friendly_name: String,
+}
+
+/// Set (or clear, on empty/whitespace) the session's display label. The agent
+/// running inside a tmux session calls this via MCP after picking up a task.
+pub fn set_session_friendly_name(
+    args: SetFriendlyNameArgs,
+    store: &Mutex<Store>,
+) -> Result<SessionRow, IpcError> {
+    crate::validate::host_alias(&args.host_alias)?;
+    // Lookup-mode validator: must accept the synthetic `bg:<uuid>` form used
+    // by background-agent rows, which the create-mode `tmux_name` validator
+    // rejects (tmux forbids `:` when creating a session, but we're only
+    // addressing an existing row here, never spawning tmux).
+    crate::validate::tmux_name_lookup(&args.tmux_name)?;
+    crate::validate::friendly_name(&args.friendly_name)?;
+    let trimmed = args.friendly_name.trim();
+    let value = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    };
+    let s = store
+        .lock()
+        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    s.set_friendly_name(&args.host_alias, &args.tmux_name, value)?
+        .ok_or_else(|| {
+            IpcError::new(
+                "E_NOTFOUND",
+                format!(
+                    "session {} not found on {}",
+                    args.tmux_name, args.host_alias
+                ),
+            )
+        })
+}
+
+#[derive(Deserialize)]
 pub struct RestartSessionArgs {
     pub host_alias: String,
     pub name: String,
@@ -1357,24 +1409,142 @@ fn resolve_controller(store: &Store) -> Option<(String, String)> {
     store.get_controller().ok().flatten()
 }
 
-/// Resolve the cwd a session should (re)open in. Order: the session's worktree
-/// path (by `worktree_id`) → its project `base_path` → error. Used by both
-/// `spawn_review` and `recreate_session`.
+/// Resolve the cwd a session should (re)open in for a LOCAL host. Order: the
+/// session's worktree path (by `worktree_id`) → its project `base_path` →
+/// error. Remote hosts must go through [`cwd_source_for_session`] /
+/// [`resolve_cwd_source`] instead — the local paths in this table do not
+/// exist on the remote machine.
 fn resolve_session_cwd(s: &Store, row: &crate::store::SessionRow) -> Result<String, IpcError> {
     if let Some(wt_id) = row.worktree_id {
         if let Some(path) = s.worktree_path(wt_id)? {
             return Ok(path);
         }
     }
-    if let Some(pid) = row.project_id {
-        if let Some(base) = s.project_base_path(pid)? {
-            return Ok(base);
+    let base = match row.project_id {
+        Some(pid) => s.project_base_path(pid)?,
+        None => None,
+    };
+    // Sessions discovered by reconcile carry only `worktree_key` (the worktree
+    // dir name, derived from their live cwd), never `worktree_id` — reconcile
+    // does not resolve the FK. Honor the key so a session in a worktree is
+    // recreated there, not at the repo root.
+    if let (Some(pid), Some(key)) = (row.project_id, row.worktree_key.as_deref()) {
+        if key != "main" {
+            // 1. The worktrees table is authoritative (and handles non-standard
+            //    locations) — when it is fresh.
+            if let Some(path) = s
+                .list_worktrees_for_project(pid)?
+                .into_iter()
+                .find(|w| w.name == key)
+                .map(|w| w.path)
+            {
+                return Ok(path);
+            }
+            // 2. The table is only refreshed by `refresh_projects`, so a
+            //    just-created worktree (the common recreate case) may be absent.
+            //    Reconstruct from the on-disk standard layouts under the base.
+            if let Some(ref base) = base {
+                if let Some(path) =
+                    worktree_path_on_disk(base, key, |p| std::path::Path::new(p).exists())
+                {
+                    return Ok(path);
+                }
+            }
         }
+    }
+    if let Some(base) = base {
+        return Ok(base);
     }
     Err(IpcError::new(
         "E_NOREPO",
         "cannot determine a worktree path for this session",
     ))
+}
+
+/// Reconstruct a local worktree's path from the project `base` and its dir
+/// name `key`, trying the two layouts the ecosystem uses (`.claude/worktrees/`
+/// then `.worktrees/`). Returns the first that `exists`. Used as a fallback
+/// when the worktrees table has not been refreshed since the worktree was made.
+fn worktree_path_on_disk(base: &str, key: &str, exists: impl Fn(&str) -> bool) -> Option<String> {
+    for layout in [".claude/worktrees", ".worktrees"] {
+        let candidate = format!("{base}/{layout}/{key}");
+        if exists(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Per-host cwd resolution input, captured under the store lock before any
+/// async work. For `local` we already have the absolute path; for remote we
+/// keep the (owner, repo, worktree-name) tuple and only translate to a path
+/// once `ssh.remote_home` resolves off-lock.
+#[cfg_attr(test, derive(Debug))]
+enum CwdSource {
+    Local(String),
+    Remote {
+        owner: String,
+        repo: String,
+        wt_name: Option<String>,
+    },
+}
+
+/// Pick the cwd-resolution strategy for `row` while holding the store lock.
+/// Falls back from worktree → project root (matching the local resolver) when
+/// the worktree row is missing.
+fn cwd_source_for_session(
+    s: &Store,
+    row: &crate::store::SessionRow,
+) -> Result<CwdSource, IpcError> {
+    if row.host_alias == "local" {
+        return Ok(CwdSource::Local(resolve_session_cwd(s, row)?));
+    }
+    let pid = row.project_id.ok_or_else(|| {
+        IpcError::new(
+            "E_NOREPO",
+            "cannot determine a remote path: session has no project",
+        )
+    })?;
+    let (owner, repo) = fetch_owner_repo(s, pid)?;
+    // Like the local resolver: reconciled sessions only have `worktree_key`, so
+    // fall back to it when the FK is unset. `remote_project_path` maps a
+    // non-"main" name to `<repo>/.claude/worktrees/<name>`, matching how
+    // `new_session` creates remote worktrees.
+    let wt_name = match row.worktree_id {
+        Some(wid) => s.worktree_name(wid)?,
+        None => row
+            .worktree_key
+            .as_deref()
+            .filter(|k| *k != "main")
+            .map(str::to_string),
+    };
+    Ok(CwdSource::Remote {
+        owner,
+        repo,
+        wt_name,
+    })
+}
+
+/// Off-lock half of host-aware cwd resolution: for remote sources, look up
+/// the remote `$HOME` and assemble the project (or worktree) path using the
+/// same convention `new_session` uses. Local sources pass straight through.
+async fn resolve_cwd_source(
+    src: CwdSource,
+    host_alias: &str,
+    ssh: &Arc<SshClient>,
+) -> Result<String, IpcError> {
+    match src {
+        CwdSource::Local(p) => Ok(p),
+        CwdSource::Remote {
+            owner,
+            repo,
+            wt_name,
+        } => {
+            let home = ssh.remote_home(host_alias).await?;
+            let (_root, cwd) = remote_project_path(&home, &owner, &repo, wt_name.as_deref());
+            Ok(cwd)
+        }
+    }
 }
 
 /// Poll the tmux pane until `cl`'s REPL prompt appears, up to ~6s. Returns
@@ -1410,17 +1580,19 @@ pub async fn spawn_review(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<crate::store::SessionRow, IpcError> {
-    // 1. Snapshot source + resolve cwd under a brief lock.
-    let (source, cwd) = {
+    // 1. Snapshot source + capture cwd-resolution inputs under a brief lock.
+    //    For remote hosts the cwd is finalized off-lock via `ssh.remote_home`.
+    let (source, cwd_src) = {
         let s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
         let source = s
             .get_session_by_id(args.source_session_id)?
             .ok_or_else(|| IpcError::new("E_NOTFOUND", "source session not found"))?;
-        let cwd = resolve_session_cwd(&s, &source)?;
-        (source, cwd)
+        let cwd_src = cwd_source_for_session(&s, &source)?;
+        (source, cwd_src)
     };
+    let cwd = resolve_cwd_source(cwd_src, &source.host_alias, ssh).await?;
 
     // 2. Spawn the review tmux session (off-lock).
     //    A review runs Claude Code — same pane command as any "work" session.
@@ -1505,11 +1677,11 @@ pub async fn recreate_session(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<SessionRow, IpcError> {
-    // Snapshot the session, gate on host reachability, and resolve the rebuild
-    // cwd + launch command — all under one brief lock, before any tmux call.
-    // Works for both `running` sessions (eating RAM / wedged → nuke & rebuild)
-    // and `ghost` sessions (lost from tmux → bring back in the right worktree).
-    let (sess, cwd, pane_cmd) = {
+    // Snapshot the session, gate on host reachability, and capture cwd-resolution
+    // inputs — all under one brief lock, before any tmux/ssh call. For remote
+    // hosts the cwd is finalized off-lock (needs `ssh.remote_home`), because the
+    // local DB path is meaningless on the other machine.
+    let (sess, cwd_src, pane_cmd) = {
         let s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
@@ -1532,10 +1704,11 @@ pub async fn recreate_session(
                 format!("host {} is not reachable", host.alias),
             ));
         }
-        let cwd = resolve_session_cwd(&s, &sess)?;
+        let cwd_src = cwd_source_for_session(&s, &sess)?;
         let pane_cmd = recreate_pane_command(&sess.kind, sess.claude_session_id.as_deref());
-        (sess, cwd, pane_cmd)
+        (sess, cwd_src, pane_cmd)
     };
+    let cwd = resolve_cwd_source(cwd_src, &sess.host_alias, ssh).await?;
 
     let tmux = exec_for(&sess.host_alias, ssh);
     // Tear down any live session first (frees the old process tree / wedged
@@ -1648,6 +1821,7 @@ mod tests {
             current_activity: None,
             context_pct: None,
             stuck_kind: None,
+            friendly_name: None,
             safe_kill_state: None,
             safe_kill_nonce: None,
             safe_kill_detail: None,
@@ -2214,6 +2388,157 @@ mod tests {
     }
 
     #[test]
+    fn resolve_session_cwd_honors_worktree_key_when_id_missing() {
+        // Reproduces the recreate bug: reconcile sets `worktree_key` but never
+        // `worktree_id`, so a session in a worktree must still resolve to that
+        // worktree's path, not the repo root.
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_host("local").unwrap();
+        let pid = store.upsert_project("o", "r", "/base/r").unwrap();
+        store
+            .upsert_worktree(pid, "feat-x", "/base/r/.claude/worktrees/feat-x", None)
+            .unwrap();
+
+        // worktree_id is None (as after reconcile) but worktree_key points at it.
+        let mut r = row(1, "local", "dev", "work", Some(pid), Some("idle"));
+        r.worktree_key = Some("feat-x".into());
+        assert_eq!(
+            resolve_session_cwd(&store, &r).unwrap(),
+            "/base/r/.claude/worktrees/feat-x"
+        );
+
+        // worktree_key "main" → repo root.
+        let mut rm = row(2, "local", "dev2", "work", Some(pid), Some("idle"));
+        rm.worktree_key = Some("main".into());
+        assert_eq!(resolve_session_cwd(&store, &rm).unwrap(), "/base/r");
+
+        // Unknown key (worktree not in the table) → graceful fallback to root.
+        let mut ru = row(3, "local", "dev3", "work", Some(pid), Some("idle"));
+        ru.worktree_key = Some("gone".into());
+        assert_eq!(resolve_session_cwd(&store, &ru).unwrap(), "/base/r");
+    }
+
+    #[test]
+    fn worktree_path_on_disk_tries_both_layouts() {
+        let base = "/base/r";
+        // `.worktrees/<key>` layout (the case the stale-table bug hit).
+        let only_dot_worktrees = worktree_path_on_disk(base, "test-worktree", |p| {
+            p == "/base/r/.worktrees/test-worktree"
+        });
+        assert_eq!(
+            only_dot_worktrees.as_deref(),
+            Some("/base/r/.worktrees/test-worktree")
+        );
+        // `.claude/worktrees/<key>` is preferred when both exist.
+        let both = worktree_path_on_disk(base, "feat", |_| true);
+        assert_eq!(both.as_deref(), Some("/base/r/.claude/worktrees/feat"));
+        // Neither present → None (caller falls back to the repo root).
+        assert_eq!(worktree_path_on_disk(base, "gone", |_| false), None);
+    }
+
+    #[test]
+    fn cwd_source_remote_honors_worktree_key_when_id_missing() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_host("mefistos").unwrap();
+        let pid = store.upsert_project("acme", "repo", "/base/repo").unwrap();
+
+        let mut r = row(1, "mefistos", "dev", "work", Some(pid), Some("idle"));
+        r.worktree_key = Some("feat-x".into());
+        match cwd_source_for_session(&store, &r).unwrap() {
+            CwdSource::Remote {
+                owner,
+                repo,
+                wt_name,
+            } => {
+                assert_eq!(owner, "acme");
+                assert_eq!(repo, "repo");
+                assert_eq!(wt_name, Some("feat-x".to_string()));
+            }
+            CwdSource::Local(_) => panic!("expected Remote for host=mefistos"),
+        }
+
+        // "main" carries no worktree name → project root on the remote.
+        let mut rm = row(2, "mefistos", "dev2", "work", Some(pid), Some("idle"));
+        rm.worktree_key = Some("main".into());
+        match cwd_source_for_session(&store, &rm).unwrap() {
+            CwdSource::Remote { wt_name, .. } => assert_eq!(wt_name, None),
+            CwdSource::Local(_) => panic!("expected Remote for host=mefistos"),
+        }
+    }
+
+    #[test]
+    fn cwd_source_local_uses_db_path_remote_uses_owner_repo() {
+        let store = Store::open_in_memory().expect("store");
+        store.upsert_host("local").unwrap();
+        store.upsert_host("mefistos").unwrap();
+        let pid = store.upsert_project("acme", "repo", "/base/repo").unwrap();
+        let wid = store
+            .upsert_worktree(pid, "feat-x", "/base/repo/.claude/worktrees/feat-x", None)
+            .unwrap();
+
+        // LOCAL: takes the worktree's stored path verbatim.
+        let lid = store
+            .upsert_session("dev", "local", Some(pid), Some(wid), 1, 1, "running", None)
+            .unwrap();
+        let local_row = store.get_session_by_id(lid).unwrap().unwrap();
+        match cwd_source_for_session(&store, &local_row).unwrap() {
+            CwdSource::Local(p) => assert_eq!(p, "/base/repo/.claude/worktrees/feat-x"),
+            CwdSource::Remote { .. } => panic!("expected Local for host=local"),
+        }
+
+        // REMOTE: captures (owner, repo, wt_name) — the local DB path is
+        // unusable on the remote machine and must NOT leak into the cwd.
+        let rid = store
+            .upsert_session(
+                "dev",
+                "mefistos",
+                Some(pid),
+                Some(wid),
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+        let remote_row = store.get_session_by_id(rid).unwrap().unwrap();
+        match cwd_source_for_session(&store, &remote_row).unwrap() {
+            CwdSource::Remote {
+                owner,
+                repo,
+                wt_name,
+            } => {
+                assert_eq!(owner, "acme");
+                assert_eq!(repo, "repo");
+                assert_eq!(wt_name.as_deref(), Some("feat-x"));
+            }
+            CwdSource::Local(_) => panic!("expected Remote for non-local host"),
+        }
+
+        // REMOTE without worktree → wt_name = None, so remote_project_path
+        // returns the project root.
+        let rid2 = store
+            .upsert_session("dev2", "mefistos", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
+        let remote_row2 = store.get_session_by_id(rid2).unwrap().unwrap();
+        match cwd_source_for_session(&store, &remote_row2).unwrap() {
+            CwdSource::Remote { wt_name, .. } => assert!(wt_name.is_none()),
+            CwdSource::Local(_) => panic!("expected Remote for non-local host"),
+        }
+    }
+
+    #[test]
+    fn cwd_source_remote_without_project_errors() {
+        let store = Store::open_in_memory().expect("store");
+        store.upsert_host("mefistos").unwrap();
+        let id = store
+            .upsert_session("orphan", "mefistos", None, None, 1, 1, "running", None)
+            .unwrap();
+        let row = store.get_session_by_id(id).unwrap().unwrap();
+        let err = cwd_source_for_session(&store, &row).unwrap_err();
+        assert_eq!(err.code, "E_NOREPO");
+    }
+
+    #[test]
     fn worktree_key_root_is_main_local_and_remote() {
         assert_eq!(
             worktree_key_for_path(
@@ -2238,6 +2563,20 @@ mod tests {
                 "/home/mjanci/projects/github.com/o/r/.claude/worktrees/feat-auth/src"
             ),
             Some("feat-auth".to_string())
+        );
+    }
+
+    #[test]
+    fn worktree_key_extracts_dot_worktrees_named_worktree() {
+        // The `.worktrees/` layout (no `.claude/` prefix) must also key to the
+        // worktree name — otherwise these sessions recreate at the repo root.
+        assert_eq!(
+            worktree_key_for_path("/Users/x/projects/github.com/o/r/.worktrees/changelog"),
+            Some("changelog".to_string())
+        );
+        assert_eq!(
+            worktree_key_for_path("/home/mjanci/projects/github.com/o/r/.worktrees/changelog/src"),
+            Some("changelog".to_string())
         );
     }
 
@@ -2601,5 +2940,120 @@ mod ghost_tests {
             .get_session_by_id(id)
             .unwrap()
             .is_none());
+    }
+
+    fn set_friendly_args(host: &str, tmux: &str, label: &str) -> SetFriendlyNameArgs {
+        SetFriendlyNameArgs {
+            host_alias: host.into(),
+            tmux_name: tmux.into(),
+            friendly_name: label.into(),
+        }
+    }
+
+    #[test]
+    fn set_friendly_name_round_trips_through_store() {
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("h").unwrap();
+            s.upsert_session("dev-x", "h", None, None, 1, 1, "running", None)
+                .unwrap();
+        }
+        let row =
+            set_session_friendly_name(set_friendly_args("h", "dev-x", "fix login bug"), &store)
+                .expect("update");
+        assert_eq!(row.friendly_name.as_deref(), Some("fix login bug"));
+        // Persisted, not just returned.
+        let stored = store
+            .lock()
+            .unwrap()
+            .get_session("dev-x", "h")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.friendly_name.as_deref(), Some("fix login bug"));
+    }
+
+    #[test]
+    fn set_friendly_name_trims_and_whitespace_clears() {
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("h").unwrap();
+            s.upsert_session("dev-x", "h", None, None, 1, 1, "running", None)
+                .unwrap();
+            // Seed an existing label so we can prove the clear path actually nulls it.
+            s.set_friendly_name("h", "dev-x", Some("old label"))
+                .unwrap();
+        }
+        // Padding around real content is trimmed.
+        let row =
+            set_session_friendly_name(set_friendly_args("h", "dev-x", "  trimmed label  "), &store)
+                .expect("update");
+        assert_eq!(row.friendly_name.as_deref(), Some("trimmed label"));
+        // Whitespace-only input clears.
+        let row = set_session_friendly_name(set_friendly_args("h", "dev-x", "   "), &store)
+            .expect("clear");
+        assert!(row.friendly_name.is_none());
+        // Empty input also clears.
+        let row = set_session_friendly_name(set_friendly_args("h", "dev-x", ""), &store)
+            .expect("clear empty");
+        assert!(row.friendly_name.is_none());
+    }
+
+    #[test]
+    fn set_friendly_name_works_on_bg_session_rows() {
+        // Regression: synthetic bg rows have `tmux_name = "bg:<uuid>"`, which
+        // contains ':'. The create-mode `tmux_name` validator rejects ':',
+        // so the lookup-mode `tmux_name_lookup` validator must be used here
+        // — otherwise every bg agent fails with E_INVALID at the MCP layer.
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let bg_name = format!("bg:{uuid}");
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            s.upsert_bg_session("local", &bg_name, None, uuid, Some("working"), 1)
+                .unwrap();
+        }
+        let row = set_session_friendly_name(
+            set_friendly_args("local", &bg_name, "review hardening spec"),
+            &store,
+        )
+        .expect("bg row must be addressable");
+        assert_eq!(row.tmux_name, bg_name);
+        assert_eq!(row.kind, "bg");
+        assert_eq!(row.friendly_name.as_deref(), Some("review hardening spec"));
+    }
+
+    #[test]
+    fn set_friendly_name_returns_not_found_when_row_absent() {
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("h").unwrap();
+            // No session inserted.
+        }
+        let err = set_session_friendly_name(set_friendly_args("h", "ghost", "x"), &store)
+            .expect_err("absent row");
+        assert_eq!(err.code, "E_NOTFOUND");
+    }
+
+    #[test]
+    fn set_friendly_name_rejects_invalid_input() {
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("h").unwrap();
+            s.upsert_session("dev-x", "h", None, None, 1, 1, "running", None)
+                .unwrap();
+        }
+        // Control char rejected by validate::friendly_name.
+        let err = set_session_friendly_name(set_friendly_args("h", "dev-x", "bad\nlabel"), &store)
+            .expect_err("control char");
+        assert_eq!(err.code, "E_INVALID");
+        // Bad host alias rejected before any UPDATE.
+        let err = set_session_friendly_name(set_friendly_args("-evil", "dev-x", "x"), &store)
+            .expect_err("bad alias");
+        assert_eq!(err.code, "E_INVALID");
     }
 }

@@ -13,6 +13,7 @@
     newBgSession,
     purgeProject,
     showBgAgents,
+    showFriendlyNames,
     type SessionRow,
   } from './sessions';
   import { type ProjectRow } from './projects';
@@ -123,7 +124,8 @@
     return sessionsForProject(p.project.id).some(
       (s) =>
         s.tmux_name.toLowerCase().includes(needle) ||
-        s.host_alias.toLowerCase().includes(needle),
+        s.host_alias.toLowerCase().includes(needle) ||
+        (s.friendly_name?.toLowerCase().includes(needle) ?? false),
     );
   }
 
@@ -555,7 +557,9 @@
         {#if sess.status === 'ghost'}
           <span class="status-dot status-ghost" title="ghost — session lost" aria-hidden="true"></span>
           <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
-          <span class="sess-name">{sess.tmux_name}</span>
+          <span class="sess-name" title={sess.tmux_name}>{
+            $showFriendlyNames && sess.friendly_name ? sess.friendly_name : sess.tmux_name
+          }</span>
           {#if sess.lost_at}
             <span class="lost-at" title="Lost at {new Date(sess.lost_at * 1000).toLocaleString()}">
               lost {timeAgo(sess.lost_at)}
@@ -599,7 +603,9 @@
             <span class="bg-badge" role="img" title="background agent" aria-label="background agent">🤖</span>
           {/if}
           <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
-          <span class="sess-name">{sess.tmux_name}</span>
+          <span class="sess-name" title={sess.tmux_name}>{
+            $showFriendlyNames && sess.friendly_name ? sess.friendly_name : sess.tmux_name
+          }</span>
           {#if sess.claude_status}
             <span
               class="claude-chip"
@@ -736,6 +742,18 @@
         onclick={() => showBgAgents.update((v) => !v)}
       >
         🤖 bg {$showBgAgents ? 'on' : 'off'}
+      </button>
+      <button
+        class="pill"
+        class:active={$showFriendlyNames}
+        data-testid="friendly-name-toggle"
+        aria-pressed={$showFriendlyNames}
+        title={$showFriendlyNames
+          ? 'Show raw tmux names'
+          : 'Show agent-set friendly names'}
+        onclick={() => showFriendlyNames.update((v) => !v)}
+      >
+        🏷 friendly {$showFriendlyNames ? 'on' : 'off'}
       </button>
     </nav>
 
