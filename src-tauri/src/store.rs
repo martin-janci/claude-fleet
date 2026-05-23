@@ -1297,6 +1297,19 @@ impl Store {
             .optional()
     }
 
+    /// Worktree's logical name (the leaf used in remote
+    /// `~/projects/.../.claude/worktrees/<name>` paths). The on-host `path`
+    /// column is local-machine-only and unusable for remote rebuilds.
+    pub fn worktree_name(&self, id: i64) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT name FROM worktrees WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
     pub fn project_base_path(&self, id: i64) -> Result<Option<String>, rusqlite::Error> {
         self.conn
             .query_row(
