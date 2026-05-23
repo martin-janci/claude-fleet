@@ -136,7 +136,9 @@
   // Tokenised file body, one token row per line. Keyed off the path's
   // extension; binary files never reach here.
   const hlLines = $derived(
-    file && !file.binary ? highlight(file.content, langForPath(path)) : [],
+    file && !file.binary && !file.is_dir
+      ? highlight(file.content, langForPath(path))
+      : [],
   );
 </script>
 
@@ -179,7 +181,9 @@
           <DiffView diff={diff.diff} />
         {/if}
       {:else if view === 'file' && file}
-        {#if file.binary}
+        {#if file.is_dir}
+          <p class="hint">This entry is a directory — no file content to show.</p>
+        {:else if file.binary}
           <p class="hint">Binary file — content not shown.</p>
         {:else}
           {#if file.truncated}

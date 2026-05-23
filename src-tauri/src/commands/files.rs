@@ -53,6 +53,9 @@ pub struct FileContent {
     pub content: String,
     pub truncated: bool,
     pub binary: bool,
+    /// True when `path` is a directory (e.g. an embedded git repo) rather
+    /// than a file; `content` is empty.
+    pub is_dir: bool,
     /// Byte size when fully read; `None` when the file was truncated.
     pub size: Option<u64>,
 }
@@ -222,7 +225,8 @@ pub async fn repo_file_impl(
     let (host, name) = session_target(store, args.session_id)?;
     // `git ls-files --others` reports an embedded git repo (e.g. a nested
     // worktree) as a single directory entry; running `head` on it would leak
-    // a raw "Is a directory" error. Detect that first and report it cleanly.
+    // a raw "Is a directory" error. Detect that first and flag it as a
+    // directory so the viewer can show a calm message.
     // Read one byte past the cap so we can tell "exactly cap" from "truncated".
     let body = format!(
         "f=\"$root\"/{path}\n\
@@ -235,10 +239,14 @@ pub async fn repo_file_impl(
     let out = run_in_repo(ssh, &host, &script).await?;
     if !out.status.success() {
         if String::from_utf8_lossy(&out.stderr).contains("cf-is-dir") {
-            return Err(IpcError::new(
-                "E_REPO",
-                format!("{} is a directory, not a file", args.path),
-            ));
+            return Ok(FileContent {
+                path: args.path,
+                content: String::new(),
+                truncated: false,
+                binary: false,
+                is_dir: true,
+                size: None,
+            });
         }
         return Err(repo_err(&out));
     }
@@ -255,6 +263,7 @@ pub async fn repo_file_impl(
         },
         truncated,
         binary,
+        is_dir: false,
         size: if truncated {
             None
         } else {
