@@ -45,6 +45,12 @@ Hide or show a host. Hidden hosts are skipped during reconcile. Returns the upda
 
 Parameters: `alias`, `hidden`
 
+### `inbox`
+
+Read the caller session's inbox. Returns the messages sent TO `session_id`, newest-first; `unread_only` filters and `mark_read` (default true) flips the returned unread rows to read. Pass `mark_read: false` to peek without consuming.
+
+Parameters: `limit`, `mark_read`, `session_id`, `unread_only`
+
 ### `kill_session`
 
 Kill a tmux session on a host. Returns the killed session's id.
@@ -82,6 +88,12 @@ Parameters: `host_alias`, `name`, `project_id`, `worktree_id`
 ### `peek_session`
 
 Peek at a session's background Claude logs. Returns an informational message for interactive sessions with no background job.
+
+Parameters: `session_id`
+
+### `peer_status`
+
+What is a peer session currently doing? Returns the reconcile-derived `claude_status`, `current_activity`, `stuck_kind`, and `context_pct` for one session, plus its host/name/status. Useful before sending a message or broadcasting work.
 
 Parameters: `session_id`
 
@@ -182,6 +194,12 @@ Parameters: `session_id`
 Restart a tmux session (kill and recreate it in the same place). Returns the updated session row as JSON.
 
 Parameters: `force`, `host_alias`, `name`
+
+### `send_message`
+
+Send a peer-to-peer message from one session to another. The message is persisted to the recipient's inbox (read with `inbox`); set `deliver: true` to ALSO type the message into the recipient's tmux pane with a `[msg #id from name@host]:` header. The inbox row is the source of truth — it lands even if the pane delivery fails. Returns JSON with the new message id and the delivery outcome.
+
+Parameters: `body`, `deliver`, `from_session_id`, `kind`, `submit`, `to_session_id`
 
 ### `send_prompt`
 
