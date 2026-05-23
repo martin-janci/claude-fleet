@@ -24,24 +24,58 @@ live tmux *screen*, not a clean transcript. So driving a session is a loop:
    spinner), wait and capture again. Repeat until you see Claude's input prompt
    box / a bare `>` with no activity (idle) or your task is done.
 
-Always get `session_id` from `list_sessions` first (rows carry `id`,
-`tmux_name`, `host_alias`, `status`). Orient with `fleet_health` / `list_hosts`
-/ `list_projects` when you don't yet know what exists.
+Always get `session_id` from `list_sessions` first. Each row now carries the
+auto-derived fields the reconcile pass fills in — use them instead of
+capturing panes when you only need a quick read:
+
+- `claude_status` — `working` / `idle` / `stuck` / unknown
+- `current_activity` — REPL footer line ("Sketching", "Running test", …)
+- `stuck_kind` — `auth_menu` / `confirmation` / `none`
+- `context_pct` — percent of context window used
+- `is_controller` — true on the calling session once you've registered (see below)
+
+Orient with `fleet_health` / `list_hosts` / `list_projects` when you don't yet
+know what exists.
+
+## Identifying yourself — `register_self`
+
+Before doing any session lifecycle work, call **`register_self { host_alias,
+tmux_name }`** once at the top of your run. This records you as the fleet
+controller in the store. Effects:
+
+- `list_sessions` marks your row with `is_controller: true` so other
+  controllers can recognise you.
+- `kill_session` / `restart_session` / `recreate_session` will **refuse** to
+  target the controller — they return `E_SELF_TARGET`. Pass `force: true` if
+  you really mean to act on yourself (e.g. a deliberate restart).
+- `broadcast_prompt` excludes the controller from its fan-out by default, so
+  you never spam yourself.
+
+Skip this only for read-only or one-shot tasks where you'll never be a
+plausible target.
 
 ## Recovering a misbehaving session — escalation ladder
+
+**Look before you climb.** Read the row from `list_sessions` (or call
+`peer_status`) and use `claude_status`, `stuck_kind`, and `context_pct` to
+pick the right rung — don't `recreate_session` something that just needs a
+nudge.
 
 Climb only as far as needed; each step is more destructive:
 
 | Symptom | Action |
 | --- | --- |
-| Waiting at a prompt / needs a nudge | `send_prompt(session_id, "continue")` |
+| `claude_status: stuck` with `stuck_kind: confirmation` / `auth_menu` | `send_prompt(session_id, "1")` (or the right keystroke) to dismiss it |
+| `claude_status: idle` but waiting at a prompt | `send_prompt(session_id, "continue")` |
+| `context_pct` near 100 — the conversation is full | `recreate_session` resumes the same Claude id in a fresh REPL |
 | REPL itself wedged, but tmux fine | `restart_session` — relaunches Claude in place |
 | Frozen / eating RAM / needs a clean slate | `recreate_session` — kills + rebuilds the tmux session in the same worktree, **resuming the same Claude conversation** |
-| Lost from tmux (ghost — shows `status: "ghost"` in `list_sessions`) | `recreate_session` to bring it back, or `dismiss_ghost_session` to drop it |
+| Lost from tmux (ghost — `status: "ghost"` in `list_sessions`) | `recreate_session` to bring it back, or `dismiss_ghost_session` to drop it |
 
-`recreate_session` is destructive (kills the running process) but preserves the
-conversation via session-id resume — prefer `send_prompt`/`restart` for
-in-place fixes.
+`recreate_session` is destructive (kills the running process) but preserves
+the conversation via session-id resume — prefer `send_prompt`/`restart` for
+in-place fixes. If the target is the registered controller, pass
+`force: true` or the call refuses with `E_SELF_TARGET`.
 
 ## Inspecting a session's work
 
@@ -49,6 +83,17 @@ Before reporting or acting, read the worktree (read-only): `repo_changes`
 (status), `repo_diff(session_id, path)` (one file's diff), `repo_file`,
 `repo_tree`; and git state via `repo_log` / `repo_branches` / `repo_commit` /
 `repo_commit_diff`.
+
+## Session timeline — `session_history`
+
+Every status change, prompt send, stuck detection, kill, recreate, and
+peer message is appended to a per-session event log. Pull it with
+**`session_history { session_id, limit? }`** when you need the *story* of
+what happened — `capture_session` only shows the current screen.
+
+Recorded `kind`s: `status_change` · `prompt_sent` · `stuck` · `killed` ·
+`recreated` · `message_sent` · `message_received`. The response is newest-
+first; default `limit` is 50.
 
 ## Checking what a peer is doing — `peer_status`
 
@@ -94,9 +139,28 @@ B → send_message(from=B, to=A, body="LGTM", kind="reply", deliver=true)
 A → inbox(session_id=A)                # or sees the pane line directly
 ```
 
-For one-to-many work you still want `broadcast_prompt` (typed straight into
-every matching session's pane). For one-to-one coordination, prefer
-`send_message`.
+For one-to-many work use `broadcast_prompt` (next section); for one-to-one
+coordination prefer `send_message`.
+
+## Broadcasting to many sessions — `broadcast_prompt`
+
+When the same instruction needs to reach every matching work session,
+**`broadcast_prompt { host?, project_id?, status?, prompt, submit? }`** is the
+fan-out. The filter is AND-combined; omit a field to leave it open:
+
+- `host` — only sessions on this host alias
+- `project_id` — only sessions in this project (from `list_projects`)
+- `status` — only sessions whose `claude_status` matches (e.g. `"idle"`)
+
+The call returns a per-session result vector (sent / failed counts + each
+target's outcome) so you can see who got it. Two implicit guardrails: only
+**work** sessions are eligible (background sessions are skipped), and the
+registered controller is excluded — so you never broadcast to yourself.
+
+Typical use: `broadcast_prompt { status: "idle", prompt: "git pull && pnpm test" }`
+to wake every idle worker. Use `peer_status`/`list_sessions` first to set a
+realistic `status` filter — broadcasting to `working` sessions interrupts
+them mid-stream.
 
 ## Headless work
 
