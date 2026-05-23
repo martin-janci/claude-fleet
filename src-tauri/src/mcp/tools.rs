@@ -188,6 +188,20 @@ pub struct SendPromptParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct BroadcastPromptParams {
+    /// Only target sessions on this host alias (omit for all hosts).
+    pub host: Option<String>,
+    /// Only target sessions in this project id (omit for all projects).
+    pub project_id: Option<i64>,
+    /// Only target sessions whose claude_status equals this (omit for any).
+    pub status: Option<String>,
+    /// The prompt text to deliver to every matching session.
+    pub prompt: String,
+    /// Press Enter to submit after the literal text. Defaults to true.
+    pub submit: Option<bool>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SpawnReviewParams {
     /// Id of the session whose work should be reviewed.
     pub source_session_id: i64,
@@ -603,6 +617,32 @@ impl FleetTools {
         Ok(CallToolResult::success(vec![text_content(
             "prompt delivered",
         )]))
+    }
+
+    #[tool(description = "Send the same prompt to every matching work session \
+        (excludes the controller). Returns per-session results.")]
+    async fn broadcast_prompt(
+        &self,
+        Parameters(p): Parameters<BroadcastPromptParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // Prompt body intentionally not logged.
+        audit(
+            "broadcast_prompt",
+            &format!(
+                "host={:?} project_id={:?} status={:?}",
+                p.host, p.project_id, p.status
+            ),
+        );
+        let filter = sessions::BroadcastFilter {
+            host: p.host,
+            project_id: p.project_id,
+            status: p.status,
+        };
+        let submit = p.submit.unwrap_or(true);
+        let summary = sessions::broadcast_prompt(filter, p.prompt, submit, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&summary)
     }
 
     #[tool(description = "Spawn a review session: a new Claude session in the \
