@@ -1,11 +1,15 @@
 # claude-fleet
 
+[![CI](https://github.com/martin-janci/claude-fleet/actions/workflows/ci.yml/badge.svg)](https://github.com/martin-janci/claude-fleet/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/martin-janci/claude-fleet?display_name=tag&sort=semver)](https://github.com/martin-janci/claude-fleet/releases)
+
 A native cross-platform desktop app for managing long-lived [Claude Code](https://claude.com/claude-code) sessions running in tmux across multiple machines (mac, mefistos, hetzner). Built with Rust + Tauri 2 + Svelte.
 
-> Status: iteration 4a complete — multi-host SSH, account model, cross-host
-> session memory, prompt transfer, and the async/event-driven responsiveness
-> rework are all landed. Handoff and Freeze (original spec §8.3–8.4) remain
-> unimplemented. See [docs/specs](docs/specs/) for the per-iteration designs and
+> Status: multi-host SSH, account model, cross-host session memory, prompt
+> transfer, the async/event-driven responsiveness rework, the embedded MCP
+> control API, background sessions, and the background reconcile tick are all
+> landed. Handoff and Freeze (original spec §8.3–8.4) remain unimplemented. See
+> [docs/specs](docs/specs/) for the per-iteration designs and
 > [docs/plans](docs/plans/) for the implementation plans.
 
 ## Features
@@ -72,6 +76,15 @@ A hardening review (2026-05-21, see
 [docs/specs/2026-05-21-hardening-review.md](docs/specs/2026-05-21-hardening-review.md))
 catalogues open issues. Highest priority: SSH host-alias validation, migration
 atomicity, and the single-global-PTY races in `TerminalView`.
+
+## Releasing & documentation
+
+- Versioning and changelog are automated via release-please — see
+  [docs/RELEASING.md](docs/RELEASING.md).
+- **Control API reference:** [docs/control-api-reference.md](docs/control-api-reference.md)
+  (generated from source) and [docs/control-api.md](docs/control-api.md) (guide).
+- **Rust API docs (rustdoc):** published to GitHub Pages on each release —
+  https://martin-janci.github.io/claude-fleet/
 
 ## License
 
