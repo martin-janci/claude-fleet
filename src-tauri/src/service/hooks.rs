@@ -23,15 +23,21 @@ pub fn apply_hook(store: &Arc<Mutex<Store>>, payload: &HookPayload) -> Result<()
     }
 }
 
-/// Mark the matching session's `claude_status` as "stopped".
+/// Mark the matching session's `claude_status` as "idle".
 /// Matches by `claude_session_id`. No-ops if no session has this ID.
+///
+/// Claude Code's `Stop` hook fires when the agent finishes a turn and is ready
+/// for input again — NOT when the session terminates. So the right status is
+/// "idle", not "stopped": stamping "stopped" here made every normal
+/// turn-completion mark the session stopped, and reconcile's pane heuristic
+/// never produced "stopped" to clear it, so sessions hung in "stopped".
 fn apply_stop_hook(store: &Arc<Mutex<Store>>, payload: &HookPayload) -> Result<(), IpcError> {
     let session_id = match &payload.session_id {
         Some(id) => id.clone(),
         None => return Ok(()),
     };
     let s = store.lock().map_err(|_| lock_err())?;
-    s.set_claude_status_by_session_id(&session_id, "stopped")
+    s.set_claude_status_by_session_id(&session_id, "idle")
 }
 
 /// Auto-register a worktree created by Claude Code's WorktreeCreate tool.
@@ -115,6 +121,28 @@ mod tests {
         let store = make_store();
         let payload = make_payload("Stop", "no-such-id");
         assert!(apply_hook(&store, &payload).is_ok());
+    }
+
+    #[test]
+    fn stop_hook_sets_matching_session_to_idle() {
+        // A turn finishing (Stop hook) means the session is idle/ready, not
+        // terminated — see apply_stop_hook.
+        let store = make_store();
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let id = s
+                .upsert_session("sess", "local", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.set_claude_session_id(id, "uuid-1").unwrap();
+            // Pretend it was last seen working.
+            s.set_claude_status_by_session_id("uuid-1", "working")
+                .unwrap();
+        }
+        apply_hook(&store, &make_payload("Stop", "uuid-1")).unwrap();
+        let s = store.lock().unwrap();
+        let row = s.get_session("sess", "local").unwrap().unwrap();
+        assert_eq!(row.claude_status.as_deref(), Some("idle"));
     }
 
     #[test]

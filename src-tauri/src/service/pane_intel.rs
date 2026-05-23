@@ -277,21 +277,27 @@ fn derive_status(stuck: Option<StuckKind>, stripped: &str) -> Option<&'static st
     if lower.trim().is_empty() {
         return None;
     }
-    // Active spinner / in-progress markers seen in the REPL.
-    let working = lower.contains("esc to interrupt")
-        || lower.contains("in progress…")
-        || lower.contains("in progress...")
-        || lower.contains("tool use")
-        || lower.contains("running…")
-        || lower.contains("running...")
-        // A tool-call line: "⏺ Bash(...)" / "⏺ Read(...)".
-        || stripped.contains('⏺');
-    if working {
+    // WORKING only while Claude is actively generating. The interrupt hint sits
+    // in the live REPL footer and vanishes the instant the turn ends, so it is
+    // the one reliable "still running" signal.
+    //
+    // We deliberately do NOT key off `⏺` tool glyphs, "tool use", or
+    // "running…"/"in progress…": those persist in the captured scrollback long
+    // after the work finished (e.g. a completed "⏺ Bash(…)" line, or the summary
+    // text "41 tool uses"), which made idle sessions read as "working" forever.
+    if lower.contains("esc to interrupt") {
         return Some("working");
     }
-    // A prompt-ready footer ("? for shortcuts", the "N% used" status bar) means
-    // the REPL is sitting idle waiting for input.
-    if lower.contains("? for shortcuts") || lower.contains("% used") {
+    // IDLE: the REPL is showing its input chrome — the status bar, the
+    // permissions/mode footer, the shortcut hint, or a selection menu waiting on
+    // a keystroke. Any of these means the turn is over and Claude wants input.
+    if lower.contains("? for shortcuts")
+        || lower.contains("% used")
+        || lower.contains("bypass permissions")
+        || lower.contains("shift+tab to cycle")
+        || lower.contains("enter to select")
+        || lower.contains("esc to cancel")
+    {
         return Some("idle");
     }
     None
@@ -411,13 +417,46 @@ mod tests {
     }
 
     #[test]
-    fn normal_tool_line_is_activity_and_working() {
-        let tail = "⏺ Bash(cargo test)\n  ⎿ Running…\n";
+    fn active_generation_with_interrupt_footer_is_working() {
+        // "esc to interrupt" in the live footer is the one reliable "still
+        // generating" signal.
+        let tail = "⏺ Bash(cargo test)\n  ⎿ Running…\n✶ Cooking… (3s · esc to interrupt)\n";
         let intel = analyze(tail);
         assert!(intel.stuck.is_none());
         assert_eq!(intel.derived_status, Some("working"));
         let activity = intel.activity.expect("activity");
-        assert!(activity.contains("Running") || activity.contains("⏺"));
+        assert!(
+            activity.contains("interrupt")
+                || activity.contains("Running")
+                || activity.contains("⏺")
+        );
+    }
+
+    #[test]
+    fn lingering_tool_glyph_with_idle_footer_is_idle_not_working() {
+        // LIVE-CAPTURED shape: a finished "⏺ …" line still sits in the tail, but
+        // the footer shows the idle status bar. Must be idle, not working — this
+        // exact case made sessions hang in "working".
+        let tail = "⏺ Yes — all merged, queue empty.\n  - 7 work PRs MERGED\n  [███████░░] 59% used  |  Opus 4.7  |  /Users/me/proj\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents";
+        assert_eq!(analyze(tail).derived_status, Some("idle"));
+    }
+
+    #[test]
+    fn idle_repl_footer_without_percent_is_idle() {
+        // LIVE-CAPTURED shape: a fresh session whose footer shows the model +
+        // permissions hint but NO "% used". Previously yielded None → the upsert
+        // COALESCE froze the prior status. Must classify as idle.
+        let tail = "❯ \n────────\n  Opus 4.7 (1M context)  |  /Users/me/proj\n  ⏵⏵ bypass permissions on (shift+tab to cycle)";
+        assert_eq!(analyze(tail).derived_status, Some("idle"));
+    }
+
+    #[test]
+    fn selection_menu_waiting_for_input_is_idle() {
+        // LIVE-CAPTURED shape: an interactive menu (e.g. a brainstorming
+        // question) is waiting on a keystroke. The "41 tool uses" summary text
+        // previously tripped the "tool use" working heuristic.
+        let tail = "⏺ Explore(bg sessions)\n  ⎿  Done (41 tool uses · 133.5k tokens · 2m 1s)\n❯ 1. Show bg, toggle to hide\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel";
+        assert_eq!(analyze(tail).derived_status, Some("idle"));
     }
 
     #[test]
