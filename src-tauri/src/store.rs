@@ -107,6 +107,11 @@ pub struct ReconcileSession<'a> {
     pub current_activity: Option<String>,
     pub context_pct: Option<f64>,
     pub stuck_kind: Option<String>,
+    /// Whether this pass actually captured & analyzed the session's pane. When
+    /// `true`, `stuck_kind` is authoritative and a `None` CLEARS any prior stuck
+    /// flag; when `false` (capture failed / pane absent) the prior `stuck_kind`
+    /// is preserved. Without this, a once-set stuck flag could never clear.
+    pub intel_observed: bool,
 }
 
 /// All inputs for applying one host's probe result atomically. Consumed by
@@ -1280,6 +1285,7 @@ impl Store {
         current_activity: Option<&str>,
         context_pct: Option<f64>,
         stuck_kind: Option<&str>,
+        intel_observed: bool,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
         // Check existence before the write so we can distinguish created vs updated.
@@ -1311,7 +1317,11 @@ impl Store {
                pr_url=COALESCE(excluded.pr_url, pr_url),
                current_activity=COALESCE(excluded.current_activity, current_activity),
                context_pct=COALESCE(excluded.context_pct, context_pct),
-               stuck_kind=COALESCE(excluded.stuck_kind, stuck_kind)",
+               -- stuck_kind is authoritative when the pane was observed this
+               -- pass (?16): a NULL then CLEARS a stale flag. When the pane was
+               -- NOT observed (capture failed) we preserve the prior value.
+               stuck_kind=CASE WHEN ?16 THEN excluded.stuck_kind
+                               ELSE COALESCE(excluded.stuck_kind, stuck_kind) END",
             rusqlite::params![
                 tmux_name,
                 host_alias,
@@ -1327,7 +1337,8 @@ impl Store {
                 pr_url,
                 current_activity,
                 context_pct,
-                stuck_kind
+                stuck_kind,
+                intel_observed
             ],
         )?;
         if let Some(row) = fetch_session(tx, tmux_name, host_alias)? {
@@ -1498,6 +1509,7 @@ impl Store {
                         sess.current_activity.as_deref(),
                         sess.context_pct,
                         sess.stuck_kind.as_deref(),
+                        sess.intel_observed,
                         &mut out,
                     )?;
                     if let Some(pid) = sess.project_id {
@@ -2714,6 +2726,70 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_clears_stuck_kind_only_when_pane_observed() {
+        let (mut store, _bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let pid = store.upsert_project("o", "r", "/base/r").unwrap();
+
+        let pass = |store: &mut Store, stuck: Option<&str>, observed: bool| {
+            let sessions = vec![ReconcileSession {
+                tmux_name: "s1",
+                project_id: Some(pid),
+                created_at: 1,
+                last_activity_at: 1,
+                account_uuid: None,
+                worktree_key: None,
+                claude_session_id: None,
+                claude_status: None,
+                effort_level: None,
+                pr_url: None,
+                current_activity: None,
+                context_pct: None,
+                stuck_kind: stuck.map(|s| s.to_string()),
+                intel_observed: observed,
+            }];
+            store
+                .apply_host_reconcile(HostReconcile {
+                    alias: "alpha",
+                    reachable: true,
+                    claude_version: None,
+                    tmux_version: None,
+                    last_pinged_at: 1,
+                    sessions: &sessions,
+                    keep: &["s1".to_string()],
+                })
+                .unwrap();
+        };
+        let stuck_of = |store: &Store| {
+            store
+                .get_session("s1", "alpha")
+                .unwrap()
+                .unwrap()
+                .stuck_kind
+        };
+
+        // Observed pane, stuck detected → flag stored.
+        pass(&mut store, Some("reconnect"), true);
+        assert_eq!(stuck_of(&store).as_deref(), Some("reconnect"));
+
+        // Capture FAILED (pane not observed), no stuck → prior flag preserved.
+        pass(&mut store, None, false);
+        assert_eq!(
+            stuck_of(&store).as_deref(),
+            Some("reconnect"),
+            "must preserve stuck_kind when the pane was not observed"
+        );
+
+        // Observed pane, stuck no longer present → flag CLEARED.
+        pass(&mut store, None, true);
+        assert_eq!(
+            stuck_of(&store),
+            None,
+            "must clear stuck_kind when the pane was observed and shows no stuck state"
+        );
+    }
+
+    #[test]
     fn apply_host_reconcile_happy_path_persists_all_and_emits_after_commit() {
         let (mut store, bus) = store_with_recorder();
         store.upsert_host("alpha").unwrap();
@@ -2745,6 +2821,7 @@ mod tests {
                 current_activity: None,
                 context_pct: None,
                 stuck_kind: None,
+                intel_observed: false,
             },
             // brand new → create
             ReconcileSession {
@@ -2761,6 +2838,7 @@ mod tests {
                 current_activity: None,
                 context_pct: None,
                 stuck_kind: None,
+                intel_observed: false,
             },
         ];
         let keep = vec!["keep-existing".to_string(), "fresh".to_string()];
@@ -2933,6 +3011,7 @@ mod tests {
                 current_activity: None,
                 context_pct: None,
                 stuck_kind: None,
+                intel_observed: false,
             },
             ReconcileSession {
                 tmux_name: "bad",
@@ -2948,6 +3027,7 @@ mod tests {
                 current_activity: None,
                 context_pct: None,
                 stuck_kind: None,
+                intel_observed: false,
             },
         ];
         let keep = vec!["good".to_string(), "bad".to_string()];

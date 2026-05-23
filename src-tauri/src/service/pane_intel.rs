@@ -171,17 +171,37 @@ fn parse_trailing_number(s: &str) -> Option<f64> {
     num.parse::<f64>().ok()
 }
 
+/// True iff `needle` occurs in `haystack` delimited by non-alphanumeric
+/// boundaries — so "oom" matches "(oom)" or "killed: oom" but NOT "zoom",
+/// "room", or "boom". Used to keep the bare OOM acronym from false-matching
+/// innocent words.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    haystack.match_indices(needle).any(|(i, _)| {
+        let before_ok = haystack[..i]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric());
+        let after_ok = haystack[i + needle.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric());
+        before_ok && after_ok
+    })
+}
+
 /// Detect a stuck state from the (already ANSI-stripped) tail. First match wins,
 /// ordered most-specific first.
 fn detect_stuck(text: &str) -> Option<StuckKind> {
     let lower = text.to_lowercase();
 
-    // OOM / allocation failure.
+    // OOM / allocation failure. The acronym is matched only as a whole word
+    // (plus the explicit "oomkilled") so prose like "zoom"/"room" can't trip it.
     if lower.contains("out of memory")
-        || lower.contains("oom")
         || lower.contains("cannot allocate memory")
         || lower.contains("javascript heap out of memory")
         || lower.contains("fatal error: reached heap limit")
+        || lower.contains("oomkilled")
+        || contains_word(&lower, "oom")
     {
         return Some(StuckKind::Oom);
     }
@@ -377,6 +397,23 @@ mod tests {
         let intel = analyze("Update available.\nPress Enter to continue\n");
         assert_eq!(intel.stuck, Some(StuckKind::PressEnter));
         assert_eq!(intel.derived_status, Some("blocked"));
+    }
+
+    #[test]
+    fn oom_matches_real_signals_not_innocent_words() {
+        // Real OOM signals are still detected.
+        assert_eq!(
+            analyze("Killed process 123 (OOM)").stuck,
+            Some(StuckKind::Oom)
+        );
+        assert_eq!(
+            analyze("container terminated reason=OOMKilled").stuck,
+            Some(StuckKind::Oom)
+        );
+        // Innocent words that merely contain the letters "oom" must NOT trip it
+        // (this was the false-positive: e.g. a session discussing Zoom).
+        assert_eq!(analyze("Let's zoom into the room — boom!").stuck, None);
+        assert_eq!(analyze("⏺ Joining the Zoom meeting room").stuck, None);
     }
 
     #[test]

@@ -149,6 +149,10 @@ fn reconcile_write_one_host(
                     current_activity: pane.and_then(|p| p.activity.clone()),
                     context_pct: pane.and_then(|p| p.context_pct),
                     stuck_kind,
+                    // Pane captured this pass ⇒ stuck_kind is authoritative and a
+                    // None clears any stale flag; a failed capture (pane absent)
+                    // leaves intel_observed false so the prior flag is preserved.
+                    intel_observed: pane.is_some(),
                 });
             }
             s.apply_host_reconcile(HostReconcile {
