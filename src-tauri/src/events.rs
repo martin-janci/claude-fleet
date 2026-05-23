@@ -33,6 +33,11 @@ pub struct HostRemovedPayload {
     pub alias: String,
 }
 
+#[derive(Serialize, Clone)]
+pub struct WorktreeRemovedPayload {
+    pub id: i64,
+}
+
 pub trait EventBus: Send + Sync {
     fn session_created(&self, row: &SessionRow);
     fn session_updated(&self, row: &SessionRow);
@@ -43,6 +48,7 @@ pub trait EventBus: Send + Sync {
     fn account_upserted(&self, row: &AccountRow);
     fn project_updated(&self, row: &ProjectRow);
     fn worktree_updated(&self, row: &WorktreeRow);
+    fn worktree_removed(&self, id: i64);
 
     /// Flush a single deferred `RowChange` through the matching typed method.
     /// Used by batched (transactional) writes to emit AFTER commit. The
@@ -72,6 +78,7 @@ impl EventBus for NoopEventBus {
     fn account_upserted(&self, _: &AccountRow) {}
     fn project_updated(&self, _: &ProjectRow) {}
     fn worktree_updated(&self, _: &WorktreeRow) {}
+    fn worktree_removed(&self, _: i64) {}
 }
 
 /// Production event bus: forwards every event to the Tauri frontend.
@@ -151,6 +158,9 @@ impl EventBus for AppHandleEventBus {
     fn worktree_updated(&self, row: &WorktreeRow) {
         self.queue("worktree:updated", row);
     }
+    fn worktree_removed(&self, id: i64) {
+        self.queue("worktree:removed", &WorktreeRemovedPayload { id });
+    }
 }
 
 /// Records every event in order. Used in unit tests to assert that a Store
@@ -227,5 +237,11 @@ impl EventBus for RecordingEventBus {
             .lock()
             .unwrap()
             .push(format!("worktree:updated:{}", r.id));
+    }
+    fn worktree_removed(&self, id: i64) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("worktree:removed:{}", id));
     }
 }

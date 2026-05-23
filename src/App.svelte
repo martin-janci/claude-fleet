@@ -8,7 +8,7 @@
   import TerminalView from './lib/TerminalView.svelte';
   import BgSessionPanel from './lib/BgSessionPanel.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
-  import { loadProjects, bootstrapProjects, mergeProjectFromEvent, mergeWorktree } from './lib/projects';
+  import { loadProjects, bootstrapProjects, mergeProjectFromEvent, mergeWorktree, removeWorktree } from './lib/projects';
   import { loadSessions, bootstrapSessions, mergeSession, removeSession } from './lib/sessions';
   import { bootstrapHosts, mergeHost, removeHost } from './lib/hosts';
   import { bootstrapAccounts, mergeAccount } from './lib/accounts';
@@ -114,6 +114,7 @@
       onAccountUpserted: mergeAccount,
       onProjectUpdated: mergeProjectFromEvent,
       onWorktreeUpdated: mergeWorktree,
+      onWorktreeRemoved: (p) => removeWorktree(p.id),
     });
   });
 

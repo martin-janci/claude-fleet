@@ -1648,6 +1648,10 @@ mod tests {
             current_activity: None,
             context_pct: None,
             stuck_kind: None,
+            safe_kill_state: None,
+            safe_kill_nonce: None,
+            safe_kill_detail: None,
+            safe_kill_requested_at: None,
         }
     }
 

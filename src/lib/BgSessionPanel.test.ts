@@ -13,7 +13,9 @@ function bgSession(over: Partial<SessionRow> = {}): SessionRow {
     created_at: 1, last_activity_at: 1, status: 'running', notes: null, account_uuid: null,
     kind: 'bg', reviews_session_id: null, worktree_key: null, lost_at: null,
     claude_session_id: 'sess-abc', claude_status: 'working', effort_level: null,
-    pr_url: null, current_activity: 'editing files', ...over,
+    pr_url: null, current_activity: 'editing files',
+    safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null,
+    ...over,
   };
 }
 

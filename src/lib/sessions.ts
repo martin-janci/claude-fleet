@@ -23,6 +23,11 @@ export interface SessionRow {
   effort_level: string | null;
   pr_url: string | null;
   current_activity: string | null;
+  // Safe-kill flow (migration 016): values "requested" | "ready" | "failed" | null.
+  safe_kill_state: string | null;
+  safe_kill_nonce: string | null;
+  safe_kill_detail: string | null;
+  safe_kill_requested_at: number | null;
 }
 
 export const sessions = writable<SessionRow[]>([]);
@@ -44,6 +49,21 @@ export async function killSession(hostAlias: string, name: string): Promise<Resu
     args: { host_alias: hostAlias, name },
   });
   if (r.ok) removeSession(r.value);
+  return r;
+}
+
+/** Ask Claude to safely persist all work, then delete the worktree and kill
+ *  the tmux session. The command returns the row with `safe_kill_state =
+ *  "requested"`; subsequent transitions ("ready" → row will be killed via the
+ *  Stop hook; "failed" → user must resolve) arrive via `session:updated`. */
+export async function safeKillSession(
+  hostAlias: string,
+  tmuxName: string,
+): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('safe_kill_session', {
+    args: { host_alias: hostAlias, tmux_name: tmuxName },
+  });
+  if (r.ok) acceptCommandRow(r.value);
   return r;
 }
 

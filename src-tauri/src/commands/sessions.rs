@@ -5,6 +5,7 @@
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::IpcError;
 use crate::service::bg_sessions::{self, NewBgSessionArgs, PeekSessionArgs, PurgeProjectArgs};
+use crate::service::safe_kill::{self, SafeKillSessionArgs};
 use crate::service::sessions::{
     self, DismissGhostSessionArgs, KillSessionArgs, NewSessionArgs, RecreateSessionArgs,
     RelatedSessionsArgs, RenameSessionArgs, RestartSessionArgs, SendPromptArgs, SpawnReviewArgs,
@@ -47,6 +48,15 @@ pub async fn kill_session(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<i64, IpcError> {
     sessions::kill_session(args, &store, &ssh).await
+}
+
+#[tauri::command]
+pub async fn safe_kill_session(
+    args: SafeKillSessionArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<SessionRow, IpcError> {
+    safe_kill::safe_kill_session(args, &store, &ssh).await
 }
 
 #[tauri::command]

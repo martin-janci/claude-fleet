@@ -12,12 +12,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::ssh::SshClient;
 use crate::store::Store;
 
 /// Axum router state for the `/hook` endpoint.
 #[derive(Clone)]
 pub struct HookState {
     pub store: Arc<Mutex<Store>>,
+    pub ssh: Arc<SshClient>,
     pub token: Arc<String>,
 }
 
@@ -72,7 +74,7 @@ pub async fn handle_hook(
         "[hook] event={:?} session={:?} tool={:?}",
         payload.hook_event_name, payload.session_id, payload.tool_name
     );
-    match crate::service::hooks::apply_hook(&state.store, &payload) {
+    match crate::service::hooks::apply_hook(&state.store, &state.ssh, &payload) {
         Ok(()) => StatusCode::NO_CONTENT,
         Err(e) => {
             eprintln!("[hook] apply_hook error: {} {}", e.code, e.message);

@@ -11,7 +11,7 @@
 
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::IpcError;
-use crate::service::{health, hosts, projects, sessions};
+use crate::service::{health, hosts, projects, safe_kill, sessions, worktrees};
 use crate::ssh::SshClient;
 use crate::store::Store;
 use rmcp::{
@@ -236,6 +236,30 @@ pub struct KillSessionParams {
     /// tmux session name to kill.
     pub name: String,
     /// Kill even if this is the registered fleet controller. Default false.
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SafeKillSessionParams {
+    /// Host alias the session lives on.
+    pub host_alias: String,
+    /// tmux session name to safely retire.
+    pub tmux_name: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ListWorktreesParams {
+    /// Restrict to one project; omit for every worktree across the fleet.
+    pub project_id: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct DeleteWorktreeParams {
+    /// Worktree row id (from `list_worktrees`).
+    pub worktree_id: i64,
+    /// Delete even when an alive Claude session currently uses it. Default
+    /// false — the call returns `E_WORKTREE_BUSY` instead.
     #[serde(default)]
     pub force: bool,
 }
@@ -723,6 +747,74 @@ impl FleetTools {
             .await
             .map_err(to_mcp_err)?;
         ok_json(&id)
+    }
+
+    #[tool(description = "Ask a running Claude session to safely persist all \
+        its work (commit + push to main, or commit on a feature branch with \
+        an open PR) before fleet deletes its worktree and kills the tmux \
+        session. Sends a marker-baked prompt and arms a Stop-hook listener; \
+        the actual deletion happens only after Claude emits the SAFE_REMOVE_READY \
+        marker AND fleet's own dirty-tree check passes. Returns the updated \
+        session row with `safe_kill_state=requested`; subsequent transitions \
+        ('ready', 'failed') arrive via session row events.")]
+    async fn safe_kill_session(
+        &self,
+        Parameters(p): Parameters<SafeKillSessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "safe_kill_session",
+            &format!("host={} session={}", p.host_alias, p.tmux_name),
+        );
+        let args = safe_kill::SafeKillSessionArgs {
+            host_alias: p.host_alias,
+            tmux_name: p.tmux_name,
+        };
+        let row = safe_kill::safe_kill_session(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
+    #[tool(description = "List git worktrees fleet knows about, each tagged \
+        with its alive-session occupants. An empty `occupants` array means \
+        the worktree is free to delete via `delete_worktree`. Optionally \
+        filter to one project.")]
+    async fn list_worktrees(
+        &self,
+        Parameters(p): Parameters<ListWorktreesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("list_worktrees", &format!("project_id={:?}", p.project_id));
+        let args = worktrees::ListWorktreesArgs {
+            project_id: p.project_id,
+        };
+        let out = worktrees::list_worktrees(args, &self.store).map_err(to_mcp_err)?;
+        ok_json(&out)
+    }
+
+    #[tool(description = "Delete a git worktree on its host (runs `git \
+        worktree remove`, no --force) and drop fleet's row for it. Refuses \
+        if any alive Claude session points at the worktree, unless \
+        `force=true` is passed. Returns errors `E_WORKTREE_BUSY` (occupied), \
+        `E_NOTFOUND` (no such row), `E_GIT` (git refused — usually a dirty \
+        working tree).")]
+    async fn delete_worktree(
+        &self,
+        Parameters(p): Parameters<DeleteWorktreeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "delete_worktree",
+            &format!("worktree_id={} force={}", p.worktree_id, p.force),
+        );
+        let args = worktrees::DeleteWorktreeArgs {
+            worktree_id: p.worktree_id,
+            force: p.force,
+        };
+        worktrees::delete_worktree(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        Ok(CallToolResult::success(vec![text_content(
+            "worktree deleted",
+        )]))
     }
 
     #[tool(description = "Rename a tmux session on a host. Returns the updated \
@@ -1348,7 +1440,10 @@ mod tests {
         let r = ok_json_compact(&v).unwrap();
         let text = text_of(&r.content[0]);
         assert!(!text.contains('\n'), "expected compact JSON, got: {text}");
-        assert!(!text.contains("null"), "null fields must be stripped: {text}");
+        assert!(
+            !text.contains("null"),
+            "null fields must be stripped: {text}"
+        );
         assert!(text.contains("\"a\":1"));
     }
 
