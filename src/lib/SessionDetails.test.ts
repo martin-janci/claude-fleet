@@ -32,6 +32,7 @@ const sampleSession = {
   effort_level: null,
   pr_url: null,
   current_activity: null,
+  friendly_name: null,
 };
 
 beforeEach(() => {

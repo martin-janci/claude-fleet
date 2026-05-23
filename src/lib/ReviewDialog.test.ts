@@ -14,6 +14,7 @@ const source: SessionRow = {
   status: 'running', notes: null, account_uuid: null, kind: 'work', reviews_session_id: null,
   worktree_key: 'main', lost_at: null,
   claude_session_id: null, claude_status: null, effort_level: null, pr_url: null, current_activity: null,
+  friendly_name: null,
 };
 
 beforeEach(() => { (mockedInvoke as ReturnType<typeof vi.fn>).mockReset(); });

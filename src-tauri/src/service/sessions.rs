@@ -1038,6 +1038,44 @@ pub async fn rename_session(
 }
 
 #[derive(Deserialize)]
+pub struct SetFriendlyNameArgs {
+    pub host_alias: String,
+    pub tmux_name: String,
+    /// Empty / whitespace-only value clears the label.
+    pub friendly_name: String,
+}
+
+/// Set (or clear, on empty/whitespace) the session's display label. The agent
+/// running inside a tmux session calls this via MCP after picking up a task.
+pub fn set_session_friendly_name(
+    args: SetFriendlyNameArgs,
+    store: &Mutex<Store>,
+) -> Result<SessionRow, IpcError> {
+    crate::validate::host_alias(&args.host_alias)?;
+    crate::validate::tmux_name(&args.tmux_name)?;
+    crate::validate::friendly_name(&args.friendly_name)?;
+    let trimmed = args.friendly_name.trim();
+    let value = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    };
+    let s = store
+        .lock()
+        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    s.set_friendly_name(&args.host_alias, &args.tmux_name, value)?
+        .ok_or_else(|| {
+            IpcError::new(
+                "E_NOTFOUND",
+                format!(
+                    "session {} not found on {}",
+                    args.tmux_name, args.host_alias
+                ),
+            )
+        })
+}
+
+#[derive(Deserialize)]
 pub struct RestartSessionArgs {
     pub host_alias: String,
     pub name: String,
@@ -1648,6 +1686,7 @@ mod tests {
             current_activity: None,
             context_pct: None,
             stuck_kind: None,
+            friendly_name: None,
         }
     }
 

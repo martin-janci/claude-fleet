@@ -377,9 +377,7 @@ fn maybe_start_mcp(
         )
         .await;
         if r.is_ok() {
-            if let Err(e) =
-                crate::service::provision::reestablish_tunnels(store, tunnels, port)
-            {
+            if let Err(e) = crate::service::provision::reestablish_tunnels(store, tunnels, port) {
                 eprintln!("[mcp] reestablish_tunnels: {e}");
             }
         }
@@ -493,6 +491,7 @@ pub fn run() {
             commands::sessions::new_session,
             commands::sessions::kill_session,
             commands::sessions::rename_session,
+            commands::sessions::set_session_friendly_name,
             commands::sessions::restart_session,
             commands::sessions::send_prompt,
             commands::sessions::spawn_review,

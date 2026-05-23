@@ -52,6 +52,10 @@ pub struct SessionRow {
     pub current_activity: Option<String>,
     pub context_pct: Option<f64>,
     pub stuck_kind: Option<String>,
+    /// Display label set by the in-session agent via the `set_friendly_name`
+    /// MCP tool (migration 016). The sidebar shows this when the user's
+    /// "friendly names" toggle is on; falls back to `tmux_name` when NULL.
+    pub friendly_name: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -268,6 +272,11 @@ impl Store {
         if v < 15 {
             let tx = self.conn.unchecked_transaction()?;
             tx.execute_batch(include_str!("../migrations/015_session_messages.sql"))?;
+            tx.commit()?;
+        }
+        if v < 16 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(include_str!("../migrations/016_session_friendly_name.sql"))?;
             tx.commit()?;
         }
         Ok(())
@@ -1093,7 +1102,7 @@ impl Store {
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                     worktree_key, lost_at,
                     claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind
+                    context_pct, stuck_kind, friendly_name
              FROM sessions WHERE host_alias=?1 ORDER BY last_activity_at DESC",
         )?;
         let rows = stmt.query_map(rusqlite::params![host_alias], |row| {
@@ -1119,6 +1128,7 @@ impl Store {
                 current_activity: row.get(18)?,
                 context_pct: row.get(19)?,
                 stuck_kind: row.get(20)?,
+                friendly_name: row.get(21)?,
             })
         })?;
         rows.collect()
@@ -1132,7 +1142,7 @@ impl Store {
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                     worktree_key, lost_at,
                     claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind
+                    context_pct, stuck_kind, friendly_name
              FROM sessions ORDER BY last_activity_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -1158,6 +1168,7 @@ impl Store {
                 current_activity: row.get(18)?,
                 context_pct: row.get(19)?,
                 stuck_kind: row.get(20)?,
+                friendly_name: row.get(21)?,
             })
         })?;
         rows.collect()
@@ -1187,7 +1198,7 @@ impl Store {
                     last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                     worktree_key, lost_at,
                     claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind
+                    context_pct, stuck_kind, friendly_name
              FROM sessions
              WHERE project_id=?1 AND worktree_key=?2 AND id<>?3
              ORDER BY host_alias ASC, tmux_name ASC",
@@ -1215,6 +1226,7 @@ impl Store {
                 current_activity: row.get(18)?,
                 context_pct: row.get(19)?,
                 stuck_kind: row.get(20)?,
+                friendly_name: row.get(21)?,
             })
         })?;
         rows.collect()
@@ -1262,6 +1274,29 @@ impl Store {
             self.bus.session_updated(&row);
         }
         Ok(())
+    }
+
+    /// Set the session's display label (migration 016). `None` clears it.
+    /// Emits `session_updated` so the sidebar patches in place.
+    pub fn set_friendly_name(
+        &self,
+        host_alias: &str,
+        tmux_name: &str,
+        friendly_name: Option<&str>,
+    ) -> Result<Option<SessionRow>, rusqlite::Error> {
+        let changed = self.conn.execute(
+            "UPDATE sessions SET friendly_name = ?1 \
+             WHERE host_alias = ?2 AND tmux_name = ?3",
+            rusqlite::params![friendly_name, host_alias, tmux_name],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let row = fetch_session(&self.conn, tmux_name, host_alias)?;
+        if let Some(ref r) = row {
+            self.bus.session_updated(r);
+        }
+        Ok(row)
     }
 
     /// Transition a session back to running (clears `lost_at`). Called by the
@@ -1760,7 +1795,7 @@ impl Store {
                         last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                         worktree_key, lost_at,
                         claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind
+                    context_pct, stuck_kind, friendly_name
                  FROM sessions WHERE claude_session_id = ?1",
             )
             .map_err(crate::ipc_error::IpcError::from)?;
@@ -1787,6 +1822,7 @@ impl Store {
                 current_activity: row.get(18)?,
                 context_pct: row.get(19)?,
                 stuck_kind: row.get(20)?,
+                friendly_name: row.get(21)?,
             })
         })
         .map_err(crate::ipc_error::IpcError::from)
@@ -1810,7 +1846,7 @@ fn fetch_session(
                 last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                 worktree_key, lost_at,
                 claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind
+                    context_pct, stuck_kind, friendly_name
          FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
     )?;
     let mut rows = stmt.query_map(rusqlite::params![tmux_name, host_alias], |row| {
@@ -1836,6 +1872,7 @@ fn fetch_session(
             current_activity: row.get(18)?,
             context_pct: row.get(19)?,
             stuck_kind: row.get(20)?,
+            friendly_name: row.get(21)?,
         })
     })?;
     match rows.next() {
@@ -1850,7 +1887,7 @@ fn fetch_session_by_id(conn: &Connection, id: i64) -> Result<Option<SessionRow>,
                 last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
                 worktree_key, lost_at,
                 claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind
+                    context_pct, stuck_kind, friendly_name
          FROM sessions WHERE id=?1",
     )?;
     let mut rows = stmt.query_map(rusqlite::params![id], |row| {
@@ -1876,6 +1913,7 @@ fn fetch_session_by_id(conn: &Connection, id: i64) -> Result<Option<SessionRow>,
             current_activity: row.get(18)?,
             context_pct: row.get(19)?,
             stuck_kind: row.get(20)?,
+            friendly_name: row.get(21)?,
         })
     })?;
     match rows.next() {
@@ -1956,7 +1994,7 @@ mod tests {
     fn migrate_is_idempotent() {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
-        assert_eq!(store.schema_version().expect("version"), 15);
+        assert_eq!(store.schema_version().expect("version"), 16);
     }
 
     #[test]
@@ -2173,7 +2211,7 @@ mod tests {
     #[test]
     fn schema_version_is_seven_after_migration() {
         let s = Store::open_in_memory().expect("open");
-        assert_eq!(s.schema_version().expect("version"), 15);
+        assert_eq!(s.schema_version().expect("version"), 16);
     }
 
     #[test]
@@ -2790,7 +2828,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 15, "schema_version should be 15 after migration");
+        assert_eq!(v, 16, "schema_version should be 16 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store

@@ -23,6 +23,10 @@ export interface SessionRow {
   effort_level: string | null;
   pr_url: string | null;
   current_activity: string | null;
+  // Display label set by the in-session agent via the `set_friendly_name`
+  // MCP tool. When the sidebar toggle is on, this is shown instead of
+  // tmux_name; null falls back to tmux_name.
+  friendly_name: string | null;
 }
 
 export const sessions = writable<SessionRow[]>([]);
@@ -32,6 +36,15 @@ export const sessions = writable<SessionRow[]>([]);
 const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
 export const showBgAgents = writable<boolean>(readPref('show-bg-agents', true, isBool));
 showBgAgents.subscribe((v) => writePref('show-bg-agents', v));
+
+// Sidebar display toggle — when true, sessions render their agent-set
+// `friendly_name` (falling back to `tmux_name` when unset) instead of the raw
+// tmux_name. Defaults to true so a newly populated friendly_name is visible
+// without the user having to discover the toggle. Persisted across restarts.
+export const showFriendlyNames = writable<boolean>(
+  readPref('show-friendly-names', true, isBool),
+);
+showFriendlyNames.subscribe((v) => writePref('show-friendly-names', v));
 
 export async function loadSessions(): Promise<Result<SessionRow[]>> {
   const r = await invokeCmd<SessionRow[]>('list_sessions');

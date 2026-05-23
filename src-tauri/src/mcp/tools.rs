@@ -251,6 +251,17 @@ pub struct RenameSessionParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SetFriendlyNameParams {
+    /// Host alias the session lives on.
+    pub host_alias: String,
+    /// tmux session name (the row's stable identity).
+    pub tmux_name: String,
+    /// 3–6 word human-readable label describing the current task.
+    /// Empty / whitespace clears the label.
+    pub friendly_name: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RestartSessionParams {
     /// Host alias the session lives on.
     pub host_alias: String,
@@ -743,6 +754,31 @@ impl FleetTools {
         let row = sessions::rename_session(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
+    #[tool(description = "Set the session's friendly display name (the \
+        sidebar shows this when the user toggles friendly names on). Intended \
+        to be called once per task by the in-session agent — keep it short \
+        (3–6 words) and human-readable. Pass an empty string to clear. \
+        Returns the updated session row as JSON.")]
+    async fn set_friendly_name(
+        &self,
+        Parameters(p): Parameters<SetFriendlyNameParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "set_friendly_name",
+            &format!(
+                "host={} tmux={} label={:?}",
+                p.host_alias, p.tmux_name, p.friendly_name
+            ),
+        );
+        let args = sessions::SetFriendlyNameArgs {
+            host_alias: p.host_alias,
+            tmux_name: p.tmux_name,
+            friendly_name: p.friendly_name,
+        };
+        let row = sessions::set_session_friendly_name(args, &self.store).map_err(to_mcp_err)?;
         ok_json(&row)
     }
 
@@ -1348,7 +1384,10 @@ mod tests {
         let r = ok_json_compact(&v).unwrap();
         let text = text_of(&r.content[0]);
         assert!(!text.contains('\n'), "expected compact JSON, got: {text}");
-        assert!(!text.contains("null"), "null fields must be stripped: {text}");
+        assert!(
+            !text.contains("null"),
+            "null fields must be stripped: {text}"
+        );
         assert!(text.contains("\"a\":1"));
     }
 

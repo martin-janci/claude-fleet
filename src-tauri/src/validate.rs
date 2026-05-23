@@ -219,6 +219,27 @@ pub fn tmux_name(value: &str) -> Result<(), IpcError> {
     Ok(())
 }
 
+/// Validate a session friendly-name (display label set by the in-session
+/// agent via MCP). Display-only, but still passes through `serde_json` and
+/// the row event bus — reject control chars and cap length so a runaway
+/// agent can't ship megabytes through the event stream. Empty / whitespace-
+/// only is allowed and means "clear" at the service layer.
+pub fn friendly_name(value: &str) -> Result<(), IpcError> {
+    if value.chars().count() > 80 {
+        return Err(IpcError::new(
+            "E_INVALID",
+            "friendly name must be 80 characters or fewer",
+        ));
+    }
+    if value.chars().any(|c| c.is_control()) {
+        return Err(IpcError::new(
+            "E_INVALID",
+            "friendly name must not contain control characters",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
