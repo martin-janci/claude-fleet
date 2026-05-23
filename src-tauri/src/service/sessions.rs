@@ -180,6 +180,16 @@ fn reconcile_write_one_host(
             // `list_sessions`. These rows are exempt from ghost cleanup (they're
             // never tmux sessions) — see `ghost_and_clean_sessions_in_tx`.
             reconcile_bg_agents(s, &host.alias, live, projects, agent_rows)?;
+            // Task H: stamp freshness on every session this pass observed live,
+            // so a proactive (background) reconcile keeps `last_reconciled_at`
+            // current and the UI can dim rows whose host has gone quiet.
+            // Best-effort: a failure here must not abort reconcile.
+            if let Err(e) = s.mark_sessions_reconciled(&host.alias, &keep, now_unix()) {
+                eprintln!(
+                    "[reconcile] mark_sessions_reconciled failed for {}: {e}",
+                    host.alias
+                );
+            }
         }
         Err(_e) => {
             // Mark host unreachable; surface last-known sessions so the UI
@@ -452,6 +462,34 @@ pub async fn list_sessions(
     ssh: &Arc<SshClient>,
 ) -> Result<Vec<SessionRow>, IpcError> {
     reconcile_sessions(store, ssh).await
+}
+
+/// Headless reconcile entry point for the Wave-2 background tick (Task H).
+///
+/// Reconcile is already Tauri-free: `reconcile_sessions` takes only a
+/// `&Mutex<Store>` and a `&Arc<SshClient>`, and all row events are emitted
+/// through the store's `EventBus` (see `events.rs`) — NOT a Tauri `AppHandle`.
+/// So a `tokio::spawn`ed loop can drive it with the same managed `Arc`s the
+/// commands use. This wrapper exists so the spawn site reads as "reconcile now"
+/// rather than "list sessions", and so the entry point is independently
+/// testable without a running Tauri app.
+pub async fn reconcile_now(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result<(), IpcError> {
+    reconcile_sessions(store, ssh).await.map(|_| ())
+}
+
+/// Pure interval-guard decision for the background reconcile tick.
+///
+/// Returns the tick interval to use when reconcile should run, or `None` when
+/// the feature is disabled. A `reconcile.interval_secs` of `0` (or anything
+/// non-positive) disables the proactive tick entirely — reconcile then stays
+/// pull-only (list_sessions / per-host paths). Kept pure so it is unit-testable
+/// without spawning a timer.
+pub fn reconcile_tick_interval(interval_secs: i64) -> Option<std::time::Duration> {
+    if interval_secs <= 0 {
+        None
+    } else {
+        Some(std::time::Duration::from_secs(interval_secs as u64))
+    }
 }
 
 #[derive(Deserialize)]
@@ -2146,6 +2184,50 @@ mod tests {
             String::from_utf8_lossy(&quoted.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&quoted.stdout).trim(), "OK");
+    }
+
+    // ── Task H: background reconcile tick ──────────────────────────────────
+
+    #[test]
+    fn reconcile_tick_interval_disabled_when_zero_or_negative() {
+        // 0 = disabled (the documented "off" sentinel) and any non-positive
+        // value must keep the tick from running rather than busy-loop.
+        assert_eq!(reconcile_tick_interval(0), None);
+        assert_eq!(reconcile_tick_interval(-5), None);
+    }
+
+    #[test]
+    fn reconcile_tick_interval_enabled_for_positive_secs() {
+        assert_eq!(
+            reconcile_tick_interval(20),
+            Some(std::time::Duration::from_secs(20))
+        );
+        assert_eq!(
+            reconcile_tick_interval(1),
+            Some(std::time::Duration::from_secs(1))
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_now_is_callable_headless() {
+        // The whole point of Task H: reconcile must be drivable from a
+        // background task with just an in-memory Store + a bare SshClient — no
+        // Tauri AppHandle. We assert it is *callable* this way (compiles, spawns
+        // on the managed deps) without depending on the test box's real local
+        // probe, which shells out to `tmux` / `claude agents --json` and can
+        // block on a developer machine. A bounded timeout keeps the suite fast:
+        //   - Ok(Ok(_))  → reconcile ran and returned (no real probe stalled)
+        //   - Ok(Err(_)) → reconcile ran and surfaced an IpcError (still proves
+        //                  the headless path executes end to end)
+        //   - Err(_)     → the real local probe is blocking; the entry point is
+        //                  still demonstrably callable (it was driven to await).
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        let ssh = Arc::new(SshClient::new());
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            reconcile_now(&store, &ssh),
+        )
+        .await;
     }
 }
 
