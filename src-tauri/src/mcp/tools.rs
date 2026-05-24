@@ -159,6 +159,68 @@ impl From<SessionWithController> for SessionSummary {
     }
 }
 
+/// Slim row returned by `inbox` when `summary: true` (the default). Replaces
+/// the full message `body` with a length hint + 80-char preview — the bulk of
+/// an inbox response is body text, and triage usually only needs metadata +
+/// "is this the one I'm looking for?". Callers fetch full bodies by
+/// re-calling with `summary: false` (and `mark_read: false` to keep peek
+/// semantics).
+#[derive(serde::Serialize)]
+struct InboxSummary {
+    id: i64,
+    from_session_id: i64,
+    to_session_id: i64,
+    kind: String,
+    sent_at: i64,
+    read_at: Option<i64>,
+    body_chars: usize,
+    body_preview: String,
+}
+
+const INBOX_PREVIEW_CHARS: usize = 80;
+
+impl From<crate::store::SessionMessage> for InboxSummary {
+    fn from(m: crate::store::SessionMessage) -> Self {
+        let body_chars = m.body.chars().count();
+        let body_preview: String = m.body.chars().take(INBOX_PREVIEW_CHARS).collect();
+        Self {
+            id: m.id,
+            from_session_id: m.from_session_id,
+            to_session_id: m.to_session_id,
+            kind: m.kind,
+            sent_at: m.sent_at,
+            read_at: m.read_at,
+            body_chars,
+            body_preview,
+        }
+    }
+}
+
+/// Slim row returned by `list_projects` when `summary: true` (the default).
+/// Drops the bulky nested worktree array (paths can be 60+ chars each) in
+/// favor of a count; callers fetch worktrees per project via
+/// `list_worktrees { project_id }` or re-call with `summary: false`.
+#[derive(serde::Serialize)]
+struct ProjectSummary {
+    id: i64,
+    owner: String,
+    repo: String,
+    worktree_count: usize,
+    last_session_at: Option<i64>,
+}
+
+impl From<crate::service::projects::ProjectTreeRow> for ProjectSummary {
+    fn from(t: crate::service::projects::ProjectTreeRow) -> Self {
+        Self {
+            id: t.project.id,
+            owner: t.project.owner,
+            repo: t.project.repo,
+            worktree_count: t.worktrees.len(),
+            last_session_at: t.project.last_session_at,
+        }
+    }
+}
+
 // --- tool parameter structs ------------------------------------------------
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -404,6 +466,20 @@ pub struct InboxParams {
     /// "list and consume" pull. Pass false to peek.
     #[serde(default = "default_true")]
     pub mark_read: bool,
+    /// Return slim rows (metadata + body preview, no full body). Default
+    /// true to keep responses inside MCP token caps; set false to fetch full
+    /// message bodies.
+    #[serde(default = "default_true")]
+    pub summary: bool,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ListProjectsParams {
+    /// Return slim rows (id, owner, repo, worktree_count, last_session_at).
+    /// Default true to keep responses inside MCP token caps; set false to get
+    /// the full nested worktree tree.
+    #[serde(default = "default_true")]
+    pub summary: bool,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -591,11 +667,21 @@ impl FleetTools {
 
     // ---- projects ----
 
-    #[tool(description = "List all discovered projects with their worktrees. \
-        Returns JSON.")]
-    async fn list_projects(&self) -> Result<CallToolResult, McpError> {
-        audit("list_projects", "");
-        ok_json(&projects::list_projects(&self.store).map_err(to_mcp_err)?)
+    #[tool(description = "List discovered projects. Slim rows by default \
+        (id, owner, repo, worktree_count, last_session_at); pass \
+        summary=false for the full nested worktree tree.")]
+    async fn list_projects(
+        &self,
+        Parameters(p): Parameters<ListProjectsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("list_projects", &format!("summary={}", p.summary));
+        let trees = projects::list_projects(&self.store).map_err(to_mcp_err)?;
+        if p.summary {
+            let slim: Vec<ProjectSummary> = trees.into_iter().map(ProjectSummary::from).collect();
+            ok_json_compact(&slim)
+        } else {
+            ok_json_compact(&trees)
+        }
     }
 
     #[tool(description = "Rescan the local projects directory for new or \
@@ -611,13 +697,10 @@ impl FleetTools {
 
     // ---- sessions ----
 
-    #[tool(description = "Reconcile and list tmux sessions across reachable \
-        hosts. Returns slim summary rows by default (id, host_alias, \
-        tmux_name, project_id, worktree_id, status, claude_status, \
-        stuck_kind, lost_at, is_controller) to fit MCP token caps on large \
-        fleets — pass summary=false for full SessionRow. Optional filters: \
-        host_alias, project_id, status, claude_status, include_lost (default \
-        false drops sessions with a non-null lost_at). JSON.")]
+    #[tool(description = "List tmux sessions across reachable hosts. Slim \
+        summary rows by default; pass summary=false for the full SessionRow. \
+        Optional filters: host_alias, project_id, status, claude_status, \
+        include_lost (default false drops ghosts).")]
     async fn list_sessions(
         &self,
         Parameters(p): Parameters<ListSessionsParams>,
@@ -719,11 +802,10 @@ impl FleetTools {
         }))
     }
 
-    #[tool(description = "Create a new Claude Code tmux session on a host, in \
-        the given project (and optional worktree). Pass new_worktree to create \
-        a fresh worktree+branch, optionally choosing its base_branch (defaults \
-        to the repo's default branch). Auto-clones the repo on remote hosts if \
-        missing. Returns the new session row as JSON.")]
+    #[tool(description = "Create a Claude Code tmux session on a host, in a \
+        project (and optional worktree). Pass new_worktree to fork a fresh \
+        worktree+branch (optional base_branch). Auto-clones the repo on \
+        remote hosts.")]
     async fn new_session(
         &self,
         Parameters(p): Parameters<NewSessionParams>,
@@ -772,14 +854,11 @@ impl FleetTools {
         ok_json(&id)
     }
 
-    #[tool(description = "Ask a running Claude session to safely persist all \
-        its work (commit + push to main, or commit on a feature branch with \
-        an open PR) before fleet deletes its worktree and kills the tmux \
-        session. Sends a marker-baked prompt and arms a Stop-hook listener; \
-        the actual deletion happens only after Claude emits the SAFE_REMOVE_READY \
-        marker AND fleet's own dirty-tree check passes. Returns the updated \
-        session row with `safe_kill_state=requested`; subsequent transitions \
-        ('ready', 'failed') arrive via session row events.")]
+    #[tool(description = "Ask a running Claude session to safely persist its \
+        work (commit + push), then arm deletion of its worktree + tmux session. \
+        Returns the row with safe_kill_state=requested; the actual delete \
+        fires only after the SAFE_REMOVE_READY marker AND a clean-tree check. \
+        Transitions ('ready', 'failed') arrive via row events.")]
     async fn safe_kill_session(
         &self,
         Parameters(p): Parameters<SafeKillSessionParams>,
@@ -798,10 +877,9 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "List git worktrees fleet knows about, each tagged \
-        with its alive-session occupants. An empty `occupants` array means \
-        the worktree is free to delete via `delete_worktree`. Optionally \
-        filter to one project.")]
+    #[tool(description = "List git worktrees fleet knows about, each with \
+        its alive-session occupants (empty = free to delete via \
+        delete_worktree). Optional project filter.")]
     async fn list_worktrees(
         &self,
         Parameters(p): Parameters<ListWorktreesParams>,
@@ -814,12 +892,9 @@ impl FleetTools {
         ok_json(&out)
     }
 
-    #[tool(description = "Delete a git worktree on its host (runs `git \
-        worktree remove`, no --force) and drop fleet's row for it. Refuses \
-        if any alive Claude session points at the worktree, unless \
-        `force=true` is passed. Returns errors `E_WORKTREE_BUSY` (occupied), \
-        `E_NOTFOUND` (no such row), `E_GIT` (git refused — usually a dirty \
-        working tree).")]
+    #[tool(description = "Delete a git worktree on its host (no --force) and \
+        drop fleet's row. Refuses if an alive session points at it (override \
+        with force=true). Errors: E_WORKTREE_BUSY, E_NOTFOUND, E_GIT.")]
     async fn delete_worktree(
         &self,
         Parameters(p): Parameters<DeleteWorktreeParams>,
@@ -861,11 +936,10 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "Set the session's friendly display name (the \
-        sidebar shows this when the user toggles friendly names on). Intended \
-        to be called once per task by the in-session agent — keep it short \
-        (3–6 words) and human-readable. Pass an empty string to clear. \
-        Returns the updated session row as JSON.")]
+    #[tool(description = "Set the session's friendly display name (shown when \
+        the user toggles friendly names on). Called once per task by the \
+        in-session agent — short (3–6 words). Empty string clears. Returns \
+        the updated row.")]
     async fn set_friendly_name(
         &self,
         Parameters(p): Parameters<SetFriendlyNameParams>,
@@ -1066,10 +1140,11 @@ impl FleetTools {
         ok_json(&result)
     }
 
-    #[tool(description = "Read the caller session's inbox. Returns the messages \
-        sent TO `session_id`, newest-first; `unread_only` filters and \
-        `mark_read` (default true) flips the returned unread rows to read. \
-        Pass `mark_read: false` to peek without consuming.")]
+    #[tool(description = "Read a session's inbox — messages sent TO \
+        session_id, newest-first. Slim rows by default (metadata + 80-char \
+        body preview); pass summary=false for full bodies. mark_read \
+        (default true) flips returned unread rows to read — pass false to \
+        peek without consuming.")]
     async fn inbox(
         &self,
         Parameters(p): Parameters<InboxParams>,
@@ -1077,8 +1152,8 @@ impl FleetTools {
         audit(
             "inbox",
             &format!(
-                "session_id={} unread_only={} mark_read={}",
-                p.session_id, p.unread_only, p.mark_read
+                "session_id={} unread_only={} mark_read={} summary={}",
+                p.session_id, p.unread_only, p.mark_read, p.summary
             ),
         );
         let limit = p.limit.unwrap_or(50);
@@ -1090,13 +1165,17 @@ impl FleetTools {
             &self.store,
         )
         .map_err(to_mcp_err)?;
-        ok_json(&msgs)
+        if p.summary {
+            let slim: Vec<InboxSummary> = msgs.into_iter().map(InboxSummary::from).collect();
+            ok_json_compact(&slim)
+        } else {
+            ok_json_compact(&msgs)
+        }
     }
 
-    #[tool(description = "What is a peer session currently doing? Returns the \
-        reconcile-derived `claude_status`, `current_activity`, `stuck_kind`, \
-        and `context_pct` for one session, plus its host/name/status. Useful \
-        before sending a message or broadcasting work.")]
+    #[tool(description = "What is a peer session doing? Returns claude_status, \
+        current_activity, stuck_kind, context_pct (plus host/name/status) for \
+        one session. Cheap pre-check before send_message or broadcast_prompt.")]
     async fn peer_status(
         &self,
         Parameters(p): Parameters<PeerStatusParams>,
@@ -1385,10 +1464,10 @@ impl FleetTools {
         ok_json(&v)
     }
 
-    #[tool(description = "Install the claude-fleet-control skill and register \
-        this fleet's MCP server into every reachable host's Claude config \
-        (~/.claude.json), with a reverse SSH tunnel for remote hosts. Returns a \
-        per-host status list. Each host must restart Claude to load the server.")]
+    #[tool(description = "Install fleet skills and register this fleet's MCP \
+        server into every reachable host's ~/.claude.json (reverse SSH tunnel \
+        for remote hosts). Returns a per-host status list; each host must \
+        restart Claude to load the server.")]
     async fn provision_hosts(&self) -> Result<CallToolResult, McpError> {
         audit("provision_hosts", "");
         let (port, token) = {
