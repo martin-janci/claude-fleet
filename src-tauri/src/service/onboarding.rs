@@ -13,9 +13,16 @@ pub struct LocalPrereqs {
     pub tmux_version: Option<String>,
     pub projects_path: String,
     pub projects_readable: bool,
+    /// Count of top-level entries under the projects base. Note these are the
+    /// org/owner subdirectories, not individual repos — purely informational.
     pub projects_count: u32,
 }
 
+/// Tunnel liveness as surfaced to the onboarding UI. There is intentionally no
+/// `Starting` state: `TunnelSupervisor::snapshot()` reports a single bool per
+/// host (task alive vs. finished), so a supervised task that is up *or*
+/// mid-backoff both read as `Up`; `NotStarted` means no task exists (e.g. the
+/// Control API is disabled).
 #[derive(Serialize, Debug, PartialEq, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum TunnelState {
@@ -46,10 +53,7 @@ pub fn parse_tool_version(output: &str) -> Option<String> {
 /// Map a per-host liveness snapshot (from `TunnelSupervisor::snapshot`) onto the
 /// non-hidden hosts. Absent host => `NotStarted` (e.g. MCP disabled); present &
 /// alive => `Up`; present & finished => `Down`.
-pub fn map_tunnel_states(
-    hosts: &[HostRow],
-    alive: &HashMap<String, bool>,
-) -> Vec<TunnelStatusRow> {
+pub fn map_tunnel_states(hosts: &[HostRow], alive: &HashMap<String, bool>) -> Vec<TunnelStatusRow> {
     hosts
         .iter()
         .filter(|h| !h.hidden)
@@ -64,13 +68,16 @@ pub fn map_tunnel_states(
         .collect()
 }
 
-/// Run a `<bin> <arg>` and return its parsed version if it exits 0.
+/// Run a `<bin> <arg>` and return its parsed version if it exits 0. Bounded by a
+/// short timeout so a hung binary (e.g. `claude` pausing for a token refresh)
+/// can't stall onboarding; a timeout, spawn error, or non-zero exit all yield
+/// `None`.
 async fn tool_version(bin: &str, arg: &str) -> Option<String> {
-    let out = tokio::process::Command::new(bin)
-        .arg(arg)
-        .output()
+    let fut = tokio::process::Command::new(bin).arg(arg).output();
+    let out = tokio::time::timeout(std::time::Duration::from_secs(3), fut)
         .await
-        .ok()?;
+        .ok()? // timed out
+        .ok()?; // spawn / I/O error
     if !out.status.success() {
         return None;
     }
@@ -81,8 +88,10 @@ async fn tool_version(bin: &str, arg: &str) -> Option<String> {
 /// Detect local prerequisites: the `claude` CLI, `tmux`, and the projects scan
 /// directory. Never errors — a missing tool is reported as `*_ok = false`.
 pub async fn local_prereqs() -> LocalPrereqs {
-    let claude_version = tool_version("claude", "--version").await;
-    let tmux_version = tool_version("tmux", "-V").await;
+    let (claude_version, tmux_version) = tokio::join!(
+        tool_version("claude", "--version"),
+        tool_version("tmux", "-V"),
+    );
 
     let base = crate::service::projects::projects_base();
     let projects_path = base.to_string_lossy().to_string();
@@ -134,7 +143,12 @@ mod tests {
 
     #[test]
     fn maps_tunnel_states() {
-        let hosts = vec![host("up", false), host("dead", false), host("none", false), host("hidden", true)];
+        let hosts = vec![
+            host("up", false),
+            host("dead", false),
+            host("none", false),
+            host("hidden", true),
+        ];
         let mut alive = HashMap::new();
         alive.insert("up".to_string(), true);
         alive.insert("dead".to_string(), false);
@@ -143,9 +157,18 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                TunnelStatusRow { host_alias: "up".into(), state: TunnelState::Up },
-                TunnelStatusRow { host_alias: "dead".into(), state: TunnelState::Down },
-                TunnelStatusRow { host_alias: "none".into(), state: TunnelState::NotStarted },
+                TunnelStatusRow {
+                    host_alias: "up".into(),
+                    state: TunnelState::Up
+                },
+                TunnelStatusRow {
+                    host_alias: "dead".into(),
+                    state: TunnelState::Down
+                },
+                TunnelStatusRow {
+                    host_alias: "none".into(),
+                    state: TunnelState::NotStarted
+                },
             ]
         );
     }
