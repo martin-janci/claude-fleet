@@ -91,7 +91,7 @@
     const col = Math.max(1, Math.min(lastCols,
       Math.floor((e.clientX - rect.left - 4) / cellWidth) + 1));
     const row = Math.max(1, Math.min(lastRows,
-      Math.floor((e.clientY - rect.top) / cellHeight) + 1));
+      Math.floor((e.clientY - rect.top - 4) / cellHeight) + 1));
     return { col, row };
   }
 
@@ -202,6 +202,9 @@
     if (e.button === 0 && !screen.mouseEnabled && !e.altKey) {
       // Plain shell: begin a local drag-selection.
       e.preventDefault();
+      // Tear down any prior in-progress drag before starting a new one, so a
+      // missed mouseup can't leave a stale handler that wipes this selection.
+      removeWindowListeners?.();
       (e.currentTarget as HTMLElement | null)?.focus();
       const cell = cellFromEvent(e);
       selAnchor = cell;
@@ -212,6 +215,7 @@
         selFocus = cellFromEvent(ev);
       };
       const handleUp = () => {
+        if (!selecting) return;
         selecting = false;
         removeWindowListeners?.();
         // Only copy a real drag-selection; a plain click clears any selection.
@@ -903,8 +907,8 @@
     flex: 1 1 auto;
     min-height: 0;
     min-width: 0;
-    user-select: text;
-    -webkit-user-select: text;
+    user-select: none;
+    -webkit-user-select: none;
     background: #0a0a0a;
     color: #e8e8e8;
     overflow: hidden;
