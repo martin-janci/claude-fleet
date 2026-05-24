@@ -218,7 +218,7 @@
       {#if error}<p class="err">{error}</p>{/if}
     </section>
 
-    <section class="block">
+    <section class="block" data-testid="onboarding-section">
       <div class="section-header">
         <h4>Setup guide</h4>
       </div>

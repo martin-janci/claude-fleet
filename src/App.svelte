@@ -208,6 +208,8 @@
 </script>
 
 {#if showWelcome}
+  <!-- "Skip for now" closes the welcome dialog but intentionally leaves the
+       sidebar "Get started" card visible (it sets welcomed, not dismissed). -->
   <WelcomeDialog
     onstart={() => {
       onboardingWelcomed.set(true);

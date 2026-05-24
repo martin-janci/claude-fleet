@@ -30,10 +30,6 @@
 
   let showSettings = $state(false);
 
-  // Onboarding card actions — open the same flows as existing UI.
-  const openAddHost = () => { showSettings = true; };
-  const openNewSession = () => { showProjectPicker = true; };
-
   // Optional collapse handler injected by the parent (App.svelte). When
   // present, a ‹ button appears in the sidebar header so the user can
   // hide the whole sidebar to make room for the terminal.
@@ -235,6 +231,10 @@
 
   let dialogProject: ProjectTreeRow | null = $state(null);
   let showProjectPicker = $state(false);
+
+  // Onboarding card actions — open the same flows as existing UI.
+  const openAddHost = () => { showSettings = true; };
+  const openNewSession = () => { showProjectPicker = true; };
 
   function openNew(p: ProjectTreeRow, e?: Event) {
     e?.stopPropagation();
