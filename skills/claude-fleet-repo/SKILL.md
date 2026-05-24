@@ -1,6 +1,6 @@
 ---
 name: claude-fleet-repo
-description: Use when developing the claude-fleet app itself — adding MCP tools, service functions, store helpers, migrations, frontend stores; building, testing, or shipping a PR. Triggers when working inside the `claude-fleet` repo (Tauri 2 + Svelte 5 + Rust), or when the user asks to "add to fleet", "fix fleet", "ship a fleet PR", or similar. Sister skill: `claude-fleet-control` (for *operating* sessions, not for hacking on the app).
+description: Use when developing claude-fleet itself — adding MCP tools, services, migrations, frontend stores; building, testing, or shipping a PR. Triggers inside the `claude-fleet` repo (Tauri 2 + Svelte 5 + Rust) or on asks like "add to fleet", "fix fleet", "ship a fleet PR". Sister: `claude-fleet-control` for *operating* sessions.
 ---
 
 # Working on claude-fleet
@@ -54,6 +54,7 @@ See "Shipping a PR" below.
 - **Best-effort writes** (timeline events, intel) should never block the mutation that produced them. Pattern: `let _ = s.insert_session_event(…);` and log/swallow errors.
 - **Terminal is hand-rolled**: `src/lib/ansi.ts` + `TerminalView.svelte`. xterm.js was tried and abandoned (WKWebView repaint bug). Only one PTY is attached at a time — see `pty.rs`.
 - **Test caveats**: a few frontend tests (`session_ui.test.ts`, `App.test.ts`) fail pre-existingly with `localStorage is undefined`; verify against `main` before blaming your change. The `Sidebar` "without quadratic blow-up" perf test is timing-sensitive and occasionally flakes on a loaded box.
+- **MCP prefix stability**: every `#[tool(...)]` addition/rename/description edit in `src-tauri/src/mcp/tools.rs` invalidates the Claude API tool-definition cache for every connected client. Add tools sparingly; when you must rename or rewrite a description, batch with sibling edits in one release rather than churning across many.
 
 ## Shipping a PR (current CI billing block)
 

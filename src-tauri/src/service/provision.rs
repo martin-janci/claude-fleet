@@ -35,13 +35,11 @@ at the start of every new task and whenever the task changes significantly.
 Use the **fleet-friendly-name** skill — it is the single, token-cheap path
 for this. Do not chat about the label; just set it.
 
-If `set_friendly_name` returns `E_NOTFOUND`, retry with the full `hostname`,
-then with the fixed alias `local` (sessions on the machine running
-claude-fleet itself are keyed under `local`, not the hostname). Only when all
-three — `hostname -s`, `hostname`, and `local` — return `E_NOTFOUND` does this
-machine's alias truly not match: emit a one-line notice to the user (the skill
-has the exact wording) and stop. The user fixes the alias once in the
-claude-fleet host picker.";
+The `host_alias` is configuration, not a fact derivable from `hostname`. If
+`set_friendly_name` returns `E_NOTFOUND` for `hostname -s`, do not guess —
+call `list_sessions` and read the correct `host_alias` from the row whose
+`tmux_name` matches your `tmux display-message -p '#S'`. The skill spells out
+the full programmatic-verification flow.";
 
 /// Install the skill + merge the MCP entry on one host. `url` is the MCP
 /// endpoint that host should use. Reads `~/.claude.json`, merges (preserving
@@ -534,18 +532,23 @@ mod tests {
     }
 
     #[test]
-    fn claude_md_body_documents_local_fallback() {
-        // Regression: the managed CLAUDE.md block must mirror the
-        // fleet-friendly-name skill's host-alias fallback. On the central
-        // host, sessions are keyed under the fixed alias `local`, never the OS
-        // hostname (see `claude_cli.rs`/`pty.rs`). Guidance that stops after
-        // `hostname -s` / `hostname` makes the in-session agent wrongly report
-        // an alias mismatch on that host, so the block MUST name `local` as
-        // the final fallback before giving up.
+    fn claude_md_body_documents_programmatic_verification() {
+        // Regression: the managed CLAUDE.md block must steer the in-session
+        // agent toward `list_sessions` lookup on `E_NOTFOUND` rather than a
+        // hardcoded hostname-guessing fallback chain. The previous wording
+        // listed `hostname -s` / `hostname` / `local` as fallbacks, which
+        // silently broke on any host whose alias was renamed in the picker
+        // (alias is configuration, not a function of `hostname`).
         assert!(
-            super::CLAUDE_MD_BODY.contains("`local`"),
-            "managed CLAUDE.md block must document the `local` fallback so the \
-             central host (alias `local`) does not trip a false mismatch notice"
+            super::CLAUDE_MD_BODY.contains("list_sessions"),
+            "managed CLAUDE.md block must point at `list_sessions` for \
+             programmatic alias verification, not a hardcoded fallback chain"
+        );
+        assert!(
+            super::CLAUDE_MD_BODY.contains("configuration"),
+            "managed CLAUDE.md block must call out that `host_alias` is \
+             configuration, so the agent doesn't try to derive it from \
+             `hostname`"
         );
     }
 }

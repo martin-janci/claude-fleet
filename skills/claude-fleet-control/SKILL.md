@@ -78,6 +78,20 @@ controller in the store. Effects:
 Skip this only for read-only or one-shot tasks where you'll never be a
 plausible target.
 
+**Discover your identity programmatically** — do not hardcode the alias.
+`tmux_name` comes from `tmux display-message -p '#S'`; `host_alias` is
+**configuration** (whatever the user picked in the host picker) and may not
+match `hostname -s`. Get it from the source of truth:
+
+1. Try `mcp__claude-fleet__register_self { host_alias: "<hostname -s>", tmux_name: "<#S>" }`
+   first — fast path, succeeds when the alias matches the short hostname
+   (the common case).
+2. On `E_NOTFOUND`, call `mcp__claude-fleet__list_sessions {}`, find the row
+   whose `tmux_name` matches your `<#S>`, take its `host_alias`, and retry.
+
+Same pattern the `fleet-friendly-name` skill uses; see it for edge cases
+(no matching row, multiple matches).
+
 ## Recovering a misbehaving session — escalation ladder
 
 **Look before you climb.** Read the row from `list_sessions` (or call
@@ -194,6 +208,35 @@ with `peek_session(session_id)`. (`peek_session` on an interactive session
 returns an informational message — interactive sessions have no background job;
 use `capture_session` for those.)
 
+## Recovering from MCP errors
+
+Three error classes, three different responses — do not blanket-retry:
+
+- **Application errors** (`E_NOTFOUND`, `E_SELF_TARGET`, `E_LOCK`, `E_VALIDATION`, …):
+  the call reached the server and the server said no. **Surface immediately**,
+  then re-sync state before any retry. The canonical re-sync calls are
+  `list_sessions`, `list_hosts`, `list_projects`, `list_worktrees` — they
+  return fresh truth from the store. `E_NOTFOUND` on a session id usually
+  means the row moved (ghost, recreated, renamed); `list_sessions { include_lost: true }`
+  surfaces ghosts so `recreate_session` can revive them.
+
+- **Transient transport errors** (timeout, connection drop, 5xx): retry **once**
+  after a short wait, then re-sync state. The MCP server is local (or via
+  reverse tunnel) and recovers quickly. If the second attempt also fails,
+  surface — don't loop.
+
+- **Destructive ops** (`kill_session`, `safe_kill_session`, `recreate_session`,
+  `restart_session`, `delete_worktree`, `remove_host`, `dismiss_ghost_session`):
+  **never auto-retry**. A timeout doesn't mean the op didn't happen — it may
+  have succeeded server-side and the response was lost. Re-sync first
+  (`list_sessions`/`list_hosts`/`list_worktrees`), confirm the actual state,
+  then decide whether to act again.
+
+**Self-healing pattern** — when a tool that takes a `session_id` errors with
+`E_NOTFOUND`, your in-memory id is stale. Call `list_sessions` (or
+`related_sessions { session_id }` if you have a sibling id) to find the
+current row before retrying. Do not loop the same id.
+
 ## Common mistakes
 
 - **Reading right after `send_prompt`** → empty/partial output. Wait first, then
@@ -202,3 +245,5 @@ use `capture_session` for those.)
   use `scrollback_lines` for history.
 - **Jumping to `recreate_session`** for a session that just needed a nudge — try
   `send_prompt` / `restart_session` first.
+- **Auto-retrying a destructive op after a timeout** — the op may have
+  succeeded; re-sync state first (see "Recovering from MCP errors" above).
