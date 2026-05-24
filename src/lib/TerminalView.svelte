@@ -128,6 +128,14 @@
     if (!r.ok) openError = `Copy failed: ${r.error.message}`;
   }
 
+  /** Paste the native clipboard into the PTY (bracketed-paste framing happens
+   *  in sendPaste). Shared by Cmd+V and the context-menu Paste item. */
+  async function pasteFromClipboard() {
+    const r = await nativeReadText();
+    if (r.ok) sendPaste(r.value);
+    else openError = `Paste failed: ${r.error.message}`;
+  }
+
   function onContextMenu(e: MouseEvent) {
     if (!ptyOpen) return;
     e.preventDefault();
@@ -148,9 +156,7 @@
 
   async function ctxPaste() {
     closeCtxMenu();
-    const r = await nativeReadText();
-    if (r.ok) sendPaste(r.value);
-    else openError = `Paste failed: ${r.error.message}`;
+    await pasteFromClipboard();
   }
 
   function ctxSelectAll() {
@@ -675,10 +681,7 @@
     // sendPaste). Ctrl+V is intentionally NOT intercepted so ^V reaches the app.
     if (e.metaKey && !e.altKey && e.key.toLowerCase() === 'v') {
       e.preventDefault();
-      void nativeReadText().then((r) => {
-        if (r.ok) sendPaste(r.value);
-        else openError = `Paste failed: ${r.error.message}`;
-      });
+      void pasteFromClipboard();
       return;
     }
     // Cmd+C → copy the selection. No selection → no-op (Ctrl+C still sends

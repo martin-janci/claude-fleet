@@ -31,4 +31,10 @@ describe('selectionRects', () => {
       { left: 4, top: 4 + 32, width: (1 + 1) * 8, height: 16 },         // row 2: col 0..1 inclusive
     ]);
   });
+
+  it('does not clamp an out-of-range end col — overflow is left for overflow:hidden to clip', () => {
+    // end.col beyond cols (10) is intentionally NOT clamped; the grid clips it.
+    const rects = selectionRects({ row: 0, col: 2 }, { row: 0, col: 50 }, cfg.cols, cfg.cw, cfg.ch, cfg.pad);
+    expect(rects).toEqual([{ left: 4 + 2 * 8, top: 4, width: (50 - 2 + 1) * 8, height: 16 }]);
+  });
 });
