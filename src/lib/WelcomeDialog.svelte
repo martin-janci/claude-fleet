@@ -4,6 +4,8 @@
   let { onstart, onskip }: { onstart: () => void; onskip: () => void } = $props();
 </script>
 
+<svelte:window onkeydown={(e) => { if (e.key === 'Escape') onskip(); }} />
+
 <div class="backdrop" role="presentation" onclick={onskip}>
   <div
     class="panel"
