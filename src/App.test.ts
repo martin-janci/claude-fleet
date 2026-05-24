@@ -1,8 +1,15 @@
 import { findByTestId, render } from '@testing-library/svelte';
 import { fireEvent } from '@testing-library/svelte';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { vi } from 'vitest';
 import App from './App.svelte';
+import { onboardingDismissed } from './lib/onboarding';
+
+beforeEach(() => {
+  // Suppress the OnboardingCard so tests don't need stubs for its IPC calls
+  // (check_local_prereqs, tunnel_status, mcp_status).
+  onboardingDismissed.set(true);
+});
 
 describe('App layout', () => {
   it('renders sidebar, center, and terminal panes', () => {

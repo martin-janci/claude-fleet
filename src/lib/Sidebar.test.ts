@@ -57,6 +57,7 @@ import { sessions, bootstrapSessions, showBgAgents, type SessionRow } from './se
 import { selectedSession, selectSession } from './selection';
 import { hosts, bootstrapHosts, hostFilter } from './hosts';
 import { accounts, bootstrapAccounts } from './accounts';
+import { onboardingDismissed } from './onboarding';
 
 function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof sessionFor>[]) {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: { args?: { id?: number; new_name?: string; alias?: string } }) => {
@@ -96,6 +97,9 @@ beforeEach(() => {
   hostFilter.set('all');
   showBgAgents.set(true);
   selectSession(null);
+  // Suppress the OnboardingCard so tests don't need stubs for its IPC calls
+  // (check_local_prereqs, tunnel_status, mcp_status).
+  onboardingDismissed.set(true);
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
   // Wipe persisted prefs so one test's recency choice doesn't leak into
   // the next test's mount-time hydration.
