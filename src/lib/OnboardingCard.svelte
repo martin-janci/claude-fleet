@@ -2,7 +2,7 @@
   import { hosts } from './hosts';
   import { projects, refreshProjects } from './projects';
   import { sessions } from './sessions';
-  import { mcpStatus, mcpConfigure, provisionHosts } from './mcp';
+  import { mcpStatus, mcpConfigure, mcpClientConfig, provisionHosts, type McpStatus } from './mcp';
   import {
     deriveSteps,
     allRequiredComplete,
@@ -21,7 +21,7 @@
   // Async snapshots not derivable from stores.
   let prereqs = $state<LocalPrereqs | null>(null);
   let tunnels = $state<TunnelStatusRow[]>([]);
-  let mcpEnabled = $state(false);
+  let mcp = $state<McpStatus | null>(null);
 
   // In-flight UI per step.
   let busy = $state<StepId | null>(null);
@@ -32,7 +32,7 @@
     const [p, t, m] = await Promise.all([checkLocalPrereqs(), tunnelStatus(), mcpStatus()]);
     if (p.ok) prereqs = p.value;
     if (t.ok) tunnels = t.value;
-    if (m.ok) mcpEnabled = m.value.enabled;
+    if (m.ok) mcp = m.value;
   }
   $effect(() => {
     // Re-read snapshots when the host list size changes (host added/provisioned).
@@ -51,7 +51,7 @@
       firstHostAlias: visibleHosts[0]?.alias ?? null,
       tunnels,
       projectCount: $projects.length,
-      mcpEnabled,
+      mcpEnabled: mcp?.enabled ?? false,
       workSessionCount: workSessions.length,
     }),
   );
@@ -88,11 +88,26 @@
       } else if (id === 'mcp') {
         const r = await mcpConfigure({ enabled: true });
         if (!r.ok) errorText = r.error.message;
-        else mcpEnabled = r.value.enabled;
+        else {
+          mcp = r.value;
+          if (!r.value.enabled && r.value.bind_error) errorText = r.value.bind_error;
+        }
         await refreshSnapshots();
       }
     } finally {
       busy = null;
+    }
+  }
+
+  function maskToken(t: string): string {
+    return t.length > 4 ? '••••••••••••' + t.slice(-4) : '••••';
+  }
+
+  async function copyText(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      /* clipboard unavailable — no-op */
     }
   }
 
@@ -138,6 +153,14 @@
         </span>
       </button>
     {/each}
+
+    {#if mcp?.enabled}
+      <div class="mcp-detail">
+        <span class="mcp-detail-item"><span class="mcp-lbl">Port</span>{mcp.port}</span>
+        <span class="mcp-detail-item"><span class="mcp-lbl">Token</span><code class="mcp-token">{maskToken(mcp.token)}</code></span>
+        <button class="mcp-copy" onclick={(e) => { e.stopPropagation(); copyText(mcpClientConfig(mcp!)); }}>Copy config</button>
+      </div>
+    {/if}
 
     {#if errorText}
       <p class="err">{errorText}</p>
@@ -285,4 +308,40 @@
     padding: 5px 10px;
     cursor: pointer;
   }
+  .mcp-detail {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0 4px 26px;
+    font-size: 0.68rem;
+    color: var(--fg-muted, #777);
+    border-top: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .mcp-detail-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .mcp-lbl {
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.7;
+  }
+  .mcp-token {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.68rem;
+  }
+  .mcp-copy {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--fg-muted, #777);
+    cursor: pointer;
+    padding: 1px 6px;
+    font-size: 0.62rem;
+    border-radius: 4px;
+    margin-left: auto;
+  }
+  .mcp-copy:hover { border-color: var(--accent); color: var(--fg); }
 </style>
