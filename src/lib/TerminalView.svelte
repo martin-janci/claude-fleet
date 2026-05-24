@@ -4,8 +4,10 @@
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { selectedSession } from './selection';
   import { Screen, rowToRuns, colorToCss, encodeMouse, type Run } from './ansi';
-  import { trimSelectionText, sanitizePaste, framePaste } from './clipboard';
+  import { sanitizePaste, framePaste } from './clipboard';
   import { pointInRect } from './geometry';
+  import { selectionRects, type CellPos } from './terminal_selection';
+  import { nativeWriteText, nativeReadText } from './clipboard_native';
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -46,7 +48,16 @@
    *  spinner during the upload. */
   let dragOver = $state(false);
   let uploading = $state(false);
+  /** Selection endpoints in 0-based grid cells; null when nothing selected.
+   *  Held in component state so the drain re-render can't wipe it (unlike the
+   *  old window.getSelection() path). */
+  let selAnchor: CellPos | null = $state(null);
+  let selFocus: CellPos | null = $state(null);
+  /** True while a drag-select is in progress (between mousedown and mouseup). */
+  let selecting = false;
   let openError: string | null = $state(null);
+  /** Context-menu position (client px) or null when hidden. */
+  let ctxMenu: { x: number; y: number } | null = $state(null);
   let ptyOpen = false;
   let lastCols = $state(0);
   let lastRows = $state(0);
@@ -62,6 +73,9 @@
   // ─── Mouse forwarding state ───────────────────────────────────────────
   /** Which button (0/1/2, encoded as cb) is currently pressed. Null = none. */
   let pressedButton: number | null = null;
+  /** When mouse reporting is on, a left press is deferred until we know whether
+   *  it becomes a drag (→ local selection) or a click (→ forward to the app). */
+  let pendingPress: { cell: CellPos; startX: number; startY: number } | null = null;
   /** The last cell (1-based col, row) for which we sent a motion report,
    *  used to throttle: we only send a new report when the cell changes. */
   let lastMotionCell: { col: number; row: number } | null = null;
@@ -74,6 +88,8 @@
    *  wheels still register — smooth, proportional scrolling either way. */
   let wheelAccum = 0;
   const WHEEL_TICK_PX = 40;
+  /** Pointer travel (px) before a deferred left-press promotes to a selection. */
+  const DRAG_PX = 4;
 
   /** Map a MouseEvent's client coordinates to a 1-based terminal cell,
    *  clamped to the visible grid. Accounts for the 4px left/top padding. */
@@ -82,7 +98,7 @@
     const col = Math.max(1, Math.min(lastCols,
       Math.floor((e.clientX - rect.left - 4) / cellWidth) + 1));
     const row = Math.max(1, Math.min(lastRows,
-      Math.floor((e.clientY - rect.top) / cellHeight) + 1));
+      Math.floor((e.clientY - rect.top - 4) / cellHeight) + 1));
     return { col, row };
   }
 
@@ -101,6 +117,63 @@
     const framed = framePaste(clean, screen?.bracketedPaste ?? false);
     void invoke('pty_write', { args: { data: framed } }).catch(() => {});
     bumpDrain();
+  }
+
+  /** Copy the current selection to the native clipboard. No-op if empty. */
+  async function copySelection() {
+    if (!screen || !selAnchor || !selFocus) return;
+    const text = screen.selectionText(selAnchor, selFocus);
+    if (text === '') return;
+    const r = await nativeWriteText(text);
+    if (!r.ok) openError = `Copy failed: ${r.error.message}`;
+  }
+
+  /** Paste the native clipboard into the PTY (bracketed-paste framing happens
+   *  in sendPaste). Shared by Cmd+V and the context-menu Paste item. */
+  async function pasteFromClipboard() {
+    const r = await nativeReadText();
+    if (r.ok) sendPaste(r.value);
+    else openError = `Paste failed: ${r.error.message}`;
+  }
+
+  function onContextMenu(e: MouseEvent) {
+    if (!ptyOpen) return;
+    e.preventDefault();
+    // Clamp so the ~160x96px menu stays on screen.
+    const x = Math.max(0, Math.min(e.clientX, window.innerWidth - 170));
+    const y = Math.max(0, Math.min(e.clientY, window.innerHeight - 110));
+    ctxMenu = { x, y };
+  }
+
+  function closeCtxMenu() {
+    ctxMenu = null;
+  }
+
+  async function ctxCopy() {
+    closeCtxMenu();
+    await copySelection();
+  }
+
+  async function ctxPaste() {
+    closeCtxMenu();
+    await pasteFromClipboard();
+  }
+
+  function ctxSelectAll() {
+    closeCtxMenu();
+    selAnchor = { row: 0, col: 0 };
+    selFocus = { row: lastRows - 1, col: lastCols - 1 };
+  }
+
+  /** Convert a 1-based eventToCell result to a 0-based grid cell. */
+  function cellFromEvent(e: MouseEvent): CellPos {
+    const { col, row } = eventToCell(e);
+    return { row: row - 1, col: col - 1 };
+  }
+
+  function clearSelection() {
+    selAnchor = null;
+    selFocus = null;
   }
 
   /** Is a drag-drop point inside the terminal grid? Tauri delivers the macOS
@@ -133,7 +206,7 @@
       });
       if (remote.length > 0) sendPaste(pathsToPasteText(remote));
     } catch (e) {
-      openError = describeError(e);
+      openError = `Upload failed: ${describeError(e)}`;
     } finally {
       uploading = false;
     }
@@ -168,11 +241,98 @@
   }
 
   function onMousedown(e: MouseEvent) {
-    // Option (Alt) held → let the browser do a native text selection instead
-    // of forwarding the click to the app, so the user can copy while mouse
-    // reporting is on.
-    if (e.altKey) return;
-    if (!ptyOpen || !screen || !screen.mouseEnabled) return;
+    if (!ptyOpen || !screen) return;
+    // Right-click is reserved for our context menu (handled by onContextMenu).
+    if (e.button === 2) return;
+    // Left-button only for selection; other buttons fall through to app forwarding.
+    if (e.button === 0 && !screen.mouseEnabled && !e.altKey) {
+      // Plain shell: begin a local drag-selection.
+      e.preventDefault();
+      // Tear down any prior in-progress drag before starting a new one, so a
+      // missed mouseup can't leave a stale handler that wipes this selection.
+      removeWindowListeners?.();
+      (e.currentTarget as HTMLElement | null)?.focus();
+      const cell = cellFromEvent(e);
+      selAnchor = cell;
+      selFocus = cell;
+      selecting = true;
+      const handleMove = (ev: MouseEvent) => {
+        if (!selecting) return;
+        selFocus = cellFromEvent(ev);
+      };
+      const handleUp = () => {
+        if (!selecting) return;
+        selecting = false;
+        removeWindowListeners?.();
+        // Only copy a real drag-selection; a plain click clears any selection.
+        if (
+          selAnchor && selFocus &&
+          (selAnchor.row !== selFocus.row || selAnchor.col !== selFocus.col)
+        ) {
+          void copySelection();
+        } else {
+          clearSelection();
+        }
+      };
+      window.addEventListener('mousemove', handleMove);
+      window.addEventListener('mouseup', handleUp);
+      removeWindowListeners = () => {
+        window.removeEventListener('mousemove', handleMove);
+        window.removeEventListener('mouseup', handleUp);
+        removeWindowListeners = null;
+      };
+      return;
+    }
+    // Mouse reporting ON, left button, no Option → defer: a drag becomes a local
+    // selection, a click (no movement) forwards to the app.
+    if (e.button === 0 && screen.mouseEnabled && !e.altKey) {
+      e.preventDefault();
+      removeWindowListeners?.(); // drop any stale in-progress drag first
+      (e.currentTarget as HTMLElement | null)?.focus();
+      const cell = cellFromEvent(e);
+      pendingPress = { cell, startX: e.clientX, startY: e.clientY };
+      clearSelection();
+      const handleMove = (ev: MouseEvent) => {
+        if (!pendingPress) return;
+        const moved =
+          Math.abs(ev.clientX - pendingPress.startX) > DRAG_PX ||
+          Math.abs(ev.clientY - pendingPress.startY) > DRAG_PX;
+        if (moved && !selecting) {
+          // Promote to a local selection.
+          selecting = true;
+          selAnchor = pendingPress.cell;
+        }
+        if (selecting) selFocus = cellFromEvent(ev);
+      };
+      const handleUp = (ev: MouseEvent) => {
+        removeWindowListeners?.();
+        if (selecting) {
+          selecting = false;
+          void copySelection();
+        } else if (pendingPress) {
+          // No drag → forward a real click (press + release) to the app.
+          const c = cellFromEvent(ev);
+          const sgr = screen!.mouseSgr;
+          // Press + release in one write so the app sees an atomic click.
+          sendMouse(
+            encodeMouse(0, c.col + 1, c.row + 1, false, sgr) +
+              encodeMouse(0, c.col + 1, c.row + 1, true, sgr),
+          );
+        }
+        pendingPress = null;
+      };
+      window.addEventListener('mousemove', handleMove);
+      window.addEventListener('mouseup', handleUp);
+      removeWindowListeners = () => {
+        window.removeEventListener('mousemove', handleMove);
+        window.removeEventListener('mouseup', handleUp);
+        removeWindowListeners = null;
+      };
+      return;
+    }
+    // Not a left-button local-select gesture. Option-held drags and middle/right
+    // buttons fall through to app forwarding below.
+    if (!screen.mouseEnabled) return; // no reporting + not a left-select → ignore
     // Only forward left (0), middle (1), right (2).
     if (e.button > 2) return;
     e.preventDefault();
@@ -227,18 +387,6 @@
     removeWindowListeners?.();
   }
 
-  /** After a mouse-up, if the user selected text inside the grid, copy it to
-   *  the clipboard automatically (iTerm "copy on select"). The selection is
-   *  left highlighted. Trailing whitespace per line is trimmed because rows
-   *  are space-padded to the full width. */
-  function onGridMouseup() {
-    const sel = window.getSelection();
-    if (!sel || sel.isCollapsed || !container) return;
-    if (!container.contains(sel.anchorNode) && !container.contains(sel.focusNode)) return;
-    const text = trimSelectionText(sel.toString());
-    if (text.trim() === '') return;
-    void navigator.clipboard.writeText(text).catch(() => {});
-  }
 
   $effect(() => {
     const sess = $selectedSession;
@@ -312,8 +460,14 @@
     lastCols = dim.cols;
     lastRows = dim.rows;
     screen = new Screen(dim.rows, dim.cols);
+    clearSelection();
+    // Reset any in-progress drag state so a session switch can't leave it stale.
+    selecting = false;
+    pendingPress = null;
     screen.onClipboard = (text) => {
-      void navigator.clipboard.writeText(text).catch(() => {});
+      void nativeWriteText(text).then((r) => {
+        if (!r.ok) openError = `Clipboard write failed: ${r.error.message}`;
+      });
     };
     renderVersion++;
 
@@ -344,7 +498,7 @@
       currentHost = sess.host_alias;
       ptyOpen = true;
     } catch (e) {
-      openError = describeError(e);
+      openError = `PTY error: ${describeError(e)}`;
       opening = false;
       return;
     }
@@ -457,6 +611,9 @@
     const hadAnything = screen !== null || ptyOpen || drainTimer !== null || resizeObserver !== null;
     if (!hadAnything) return;
 
+    // Drop the context menu so a session switch can't leave the backdrop stuck.
+    ctxMenu = null;
+
     if (drainTimer) {
       clearTimeout(drainTimer);
       drainTimer = null;
@@ -519,11 +676,28 @@
     // While an IME / dead-key composition is in progress the keydowns are
     // part of composing — the finished text arrives via compositionend.
     if (e.isComposing) return;
-    // Cmd+V / Ctrl+V → read the clipboard and paste into the PTY. A non-editable
-    // <div> doesn't fire a native paste event, so we read the clipboard here.
-    if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'v') {
+    if (e.key === 'Escape' && ctxMenu) { ctxMenu = null; return; }
+    // Cmd+V → paste from the native clipboard (bracketed-paste framing in
+    // sendPaste). Ctrl+V is intentionally NOT intercepted so ^V reaches the app.
+    if (e.metaKey && !e.altKey && e.key.toLowerCase() === 'v') {
       e.preventDefault();
-      void navigator.clipboard.readText().then((t) => sendPaste(t)).catch(() => {});
+      void pasteFromClipboard();
+      return;
+    }
+    // Cmd+C → copy the selection. No selection → no-op (Ctrl+C still sends
+    // SIGINT via keyToBytes).
+    if (e.metaKey && !e.altKey && e.key.toLowerCase() === 'c') {
+      if (selAnchor && selFocus) {
+        e.preventDefault();
+        void copySelection();
+      }
+      return;
+    }
+    // Cmd+A → select the whole viewport.
+    if (e.metaKey && !e.altKey && e.key.toLowerCase() === 'a') {
+      e.preventDefault();
+      selAnchor = { row: 0, col: 0 };
+      selFocus = { row: lastRows - 1, col: lastCols - 1 };
       return;
     }
     const bytes = keyToBytes(e);
@@ -628,6 +802,13 @@
     };
   });
 
+  // Selection highlight rects. Touch renderVersion so it tracks resizes/redraws.
+  const selRects = $derived.by(() => {
+    void renderVersion;
+    if (!selAnchor || !selFocus || cellWidth <= 0 || cellHeight <= 0) return [];
+    return selectionRects(selAnchor, selFocus, lastCols, cellWidth, cellHeight, 4);
+  });
+
   function runStyle(run: Run): string {
     const cacheKey = `${run.fg}|${run.bg}|${run.attrs}`;
     const hit = styleCache.get(cacheKey);
@@ -697,7 +878,7 @@
       oncompositionend={onCompositionEnd}
       onwheel={onWheel}
       onmousedown={onMousedown}
-      onmouseup={onGridMouseup}
+      oncontextmenu={onContextMenu}
       data-testid="terminal-host"
     >
       <!-- Hidden 1ch×1lh probe used once to measure font metrics. We can't
@@ -710,6 +891,13 @@
             <span style={runStyle(run)}>{run.text}</span>
           {/each}
         </div>
+      {/each}
+      {#each selRects as r (r.top + ':' + r.left)}
+        <div
+          class="selection"
+          style="left:{r.left}px; top:{r.top}px; width:{r.width}px; height:{r.height}px"
+          aria-hidden="true"
+        ></div>
       {/each}
       {#if cursor}
         <div
@@ -725,8 +913,22 @@
         </div>
       {/if}
     </div>
+    {#if ctxMenu}
+      <!-- Backdrop closes the menu on any outside click. -->
+      <div
+        class="ctx-backdrop"
+        onmousedown={closeCtxMenu}
+        oncontextmenu={(e) => { e.preventDefault(); closeCtxMenu(); }}
+        role="presentation"
+      ></div>
+      <div class="ctx-menu" style="left:{ctxMenu.x}px; top:{ctxMenu.y}px" data-testid="terminal-ctx-menu">
+        <button onclick={ctxCopy} disabled={!selAnchor || !selFocus}>Copy</button>
+        <button onclick={ctxPaste}>Paste</button>
+        <button onclick={ctxSelectAll}>Select All</button>
+      </div>
+    {/if}
     {#if openError}
-      <div class="err">PTY error: {openError}</div>
+      <div class="err">{openError}</div>
     {/if}
   </div>
 {:else}
@@ -837,8 +1039,8 @@
     flex: 1 1 auto;
     min-height: 0;
     min-width: 0;
-    user-select: text;
-    -webkit-user-select: text;
+    user-select: none;
+    -webkit-user-select: none;
     background: #0a0a0a;
     color: #e8e8e8;
     overflow: hidden;
@@ -863,6 +1065,12 @@
   .row span {
     /* span color comes from inline style applied per run. */
     display: inline;
+  }
+  .selection {
+    position: absolute;
+    background: rgba(120, 170, 255, 0.35);
+    pointer-events: none;
+    z-index: 1;
   }
   /* Block cursor overlay. Translucent so the glyph under it stays readable;
      blinks like a standard terminal cursor. Position/size are set inline from
@@ -930,4 +1138,34 @@
     padding: 0.3rem 0.6rem;
     border-top: 1px solid #e64a4a;
   }
+  .ctx-backdrop {
+    position: fixed;
+    inset: 0;
+    /* Below the app's modals (z-index 20); above terminal content. */
+    z-index: 18;
+  }
+  .ctx-menu {
+    position: fixed;
+    z-index: 19;
+    min-width: 150px;
+    background: #1c1c1c;
+    border: 1px solid #3a3a3a;
+    border-radius: 6px;
+    padding: 4px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+    display: flex;
+    flex-direction: column;
+  }
+  .ctx-menu button {
+    text-align: left;
+    background: none;
+    border: none;
+    color: #e8e8e8;
+    padding: 6px 10px;
+    border-radius: 4px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .ctx-menu button:hover:not(:disabled) { background: #2d6cdf; }
+  .ctx-menu button:disabled { color: #666; cursor: default; }
 </style>

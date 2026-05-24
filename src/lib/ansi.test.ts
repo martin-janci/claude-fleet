@@ -739,3 +739,40 @@ describe('bracketed paste mode (DECSET ?2004)', () => {
     expect(s.bracketedPaste).toBe(true);
   });
 });
+
+describe('Screen.selectionText', () => {
+  function withText(lines: string[]): Screen {
+    const cols = Math.max(...lines.map((l) => l.length), 1);
+    const s = new Screen(lines.length, cols);
+    lines.forEach((line, r) => {
+      for (let c = 0; c < line.length; c++) s.cells[r][c].ch = line[c];
+    });
+    return s;
+  }
+
+  it('returns a single cell', () => {
+    const s = withText(['abc']);
+    expect(s.selectionText({ row: 0, col: 1 }, { row: 0, col: 1 })).toBe('b');
+  });
+
+  it('returns a single-row range inclusive of both ends', () => {
+    const s = withText(['hello world']);
+    expect(s.selectionText({ row: 0, col: 0 }, { row: 0, col: 4 })).toBe('hello');
+  });
+
+  it('spans multiple rows: first row from col, middle rows full, last row to col', () => {
+    const s = withText(['abcde', 'fghij', 'klmno']);
+    // from (0,2) to (2,1): "cde" + "fghij" + "kl"
+    expect(s.selectionText({ row: 0, col: 2 }, { row: 2, col: 1 })).toBe('cde\nfghij\nkl');
+  });
+
+  it('normalizes a reversed anchor/focus', () => {
+    const s = withText(['abcde']);
+    expect(s.selectionText({ row: 0, col: 4 }, { row: 0, col: 0 })).toBe('abcde');
+  });
+
+  it('trims trailing whitespace per line (padded cells)', () => {
+    const s = withText(['hi', 'yo']);
+    expect(s.selectionText({ row: 0, col: 0 }, { row: 1, col: 4 })).toBe('hi\nyo');
+  });
+});
