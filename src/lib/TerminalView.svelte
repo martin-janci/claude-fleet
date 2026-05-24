@@ -7,7 +7,7 @@
   import { sanitizePaste, framePaste } from './clipboard';
   import { pointInRect } from './geometry';
   import { selectionRects, type CellPos } from './terminal_selection';
-  import { nativeWriteText } from './clipboard_native';
+  import { nativeWriteText, nativeReadText } from './clipboard_native';
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -630,11 +630,30 @@
     // While an IME / dead-key composition is in progress the keydowns are
     // part of composing — the finished text arrives via compositionend.
     if (e.isComposing) return;
-    // Cmd+V / Ctrl+V → read the clipboard and paste into the PTY. A non-editable
-    // <div> doesn't fire a native paste event, so we read the clipboard here.
-    if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'v') {
+    // Cmd+V → paste from the native clipboard (bracketed-paste framing in
+    // sendPaste). Ctrl+V is intentionally NOT intercepted so ^V reaches the app.
+    if (e.metaKey && !e.altKey && e.key.toLowerCase() === 'v') {
       e.preventDefault();
-      void navigator.clipboard.readText().then((t) => sendPaste(t)).catch(() => {});
+      void nativeReadText().then((r) => {
+        if (r.ok) sendPaste(r.value);
+        else openError = `Paste failed: ${r.error.message}`;
+      });
+      return;
+    }
+    // Cmd+C → copy the selection. No selection → no-op (Ctrl+C still sends
+    // SIGINT via keyToBytes).
+    if (e.metaKey && !e.altKey && e.key.toLowerCase() === 'c') {
+      if (selAnchor && selFocus) {
+        e.preventDefault();
+        void copySelection();
+      }
+      return;
+    }
+    // Cmd+A → select the whole viewport.
+    if (e.metaKey && !e.altKey && e.key.toLowerCase() === 'a') {
+      e.preventDefault();
+      selAnchor = { row: 0, col: 0 };
+      selFocus = { row: lastRows - 1, col: lastCols - 1 };
       return;
     }
     const bytes = keyToBytes(e);
