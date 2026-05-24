@@ -410,7 +410,7 @@ This task wires selection for the **mouse-reporting-OFF** path (plain shell) and
 After the existing `import { pointInRect } from './geometry';` line, add:
 
 ```ts
-  import { normalizeSelection, selectionRects, type CellPos } from './selection';
+  import { normalizeSelection, selectionRects, type CellPos } from './terminal_selection';
   import { nativeWriteText, nativeReadText } from './clipboard_native';
 ```
 
