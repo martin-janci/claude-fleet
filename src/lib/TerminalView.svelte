@@ -200,7 +200,7 @@
       });
       if (remote.length > 0) sendPaste(pathsToPasteText(remote));
     } catch (e) {
-      openError = describeError(e);
+      openError = `Upload failed: ${describeError(e)}`;
     } finally {
       uploading = false;
     }
@@ -459,7 +459,9 @@
     selecting = false;
     pendingPress = null;
     screen.onClipboard = (text) => {
-      void navigator.clipboard.writeText(text).catch(() => {});
+      void nativeWriteText(text).then((r) => {
+        if (!r.ok) openError = `Clipboard write failed: ${r.error.message}`;
+      });
     };
     renderVersion++;
 
@@ -490,7 +492,7 @@
       currentHost = sess.host_alias;
       ptyOpen = true;
     } catch (e) {
-      openError = describeError(e);
+      openError = `PTY error: ${describeError(e)}`;
       opening = false;
       return;
     }
@@ -923,7 +925,7 @@
       </div>
     {/if}
     {#if openError}
-      <div class="err">PTY error: {openError}</div>
+      <div class="err">{openError}</div>
     {/if}
   </div>
 {:else}
