@@ -78,16 +78,16 @@ controller in the store. Effects:
 Skip this only for read-only or one-shot tasks where you'll never be a
 plausible target.
 
-**Discover your identity programmatically** — do not hardcode the alias.
+**Discover your identity programmatically** — never guess the alias.
 `tmux_name` comes from `tmux display-message -p '#S'`; `host_alias` is
-**configuration** (whatever the user picked in the host picker) and may not
-match `hostname -s`. Get it from the source of truth:
+**configuration** (whatever the user picked in the host picker) and is not
+derivable from `hostname`. The two diverge whenever the user renames a host,
+so a hostname-based fast path silently breaks. Always look up the alias:
 
-1. Try `mcp__claude-fleet__register_self { host_alias: "<hostname -s>", tmux_name: "<#S>" }`
-   first — fast path, succeeds when the alias matches the short hostname
-   (the common case).
-2. On `E_NOTFOUND`, call `mcp__claude-fleet__list_sessions {}`, find the row
-   whose `tmux_name` matches your `<#S>`, take its `host_alias`, and retry.
+1. `tmux display-message -p '#S'` — your `tmux_name`.
+2. `mcp__claude-fleet__list_sessions {}` — find the row whose `tmux_name`
+   matches; take its `host_alias`.
+3. `mcp__claude-fleet__register_self { host_alias: "<discovered>", tmux_name: "<#S>" }`.
 
 Same pattern the `fleet-friendly-name` skill uses; see it for edge cases
 (no matching row, multiple matches).

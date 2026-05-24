@@ -35,11 +35,12 @@ at the start of every new task and whenever the task changes significantly.
 Use the **fleet-friendly-name** skill — it is the single, token-cheap path
 for this. Do not chat about the label; just set it.
 
-The `host_alias` is configuration, not a fact derivable from `hostname`. If
-`set_friendly_name` returns `E_NOTFOUND` for `hostname -s`, do not guess —
-call `list_sessions` and read the correct `host_alias` from the row whose
-`tmux_name` matches your `tmux display-message -p '#S'`. The skill spells out
-the full programmatic-verification flow.";
+The `host_alias` is configuration, not a fact derivable from `hostname`.
+Never call `set_friendly_name` with a guessed alias (e.g. `hostname -s`) —
+it silently misses whenever the user renames a host in the picker. Always
+look it up: `list_sessions {}`, find the row whose `tmux_name` matches
+`tmux display-message -p '#S'`, then call `set_friendly_name` with that
+row's `host_alias`. The skill spells out the full flow.";
 
 /// Install the skill + merge the MCP entry on one host. `url` is the MCP
 /// endpoint that host should use. Reads `~/.claude.json`, merges (preserving

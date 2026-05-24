@@ -22,9 +22,9 @@ If unsure, prefer setting it. The sidebar falls back to `tmux_name` when
 ## How to run
 
 The session's `tmux_name` is reliable identity. The `host_alias` is
-**configuration** — it's whatever the user chose in the claude-fleet host
-picker, which may or may not match `hostname -s`. Do not hardcode a fallback
-chain; **discover** the alias from the source of truth.
+**configuration** — whatever the user chose in the claude-fleet host picker,
+not derivable from `hostname`. Always discover the alias from the source of
+truth; never guess.
 
 1. **Read your tmux session name.** Single Bash call:
 
@@ -32,38 +32,40 @@ chain; **discover** the alias from the source of truth.
    tmux display-message -p '#S'
    ```
 
-2. **Pick a 3–6 word label.** Imperative phrase, no quotes/punctuation, no
-   ticket IDs or branch names. Examples:
-   - `add friendly name to sessions`
-   - `debug login redirect loop`
-   - `migrate auth middleware`
-   - `review hardening spec`
-
-3. **Try the fast path** — most hosts have alias == `hostname -s`, so try
-   that first to skip a `list_sessions` round-trip:
-
-   ```
-   mcp__claude-fleet__set_friendly_name {
-     host_alias: "<hostname -s>",
-     tmux_name: "<#S>",
-     friendly_name: "<label>"
-   }
-   ```
-
-   If this succeeds, you're done (2 tool calls total).
-
-4. **On `E_NOTFOUND`, verify programmatically.** Call `list_sessions {}` and
-   find the row whose `tmux_name` exactly matches your `<#S>`. The row's
-   `host_alias` is your correct alias — no guessing. Then retry
-   `set_friendly_name` with that alias.
+2. **Discover the alias programmatically.** Call
+   `mcp__claude-fleet__list_sessions {}` and find the row whose `tmux_name`
+   exactly matches your `<#S>`. Take that row's `host_alias`.
 
    If multiple rows match the same `tmux_name` (rare: same name on different
    hosts), prefer the row with `status: "running"` and, if still ambiguous,
    the one whose `project_id` matches your current working directory's
    project. If you still cannot pin one row, see "Cannot resolve" below.
 
-That's it. Do not announce the call to the user, do not summarize the result —
-the sidebar updates live via the row event.
+3. **Pick a 3–6 word label.** Imperative phrase, no quotes/punctuation, no
+   ticket IDs or branch names. Examples:
+   - `add friendly name to sessions`
+   - `debug login redirect loop`
+   - `migrate auth middleware`
+   - `review hardening spec`
+
+4. **Set the name.** One MCP call with the discovered alias:
+
+   ```
+   mcp__claude-fleet__set_friendly_name {
+     host_alias: "<discovered alias>",
+     tmux_name: "<#S>",
+     friendly_name: "<label>"
+   }
+   ```
+
+Three tool calls total: Bash + list_sessions + set_friendly_name.
+
+Do not try a hostname-based "fast path" first — `hostname -s` returns the OS
+hostname, not the claude-fleet alias, and the two diverge whenever the user
+renames a host in the picker. Guessing wastes a tool call on every miss.
+
+Do not announce the call to the user, do not summarize the result — the
+sidebar updates live via the row event.
 
 ## Clearing the label
 
@@ -86,6 +88,6 @@ notice to the user and stop:
 
 ## Token discipline
 
-Happy path: 2 tool calls (Bash + set_friendly_name). Fallback path: 3 tool
-calls (Bash + list_sessions + set_friendly_name). Never more than 4 in any
-realistic scenario. Do not chat about the label.
+Three tool calls per task pickup: Bash + list_sessions + set_friendly_name.
+No hostname-guessing fast path — that path silently breaks on renamed hosts
+and wastes a call when it does. Do not chat about the label.
