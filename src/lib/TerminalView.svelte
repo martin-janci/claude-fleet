@@ -56,6 +56,8 @@
   /** True while a drag-select is in progress (between mousedown and mouseup). */
   let selecting = false;
   let openError: string | null = $state(null);
+  /** Context-menu position (client px) or null when hidden. */
+  let ctxMenu: { x: number; y: number } | null = $state(null);
   let ptyOpen = false;
   let lastCols = $state(0);
   let lastRows = $state(0);
@@ -124,6 +126,37 @@
     if (text === '') return;
     const r = await nativeWriteText(text);
     if (!r.ok) openError = `Copy failed: ${r.error.message}`;
+  }
+
+  function onContextMenu(e: MouseEvent) {
+    if (!ptyOpen) return;
+    e.preventDefault();
+    // Clamp so the ~160x96px menu stays on screen.
+    const x = Math.min(e.clientX, window.innerWidth - 170);
+    const y = Math.min(e.clientY, window.innerHeight - 110);
+    ctxMenu = { x, y };
+  }
+
+  function closeCtxMenu() {
+    ctxMenu = null;
+  }
+
+  async function ctxCopy() {
+    closeCtxMenu();
+    await copySelection();
+  }
+
+  async function ctxPaste() {
+    closeCtxMenu();
+    const r = await nativeReadText();
+    if (r.ok) sendPaste(r.value);
+    else openError = `Paste failed: ${r.error.message}`;
+  }
+
+  function ctxSelectAll() {
+    closeCtxMenu();
+    selAnchor = { row: 0, col: 0 };
+    selFocus = { row: lastRows - 1, col: lastCols - 1 };
   }
 
   /** Convert a 1-based eventToCell result to a 0-based grid cell. */
@@ -203,6 +236,8 @@
 
   function onMousedown(e: MouseEvent) {
     if (!ptyOpen || !screen) return;
+    // Right-click is reserved for our context menu (handled by onContextMenu).
+    if (e.button === 2) return;
     // Left-button only for selection; other buttons fall through to app forwarding.
     if (e.button === 0 && !screen.mouseEnabled && !e.altKey) {
       // Plain shell: begin a local drag-selection.
@@ -630,6 +665,7 @@
     // While an IME / dead-key composition is in progress the keydowns are
     // part of composing — the finished text arrives via compositionend.
     if (e.isComposing) return;
+    if (e.key === 'Escape' && ctxMenu) { ctxMenu = null; return; }
     // Cmd+V → paste from the native clipboard (bracketed-paste framing in
     // sendPaste). Ctrl+V is intentionally NOT intercepted so ^V reaches the app.
     if (e.metaKey && !e.altKey && e.key.toLowerCase() === 'v') {
@@ -834,6 +870,7 @@
       oncompositionend={onCompositionEnd}
       onwheel={onWheel}
       onmousedown={onMousedown}
+      oncontextmenu={onContextMenu}
       data-testid="terminal-host"
     >
       <!-- Hidden 1ch×1lh probe used once to measure font metrics. We can't
@@ -868,6 +905,20 @@
         </div>
       {/if}
     </div>
+    {#if ctxMenu}
+      <!-- Backdrop closes the menu on any outside click. -->
+      <div
+        class="ctx-backdrop"
+        onmousedown={closeCtxMenu}
+        oncontextmenu={(e) => { e.preventDefault(); closeCtxMenu(); }}
+        role="presentation"
+      ></div>
+      <div class="ctx-menu" style="left:{ctxMenu.x}px; top:{ctxMenu.y}px" data-testid="terminal-ctx-menu">
+        <button onclick={ctxCopy} disabled={!selAnchor || !selFocus}>Copy</button>
+        <button onclick={ctxPaste}>Paste</button>
+        <button onclick={ctxSelectAll}>Select All</button>
+      </div>
+    {/if}
     {#if openError}
       <div class="err">PTY error: {openError}</div>
     {/if}
@@ -1079,4 +1130,33 @@
     padding: 0.3rem 0.6rem;
     border-top: 1px solid #e64a4a;
   }
+  .ctx-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+  }
+  .ctx-menu {
+    position: fixed;
+    z-index: 31;
+    min-width: 150px;
+    background: #1c1c1c;
+    border: 1px solid #3a3a3a;
+    border-radius: 6px;
+    padding: 4px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+    display: flex;
+    flex-direction: column;
+  }
+  .ctx-menu button {
+    text-align: left;
+    background: none;
+    border: none;
+    color: #e8e8e8;
+    padding: 6px 10px;
+    border-radius: 4px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .ctx-menu button:hover:not(:disabled) { background: #2d6cdf; }
+  .ctx-menu button:disabled { color: #666; cursor: default; }
 </style>
