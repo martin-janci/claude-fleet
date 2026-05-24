@@ -132,8 +132,8 @@
     if (!ptyOpen) return;
     e.preventDefault();
     // Clamp so the ~160x96px menu stays on screen.
-    const x = Math.min(e.clientX, window.innerWidth - 170);
-    const y = Math.min(e.clientY, window.innerHeight - 110);
+    const x = Math.max(0, Math.min(e.clientX, window.innerWidth - 170));
+    const y = Math.max(0, Math.min(e.clientY, window.innerHeight - 110));
     ctxMenu = { x, y };
   }
 
@@ -602,6 +602,9 @@
     // reactivity scheduler treats the cascade as an effect-update loop.
     const hadAnything = screen !== null || ptyOpen || drainTimer !== null || resizeObserver !== null;
     if (!hadAnything) return;
+
+    // Drop the context menu so a session switch can't leave the backdrop stuck.
+    ctxMenu = null;
 
     if (drainTimer) {
       clearTimeout(drainTimer);
@@ -1133,11 +1136,12 @@
   .ctx-backdrop {
     position: fixed;
     inset: 0;
-    z-index: 30;
+    /* Below the app's modals (z-index 20); above terminal content. */
+    z-index: 18;
   }
   .ctx-menu {
     position: fixed;
-    z-index: 31;
+    z-index: 19;
     min-width: 150px;
     background: #1c1c1c;
     border: 1px solid #3a3a3a;
