@@ -116,7 +116,7 @@ mod tests {
         let snap = sup.snapshot();
         assert_eq!(snap.get("mefistos"), Some(&true));
         // A host we never started is simply absent (caller maps to NotStarted).
-        assert!(snap.get("never").is_none());
+        assert!(!snap.contains_key("never"));
 
         sup.stop_all();
     }
