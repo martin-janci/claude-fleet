@@ -61,6 +61,51 @@ branch**; pass `base_branch: "dev"` to fork from another branch (it falls back
 to the default branch if `dev` doesn't exist on that host). Remote hosts
 auto-clone the repo if it's missing.
 
+## Plain-shell sessions — `new_shell_session`
+
+`new_session` runs Claude Code in the pane. When you want a **raw shell** —
+to run a dev server, watch a build, exec ad-hoc commands — use
+**`new_shell_session { host_alias, project_id, name, worktree_id?, new_worktree?,
+base_branch?, start_command? }`** instead. Same project/worktree plumbing
+(remote auto-clones, `new_worktree` forks a branch, etc.), but the pane is an
+interactive login shell.
+
+`start_command` runs once before the shell drops to an interactive prompt;
+the pane stays alive after it exits, so the session survives even if the
+command is `cargo run` and you Ctrl+C it. Use it for "leave this running":
+
+```text
+new_shell_session { host_alias: "mefistos", project_id: 7,
+                    name: "ppt-web-dev", start_command: "pnpm dev:ppt" }
+```
+
+You steer a shell session the same way you steer a Claude one:
+
+- `send_prompt(session_id, "ls -la")` — types the text + Enter (it's just
+  `tmux send-keys`; works equally well for a REPL or a bash prompt).
+- `capture_session(session_id)` — reads the pane.
+
+The escalation ladder (stuck / recreate / restart) and the controller guard
+both apply — shell sessions appear in `list_sessions` like any other.
+
+## Host clipboard — `get_clipboard` / `set_clipboard`
+
+When you need to hand text to the human at the keyboard (or read something
+they just copied), use the clipboard tools. Both take a `host_alias` and
+operate on that host's system clipboard:
+
+- `get_clipboard { host_alias }` — returns the current clipboard contents.
+  An empty clipboard returns `(clipboard is empty)` rather than an empty
+  block.
+- `set_clipboard { host_alias, content }` — overwrites the clipboard.
+  Capped at 64 KiB.
+
+The tools probe `wl-paste`/`wl-copy` (Wayland), then `xclip`, then `xsel`
+(X11), then `pbpaste`/`pbcopy` (macOS) — the first installed helper wins.
+On a headless Linux box with no display + none of those helpers installed,
+the call fails with `E_CLIPBOARD_UNAVAILABLE` — that's a host config gap,
+not a bug to retry.
+
 ## Identifying yourself — `register_self`
 
 Before doing any session lifecycle work, call **`register_self { host_alias,

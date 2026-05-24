@@ -302,6 +302,32 @@ pub struct NewSessionParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct NewShellSessionParams {
+    /// Host alias to create the shell session on.
+    pub host_alias: String,
+    /// Project id (see `list_projects`).
+    pub project_id: i64,
+    /// Optional worktree id; omit to use the project root.
+    #[serde(default)]
+    pub worktree_id: Option<i64>,
+    /// tmux session name to create.
+    pub name: String,
+    /// Create a NEW worktree with this branch/worktree name instead of using
+    /// an existing one. Mutually exclusive with `worktree_id`.
+    #[serde(default)]
+    pub new_worktree: Option<String>,
+    /// Branch to fork the new worktree from (only with `new_worktree`).
+    /// Omit / empty = the repo's default branch.
+    #[serde(default)]
+    pub base_branch: Option<String>,
+    /// Optional command to run once on start, before the pane drops to an
+    /// interactive shell (e.g. `"pnpm dev"`, `"cargo watch -x test"`).
+    /// The pane stays alive after the command exits.
+    #[serde(default)]
+    pub start_command: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct KillSessionParams {
     /// Host alias the session lives on.
     pub host_alias: String,
@@ -513,6 +539,20 @@ pub struct NewBgSessionParams {
     pub name: String,
     /// Initial prompt for the headless Claude session.
     pub prompt: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct HostClipboardParams {
+    /// Host alias whose clipboard to read.
+    pub host_alias: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SetClipboardParams {
+    /// Host alias whose clipboard to overwrite.
+    pub host_alias: String,
+    /// Text to put on the clipboard. Capped at 64 KiB.
+    pub content: String,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -826,6 +866,39 @@ impl FleetTools {
             // MCP surface yet; the GUI is the only path for those.
             kind: None,
             start_command: None,
+        };
+        let row = sessions::new_session(args, &self.store, &self.ssh, &self.reg)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
+    #[tool(
+        description = "Create a plain-shell tmux session on a host (no Claude \
+        Code in the pane — an interactive login shell). Same project/worktree \
+        plumbing as new_session, plus an optional start_command that runs once \
+        before the shell drops to an interactive prompt; the pane stays alive \
+        after it exits so you can attach or send-keys to it. Steer it with \
+        send_prompt (typed text + Enter) and read it with capture_session."
+    )]
+    async fn new_shell_session(
+        &self,
+        Parameters(p): Parameters<NewShellSessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "new_shell_session",
+            &format!("host={} name={}", p.host_alias, p.name),
+        );
+        let args = sessions::NewSessionArgs {
+            host_alias: p.host_alias,
+            project_id: p.project_id,
+            worktree_id: p.worktree_id,
+            name: p.name,
+            call_id: None,
+            new_worktree: p.new_worktree,
+            base_branch: p.base_branch,
+            kind: Some("shell".to_string()),
+            start_command: p.start_command,
         };
         let row = sessions::new_session(args, &self.store, &self.ssh, &self.reg)
             .await
@@ -1462,6 +1535,59 @@ impl FleetTools {
         .await
         .map_err(to_mcp_err)?;
         ok_json(&v)
+    }
+
+    #[tool(description = "Read a host's current system clipboard (whatever a \
+        human would get from Ctrl+V on that machine). Probes wl-paste, xclip, \
+        xsel, pbpaste in order. E_CLIPBOARD_UNAVAILABLE if none is installed.")]
+    async fn get_clipboard(
+        &self,
+        Parameters(p): Parameters<HostClipboardParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("get_clipboard", &format!("host={}", p.host_alias));
+        let text = crate::service::clipboard::get_clipboard(
+            crate::service::clipboard::GetClipboardArgs {
+                host_alias: p.host_alias,
+            },
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        // Empty clipboard would yield an empty text block, which the Anthropic
+        // API rejects (see EMPTY_RESULT_PLACEHOLDER) — `ok_json` substitutes
+        // safely for "" but only after JSON-encoding; say it explicitly.
+        if text.is_empty() {
+            return Ok(CallToolResult::success(vec![text_content(
+                "(clipboard is empty)",
+            )]));
+        }
+        ok_json(&text)
+    }
+
+    #[tool(description = "Write text to a host's system clipboard. Probes \
+        wl-copy, xclip, xsel, pbcopy in order. Capped at 64 KiB. \
+        E_CLIPBOARD_UNAVAILABLE if no clipboard helper is installed.")]
+    async fn set_clipboard(
+        &self,
+        Parameters(p): Parameters<SetClipboardParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // Content body intentionally not logged.
+        audit(
+            "set_clipboard",
+            &format!("host={} bytes={}", p.host_alias, p.content.len()),
+        );
+        crate::service::clipboard::set_clipboard(
+            crate::service::clipboard::SetClipboardArgs {
+                host_alias: p.host_alias,
+                content: p.content,
+            },
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        Ok(CallToolResult::success(vec![text_content(
+            "clipboard updated",
+        )]))
     }
 
     #[tool(description = "Install fleet skills and register this fleet's MCP \

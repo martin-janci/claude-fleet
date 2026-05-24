@@ -37,7 +37,7 @@ See "Shipping a PR" below.
 
 | Adding… | File(s) | Pattern |
 |---|---|---|
-| A new MCP tool | `src-tauri/src/mcp/tools.rs` — params struct + `#[tool]` method calling into `service::*` | Audit non-secret args; pass bodies / prompts but never log them. Return `ok_json(&result)` or `text_content`. |
+| A new MCP tool | `src-tauri/src/mcp/tools.rs` — params struct + `#[tool]` method calling into `service::*` | Audit non-secret args; pass bodies / prompts but never log them. Return `ok_json(&result)` or `text_content`. After adding: `REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_current` to refresh `docs/control-api-reference.md`. |
 | A new service function | `src-tauri/src/service/<area>.rs` | Take `&Mutex<Store>` + `&Arc<SshClient>`, never `tauri::State`. Same code path runs from both Tauri IPC and MCP. |
 | A new store helper | `src-tauri/src/store.rs` | Hold the `Mutex<Store>` guard *briefly*; never across `.await`. Use `unchecked_transaction` for multi-step writes. |
 | A schema change | `src-tauri/migrations/NNN_<topic>.sql` + a `tx.execute_batch(include_str!(…))` arm in `migrate()` + bump `assert_eq!(…schema_version, NNN)` in the relevant tests (currently `15`). | One `.sql` per change. Wrap in a transaction in the migrate arm so an interrupted run rolls back cleanly. End each file with `INSERT OR IGNORE INTO schema_version (version) VALUES (NNN);`. |
