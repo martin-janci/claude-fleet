@@ -71,6 +71,9 @@
   // ─── Mouse forwarding state ───────────────────────────────────────────
   /** Which button (0/1/2, encoded as cb) is currently pressed. Null = none. */
   let pressedButton: number | null = null;
+  /** When mouse reporting is on, a left press is deferred until we know whether
+   *  it becomes a drag (→ local selection) or a click (→ forward to the app). */
+  let pendingPress: { cell: CellPos; startX: number; startY: number } | null = null;
   /** The last cell (1-based col, row) for which we sent a motion report,
    *  used to throttle: we only send a new report when the cell changes. */
   let lastMotionCell: { col: number; row: number } | null = null;
@@ -237,10 +240,54 @@
       };
       return;
     }
-    // Option held with mouse reporting on → native selection (handled in a later
-    // task); for now keep the old forward-to-app guard.
-    if (e.altKey) return;
-    if (!screen.mouseEnabled) return;
+    // Mouse reporting ON, left button, no Option → defer: a drag becomes a local
+    // selection, a click (no movement) forwards to the app.
+    if (e.button === 0 && screen.mouseEnabled && !e.altKey) {
+      e.preventDefault();
+      removeWindowListeners?.(); // drop any stale in-progress drag first
+      (e.currentTarget as HTMLElement | null)?.focus();
+      const cell = cellFromEvent(e);
+      pendingPress = { cell, startX: e.clientX, startY: e.clientY };
+      clearSelection();
+      const DRAG_PX = 4;
+      const handleMove = (ev: MouseEvent) => {
+        if (!pendingPress) return;
+        const moved =
+          Math.abs(ev.clientX - pendingPress.startX) > DRAG_PX ||
+          Math.abs(ev.clientY - pendingPress.startY) > DRAG_PX;
+        if (moved && !selecting) {
+          // Promote to a local selection.
+          selecting = true;
+          selAnchor = pendingPress.cell;
+        }
+        if (selecting) selFocus = cellFromEvent(ev);
+      };
+      const handleUp = (ev: MouseEvent) => {
+        removeWindowListeners?.();
+        if (selecting) {
+          selecting = false;
+          void copySelection();
+        } else if (pendingPress) {
+          // No drag → forward a real click (press + release) to the app.
+          const c = cellFromEvent(ev);
+          const sgr = screen!.mouseSgr;
+          sendMouse(encodeMouse(0, c.col + 1, c.row + 1, false, sgr));
+          sendMouse(encodeMouse(0, c.col + 1, c.row + 1, true, sgr));
+        }
+        pendingPress = null;
+      };
+      window.addEventListener('mousemove', handleMove);
+      window.addEventListener('mouseup', handleUp);
+      removeWindowListeners = () => {
+        window.removeEventListener('mousemove', handleMove);
+        window.removeEventListener('mouseup', handleUp);
+        removeWindowListeners = null;
+      };
+      return;
+    }
+    // Not a left-button local-select gesture. Option-held drags and middle/right
+    // buttons fall through to app forwarding below.
+    if (!screen.mouseEnabled) return; // no reporting + not a left-select → ignore
     // Only forward left (0), middle (1), right (2).
     if (e.button > 2) return;
     e.preventDefault();
