@@ -11,7 +11,7 @@ pub struct ProjectTreeRow {
     pub worktrees: Vec<WorktreeRow>,
 }
 
-fn projects_base() -> PathBuf {
+pub(crate) fn projects_base() -> PathBuf {
     if let Ok(p) = std::env::var("CLAUDE_FLEET_PROJECTS_BASE") {
         return PathBuf::from(p);
     }
