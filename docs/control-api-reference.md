@@ -320,6 +320,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mcp::mcp_configure`
 - `commands::mcp::install_fleet_hook`
 - `commands::mcp::provision_hosts`
+- `commands::onboarding::check_local_prereqs`
+- `commands::onboarding::tunnel_status`
 - `pty::pty_open`
 - `pty::pty_write`
 - `pty::pty_resize`
