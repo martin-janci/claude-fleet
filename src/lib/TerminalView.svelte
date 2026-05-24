@@ -86,6 +86,8 @@
    *  wheels still register — smooth, proportional scrolling either way. */
   let wheelAccum = 0;
   const WHEEL_TICK_PX = 40;
+  /** Pointer travel (px) before a deferred left-press promotes to a selection. */
+  const DRAG_PX = 4;
 
   /** Map a MouseEvent's client coordinates to a 1-based terminal cell,
    *  clamped to the visible grid. Accounts for the 4px left/top padding. */
@@ -249,7 +251,6 @@
       const cell = cellFromEvent(e);
       pendingPress = { cell, startX: e.clientX, startY: e.clientY };
       clearSelection();
-      const DRAG_PX = 4;
       const handleMove = (ev: MouseEvent) => {
         if (!pendingPress) return;
         const moved =
@@ -271,8 +272,11 @@
           // No drag → forward a real click (press + release) to the app.
           const c = cellFromEvent(ev);
           const sgr = screen!.mouseSgr;
-          sendMouse(encodeMouse(0, c.col + 1, c.row + 1, false, sgr));
-          sendMouse(encodeMouse(0, c.col + 1, c.row + 1, true, sgr));
+          // Press + release in one write so the app sees an atomic click.
+          sendMouse(
+            encodeMouse(0, c.col + 1, c.row + 1, false, sgr) +
+              encodeMouse(0, c.col + 1, c.row + 1, true, sgr),
+          );
         }
         pendingPress = null;
       };
@@ -416,6 +420,9 @@
     lastRows = dim.rows;
     screen = new Screen(dim.rows, dim.cols);
     clearSelection();
+    // Reset any in-progress drag state so a session switch can't leave it stale.
+    selecting = false;
+    pendingPress = null;
     screen.onClipboard = (text) => {
       void navigator.clipboard.writeText(text).catch(() => {});
     };
