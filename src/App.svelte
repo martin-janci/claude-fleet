@@ -9,14 +9,17 @@
   import BgSessionPanel from './lib/BgSessionPanel.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
   import { loadProjects, bootstrapProjects, mergeProjectFromEvent, mergeWorktree, removeWorktree } from './lib/projects';
-  import { loadSessions, bootstrapSessions, mergeSession, removeSession } from './lib/sessions';
-  import { bootstrapHosts, mergeHost, removeHost } from './lib/hosts';
+  import { loadSessions, bootstrapSessions, mergeSession, removeSession, sessions } from './lib/sessions';
+  import { bootstrapHosts, mergeHost, removeHost, hosts } from './lib/hosts';
   import { bootstrapAccounts, mergeAccount } from './lib/accounts';
   import { subscribeToRowEvents } from './lib/events';
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import { selectedSession, restoreLastSession } from './lib/selection';
   import { loadSessionUi, saveSessionUi, DEFAULT_UI } from './lib/session_ui';
   import { readPref, writePref } from './lib/prefs';
+  import WelcomeDialog from './lib/WelcomeDialog.svelte';
+  import { onboardingWelcomed, onboardingDismissed } from './lib/onboarding';
+  import { get } from 'svelte/store';
 
   const isNumber = (v: unknown): v is number => typeof v === 'number';
   const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
@@ -89,6 +92,7 @@
   let health = $state<Health | null>(null);
   let healthError = $state<string | null>(null);
   let unlistenEvents: UnlistenFn | null = null;
+  let showWelcome = $state(false);
 
   onMount(async () => {
     try {
@@ -104,6 +108,12 @@
     ]);
     // Sessions are loaded now — re-open the one the user last had selected.
     restoreLastSession();
+    // First-run welcome: only when never shown AND the fleet is empty.
+    const visibleHostCount = get(hosts).filter((h) => !h.hidden).length;
+    const workSessionCount = get(sessions).filter((s) => s.kind !== 'bg').length;
+    if (!get(onboardingWelcomed) && visibleHostCount === 0 && workSessionCount === 0) {
+      showWelcome = true;
+    }
     unlistenEvents = await subscribeToRowEvents({
       onSessionCreated: mergeSession,
       onSessionUpdated: mergeSession,
@@ -196,6 +206,22 @@
     return `${sb} ${sbResizer} ${center} ${centerResizer} 1fr`;
   });
 </script>
+
+{#if showWelcome}
+  <!-- "Skip for now" closes the welcome dialog but intentionally leaves the
+       sidebar "Get started" card visible (it sets welcomed, not dismissed). -->
+  <WelcomeDialog
+    onstart={() => {
+      onboardingWelcomed.set(true);
+      onboardingDismissed.set(false);
+      showWelcome = false;
+    }}
+    onskip={() => {
+      onboardingWelcomed.set(true);
+      showWelcome = false;
+    }}
+  />
+{/if}
 
 <main class="layout" style="grid-template-columns: {gridTemplate};">
   {#if sidebarCollapsed}

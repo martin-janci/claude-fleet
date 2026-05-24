@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { hosts, probeHost, deleteHost, hideHost } from './hosts';
+  import { onboardingDismissed, onboardingWelcomed } from './onboarding';
   import { accounts, type AccountRow } from './accounts';
   import { mcpStatus, mcpConfigure, mcpClientConfig, installFleetHook, provisionHosts, type McpStatus, type HostProvisionResult } from './mcp';
   import AddHostPicker from './AddHostPicker.svelte';
@@ -215,6 +216,24 @@
         </tbody>
       </table>
       {#if error}<p class="err">{error}</p>{/if}
+    </section>
+
+    <section class="block" data-testid="onboarding-section">
+      <div class="section-header">
+        <h4>Setup guide</h4>
+      </div>
+      <div class="hook-section">
+        <p class="hook-desc">Re-show the "Get started" checklist in the sidebar.</p>
+        <button
+          class="hook-btn"
+          onclick={() => {
+            onboardingWelcomed.set(true);
+            onboardingDismissed.set(false);
+          }}
+        >
+          Replay setup guide
+        </button>
+      </div>
     </section>
 
     <section class="block" data-testid="mcp-section">

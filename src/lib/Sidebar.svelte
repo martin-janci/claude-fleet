@@ -23,7 +23,9 @@
   import { theme, cycleTheme } from './theme';
   import NewSessionDialog from './NewSessionDialog.svelte';
   import SettingsDialog from './SettingsDialog.svelte';
+  import OnboardingCard from './OnboardingCard.svelte';
   import { hosts, hostFilter, hostByAlias } from './hosts';
+  import { onboardingDismissed } from './onboarding';
   import { accounts, type AccountRow } from './accounts';
 
   let showSettings = $state(false);
@@ -229,6 +231,10 @@
 
   let dialogProject: ProjectTreeRow | null = $state(null);
   let showProjectPicker = $state(false);
+
+  // Onboarding card actions — open the same flows as existing UI.
+  const openAddHost = () => { showSettings = true; };
+  const openNewSession = () => { showProjectPicker = true; };
 
   function openNew(p: ProjectTreeRow, e?: Event) {
     e?.stopPropagation();
@@ -766,6 +772,9 @@
   </header>
 
   <div class="scroller">
+    {#if !$onboardingDismissed}
+      <OnboardingCard onaddhost={openAddHost} onnewsession={openNewSession} />
+    {/if}
     {#if filtered.length > 0}
       <ul class="tree">
         {#each filtered as row (row.project.id)}

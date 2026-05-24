@@ -4,6 +4,7 @@ pub mod history;
 pub mod hosts;
 pub mod mcp;
 pub mod mutate;
+pub mod onboarding;
 pub mod projects;
 pub mod repo;
 pub mod sessions;
