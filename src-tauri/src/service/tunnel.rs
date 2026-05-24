@@ -69,6 +69,18 @@ impl TunnelSupervisor {
         }
     }
 
+    /// Per-host liveness for the onboarding/status UI. `true` = the supervised
+    /// task is still running (tunnel up or mid-backoff), `false` = it has
+    /// finished. Hosts with no task are simply absent from the map; callers map
+    /// absence to "not started" (e.g. MCP disabled).
+    pub fn snapshot(&self) -> std::collections::HashMap<String, bool> {
+        let tasks = self.tasks.lock().unwrap();
+        tasks
+            .iter()
+            .map(|(host, handle)| (host.clone(), !handle.is_finished()))
+            .collect()
+    }
+
     /// Stop all tunnels (app exit / MCP disable).
     pub fn stop_all(&self) {
         let mut tasks = self.tasks.lock().unwrap();
@@ -89,5 +101,21 @@ mod tests {
         assert!(a.iter().any(|s| s == "127.0.0.1:4180:127.0.0.1:4180"));
         assert!(a.iter().any(|s| s == "ExitOnForwardFailure=yes"));
         assert_eq!(a.last().unwrap(), "mefistos");
+    }
+
+    #[tokio::test]
+    async fn snapshot_reports_known_hosts_only() {
+        let sup = TunnelSupervisor::new();
+        // No tasks yet → empty snapshot.
+        assert!(sup.snapshot().is_empty());
+
+        // A long-lived task counts as alive.
+        sup.ensure("mefistos", 4180, 4180);
+        let snap = sup.snapshot();
+        assert_eq!(snap.get("mefistos"), Some(&true));
+        // A host we never started is simply absent (caller maps to NotStarted).
+        assert!(snap.get("never").is_none());
+
+        sup.stop_all();
     }
 }
