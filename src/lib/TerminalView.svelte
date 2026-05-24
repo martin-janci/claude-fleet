@@ -4,8 +4,10 @@
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { selectedSession } from './selection';
   import { Screen, rowToRuns, colorToCss, encodeMouse, type Run } from './ansi';
-  import { trimSelectionText, sanitizePaste, framePaste } from './clipboard';
+  import { sanitizePaste, framePaste } from './clipboard';
   import { pointInRect } from './geometry';
+  import { selectionRects, type CellPos } from './terminal_selection';
+  import { nativeWriteText } from './clipboard_native';
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -46,6 +48,13 @@
    *  spinner during the upload. */
   let dragOver = $state(false);
   let uploading = $state(false);
+  /** Selection endpoints in 0-based grid cells; null when nothing selected.
+   *  Held in component state so the drain re-render can't wipe it (unlike the
+   *  old window.getSelection() path). */
+  let selAnchor: CellPos | null = $state(null);
+  let selFocus: CellPos | null = $state(null);
+  /** True while a drag-select is in progress (between mousedown and mouseup). */
+  let selecting = false;
   let openError: string | null = $state(null);
   let ptyOpen = false;
   let lastCols = $state(0);
@@ -101,6 +110,26 @@
     const framed = framePaste(clean, screen?.bracketedPaste ?? false);
     void invoke('pty_write', { args: { data: framed } }).catch(() => {});
     bumpDrain();
+  }
+
+  /** Copy the current selection to the native clipboard. No-op if empty. */
+  async function copySelection() {
+    if (!screen || !selAnchor || !selFocus) return;
+    const text = screen.selectionText(selAnchor, selFocus);
+    if (text === '') return;
+    const r = await nativeWriteText(text);
+    if (!r.ok) openError = `Copy failed: ${r.error.message}`;
+  }
+
+  /** Convert a 1-based eventToCell result to a 0-based grid cell. */
+  function cellFromEvent(e: MouseEvent): CellPos {
+    const { col, row } = eventToCell(e);
+    return { row: row - 1, col: col - 1 };
+  }
+
+  function clearSelection() {
+    selAnchor = null;
+    selFocus = null;
   }
 
   /** Is a drag-drop point inside the terminal grid? Tauri delivers the macOS
@@ -168,11 +197,46 @@
   }
 
   function onMousedown(e: MouseEvent) {
-    // Option (Alt) held → let the browser do a native text selection instead
-    // of forwarding the click to the app, so the user can copy while mouse
-    // reporting is on.
+    if (!ptyOpen || !screen) return;
+    // Left-button only for selection; other buttons fall through to app forwarding.
+    if (e.button === 0 && !screen.mouseEnabled && !e.altKey) {
+      // Plain shell: begin a local drag-selection.
+      e.preventDefault();
+      (e.currentTarget as HTMLElement | null)?.focus();
+      const cell = cellFromEvent(e);
+      selAnchor = cell;
+      selFocus = cell;
+      selecting = true;
+      const handleMove = (ev: MouseEvent) => {
+        if (!selecting) return;
+        selFocus = cellFromEvent(ev);
+      };
+      const handleUp = () => {
+        selecting = false;
+        removeWindowListeners?.();
+        // Only copy a real drag-selection; a plain click clears any selection.
+        if (
+          selAnchor && selFocus &&
+          (selAnchor.row !== selFocus.row || selAnchor.col !== selFocus.col)
+        ) {
+          void copySelection();
+        } else {
+          clearSelection();
+        }
+      };
+      window.addEventListener('mousemove', handleMove);
+      window.addEventListener('mouseup', handleUp);
+      removeWindowListeners = () => {
+        window.removeEventListener('mousemove', handleMove);
+        window.removeEventListener('mouseup', handleUp);
+        removeWindowListeners = null;
+      };
+      return;
+    }
+    // Option held with mouse reporting on → native selection (handled in a later
+    // task); for now keep the old forward-to-app guard.
     if (e.altKey) return;
-    if (!ptyOpen || !screen || !screen.mouseEnabled) return;
+    if (!screen.mouseEnabled) return;
     // Only forward left (0), middle (1), right (2).
     if (e.button > 2) return;
     e.preventDefault();
@@ -227,18 +291,6 @@
     removeWindowListeners?.();
   }
 
-  /** After a mouse-up, if the user selected text inside the grid, copy it to
-   *  the clipboard automatically (iTerm "copy on select"). The selection is
-   *  left highlighted. Trailing whitespace per line is trimmed because rows
-   *  are space-padded to the full width. */
-  function onGridMouseup() {
-    const sel = window.getSelection();
-    if (!sel || sel.isCollapsed || !container) return;
-    if (!container.contains(sel.anchorNode) && !container.contains(sel.focusNode)) return;
-    const text = trimSelectionText(sel.toString());
-    if (text.trim() === '') return;
-    void navigator.clipboard.writeText(text).catch(() => {});
-  }
 
   $effect(() => {
     const sess = $selectedSession;
@@ -312,6 +364,7 @@
     lastCols = dim.cols;
     lastRows = dim.rows;
     screen = new Screen(dim.rows, dim.cols);
+    clearSelection();
     screen.onClipboard = (text) => {
       void navigator.clipboard.writeText(text).catch(() => {});
     };
@@ -628,6 +681,13 @@
     };
   });
 
+  // Selection highlight rects. Touch renderVersion so it tracks resizes/redraws.
+  const selRects = $derived.by(() => {
+    void renderVersion;
+    if (!selAnchor || !selFocus || cellWidth <= 0 || cellHeight <= 0) return [];
+    return selectionRects(selAnchor, selFocus, lastCols, cellWidth, cellHeight, 4);
+  });
+
   function runStyle(run: Run): string {
     const cacheKey = `${run.fg}|${run.bg}|${run.attrs}`;
     const hit = styleCache.get(cacheKey);
@@ -697,7 +757,6 @@
       oncompositionend={onCompositionEnd}
       onwheel={onWheel}
       onmousedown={onMousedown}
-      onmouseup={onGridMouseup}
       data-testid="terminal-host"
     >
       <!-- Hidden 1ch×1lh probe used once to measure font metrics. We can't
@@ -710,6 +769,13 @@
             <span style={runStyle(run)}>{run.text}</span>
           {/each}
         </div>
+      {/each}
+      {#each selRects as r (r.top + ':' + r.left)}
+        <div
+          class="selection"
+          style="left:{r.left}px; top:{r.top}px; width:{r.width}px; height:{r.height}px"
+          aria-hidden="true"
+        ></div>
       {/each}
       {#if cursor}
         <div
@@ -863,6 +929,12 @@
   .row span {
     /* span color comes from inline style applied per run. */
     display: inline;
+  }
+  .selection {
+    position: absolute;
+    background: rgba(120, 170, 255, 0.35);
+    pointer-events: none;
+    z-index: 1;
   }
   /* Block cursor overlay. Translucent so the glyph under it stays readable;
      blinks like a standard terminal cursor. Position/size are set inline from
