@@ -5,6 +5,7 @@
   import { selectedSession } from './selection';
   import { Screen, rowToRuns, colorToCss, encodeMouse, type Run } from './ansi';
   import { trimSelectionText, sanitizePaste, framePaste } from './clipboard';
+  import { pointInRect } from './geometry';
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -102,14 +103,13 @@
     bumpDrain();
   }
 
-  /** Is a physical-pixel point inside the terminal grid? */
+  /** Is a drag-drop point inside the terminal grid? Tauri delivers the macOS
+   *  drag position in logical points (see geometry.ts), the same space as
+   *  getBoundingClientRect(), so we compare directly — no devicePixelRatio
+   *  scaling, which previously halved the point on Retina and missed the grid. */
   function pointOverGrid(px: number, py: number): boolean {
     if (!container) return false;
-    const dpr = window.devicePixelRatio || 1;
-    const r = container.getBoundingClientRect();
-    const x = px / dpr;
-    const y = py / dpr;
-    return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    return pointInRect(px, py, container.getBoundingClientRect());
   }
 
   /** Build the prompt text for a set of uploaded remote paths: space-joined,
