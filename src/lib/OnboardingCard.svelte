@@ -40,8 +40,6 @@
     refreshSnapshots();
   });
 
-  // `HostRow` has no `provisioned` field; use `reachable` as the proxy —
-  // a host becomes reachable after a successful provision run.
   const visibleHosts = $derived($hosts.filter((h) => !h.hidden));
   const workSessions = $derived($sessions.filter((s) => s.kind !== 'bg'));
 
@@ -49,7 +47,7 @@
     deriveSteps({
       prereqs,
       visibleHostCount: visibleHosts.length,
-      provisionedHost: visibleHosts.some((h) => h.reachable),
+      provisionedHost: visibleHosts.some((h) => h.provisioned),
       firstHostAlias: visibleHosts[0]?.alias ?? null,
       tunnels,
       projectCount: $projects.length,

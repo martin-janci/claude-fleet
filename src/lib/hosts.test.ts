@@ -17,6 +17,7 @@ const sampleLocal = {
   hidden: false,
   last_pinged_at: 1,
   account_uuid: null,
+  provisioned: false,
 };
 
 beforeEach(() => {

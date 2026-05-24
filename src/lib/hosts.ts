@@ -11,6 +11,7 @@ export interface HostRow {
   hidden: boolean;
   last_pinged_at: number | null;
   account_uuid: string | null;
+  provisioned: boolean;
 }
 
 export interface SshHost {
