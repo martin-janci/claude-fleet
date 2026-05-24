@@ -22,8 +22,11 @@ const base: DeriveInputs = {
   workSessionCount: 0,
 };
 
-const byId = (steps: ReturnType<typeof deriveSteps>, id: string) =>
-  steps.find((s) => s.id === id)!;
+const byId = (steps: ReturnType<typeof deriveSteps>, id: string) => {
+  const s = steps.find((s) => s.id === id);
+  if (!s) throw new Error(`step "${id}" not found`);
+  return s;
+};
 
 describe('deriveSteps', () => {
   it('fresh state: prereqs is active, rest pending, none done', () => {
@@ -83,6 +86,21 @@ describe('deriveSteps', () => {
     const mcp = byId(steps, 'mcp');
     expect(mcp.optional).toBe(true);
     expect(mcp.status).not.toBe('active');
+  });
+
+  it('session becomes active when all required steps before it are done and mcp is not', () => {
+    const steps = deriveSteps({
+      ...base,
+      prereqs: okPrereqs,
+      visibleHostCount: 1,
+      provisionedHost: true,
+      firstHostAlias: 'mefistos',
+      projectCount: 3,
+      mcpEnabled: false, // optional, not done
+      workSessionCount: 0, // session not done
+    });
+    expect(byId(steps, 'mcp').status).toBe('pending'); // optional, never active
+    expect(byId(steps, 'session').status).toBe('active'); // active skips over the optional step
   });
 
   it('all required complete ignores the optional Control API step', () => {

@@ -72,6 +72,8 @@ export interface DeriveInputs {
   /** First non-hidden host alias, for sublabels. */
   firstHostAlias: string | null;
   tunnels: TunnelStatusRow[];
+  /** Count of projects discovered by the app (the project store) — NOT the
+   *  filesystem `LocalPrereqs.projects_count`. Drives the "Pick projects" step. */
   projectCount: number;
   mcpEnabled: boolean;
   /** Count of non-background ("work") sessions. */
