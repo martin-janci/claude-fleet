@@ -45,6 +45,12 @@ Parameters: `session_id`
 
 Report claude-fleet backend health: application version, SQLite schema version, and database readiness. Returns JSON.
 
+### `get_clipboard`
+
+Read a host's current system clipboard (whatever a human would get from Ctrl+V on that machine). Probes wl-paste, xclip, xsel, pbpaste in order. E_CLIPBOARD_UNAVAILABLE if none is installed.
+
+Parameters: `host_alias`
+
 ### `hide_host`
 
 Hide or show a host. Hidden hosts are skipped during reconcile. Returns the updated host row as JSON.
@@ -100,6 +106,12 @@ Parameters: `host_alias`, `name`, `prompt`
 Create a Claude Code tmux session on a host, in a project (and optional worktree). Pass new_worktree to fork a fresh worktree+branch (optional base_branch). Auto-clones the repo on remote hosts.
 
 Parameters: `base_branch`, `host_alias`, `name`, `new_worktree`, `project_id`, `worktree_id`
+
+### `new_shell_session`
+
+Create a plain-shell tmux session on a host (no Claude Code in the pane — an interactive login shell). Same project/worktree plumbing as new_session, plus an optional start_command that runs once before the shell drops to an interactive prompt; the pane stays alive after it exits so you can attach or send-keys to it. Steer it with send_prompt (typed text + Enter) and read it with capture_session.
+
+Parameters: `base_branch`, `host_alias`, `name`, `new_worktree`, `project_id`, `start_command`, `worktree_id`
 
 ### `peek_session`
 
@@ -234,6 +246,12 @@ Parameters: `host_alias`, `prompt`, `submit`, `tmux_name`
 Return the recorded event timeline for a session (status changes, prompts, stuck, kills). Newest-first; pass `limit` to cap (default 50). Returns the events as JSON.
 
 Parameters: `limit`, `session_id`
+
+### `set_clipboard`
+
+Write text to a host's system clipboard. Probes wl-copy, xclip, xsel, pbcopy in order. Capped at 64 KiB. E_CLIPBOARD_UNAVAILABLE if no clipboard helper is installed.
+
+Parameters: `content`, `host_alias`
 
 ### `set_friendly_name`
 
