@@ -929,6 +929,30 @@ export class Screen {
     this.curBg = COLOR_DEFAULT;
     this.curAttrs = 0;
   }
+
+  /** Extract selected text from the buffer for an inclusive cell range.
+   *  Anchor/focus may be in any order. First row runs from its column to EOL,
+   *  middle rows are whole lines, the last row runs to its column. Trailing
+   *  whitespace is trimmed per line (cells are space-padded to full width). */
+  selectionText(a: { row: number; col: number }, b: { row: number; col: number }): string {
+    // Order the two endpoints in reading order (row, then col).
+    const before = a.row < b.row || (a.row === b.row && a.col <= b.col);
+    const start = before ? a : b;
+    const end = before ? b : a;
+    const r0 = Math.max(0, Math.min(this.rows - 1, start.row));
+    const r1 = Math.max(0, Math.min(this.rows - 1, end.row));
+    const out: string[] = [];
+    for (let r = r0; r <= r1; r++) {
+      const colFrom = r === r0 ? start.col : 0;
+      const colTo = r === r1 ? end.col : this.cols - 1; // inclusive
+      const from = Math.max(0, colFrom);
+      const to = Math.min(this.cols - 1, colTo);
+      let line = '';
+      for (let c = from; c <= to; c++) line += this.cells[r][c].ch || ' ';
+      out.push(line.replace(/[ \t]+$/, ''));
+    }
+    return out.join('\n');
+  }
 }
 
 function makeRow(cols: number): Cell[] {
