@@ -62,36 +62,37 @@
 
   async function runStep(id: StepId) {
     errorText = null;
-    if (id === 'prereqs') {
-      busy = 'prereqs';
-      await refreshSnapshots();
-      busy = null;
-    } else if (id === 'add-host') {
+    if (id === 'add-host') {
       onaddhost();
-    } else if (id === 'provision') {
-      busy = 'provision';
-      const r = await provisionHosts();
-      if (!r.ok) errorText = r.error.message;
-      else {
-        const failed = r.value.find((h) => h.status === 'failed');
-        if (failed) errorText = `${failed.host}: ${failed.detail ?? 'provision failed'}`;
-      }
-      await refreshSnapshots();
-      busy = null;
-    } else if (id === 'projects') {
-      busy = 'projects';
-      const r = await refreshProjects();
-      if (!r.ok) errorText = r.error.message;
-      busy = null;
-    } else if (id === 'mcp') {
-      busy = 'mcp';
-      const r = await mcpConfigure({ enabled: true });
-      if (!r.ok) errorText = r.error.message;
-      else mcpEnabled = r.value.enabled;
-      await refreshSnapshots();
-      busy = null;
-    } else if (id === 'session') {
+      return;
+    }
+    if (id === 'session') {
       onnewsession();
+      return;
+    }
+    busy = id;
+    try {
+      if (id === 'prereqs') {
+        await refreshSnapshots();
+      } else if (id === 'provision') {
+        const r = await provisionHosts();
+        if (!r.ok) errorText = r.error.message;
+        else {
+          const failed = r.value.find((h) => h.status === 'failed');
+          if (failed) errorText = `${failed.host}: ${failed.detail ?? 'provision failed'}`;
+        }
+        await refreshSnapshots();
+      } else if (id === 'projects') {
+        const r = await refreshProjects();
+        if (!r.ok) errorText = r.error.message;
+      } else if (id === 'mcp') {
+        const r = await mcpConfigure({ enabled: true });
+        if (!r.ok) errorText = r.error.message;
+        else mcpEnabled = r.value.enabled;
+        await refreshSnapshots();
+      }
+    } finally {
+      busy = null;
     }
   }
 
@@ -111,7 +112,7 @@
     <button class="dismiss-all" onclick={dismiss}>Dismiss</button>
   {:else}
     <div class="prog">{doneCount} of {requiredCount} done</div>
-    <div class="pbar"><i style="width:{(doneCount / requiredCount) * 100}%"></i></div>
+    <div class="pbar"><i aria-hidden="true" style="width:{requiredCount > 0 ? (doneCount / requiredCount) * 100 : 0}%"></i></div>
 
     {#each steps as step (step.id)}
       <button
@@ -120,7 +121,7 @@
         onclick={() => runStep(step.id)}
         disabled={busy !== null}
       >
-        <span class="ic {step.status}">{step.status === 'done' ? '✓' : busy === step.id ? '◐' : ''}</span>
+        <span class="ic {step.status}" aria-hidden="true">{step.status === 'done' ? '✓' : busy === step.id ? '◐' : ''}</span>
         <span class="body">
           <span class="label">
             {step.label}
