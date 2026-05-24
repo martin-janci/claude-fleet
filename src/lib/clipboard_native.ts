@@ -3,9 +3,9 @@
 // and fails silently. Returns Result so callers surface errors instead of
 // swallowing them.
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
-import type { Result } from './result';
+import type { Result, IpcError } from './result';
 
-function toErr(raw: unknown): { code: string; message: string } {
+function toErr(raw: unknown): IpcError {
   if (raw instanceof Error) return { code: 'E_CLIPBOARD', message: raw.message };
   return { code: 'E_CLIPBOARD', message: String(raw) };
 }

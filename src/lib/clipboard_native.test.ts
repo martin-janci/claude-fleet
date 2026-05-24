@@ -26,6 +26,13 @@ describe('clipboard_native', () => {
     const r = await nativeReadText();
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.message).toBe('denied');
+    if (!r.ok) expect(r.error.code).toBe('E_CLIPBOARD');
+  });
+
+  it('nativeReadText coerces a null clipboard to an empty string', async () => {
+    readText.mockResolvedValue(null as unknown as string);
+    const r = await nativeReadText();
+    expect(r).toEqual({ ok: true, value: '' });
   });
 
   it('nativeWriteText writes and returns Ok', async () => {
@@ -39,5 +46,6 @@ describe('clipboard_native', () => {
     writeText.mockRejectedValue(new Error('nope'));
     const r = await nativeWriteText('x');
     expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe('E_CLIPBOARD');
   });
 });
