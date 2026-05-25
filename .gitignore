@@ -14,3 +14,6 @@ vite.config.ts.timestamp-*
 
 # git worktrees created under the repo (not part of the tree)
 .worktrees/
+
+# local Claude Code settings (machine-specific, e.g. CARGO_TARGET_DIR on CargoSD)
+.claude/settings.local.json
