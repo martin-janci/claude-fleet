@@ -543,6 +543,34 @@ pub struct NewSessionArgs {
     pub start_command: Option<String>,
 }
 
+/// Pick a default sidebar label for a freshly created session — the worktree
+/// name if any (e.g. `Drag`), else the project's repo name. Returns `None`
+/// when nothing reasonable applies or the candidate fails validation.
+fn default_friendly_name(
+    s: &Store,
+    args: &NewSessionArgs,
+) -> Result<Option<String>, IpcError> {
+    let candidate: Option<String> = if let Some(name) = args.new_worktree.as_ref() {
+        Some(name.clone())
+    } else if let Some(wid) = args.worktree_id {
+        let (name, _) = fetch_worktree(s, wid)?;
+        if name == "main" {
+            // "main" is just the project root — fall through to the repo name
+            // so the label reads "claude-fleet" instead of "main".
+            let (_, repo) = fetch_owner_repo(s, args.project_id)?;
+            Some(repo)
+        } else {
+            Some(name)
+        }
+    } else {
+        let (_, repo) = fetch_owner_repo(s, args.project_id)?;
+        Some(repo)
+    };
+    Ok(candidate
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty() && crate::validate::friendly_name(c).is_ok()))
+}
+
 /// Look up `(owner, repo)` for a given project id.
 fn fetch_owner_repo(s: &Store, project_id: i64) -> Result<(String, String), IpcError> {
     let mut stmt = s
@@ -937,6 +965,22 @@ async fn new_session_inner(
                 ),
             )
         })?;
+    // Give every freshly created session a sane default label so the sidebar
+    // shows "Drag" instead of `dev-martin-janci-claude-fleet--Drag`. Only sets
+    // when nothing is already there — a user-supplied label always wins.
+    let mut row = row;
+    if row.friendly_name.is_none() {
+        if let Some(label) = default_friendly_name(&s, &args)? {
+            match s.set_friendly_name(&args.host_alias, &args.name, Some(&label)) {
+                Ok(Some(updated)) => row = updated,
+                Ok(None) => {}
+                Err(e) => eprintln!(
+                    "new_session: defaulting friendly_name for {} failed: {e:?}",
+                    args.name
+                ),
+            }
+        }
+    }
     // Reconcile inserts every session as kind="work"; tag shell sessions
     // afterwards. The session upsert preserves `kind` on re-reconcile.
     if is_shell {
@@ -947,7 +991,6 @@ async fn new_session_inner(
     }
     // Persist the minted Claude session id. Soft-fail: the session is live; a
     // failed write just means a future recreate falls back to `cl --continue`.
-    let mut row = row;
     if let Some(ref cid) = claude_id {
         if let Err(e) = s.set_claude_session_id(row.id, cid) {
             eprintln!(
@@ -3001,6 +3044,61 @@ mod ghost_tests {
             .get_session_by_id(id)
             .unwrap()
             .is_none());
+    }
+
+    fn new_session_args_for(
+        project_id: i64,
+        worktree_id: Option<i64>,
+        new_worktree: Option<&str>,
+    ) -> NewSessionArgs {
+        NewSessionArgs {
+            host_alias: "local".into(),
+            project_id,
+            worktree_id,
+            name: "dev-test".into(),
+            call_id: None,
+            new_worktree: new_worktree.map(str::to_string),
+            base_branch: None,
+            kind: None,
+            start_command: None,
+        }
+    }
+
+    #[test]
+    fn default_friendly_name_uses_new_worktree() {
+        let store = Store::open_in_memory().unwrap();
+        let pid = store.upsert_project("acme", "repo", "/p").unwrap();
+        let args = new_session_args_for(pid, None, Some("Drag"));
+        assert_eq!(default_friendly_name(&store, &args).unwrap().as_deref(), Some("Drag"));
+    }
+
+    #[test]
+    fn default_friendly_name_uses_existing_worktree_name() {
+        let store = Store::open_in_memory().unwrap();
+        let pid = store.upsert_project("acme", "repo", "/p").unwrap();
+        let wid = store.upsert_worktree(pid, "feat-x", "/p/.claude/worktrees/feat-x", None).unwrap();
+        let args = new_session_args_for(pid, Some(wid), None);
+        assert_eq!(default_friendly_name(&store, &args).unwrap().as_deref(), Some("feat-x"));
+    }
+
+    #[test]
+    fn default_friendly_name_main_worktree_uses_repo() {
+        let store = Store::open_in_memory().unwrap();
+        let pid = store.upsert_project("acme", "claude-fleet", "/p").unwrap();
+        let wid = store.upsert_worktree(pid, "main", "/p", None).unwrap();
+        let args = new_session_args_for(pid, Some(wid), None);
+        assert_eq!(
+            default_friendly_name(&store, &args).unwrap().as_deref(),
+            Some("claude-fleet"),
+        );
+    }
+
+    #[test]
+    fn default_friendly_name_falls_back_to_repo() {
+        let store = Store::open_in_memory().unwrap();
+        let pid = store.upsert_project("acme", "claude-fleet", "/p").unwrap();
+        let args = new_session_args_for(pid, None, None);
+        assert_eq!(default_friendly_name(&store, &args).unwrap().as_deref(), Some("claude-fleet"));
     }
 
     fn set_friendly_args(host: &str, tmux: &str, label: &str) -> SetFriendlyNameArgs {
