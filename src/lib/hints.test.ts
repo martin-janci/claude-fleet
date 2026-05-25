@@ -1,13 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { pickActiveHint, type HintId } from './hints';
+import { pickActiveHint, HINTS, type HintId } from './hints';
 
-const ORDER: HintId[] = [
-  'host-filter',
-  'bg-session',
-  'session-actions',
-  'terminal-header',
-  'recency-filter',
-];
+const ORDER: HintId[] = HINTS.map((h) => h.id);
 
 describe('pickActiveHint', () => {
   it('returns null when hints are disabled', () => {

@@ -1,4 +1,4 @@
-import { writable, derived, get, type Readable } from 'svelte/store';
+import { writable, derived, type Readable } from 'svelte/store';
 import { readPref, writePref } from './prefs';
 import { onboardingWelcomed } from './onboarding';
 
@@ -50,7 +50,11 @@ const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
 const isStringArray = (v: unknown): v is string[] =>
   Array.isArray(v) && v.every((x) => typeof x === 'string');
 
-/** Ids the user has dismissed (persisted). */
+/**
+ * Ids the user has dismissed (persisted). Typed `string[]` rather than
+ * `HintId[]` so a stored id from an older/newer build that no longer matches
+ * the current `HintId` union is tolerated rather than crashing the validator.
+ */
 export const seenHints = writable<string[]>(readPref('hints-seen', [], isStringArray));
 seenHints.subscribe((v) => writePref('hints-seen', v));
 
@@ -84,6 +88,9 @@ function register(id: HintId, node: HTMLElement): void {
 function unregister(id: HintId, node: HTMLElement): void {
   // Only clear if THIS node is the current holder (multiple rows may share an id,
   // e.g. session-actions — last mount wins, and only it unregisters).
+  // Consequence: if the holder unmounts while earlier registrants of the same
+  // id are still alive, the id is dropped until one of them re-registers. For a
+  // one-shot hint this is an acceptable, rare cosmetic miss.
   if (anchorEls.get(id) !== node) return;
   anchorEls.delete(id);
   registeredIds.update((s) => {
@@ -154,4 +161,3 @@ export function hintDef(id: HintId): HintDef | undefined {
   return HINTS.find((h) => h.id === id);
 }
 
-export { get };
