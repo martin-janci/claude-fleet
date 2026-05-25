@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { pickActiveHint, HINTS, type HintId } from './hints';
+import { pickActiveHint, hintsGateOpen, HINTS, type HintId } from './hints';
 
 const ORDER: HintId[] = HINTS.map((h) => h.id);
 
@@ -29,5 +29,20 @@ describe('pickActiveHint', () => {
   it('returns null when all registered hints are seen', () => {
     const reg = new Set<HintId>(['host-filter']);
     expect(pickActiveHint(ORDER, reg, ['host-filter'], true, true)).toBeNull();
+  });
+});
+
+describe('hintsGateOpen', () => {
+  it('open when welcomed', () => {
+    expect(hintsGateOpen(true, 0, 0)).toBe(true);
+  });
+  it('open when not welcomed but a host exists (existing user)', () => {
+    expect(hintsGateOpen(false, 1, 0)).toBe(true);
+  });
+  it('open when not welcomed but a work session exists', () => {
+    expect(hintsGateOpen(false, 0, 1)).toBe(true);
+  });
+  it('closed when not welcomed and the fleet is empty', () => {
+    expect(hintsGateOpen(false, 0, 0)).toBe(false);
   });
 });

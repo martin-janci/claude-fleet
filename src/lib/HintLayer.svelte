@@ -40,6 +40,7 @@
   $effect(() => {
     void $activeHintId;
     void def;
+    void bubbleEl; // re-run once the bubble mounts so we reposition with its measured size
     reposition();
     if (!$activeHintId) return;
     const handler = () => reposition();

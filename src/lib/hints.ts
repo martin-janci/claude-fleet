@@ -1,6 +1,8 @@
 import { writable, derived, type Readable } from 'svelte/store';
 import { readPref, writePref } from './prefs';
 import { onboardingWelcomed } from './onboarding';
+import { hosts } from './hosts';
+import { sessions } from './sessions';
 
 export type HintId =
   | 'host-filter'
@@ -31,7 +33,7 @@ export const HINTS: HintDef[] = [
   },
   {
     id: 'session-actions',
-    text: 'Restart, rename, recreate, or kill a session from these icons.',
+    text: 'Hover or select a session to restart, rename, recreate, or kill it.',
     placement: 'bottom',
   },
   {
@@ -133,17 +135,30 @@ export function hintAnchor(node: HTMLElement, params: HintAnchorParams) {
 }
 
 /**
+ * Hints are allowed to show once the first-run welcome is no longer in play:
+ * either the user dismissed the welcome, or the fleet is already non-empty
+ * (an existing user who never saw the welcome). Pure — testable.
+ */
+export function hintsGateOpen(
+  welcomed: boolean,
+  visibleHostCount: number,
+  workSessionCount: number,
+): boolean {
+  return welcomed || visibleHostCount > 0 || workSessionCount > 0;
+}
+
+/**
  * Pure selection: the first hint in `order` that is registered, unseen, with
- * hints enabled and the welcome already dismissed. `null` otherwise.
+ * hints enabled and the first-run gate open. `null` otherwise.
  */
 export function pickActiveHint(
   order: readonly HintId[],
   registered: ReadonlySet<HintId>,
   seen: readonly string[],
   enabled: boolean,
-  welcomed: boolean,
+  gateOpen: boolean,
 ): HintId | null {
-  if (!enabled || !welcomed) return null;
+  if (!enabled || !gateOpen) return null;
   for (const id of order) {
     if (registered.has(id) && !seen.includes(id)) return id;
   }
@@ -153,9 +168,13 @@ export function pickActiveHint(
 const order = HINTS.map((h) => h.id);
 
 export const activeHintId: Readable<HintId | null> = derived(
-  [registeredIds, seenHints, hintsEnabled, onboardingWelcomed],
-  ([reg, seen, enabled, welcomed]) =>
-    pickActiveHint(order, reg, seen, enabled, welcomed),
+  [registeredIds, seenHints, hintsEnabled, onboardingWelcomed, hosts, sessions],
+  ([reg, seen, enabled, welcomed, hostList, sessionList]) => {
+    const visibleHostCount = hostList.filter((h) => !h.hidden).length;
+    const workSessionCount = sessionList.filter((s) => s.kind !== 'bg').length;
+    const gateOpen = hintsGateOpen(welcomed, visibleHostCount, workSessionCount);
+    return pickActiveHint(order, reg, seen, enabled, gateOpen);
+  },
 );
 
 /** Look up a hint definition by id. */

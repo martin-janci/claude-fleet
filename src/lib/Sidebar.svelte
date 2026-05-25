@@ -550,6 +550,7 @@
       ondblclick={(e) => sess.status !== 'ghost' && beginRename(sess, e)}
       onclick={() => !isRenaming && sess.status !== 'ghost' && onSelectSession(sess)}
       onkeydown={(e) => !isRenaming && sess.status !== 'ghost' && onKeySession(e, sess)}
+      use:hintAnchor={{ id: 'session-actions', when: !!sess.claude_session_id && sess.status !== 'ghost' }}
     >
       {#if isRenaming}
         <input
@@ -633,7 +634,7 @@
               rel="noreferrer"
             >PR↗</a>
           {/if}
-          <div class="row-actions" use:hintAnchor={{ id: 'session-actions' }}>
+          <div class="row-actions">
             {#if sess.claude_session_id && sess.status !== 'ghost'}
               <button
                 class="icon-btn small peek-btn"
