@@ -7,6 +7,10 @@ localhost HTTP connection.
 
 The design rationale is in `docs/specs/2026-05-21-control-api-mcp-design.md`.
 
+> **Quick start:** you can enable the Control API via the **Getting Started**
+> flow (see [getting-started.md](getting-started.md)) or manually via
+> **Settings → Control API (MCP)** as described below.
+
 ## Enabling it
 
 The control API is **off by default**. To turn it on:
@@ -15,7 +19,7 @@ The control API is **off by default**. To turn it on:
 2. Tick **Enable control API**. The server starts immediately (no restart);
    the indicator flips to **running**.
 3. Note the **URL** (`http://127.0.0.1:<port>/mcp`, default port `4180`) and
-   the **token**. Use **Show** / **Copy** to read the token.
+   the **token**. Use **Show** / **Hide** / **Copy** to manage the token.
 
 The token is a 256-bit secret generated on first use. Every request must carry
 it as `Authorization: Bearer <token>`. The server binds `127.0.0.1` only — it
@@ -26,8 +30,9 @@ invalidates any client still using the old token.
 
 ## Connecting a client
 
-The Settings panel has a **MCP client config** block — copy it straight into a
-client that reads `mcpServers` JSON (e.g. Claude Desktop):
+The Settings panel has a collapsible **MCP client config** disclosure — expand
+it and click **Copy config** to grab the snippet, then paste it into a client
+that reads `mcpServers` JSON (e.g. Claude Desktop):
 
 ```json
 {
