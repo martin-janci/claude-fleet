@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { hosts, probeHost, deleteHost, hideHost } from './hosts';
   import { onboardingDismissed, onboardingWelcomed } from './onboarding';
+  import { hintsEnabled, resetHints } from './hints';
   import { accounts, type AccountRow } from './accounts';
   import { mcpStatus, mcpConfigure, mcpClientConfig, installFleetHook, provisionHosts, type McpStatus, type HostProvisionResult } from './mcp';
   import AddHostPicker from './AddHostPicker.svelte';
@@ -232,6 +233,15 @@
           }}
         >
           Replay setup guide
+        </button>
+      </div>
+      <div class="hook-section">
+        <label class="toggle">
+          <input type="checkbox" bind:checked={$hintsEnabled} />
+          Show feature hints
+        </label>
+        <button class="hook-btn" onclick={resetHints} data-testid="reset-hints">
+          Reset hints
         </button>
       </div>
     </section>
