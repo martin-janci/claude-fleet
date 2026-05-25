@@ -39,7 +39,7 @@ On first launch the app walks you through setup — see the **[Getting Started g
 - [Concepts](docs/concepts.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Control API](docs/control-api.md)
-- [Docs index](docs/)
+- [Docs index](docs/README.md)
 
 ## Development
 
