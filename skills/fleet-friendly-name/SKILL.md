@@ -1,23 +1,34 @@
 ---
 name: fleet-friendly-name
-description: Set this claude-fleet session's friendly display name when picking up a new task. Triggers on a new task, a task switch, or a stale session label (e.g. "fix login bug" beats "dev-claude-fleet").
+description: Set this claude-fleet session's friendly display name (sidebar label). Fires on deterministic signals only — the first user prompt of a session, the first user prompt after a `/clear` command, a ~10-prompt heartbeat re-check, or an explicit user ask to relabel. Skip otherwise.
 ---
 
 # fleet-friendly-name
 
 You are running inside a tmux session managed by claude-fleet. The sidebar
 shows either the raw `tmux_name` or a short human-readable label
-(`friendly_name`) that **you set** via MCP. Setting a good label whenever you
-start a task makes the fleet sidebar scannable.
+(`friendly_name`) that **you set** via MCP. A good, current label makes the
+fleet sidebar scannable.
 
 ## When to run
 
-- At the start of a new task (user prompt that opens a new topic).
-- When the current task changes significantly (different file/feature).
-- Once per task — do **not** update mid-task on every commit.
+Fire on these deterministic signals — never on vibes:
 
-If unsure, prefer setting it. The sidebar falls back to `tmux_name` when
-`friendly_name` is empty, so a stale label is worse than none.
+1. **First user prompt of this conversation.** No prior `set_friendly_name`
+   tool call exists in the transcript yet.
+2. **First user prompt after `/clear`.** The most recent user turn contains
+   the harness marker `<command-name>/clear</command-name>` (emitted when
+   the user runs `/clear`). `/clear` wipes context, so the next prompt is by
+   definition a new task — relabel.
+3. **Heartbeat every ~10 user prompts.** Count user prompts since your last
+   `set_friendly_name` call. When the count crosses 10, glance at the
+   current label vs. the recent work; relabel if they no longer match. If
+   they still match, do nothing — don't burn the call.
+4. **Explicit user ask.** "relabel this", "set the name to X", "rename the
+   session".
+
+Do **not** fire on commits, file saves, file switches, or a fuzzy "the task
+feels different". A stale label is annoying; a flapping label is worse.
 
 ## How to run
 
@@ -58,7 +69,10 @@ truth; never guess.
    }
    ```
 
-Three tool calls total: Bash + list_sessions + set_friendly_name.
+Three tool calls total on a fresh fire: Bash + list_sessions +
+set_friendly_name. A heartbeat that confirms the current label is still
+right costs zero new MCP calls — the decision is read-only against
+transcript state.
 
 Do not try a hostname-based "fast path" first — `hostname -s` returns the OS
 hostname, not the claude-fleet alias, and the two diverge whenever the user
@@ -88,6 +102,7 @@ notice to the user and stop:
 
 ## Token discipline
 
-Three tool calls per task pickup: Bash + list_sessions + set_friendly_name.
-No hostname-guessing fast path — that path silently breaks on renamed hosts
-and wastes a call when it does. Do not chat about the label.
+Fresh fire: three tool calls (Bash + list_sessions + set_friendly_name).
+Heartbeat: zero MCP calls if the label still matches. No hostname-guessing
+fast path — that path silently breaks on renamed hosts and wastes a call
+when it does. Do not chat about the label.

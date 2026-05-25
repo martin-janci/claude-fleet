@@ -113,6 +113,74 @@ describe('NewSessionDialog', () => {
     newSessionAbortableSpy.mockRestore();
   });
 
+  it('auto-slugifies a free-form sentence in the worktree-name input', async () => {
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({
+      ok: true,
+      value: {
+        id: 44, tmux_name: 'dev-martin-janci-claude-fleet--fix-the-login-bug',
+        host_alias: 'local', project_id: 1, worktree_id: null,
+        created_at: 1, last_activity_at: 1, status: 'running', notes: null,
+        account_uuid: null, kind: 'work', reviews_session_id: null,
+        worktree_key: null, lost_at: null, claude_session_id: null,
+        claude_status: null, effort_level: null, pr_url: null, current_activity: null,
+        friendly_name: null, safe_kill_state: null, safe_kill_nonce: null,
+        safe_kill_detail: null, safe_kill_requested_at: null,
+      },
+    });
+
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+
+    await fireEvent.click(screen.getByTestId('new-worktree-chip'));
+    await tick();
+
+    const input = screen.getByTestId('new-worktree-name') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'Fix the login bug!' } });
+    await tick();
+
+    // The input itself reflects the slug, not the raw sentence.
+    expect(input.value).toBe('fix-the-login-bug');
+    // The derived tmux name picks up the slug too.
+    expect((screen.getByTestId('new-session-name') as HTMLInputElement).value)
+      .toBe('dev-martin-janci-claude-fleet--fix-the-login-bug');
+
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+
+    expect(spy.mock.calls[0][0].new_worktree).toBe('fix-the-login-bug');
+    spy.mockRestore();
+  });
+
+  it('strips a trailing dash on submit even if the user did not blur the input', async () => {
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({
+      ok: true,
+      value: {
+        id: 45, tmux_name: 'x', host_alias: 'local', project_id: 1, worktree_id: null,
+        created_at: 1, last_activity_at: 1, status: 'running', notes: null,
+        account_uuid: null, kind: 'work', reviews_session_id: null,
+        worktree_key: null, lost_at: null, claude_session_id: null,
+        claude_status: null, effort_level: null, pr_url: null, current_activity: null,
+        friendly_name: null, safe_kill_state: null, safe_kill_nonce: null,
+        safe_kill_detail: null, safe_kill_requested_at: null,
+      },
+    });
+
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('new-worktree-chip'));
+    await tick();
+    // Trailing space → live slugifier yields a trailing dash.
+    await fireEvent.input(screen.getByTestId('new-worktree-name'), {
+      target: { value: 'fix login ' },
+    });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+
+    expect(spy.mock.calls[0][0].new_worktree).toBe('fix-login');
+    spy.mockRestore();
+  });
+
   it('typing a base branch in new-worktree mode passes base_branch', async () => {
     const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({
       ok: true,
