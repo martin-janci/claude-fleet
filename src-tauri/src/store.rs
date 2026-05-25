@@ -1345,6 +1345,53 @@ impl Store {
         Ok(())
     }
 
+    /// One-shot startup pass: give every session row with `friendly_name IS
+    /// NULL` a deterministic label derived from its branch (or the worktree
+    /// name when no branch is recorded, or the tmux name as last resort).
+    /// Skips `kind='bg'` rows — their synthetic `bg:<uuid>` tmux names
+    /// humanise poorly. Bypasses the event bus by design: the frontend hasn't
+    /// subscribed yet, and emitting one event per row at boot is pure noise.
+    /// Returns the number of rows updated.
+    pub fn backfill_friendly_names(&self) -> Result<usize, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.id, s.tmux_name,
+                    COALESCE(p.owner, '') AS owner,
+                    COALESCE(p.repo, '') AS repo,
+                    COALESCE(w.branch, w.name) AS branch
+               FROM sessions s
+               LEFT JOIN projects p ON p.id = s.project_id
+               LEFT JOIN worktrees w ON w.id = s.worktree_id
+              WHERE s.friendly_name IS NULL
+                AND COALESCE(s.kind, 'work') != 'bg'",
+        )?;
+        let rows: Vec<(i64, String, String, String, Option<String>)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        let mut updated = 0usize;
+        for (id, tmux_name, owner, repo, branch) in rows {
+            let source = branch.unwrap_or(tmux_name);
+            let label = crate::humanize::humanize_branch(&source, &owner, &repo);
+            if label.is_empty() {
+                continue;
+            }
+            self.conn.execute(
+                "UPDATE sessions SET friendly_name = ?1 WHERE id = ?2",
+                rusqlite::params![label, id],
+            )?;
+            updated += 1;
+        }
+        Ok(updated)
+    }
+
     /// Set the session's display label (migration 016). `None` clears it.
     /// Emits `session_updated` so the sidebar patches in place.
     pub fn set_friendly_name(
@@ -3544,6 +3591,91 @@ mod tests {
                 .claude_session_id
                 .as_deref(),
             Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+    }
+
+    #[test]
+    fn upsert_session_preserves_friendly_name_on_conflict() {
+        // Regression guard for the "deterministic backup, agent refines"
+        // design: once a friendly_name is set, a subsequent reconcile-driven
+        // upsert must NOT NULL it back out.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session("dev", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_friendly_name("local", "dev", Some("Friendly name"))
+            .unwrap();
+        s.upsert_session("dev", "local", None, None, 1, 2, "running", None)
+            .unwrap();
+        assert_eq!(
+            s.get_session("dev", "local")
+                .unwrap()
+                .unwrap()
+                .friendly_name
+                .as_deref(),
+            Some("Friendly name")
+        );
+    }
+
+    #[test]
+    fn backfill_friendly_names_humanises_null_rows() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        // Project + worktree so the JOIN finds owner/repo and a branch.
+        let project_id = s
+            .upsert_project("martin-janci", "claude-fleet", "/p")
+            .unwrap();
+        let wt_id = s
+            .upsert_worktree(
+                project_id,
+                "friendly-name",
+                "/p/.claude/worktrees/friendly-name",
+                Some("friendly-name"),
+            )
+            .unwrap();
+        s.upsert_session(
+            "dev-martin-janci-claude-fleet--friendly-name",
+            "local",
+            Some(project_id),
+            Some(wt_id),
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap();
+        // A row that already has a label must NOT be touched.
+        s.upsert_session(
+            "dev-other",
+            "local",
+            Some(project_id),
+            None,
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap();
+        s.set_friendly_name("local", "dev-other", Some("Already set"))
+            .unwrap();
+
+        let updated = s.backfill_friendly_names().unwrap();
+        assert_eq!(updated, 1);
+        assert_eq!(
+            s.get_session("dev-martin-janci-claude-fleet--friendly-name", "local")
+                .unwrap()
+                .unwrap()
+                .friendly_name
+                .as_deref(),
+            Some("Friendly name")
+        );
+        assert_eq!(
+            s.get_session("dev-other", "local")
+                .unwrap()
+                .unwrap()
+                .friendly_name
+                .as_deref(),
+            Some("Already set")
         );
     }
 }

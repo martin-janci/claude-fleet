@@ -43,14 +43,31 @@
     return `${base}--${newName.trim()}${suffix}`;
   }
 
+  // Inverse of slugify-ish: take a worktree/branch name and produce a
+  // sentence-cased label so the friendly-name field is pre-filled with
+  // something readable when the user picks an existing worktree.
+  function humanize(branch: string): string {
+    if (!branch || branch === 'main') return '';
+    const spaced = branch.replace(/[-_]+/g, ' ').trim();
+    if (!spaced) return '';
+    return spaced.charAt(0).toUpperCase() + spaced.slice(1).toLowerCase();
+  }
+
   let chosenWorktreeId = $state<number | null>(untrack(() => project.worktrees[0]?.id ?? null));
   let newWorktreeName = $state<string>('');
   // Base branch to fork the new worktree from. Empty = the repo's default
   // branch (the backend falls back to default if the named branch is missing).
   let baseBranch = $state<string>('');
+  // Track whether the user has manually edited the slug; once they do, we
+  // stop auto-syncing it from the friendly-name field so their override
+  // sticks. Reset on worktree-mode changes.
+  let slugDirty = $state<boolean>(false);
+  let friendlyName = $state<string>(
+    untrack(() => humanize(project.worktrees[0]?.name ?? '')),
+  );
   let name = $state(untrack(() => defaultName(project.worktrees[0] ?? null)));
 
-  // Re-derive the tmux name when the kind toggles so the `-sh` suffix tracks it.
+  // Re-derive the tmux name when the kind toggles so the `-term` suffix tracks it.
   function onPickKind(kind: 'work' | 'shell') {
     chosenKind = kind;
     if (inNewMode) {
@@ -68,15 +85,34 @@
     chosenWorktreeId = id;
     newWorktreeName = '';
     baseBranch = '';
+    slugDirty = false;
     const wt = project.worktrees.find((w) => w.id === id) ?? null;
     name = defaultName(wt);
+    friendlyName = humanize(wt?.name ?? '');
   }
 
   function onPickNew() {
     chosenWorktreeId = null;
     newWorktreeName = '';
     baseBranch = '';
+    slugDirty = false;
+    friendlyName = '';
     name = defaultNameForNew('');
+  }
+
+  function onFriendlyNameInput(value: string) {
+    friendlyName = value;
+    if (inNewMode && !slugDirty) {
+      // Use the canonical branch-slug helper so the auto-derived slug is
+      // git-safe the same way the user's direct edits are. Run it through
+      // `finalizeBranchSlug` (not the live `slugifyBranch`) because the
+      // friendly-name field's "word in progress" trailing space already
+      // collapses to a stable form here — no point preserving a trailing
+      // dash for a value the user isn't directly typing into the slug.
+      const slug = finalizeBranchSlug(value);
+      newWorktreeName = slug;
+      name = defaultNameForNew(slug);
+    }
   }
 
   function onNewWorktreeNameInput(value: string) {
@@ -84,6 +120,9 @@
     // ("fix-login-bug") as the user types.
     newWorktreeName = slugifyBranch(value);
     name = defaultNameForNew(newWorktreeName);
+    // Any divergence from the friendly-name-derived slug means the user has
+    // taken manual control — stop auto-syncing future friendly-name edits.
+    slugDirty = newWorktreeName !== finalizeBranchSlug(friendlyName);
   }
 
   function onNewWorktreeNameBlur() {
@@ -129,6 +168,7 @@
         kind: chosenKind,
         start_command:
           chosenKind === 'shell' ? startCommand.trim() || null : null,
+        friendly_name: friendlyName.trim() || null,
       },
       createController.signal,
     );
@@ -150,6 +190,16 @@
 
 <div class="dialog" role="dialog" aria-label="New session">
   <h3>New session — {project.project.owner}/{project.project.repo}</h3>
+
+  <label for="friendly-name">Friendly name</label>
+  <input
+    id="friendly-name"
+    data-testid="friendly-name"
+    value={friendlyName}
+    oninput={(e) => onFriendlyNameInput((e.target as HTMLInputElement).value)}
+    placeholder="e.g. fix friendly name fallback"
+    maxlength="80"
+  />
 
   <label for="kind-picker">Type</label>
   <div class="kind-row" id="kind-picker" role="group">
