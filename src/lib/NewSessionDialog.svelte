@@ -4,6 +4,7 @@
   import { newSessionAbortable, type SessionRow } from './sessions';
   import { hosts } from './hosts';
   import { readPref, writePref } from './prefs';
+  import { slugifyBranch, finalizeBranchSlug } from './branch-slug';
 
   let {
     project,
@@ -79,14 +80,33 @@
   }
 
   function onNewWorktreeNameInput(value: string) {
-    newWorktreeName = value;
-    name = defaultNameForNew(value);
+    // Auto-correct free-form input ("fix login bug") into a git-safe slug
+    // ("fix-login-bug") as the user types.
+    newWorktreeName = slugifyBranch(value);
+    name = defaultNameForNew(newWorktreeName);
+  }
+
+  function onNewWorktreeNameBlur() {
+    const cleaned = finalizeBranchSlug(newWorktreeName);
+    if (cleaned !== newWorktreeName) {
+      newWorktreeName = cleaned;
+      name = defaultNameForNew(cleaned);
+    }
   }
 
   // Re-derive: new-worktree mode is active when chosenWorktreeId is null
   let inNewMode = $derived(chosenWorktreeId === null);
 
   async function submit() {
+    if (inNewMode) {
+      // Strip any trailing dash the live slugifier left in place so the
+      // backend sees a fully-finalized branch name.
+      const cleaned = finalizeBranchSlug(newWorktreeName);
+      if (cleaned !== newWorktreeName) {
+        newWorktreeName = cleaned;
+        name = defaultNameForNew(cleaned);
+      }
+    }
     if (!name.trim()) {
       error = 'Session name required';
       return;
@@ -203,7 +223,8 @@
       data-testid="new-worktree-name"
       value={newWorktreeName}
       oninput={(e) => onNewWorktreeNameInput((e.target as HTMLInputElement).value)}
-      placeholder="feat-my-feature"
+      onblur={onNewWorktreeNameBlur}
+      placeholder="fix login bug → fix-login-bug"
     />
     <label for="new-wt-base">base branch</label>
     <input
