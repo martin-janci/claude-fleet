@@ -8,6 +8,7 @@
   import { pointInRect } from './geometry';
   import { selectionRects, type CellPos } from './terminal_selection';
   import { nativeWriteText, nativeReadText } from './clipboard_native';
+  import { hintAnchor } from './hints';
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -846,7 +847,7 @@
         <button onclick={reconnect}>Reconnect</button>
       </div>
     {/if}
-    <div class="header" data-testid="terminal-header">
+    <div class="header" data-testid="terminal-header" use:hintAnchor={{ id: 'terminal-header' }}>
       <span class="name">{$selectedSession.tmux_name}</span>
       <span class="host">on {$selectedSession.host_alias}</span>
       <span class="size" data-testid="terminal-size">
