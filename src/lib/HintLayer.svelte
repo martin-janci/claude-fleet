@@ -76,7 +76,7 @@
 <style>
   .hint {
     position: fixed;
-    z-index: 30;
+    z-index: 15; /* above general UI, below modals (z-index 20) so an open modal hides hints */
     width: 208px;
     background: var(--bg);
     color: var(--fg);
@@ -111,5 +111,11 @@
     color: var(--fg-muted, #777);
     font-size: 0.75rem;
     cursor: pointer;
+  }
+  .gotit:hover {
+    filter: brightness(1.08);
+  }
+  .x:hover {
+    color: var(--fg);
   }
 </style>
