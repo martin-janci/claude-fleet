@@ -26,6 +26,7 @@
   import OnboardingCard from './OnboardingCard.svelte';
   import { hosts, hostFilter, hostByAlias } from './hosts';
   import { onboardingDismissed } from './onboarding';
+  import { hintAnchor } from './hints';
   import { accounts, type AccountRow } from './accounts';
 
   let showSettings = $state(false);
@@ -632,7 +633,7 @@
               rel="noreferrer"
             >PR↗</a>
           {/if}
-          <div class="row-actions">
+          <div class="row-actions" use:hintAnchor={{ id: 'session-actions' }}>
             {#if sess.claude_session_id && sess.status !== 'ghost'}
               <button
                 class="icon-btn small peek-btn"
@@ -699,7 +700,7 @@
       {/if}
     </div>
 
-    <nav class="hosts" aria-label="host filter">
+    <nav class="hosts" aria-label="host filter" use:hintAnchor={{ id: 'host-filter', when: $hosts.filter((h) => !h.hidden).length >= 2 }}>
       <button
         class="pill"
         class:active={$hostFilter === 'all'}
@@ -726,7 +727,7 @@
       >⚙</button>
     </nav>
 
-    <nav class="recency" aria-label="recency filter">
+    <nav class="recency" aria-label="recency filter" use:hintAnchor={{ id: 'recency-filter', when: $sessions.length > 0 }}>
       {#each RECENCY_VALUES as opt (opt)}
         <button
           class="pill"
@@ -854,6 +855,7 @@
         title="Launch a supervised Claude background session"
         onclick={() => (showBgModal = true)}
         data-testid="new-bg-session-btn"
+        use:hintAnchor={{ id: 'bg-session', when: $sessions.some((s) => s.kind !== 'bg') && !$sessions.some((s) => s.kind === 'bg') }}
       >⚡</button>
     </div>
     <button

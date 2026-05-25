@@ -18,6 +18,7 @@
   import { loadSessionUi, saveSessionUi, DEFAULT_UI } from './lib/session_ui';
   import { readPref, writePref } from './lib/prefs';
   import WelcomeDialog from './lib/WelcomeDialog.svelte';
+  import HintLayer from './lib/HintLayer.svelte';
   import { onboardingWelcomed, onboardingDismissed } from './lib/onboarding';
   import { get } from 'svelte/store';
 
@@ -206,6 +207,8 @@
     return `${sb} ${sbResizer} ${center} ${centerResizer} 1fr`;
   });
 </script>
+
+<HintLayer />
 
 {#if showWelcome}
   <!-- "Skip for now" closes the welcome dialog but intentionally leaves the
