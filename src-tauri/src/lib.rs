@@ -3,6 +3,7 @@ mod claude_agents;
 mod claude_cli;
 mod commands;
 mod events;
+mod humanize;
 mod ipc_error;
 mod mcp;
 mod projects;
@@ -483,6 +484,21 @@ pub fn run() {
             // Managed as Arc<Mutex<Store>> (not bare Mutex<Store>) so the
             // embedded MCP server can hold a clone of the same store handle.
             let store = std::sync::Arc::new(Mutex::new(store));
+            // One-shot deterministic friendly-name backfill: any session row
+            // that pre-dates the agent-driven labelling (or whose agent never
+            // labelled it) gets a humanised branch name so the sidebar isn't
+            // dominated by raw `dev-<owner>-<repo>--…` slugs. Runs BEFORE the
+            // reconcile tick / MCP server so we don't race the frontend's row
+            // subscription. Best-effort — a poisoned mutex here means the app
+            // is already in trouble and the sidebar fallback to tmux_name
+            // remains the safety net.
+            if let Ok(s) = store.lock() {
+                match s.backfill_friendly_names() {
+                    Ok(0) => {}
+                    Ok(n) => eprintln!("[startup] backfilled {n} friendly_name row(s)"),
+                    Err(e) => eprintln!("[startup] friendly_name backfill failed: {e}"),
+                }
+            }
             app.manage(std::sync::Arc::clone(&store));
             app.manage(Mutex::new(mcp::McpRuntime::default()));
             // Start the MCP control API if the user has enabled it (off by

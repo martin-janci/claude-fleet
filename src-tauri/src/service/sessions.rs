@@ -541,6 +541,12 @@ pub struct NewSessionArgs {
     /// Optional command run once on start for a `"shell"` session, before
     /// the pane drops to an interactive shell. Ignored for `"work"`.
     pub start_command: Option<String>,
+    /// Optional user-supplied sidebar label. Empty / missing -> derive
+    /// deterministically from the branch via `humanize::humanize_branch` so
+    /// the sidebar never shows the raw `dev-<owner>-<repo>--…` slug. The
+    /// in-session agent can refine it later via the `set_friendly_name`
+    /// MCP tool.
+    pub friendly_name: Option<String>,
 }
 
 /// Look up `(owner, repo)` for a given project id.
@@ -751,6 +757,9 @@ pub async fn new_session(
     // Reject hostile input before it reaches ssh / tmux / git.
     crate::validate::host_alias(&args.host_alias)?;
     crate::validate::tmux_name(&args.name)?;
+    if let Some(fname) = args.friendly_name.as_deref() {
+        crate::validate::friendly_name(fname)?;
+    }
 
     if let Some(name) = args.new_worktree.as_deref() {
         crate::validate::git_ref(name)?;
@@ -937,6 +946,21 @@ async fn new_session_inner(
                 ),
             )
         })?;
+
+    // Deterministic friendly name: trust an explicit user value, otherwise
+    // derive from the branch so the sidebar never shows the raw slug. Soft-
+    // fail like the claude_session_id write below — a missing label is
+    // cosmetic, the session is live.
+    let derived_friendly = derive_friendly_name(&s, &args, row.worktree_id)?;
+    if let Some(ref value) = derived_friendly {
+        if let Err(e) = s.set_friendly_name(&args.host_alias, &args.name, Some(value)) {
+            eprintln!(
+                "new_session: storing friendly_name for {} failed: {e:?}",
+                args.name
+            );
+        }
+    }
+
     // Reconcile inserts every session as kind="work"; tag shell sessions
     // afterwards. The session upsert preserves `kind` on re-reconcile.
     if is_shell {
@@ -958,7 +982,54 @@ async fn new_session_inner(
             row.claude_session_id = Some(cid.clone());
         }
     }
+    if derived_friendly.is_some() {
+        // The set_friendly_name call above emitted a session_updated row
+        // event already; we refresh in-memory so the value returned to the
+        // caller matches what the sidebar will display.
+        if let Some(refreshed) = s.get_session(&args.name, &args.host_alias)? {
+            row.friendly_name = refreshed.friendly_name;
+        }
+    }
     Ok(row)
+}
+
+/// Resolve the friendly name to persist for a freshly created session:
+/// trim the user's explicit value, or derive a humanised label from the
+/// branch when none was supplied. Returns `None` only when both inputs
+/// resolve to empty — in practice this is rare (the humaniser falls back
+/// to the repo name), but we treat it as "leave it NULL, let the agent
+/// fill it in later" rather than overwriting with an empty string.
+fn derive_friendly_name(
+    s: &Store,
+    args: &NewSessionArgs,
+    row_worktree_id: Option<i64>,
+) -> Result<Option<String>, IpcError> {
+    if let Some(supplied) = args.friendly_name.as_deref() {
+        let trimmed = supplied.trim();
+        if !trimmed.is_empty() {
+            return Ok(Some(trimmed.to_string()));
+        }
+    }
+    let (owner, repo) = fetch_owner_repo(s, args.project_id)?;
+    // Pick the most specific branch source available. `new_worktree` is the
+    // branch the dialog just created; otherwise the worktree row stored
+    // either a real `branch` ref or its display `name`; falling back to the
+    // tmux name handles attach-to-bare-main and other oddities so the
+    // humaniser always has something to chew on.
+    let branch = if let Some(name) = args.new_worktree.as_deref() {
+        name.to_string()
+    } else if let Some(wid) = row_worktree_id.or(args.worktree_id) {
+        let (name, branch) = fetch_worktree(s, wid)?;
+        branch.unwrap_or(name)
+    } else {
+        args.name.clone()
+    };
+    let derived = crate::humanize::humanize_branch(&branch, &owner, &repo);
+    if derived.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(derived))
+    }
 }
 
 /// Refuse to operate on the registered controller session unless `force`.

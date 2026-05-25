@@ -866,6 +866,9 @@ impl FleetTools {
             // MCP surface yet; the GUI is the only path for those.
             kind: None,
             start_command: None,
+            // MCP callers don't pick a label; let the service derive one from
+            // the branch via `humanize::humanize_branch`.
+            friendly_name: None,
         };
         let row = sessions::new_session(args, &self.store, &self.ssh, &self.reg)
             .await
@@ -899,6 +902,8 @@ impl FleetTools {
             base_branch: p.base_branch,
             kind: Some("shell".to_string()),
             start_command: p.start_command,
+            // Let the service derive a humanised label from the branch.
+            friendly_name: None,
         };
         let row = sessions::new_session(args, &self.store, &self.ssh, &self.reg)
             .await

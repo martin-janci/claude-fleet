@@ -112,6 +112,12 @@ export interface NewSessionArgs {
   kind?: 'work' | 'shell';
   /** Optional command run on start for a shell session (null = bare shell). */
   start_command?: string | null;
+  /**
+   * Optional user-supplied sidebar label. When omitted or empty, the backend
+   * derives one from the branch name so the sidebar never shows the raw
+   * `dev-<owner>-<repo>--…` slug.
+   */
+  friendly_name?: string | null;
 }
 
 export async function newSession(args: NewSessionArgs): Promise<Result<SessionRow>> {
