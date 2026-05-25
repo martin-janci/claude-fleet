@@ -80,6 +80,48 @@ export async function safeKillSession(
   return r;
 }
 
+export interface DirtyFile {
+  status: string;
+  path: string;
+}
+
+export interface SafeKillInspection {
+  has_worktree: boolean;
+  worktree_path: string | null;
+  branch: string | null;
+  upstream: string | null;
+  dirty_files: DirtyFile[];
+  unpushed_commits: number;
+  safe_to_remove: boolean;
+  error: string | null;
+}
+
+/** Pre-flight: cheap git inspect that drives the safe-remove dialog. */
+export async function inspectSafeKill(
+  hostAlias: string,
+  tmuxName: string,
+): Promise<Result<SafeKillInspection>> {
+  return invokeCmd<SafeKillInspection>('inspect_safe_kill', {
+    args: { host_alias: hostAlias, tmux_name: tmuxName },
+  });
+}
+
+/** Direct remove. `force=false` errors out if anything is dirty — only safe
+ *  when the inspection said `safe_to_remove`. `force=true` is the explicit
+ *  "discard local work and kill" path. */
+export async function discardKillSession(
+  hostAlias: string,
+  tmuxName: string,
+  force: boolean,
+): Promise<Result<number>> {
+  const r = await invokeCmd<number>('discard_kill_session', {
+    args: { host_alias: hostAlias, tmux_name: tmuxName },
+    force,
+  });
+  if (r.ok) removeSession(r.value);
+  return r;
+}
+
 export async function renameSession(
   hostAlias: string,
   oldName: string,
