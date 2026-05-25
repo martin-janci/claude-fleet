@@ -31,9 +31,17 @@ const CLAUDE_MD_BODY: &str = "## claude-fleet session labels
 
 If you are running inside a claude-fleet-managed tmux session and the
 `mcp__claude-fleet__set_friendly_name` tool is available, label this session
-at the start of every new task and whenever the task changes significantly.
-Use the **fleet-friendly-name** skill — it is the single, token-cheap path
-for this. Do not chat about the label; just set it.
+via the **fleet-friendly-name** skill. Fire on deterministic signals only:
+
+- the first user prompt of this conversation,
+- the first user prompt after a `/clear` (the harness marker
+  `<command-name>/clear</command-name>` will be in the prior user turn),
+- a ~10-prompt heartbeat — re-check whether the current label still matches
+  the recent work; relabel if not,
+- an explicit user ask to relabel.
+
+Do not fire on commits, file saves, or a fuzzy \"task feels different\".
+Do not chat about the label; just invoke the skill.
 
 The `host_alias` is configuration, not a fact derivable from `hostname`.
 Never call `set_friendly_name` with a guessed alias (e.g. `hostname -s`) —
@@ -550,6 +558,32 @@ mod tests {
             "managed CLAUDE.md block must call out that `host_alias` is \
              configuration, so the agent doesn't try to derive it from \
              `hostname`"
+        );
+    }
+
+    #[test]
+    fn claude_md_body_documents_deterministic_triggers() {
+        // Regression: the managed CLAUDE.md block must enumerate the
+        // deterministic signals that fire the fleet-friendly-name skill
+        // (first prompt, post-`/clear`, heartbeat). The previous wording
+        // (\"at the start of every new task and whenever the task changes
+        // significantly\") was vibe-based and skipped fires after `/clear`,
+        // leaving sidebar labels stale across context resets.
+        let body = super::CLAUDE_MD_BODY;
+        assert!(
+            body.contains("/clear"),
+            "managed CLAUDE.md block must name `/clear` as a deterministic \
+             trigger — that's the most reliable new-task signal we have"
+        );
+        assert!(
+            body.contains("first user prompt"),
+            "managed CLAUDE.md block must name the first-prompt trigger so \
+             sessions get labeled at the start of a conversation"
+        );
+        assert!(
+            body.contains("heartbeat"),
+            "managed CLAUDE.md block must mention the N-prompt heartbeat so \
+             labels don't go stale mid-conversation when `/clear` isn't used"
         );
     }
 }
