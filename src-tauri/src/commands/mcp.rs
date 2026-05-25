@@ -214,9 +214,15 @@ pub fn build_hook_config(url: &str) -> String {
 
 /// Build the fail-silent hook curl. A down/refused server must produce no
 /// stdout/stderr (no pane noise) and exit 0 so Claude doesn't surface it.
+///
+/// Claude Code feeds the hook event JSON on stdin, so we POST it through with
+/// `--data-binary @-`; without that the server has no payload and every hook
+/// looks like an unknown-session no-op (which is what made safe-kill never
+/// finalize).
 fn hook_curl_command(port: u16, token: &str) -> String {
     format!(
-        "curl --connect-timeout 1 --max-time 2 -s -o /dev/null \
+        "curl --connect-timeout 1 --max-time 2 -sS -o /dev/null \
+         -X POST -H 'Content-Type: application/json' --data-binary @- \
          'http://127.0.0.1:{port}/hook?token={token}' 2>/dev/null || true"
     )
 }
@@ -367,8 +373,24 @@ mod tests {
     fn hook_curl_is_fail_silent() {
         let c = hook_curl_command(4180, "tok");
         assert!(c.contains("--connect-timeout 1"));
-        assert!(c.contains("-s -o /dev/null"));
+        assert!(c.contains("-o /dev/null"));
         assert!(c.ends_with("|| true"));
         assert!(c.contains("2>/dev/null"));
+    }
+
+    #[test]
+    fn hook_curl_posts_stdin_payload() {
+        // Claude Code passes hook JSON via stdin; without POST + stdin pass-through
+        // the server sees an empty body and never matches the session_id.
+        let c = hook_curl_command(4180, "tok");
+        assert!(c.contains("-X POST"), "must use POST: {c}");
+        assert!(
+            c.contains("--data-binary @-"),
+            "must forward stdin body: {c}"
+        );
+        assert!(
+            c.contains("Content-Type: application/json"),
+            "must set json content-type: {c}"
+        );
     }
 }

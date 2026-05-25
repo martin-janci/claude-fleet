@@ -5,7 +5,9 @@
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::IpcError;
 use crate::service::bg_sessions::{self, NewBgSessionArgs, PeekSessionArgs, PurgeProjectArgs};
-use crate::service::safe_kill::{self, SafeKillSessionArgs};
+use crate::service::safe_kill::{
+    self, DiscardKillSessionArgs, InspectSafeKillArgs, SafeKillInspection, SafeKillSessionArgs,
+};
 use crate::service::sessions::{
     self, DismissGhostSessionArgs, KillSessionArgs, NewSessionArgs, RecreateSessionArgs,
     RelatedSessionsArgs, RenameSessionArgs, RestartSessionArgs, SendPromptArgs,
@@ -58,6 +60,32 @@ pub async fn safe_kill_session(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SessionRow, IpcError> {
     safe_kill::safe_kill_session(args, &store, &ssh).await
+}
+
+/// Pre-flight check used by the UI before showing the safe-remove dialog:
+/// returns dirty files + pushed-state so we can either skip the Claude prompt
+/// (clean+pushed) or warn the user about what would be lost.
+#[tauri::command]
+pub async fn inspect_safe_kill(
+    args: InspectSafeKillArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<SafeKillInspection, IpcError> {
+    safe_kill::inspect_safe_kill(args, &store, &ssh).await
+}
+
+/// Direct remove: skip the Claude prompt, drop the worktree, kill the
+/// session. `force` is the discard-dirty toggle — pass `false` for the
+/// clean+pushed fast path (any unexpected dirty state errors out), and `true`
+/// when the user explicitly chose "discard & kill" from the dialog.
+#[tauri::command]
+pub async fn discard_kill_session(
+    args: DiscardKillSessionArgs,
+    force: bool,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<i64, IpcError> {
+    safe_kill::discard_kill_session(args, force, &store, &ssh).await
 }
 
 #[tauri::command]

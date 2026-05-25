@@ -13,7 +13,7 @@ use crate::ipc_error::IpcError;
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::{SessionRow, Store};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 /// Markers Claude is asked to emit. The nonce is appended at request time so
@@ -29,6 +29,53 @@ const MARKER_SCAN_LINES: u32 = 3000;
 
 #[derive(Deserialize)]
 pub struct SafeKillSessionArgs {
+    pub host_alias: String,
+    pub tmux_name: String,
+}
+
+/// A single uncommitted entry from `git status --porcelain`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DirtyFile {
+    /// Two-letter porcelain code (e.g. " M", "??", "AM"). Trimmed of trailing
+    /// whitespace but preserves leading spaces — they encode index/worktree
+    /// status separately.
+    pub status: String,
+    pub path: String,
+}
+
+/// Pre-flight snapshot consumed by the UI before deciding which remove path
+/// to take. All git fields are `None` / empty when the session has no
+/// worktree attached (e.g. orphan or in-repo session).
+#[derive(Debug, Clone, Serialize)]
+pub struct SafeKillInspection {
+    pub has_worktree: bool,
+    pub worktree_path: Option<String>,
+    pub branch: Option<String>,
+    /// e.g. `"origin/feature"` — `None` if no upstream tracking branch is set.
+    pub upstream: Option<String>,
+    pub dirty_files: Vec<DirtyFile>,
+    /// Commits in HEAD that are not on the upstream. `0` when fully pushed,
+    /// `-1` when we couldn't determine (no upstream, or the branch isn't
+    /// pushed at all).
+    pub unpushed_commits: i32,
+    /// True iff worktree is clean AND branch has upstream AND no unpushed
+    /// commits. When true, the UI can skip the Claude prompt entirely and
+    /// just remove + kill.
+    pub safe_to_remove: bool,
+    /// If we couldn't inspect (path missing, git error), this is the message
+    /// to surface. Frontend should fall back to the Claude prompt flow when
+    /// set.
+    pub error: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct InspectSafeKillArgs {
+    pub host_alias: String,
+    pub tmux_name: String,
+}
+
+#[derive(Deserialize)]
+pub struct DiscardKillSessionArgs {
     pub host_alias: String,
     pub tmux_name: String,
 }
@@ -159,6 +206,231 @@ pub async fn safe_kill_session(
     s.get_session_by_id(session_id)
         .map_err(IpcError::from)?
         .ok_or_else(|| IpcError::new("E_NOTFOUND", "session vanished after safe-kill request"))
+}
+
+/// Inspect a worktree-backed session so the UI can decide whether to even
+/// involve Claude. Returns dirty files + ahead-of-upstream info from a single
+/// SSH round trip.
+pub async fn inspect_safe_kill(
+    args: InspectSafeKillArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<SafeKillInspection, IpcError> {
+    crate::validate::host_alias(&args.host_alias)?;
+    crate::validate::tmux_name(&args.tmux_name)?;
+
+    let (worktree_path, _project_base) = {
+        let s = store.lock().map_err(|_| lock_err())?;
+        let row = s
+            .get_session(&args.tmux_name, &args.host_alias)
+            .map_err(IpcError::from)?
+            .ok_or_else(|| {
+                IpcError::new(
+                    "E_NOTFOUND",
+                    format!(
+                        "session {} not found on {}",
+                        args.tmux_name, args.host_alias
+                    ),
+                )
+            })?;
+        let wt = match row.worktree_id {
+            Some(wid) => s.worktree_path(wid).map_err(IpcError::from)?,
+            None => None,
+        };
+        let base = match row.project_id {
+            Some(pid) => s.project_base_path(pid).map_err(IpcError::from)?,
+            None => None,
+        };
+        (wt, base)
+    };
+
+    let Some(wt) = worktree_path else {
+        // No worktree: nothing to inspect. UI will offer the Claude flow as
+        // the only sensible option.
+        return Ok(SafeKillInspection {
+            has_worktree: false,
+            worktree_path: None,
+            branch: None,
+            upstream: None,
+            dirty_files: Vec::new(),
+            unpushed_commits: -1,
+            safe_to_remove: false,
+            error: None,
+        });
+    };
+
+    let wt_q = quote(&wt);
+    // Single bash invocation prints three NUL-terminated sections:
+    //   1. porcelain -z dirty list
+    //   2. current branch name
+    //   3. upstream (origin/<branch>) or empty
+    //   4. ahead count (HEAD ahead of upstream) or "-1" when unknown
+    // Separator `\x1e` (RS) is illegal in branch names and unlikely in paths.
+    let script = format!(
+        r#"set +e
+wt={wt_q}
+if [ ! -d "$wt/.git" ] && [ ! -f "$wt/.git" ]; then
+  printf 'ERR\x1enot a git worktree: %s\n' "$wt" 1>&2
+  exit 2
+fi
+porcelain=$(git -C "$wt" status --porcelain=v1 2>/dev/null)
+branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)
+upstream=$(git -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{{u}}' 2>/dev/null)
+if [ -n "$upstream" ]; then
+  ahead=$(git -C "$wt" rev-list --count "$upstream"..HEAD 2>/dev/null)
+  if [ -z "$ahead" ]; then ahead=-1; fi
+else
+  ahead=-1
+fi
+printf '%s\x1e%s\x1e%s\x1e%s' "$porcelain" "$branch" "$upstream" "$ahead"
+"#
+    );
+
+    let out = run_shell(ssh, &args.host_alias, &script).await?;
+    if !out.status.success() {
+        return Ok(SafeKillInspection {
+            has_worktree: true,
+            worktree_path: Some(wt),
+            branch: None,
+            upstream: None,
+            dirty_files: Vec::new(),
+            unpushed_commits: -1,
+            safe_to_remove: false,
+            error: Some(format!(
+                "git inspect failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )),
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut parts = stdout.split('\x1e');
+    let porcelain = parts.next().unwrap_or("");
+    let branch_raw = parts.next().unwrap_or("").trim();
+    let upstream_raw = parts.next().unwrap_or("").trim();
+    let ahead_raw = parts.next().unwrap_or("-1").trim();
+
+    let dirty_files = parse_porcelain(porcelain);
+    let branch = (!branch_raw.is_empty()).then(|| branch_raw.to_string());
+    let upstream = (!upstream_raw.is_empty()).then(|| upstream_raw.to_string());
+    let unpushed_commits = ahead_raw.parse::<i32>().unwrap_or(-1);
+
+    let safe_to_remove = dirty_files.is_empty() && upstream.is_some() && unpushed_commits == 0;
+
+    Ok(SafeKillInspection {
+        has_worktree: true,
+        worktree_path: Some(wt),
+        branch,
+        upstream,
+        dirty_files,
+        unpushed_commits,
+        safe_to_remove,
+        error: None,
+    })
+}
+
+/// Parse `git status --porcelain=v1` output. Each line is `XY␣path` where XY
+/// are two status chars. We keep both chars intact (leading space matters).
+pub fn parse_porcelain(s: &str) -> Vec<DirtyFile> {
+    s.lines()
+        .filter(|l| l.len() >= 3)
+        .map(|l| {
+            let (code, rest) = l.split_at(2);
+            DirtyFile {
+                status: code.to_string(),
+                path: rest.trim_start().to_string(),
+            }
+        })
+        .collect()
+}
+
+/// Skip the Claude prompt. Used when the UI's inspect call reported
+/// `safe_to_remove == true` (clean + pushed) — or when the user explicitly
+/// chose "discard & kill" after seeing dirty files / unpushed commits.
+///
+/// Force-removes the worktree on disk (the discard contract is "I accept
+/// losing local-only work"), drops the worktree DB row, then kills the tmux
+/// session. The `force_discard` flag controls whether `git worktree remove`
+/// gets `--force`: callers that want clean+pushed semantics pass `false`
+/// (and a non-clean worktree will surface as a hard error).
+pub async fn discard_kill_session(
+    args: DiscardKillSessionArgs,
+    force_discard: bool,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<i64, IpcError> {
+    crate::validate::host_alias(&args.host_alias)?;
+    crate::validate::tmux_name(&args.tmux_name)?;
+
+    let (session_id, worktree_id, worktree_path, project_base) = {
+        let s = store.lock().map_err(|_| lock_err())?;
+        let row = s
+            .get_session(&args.tmux_name, &args.host_alias)
+            .map_err(IpcError::from)?
+            .ok_or_else(|| {
+                IpcError::new(
+                    "E_NOTFOUND",
+                    format!(
+                        "session {} not found on {}",
+                        args.tmux_name, args.host_alias
+                    ),
+                )
+            })?;
+        let wt = match row.worktree_id {
+            Some(wid) => s.worktree_path(wid).map_err(IpcError::from)?,
+            None => None,
+        };
+        let base = match row.project_id {
+            Some(pid) => s.project_base_path(pid).map_err(IpcError::from)?,
+            None => None,
+        };
+        (row.id, row.worktree_id, wt, base)
+    };
+
+    if let (Some(ref wt), Some(ref base)) = (&worktree_path, &project_base) {
+        let force_flag = if force_discard { " --force" } else { "" };
+        let rm_cmd = format!(
+            "git -C {} worktree remove{force_flag} {}",
+            quote(base),
+            quote(wt)
+        );
+        let out = run_shell(ssh, &args.host_alias, &rm_cmd).await?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(IpcError::new(
+                "E_WORKTREE_REMOVE",
+                format!("git worktree remove failed: {}", stderr.trim()),
+            ));
+        }
+    }
+
+    if let Some(wid) = worktree_id {
+        if let Ok(s) = store.lock() {
+            if let Err(e) = s.delete_worktree(wid) {
+                eprintln!("[safe_kill] discard: delete_worktree({wid}) failed: {e}");
+            }
+            let _ = s.insert_session_event(
+                session_id,
+                if force_discard {
+                    "safe_kill_discarded"
+                } else {
+                    "safe_kill_ready"
+                },
+                None,
+            );
+        }
+    }
+
+    crate::service::sessions::kill_session(
+        crate::service::sessions::KillSessionArgs {
+            host_alias: args.host_alias,
+            name: args.tmux_name,
+            force: true,
+        },
+        store,
+        ssh,
+    )
+    .await
 }
 
 /// Outcome of one marker scan. `NotYet` means the assistant has not yet

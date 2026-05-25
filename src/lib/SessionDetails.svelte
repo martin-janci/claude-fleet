@@ -1,7 +1,15 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import { sessions, type SessionRow } from './sessions';
-  import { killSession, renameSession, restartSession, recreateSession, safeKillSession } from './sessions';
+  import { sessions, type SessionRow, type SafeKillInspection } from './sessions';
+  import {
+    killSession,
+    renameSession,
+    restartSession,
+    recreateSession,
+    safeKillSession,
+    inspectSafeKill,
+    discardKillSession,
+  } from './sessions';
   import { projectById } from './projects';
   import { selectSession, clearSelection } from './selection';
   import { hostByAlias } from './hosts';
@@ -141,17 +149,74 @@
   let confirmingSafeKill = $state(false);
   let confirmingRecreate = $state(false);
 
-  function askSafeKill() {
-    confirmingSafeKill = true;
+  // Safe-remove inspection state. `null` while loading; populated once the
+  // pre-flight git inspect returns. `safe_to_remove` short-circuits the
+  // Claude prompt entirely.
+  let inspection: SafeKillInspection | null = $state(null);
+  let inspectError: string | null = $state(null);
+  let busy = $state(false);
+
+  async function askSafeKill() {
     actionError = null;
+    inspection = null;
+    inspectError = null;
+    confirmingSafeKill = true;
+    const r = await inspectSafeKill(session.host_alias, session.tmux_name);
+    if (r.ok) {
+      inspection = r.value;
+    } else {
+      inspectError = r.error.message;
+    }
   }
   function cancelSafeKill() {
+    if (busy) return;
     confirmingSafeKill = false;
+    inspection = null;
+    inspectError = null;
   }
-  async function doSafeKill() {
-    confirmingSafeKill = false;
+
+  // "Let Claude commit it" path: current behavior — send the marker-baked
+  // prompt and wait for the Stop hook to finalize.
+  async function doSafeKillViaClaude() {
+    busy = true;
     const r = await safeKillSession(session.host_alias, session.tmux_name);
-    if (!r.ok) actionError = r.error.message;
+    busy = false;
+    if (!r.ok) {
+      actionError = r.error.message;
+      return;
+    }
+    confirmingSafeKill = false;
+    inspection = null;
+  }
+
+  // Clean+pushed fast path: backend just removes the worktree + kills tmux,
+  // no Claude involvement. `force=false` so a surprise dirty file errors out.
+  async function doDirectRemove() {
+    busy = true;
+    const r = await discardKillSession(session.host_alias, session.tmux_name, false);
+    busy = false;
+    if (r.ok) {
+      confirmingSafeKill = false;
+      inspection = null;
+      clearSelection();
+    } else {
+      actionError = r.error.message;
+    }
+  }
+
+  // Explicit discard: user has seen the dirty list / unpushed warning and
+  // chose to drop the work anyway.
+  async function doDiscardAndKill() {
+    busy = true;
+    const r = await discardKillSession(session.host_alias, session.tmux_name, true);
+    busy = false;
+    if (r.ok) {
+      confirmingSafeKill = false;
+      inspection = null;
+      clearSelection();
+    } else {
+      actionError = r.error.message;
+    }
   }
   function askKill() {
     confirmingKill = true;
@@ -377,19 +442,104 @@
 
 {#if confirmingSafeKill}
   <div class="modal-backdrop" onclick={cancelSafeKill} role="presentation">
-    <div class="confirm" onclick={(e) => e.stopPropagation()} role="presentation">
-      <h3>Safe remove?</h3>
-      <p>
-        Fleet will ask Claude to make sure all work in <code>{session.tmux_name}</code> is
-        committed and pushed to <code>main</code> or in a PR. When Claude reports
-        success and the worktree is clean, fleet deletes the worktree and kills
-        the session. If Claude can't safely persist the work, the session stays
-        alive and you can resolve manually.
-      </p>
-      <div class="confirm-actions">
-        <button onclick={cancelSafeKill}>Cancel</button>
-        <button onclick={doSafeKill} data-testid="confirm-safe-kill-details">Start safe remove</button>
-      </div>
+    <div class="confirm wide" onclick={(e) => e.stopPropagation()} role="presentation">
+      <h3>Safe remove <code>{session.tmux_name}</code>?</h3>
+
+      {#if inspection === null && inspectError === null}
+        <p class="muted">Inspecting worktree…</p>
+        <div class="confirm-actions">
+          <button onclick={cancelSafeKill}>Cancel</button>
+        </div>
+      {:else if inspectError}
+        <p>
+          Couldn't inspect the worktree: <code>{inspectError}</code>. You can
+          still ask Claude to persist the work safely.
+        </p>
+        <div class="confirm-actions">
+          <button onclick={cancelSafeKill}>Cancel</button>
+          <button
+            disabled={busy}
+            onclick={doSafeKillViaClaude}
+            data-testid="confirm-safe-kill-claude"
+          >Ask Claude to commit + push</button>
+        </div>
+      {:else if inspection && inspection.safe_to_remove}
+        <p>
+          Worktree is clean and branch
+          <code>{inspection.branch ?? '(detached)'}</code> is up-to-date with
+          <code>{inspection.upstream ?? 'origin'}</code>. Safe to remove
+          immediately.
+        </p>
+        <div class="confirm-actions">
+          <button disabled={busy} onclick={cancelSafeKill}>Cancel</button>
+          <button
+            class="primary"
+            disabled={busy}
+            onclick={doDirectRemove}
+            data-testid="confirm-safe-kill-direct"
+          >Remove worktree + kill</button>
+        </div>
+      {:else if inspection}
+        {#if !inspection.has_worktree}
+          <p>
+            This session has no tracked worktree. Asking Claude to commit and
+            push will surface any unsaved work; the session is then killed.
+          </p>
+        {:else}
+          <div class="inspect-box">
+            <p class="inspect-line">
+              Branch: <code>{inspection.branch ?? '(detached)'}</code>
+              {#if inspection.upstream}
+                → <code>{inspection.upstream}</code>
+              {:else}
+                <span class="muted">(no upstream — not pushed)</span>
+              {/if}
+            </p>
+            {#if inspection.upstream && inspection.unpushed_commits > 0}
+              <p class="inspect-line warn">
+                {inspection.unpushed_commits} unpushed commit{inspection.unpushed_commits === 1 ? '' : 's'}
+                on this branch.
+              </p>
+            {/if}
+            {#if inspection.dirty_files.length > 0}
+              <p class="inspect-line warn">
+                {inspection.dirty_files.length} uncommitted file{inspection.dirty_files.length === 1 ? '' : 's'}:
+              </p>
+              <ul class="dirty-list" data-testid="dirty-files">
+                {#each inspection.dirty_files.slice(0, 20) as f (f.path)}
+                  <li>
+                    <code class="status-code">{f.status}</code>
+                    <span>{f.path}</span>
+                  </li>
+                {/each}
+                {#if inspection.dirty_files.length > 20}
+                  <li class="muted">… and {inspection.dirty_files.length - 20} more</li>
+                {/if}
+              </ul>
+            {/if}
+          </div>
+          <p class="muted small">
+            "Let Claude commit it" sends a prompt asking Claude to commit + push
+            (to <code>main</code> or a PR) before fleet removes the worktree.
+            "Discard &amp; kill" force-removes the worktree and kills the
+            session — local-only changes will be lost.
+          </p>
+        {/if}
+        <div class="confirm-actions">
+          <button disabled={busy} onclick={cancelSafeKill}>Cancel</button>
+          <button
+            disabled={busy}
+            onclick={doSafeKillViaClaude}
+            data-testid="confirm-safe-kill-claude"
+          >Let Claude commit it</button>
+          <button
+            class="danger"
+            disabled={busy}
+            onclick={doDiscardAndKill}
+            data-testid="confirm-safe-kill-discard"
+          >Discard &amp; kill</button>
+        </div>
+      {/if}
     </div>
   </div>
 {/if}
@@ -591,7 +741,52 @@
     border-radius: 3px;
     color: var(--fg);
   }
-  .confirm-actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
+  .confirm-actions { display: flex; gap: 0.4rem; justify-content: flex-end; flex-wrap: wrap; }
+  .confirm.wide { width: 480px; max-width: 90vw; }
+  .confirm .primary {
+    background: var(--accent);
+    color: white;
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    padding: 0.3rem 0.7rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  .confirm .primary:disabled { opacity: 0.6; cursor: not-allowed; }
+  .confirm button:disabled { opacity: 0.6; cursor: not-allowed; }
+  .inspect-box {
+    background: var(--bg-pane);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 0.5rem 0.7rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .inspect-line { margin: 0; font-size: 0.8rem; color: var(--fg); }
+  .inspect-line.warn { color: #d29b4a; }
+  .dirty-list {
+    margin: 0.2rem 0 0 0;
+    padding: 0;
+    list-style: none;
+    max-height: 9rem;
+    overflow-y: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.75rem;
+  }
+  .dirty-list li {
+    display: flex;
+    gap: 0.5rem;
+    align-items: baseline;
+    padding: 0.05rem 0;
+  }
+  .status-code {
+    color: #d29b4a;
+    width: 2ch;
+    flex: 0 0 auto;
+    white-space: pre;
+  }
+  .small { font-size: 0.75rem; }
   .confirm-actions button {
     font-size: 0.85rem;
     padding: 0.3rem 0.8rem;
