@@ -236,6 +236,7 @@
         </button>
       </div>
       <div class="hook-section">
+        <p class="hook-desc">Show inline tips the first time a feature is used.</p>
         <label class="toggle">
           <input type="checkbox" bind:checked={$hintsEnabled} />
           Show feature hints

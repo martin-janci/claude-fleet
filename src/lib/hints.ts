@@ -66,8 +66,10 @@ export function markSeen(id: HintId): void {
   seenHints.update((s) => (s.includes(id) ? s : [...s, id]));
 }
 
+/** Re-show all hints: clear the dismissed set and re-enable hints globally. */
 export function resetHints(): void {
   seenHints.set([]);
+  hintsEnabled.set(true);
 }
 
 // Set of hint ids whose anchor is currently mounted AND relevant — drives
