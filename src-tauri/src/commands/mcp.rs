@@ -219,12 +219,98 @@ pub fn build_hook_config(url: &str) -> String {
 /// `--data-binary @-`; without that the server has no payload and every hook
 /// looks like an unknown-session no-op (which is what made safe-kill never
 /// finalize).
-fn hook_curl_command(port: u16, token: &str) -> String {
+pub(crate) fn hook_curl_command(port: u16, token: &str) -> String {
     format!(
         "curl --connect-timeout 1 --max-time 2 -sS -o /dev/null \
          -X POST -H 'Content-Type: application/json' --data-binary @- \
          'http://127.0.0.1:{port}/hook?token={token}' 2>/dev/null || true"
     )
+}
+
+/// Pure merge: given `existing` (current `~/.claude/settings.json` content,
+/// possibly empty), return new pretty-JSON with fleet's Stop +
+/// PostToolUse(WorktreeCreate) hooks installed/refreshed.
+///
+/// Any prior fleet hook entries pointing at the same port URL are stripped
+/// first so re-running stays idempotent. Other hooks (e.g. user's own tsc
+/// pre-commit) are preserved verbatim.
+///
+/// Lifted out of `install_fleet_hook` so `provision_one` can call it for
+/// remote hosts — local-only install isn't enough when the user's actual
+/// Claude Code sessions run on remote machines (their Stop hook never fired
+/// otherwise, so safe-kill stayed stuck on "requested").
+pub(crate) fn merge_hook_into_settings_json(
+    existing: &str,
+    port: u16,
+    token: &str,
+) -> Result<String, IpcError> {
+    let mut settings: serde_json::Value = if existing.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        // A garbage settings.json shouldn't brick fleet install; treat as
+        // empty so we overwrite with a valid object. The caller's filesystem
+        // backup (if any) is the user's safety net.
+        serde_json::from_str(existing).unwrap_or(serde_json::json!({}))
+    };
+
+    if !settings.is_object() {
+        return Err(IpcError::new(
+            "E_PARSE",
+            "settings.json root is not a JSON object",
+        ));
+    }
+
+    let hook_command = hook_curl_command(port, token);
+    let fleet_prefix = format!("http://127.0.0.1:{port}/hook");
+
+    let strip_fleet = |arr: &serde_json::Value| -> serde_json::Value {
+        let items = arr.as_array().cloned().unwrap_or_default();
+        serde_json::Value::Array(
+            items
+                .into_iter()
+                .filter(|block| {
+                    let hooks_arr = block.get("hooks").and_then(|h| h.as_array());
+                    hooks_arr.is_none_or(|hs| {
+                        !hs.iter().any(|h| {
+                            let url_match = h
+                                .get("url")
+                                .and_then(|u| u.as_str())
+                                .is_some_and(|u| u.starts_with(&fleet_prefix));
+                            let cmd_match = h
+                                .get("command")
+                                .and_then(|c| c.as_str())
+                                .is_some_and(|c| c.contains(&fleet_prefix));
+                            url_match || cmd_match
+                        })
+                    })
+                })
+                .collect(),
+        )
+    };
+
+    let hooks = settings
+        .as_object_mut()
+        .unwrap()
+        .entry("hooks")
+        .or_insert(serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| IpcError::new("E_PARSE", "hooks is not an object"))?;
+
+    let mut stop_arr = strip_fleet(hooks.get("Stop").unwrap_or(&serde_json::json!([])));
+    stop_arr.as_array_mut().unwrap().push(serde_json::json!({
+        "matcher": "",
+        "hooks": [{ "type": "command", "command": hook_command.clone() }]
+    }));
+    hooks.insert("Stop".into(), stop_arr);
+
+    let mut ptu_arr = strip_fleet(hooks.get("PostToolUse").unwrap_or(&serde_json::json!([])));
+    ptu_arr.as_array_mut().unwrap().push(serde_json::json!({
+        "matcher": "WorktreeCreate",
+        "hooks": [{ "type": "command", "command": hook_command }]
+    }));
+    hooks.insert("PostToolUse".into(), ptu_arr);
+
+    serde_json::to_string_pretty(&settings).map_err(|e| IpcError::new("E_SERIALIZE", e.to_string()))
 }
 
 /// Install (or update) the fleet hook in the local `~/.claude/settings.json`.
@@ -277,76 +363,26 @@ pub fn install_fleet_hook(
     }
 
     let hook_url = format!("http://127.0.0.1:{port}/hook?token={token}");
-    let hook_command = hook_curl_command(port, &token);
 
     let settings_path = dirs::home_dir()
         .ok_or_else(|| IpcError::new("E_HOME", "cannot determine home directory"))?
         .join(".claude")
         .join("settings.json");
 
-    let mut settings: serde_json::Value = if settings_path.exists() {
-        let content = std::fs::read_to_string(&settings_path)
-            .map_err(|e| IpcError::new("E_IO", format!("read settings.json: {e}")))?;
-        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    let existing = if settings_path.exists() {
+        std::fs::read_to_string(&settings_path)
+            .map_err(|e| IpcError::new("E_IO", format!("read settings.json: {e}")))?
     } else {
-        serde_json::json!({})
+        String::new()
     };
 
-    let hooks = settings
-        .as_object_mut()
-        .ok_or_else(|| IpcError::new("E_PARSE", "settings.json root is not an object"))?
-        .entry("hooks")
-        .or_insert(serde_json::json!({}))
-        .as_object_mut()
-        .ok_or_else(|| IpcError::new("E_PARSE", "hooks is not an object"))?;
-
-    let fleet_prefix = format!("http://127.0.0.1:{port}/hook");
-    let strip_fleet = |arr: &serde_json::Value| -> serde_json::Value {
-        let items = arr.as_array().cloned().unwrap_or_default();
-        serde_json::Value::Array(
-            items
-                .into_iter()
-                .filter(|block| {
-                    let hooks_arr = block.get("hooks").and_then(|h| h.as_array());
-                    hooks_arr.is_none_or(|hs| {
-                        !hs.iter().any(|h| {
-                            let url_match = h
-                                .get("url")
-                                .and_then(|u| u.as_str())
-                                .is_some_and(|u| u.starts_with(&fleet_prefix));
-                            let cmd_match = h
-                                .get("command")
-                                .and_then(|c| c.as_str())
-                                .is_some_and(|c| c.contains(&fleet_prefix));
-                            url_match || cmd_match
-                        })
-                    })
-                })
-                .collect(),
-        )
-    };
-
-    let mut stop_arr = strip_fleet(hooks.get("Stop").unwrap_or(&serde_json::json!([])));
-    stop_arr.as_array_mut().unwrap().push(serde_json::json!({
-        "matcher": "",
-        "hooks": [{ "type": "command", "command": hook_command.clone() }]
-    }));
-    hooks.insert("Stop".into(), stop_arr);
-
-    let mut ptu_arr = strip_fleet(hooks.get("PostToolUse").unwrap_or(&serde_json::json!([])));
-    ptu_arr.as_array_mut().unwrap().push(serde_json::json!({
-        "matcher": "WorktreeCreate",
-        "hooks": [{ "type": "command", "command": hook_command }]
-    }));
-    hooks.insert("PostToolUse".into(), ptu_arr);
+    let merged = merge_hook_into_settings_json(&existing, port, &token)?;
 
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| IpcError::new("E_IO", format!("create .claude dir: {e}")))?;
     }
-    let json = serde_json::to_string_pretty(&settings)
-        .map_err(|e| IpcError::new("E_SERIALIZE", e.to_string()))?;
-    std::fs::write(&settings_path, &json)
+    std::fs::write(&settings_path, &merged)
         .map_err(|e| IpcError::new("E_IO", format!("write settings.json: {e}")))?;
 
     Ok(format!(
@@ -376,6 +412,80 @@ mod tests {
         assert!(c.contains("-o /dev/null"));
         assert!(c.ends_with("|| true"));
         assert!(c.contains("2>/dev/null"));
+    }
+
+    #[test]
+    fn merge_hook_into_empty_settings() {
+        let out = merge_hook_into_settings_json("", 4180, "tok").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let stop = v["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 1);
+        let cmd = stop[0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(cmd.contains("-X POST"), "{cmd}");
+        assert!(cmd.contains("4180"));
+        assert!(cmd.contains("token=tok"));
+        let ptu = v["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(ptu[0]["matcher"], "WorktreeCreate");
+    }
+
+    #[test]
+    fn merge_hook_preserves_unrelated_hooks_and_is_idempotent() {
+        let existing = r#"{
+          "hooks": {
+            "PostToolUse": [{
+              "matcher": "Write|Edit",
+              "hooks": [{"type":"command","command":"npx tsc --noEmit"}]
+            }]
+          },
+          "otherTopLevel": {"keep": true}
+        }"#;
+        let out = merge_hook_into_settings_json(existing, 4180, "tok").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+
+        // User's tsc hook survives.
+        let ptu = v["hooks"]["PostToolUse"].as_array().unwrap();
+        assert!(
+            ptu.iter().any(|b| b["matcher"] == "Write|Edit"),
+            "user's Write|Edit hook must survive: {ptu:?}"
+        );
+        // Fleet's WorktreeCreate hook landed.
+        assert!(
+            ptu.iter().any(|b| b["matcher"] == "WorktreeCreate"),
+            "fleet WorktreeCreate hook must be present: {ptu:?}"
+        );
+        // Unrelated top-level keys preserved.
+        assert_eq!(v["otherTopLevel"]["keep"], true);
+
+        // Re-running with same port replaces fleet's entries instead of
+        // duplicating them.
+        let out2 = merge_hook_into_settings_json(&out, 4180, "tok2").unwrap();
+        let v2: serde_json::Value = serde_json::from_str(&out2).unwrap();
+        let ptu2 = v2["hooks"]["PostToolUse"].as_array().unwrap();
+        let fleet_count = ptu2
+            .iter()
+            .filter(|b| b["matcher"] == "WorktreeCreate")
+            .count();
+        assert_eq!(
+            fleet_count, 1,
+            "fleet hook duplicated on re-merge: {ptu2:?}"
+        );
+        // Token updated on the surviving entry.
+        let fleet_cmd = ptu2
+            .iter()
+            .find(|b| b["matcher"] == "WorktreeCreate")
+            .unwrap()["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(fleet_cmd.contains("token=tok2"), "{fleet_cmd}");
+    }
+
+    #[test]
+    fn merge_hook_into_garbage_json_resets_to_empty() {
+        // Don't brick install if settings.json is corrupted — overwrite with
+        // a minimal valid object containing just our hook.
+        let out = merge_hook_into_settings_json("not json at all", 4180, "tok").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v["hooks"]["Stop"].is_array());
     }
 
     #[test]
