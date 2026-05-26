@@ -53,11 +53,17 @@ row's `host_alias`. The skill spells out the full flow.";
 /// Install the skill + merge the MCP entry on one host. `url` is the MCP
 /// endpoint that host should use. Reads `~/.claude.json`, merges (preserving
 /// siblings), backs it up, writes it back. Parse errors abort BEFORE any write.
+///
+/// `mcp_port` is also installed as a Stop / PostToolUse(WorktreeCreate) hook
+/// in `~/.claude/settings.json` so the host's Claude Code can notify fleet
+/// over the reverse tunnel — without this, safe-kill on remote hosts never
+/// finalizes (the marker check is gated on the Stop hook firing).
 pub async fn provision_one(
     ssh: &Arc<SshClient>,
     host: &str,
     url: &str,
     token: &str,
+    mcp_port: u16,
 ) -> Result<(), IpcError> {
     // 1. Skills (live-discovered, no restart). Both ship from the repo so
     //    every fleet host gets the same shared copy.
@@ -90,7 +96,26 @@ pub async fn provision_one(
     write_host_file(ssh, host, CLAUDE_DIR, CLAUDE_JSON, &merged).await?;
     // 3. Ensure tmux clipboard passthrough for OSC 52.
     provision_tmux_clipboard(ssh, host).await?;
+    // 4. Stop / WorktreeCreate hooks. Required for safe-kill finalization on
+    //    any host that runs Claude Code.
+    provision_hook(ssh, host, mcp_port, token).await?;
     Ok(())
+}
+
+const SETTINGS_JSON: &str = "~/.claude/settings.json";
+
+/// Merge fleet's Stop + PostToolUse(WorktreeCreate) hooks into the host's
+/// `~/.claude/settings.json`. Idempotent — re-running replaces fleet entries
+/// pointing at the same `mcp_port` and leaves the user's own hooks alone.
+pub async fn provision_hook(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    mcp_port: u16,
+    token: &str,
+) -> Result<(), IpcError> {
+    let existing = read_host_file(ssh, host, SETTINGS_JSON).await?;
+    let merged = crate::commands::mcp::merge_hook_into_settings_json(&existing, mcp_port, token)?;
+    write_host_file(ssh, host, CLAUDE_DIR, SETTINGS_JSON, &merged).await
 }
 
 /// Ensure `~/.tmux.conf` has `set -g set-clipboard on` for OSC 52 passthrough.
@@ -211,7 +236,7 @@ pub async fn provision_hosts(
             continue;
         }
         let url = format!("http://127.0.0.1:{mcp_port}/mcp");
-        match provision_one(ssh, &h.alias, &url, token).await {
+        match provision_one(ssh, &h.alias, &url, token, mcp_port).await {
             Ok(()) => {
                 if h.alias != "local" {
                     tunnels.ensure(&h.alias, mcp_port, mcp_port);
