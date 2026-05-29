@@ -119,6 +119,18 @@ impl SshClient {
             "BatchMode=yes".into(),
             "-o".into(),
             format!("ConnectTimeout={}", timeout.as_secs().max(1)),
+            // Keepalive so a wedged connection self-terminates instead of
+            // hanging forever. `ConnectTimeout` only bounds the INITIAL connect
+            // of a fresh master; when a later call multiplexes onto an EXISTING
+            // master no connect happens, so without keepalives a black-holed
+            // master (peer gone silently — laptop sleep/wake, network switch,
+            // remote reboot) leaves both the master and its sessions blocked
+            // indefinitely. 5s × 2 ⇒ the master gives up ~10s after the peer
+            // goes quiet, exits, and subsequent calls reconnect cleanly.
+            "-o".into(),
+            "ServerAliveInterval=5".into(),
+            "-o".into(),
+            "ServerAliveCountMax=2".into(),
         ]
     }
 
@@ -325,6 +337,11 @@ mod tests {
         assert!(opts.iter().any(|o| o == "ControlMaster=auto"));
         assert!(opts.iter().any(|o| o == "ControlPersist=10m"));
         assert!(opts.iter().any(|o| o == "ConnectTimeout=5"));
+        // Keepalives bound a wedged multiplexed session — `ConnectTimeout`
+        // only covers the initial connect of a fresh master, not a later
+        // attach onto an existing one.
+        assert!(opts.iter().any(|o| o == "ServerAliveInterval=5"));
+        assert!(opts.iter().any(|o| o == "ServerAliveCountMax=2"));
     }
 
     #[tokio::test]

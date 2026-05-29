@@ -14,6 +14,18 @@ use tokio_util::sync::CancellationToken;
 /// last tool line or prompt without dragging in scrollback.
 const PANE_TAIL_LINES: u32 = 8;
 
+/// Hard wall-clock cap on a single host's reconcile probe. Without it, a wedged
+/// SSH ControlMaster (see `ssh.rs` `mux_opts`) leaves `tmux.list_sessions`
+/// awaiting forever — and because the multi-host reconcile awaits EVERY probe
+/// before `list_sessions` can return, one hung host would block the whole load
+/// path and leave the sidebar empty for ALL hosts, including the healthy
+/// `local` one. On elapse we synthesize a probe error, routing the host through
+/// the existing "unreachable, keep last-known sessions" branch. Set generously
+/// so a healthy host with many sessions (each pane capture is a sequential
+/// round-trip) never false-trips; on a real wedge the ssh-layer keepalive
+/// usually tears the master down well before this fires.
+const HOST_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Map of `tmux_name` → analyzed pane intel, gathered off-lock during a host
 /// probe. A name absent from the map (capture failed) leaves the session's
 /// intel fields untouched (COALESCE in the upsert preserves prior values).
@@ -273,6 +285,53 @@ fn reconcile_bg_agents(
     Ok(())
 }
 
+/// Probe one host off-lock, under a hard wall-clock cap (`HOST_PROBE_TIMEOUT`).
+/// A wedged SSH ControlMaster can make any of these awaits hang forever
+/// (`ConnectTimeout` does not cover a multiplexed attach onto an existing
+/// master), so the whole probe is bounded. On timeout we return an `Err` probe
+/// result, which `reconcile_write_one_host` turns into "host unreachable, keep
+/// last-known sessions". The abandoned ssh child is reaped on its own by the
+/// ssh-layer keepalive. Shared by the multi-host reconcile and the single-host
+/// background refresh so both are bounded identically.
+async fn probe_one_host(host: HostRow, ssh: &Arc<SshClient>) -> HostProbeResult {
+    let tmux = exec_for(&host.alias, ssh);
+    probe_with_timeout(host, tmux, HOST_PROBE_TIMEOUT).await
+}
+
+/// Inner probe with an injectable executor + timeout, so the wedged-host path
+/// is unit-testable without real ssh. See `probe_one_host` for the rationale.
+async fn probe_with_timeout(
+    host: HostRow,
+    tmux: Box<dyn TmuxExec>,
+    timeout: std::time::Duration,
+) -> HostProbeResult {
+    let probe = async {
+        let tmux_result = tmux.list_sessions().await;
+        let agent_rows = tmux.list_claude_agents().await;
+        // One pane-tail read per live session, parsed into reconcile intel.
+        let intel = match &tmux_result {
+            Ok(live) => capture_pane_intel(tmux.as_ref(), live).await,
+            Err(_) => PaneIntelMap::new(),
+        };
+        (tmux_result, agent_rows, intel)
+    };
+    match tokio::time::timeout(timeout, probe).await {
+        Ok((tmux_result, agent_rows, intel)) => (host, tmux_result, agent_rows, intel),
+        Err(_elapsed) => {
+            eprintln!(
+                "[reconcile] host {alias} probe exceeded {timeout:?}; marking unreachable (last-known sessions kept)",
+                alias = host.alias,
+            );
+            (
+                host,
+                Err(IpcError::new("E_TIMEOUT", "host probe timed out")),
+                Vec::new(),
+                PaneIntelMap::new(),
+            )
+        }
+    }
+}
+
 async fn reconcile_sessions(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
@@ -291,24 +350,19 @@ async fn reconcile_sessions(
     //    surfaced by the final `list_all_sessions` read, without probing.
     //    Each task receives owned data so it satisfies 'static + Send.
     //
-    //    TODO(iter4a-M4): `JoinSet::drop` aborts the futures but does NOT
-    //    kill the spawned ssh/tmux child processes; on early return/panic
-    //    those orphan. Will be addressed by the CancellationToken plumbing
-    //    in M4 (Tasks 16–18).
+    //    Each probe is bounded by `HOST_PROBE_TIMEOUT` (see `probe_one_host`):
+    //    a single wedged host can no longer stall the collector below and, with
+    //    it, the whole load path.
+    //
+    //    TODO(iter4a-M4): `JoinSet::drop` aborts the futures but does NOT kill
+    //    the spawned ssh/tmux child processes; on timeout/early-return/panic
+    //    those orphan. They now self-reap via the ssh keepalive (ServerAlive in
+    //    `ssh.rs` `mux_opts`) within ~10s instead of lingering for hours, but
+    //    explicit kill+reap still awaits the CancellationToken plumbing in M4.
     let mut set = tokio::task::JoinSet::new();
     for host in hosts.into_iter().filter(|h| !h.hidden) {
         let ssh_arc = Arc::clone(ssh);
-        set.spawn(async move {
-            let tmux = exec_for(&host.alias, &ssh_arc);
-            let tmux_result = tmux.list_sessions().await;
-            let agent_rows = tmux.list_claude_agents().await;
-            // One pane-tail read per live session, parsed into reconcile intel.
-            let intel = match &tmux_result {
-                Ok(live) => capture_pane_intel(tmux.as_ref(), live).await,
-                Err(_) => PaneIntelMap::new(),
-            };
-            (host, tmux_result, agent_rows, intel)
-        });
+        set.spawn(async move { probe_one_host(host, &ssh_arc).await });
     }
 
     // Collect per-host probe results. Join errors (task panics) are logged
@@ -372,14 +426,8 @@ async fn reconcile_one_host(
             .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("host {alias} not found")))?
     };
 
-    // 2. Probe off-lock.
-    let tmux = exec_for(&host.alias, ssh);
-    let result = tmux.list_sessions().await;
-    let agent_rows = tmux.list_claude_agents().await;
-    let intel = match &result {
-        Ok(live) => capture_pane_intel(tmux.as_ref(), live).await,
-        Err(_) => PaneIntelMap::new(),
-    };
+    // 2. Probe off-lock, under the same hard cap as the multi-host reconcile.
+    let (host, result, agent_rows, intel) = probe_one_host(host, ssh).await;
 
     // 3. Apply writes under one brief lock, via the SAME per-host write path
     //    as the multi-host reconcile (single transaction + emit-after-commit).
@@ -2312,6 +2360,81 @@ mod tests {
         assert!(
             elapsed < Duration::from_millis(700),
             "parallel reconcile took {elapsed:?}, expected ≈max not sum",
+        );
+    }
+
+    #[tokio::test]
+    async fn wedged_host_probe_times_out_into_unreachable() {
+        // Regression: a host whose probe hangs far past the cap must still
+        // resolve — as an Err result (→ "unreachable, keep last-known
+        // sessions") — and at ~the cap, not the hang length. Without the
+        // timeout this future never completes, which is exactly what left the
+        // whole sidebar empty when one host's ssh ControlMaster wedged: the
+        // multi-host collector awaits EVERY probe before list_sessions returns.
+        use crate::tmux::TmuxSession;
+        use async_trait::async_trait;
+        use std::time::Duration;
+
+        struct HangingTmux;
+        #[async_trait]
+        impl TmuxExec for HangingTmux {
+            async fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError> {
+                tokio::time::sleep(Duration::from_secs(3600)).await; // never within the test
+                Ok(Vec::new())
+            }
+            async fn new_session(
+                &self,
+                _n: &str,
+                _c: &std::path::Path,
+                _p: &str,
+            ) -> Result<(), IpcError> {
+                Ok(())
+            }
+            async fn kill_session(&self, _n: &str) -> Result<(), IpcError> {
+                Ok(())
+            }
+            async fn rename_session(&self, _o: &str, _n: &str) -> Result<(), IpcError> {
+                Ok(())
+            }
+            async fn restart_session(&self, _n: &str, _p: &str) -> Result<(), IpcError> {
+                Ok(())
+            }
+            async fn capture_pane(&self, _n: &str) -> Result<String, IpcError> {
+                Ok(String::new())
+            }
+            async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
+                Ok(String::new())
+            }
+            async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
+                vec![]
+            }
+        }
+
+        // A real HostRow, without standing up ssh.
+        let store = Store::open_in_memory().expect("store");
+        store.upsert_host("wedged").unwrap();
+        let host = store
+            .list_hosts()
+            .unwrap()
+            .into_iter()
+            .find(|h| h.alias == "wedged")
+            .expect("host row");
+
+        let start = std::time::Instant::now();
+        let (h, res, agents, intel) =
+            probe_with_timeout(host, Box::new(HangingTmux), Duration::from_millis(80)).await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(h.alias, "wedged", "host identity preserved for the writer");
+        assert!(
+            res.is_err(),
+            "wedged probe must surface as Err → unreachable"
+        );
+        assert!(agents.is_empty());
+        assert!(intel.is_empty());
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "must return at ~the cap, not the 3600s hang; took {elapsed:?}",
         );
     }
 
