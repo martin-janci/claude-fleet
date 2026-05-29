@@ -70,6 +70,17 @@
   let cellWidth = 0;
   let cellHeight = 0;
   let disconnected = $state(false);
+  /** Self-healing: when the PTY dies (EOF / reader error — e.g. the ssh attach
+   *  to a remote host dropped or its ControlMaster wedged), auto-reattach a
+   *  bounded number of times with backoff before falling back to the manual
+   *  reconnect banner. The budget resets on a fresh selection, a manual
+   *  reconnect, or sustained healthy output, so the cap only bites on a
+   *  genuinely persistent failure rather than a one-off blip. */
+  let autoReconnecting = $state(false);
+  let reconnectAttempts = 0;
+  let autoReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  const MAX_AUTO_RECONNECT = 3;
+  const AUTO_RECONNECT_BASE_MS = 600;
 
   // ─── Mouse forwarding state ───────────────────────────────────────────
   /** Which button (0/1/2, encoded as cb) is currently pressed. Null = none. */
@@ -445,12 +456,16 @@
    *  and a drain timer and double-opening the PTY. */
   let opening = false;
 
-  async function openTerm() {
+  async function openTerm(isAutoReconnect = false) {
     if (opening) return;
     const sess = $selectedSession;
     if (!sess) return;
     if (!container) return;
     opening = true;
+    // A fresh open (new selection, manual reconnect, detach/reattach button)
+    // starts with a clean self-heal budget; an auto-reconnect must preserve the
+    // running attempt count so the cap can actually be reached.
+    if (!isAutoReconnect) reconnectAttempts = 0;
     await closeTerm();
     openError = null;
     disconnected = false;
@@ -589,22 +604,62 @@
     totalBytes += result.bytes;
     screen.write(result.data);
     renderVersion++;
-    // Markers injected by the Rust reader thread when the PTY closes (e.g.
-    // the SSH child to a remote host died). Surface a reconnect banner so
-    // the user has a one-click recovery path.
+    // Markers injected by the Rust reader thread when the PTY closes (e.g. the
+    // SSH child to a remote host died — now within ~10s thanks to the
+    // ServerAlive keepalive in pty.rs, instead of hanging silently forever).
+    // Try to self-heal by auto-reattaching; fall back to the manual banner
+    // only after the retry budget is exhausted.
     if (result.data.includes('[cf] PTY EOF') || result.data.includes('[cf] reader error')) {
-      disconnected = true;
+      scheduleAutoReconnect();
+    } else if (reconnectAttempts > 0 && !result.data.includes('[cf] attached')) {
+      // Real session output after a reconnect (not our own status banner) ⇒
+      // the connection is healthy again; restore the self-heal budget.
+      reconnectAttempts = 0;
     }
     return true;
   }
 
+  /** Self-healing reattach. Called when the reader thread reports the PTY
+   *  died. Schedules a bounded, backed-off reattach for the still-selected
+   *  session; once the budget is spent, surfaces the manual banner instead. */
+  function scheduleAutoReconnect() {
+    if (autoReconnectTimer !== null) return; // one already pending
+    if (reconnectAttempts >= MAX_AUTO_RECONNECT) {
+      autoReconnecting = false;
+      disconnected = true; // give up → manual one-click recovery
+      return;
+    }
+    reconnectAttempts += 1;
+    autoReconnecting = true;
+    const sessionAtSchedule = currentSession;
+    const delay = AUTO_RECONNECT_BASE_MS * reconnectAttempts; // 0.6s, 1.2s, 1.8s
+    autoReconnectTimer = setTimeout(() => {
+      autoReconnectTimer = null;
+      autoReconnecting = false;
+      // Bail if the user switched away or detached while we waited.
+      if ($selectedSession?.tmux_name !== sessionAtSchedule) return;
+      void openTerm(true);
+    }, delay);
+  }
+
   async function reconnect() {
     disconnected = false;
+    reconnectAttempts = 0; // manual click → fresh budget
     await closeTerm();
     await openTerm();
   }
 
   async function closeTerm() {
+    // Cancel any pending self-heal first — a scheduled auto-reconnect for a
+    // now-stale session must never fire after a detach or session switch.
+    // (Done before the no-op guard below so a lingering timer is always
+    // cleared, and kept conditional so we don't write $state needlessly.)
+    if (autoReconnectTimer !== null) {
+      clearTimeout(autoReconnectTimer);
+      autoReconnectTimer = null;
+    }
+    if (autoReconnecting) autoReconnecting = false;
+
     // No-op when there's nothing to clean up. Without this guard the
     // mount-time effect fires closeTerm() against a fresh component,
     // unconditionally writes state ($state assignments), and Svelte 5's
@@ -841,7 +896,11 @@
 
 {#if $selectedSession}
   <div class="wrap">
-    {#if disconnected}
+    {#if autoReconnecting}
+      <div class="reconnect-banner" data-testid="terminal-autoreconnect-banner">
+        Connection lost — reconnecting…
+      </div>
+    {:else if disconnected}
       <div class="reconnect-banner" data-testid="terminal-reconnect-banner">
         Connection lost.
         <button onclick={reconnect}>Reconnect</button>

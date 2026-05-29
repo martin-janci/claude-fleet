@@ -112,23 +112,22 @@ pub fn pty_open(
         c.args(["attach", "-t", &args.session_name]);
         c
     } else {
-        // Reuse SshClient's ControlPath so this PTY multiplexes through the
-        // same master as every other ssh command (ControlMaster=auto creates
-        // it if it isn't up yet).
-        let cm = ssh.control_path(&args.host_alias);
+        // Multiplex through the SAME ControlMaster — and inherit the SAME
+        // keepalive (`ServerAlive*`) — as every other ssh command, by reusing
+        // `SshClient::mux_opts` instead of duplicating the option list here.
+        // That duplication is exactly how the wedged-master keepalive fix
+        // (added to mux_opts for the reconcile hang) missed this PTY path: an
+        // attach over a black-holed master produced no output AND never died,
+        // so the reader thread emitted no EOF/error marker and the terminal
+        // froze on the banner with no way to self-heal. Reusing mux_opts keeps
+        // ConnectTimeout=5 (snappy connect cap) and adds the keepalive so a
+        // dead attach now EOFs within ~10s. The options must never drift again.
         let mut c = CommandBuilder::new("ssh");
+        c.arg("-tt");
+        for opt in ssh.mux_opts(&args.host_alias, std::time::Duration::from_secs(5)) {
+            c.arg(opt);
+        }
         c.args([
-            "-tt",
-            "-o",
-            "ControlMaster=auto",
-            "-o",
-            &format!("ControlPath={}", cm.display()),
-            "-o",
-            "ControlPersist=10m",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=5",
             // `--` ends ssh option parsing so a host alias can never be
             // interpreted as an option (defence-in-depth; the alias is also
             // validated above).
@@ -136,19 +135,16 @@ pub fn pty_open(
             &args.host_alias,
             "bash",
             "-lc",
-            // We re-export LANG/LC_ALL/COLORTERM/TERM inside the remote
-            // shell so the embedded TUI gets proper Unicode glyph
-            // rendering even if the remote sshd has AcceptEnv disabled.
+            // We re-export LANG/LC_ALL/COLORTERM/TERM inside the remote shell so
+            // the embedded TUI gets proper Unicode glyph rendering even if the
+            // remote sshd has AcceptEnv disabled.
             //
             // CRITICAL: `ssh <host> bash -lc <script>` joins all trailing argv
             // with spaces before sending to the remote sshd, which then
-            // re-tokenizes. We MUST single-quote the whole script so it
-            // crosses the ssh boundary as a single shell word; otherwise the
-            // remote bash receives `LANG=...` as its -c argument and never
-            // runs tmux attach. (Same fix shape as RemoteTmux::remote_bash
-            // in tmux.rs.) `quote(&session_name)` keeps its inner
-            // quoting; the outer wrap escapes those single quotes via the
-            // canonical `'\''` dance.
+            // re-tokenizes. We MUST single-quote the whole script so it crosses
+            // the ssh boundary as a single shell word; otherwise the remote bash
+            // receives `LANG=...` as its -c argument and never runs tmux attach.
+            // (Same fix shape as RemoteTmux::remote_bash in tmux.rs.)
             &quote(&format!(
                 "LANG=${{LANG:-en_US.UTF-8}} LC_ALL=${{LC_ALL:-en_US.UTF-8}} COLORTERM=truecolor TERM=xterm-256color tmux attach -t {}",
                 quote(&args.session_name)

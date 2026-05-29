@@ -106,7 +106,7 @@ impl SshClient {
     /// The `-o` flags shared by every multiplexed ssh invocation. With
     /// `ControlMaster=auto` + `ControlPersist`, ssh creates the master on the
     /// first call and reuses/recreates it as needed — no app-side bookkeeping.
-    fn mux_opts(&self, host: &str, timeout: Duration) -> Vec<String> {
+    pub(crate) fn mux_opts(&self, host: &str, timeout: Duration) -> Vec<String> {
         let path = self.control_path(host);
         vec![
             "-o".into(),
