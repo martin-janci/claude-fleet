@@ -12,17 +12,20 @@ machines over SSH. ~16,400 LOC Rust, ~12,900 LOC frontend.
 
 ```bash
 pnpm install
+pnpm install --allow-build=esbuild # needed if esbuild scripts are ignored
 pnpm test                       # frontend (Vitest)
 pnpm check                      # Svelte/TS type-check
-cd src-tauri && cargo test      # backend
-cd src-tauri && cargo clippy --all-targets -- -D warnings
-cd src-tauri && cargo fmt --check
+# Run from workspace root using manifest path (preferred)
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo fmt --manifest-path src-tauri/Cargo.toml
 ```
 
 **Caveat:** `cargo` builds need the Tauri system libraries (dbus, gtk/atk,
 pkg-config). On a headless box without them, `cargo build`/`cargo test` fail in
 a build script — that is an environment gap, not a code error. Frontend
-(`pnpm test`) builds anywhere.
+(`pnpm test`) builds anywhere. Always run `pnpm check`/`test` from the project
+root, never from inside `src-tauri/`.
 
 A handful of frontend tests (`session_ui.test.ts`, `App.test.ts`, …) currently
 fail with `localStorage is undefined` — a pre-existing test-environment issue,
@@ -83,3 +86,21 @@ not implemented. A full hardening review is in
 `docs/specs/2026-05-21-hardening-review.md` — consult it before touching SSH
 command construction, the PTY, migrations, or the optimistic-merge / event-bus
 paths.
+
+## Development gotchas
+
+- **File modifications:** `cargo fmt` and linters silently modify files. Always
+  **re-read** `.rs` files after formatting before attempting an Edit, or it may
+  fail due to stale reads.
+- **Rebase hotspots:** `src-tauri/src/commands/sessions.rs` and
+  `src-tauri/src/store.rs` are frequent conflict hotspots on rebase. Resolve
+  manually; avoid blind `--ours`.
+- **Untracked files:** Never commit `pnpm-workspace.yaml`. Run
+  `rm -f pnpm-workspace.yaml` before rebasing/merging to prevent it blocking the
+  operation as an untracked file.
+- **gh CLI:** `gh pr view --json` does not support a `merged` field. Use
+  `mergedAt` and `mergeCommit` to check PR merge status.
+- **Fleet names:** `set_friendly_name` requires `host_alias` from the fleet DB,
+  not the OS hostname. Use `mcp__claude-fleet__list_sessions` to find the
+  correct alias for the current tmux session.
+
