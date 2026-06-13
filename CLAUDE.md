@@ -87,20 +87,14 @@ not implemented. A full hardening review is in
 command construction, the PTY, migrations, or the optimistic-merge / event-bus
 paths.
 
-## Development gotchas
+## Headroom Learned Patterns
 
-- **File modifications:** `cargo fmt` and linters silently modify files. Always
-  **re-read** `.rs` files after formatting before attempting an Edit, or it may
-  fail due to stale reads.
-- **Rebase hotspots:** `src-tauri/src/commands/sessions.rs` and
-  `src-tauri/src/store.rs` are frequent conflict hotspots on rebase. Resolve
-  manually; avoid blind `--ours`.
-- **Untracked files:** Never commit `pnpm-workspace.yaml`. Run
-  `rm -f pnpm-workspace.yaml` before rebasing/merging to prevent it blocking the
-  operation as an untracked file.
-- **gh CLI:** `gh pr view --json` does not support a `merged` field. Use
-  `mergedAt` and `mergeCommit` to check PR merge status.
-- **Fleet names:** `set_friendly_name` requires `host_alias` from the fleet DB,
-  not the OS hostname. Use `mcp__claude-fleet__list_sessions` to find the
-  correct alias for the current tmux session.
+- **Cargo:** `Cargo.toml` lives at `src-tauri/Cargo.toml`, NOT the project root. Never run bare `cargo` from the project root; use `--manifest-path src-tauri/Cargo.toml` or `cd src-tauri && cargo ...`.
+- **Frontend Commands:** `pnpm check`, `pnpm test`, and `npx svelte-check` must be run from the **project root** (where `package.json` lives), never from inside `src-tauri/`.
+- **pnpm Builds:** If `pnpm` blocks esbuild scripts with `ERR_PNPM_IGNORED_BUILDS`, ensure `pnpm-workspace.yaml` contains `allowBuilds: esbuild: true`. (This is currently tracked in the repo).
+- **Stale Reads:** `cargo fmt` and linters silently modify files. Always **re-read** `.rs` files after formatting before attempting an Edit.
+- **Rebase Hotspots:** `src-tauri/src/commands/sessions.rs` and `src-tauri/src/store.rs` are frequent conflict hotspots on rebase. Resolve manually; avoid blind `--ours`.
+- **Docs Regeneration:** To regenerate the MCP control-API reference doc snapshot: `REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_current`.
+- **gh CLI:** `gh pr view --json` does not support a `merged` field. Use `mergedAt` and `mergeCommit` to check PR merge status.
+- **Fleet Names:** `set_friendly_name` requires `host_alias` from the fleet DB, not the OS hostname. Use `mcp__claude-fleet__list_sessions` to find the correct alias for the current tmux session.
 
