@@ -154,6 +154,11 @@ pub struct HostReconcile<'a> {
     pub keep: &'a [String],
 }
 
+/// Max `session_events` rows kept per session. Enforced on every
+/// `insert_session_event` (oldest rows beyond the cap are pruned) so a
+/// status-flapping session cannot grow the table without bound.
+pub const SESSION_EVENTS_CAP: i64 = 500;
+
 pub struct Store {
     conn: Connection,
     bus: Arc<dyn EventBus>,
@@ -312,6 +317,12 @@ impl Store {
     /// timeline is append-only; callers must treat a write failure as
     /// non-fatal (log + continue) so it can never block the mutation that
     /// produced the event.
+    ///
+    /// Each insert also prunes the session's timeline down to
+    /// `SESSION_EVENTS_CAP` newest rows. A status flap observed by the
+    /// background reconcile tick can otherwise grow one session's timeline
+    /// without bound (observed: ~200k `status_change` rows per session); the
+    /// prune is a cheap indexed subselect and keeps the table bounded.
     pub fn insert_session_event(
         &self,
         session_id: i64,
@@ -327,6 +338,14 @@ impl Store {
                 "INSERT INTO session_events (session_id, at, kind, detail) \
                  VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![session_id, at, kind, detail],
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        self.conn
+            .execute(
+                "DELETE FROM session_events WHERE session_id=?1 AND id NOT IN (\
+                   SELECT id FROM session_events WHERE session_id=?1 \
+                   ORDER BY at DESC, id DESC LIMIT ?2)",
+                rusqlite::params![session_id, SESSION_EVENTS_CAP],
             )
             .map_err(crate::ipc_error::IpcError::from)?;
         Ok(())
@@ -1079,7 +1098,11 @@ impl Store {
     /// keeps it unique under the `(host_alias, tmux_name)` constraint and signals
     /// to the UI that there is no tmux pane to attach. Refreshes the live
     /// `claude_status` on every reconcile; the row's `kind='bg'` exempts it from
-    /// ghost cleanup (it is never in the tmux `keep` set).
+    /// the tmux-keyed ghost cleanup (it is never in the tmux `keep` set) — bg
+    /// rows are instead pruned against the `claude agents --json` result by
+    /// `ghost_and_clean_bg_sessions`. A row that was ghosted by that pruner and
+    /// whose agent reappears is resurrected here (`status='running'`,
+    /// `lost_at=NULL`), mirroring the tmux upsert's ghost revival.
     pub fn upsert_bg_session(
         &self,
         host_alias: &str,
@@ -1107,6 +1130,8 @@ impl Store {
                project_id=COALESCE(excluded.project_id, project_id),
                last_activity_at=excluded.last_activity_at,
                kind='bg',
+               status='running',
+               lost_at=NULL,
                claude_session_id=COALESCE(excluded.claude_session_id, claude_session_id),
                claude_status=COALESCE(excluded.claude_status, claude_status)
              RETURNING id",
@@ -1128,6 +1153,123 @@ impl Store {
             }
         }
         Ok(id)
+    }
+
+    /// Two-phase cleanup for synthetic `kind='bg'` rows on one host, keyed on
+    /// the CURRENT `claude agents --json` result (`keep_names` = the sentinel
+    /// `bg:<sessionId>` names observed this reconcile pass) instead of the tmux
+    /// `keep` set. Mirrors `ghost_and_clean_sessions_in_tx`:
+    ///
+    /// Phase 1: live bg rows not in `keep_names` → `status='ghost'`,
+    /// `lost_at=now`. Phase 2: bg rows already ghost BEFORE this pass and still
+    /// absent → hard-deleted, together with their `session_events` (no FK
+    /// cascade exists). The one-cycle grace matters because a failed
+    /// `claude agents` probe is indistinguishable from "no agents" (both come
+    /// back as an empty list): a transient miss only ghosts, and
+    /// `upsert_bg_session` resurrects the row when the agent reappears.
+    ///
+    /// Without this pruner, dead bg rows accumulate forever (observed:
+    /// 22k rows / 88MB state.db).
+    pub fn ghost_and_clean_bg_sessions(
+        &self,
+        host_alias: &str,
+        keep_names: &[String],
+        now: i64,
+    ) -> Result<(), rusqlite::Error> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut changes: Vec<RowChange> = Vec::new();
+
+        // Phase 2 prep: already-ghost bg ids, collected BEFORE Phase 1 so rows
+        // ghosted this pass survive one more cycle.
+        let pre_ghost_ids: Vec<i64> = if keep_names.is_empty() {
+            let mut stmt = tx.prepare_cached(
+                "SELECT id FROM sessions WHERE host_alias=?1 AND status='ghost' AND kind='bg'",
+            )?;
+            let ids = stmt
+                .query_map(rusqlite::params![host_alias], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ids
+        } else {
+            let phs = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "SELECT id FROM sessions
+                 WHERE host_alias=?1 AND status='ghost' AND kind='bg' AND tmux_name NOT IN ({phs})"
+            );
+            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
+            for n in keep_names {
+                params.push(n);
+            }
+            let mut stmt = tx.prepare(&sql)?;
+            let ids = stmt
+                .query_map(params.as_slice(), |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ids
+        };
+
+        // Phase 1: ghost live bg rows whose agent vanished from the listing.
+        let ghost_ids: Vec<i64> = if keep_names.is_empty() {
+            let mut stmt = tx.prepare_cached(
+                "UPDATE sessions SET status='ghost', lost_at=?1
+                 WHERE host_alias=?2 AND status!='ghost' AND kind='bg'
+                 RETURNING id",
+            )?;
+            let ids = stmt
+                .query_map(rusqlite::params![now, host_alias], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ids
+        } else {
+            let phs = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "UPDATE sessions SET status='ghost', lost_at=?1
+                 WHERE host_alias=?2 AND status!='ghost' AND kind='bg' AND tmux_name NOT IN ({phs})
+                 RETURNING id"
+            );
+            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&now, &host_alias];
+            for n in keep_names {
+                params.push(n);
+            }
+            let mut stmt = tx.prepare(&sql)?;
+            let ids = stmt
+                .query_map(params.as_slice(), |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ids
+        };
+        for id in &ghost_ids {
+            if let Some(row) = fetch_session_by_id(&tx, *id)? {
+                changes.push(RowChange::SessionUpdated(row));
+            }
+        }
+
+        // Phase 2: hard-delete rows that were already ghost, plus their events.
+        if !pre_ghost_ids.is_empty() {
+            let phs = pre_ghost_ids
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
+            let params: Vec<&dyn rusqlite::ToSql> = pre_ghost_ids
+                .iter()
+                .map(|id| id as &dyn rusqlite::ToSql)
+                .collect();
+            tx.execute(
+                &format!("DELETE FROM session_events WHERE session_id IN ({phs})"),
+                params.as_slice(),
+            )?;
+            tx.execute(
+                &format!("DELETE FROM sessions WHERE id IN ({phs})"),
+                params.as_slice(),
+            )?;
+            for id in &pre_ghost_ids {
+                changes.push(RowChange::SessionKilled(*id));
+            }
+        }
+
+        tx.commit()?;
+        // Emit only after the commit so no event fires for a rolled-back write.
+        for change in &changes {
+            self.bus.emit_change(change);
+        }
+        Ok(())
     }
 
     pub fn get_session_account(
@@ -1724,7 +1866,8 @@ impl Store {
     /// `kind='bg'` rows are EXCLUDED from both phases: background (`claude --bg`)
     /// sessions are never tmux sessions, so they can never appear in
     /// `keep_names`. Ghosting them on every reconcile would be wrong — they're
-    /// surfaced from `claude agents --json`, not from tmux.
+    /// surfaced from `claude agents --json`, not from tmux. They get their own
+    /// agents-keyed pruner instead: `ghost_and_clean_bg_sessions`.
     fn ghost_and_clean_sessions_in_tx(
         tx: &rusqlite::Transaction,
         host_alias: &str,
@@ -1801,12 +1944,20 @@ impl Store {
                 .map(|_| "?")
                 .collect::<Vec<_>>()
                 .join(",");
-            let sql = format!("DELETE FROM sessions WHERE id IN ({phs})");
             let params: Vec<&dyn rusqlite::ToSql> = pre_ghost_ids
                 .iter()
                 .map(|id| id as &dyn rusqlite::ToSql)
                 .collect();
-            tx.execute(&sql, params.as_slice())?;
+            // No FK cascade on session_events — delete them with the row or
+            // they linger as orphans forever.
+            tx.execute(
+                &format!("DELETE FROM session_events WHERE session_id IN ({phs})"),
+                params.as_slice(),
+            )?;
+            tx.execute(
+                &format!("DELETE FROM sessions WHERE id IN ({phs})"),
+                params.as_slice(),
+            )?;
             for id in &pre_ghost_ids {
                 out.push(RowChange::SessionKilled(*id));
             }
@@ -2260,6 +2411,181 @@ mod tests {
         let other = s.list_session_events(99, 50).unwrap();
         assert_eq!(other.len(), 1);
         assert_eq!(other[0].detail, None);
+    }
+
+    #[test]
+    fn insert_session_event_caps_timeline_per_session() {
+        let s = Store::open_in_memory().expect("open");
+        // Insert well past the cap for session 7, plus a decoy for session 8.
+        for i in 0..(SESSION_EVENTS_CAP + 25) {
+            s.insert_session_event(7, "status_change", Some(&format!("v{i}")))
+                .unwrap();
+        }
+        s.insert_session_event(8, "killed", None).unwrap();
+
+        let count: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_events WHERE session_id=7",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, SESSION_EVENTS_CAP, "timeline capped per session");
+        // Newest rows survive, oldest are pruned.
+        let newest = s.list_session_events(7, 1).unwrap();
+        assert_eq!(
+            newest[0].detail.as_deref(),
+            Some(&*format!("v{}", SESSION_EVENTS_CAP + 24))
+        );
+        // The other session's timeline is untouched.
+        assert_eq!(s.list_session_events(8, 50).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ghost_and_clean_bg_sessions_two_phase_with_event_cleanup() {
+        let (store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        store.upsert_host("beta").unwrap();
+        bus.take();
+        let id = store
+            .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 100)
+            .unwrap();
+        store
+            .insert_session_event(id, "status_change", None)
+            .unwrap();
+        // A bg row on ANOTHER host must never be touched.
+        let other = store
+            .upsert_bg_session("beta", "bg:u9", None, "u9", Some("working"), 100)
+            .unwrap();
+        bus.take();
+
+        // Pass 1: agent vanished → row is ghosted (soft), not deleted.
+        store
+            .ghost_and_clean_bg_sessions("alpha", &[], 200)
+            .unwrap();
+        let row = store.get_session_by_id(id).unwrap().expect("still present");
+        assert_eq!(row.status, "ghost");
+        assert_eq!(row.lost_at, Some(200));
+        assert!(bus.take().contains(&format!("session:updated:{id}")));
+
+        // Pass 2: still vanished → hard-deleted, events reaped, kill emitted.
+        store
+            .ghost_and_clean_bg_sessions("alpha", &[], 300)
+            .unwrap();
+        assert!(store.get_session_by_id(id).unwrap().is_none());
+        let orphans: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_events WHERE session_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0, "events must not outlive the row");
+        assert!(bus.take().contains(&format!("session:killed:{id}")));
+
+        // The other host's bg row is untouched throughout.
+        let other_row = store.get_session_by_id(other).unwrap().expect("beta row");
+        assert_eq!(other_row.status, "running");
+    }
+
+    #[test]
+    fn ghost_and_clean_bg_sessions_keeps_listed_agents_and_tmux_rows() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let kept = store
+            .upsert_bg_session("alpha", "bg:live", None, "live", Some("working"), 100)
+            .unwrap();
+        // A normal tmux-backed row — ghosted or not, the bg pruner must skip it.
+        store
+            .upsert_session("work-a", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store
+            .apply_host_reconcile(HostReconcile {
+                alias: "alpha",
+                reachable: true,
+                claude_version: None,
+                tmux_version: None,
+                last_pinged_at: 1,
+                sessions: &[],
+                keep: &[],
+            })
+            .unwrap(); // ghosts work-a
+
+        let keep = vec!["bg:live".to_string()];
+        store
+            .ghost_and_clean_bg_sessions("alpha", &keep, 200)
+            .unwrap();
+        store
+            .ghost_and_clean_bg_sessions("alpha", &keep, 300)
+            .unwrap();
+
+        let rows = store.list_sessions_for_host("alpha").unwrap();
+        let live = rows.iter().find(|r| r.tmux_name == "bg:live").unwrap();
+        assert_eq!(live.status, "running", "listed agent's row stays live");
+        let work = rows.iter().find(|r| r.tmux_name == "work-a").unwrap();
+        assert_eq!(
+            work.status, "ghost",
+            "tmux row is left for the tmux-keyed cleanup, not deleted here"
+        );
+        assert!(store.get_session_by_id(kept).unwrap().is_some());
+    }
+
+    #[test]
+    fn upsert_bg_session_resurrects_ghosted_row() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("alpha").unwrap();
+        let id = s
+            .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 100)
+            .unwrap();
+        s.ghost_and_clean_bg_sessions("alpha", &[], 200).unwrap();
+        assert_eq!(s.get_session_by_id(id).unwrap().unwrap().status, "ghost");
+
+        // Agent reappears (e.g. the previous probe transiently failed).
+        let id2 = s
+            .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 300)
+            .unwrap();
+        assert_eq!(id2, id, "same row, not a new one");
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.status, "running");
+        assert_eq!(row.lost_at, None);
+    }
+
+    #[test]
+    fn reconcile_hard_delete_reaps_session_events() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let id = store
+            .upsert_session("work-a", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store
+            .insert_session_event(id, "status_change", None)
+            .unwrap();
+        // Two empty reconciles: ghost, then hard-delete.
+        for ts in [10, 20] {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    alias: "alpha",
+                    reachable: true,
+                    claude_version: None,
+                    tmux_version: None,
+                    last_pinged_at: ts,
+                    sessions: &[],
+                    keep: &[],
+                })
+                .unwrap();
+        }
+        assert!(store.get_session_by_id(id).unwrap().is_none());
+        let orphans: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_events WHERE session_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0, "events must not outlive the hard-deleted row");
     }
 
     #[test]
