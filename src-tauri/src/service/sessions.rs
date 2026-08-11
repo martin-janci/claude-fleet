@@ -193,8 +193,10 @@ fn reconcile_write_one_host(
             // SECOND pass: background (`claude --bg`) agents that matched NO tmux
             // session are never in `keep` and would otherwise be invisible.
             // Surface each as a synthetic `kind='bg'` SessionRow so it appears in
-            // `list_sessions`. These rows are exempt from ghost cleanup (they're
-            // never tmux sessions) — see `ghost_and_clean_sessions_in_tx`.
+            // `list_sessions`. These rows are exempt from the tmux-keyed ghost
+            // cleanup (`ghost_and_clean_sessions_in_tx`) — instead they are
+            // pruned inside `reconcile_bg_agents` against the current
+            // `claude agents --json` result, so dead agents can't accumulate.
             reconcile_bg_agents(s, &host.alias, live, projects, agent_rows)?;
             // Task H: stamp freshness on every session this pass observed live,
             // so a proactive (background) reconcile keeps `last_reconciled_at`
@@ -254,8 +256,13 @@ fn unmatched_bg_agents<'a>(
 }
 
 /// Upsert a synthetic `kind='bg'` SessionRow for every background agent that has
-/// no tmux session (the reconcile "second pass"). Per-agent write failures are
-/// logged and skipped so one bad row can't abort the others.
+/// no tmux session (the reconcile "second pass"), then prune the host's bg rows
+/// whose agent is NOT in the current `claude agents --json` result. The prune is
+/// two-phase (ghost this pass, hard-delete next pass) via
+/// `ghost_and_clean_bg_sessions`, so a transiently-failed agents probe — which
+/// comes back as an empty list — only ghosts rows for one cycle instead of
+/// deleting them. Per-agent write failures are logged and skipped so one bad
+/// row can't abort the others.
 fn reconcile_bg_agents(
     s: &Store,
     host_alias: &str,
@@ -263,11 +270,15 @@ fn reconcile_bg_agents(
     projects: &[ProjectRow],
     agents: &[crate::claude_agents::ClaudeAgentRow],
 ) -> Result<(), IpcError> {
+    let mut keep: Vec<String> = Vec::new();
     for agent in unmatched_bg_agents(live, agents) {
         let Some(session_id) = agent.session_id.as_deref() else {
             continue;
         };
         let tmux_name = format!("bg:{session_id}");
+        // Keep the sentinel even if the upsert below fails — ghosting an
+        // existing row over a transient write error would be wrong.
+        keep.push(tmux_name.clone());
         let project_id = agent.cwd.as_deref().and_then(|cwd| {
             find_project_id_for_path(projects, host_alias, std::path::Path::new(cwd))
         });
@@ -281,6 +292,9 @@ fn reconcile_bg_agents(
         ) {
             eprintln!("[reconcile] bg upsert failed for {host_alias}/{session_id}: {e}");
         }
+    }
+    if let Err(e) = s.ghost_and_clean_bg_sessions(host_alias, &keep, now_unix()) {
+        eprintln!("[reconcile] bg cleanup failed for {host_alias}: {e}");
     }
     Ok(())
 }
@@ -2173,6 +2187,87 @@ mod tests {
         assert_eq!(bg.claude_session_id.as_deref(), Some("bg-uuid-1"));
         assert_eq!(bg.claude_status.as_deref(), Some("working"));
         assert_eq!(bg.status, "running");
+    }
+
+    #[test]
+    fn reconcile_bg_agents_prunes_vanished_agents_two_phase() {
+        // A bg agent that disappears from `claude agents --json` is ghosted on
+        // the next reconcile pass and hard-deleted (events included) on the one
+        // after — so dead bg rows cannot accumulate.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let agents = vec![agent("bg-uuid-1", Some("my-bg-job"), Some("/tmp/proj"))];
+        reconcile_bg_agents(&s, "local", &[], &[], &agents).unwrap();
+        let id = s
+            .get_session("bg:bg-uuid-1", "local")
+            .unwrap()
+            .expect("upserted")
+            .id;
+
+        // Pass 2: agent gone (empty listing) → ghosted, still present.
+        reconcile_bg_agents(&s, "local", &[], &[], &[]).unwrap();
+        let row = s
+            .get_session("bg:bg-uuid-1", "local")
+            .unwrap()
+            .expect("ghosted, not yet deleted");
+        assert_eq!(row.status, "ghost");
+        assert!(row.lost_at.is_some());
+
+        // Pass 3: still gone → hard-deleted.
+        reconcile_bg_agents(&s, "local", &[], &[], &[]).unwrap();
+        assert!(
+            s.get_session("bg:bg-uuid-1", "local").unwrap().is_none(),
+            "dead bg row must be reaped on the second missing pass"
+        );
+        assert!(s.get_session_by_id(id).unwrap().is_none());
+    }
+
+    #[test]
+    fn reconcile_bg_agents_resurrects_ghost_when_agent_returns() {
+        // A single missing pass (e.g. a transiently failed `claude agents`
+        // probe, which comes back as an empty list) must not lose the row.
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let agents = vec![agent("bg-uuid-1", Some("my-bg-job"), Some("/tmp/proj"))];
+        reconcile_bg_agents(&s, "local", &[], &[], &agents).unwrap();
+        reconcile_bg_agents(&s, "local", &[], &[], &[]).unwrap(); // ghosts it
+        reconcile_bg_agents(&s, "local", &[], &[], &agents).unwrap(); // returns
+
+        let row = s
+            .get_session("bg:bg-uuid-1", "local")
+            .unwrap()
+            .expect("row survives a one-pass blip");
+        assert_eq!(row.status, "running");
+        assert_eq!(row.lost_at, None);
+
+        // And it is NOT deleted on the next pass with the agent still live.
+        reconcile_bg_agents(&s, "local", &[], &[], &agents).unwrap();
+        assert!(s.get_session("bg:bg-uuid-1", "local").unwrap().is_some());
+    }
+
+    #[test]
+    fn reconcile_bg_agents_cleanup_spares_other_hosts_and_tmux_rows() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_host("remote").unwrap();
+        // A bg row on ANOTHER host and a normal tmux row on this host.
+        s.upsert_bg_session("remote", "bg:other", None, "other", Some("working"), 1)
+            .unwrap();
+        s.upsert_session("work-a", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+
+        // Two empty-agent passes on `local` — enough to ghost + delete any
+        // bg row this cleanup wrongly considered.
+        reconcile_bg_agents(&s, "local", &[], &[], &[]).unwrap();
+        reconcile_bg_agents(&s, "local", &[], &[], &[]).unwrap();
+
+        let work = s.get_session("work-a", "local").unwrap().expect("tmux row");
+        assert_eq!(work.status, "running", "tmux rows are not the bg pruner's");
+        let other = s
+            .get_session("bg:other", "remote")
+            .unwrap()
+            .expect("other host's bg row");
+        assert_eq!(other.status, "running");
     }
 
     #[test]
