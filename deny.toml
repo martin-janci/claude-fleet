@@ -1,10 +1,12 @@
 # cargo-deny configuration for the Rust backend in src-tauri/.
 #
 # The cargo workspace root is src-tauri/; cargo-deny walks up from the working
-# directory and finds this file from either the repo root or src-tauri/, but
-# scripts/ci-local.sh and .github/workflows/ci.yml pass it explicitly:
+# directory and finds this file from either the repo root or src-tauri/
+# (verified with 0.19.7 and 0.20.2). scripts/ci-local.sh and
+# .github/workflows/ci.yml run it from the repo root without --config, because
+# 0.20 moved that flag from `check` to the root command:
 #
-#     cargo deny --manifest-path src-tauri/Cargo.toml check --config deny.toml
+#     cargo deny --manifest-path src-tauri/Cargo.toml check
 #
 # Install with: cargo install cargo-deny --locked
 

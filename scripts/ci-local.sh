@@ -17,10 +17,13 @@
 #   scripts/ci-local.sh --rust-only
 #   scripts/ci-local.sh --frontend-only
 #
-# Opt in to running this automatically before each commit (see
-# .githooks/pre-commit for what runs when):
+# Opt in to a fast subset of this before each commit (fmt + clippy for rust
+# changes, the full frontend job for frontend changes; see .githooks/pre-commit):
 #
 #   git config core.hooksPath .githooks
+#
+# cargo test and cargo deny are intentionally left to this script (or a
+# pre-push hook), not the pre-commit hook.
 #
 # Requirements: the Rust toolchain from rust-toolchain.toml (rustfmt + clippy),
 # cargo-deny (`cargo install cargo-deny --locked`), Node >= 20 (.node-version)
@@ -61,8 +64,12 @@ need() {
 }
 
 # --- pnpm resolution -------------------------------------------------------
-# CI uses pnpm/action-setup with version 10. Locally, prefer a pnpm >= 10 on
-# PATH; otherwise let corepack resolve the pinned version from package.json.
+# CI (pnpm/action-setup) reads the pinned version from "packageManager" in
+# package.json. Locally, prefer a pnpm >= 10 on PATH; otherwise let corepack
+# resolve the same pin. Note that on pnpm 9 even `pnpm --version` errors in
+# this repo ("packages field missing or empty", pnpm-workspace.yaml uses the
+# pnpm 10 `allowBuilds` key), so `major` stays empty and we fall through to
+# corepack.
 resolve_pnpm() {
   local major=""
   if command -v pnpm >/dev/null 2>&1; then
@@ -91,7 +98,9 @@ run_rust() {
   step cargo fmt --manifest-path "$manifest" --check
   step cargo clippy --manifest-path "$manifest" --all-targets -- -D warnings
   step cargo test --manifest-path "$manifest"
-  step cargo deny --manifest-path "$manifest" check --config deny.toml
+  # No --config: cargo-deny finds ./deny.toml from the repo root on its own,
+  # and the flag's position differs between cargo-deny 0.19 and 0.20.
+  step cargo deny --manifest-path "$manifest" check
 }
 
 # --- frontend job ----------------------------------------------------------
