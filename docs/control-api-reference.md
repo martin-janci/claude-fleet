@@ -21,9 +21,9 @@ Parameters: `host`, `project_id`, `prompt`, `status`, `submit`
 
 ### `capture_session`
 
-Capture a session's terminal output — the visible tmux pane, or include scrollback history. Use after send_prompt to read the session's reply. Returns the pane text.
+Capture a session's terminal output — the visible tmux pane, or include scrollback history (scrollback_lines). Use after send_prompt to read the session's reply. Returns the pane as plain text (not JSON), capped to the last max_lines lines (default 200).
 
-Parameters: `scrollback_lines`, `session_id`
+Parameters: `max_lines`, `scrollback_lines`, `session_id`
 
 ### `delete_worktree`
 
@@ -85,9 +85,9 @@ Parameters: `summary`
 
 ### `list_sessions`
 
-List tmux sessions across reachable hosts. Slim summary rows by default; pass summary=false for the full SessionRow. Optional filters: host_alias, project_id, status, claude_status, include_lost (default false drops ghosts).
+List tmux sessions across reachable hosts. Slim summary rows by default; pass summary=false for the full SessionRow. Optional filters: host_alias, project_id, status, claude_status, include_lost (default false drops ghosts); `limit` caps the row count after filtering (default: all). claude_status is one of working | blocked | completed | failed | stopped | idle; stuck_kind is one of auth_menu | reconnect | trust_prompt | oom | press_enter.
 
-Parameters: `claude_status`, `host_alias`, `include_lost`, `project_id`, `status`, `summary`
+Parameters: `claude_status`, `host_alias`, `include_lost`, `limit`, `project_id`, `status`, `summary`
 
 ### `list_worktrees`
 
@@ -207,7 +207,7 @@ Parameters: `path`, `session_id`
 
 ### `repo_log`
 
-Commit log (branch graph) for a session's worktree. all=true (default) includes every branch. Returns JSON array of commits with parents + ref decorations.
+Commit log (branch graph) for a session's worktree. all=true (default) includes every branch. Returns a JSON array of commits with parents + ref decorations, newest first; `limit` defaults to 50 and `skip` pages through older history.
 
 Parameters: `all`, `limit`, `session_id`, `skip`
 
