@@ -28,6 +28,7 @@
   import { onboardingDismissed } from './onboarding';
   import { hintAnchor } from './hints';
   import { accounts, type AccountRow } from './accounts';
+  import { buildSessionsByProject, buildRelatedCountById } from './sidebar_index';
 
   let showSettings = $state(false);
 
@@ -172,33 +173,12 @@
   // Map: project_id → sessions filtered by current hostFilter. This derived
   // value is read directly in the template so Svelte tracks it reactively —
   // using a plain function via {@const} doesn't establish the dependency.
-  const filteredSessionsByProject = $derived.by(() => {
-    const m = new Map<number, SessionRow[]>();
-    for (const s of $sessions) {
-      if (s.project_id == null) continue;
-      if ($hostFilter !== 'all' && s.host_alias !== $hostFilter) continue;
-      if (!$showBgAgents && s.kind === 'bg') continue;
-      if (!m.has(s.project_id)) m.set(s.project_id, []);
-      m.get(s.project_id)!.push(s);
-    }
-    return m;
-  });
+  const filteredSessionsByProject = $derived(
+    buildSessionsByProject($sessions, $hostFilter, $showBgAgents),
+  );
 
   // Map: session.id → count of other sessions sharing the same (project, worktree_key)
-  const relatedCountById = $derived.by(() => {
-    const grouped = new Map<string, SessionRow[]>();
-    for (const s of $sessions) {
-      if (s.project_id == null || s.worktree_key == null) continue;
-      const key = `${s.project_id}:${s.worktree_key}`;
-      if (!grouped.has(key)) grouped.set(key, []);
-      grouped.get(key)!.push(s);
-    }
-    const out = new Map<number, number>();
-    for (const list of grouped.values()) {
-      for (const s of list) out.set(s.id, list.length - 1);
-    }
-    return out;
-  });
+  const relatedCountById = $derived(buildRelatedCountById($sessions));
 
   function sessionsForProject(projectId: number): SessionRow[] {
     return filteredSessionsByProject.get(projectId) ?? [];
