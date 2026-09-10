@@ -1,6 +1,7 @@
 <script lang="ts">
   import { spawnReview, DEFAULT_REVIEW_PROMPT, type SessionRow } from './sessions';
   import { selectSession } from './selection';
+  import Modal from './Modal.svelte';
 
   let { source, onClose }: { source: SessionRow; onClose: () => void } = $props();
 
@@ -30,8 +31,8 @@
   }
 </script>
 
-<div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) onClose(); }} role="presentation">
-  <div class="dialog" role="dialog" aria-label="Start review">
+<Modal label="Start review" onclose={onClose} width="560px">
+  <div class="dialog">
     <h3>Review session</h3>
     <p class="src">
       <span class="host-badge">[{source.host_alias}]</span>
@@ -55,11 +56,10 @@
       </button>
     </div>
   </div>
-</div>
+</Modal>
 
 <style>
-  .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 20; }
-  .dialog { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; width: 560px; max-height: 80vh; overflow: auto; color: var(--fg); display: flex; flex-direction: column; gap: 0.7rem; }
+  .dialog { display: flex; flex-direction: column; gap: 0.7rem; }
   .dialog h3 { margin: 0; font-size: 1rem; }
   .dialog h4 { margin: 0 0 0.3rem 0; font-size: 0.7rem; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.05em; }
   .src { margin: 0; display: flex; gap: 0.4rem; align-items: center; }

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ConfirmDialog from './ConfirmDialog.svelte';
   import { selectedProject } from './selection';
   import { sessions } from './sessions';
   import { deleteWorktree } from './projects';
@@ -112,24 +113,23 @@
 
 {#if pendingDelete !== null}
   {@const wt = $selectedProject?.worktrees.find((w) => w.id === pendingDelete) ?? null}
-  <div class="modal-backdrop" onclick={() => (pendingDelete = null)} role="presentation">
-    <div class="confirm" onclick={(e) => e.stopPropagation()} role="presentation">
-      <h3>Delete worktree?</h3>
-      {#if wt}
-        <p>
-          Run <code>git worktree remove</code> for <code class="mono">{wt.path}</code> on its
-          host and drop the fleet row. The git command will refuse if the
-          worktree has uncommitted changes — your work won't be silently lost.
-        </p>
-      {/if}
-      <div class="confirm-actions">
-        <button onclick={() => (pendingDelete = null)}>Cancel</button>
-        <button class="danger" onclick={() => doDelete(pendingDelete!)} data-testid="confirm-delete-worktree">
-          Delete
-        </button>
-      </div>
-    </div>
-  </div>
+  <ConfirmDialog
+    title="Delete worktree?"
+    confirmLabel="Delete"
+    danger
+    onconfirm={() => doDelete(pendingDelete!)}
+    oncancel={() => (pendingDelete = null)}
+    confirmTestId="confirm-delete-worktree"
+  >
+    {#if wt}
+      Run <code>git worktree remove</code> for <code class="mono">{wt.path}</code> on its
+      host and drop the fleet row. The git command will refuse if the
+      worktree has uncommitted changes — your work won't be silently lost.
+    {:else}
+      Remove this worktree on its host and drop the fleet row. The command will
+      refuse if the worktree has uncommitted changes.
+    {/if}
+  </ConfirmDialog>
 {/if}
 
 <style>
@@ -204,33 +204,4 @@
   }
   .err { color: #e64a4a; font-size: 0.78rem; margin: 0.4rem 0 0 0; }
 
-  .modal-backdrop {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.4);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 10;
-  }
-  .confirm {
-    background: var(--bg-pane);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 1rem 1.2rem;
-    max-width: 460px;
-    color: var(--fg);
-  }
-  .confirm h3 { margin: 0 0 0.5rem 0; font-size: 1rem; }
-  .confirm p { font-size: 0.85rem; line-height: 1.4; margin: 0 0 0.8rem 0; }
-  .confirm-actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
-  .confirm-actions button {
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--fg);
-    padding: 0.3rem 0.7rem;
-    border-radius: 4px;
-    cursor: pointer;
-  }
-  .confirm-actions button.danger {
-    border-color: rgba(230, 74, 74, 0.6);
-    color: #e64a4a;
-  }
-  .confirm-actions button.danger:hover { background: rgba(230, 74, 74, 0.1); }
 </style>

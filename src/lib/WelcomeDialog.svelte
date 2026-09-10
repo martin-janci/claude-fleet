@@ -1,20 +1,15 @@
 <script lang="ts">
   // One-time welcome shown on first run. The parent owns visibility and the
   // `onboarding-welcomed` flag; this component just renders + emits intent.
+  import Modal from './Modal.svelte';
   let { onstart, onskip }: { onstart: () => void; onskip: () => void } = $props();
 </script>
 
-<svelte:window onkeydown={(e) => { if (e.key === 'Escape') onskip(); }} />
-
-<div class="backdrop" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) onskip(); }}>
-  <div
-    class="panel"
-    role="dialog"
-    aria-modal="true"
-    aria-labelledby="welcome-title"
-  >
+<!-- Escape and backdrop click both mean "skip for now" (handled by Modal). -->
+<Modal label="Welcome to claude-fleet" onclose={onskip} width="380px">
+  <div class="panel">
     <div class="logo" aria-hidden="true"></div>
-    <h2 id="welcome-title">Welcome to claude-fleet</h2>
+    <h2>Welcome to claude-fleet</h2>
     <p>
       Run long-lived Claude Code sessions in tmux across your machines. Let's get
       you set up — add a host, pick a project, and start your first session.
@@ -25,30 +20,14 @@
       <button class="ghost" onclick={onskip}>Skip for now</button>
     </div>
   </div>
-</div>
+</Modal>
 
 <style>
-  .backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.4);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 100;
-  }
   .panel {
-    background: var(--bg);
-    color: var(--fg);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 24px;
-    width: 380px;
-    max-width: 90vw;
     display: flex;
     flex-direction: column;
     gap: 12px;
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+    padding: 8px;
   }
   .logo {
     width: 40px;

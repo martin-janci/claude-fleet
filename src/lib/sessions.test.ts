@@ -6,10 +6,11 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { sessions, loadSessions, killSession, renameSession, restartSession, newSessionAbortable, newBgSession, peekSession, purgeProject, showBgAgents } from './sessions';
+import { sessions, loadSessions, killSession, renameSession, restartSession, newSessionAbortable, newBgSession, peekSession, purgeProject, showBgAgents, resetTombstonesForTests } from './sessions';
 
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
+  resetTombstonesForTests();
   sessions.set([]);
 });
 

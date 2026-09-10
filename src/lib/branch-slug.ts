@@ -35,3 +35,26 @@ export function slugifyBranch(raw: string): string {
 export function finalizeBranchSlug(raw: string): string {
   return slugifyBranch(raw).replace(/[-./]+$/, '');
 }
+
+/**
+ * Mirror git's `check-ref-format --branch` rules closely enough to catch the
+ * common typos in the "New branch" prompt before the round-trip to the host.
+ * Returns a human-readable reason, or null when the name is acceptable.
+ */
+export function validateBranchName(name: string): string | null {
+  if (name.trim() === '') return 'Branch name is required.';
+  if (/\s/.test(name)) return 'Branch names cannot contain whitespace.';
+  if (/[~^:?*[\\]/.test(name)) return 'Branch names cannot contain ~ ^ : ? * [ or \\.';
+  if (/[\x00-\x1f\x7f]/.test(name)) return 'Branch names cannot contain control characters.';
+  if (name.startsWith('-')) return 'Branch names cannot start with -.';
+  if (name.startsWith('/') || name.endsWith('/')) return 'Branch names cannot start or end with /.';
+  if (name.endsWith('.') || name.endsWith('.lock')) return 'Branch names cannot end with . or .lock.';
+  if (name.includes('..') || name.includes('//') || name.includes('@{')) {
+    return 'Branch names cannot contain .. // or @{.';
+  }
+  if (name.split('/').some((seg) => seg.startsWith('.'))) {
+    return 'Branch name components cannot start with a dot.';
+  }
+  if (name === '@') return '"@" is not a valid branch name.';
+  return null;
+}

@@ -6,7 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { hosts, loadHosts, addHost, probeHost, deleteHost, hideHost } from './hosts';
+import { hosts, loadHosts, addHost, probeHost, deleteHost, hideHost, resetTombstonesForTests } from './hosts';
 
 const sampleLocal = {
   alias: 'local',
@@ -21,6 +21,7 @@ const sampleLocal = {
 };
 
 beforeEach(() => {
+  resetTombstonesForTests();
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
   hosts.set([]);
   localStorage.clear();

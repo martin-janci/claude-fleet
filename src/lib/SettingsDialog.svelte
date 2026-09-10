@@ -6,6 +6,7 @@
   import { accounts, type AccountRow } from './accounts';
   import { mcpStatus, mcpConfigure, mcpClientConfig, installFleetHook, provisionHosts, type McpStatus, type HostProvisionResult } from './mcp';
   import AddHostPicker from './AddHostPicker.svelte';
+  import Modal from './Modal.svelte';
 
   let { onClose }: { onClose: () => void } = $props();
 
@@ -150,13 +151,10 @@
   }
 </script>
 
-<svelte:window
-  onkeydown={(e) => {
-    if (e.key === 'Escape') onClose();
-  }} />
-
-<div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) onClose(); }} role="presentation">
-  <div class="dialog" role="dialog" aria-label="Settings">
+<!-- Escape + backdrop are handled by Modal (native <dialog>). When the
+     AddHostPicker is stacked on top, Escape reaches only that topmost dialog. -->
+<Modal label="Settings" onclose={onClose} width="600px">
+  <div class="dialog">
     <header>
       <h3>Settings</h3>
       <button class="close" onclick={onClose} aria-label="Close">×</button>
@@ -392,27 +390,14 @@
       {#if mcpError}<p class="err">{mcpError}</p>{/if}
     </section>
   </div>
-</div>
+</Modal>
 
 {#if showAddPicker}
   <AddHostPicker onClose={() => (showAddPicker = false)} />
 {/if}
 
 <style>
-  .modal-backdrop {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.4);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 15;
-  }
   .dialog {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 1rem;
-    width: 560px;
-    max-height: 80vh;
-    overflow: auto;
-    color: var(--fg);
     display: flex;
     flex-direction: column;
     gap: 0.8rem;

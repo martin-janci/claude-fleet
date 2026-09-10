@@ -22,19 +22,28 @@ export async function loadAccounts(): Promise<Result<AccountRow[]>> {
   return r;
 }
 
-export async function bootstrapAccounts(): Promise<void> {
+export async function bootstrapAccounts(): Promise<Result<AccountRow[]>> {
   const r = await invokeCmd<AccountRow[]>('list_accounts');
   if (r.ok) accounts.set(r.value);
+  return r;
+}
+
+function mergeInto(arr: AccountRow[], row: AccountRow): AccountRow[] {
+  const i = arr.findIndex((a) => a.uuid === row.uuid);
+  if (i === -1) return [...arr, row];
+  const next = arr.slice();
+  next[i] = row;
+  return next;
 }
 
 export function mergeAccount(row: AccountRow): void {
-  accounts.update((arr) => {
-    const i = arr.findIndex((a) => a.uuid === row.uuid);
-    if (i === -1) return [...arr, row];
-    const next = arr.slice();
-    next[i] = row;
-    return next;
-  });
+  accounts.update((arr) => mergeInto(arr, row));
+}
+
+/** Apply a burst of `account:upserted` rows in ONE store update. */
+export function applyAccountEvents(rows: readonly AccountRow[]): void {
+  if (rows.length === 0) return;
+  accounts.update((arr) => rows.reduce(mergeInto, arr));
 }
 
 // No removeAccount — backend never deletes accounts in iter 4a.

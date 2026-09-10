@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { discoverHosts, addHost, type SshHost } from './hosts';
   import { probeSshAliasAbortable, type ProbePreview } from './accounts';
+  import Modal from './Modal.svelte';
 
   let { onClose }: { onClose: () => void } = $props();
 
@@ -80,8 +81,8 @@
   }
 </script>
 
-<div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) onClose(); }} role="presentation">
-  <div class="dialog" role="dialog" aria-label="Add SSH host">
+<Modal label="Add SSH host" onclose={onClose} width="480px">
+  <div class="dialog">
     {#if !previewing}
       <h3>Add SSH host</h3>
       {#if loading}
@@ -137,23 +138,10 @@
       </div>
     {/if}
   </div>
-</div>
+</Modal>
 
 <style>
-  .modal-backdrop {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.4);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 20;
-  }
   .dialog {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 1rem;
-    width: 480px;
-    max-height: 80vh;
-    overflow: auto;
-    color: var(--fg);
     display: flex;
     flex-direction: column;
     gap: 0.6rem;

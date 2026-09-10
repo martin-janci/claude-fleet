@@ -5,6 +5,7 @@
   import { hosts } from './hosts';
   import { readPref, writePref } from './prefs';
   import { slugifyBranch, finalizeBranchSlug } from './branch-slug';
+  import Modal from './Modal.svelte';
 
   let {
     project,
@@ -188,7 +189,8 @@
   }
 </script>
 
-<div class="dialog" role="dialog" aria-label="New session">
+<Modal label="New session" onclose={onCancel} width="380px">
+<div class="dialog">
   <h3>New session — {project.project.owner}/{project.project.repo}</h3>
 
   <label for="friendly-name">Friendly name</label>
@@ -301,15 +303,10 @@
     {/if}
   </div>
 </div>
+</Modal>
 
 <style>
   .dialog {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 1rem;
-    width: 360px;
-    color: var(--fg);
     display: flex;
     flex-direction: column;
     gap: 0.5rem;

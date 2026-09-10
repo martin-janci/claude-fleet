@@ -68,7 +68,7 @@ export async function invokeCmdAbortable<T>(
   }
 }
 
-function toIpcError(raw: unknown): IpcError {
+export function toIpcError(raw: unknown): IpcError {
   if (raw && typeof raw === 'object' && 'code' in raw && 'message' in raw) {
     const r = raw as { code: unknown; message: unknown; details?: unknown };
     if (typeof r.code === 'string' && typeof r.message === 'string') {

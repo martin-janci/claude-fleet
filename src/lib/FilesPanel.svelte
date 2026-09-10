@@ -16,6 +16,9 @@
   import CommitGraph from './CommitGraph.svelte';
   import BranchList from './BranchList.svelte';
   import RemoteToolbar from './RemoteToolbar.svelte';
+  import ConfirmDialog from './ConfirmDialog.svelte';
+  import PromptDialog from './PromptDialog.svelte';
+  import { validateBranchName } from './branch-slug';
 
   let { session }: { session: SessionRow } = $props();
 
@@ -171,20 +174,48 @@
     void runAction(repoCheckout(session.id, branch), () => { loadBranches(); historyLoaded = false; reloadKey++; });
   }
 
+  // In-app dialogs replace window.confirm/prompt: WKWebView answers prompt()
+  // with null, so "New branch" never worked on macOS, and the native boxes
+  // were unstyled and untrappable. Exactly one dialog is open at a time.
+  type FilesDialog =
+    | { kind: 'checkout-commit'; hash: string }
+    | { kind: 'delete-branch'; name: string }
+    | { kind: 'new-branch'; startPoint: string | null };
+  let dialog = $state<FilesDialog | null>(null);
+  // "Check out the new branch now?" — a checkbox inside the prompt instead
+  // of a second confirm box.
+  let newBranchCheckout = $state(true);
+
+  function closeDialog(): void {
+    dialog = null;
+  }
+
   function confirmCheckoutCommit(hash: string): void {
-    if (!confirm(`Checkout ${hash.slice(0, 8)} as a detached HEAD? The agent's branch will change.`)) return;
+    dialog = { kind: 'checkout-commit', hash };
+  }
+
+  function doCheckoutCommit(hash: string): void {
+    closeDialog();
     void runAction(repoCheckoutCommit(session.id, hash), () => { historyLoaded = false; onRefresh(); });
   }
 
   function confirmDeleteBranch(name: string): void {
-    if (!confirm(`Delete branch "${name}"?`)) return;
+    dialog = { kind: 'delete-branch', name };
+  }
+
+  function doDeleteBranch(name: string): void {
+    closeDialog();
     void runAction(repoDeleteBranch(session.id, name, false), () => { loadBranches(); historyLoaded = false; });
   }
 
   function promptCreateBranch(startPoint: string | null): void {
-    const name = prompt('New branch name:')?.trim();
-    if (!name) return;
-    const checkout = confirm('Check out the new branch now?');
+    newBranchCheckout = true;
+    dialog = { kind: 'new-branch', startPoint };
+  }
+
+  function doCreateBranch(name: string, startPoint: string | null): void {
+    const checkout = newBranchCheckout;
+    closeDialog();
     void runAction(
       repoCreateBranch(session.id, name, { startPoint, checkout }),
       () => { loadBranches(); if (mode === 'history') loadHistory(); else historyLoaded = false; },
@@ -319,7 +350,55 @@
   {/if}
 </div>
 
+{#if dialog?.kind === 'checkout-commit'}
+  {@const hash = dialog.hash}
+  <ConfirmDialog
+    title="Checkout commit?"
+    confirmLabel="Checkout"
+    danger
+    onconfirm={() => doCheckoutCommit(hash)}
+    oncancel={closeDialog}
+    confirmTestId="confirm-checkout-commit"
+  >
+    Checkout <code>{hash.slice(0, 8)}</code> as a detached HEAD? The agent's branch will change.
+  </ConfirmDialog>
+{:else if dialog?.kind === 'delete-branch'}
+  {@const name = dialog.name}
+  <ConfirmDialog
+    title="Delete branch?"
+    confirmLabel="Delete"
+    danger
+    onconfirm={() => doDeleteBranch(name)}
+    oncancel={closeDialog}
+    confirmTestId="confirm-delete-branch"
+  >
+    Delete branch <code>{name}</code>?
+  </ConfirmDialog>
+{:else if dialog?.kind === 'new-branch'}
+  {@const startPoint = dialog.startPoint}
+  <PromptDialog
+    title="New branch"
+    label="Branch name"
+    placeholder="feature/my-change"
+    confirmLabel="Create"
+    validate={validateBranchName}
+    onsubmit={(name) => doCreateBranch(name, startPoint)}
+    oncancel={closeDialog}
+  >
+    {#if startPoint}
+      <p class="dlg-hint">Starting from <code>{startPoint.slice(0, 8)}</code>.</p>
+    {/if}
+    <label class="dlg-check">
+      <input type="checkbox" bind:checked={newBranchCheckout} data-testid="new-branch-checkout" />
+      Check out the new branch now
+    </label>
+  </PromptDialog>
+{/if}
+
 <style>
+  .dlg-hint { margin: 0; font-size: 0.8rem; color: var(--fg-muted); }
+  .dlg-hint code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .dlg-check { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; cursor: pointer; }
   .panel-wrap {
     display: flex;
     flex-direction: column;

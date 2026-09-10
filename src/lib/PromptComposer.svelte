@@ -3,6 +3,7 @@
   import { get } from 'svelte/store';
   import { sessions, sendPrompt, type SessionRow } from './sessions';
   import { accounts, type AccountRow } from './accounts';
+  import Modal from './Modal.svelte';
 
   let {
     source,
@@ -112,8 +113,8 @@
   }
 </script>
 
-<div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) onClose(); }} role="presentation">
-  <div class="dialog" role="dialog" aria-label="Send prompt">
+<Modal label="Send prompt" onclose={onClose} width="520px">
+  <div class="dialog">
     <h3>Send prompt to session(s)</h3>
 
     <section class="targets">
@@ -180,23 +181,10 @@
       >{sending ? 'Sending…' : 'Send →'}</button>
     </div>
   </div>
-</div>
+</Modal>
 
 <style>
-  .modal-backdrop {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.4);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 20;
-  }
   .dialog {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 1rem;
-    width: 520px;
-    max-height: 80vh;
-    overflow: auto;
-    color: var(--fg);
     display: flex;
     flex-direction: column;
     gap: 0.8rem;

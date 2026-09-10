@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import Pane from './lib/Pane.svelte';
   import Resizer from './lib/Resizer.svelte';
   import { healthCheck, type Health } from './lib/ipc';
@@ -8,11 +8,14 @@
   import TerminalView from './lib/TerminalView.svelte';
   import BgSessionPanel from './lib/BgSessionPanel.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
-  import { loadProjects, bootstrapProjects, mergeProjectFromEvent, mergeWorktree, removeWorktree } from './lib/projects';
-  import { loadSessions, bootstrapSessions, mergeSession, removeSession, sessions } from './lib/sessions';
-  import { bootstrapHosts, mergeHost, removeHost, hosts } from './lib/hosts';
-  import { bootstrapAccounts, mergeAccount } from './lib/accounts';
+  import { loadProjects, bootstrapProjects, applyProjectEvents } from './lib/projects';
+  import { loadSessions, bootstrapSessions, applySessionEvents, sessions } from './lib/sessions';
+  import { bootstrapHosts, applyHostEvents, hosts } from './lib/hosts';
+  import { bootstrapAccounts, applyAccountEvents } from './lib/accounts';
   import { subscribeToRowEvents } from './lib/events';
+  import Toasts from './lib/Toasts.svelte';
+  import { push, pushError } from './lib/toasts';
+  import type { Result } from './lib/result';
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import { selectedSession, restoreLastSession } from './lib/selection';
   import { loadSessionUi, saveSessionUi, DEFAULT_UI } from './lib/session_ui';
@@ -63,11 +66,18 @@
   let hydratedKey: string | null = null;
   const sessionKey = (s: { host_alias: string; tmux_name: string }) =>
     `${s.host_alias}/${s.tmux_name}`;
+  // `$selectedSession` is derived from the sessions store, so its object
+  // identity changes on every `session:updated` (each reconcile tick). Key
+  // the layout effects on the stable host/name string so they don't re-run
+  // — and re-arm the save timer — for updates that don't change which
+  // session is open; the row itself is read untracked inside.
+  const selectedKey = $derived($selectedSession ? sessionKey($selectedSession) : null);
   $effect(() => {
-    const sess = $selectedSession;
-    if (!sess) return;
-    const key = sessionKey(sess);
+    const key = selectedKey;
+    if (!key) return;
     if (key === hydratedKey) return;
+    const sess = untrack(() => $selectedSession);
+    if (!sess) return;
     const ui = loadSessionUi(sess.host_alias, sess.tmux_name);
     centerPx = ui.centerPx;
     hydratedKey = key;
@@ -76,56 +86,74 @@
   // centerPx changes per resize-drag frame too — debounce its persistence.
   let centerSaveTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
-    const sess = $selectedSession;
+    const key = selectedKey;
     const px = centerPx;
-    if (!sess) return;
+    if (!key) return;
     // Only persist once centerPx has actually been hydrated FOR this session
     // — otherwise we'd write the previous session's value under this key.
-    if (sessionKey(sess) !== hydratedKey) return;
+    if (key !== hydratedKey) return;
+    const sess = untrack(() => $selectedSession);
+    if (!sess) return;
+    const { host_alias, tmux_name } = sess;
     clearTimeout(centerSaveTimer);
-    centerSaveTimer = setTimeout(
-      () => saveSessionUi(sess.host_alias, sess.tmux_name, { centerPx: px }),
-      200,
-    );
+    centerSaveTimer = setTimeout(() => saveSessionUi(host_alias, tmux_name, { centerPx: px }), 200);
     return () => clearTimeout(centerSaveTimer);
   });
 
   let health = $state<Health | null>(null);
   let healthError = $state<string | null>(null);
+  // Bootstrap (initial list_* fetches) failures. These used to be swallowed,
+  // so a broken DB showed an innocent "No projects yet". Now they surface as
+  // a sticky error toast (with the E_* code) plus this footer banner.
+  let bootstrapError = $state<string | null>(null);
   let unlistenEvents: UnlistenFn | null = null;
   let showWelcome = $state(false);
+
+  function reportBootstrap(what: string, r: Result<unknown>): string | null {
+    if (r.ok) return null;
+    pushError(r.error, `Failed to load ${what}`);
+    return `${what}: ${r.error.code}`;
+  }
 
   onMount(async () => {
     try {
       health = await healthCheck();
     } catch (e) {
       healthError = String(e);
+      push({ kind: 'error', code: 'E_IPC', message: `Health check failed: ${String(e)}` });
     }
-    await Promise.all([
+    const [pr, sr, hr, ar] = await Promise.all([
       bootstrapProjects(),
       bootstrapSessions(),
       bootstrapHosts(),
       bootstrapAccounts(),
     ]);
+    const failures = [
+      reportBootstrap('projects', pr),
+      reportBootstrap('sessions', sr),
+      reportBootstrap('hosts', hr),
+      reportBootstrap('accounts', ar),
+    ].filter((f): f is string => f !== null);
+    if (failures.length > 0) bootstrapError = `startup load failed — ${failures.join(', ')}`;
     // Sessions are loaded now — re-open the one the user last had selected.
-    restoreLastSession();
+    // Only when the list actually arrived: on a failed fetch the store is
+    // empty, and restoreLastSession() would take that as "the session is
+    // gone" and erase the persisted pref — losing the selection over a
+    // transient DB error.
+    if (sr.ok) restoreLastSession();
     // First-run welcome: only when never shown AND the fleet is empty.
     const visibleHostCount = get(hosts).filter((h) => !h.hidden).length;
     const workSessionCount = get(sessions).filter((s) => s.kind !== 'bg').length;
     if (!get(onboardingWelcomed) && visibleHostCount === 0 && workSessionCount === 0) {
       showWelcome = true;
     }
+    // Batched handlers: a reconcile burst of N `session:updated` events lands
+    // as ONE store update instead of N (see events.ts).
     unlistenEvents = await subscribeToRowEvents({
-      onSessionCreated: mergeSession,
-      onSessionUpdated: mergeSession,
-      onSessionKilled: (p) => removeSession(p.id),
-      onHostAdded: mergeHost,
-      onHostProbed: mergeHost,
-      onHostRemoved: (p) => removeHost(p.alias),
-      onAccountUpserted: mergeAccount,
-      onProjectUpdated: mergeProjectFromEvent,
-      onWorktreeUpdated: mergeWorktree,
-      onWorktreeRemoved: (p) => removeWorktree(p.id),
+      onSessionEvents: applySessionEvents,
+      onHostEvents: applyHostEvents,
+      onAccountEvents: applyAccountEvents,
+      onProjectEvents: applyProjectEvents,
     });
   });
 
@@ -209,6 +237,7 @@
 </script>
 
 <HintLayer />
+<Toasts />
 
 {#if showWelcome}
   <!-- "Skip for now" closes the welcome dialog but intentionally leaves the
@@ -332,6 +361,8 @@
 <footer class="status">
   {#if healthError}
     <span class="err">ipc error: {healthError}</span>
+  {:else if bootstrapError}
+    <span class="err" data-testid="bootstrap-error">{bootstrapError}</span>
   {:else if health}
     <span>v{health.version} · db: {health.db_ready ? 'ok' : 'fail'} · schema {health.schema_version}</span>
   {:else}

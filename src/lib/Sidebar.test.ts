@@ -58,9 +58,9 @@ import { buildSessionsByProject, buildRelatedCountById } from './sidebar_index';
 import { get } from 'svelte/store';
 import Sidebar from './Sidebar.svelte';
 import { projects, bootstrapProjects } from './projects';
-import { sessions, bootstrapSessions, showBgAgents, type SessionRow } from './sessions';
+import { sessions, bootstrapSessions, showBgAgents, resetTombstonesForTests, type SessionRow } from './sessions';
 import { selectedSession, selectSession } from './selection';
-import { hosts, bootstrapHosts, hostFilter } from './hosts';
+import { hosts, bootstrapHosts, hostFilter, resetTombstonesForTests as resetHostTombstones } from './hosts';
 import { accounts, bootstrapAccounts } from './accounts';
 import { onboardingDismissed } from './onboarding';
 
@@ -95,6 +95,8 @@ function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof session
 }
 
 beforeEach(() => {
+  resetTombstonesForTests();
+  resetHostTombstones();
   projects.set([]);
   sessions.set([]);
   hosts.set([]);
@@ -211,6 +213,77 @@ describe('Sidebar (sessions-grouped view)', () => {
     await fireEvent.click(sessRows[0]);
     await fireEvent.click(sessRows[0]);
     expect(get(selectedSession)).toBeNull();
+  });
+
+  // FE-1: default tmux names are project-derived, so the same name on two
+  // hosts is the normal case. Every lookup must key on the full identity.
+  describe('two sessions sharing a tmux_name on different hosts', () => {
+    const twinName = 'dev-martin-janci-claude-fleet';
+    function twins() {
+      const onAlpha = { ...sessionFor(1, twinName), host_alias: 'alpha' };
+      const onBeta = { ...sessionFor(1, twinName), host_alias: 'beta' };
+      return { onAlpha, onBeta };
+    }
+
+    it('selecting the second twin selects that row (not the first by name)', async () => {
+      const { onAlpha, onBeta } = twins();
+      mockBackend(fakeProjects, [onAlpha, onBeta]);
+      render(Sidebar);
+      await tick(); await tick();
+      const rows = await screen.findAllByTestId('sess-row');
+      expect(rows).toHaveLength(2);
+      await fireEvent.click(rows[0]);
+      expect(get(selectedSession)?.id).toBe(onAlpha.id);
+      await fireEvent.click(rows[1]);
+      expect(get(selectedSession)?.id).toBe(onBeta.id);
+      expect(get(selectedSession)?.host_alias).toBe('beta');
+      expect(rows[1].className).toContain('selected');
+      expect(rows[0].className).not.toContain('selected');
+    });
+
+    it("renaming the second twin sends the rename to that twin's host", async () => {
+      const { onAlpha, onBeta } = twins();
+      mockBackend(fakeProjects, [onAlpha, onBeta]);
+      render(Sidebar);
+      await tick(); await tick();
+      const rows = await screen.findAllByTestId('sess-row');
+      await fireEvent.dblClick(rows[1]);
+      const input = await screen.findByTestId('rename-input');
+      // Only the second row is in rename mode.
+      expect(rows[1].className).toContain('renaming');
+      expect(rows[0].className).not.toContain('renaming');
+      await fireEvent.input(input, { target: { value: 'dev-renamed' } });
+      await fireEvent.keyDown(input, { key: 'Enter' });
+      await tick(); await tick();
+      const call = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.find((c) => c[0] === 'rename_session');
+      expect(call).toBeDefined();
+      expect((call![1] as { args: { host_alias: string; old_name: string; new_name: string } }).args).toEqual({
+        host_alias: 'beta',
+        old_name: twinName,
+        new_name: 'dev-renamed',
+      });
+    });
+
+    it('killing the second twin targets its host and keeps the first twin selected', async () => {
+      const { onAlpha, onBeta } = twins();
+      mockBackend(fakeProjects, [onAlpha, onBeta]);
+      render(Sidebar);
+      await tick(); await tick();
+      const rows = await screen.findAllByTestId('sess-row');
+      await fireEvent.click(rows[0]); // select alpha's twin
+      expect(get(selectedSession)?.id).toBe(onAlpha.id);
+      const killBtn = rows[1].querySelector('button[aria-label="Kill"]') as HTMLButtonElement;
+      await fireEvent.click(killBtn);
+      await fireEvent.click(await screen.findByTestId('confirm-kill'));
+      await tick(); await tick();
+      const call = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.find((c) => c[0] === 'kill_session');
+      expect((call![1] as { args: { host_alias: string; name: string } }).args).toEqual({
+        host_alias: 'beta',
+        name: twinName,
+      });
+      // The selection pointed at alpha's twin; a kill on beta must not clear it.
+      expect(get(selectedSession)?.id).toBe(onAlpha.id);
+    });
   });
 
   it('kill button opens an in-app confirm dialog (no window.confirm)', async () => {
