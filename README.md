@@ -47,7 +47,10 @@ On first launch the app walks you through setup — see the **[Getting Started g
 
 - macOS 13+ (primary) or Linux
 - Rust 1.83+ (`rustup install stable`)
-- pnpm 9+ (`npm i -g pnpm`)
+- Node 20+ and pnpm 10 (`npm i -g pnpm@10`, or `corepack enable`). The
+  workspace file uses the pnpm 10 `allowBuilds` key; if a local pnpm 9 prints
+  `packages field missing or empty`, run `corepack pnpm@10 <cmd>` or
+  `npx -y pnpm@10 <cmd>` instead.
 - Tauri 2 prerequisites: https://v2.tauri.app/start/prerequisites/
 
 ### Build & run
@@ -90,7 +93,7 @@ Freeze (original spec §8.3–8.4) remain unimplemented.
 
 ## Releasing & documentation
 
-- Versioning and changelog are automated via release-please — see
+- Versioning and changelog are cut manually with `scripts/release.sh` — see
   [docs/RELEASING.md](docs/RELEASING.md).
 - **Control API reference:** [docs/control-api-reference.md](docs/control-api-reference.md)
   (generated from source) and [docs/control-api.md](docs/control-api.md) (guide).
