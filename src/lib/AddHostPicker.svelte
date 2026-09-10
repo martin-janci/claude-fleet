@@ -80,8 +80,8 @@
   }
 </script>
 
-<div class="modal-backdrop" onclick={onClose} role="presentation">
-  <div class="dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-label="Add SSH host">
+<div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) onClose(); }} role="presentation">
+  <div class="dialog" role="dialog" aria-label="Add SSH host">
     {#if !previewing}
       <h3>Add SSH host</h3>
       {#if loading}
@@ -179,7 +179,6 @@
   .host-row:disabled { opacity: 0.6; cursor: progress; }
   .alias { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; }
   .desc { color: var(--fg-muted); font-size: 0.8rem; flex: 1; }
-  .status { font-size: 0.75rem; color: var(--accent); }
 
   .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
   .actions { display: flex; gap: 0.4rem; justify-content: flex-end; }

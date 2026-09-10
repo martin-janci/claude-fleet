@@ -6,13 +6,12 @@
 
 <svelte:window onkeydown={(e) => { if (e.key === 'Escape') onskip(); }} />
 
-<div class="backdrop" role="presentation" onclick={onskip}>
+<div class="backdrop" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) onskip(); }}>
   <div
     class="panel"
     role="dialog"
     aria-modal="true"
     aria-labelledby="welcome-title"
-    onclick={(e) => e.stopPropagation()}
   >
     <div class="logo" aria-hidden="true"></div>
     <h2 id="welcome-title">Welcome to claude-fleet</h2>

@@ -49,7 +49,12 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
 }));
 
+// Wrap the memoised index builders in call-through spies so the scale test
+// below can assert they run once per render, not once per row.
+vi.mock('./sidebar_index', { spy: true });
+
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
+import { buildSessionsByProject, buildRelatedCountById } from './sidebar_index';
 import { get } from 'svelte/store';
 import Sidebar from './Sidebar.svelte';
 import { projects, bootstrapProjects } from './projects';
@@ -616,19 +621,25 @@ describe('Sidebar (sessions-grouped view)', () => {
       }
     }
     mockBackend(projs, sess);
-    const start = performance.now();
+    vi.mocked(buildSessionsByProject).mockClear();
+    vi.mocked(buildRelatedCountById).mockClear();
     render(Sidebar);
     await tick(); await tick();
-    const elapsed = performance.now() - start;
     // Durable signal: all 25 projects render their rows (correctness at scale —
-    // the memoised indices feed every project row). The timing check below is
-    // only a coarse O(N^2) tripwire, NOT a precise benchmark: jsdom wall-clock
-    // is load-sensitive (parallel test workers, machine load) so the bound is
-    // deliberately generous. A real quadratic regression at this size would
-    // blow past it by an order of magnitude; normal runs land in the low
-    // hundreds of ms.
+    // the memoised indices feed every project row).
     const projRows = await screen.findAllByTestId('proj-row');
     expect(projRows).toHaveLength(25);
-    expect(elapsed).toBeLessThan(5000);
+    // O(N^2) tripwire, made deterministic: the index builders must run once
+    // per `$sessions` change (a `$derived` at component level), never once per
+    // project/session row. A wall-clock bound was used here before and flaked
+    // on loaded machines (jsdom timing is load-sensitive); counting builder
+    // calls catches the same regression — someone moving the grouping back
+    // into a per-row `{@const}` or a plain function — without depending on
+    // machine speed. Two calls are tolerated in case Svelte re-evaluates the
+    // derived once after mount; 25 or 500 would mean per-row rebuilds.
+    expect(vi.mocked(buildSessionsByProject).mock.calls.length).toBeLessThanOrEqual(2);
+    expect(vi.mocked(buildRelatedCountById).mock.calls.length).toBeLessThanOrEqual(2);
+    expect(buildSessionsByProject).toHaveBeenCalled();
+    expect(buildRelatedCountById).toHaveBeenCalled();
   });
 });
