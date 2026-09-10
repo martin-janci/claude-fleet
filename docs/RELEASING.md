@@ -1,49 +1,86 @@
 # Releasing claude-fleet
 
-Releases are automated with [release-please](https://github.com/googleapis/release-please).
-You never bump versions or write the changelog by hand.
+Releases are cut **manually** with `scripts/release.sh`. GitHub Actions on this
+repo is currently billing-blocked and the former CI release bot never ran,
+so the script is the single source of truth for version bumps and the
+changelog. Never edit the version fields by hand.
 
-## How it works
+## Steps
 
-1. Land changes on `main` using **Conventional Commits** (see below).
-2. The `release-please` workflow watches `main` and maintains an open
-   **"chore: release X.Y.Z"** pull request. It computes the next semantic
-   version from the commit types, updates every version file, and rewrites
-   `CHANGELOG.md`.
-3. When you're ready to ship, **merge that PR**. release-please creates the git
-   tag (`vX.Y.Z`) and a **GitHub Release** with the generated notes.
-4. Publishing the Release triggers the `docs` workflow, which builds rustdoc and
-   deploys it to GitHub Pages.
+1. Make sure `main` is green locally (mirror `.github/workflows/ci.yml`):
 
-No binaries are built or attached — releases are tag + notes only.
+   ```bash
+   git checkout main && git pull --ff-only
+   (cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test)
+   pnpm install --frozen-lockfile && pnpm run check && pnpm run test && pnpm run build
+   ```
 
-## Conventional Commits
+2. Pick the next version from the Conventional Commits since the last tag
+   (`git log --oneline $(git describe --tags --abbrev=0)..HEAD`): `feat` → minor,
+   `fix`/`perf`/`refactor`/`docs` → patch, `feat!`/`BREAKING CHANGE` → major.
 
-Commit subjects drive the version bump and changelog section:
+3. Run the script:
 
-| Prefix      | Bump  | Changelog section |
-|-------------|-------|-------------------|
-| `feat:`     | minor | Features          |
-| `fix:`      | patch | Bug Fixes         |
-| `perf:`     | patch | Performance       |
-| `refactor:` | patch | Refactors         |
-| `docs:`     | patch | Documentation     |
-| `chore:` / `test:` / `ci:` | none | hidden |
+   ```bash
+   scripts/release.sh 0.3.0
+   ```
 
-A `feat!:` / `fix!:` or a `BREAKING CHANGE:` footer triggers a **major** bump.
+   It refuses to run on a dirty tree, off `main`, or if `v0.3.0` already exists.
+   When it pauses, open `CHANGELOG.md`, polish the generated section (the
+   bullets are raw commit subjects), save, and press Enter.
 
-## Version files kept in sync
+4. Push the release commit and tag:
 
-release-please updates all four on each release:
+   ```bash
+   git push origin main --follow-tags
+   ```
 
-- `package.json`
-- `src-tauri/tauri.conf.json`
-- `src-tauri/Cargo.toml`
-- `src-tauri/Cargo.lock`
+5. Create the GitHub Release from the tag (notes = the CHANGELOG section):
 
-Config lives in `release-please-config.json` (a `rust`-type package rooted at
-`src-tauri/`, with `package.json` and `tauri.conf.json` as JSON `extra-files`)
-and `.release-please-manifest.json` (the current version).
+   ```bash
+   gh release create v0.3.0 --title "v0.3.0" --notes-from-tag
+   ```
+
+   No binaries are attached — releases are tag + notes only.
+
+## What the script touches
+
+| File | Change |
+|------|--------|
+| `package.json` | `"version"` |
+| `src-tauri/tauri.conf.json` | `"version"` |
+| `src-tauri/Cargo.toml` | `version =` under `[package]` |
+| `src-tauri/Cargo.lock` | via `cargo update -p claude-fleet` (no dependency changes) |
+| `CHANGELOG.md` | new `## [X.Y.Z] - YYYY-MM-DD` section under the header, bullets from `git log <last-tag>..HEAD` grouped `feat` → Added, `fix` → Fixed, `docs` → Documentation, everything else → Changed; plus a `[X.Y.Z]: …/releases/tag/vX.Y.Z` link reference at the bottom |
+
+Then it commits `chore(release): vX.Y.Z` and creates the annotated tag
+`vX.Y.Z`. It prints the push command but **does not push**.
+
+## Verifying before you tag
+
+`RELEASE_DRY_RUN=1 scripts/release.sh 0.3.0` edits the files and stops (no
+`cargo update`, no commit, no tag) so you can inspect `git diff`. Discard with
+`git checkout -- .` when done.
+
+After a real run, before pushing:
+
+```bash
+git show --stat HEAD              # exactly 5 files: 3 version files, Cargo.lock, CHANGELOG.md
+grep -n '"version"' package.json src-tauri/tauri.conf.json
+grep -n '^version' src-tauri/Cargo.toml
+git tag -n1 v0.3.0
+```
+
+If something is wrong: `git tag -d v0.3.0 && git reset --hard HEAD~1`, fix,
+re-run.
+
+## Docs workflow
+
+`.github/workflows/docs.yml` builds rustdoc and deploys it to GitHub Pages on
+`release: published`. It will start running again automatically once Actions
+billing is restored; until then it can be triggered by hand via
+`workflow_dispatch` on the Actions tab (once billing allows) or the rustdoc
+site simply stays at its last published version.
 
 ## Generated docs
 
@@ -55,18 +92,15 @@ do not edit it by hand. After changing any `#[tool(...)]` description or the
 REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_current
 ```
 
-## One-time setup
+## Conventional Commits
 
-- **Settings → Actions → General → Workflow permissions:** enable
-  "Allow GitHub Actions to create and approve pull requests".
-- **Settings → Pages:** set Source = "GitHub Actions" (for the rustdoc site).
+Commit subjects drive both the version choice and the changelog grouping:
 
-## Troubleshooting
+| Prefix      | Bump  | Changelog section |
+|-------------|-------|-------------------|
+| `feat:`     | minor | Added             |
+| `fix:`      | patch | Fixed             |
+| `docs:`     | patch | Documentation     |
+| `perf:` / `refactor:` / `chore:` / `ci:` / `test:` / other | patch or none | Changed |
 
-- **No release PR appears:** check the workflow permissions setting above; check
-  the `release-please` workflow run logs.
-- **A version file didn't update:** confirm its path/jsonpath in
-  `release-please-config.json`. If `Cargo.lock` is not updated by the `rust`
-  type for this layout, add a `generic` extra-file targeting the
-  `name = "claude-fleet"` package entry's `version` line in `Cargo.lock`.
-- **Wrong bump computed:** check the commit prefixes since the last tag.
+A `feat!:` / `fix!:` or a `BREAKING CHANGE:` footer means a **major** bump.
