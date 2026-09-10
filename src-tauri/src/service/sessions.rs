@@ -1,5 +1,5 @@
 use crate::cancel::{CancelGuard, CancellationRegistry};
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::{HostReconcile, HostRow, ProjectRow, ReconcileSession, SessionRow, Store};
@@ -1536,10 +1536,10 @@ pub async fn broadcast_prompt(
     // Snapshot sessions + resolve the controller while holding the guard, then
     // drop it before any `.await` (never hold the mutex across await).
     let (sessions, controller) = {
-        let s = store.lock().expect("store mutex poisoned");
-        let sessions = s
-            .list_all_sessions()
-            .map_err(|e| IpcError::new("E_DB", format!("list sessions for broadcast: {e}")))?;
+        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let sessions = s.list_all_sessions().map_err(|e| {
+            IpcError::new(codes::E_SQLITE, format!("list sessions for broadcast: {e}"))
+        })?;
         // The controller concept is resolved from the store when available.
         // Until a controller is recorded, no session is excluded on that basis.
         let controller = resolve_controller(&s);

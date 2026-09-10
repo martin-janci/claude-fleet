@@ -39,15 +39,11 @@ pub struct McpConfigureArgs {
     pub regenerate_token: bool,
 }
 
-fn lock_err() -> IpcError {
-    IpcError::new("E_LOCK", "store mutex poisoned")
-}
-
 /// Read the persisted settings + live runtime into an `McpStatus`. Generates
 /// and persists a token on first call so the UI always has one to display.
 fn status(store: &Mutex<Store>, runtime: &Mutex<McpRuntime>) -> Result<McpStatus, IpcError> {
     let (enabled, port, token) = {
-        let s = store.lock().map_err(|_| lock_err())?;
+        let s = store.lock().map_err(|_| IpcError::lock())?;
         let enabled = s.get_setting(mcp::SETTING_ENABLED)?.as_deref() == Some("true");
         let port = s
             .get_setting(mcp::SETTING_PORT)?
@@ -63,7 +59,7 @@ fn status(store: &Mutex<Store>, runtime: &Mutex<McpRuntime>) -> Result<McpStatus
         };
         (enabled, port, token)
     };
-    let rt = runtime.lock().map_err(|_| lock_err())?;
+    let rt = runtime.lock().map_err(|_| IpcError::lock())?;
     Ok(McpStatus {
         enabled,
         running: rt.is_running(),
@@ -93,7 +89,7 @@ pub async fn mcp_configure(
 ) -> Result<McpStatus, IpcError> {
     // 1. Persist the requested settings.
     {
-        let s = store.lock().map_err(|_| lock_err())?;
+        let s = store.lock().map_err(|_| IpcError::lock())?;
         if let Some(p) = args.port {
             s.set_setting(mcp::SETTING_PORT, &p.to_string())?;
         }
@@ -108,7 +104,7 @@ pub async fn mcp_configure(
 
     // 2. Stop whatever is running — a port/token change is applied by restart.
     {
-        let mut rt = runtime.lock().map_err(|_| lock_err())?;
+        let mut rt = runtime.lock().map_err(|_| IpcError::lock())?;
         rt.stop();
     }
     if !args.enabled {
@@ -118,7 +114,7 @@ pub async fn mcp_configure(
     // 3. If enabled, (re)start with the persisted port + token.
     if args.enabled {
         let (port, token) = {
-            let s = store.lock().map_err(|_| lock_err())?;
+            let s = store.lock().map_err(|_| IpcError::lock())?;
             let port = s
                 .get_setting(mcp::SETTING_PORT)?
                 .and_then(|p| p.parse::<u16>().ok())
@@ -142,7 +138,7 @@ pub async fn mcp_configure(
             token,
         )
         .await;
-        let mut rt = runtime.lock().map_err(|_| lock_err())?;
+        let mut rt = runtime.lock().map_err(|_| IpcError::lock())?;
         match result {
             Ok(shutdown) => {
                 // Re-establish tunnels for already-provisioned hosts (best-effort).
@@ -168,7 +164,7 @@ pub async fn provision_hosts(
     tunnels: State<'_, Arc<crate::service::tunnel::TunnelSupervisor>>,
 ) -> Result<Vec<crate::service::provision::HostProvisionResult>, IpcError> {
     let (port, token) = {
-        let s = store.lock().map_err(|_| lock_err())?;
+        let s = store.lock().map_err(|_| IpcError::lock())?;
         let port = s
             .get_setting(mcp::SETTING_PORT)?
             .and_then(|p| p.parse().ok())
@@ -336,7 +332,7 @@ pub fn install_fleet_hook(
     }
 
     let (port, token) = {
-        let s = store.lock().map_err(|_| lock_err())?;
+        let s = store.lock().map_err(|_| IpcError::lock())?;
         let port = s
             .get_setting(mcp::SETTING_PORT)?
             .and_then(|p| p.parse::<u16>().ok())
@@ -353,7 +349,7 @@ pub fn install_fleet_hook(
     }
 
     {
-        let rt = runtime.lock().map_err(|_| lock_err())?;
+        let rt = runtime.lock().map_err(|_| IpcError::lock())?;
         if !rt.is_running() {
             return Err(IpcError::new(
                 "E_NOT_RUNNING",

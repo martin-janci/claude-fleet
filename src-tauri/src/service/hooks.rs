@@ -8,10 +8,6 @@ use crate::ssh::SshClient;
 use crate::store::{ProjectRow, Store};
 use std::sync::{Arc, Mutex};
 
-fn lock_err() -> IpcError {
-    IpcError::new("E_LOCK", "store mutex poisoned")
-}
-
 /// Dispatch a hook event to the appropriate handler.
 /// Unknown events are silently ignored.
 pub fn apply_hook(
@@ -49,7 +45,7 @@ fn apply_stop_hook(
     // if it is, we spawn the marker check off the hook handler so the HTTP
     // response returns fast (the work involves pane capture + SSH).
     let safe_kill_in_flight = {
-        let s = store.lock().map_err(|_| lock_err())?;
+        let s = store.lock().map_err(|_| IpcError::lock())?;
         let in_flight = s
             .get_session_by_claude_id(&session_id)
             .ok()
@@ -90,7 +86,7 @@ fn apply_worktree_hook(store: &Arc<Mutex<Store>>, payload: &HookPayload) -> Resu
         .unwrap_or("unnamed")
         .to_string();
 
-    let s = store.lock().map_err(|_| lock_err())?;
+    let s = store.lock().map_err(|_| IpcError::lock())?;
     let projects = s.list_projects().map_err(IpcError::from)?;
     let project_id = match find_project_id_for_path(&projects, &path) {
         Some(id) => id,

@@ -71,24 +71,18 @@ pub async fn send_message(
         let s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-        let from = s
-            .get_session_by_id(args.from_session_id)
-            .map_err(|e| IpcError::new("E_REPO", e.to_string()))?
-            .ok_or_else(|| {
-                IpcError::new(
-                    "E_NOTFOUND",
-                    format!("from session {} not found", args.from_session_id),
-                )
-            })?;
-        let to = s
-            .get_session_by_id(args.to_session_id)
-            .map_err(|e| IpcError::new("E_REPO", e.to_string()))?
-            .ok_or_else(|| {
-                IpcError::new(
-                    "E_NOTFOUND",
-                    format!("to session {} not found", args.to_session_id),
-                )
-            })?;
+        let from = s.get_session_by_id(args.from_session_id)?.ok_or_else(|| {
+            IpcError::new(
+                "E_NOTFOUND",
+                format!("from session {} not found", args.from_session_id),
+            )
+        })?;
+        let to = s.get_session_by_id(args.to_session_id)?.ok_or_else(|| {
+            IpcError::new(
+                "E_NOTFOUND",
+                format!("to session {} not found", args.to_session_id),
+            )
+        })?;
         (from, to)
     };
     let kind = args.kind.as_deref().unwrap_or("message");
@@ -201,8 +195,7 @@ pub fn peer_status(session_id: i64, store: &Mutex<Store>) -> Result<PeerStatus, 
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
     let row = s
-        .get_session_by_id(session_id)
-        .map_err(|e| IpcError::new("E_REPO", e.to_string()))?
+        .get_session_by_id(session_id)?
         .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("session {} not found", session_id)))?;
     Ok(PeerStatus {
         session_id: row.id,

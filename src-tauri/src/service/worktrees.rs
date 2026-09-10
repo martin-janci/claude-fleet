@@ -10,10 +10,6 @@ use crate::store::{Store, WorktreeRow};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
-fn lock_err() -> IpcError {
-    IpcError::new("E_LOCK", "store mutex poisoned")
-}
-
 /// One worktree row with its alive-session occupants attached. `occupants`
 /// is empty when the worktree is free to delete.
 #[derive(Debug, Clone, Serialize)]
@@ -38,7 +34,7 @@ pub fn list_worktrees(
     args: ListWorktreesArgs,
     store: &Mutex<Store>,
 ) -> Result<Vec<WorktreeOccupancy>, IpcError> {
-    let s = store.lock().map_err(|_| lock_err())?;
+    let s = store.lock().map_err(|_| IpcError::lock())?;
     let projects = s.list_projects().map_err(IpcError::from)?;
     let mut out = Vec::new();
     for proj in projects {
@@ -92,7 +88,7 @@ pub async fn delete_worktree(
     // Resolve everything we need under one lock; the SSH call below runs
     // off-lock.
     let (worktree_path, project_base_path, host_alias) = {
-        let s = store.lock().map_err(|_| lock_err())?;
+        let s = store.lock().map_err(|_| IpcError::lock())?;
         let wt = s
             .get_worktree_row(args.worktree_id)
             .map_err(IpcError::from)?
@@ -168,7 +164,7 @@ pub async fn delete_worktree(
         ));
     }
 
-    let s = store.lock().map_err(|_| lock_err())?;
+    let s = store.lock().map_err(|_| IpcError::lock())?;
     s.delete_worktree(args.worktree_id)
         .map_err(IpcError::from)?;
     Ok(())
