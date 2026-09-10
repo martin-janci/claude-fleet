@@ -16,6 +16,9 @@
   import { accountByUuid, type AccountRow } from './accounts';
   import PromptComposer from './PromptComposer.svelte';
   import ReviewDialog from './ReviewDialog.svelte';
+  import Modal from './Modal.svelte';
+  import ConfirmDialog from './ConfirmDialog.svelte';
+  import { push, pushError } from './toasts';
 
   let { session }: { session: SessionRow } = $props();
 
@@ -66,27 +69,24 @@
   }
 
   let copied = $state(false);
-  let actionError: string | null = $state(null);
 
   // Title rename state — same UX as the sidebar's inline rename.
   let renaming = $state(false);
   let renameValue = $state('');
 
   async function onCopy() {
-    actionError = null;
     try {
       await navigator.clipboard.writeText(attachCommand);
       copied = true;
       setTimeout(() => (copied = false), 1500);
     } catch (e) {
-      actionError = String(e);
+      push({ kind: 'error', code: 'E_CLIPBOARD', message: `Copy failed: ${String(e)}` });
     }
   }
 
   async function beginRename() {
     renaming = true;
     renameValue = session.tmux_name;
-    actionError = null;
     await tick();
     const input = document.querySelector<HTMLInputElement>('[data-testid="details-rename"]');
     input?.focus();
@@ -102,7 +102,7 @@
     }
     const r = await renameSession(session.host_alias, session.tmux_name, next);
     if (!r.ok) {
-      actionError = r.error.message;
+      pushError(r.error, 'Rename failed');
       return;
     }
     selectSession(r.value);
@@ -124,9 +124,8 @@
   }
 
   async function onRestart() {
-    actionError = null;
     const r = await restartSession(session.host_alias, session.tmux_name);
-    if (!r.ok) actionError = r.error.message;
+    if (!r.ok) pushError(r.error, 'Restart failed');
   }
 
   let composerOpen = $state(false);
@@ -157,7 +156,6 @@
   let busy = $state(false);
 
   async function askSafeKill() {
-    actionError = null;
     inspection = null;
     inspectError = null;
     confirmingSafeKill = true;
@@ -182,7 +180,7 @@
     const r = await safeKillSession(session.host_alias, session.tmux_name);
     busy = false;
     if (!r.ok) {
-      actionError = r.error.message;
+      pushError(r.error, 'Safe remove failed');
       return;
     }
     confirmingSafeKill = false;
@@ -200,7 +198,7 @@
       inspection = null;
       clearSelection();
     } else {
-      actionError = r.error.message;
+      pushError(r.error, 'Remove failed');
     }
   }
 
@@ -215,12 +213,11 @@
       inspection = null;
       clearSelection();
     } else {
-      actionError = r.error.message;
+      pushError(r.error, 'Discard & kill failed');
     }
   }
   function askKill() {
     confirmingKill = true;
-    actionError = null;
   }
   function cancelKill() {
     confirmingKill = false;
@@ -231,13 +228,12 @@
     if (r.ok) {
       clearSelection();
     } else {
-      actionError = r.error.message;
+      pushError(r.error, 'Kill failed');
     }
   }
 
   function askRecreate() {
     confirmingRecreate = true;
-    actionError = null;
   }
 
   function cancelRecreate() {
@@ -248,7 +244,7 @@
     confirmingRecreate = false;
     const r = await recreateSession(session.id);
     if (!r.ok) {
-      actionError = r.error.message;
+      pushError(r.error, 'Recreate failed');
       return;
     }
     // kill-session severed the PTY; same tmux_name won't auto-reopen. This
@@ -370,10 +366,6 @@
     </div>
   </section>
 
-  {#if actionError}
-    <p class="err">{actionError}</p>
-  {/if}
-
   <section class="block actions">
     <button class="ghost" onclick={beginRename} data-testid="rename-from-details">
       ✎ Rename
@@ -428,21 +420,22 @@
 {/if}
 
 {#if confirmingKill}
-  <div class="modal-backdrop" onclick={cancelKill} role="presentation">
-    <div class="confirm" onclick={(e) => e.stopPropagation()} role="presentation">
-      <h3>Kill session?</h3>
-      <p>This will kill the tmux session <code>{session.tmux_name}</code> and lose any running claude state inside it. Continue?</p>
-      <div class="confirm-actions">
-        <button onclick={cancelKill}>Cancel</button>
-        <button class="danger" onclick={doKill} data-testid="confirm-kill-details">Kill</button>
-      </div>
-    </div>
-  </div>
+  <ConfirmDialog
+    title="Kill session?"
+    confirmLabel="Kill"
+    danger
+    onconfirm={doKill}
+    oncancel={cancelKill}
+    confirmTestId="confirm-kill-details"
+  >
+    This will kill the tmux session <code>{session.tmux_name}</code> on
+    <code>{session.host_alias}</code> and lose any running claude state inside it. Continue?
+  </ConfirmDialog>
 {/if}
 
 {#if confirmingSafeKill}
-  <div class="modal-backdrop" onclick={cancelSafeKill} role="presentation">
-    <div class="confirm wide" onclick={(e) => e.stopPropagation()} role="presentation">
+  <Modal label="Safe remove {session.tmux_name}" onclose={cancelSafeKill} width="480px" testid="safe-kill-dialog">
+    <div class="confirm wide">
       <h3>Safe remove <code>{session.tmux_name}</code>?</h3>
 
       {#if inspection === null && inspectError === null}
@@ -541,20 +534,22 @@
         </div>
       {/if}
     </div>
-  </div>
+  </Modal>
 {/if}
 
 {#if confirmingRecreate}
-  <div class="modal-backdrop" onclick={cancelRecreate} role="presentation">
-    <div class="confirm" onclick={(e) => e.stopPropagation()} role="presentation">
-      <h3>Recreate session?</h3>
-      <p>This kills the tmux session <code>{session.tmux_name}</code> and the running claude state inside it, then starts a fresh session in the same worktree. Continue?</p>
-      <div class="confirm-actions">
-        <button onclick={cancelRecreate}>Cancel</button>
-        <button class="danger" onclick={doRecreate} data-testid="confirm-recreate-details">Recreate</button>
-      </div>
-    </div>
-  </div>
+  <ConfirmDialog
+    title="Recreate session?"
+    confirmLabel="Recreate"
+    danger
+    onconfirm={doRecreate}
+    oncancel={cancelRecreate}
+    confirmTestId="confirm-recreate-details"
+  >
+    This kills the tmux session <code>{session.tmux_name}</code> on
+    <code>{session.host_alias}</code> and the running claude state inside it, then
+    starts a fresh session in the same worktree. Continue?
+  </ConfirmDialog>
 {/if}
 
 <style>
@@ -716,18 +711,8 @@
   }
   .link:hover { opacity: 0.8; }
 
-  .modal-backdrop {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.4);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 10;
-  }
+  /* Safe-remove body (lives inside Modal, which owns the box chrome). */
   .confirm {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 1rem;
-    width: 360px;
-    color: var(--fg);
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
@@ -742,7 +727,6 @@
     color: var(--fg);
   }
   .confirm-actions { display: flex; gap: 0.4rem; justify-content: flex-end; flex-wrap: wrap; }
-  .confirm.wide { width: 480px; max-width: 90vw; }
   .confirm .primary {
     background: var(--accent);
     color: white;

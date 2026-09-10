@@ -39,9 +39,10 @@ export async function refreshProjects(): Promise<Result<ProjectTreeRow[]>> {
   return r;
 }
 
-export async function bootstrapProjects(): Promise<void> {
+export async function bootstrapProjects(): Promise<Result<ProjectTreeRow[]>> {
   const r = await invokeCmd<ProjectTreeRow[]>('list_projects');
   if (r.ok) projects.set(r.value);
+  return r;
 }
 
 export function mergeProject(row: ProjectTreeRow): void {
@@ -60,38 +61,66 @@ export function mergeProject(row: ProjectTreeRow): void {
  * project is already in the store, update only its `project` field and preserve
  * the existing `worktrees` array. If it's new, seed an empty `worktrees: []`.
  */
-export function mergeProjectFromEvent(row: ProjectRow): void {
-  projects.update((arr) => {
-    const i = arr.findIndex((p) => p.project.id === row.id);
-    if (i === -1) return [...arr, { project: row, worktrees: [] }];
-    const next = arr.slice();
-    next[i] = { project: row, worktrees: arr[i].worktrees };
-    return next;
+function mergeProjectRow(arr: ProjectTreeRow[], row: ProjectRow): ProjectTreeRow[] {
+  const i = arr.findIndex((p) => p.project.id === row.id);
+  if (i === -1) return [...arr, { project: row, worktrees: [] }];
+  const next = arr.slice();
+  next[i] = { project: row, worktrees: arr[i].worktrees };
+  return next;
+}
+
+function mergeWorktreeRow(arr: ProjectTreeRow[], row: WorktreeRow): ProjectTreeRow[] {
+  const idx = arr.findIndex((p) => p.project.id === row.project_id);
+  if (idx === -1) return arr;
+  const entry = arr[idx];
+  const wts = entry.worktrees ?? [];
+  const wIdx = wts.findIndex((w) => w.id === row.id);
+  const newWts =
+    wIdx === -1 ? [...wts, row] : wts.map((w) => (w.id === row.id ? row : w));
+  const next = arr.slice();
+  next[idx] = { ...entry, worktrees: newWts };
+  return next;
+}
+
+function removeWorktreeRow(arr: ProjectTreeRow[], id: number): ProjectTreeRow[] {
+  if (!arr.some((entry) => entry.worktrees?.some((w) => w.id === id))) return arr;
+  return arr.map((entry) => {
+    if (!entry.worktrees?.some((w) => w.id === id)) return entry;
+    return { ...entry, worktrees: entry.worktrees.filter((w) => w.id !== id) };
   });
+}
+
+export function mergeProjectFromEvent(row: ProjectRow): void {
+  projects.update((arr) => mergeProjectRow(arr, row));
 }
 
 export function mergeWorktree(row: WorktreeRow): void {
-  projects.update((arr) => {
-    const idx = arr.findIndex((p) => p.project.id === row.project_id);
-    if (idx === -1) return arr;
-    const entry = arr[idx];
-    const wts = entry.worktrees ?? [];
-    const wIdx = wts.findIndex((w) => w.id === row.id);
-    const newWts =
-      wIdx === -1 ? [...wts, row] : wts.map((w) => (w.id === row.id ? row : w));
-    const next = arr.slice();
-    next[idx] = { ...entry, worktrees: newWts };
-    return next;
-  });
+  projects.update((arr) => mergeWorktreeRow(arr, row));
 }
 
 export function removeWorktree(id: number): void {
-  projects.update((arr) =>
-    arr.map((entry) => {
-      if (!entry.worktrees?.some((w) => w.id === id)) return entry;
-      return { ...entry, worktrees: entry.worktrees.filter((w) => w.id !== id) };
-    }),
-  );
+  projects.update((arr) => removeWorktreeRow(arr, id));
+}
+
+/** One backend project/worktree event, as delivered by `events.ts`. Both
+ *  kinds land in the same `projects` store, so they batch together. */
+export type ProjectEvent =
+  | { type: 'project_updated'; row: ProjectRow }
+  | { type: 'worktree_updated'; row: WorktreeRow }
+  | { type: 'worktree_removed'; id: number };
+
+/** Apply a burst of project + worktree events in ONE store update, in order. */
+export function applyProjectEvents(events: readonly ProjectEvent[]): void {
+  if (events.length === 0) return;
+  projects.update((arr) => {
+    let next = arr;
+    for (const ev of events) {
+      if (ev.type === 'project_updated') next = mergeProjectRow(next, ev.row);
+      else if (ev.type === 'worktree_updated') next = mergeWorktreeRow(next, ev.row);
+      else next = removeWorktreeRow(next, ev.id);
+    }
+    return next;
+  });
 }
 
 export interface WorktreeOccupant {

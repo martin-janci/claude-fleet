@@ -177,9 +177,38 @@ export async function newSessionAbortable(
   return r;
 }
 
-export async function bootstrapSessions(): Promise<void> {
+export async function bootstrapSessions(): Promise<Result<SessionRow[]>> {
   const r = await invokeCmd<SessionRow[]>('list_sessions');
   if (r.ok) sessions.set(r.value);
+  return r;
+}
+
+// ─── identity ────────────────────────────────────────────────────────────────
+
+/** The stable identity of a session. `id` is the primary key; the
+ *  host_alias + tmux_name pair is the fallback for rows whose id churned on
+ *  re-discovery. A bare tmux_name is NOT an identity — default names are
+ *  project-derived, so the same name on two hosts is the normal case. */
+export interface SessionIdentity {
+  id?: number | null;
+  host_alias: string;
+  tmux_name: string;
+}
+
+/** True when `a` and `b` denote the same session: same id, or (when either
+ *  side has no usable id) same host_alias + tmux_name. */
+export function sameSession(a: SessionIdentity, b: SessionIdentity): boolean {
+  if (a.id != null && b.id != null) return a.id === b.id;
+  return a.host_alias === b.host_alias && a.tmux_name === b.tmux_name;
+}
+
+/** Locate `ident` in `arr`: by id first, then by the host+name pair. */
+export function findSession(arr: SessionRow[], ident: SessionIdentity): SessionRow | undefined {
+  if (ident.id != null) {
+    const byId = arr.find((s) => s.id === ident.id);
+    if (byId) return byId;
+  }
+  return arr.find((s) => s.host_alias === ident.host_alias && s.tmux_name === ident.tmux_name);
 }
 
 // Recently-removed session ids. Both the optimistic `removeSession()` and the
@@ -199,25 +228,57 @@ function isTombstoned(id: number): boolean {
   return true;
 }
 
+/** Pure merge step shared by the single-row and batched paths. Returns the
+ *  input array untouched when the row is tombstoned or stale. */
+function mergeInto(arr: SessionRow[], row: SessionRow): SessionRow[] {
+  if (!row) return arr;
+  if (isTombstoned(row.id)) return arr;
+  const i = arr.findIndex((s) => s.id === row.id);
+  if (i === -1) return [...arr, row];
+  // Monotonic guard: don't let a staler payload (e.g. a command return
+  // value that raced a newer `session:updated` event) clobber a fresher
+  // row. Equal timestamps still apply — they may carry a status change.
+  if (row.last_activity_at < arr[i].last_activity_at) return arr;
+  const next = arr.slice();
+  next[i] = row;
+  return next;
+}
+
+function removeFrom(arr: SessionRow[], id: number): SessionRow[] {
+  tombstones.set(id, Date.now());
+  const next = arr.filter((s) => s.id !== id);
+  return next.length === arr.length ? arr : next;
+}
+
 export function mergeSession(row: SessionRow): void {
   if (!row) return;
   if (isTombstoned(row.id)) return;
-  sessions.update((arr) => {
-    const i = arr.findIndex((s) => s.id === row.id);
-    if (i === -1) return [...arr, row];
-    // Monotonic guard: don't let a staler payload (e.g. a command return
-    // value that raced a newer `session:updated` event) clobber a fresher
-    // row. Equal timestamps still apply — they may carry a status change.
-    if (row.last_activity_at < arr[i].last_activity_at) return arr;
-    const next = arr.slice();
-    next[i] = row;
-    return next;
-  });
+  sessions.update((arr) => mergeInto(arr, row));
 }
 
 export function removeSession(id: number): void {
-  tombstones.set(id, Date.now());
-  sessions.update((arr) => arr.filter((s) => s.id !== id));
+  sessions.update((arr) => removeFrom(arr, id));
+}
+
+/** One backend row event, as delivered by `events.ts`. */
+export type SessionEvent =
+  | { type: 'created' | 'updated'; row: SessionRow }
+  | { type: 'killed'; id: number };
+
+/** Apply a burst of session events in ONE store update. The reconcile tick
+ *  emits `session:updated` once per session, so without batching every tick
+ *  costs N store flushes (and N sidebar re-derives). Events are applied in
+ *  order, so a `killed` after an `updated` for the same id still removes the
+ *  row, and an `updated` after a `killed` is dropped by the tombstone. */
+export function applySessionEvents(events: readonly SessionEvent[]): void {
+  if (events.length === 0) return;
+  sessions.update((arr) => {
+    let next = arr;
+    for (const ev of events) {
+      next = ev.type === 'killed' ? removeFrom(next, ev.id) : mergeInto(next, ev.row);
+    }
+    return next;
+  });
 }
 
 /** Apply a row returned by a mutation command (rename/restart/new). Unlike an

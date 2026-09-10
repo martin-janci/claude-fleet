@@ -14,6 +14,7 @@
     purgeProject,
     showBgAgents,
     showFriendlyNames,
+    sameSession,
     type SessionRow,
   } from './sessions';
   import { type ProjectRow } from './projects';
@@ -29,6 +30,9 @@
   import { hintAnchor } from './hints';
   import { accounts, type AccountRow } from './accounts';
   import { buildSessionsByProject, buildRelatedCountById } from './sidebar_index';
+  import { pushError } from './toasts';
+  import Modal from './Modal.svelte';
+  import ConfirmDialog from './ConfirmDialog.svelte';
 
   let showSettings = $state(false);
 
@@ -69,8 +73,11 @@
 
   // Per-session UI state. Kept here instead of on each row so collapse and
   // rename state survive a sessions store refresh that creates new row
-  // objects (the underlying tmux_name is the stable id).
-  let renamingName: string | null = $state(null);
+  // objects. The row being renamed is pinned by its full identity (id +
+  // host + old name) — a bare tmux_name is ambiguous across hosts, since
+  // default names are project-derived and the same name on two hosts is
+  // the normal case.
+  let renaming: { id: number; host_alias: string; tmux_name: string } | null = $state(null);
   let renameValue = $state('');
   let renameError: string | null = $state(null);
   // The live rename <input> (only one renders at a time). Bound directly so
@@ -88,7 +95,6 @@
   // is open by default — most users have one or two projects and want to
   // see their sessions immediately.
   let collapsed: Set<number> = $state(new Set());
-  let actionError: string | null = $state(null);
 
   // Stores are bootstrapped once by App.svelte's onMount; Sidebar just reads
   // them. (A second bootstrap here would double every startup IPC call.)
@@ -99,8 +105,13 @@
     const pr = await refreshProjects();
     const sr = await loadSessions();
     loading = false;
-    if (!pr.ok) loadError = pr.error.message;
-    else if (!sr.ok) loadError = sr.error.message;
+    if (!pr.ok) {
+      loadError = pr.error.message;
+      pushError(pr.error, 'Refresh projects failed');
+    } else if (!sr.ok) {
+      loadError = sr.error.message;
+      pushError(sr.error, 'Refresh sessions failed');
+    }
   }
 
   const RECENCY_WINDOW: Record<Recency, number | null> = {
@@ -245,7 +256,7 @@
 
   function onSelectSession(sess: SessionRow) {
     // Stop rename mode if the user clicks away to another row.
-    if (renamingName !== null && renamingName !== sess.tmux_name) {
+    if (renaming !== null && !sameSession(renaming, sess)) {
       cancelRename();
     }
     const cur = $selectedSession;
@@ -265,7 +276,7 @@
 
   async function beginRename(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
-    renamingName = sess.tmux_name;
+    renaming = { id: sess.id, host_alias: sess.host_alias, tmux_name: sess.tmux_name };
     renameValue = sess.tmux_name;
     renameError = null;
     await tick();
@@ -274,26 +285,28 @@
   }
 
   function cancelRename() {
-    renamingName = null;
+    renaming = null;
     renameValue = '';
     renameError = null;
   }
 
   async function commitRename() {
-    if (committingRename || !renamingName) return;
+    if (committingRename || !renaming) return;
     const next = renameValue.trim();
-    if (!next || next === renamingName) {
+    if (!next || next === renaming.tmux_name) {
       cancelRename();
       return;
     }
     committingRename = true;
     try {
-      const oldName = renamingName;
-      const sess = $sessions.find((s) => s.tmux_name === oldName);
-      const hostAlias = sess?.host_alias ?? 'local';
+      // Target the exact row that was double-clicked — host + old name from
+      // the pinned identity, never a lookup by name alone.
+      const target = renaming;
+      const { host_alias: hostAlias, tmux_name: oldName } = target;
       const r = await renameSession(hostAlias, oldName, next);
       if (!r.ok) {
         renameError = r.error.message;
+        pushError(r.error, 'Rename failed');
         return;
       }
       // Persisted UI state (pane widths, collapsed) is keyed by tmux name;
@@ -301,7 +314,7 @@
       migrateSessionUi(r.value.host_alias, oldName, r.value.tmux_name);
       // If the renamed session was the selected one, follow the rename.
       const cur = $selectedSession;
-      if (cur && cur.tmux_name === oldName) {
+      if (cur && sameSession(cur, target)) {
         selectSession(r.value);
       }
       cancelRename();
@@ -322,15 +335,13 @@
 
   async function doRestart(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
-    actionError = null;
     const r = await restartSession(sess.host_alias, sess.tmux_name);
-    if (!r.ok) actionError = r.error.message;
+    if (!r.ok) pushError(r.error, 'Restart failed');
   }
 
   function askKill(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
     pendingKill = sess;
-    actionError = null;
   }
 
   async function confirmKill() {
@@ -339,7 +350,7 @@
     pendingKill = null;
     const r = await killSession(sess.host_alias, sess.tmux_name);
     if (!r.ok) {
-      actionError = r.error.message;
+      pushError(r.error, 'Kill failed');
       return;
     }
     // Drop persisted layout for the now-dead session — otherwise localStorage
@@ -349,7 +360,7 @@
     // If we just killed the selected session, drop the selection so the
     // terminal pane shows the empty state instead of trying to attach.
     const cur = $selectedSession;
-    if (cur && cur.tmux_name === sess.tmux_name) {
+    if (cur && sameSession(cur, sess)) {
       selectSession(null);
     }
   }
@@ -361,7 +372,6 @@
   function askRecreate(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
     pendingRecreate = sess;
-    actionError = null;
   }
 
   function cancelRecreate() {
@@ -374,14 +384,14 @@
     pendingRecreate = null;
     const r = await recreateSession(sess.id);
     if (!r.ok) {
-      actionError = r.error.message;
+      pushError(r.error, 'Recreate failed');
       return;
     }
     // kill-session severed the PTY; the tmux_name is unchanged so TerminalView
     // won't auto-reopen. Force a re-attach when this session is selected by
     // dropping and (after the close effect runs) restoring the selection.
     const cur = $selectedSession;
-    if (cur && cur.tmux_name === sess.tmux_name) {
+    if (cur && sameSession(cur, sess)) {
       selectSession(null);
       await tick();
       selectSession(r.value);
@@ -390,9 +400,8 @@
 
   async function doRecreate(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
-    actionError = null;
     const r = await recreateSession(sess.id);
-    if (!r.ok) actionError = r.error.message;
+    if (!r.ok) pushError(r.error, 'Recreate failed');
   }
 
   // Per-session peek panel state: row id → log text | "loading" | null
@@ -419,10 +428,9 @@
 
   async function doDismissGhost(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
-    actionError = null;
     const r = await dismissGhostSession(sess.id);
     if (!r.ok) {
-      actionError = r.error.message;
+      pushError(r.error, 'Dismiss failed');
       return;
     }
     forgetSessionUi(sess.host_alias, sess.tmux_name);
@@ -468,7 +476,7 @@
     pendingPurge = null;
     const result = await purgeProject('local', project.base_path, project.id);
     if (!result.ok) {
-      actionError = 'Purge failed: ' + result.error.message;
+      pushError(result.error, 'Purge failed');
     } else {
       // Refresh stores since the backend doesn't emit row-level events for project deletion
       await loadSessions();
@@ -519,7 +527,7 @@
 <div class="sidebar" data-testid="sidebar-tree">
   {#snippet sessionRow(sess: SessionRow)}
     {@const sessSelected = $selectedSession?.id === sess.id}
-    {@const isRenaming = renamingName === sess.tmux_name}
+    {@const isRenaming = renaming !== null && renaming.id === sess.id}
     <div
       class="sess-row"
       class:selected={sessSelected}
@@ -748,9 +756,6 @@
     {#if loadError}
       <p class="err">{loadError}</p>
     {/if}
-    {#if actionError}
-      <p class="err">{actionError}</p>
-    {/if}
   </header>
 
   <div class="scroller">
@@ -864,52 +869,43 @@
   </footer>
 </div>
 
+<!-- The project picker is a popover, not a modal; the modals below handle
+     their own Escape through <dialog>'s cancel event. -->
 <svelte:window onkeydown={(e) => {
-  if (e.key !== 'Escape') return;
-  if (dialogProject) onCancel();
-  else if (pendingKill) cancelKill();
-  else if (pendingRecreate) cancelRecreate();
-  else if (pendingPurge) cancelPurge();
-  else if (showBgModal) showBgModal = false;
-  else if (showProjectPicker) showProjectPicker = false;
+  if (e.key === 'Escape' && showProjectPicker) showProjectPicker = false;
 }} />
 
 {#if dialogProject}
-  <div class="modal-backdrop" onclick={onCancel} role="presentation">
-    <div onclick={(e) => e.stopPropagation()} role="presentation">
-      <NewSessionDialog project={dialogProject} onCreate={onCreated} {onCancel} />
-    </div>
-  </div>
+  <NewSessionDialog project={dialogProject} onCreate={onCreated} {onCancel} />
 {/if}
 
 {#if pendingKill}
-  <div class="modal-backdrop" onclick={cancelKill} role="presentation">
-    <div class="confirm" onclick={(e) => e.stopPropagation()} role="presentation">
-      <h3>Kill session?</h3>
-      <p>This will kill the tmux session <code>{pendingKill.tmux_name}</code> and lose any running claude state inside it. Continue?</p>
-      <div class="actions">
-        <button onclick={cancelKill}>Cancel</button>
-        <button class="danger" onclick={confirmKill} data-testid="confirm-kill">Kill</button>
-      </div>
-    </div>
-  </div>
+  <ConfirmDialog
+    title="Kill session?"
+    confirmLabel="Kill"
+    danger
+    onconfirm={confirmKill}
+    oncancel={cancelKill}
+    confirmTestId="confirm-kill"
+  >
+    This will kill the tmux session <code>{pendingKill.tmux_name}</code> on
+    <code>{pendingKill.host_alias}</code> and lose any running claude state inside it. Continue?
+  </ConfirmDialog>
 {/if}
 
 {#if pendingRecreate}
-  <div class="modal-backdrop" onclick={cancelRecreate} role="presentation">
-    <div class="confirm" onclick={(e) => e.stopPropagation()} role="presentation">
-      <h3>Recreate session?</h3>
-      <p>
-        This kills the tmux session <code>{pendingRecreate.tmux_name}</code> and the
-        running claude state inside it, then starts a fresh session in the same
-        worktree. Continue?
-      </p>
-      <div class="actions">
-        <button onclick={cancelRecreate}>Cancel</button>
-        <button class="danger" onclick={confirmRecreate} data-testid="confirm-recreate">Recreate</button>
-      </div>
-    </div>
-  </div>
+  <ConfirmDialog
+    title="Recreate session?"
+    confirmLabel="Recreate"
+    danger
+    onconfirm={confirmRecreate}
+    oncancel={cancelRecreate}
+    confirmTestId="confirm-recreate"
+  >
+    This kills the tmux session <code>{pendingRecreate.tmux_name}</code> on
+    <code>{pendingRecreate.host_alias}</code> and the running claude state inside it,
+    then starts a fresh session in the same worktree. Continue?
+  </ConfirmDialog>
 {/if}
 
 {#if showSettings}
@@ -917,22 +913,21 @@
 {/if}
 
 {#if pendingPurge}
-  <div class="modal-backdrop" onclick={cancelPurge} role="presentation">
-    <div class="confirm" onclick={(e) => e.stopPropagation()} role="presentation">
-      <h3>Purge project?</h3>
-      <p>This will permanently delete all Claude Code state for <code>{pendingPurge.repo}</code>. This is irreversible.</p>
-      <div class="actions">
-        <button onclick={cancelPurge}>Cancel</button>
-        <button class="danger" onclick={confirmPurge} data-testid="confirm-purge">Purge</button>
-      </div>
-    </div>
-  </div>
+  <ConfirmDialog
+    title="Purge project?"
+    confirmLabel="Purge"
+    danger
+    onconfirm={confirmPurge}
+    oncancel={cancelPurge}
+    confirmTestId="confirm-purge"
+  >
+    This will permanently delete all Claude Code state for <code>{pendingPurge.repo}</code>. This is irreversible.
+  </ConfirmDialog>
 {/if}
 
 {#if showBgModal}
-  <div class="modal-backdrop" onclick={() => (showBgModal = false)} role="presentation">
-    <div class="modal" onclick={(e) => e.stopPropagation()} data-testid="bg-session-modal" role="presentation">
-      <h3>New Background Session</h3>
+  <Modal title="New Background Session" onclose={() => (showBgModal = false)} width="420px" testid="bg-session-modal">
+    <div class="modal">
       <label class="modal-field">
         <span>Host</span>
         <select bind:value={bgModalHost}>
@@ -974,7 +969,7 @@
         </button>
       </div>
     </div>
-  </div>
+  </Modal>
 {/if}
 
 <style>
@@ -1233,47 +1228,6 @@
     min-width: 0;
   }
 
-  .modal-backdrop {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.4);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 10;
-  }
-  .confirm {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 1rem;
-    width: 360px;
-    color: var(--fg);
-    display: flex;
-    flex-direction: column;
-    gap: 0.6rem;
-  }
-  .confirm h3 { margin: 0; font-size: 0.95rem; }
-  .confirm p { margin: 0; font-size: 0.85rem; color: var(--fg-muted); line-height: 1.4; }
-  .confirm code {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    background: var(--bg-pane);
-    padding: 0.1rem 0.3rem;
-    border-radius: 3px;
-    color: var(--fg);
-  }
-  .actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
-  .actions button {
-    font-size: 0.85rem;
-    padding: 0.3rem 0.8rem;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--fg);
-    border-radius: 4px;
-    cursor: pointer;
-  }
-  .actions button.danger {
-    color: #e64a4a;
-    border-color: #e64a4a;
-  }
-  .actions button.danger:hover { background: rgba(230, 74, 74, 0.12); }
-
   .orphan-section {
     border-top: 1px solid var(--border);
     padding-top: 0.35rem;
@@ -1405,18 +1359,10 @@
   }
 
   .modal {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 20px;
-    min-width: 320px;
-    max-width: 480px;
     display: flex;
     flex-direction: column;
     gap: 12px;
-    color: var(--fg);
   }
-  .modal h3 { margin: 0; font-size: 0.95rem; }
   .modal-field {
     display: flex;
     flex-direction: column;

@@ -9,6 +9,8 @@
   import { selectionRects, type CellPos } from './terminal_selection';
   import { nativeWriteText, nativeReadText } from './clipboard_native';
   import { hintAnchor } from './hints';
+  import { toIpcError } from './result';
+  import { pushError } from './toasts';
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -43,8 +45,25 @@
   const DRAIN_MAX_MS = 250;
   let drainTimer: ReturnType<typeof setTimeout> | null = null;
   let drainDelay = DRAIN_MIN_MS;
+  // The attached PTY's identity. BOTH parts are compared by the open/attach
+  // guard: a tmux_name alone is ambiguous across hosts (default names are
+  // project-derived, so host A and host B often run a same-named session),
+  // and selecting the twin must reattach rather than silently keep showing
+  // the other host's terminal.
   let currentSession: string | null = $state(null);
   let currentHost: string | null = $state(null);
+
+  function isAttachedTo(sess: { tmux_name: string; host_alias: string } | null | undefined): boolean {
+    return !!sess && sess.tmux_name === currentSession && sess.host_alias === currentHost;
+  }
+
+  /** Forward bytes to the PTY. A rejection (PTY gone, host dropped) used to be
+   *  swallowed; now it surfaces once — the toast store dedupes repeats. */
+  function writePty(data: string) {
+    void invoke('pty_write', { args: { data } }).catch((e) => {
+      pushError(toIpcError(e), 'Terminal input failed');
+    });
+  }
   /** Drop-overlay state: shown while a drag is over the grid, switched to a
    *  spinner during the upload. */
   let dragOver = $state(false);
@@ -116,7 +135,7 @@
 
   /** Write a mouse escape sequence to the PTY. */
   function sendMouse(data: string) {
-    void invoke('pty_write', { args: { data } }).catch(() => {});
+    writePty(data);
   }
 
   /** Send text to the PTY as a paste: strip any embedded paste-end marker,
@@ -127,7 +146,7 @@
     const clean = sanitizePaste(text);
     if (clean === '') return;
     const framed = framePaste(clean, screen?.bracketedPaste ?? false);
-    void invoke('pty_write', { args: { data: framed } }).catch(() => {});
+    writePty(framed);
     bumpDrain();
   }
 
@@ -406,7 +425,7 @@
       void closeTerm();
       return;
     }
-    if (sess.tmux_name === currentSession) return;
+    if (isAttachedTo(sess)) return;
     void openTerm();
   });
 
@@ -415,7 +434,7 @@
   // PTY. Required because the first effect above can fire before the
   // <div bind:this> has populated `container`.
   $effect(() => {
-    if (container && $selectedSession && currentSession !== $selectedSession.tmux_name) {
+    if (container && $selectedSession && !isAttachedTo($selectedSession)) {
       void openTerm();
     }
   });
@@ -487,17 +506,14 @@
     };
     renderVersion++;
 
+    // A pane drag fires ResizeObserver every frame; resizing the screen
+    // buffer (a full re-mark of every row) and sending pty_resize (a
+    // SIGWINCH + tmux redraw over SSH) on each one floods the PTY. Debounce
+    // on the trailing edge: only the settled size is applied, and it always
+    // is — the last frame of a drag is never dropped.
     resizeObserver = new ResizeObserver(() => {
-      if (!screen) return;
-      const next = computeDimensions();
-      if (next.cols === lastCols && next.rows === lastRows) return;
-      lastCols = next.cols;
-      lastRows = next.rows;
-      screen.resize(next.rows, next.cols);
-      renderVersion++;
-      if (ptyOpen) {
-        void invoke('pty_resize', { args: { cols: next.cols, rows: next.rows } }).catch(() => {});
-      }
+      if (resizeTimer !== null) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(applyResize, RESIZE_DEBOUNCE_MS);
     });
     resizeObserver.observe(container);
 
@@ -532,6 +548,23 @@
       void invoke('pty_resize', { args: { cols: lastCols, rows: lastRows } }).catch(() => {});
     }, 150);
     opening = false;
+  }
+
+  const RESIZE_DEBOUNCE_MS = 50;
+  let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function applyResize() {
+    resizeTimer = null;
+    if (!screen) return;
+    const next = computeDimensions();
+    if (next.cols === lastCols && next.rows === lastRows) return;
+    lastCols = next.cols;
+    lastRows = next.rows;
+    screen.resize(next.rows, next.cols);
+    renderVersion++;
+    if (ptyOpen) {
+      void invoke('pty_resize', { args: { cols: next.cols, rows: next.rows } }).catch(() => {});
+    }
   }
 
   function measureCellSize() {
@@ -632,12 +665,14 @@
     reconnectAttempts += 1;
     autoReconnecting = true;
     const sessionAtSchedule = currentSession;
+    const hostAtSchedule = currentHost;
     const delay = AUTO_RECONNECT_BASE_MS * reconnectAttempts; // 0.6s, 1.2s, 1.8s
     autoReconnectTimer = setTimeout(() => {
       autoReconnectTimer = null;
       autoReconnecting = false;
       // Bail if the user switched away or detached while we waited.
-      if ($selectedSession?.tmux_name !== sessionAtSchedule) return;
+      const sel = $selectedSession;
+      if (!sel || sel.tmux_name !== sessionAtSchedule || sel.host_alias !== hostAtSchedule) return;
       void openTerm(true);
     }, delay);
   }
@@ -664,7 +699,8 @@
     // mount-time effect fires closeTerm() against a fresh component,
     // unconditionally writes state ($state assignments), and Svelte 5's
     // reactivity scheduler treats the cascade as an effect-update loop.
-    const hadAnything = screen !== null || ptyOpen || drainTimer !== null || resizeObserver !== null;
+    const hadAnything =
+      screen !== null || ptyOpen || drainTimer !== null || resizeObserver !== null || resizeTimer !== null;
     if (!hadAnything) return;
 
     // Drop the context menu so a session switch can't leave the backdrop stuck.
@@ -677,6 +713,10 @@
     drainDelay = DRAIN_MIN_MS;
     resizeObserver?.disconnect();
     resizeObserver = null;
+    if (resizeTimer !== null) {
+      clearTimeout(resizeTimer);
+      resizeTimer = null;
+    }
     screen = null;
     lastCols = 0;
     lastRows = 0;
@@ -692,6 +732,7 @@
       }
     }
     currentSession = null;
+    currentHost = null;
   }
 
   /** Translate a KeyboardEvent into the byte sequence a real terminal would
@@ -759,7 +800,7 @@
     const bytes = keyToBytes(e);
     if (bytes === null) return;
     e.preventDefault();
-    void invoke('pty_write', { args: { data: bytes } }).catch(() => {});
+    writePty(bytes);
     // The keystroke will produce output (echo / TUI redraw); pull the drain
     // loop back to full rate so it doesn't sit on a backed-off delay.
     bumpDrain();
@@ -769,7 +810,7 @@
    *  never reaches `onKeydown` as a single printable char. */
   function onCompositionEnd(e: CompositionEvent) {
     if (!ptyOpen || !e.data) return;
-    void invoke('pty_write', { args: { data: e.data } }).catch(() => {});
+    writePty(e.data);
     bumpDrain();
   }
 
