@@ -33,7 +33,7 @@ pub async fn upload_to_session(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<Vec<String>, IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
-    crate::validate::tmux_name(&args.session_name)?;
+    crate::validate::tmux_name_addressable(&args.session_name)?;
     if args.local_paths.is_empty() {
         return Ok(vec![]);
     }

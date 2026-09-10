@@ -94,6 +94,26 @@ pub async fn claude_logs(
     }
 }
 
+/// Run `claude stop <session_id>` on `host_alias` to stop a background
+/// (`claude --bg`) session. Idempotent: a "no job matching" response — the
+/// session already exited or was stopped elsewhere — is success, so callers
+/// can use this to clear a stale fleet row without racing the agent's own
+/// exit. Returns `true` when a live job was actually stopped, `false` when
+/// there was nothing left to stop.
+pub async fn claude_stop(
+    ssh: &Arc<SshClient>,
+    host_alias: &str,
+    session_id: &str,
+) -> Result<bool, IpcError> {
+    let quoted_id = quote(session_id);
+    let script = format!("claude stop {quoted_id}");
+    match run_claude_script(ssh, host_alias, &script, CLAUDE_TIMEOUT).await {
+        Ok(_) => Ok(true),
+        Err(e) if is_no_running_job(&e.message) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// Run `claude project purge <project_path> --yes` on `host_alias`.
 pub async fn claude_purge_project(
     ssh: &Arc<SshClient>,
