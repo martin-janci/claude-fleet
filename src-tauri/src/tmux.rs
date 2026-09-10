@@ -116,6 +116,11 @@ impl RemoteTmux {
     /// `quote` so it crosses the ssh boundary as one shell word.
     /// `quote` already escapes the embedded `'` characters used by
     /// per-arg quoting inside `script`.
+    ///
+    /// The 10s here is ssh's `ConnectTimeout` only. `SshClient::run` bounds
+    /// the whole command by `default_wall_clock(10s)` = 30s on top, so a tmux
+    /// command that hangs after connect (wedged ControlMaster) surfaces as
+    /// `E_SSH_TIMEOUT` instead of blocking the caller forever.
     async fn remote_bash(&self, script: &str) -> Result<std::process::Output, IpcError> {
         let quoted = quote(script);
         self.client

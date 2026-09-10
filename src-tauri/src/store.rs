@@ -11,7 +11,7 @@ use crate::events::{EventBus, NoopEventBus, RowChange};
 use rusqlite::{Connection, OptionalExtension, Result};
 use std::sync::Arc;
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ProjectRow {
     pub id: i64,
     pub owner: String,
@@ -29,7 +29,9 @@ pub struct WorktreeRow {
     pub branch: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+/// `PartialEq` covers every wire field, so `upsert_session_in_tx` can tell a
+/// no-op reconcile pass from a real change before emitting `session:updated`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SessionRow {
     pub id: i64,
     pub tmux_name: String,
@@ -147,6 +149,13 @@ pub struct HostReconcile<'a> {
     pub claude_version: Option<&'a str>,
     pub tmux_version: Option<&'a str>,
     pub last_pinged_at: i64,
+    /// Unix-epoch second at which the probe that produced this result STARTED.
+    /// Rows that another writer reconciled at or after this instant (their
+    /// `last_reconciled_at >= probe_started_at`) are exempt from ghosting: the
+    /// probe's `keep` set predates them, so their absence from it is not
+    /// evidence they are gone (BE-3). `0` disables the guard (every row is
+    /// eligible), which is what the store-level tests use.
+    pub probe_started_at: i64,
     /// Live sessions to upsert (empty / ignored when `!reachable`).
     pub sessions: &'a [ReconcileSession<'a>],
     /// tmux_names to keep; rows on this host not in the set are deleted
@@ -1751,14 +1760,13 @@ impl Store {
         intel_observed: bool,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
-        // Check existence before the write so we can distinguish created vs updated.
-        let existing_id: Option<i64> = tx
-            .query_row(
-                "SELECT id FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
-                rusqlite::params![tmux_name, host_alias],
-                |row| row.get(0),
-            )
-            .optional()?;
+        // Read the prior row (not just its id) before the write: it tells us
+        // created-vs-updated AND, after the write, whether anything the
+        // frontend can see actually changed. Reconcile upserts every live
+        // session every pass; without this diff each pass emitted one
+        // `session:updated` per session — sixty store flushes per tick for a
+        // fleet that had not changed at all (BE-11 / FE-10).
+        let prior: Option<SessionRow> = fetch_session(tx, tmux_name, host_alias)?;
 
         tx.execute(
             "INSERT INTO sessions (tmux_name, host_alias, project_id, worktree_id,
@@ -1805,10 +1813,11 @@ impl Store {
             ],
         )?;
         if let Some(row) = fetch_session(tx, tmux_name, host_alias)? {
-            if existing_id.is_none() {
-                out.push(RowChange::SessionCreated(row));
-            } else {
-                out.push(RowChange::SessionUpdated(row));
+            match prior {
+                None => out.push(RowChange::SessionCreated(row)),
+                // Every wire field identical ⇒ a no-op pass; emit nothing.
+                Some(ref before) if *before == row => {}
+                Some(_) => out.push(RowChange::SessionUpdated(row)),
             }
         }
         Ok(())
@@ -1820,12 +1829,19 @@ impl Store {
         ts: i64,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
+        // Same no-op filter as `upsert_session_in_tx`: the MAX() update
+        // matches the row every pass even when `last_session_at` is already
+        // at least `ts`, so diff before/after instead of trusting the
+        // affected-row count.
+        let before = fetch_project(tx, project_id)?;
         tx.execute(
             "UPDATE projects SET last_session_at = MAX(COALESCE(last_session_at, 0), ?1) WHERE id = ?2",
             rusqlite::params![ts, project_id],
         )?;
         if let Some(row) = fetch_project(tx, project_id)? {
-            out.push(RowChange::ProjectUpdated(row));
+            if before.as_ref() != Some(&row) {
+                out.push(RowChange::ProjectUpdated(row));
+            }
         }
         Ok(())
     }
@@ -1840,11 +1856,20 @@ impl Store {
     /// `keep_names`. Ghosting them on every reconcile would be wrong — they're
     /// surfaced from `claude agents --json`, not from tmux. They get their own
     /// agents-keyed pruner instead: `ghost_and_clean_bg_sessions`.
+    ///
+    /// `probe_started_at` (unix secs) guards Phase 1 against a stale probe:
+    /// a row stamped `last_reconciled_at >= probe_started_at` was observed
+    /// live by a writer whose probe began after this one's, so its absence
+    /// from `keep_names` only means this probe is older than the row (e.g. a
+    /// tick that listed tmux just before `new_session` created it). Such rows
+    /// are left alone; the next pass, whose probe starts later, judges them.
+    /// `0` disables the guard.
     fn ghost_and_clean_sessions_in_tx(
         tx: &rusqlite::Transaction,
         host_alias: &str,
         keep_names: &[String],
         now: i64,
+        probe_started_at: i64,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
         // ── Phase 2 prep: collect already-ghost IDs BEFORE Phase 1 modifies rows
@@ -1875,24 +1900,31 @@ impl Store {
         };
 
         // ── Phase 1: ghost live sessions not in keep ──────────────────────────
+        // Rows reconciled by a NEWER probe than ours are skipped (see doc).
         let ghost_ids: Vec<i64> = if keep_names.is_empty() {
             let mut stmt = tx.prepare_cached(
                 "UPDATE sessions SET status='ghost', lost_at=?1
                  WHERE host_alias=?2 AND status!='ghost' AND kind!='bg'
+                   AND COALESCE(last_reconciled_at, 0) < ?3
                  RETURNING id",
             )?;
             let ids = stmt
-                .query_map(rusqlite::params![now, host_alias], |r| r.get(0))?
+                .query_map(
+                    rusqlite::params![now, host_alias, ghost_cutoff(probe_started_at)],
+                    |r| r.get(0),
+                )?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             ids
         } else {
             let phs = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!(
                 "UPDATE sessions SET status='ghost', lost_at=?1
-                 WHERE host_alias=?2 AND status!='ghost' AND kind!='bg' AND tmux_name NOT IN ({phs})
+                 WHERE host_alias=?2 AND status!='ghost' AND kind!='bg'
+                   AND COALESCE(last_reconciled_at, 0) < ?3 AND tmux_name NOT IN ({phs})
                  RETURNING id"
             );
-            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&now, &host_alias];
+            let cutoff = ghost_cutoff(probe_started_at);
+            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&now, &host_alias, &cutoff];
             for n in keep_names {
                 params.push(n);
             }
@@ -1996,7 +2028,14 @@ impl Store {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64;
-                Self::ghost_and_clean_sessions_in_tx(tx, spec.alias, spec.keep, now, &mut out)?;
+                Self::ghost_and_clean_sessions_in_tx(
+                    tx,
+                    spec.alias,
+                    spec.keep,
+                    now,
+                    spec.probe_started_at,
+                    &mut out,
+                )?;
             }
             Ok(out)
         })?;
@@ -2227,6 +2266,17 @@ fn fetch_session(
     match rows.next() {
         Some(r) => Ok(Some(r?)),
         None => Ok(None),
+    }
+}
+
+/// Translate `HostReconcile::probe_started_at` into the `last_reconciled_at`
+/// cutoff used by `ghost_and_clean_sessions_in_tx`: rows stamped at or after
+/// the probe start are protected, and `0` ("no guard") protects nothing.
+fn ghost_cutoff(probe_started_at: i64) -> i64 {
+    if probe_started_at <= 0 {
+        i64::MAX
+    } else {
+        probe_started_at
     }
 }
 
@@ -2548,6 +2598,7 @@ mod tests {
                 claude_version: None,
                 tmux_version: None,
                 last_pinged_at: 1,
+                probe_started_at: 0,
                 sessions: &[],
                 keep: &[],
             })
@@ -2611,6 +2662,7 @@ mod tests {
                     claude_version: None,
                     tmux_version: None,
                     last_pinged_at: ts,
+                    probe_started_at: 0,
                     sessions: &[],
                     keep: &[],
                 })
@@ -3292,6 +3344,201 @@ mod tests {
         (store, bus)
     }
 
+    /// One live `ReconcileSession` for the no-op / changed-row event tests.
+    fn live_session(tmux_name: &'static str, pid: i64, activity: i64) -> ReconcileSession<'static> {
+        ReconcileSession {
+            tmux_name,
+            project_id: Some(pid),
+            created_at: 1,
+            last_activity_at: activity,
+            account_uuid: None,
+            worktree_key: Some("main".to_string()),
+            claude_session_id: None,
+            claude_status: Some("idle".to_string()),
+            effort_level: None,
+            pr_url: None,
+            current_activity: None,
+            context_pct: Some(12.5),
+            stuck_kind: None,
+            intel_observed: true,
+        }
+    }
+
+    #[test]
+    fn apply_host_reconcile_identical_row_emits_no_session_or_project_event() {
+        // BE-11 / FE-10: the tick upserts every live session every pass. A
+        // pass that observes exactly what the store already holds must not
+        // fan `session:updated` / `project:updated` out to the frontend.
+        let (mut store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let pid = store.upsert_project("o", "r", "/base/r").unwrap();
+        let keep = vec!["s1".to_string()];
+
+        // Pass 1: the row is new → created + project touched.
+        let sessions = vec![live_session("s1", pid, 10)];
+        store
+            .apply_host_reconcile(HostReconcile {
+                alias: "alpha",
+                reachable: true,
+                claude_version: None,
+                tmux_version: None,
+                last_pinged_at: 1,
+                probe_started_at: 0,
+                sessions: &sessions,
+                keep: &keep,
+            })
+            .unwrap();
+        let evts = bus.take();
+        assert!(
+            evts.iter().any(|e| e.starts_with("session:created:")),
+            "first pass creates; got {evts:?}"
+        );
+        assert!(
+            evts.contains(&format!("project:updated:{pid}")),
+            "first pass touches the project; got {evts:?}"
+        );
+
+        // Pass 2: identical observation → only the host probe stamp moves.
+        let sessions = vec![live_session("s1", pid, 10)];
+        store
+            .apply_host_reconcile(HostReconcile {
+                alias: "alpha",
+                reachable: true,
+                claude_version: None,
+                tmux_version: None,
+                last_pinged_at: 2,
+                probe_started_at: 0,
+                sessions: &sessions,
+                keep: &keep,
+            })
+            .unwrap();
+        assert_eq!(
+            bus.take(),
+            vec!["host:probed:alpha".to_string()],
+            "an unchanged row must emit neither session nor project events"
+        );
+
+        // Pass 3: one field changed → exactly one session:updated and, since
+        // last_session_at moves too, exactly one project:updated.
+        let sessions = vec![live_session("s1", pid, 20)];
+        store
+            .apply_host_reconcile(HostReconcile {
+                alias: "alpha",
+                reachable: true,
+                claude_version: None,
+                tmux_version: None,
+                last_pinged_at: 3,
+                probe_started_at: 0,
+                sessions: &sessions,
+                keep: &keep,
+            })
+            .unwrap();
+        let evts = bus.take();
+        assert_eq!(
+            evts.iter()
+                .filter(|e| e.starts_with("session:updated:"))
+                .count(),
+            1,
+            "changed row emits once; got {evts:?}"
+        );
+        assert_eq!(
+            evts.iter()
+                .filter(|e| e.starts_with("project:updated:"))
+                .count(),
+            1,
+            "project touched once; got {evts:?}"
+        );
+    }
+
+    #[test]
+    fn stale_probe_does_not_ghost_row_reconciled_after_its_start() {
+        // BE-3: a tick that listed tmux BEFORE `new_session` created a
+        // session, but whose write lands AFTER the create's own reconcile
+        // stamped the new row, carries a `keep` set without the new name.
+        // The row must survive that write; a probe started after the stamp
+        // ghosts it normally.
+        let (mut store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let probe_started = 1_000;
+        store
+            .upsert_session("fresh", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        // Same second as the probe start: the guard must be inclusive.
+        store
+            .mark_sessions_reconciled("alpha", &["fresh".to_string()], probe_started)
+            .unwrap();
+        store
+            .upsert_session("old", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store
+            .mark_sessions_reconciled("alpha", &["old".to_string()], probe_started - 1)
+            .unwrap();
+        // A row that was never stamped at all is also fair game.
+        store
+            .upsert_session("never", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        bus.take();
+
+        let stale_write = |store: &mut Store, keep: &[String]| {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    alias: "alpha",
+                    reachable: true,
+                    claude_version: None,
+                    tmux_version: None,
+                    last_pinged_at: 5,
+                    probe_started_at: probe_started,
+                    sessions: &[],
+                    keep,
+                })
+                .unwrap();
+        };
+        // Both keep shapes take different SQL paths; exercise each.
+        stale_write(&mut store, &[]);
+        let status =
+            |store: &Store, name: &str| store.get_session(name, "alpha").unwrap().unwrap().status;
+        assert_eq!(status(&store, "fresh"), "running", "newer row untouched");
+        assert!(store
+            .get_session("fresh", "alpha")
+            .unwrap()
+            .unwrap()
+            .lost_at
+            .is_none());
+        assert_eq!(status(&store, "old"), "ghost", "older row still ghosted");
+        assert_eq!(
+            status(&store, "never"),
+            "ghost",
+            "unstamped row still ghosted"
+        );
+        let evts = bus.take();
+        assert_eq!(
+            evts.iter()
+                .filter(|e| e.starts_with("session:updated:"))
+                .count(),
+            2,
+            "exactly the two ghosted rows emit; got {evts:?}"
+        );
+
+        // Non-empty keep path: `fresh` is still absent from keep and still safe.
+        stale_write(&mut store, &["unrelated".to_string()]);
+        assert_eq!(status(&store, "fresh"), "running");
+
+        // A probe that started after the stamp is authoritative again.
+        store
+            .apply_host_reconcile(HostReconcile {
+                alias: "alpha",
+                reachable: true,
+                claude_version: None,
+                tmux_version: None,
+                last_pinged_at: 6,
+                probe_started_at: probe_started + 1,
+                sessions: &[],
+                keep: &[],
+            })
+            .unwrap();
+        assert_eq!(status(&store, "fresh"), "ghost", "later probe ghosts it");
+    }
+
     #[test]
     fn upsert_session_emits_created_then_updated() {
         let (store, bus) = store_with_recorder();
@@ -3542,6 +3789,7 @@ mod tests {
                     claude_version: None,
                     tmux_version: None,
                     last_pinged_at: 1,
+                    probe_started_at: 0,
                     sessions: &sessions,
                     keep: &["s1".to_string()],
                 })
@@ -3636,6 +3884,7 @@ mod tests {
                 claude_version: Some("2.1"),
                 tmux_version: Some("3.6"),
                 last_pinged_at: 999,
+                probe_started_at: 0,
                 sessions: &sessions,
                 keep: &keep,
             })
@@ -3723,6 +3972,7 @@ mod tests {
                 claude_version: None,
                 tmux_version: None,
                 last_pinged_at: 1,
+                probe_started_at: 0,
                 sessions: &[],
                 keep: &[],
             })
@@ -3749,6 +3999,7 @@ mod tests {
                 claude_version: None,
                 tmux_version: None,
                 last_pinged_at: 2,
+                probe_started_at: 0,
                 sessions: &[],
                 keep: &[],
             })
@@ -3824,6 +4075,7 @@ mod tests {
             claude_version: Some("9.9"),
             tmux_version: None,
             last_pinged_at: 12345,
+            probe_started_at: 0,
             sessions: &sessions,
             keep: &keep,
         });
@@ -3873,6 +4125,7 @@ mod tests {
                 claude_version: None,
                 tmux_version: None,
                 last_pinged_at: 100,
+                probe_started_at: 0,
                 sessions: &[],
                 keep: &[],
             })
@@ -3900,6 +4153,7 @@ mod tests {
                 claude_version: None,
                 tmux_version: None,
                 last_pinged_at: 200,
+                probe_started_at: 0,
                 sessions: &[],
                 keep: &[],
             })

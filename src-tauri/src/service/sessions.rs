@@ -22,22 +22,169 @@ const PANE_TAIL_LINES: u32 = 8;
 /// `local` one. On elapse we synthesize a probe error, routing the host through
 /// the existing "unreachable, keep last-known sessions" branch. Set generously
 /// so a healthy host with many sessions (each pane capture is a sequential
-/// round-trip) never false-trips; on a real wedge the ssh-layer keepalive
-/// usually tears the master down well before this fires.
+/// round-trip) never false-trips; on a real wedge the ssh-layer wall clock
+/// (`SshClient::run` → `E_SSH_TIMEOUT`) usually fires first and resets the
+/// master.
 const HOST_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Default cadence (seconds) for the background reconcile tick, and the
+/// freshness window `list_sessions` serves cached rows within when the tick
+/// is disabled. Overridden by the `reconcile.interval_secs` setting.
+pub const DEFAULT_RECONCILE_INTERVAL_SECS: i64 = 20;
+
+/// Pure: resolve the reconcile interval from the raw `reconcile.interval_secs`
+/// setting value. `None`/garbage falls back to the 20s default; an explicit
+/// `0` (or negative) is surfaced verbatim — it disables the proactive tick
+/// (see `reconcile_tick_interval`). Shared by the tick spawner in `lib.rs`
+/// and the `list_sessions` freshness window so the two can never disagree.
+pub fn read_reconcile_interval_secs(raw: Option<String>) -> i64 {
+    match raw {
+        Some(v) => v
+            .trim()
+            .parse::<i64>()
+            .unwrap_or(DEFAULT_RECONCILE_INTERVAL_SECS),
+        None => DEFAULT_RECONCILE_INTERVAL_SECS,
+    }
+}
 
 /// Map of `tmux_name` → analyzed pane intel, gathered off-lock during a host
 /// probe. A name absent from the map (capture failed) leaves the session's
 /// intel fields untouched (COALESCE in the upsert preserves prior values).
 type PaneIntelMap = std::collections::HashMap<String, crate::service::pane_intel::PaneIntel>;
 
-/// Per-host probe result tuple: (host, tmux sessions, claude agents, pane intel).
-type HostProbeResult = (
-    HostRow,
-    Result<Vec<crate::tmux::TmuxSession>, IpcError>,
-    Vec<crate::claude_agents::ClaudeAgentRow>,
-    PaneIntelMap,
-);
+/// One host's probe result, carried from the off-lock probe task to the
+/// under-lock writer.
+struct HostProbe {
+    host: HostRow,
+    result: Result<Vec<crate::tmux::TmuxSession>, IpcError>,
+    agent_rows: Vec<crate::claude_agents::ClaudeAgentRow>,
+    intel: PaneIntelMap,
+    /// Unix-epoch second the probe STARTED. Forwarded as
+    /// `HostReconcile::probe_started_at` so the writer never ghosts a row that
+    /// a newer probe (e.g. `new_session`'s own reconcile) stamped after this
+    /// probe listed tmux (BE-3).
+    started_at: i64,
+}
+
+/// Executor factory + probe budget for the reconcile core. Production uses
+/// `exec_for` (local tmux or ssh-wrapped tmux) under `HOST_PROBE_TIMEOUT`;
+/// tests inject fakes so the fan-out, the gate and the ghost guard are
+/// exercisable without a real host (BE-7).
+pub(crate) struct ReconcileDeps {
+    exec: ExecFactory,
+    probe_timeout: std::time::Duration,
+}
+
+/// `host alias → tmux executor` factory used by `ReconcileDeps`.
+type ExecFactory = Box<dyn Fn(&str) -> Box<dyn TmuxExec> + Send + Sync>;
+
+impl ReconcileDeps {
+    fn real(ssh: &Arc<SshClient>) -> Arc<Self> {
+        let ssh = Arc::clone(ssh);
+        Arc::new(Self {
+            exec: Box::new(move |alias| exec_for(alias, &ssh)),
+            probe_timeout: HOST_PROBE_TIMEOUT,
+        })
+    }
+
+    #[cfg(test)]
+    fn fake(
+        exec: impl Fn(&str) -> Box<dyn TmuxExec> + Send + Sync + 'static,
+        probe_timeout: std::time::Duration,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            exec: Box::new(exec),
+            probe_timeout,
+        })
+    }
+}
+
+/// Shared overlap guard + freshness marker for the fleet-wide reconcile.
+///
+/// Every entry point that can start a full pass — the background tick, the
+/// `list_sessions` Tauri command, the MCP `list_sessions` tool — goes through
+/// the same gate, so at most ONE pass runs at a time process-wide (BE-2).
+/// A caller that finds a pass already running is served the stored rows
+/// instead of stacking a second N-host probe behind it. `last_completed`
+/// lets `list_sessions` skip the probe entirely while the last pass is still
+/// within the configured interval.
+///
+/// The gate is a process-wide static (`reconcile_gate()`) rather than Tauri
+/// managed state because the MCP tools and the commands only hand the service
+/// a `&Mutex<Store>` + `&Arc<SshClient>`; tests construct their own instance.
+pub struct ReconcileGate {
+    running: tokio::sync::Mutex<()>,
+    last_completed: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Number of full passes that ran to completion (tests use it to prove a
+    /// call caused zero / exactly one pass).
+    passes: std::sync::atomic::AtomicU64,
+}
+
+/// RAII token for a running pass. Drop without `complete()` (a pass that
+/// errored) leaves `last_completed` untouched so the next caller retries.
+pub struct ReconcilePass<'a> {
+    _guard: tokio::sync::MutexGuard<'a, ()>,
+    gate: &'a ReconcileGate,
+}
+
+impl ReconcilePass<'_> {
+    fn complete(self) {
+        if let Ok(mut last) = self.gate.last_completed.lock() {
+            *last = Some(std::time::Instant::now());
+        }
+        self.gate
+            .passes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl Default for ReconcileGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ReconcileGate {
+    pub fn new() -> Self {
+        Self {
+            running: tokio::sync::Mutex::new(()),
+            last_completed: std::sync::Mutex::new(None),
+            passes: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Claim the single pass slot without waiting. `None` ⇒ a pass is
+    /// already running.
+    pub fn try_begin(&self) -> Option<ReconcilePass<'_>> {
+        self.running.try_lock().ok().map(|guard| ReconcilePass {
+            _guard: guard,
+            gate: self,
+        })
+    }
+
+    /// `true` when a full pass completed less than `window` ago.
+    pub fn is_fresh(&self, window: std::time::Duration) -> bool {
+        self.last_completed
+            .lock()
+            .ok()
+            .and_then(|l| *l)
+            .map(|t| t.elapsed() < window)
+            .unwrap_or(false)
+    }
+
+    /// Completed full passes so far.
+    #[cfg(test)]
+    pub fn passes(&self) -> u64 {
+        self.passes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// The process-wide gate every production entry point shares.
+pub fn reconcile_gate() -> &'static ReconcileGate {
+    static GATE: once_cell::sync::Lazy<ReconcileGate> =
+        once_cell::sync::Lazy::new(ReconcileGate::new);
+    &GATE
+}
 
 /// Capture and analyze the pane tail for every live session on a host. Runs
 /// off-lock inside the probe task. A failed capture for one session is skipped
@@ -82,13 +229,13 @@ fn exec_for(host: &str, ssh: &Arc<SshClient>) -> Box<dyn TmuxExec> {
 /// transactional `Store::apply_host_reconcile` (one fsync, emit-after-commit).
 fn reconcile_write_one_host(
     s: &mut Store,
-    host: &HostRow,
-    res: &Result<Vec<crate::tmux::TmuxSession>, IpcError>,
+    probe: &HostProbe,
     projects: &[ProjectRow],
-    agent_rows: &[crate::claude_agents::ClaudeAgentRow],
-    intel: &PaneIntelMap,
 ) -> Result<(), IpcError> {
-    match res {
+    let host = &probe.host;
+    let agent_rows = &probe.agent_rows;
+    let intel = &probe.intel;
+    match &probe.result {
         Ok(live) => {
             let mut keep: Vec<String> = Vec::with_capacity(live.len());
             let mut sessions: Vec<ReconcileSession> = Vec::with_capacity(live.len());
@@ -173,6 +320,7 @@ fn reconcile_write_one_host(
                 claude_version: host.claude_version.as_deref(),
                 tmux_version: host.tmux_version.as_deref(),
                 last_pinged_at: now_unix(),
+                probe_started_at: probe.started_at,
                 sessions: &sessions,
                 keep: &keep,
             })?;
@@ -200,7 +348,8 @@ fn reconcile_write_one_host(
             reconcile_bg_agents(s, &host.alias, live, projects, agent_rows)?;
             // Task H: stamp freshness on every session this pass observed live,
             // so a proactive (background) reconcile keeps `last_reconciled_at`
-            // current and the UI can dim rows whose host has gone quiet.
+            // current and the UI can dim rows whose host has gone quiet. It is
+            // also the BE-3 ghost guard's evidence (`probe_started_at` above).
             // Best-effort: a failure here must not abort reconcile.
             if let Err(e) = s.mark_sessions_reconciled(&host.alias, &keep, now_unix()) {
                 eprintln!(
@@ -218,6 +367,7 @@ fn reconcile_write_one_host(
                 claude_version: host.claude_version.as_deref(),
                 tmux_version: host.tmux_version.as_deref(),
                 last_pinged_at: now_unix(),
+                probe_started_at: probe.started_at,
                 sessions: &[],
                 keep: &[],
             })?;
@@ -299,17 +449,17 @@ fn reconcile_bg_agents(
     Ok(())
 }
 
-/// Probe one host off-lock, under a hard wall-clock cap (`HOST_PROBE_TIMEOUT`).
-/// A wedged SSH ControlMaster can make any of these awaits hang forever
-/// (`ConnectTimeout` does not cover a multiplexed attach onto an existing
-/// master), so the whole probe is bounded. On timeout we return an `Err` probe
-/// result, which `reconcile_write_one_host` turns into "host unreachable, keep
-/// last-known sessions". The abandoned ssh child is reaped on its own by the
-/// ssh-layer keepalive. Shared by the multi-host reconcile and the single-host
-/// background refresh so both are bounded identically.
-async fn probe_one_host(host: HostRow, ssh: &Arc<SshClient>) -> HostProbeResult {
-    let tmux = exec_for(&host.alias, ssh);
-    probe_with_timeout(host, tmux, HOST_PROBE_TIMEOUT).await
+/// Probe one host off-lock, under a hard wall-clock cap (`deps.probe_timeout`,
+/// `HOST_PROBE_TIMEOUT` in production). A wedged SSH ControlMaster can make
+/// any of these awaits hang (`ConnectTimeout` does not cover a multiplexed
+/// attach onto an existing master; the ssh-layer wall clock is the first line
+/// of defence, this cap the second), so the whole probe is bounded. On timeout
+/// we return an `Err` probe result, which `reconcile_write_one_host` turns
+/// into "host unreachable, keep last-known sessions". Shared by the multi-host
+/// reconcile and the single-host refresh so both are bounded identically.
+async fn probe_one_host(host: HostRow, deps: &ReconcileDeps) -> HostProbe {
+    let tmux = (deps.exec)(&host.alias);
+    probe_with_timeout(host, tmux, deps.probe_timeout).await
 }
 
 /// Inner probe with an injectable executor + timeout, so the wedged-host path
@@ -318,7 +468,10 @@ async fn probe_with_timeout(
     host: HostRow,
     tmux: Box<dyn TmuxExec>,
     timeout: std::time::Duration,
-) -> HostProbeResult {
+) -> HostProbe {
+    // Recorded BEFORE the first await: this is the instant the probe's view of
+    // the host stops being current (BE-3 ghost guard).
+    let started_at = now_unix();
     let probe = async {
         let tmux_result = tmux.list_sessions().await;
         let agent_rows = tmux.list_claude_agents().await;
@@ -330,31 +483,40 @@ async fn probe_with_timeout(
         (tmux_result, agent_rows, intel)
     };
     match tokio::time::timeout(timeout, probe).await {
-        Ok((tmux_result, agent_rows, intel)) => (host, tmux_result, agent_rows, intel),
+        Ok((result, agent_rows, intel)) => HostProbe {
+            host,
+            result,
+            agent_rows,
+            intel,
+            started_at,
+        },
         Err(_elapsed) => {
             eprintln!(
                 "[reconcile] host {alias} probe exceeded {timeout:?}; marking unreachable (last-known sessions kept)",
                 alias = host.alias,
             );
-            (
+            HostProbe {
                 host,
-                Err(IpcError::new("E_TIMEOUT", "host probe timed out")),
-                Vec::new(),
-                PaneIntelMap::new(),
-            )
+                result: Err(IpcError::new("E_TIMEOUT", "host probe timed out")),
+                agent_rows: Vec::new(),
+                intel: PaneIntelMap::new(),
+                started_at,
+            }
         }
     }
 }
 
-async fn reconcile_sessions(
+/// Full fleet pass: probe every non-hidden host in parallel, then apply each
+/// host's result under its own short store-lock window. Callers are expected
+/// to hold a `ReconcilePass` from the shared gate (see `run_full_reconcile`);
+/// this function does not take the gate itself so tests can drive it directly.
+async fn reconcile_sessions_with(
     store: &Mutex<Store>,
-    ssh: &Arc<SshClient>,
-) -> Result<Vec<SessionRow>, IpcError> {
+    deps: &Arc<ReconcileDeps>,
+) -> Result<(), IpcError> {
     // 1. Snapshot under lock (brief). Ensure local host exists first.
     let hosts = {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = store.lock().map_err(|_| IpcError::lock())?;
         s.upsert_host("local")?;
         s.list_hosts()?
     };
@@ -364,76 +526,115 @@ async fn reconcile_sessions(
     //    surfaced by the final `list_all_sessions` read, without probing.
     //    Each task receives owned data so it satisfies 'static + Send.
     //
-    //    Each probe is bounded by `HOST_PROBE_TIMEOUT` (see `probe_one_host`):
+    //    Each probe is bounded by `deps.probe_timeout` (see `probe_one_host`):
     //    a single wedged host can no longer stall the collector below and, with
     //    it, the whole load path.
     //
-    //    TODO(iter4a-M4): `JoinSet::drop` aborts the futures but does NOT kill
-    //    the spawned ssh/tmux child processes; on timeout/early-return/panic
-    //    those orphan. They now self-reap via the ssh keepalive (ServerAlive in
-    //    `ssh.rs` `mux_opts`) within ~10s instead of lingering for hours, but
-    //    explicit kill+reap still awaits the CancellationToken plumbing in M4.
+    //    `JoinSet::drop` aborts the futures but does NOT kill spawned ssh
+    //    children by itself; the ssh layer's own wall clock
+    //    (`SshClient::run_child`) kills and reaps them and resets the master.
     let mut set = tokio::task::JoinSet::new();
     for host in hosts.into_iter().filter(|h| !h.hidden) {
-        let ssh_arc = Arc::clone(ssh);
-        set.spawn(async move { probe_one_host(host, &ssh_arc).await });
+        let deps = Arc::clone(deps);
+        set.spawn(async move { probe_one_host(host, &deps).await });
     }
 
     // Collect per-host probe results. Join errors (task panics) are logged
     // and skipped — they don't abort the rest of reconcile.
-    let mut probed: Vec<HostProbeResult> = Vec::new();
+    let mut probed: Vec<HostProbe> = Vec::new();
     while let Some(join) = set.join_next().await {
         match join {
-            Ok((host, res, agent_rows, intel)) => probed.push((host, res, agent_rows, intel)),
+            Ok(probe) => probed.push(probe),
             Err(e) => eprintln!("[reconcile] probe task panicked: {e}"),
         }
     }
 
-    // 3. Apply all writes in a single short lock window. Each host's
-    //    write-burst goes through `Store::apply_host_reconcile`, which wraps
-    //    update_host_probe + upserts + touches + delete-not-in in ONE
-    //    transaction (one fsync) and emits events only AFTER it commits — so a
-    //    mid-burst error rolls everything back and emits nothing for that host.
-    {
-        let mut s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-
-        // The project list is identical for every host — fetch it once here
-        // rather than re-querying inside `find_project_id_for_path` per session.
-        let projects = s.list_projects()?;
-
-        for (host, res, agent_rows, intel) in &probed {
-            // Per-host isolation: one host's DB write failure (e.g. an FK
-            // violation on a stale account_uuid) must NOT abort reconcile for
-            // every other host. apply_host_reconcile is transactional, so a
-            // failed host rolls back cleanly; we log it and carry on.
-            if let Err(e) =
-                reconcile_write_one_host(&mut s, host, res, &projects, agent_rows, intel)
-            {
-                eprintln!("[reconcile] write failed for {}: {e}", host.alias);
-            }
+    // 3. Apply writes, taking the store lock ONCE PER HOST rather than once
+    //    for the whole loop (BE-12): a command or the PTY poller waiting on
+    //    the store only ever queues behind one host's transaction. Each
+    //    host's write-burst goes through `Store::apply_host_reconcile`, which
+    //    wraps update_host_probe + upserts + touches + ghosting in ONE
+    //    transaction (one fsync) and emits events only AFTER it commits — so
+    //    a mid-burst error rolls everything back and emits nothing for that
+    //    host.
+    //
+    //    The project list is identical for every host — fetch it once here
+    //    rather than re-querying inside `find_project_id_for_path` per session.
+    let projects = {
+        let s = store.lock().map_err(|_| IpcError::lock())?;
+        s.list_projects()?
+    };
+    for probe in &probed {
+        let mut s = store.lock().map_err(|_| IpcError::lock())?;
+        // Per-host isolation: one host's DB write failure (e.g. an FK
+        // violation on a stale account_uuid) must NOT abort reconcile for
+        // every other host. apply_host_reconcile is transactional, so a
+        // failed host rolls back cleanly; we log it and carry on.
+        if let Err(e) = reconcile_write_one_host(&mut s, probe, &projects) {
+            eprintln!("[reconcile] write failed for {}: {e}", probe.host.alias);
         }
     }
+    Ok(())
+}
 
-    // 4. Read the final session set in one query (covers active + hidden
-    //    hosts) instead of N per-host reads.
-    let s = store
+/// Claim the gate and run one full pass. Returns `Ok(false)` without probing
+/// when another pass is already running (the caller then serves stored rows).
+async fn run_full_reconcile(
+    store: &Mutex<Store>,
+    deps: &Arc<ReconcileDeps>,
+    gate: &ReconcileGate,
+) -> Result<bool, IpcError> {
+    let Some(pass) = gate.try_begin() else {
+        return Ok(false);
+    };
+    reconcile_sessions_with(store, deps).await?;
+    pass.complete();
+    Ok(true)
+}
+
+/// Freshness window for `list_sessions`: the configured tick interval, or the
+/// default when the tick is disabled (`0`) — pull-only mode still must not
+/// re-probe the fleet on every sidebar focus.
+fn list_freshness_window(store: &Mutex<Store>) -> std::time::Duration {
+    let raw = store
         .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        .ok()
+        .and_then(|s| s.get_setting("reconcile.interval_secs").ok().flatten());
+    let secs = read_reconcile_interval_secs(raw);
+    let secs = if secs <= 0 {
+        DEFAULT_RECONCILE_INTERVAL_SECS
+    } else {
+        secs
+    };
+    std::time::Duration::from_secs(secs as u64)
+}
+
+/// `list_sessions` core with injectable deps/gate/window (tests). See the
+/// public `list_sessions` for the policy.
+async fn list_sessions_with(
+    store: &Mutex<Store>,
+    deps: &Arc<ReconcileDeps>,
+    gate: &ReconcileGate,
+    window: std::time::Duration,
+    force: bool,
+) -> Result<Vec<SessionRow>, IpcError> {
+    if force || !gate.is_fresh(window) {
+        // `Ok(false)` ⇒ a pass is in flight; fall through to the stored rows
+        // rather than queue a second fleet-wide probe behind it.
+        run_full_reconcile(store, deps, gate).await?;
+    }
+    let s = store.lock().map_err(|_| IpcError::lock())?;
     s.list_all_sessions().map_err(IpcError::from)
 }
 
-async fn reconcile_one_host(
+async fn reconcile_one_host_with(
     store: &Mutex<Store>,
-    ssh: &Arc<SshClient>,
+    deps: &ReconcileDeps,
     alias: &str,
 ) -> Result<(), IpcError> {
     // 1. Snapshot the host under lock (brief).
     let host = {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = store.lock().map_err(|_| IpcError::lock())?;
         s.list_hosts()?
             .into_iter()
             .find(|h| h.alias == alias)
@@ -441,15 +642,25 @@ async fn reconcile_one_host(
     };
 
     // 2. Probe off-lock, under the same hard cap as the multi-host reconcile.
-    let (host, result, agent_rows, intel) = probe_one_host(host, ssh).await;
+    let probe = probe_one_host(host, deps).await;
 
     // 3. Apply writes under one brief lock, via the SAME per-host write path
     //    as the multi-host reconcile (single transaction + emit-after-commit).
-    let mut s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let mut s = store.lock().map_err(|_| IpcError::lock())?;
     let projects = s.list_projects()?;
-    reconcile_write_one_host(&mut s, &host, &result, &projects, &agent_rows, &intel)
+    reconcile_write_one_host(&mut s, &probe, &projects)
+}
+
+/// Single-host refresh used after a mutation (`new_session`, `kill`, `rename`,
+/// …) so the caller can return the fresh row. Not gated: it is one host, not
+/// the fleet, and the BE-3 probe-start guard makes it safe to interleave with
+/// a full pass.
+async fn reconcile_one_host(
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    alias: &str,
+) -> Result<(), IpcError> {
+    reconcile_one_host_with(store, &ReconcileDeps::real(ssh), alias).await
 }
 
 fn now_unix() -> i64 {
@@ -533,24 +744,40 @@ fn find_project_id_for_path(
         .map(|p| p.id)
 }
 
+/// List every session in the fleet.
+///
+/// Served from the store; a full reconcile pass runs first ONLY when the last
+/// completed pass is older than the configured interval AND no pass is
+/// currently running (BE-2). Called from the Tauri command, the MCP tool and
+/// the frontend on window focus — none of which should be able to stack
+/// N-host probes on top of the background tick. Use `reconcile_now` for an
+/// explicit refresh that ignores freshness.
 pub async fn list_sessions(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<Vec<SessionRow>, IpcError> {
-    reconcile_sessions(store, ssh).await
+    let window = list_freshness_window(store);
+    list_sessions_with(
+        store,
+        &ReconcileDeps::real(ssh),
+        reconcile_gate(),
+        window,
+        false,
+    )
+    .await
 }
 
-/// Headless reconcile entry point for the Wave-2 background tick (Task H).
+/// Headless, forced reconcile entry point: the background tick (Task H) and
+/// any "refresh now" caller.
 ///
-/// Reconcile is already Tauri-free: `reconcile_sessions` takes only a
-/// `&Mutex<Store>` and a `&Arc<SshClient>`, and all row events are emitted
-/// through the store's `EventBus` (see `events.rs`) — NOT a Tauri `AppHandle`.
-/// So a `tokio::spawn`ed loop can drive it with the same managed `Arc`s the
-/// commands use. This wrapper exists so the spawn site reads as "reconcile now"
-/// rather than "list sessions", and so the entry point is independently
-/// testable without a running Tauri app.
-pub async fn reconcile_now(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result<(), IpcError> {
-    reconcile_sessions(store, ssh).await.map(|_| ())
+/// Reconcile is Tauri-free: it takes only a `&Mutex<Store>` and a
+/// `&Arc<SshClient>`, and all row events are emitted through the store's
+/// `EventBus` (see `events.rs`) — NOT a Tauri `AppHandle`. So a `tokio::spawn`ed
+/// loop can drive it with the same managed `Arc`s the commands use. Ignores
+/// the freshness window but still honours the shared gate: `Ok(false)` means a
+/// pass was already running and this call did nothing.
+pub async fn reconcile_now(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result<bool, IpcError> {
+    run_full_reconcile(store, &ReconcileDeps::real(ssh), reconcile_gate()).await
 }
 
 /// Pure interval-guard decision for the background reconcile tick.
@@ -2555,21 +2782,335 @@ mod tests {
             .expect("host row");
 
         let start = std::time::Instant::now();
-        let (h, res, agents, intel) =
+        let before = now_unix();
+        let probe =
             probe_with_timeout(host, Box::new(HangingTmux), Duration::from_millis(80)).await;
         let elapsed = start.elapsed();
 
-        assert_eq!(h.alias, "wedged", "host identity preserved for the writer");
+        assert_eq!(
+            probe.host.alias, "wedged",
+            "host identity preserved for the writer"
+        );
         assert!(
-            res.is_err(),
+            probe.result.is_err(),
             "wedged probe must surface as Err → unreachable"
         );
-        assert!(agents.is_empty());
-        assert!(intel.is_empty());
+        assert!(probe.agent_rows.is_empty());
+        assert!(probe.intel.is_empty());
+        assert!(
+            probe.started_at >= before && probe.started_at <= now_unix(),
+            "probe start is stamped even on timeout"
+        );
         assert!(
             elapsed < Duration::from_secs(2),
             "must return at ~the cap, not the 3600s hang; took {elapsed:?}",
         );
+    }
+
+    /// Scriptable executor for the reconcile-core tests: returns a fixed
+    /// session list after `delay` (or never, when `hang`), and counts how many
+    /// probes hit it so a test can prove "zero probes" / "exactly one probe".
+    struct ScriptedTmux {
+        sessions: Vec<crate::tmux::TmuxSession>,
+        delay: std::time::Duration,
+        hang: bool,
+        probes: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl TmuxExec for ScriptedTmux {
+        async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+            self.probes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.hang {
+                std::future::pending::<()>().await;
+            }
+            tokio::time::sleep(self.delay).await;
+            Ok(self.sessions.clone())
+        }
+        async fn new_session(
+            &self,
+            _n: &str,
+            _c: &std::path::Path,
+            _p: &str,
+        ) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn kill_session(&self, _n: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn rename_session(&self, _o: &str, _n: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn restart_session(&self, _n: &str, _p: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn capture_pane(&self, _n: &str) -> Result<String, IpcError> {
+            Ok(String::new())
+        }
+        async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
+            Ok(String::new())
+        }
+        async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
+            vec![]
+        }
+    }
+
+    fn tmux_session(name: &str) -> crate::tmux::TmuxSession {
+        crate::tmux::TmuxSession {
+            name: name.to_string(),
+            created: 1,
+            last_activity: 1,
+            attached: false,
+            path: PathBuf::from("/tmp"),
+        }
+    }
+
+    /// Deps whose `local` host answers with `local_sessions` after `delay`
+    /// and whose every other host hangs forever. `probes` counts list calls
+    /// across all hosts.
+    fn scripted_deps(
+        local_sessions: Vec<crate::tmux::TmuxSession>,
+        delay: std::time::Duration,
+        probe_timeout: std::time::Duration,
+    ) -> (Arc<ReconcileDeps>, Arc<std::sync::atomic::AtomicUsize>) {
+        let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probes_for_exec = Arc::clone(&probes);
+        let deps = ReconcileDeps::fake(
+            move |alias| {
+                Box::new(ScriptedTmux {
+                    sessions: if alias == "local" {
+                        local_sessions.clone()
+                    } else {
+                        Vec::new()
+                    },
+                    delay,
+                    hang: alias != "local",
+                    probes: Arc::clone(&probes_for_exec),
+                })
+            },
+            probe_timeout,
+        );
+        (deps, probes)
+    }
+
+    #[tokio::test]
+    async fn fleet_reconcile_completes_when_one_host_never_answers() {
+        // BE-1 (d): the multi-host fan-out must finish — and write the healthy
+        // host's rows — when another host's probe never returns. The dead host
+        // is treated exactly like an unreachable one (reachable=false,
+        // last-known rows kept).
+        use std::time::Duration;
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("wedged").unwrap();
+            s.upsert_session("wedged-old", "wedged", None, None, 1, 1, "running", None)
+                .unwrap();
+        }
+        let (deps, _probes) = scripted_deps(
+            vec![tmux_session("local-live")],
+            Duration::from_millis(10),
+            Duration::from_millis(150),
+        );
+        let start = std::time::Instant::now();
+        reconcile_sessions_with(&store, &deps)
+            .await
+            .expect("fan-out completes");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "one dead host must not block the pass; took {:?}",
+            start.elapsed()
+        );
+        let s = store.lock().unwrap();
+        let wedged = s
+            .list_hosts()
+            .unwrap()
+            .into_iter()
+            .find(|h| h.alias == "wedged")
+            .unwrap();
+        assert!(!wedged.reachable, "timed-out host is marked unreachable");
+        let kept = s.list_sessions_for_host("wedged").unwrap();
+        assert_eq!(kept.len(), 1, "last-known rows kept on the dead host");
+        assert_eq!(kept[0].status, "running", "not ghosted by a timeout");
+        let local = s.list_sessions_for_host("local").unwrap();
+        assert_eq!(local.len(), 1, "healthy host's rows were written");
+        assert_eq!(local[0].tmux_name, "local-live");
+    }
+
+    #[tokio::test]
+    async fn concurrent_list_sessions_share_one_reconcile_pass() {
+        // BE-2: two callers racing into `list_sessions` (UI focus + MCP tool,
+        // say) must cause ONE fleet probe; the loser is served the stored
+        // rows immediately instead of queueing a second pass.
+        use std::time::Duration;
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        let gate = ReconcileGate::new();
+        let (deps, probes) = scripted_deps(
+            vec![tmux_session("s1")],
+            Duration::from_millis(200),
+            Duration::from_secs(5),
+        );
+        let window = Duration::from_secs(60);
+        let (a, b) = tokio::join!(
+            list_sessions_with(&store, &deps, &gate, window, false),
+            list_sessions_with(&store, &deps, &gate, window, false),
+        );
+        a.expect("first caller ok");
+        b.expect("second caller ok");
+        assert_eq!(
+            gate.passes(),
+            1,
+            "exactly one pass for two concurrent callers"
+        );
+        assert_eq!(
+            probes.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "only the `local` host was probed, once"
+        );
+        // The winner (whichever it was) got the fresh row; the store now has it.
+        let rows = list_sessions_with(&store, &deps, &gate, window, false)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tmux_name, "s1");
+    }
+
+    #[tokio::test]
+    async fn list_sessions_within_freshness_window_causes_zero_probes() {
+        // BE-2: a store that was reconciled within the interval is served as
+        // is; `force` (the explicit-refresh path) still probes.
+        use std::time::Duration;
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        let gate = ReconcileGate::new();
+        let (deps, probes) = scripted_deps(
+            vec![tmux_session("s1")],
+            Duration::from_millis(1),
+            Duration::from_secs(5),
+        );
+        let window = Duration::from_secs(60);
+        // First call: nothing completed yet → one pass.
+        list_sessions_with(&store, &deps, &gate, window, false)
+            .await
+            .unwrap();
+        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // Within the window: served from the store, zero new probes.
+        for _ in 0..3 {
+            let rows = list_sessions_with(&store, &deps, &gate, window, false)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1, "stored rows are returned");
+        }
+        assert_eq!(
+            probes.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "fresh store ⇒ no probe"
+        );
+        assert_eq!(gate.passes(), 1);
+        // Explicit refresh ignores freshness.
+        list_sessions_with(&store, &deps, &gate, window, true)
+            .await
+            .unwrap();
+        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(gate.passes(), 2);
+        // A zero-length window means "always stale".
+        list_sessions_with(&store, &deps, &gate, Duration::ZERO, false)
+            .await
+            .unwrap();
+        assert_eq!(gate.passes(), 3);
+    }
+
+    #[tokio::test]
+    async fn failed_pass_leaves_gate_stale_so_next_caller_retries() {
+        // A pass that errors must not stamp `last_completed`; the next caller
+        // probes again instead of trusting a store that never got written.
+        let gate = ReconcileGate::new();
+        {
+            let pass = gate.try_begin().expect("free gate");
+            drop(pass); // errored / aborted: no `complete()`
+        }
+        assert!(!gate.is_fresh(std::time::Duration::from_secs(60)));
+        assert_eq!(gate.passes(), 0);
+        let pass = gate.try_begin().expect("released after drop");
+        assert!(gate.try_begin().is_none(), "single slot while a pass runs");
+        pass.complete();
+        assert!(gate.is_fresh(std::time::Duration::from_secs(60)));
+        assert_eq!(gate.passes(), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
+        // BE-3 end to end through the service writer: a tick's probe starts
+        // (its `keep` set is frozen), `new_session` then creates + reconciles
+        // a session on the same host, and only afterwards does the tick's
+        // write land. The new row must survive; a probe that starts after the
+        // create ghosts it as usual.
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        let host = {
+            let s = store.lock().unwrap();
+            s.upsert_host("h").unwrap();
+            s.list_hosts()
+                .unwrap()
+                .into_iter()
+                .find(|h| h.alias == "h")
+                .unwrap()
+        };
+        // 1. The stale tick probe starts: sees zero sessions.
+        let stale = HostProbe {
+            host: host.clone(),
+            result: Ok(Vec::new()),
+            agent_rows: Vec::new(),
+            intel: PaneIntelMap::new(),
+            started_at: now_unix(),
+        };
+        // 2. `new_session` creates the tmux session and runs its own
+        //    single-host reconcile, which upserts + stamps the row.
+        let (deps, _) = scripted_deps(
+            vec![tmux_session("brand-new")],
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_secs(5),
+        );
+        // Point the fake at host `h` instead of `local`.
+        let deps_h = ReconcileDeps::fake(
+            move |_alias| (deps.exec)("local"),
+            std::time::Duration::from_secs(5),
+        );
+        reconcile_one_host_with(&store, &deps_h, "h")
+            .await
+            .expect("create's reconcile");
+        {
+            let s = store.lock().unwrap();
+            let row = s
+                .get_session("brand-new", "h")
+                .unwrap()
+                .expect("row exists");
+            assert_eq!(row.status, "running");
+        }
+        // 3. The stale write lands.
+        {
+            let mut s = store.lock().unwrap();
+            let projects = s.list_projects().unwrap();
+            reconcile_write_one_host(&mut s, &stale, &projects).expect("stale write ok");
+            let row = s.get_session("brand-new", "h").unwrap().unwrap();
+            assert_eq!(
+                row.status, "running",
+                "row reconciled after the stale probe started must not be ghosted"
+            );
+            assert!(row.lost_at.is_none());
+        }
+        // 4. A probe that starts strictly after the create is authoritative.
+        let later = HostProbe {
+            host,
+            result: Ok(Vec::new()),
+            agent_rows: Vec::new(),
+            intel: PaneIntelMap::new(),
+            started_at: now_unix() + 5,
+        };
+        let mut s = store.lock().unwrap();
+        let projects = s.list_projects().unwrap();
+        reconcile_write_one_host(&mut s, &later, &projects).unwrap();
+        let row = s.get_session("brand-new", "h").unwrap().unwrap();
+        assert_eq!(row.status, "ghost", "a later probe ghosts it normally");
     }
 
     #[tokio::test]
@@ -3177,6 +3718,51 @@ mod tests {
     }
 
     // ── Task H: background reconcile tick ──────────────────────────────────
+
+    #[test]
+    fn reconcile_interval_defaults_when_absent_or_garbage() {
+        assert_eq!(read_reconcile_interval_secs(None), 20);
+        assert_eq!(read_reconcile_interval_secs(Some("nonsense".into())), 20);
+        assert_eq!(read_reconcile_interval_secs(Some("".into())), 20);
+    }
+
+    #[test]
+    fn reconcile_interval_honours_explicit_values() {
+        assert_eq!(read_reconcile_interval_secs(Some("5".into())), 5);
+        // Surrounding whitespace is trimmed before parsing.
+        assert_eq!(read_reconcile_interval_secs(Some(" 45 ".into())), 45);
+        // 0 is the documented "disabled" sentinel; surfaced verbatim so the
+        // tick-interval guard can turn it into None.
+        assert_eq!(read_reconcile_interval_secs(Some("0".into())), 0);
+    }
+
+    #[test]
+    fn list_freshness_window_falls_back_to_default_when_tick_disabled() {
+        // Pull-only mode (interval 0) must still not re-probe on every focus.
+        let store = Mutex::new(Store::open_in_memory().expect("store"));
+        assert_eq!(
+            list_freshness_window(&store),
+            std::time::Duration::from_secs(DEFAULT_RECONCILE_INTERVAL_SECS as u64)
+        );
+        store
+            .lock()
+            .unwrap()
+            .set_setting("reconcile.interval_secs", "0")
+            .unwrap();
+        assert_eq!(
+            list_freshness_window(&store),
+            std::time::Duration::from_secs(DEFAULT_RECONCILE_INTERVAL_SECS as u64)
+        );
+        store
+            .lock()
+            .unwrap()
+            .set_setting("reconcile.interval_secs", "7")
+            .unwrap();
+        assert_eq!(
+            list_freshness_window(&store),
+            std::time::Duration::from_secs(7)
+        );
+    }
 
     #[test]
     fn reconcile_tick_interval_disabled_when_zero_or_negative() {
