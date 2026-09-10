@@ -141,7 +141,7 @@ pub async fn safe_kill_session(
     ssh: &Arc<SshClient>,
 ) -> Result<SessionRow, IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
-    crate::validate::tmux_name(&args.tmux_name)?;
+    crate::validate::tmux_name_addressable(&args.tmux_name)?;
 
     // Read + state-update happens under one lock; the SSH send afterwards is
     // off-lock.
@@ -217,7 +217,7 @@ pub async fn inspect_safe_kill(
     ssh: &Arc<SshClient>,
 ) -> Result<SafeKillInspection, IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
-    crate::validate::tmux_name(&args.tmux_name)?;
+    crate::validate::tmux_name_addressable(&args.tmux_name)?;
 
     let (worktree_path, _project_base) = {
         let s = store.lock().map_err(|_| lock_err())?;
@@ -360,7 +360,7 @@ pub async fn discard_kill_session(
     ssh: &Arc<SshClient>,
 ) -> Result<i64, IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
-    crate::validate::tmux_name(&args.tmux_name)?;
+    crate::validate::tmux_name_addressable(&args.tmux_name)?;
 
     let (session_id, worktree_id, worktree_path, project_base) = {
         let s = store.lock().map_err(|_| lock_err())?;

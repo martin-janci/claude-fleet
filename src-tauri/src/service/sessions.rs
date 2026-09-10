@@ -1132,16 +1132,28 @@ pub struct KillSessionArgs {
     pub force: bool,
 }
 
+/// Claude session id to `claude stop` for a synthetic `bg:<uuid>` row: the
+/// row's stored `claude_session_id` when present, else the uuid embedded in
+/// the tmux_name itself. Pure so the fallback order is unit-testable.
+fn bg_claude_session_id(tmux_name: &str, row_claude_id: Option<&str>) -> String {
+    match row_claude_id {
+        Some(id) if !id.trim().is_empty() => id.to_string(),
+        _ => tmux_name.trim_start_matches("bg:").to_string(),
+    }
+}
+
 pub async fn kill_session(
     args: KillSessionArgs,
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<i64, IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
-    crate::validate::tmux_name(&args.name)?;
+    // Lookup form: synthetic `bg:<uuid>` rows are killable too (via
+    // `claude stop`, below) — only real tmux rows go through tmux.
+    crate::validate::tmux_name_lookup(&args.name)?;
     // Look up id BEFORE killing so we can return it after. Read the controller
     // under the same lock and refuse to nuke ourselves unless forced.
-    let id = {
+    let (id, claude_sid) = {
         let s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
@@ -1152,11 +1164,26 @@ pub async fn kill_session(
             args.force,
         )?;
         s.get_session(&args.name, &args.host_alias)?
-            .map(|r| r.id)
+            .map(|r| (r.id, r.claude_session_id))
             .ok_or_else(|| {
                 IpcError::new("E_NOTFOUND", format!("session {} not found", args.name))
             })?
     };
+    if args.name.starts_with("bg:") {
+        // Background (`claude --bg`) agent — there is no tmux pane to kill.
+        // `claude stop` is idempotent (an already-dead job is not an error),
+        // so this also clears a stale row whose process died un-noticed: the
+        // reconcile below sees the agent gone and prunes the row.
+        let sid = bg_claude_session_id(&args.name, claude_sid.as_deref());
+        crate::claude_cli::claude_stop(ssh, &args.host_alias, &sid).await?;
+        if let Ok(s) = store.lock() {
+            if let Err(e) = s.insert_session_event(id, "killed", None) {
+                eprintln!("[event] insert killed failed for session {id}: {e}");
+            }
+        }
+        reconcile_one_host(store, ssh, &args.host_alias).await?;
+        return Ok(id);
+    }
     let tmux = exec_for(&args.host_alias, ssh);
     tmux.kill_session(&args.name).await?;
     // Task G: record the kill before reconcile reaps the row. Best-effort.
@@ -1182,7 +1209,7 @@ pub async fn rename_session(
     ssh: &Arc<SshClient>,
 ) -> Result<SessionRow, IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
-    crate::validate::tmux_name(&args.old_name)?;
+    crate::validate::tmux_name_addressable(&args.old_name)?;
     crate::validate::tmux_name(&args.new_name)?;
     let tmux = exec_for(&args.host_alias, ssh);
     tmux.rename_session(&args.old_name, &args.new_name).await?;
@@ -1261,7 +1288,7 @@ pub async fn restart_session(
     ssh: &Arc<SshClient>,
 ) -> Result<SessionRow, IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
-    crate::validate::tmux_name(&args.name)?;
+    crate::validate::tmux_name_addressable(&args.name)?;
     // Respawn the pane with the command matching the session's kind so a
     // restarted shell session comes back as a shell, not a Claude pane. Read
     // the controller under the same lock and refuse to restart ourselves
@@ -1344,7 +1371,7 @@ async fn send_prompt_inner(
     submit: bool,
 ) -> Result<(), IpcError> {
     crate::validate::host_alias(host_alias)?;
-    crate::validate::tmux_name(tmux_name)?;
+    crate::validate::tmux_name_addressable(tmux_name)?;
     // The send-keys commands run in ONE shell invocation joined with `&&` (so a
     // failed literal-text send doesn't still fire Enter) — one round-trip
     // instead of two.
@@ -1946,6 +1973,18 @@ pub async fn capture_session_output(
 mod tests {
     use super::*;
     use crate::store::Store;
+
+    #[test]
+    fn bg_claude_session_id_prefers_row_id_falls_back_to_name() {
+        // Stored claude_session_id wins…
+        assert_eq!(
+            bg_claude_session_id("bg:aaa-111", Some("bbb-222")),
+            "bbb-222"
+        );
+        // …a missing or blank one falls back to the uuid in the tmux_name.
+        assert_eq!(bg_claude_session_id("bg:aaa-111", None), "aaa-111");
+        assert_eq!(bg_claude_session_id("bg:aaa-111", Some("  ")), "aaa-111");
+    }
 
     /// Build a `SessionRow` with sensible defaults for selector tests.
     fn row(

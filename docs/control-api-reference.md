@@ -65,7 +65,7 @@ Parameters: `limit`, `mark_read`, `session_id`, `summary`, `unread_only`
 
 ### `kill_session`
 
-Kill a tmux session on a host. Returns the killed session's id.
+Kill a session on a host: a tmux session by name, or a background agent row (name `bg:<uuid>`) via `claude stop` — the latter is idempotent, so it also clears a stale row whose process already died. Returns the killed session's id.
 
 Parameters: `force`, `host_alias`, `name`
 

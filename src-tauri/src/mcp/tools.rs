@@ -911,8 +911,10 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "Kill a tmux session on a host. Returns the killed \
-        session's id.")]
+    #[tool(description = "Kill a session on a host: a tmux session by name, or \
+        a background agent row (name `bg:<uuid>`) via `claude stop` — the \
+        latter is idempotent, so it also clears a stale row whose process \
+        already died. Returns the killed session's id.")]
     async fn kill_session(
         &self,
         Parameters(p): Parameters<KillSessionParams>,

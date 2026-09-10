@@ -36,7 +36,7 @@ pub fn session_target(store: &Mutex<Store>, session_id: i64) -> Result<(String, 
         .get_session_by_id(session_id)?
         .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("session {session_id} not found")))?;
     crate::validate::host_alias(&sess.host_alias)?;
-    crate::validate::tmux_name(&sess.tmux_name)?;
+    crate::validate::tmux_name_addressable(&sess.tmux_name)?;
     Ok((sess.host_alias, sess.tmux_name))
 }
 

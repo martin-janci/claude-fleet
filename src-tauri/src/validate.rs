@@ -248,6 +248,24 @@ pub fn tmux_name_lookup(value: &str) -> Result<(), IpcError> {
     Ok(())
 }
 
+/// Validate a tmux session name for operations that need a real tmux pane
+/// (send-keys, capture, restart, rename, safe-kill…). Synthetic `bg:<uuid>`
+/// rows (background `claude --bg` agents — see `Store::upsert_bg_session`)
+/// have no pane, so targeting one is rejected with a dedicated
+/// `E_BG_SESSION` code and a pointer to the tools that DO work on them,
+/// instead of the generic (and misleading) `tmux_name` character-set error.
+/// Everything else defers to `tmux_name`.
+pub fn tmux_name_addressable(value: &str) -> Result<(), IpcError> {
+    if value.starts_with("bg:") {
+        return Err(IpcError::new(
+            "E_BG_SESSION",
+            "this is a background (claude --bg) session with no tmux pane — \
+             use peek_session for its logs or kill_session to stop it",
+        ));
+    }
+    tmux_name(value)
+}
+
 /// Validate a session friendly-name (display label set by the in-session
 /// agent via MCP). Display-only, but still passes through `serde_json` and
 /// the row event bus — reject control chars and cap length so a runaway
@@ -392,6 +410,17 @@ mod tests {
         assert!(tmux_name_lookup("has\ttab").is_err());
         assert!(tmux_name_lookup("has.dot").is_err());
         assert!(tmux_name_lookup("has\nnewline").is_err());
+    }
+
+    #[test]
+    fn tmux_name_addressable_rejects_bg_rows_with_typed_error() {
+        let err = tmux_name_addressable("bg:550e8400-e29b-41d4-a716-446655440000")
+            .expect_err("bg rows have no tmux pane");
+        assert_eq!(err.code, "E_BG_SESSION");
+        // Plain names behave exactly like `tmux_name`.
+        assert!(tmux_name_addressable("dev-foo").is_ok());
+        assert!(tmux_name_addressable("has:colon").is_err()); // non-bg colon still E_INVALID
+        assert!(tmux_name_addressable("").is_err());
     }
 
     #[test]
