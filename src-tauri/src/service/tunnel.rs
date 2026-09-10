@@ -20,6 +20,9 @@ pub fn tunnel_argv(host: &str, remote_port: u16, mcp_port: u16) -> Vec<String> {
         "ServerAliveCountMax=3".into(),
         "-R".into(),
         format!("127.0.0.1:{remote_port}:127.0.0.1:{mcp_port}"),
+        // End-of-options marker: `host` is validated at add_host, but make
+        // sure ssh can never read it as an option regardless.
+        "--".into(),
         host.into(),
     ]
 }
@@ -39,7 +42,10 @@ impl TunnelSupervisor {
 
     /// Ensure a tunnel for `host` is running (idempotent — no-op if already up).
     pub fn ensure(&self, host: &str, remote_port: u16, mcp_port: u16) {
-        let mut tasks = self.tasks.lock().unwrap();
+        let mut tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if tasks.get(host).map(|h| !h.is_finished()).unwrap_or(false) {
             return;
         }
@@ -64,7 +70,12 @@ impl TunnelSupervisor {
     /// Stop a single host's tunnel.
     #[allow(dead_code)]
     pub fn stop(&self, host: &str) {
-        if let Some(h) = self.tasks.lock().unwrap().remove(host) {
+        if let Some(h) = self
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(host)
+        {
             h.abort();
         }
     }
@@ -75,7 +86,10 @@ impl TunnelSupervisor {
     /// it. A deliberately stopped host is removed via `stop`/`stop_all` and
     /// therefore absent (callers map absence to "not started", e.g. MCP disabled).
     pub fn snapshot(&self) -> HashMap<String, bool> {
-        let tasks = self.tasks.lock().unwrap();
+        let tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         tasks
             .iter()
             .map(|(host, handle)| (host.clone(), !handle.is_finished()))
@@ -84,7 +98,10 @@ impl TunnelSupervisor {
 
     /// Stop all tunnels (app exit / MCP disable).
     pub fn stop_all(&self) {
-        let mut tasks = self.tasks.lock().unwrap();
+        let mut tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (_, h) in tasks.drain() {
             h.abort();
         }
@@ -102,6 +119,10 @@ mod tests {
         assert!(a.iter().any(|s| s == "127.0.0.1:4180:127.0.0.1:4180"));
         assert!(a.iter().any(|s| s == "ExitOnForwardFailure=yes"));
         assert_eq!(a.last().unwrap(), "mefistos");
+        // `--` must immediately precede the host so ssh treats it as an operand.
+        let n = a.len();
+        assert_eq!(a[n - 2], "--");
+        assert_eq!(a[n - 1], "mefistos");
     }
 
     #[tokio::test]

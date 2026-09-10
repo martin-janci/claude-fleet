@@ -287,9 +287,44 @@ pub fn friendly_name(value: &str) -> Result<(), IpcError> {
     Ok(())
 }
 
+/// Validate a free-form positional argument handed to a CLI (`claude` prompt,
+/// display name, project path). The value may contain anything a shell quote
+/// can carry — spaces, unicode, newlines in a prompt — but it must be
+/// non-blank and must not begin with `-`, since an option parser would read
+/// `--foo` as a flag. Call sites additionally pass `--` before the positional
+/// where the CLI accepts it; this check is the belt to that suspender.
+pub fn not_option_like(label: &str, value: &str) -> Result<(), IpcError> {
+    if value.trim().is_empty() {
+        return Err(IpcError::new(
+            "E_INVALID",
+            format!("{label} must not be empty"),
+        ));
+    }
+    if value.starts_with('-') {
+        return Err(IpcError::new(
+            "E_INVALID",
+            format!("{label} must not start with '-'"),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn not_option_like_rejects_blank_and_leading_dash() {
+        assert!(not_option_like("prompt", "fix the login bug").is_ok());
+        assert!(not_option_like("prompt", "multi\nline prompt").is_ok());
+        assert!(not_option_like("path", "/home/me/proj").is_ok());
+        assert!(not_option_like("prompt", "a - b").is_ok()); // dash inside is fine
+        for bad in ["", "   ", "--foo", "-n", "--", "-"] {
+            let err = not_option_like("prompt", bad).unwrap_err();
+            assert_eq!(err.code, "E_INVALID", "{bad:?}");
+            assert!(err.message.starts_with("prompt must"), "{}", err.message);
+        }
+    }
 
     #[test]
     fn host_alias_accepts_normal_aliases() {

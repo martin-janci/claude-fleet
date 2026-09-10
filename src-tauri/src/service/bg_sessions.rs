@@ -4,10 +4,16 @@ use crate::claude_cli;
 use crate::ipc_error::IpcError;
 use crate::ssh::SshClient;
 use crate::store::Store;
+use crate::validate;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 // ─── args / result types ─────────────────────────────────────────────────────
+//
+// Every arg struct validates the host alias (it becomes an `ssh` operand) and
+// every value that becomes a `claude` positional / option value (a leading
+// `-` would be read as a flag). `claude_cli` re-checks the same rules when it
+// builds the script, so DevTools / MCP callers cannot bypass them.
 
 #[derive(Debug, Deserialize)]
 pub struct NewBgSessionArgs {
@@ -18,12 +24,15 @@ pub struct NewBgSessionArgs {
 
 impl NewBgSessionArgs {
     pub fn validate(&self) -> Result<(), IpcError> {
-        if self.name.trim().is_empty() {
-            return Err(IpcError::new("E_INVALID", "session name must not be empty"));
+        validate::host_alias(&self.host_alias)?;
+        validate::not_option_like("session name", &self.name)?;
+        if self.name.chars().any(|c| c.is_control()) {
+            return Err(IpcError::new(
+                "E_INVALID",
+                "session name must not contain control characters",
+            ));
         }
-        if self.prompt.trim().is_empty() {
-            return Err(IpcError::new("E_INVALID", "prompt must not be empty"));
-        }
+        validate::not_option_like("prompt", &self.prompt)?;
         Ok(())
     }
 }
@@ -46,12 +55,14 @@ pub struct PeekSessionArgs {
 
 impl PeekSessionArgs {
     pub fn validate(&self) -> Result<(), IpcError> {
+        validate::host_alias(&self.host_alias)?;
         if self.claude_session_id.trim().is_empty() {
             return Err(IpcError::new(
                 "E_INVALID",
                 "claude_session_id must not be empty",
             ));
         }
+        validate::claude_session_id(&self.claude_session_id)?;
         Ok(())
     }
 }
@@ -61,6 +72,20 @@ pub struct PurgeProjectArgs {
     pub host_alias: String,
     pub project_path: String,
     pub project_id: i64,
+}
+
+impl PurgeProjectArgs {
+    pub fn validate(&self) -> Result<(), IpcError> {
+        validate::host_alias(&self.host_alias)?;
+        validate::not_option_like("project_path", &self.project_path)?;
+        if self.project_path.chars().any(|c| c.is_control()) {
+            return Err(IpcError::new(
+                "E_INVALID",
+                "project_path must not contain control characters",
+            ));
+        }
+        Ok(())
+    }
 }
 
 // ─── service functions ───────────────────────────────────────────────────────
@@ -104,13 +129,9 @@ pub async fn purge_project(
     store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
 ) -> Result<(), IpcError> {
-    if args.project_path.trim().is_empty() {
-        return Err(IpcError::new("E_INVALID", "project_path must not be empty"));
-    }
+    args.validate()?;
     claude_cli::claude_purge_project(ssh, &args.host_alias, &args.project_path).await?;
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = store.lock().map_err(|_| IpcError::lock())?;
     s.delete_project(args.project_id)?;
     Ok(())
 }
@@ -167,5 +188,88 @@ mod tests {
             claude_session_id: "".into(),
         };
         assert!(args.validate().is_err());
+    }
+
+    const UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    #[test]
+    fn new_bg_session_args_rejects_option_like_values_and_bad_host() {
+        let ok = NewBgSessionArgs {
+            host_alias: "mefistos".into(),
+            name: "review-1".into(),
+            prompt: "Summarise the diff".into(),
+        };
+        assert!(ok.validate().is_ok());
+
+        let bad_prompt = NewBgSessionArgs {
+            prompt: "--dangerously-skip-permissions".into(),
+            ..ok
+        };
+        assert_eq!(bad_prompt.validate().unwrap_err().code, "E_INVALID");
+
+        let bad_name = NewBgSessionArgs {
+            name: "-n".into(),
+            prompt: "fine".into(),
+            ..bad_prompt
+        };
+        assert_eq!(bad_name.validate().unwrap_err().code, "E_INVALID");
+
+        let ctrl_name = NewBgSessionArgs {
+            name: "a\nb".into(),
+            ..bad_name
+        };
+        assert_eq!(ctrl_name.validate().unwrap_err().code, "E_INVALID");
+
+        let bad_host = NewBgSessionArgs {
+            host_alias: "-oProxyCommand=id".into(),
+            name: "ok".into(),
+            ..ctrl_name
+        };
+        assert_eq!(bad_host.validate().unwrap_err().code, "E_INVALID");
+    }
+
+    #[test]
+    fn peek_session_args_requires_uuid_id_and_valid_host() {
+        let ok = PeekSessionArgs {
+            host_alias: "local".into(),
+            claude_session_id: UUID.into(),
+        };
+        assert!(ok.validate().is_ok());
+        for bad in ["--foo", "-h", "abc-123", "'; rm -rf / #"] {
+            let args = PeekSessionArgs {
+                host_alias: "local".into(),
+                claude_session_id: bad.into(),
+            };
+            assert_eq!(args.validate().unwrap_err().code, "E_INVALID", "{bad:?}");
+        }
+        let bad_host = PeekSessionArgs {
+            host_alias: "-tt".into(),
+            claude_session_id: UUID.into(),
+        };
+        assert_eq!(bad_host.validate().unwrap_err().code, "E_INVALID");
+    }
+
+    #[test]
+    fn purge_project_args_rejects_option_like_path_and_bad_host() {
+        let ok = PurgeProjectArgs {
+            host_alias: "local".into(),
+            project_path: "/home/me/projects/x".into(),
+            project_id: 1,
+        };
+        assert!(ok.validate().is_ok());
+        for bad in ["", "  ", "--all", "-rf", "/a\nb"] {
+            let args = PurgeProjectArgs {
+                host_alias: "local".into(),
+                project_path: bad.into(),
+                project_id: 1,
+            };
+            assert_eq!(args.validate().unwrap_err().code, "E_INVALID", "{bad:?}");
+        }
+        let bad_host = PurgeProjectArgs {
+            host_alias: "has space".into(),
+            project_path: "/x".into(),
+            project_id: 1,
+        };
+        assert_eq!(bad_host.validate().unwrap_err().code, "E_INVALID");
     }
 }
