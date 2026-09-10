@@ -8,7 +8,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import TerminalView from './TerminalView.svelte';
-import { sessions, type SessionRow } from './sessions';
+import { sessions, resetTombstonesForTests, type SessionRow } from './sessions';
 import { selectSession, clearSelection } from './selection';
 import { toasts, clearToasts } from './toasts';
 import { get } from 'svelte/store';
@@ -75,6 +75,7 @@ beforeEach(() => {
     return null;
   });
   resizeCallbacks = [];
+  resetTombstonesForTests();
   // @ts-expect-error: test stub
   globalThis.ResizeObserver = FakeResizeObserver;
   sessions.set([onAlpha, onBeta]);

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('@tauri-apps/api/event', () => {
   const handlers = new Map<string, (e: { payload: unknown }) => void>();
@@ -15,9 +15,16 @@ vi.mock('@tauri-apps/api/event', () => {
 
 import { emit } from '@tauri-apps/api/event';
 import { get } from 'svelte/store';
-import { subscribeToRowEvents } from './events';
-import { sessions, mergeSession, removeSession, applySessionEvents, type SessionRow } from './sessions';
-import { hosts, applyHostEvents } from './hosts';
+import { subscribeToRowEvents, ROW_EVENT_FLUSH_MS } from './events';
+import {
+  sessions,
+  mergeSession,
+  removeSession,
+  applySessionEvents,
+  resetTombstonesForTests,
+  type SessionRow,
+} from './sessions';
+import { hosts, applyHostEvents, resetTombstonesForTests as resetHostTombstones } from './hosts';
 
 function row(over: Partial<SessionRow> = {}): SessionRow {
   return {
@@ -49,22 +56,34 @@ function row(over: Partial<SessionRow> = {}): SessionRow {
   };
 }
 
-// Fire without awaiting so the handler's enqueue happens synchronously; the
-// microtask flush runs before the awaited continuation below.
+// Deliver one event the way Tauri does in production: the listener runs in
+// its own task. The mock's `emit` calls the handler synchronously, so `fire`
+// is one task; the tests below interleave `vi.advanceTimersByTimeAsync` to
+// put real (fake) time between deliveries.
 const fire = (name: string, payload: unknown) => void vi.mocked(emit)(name, payload);
-const flush = () => Promise.resolve();
+// Let the batch timer expire.
+const flush = () => vi.advanceTimersByTimeAsync(ROW_EVENT_FLUSH_MS + 1);
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.mocked(emit).mockClear();
+  resetTombstonesForTests();
+  resetHostTombstones();
+  sessions.set([]);
+  hosts.set([]);
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe('subscribeToRowEvents', () => {
-  beforeEach(() => {
-    vi.mocked(emit).mockClear();
-  });
-
   it('fires onSessionCreated when session:created is emitted', async () => {
     const seen: number[] = [];
     await subscribeToRowEvents({
       onSessionCreated: (row) => seen.push(row.id),
     });
-    await vi.mocked(emit)('session:created', row({ id: 42 }));
+    fire('session:created', row({ id: 42 }));
+    await flush();
     expect(seen).toEqual([42]);
   });
 
@@ -73,7 +92,8 @@ describe('subscribeToRowEvents', () => {
     await subscribeToRowEvents({
       onSessionKilled: (p) => killed.push(p.id),
     });
-    await vi.mocked(emit)('session:killed', { id: 99 });
+    fire('session:killed', { id: 99 });
+    await flush();
     expect(killed).toEqual([99]);
   });
 
@@ -83,7 +103,8 @@ describe('subscribeToRowEvents', () => {
       onSessionCreated: (row) => seen.push(row.id),
     });
     unlisten();
-    await vi.mocked(emit)('session:created', row({ id: 1 }));
+    fire('session:created', row({ id: 1 }));
+    await flush();
     expect(seen).toEqual([]);
   });
 
@@ -102,14 +123,15 @@ describe('subscribeToRowEvents', () => {
 // End-to-end: emit → handler → store update.
 describe('subscribeToRowEvents → store integration', () => {
   it('session:created event updates the sessions store via mergeSession', async () => {
-    sessions.set([]);
     await subscribeToRowEvents({
       onSessionCreated: mergeSession,
       onSessionKilled: (p) => removeSession(p.id),
     });
-    await vi.mocked(emit)('session:created', row({ id: 7, tmux_name: 'dev-test', host_alias: 'local', created_at: 1, last_activity_at: 1 }));
+    fire('session:created', row({ id: 7, tmux_name: 'dev-test', host_alias: 'local', created_at: 1, last_activity_at: 1 }));
+    await flush();
     expect(get(sessions).map((s) => s.id)).toEqual([7]);
-    await vi.mocked(emit)('session:killed', { id: 7 });
+    fire('session:killed', { id: 7 });
+    await flush();
     expect(get(sessions)).toEqual([]);
   });
 });
@@ -117,27 +139,20 @@ describe('subscribeToRowEvents → store integration', () => {
 // FE-10: the reconcile tick emits one session:updated per session; each one
 // used to be its own store flush (60 sessions → 60 sidebar re-derives).
 describe('row event batching', () => {
-  beforeEach(() => {
-    sessions.set([]);
-    hosts.set([]);
-  });
+  const seed60 = () =>
+    Array.from({ length: 60 }, (_, i) => row({ id: i + 1, tmux_name: `s${i + 1}`, last_activity_at: 1 }));
+  const update = (i: number) =>
+    row({ id: i + 1, tmux_name: `s${i + 1}`, last_activity_at: 2, claude_status: 'working' });
 
   it('coalesces 60 synchronous session:updated events into one store notification', async () => {
-    // ids 1000+: tombstones from earlier tests in this file (a killed id stays
-    // dead for 5 s) must not collide with this batch.
-    const seed = Array.from({ length: 60 }, (_, i) =>
-      row({ id: 1000 + i, tmux_name: `s${i}`, last_activity_at: 1 }),
-    );
-    sessions.set(seed);
+    sessions.set(seed60());
     const unlisten = await subscribeToRowEvents({ onSessionEvents: applySessionEvents });
     const notify = vi.fn();
     const unsub = sessions.subscribe(notify);
     notify.mockClear(); // drop the initial subscribe call
 
-    for (let i = 0; i < 60; i++) {
-      fire('session:updated', row({ id: 1000 + i, tmux_name: `s${i}`, last_activity_at: 2, claude_status: 'working' }));
-    }
-    // Nothing applied yet — delivery is deferred to the microtask flush.
+    for (let i = 0; i < 60; i++) fire('session:updated', update(i));
+    // Nothing applied yet — delivery waits for the batch timer.
     expect(notify).not.toHaveBeenCalled();
     await flush();
 
@@ -145,6 +160,53 @@ describe('row event batching', () => {
     const final = get(sessions);
     expect(final).toHaveLength(60);
     expect(final.every((s) => s.claude_status === 'working' && s.last_activity_at === 2)).toBe(true);
+    unsub();
+    unlisten();
+  });
+
+  it('coalesces events delivered in SEPARATE tasks (as Tauri does) into one notification', async () => {
+    // Tauri hands each emitted event to the webview as its own eval(), i.e.
+    // its own macrotask, so the microtask queue drains between them. The
+    // batch window must span real time, not just the current task.
+    sessions.set(seed60());
+    const unlisten = await subscribeToRowEvents({ onSessionEvents: applySessionEvents });
+    const notify = vi.fn();
+    const unsub = sessions.subscribe(notify);
+    notify.mockClear();
+
+    for (let i = 0; i < 60; i++) {
+      fire('session:updated', update(i));
+      // A few hundred µs between deliveries — well inside the window overall
+      // (60 × 0.2 ms = 12 ms < ROW_EVENT_FLUSH_MS); each advance yields the
+      // task so every listener call really is a separate macrotask.
+      await vi.advanceTimersByTimeAsync(0.2);
+    }
+    expect(notify).not.toHaveBeenCalled();
+    await flush();
+
+    expect(notify).toHaveBeenCalledTimes(1);
+    const final = get(sessions);
+    expect(final).toHaveLength(60);
+    expect(final.every((s) => s.claude_status === 'working')).toBe(true);
+    unsub();
+    unlisten();
+  });
+
+  it('a burst longer than the window is split, but into far fewer flushes than events', async () => {
+    sessions.set(seed60());
+    const unlisten = await subscribeToRowEvents({ onSessionEvents: applySessionEvents });
+    const notify = vi.fn();
+    const unsub = sessions.subscribe(notify);
+    notify.mockClear();
+    // 60 events 1 ms apart = 60 ms ≈ 4 windows.
+    for (let i = 0; i < 60; i++) {
+      fire('session:updated', update(i));
+      await vi.advanceTimersByTimeAsync(1);
+    }
+    await flush();
+    expect(notify.mock.calls.length).toBeGreaterThanOrEqual(1);
+    expect(notify.mock.calls.length).toBeLessThanOrEqual(6);
+    expect(get(sessions).every((s) => s.claude_status === 'working')).toBe(true);
     unsub();
     unlisten();
   });
@@ -217,17 +279,17 @@ describe('row event batching', () => {
     unlisten();
   });
 
-  it('separate tasks produce separate flushes', async () => {
+  it('events after a flush start a new batch', async () => {
     const unlisten = await subscribeToRowEvents({ onSessionEvents: applySessionEvents });
     const notify = vi.fn();
     const unsub = sessions.subscribe(notify);
     notify.mockClear();
-    fire('session:created', row({ id: 2001 }));
+    fire('session:created', row({ id: 1 }));
     await flush();
-    fire('session:created', row({ id: 2002, tmux_name: 'b' }));
+    fire('session:created', row({ id: 2, tmux_name: 'b' }));
     await flush();
     expect(notify).toHaveBeenCalledTimes(2);
-    expect(get(sessions).map((s) => s.id)).toEqual([2001, 2002]);
+    expect(get(sessions).map((s) => s.id)).toEqual([1, 2]);
     unsub();
     unlisten();
   });

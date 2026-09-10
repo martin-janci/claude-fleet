@@ -6,7 +6,7 @@
      interrupting; errors stay until dismissed, info auto-clears. -->
 <div class="toasts" aria-live="polite" role="status" data-testid="toasts">
   {#each $toasts as t (t.id)}
-    <div class="toast {t.kind}" data-testid="toast" data-kind={t.kind}>
+    <div class="toast {t.kind}" role={t.kind === 'error' ? 'alert' : undefined} data-testid="toast" data-kind={t.kind}>
       {#if t.code}
         <code class="code" data-testid="toast-code">{t.code}</code>
       {/if}

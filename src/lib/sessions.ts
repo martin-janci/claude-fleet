@@ -218,6 +218,12 @@ export function findSession(arr: SessionRow[], ident: SessionIdentity): SessionR
 const tombstones = new Map<number, number>();
 const TOMBSTONE_MS = 5000;
 
+/** Test hook: forget every tombstone so one test's kill can't shadow the
+ *  next test's merge of the same id. Not for production code. */
+export function resetTombstonesForTests(): void {
+  tombstones.clear();
+}
+
 function isTombstoned(id: number): boolean {
   const t = tombstones.get(id);
   if (t === undefined) return false;

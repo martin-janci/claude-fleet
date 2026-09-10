@@ -125,6 +125,9 @@
       Run <code>git worktree remove</code> for <code class="mono">{wt.path}</code> on its
       host and drop the fleet row. The git command will refuse if the
       worktree has uncommitted changes — your work won't be silently lost.
+    {:else}
+      Remove this worktree on its host and drop the fleet row. The command will
+      refuse if the worktree has uncommitted changes.
     {/if}
   </ConfirmDialog>
 {/if}

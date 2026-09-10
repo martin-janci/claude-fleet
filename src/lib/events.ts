@@ -4,17 +4,38 @@ import type { HostRow, HostEvent } from './hosts';
 import type { AccountRow } from './accounts';
 import type { ProjectRow, WorktreeRow, ProjectEvent } from './projects';
 
+/**
+ * How long a flush waits for more events after the first one arrives. Tauri
+ * delivers every emitted event as its own `webview.eval()` — a separate script
+ * task — so a microtask flush would see exactly one event per batch. A short
+ * timer spans the whole reconcile burst (tens of events a few hundred µs apart)
+ * while adding no perceptible latency to a lone event.
+ */
+export const ROW_EVENT_FLUSH_MS = 16;
+
 export type RowEventHandlers = {
   // ── per-event handlers (delivered one call per event, in arrival order) ──
+  /** @deprecated Wire stores through the batched `on*Events` handlers below;
+   *  per-event delivery costs one store flush per event. Kept for tests and
+   *  for ad-hoc listeners that don't touch a store. */
   onSessionCreated?: (row: SessionRow) => void;
+  /** @deprecated See `onSessionCreated`. */
   onSessionUpdated?: (row: SessionRow) => void;
+  /** @deprecated See `onSessionCreated`. */
   onSessionKilled?: (payload: { id: number }) => void;
+  /** @deprecated See `onSessionCreated`. */
   onHostAdded?: (row: HostRow) => void;
+  /** @deprecated See `onSessionCreated`. */
   onHostProbed?: (row: HostRow) => void;
+  /** @deprecated See `onSessionCreated`. */
   onHostRemoved?: (payload: { alias: string }) => void;
+  /** @deprecated See `onSessionCreated`. */
   onAccountUpserted?: (row: AccountRow) => void;
+  /** @deprecated See `onSessionCreated`. */
   onProjectUpdated?: (row: ProjectRow) => void;
+  /** @deprecated See `onSessionCreated`. */
   onWorktreeUpdated?: (row: WorktreeRow) => void;
+  /** @deprecated See `onSessionCreated`. */
   onWorktreeRemoved?: (payload: { id: number }) => void;
   // ── batched handlers (one call per flush per store, events in order) ──
   // Prefer these for store wiring: the backend's reconcile tick emits one
@@ -45,19 +66,20 @@ type Queued =
  * Each handler is optional — if you only care about session events, just pass
  * the session handlers. The listeners not declared are simply never created.
  *
- * Delivery is batched per microtask: events that arrive synchronously (a
- * reconcile burst) are queued and flushed together. Per-event handlers still
- * see every event, in order; the batched `on*Events` handlers get one call
- * per flush with that kind's events in order. A `killed` after an `updated`
- * of the same id inside one batch therefore still removes the row.
+ * Delivery is batched on a short timer (`ROW_EVENT_FLUSH_MS`): the first
+ * event arms it, everything that lands before it fires is flushed together.
+ * Per-event handlers still see every event, in order; the batched `on*Events`
+ * handlers get one call per flush with that kind's events in order. A
+ * `killed` after an `updated` of the same id inside one batch therefore
+ * still removes the row.
  */
 export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<UnlistenFn> {
   let queue: Queued[] = [];
-  let scheduled = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
 
   const flush = () => {
-    scheduled = false;
+    timer = null;
     if (disposed) {
       queue = [];
       return;
@@ -120,10 +142,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
 
   const enqueue = (ev: Queued) => {
     queue.push(ev);
-    if (!scheduled) {
-      scheduled = true;
-      queueMicrotask(flush);
-    }
+    if (timer === null) timer = setTimeout(flush, ROW_EVENT_FLUSH_MS);
   };
 
   const wanted = {
@@ -174,6 +193,10 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
   return () => {
     disposed = true;
     queue = [];
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
     for (const u of unlisteners) u?.();
   };
 }

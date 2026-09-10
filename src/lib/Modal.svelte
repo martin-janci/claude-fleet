@@ -93,11 +93,21 @@
   }
 
   // Clicks on the ::backdrop are delivered to the <dialog> element itself.
-  // The dialog has no padding of its own (it's on .body), so a click whose
-  // target is the dialog is a click outside the visible box.
+  // But so are clicks on the dialog's own border — and, if it ever scrolled,
+  // its scrollbar — so the target check alone is not enough: a click only
+  // counts as "outside" when its point lies beyond the dialog's box. (The
+  // box never scrolls itself: overflow lives on .body, see the styles.)
   function onClick(e: MouseEvent) {
-    if (!closeOnBackdrop) return;
-    if (e.target === dialog) onclose?.();
+    if (!closeOnBackdrop || !dialog) return;
+    if (e.target !== dialog) return;
+    if (isInside(dialog.getBoundingClientRect(), e.clientX, e.clientY)) return;
+    onclose?.();
+  }
+
+  function isInside(r: DOMRect, x: number, y: number): boolean {
+    // Strict on all edges: a zero-size rect (jsdom) classifies every click
+    // as outside, matching the old behaviour there.
+    return x > r.left && x < r.right && y > r.top && y < r.bottom;
   }
 </script>
 
@@ -129,8 +139,9 @@
     background: var(--bg);
     color: var(--fg);
     max-width: min(90vw, 720px);
-    max-height: 85vh;
-    overflow: auto;
+    /* No overflow here: a scrollbar on the <dialog> would be part of the
+       element, and grabbing it would read as a backdrop click. */
+    overflow: hidden;
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
   }
   .modal::backdrop {
@@ -150,6 +161,8 @@
     gap: 0.6rem;
     padding: 1rem;
     box-sizing: border-box;
+    max-height: 85vh;
+    overflow: auto;
   }
   .title {
     margin: 0;

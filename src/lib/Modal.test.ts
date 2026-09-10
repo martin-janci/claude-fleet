@@ -43,6 +43,24 @@ describe('Modal (via ConfirmDialog)', () => {
     expect(oncancel).toHaveBeenCalledTimes(1);
   });
 
+  it('a click on the dialog box itself (border / scrollbar) does not count as a backdrop click', async () => {
+    const oncancel = vi.fn();
+    render(ConfirmDialog, { props: { title: 'T', message: 'm', onconfirm: () => {}, oncancel } });
+    await tick();
+    const dlg = screen.getByRole('dialog') as HTMLDialogElement;
+    // jsdom has no layout; give the dialog a box so the hit test is real.
+    dlg.getBoundingClientRect = () =>
+      ({ left: 100, top: 100, right: 500, bottom: 400, width: 400, height: 300, x: 100, y: 100, toJSON() {} }) as DOMRect;
+    // Target is the <dialog> (as for a border or scrollbar click) but the
+    // point is inside the box → stays open.
+    await fireEvent.click(dlg, { clientX: 101, clientY: 250 }); // 1 px border
+    await fireEvent.click(dlg, { clientX: 495, clientY: 250 }); // scrollbar gutter
+    expect(oncancel).not.toHaveBeenCalled();
+    // Same target, point outside the box → backdrop.
+    await fireEvent.click(dlg, { clientX: 50, clientY: 250 });
+    expect(oncancel).toHaveBeenCalledTimes(1);
+  });
+
   it('confirm and cancel buttons call their handlers', async () => {
     const onconfirm = vi.fn();
     const oncancel = vi.fn();

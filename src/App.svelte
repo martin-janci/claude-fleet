@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import Pane from './lib/Pane.svelte';
   import Resizer from './lib/Resizer.svelte';
   import { healthCheck, type Health } from './lib/ipc';
@@ -68,28 +68,17 @@
     `${s.host_alias}/${s.tmux_name}`;
   // `$selectedSession` is derived from the sessions store, so its object
   // identity changes on every `session:updated` (each reconcile tick). Key
-  // the layout effects on the stable host/name identity so they don't re-run
+  // the layout effects on the stable host/name string so they don't re-run
   // — and re-arm the save timer — for updates that don't change which
-  // session is open.
-  type Ident = { host_alias: string; tmux_name: string };
-  let lastIdent: Ident | null = null;
-  const selectedIdent = $derived.by<Ident | null>(() => {
-    const s = $selectedSession;
-    if (!s) return (lastIdent = null);
-    // Return the previous object while the identity is unchanged so the
-    // effects below see a stable value and don't re-run per update.
-    if (lastIdent && lastIdent.host_alias === s.host_alias && lastIdent.tmux_name === s.tmux_name) {
-      return lastIdent;
-    }
-    return (lastIdent = { host_alias: s.host_alias, tmux_name: s.tmux_name });
-  });
-  const selectedKey = $derived(selectedIdent ? sessionKey(selectedIdent) : null);
+  // session is open; the row itself is read untracked inside.
+  const selectedKey = $derived($selectedSession ? sessionKey($selectedSession) : null);
   $effect(() => {
-    const ident = selectedIdent;
     const key = selectedKey;
-    if (!ident || !key) return;
+    if (!key) return;
     if (key === hydratedKey) return;
-    const ui = loadSessionUi(ident.host_alias, ident.tmux_name);
+    const sess = untrack(() => $selectedSession);
+    if (!sess) return;
+    const ui = loadSessionUi(sess.host_alias, sess.tmux_name);
     centerPx = ui.centerPx;
     hydratedKey = key;
   });
@@ -97,18 +86,17 @@
   // centerPx changes per resize-drag frame too — debounce its persistence.
   let centerSaveTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
-    const ident = selectedIdent;
     const key = selectedKey;
     const px = centerPx;
-    if (!ident || !key) return;
+    if (!key) return;
     // Only persist once centerPx has actually been hydrated FOR this session
     // — otherwise we'd write the previous session's value under this key.
     if (key !== hydratedKey) return;
+    const sess = untrack(() => $selectedSession);
+    if (!sess) return;
+    const { host_alias, tmux_name } = sess;
     clearTimeout(centerSaveTimer);
-    centerSaveTimer = setTimeout(
-      () => saveSessionUi(ident.host_alias, ident.tmux_name, { centerPx: px }),
-      200,
-    );
+    centerSaveTimer = setTimeout(() => saveSessionUi(host_alias, tmux_name, { centerPx: px }), 200);
     return () => clearTimeout(centerSaveTimer);
   });
 
@@ -148,7 +136,11 @@
     ].filter((f): f is string => f !== null);
     if (failures.length > 0) bootstrapError = `startup load failed — ${failures.join(', ')}`;
     // Sessions are loaded now — re-open the one the user last had selected.
-    restoreLastSession();
+    // Only when the list actually arrived: on a failed fetch the store is
+    // empty, and restoreLastSession() would take that as "the session is
+    // gone" and erase the persisted pref — losing the selection over a
+    // transient DB error.
+    if (sr.ok) restoreLastSession();
     // First-run welcome: only when never shown AND the fleet is empty.
     const visibleHostCount = get(hosts).filter((h) => !h.hidden).length;
     const workSessionCount = get(sessions).filter((s) => s.kind !== 'bg').length;

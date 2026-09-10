@@ -58,9 +58,9 @@ import { buildSessionsByProject, buildRelatedCountById } from './sidebar_index';
 import { get } from 'svelte/store';
 import Sidebar from './Sidebar.svelte';
 import { projects, bootstrapProjects } from './projects';
-import { sessions, bootstrapSessions, showBgAgents, type SessionRow } from './sessions';
+import { sessions, bootstrapSessions, showBgAgents, resetTombstonesForTests, type SessionRow } from './sessions';
 import { selectedSession, selectSession } from './selection';
-import { hosts, bootstrapHosts, hostFilter } from './hosts';
+import { hosts, bootstrapHosts, hostFilter, resetTombstonesForTests as resetHostTombstones } from './hosts';
 import { accounts, bootstrapAccounts } from './accounts';
 import { onboardingDismissed } from './onboarding';
 
@@ -95,6 +95,8 @@ function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof session
 }
 
 beforeEach(() => {
+  resetTombstonesForTests();
+  resetHostTombstones();
   projects.set([]);
   sessions.set([]);
   hosts.set([]);

@@ -100,6 +100,12 @@ export async function bootstrapHosts(): Promise<Result<HostRow[]>> {
 const hostTombstones = new Map<string, number>();
 const HOST_TOMBSTONE_MS = 5000;
 
+/** Test hook: forget every tombstone (see `resetTombstonesForTests` in
+ *  sessions.ts). Not for production code. */
+export function resetTombstonesForTests(): void {
+  hostTombstones.clear();
+}
+
 function isHostTombstoned(alias: string): boolean {
   const t = hostTombstones.get(alias);
   if (t === undefined) return false;

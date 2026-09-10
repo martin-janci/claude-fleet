@@ -1,7 +1,14 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
 import { selectedSession, selectSession, restoreLastSession, clearSelection } from './selection';
-import { sessions, mergeSession, removeSession, applySessionEvents, type SessionRow } from './sessions';
+import {
+  sessions,
+  mergeSession,
+  removeSession,
+  applySessionEvents,
+  resetTombstonesForTests,
+  type SessionRow,
+} from './sessions';
 
 function makeSession(over: Partial<SessionRow> = {}): SessionRow {
   return {
@@ -32,6 +39,7 @@ function makeSession(over: Partial<SessionRow> = {}): SessionRow {
 beforeEach(() => {
   localStorage.clear();
   clearSelection();
+  resetTombstonesForTests();
   sessions.set([]);
 });
 
@@ -138,8 +146,7 @@ describe('selectedSession is derived from the sessions store', () => {
   });
 
   it('follows a rename of the selected row (same id, new tmux_name)', () => {
-    // Fresh id: id 7 was tombstoned by the remove test above (5 s TTL).
-    const row = makeSession({ id: 11, tmux_name: 'old', last_activity_at: 1 });
+    const row = makeSession({ id: 7, tmux_name: 'old', last_activity_at: 1 });
     sessions.set([row]);
     selectSession(row);
     mergeSession({ ...row, tmux_name: 'new', last_activity_at: 2 });
@@ -147,12 +154,12 @@ describe('selectedSession is derived from the sessions store', () => {
   });
 
   it('survives an id churn via the host+name fallback', () => {
-    const row = makeSession({ id: 12 });
+    const row = makeSession({ id: 7 });
     sessions.set([row]);
     selectSession(row);
     // Re-discovery replaced the row under a fresh id in one atomic set.
-    sessions.set([makeSession({ id: 120 })]);
-    expect(get(selectedSession)?.id).toBe(120);
+    sessions.set([makeSession({ id: 70 })]);
+    expect(get(selectedSession)?.id).toBe(70);
   });
 
   it('never matches by tmux_name alone across hosts', () => {
