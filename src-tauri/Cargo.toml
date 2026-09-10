@@ -14,11 +14,20 @@ edition = "2021"
 name = "claude_fleet_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = []
+# Web Inspector in *release* builds. Debug builds always have devtools: tauri
+# gates them on `any(debug_assertions, feature = "devtools")`, so `pnpm tauri
+# dev` is unaffected. Opt in for a release build with
+# `cargo tauri build --features devtools`. (Cargo does not support
+# `[target.'cfg(debug_assertions)'.dependencies]`, hence a feature.)
+devtools = ["tauri/devtools"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["devtools"] }
+tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-clipboard-manager = "2"
 sysinfo = "0.33"

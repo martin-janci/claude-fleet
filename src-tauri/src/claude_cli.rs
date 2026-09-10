@@ -6,6 +6,7 @@
 use crate::ipc_error::IpcError;
 use crate::shell::quote;
 use crate::ssh::SshClient;
+use crate::validate;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,7 +51,53 @@ pub fn parse_session_id_from_bg_output(output: &str) -> Option<String> {
     UUID_RE.find(output).map(|m| m.as_str().to_string())
 }
 
-/// Launch `claude --bg --name <name> <prompt>` on `host_alias`.
+// ─── script builders ─────────────────────────────────────────────────────────
+//
+// Every `claude` invocation is assembled here from validated parts. Positional
+// arguments are preceded by `--` wherever the CLI accepts it (the top-level
+// `[prompt]` and `project purge [path]`), so a value that starts with `-` can
+// never be parsed as an option. `claude logs <id>` / `claude stop <id>` reject
+// `--` with "unknown option" (verified against Claude Code 2.1.x), so those
+// two rely on `validate::claude_session_id` — a strict lowercase-UUID shape —
+// instead. Pure functions so the argv shape is unit-testable.
+
+/// `claude --bg --name <name> -- <prompt>`.
+///
+/// The name is an option *value* so it must not look like an option; the
+/// prompt sits after `--` and may legitimately start with `-` (a markdown
+/// list, say), so it is only checked for being non-blank.
+pub fn bg_script(name: &str, prompt: &str) -> Result<String, IpcError> {
+    validate::not_option_like("session name", name)?;
+    validate::not_blank("prompt", prompt)?;
+    Ok(format!(
+        "claude --bg --name {} -- {}",
+        quote(name),
+        quote(prompt)
+    ))
+}
+
+/// `claude logs <session_id>` (no `--`: the subcommand rejects it).
+pub fn logs_script(session_id: &str) -> Result<String, IpcError> {
+    validate::claude_session_id(session_id)?;
+    Ok(format!("claude logs {}", quote(session_id)))
+}
+
+/// `claude stop <session_id>` (no `--`: the subcommand rejects it).
+pub fn stop_script(session_id: &str) -> Result<String, IpcError> {
+    validate::claude_session_id(session_id)?;
+    Ok(format!("claude stop {}", quote(session_id)))
+}
+
+/// `claude project purge --yes -- <project_path>`.
+pub fn purge_script(project_path: &str) -> Result<String, IpcError> {
+    validate::not_option_like("project_path", project_path)?;
+    Ok(format!(
+        "claude project purge --yes -- {}",
+        quote(project_path)
+    ))
+}
+
+/// Launch `claude --bg --name <name> -- <prompt>` on `host_alias`.
 /// Returns the session ID extracted from CLI output, if present.
 pub async fn claude_bg(
     ssh: &Arc<SshClient>,
@@ -58,9 +105,7 @@ pub async fn claude_bg(
     name: &str,
     prompt: &str,
 ) -> Result<Option<String>, IpcError> {
-    let quoted_name = quote(name);
-    let quoted_prompt = quote(prompt);
-    let script = format!("claude --bg --name {quoted_name} {quoted_prompt}");
+    let script = bg_script(name, prompt)?;
     let output = run_claude_script(ssh, host_alias, &script, CLAUDE_BG_TIMEOUT).await?;
     Ok(parse_session_id_from_bg_output(&output))
 }
@@ -85,8 +130,7 @@ pub async fn claude_logs(
     host_alias: &str,
     session_id: &str,
 ) -> Result<String, IpcError> {
-    let quoted_id = quote(session_id);
-    let script = format!("claude logs {quoted_id}");
+    let script = logs_script(session_id)?;
     match run_claude_script(ssh, host_alias, &script, CLAUDE_TIMEOUT).await {
         Ok(out) => Ok(out),
         Err(e) if is_no_running_job(&e.message) => Ok(NO_BG_LOGS_MSG.to_string()),
@@ -105,8 +149,7 @@ pub async fn claude_stop(
     host_alias: &str,
     session_id: &str,
 ) -> Result<bool, IpcError> {
-    let quoted_id = quote(session_id);
-    let script = format!("claude stop {quoted_id}");
+    let script = stop_script(session_id)?;
     match run_claude_script(ssh, host_alias, &script, CLAUDE_TIMEOUT).await {
         Ok(_) => Ok(true),
         Err(e) if is_no_running_job(&e.message) => Ok(false),
@@ -114,26 +157,28 @@ pub async fn claude_stop(
     }
 }
 
-/// Run `claude project purge <project_path> --yes` on `host_alias`.
+/// Run `claude project purge --yes -- <project_path>` on `host_alias`.
 pub async fn claude_purge_project(
     ssh: &Arc<SshClient>,
     host_alias: &str,
     project_path: &str,
 ) -> Result<(), IpcError> {
-    let quoted_path = quote(project_path);
-    let script = format!("claude project purge {quoted_path} --yes");
+    let script = purge_script(project_path)?;
     run_claude_script(ssh, host_alias, &script, CLAUDE_TIMEOUT).await?;
     Ok(())
 }
 
 /// Run `script` via `bash -lc` either locally or over SSH depending on
 /// `host_alias`. Returns stdout on success; maps non-zero exit to `E_CLAUDE_CLI`.
+/// The alias is validated here (not only at `add_host`) because the MCP tools
+/// and DevTools reach this path with caller-supplied values.
 async fn run_claude_script(
     ssh: &Arc<SshClient>,
     host_alias: &str,
     script: &str,
     timeout: Duration,
 ) -> Result<String, IpcError> {
+    validate::host_alias(host_alias)?;
     if host_alias == "local" {
         let output = tokio::time::timeout(
             timeout,
@@ -249,5 +294,85 @@ mod tests {
         let output = "Session ID: session-abc-123\n";
         let id = parse_session_id_from_bg_output(output);
         assert_eq!(id, Some("session-abc-123".to_string()));
+    }
+
+    // ─── script builders ─────────────────────────────────────────────────
+
+    const UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    #[test]
+    fn bg_script_places_end_of_options_before_prompt() {
+        let s = bg_script("review-1", "Summarise the diff").unwrap();
+        assert_eq!(s, "claude --bg --name 'review-1' -- 'Summarise the diff'");
+        // `--` sits immediately before the (quoted) prompt and after --name's value.
+        let idx = s.find(" -- ").expect("has -- separator");
+        assert!(s[..idx].ends_with("'review-1'"));
+        assert!(s[idx + 4..].starts_with("'Summarise"));
+    }
+
+    #[test]
+    fn bg_script_rejects_option_like_name_but_not_dash_prompt() {
+        // The name is an option value: a leading `-` is refused.
+        for bad in ["--foo", "-n", "--help"] {
+            let err = bg_script(bad, "ok prompt").unwrap_err();
+            assert_eq!(err.code, "E_INVALID", "name {bad:?}");
+        }
+        // The prompt sits after `--`, so a leading `-` is legitimate (e.g. a
+        // markdown list) and must land verbatim after the separator.
+        for prompt in ["- fix login\n- add test", "--foo", "-"] {
+            let s = bg_script("ok-name", prompt).unwrap();
+            let expected_tail = format!(" -- {}", quote(prompt));
+            assert!(
+                s.ends_with(&expected_tail),
+                "{s:?} should end with {expected_tail:?}"
+            );
+        }
+        // Blank values are still refused on both sides.
+        assert!(bg_script("", "x").is_err());
+        assert!(bg_script("x", "").is_err());
+        assert!(bg_script("x", "   ").is_err());
+    }
+
+    #[test]
+    fn bg_script_quotes_shell_metacharacters() {
+        let s = bg_script("n", "it's $(rm -rf /) `x`").unwrap();
+        assert_eq!(s, "claude --bg --name 'n' -- 'it'\\''s $(rm -rf /) `x`'");
+    }
+
+    #[test]
+    fn logs_and_stop_scripts_require_uuid_and_skip_double_dash() {
+        assert_eq!(logs_script(UUID).unwrap(), format!("claude logs '{UUID}'"));
+        assert_eq!(stop_script(UUID).unwrap(), format!("claude stop '{UUID}'"));
+        // `claude logs -- <id>` is rejected by the CLI, so no `--` here…
+        assert!(!logs_script(UUID).unwrap().contains(" -- "));
+        // …and an option-shaped or non-UUID id is refused up front instead.
+        for bad in [
+            "--foo",
+            "-h",
+            "abc-123",
+            "",
+            "550E8400-E29B-41D4-A716-446655440000",
+        ] {
+            assert_eq!(logs_script(bad).unwrap_err().code, "E_INVALID", "{bad:?}");
+            assert_eq!(stop_script(bad).unwrap_err().code, "E_INVALID", "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn purge_script_places_end_of_options_before_path() {
+        let s = purge_script("/home/me/projects/x").unwrap();
+        assert_eq!(s, "claude project purge --yes -- '/home/me/projects/x'");
+        for bad in ["--all", "-rf", ""] {
+            assert_eq!(purge_script(bad).unwrap_err().code, "E_INVALID", "{bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn run_claude_script_rejects_option_like_host_alias() {
+        let ssh = Arc::new(SshClient::new());
+        let err = run_claude_script(&ssh, "-oProxyCommand=id", "true", CLAUDE_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
     }
 }

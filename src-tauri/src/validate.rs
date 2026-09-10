@@ -287,9 +287,62 @@ pub fn friendly_name(value: &str) -> Result<(), IpcError> {
     Ok(())
 }
 
+/// Validate that a free-form value (a `claude` prompt) is not empty or
+/// whitespace-only. Use this alone for a positional that the call site places
+/// after `--`: such a value may legitimately begin with `-` (a markdown list).
+pub fn not_blank(label: &str, value: &str) -> Result<(), IpcError> {
+    if value.trim().is_empty() {
+        return Err(IpcError::new(
+            "E_INVALID",
+            format!("{label} must not be empty"),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a value handed to a CLI as an option *value* or a positional the
+/// CLI cannot take after `--` (`claude --name <x>`, `claude logs <id>`,
+/// a project path). It may contain anything a shell quote can carry — spaces,
+/// unicode — but it must be non-blank and must not begin with `-`, since an
+/// option parser would read `--foo` as a flag.
+pub fn not_option_like(label: &str, value: &str) -> Result<(), IpcError> {
+    not_blank(label, value)?;
+    if value.starts_with('-') {
+        return Err(IpcError::new(
+            "E_INVALID",
+            format!("{label} must not start with '-'"),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn not_blank_accepts_leading_dash_rejects_whitespace_only() {
+        assert!(not_blank("prompt", "- fix login\n- add test").is_ok());
+        assert!(not_blank("prompt", "--foo").is_ok());
+        for bad in ["", " ", "\n\t "] {
+            let err = not_blank("prompt", bad).unwrap_err();
+            assert_eq!(err.code, "E_INVALID", "{bad:?}");
+            assert_eq!(err.message, "prompt must not be empty");
+        }
+    }
+
+    #[test]
+    fn not_option_like_rejects_blank_and_leading_dash() {
+        assert!(not_option_like("prompt", "fix the login bug").is_ok());
+        assert!(not_option_like("prompt", "multi\nline prompt").is_ok());
+        assert!(not_option_like("path", "/home/me/proj").is_ok());
+        assert!(not_option_like("prompt", "a - b").is_ok()); // dash inside is fine
+        for bad in ["", "   ", "--foo", "-n", "--", "-"] {
+            let err = not_option_like("prompt", bad).unwrap_err();
+            assert_eq!(err.code, "E_INVALID", "{bad:?}");
+            assert!(err.message.starts_with("prompt must"), "{}", err.message);
+        }
+    }
 
     #[test]
     fn host_alias_accepts_normal_aliases() {
