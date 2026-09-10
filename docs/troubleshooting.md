@@ -19,7 +19,7 @@ it.
 | **MCP bind error** — server enabled but not listening | Port 4180 (or configured port) already in use | Change the port in **Settings → Control API (MCP)**. The `bind_error` field in `McpStatus` shows the exact OS error. |
 | **No projects found** | Scan path is empty or the base directory does not exist | Place repos under `~/projects/github.com/<owner>/<repo>`, or set `CLAUDE_FLEET_PROJECTS_BASE` to your projects root. (`E_FLEET_PROJECTS_BASE`) |
 | Session **won't attach** / appears as a ghost | The underlying tmux session has been destroyed | Use **Recreate** to replace the session, or **Dismiss** to remove the ghost entry. |
-| *(Developers)* `localStorage is undefined` in frontend tests | Pre-existing test-environment limitation noted in `CLAUDE.md` | This is not caused by app code. Run `npx vitest run` and compare failures against `main` before attributing them to a change. |
+| *(Developers)* `Failed to resolve import "@tauri-apps/plugin-clipboard-manager"` in `App.test.ts` / `clipboard_native.test.ts` | Stale `node_modules` after pulling | Run `pnpm install --frozen-lockfile` (pnpm 10; `corepack pnpm@10 install --frozen-lockfile` if your pnpm is older), then re-run `pnpm test`. `localStorage` is polyfilled in `vitest.setup.ts`, so a missing-`localStorage` failure is not expected. |
 
 ---
 

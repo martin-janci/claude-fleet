@@ -16,10 +16,14 @@ all green):
 
 - **CRITICAL:** CR1, CR2, CR3.
 - **HIGH:** H1–H7.
-- **MEDIUM:** M1–M5, M7–M12. M5 was fixed by moving to `ControlMaster=auto`
+- **MEDIUM:** M1, M3–M5, M7–M12. M5 was fixed by moving to `ControlMaster=auto`
   (ssh owns the master lifecycle — no app-side staleness, less code). M6
   (`with_transaction` in reconcile) was resolved independently by the iter-4b
   `apply_host_reconcile` rework.
+- **M2 is still OPEN** (re-verified 2026-09-10): `src-tauri/Cargo.toml` enables
+  the `devtools` feature unconditionally (`tauri = { version = "2", features =
+  ["devtools"] }`), so release builds still ship DevTools. The Wave 0 PR
+  `chore/w0-backend-hygiene` gates it behind `cfg(debug_assertions)`.
 - **LOW:** L1, L2, L3, L7, L8. L4 (double bootstrap) and L6 (ANSI scroll
   region) were resolved by other work.
 - The pre-existing `localStorage`-undefined vitest failure is also fixed
