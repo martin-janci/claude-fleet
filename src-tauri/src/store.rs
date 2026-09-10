@@ -159,6 +159,49 @@ pub struct HostReconcile<'a> {
 /// status-flapping session cannot grow the table without bound.
 pub const SESSION_EVENTS_CAP: i64 = 500;
 
+/// Ordered schema migrations, `(version, sql)`. Versions are contiguous from
+/// 1 and every script must end by recording its own version with
+/// `INSERT OR IGNORE INTO schema_version (version) VALUES (N)` — the tests
+/// enforce both. `migrate()` runs entry 0 unconditionally (it is idempotent
+/// and bootstraps `schema_version`) and each later entry in its own
+/// transaction iff its version is above the recorded maximum. To add one:
+/// drop `NNN_name.sql` into `migrations/` and append it here.
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../migrations/001_init.sql")),
+    (2, include_str!("../migrations/002_hosts_ssh.sql")),
+    (3, include_str!("../migrations/003_accounts.sql")),
+    (4, include_str!("../migrations/004_session_account.sql")),
+    (5, include_str!("../migrations/005_session_reviews.sql")),
+    (
+        6,
+        include_str!("../migrations/006_session_worktree_key.sql"),
+    ),
+    (7, include_str!("../migrations/007_indexes.sql")),
+    (8, include_str!("../migrations/008_ghost_sessions.sql")),
+    (9, include_str!("../migrations/009_session_claude_id.sql")),
+    (
+        10,
+        include_str!("../migrations/010_claude_agent_fields.sql"),
+    ),
+    (11, include_str!("../migrations/011_host_provisioned.sql")),
+    (
+        12,
+        include_str!("../migrations/012_session_context_pressure.sql"),
+    ),
+    (13, include_str!("../migrations/013_session_events.sql")),
+    (14, include_str!("../migrations/014_last_reconciled_at.sql")),
+    (15, include_str!("../migrations/015_session_messages.sql")),
+    (
+        16,
+        include_str!("../migrations/016_session_friendly_name.sql"),
+    ),
+    (17, include_str!("../migrations/017_safe_kill.sql")),
+];
+
+/// The schema version a fully migrated database reports.
+#[cfg(test)]
+const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
+
 pub struct Store {
     conn: Connection,
     bus: Arc<dyn EventBus>,
@@ -197,8 +240,11 @@ impl Store {
 
     fn migrate(&self) -> Result<()> {
         self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-        self.conn
-            .execute_batch(include_str!("../migrations/001_init.sql"))?;
+        // The bootstrap migration is idempotent (`CREATE TABLE IF NOT EXISTS`
+        // + `INSERT OR IGNORE`) and always runs: on a fresh DB it also creates
+        // `schema_version`, which the gate below needs to exist.
+        let (_, bootstrap) = MIGRATIONS[0];
+        self.conn.execute_batch(bootstrap)?;
         // Newer migrations are applied only if not yet recorded. We can't
         // wrap them in CREATE-OR-IGNORE because they ALTER existing tables.
         let v: i64 = self
@@ -211,86 +257,12 @@ impl Store {
         // it can never leave a column half-added, which on the next launch
         // would re-run the migration and fail with "duplicate column",
         // bricking startup.
-        if v < 2 {
+        for (version, sql) in MIGRATIONS.iter().copied() {
+            if version <= v {
+                continue;
+            }
             let tx = self.conn.unchecked_transaction()?;
-            tx.execute_batch(include_str!("../migrations/002_hosts_ssh.sql"))?;
-            tx.commit()?;
-        }
-        if v < 3 {
-            let tx = self.conn.unchecked_transaction()?;
-            tx.execute_batch(include_str!("../migrations/003_accounts.sql"))?;
-            tx.commit()?;
-        }
-        if v < 4 {
-            let tx = self.conn.unchecked_transaction()?;
-            tx.execute_batch(include_str!("../migrations/004_session_account.sql"))?;
-            tx.commit()?;
-        }
-        if v < 5 {
-            let tx = self.conn.unchecked_transaction()?;
-            tx.execute_batch(include_str!("../migrations/005_session_reviews.sql"))?;
-            tx.commit()?;
-        }
-        if v < 6 {
-            let tx = self.conn.unchecked_transaction()?;
-            tx.execute_batch(include_str!("../migrations/006_session_worktree_key.sql"))?;
-            tx.commit()?;
-        }
-        if v < 7 {
-            let tx = self.conn.unchecked_transaction()?;
-            tx.execute_batch(include_str!("../migrations/007_indexes.sql"))?;
-            tx.commit()?;
-        }
-        if v < 8 {
-            let tx = self.conn.unchecked_transaction()?;
-            tx.execute_batch(include_str!("../migrations/008_ghost_sessions.sql"))?;
-            tx.commit()?;
-        }
-        if v < 9 {
-            let tx = self.conn.unchecked_transaction()?;
-            tx.execute_batch(include_str!("../migrations/009_session_claude_id.sql"))?;
-            tx.commit()?;
-        }
-        if v < 10 {
-            let tx = self.conn.unchecked_transaction()?;
-            tx.execute_batch(include_str!("../migrations/010_claude_agent_fields.sql"))?;
-            tx.commit()?;
-        }
-        if v < 11 {
-            let tx = self.conn.unchecked_transaction()?;
-            tx.execute_batch(include_str!("../migrations/011_host_provisioned.sql"))?;
-            tx.commit()?;
-        }
-        if v < 12 {
-            let tx = self.conn.unchecked_transaction()?;
-            tx.execute_batch(include_str!(
-                "../migrations/012_session_context_pressure.sql"
-            ))?;
-            tx.commit()?;
-        }
-        if v < 13 {
-            let tx = self.conn.unchecked_transaction()?;
-            tx.execute_batch(include_str!("../migrations/013_session_events.sql"))?;
-            tx.commit()?;
-        }
-        if v < 14 {
-            let tx = self.conn.unchecked_transaction()?;
-            tx.execute_batch(include_str!("../migrations/014_last_reconciled_at.sql"))?;
-            tx.commit()?;
-        }
-        if v < 15 {
-            let tx = self.conn.unchecked_transaction()?;
-            tx.execute_batch(include_str!("../migrations/015_session_messages.sql"))?;
-            tx.commit()?;
-        }
-        if v < 16 {
-            let tx = self.conn.unchecked_transaction()?;
-            tx.execute_batch(include_str!("../migrations/016_session_friendly_name.sql"))?;
-            tx.commit()?;
-        }
-        if v < 17 {
-            let tx = self.conn.unchecked_transaction()?;
-            tx.execute_batch(include_str!("../migrations/017_safe_kill.sql"))?;
+            tx.execute_batch(sql)?;
             tx.commit()?;
         }
         Ok(())
@@ -2376,7 +2348,75 @@ mod tests {
     fn migrate_is_idempotent() {
         let store = Store::open_in_memory().expect("open");
         store.migrate().expect("re-migrate");
-        assert_eq!(store.schema_version().expect("version"), 17);
+        assert_eq!(
+            store.schema_version().expect("version"),
+            LATEST_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn migrations_are_contiguous_from_one() {
+        assert!(!MIGRATIONS.is_empty());
+        for (i, (version, _)) in MIGRATIONS.iter().enumerate() {
+            assert_eq!(
+                *version,
+                i as i64 + 1,
+                "MIGRATIONS[{i}] has version {version}"
+            );
+        }
+        assert_eq!(LATEST_SCHEMA_VERSION, MIGRATIONS.len() as i64);
+    }
+
+    #[test]
+    fn every_migration_records_its_own_version() {
+        for (version, sql) in MIGRATIONS {
+            // Normalise whitespace so formatting differences between scripts
+            // (line breaks, double spaces) do not matter.
+            let flat = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+            let stamp =
+                format!("INSERT OR IGNORE INTO schema_version (version) VALUES ({version});");
+            assert!(
+                flat.contains(&stamp),
+                "migration {version} must contain `{stamp}`"
+            );
+            // …and must not stamp any *other* version by mistake.
+            let stamps = flat
+                .matches("INTO schema_version (version) VALUES (")
+                .count();
+            assert_eq!(stamps, 1, "migration {version} stamps {stamps} versions");
+        }
+    }
+
+    #[test]
+    fn second_migrate_on_fresh_db_is_a_noop() {
+        let store = Store::open_in_memory().expect("open");
+        let before = store.schema_version().expect("version");
+        let count = |s: &Store| -> i64 {
+            s.conn
+                .query_row("SELECT COUNT(*) FROM schema_version", [], |r| r.get(0))
+                .unwrap()
+        };
+        let rows_before = count(&store);
+        let tables_before = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table','index')",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        store.migrate().expect("second migrate");
+        assert_eq!(store.schema_version().expect("version"), before);
+        assert_eq!(count(&store), rows_before);
+        let tables_after = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table','index')",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(tables_after, tables_before);
     }
 
     #[test]
@@ -2766,9 +2806,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_seven_after_migration() {
+    fn schema_version_is_latest_after_migration() {
         let s = Store::open_in_memory().expect("open");
-        assert_eq!(s.schema_version().expect("version"), 17);
+        assert_eq!(s.schema_version().expect("version"), LATEST_SCHEMA_VERSION);
     }
 
     #[test]
