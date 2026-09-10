@@ -32,7 +32,9 @@ impl NewBgSessionArgs {
                 "session name must not contain control characters",
             ));
         }
-        validate::not_option_like("prompt", &self.prompt)?;
+        // The prompt lands after `--` (see `claude_cli::bg_script`), so a
+        // leading `-` is fine — only blank prompts are rejected.
+        validate::not_blank("prompt", &self.prompt)?;
         Ok(())
     }
 }
@@ -56,12 +58,6 @@ pub struct PeekSessionArgs {
 impl PeekSessionArgs {
     pub fn validate(&self) -> Result<(), IpcError> {
         validate::host_alias(&self.host_alias)?;
-        if self.claude_session_id.trim().is_empty() {
-            return Err(IpcError::new(
-                "E_INVALID",
-                "claude_session_id must not be empty",
-            ));
-        }
         validate::claude_session_id(&self.claude_session_id)?;
         Ok(())
     }
@@ -201,16 +197,24 @@ mod tests {
         };
         assert!(ok.validate().is_ok());
 
-        let bad_prompt = NewBgSessionArgs {
-            prompt: "--dangerously-skip-permissions".into(),
+        // A prompt may start with `-` (markdown list): bg_script emits `--`
+        // before it, so it can never be parsed as a flag.
+        let dash_prompt = NewBgSessionArgs {
+            prompt: "- fix login\n- add test".into(),
             ..ok
         };
-        assert_eq!(bad_prompt.validate().unwrap_err().code, "E_INVALID");
+        assert!(dash_prompt.validate().is_ok());
+
+        let blank_prompt = NewBgSessionArgs {
+            prompt: "   ".into(),
+            ..dash_prompt
+        };
+        assert_eq!(blank_prompt.validate().unwrap_err().code, "E_INVALID");
 
         let bad_name = NewBgSessionArgs {
             name: "-n".into(),
             prompt: "fine".into(),
-            ..bad_prompt
+            ..blank_prompt
         };
         assert_eq!(bad_name.validate().unwrap_err().code, "E_INVALID");
 

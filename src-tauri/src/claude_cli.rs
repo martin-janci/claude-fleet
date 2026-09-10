@@ -62,9 +62,13 @@ pub fn parse_session_id_from_bg_output(output: &str) -> Option<String> {
 // instead. Pure functions so the argv shape is unit-testable.
 
 /// `claude --bg --name <name> -- <prompt>`.
+///
+/// The name is an option *value* so it must not look like an option; the
+/// prompt sits after `--` and may legitimately start with `-` (a markdown
+/// list, say), so it is only checked for being non-blank.
 pub fn bg_script(name: &str, prompt: &str) -> Result<String, IpcError> {
     validate::not_option_like("session name", name)?;
-    validate::not_option_like("prompt", prompt)?;
+    validate::not_blank("prompt", prompt)?;
     Ok(format!(
         "claude --bg --name {} -- {}",
         quote(name),
@@ -307,15 +311,26 @@ mod tests {
     }
 
     #[test]
-    fn bg_script_rejects_option_like_name_and_prompt() {
+    fn bg_script_rejects_option_like_name_but_not_dash_prompt() {
+        // The name is an option value: a leading `-` is refused.
         for bad in ["--foo", "-n", "--help"] {
             let err = bg_script(bad, "ok prompt").unwrap_err();
             assert_eq!(err.code, "E_INVALID", "name {bad:?}");
-            let err = bg_script("ok-name", bad).unwrap_err();
-            assert_eq!(err.code, "E_INVALID", "prompt {bad:?}");
         }
+        // The prompt sits after `--`, so a leading `-` is legitimate (e.g. a
+        // markdown list) and must land verbatim after the separator.
+        for prompt in ["- fix login\n- add test", "--foo", "-"] {
+            let s = bg_script("ok-name", prompt).unwrap();
+            let expected_tail = format!(" -- {}", quote(prompt));
+            assert!(
+                s.ends_with(&expected_tail),
+                "{s:?} should end with {expected_tail:?}"
+            );
+        }
+        // Blank values are still refused on both sides.
         assert!(bg_script("", "x").is_err());
         assert!(bg_script("x", "").is_err());
+        assert!(bg_script("x", "   ").is_err());
     }
 
     #[test]
