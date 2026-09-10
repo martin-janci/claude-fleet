@@ -30,8 +30,8 @@
   }
 </script>
 
-<div class="modal-backdrop" onclick={onClose} role="presentation">
-  <div class="dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-label="Start review">
+<div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) onClose(); }} role="presentation">
+  <div class="dialog" role="dialog" aria-label="Start review">
     <h3>Review session</h3>
     <p class="src">
       <span class="host-badge">[{source.host_alias}]</span>

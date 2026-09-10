@@ -155,8 +155,8 @@
     if (e.key === 'Escape') onClose();
   }} />
 
-<div class="modal-backdrop" onclick={onClose} role="presentation">
-  <div class="dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-label="Settings">
+<div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) onClose(); }} role="presentation">
+  <div class="dialog" role="dialog" aria-label="Settings">
     <header>
       <h3>Settings</h3>
       <button class="close" onclick={onClose} aria-label="Close">×</button>

@@ -76,7 +76,7 @@
   // The live rename <input> (only one renders at a time). Bound directly so
   // focus targets the right element — a `data-testid` querySelector would
   // pick the first match if a tree row and an orphan row shared a name.
-  let renameInput: HTMLInputElement | undefined;
+  let renameInput: HTMLInputElement | undefined = $state();
   // Synchronous in-flight guard: commitRename is wired to BOTH Enter and
   // onblur, and Enter blurs the input — without this the rename IPC fires
   // twice (the `!renamingName` check doesn't help: it's still set during the

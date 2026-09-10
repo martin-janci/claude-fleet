@@ -112,8 +112,8 @@
   }
 </script>
 
-<div class="modal-backdrop" onclick={onClose} role="presentation">
-  <div class="dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-label="Send prompt">
+<div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) onClose(); }} role="presentation">
+  <div class="dialog" role="dialog" aria-label="Send prompt">
     <h3>Send prompt to session(s)</h3>
 
     <section class="targets">
