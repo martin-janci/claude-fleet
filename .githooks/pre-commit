@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Opt-in pre-commit hook: runs the relevant half of scripts/ci-local.sh for the
+# files staged in this commit.
+#
+# Enable it (once, per clone):
+#
+#   git config core.hooksPath .githooks
+#
+# Disable it again with `git config --unset core.hooksPath`, or skip a single
+# commit with `git commit --no-verify`.
+#
+#   staged path matches src-tauri/, deny.toml, rust-toolchain.toml
+#       -> scripts/ci-local.sh --rust-only      (fmt, clippy, test, cargo deny)
+#   staged path matches src/, package.json, pnpm-lock.yaml
+#       -> scripts/ci-local.sh --frontend-only  (install, check, test, build, audit)
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+staged="$(git diff --cached --name-only --diff-filter=ACMRD)"
+[[ -z "$staged" ]] && exit 0
+
+run_rust=0
+run_frontend=0
+while IFS= read -r path; do
+  case "$path" in
+    src-tauri/*|deny.toml|rust-toolchain.toml) run_rust=1 ;;
+    src/*|package.json|pnpm-lock.yaml) run_frontend=1 ;;
+  esac
+done <<< "$staged"
+
+if [[ "$run_rust" == 1 ]]; then
+  scripts/ci-local.sh --rust-only
+fi
+if [[ "$run_frontend" == 1 ]]; then
+  scripts/ci-local.sh --frontend-only
+fi

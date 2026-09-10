@@ -1,0 +1,68 @@
+# cargo-deny configuration for the Rust backend in src-tauri/.
+#
+# The cargo workspace root is src-tauri/; cargo-deny walks up from the working
+# directory and finds this file from either the repo root or src-tauri/, but
+# scripts/ci-local.sh and .github/workflows/ci.yml pass it explicitly:
+#
+#     cargo deny --manifest-path src-tauri/Cargo.toml check --config deny.toml
+#
+# Install with: cargo install cargo-deny --locked
+
+[graph]
+all-features = false
+
+[advisories]
+# Unmaintained transitive crates with no fixed upstream version. Each is pulled
+# in by tauri 2.x and cannot be replaced from this crate; re-check whenever
+# tauri is bumped and drop the entry once the tree no longer contains it.
+ignore = [
+  # proc-macro-error: unmaintained; via tauri-macros / tauri-codegen (fix is upstream in tauri).
+  "RUSTSEC-2024-0370",
+  # unic-char-property: unmaintained rust-unic family; via urlpattern <- tauri-utils.
+  "RUSTSEC-2025-0081",
+  # unic-char-range: unmaintained rust-unic family; via urlpattern <- tauri-utils.
+  "RUSTSEC-2025-0075",
+  # unic-common: unmaintained rust-unic family; via urlpattern <- tauri-utils.
+  "RUSTSEC-2025-0080",
+  # unic-ucd-ident: unmaintained rust-unic family; via urlpattern <- tauri-utils.
+  "RUSTSEC-2025-0100",
+  # unic-ucd-version: unmaintained rust-unic family; via urlpattern <- tauri-utils.
+  "RUSTSEC-2025-0098",
+]
+
+[licenses]
+# Every license that appears in the dependency tree (see `cargo deny list`),
+# plus the permissive set we are happy to accept in future.
+allow = [
+  "MIT",
+  "MIT-0",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Zlib",
+  "CC0-1.0",
+  "0BSD",
+  "BSL-1.0",
+  "Unlicense",
+]
+confidence-threshold = 0.8
+
+# The app crate itself has no `license` field in src-tauri/Cargo.toml; the
+# repository is MIT (package.json). Remove this once the field exists.
+[[licenses.clarify]]
+crate = "claude-fleet"
+expression = "MIT"
+license-files = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
