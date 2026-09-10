@@ -78,6 +78,29 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../docs/control-api-reference.md")
     }
 
+    /// The hand-written narrative guide. Compiled in so the check runs
+    /// wherever `cargo test` runs, with no working-directory assumptions.
+    const NARRATIVE_GUIDE: &str = include_str!("../../../docs/control-api.md");
+
+    #[test]
+    fn narrative_guide_names_every_tool() {
+        // docs/control-api.md no longer restates each tool (the generated
+        // reference does that), but it must at least index every tool by name
+        // so a reader can find it — a new tool without a mention fails here.
+        let tools = FleetTools::tool_router_for_doc().list_all();
+        assert!(tools.len() > 20, "router lists {} tools", tools.len());
+        let missing: Vec<String> = tools
+            .iter()
+            .map(|t| t.name.to_string())
+            .filter(|name| !NARRATIVE_GUIDE.contains(&format!("`{name}`")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "docs/control-api.md does not mention these tools (add them to the \
+             tool index as backticked names): {missing:?}"
+        );
+    }
+
     #[test]
     fn extracts_some_commands() {
         let cmds = tauri_commands();

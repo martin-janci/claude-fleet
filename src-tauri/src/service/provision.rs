@@ -27,28 +27,12 @@ const TMUX_CONF: &str = "~/.tmux.conf";
 /// sentinels is the user's own content and untouched.
 const CLAUDE_MD_BEGIN: &str = "<!-- BEGIN claude-fleet managed (do not edit between sentinels) -->";
 const CLAUDE_MD_END: &str = "<!-- END claude-fleet managed -->";
-const CLAUDE_MD_BODY: &str = "## claude-fleet session labels
+const CLAUDE_MD_BODY: &str = "## claude-fleet
 
-If you are running inside a claude-fleet-managed tmux session and the
-`mcp__claude-fleet__set_friendly_name` tool is available, label this session
-via the **fleet-friendly-name** skill. Fire on deterministic signals only:
-
-- the first user prompt of this conversation,
-- the first user prompt after a `/clear` (the harness marker
-  `<command-name>/clear</command-name>` will be in the prior user turn),
-- a ~10-prompt heartbeat — re-check whether the current label still matches
-  the recent work; relabel if not,
-- an explicit user ask to relabel.
-
-Do not fire on commits, file saves, or a fuzzy \"task feels different\".
-Do not chat about the label; just invoke the skill.
-
-The `host_alias` is configuration, not a fact derivable from `hostname`.
-Never call `set_friendly_name` with a guessed alias (e.g. `hostname -s`) —
-it silently misses whenever the user renames a host in the picker. Always
-look it up: `list_sessions {}`, find the row whose `tmux_name` matches
-`tmux display-message -p '#S'`, then call `set_friendly_name` with that
-row's `host_alias`. The skill spells out the full flow.";
+This host is managed by claude-fleet (Claude Code sessions in tmux across machines).
+Use the **claude-fleet-control** skill to operate sessions over the fleet MCP server.
+If you run inside a fleet tmux session, use the **fleet-friendly-name** skill to
+label this session; it defines when to fire and how to look up your `host_alias`.";
 
 /// Install the skill + merge the MCP entry on one host. `url` is the MCP
 /// endpoint that host should use. Reads `~/.claude.json`, merges (preserving
@@ -566,49 +550,28 @@ mod tests {
     }
 
     #[test]
-    fn claude_md_body_documents_programmatic_verification() {
-        // Regression: the managed CLAUDE.md block must steer the in-session
-        // agent toward `list_sessions` lookup on `E_NOTFOUND` rather than a
-        // hardcoded hostname-guessing fallback chain. The previous wording
-        // listed `hostname -s` / `hostname` / `local` as fallbacks, which
-        // silently broke on any host whose alias was renamed in the picker
-        // (alias is configuration, not a function of `hostname`).
-        assert!(
-            super::CLAUDE_MD_BODY.contains("list_sessions"),
-            "managed CLAUDE.md block must point at `list_sessions` for \
-             programmatic alias verification, not a hardcoded fallback chain"
-        );
-        assert!(
-            super::CLAUDE_MD_BODY.contains("configuration"),
-            "managed CLAUDE.md block must call out that `host_alias` is \
-             configuration, so the agent doesn't try to derive it from \
-             `hostname`"
-        );
-    }
-
-    #[test]
-    fn claude_md_body_documents_deterministic_triggers() {
-        // Regression: the managed CLAUDE.md block must enumerate the
-        // deterministic signals that fire the fleet-friendly-name skill
-        // (first prompt, post-`/clear`, heartbeat). The previous wording
-        // (\"at the start of every new task and whenever the task changes
-        // significantly\") was vibe-based and skipped fires after `/clear`,
-        // leaving sidebar labels stale across context resets.
+    fn claude_md_body_is_a_short_pointer_to_the_skills() {
+        // The managed block used to duplicate the fleet-friendly-name skill
+        // body; the skill is the single source of truth, so the block only
+        // says what claude-fleet is and which skills to use. Keep it short —
+        // it lands in every host's global CLAUDE.md.
         let body = super::CLAUDE_MD_BODY;
         assert!(
-            body.contains("/clear"),
-            "managed CLAUDE.md block must name `/clear` as a deterministic \
-             trigger — that's the most reliable new-task signal we have"
+            body.contains("claude-fleet-control"),
+            "managed CLAUDE.md block must point at the claude-fleet-control skill"
         );
         assert!(
-            body.contains("first user prompt"),
-            "managed CLAUDE.md block must name the first-prompt trigger so \
-             sessions get labeled at the start of a conversation"
+            body.contains("fleet-friendly-name"),
+            "managed CLAUDE.md block must point at the fleet-friendly-name skill"
         );
         assert!(
-            body.contains("heartbeat"),
-            "managed CLAUDE.md block must mention the N-prompt heartbeat so \
-             labels don't go stale mid-conversation when `/clear` isn't used"
+            !body.contains("hostname"),
+            "alias lookup rules live in the skill, not the managed block"
+        );
+        let lines = body.lines().filter(|l| !l.trim().is_empty()).count();
+        assert!(
+            lines <= 6,
+            "managed block must stay short, has {lines} lines"
         );
     }
 }
