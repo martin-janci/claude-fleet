@@ -776,3 +776,358 @@ describe('Screen.selectionText', () => {
     expect(s.selectionText({ row: 0, col: 0 }, { row: 1, col: 4 })).toBe('hi\nyo');
   });
 });
+
+describe('ansi.Screen — code points and wide glyphs (FE-5)', () => {
+  const cells = (s: Screen, r: number) => s.cells[r].map((c) => c.ch);
+
+  it('an astral emoji occupies two cells as one grapheme (head + trailing placeholder)', () => {
+    const s = new Screen(2, 6);
+    s.write('a😀b');
+    expect(cells(s, 0)).toEqual(['a', '😀', '', 'b', ' ', ' ']);
+    expect(s.cursorCol).toBe(4);
+  });
+
+  it('CJK shifts later columns by two per glyph', () => {
+    const s = new Screen(2, 8);
+    s.write('中文x');
+    expect(cells(s, 0)).toEqual(['中', '', '文', '', 'x', ' ', ' ', ' ']);
+    expect(s.cursorCol).toBe(5);
+    // CHA to column 5 lands on the 'x' — the wide glyphs really took 4 cells.
+    s.write('\x1b[5Gy');
+    expect(cells(s, 0)[4]).toBe('y');
+  });
+
+  it('a wide glyph that would straddle the right edge wraps, leaving the orphan column blank', () => {
+    const s = new Screen(2, 5);
+    s.write('abcd中');
+    expect(cells(s, 0)).toEqual(['a', 'b', 'c', 'd', ' ']);
+    expect(cells(s, 1)).toEqual(['中', '', ' ', ' ', ' ']);
+    expect(s.cursorCol).toBe(2);
+  });
+
+  it('a surrogate pair split across two writes is still one glyph', () => {
+    const s = new Screen(1, 4);
+    const [hi, lo] = ['😀'.charAt(0), '😀'.charAt(1)];
+    s.write('a' + hi);
+    expect(cells(s, 0)).toEqual(['a', ' ', ' ', ' ']);
+    s.write(lo + 'b');
+    expect(cells(s, 0)).toEqual(['a', '😀', '', 'b']);
+  });
+
+  it('an unpaired surrogate renders as U+FFFD in a single cell', () => {
+    const s = new Screen(1, 4);
+    s.write('a\ud83db');
+    expect(cells(s, 0)).toEqual(['a', '�', 'b', ' ']);
+  });
+
+  it('combining marks attach to the previous cell', () => {
+    const s = new Screen(1, 4);
+    s.write('éx');
+    expect(cells(s, 0)).toEqual(['é', 'x', ' ', ' ']);
+    expect(s.cursorCol).toBe(2);
+  });
+
+  it('a variation selector after a wide glyph attaches to its head, not the trailing cell', () => {
+    const s = new Screen(1, 4);
+    s.write('😀️x');
+    expect(cells(s, 0)).toEqual(['😀️', '', 'x', ' ']);
+  });
+
+  it('a combining mark with nothing before it on the row is dropped', () => {
+    const s = new Screen(1, 3);
+    s.write('́a');
+    expect(cells(s, 0)).toEqual(['a', ' ', ' ']);
+  });
+
+  it('overwriting the trailing half of a wide glyph blanks its head', () => {
+    const s = new Screen(1, 4);
+    s.write('中x\x1b[2GZ');
+    expect(cells(s, 0)).toEqual([' ', 'Z', 'x', ' ']);
+  });
+
+  it('overwriting the head of a wide glyph with a narrow char blanks its trailing half', () => {
+    const s = new Screen(1, 4);
+    s.write('中x\x1b[1GZ');
+    expect(cells(s, 0)).toEqual(['Z', ' ', 'x', ' ']);
+  });
+
+  it('erasing (ECH) either half of a pair clears both', () => {
+    const a = new Screen(1, 4);
+    a.write('中x\x1b[2G\x1b[X'); // erase the trailing cell
+    expect(cells(a, 0)).toEqual([' ', ' ', 'x', ' ']);
+    const b = new Screen(1, 4);
+    b.write('中x\x1b[1G\x1b[X'); // erase the head
+    expect(cells(b, 0)).toEqual([' ', ' ', 'x', ' ']);
+  });
+
+  it('EL from the middle of a pair clears the whole pair', () => {
+    const s = new Screen(1, 4);
+    s.write('a中b\x1b[3G\x1b[K');
+    expect(cells(s, 0)).toEqual(['a', ' ', ' ', ' ']);
+  });
+
+  it('DCH on the trailing half deletes the pair; an orphaned trailing half is blanked', () => {
+    const a = new Screen(1, 5);
+    a.write('中xy\x1b[2G\x1b[P');
+    expect(cells(a, 0)).toEqual([' ', 'x', 'y', ' ', ' ']);
+    const b = new Screen(1, 5);
+    b.write('a中b\x1b[1G\x1b[2P'); // deletes 'a' and the head; the trailing slides into col 0
+    expect(cells(b, 0)).toEqual([' ', 'b', ' ', ' ', ' ']);
+  });
+
+  it('ICH that pushes a head into the last column blanks it (trailing fell off)', () => {
+    const s = new Screen(1, 3);
+    s.write('a中\x1b[1G\x1b[@');
+    expect(cells(s, 0)).toEqual([' ', 'a', ' ']);
+    // With room for the pair it simply shifts intact.
+    const t = new Screen(1, 4);
+    t.write('a中\x1b[1G\x1b[@');
+    expect(cells(t, 0)).toEqual([' ', 'a', '中', '']);
+  });
+
+  it('ICH in front of a trailing half breaks the pair', () => {
+    const s = new Screen(1, 5);
+    s.write('中x\x1b[2G\x1b[@');
+    expect(cells(s, 0)).toEqual([' ', ' ', ' ', 'x', ' ']);
+  });
+
+  it('narrowing the screen through a pair blanks the cut head', () => {
+    const s = new Screen(1, 4);
+    s.write('a中');
+    s.resize(1, 2);
+    expect(cells(s, 0)).toEqual(['a', ' ']);
+  });
+
+  it('REP repeats a wide glyph as full pairs', () => {
+    const s = new Screen(1, 8);
+    s.write('中\x1b[2b');
+    expect(cells(s, 0)).toEqual(['中', '', '中', '', '中', '', ' ', ' ']);
+  });
+
+  it('selectionText skips trailing placeholders so the copied text has no extra spaces', () => {
+    const s = new Screen(1, 6);
+    s.write('a😀b');
+    expect(s.selectionText({ row: 0, col: 0 }, { row: 0, col: 5 })).toBe('a😀b');
+  });
+
+  it('rowToRuns concatenates a wide head and its placeholder into one run', () => {
+    const s = new Screen(1, 4);
+    s.write('中x');
+    expect(rowToRuns(s.cells[0]).map((r) => r.text)).toEqual(['中x ']);
+  });
+
+  it('DEL and C1 controls are dropped, not printed', () => {
+    const s = new Screen(1, 4);
+    s.write('a\x7fb\x85c');
+    expect(cells(s, 0)).toEqual(['a', 'b', 'c', ' ']);
+  });
+});
+
+describe('ansi.Screen — control strings are swallowed (FE-5)', () => {
+  it('a DCS body (ESC P … ESC \\) is invisible', () => {
+    const s = new Screen(1, 10);
+    s.write('a\x1bPq#0;2;0;0;0#0~~\x1b\\b');
+    expect(rowText(s, 0)).toBe('ab        ');
+  });
+
+  it('DCS terminated by C1 ST (0x9c) is invisible', () => {
+    const s = new Screen(1, 6);
+    s.write('a\x1bP1$r0m\x9cb');
+    expect(rowText(s, 0)).toBe('ab    ');
+  });
+
+  it('APC / PM / SOS bodies are invisible', () => {
+    const s = new Screen(1, 8);
+    s.write('a\x1b_Gi=1\x1b\\b\x1b^pm\x1b\\c\x1bXsos\x1b\\d');
+    expect(rowText(s, 0)).toBe('abcd    ');
+  });
+
+  it('a DCS split across writes stays swallowed', () => {
+    const s = new Screen(1, 6);
+    s.write('a\x1bPhid');
+    s.write('den\x1b');
+    s.write('\\b');
+    expect(rowText(s, 0)).toBe('ab    ');
+  });
+
+  it('an unhandled OSC (hyperlink 8) prints nothing', () => {
+    const s = new Screen(1, 6);
+    s.write('\x1b]8;;http://x\x1b\\ok\x1b]8;;\x1b\\');
+    expect(rowText(s, 0)).toBe('ok    ');
+  });
+
+  it('ESC + intermediate + final (DECALN) consumes its final byte', () => {
+    const s = new Screen(1, 4);
+    s.write('a\x1b#8b');
+    expect(rowText(s, 0)).toBe('ab  ');
+  });
+});
+
+describe('ansi.Screen — queries and replies (FE-5)', () => {
+  it('DSR 6 queues a 1-based cursor-position report', () => {
+    const s = new Screen(5, 10);
+    s.write('\x1b[3;4H\x1b[6n');
+    expect(s.pendingReplies).toEqual(['\x1b[3;4R']);
+    expect(s.takeReplies()).toBe('\x1b[3;4R');
+    expect(s.takeReplies()).toBe('');
+  });
+
+  it('DSR 6 with a deferred-wrap cursor reports the last column', () => {
+    const s = new Screen(1, 4);
+    s.write('abcd\x1b[6n');
+    expect(s.takeReplies()).toBe('\x1b[1;4R');
+  });
+
+  it('DECXCPR (CSI ? 6 n) replies with the private form', () => {
+    const s = new Screen(3, 3);
+    s.write('\x1b[2;2H\x1b[?6n');
+    expect(s.takeReplies()).toBe('\x1b[?2;2R');
+  });
+
+  it('DSR 5 replies "OK"', () => {
+    const s = new Screen(1, 1);
+    s.write('\x1b[5n');
+    expect(s.takeReplies()).toBe('\x1b[0n');
+  });
+
+  it('primary DA (CSI c / CSI 0 c) replies VT100-with-AVO', () => {
+    const s = new Screen(1, 1);
+    s.write('\x1b[c\x1b[0c');
+    expect(s.takeReplies()).toBe('\x1b[?1;2c\x1b[?1;2c');
+  });
+
+  it('secondary DA (CSI > c) gets its own reply; nothing is printed', () => {
+    const s = new Screen(1, 3);
+    s.write('\x1b[>c');
+    expect(s.takeReplies()).toBe('\x1b[>0;0;0c');
+    expect(rowText(s, 0)).toBe('   ');
+  });
+
+  it('multiple queries in one chunk are answered in order', () => {
+    const s = new Screen(2, 2);
+    s.write('\x1b[6n\x1b[c');
+    expect(s.takeReplies()).toBe('\x1b[1;1R\x1b[?1;2c');
+  });
+});
+
+describe('ansi.Screen — CHT / CBT / REP / DECSCUSR / BCE (FE-5)', () => {
+  it('CHT (CSI I) moves forward N tab stops', () => {
+    const s = new Screen(1, 40);
+    s.write('ab\x1b[IX');
+    expect(s.cells[0][8].ch).toBe('X');
+    s.write('\x1b[2IY');
+    expect(s.cells[0][24].ch).toBe('Y');
+  });
+
+  it('CHT clamps at the last column', () => {
+    const s = new Screen(1, 10);
+    s.write('\x1b[99I');
+    expect(s.cursorCol).toBe(9);
+  });
+
+  it('CBT (CSI Z) moves back N tab stops', () => {
+    const s = new Screen(1, 40);
+    s.write('\x1b[20G\x1b[Z');
+    expect(s.cursorCol).toBe(16);
+    s.write('\x1b[Z');
+    expect(s.cursorCol).toBe(8);
+    s.write('\x1b[5Z');
+    expect(s.cursorCol).toBe(0);
+  });
+
+  it('REP (CSI b) repeats the last printed character N times', () => {
+    const s = new Screen(1, 8);
+    s.write('ab\x1b[3b');
+    expect(rowText(s, 0)).toBe('abbbb   ');
+    expect(s.cursorCol).toBe(5);
+  });
+
+  it('REP with nothing printed yet is a no-op', () => {
+    const s = new Screen(1, 4);
+    s.write('\x1b[3b');
+    expect(rowText(s, 0)).toBe('    ');
+    expect(s.cursorCol).toBe(0);
+  });
+
+  it('REP keeps the current SGR for the repeats', () => {
+    const s = new Screen(1, 4);
+    s.write('\x1b[1mx\x1b[2b');
+    expect(s.cells[0].slice(0, 3).map((c) => c.attrs)).toEqual([ATTR_BOLD, ATTR_BOLD, ATTR_BOLD]);
+  });
+
+  it('DECSCUSR (CSI Ps SP q) stores the cursor style', () => {
+    const s = new Screen(1, 1);
+    expect(s.cursorStyle).toBe(0);
+    s.write('\x1b[5 q');
+    expect(s.cursorStyle).toBe(5);
+    s.write('\x1b[ q');
+    expect(s.cursorStyle).toBe(0);
+    s.write('\x1b[99 q');
+    expect(s.cursorStyle).toBe(6);
+  });
+
+  it('DECSET ?1 toggles application cursor keys', () => {
+    const s = new Screen(1, 1);
+    expect(s.appCursorKeys).toBe(false);
+    s.write('\x1b[?1h');
+    expect(s.appCursorKeys).toBe(true);
+    s.write('\x1b[?1l');
+    expect(s.appCursorKeys).toBe(false);
+  });
+
+  it('EL honours background-color-erase: erased cells take the current bg', () => {
+    const s = new Screen(1, 4);
+    s.write('abcd\x1b[44m\x1b[2G\x1b[K');
+    expect(rowText(s, 0)).toBe('a   ');
+    expect(s.cells[0].map((c) => c.bg)).toEqual([COLOR_DEFAULT, 4, 4, 4]);
+    // fg / attrs are reset, only bg is kept.
+    expect(s.cells[0][2].fg).toBe(COLOR_DEFAULT);
+    expect(s.cells[0][2].attrs).toBe(0);
+  });
+
+  it('ED honours BCE across rows', () => {
+    const s = new Screen(2, 2);
+    s.write('\x1b[42m\x1b[2J');
+    for (const row of s.cells) for (const c of row) expect(c.bg).toBe(2);
+    s.write('\x1b[0m\x1b[2J');
+    for (const row of s.cells) for (const c of row) expect(c.bg).toBe(COLOR_DEFAULT);
+  });
+
+  it('CSI > … m (XTMODKEYS) is not applied as SGR', () => {
+    const s = new Screen(1, 1);
+    s.write('\x1b[>4;2m');
+    expect(s.curAttrs).toBe(0);
+    expect(s.curBg).toBe(COLOR_DEFAULT);
+  });
+
+  it('a 1-column screen prints a blank for a wide glyph rather than half of it', () => {
+    const s = new Screen(2, 1);
+    s.write('中a');
+    expect(s.cells[0][0].ch).toBe(' ');
+    expect(s.cells[1][0].ch).toBe('a');
+  });
+
+  it('a saved cursor (ESC 7) is clamped on restore after the screen shrank', () => {
+    const s = new Screen(4, 4);
+    s.write('\x1b[4;4H\x1b7');
+    s.resize(2, 2);
+    s.write('\x1b8x');
+    expect(s.cursorRow).toBe(1);
+    expect(s.cells[1][1].ch).toBe('x');
+  });
+
+  it('ED 1 / EL 1 with a deferred-wrap cursor (past the last column) does not throw', () => {
+    const s = new Screen(2, 3);
+    s.write('abc\x1b[1J');
+    expect(rowText(s, 0)).toBe('   ');
+    s.write('abc\x1b[1K');
+    expect(rowText(s, 0)).toBe('   ');
+  });
+
+  it('a huge IL/DL/ICH/DCH count is clamped instead of stalling the parser', () => {
+    const s = new Screen(3, 5);
+    s.write('abc\x1b[999999999L\x1b[999999999M\x1b[999999999@\x1b[999999999P\x1b[999999999X\x1b[999999999b');
+    expect(s.rows).toBe(3);
+    expect(s.cursorRow).toBeLessThan(3);
+  });
+});

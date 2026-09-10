@@ -3,6 +3,7 @@
   import { hosts, probeHost, deleteHost, hideHost } from './hosts';
   import { onboardingDismissed, onboardingWelcomed } from './onboarding';
   import { hintsEnabled, resetHints } from './hints';
+  import { copyOnSelect } from './prefs';
   import { accounts, type AccountRow } from './accounts';
   import { mcpStatus, mcpConfigure, mcpClientConfig, installFleetHook, provisionHosts, type McpStatus, type HostProvisionResult } from './mcp';
   import AddHostPicker from './AddHostPicker.svelte';
@@ -242,6 +243,16 @@
         <button class="hook-btn" onclick={resetHints} data-testid="reset-hints">
           Reset hints
         </button>
+      </div>
+      <div class="hook-section">
+        <p class="hook-desc">
+          Copy a terminal drag-selection to the clipboard as soon as the mouse
+          is released. Off: use Cmd+C / Ctrl+Shift+C or the context menu.
+        </p>
+        <label class="toggle">
+          <input type="checkbox" bind:checked={$copyOnSelect} data-testid="copy-on-select" />
+          Copy on select
+        </label>
       </div>
     </section>
 
