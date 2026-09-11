@@ -282,6 +282,7 @@ pub fn is_transient(code: &str) -> bool {
 }
 
 /// The backoff stamp of a session: `(signature, unix secs)`.
+#[cfg(test)]
 pub fn backoff_of(s: &Store, session_id: i64) -> Option<(String, i64)> {
     s.conn_ref()
         .query_row(

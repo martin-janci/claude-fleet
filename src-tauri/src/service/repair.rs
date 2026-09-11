@@ -643,7 +643,9 @@ fn vanished_guard(p: &Probe, r: &RegisteredWorktree, ctx: AutoContext) -> Vanish
 /// Decide the fix. Pure: every branch of this function is covered by a unit
 /// test with a hand-built [`Probe`]. Refusals (`Err`) apply in every policy;
 /// explicit-only steps are deferred under [`Policy::Auto`]. Without an
-/// [`AutoContext`] the guarded automatic removal never applies.
+/// [`AutoContext`] the guarded automatic removal never applies. Test-only:
+/// production always plans with the store context ([`plan_with`]).
+#[cfg(test)]
 pub fn plan(spec: &WorkspaceSpec, p: &Probe, policy: Policy) -> Result<Plan, IpcError> {
     plan_with(spec, p, policy, AutoContext::default())
 }
