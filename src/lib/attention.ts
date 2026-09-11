@@ -95,7 +95,7 @@ export function contextColor(level: ContextLevel | null): string {
   }
 }
 
-// ── needs attention ──
+// ── triage ranking (P13) ──
 
 export interface AttentionOptions {
   /** Work sessions idle at least this long (seconds) need a nudge. 0 = off. */
@@ -106,37 +106,150 @@ export interface AttentionOptions {
 
 export const DEFAULT_ATTENTION_IDLE_MINUTES = 30;
 
-export type AttentionReason = 'stuck' | 'safe_kill' | 'ghost' | 'failed' | 'idle';
+/** Triage buckets, most urgent first. `classify()` puts a row in exactly one,
+ *  and everything that orders sessions reads this one list — the sidebar's
+ *  "Needs you" queue, the project sort below, later the quick switcher and the
+ *  digest — so those orderings cannot drift apart.
+ *
+ *  Two buckets are reachable but stay empty until Wave 1 A2 lands its columns:
+ *   - `waiting` is driven by `claude_status === 'blocked'` alone. A2's
+ *     `waiting_for` will separate a permission prompt from a question and let
+ *     the age weighting apply per kind.
+ *   - `done_unread` needs `last_viewed_at` and its `touch_session_viewed`
+ *     writer, so nothing matches it today. */
+export const TRIAGE_BUCKETS = [
+  'waiting',
+  'stuck',
+  'failed',
+  'done_unread',
+  'lifecycle',
+  'idle_long',
+  'working',
+  'idle',
+] as const;
 
-/** Why a row needs the operator, or null when it does not. Checked in
- *  priority order so the strongest reason wins. */
-export function attentionReason(s: SessionRow, opts: AttentionOptions): AttentionReason | null {
-  if (s.stuck_kind) return 'stuck';
-  if (s.safe_kill_state === 'failed' || s.safe_kill_state === 'requested') return 'safe_kill';
-  if (s.status === 'ghost' || s.lost_at !== null) return 'ghost';
-  if (s.claude_status === 'failed') return 'failed';
-  if (opts.idleSecs > 0 && (s.kind === 'work' || s.kind === 'review') && s.idle_since !== null) {
-    if (opts.now - s.idle_since >= opts.idleSecs) return 'idle';
-  }
-  return null;
+export type TriageBucket = (typeof TRIAGE_BUCKETS)[number];
+
+/** Buckets the "Needs you" FILTER shows. `idle_long` is in: the toggle is the
+ *  only surface for the operator-configured idle nudge, so leaving it out
+ *  would delete that reach and reduce `attentionIdleMinutes` to a sort knob.
+ *  `working` and `idle` are never in it. */
+export const NEEDS_YOU_BUCKETS: readonly TriageBucket[] = TRIAGE_BUCKETS.slice(0, 6);
+
+/** Buckets the "Needs you" COUNTER reports — deliberately one narrower than
+ *  the filter, excluding `idle_long`.
+ *
+ *  The divergence is intentional, not an oversight. The pill answers "which
+ *  sessions need me NOW"; on a fleet of ~60 sessions most are idle, so
+ *  counting them would read "Needs you (34)" and the number would stop
+ *  meaning anything. The rows are still one toggle away, because the filter
+ *  above does include them. Do not "reconcile" these two sets. */
+export const NEEDS_YOU_COUNTED_BUCKETS: readonly TriageBucket[] = TRIAGE_BUCKETS.slice(0, 5);
+
+const NEEDS_YOU = new Set<TriageBucket>(NEEDS_YOU_BUCKETS);
+const NEEDS_YOU_COUNTED = new Set<TriageBucket>(NEEDS_YOU_COUNTED_BUCKETS);
+
+/** Age is capped so that no wait, however long, lets a row jump its bucket. */
+const AGE_CAP_SECS = 1_000_000;
+
+export interface TriageRank {
+  bucket: TriageBucket;
+  /** Index into TRIAGE_BUCKETS; 0 is the most urgent. */
+  order: number;
+  /** Seconds spent in this state; 0 when the row carries no usable stamp. */
+  ageSecs: number;
+  /** Sort weight, higher = more urgent. The bucket dominates, age breaks ties. */
+  score: number;
 }
 
-export function needsAttention(s: SessionRow, opts: AttentionOptions): boolean {
-  return attentionReason(s, opts) !== null;
+/** A2: `waiting_for` will distinguish permission, question and elicitation.
+ *  Until then a blocked session is the only thing known to await the user. */
+function isWaiting(s: SessionRow): boolean {
+  return s.claude_status === 'blocked';
+}
+
+/** A2: needs `last_viewed_at`, so nothing is done-unread yet. */
+function isDoneUnread(_s: SessionRow): boolean {
+  return false;
+}
+
+function isLifecycleBroken(s: SessionRow): boolean {
+  if (s.safe_kill_state === 'failed' || s.safe_kill_state === 'requested') return true;
+  return s.status === 'ghost' || s.lost_at !== null;
+}
+
+function isIdleLong(s: SessionRow, opts: AttentionOptions): boolean {
+  if (opts.idleSecs <= 0) return false;
+  if (s.kind !== 'work' && s.kind !== 'review') return false;
+  if (s.idle_since === null) return false;
+  return opts.now - s.idle_since >= opts.idleSecs;
+}
+
+/** The single classifier: the order of these checks IS the bucket order. */
+export function classify(s: SessionRow, opts: AttentionOptions): TriageBucket {
+  if (isWaiting(s)) return 'waiting';
+  if (s.stuck_kind) return 'stuck';
+  if (s.claude_status === 'failed') return 'failed';
+  if (isDoneUnread(s)) return 'done_unread';
+  if (isLifecycleBroken(s)) return 'lifecycle';
+  if (isIdleLong(s, opts)) return 'idle_long';
+  if (s.claude_status === 'working') return 'working';
+  return 'idle';
+}
+
+/** When the row entered the state its bucket describes, best effort. */
+function bucketSince(s: SessionRow, bucket: TriageBucket): number {
+  switch (bucket) {
+    case 'stuck':
+      return s.stuck_since ?? s.last_activity_at;
+    case 'lifecycle':
+      return s.lost_at ?? s.safe_kill_requested_at ?? s.last_activity_at;
+    case 'done_unread':
+      return s.last_stop_at ?? s.last_turn_at ?? s.last_activity_at;
+    case 'working':
+      return s.last_activity_at;
+    default:
+      return s.idle_since ?? s.last_activity_at;
+  }
+}
+
+/** Where a row sits in the triage queue. Pure, and `now` is injected, so the
+ *  sidebar, the tests and later the digest all agree. */
+export function rank(s: SessionRow, opts: AttentionOptions): TriageRank {
+  const bucket = classify(s, opts);
+  const order = TRIAGE_BUCKETS.indexOf(bucket);
+  const ageSecs = Math.min(AGE_CAP_SECS - 1, Math.max(0, opts.now - bucketSince(s, bucket)));
+  return { bucket, order, ageSecs, score: (TRIAGE_BUCKETS.length - order) * AGE_CAP_SECS + ageSecs };
+}
+
+export function needsYou(s: SessionRow, opts: AttentionOptions): boolean {
+  return NEEDS_YOU.has(classify(s, opts));
+}
+
+/** How many rows are waiting on the operator right now. Narrower than
+ *  `needsYou()` on purpose — see NEEDS_YOU_COUNTED_BUCKETS. */
+export function countNeedsYou(rows: readonly SessionRow[], opts: AttentionOptions): number {
+  let n = 0;
+  for (const s of rows) if (NEEDS_YOU_COUNTED.has(classify(s, opts))) n++;
+  return n;
+}
+
+/** Rows worst-first: bucket, then the longest wait, then id — so the order is
+ *  stable across ticks and never reshuffles under the cursor. */
+export function byTriage(rows: readonly SessionRow[], opts: AttentionOptions): SessionRow[] {
+  return rows
+    .map((s) => ({ s, score: rank(s, opts).score }))
+    .sort((a, b) => b.score - a.score || a.s.id - b.s.id)
+    .map((x) => x.s);
 }
 
 // ── severity (for sorting projects by worst child) ──
 
-/** Higher = worse. stuck > blocked > lost > failed > working > idle > rest. */
+/** Higher = worse, derived from the triage buckets so the project tree and the
+ *  Needs-you queue can never disagree. Classified with the idle rule off, which
+ *  keeps severity a pure function of the row with no clock to inject. */
 export function severity(s: SessionRow): number {
-  if (s.stuck_kind) return 6;
-  if (s.claude_status === 'blocked') return 5;
-  if (s.status === 'ghost' || s.lost_at !== null) return 4;
-  if (s.claude_status === 'failed' || s.safe_kill_state === 'failed') return 3;
-  if (s.claude_status === 'working') return 2;
-  if (s.claude_status === 'idle' || s.claude_status === 'completed' || s.claude_status === 'stopped')
-    return 1;
-  return 0;
+  return TRIAGE_BUCKETS.length - TRIAGE_BUCKETS.indexOf(classify(s, { idleSecs: 0, now: 0 }));
 }
 
 /** project_id → max severity over its sessions. */

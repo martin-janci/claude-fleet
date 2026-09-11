@@ -20,9 +20,11 @@
     contextLevel,
     ciStatusColor,
     ciStatusLabel,
+    rank,
     stuckKindLabel,
     STUCK_COLOR,
   } from './attention';
+  import { attentionIdleMinutes } from './notify';
   import { pushError } from './toasts';
   import { rowMeta, timeAgo } from './session_status';
   import PeekPanel from './PeekPanel.svelte';
@@ -81,6 +83,9 @@
   const sessSelected = $derived($selectedSession?.id === sess.id);
   const ctxLevel = $derived(contextLevel(sess.context_pct));
   const meta = $derived(rowMeta(sess, nowSec));
+  // The row's triage bucket (P13). Published as data-bucket because component
+  // CSS never reaches jsdom, so this is how tests assert a row's triage state.
+  const triage = $derived(rank(sess, { idleSecs: $attentionIdleMinutes * 60, now: nowSec }));
 
   async function doRestart(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
@@ -118,6 +123,7 @@
   data-testid="sess-row"
   data-session-id={sess.id}
   data-stuck={sess.stuck_kind ?? undefined}
+  data-bucket={triage.bucket}
   role="button"
   tabindex="0"
   ondblclick={(e) => sess.status !== 'ghost' && beginLabelEdit(sess, e)}
