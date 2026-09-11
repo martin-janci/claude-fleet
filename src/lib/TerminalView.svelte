@@ -11,6 +11,9 @@
   import { hintAnchor } from './hints';
   import { toIpcError } from './result';
   import { pushError } from './toasts';
+  import { keyToBytes, detectMac } from './terminal_keys';
+  import { copyOnSelect } from './prefs';
+  import { get } from 'svelte/store';
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -21,12 +24,11 @@
   // branch `main` around 2026-05). Instead we maintain a virtual screen
   // buffer (`./ansi.ts`) and render it as styled `<div>` rows, which is
   // dirt-simple DOM that we can prove repaints. Tradeoffs:
-  //   - No mouse tracking, no application keypad, no scrollback beyond
-  //     what tmux's own scroll buffer can show with C-b [.
-  //   - No wide-glyph (CJK / emoji) width fixups.
-  //   - Keyboard input is forwarded as raw bytes; we translate the most
-  //     common keys (Enter/Backspace/arrows/Ctrl-*) and let everything
-  //     else go via printable character.
+  //   - No scrollback beyond what tmux's own scroll buffer can show with
+  //     C-b [.
+  //   - Keyboard input is forwarded as raw bytes via the xterm key table in
+  //     `./terminal_keys.ts` (arrows/Home/End/Ins/Del/F-keys with modifiers,
+  //     Ctrl chords, Alt/Option as an ESC prefix).
   // For our use case (tmux + claude TUI legibly visible in-app) these
   // limits are acceptable.
   // ─────────────────────────────────────────────────────────────────────
@@ -300,7 +302,7 @@
           selAnchor && selFocus &&
           (selAnchor.row !== selFocus.row || selAnchor.col !== selFocus.col)
         ) {
-          void copySelection();
+          if (get(copyOnSelect)) void copySelection();
         } else {
           clearSelection();
         }
@@ -339,7 +341,7 @@
         removeWindowListeners?.();
         if (selecting) {
           selecting = false;
-          void copySelection();
+          if (get(copyOnSelect)) void copySelection();
         } else if (pendingPress) {
           // No drag → forward a real click (press + release) to the app.
           const c = cellFromEvent(ev);
@@ -637,6 +639,10 @@
     totalBytes += result.bytes;
     screen.write(result.data);
     renderVersion++;
+    // Answer any terminal queries (DSR cursor position, DA) the output
+    // carried — the parser has no back-channel, so we forward its replies.
+    const reply = screen.takeReplies();
+    if (reply !== '') writePty(reply);
     // Markers injected by the Rust reader thread when the PTY closes (e.g. the
     // SSH child to a remote host died — now within ~10s thanks to the
     // ServerAlive keepalive in pty.rs, instead of hanging silently forever).
@@ -735,38 +741,10 @@
     currentHost = null;
   }
 
-  /** Translate a KeyboardEvent into the byte sequence a real terminal would
-   *  send. Returns null for keys we choose not to forward (e.g. F-keys).
-   *  This is intentionally minimal — most apps only need printable chars,
-   *  Enter, Backspace, Tab, arrows, and Ctrl-letter chords. */
-  function keyToBytes(e: KeyboardEvent): string | null {
-    if (e.key === 'Enter') return '\r';
-    if (e.key === 'Backspace') return '\x7f';
-    if (e.key === 'Tab') return e.shiftKey ? '\x1b[Z' : '\t'; // Shift+Tab → CBT (back-tab)
-    if (e.key === 'Escape') return '\x1b';
-    if (e.key === 'ArrowUp') return '\x1b[A';
-    if (e.key === 'ArrowDown') return '\x1b[B';
-    if (e.key === 'ArrowRight') return '\x1b[C';
-    if (e.key === 'ArrowLeft') return '\x1b[D';
-    if (e.key === 'Home') return '\x1b[H';
-    if (e.key === 'End') return '\x1b[F';
-    if (e.key === 'PageUp') return '\x1b[5~';
-    if (e.key === 'PageDown') return '\x1b[6~';
-    // Ctrl + letter / common chord: send the C0 control byte.
-    if (e.ctrlKey && e.key.length === 1) {
-      const k = e.key.toLowerCase();
-      if (k >= 'a' && k <= 'z') {
-        return String.fromCharCode(k.charCodeAt(0) - 96);
-      }
-      if (k === ' ') return '\x00';
-      if (k === '[') return '\x1b';
-      if (k === '\\') return '\x1c';
-      if (k === ']') return '\x1d';
-    }
-    // A printable single character: forward as-is.
-    if (e.key.length === 1 && !e.metaKey) return e.key;
-    return null;
-  }
+  /** macOS: Cmd+C/V/A are the clipboard chords and Option is the ESC-prefix
+   *  key. Elsewhere Ctrl+Shift+C/V do copy/paste (the Linux terminal
+   *  convention) so plain Ctrl+C/V still reach the app as ^C / ^V. */
+  const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
 
   function onKeydown(e: KeyboardEvent) {
     if (!ptyOpen) return;
@@ -774,30 +752,36 @@
     // part of composing — the finished text arrives via compositionend.
     if (e.isComposing) return;
     if (e.key === 'Escape' && ctxMenu) { ctxMenu = null; return; }
-    // Cmd+V → paste from the native clipboard (bracketed-paste framing in
-    // sendPaste). Ctrl+V is intentionally NOT intercepted so ^V reaches the app.
-    if (e.metaKey && !e.altKey && e.key.toLowerCase() === 'v') {
+    const k = e.key.toLowerCase();
+    const cmdChord = e.metaKey && !e.altKey && !e.ctrlKey;
+    const ctrlShiftChord = !isMac && e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;
+    // Paste from the native clipboard (bracketed-paste framing in sendPaste).
+    // Plain Ctrl+V is intentionally NOT intercepted so ^V reaches the app.
+    if ((cmdChord || ctrlShiftChord) && k === 'v') {
       e.preventDefault();
       void pasteFromClipboard();
       return;
     }
-    // Cmd+C → copy the selection. No selection → no-op (Ctrl+C still sends
-    // SIGINT via keyToBytes).
-    if (e.metaKey && !e.altKey && e.key.toLowerCase() === 'c') {
+    // Copy the selection. Cmd+C with no selection falls through to the
+    // browser; Ctrl+Shift+C with no selection is swallowed (it is the copy
+    // chord, not SIGINT — plain Ctrl+C still sends ^C via keyToBytes).
+    if ((cmdChord || ctrlShiftChord) && k === 'c') {
       if (selAnchor && selFocus) {
         e.preventDefault();
         void copySelection();
+      } else if (ctrlShiftChord) {
+        e.preventDefault();
       }
       return;
     }
     // Cmd+A → select the whole viewport.
-    if (e.metaKey && !e.altKey && e.key.toLowerCase() === 'a') {
+    if (cmdChord && k === 'a') {
       e.preventDefault();
       selAnchor = { row: 0, col: 0 };
       selFocus = { row: lastRows - 1, col: lastCols - 1 };
       return;
     }
-    const bytes = keyToBytes(e);
+    const bytes = keyToBytes(e, { appCursor: screen?.appCursorKeys ?? false, isMac });
     if (bytes === null) return;
     e.preventDefault();
     writePty(bytes);

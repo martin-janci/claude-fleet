@@ -6,6 +6,13 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
 }));
 
+const clipboardReadText = vi.fn();
+const clipboardWriteText = vi.fn();
+vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({
+  readText: (...a: unknown[]) => clipboardReadText(...a),
+  writeText: (...a: unknown[]) => clipboardWriteText(...a),
+}));
+
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import TerminalView from './TerminalView.svelte';
 import { sessions, resetTombstonesForTests, type SessionRow } from './sessions';
@@ -209,5 +216,80 @@ describe('TerminalView pty_write errors (FE-12)', () => {
     expect(all).toHaveLength(1);
     expect(all[0]).toMatchObject({ kind: 'error', code: 'E_PTY', count: 3 });
     expect(all[0].message).toContain('pty closed');
+  });
+});
+
+describe('TerminalView keyboard (FE-6)', () => {
+  const written = () => calls('pty_write').map((c) => (c[1] as { args: { data: string } }).args.data);
+
+  beforeEach(() => {
+    clipboardReadText.mockReset();
+    clipboardWriteText.mockReset();
+  });
+
+  it('Ctrl+Shift+V pastes the native clipboard on Linux', async () => {
+    clipboardReadText.mockResolvedValue('pasted text');
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    const host = screen.getByTestId('terminal-host');
+    const ev = new KeyboardEvent('keydown', {
+      key: 'V', code: 'KeyV', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
+    });
+    host.dispatchEvent(ev);
+    await settle();
+    expect(ev.defaultPrevented).toBe(true);
+    expect(clipboardReadText).toHaveBeenCalledTimes(1);
+    expect(written()).toEqual(['pasted text']);
+  });
+
+  it('Ctrl+Shift+C does not send SIGINT; plain Ctrl+C still does', async () => {
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    const host = screen.getByTestId('terminal-host');
+    host.dispatchEvent(new KeyboardEvent('keydown', { key: 'C', ctrlKey: true, shiftKey: true, bubbles: true }));
+    host.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true }));
+    await settle();
+    expect(written()).toEqual(['\x03']);
+  });
+
+  it('forwards Delete, F-keys, modifier-encoded arrows and Alt+key via the xterm key table', async () => {
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    const host = screen.getByTestId('terminal-host');
+    host.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
+    host.dispatchEvent(new KeyboardEvent('keydown', { key: 'F5', bubbles: true }));
+    host.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', ctrlKey: true, bubbles: true }));
+    host.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', altKey: true, bubbles: true }));
+    await settle();
+    expect(written()).toEqual(['\x1b[3~', '\x1b[15~', '\x1b[1;5C', '\x1bx']);
+  });
+
+  it('answers a DSR 6 cursor-position query carried by the drained output', async () => {
+    let served = false;
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_drain') {
+        if (served) return { data: '', bytes: 0 };
+        served = true;
+        // jsdom reports clientHeight 0, so the screen is the 2-row minimum:
+        // row 2 is the last one that exists.
+        return { data: '\x1b[2;4H\x1b[6n', bytes: 10 };
+      }
+      return null;
+    });
+    vi.useFakeTimers();
+    try {
+      render(TerminalView);
+      selectSession(onAlpha);
+      await settle();
+      // First drain tick fires after DRAIN_MIN_MS (30 ms); the async variant
+      // lets the mocked pty_drain promise resolve inside the tick.
+      await vi.advanceTimersByTimeAsync(40);
+      expect(written()).toContain('\x1b[2;4R');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

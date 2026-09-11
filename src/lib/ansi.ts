@@ -9,15 +9,22 @@
  * We chose this path because xterm.js's renderer silently no-ops after the
  * first write in our Tauri 2.11 + macOS WKWebView setup (see commit log on
  * branch main around 2026-05). The downside is fewer features — no
- * mouse-tracking, no application keypad, no UTF-8 width fixups for wide
- * glyphs, no scrollback beyond the visible window. The upside is that the
- * DOM render path is dirt-simple and provably works.
+ * scrollback beyond the visible window, no tab-stop editing, no sixels. The
+ * upside is that the DOM render path is dirt-simple and provably works.
+ *
+ * Text is handled per Unicode code point (not UTF-16 unit): astral emoji are
+ * one glyph, East Asian Wide / emoji glyphs occupy two cells (head + a
+ * reserved `''` trailing cell, see `wcwidth.ts`), and combining marks attach
+ * to the preceding cell.
  */
 
+import { wcwidth, firstCharWidth } from './wcwidth';
+
 export interface Cell {
-  /** Single grapheme cluster. Empty string represents the trailing half of a
-   *  wide glyph; we don't currently produce that — every printable Rune
-   *  occupies exactly one cell. */
+  /** One grapheme: a base code point plus any combining marks / variation
+   *  selectors that followed it. The empty string marks the trailing half of
+   *  a wide (2-column) glyph whose head is the cell to the left; the pair is
+   *  kept consistent by every write/erase/insert/delete operation. */
   ch: string;
   fg: number;
   bg: number;
@@ -164,13 +171,34 @@ export class Screen {
    *  pastes aren't treated as typed input. The component reads this to decide
    *  whether to frame a paste. */
   bracketedPaste = false;
+  /** Application cursor keys (DECSET ?1). When on, arrows/Home/End are sent
+   *  as SS3 (`ESC O A`) instead of CSI (`ESC [ A`). Read by the key mapper. */
+  appCursorKeys = false;
+  /** Cursor style requested via DECSCUSR (`CSI Ps SP q`), stored only:
+   *  0/1 blinking block, 2 steady block, 3/4 underline, 5/6 bar. */
+  cursorStyle = 0;
+  /** Bytes the terminal owes the host in answer to a query (DSR, DA). The
+   *  parser has no back-channel of its own; the component drains this after
+   *  every `write()` and forwards it to the PTY. */
+  pendingReplies: string[] = [];
   /** Current SGR state — applied to each printed cell. */
   curFg = COLOR_DEFAULT;
   curBg = COLOR_DEFAULT;
   curAttrs = 0;
   /** Partial escape-sequence buffer carried between chunks. Avoids splitting
-   *  a CSI across two writes. */
+   *  a CSI (or a surrogate pair) across two writes. Bounded: a CSI is
+   *  abandoned after CSI_MAX body chars, and control-string bodies are not
+   *  buffered here at all (see `stringKind`). */
   private pending = '';
+  /** Control string (OSC / DCS / APC / PM / SOS) opened in an earlier chunk
+   *  and not yet terminated. Bodies are consumed as they arrive rather than
+   *  accumulated in `pending`, so an opener with no ST — `cat` of a binary
+   *  hitting ESC P — costs nothing per later chunk. Only an OSC body is kept
+   *  (capped at OSC_MAX) because OSC 52 needs it. */
+  private stringKind: 'osc' | 'other' | null = null;
+  private stringBuf = '';
+  /** Last printed glyph + its width, for REP (`CSI Ps b`). */
+  private lastGlyph: { ch: string; width: 1 | 2 } | null = null;
   /** Saved cursor (ESC 7 / DECSC). */
   private savedRow = 0;
   private savedCol = 0;
@@ -275,6 +303,10 @@ export class Screen {
     this.markAll();
     if (this.cursorRow >= rows) this.cursorRow = rows - 1;
     if (this.cursorCol >= cols) this.cursorCol = cols - 1;
+    // The DECSC slot too — a later ESC 8 / CSI u must not restore a row
+    // that no longer exists.
+    if (this.savedRow >= rows) this.savedRow = rows - 1;
+    if (this.savedCol >= cols) this.savedCol = cols - 1;
     // A SIGWINCH invalidates the scroll region — programs re-establish it
     // after the resize (that's exactly why a resize "fixes" a garbled pane).
     // Reset to the full new screen so stale margins can't mis-scroll.
@@ -282,12 +314,30 @@ export class Screen {
     this.scrollBottom = this.rows - 1;
   }
 
-  /** Feed bytes (already decoded to UTF-16) into the parser. */
+  /** Drain the reply queue (DSR / DA answers) as one string; empty when the
+   *  host asked nothing since the last drain. */
+  takeReplies(): string {
+    if (this.pendingReplies.length === 0) return '';
+    const out = this.pendingReplies.join('');
+    this.pendingReplies = [];
+    return out;
+  }
+
+  /** Feed text (already decoded from UTF-8 to a JS string) into the parser.
+   *  Iterates by code point: a surrogate pair is one glyph, and a high
+   *  surrogate cut off at the chunk end is held in `pending` like a partial
+   *  escape sequence so splitting a chunk anywhere is invisible. */
   write(input: string): void {
     const s = this.pending + input;
     this.pending = '';
     let i = 0;
     while (i < s.length) {
+      if (this.stringKind !== null) {
+        // Inside a control string opened by an earlier chunk: eat the body
+        // up to its terminator without buffering.
+        i = this.continueString(s, i);
+        continue;
+      }
       const code = s.charCodeAt(i);
       if (code === 0x1b /* ESC */) {
         const consumed = this.parseEscape(s, i);
@@ -335,35 +385,122 @@ export class Screen {
         i++;
         continue;
       }
-      if (code < 0x20) {
-        // Unknown control byte — drop.
+      if (code < 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f)) {
+        // Unknown C0 / DEL / C1 control — drop. (A C1 ST 0x9c only matters
+        // as a string terminator, which parseEscape handles.)
         i++;
         continue;
       }
+      // Decode one code point. A high surrogate at the very end of the chunk
+      // is stashed for the next write; an unpaired surrogate becomes U+FFFD.
+      let cp = code;
+      let len = 1;
+      if (code >= 0xd800 && code <= 0xdbff) {
+        if (i + 1 >= s.length) {
+          this.pending = s.slice(i);
+          return;
+        }
+        const lo = s.charCodeAt(i + 1);
+        if (lo >= 0xdc00 && lo <= 0xdfff) {
+          cp = ((code - 0xd800) << 10) + (lo - 0xdc00) + 0x10000;
+          len = 2;
+        } else {
+          cp = 0xfffd;
+        }
+      } else if (code >= 0xdc00 && code <= 0xdfff) {
+        cp = 0xfffd;
+      }
+      const ch = cp === 0xfffd ? '�' : s.substr(i, len);
+      i += len;
+      const width = wcwidth(cp);
+      if (width === 0) {
+        this.combine(ch);
+        continue;
+      }
       // Printable: write at cursor, advance. Wrap to next row if past edge.
-      this.putChar(s.charAt(i));
-      i++;
+      this.putChar(ch, width);
     }
   }
 
-  /** Apply current SGR state to a cell and write a character at cursor.
-   *  If the active charset (G0/G1) is currently DEC Special Graphics, the
-   *  char is run through `DEC_SPECIAL_GRAPHICS` first; otherwise it goes
-   *  in literally. */
-  private putChar(ch: string): void {
+  /** Attach a zero-width code point (combining mark, ZWJ, variation
+   *  selector, …) to the glyph before the cursor. With nothing before the
+   *  cursor on this row it is dropped — there is no base to combine with. */
+  private combine(mark: string): void {
+    let c = Math.min(this.cursorCol, this.cols) - 1;
+    if (c < 0) return;
+    const row = this.cells[this.cursorRow];
+    // The cell left of the cursor may be the trailing half of a wide glyph.
+    if (row[c].ch === '' && c > 0) c--;
+    if (row[c].ch === '') return;
+    row[c].ch += mark;
+    this.markRow(this.cursorRow);
+  }
+
+  /** Write a glyph at the cursor with the current SGR state and advance by
+   *  its width. If the active charset (G0/G1) is DEC Special Graphics the
+   *  char is run through `DEC_SPECIAL_GRAPHICS` first. A wide glyph takes
+   *  two cells (head + `''` trailing); one that would straddle the right
+   *  edge wraps first, leaving the orphan column blank. Whatever the new
+   *  glyph overwrites is pair-repaired so no half of a wide glyph survives
+   *  alone. */
+  private putChar(ch: string, width: 1 | 2): void {
+    if (width === 2 && this.cols < 2) {
+      // A 1-column screen can't hold a pair; print a blank in its place so
+      // the head/trailing invariant holds everywhere.
+      ch = ' ';
+      width = 1;
+    }
     if (this.cursorCol >= this.cols) {
+      this.cursorCol = 0;
+      this.lineFeed();
+    } else if (width === 2 && this.cursorCol === this.cols - 1) {
+      this.blankCell(this.cursorRow, this.cursorCol);
       this.cursorCol = 0;
       this.lineFeed();
     }
     const graphics = this.useG1 ? this.g1Graphics : this.g0Graphics;
     const mapped = graphics ? (DEC_SPECIAL_GRAPHICS[ch] ?? ch) : ch;
-    const cell = this.cells[this.cursorRow][this.cursorCol];
+    const row = this.cells[this.cursorRow];
+    const c = this.cursorCol;
+    this.breakPairAt(row, c);
+    if (width === 2) this.breakPairAt(row, c + 1);
+    const cell = row[c];
     cell.ch = mapped;
     cell.fg = this.curFg;
     cell.bg = this.curBg;
     cell.attrs = this.curAttrs;
+    if (width === 2) {
+      const tail = row[c + 1];
+      tail.ch = '';
+      tail.fg = this.curFg;
+      tail.bg = this.curBg;
+      tail.attrs = this.curAttrs;
+    }
+    this.lastGlyph = { ch: mapped, width };
     this.markRow(this.cursorRow);
-    this.cursorCol++;
+    this.cursorCol += width;
+  }
+
+  /** Before overwriting, deleting or shifting `row[c]`: if it is one half of
+   *  a wide pair, blank both halves (keeping their colours) so neither can
+   *  be left dangling once the operation moves or replaces `row[c]`. */
+  private breakPairAt(row: Cell[], c: number): void {
+    const cell = row[c];
+    if (cell.ch === '') {
+      if (c > 0) row[c - 1].ch = ' ';
+      cell.ch = ' ';
+    } else if (firstCharWidth(cell.ch) === 2 && c + 1 < row.length && row[c + 1].ch === '') {
+      row[c + 1].ch = ' ';
+      cell.ch = ' ';
+    }
+  }
+
+  /** Blank one cell with its colours kept (pair-aware). */
+  private blankCell(r: number, c: number): void {
+    const row = this.cells[r];
+    this.breakPairAt(row, c);
+    row[c].ch = ' ';
+    this.markRow(r);
   }
 
   /** LF: move to next row, scrolling the active region up if we're at the
@@ -427,11 +564,54 @@ export class Screen {
     this.markRows(this.scrollTop, this.scrollBottom);
   }
 
+  /** Bytes of parser state carried between writes (`pending` + a buffered
+   *  OSC body). Exposed for tests and diagnostics: it must stay bounded no
+   *  matter what the host sends. */
+  get bufferedLength(): number {
+    return this.pending.length + this.stringBuf.length;
+  }
+
+  /** Open a control string at `start` (ESC + intro). Its body is consumed
+   *  from this chunk onward via `continueString`; returns chars consumed. */
+  private openString(kind: 'osc' | 'other', s: string, start: number): number {
+    this.stringKind = kind;
+    this.stringBuf = '';
+    return this.continueString(s, start + 2) - start;
+  }
+
+  /** Consume control-string body from `from`. Returns the index to resume
+   *  at: just past the terminator, or `s.length` when the string is still
+   *  open (state kept for the next chunk). Per the VT500 state machine any
+   *  ESC ends the string (`ESC \` is the ST proper; another ESC starts a new
+   *  sequence), as do CAN/SUB, C1 ST and — for OSC — BEL. */
+  private continueString(s: string, from: number): number {
+    const kind = this.stringKind!;
+    const end = findStringEnd(s, from, kind === 'osc');
+    const stop = end < 0 ? s.length : end;
+    if (kind === 'osc') this.appendOsc(s, from, stop);
+    if (end < 0) return s.length; // still open
+    if (kind === 'osc') this.applyOsc(this.stringBuf);
+    this.stringKind = null;
+    this.stringBuf = '';
+    return stringTermEnd(s, end);
+  }
+
+  /** Append `s[from, to)` to the OSC body, capped at OSC_MAX so a runaway
+   *  OSC can't grow memory. */
+  private appendOsc(s: string, from: number, to: number): void {
+    const room = OSC_MAX - this.stringBuf.length;
+    if (room <= 0) return;
+    this.stringBuf += s.slice(from, Math.min(to, from + room));
+  }
+
   /** Parse a single escape sequence starting at `start`. Returns number of
    *  chars consumed including the leading ESC, or -1 if incomplete. */
   private parseEscape(s: string, start: number): number {
     if (start + 1 >= s.length) return -1;
     const intro = s.charAt(start + 1);
+    // ESC ESC — the first ESC was a false start; the sequence restarts at
+    // the second one.
+    if (intro === '\x1b') return 1;
     // ESC c — full reset (rare; tmux uses it sometimes during resize).
     if (intro === 'c') {
       this.fullReset();
@@ -443,8 +623,7 @@ export class Screen {
       return 2;
     }
     if (intro === '8') {
-      this.cursorRow = this.savedRow;
-      this.cursorCol = this.savedCol;
+      this.restoreCursor();
       return 2;
     }
     // ESC M — RI (reverse index): up one row, scroll region down at top margin.
@@ -469,6 +648,13 @@ export class Screen {
       while (end < s.length) {
         const ch = s.charCodeAt(end);
         if (ch >= 0x40 && ch <= 0x7e) break;
+        // ESC inside a CSI restarts: abandon this one, re-parse from there.
+        if (ch === 0x1b) return end - start;
+        // CAN / SUB abort the sequence (and are themselves consumed).
+        if (ch === 0x18 || ch === 0x1a) return end - start + 1;
+        // Runaway (no final byte within CSI_MAX): discard what we scanned
+        // and resume as text, so `pending` can never grow without bound.
+        if (end - start - 2 >= CSI_MAX) return end - start;
         end++;
       }
       if (end >= s.length) return -1; // incomplete CSI
@@ -478,23 +664,14 @@ export class Screen {
       return end - start + 1;
     }
     if (intro === ']') {
-      // OSC: ESC ] ... BEL  or  ESC ] ... ESC \
-      let end = start + 2;
-      let termLen = 0;
-      while (end < s.length) {
-        const ch = s.charCodeAt(end);
-        if (ch === 0x07) { termLen = 1; break; }
-        if (ch === 0x1b && end + 1 < s.length && s.charCodeAt(end + 1) === 0x5c) {
-          termLen = 2;
-          break;
-        }
-        end++;
-      }
-      if (termLen === 0) return -1; // incomplete OSC
-      // Extract and handle the OSC payload (between ESC ] and terminator)
-      const payload = s.slice(start + 2, end);
-      this.applyOsc(payload);
-      return end - start + termLen;
+      // OSC: ESC ] ... BEL  or  ESC ] ... ST. Body kept (capped) for OSC 52.
+      return this.openString('osc', s, start);
+    }
+    if (intro === 'P' || intro === '_' || intro === '^' || intro === 'X') {
+      // DCS (ESC P), APC (ESC _), PM (ESC ^), SOS (ESC X): a string body up
+      // to ST. We implement none of them (sixel, tmux passthrough, kitty
+      // keyboard/graphics, …) — swallow the body so it can't print as text.
+      return this.openString('other', s, start);
     }
     if (intro === '(' || intro === ')') {
       // SCS — designate a charset into G0 (intro='(') or G1 (intro=')'):
@@ -512,6 +689,14 @@ export class Screen {
     if (intro === '=' || intro === '>') {
       // Application/numeric keypad — ignore.
       return 2;
+    }
+    const introCode = intro.charCodeAt(0);
+    if (introCode >= 0x20 && introCode <= 0x2f) {
+      // ESC + intermediate + final (ESC # 8 DECALN, ESC % G, ESC SP F, …):
+      // three bytes, none of which we act on — but the final byte must be
+      // consumed rather than printed.
+      if (start + 2 >= s.length) return -1;
+      return 3;
     }
     // Unknown / unsupported single-char ESC — drop.
     return 2;
@@ -549,20 +734,27 @@ export class Screen {
     this.useG1 = false;
     this.scrollTop = 0;
     this.scrollBottom = this.rows - 1;
+    this.appCursorKeys = false;
+    this.cursorStyle = 0;
+    this.lastGlyph = null;
     // ESC c is a full power-on reset — drop any alt-screen snapshot so
     // we don't pop back into stale content the next time we leave alt.
     this.savedScreen = null;
   }
 
   private applyCsi(body: string, final: string): void {
-    // Strip leading '?' / '>' / '=' / '!' private-mode markers. We don't
-    // implement any private modes, so dropping the marker lets us at least
-    // not corrupt the buffer when tmux sends DECSET/DECRST.
+    // Strip a leading '?' / '>' / '=' / '!' private marker. Remember which
+    // one: `?` selects DEC private modes and DECXCPR, `>` selects secondary
+    // DA / xterm resource requests; the rest we only need to not misparse.
     let isPrivate = false;
-    if (body.length > 0 && (body[0] === '?' || body[0] === '>' || body[0] === '!')) {
+    let marker = '';
+    if (body.length > 0 && (body[0] === '?' || body[0] === '>' || body[0] === '!' || body[0] === '=')) {
       isPrivate = true;
+      marker = body[0];
       body = body.slice(1);
     }
+    // Intermediates (0x20–0x2f, e.g. the SP in DECSCUSR `CSI 2 SP q`) sit
+    // between the params and the final byte; parseInt stops at them.
     const params = body.length === 0 ? [] : body.split(';').map((x) => (x === '' ? 0 : parseInt(x, 10) || 0));
     const p0 = params[0] ?? 0;
     const p1 = params[1] ?? 0;
@@ -644,25 +836,94 @@ export class Screen {
         }
         return;
       }
-      case 's': // save cursor (ANSI.SYS variant)
+      case 's': // save cursor (ANSI.SYS variant); `? s` is XTSAVE (DEC modes)
+        if (isPrivate) return;
         this.savedRow = this.cursorRow;
         this.savedCol = this.cursorCol;
         return;
-      case 'u': // restore cursor
-        this.cursorRow = this.savedRow;
-        this.cursorCol = this.savedCol;
+      case 'u': // restore cursor; `? u` is XTRESTORE / the kitty keyboard query
+        if (isPrivate) return;
+        this.restoreCursor();
         return;
       case 'm': // SGR - select graphic rendition
-        this.applySgr(params);
+        if (!isPrivate) this.applySgr(params);
         return;
       case 'h':
       case 'l':
-        if (isPrivate) this.applyDecPrivate(params, final === 'h');
+        if (marker === '?') this.applyDecPrivate(params, final === 'h');
+        return;
+      case 'I': // CHT - cursor forward N tab stops (fixed stops every 8)
+        if (!isPrivate) this.tabForward(Math.max(1, p0));
+        return;
+      case 'Z': // CBT - cursor backward N tab stops
+        if (!isPrivate) this.tabBackward(Math.max(1, p0));
+        return;
+      case 'b': // REP - repeat the preceding graphic character N times
+        if (!isPrivate) this.repeatLast(Math.max(1, p0));
+        return;
+      case 'q': // DECSCUSR (`CSI Ps SP q`) - cursor style; `>q` is XTVERSION
+        if (!isPrivate && body.includes(' ')) this.cursorStyle = clamp(p0, 0, 6);
+        return;
+      case 'n': // DSR - device status report
+        // Positions are screen-absolute: DECOM (origin mode, ?6) is not
+        // implemented, so there is no margin-relative form to report.
+        if (marker === '' && p0 === 5) this.pendingReplies.push('\x1b[0n');
+        else if (marker === '' && p0 === 6) this.pendingReplies.push(`\x1b[${this.reportRow()};${this.reportCol()}R`);
+        else if (marker === '?' && p0 === 6) this.pendingReplies.push(`\x1b[?${this.reportRow()};${this.reportCol()}R`);
+        return;
+      case 'c': // DA - device attributes
+        // Only a bare query (no params, or a single 0) is a request. Anything
+        // else — in particular our own replies echoed back as output by a
+        // raw-echo program or a nested terminal, which carry `?1;2` /
+        // `>1;10;0` — is ignored, so a reply can never feed a loop.
+        if (params.length > 1 || p0 !== 0) return;
+        // Primary: "VT100 with Advanced Video Option" — the minimal answer
+        // every curses app accepts. Secondary: VT220 class, firmware 1.0,
+        // as real terminals answer (a non-zero first param is what keeps the
+        // echoed reply from parsing as a fresh query).
+        if (marker === '') this.pendingReplies.push('\x1b[?1;2c');
+        else if (marker === '>') this.pendingReplies.push('\x1b[>1;10;0c');
         return;
       default:
         // Unknown CSI — silently drop.
         return;
     }
+  }
+
+  /** DECRC / CSI u / ?1048l: restore the saved cursor, clamped — the slot
+   *  may predate a resize or an alt-screen swap at other dimensions. */
+  private restoreCursor(): void {
+    this.cursorRow = clamp(this.savedRow, 0, this.rows - 1);
+    this.cursorCol = clamp(this.savedCol, 0, this.cols - 1);
+  }
+
+  /** 1-based cursor row/col for DSR. A cursor parked past the last column
+   *  (deferred wrap) reports as the last column, like xterm. */
+  private reportRow(): number { return this.cursorRow + 1; }
+  private reportCol(): number { return Math.min(this.cursorCol, this.cols - 1) + 1; }
+
+  private tabForward(n: number): void {
+    n = Math.min(n, (this.cols >> 3) + 1);
+    let c = Math.min(this.cursorCol, this.cols - 1);
+    for (let i = 0; i < n; i++) c = Math.min(this.cols - 1, ((c >> 3) + 1) << 3);
+    this.cursorCol = c;
+  }
+
+  private tabBackward(n: number): void {
+    n = Math.min(n, (this.cols >> 3) + 1);
+    let c = Math.min(this.cursorCol, this.cols - 1);
+    for (let i = 0; i < n && c > 0; i++) c = ((c - 1) >> 3) << 3;
+    this.cursorCol = c;
+  }
+
+  /** REP: re-print the last graphic character `n` times. A screenful is the
+   *  most that can be visible, so the count is capped there — a hostile
+   *  `CSI 999999999 b` can't stall the parser. */
+  private repeatLast(n: number): void {
+    const g = this.lastGlyph;
+    if (!g) return;
+    n = Math.min(n, this.rows * this.cols);
+    for (let i = 0; i < n; i++) this.putChar(g.ch, g.width);
   }
 
   /** Apply a private-mode set/reset (DECSET / DECRST). We implement the
@@ -684,8 +945,7 @@ export class Screen {
           this.savedRow = this.cursorRow;
           this.savedCol = this.cursorCol;
         } else {
-          this.cursorRow = this.savedRow;
-          this.cursorCol = this.savedCol;
+          this.restoreCursor();
         }
       } else if (p === 1000) {
         this._mouse1000 = set;
@@ -699,6 +959,8 @@ export class Screen {
         this.bracketedPaste = set;
       } else if (p === 25) {
         this.cursorVisible = set;
+      } else if (p === 1) {
+        this.appCursorKeys = set;
       }
       // Other private modes are intentionally ignored.
     }
@@ -774,10 +1036,12 @@ export class Screen {
       for (let r = this.cursorRow + 1; r < this.rows; r++)
         for (let c = 0; c < this.cols; c++) this.clearCell(r, c);
     } else if (mode === 1) {
-      // From start of screen to cursor.
+      // From start of screen to cursor (a deferred-wrap cursor sits one past
+      // the last column — clamp so the loop stays inside the row).
       for (let r = 0; r < this.cursorRow; r++)
         for (let c = 0; c < this.cols; c++) this.clearCell(r, c);
-      for (let c = 0; c <= this.cursorCol; c++) this.clearCell(this.cursorRow, c);
+      const to = Math.min(this.cursorCol, this.cols - 1);
+      for (let c = 0; c <= to; c++) this.clearCell(this.cursorRow, c);
     } else if (mode === 2 || mode === 3) {
       // Whole screen (3 also clears scrollback in real terms; we have none).
       for (let r = 0; r < this.rows; r++)
@@ -789,7 +1053,8 @@ export class Screen {
     if (mode === 0) {
       for (let c = this.cursorCol; c < this.cols; c++) this.clearCell(this.cursorRow, c);
     } else if (mode === 1) {
-      for (let c = 0; c <= this.cursorCol; c++) this.clearCell(this.cursorRow, c);
+      const to = Math.min(this.cursorCol, this.cols - 1);
+      for (let c = 0; c <= to; c++) this.clearCell(this.cursorRow, c);
     } else if (mode === 2) {
       for (let c = 0; c < this.cols; c++) this.clearCell(this.cursorRow, c);
     }
@@ -801,6 +1066,7 @@ export class Screen {
     // the region is a no-op (xterm behaviour) so a status bar below the
     // region is never disturbed.
     if (this.cursorRow < this.scrollTop || this.cursorRow > this.scrollBottom) return;
+    n = Math.min(n, this.scrollBottom - this.cursorRow + 1);
     for (let i = 0; i < n; i++) {
       // Drop the line currently at the region bottom, then insert a blank at
       // the cursor — everything between shifts down by one within the region.
@@ -815,6 +1081,7 @@ export class Screen {
     // blanks fill in at `scrollBottom`. A cursor outside the region is a
     // no-op.
     if (this.cursorRow < this.scrollTop || this.cursorRow > this.scrollBottom) return;
+    n = Math.min(n, this.scrollBottom - this.cursorRow + 1);
     for (let i = 0; i < n; i++) {
       // Remove the cursor line, then insert a blank at the region bottom —
       // everything between shifts up by one within the region.
@@ -826,20 +1093,38 @@ export class Screen {
 
   private deleteChars(n: number): void {
     const row = this.cells[this.cursorRow];
-    row.splice(this.cursorCol, n);
-    while (row.length < this.cols) row.push(emptyCell());
+    const c = Math.min(this.cursorCol, this.cols - 1);
+    n = Math.min(n, this.cols - c);
+    // Deleting the trailing half of a wide glyph takes its head with it
+    // (a head at `c` just shifts left intact with its trailing cell); a
+    // trailing half whose head was deleted — the cell that slides into `c`
+    // — is blanked rather than left orphaned.
+    if (row[c].ch === '') this.breakPairAt(row, c);
+    row.splice(c, n);
+    while (row.length < this.cols) row.push(this.blankWithBg());
     if (row.length > this.cols) row.length = this.cols;
+    if (row[c].ch === '') row[c].ch = ' ';
     this.markRow(this.cursorRow);
   }
 
   private insertChars(n: number): void {
     const row = this.cells[this.cursorRow];
-    for (let i = 0; i < n; i++) row.splice(this.cursorCol, 0, emptyCell());
+    const c = Math.min(this.cursorCol, this.cols - 1);
+    n = Math.min(n, this.cols - c);
+    // Inserting in front of a trailing half splits the pair — blank both.
+    // (In front of a head the whole pair shifts right intact.)
+    if (row[c].ch === '') this.breakPairAt(row, c);
+    const blanks = Array.from({ length: n }, () => this.blankWithBg());
+    row.splice(c, 0, ...blanks);
     if (row.length > this.cols) row.length = this.cols;
+    // A head pushed to the last column lost its trailing half off the edge.
+    const last = row[this.cols - 1];
+    if (firstCharWidth(last.ch) === 2) last.ch = ' ';
     this.markRow(this.cursorRow);
   }
 
   private eraseChars(n: number): void {
+    n = Math.min(n, this.cols);
     for (let i = 0; i < n; i++) {
       const c = this.cursorCol + i;
       if (c >= this.cols) break;
@@ -847,13 +1132,32 @@ export class Screen {
     }
   }
 
+  /** A blank cell carrying the current background (BCE) — what EL/ED/ECH/
+   *  ICH/DCH fill with, so an app that paints a coloured pane by setting bg
+   *  and clearing gets the colour it asked for. fg/attrs are reset. */
+  private blankWithBg(): Cell {
+    return { ch: ' ', fg: COLOR_DEFAULT, bg: this.curBg, attrs: 0 };
+  }
+
+  /** Erase one cell to a BCE blank. Erasing either half of a wide glyph
+   *  erases the other half too — a lone half is never left behind. */
   private clearCell(r: number, c: number): void {
-    const cell = this.cells[r][c];
+    const row = this.cells[r];
+    const cell = row[c];
+    if (cell.ch === '') {
+      if (c > 0) this.resetCell(row[c - 1]);
+    } else if (firstCharWidth(cell.ch) === 2 && c + 1 < this.cols && row[c + 1].ch === '') {
+      this.resetCell(row[c + 1]);
+    }
+    this.resetCell(cell);
+    this.markRow(r);
+  }
+
+  private resetCell(cell: Cell): void {
     cell.ch = ' ';
     cell.fg = COLOR_DEFAULT;
-    cell.bg = COLOR_DEFAULT;
+    cell.bg = this.curBg;
     cell.attrs = 0;
-    this.markRow(r);
   }
 
   private applySgr(params: number[]): void {
@@ -948,11 +1252,45 @@ export class Screen {
       const from = Math.max(0, colFrom);
       const to = Math.min(this.cols - 1, colTo);
       let line = '';
-      for (let c = from; c <= to; c++) line += this.cells[r][c].ch || ' ';
+      // A wide glyph's trailing `''` cell contributes nothing — the head
+      // already carries the whole glyph.
+      for (let c = from; c <= to; c++) line += this.cells[r][c].ch;
       out.push(line.replace(/[ \t]+$/, ''));
     }
     return out.join('\n');
   }
+}
+
+/** Longest OSC body we keep (OSC 52 clipboard payloads are base64 text;
+ *  anything bigger is not something we would put on the clipboard). */
+const OSC_MAX = 64 * 1024;
+/** Longest CSI parameter/intermediate run before the sequence is treated as
+ *  garbage. Real sequences are a few dozen chars. */
+const CSI_MAX = 1024;
+
+/** Scan a control-string body (OSC / DCS / APC / PM / SOS) starting at
+ *  `from` for whatever ends it: any ESC (an `ESC \` ST, or the start of the
+ *  next sequence), C1 ST 0x9c, CAN, SUB, plus BEL when `allowBel` (xterm's
+ *  OSC convention). Returns the index of that char, or -1 when the string
+ *  is still open at the end of `s`. */
+function findStringEnd(s: string, from: number, allowBel: boolean): number {
+  let end = from;
+  while (end < s.length) {
+    const ch = s.charCodeAt(end);
+    if (ch === 0x1b || ch === 0x9c || ch === 0x18 || ch === 0x1a) return end;
+    if (allowBel && ch === 0x07) return end;
+    end++;
+  }
+  return -1;
+}
+
+/** Index to resume parsing at after the terminator `findStringEnd` found at
+ *  `end`: past `ESC \`, past a one-char terminator, or *at* an ESC that
+ *  starts something else (it is re-parsed as a new sequence). An ESC at the
+ *  very end of the chunk is left in place too — the next chunk decides. */
+function stringTermEnd(s: string, end: number): number {
+  if (s.charCodeAt(end) !== 0x1b) return end + 1;
+  return end + 1 < s.length && s.charCodeAt(end + 1) === 0x5c ? end + 2 : end;
 }
 
 function makeRow(cols: number): Cell[] {
@@ -984,6 +1322,10 @@ function resizeGrid(
     for (let c = 0; c < cMin; c++) {
       next[r][c] = src[r][c];
     }
+    // Narrowing can cut a wide glyph in half at the new right edge: blank
+    // the head whose trailing cell fell off.
+    const last = next[r][newCols - 1];
+    if (firstCharWidth(last.ch) === 2) last.ch = ' ';
   }
   return next;
 }
