@@ -33,8 +33,9 @@ pub struct McpStatus {
     pub url: String,
     /// The most recent start failure, if any.
     pub bind_error: Option<String>,
-    /// `mcp.confirm_destructive`: broadcast / kill / delete_worktree /
-    /// set_clipboard need a desktop confirmation. Default off.
+    /// `mcp.confirm_destructive`: every tool in `mcp::guard::CONFIRM_TOOLS`
+    /// (broadcast, kill, delete_worktree, set_clipboard, repair_session,
+    /// cancel_task, move_session) needs a desktop confirmation. Default off.
     pub confirm_destructive: bool,
 }
 

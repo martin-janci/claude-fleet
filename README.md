@@ -99,8 +99,10 @@ CLAUDE.md           # orientation for Claude Code working in this repo
 A hardening review (2026-05-21, see
 [docs/specs/2026-05-21-hardening-review.md](docs/specs/2026-05-21-hardening-review.md))
 catalogues open issues. Highest priority: SSH host-alias validation, migration
-atomicity, and the single-global-PTY races in `TerminalView`. Handoff and
-Freeze (original spec §8.3–8.4) remain unimplemented.
+atomicity, and the single-global-PTY races in `TerminalView`. Handoff
+(original spec §8.3) is replaced by Move to host… / `move_session`, and Freeze
+(§8.4) is descoped; see
+[ADR 0001](docs/adr/0001-descope-freeze-ship-move.md).
 
 ## Releasing & documentation
 

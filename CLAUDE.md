@@ -96,8 +96,9 @@ REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_curren
 Iterations 1–4a are landed (multi-host, accounts, cross-host sessions, prompt
 transfer, async/events rework), plus the MCP control API, background sessions,
 the background reconcile tick, fleet_health roll-up, and the persistent session
-event timeline (session_history). Handoff and Freeze from the original spec are
-not implemented. A full hardening review is in
+event timeline (session_history). Handoff from the original spec is replaced by
+`move_session` (Move to host…) and Freeze is descoped, per
+`docs/adr/0001-descope-freeze-ship-move.md`. A full hardening review is in
 `docs/specs/2026-05-21-hardening-review.md` — consult it before touching SSH
 command construction, the PTY, migrations, or the optimistic-merge / event-bus
 paths.

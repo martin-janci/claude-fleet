@@ -23,6 +23,8 @@ pub enum Kind {
     /// Integer seconds in `min..=MAX_SECS`: a cadence with no "disabled"
     /// value (an opt-in toggle elsewhere turns the feature off).
     SecsMin(u64),
+    /// Integer in `min..=max` (a count or size, not seconds).
+    Int { min: u64, max: u64 },
     /// One of a fixed set of strings.
     Choice(&'static [&'static str]),
     /// JSON object `{ "<host alias>": "<projects root>" }`. Every alias must
@@ -84,6 +86,12 @@ const LAYOUTS: &[&str] = &["github", "flat"];
 /// Open tasks older than this (from start, else creation) are failed by the
 /// liveness sweep. `0` disables the TTL.
 pub const TASKS_MAX_AGE_SECS: &str = "tasks.max_age_secs";
+
+/// Largest transcript (MiB) `move_session` copies (`E_MOVE_TOO_LARGE`
+/// above it).
+pub const MOVE_MAX_TRANSCRIPT_MB: &str = crate::service::move_session::SETTING_MAX_TRANSCRIPT_MB;
+/// Upper bound for [`MOVE_MAX_TRANSCRIPT_MB`]: the copy is held in memory.
+pub const MOVE_MAX_TRANSCRIPT_MB_MAX: u64 = 4096;
 
 /// Every editable setting. Order is the display order.
 pub const SPECS: &[Spec] = &[
@@ -151,6 +159,14 @@ pub const SPECS: &[Spec] = &[
         key: REPAIR_TICK_INTERVAL_SECS,
         default: "600",
         kind: Kind::SecsMin(REPAIR_TICK_MIN_SECS),
+    },
+    Spec {
+        key: MOVE_MAX_TRANSCRIPT_MB,
+        default: "200",
+        kind: Kind::Int {
+            min: 1,
+            max: MOVE_MAX_TRANSCRIPT_MB_MAX,
+        },
     },
 ];
 
@@ -230,6 +246,13 @@ pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
             "E_INVALID",
             format!("{key} must be an integer number of seconds between {min} and {MAX_SECS}"),
         )),
+        Kind::Int { min, max } if v.parse::<u64>().is_ok_and(|n| (min..=max).contains(&n)) => {
+            Ok(())
+        }
+        Kind::Int { min, max } => Err(IpcError::new(
+            "E_INVALID",
+            format!("{key} must be an integer between {min} and {max}"),
+        )),
         Kind::Choice(options) if options.contains(&v) => Ok(()),
         Kind::Choice(options) => Err(IpcError::new(
             "E_INVALID",
@@ -306,6 +329,20 @@ pub fn set(s: &Store, key: &str, value: &str) -> Result<(), IpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn move_transcript_cap_is_a_bounded_integer_of_mib() {
+        assert_eq!(spec(MOVE_MAX_TRANSCRIPT_MB).unwrap().default, "200");
+        for ok in ["1", "200", "4096", " 50 "] {
+            assert!(validate(MOVE_MAX_TRANSCRIPT_MB, ok).is_ok(), "{ok}");
+        }
+        for bad in ["0", "4097", "-1", "abc", "1.5", ""] {
+            assert!(validate(MOVE_MAX_TRANSCRIPT_MB, bad).is_err(), "{bad}");
+        }
+        // A stored garbage value resolves to the default.
+        assert_eq!(resolve(MOVE_MAX_TRANSCRIPT_MB, Some("0")), "200");
+        assert_eq!(resolve(MOVE_MAX_TRANSCRIPT_MB, Some("64")), "64");
+    }
 
     #[test]
     fn every_default_validates_against_its_own_spec() {
