@@ -11,6 +11,8 @@
   import Modal from './Modal.svelte';
   import HostsTable from './HostsTable.svelte';
   import McpSettings from './McpSettings.svelte';
+  import { copyText } from './clipboard';
+  import './settings_dialog.css';
   import {
     fleetSettings,
     loadFleetSettings,
@@ -57,7 +59,10 @@
     const r = await mcpStatus();
     mcpSettings?.applyStatus(r);
     // Independent fetches, in parallel: a failed token fetch must not hide
-    // the automation section's state and vice versa.
+    // the automation section's state and vice versa. The optional call is
+    // deliberate: Svelte nulls a `bind:this` ref on teardown, so closing
+    // Settings while the mcpStatus() above is in flight leaves it unset —
+    // and a throw here would also skip resetProjectDrafts() below.
     const [fs] = await Promise.all([loadFleetSettings(), hostsTable?.loadHostTokens()]);
     if (!fs.ok) automationError = fs.error.message;
     resetProjectDrafts();
@@ -206,14 +211,6 @@
     if (Number.isFinite(v) && v >= 0) attentionIdleMinutes.set(v);
   }
 
-  async function copyText(text: string) {
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      /* clipboard unavailable — no-op */
-    }
-  }
-
   // --- Diagnostics ---
   let diagBusy = $state(false);
   // Shown once known (after a copy, or when opening the folder failed) so the
@@ -247,7 +244,7 @@
 <!-- Escape + backdrop are handled by Modal (native <dialog>). When the
      AddHostPicker is stacked on top, Escape reaches only that topmost dialog. -->
 <Modal label="Settings" onclose={onClose} width="600px">
-  <div class="dialog">
+  <div class="dialog settings-dialog">
     <header>
       <h3>Settings</h3>
       <button class="close" onclick={onClose} aria-label="Close">×</button>
@@ -569,6 +566,9 @@
       {#if limitsError}<p class="err" role="alert" data-testid="limits-error">{limitsError}</p>{/if}
     </section>
 
+    <!-- onProvisioned is optional-chained for the same reason: a slow
+         multi-host provision can outlive the dialog, and the awaiting side
+         needs a promise back either way. -->
     <McpSettings
       bind:this={mcpSettings}
       onProvisioned={() => hostsTable?.loadHostTokens() ?? Promise.resolve()} />
@@ -627,76 +627,10 @@
   }
   .close:hover { color: var(--fg); }
 
-  .section-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 0.4rem;
-  }
-  .section-header h4 {
-    margin: 0;
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--fg-muted);
-  }
-  .status {
-    font-size: 0.7rem;
-    padding: 0.1rem 0.45rem;
-    border-radius: 999px;
-  }
-  .status-on { background: rgba(60,180,90,0.18); color: rgb(80,200,110); }
-  .status-off { background: rgba(180,100,100,0.18); color: rgb(220,130,130); }
-
-  .hook-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
   .log-path code { word-break: break-all; }
 
   .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
 
-  .mcp-blurb {
-    font-size: 0.78rem;
-    color: var(--fg-muted);
-    margin: 0 0 0.6rem;
-    line-height: 1.4;
-  }
-  .mcp-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 0.5rem;
-  }
-  .toggle {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    font-size: 0.85rem;
-    cursor: pointer;
-  }
-  .mcp-field {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    margin-bottom: 0.4rem;
-    font-size: 0.82rem;
-  }
-  .mcp-field .lbl {
-    width: 3.2rem;
-    color: var(--fg-muted);
-    font-size: 0.72rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-  .mcp-field .port {
-    width: 6rem;
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--fg);
-    border-radius: 4px;
-    padding: 0.2rem 0.4rem;
-  }
-  .mcp-field .port.invalid {
-    border-color: #e64a4a;
-  }
   .project-base-row { margin-bottom: 0.3rem; }
   .project-base-row .mcp-field { margin-bottom: 0.1rem; }
   .mcp-field .project-alias {
@@ -726,45 +660,12 @@
     border-radius: 4px;
     padding: 0.2rem 0.4rem;
   }
-  .mcp-field button {
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--fg);
-    cursor: pointer;
-    padding: 0.18rem 0.5rem;
-    font-size: 0.78rem;
-    border-radius: 4px;
-  }
-  .mcp-field button:hover:not(:disabled) { border-color: var(--accent); }
-  .mcp-field button:disabled { opacity: 0.5; cursor: default; }
 
-  .hook-section {
-    margin-top: 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
   .hook-desc {
     margin: 0;
     font-size: 12px;
     color: var(--text-secondary, #888);
   }
-  .hook-btn {
-    align-self: flex-start;
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--fg);
-    cursor: pointer;
-    padding: 0.18rem 0.5rem;
-    font-size: 0.78rem;
-    border-radius: 4px;
-  }
-  .hook-btn:hover:not(:disabled) { border-color: var(--accent); }
-  .hook-btn:disabled { opacity: 0.5; cursor: default; }
 
-  .status-neutral {
-    background: rgba(127, 127, 127, 0.15);
-    color: var(--fg-muted);
-  }
   .gc-toggle { margin-top: 0.6rem; }
 </style>

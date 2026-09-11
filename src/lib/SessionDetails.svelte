@@ -23,6 +23,7 @@
   import ConfirmDialog from './ConfirmDialog.svelte';
   import TasksPanel from './TasksPanel.svelte';
   import { push, pushError } from './toasts';
+  import { copyText } from './clipboard';
   import {
     ciStatusColor,
     ciStatusLabel,
@@ -100,13 +101,12 @@
   let renameValue = $state('');
 
   async function onCopy() {
-    try {
-      await navigator.clipboard.writeText(attachCommand);
-      copied = true;
-      setTimeout(() => (copied = false), 1500);
-    } catch (e) {
+    const ok = await copyText(attachCommand, (e) => {
       push({ kind: 'error', code: 'E_CLIPBOARD', message: `Copy failed: ${String(e)}` });
-    }
+    });
+    if (!ok) return;
+    copied = true;
+    setTimeout(() => (copied = false), 1500);
   }
 
   async function beginRename() {

@@ -388,6 +388,10 @@ describe('Sidebar (sessions-grouped view)', () => {
     await fireEvent.dblClick(sessRow);
     const input = await screen.findByTestId('rename-input');
     expect((input as HTMLInputElement).value).toBe('dev-foo');
+    // Pins the bind:this → $bindable → beginRename chain: the row's input ref
+    // must reach Sidebar so beginRename can focus it after its tick().
+    await tick();
+    expect(input).toHaveFocus();
   });
 
   it('pressing Escape in rename mode cancels without calling backend', async () => {
