@@ -1,11 +1,16 @@
-//! Application logging: a daily-rotated log file under `<app_data>/logs/`
+//! Application logging: an hourly-rotated log file under `<app_data>/logs/`
 //! (plus stderr in dev builds), with bearer-token redaction applied before any
 //! line reaches a writer.
 //!
 //! Stack: `tracing` + `tracing-subscriber` (`EnvFilter`, so `RUST_LOG` works
-//! as usual) + `tracing-appender` (daily rotation, newest `MAX_LOG_FILES`
+//! as usual) + `tracing-appender` (hourly rotation, newest `MAX_LOG_FILES`
 //! kept). `log` records from dependencies (tauri, tao, …) are bridged in by
 //! `tracing-log`, so either macro family ends up in the same file.
+//!
+//! Why hourly: `tracing-appender` 0.2 has no size-based cap, so with daily
+//! rotation a `RUST_LOG=debug` run could grow one day's file without bound.
+//! Hourly rotation bounds a single file to one hour of output, and keeping
+//! [`MAX_LOG_FILES`] files still covers the last three days.
 //!
 //! **New code should log with `tracing::{error,warn,info,debug}!`** (the
 //! `log::` macros also work through the bridge). Do not add new `eprintln!`
@@ -27,12 +32,18 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use tracing_subscriber::fmt::MakeWriter;
 
-/// Log file names are `<prefix>.<YYYY-MM-DD>.<suffix>`, e.g.
-/// `claude-fleet.2026-09-11.log`.
+/// Log file names are `<prefix>.<YYYY-MM-DD-HH>.<suffix>`, e.g.
+/// `claude-fleet.2026-09-11-14.log` (UTC hour). Builds before hourly rotation
+/// wrote `claude-fleet.<YYYY-MM-DD>.log`; those are still recognised, ordered
+/// before the same day's hourly files, and pruned by the appender as the
+/// oldest files.
 pub const LOG_FILE_PREFIX: &str = "claude-fleet";
 pub const LOG_FILE_SUFFIX: &str = "log";
-/// Rotated files kept on disk (the newest, i.e. today's, included).
-pub const MAX_LOG_FILES: usize = 5;
+/// The appender's rotation period. See the module docs for why it is hourly.
+const ROTATION: tracing_appender::rolling::Rotation = tracing_appender::rolling::Rotation::HOURLY;
+/// Rotated files kept on disk (the newest, i.e. the current hour's, included):
+/// three days of hourly files.
+pub const MAX_LOG_FILES: usize = 72;
 /// Filter used when `RUST_LOG` is unset or unparsable: `info` for this app's
 /// crates, `warn` for every dependency.
 pub const DEFAULT_FILTER: &str = "warn,claude_fleet_lib=info,claude_fleet=info";
@@ -51,8 +62,23 @@ fn is_log_file_name(name: &str) -> bool {
         && name.len() > LOG_FILE_PREFIX.len() + LOG_FILE_SUFFIX.len() + 2
 }
 
-/// Our log files in `dir`, oldest first. The date-stamped names sort
-/// chronologically as strings, so no mtime lookups are needed.
+/// Sort key for a log file name: its date stamp, with a legacy daily stamp
+/// (`YYYY-MM-DD`) read as hour `00` so it orders before that day's hourly
+/// files (`YYYY-MM-DD-HH`). Hourly stamps then sort chronologically as
+/// strings, so no mtime lookups are needed.
+fn log_sort_key(name: &str) -> String {
+    let stamp = name
+        .strip_prefix(&format!("{LOG_FILE_PREFIX}."))
+        .and_then(|s| s.strip_suffix(&format!(".{LOG_FILE_SUFFIX}")))
+        .unwrap_or(name);
+    if stamp.len() == "YYYY-MM-DD".len() {
+        format!("{stamp}-00")
+    } else {
+        stamp.to_string()
+    }
+}
+
+/// Our log files in `dir`, oldest first (see [`log_sort_key`]).
 pub fn log_files(dir: &Path) -> Vec<PathBuf> {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -67,7 +93,12 @@ pub fn log_files(dir: &Path) -> Vec<PathBuf> {
                 .is_some_and(is_log_file_name)
         })
         .collect();
-    files.sort();
+    files.sort_by_cached_key(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .map(log_sort_key)
+            .unwrap_or_default()
+    });
     files
 }
 
@@ -99,7 +130,7 @@ fn read_tail(path: &Path) -> std::io::Result<String> {
 }
 
 /// The last `n` lines across the log files in `dir`, oldest first. Walks
-/// back into the previous day's file when today's is short. Unreadable files
+/// back into earlier files when the current one is short. Unreadable files
 /// are skipped. Lines are returned as written (already redacted by the
 /// writer); callers that expose them should still run [`redact`].
 pub fn tail_lines(dir: &Path, n: usize) -> Vec<String> {
@@ -120,30 +151,87 @@ pub fn tail_lines(dir: &Path, n: usize) -> Vec<String> {
     out
 }
 
-static BEARER_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)\b(bearer)(\s+)[A-Za-z0-9\-._~+/]{8,}=*").expect("bearer regex"));
+/// `Bearer` plus a candidate value (group 3). Whether the value is masked is
+/// decided by [`is_token_shaped`], so prose such as "Bearer authentication"
+/// survives.
+static BEARER_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\b(bearer)(\s+)([A-Za-z0-9\-._~+/]{8,}=*)").expect("bearer regex")
+});
 static QUERY_TOKEN_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)([?&](?:access_)?token=)[^&\s"'#]+"#).expect("query token regex")
 });
-static HEX64_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\b[0-9A-Fa-f]{64}\b").expect("hex64 regex"));
+/// Runs of 64 or more hex digits. The regex crate has no lookaround, so the
+/// rule "exactly 64 hex digits, not part of a longer hex run" (what
+/// `(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])` would say) is finished
+/// in [`redact`]: a leftmost-greedy match of this pattern is always a maximal
+/// run, so a match of length exactly 64 has a non-hex character (or the
+/// text edge) on both sides. Unlike a `\b` rule this masks a token glued to
+/// letters or `_` (`tok_<64 hex>`), and still leaves longer hex runs (a
+/// SHA-512 digest) alone.
+static HEX_RUN_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"[0-9A-Fa-f]{64,}").expect("hex run regex"));
 
 /// Placeholder that replaces masked material.
 pub const REDACTED: &str = "[REDACTED]";
 
-/// Mask anything that looks like a bearer token: `Bearer <token>` (8+
-/// token characters, so prose like "the bearer of" survives), `?token=` /
-/// `&token=` query values, and bare 64-hex strings. Text with
-/// nothing to mask is returned borrowed and unchanged.
+/// Length from which a `Bearer` value without any digit is still treated as
+/// a token. Real tokens (64-hex, JWTs, OAuth access tokens) contain digits
+/// or are long; English words after "bearer" are neither.
+const BEARER_NO_DIGIT_MIN_LEN: usize = 24;
+
+/// Whether a value following `Bearer` looks like a credential rather than
+/// the next word of a sentence: it contains a digit, or it is at least
+/// [`BEARER_NO_DIGIT_MIN_LEN`] characters long (padding excluded).
+fn is_token_shaped(value: &str) -> bool {
+    value.bytes().any(|b| b.is_ascii_digit())
+        || value.trim_end_matches('=').len() >= BEARER_NO_DIGIT_MIN_LEN
+}
+
+/// Replace each match of `re` for which `mask` returns `Some`, leaving the
+/// others as they are. Borrowed when nothing was replaced.
+fn mask_matches<'a>(
+    re: &Regex,
+    input: &'a str,
+    mask: impl Fn(&regex::Captures<'_>) -> Option<String>,
+) -> Cow<'a, str> {
+    let mut out = String::new();
+    let mut last = 0;
+    let mut changed = false;
+    for caps in re.captures_iter(input) {
+        let Some(replacement) = mask(&caps) else {
+            continue;
+        };
+        let m = caps.get(0).expect("group 0 always participates");
+        out.push_str(&input[last..m.start()]);
+        out.push_str(&replacement);
+        last = m.end();
+        changed = true;
+    }
+    if !changed {
+        return Cow::Borrowed(input);
+    }
+    out.push_str(&input[last..]);
+    Cow::Owned(out)
+}
+
+/// Mask anything that looks like a bearer token: a token-shaped value after
+/// `Bearer` (see [`is_token_shaped`]; "the bearer of" and "Bearer
+/// authentication" survive), `?token=` / `&token=` query values, and runs
+/// of exactly 64 hex digits (see [`HEX_RUN_RE`]). Text with nothing to mask
+/// is returned borrowed and unchanged.
 pub fn redact(input: &str) -> Cow<'_, str> {
     let mut out = Cow::Borrowed(input);
-    if let Cow::Owned(s) = BEARER_RE.replace_all(&out, format!("${{1}}${{2}}{REDACTED}")) {
+    if let Cow::Owned(s) = mask_matches(&BEARER_RE, &out, |c| {
+        is_token_shaped(&c[3]).then(|| format!("{}{}{REDACTED}", &c[1], &c[2]))
+    }) {
         out = Cow::Owned(s);
     }
     if let Cow::Owned(s) = QUERY_TOKEN_RE.replace_all(&out, format!("${{1}}{REDACTED}")) {
         out = Cow::Owned(s);
     }
-    if let Cow::Owned(s) = HEX64_RE.replace_all(&out, REDACTED) {
+    if let Cow::Owned(s) = mask_matches(&HEX_RUN_RE, &out, |c| {
+        (c[0].len() == 64).then(|| REDACTED.to_string())
+    }) {
         out = Cow::Owned(s);
     }
     out
@@ -197,6 +285,18 @@ impl<'a, M: MakeWriter<'a>> MakeWriter<'a> for RedactingMakeWriter<M> {
     }
 }
 
+/// The rotating file appender [`init`] installs: [`ROTATION`] rotation,
+/// newest [`MAX_LOG_FILES`] kept.
+fn build_appender(dir: &Path) -> Result<tracing_appender::rolling::RollingFileAppender, String> {
+    tracing_appender::rolling::Builder::new()
+        .rotation(ROTATION)
+        .filename_prefix(LOG_FILE_PREFIX)
+        .filename_suffix(LOG_FILE_SUFFIX)
+        .max_log_files(MAX_LOG_FILES)
+        .build(dir)
+        .map_err(|e| format!("open log file in {}: {e}", dir.display()))
+}
+
 /// The `EnvFilter` in effect: `RUST_LOG` when set and valid, else
 /// [`DEFAULT_FILTER`]. Returns whether `RUST_LOG` was used.
 fn env_filter() -> (tracing_subscriber::EnvFilter, bool) {
@@ -219,13 +319,7 @@ pub fn init(data_dir: &Path) -> Result<PathBuf, String> {
 
     let dir = log_dir_in(data_dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("create log dir {}: {e}", dir.display()))?;
-    let appender = tracing_appender::rolling::Builder::new()
-        .rotation(tracing_appender::rolling::Rotation::DAILY)
-        .filename_prefix(LOG_FILE_PREFIX)
-        .filename_suffix(LOG_FILE_SUFFIX)
-        .max_log_files(MAX_LOG_FILES)
-        .build(&dir)
-        .map_err(|e| format!("open log file in {}: {e}", dir.display()))?;
+    let appender = build_appender(&dir)?;
 
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(RedactingMakeWriter(appender))
@@ -265,13 +359,50 @@ mod tests {
             "Authorization: Bearer [REDACTED]"
         );
         assert_eq!(
-            redact("header bearer\tsecret-value"),
+            redact("header bearer\tsecret-value-42"),
             "header bearer\t[REDACTED]"
         );
         // JSON-embedded header value.
         assert_eq!(
             redact(r#"{"Authorization": "Bearer tok-12345"}"#),
             r#"{"Authorization": "Bearer [REDACTED]"}"#
+        );
+    }
+
+    #[test]
+    fn bearer_masks_only_token_shaped_values() {
+        // Prose: the word after "bearer" is not a credential.
+        for s in [
+            "Bearer authentication failed",
+            "server requires bearer authorization.",
+            "uses Bearer tokens, not cookies",
+            "the bearer of bad news",
+        ] {
+            let r = redact(s);
+            assert!(matches!(r, Cow::Borrowed(_)), "{s:?} should be untouched");
+        }
+        // A digit anywhere makes it a token.
+        assert_eq!(redact("Bearer abcdefgh1"), "Bearer [REDACTED]");
+        assert_eq!(redact(&format!("Bearer {HEX}")), "Bearer [REDACTED]");
+        // JWT shape, lowercase scheme.
+        assert_eq!(
+            redact("authorization: bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig_Abc-123"),
+            "authorization: bearer [REDACTED]"
+        );
+        // No digit but 24+ characters (a letters-only token)...
+        assert_eq!(
+            redact("Bearer abcdefghijklmnopqrstuvwx"),
+            "Bearer [REDACTED]"
+        );
+        // ...where `=` padding does not count toward the length.
+        assert_eq!(
+            redact("Bearer abcdefghijklmnopqrstuvw="),
+            "Bearer abcdefghijklmnopqrstuvw="
+        );
+        // Prose and a token in one line: only the token goes.
+        assert_eq!(
+            redact("Bearer authentication with Bearer tok-98765"),
+            "Bearer authentication with Bearer [REDACTED]"
         );
     }
 
@@ -300,6 +431,23 @@ mod tests {
     }
 
     #[test]
+    fn hex64_uses_hex_boundaries_not_word_boundaries() {
+        // Glued to non-hex word characters: a `\b` rule missed these.
+        assert_eq!(redact(&format!("tok_{HEX}")), "tok_[REDACTED]");
+        assert_eq!(redact(&format!("zz{HEX}zz")), "zz[REDACTED]zz");
+        assert_eq!(redact(&format!("x-{HEX}.log")), "x-[REDACTED].log");
+        // Part of a longer hex run on either side: not a 64-hex token.
+        for s in [format!("a{HEX}"), format!("{HEX}f"), format!("{HEX}{HEX}")] {
+            let r = redact(&s);
+            assert!(matches!(r, Cow::Borrowed(_)), "{s:?} should be untouched");
+        }
+        // Two tokens split by a non-hex character are both masked.
+        assert_eq!(redact(&format!("{HEX}:{HEX}")), "[REDACTED]:[REDACTED]");
+        // 63 hex digits are too short.
+        assert_eq!(redact(&HEX[..63]), &HEX[..63]);
+    }
+
+    #[test]
     fn ordinary_text_is_untouched_and_borrowed() {
         for s in [
             "[reconcile-tick] enabled every 20s",
@@ -316,7 +464,8 @@ mod tests {
 
     #[test]
     fn redaction_is_idempotent() {
-        let once = redact(&format!("Bearer xxxxxxxxxx ?token=y {HEX}")).into_owned();
+        let once = redact(&format!("Bearer xxxxxxxx42 ?token=y {HEX}")).into_owned();
+        assert!(!once.contains("xxxxxxxx42"), "{once}");
         assert_eq!(redact(&once), once);
     }
 
@@ -381,6 +530,52 @@ mod tests {
             "claude-fleet.2026-09-11.log"
         );
         assert!(current_log_file(&d.join("missing")).is_none());
+    }
+
+    #[test]
+    fn log_files_orders_legacy_daily_before_same_day_hourly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        for name in [
+            "claude-fleet.2026-09-11-14.log",
+            "claude-fleet.2026-09-11.log",
+            "claude-fleet.2026-09-11-03.log",
+            "claude-fleet.2026-09-10.log",
+            "claude-fleet.2026-09-12-00.log",
+        ] {
+            std::fs::write(d.join(name), "x\n").unwrap();
+        }
+        let names: Vec<String> = log_files(d)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "claude-fleet.2026-09-10.log",
+                "claude-fleet.2026-09-11.log",
+                "claude-fleet.2026-09-11-03.log",
+                "claude-fleet.2026-09-11-14.log",
+                "claude-fleet.2026-09-12-00.log",
+            ]
+        );
+    }
+
+    #[test]
+    fn appender_writes_hourly_stamped_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut a = build_appender(tmp.path()).unwrap();
+        a.write_all(b"hello\n").unwrap();
+        a.flush().unwrap();
+        let files = log_files(tmp.path());
+        assert_eq!(files.len(), 1, "{files:?}");
+        let name = files[0].file_name().unwrap().to_str().unwrap().to_string();
+        let stamp = name
+            .strip_prefix("claude-fleet.")
+            .and_then(|s| s.strip_suffix(".log"))
+            .unwrap();
+        assert_eq!(stamp.len(), "YYYY-MM-DD-HH".len(), "{name}");
+        assert_eq!(tail_lines(tmp.path(), 5), ["hello"]);
     }
 
     #[test]

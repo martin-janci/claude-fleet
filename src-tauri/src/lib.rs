@@ -29,16 +29,14 @@ use std::sync::Mutex;
 use store::Store;
 
 /// The platform app data directory (`state.db`, `logs/`), created if missing.
-pub(crate) fn appdata_dir() -> std::path::PathBuf {
+/// Panics on failure, so it is called once, at startup in [`run`]; IPC
+/// handlers read the managed `commands::diagnostics::AppDataDir` instead.
+fn appdata_dir() -> std::path::PathBuf {
     let dirs = ProjectDirs::from("sk", "rlt", "claude-fleet")
         .expect("could not resolve platform appdata dir");
     let dir = dirs.data_dir();
     std::fs::create_dir_all(dir).unwrap_or_else(|e| panic!("create appdata dir {dir:?}: {e}"));
     dir.to_path_buf()
-}
-
-fn appdata_db_path() -> std::path::PathBuf {
-    appdata_dir().join("state.db")
 }
 
 /// Pure: compute a new PATH that appends any of `common_bin_dirs` that are not
@@ -509,7 +507,10 @@ pub fn run() {
             let handle = app.handle().clone();
             let bus: std::sync::Arc<dyn crate::events::EventBus> =
                 std::sync::Arc::new(crate::events::AppHandleEventBus::new(handle));
-            let db_path = appdata_db_path();
+            // The data dir was resolved once, before logging started; IPC
+            // handlers read it from managed state instead of re-resolving.
+            app.manage(commands::diagnostics::AppDataDir(data_dir.clone()));
+            let db_path = data_dir.join("state.db");
             let store = Store::open_with_bus(&db_path, bus).unwrap_or_else(|e| {
                 // Still a hard fail (the app can't run without its DB), but
                 // with an actionable message instead of a bare "open store".
