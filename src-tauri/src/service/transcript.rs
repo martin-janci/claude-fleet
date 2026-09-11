@@ -323,7 +323,7 @@ mod tests {
     fn read_bytes_scales_with_the_char_budget_within_bounds() {
         assert_eq!(read_bytes_for(1), MIN_READ_BYTES);
         assert_eq!(read_bytes_for(8_000), 8_000 * 64);
-        assert_eq!(read_bytes_for(64_000), MAX_READ_BYTES);
+        assert_eq!(read_bytes_for(64_000), 64_000 * 64);
         assert_eq!(read_bytes_for(usize::MAX), MAX_READ_BYTES);
     }
 

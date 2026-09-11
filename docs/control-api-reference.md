@@ -19,6 +19,12 @@ Send the same prompt to every matching work session (excludes the controller). R
 
 Parameters: `confirm_nonce`, `host`, `project_id`, `prompt`, `raw`, `status`, `submit`
 
+### `cancel_task`
+
+Cancel a queued or running task: marks it cancelled (E_TASK_TERMINAL if it already finished). The worker session keeps running — kill or re-prompt it separately if needed. May return E_CONFIRM_REQUIRED when desktop confirmation is on. A per-host token may only cancel tasks it can see (E_FORBIDDEN).
+
+Parameters: `confirm_nonce`, `task_id`
+
 ### `capture_session`
 
 Capture a session's terminal output — the visible tmux pane, or include scrollback history (scrollback_lines). Use after send_prompt to read the session's reply. Returns the pane as plain text (not JSON), capped to the last max_lines lines (default 200).
@@ -37,9 +43,15 @@ Discover SSH hosts from the user's ~/.ssh/config. These are candidates for add_h
 
 ### `dismiss_ghost_session`
 
-Dismiss a ghost session (lost from tmux): permanently delete its row. Errors if the session is not a ghost.
+Dismiss a ghost session (lost from tmux): permanently delete its row. Use when a ghost is not worth reviving — the row is the only thing left to clean up. Errors if the session is not a ghost.
 
 Parameters: `session_id`
+
+### `dispatch_task`
+
+Dispatch a unit of work to a worker session and track it as a task. Pass worker_session_id (an existing session) OR new_worker { host_alias, project_id, name? } (spawns one via new_session). The prompt is delivered with an appended instruction to print FLEET_TASK_DONE_<nonce> on its own line followed by a one-paragraph result; fleet detects the marker on the worker's next Stop and flips the task to done with that paragraph as `result` (also delivered to requester_session_id's inbox as kind=task_result). Returns the task row (id, state=running, worker_session_id, …); follow with wait_for_task. A per-host token must name a requester on its own host. Marked as untrusted unless raw=true (master only).
+
+Parameters: `new_worker`, `prompt`, `raw`, `requester_session_id`, `worker_session_id`
 
 ### `fleet_health`
 
@@ -59,13 +71,13 @@ Parameters: `alias`, `hidden`
 
 ### `inbox`
 
-Read a session's inbox — messages sent TO session_id, newest-first. Slim rows by default (metadata + 80-char body preview); pass summary=false for full bodies. mark_read (default true) flips returned unread rows to read — pass false to peek without consuming. A per-host token may only read inboxes of sessions on its own host (E_FORBIDDEN).
+Read a session's inbox — messages sent TO session_id, newest-first. Slim rows by default (metadata, reply_to, 80-char body preview); pass summary=false for full bodies. Task results arrive here as kind=task_result. mark_read (default true) flips returned unread rows to read — pass false to peek without consuming. A per-host token may only read inboxes of sessions on its own host (E_FORBIDDEN).
 
 Parameters: `limit`, `mark_read`, `session_id`, `summary`, `unread_only`
 
 ### `kill_session`
 
-Kill a session on a host: a tmux session by name, or a background agent row (name `bg:<uuid>`) via `claude stop` — the latter is idempotent, so it also clears a stale row whose process already died. Returns the killed session's id. Address the session with session_id OR host_alias + name. May return E_CONFIRM_REQUIRED when desktop confirmation is on.
+Kill a session on a host: a tmux session by name, or a background agent row (name `bg:<uuid>`) via `claude stop` — the latter is idempotent, so it also clears a stale row whose process already died. Use when the session's work is disposable or already pushed and you want it gone NOW; prefer safe_kill_session when the worktree may hold unpushed work. Returns the killed session's id. Address the session with session_id OR host_alias + name. May return E_CONFIRM_REQUIRED when desktop confirmation is on.
 
 Parameters: `confirm_nonce`, `force`, `host_alias`, `name`, `session_id`
 
@@ -85,9 +97,15 @@ Parameters: `summary`
 
 ### `list_sessions`
 
-List tmux sessions across reachable hosts. Slim summary rows by default; pass summary=false for the full SessionRow. Optional filters: host_alias, project_id, status, claude_status, include_lost (default false drops ghosts); `limit` caps the row count after filtering (default: all); `force` runs a reconcile pass first instead of serving the recent cache. claude_status is one of working | blocked | completed | failed | stopped | idle; stuck_kind is one of auth_menu | reconnect | trust_prompt | oom | press_enter; ci_status (full rows) is one of passing | failing | pending (null when the session has no PR or its PR has no checks).
+List tmux sessions across reachable hosts. Slim summary rows by default; pass summary=false for the full SessionRow. Optional filters: host_alias, project_id, status, claude_status, tag, include_lost (default false drops ghosts); `limit` caps the row count after filtering (default: all); `force` runs a reconcile pass first instead of serving the recent cache. claude_status is one of working | blocked | completed | failed | stopped | idle; stuck_kind is one of auth_menu | reconnect | trust_prompt | oom | press_enter; ci_status (full rows) is one of passing | failing | pending (null when the session has no PR or its PR has no checks).
 
-Parameters: `claude_status`, `force`, `host_alias`, `include_lost`, `limit`, `project_id`, `status`, `summary`
+Parameters: `claude_status`, `force`, `host_alias`, `include_lost`, `limit`, `project_id`, `status`, `summary`, `tag`
+
+### `list_tasks`
+
+List tasks, newest-first (default 50 rows). Filters: requester_session_id, state (queued | running | done | failed | cancelled). Read-only. A per-host token sees only tasks it requested from its host or whose worker is on its host.
+
+Parameters: `limit`, `requester_session_id`, `state`
 
 ### `list_worktrees`
 
@@ -133,13 +151,13 @@ Parameters: `alias`
 
 ### `provision_hosts`
 
-Install fleet skills, the Stop/WorktreeCreate http hooks, and this fleet's MCP server entry (with a per-host bearer token) into every reachable host's ~/.claude.json (reverse SSH tunnel for remote hosts). rotate=true mints fresh per-host tokens. Returns a per-host status list; each host must restart Claude to load the server.
+Install fleet skills, the Stop / UserPromptSubmit / WorktreeCreate http hooks, and this fleet's MCP server entry (with a per-host bearer token) into every reachable host's ~/.claude.json (reverse SSH tunnel for remote hosts). rotate=true mints fresh per-host tokens. Returns a per-host status list; each host must restart Claude to load the server.
 
 Parameters: `rotate`
 
 ### `recreate_session`
 
-Recreate a session: kill its tmux session and rebuild it fresh in the same worktree, resuming the same Claude conversation. Works for running or ghost sessions. Returns the session row as JSON.
+Recreate a session: kill its tmux session and rebuild it fresh in the same worktree, resuming the same Claude conversation. Use for a frozen / OOM / context-exhausted session, or to revive a ghost — the conversation survives, the process does not. Works for running or ghost sessions. Returns the session row as JSON.
 
 Parameters: `force`, `session_id`
 
@@ -227,25 +245,31 @@ Parameters: `session_id`
 
 ### `restart_session`
 
-Restart a tmux session (kill and recreate it in the same place). Returns the updated session row as JSON. Address the session with session_id OR host_alias + name.
+Restart a tmux session (kill and recreate it in the same place). Use when the Claude REPL is wedged but tmux and the worktree are fine — an in-place relaunch, cheaper than recreate_session. Returns the updated session row as JSON. Address the session with session_id OR host_alias + name.
 
 Parameters: `force`, `host_alias`, `name`, `session_id`
 
+### `run_prompt`
+
+send_prompt + wait_for_session(turn_gt) + session_transcript in one call: deliver the prompt, wait up to timeout_s (default 120, max 600) for the turn to complete, and return JSON { turn_seq, status: satisfied | timeout, transcript } where transcript is the reply as plain text (null with transcript_error when it cannot be read). Marked as untrusted unless raw=true (master token only). Address the session with session_id.
+
+Parameters: `max_chars`, `prompt`, `raw`, `session_id`, `timeout_s`
+
 ### `safe_kill_session`
 
-Ask a running Claude session to safely persist its work (commit + push), then arm deletion of its worktree + tmux session. Returns the row with safe_kill_state=requested; the actual delete fires only after the SAFE_REMOVE_READY marker AND a clean-tree check. Transitions ('ready', 'failed') arrive via row events. Address the session with session_id OR host_alias + tmux_name.
+Ask a running Claude session to safely persist its work (commit + push), then arm deletion of its worktree + tmux session. Use when retiring a session whose worktree may hold unpushed work and you can wait for it to finish. Returns the row with safe_kill_state=requested; the actual delete fires only after the SAFE_REMOVE_READY marker AND a clean-tree check. Transitions ('ready', 'failed') arrive via row events. Address the session with session_id OR host_alias + tmux_name.
 
 Parameters: `host_alias`, `session_id`, `tmux_name`
 
 ### `send_message`
 
-Send a peer-to-peer message from one session to another. The message is persisted to the recipient's inbox (read with `inbox`); set `deliver: true` to ALSO type the message into the recipient's tmux pane with a `[msg #id from name@host]:` header. The inbox row is the source of truth — it lands even if the pane delivery fails. Returns JSON with the new message id and the delivery outcome. A per-host token must send from a session on its own host (E_FORBIDDEN). The body is prefixed with an untrusted-content marker line unless raw=true (master token only).
+Send a peer-to-peer message from one session to another. The message is persisted to the recipient's inbox (read with `inbox`); set `deliver: true` to ALSO type the message into the recipient's tmux pane with a `[msg #id from name@host]:` header. The inbox row is the source of truth — it lands even if the pane delivery fails. Returns JSON with the new message id and the delivery outcome. Pass reply_to (an inbox message id) to thread an answer. A per-host token must send from a session on its own host (E_FORBIDDEN). The body is prefixed with an untrusted-content marker line unless raw=true (master token only).
 
-Parameters: `body`, `deliver`, `from_session_id`, `kind`, `raw`, `submit`, `to_session_id`
+Parameters: `body`, `deliver`, `from_session_id`, `kind`, `raw`, `reply_to`, `submit`, `to_session_id`
 
 ### `send_prompt`
 
-Send and SUBMIT a prompt to a running Claude session's REPL (literal text, then one Enter). This is how you steer a session. Set submit=false to stage text in the REPL without submitting it. Address the session with session_id OR host_alias + tmux_name. The first prompt to a still-unnamed session also becomes its friendly name. The text is prefixed with an untrusted-content marker line unless raw=true (master token only).
+Send and SUBMIT a prompt to a running Claude session's REPL (literal text, then one Enter). This is how you steer a session. Set submit=false to stage text in the REPL without submitting it. Address the session with session_id OR host_alias + tmux_name. The first prompt to a still-unnamed session also becomes its friendly name. The text is prefixed with an untrusted-content marker line unless raw=true (master token only). Returns JSON { delivered, session_id, turn_seq_before }: pass turn_seq_before to wait_for_session { until: "turn_gt" } or session_transcript { since_turn } to collect the reply (or use run_prompt, which does all three).
 
 Parameters: `host_alias`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
 
@@ -254,6 +278,12 @@ Parameters: `host_alias`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
 Return the recorded event timeline for a session (status changes, prompts, stuck, kills). Newest-first; pass `limit` to cap (default 50). Returns the events as JSON.
 
 Parameters: `limit`, `session_id`
+
+### `session_transcript`
+
+Read a session's Claude Code transcript (the JSONL Claude writes, not the pane) and return the last assistant turn as plain text — text blocks verbatim, one summary line per tool call, no thinking. since_turn returns every turn after that turn_seq (use send_prompt's turn_seq_before). max_chars caps the text (default 8000, max 64000; the END is kept). Errors: E_INVALID_STATE (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet). Read-only; prefer it over capture_session for the reply text.
+
+Parameters: `max_chars`, `session_id`, `since_turn`
 
 ### `set_clipboard`
 
@@ -267,11 +297,29 @@ Set the session's friendly display name (shown when the user toggles friendly na
 
 Parameters: `friendly_name`, `host_alias`, `session_id`, `tmux_name`
 
+### `set_session_tags`
+
+Replace a session's tags (short labels such as `review`, `infra`, `wip`; up to 16 of 1–32 chars from [A-Za-z0-9_.:-]; an empty list clears). Tags show in list_sessions rows and list_sessions { tag } filters on them. Returns the updated row. Address the session with session_id OR host_alias + tmux_name.
+
+Parameters: `host_alias`, `session_id`, `tags`, `tmux_name`
+
 ### `spawn_review`
 
 Spawn a review session: a new Claude session in the source session's worktree, seeded with a review prompt. Returns the new review session row as JSON.
 
 Parameters: `prompt`, `source_session_id`
+
+### `wait_for_session`
+
+Block until a session reaches a state, or time out. until="idle": claude_status is idle | completed | stopped | failed (true even for a session that never started a turn). until="turn_gt": turn_seq > `turn` — pass the turn_seq_before that send_prompt returned to wait for the reply to YOUR prompt. Polls the store every 500 ms for up to timeout_s (default 120, max 600). Returns JSON { status: satisfied | timeout, claude_status, turn_seq, last_stop_at, stuck_kind }. Read-only. A per-host token may only wait on sessions on its own host.
+
+Parameters: `session_id`, `timeout_s`, `turn`, `until`
+
+### `wait_for_task`
+
+Block until a task reaches done | failed | cancelled or timeout_s elapses (default 120, max 600; polls every 500 ms). Returns JSON { status: satisfied | timeout, task } — task.result holds the worker's paragraph when done. Read-only. A per-host token may only wait on tasks it requested or whose worker is on its host (E_FORBIDDEN).
+
+Parameters: `task_id`, `timeout_s`
 
 ### `whoami`
 
@@ -310,6 +358,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::purge_project`
 - `commands::sessions::get_fleet_settings`
 - `commands::sessions::set_fleet_setting`
+- `commands::tasks::list_tasks`
+- `commands::tasks::cancel_task`
 - `commands::files::repo_changes`
 - `commands::files::repo_tree`
 - `commands::files::repo_file`

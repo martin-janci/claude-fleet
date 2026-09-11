@@ -1046,7 +1046,8 @@ pub struct NewWorkerSpec {
     pub host_alias: String,
     /// Project id (see `list_projects`).
     pub project_id: i64,
-    /// tmux session name for the worker; default `task-<8 hex>`.
+    /// tmux session name for the worker. Omit (or pass "") to let
+    /// new_session generate one with its usual naming and collision policy.
     #[serde(default)]
     pub name: Option<String>,
 }
@@ -2609,10 +2610,10 @@ impl FleetTools {
                 false,
             ),
             (None, Some(spec)) => {
-                let name = spec
-                    .name
-                    .filter(|n| !n.trim().is_empty())
-                    .unwrap_or_else(|| format!("task-{}", tasks::make_nonce()));
+                // An empty name is new_session's "pick one for me": the
+                // backend generates it (fill_session_name), so workers follow
+                // the same convention as every other session.
+                let name = spec.name.unwrap_or_default();
                 let row = sessions::new_session(
                     sessions::NewSessionArgs {
                         host_alias: spec.host_alias,

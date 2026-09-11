@@ -369,7 +369,7 @@ function okRow(over: Partial<sessionsModule.SessionRow> = {}): sessionsModule.Se
     last_prompt: null,
     started_at: null,
     last_turn_at: null,
-    ci_status: null,
+    ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [],
     ...over,
   };
 }
