@@ -609,6 +609,8 @@ pub fn run() {
             commands::sessions::purge_project,
             commands::sessions::get_fleet_settings,
             commands::sessions::set_fleet_setting,
+            commands::tasks::list_tasks,
+            commands::tasks::cancel_task,
             commands::files::repo_changes,
             commands::files::repo_tree,
             commands::files::repo_file,

@@ -19,6 +19,7 @@
   import ReviewDialog from './ReviewDialog.svelte';
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import TasksPanel from './TasksPanel.svelte';
   import { push, pushError } from './toasts';
   import {
     ciStatusColor,
@@ -466,6 +467,8 @@
       </ul>
     </section>
   {/if}
+
+  <TasksPanel sessionId={session.id} />
 
   <section class="block">
     <h3>Attach from another terminal</h3>

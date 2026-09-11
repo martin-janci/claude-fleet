@@ -80,6 +80,19 @@ pub struct SessionRow {
     pub last_turn_at: Option<i64>,
     /// `passing` | `failing` | `pending` from the PR's check rollup.
     pub ci_status: Option<String>,
+    // ── Orchestration fields (migration 020) ──
+    /// Number of completed turns, incremented by every Stop hook. Callers
+    /// snapshot it before `send_prompt` and wait for it to grow.
+    pub turn_seq: i64,
+    /// Unix secs of the last Stop hook (a hook-stamped status newer than a
+    /// reconcile pass's pane observation wins over the pane heuristic).
+    pub last_stop_at: Option<i64>,
+    /// The requester session that dispatched the task this row is working
+    /// on; NULL for top-level sessions.
+    pub parent_session_id: Option<i64>,
+    /// Free-form labels set via `set_session_tags`. Stored as a JSON array
+    /// (NULL ⇒ empty) and always surfaced as a list on the wire.
+    pub tags: Vec<String>,
 }
 
 /// The `sessions` column list every `SessionRow` read shares, in the order
@@ -91,7 +104,28 @@ const SESSION_COLUMNS: &str = "id, tmux_name, host_alias, project_id, worktree_i
      claude_session_id, claude_status, effort_level, pr_url, current_activity, \
      context_pct, stuck_kind, friendly_name, \
      safe_kill_state, safe_kill_nonce, safe_kill_detail, safe_kill_requested_at, \
-     idle_since, stuck_since, last_playbook_at, last_prompt, started_at, last_turn_at, ci_status";
+     idle_since, stuck_since, last_playbook_at, last_prompt, started_at, last_turn_at, ci_status, \
+     turn_seq, last_stop_at, parent_session_id, tags";
+
+/// Decode the `sessions.tags` JSON column. NULL, empty, or malformed text
+/// (never written by us, but a hand-edited DB is possible) reads as no tags
+/// rather than failing every session read.
+pub fn decode_tags(raw: Option<String>) -> Vec<String> {
+    raw.as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+        .unwrap_or_default()
+}
+
+/// Encode tags for the `sessions.tags` column: `None` for an empty list so
+/// an untagged row stays NULL (and `tag IS NULL` style queries work).
+pub fn encode_tags(tags: &[String]) -> Option<String> {
+    if tags.is_empty() {
+        None
+    } else {
+        serde_json::to_string(tags).ok()
+    }
+}
 
 /// Map one `SELECT {SESSION_COLUMNS}` row to a `SessionRow`.
 fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
@@ -129,6 +163,10 @@ fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
         started_at: row.get(30)?,
         last_turn_at: row.get(31)?,
         ci_status: row.get(32)?,
+        turn_seq: row.get(33)?,
+        last_stop_at: row.get(34)?,
+        parent_session_id: row.get(35)?,
+        tags: decode_tags(row.get(36)?),
     })
 }
 
@@ -206,6 +244,54 @@ pub struct SessionMessage {
     /// Unix-epoch second the recipient first listed this message, or `None`
     /// when still unread.
     pub read_at: Option<i64>,
+    /// Id of the message this one answers (migration 020); `None` when the
+    /// message is not a reply.
+    pub reply_to: Option<i64>,
+}
+
+/// One dispatched unit of work (migration 020). `state` is one of
+/// [`TASK_STATES`]; `result` is the paragraph the worker printed after its
+/// `FLEET_TASK_DONE_<nonce>` marker, `error` the failure/cancel reason.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TaskRow {
+    pub id: i64,
+    pub requester_session_id: Option<i64>,
+    pub worker_session_id: Option<i64>,
+    pub prompt: Option<String>,
+    pub state: String,
+    pub result: Option<String>,
+    pub error: Option<String>,
+    pub created_at: i64,
+    pub started_at: Option<i64>,
+    pub finished_at: Option<i64>,
+    /// Per-task random tag baked into the completion marker. Never sent to
+    /// the frontend (the marker must not be forgeable from the UI).
+    #[serde(skip_serializing)]
+    pub nonce: String,
+}
+
+/// The task state machine: `queued → running → done | failed | cancelled`.
+pub const TASK_STATES: [&str; 5] = ["queued", "running", "done", "failed", "cancelled"];
+/// States a task never leaves.
+pub const TASK_TERMINAL_STATES: [&str; 3] = ["done", "failed", "cancelled"];
+
+const TASK_COLUMNS: &str = "id, requester_session_id, worker_session_id, prompt, state, result, \
+     error, created_at, started_at, finished_at, nonce";
+
+fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
+    Ok(TaskRow {
+        id: row.get(0)?,
+        requester_session_id: row.get(1)?,
+        worker_session_id: row.get(2)?,
+        prompt: row.get(3)?,
+        state: row.get(4)?,
+        result: row.get(5)?,
+        error: row.get(6)?,
+        created_at: row.get(7)?,
+        started_at: row.get(8)?,
+        finished_at: row.get(9)?,
+        nonce: row.get(10)?,
+    })
 }
 
 /// One live session to upsert during a reconcile write-burst. `project_id`,
@@ -318,6 +404,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (17, include_str!("../migrations/017_safe_kill.sql")),
     (18, include_str!("../migrations/018_host_tokens.sql")),
     (19, include_str!("../migrations/019_lifecycle_fields.sql")),
+    (20, include_str!("../migrations/020_tasks_and_turns.sql")),
 ];
 
 /// The schema version a fully migrated database reports.
@@ -487,6 +574,7 @@ impl Store {
         to_session_id: i64,
         body: &str,
         kind: &str,
+        reply_to: Option<i64>,
     ) -> Result<i64, crate::ipc_error::IpcError> {
         let at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -495,12 +583,28 @@ impl Store {
         self.conn
             .execute(
                 "INSERT INTO session_messages \
-                   (from_session_id, to_session_id, body, kind, sent_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![from_session_id, to_session_id, body, kind, at],
+                   (from_session_id, to_session_id, body, kind, sent_at, reply_to) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![from_session_id, to_session_id, body, kind, at, reply_to],
             )
             .map_err(crate::ipc_error::IpcError::from)?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// One message by id (any recipient). Used to validate `reply_to`.
+    pub fn get_message(
+        &self,
+        id: i64,
+    ) -> Result<Option<SessionMessage>, crate::ipc_error::IpcError> {
+        self.conn
+            .query_row(
+                "SELECT id, from_session_id, to_session_id, body, kind, sent_at, read_at, reply_to \
+                 FROM session_messages WHERE id = ?1",
+                rusqlite::params![id],
+                map_message_row,
+            )
+            .optional()
+            .map_err(crate::ipc_error::IpcError::from)
     }
 
     /// Newest-first messages addressed to `to_session_id`, capped at `limit`.
@@ -512,12 +616,12 @@ impl Store {
         limit: i64,
     ) -> Result<Vec<SessionMessage>, crate::ipc_error::IpcError> {
         let sql = if unread_only {
-            "SELECT id, from_session_id, to_session_id, body, kind, sent_at, read_at \
+            "SELECT id, from_session_id, to_session_id, body, kind, sent_at, read_at, reply_to \
              FROM session_messages \
              WHERE to_session_id = ?1 AND read_at IS NULL \
              ORDER BY sent_at DESC, id DESC LIMIT ?2"
         } else {
-            "SELECT id, from_session_id, to_session_id, body, kind, sent_at, read_at \
+            "SELECT id, from_session_id, to_session_id, body, kind, sent_at, read_at, reply_to \
              FROM session_messages \
              WHERE to_session_id = ?1 \
              ORDER BY sent_at DESC, id DESC LIMIT ?2"
@@ -527,17 +631,7 @@ impl Store {
             .prepare(sql)
             .map_err(crate::ipc_error::IpcError::from)?;
         let rows = stmt
-            .query_map(rusqlite::params![to_session_id, limit], |row| {
-                Ok(SessionMessage {
-                    id: row.get(0)?,
-                    from_session_id: row.get(1)?,
-                    to_session_id: row.get(2)?,
-                    body: row.get(3)?,
-                    kind: row.get(4)?,
-                    sent_at: row.get(5)?,
-                    read_at: row.get(6)?,
-                })
-            })
+            .query_map(rusqlite::params![to_session_id, limit], map_message_row)
             .map_err(crate::ipc_error::IpcError::from)?;
         let mut out = Vec::new();
         for r in rows {
@@ -1972,6 +2066,7 @@ impl Store {
         intel_observed: bool,
         ci_status: Option<&str>,
         pr_observed: bool,
+        probe_started_at: i64,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
         // Read the prior row (not just its id) before the write: it tells us
@@ -1990,6 +2085,15 @@ impl Store {
         // (`excluded`), never each other's results.
         const NEW_STUCK: &str = "CASE WHEN ?16 THEN excluded.stuck_kind \
                                  ELSE COALESCE(excluded.stuck_kind, stuck_kind) END";
+        // The post-write claude_status. A Stop hook that landed at or after
+        // this pass's probe STARTED (`last_stop_at >= ?20`) is fresher than
+        // the pane the pass captured, so its `idle` must win over the pane
+        // heuristic (MCP-1: reconcile used to clobber the hook every tick).
+        // `?20 <= 0` disables the guard (store-level tests pass 0).
+        const NEW_STATUS: &str = "CASE WHEN ?20 > 0 AND last_stop_at IS NOT NULL \
+                                            AND last_stop_at >= ?20 \
+                                       THEN claude_status \
+                                       ELSE COALESCE(excluded.claude_status, claude_status) END";
         let sql = format!(
             "INSERT INTO sessions (tmux_name, host_alias, project_id, worktree_id,
                                    created_at, last_activity_at, status, account_uuid,
@@ -2007,7 +2111,7 @@ impl Store {
                status=CASE WHEN status='ghost' THEN 'running' ELSE status END,
                lost_at=NULL,
                claude_session_id=COALESCE(excluded.claude_session_id, claude_session_id),
-               claude_status=COALESCE(excluded.claude_status, claude_status),
+               claude_status={new_status},
                effort_level=COALESCE(excluded.effort_level, effort_level),
                -- pr_url / ci_status are authoritative when the gh probe ran
                -- this pass (?18) so a closed PR's link clears; otherwise the
@@ -2029,7 +2133,8 @@ impl Store {
                                 ELSE ?19 END,
                idle_since={idle}",
             new_stuck = NEW_STUCK,
-            idle = idle_since_sql("COALESCE(excluded.claude_status, claude_status)", "?19"),
+            new_status = NEW_STATUS,
+            idle = idle_since_sql(NEW_STATUS, "?19"),
         );
         tx.execute(
             &sql,
@@ -2052,7 +2157,8 @@ impl Store {
                 intel_observed,
                 ci_status,
                 pr_observed,
-                now_unix()
+                now_unix(),
+                probe_started_at
             ],
         )?;
         if let Some(row) = fetch_session(tx, tmux_name, host_alias)? {
@@ -2259,6 +2365,7 @@ impl Store {
                         sess.intel_observed,
                         sess.ci_status.as_deref(),
                         sess.pr_observed,
+                        spec.probe_started_at,
                         &mut out,
                     )?;
                     if let Some(pid) = sess.project_id {
@@ -2393,6 +2500,266 @@ impl Store {
         Ok(())
     }
 
+    // ── Orchestration (migration 020) ────────────────────────────────────
+
+    /// The Stop hook's write: the turn is over. Sets `claude_status = idle`,
+    /// bumps `turn_seq`, stamps `last_stop_at` / `last_turn_at` and maintains
+    /// `idle_since`. Matches by `claude_session_id`; returns the updated row
+    /// (`None` when no row carries this id yet). Emits `session_updated`.
+    pub fn record_stop_hook(
+        &self,
+        claude_session_id: &str,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        let now = now_unix();
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE sessions SET claude_status = 'idle', turn_seq = turn_seq + 1, \
+                 last_stop_at = ?2, last_turn_at = ?2, idle_since = COALESCE(idle_since, ?2) \
+                 WHERE claude_session_id = ?1",
+                rusqlite::params![claude_session_id, now],
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let row = self.fetch_session_by_claude_id(claude_session_id)?;
+        self.bus.session_updated(&row);
+        Ok(Some(row))
+    }
+
+    /// The UserPromptSubmit hook's write: a turn is starting. Sets
+    /// `claude_status = working` and clears `idle_since` so "idle because
+    /// never started" and "idle after a turn" are distinguishable from
+    /// "busy". Returns the updated row (`None` when unmatched). Emits
+    /// `session_updated`.
+    pub fn record_prompt_submit_hook(
+        &self,
+        claude_session_id: &str,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE sessions SET claude_status = 'working', idle_since = NULL \
+                 WHERE claude_session_id = ?1",
+                rusqlite::params![claude_session_id],
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let row = self.fetch_session_by_claude_id(claude_session_id)?;
+        self.bus.session_updated(&row);
+        Ok(Some(row))
+    }
+
+    /// Replace a session's tags (migration 020). Emits `session_updated`.
+    pub fn set_session_tags(
+        &self,
+        id: i64,
+        tags: &[String],
+    ) -> Result<Option<SessionRow>, rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET tags=?1 WHERE id=?2",
+            rusqlite::params![encode_tags(tags), id],
+        )?;
+        let row = fetch_session_by_id(&self.conn, id)?;
+        if let Some(ref r) = row {
+            self.bus.session_updated(r);
+        }
+        Ok(row)
+    }
+
+    /// Record which requester dispatched work to this session. Emits
+    /// `session_updated`.
+    pub fn set_parent_session_id(
+        &self,
+        id: i64,
+        parent: Option<i64>,
+    ) -> Result<Option<SessionRow>, rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET parent_session_id=?1 WHERE id=?2",
+            rusqlite::params![parent, id],
+        )?;
+        let row = fetch_session_by_id(&self.conn, id)?;
+        if let Some(ref r) = row {
+            self.bus.session_updated(r);
+        }
+        Ok(row)
+    }
+
+    /// Create a task in state `queued`. Returns the row. Emits `task_updated`.
+    pub fn insert_task(
+        &self,
+        requester_session_id: Option<i64>,
+        worker_session_id: Option<i64>,
+        prompt: &str,
+        nonce: &str,
+    ) -> Result<TaskRow, crate::ipc_error::IpcError> {
+        self.conn
+            .execute(
+                "INSERT INTO tasks (requester_session_id, worker_session_id, prompt, state, \
+                                    created_at, nonce) \
+                 VALUES (?1, ?2, ?3, 'queued', ?4, ?5)",
+                rusqlite::params![
+                    requester_session_id,
+                    worker_session_id,
+                    prompt,
+                    now_unix(),
+                    nonce
+                ],
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        let id = self.conn.last_insert_rowid();
+        let row = self
+            .fetch_task(id)?
+            .ok_or_else(|| crate::ipc_error::IpcError::new("E_DB", "task vanished after insert"))?;
+        self.bus.task_updated(&row);
+        Ok(row)
+    }
+
+    pub fn get_task(&self, id: i64) -> Result<Option<TaskRow>, crate::ipc_error::IpcError> {
+        self.fetch_task(id)
+    }
+
+    fn fetch_task(&self, id: i64) -> Result<Option<TaskRow>, crate::ipc_error::IpcError> {
+        self.conn
+            .query_row(
+                &format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?1"),
+                rusqlite::params![id],
+                map_task_row,
+            )
+            .optional()
+            .map_err(crate::ipc_error::IpcError::from)
+    }
+
+    /// Tasks newest-first, optionally narrowed by requester and/or state,
+    /// capped at `limit`.
+    pub fn list_tasks(
+        &self,
+        requester_session_id: Option<i64>,
+        state: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<TaskRow>, crate::ipc_error::IpcError> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {TASK_COLUMNS} FROM tasks \
+                 WHERE (?1 IS NULL OR requester_session_id = ?1) \
+                   AND (?2 IS NULL OR state = ?2) \
+                 ORDER BY created_at DESC, id DESC LIMIT ?3"
+            ))
+            .map_err(crate::ipc_error::IpcError::from)?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![requester_session_id, state, limit],
+                map_task_row,
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(crate::ipc_error::IpcError::from)?);
+        }
+        Ok(out)
+    }
+
+    /// The `queued` / `running` tasks a worker session is executing (oldest
+    /// first — the marker scan resolves them in dispatch order).
+    pub fn open_tasks_for_worker(
+        &self,
+        worker_session_id: i64,
+    ) -> Result<Vec<TaskRow>, crate::ipc_error::IpcError> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {TASK_COLUMNS} FROM tasks \
+                 WHERE worker_session_id = ?1 AND state IN ('queued','running') \
+                 ORDER BY created_at ASC, id ASC"
+            ))
+            .map_err(crate::ipc_error::IpcError::from)?;
+        let rows = stmt
+            .query_map(rusqlite::params![worker_session_id], map_task_row)
+            .map_err(crate::ipc_error::IpcError::from)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(crate::ipc_error::IpcError::from)?);
+        }
+        Ok(out)
+    }
+
+    /// Attach (or replace) the worker of a queued task.
+    pub fn set_task_worker(
+        &self,
+        id: i64,
+        worker_session_id: i64,
+    ) -> Result<Option<TaskRow>, crate::ipc_error::IpcError> {
+        self.conn
+            .execute(
+                "UPDATE tasks SET worker_session_id = ?1 WHERE id = ?2",
+                rusqlite::params![worker_session_id, id],
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        self.emit_task(id)
+    }
+
+    /// `queued → running`; stamps `started_at`. A no-op (returns the current
+    /// row) for any other state.
+    pub fn mark_task_running(
+        &self,
+        id: i64,
+    ) -> Result<Option<TaskRow>, crate::ipc_error::IpcError> {
+        self.conn
+            .execute(
+                "UPDATE tasks SET state = 'running', started_at = ?1 \
+                 WHERE id = ?2 AND state = 'queued'",
+                rusqlite::params![now_unix(), id],
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        self.emit_task(id)
+    }
+
+    /// Move a task to a terminal state (`done` / `failed` / `cancelled`),
+    /// storing `result` / `error` and stamping `finished_at`. Only an open
+    /// (`queued` / `running`) task transitions — a terminal task is never
+    /// rewritten, so a late marker scan cannot resurrect a cancelled task.
+    /// Returns the row and whether THIS call performed the transition.
+    pub fn finish_task(
+        &self,
+        id: i64,
+        state: &str,
+        result: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<(Option<TaskRow>, bool), crate::ipc_error::IpcError> {
+        if !TASK_TERMINAL_STATES.contains(&state) {
+            return Err(crate::ipc_error::IpcError::new(
+                "E_INVALID",
+                format!("{state} is not a terminal task state"),
+            ));
+        }
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE tasks SET state = ?1, result = ?2, error = ?3, finished_at = ?4 \
+                 WHERE id = ?5 AND state IN ('queued','running')",
+                rusqlite::params![state, result, error, now_unix(), id],
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        let row = if changed > 0 {
+            self.emit_task(id)?
+        } else {
+            self.fetch_task(id)?
+        };
+        Ok((row, changed > 0))
+    }
+
+    fn emit_task(&self, id: i64) -> Result<Option<TaskRow>, crate::ipc_error::IpcError> {
+        let row = self.fetch_task(id)?;
+        if let Some(ref r) = row {
+            self.bus.task_updated(r);
+        }
+        Ok(row)
+    }
+
     /// Lookup helper: returns `None` rather than erroring when no row matches.
     /// Used by the safe-kill flow (Stop hook may arrive before reconcile
     /// enriched the row).
@@ -2498,6 +2865,21 @@ fn fetch_session_by_id(conn: &Connection, id: i64) -> Result<Option<SessionRow>,
     }
 }
 
+/// Map one `SELECT id, from_session_id, to_session_id, body, kind, sent_at,
+/// read_at, reply_to` row of `session_messages`.
+fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMessage> {
+    Ok(SessionMessage {
+        id: row.get(0)?,
+        from_session_id: row.get(1)?,
+        to_session_id: row.get(2)?,
+        body: row.get(3)?,
+        kind: row.get(4)?,
+        sent_at: row.get(5)?,
+        read_at: row.get(6)?,
+        reply_to: row.get(7)?,
+    })
+}
+
 fn fetch_host(conn: &Connection, alias: &str) -> Result<Option<HostRow>, rusqlite::Error> {
     let mut stmt = conn.prepare_cached(
         "SELECT alias, ssh_alias, reachable, claude_version, tmux_version, hidden,
@@ -2557,6 +2939,7 @@ mod tests {
         "session_events",
         "session_messages",
         "host_tokens",
+        "tasks",
     ];
 
     #[test]
@@ -2857,9 +3240,9 @@ mod tests {
     fn session_messages_inbox_roundtrip_and_mark_read() {
         let s = Store::open_in_memory().expect("open");
         // Two messages to session 5, one decoy to session 9.
-        let m1 = s.insert_message(1, 5, "hello", "message").unwrap();
-        let m2 = s.insert_message(2, 5, "second", "task").unwrap();
-        s.insert_message(1, 9, "noise", "message").unwrap();
+        let m1 = s.insert_message(1, 5, "hello", "message", None).unwrap();
+        let m2 = s.insert_message(2, 5, "second", "task", Some(m1)).unwrap();
+        s.insert_message(1, 9, "noise", "message", None).unwrap();
 
         // list_inbox returns newest-first and excludes the decoy.
         let all = s.list_inbox(5, false, 50).unwrap();
@@ -2867,6 +3250,8 @@ mod tests {
         assert_eq!(all[0].id, m2);
         assert_eq!(all[0].body, "second");
         assert_eq!(all[0].kind, "task");
+        assert_eq!(all[0].reply_to, Some(m1));
+        assert_eq!(all[1].reply_to, None);
         assert_eq!(all[1].id, m1);
         assert!(all.iter().all(|m| m.read_at.is_none()));
 
@@ -3605,6 +3990,7 @@ mod tests {
                         true,
                         None,
                         false,
+                        0,
                         &mut out,
                     )?;
                     Ok(out)
@@ -3933,7 +4319,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 19, "schema_version should be 19 after migration");
+        assert_eq!(v, 20, "schema_version should be 20 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store
@@ -4568,6 +4954,234 @@ mod tests {
                 .as_deref(),
             Some("Already set")
         );
+    }
+
+    // ── migration 020: orchestration fields, tasks, reply_to ──
+
+    #[test]
+    fn migration_020_adds_orchestration_columns_with_defaults() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("sess", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.turn_seq, 0);
+        assert_eq!(row.last_stop_at, None);
+        assert_eq!(row.parent_session_id, None);
+        assert!(row.tags.is_empty());
+        assert!(s.has_table("tasks").unwrap());
+    }
+
+    #[test]
+    fn tags_round_trip_as_a_json_array_and_null_when_empty() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("sess", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let row = s
+            .set_session_tags(id, &["review".to_string(), "wip".to_string()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.tags, vec!["review".to_string(), "wip".to_string()]);
+        let raw: Option<String> = s
+            .conn
+            .query_row("SELECT tags FROM sessions WHERE id=?1", [id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(raw.as_deref(), Some("[\"review\",\"wip\"]"));
+        let row = s.set_session_tags(id, &[]).unwrap().unwrap();
+        assert!(row.tags.is_empty());
+        let raw: Option<String> = s
+            .conn
+            .query_row("SELECT tags FROM sessions WHERE id=?1", [id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(raw, None, "an empty list is stored as NULL");
+        // A hand-edited / malformed column reads as no tags rather than failing.
+        assert!(decode_tags(Some("not json".into())).is_empty());
+        assert!(decode_tags(Some("".into())).is_empty());
+        assert_eq!(decode_tags(Some("[\"a\"]".into())), vec!["a".to_string()]);
+        assert_eq!(encode_tags(&[]), None);
+        // A reconcile pass does not touch tags / parent / turn_seq.
+        s.set_session_tags(id, &["keep".to_string()]).unwrap();
+        s.set_parent_session_id(id, Some(7)).unwrap();
+        s.set_claude_session_id(id, "uuid-1").unwrap();
+        s.record_stop_hook("uuid-1").unwrap();
+        let mut s = s;
+        let row = reconcile_one(&mut s, "sess", Some("idle"), None, None);
+        assert_eq!(row.tags, vec!["keep".to_string()]);
+        assert_eq!(row.parent_session_id, Some(7));
+        assert_eq!(row.turn_seq, 1);
+    }
+
+    #[test]
+    fn stop_hook_write_bumps_turn_seq_and_prompt_submit_marks_working() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("sess", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        // Unmatched id: None, nothing changes.
+        assert!(s.record_stop_hook("nope").unwrap().is_none());
+        assert!(s.record_prompt_submit_hook("nope").unwrap().is_none());
+        s.set_claude_session_id(id, "uuid-1").unwrap();
+        let row = s.record_stop_hook("uuid-1").unwrap().unwrap();
+        assert_eq!(row.turn_seq, 1);
+        assert_eq!(row.claude_status.as_deref(), Some("idle"));
+        let stop = row.last_stop_at.expect("stamped");
+        assert_eq!(row.last_turn_at, Some(stop));
+        assert!(row.idle_since.is_some());
+        let row = s.record_prompt_submit_hook("uuid-1").unwrap().unwrap();
+        assert_eq!(row.claude_status.as_deref(), Some("working"));
+        assert_eq!(row.idle_since, None);
+        assert_eq!(row.turn_seq, 1, "a submit is not a turn");
+        assert_eq!(row.last_stop_at, Some(stop), "a submit keeps the last stop");
+        let row = s.record_stop_hook("uuid-1").unwrap().unwrap();
+        assert_eq!(row.turn_seq, 2);
+    }
+
+    #[test]
+    fn reconcile_does_not_clobber_a_hook_stamped_idle_newer_than_the_pass() {
+        // MCP-1: the reconcile pass captured the pane at T0; the Stop hook
+        // stamped idle at T1 >= T0; the pass's write lands at T2 with the
+        // stale "working" it derived from the pane. The hook must win.
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("a", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_claude_session_id(id, "uuid-a").unwrap();
+        let stop_at = s
+            .record_stop_hook("uuid-a")
+            .unwrap()
+            .unwrap()
+            .last_stop_at
+            .unwrap();
+        let write = |s: &mut Store, status: &str, probe_started_at: i64| -> SessionRow {
+            s.apply_host_reconcile(HostReconcile {
+                alias: "local",
+                reachable: true,
+                claude_version: None,
+                tmux_version: None,
+                last_pinged_at: 1,
+                probe_started_at,
+                sessions: &[ReconcileSession {
+                    tmux_name: "a",
+                    project_id: None,
+                    created_at: 1,
+                    last_activity_at: 1,
+                    account_uuid: None,
+                    worktree_key: None,
+                    claude_session_id: None,
+                    claude_status: Some(status.to_string()),
+                    effort_level: None,
+                    pr_url: None,
+                    current_activity: None,
+                    context_pct: None,
+                    stuck_kind: None,
+                    intel_observed: true,
+                    ci_status: None,
+                    pr_observed: false,
+                }],
+                keep: &["a".to_string()],
+            })
+            .unwrap();
+            s.get_session("a", "local").unwrap().unwrap()
+        };
+        // Pass started before (or at) the hook stamp: hook wins, idle_since kept.
+        let row = write(&mut s, "working", stop_at - 5);
+        assert_eq!(row.claude_status.as_deref(), Some("idle"));
+        assert!(row.idle_since.is_some());
+        let row = write(&mut s, "working", stop_at);
+        assert_eq!(row.claude_status.as_deref(), Some("idle"));
+        // Pass started after the hook stamp: the pane observation is fresher.
+        let row = write(&mut s, "working", stop_at + 5);
+        assert_eq!(row.claude_status.as_deref(), Some("working"));
+        assert_eq!(row.idle_since, None);
+        // Guard disabled (0): legacy COALESCE behaviour.
+        s.record_stop_hook("uuid-a").unwrap();
+        let row = write(&mut s, "working", 0);
+        assert_eq!(row.claude_status.as_deref(), Some("working"));
+    }
+
+    #[test]
+    fn tasks_crud_and_terminal_transitions() {
+        let s = Store::open_in_memory().unwrap();
+        let t = s
+            .insert_task(Some(1), Some(2), "do it", "abcd1234")
+            .unwrap();
+        assert_eq!((t.state.as_str(), t.nonce.as_str()), ("queued", "abcd1234"));
+        assert_eq!(s.get_task(t.id).unwrap().unwrap(), t);
+        assert!(s.get_task(999).unwrap().is_none());
+        let t2 = s.insert_task(None, None, "later", "ffff0000").unwrap();
+        let t2 = s.set_task_worker(t2.id, 2).unwrap().unwrap();
+        assert_eq!(t2.worker_session_id, Some(2));
+        // Listing: newest first, filters.
+        let all = s.list_tasks(None, None, 50).unwrap();
+        assert_eq!(
+            all.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![t2.id, t.id]
+        );
+        assert_eq!(s.list_tasks(Some(1), None, 50).unwrap().len(), 1);
+        assert_eq!(s.list_tasks(None, Some("queued"), 1).unwrap().len(), 1);
+        assert_eq!(s.open_tasks_for_worker(2).unwrap().len(), 2);
+        // running stamps started_at once.
+        let r = s.mark_task_running(t.id).unwrap().unwrap();
+        assert!(r.started_at.is_some());
+        assert_eq!(s.mark_task_running(t.id).unwrap().unwrap(), r);
+        // A non-terminal state is refused; a terminal one flips once.
+        assert_eq!(
+            s.finish_task(t.id, "running", None, None).unwrap_err().code,
+            "E_INVALID"
+        );
+        let (row, changed) = s.finish_task(t.id, "done", Some("ok"), None).unwrap();
+        assert!(changed);
+        let row = row.unwrap();
+        assert_eq!(
+            (row.state.as_str(), row.result.as_deref()),
+            ("done", Some("ok"))
+        );
+        assert!(row.finished_at.is_some());
+        let (row, changed) = s
+            .finish_task(t.id, "cancelled", None, Some("late"))
+            .unwrap();
+        assert!(!changed, "terminal tasks are never rewritten");
+        assert_eq!(row.unwrap().state, "done");
+        assert_eq!(s.open_tasks_for_worker(2).unwrap().len(), 1);
+        // The nonce never serialises to the wire.
+        let json = serde_json::to_value(&t).unwrap();
+        assert!(json.get("nonce").is_none());
+        assert_eq!(json["state"], "queued");
+    }
+
+    #[test]
+    fn task_writes_emit_task_updated_events() {
+        let bus = Arc::new(crate::events::RecordingEventBus::new());
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+        let t = s.insert_task(None, Some(1), "x", "n").unwrap();
+        s.mark_task_running(t.id).unwrap();
+        s.finish_task(t.id, "failed", None, Some("boom")).unwrap();
+        s.finish_task(t.id, "done", None, None).unwrap();
+        assert_eq!(
+            bus.take(),
+            vec![
+                format!("task:updated:{}:queued", t.id),
+                format!("task:updated:{}:running", t.id),
+                format!("task:updated:{}:failed", t.id),
+            ],
+            "no event for the refused rewrite of a terminal task"
+        );
+    }
+
+    #[test]
+    fn messages_carry_reply_to() {
+        let s = Store::open_in_memory().unwrap();
+        let m1 = s.insert_message(1, 5, "q", "message", None).unwrap();
+        let m2 = s.insert_message(5, 1, "a", "reply", Some(m1)).unwrap();
+        assert_eq!(s.get_message(m2).unwrap().unwrap().reply_to, Some(m1));
+        assert_eq!(s.get_message(m1).unwrap().unwrap().reply_to, None);
+        assert!(s.get_message(999).unwrap().is_none());
+        assert_eq!(s.list_inbox(1, false, 10).unwrap()[0].reply_to, Some(m1));
     }
 
     // ── migration 019: lifecycle + outcome fields ──

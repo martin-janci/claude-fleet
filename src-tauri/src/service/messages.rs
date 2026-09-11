@@ -30,6 +30,10 @@ pub struct SendMessageArgs {
     /// Defaults to true.
     #[serde(default = "default_true")]
     pub submit: bool,
+    /// Id of the inbox message this one answers (migration 020). Must exist
+    /// and involve the sender (`E_NOTFOUND` / `E_INVALID` otherwise).
+    #[serde(default)]
+    pub reply_to: Option<i64>,
 }
 
 fn default_true() -> bool {
@@ -122,9 +126,35 @@ pub async fn send_message(
                     format!("to session {} not found", args.to_session_id),
                 )
             })?;
+            // A reply must point at a real message the sender took part in;
+            // an arbitrary id would let an agent forge a thread.
+            if let Some(parent_id) = args.reply_to {
+                let parent = s.get_message(parent_id)?.ok_or_else(|| {
+                    IpcError::new(
+                        "E_NOTFOUND",
+                        format!("reply_to message {parent_id} not found"),
+                    )
+                })?;
+                if parent.from_session_id != args.from_session_id
+                    && parent.to_session_id != args.from_session_id
+                {
+                    return Err(IpcError::new(
+                        "E_INVALID",
+                        format!(
+                            "reply_to message {parent_id} does not involve session {}",
+                            args.from_session_id
+                        ),
+                    ));
+                }
+            }
             // Inbox row — the source of truth.
-            let id =
-                s.insert_message(args.from_session_id, args.to_session_id, &args.body, kind)?;
+            let id = s.insert_message(
+                args.from_session_id,
+                args.to_session_id,
+                &args.body,
+                kind,
+                args.reply_to,
+            )?;
             // Timeline events on both ends.
             s.insert_session_event(
                 args.from_session_id,
@@ -250,6 +280,7 @@ mod tests {
             kind: None,
             deliver: false,
             submit: true,
+            reply_to: None,
         }
     }
 
@@ -460,6 +491,42 @@ mod tests {
         assert_eq!(list_inbox(b, false, 3, false, &store).unwrap().len(), 3);
     }
 
+    // ---- reply_to ----
+
+    #[tokio::test]
+    async fn reply_to_is_recorded_and_must_reference_a_message_the_sender_took_part_in() {
+        let (store, ssh, a, b) = fixture();
+        let first = send_message(args(a, b, "question?"), &store, &ssh)
+            .await
+            .unwrap();
+        let mut reply = args(b, a, "answer.");
+        reply.reply_to = Some(first.id);
+        let res = send_message(reply, &store, &ssh).await.unwrap();
+        let inbox = list_inbox(a, false, 10, false, &store).unwrap();
+        assert_eq!(inbox[0].id, res.id);
+        assert_eq!(inbox[0].reply_to, Some(first.id));
+        // The original carries no reply_to.
+        let b_inbox = list_inbox(b, false, 10, false, &store).unwrap();
+        assert_eq!(b_inbox[0].reply_to, None);
+
+        // Unknown parent → E_NOTFOUND, nothing written.
+        let mut bad = args(b, a, "to nowhere");
+        bad.reply_to = Some(9999);
+        let err = send_message(bad, &store, &ssh).await.unwrap_err();
+        assert_eq!(err.code, "E_NOTFOUND");
+        assert_eq!(list_inbox(a, false, 10, false, &store).unwrap().len(), 1);
+
+        // A third session cannot reply to a thread it is not part of.
+        let c = {
+            let s = store.lock().unwrap();
+            seed(&s, "gamma")
+        };
+        let mut forged = args(c, a, "me too");
+        forged.reply_to = Some(first.id);
+        let err = send_message(forged, &store, &ssh).await.unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+    }
+
     // ---- atomicity ----
 
     #[test]
@@ -469,7 +536,7 @@ mod tests {
         let b = seed(&s, "beta");
         let err = s
             .atomically(|s| {
-                s.insert_message(a, b, "half", "message")?;
+                s.insert_message(a, b, "half", "message", None)?;
                 s.insert_session_event(a, "message_sent", Some("half"))?;
                 Err::<(), _>(IpcError::new("E_TEST", "boom"))
             })
@@ -479,7 +546,7 @@ mod tests {
         assert!(s.list_session_events(a, 10).unwrap().is_empty());
         // The connection is usable again after the rollback.
         let id = s
-            .atomically(|s| s.insert_message(a, b, "whole", "message"))
+            .atomically(|s| s.insert_message(a, b, "whole", "message", None))
             .unwrap();
         assert_eq!(s.list_inbox(b, false, 10).unwrap()[0].id, id);
     }

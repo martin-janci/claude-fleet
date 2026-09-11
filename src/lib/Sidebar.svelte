@@ -57,8 +57,10 @@
   import ConfirmDialog from './ConfirmDialog.svelte';
   import Attention from './Attention.svelte';
   import BulkPromptDialog from './BulkPromptDialog.svelte';
+  import TasksPanel from './TasksPanel.svelte';
 
   let showSettings = $state(false);
+  let showTasks = $state(false);
 
   // Optional collapse handler injected by the parent (App.svelte). When
   // present, a ‹ button appears in the sidebar header so the user can
@@ -894,6 +896,14 @@
       {/each}
       <button
         class="icon-btn"
+        onclick={() => (showTasks = true)}
+        title="Tasks (fleet-wide)"
+        aria-label="Tasks"
+        aria-expanded={showTasks}
+        data-testid="tasks-open"
+      >☑</button>
+      <button
+        class="icon-btn"
         onclick={() => (showSettings = true)}
         title="Settings"
         aria-label="Settings"
@@ -1159,6 +1169,12 @@
 
 {#if showSettings}
   <SettingsDialog onClose={() => (showSettings = false)} />
+{/if}
+
+{#if showTasks}
+  <Modal title="Tasks" onclose={() => (showTasks = false)} width="640px" testid="tasks-dialog">
+    <TasksPanel />
+  </Modal>
 {/if}
 
 {#if pendingPurge}

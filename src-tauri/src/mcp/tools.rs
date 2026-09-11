@@ -15,7 +15,7 @@ use super::McpGuards;
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::IpcError;
 use crate::service::pane_intel::{ClaudeStatus, StuckKind};
-use crate::service::{health, hosts, projects, safe_kill, sessions, worktrees};
+use crate::service::{health, hosts, projects, safe_kill, sessions, tasks, transcript, worktrees};
 use crate::ssh::SshClient;
 use crate::store::Store;
 use rmcp::{
@@ -183,10 +183,82 @@ fn resolve_and_gate(
     tmux_name: Option<&str>,
     what: &str,
 ) -> Result<(String, String), McpError> {
+    let row = resolve_row_and_gate(s, caller, session_id, host_alias, tmux_name, what)?;
+    Ok((row.host_alias, row.tmux_name))
+}
+
+/// [`resolve_and_gate`] returning the whole row — for tools that also need
+/// the id, `turn_seq` or `claude_session_id` of the target.
+fn resolve_row_and_gate(
+    s: &Store,
+    caller: &Caller,
+    session_id: Option<i64>,
+    host_alias: Option<&str>,
+    tmux_name: Option<&str>,
+    what: &str,
+) -> Result<crate::store::SessionRow, McpError> {
     let row = sessions::resolve_session_target(s, session_id, host_alias, tmux_name)
         .map_err(to_mcp_err)?;
     require_host(caller, &row.host_alias, what)?;
-    Ok((row.host_alias, row.tmux_name))
+    Ok(row)
+}
+
+/// Bound confirmation summary for `set_clipboard`: host, byte count AND a
+/// digest of the content, so an approval cannot be replayed with different
+/// same-length text. The text itself never appears (it may be a secret).
+fn clipboard_summary(host_alias: &str, content: &str) -> String {
+    format!(
+        "host={host_alias} bytes={} sha={}",
+        content.len(),
+        guard::content_digest(content)
+    )
+}
+
+/// Bound confirmation summary for `broadcast_prompt`: the filters plus a
+/// digest of the prompt (never the prompt body).
+fn broadcast_summary(
+    host: Option<&str>,
+    project_id: Option<i64>,
+    status: Option<&str>,
+    prompt: &str,
+) -> String {
+    format!(
+        "host={host:?} project_id={project_id:?} status={status:?} prompt={}",
+        guard::content_digest(prompt)
+    )
+}
+
+/// Validate `set_session_tags` input: at most 16 tags, each 1–32 chars of
+/// `[A-Za-z0-9_.:-]`, de-duplicated in order. Pure so it is unit-testable.
+fn normalize_tags(tags: Vec<String>) -> Result<Vec<String>, McpError> {
+    if tags.len() > 16 {
+        return Err(mcp_err("E_VALIDATE", "at most 16 tags per session", None));
+    }
+    let mut out: Vec<String> = Vec::with_capacity(tags.len());
+    for t in tags {
+        let t = t.trim().to_string();
+        if t.is_empty() || t.chars().count() > 32 {
+            return Err(mcp_err(
+                "E_VALIDATE",
+                format!("tag {t:?} must be 1–32 characters"),
+                None,
+            ));
+        }
+        if !t
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'))
+        {
+            return Err(mcp_err(
+                "E_VALIDATE",
+                format!("tag {t:?} may only contain letters, digits, _ . : -"),
+                None,
+            ));
+        }
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    Ok(out)
 }
 
 /// Which session an audit row should attach to, resolved from the tool's
@@ -367,6 +439,7 @@ struct SessionSummary {
     stuck_kind: Option<String>,
     lost_at: Option<i64>,
     is_controller: bool,
+    tags: Vec<String>,
 }
 
 impl From<SessionWithController> for SessionSummary {
@@ -382,6 +455,7 @@ impl From<SessionWithController> for SessionSummary {
             stuck_kind: s.row.stuck_kind,
             lost_at: s.row.lost_at,
             is_controller: s.is_controller,
+            tags: s.row.tags,
         }
     }
 }
@@ -400,6 +474,7 @@ struct InboxSummary {
     kind: String,
     sent_at: i64,
     read_at: Option<i64>,
+    reply_to: Option<i64>,
     body_chars: usize,
     body_preview: String,
 }
@@ -417,6 +492,7 @@ impl From<crate::store::SessionMessage> for InboxSummary {
             kind: m.kind,
             sent_at: m.sent_at,
             read_at: m.read_at,
+            reply_to: m.reply_to,
             body_chars,
             body_preview,
         }
@@ -517,6 +593,9 @@ pub struct ListSessionsParams {
     /// rows are served from the store when the last pass is recent.
     #[serde(default)]
     pub force: bool,
+    /// Only return sessions carrying this tag (see `set_session_tags`).
+    #[serde(default)]
+    pub tag: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -800,6 +879,11 @@ pub struct SendMessageParams {
     /// untrusted input]` marker line. Master token only. Default false.
     #[serde(default)]
     pub raw: bool,
+    /// Id of the inbox message this one answers (threads a reply to the
+    /// message it responds to). Must exist and involve the sender:
+    /// E_NOTFOUND / E_INVALID otherwise. `inbox` rows carry it back.
+    #[serde(default)]
+    pub reply_to: Option<i64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -903,6 +987,142 @@ pub struct SetClipboardParams {
     /// desktop. Only needed when `mcp.confirm_destructive` is on.
     #[serde(default)]
     pub confirm_nonce: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct WaitForSessionParams {
+    /// Fleet session id (from list_sessions / whoami).
+    pub session_id: i64,
+    /// What to wait for: "idle" (claude_status is idle | completed | \
+    /// stopped | failed — also true for a session that never started a \
+    /// turn) or "turn_gt" (turn_seq > `turn`; use the turn_seq_before that \
+    /// send_prompt returned to wait for the reply to YOUR prompt).
+    pub until: String,
+    /// Turn number for until=turn_gt.
+    #[serde(default)]
+    pub turn: Option<i64>,
+    /// Seconds to wait before giving up (default 120, max 600). The call
+    /// polls every 500 ms and returns as soon as the condition holds.
+    #[serde(default)]
+    pub timeout_s: Option<u64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionTranscriptParams {
+    /// Fleet session id (from list_sessions / whoami).
+    pub session_id: i64,
+    /// Return every turn completed after this turn_seq (typically the
+    /// turn_seq_before from send_prompt). Omit for the last turn only.
+    #[serde(default)]
+    pub since_turn: Option<i64>,
+    /// Character cap on the returned text; the END of the reply is kept.
+    /// Default 8000, max 64000.
+    #[serde(default)]
+    pub max_chars: Option<usize>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RunPromptParams {
+    /// Fleet session id (from list_sessions / whoami).
+    pub session_id: i64,
+    /// The prompt to deliver (marked as untrusted unless raw=true, master
+    /// token only).
+    pub prompt: String,
+    /// Seconds to wait for the turn to complete (default 120, max 600).
+    #[serde(default)]
+    pub timeout_s: Option<u64>,
+    /// Character cap on the returned transcript (default 8000, max 64000).
+    #[serde(default)]
+    pub max_chars: Option<usize>,
+    /// Deliver verbatim without the untrusted-content marker (master token
+    /// only). Default false.
+    #[serde(default)]
+    pub raw: bool,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct NewWorkerSpec {
+    /// Host alias to create the worker session on.
+    pub host_alias: String,
+    /// Project id (see `list_projects`).
+    pub project_id: i64,
+    /// tmux session name for the worker; default `task-<8 hex>`.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct DispatchTaskParams {
+    /// Existing session to run the task in. Exactly one of worker_session_id
+    /// / new_worker is required.
+    #[serde(default)]
+    pub worker_session_id: Option<i64>,
+    /// Spawn a fresh Claude session (via new_session) as the worker.
+    #[serde(default)]
+    pub new_worker: Option<NewWorkerSpec>,
+    /// The work to do. Fleet appends: "When finished, print exactly
+    /// FLEET_TASK_DONE_<nonce> on its own line followed by a one-paragraph
+    /// result." — the marker is how completion is detected.
+    pub prompt: String,
+    /// Your own fleet session id (from whoami), recorded as the task's
+    /// requester and as the worker's parent_session_id; the result is also
+    /// delivered to your inbox (kind=task_result). A per-host token must
+    /// name a session on its own host.
+    #[serde(default)]
+    pub requester_session_id: Option<i64>,
+    /// Deliver verbatim without the untrusted-content marker (master token
+    /// only). Default false.
+    #[serde(default)]
+    pub raw: bool,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct WaitForTaskParams {
+    /// Task id (from dispatch_task / list_tasks).
+    pub task_id: i64,
+    /// Seconds to wait for a terminal state (default 120, max 600).
+    #[serde(default)]
+    pub timeout_s: Option<u64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ListTasksParams {
+    /// Only tasks dispatched by this session.
+    #[serde(default)]
+    pub requester_session_id: Option<i64>,
+    /// Only tasks in this state: queued | running | done | failed | cancelled.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// Maximum rows, newest-first. Default 50.
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct CancelTaskParams {
+    /// Task id to cancel.
+    pub task_id: i64,
+    /// Nonce from a prior `E_CONFIRM_REQUIRED` reply, once approved on the
+    /// desktop. Only needed when `mcp.confirm_destructive` is on.
+    #[serde(default)]
+    pub confirm_nonce: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SetSessionTagsParams {
+    /// Fleet session id (from list_sessions / whoami). Alternative to
+    /// host_alias + tmux_name.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// Host alias the session lives on (with `tmux_name`).
+    #[serde(default)]
+    pub host_alias: Option<String>,
+    /// tmux session name (with `host_alias`).
+    #[serde(default)]
+    pub tmux_name: Option<String>,
+    /// The full tag list to store (replaces the current tags; empty clears).
+    /// Up to 16 tags of 1–32 chars from [A-Za-z0-9_.:-].
+    pub tags: Vec<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -1051,6 +1271,138 @@ impl FleetTools {
         resolve_and_gate(&s, caller, session_id, host_alias, tmux_name, what)
     }
 
+    /// [`Self::resolve_target`] returning the whole row.
+    fn resolve_target_row(
+        &self,
+        caller: &Caller,
+        session_id: Option<i64>,
+        host_alias: Option<&str>,
+        tmux_name: Option<&str>,
+        what: &str,
+    ) -> Result<crate::store::SessionRow, McpError> {
+        let s = self
+            .store
+            .lock()
+            .map_err(|_| to_mcp_err(IpcError::lock()))?;
+        resolve_row_and_gate(&s, caller, session_id, host_alias, tmux_name, what)
+    }
+
+    /// Deliver a (already marked) prompt to a resolved session and return
+    /// `{ delivered, session_id, turn_seq_before }`.
+    async fn deliver_prompt(
+        &self,
+        row: &crate::store::SessionRow,
+        prompt: String,
+        submit: bool,
+    ) -> Result<serde_json::Value, McpError> {
+        let args = sessions::SendPromptArgs {
+            host_alias: row.host_alias.clone(),
+            tmux_name: row.tmux_name.clone(),
+            prompt,
+            submit,
+        };
+        sessions::send_prompt(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        Ok(serde_json::json!({
+            "delivered": true,
+            "session_id": row.id,
+            "turn_seq_before": row.turn_seq,
+        }))
+    }
+
+    /// Read a session's transcript (the last turn, or every turn after
+    /// `since_turn`) as plain text.
+    async fn transcript_for(
+        &self,
+        row: &crate::store::SessionRow,
+        since_turn: Option<i64>,
+        max_chars: Option<usize>,
+    ) -> Result<String, McpError> {
+        let claude_id = row.claude_session_id.clone().ok_or_else(|| {
+            mcp_err(
+                "E_INVALID_STATE",
+                format!(
+                    "session {} has no claude_session_id yet (not reconciled, or not a Claude session)",
+                    row.id
+                ),
+                None,
+            )
+        })?;
+        // Fallback cwd for sessions without a pane (bg) or whose pane
+        // lookup fails: the worktree, else the project root.
+        let cwd = {
+            let s = self
+                .store
+                .lock()
+                .map_err(|_| to_mcp_err(IpcError::lock()))?;
+            let wt = match row.worktree_id {
+                Some(wid) => s.worktree_path(wid).ok().flatten(),
+                None => None,
+            };
+            match wt {
+                Some(p) => Some(p),
+                None => match row.project_id {
+                    Some(pid) => s.project_base_path(pid).ok().flatten(),
+                    None => None,
+                },
+            }
+        };
+        let turns = match since_turn {
+            Some(t) => usize::try_from(row.turn_seq - t).unwrap_or(0).max(1),
+            None => 1,
+        };
+        let is_bg = row.tmux_name.starts_with("bg:");
+        transcript::fetch_transcript(
+            transcript::TranscriptArgs {
+                host_alias: row.host_alias.clone(),
+                tmux_name: if is_bg {
+                    None
+                } else {
+                    Some(row.tmux_name.clone())
+                },
+                cwd,
+                claude_session_id: claude_id,
+                turns,
+                max_chars: max_chars
+                    .unwrap_or(transcript::DEFAULT_MAX_CHARS)
+                    .clamp(1, transcript::MAX_MAX_CHARS),
+            },
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)
+    }
+
+    /// A task the caller may see: master sees all; a per-host token only
+    /// tasks it requested from its host or that target a worker on its
+    /// host. Unknown → E_NOTFOUND; invisible → E_FORBIDDEN.
+    fn visible_task(
+        &self,
+        caller: &Caller,
+        task_id: i64,
+    ) -> Result<crate::store::TaskRow, McpError> {
+        let s = self
+            .store
+            .lock()
+            .map_err(|_| to_mcp_err(IpcError::lock()))?;
+        let task = s
+            .get_task(task_id)
+            .map_err(to_mcp_err)?
+            .ok_or_else(|| mcp_err("E_NOTFOUND", format!("task {task_id} not found"), None))?;
+        if !tasks::task_visible_to(&s, &task, caller.host_alias.as_deref()).map_err(to_mcp_err)? {
+            return Err(mcp_err(
+                "E_FORBIDDEN",
+                format!(
+                    "task {task_id} involves no session on this token's host ({})",
+                    caller.label()
+                ),
+                None,
+            ));
+        }
+        Ok(task)
+    }
+
     #[tool(
         description = "Report claude-fleet backend health: application version, SQLite schema version, and database readiness. Returns JSON."
     )]
@@ -1178,7 +1530,7 @@ impl FleetTools {
 
     #[tool(description = "List tmux sessions across reachable hosts. Slim \
         summary rows by default; pass summary=false for the full SessionRow. \
-        Optional filters: host_alias, project_id, status, claude_status, \
+        Optional filters: host_alias, project_id, status, claude_status, tag, \
         include_lost (default false drops ghosts); `limit` caps the row count \
         after filtering (default: all); `force` runs a reconcile pass first \
         instead of serving the recent cache. claude_status is one of working | \
@@ -1193,7 +1545,7 @@ impl FleetTools {
         audit(
             "list_sessions",
             &format!(
-                "host={:?} project={:?} status={:?} claude_status={:?} include_lost={} summary={} limit={:?} force={}",
+                "host={:?} project={:?} status={:?} claude_status={:?} include_lost={} summary={} limit={:?} force={} tag={:?}",
                 p.host_alias,
                 p.project_id,
                 p.status,
@@ -1202,6 +1554,7 @@ impl FleetTools {
                 p.summary,
                 p.limit,
                 p.force,
+                p.tag,
             ),
         );
         let rows = if p.force {
@@ -1241,6 +1594,11 @@ impl FleetTools {
                 }
                 if let Some(cs) = &p.claude_status {
                     if row.claude_status.as_deref() != Some(cs.as_str()) {
+                        return false;
+                    }
+                }
+                if let Some(tag) = &p.tag {
+                    if !row.tags.iter().any(|t| t == tag) {
                         return false;
                     }
                 }
@@ -1411,9 +1769,11 @@ impl FleetTools {
     #[tool(description = "Kill a session on a host: a tmux session by name, or \
         a background agent row (name `bg:<uuid>`) via `claude stop` — the \
         latter is idempotent, so it also clears a stale row whose process \
-        already died. Returns the killed session's id. Address the session \
-        with session_id OR host_alias + name. May return E_CONFIRM_REQUIRED \
-        when desktop confirmation is on.")]
+        already died. Use when the session's work is disposable or already \
+        pushed and you want it gone NOW; prefer safe_kill_session when the \
+        worktree may hold unpushed work. Returns the killed session's id. \
+        Address the session with session_id OR host_alias + name. May return \
+        E_CONFIRM_REQUIRED when desktop confirmation is on.")]
     async fn kill_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -1452,10 +1812,12 @@ impl FleetTools {
 
     #[tool(description = "Ask a running Claude session to safely persist its \
         work (commit + push), then arm deletion of its worktree + tmux session. \
-        Returns the row with safe_kill_state=requested; the actual delete \
-        fires only after the SAFE_REMOVE_READY marker AND a clean-tree check. \
-        Transitions ('ready', 'failed') arrive via row events. Address the \
-        session with session_id OR host_alias + tmux_name.")]
+        Use when retiring a session whose worktree may hold unpushed work and \
+        you can wait for it to finish. Returns the row with \
+        safe_kill_state=requested; the actual delete fires only after the \
+        SAFE_REMOVE_READY marker AND a clean-tree check. Transitions ('ready', \
+        'failed') arrive via row events. Address the session with session_id \
+        OR host_alias + tmux_name.")]
     async fn safe_kill_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -1598,8 +1960,10 @@ impl FleetTools {
     }
 
     #[tool(description = "Restart a tmux session (kill and recreate it in the \
-        same place). Returns the updated session row as JSON. Address the \
-        session with session_id OR host_alias + name.")]
+        same place). Use when the Claude REPL is wedged but tmux and the \
+        worktree are fine — an in-place relaunch, cheaper than \
+        recreate_session. Returns the updated session row as JSON. Address \
+        the session with session_id OR host_alias + name.")]
     async fn restart_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -1636,7 +2000,10 @@ impl FleetTools {
         it. Address the session with session_id OR host_alias + tmux_name. The \
         first prompt to a still-unnamed session also becomes its friendly name. \
         The text is prefixed with an untrusted-content marker line unless \
-        raw=true (master token only).")]
+        raw=true (master token only). Returns JSON { delivered, session_id, \
+        turn_seq_before }: pass turn_seq_before to wait_for_session \
+        { until: \"turn_gt\" } or session_transcript { since_turn } to \
+        collect the reply (or use run_prompt, which does all three).")]
     async fn send_prompt(
         &self,
         Extension(caller): Extension<Caller>,
@@ -1650,7 +2017,7 @@ impl FleetTools {
                 p.session_id, p.host_alias, p.tmux_name
             ),
         );
-        let (host_alias, tmux_name) = self.resolve_target(
+        let row = self.resolve_target_row(
             &caller,
             p.session_id,
             p.host_alias.as_deref(),
@@ -1658,18 +2025,8 @@ impl FleetTools {
             "the session to prompt",
         )?;
         let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
-        let args = sessions::SendPromptArgs {
-            host_alias,
-            tmux_name,
-            prompt,
-            submit: p.submit,
-        };
-        sessions::send_prompt(args, &self.store, &self.ssh)
-            .await
-            .map_err(to_mcp_err)?;
-        Ok(CallToolResult::success(vec![text_content(
-            "prompt delivered",
-        )]))
+        let out = self.deliver_prompt(&row, prompt, p.submit).await?;
+        ok_json(&out)
     }
 
     #[tool(description = "Send the same prompt to every matching work session \
@@ -1690,9 +2047,11 @@ impl FleetTools {
                 p.host, p.project_id, p.status
             ),
         );
-        let filter_summary = format!(
-            "host={:?} project_id={:?} status={:?}",
-            p.host, p.project_id, p.status
+        let filter_summary = broadcast_summary(
+            p.host.as_deref(),
+            p.project_id,
+            p.status.as_deref(),
+            &p.prompt,
         );
         // Confirmation first: a refused-then-approved retry must not burn the
         // caller's rate-limit slot on the initial E_CONFIRM_REQUIRED.
@@ -1827,10 +2186,11 @@ impl FleetTools {
         set `deliver: true` to ALSO type the message into the recipient's tmux \
         pane with a `[msg #id from name@host]:` header. The inbox row is the \
         source of truth — it lands even if the pane delivery fails. Returns \
-        JSON with the new message id and the delivery outcome. A per-host \
-        token must send from a session on its own host (E_FORBIDDEN). The \
-        body is prefixed with an untrusted-content marker line unless \
-        raw=true (master token only)."
+        JSON with the new message id and the delivery outcome. Pass reply_to \
+        (an inbox message id) to thread an answer. A per-host token must \
+        send from a session on its own host (E_FORBIDDEN). The body is \
+        prefixed with an untrusted-content marker line unless raw=true \
+        (master token only)."
     )]
     async fn send_message(
         &self,
@@ -1877,6 +2237,7 @@ impl FleetTools {
             kind: p.kind,
             deliver: p.deliver,
             submit: p.submit,
+            reply_to: p.reply_to,
         };
         let result = crate::service::messages::send_message(args, &self.store, &self.ssh)
             .await
@@ -1885,8 +2246,9 @@ impl FleetTools {
     }
 
     #[tool(description = "Read a session's inbox — messages sent TO \
-        session_id, newest-first. Slim rows by default (metadata + 80-char \
-        body preview); pass summary=false for full bodies. mark_read \
+        session_id, newest-first. Slim rows by default (metadata, reply_to, \
+        80-char body preview); pass summary=false for full bodies. Task \
+        results arrive here as kind=task_result. mark_read \
         (default true) flips returned unread rows to read — pass false to \
         peek without consuming. A per-host token may only read inboxes of \
         sessions on its own host (E_FORBIDDEN).")]
@@ -2006,7 +2368,9 @@ impl FleetTools {
 
     #[tool(description = "Recreate a session: kill its tmux session and rebuild \
         it fresh in the same worktree, resuming the same Claude conversation. \
-        Works for running or ghost sessions. Returns the session row as JSON.")]
+        Use for a frozen / OOM / context-exhausted session, or to revive a \
+        ghost — the conversation survives, the process does not. Works for \
+        running or ghost sessions. Returns the session row as JSON.")]
     async fn recreate_session(
         &self,
         Parameters(p): Parameters<RecreateSessionParams>,
@@ -2026,7 +2390,9 @@ impl FleetTools {
     }
 
     #[tool(description = "Dismiss a ghost session (lost from tmux): permanently \
-        delete its row. Errors if the session is not a ghost.")]
+        delete its row. Use when a ghost is not worth reviving — the row is \
+        the only thing left to clean up. Errors if the session is not a \
+        ghost.")]
     async fn dismiss_ghost_session(
         &self,
         Parameters(p): Parameters<SessionIdParams>,
@@ -2072,6 +2438,360 @@ impl FleetTools {
         .await
         .map_err(to_mcp_err)?;
         ok_json(&res)
+    }
+
+    // ── Orchestration (Wave 3 Track E) ───────────────────────────────────
+
+    #[tool(description = "Block until a session reaches a state, or time out. \
+        until=\"idle\": claude_status is idle | completed | stopped | failed \
+        (true even for a session that never started a turn). \
+        until=\"turn_gt\": turn_seq > `turn` — pass the turn_seq_before that \
+        send_prompt returned to wait for the reply to YOUR prompt. Polls the \
+        store every 500 ms for up to timeout_s (default 120, max 600). \
+        Returns JSON { status: satisfied | timeout, claude_status, turn_seq, \
+        last_stop_at, stuck_kind }. Read-only. A per-host token may only \
+        wait on sessions on its own host.")]
+    async fn wait_for_session(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<WaitForSessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "wait_for_session",
+            &format!(
+                "session_id={} until={} turn={:?} timeout_s={:?}",
+                p.session_id, p.until, p.turn, p.timeout_s
+            ),
+        );
+        let row =
+            self.resolve_target_row(&caller, Some(p.session_id), None, None, "the session")?;
+        let cond = tasks::WaitCond::parse(&p.until, p.turn).map_err(to_mcp_err)?;
+        let out =
+            tasks::wait_for_session(&self.store, row.id, cond, tasks::wait_timeout(p.timeout_s))
+                .await
+                .map_err(to_mcp_err)?;
+        ok_json(&serde_json::json!({
+            "status": if out.satisfied { "satisfied" } else { "timeout" },
+            "claude_status": out.row.claude_status,
+            "turn_seq": out.row.turn_seq,
+            "last_stop_at": out.row.last_stop_at,
+            "stuck_kind": out.row.stuck_kind,
+        }))
+    }
+
+    #[tool(description = "Read a session's Claude Code transcript (the JSONL \
+        Claude writes, not the pane) and return the last assistant turn as \
+        plain text — text blocks verbatim, one summary line per tool call, \
+        no thinking. since_turn returns every turn after that turn_seq \
+        (use send_prompt's turn_seq_before). max_chars caps the text \
+        (default 8000, max 64000; the END is kept). Errors: E_INVALID_STATE \
+        (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet). \
+        Read-only; prefer it over capture_session for the reply text.")]
+    async fn session_transcript(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<SessionTranscriptParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "session_transcript",
+            &format!(
+                "session_id={} since_turn={:?} max_chars={:?}",
+                p.session_id, p.since_turn, p.max_chars
+            ),
+        );
+        let row =
+            self.resolve_target_row(&caller, Some(p.session_id), None, None, "the session")?;
+        let text = self.transcript_for(&row, p.since_turn, p.max_chars).await?;
+        if text.trim().is_empty() {
+            return Ok(CallToolResult::success(vec![text_content(
+                "(no assistant text in the requested turns)",
+            )]));
+        }
+        Ok(CallToolResult::success(vec![text_content(text)]))
+    }
+
+    #[tool(description = "send_prompt + wait_for_session(turn_gt) + \
+        session_transcript in one call: deliver the prompt, wait up to \
+        timeout_s (default 120, max 600) for the turn to complete, and return \
+        JSON { turn_seq, status: satisfied | timeout, transcript } where \
+        transcript is the reply as plain text (null with transcript_error \
+        when it cannot be read). Marked as untrusted unless raw=true (master \
+        token only). Address the session with session_id.")]
+    async fn run_prompt(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<RunPromptParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // Prompt body intentionally not logged.
+        audit(
+            "run_prompt",
+            &format!("session_id={} timeout_s={:?}", p.session_id, p.timeout_s),
+        );
+        let row = self.resolve_target_row(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            "the session to prompt",
+        )?;
+        let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
+        let before = row.turn_seq;
+        self.deliver_prompt(&row, prompt, true).await?;
+        let out = tasks::wait_for_session(
+            &self.store,
+            row.id,
+            tasks::WaitCond::TurnGt(before),
+            tasks::wait_timeout(p.timeout_s),
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        let (transcript, transcript_error) = match self
+            .transcript_for(&out.row, Some(before), p.max_chars)
+            .await
+        {
+            Ok(t) => (Some(t), None),
+            Err(e) => (None, Some(e.message)),
+        };
+        ok_json(&serde_json::json!({
+            "session_id": row.id,
+            "turn_seq": out.row.turn_seq,
+            "status": if out.satisfied { "satisfied" } else { "timeout" },
+            "claude_status": out.row.claude_status,
+            "transcript": transcript,
+            "transcript_error": transcript_error,
+        }))
+    }
+
+    #[tool(description = "Dispatch a unit of work to a worker session and \
+        track it as a task. Pass worker_session_id (an existing session) OR \
+        new_worker { host_alias, project_id, name? } (spawns one via \
+        new_session). The prompt is delivered with an appended instruction to \
+        print FLEET_TASK_DONE_<nonce> on its own line followed by a \
+        one-paragraph result; fleet detects the marker on the worker's next \
+        Stop and flips the task to done with that paragraph as `result` \
+        (also delivered to requester_session_id's inbox as kind=task_result). \
+        Returns the task row (id, state=running, worker_session_id, …); \
+        follow with wait_for_task. A per-host token must name a requester on \
+        its own host. Marked as untrusted unless raw=true (master only).")]
+    async fn dispatch_task(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<DispatchTaskParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // Prompt body intentionally not logged.
+        audit(
+            "dispatch_task",
+            &format!(
+                "worker_session_id={:?} new_worker={:?} requester_session_id={:?}",
+                p.worker_session_id,
+                p.new_worker
+                    .as_ref()
+                    .map(|w| format!("{}:{}:{:?}", w.host_alias, w.project_id, w.name)),
+                p.requester_session_id
+            ),
+        );
+        if p.worker_session_id.is_some() == p.new_worker.is_some() {
+            return Err(mcp_err(
+                "E_INVALID",
+                "pass exactly one of worker_session_id or new_worker",
+                None,
+            ));
+        }
+        // The requester (when given) must exist and, for a per-host caller,
+        // live on that host — otherwise any agent could file tasks as anyone.
+        if let Some(req) = p.requester_session_id {
+            self.resolve_target_row(&caller, Some(req), None, None, "requester_session_id")?;
+        }
+        // Resolve or spawn the worker.
+        let (worker, spawned) = match (p.worker_session_id, p.new_worker) {
+            (Some(id), _) => (
+                self.resolve_target_row(&caller, Some(id), None, None, "the worker session")?,
+                false,
+            ),
+            (None, Some(spec)) => {
+                let name = spec
+                    .name
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or_else(|| format!("task-{}", tasks::make_nonce()));
+                let row = sessions::new_session(
+                    sessions::NewSessionArgs {
+                        host_alias: spec.host_alias,
+                        project_id: spec.project_id,
+                        worktree_id: None,
+                        name,
+                        call_id: None,
+                        new_worktree: None,
+                        base_branch: None,
+                        kind: None,
+                        start_command: None,
+                        friendly_name: None,
+                    },
+                    &self.store,
+                    &self.ssh,
+                    &self.reg,
+                )
+                .await
+                .map_err(to_mcp_err)?;
+                (row, true)
+            }
+            (None, None) => unreachable!("validated above"),
+        };
+        // Create the task row and link the worker to its requester.
+        let task = {
+            let s = self
+                .store
+                .lock()
+                .map_err(|_| to_mcp_err(IpcError::lock()))?;
+            let task = tasks::create_task(&s, p.requester_session_id, Some(worker.id), &p.prompt)
+                .map_err(to_mcp_err)?;
+            if p.requester_session_id.is_some() {
+                let _ = s.set_parent_session_id(worker.id, p.requester_session_id);
+            }
+            task
+        };
+        if spawned {
+            // A freshly launched REPL needs a moment before it accepts
+            // typed input; wait (bounded) for its input chrome.
+            tasks::wait_for_repl_ready(&self.ssh, &worker.host_alias, &worker.tmux_name).await;
+        }
+        let body = apply_marker(
+            tasks::with_instruction(&p.prompt, &task.nonce),
+            &marker_origin(&caller),
+            &caller,
+            p.raw,
+        )?;
+        match self.deliver_prompt(&worker, body, true).await {
+            Ok(_) => {}
+            Err(e) => {
+                if let Ok(s) = self.store.lock() {
+                    let _ = tasks::fail_task(&s, task.id, &e.message);
+                }
+                return Err(e);
+            }
+        }
+        let started = {
+            let s = self
+                .store
+                .lock()
+                .map_err(|_| to_mcp_err(IpcError::lock()))?;
+            tasks::start_task(&s, &task).map_err(to_mcp_err)?
+        };
+        ok_json(&started)
+    }
+
+    #[tool(description = "Block until a task reaches done | failed | cancelled \
+        or timeout_s elapses (default 120, max 600; polls every 500 ms). \
+        Returns JSON { status: satisfied | timeout, task } — task.result \
+        holds the worker's paragraph when done. Read-only. A per-host token \
+        may only wait on tasks it requested or whose worker is on its host \
+        (E_FORBIDDEN).")]
+    async fn wait_for_task(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<WaitForTaskParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "wait_for_task",
+            &format!("task_id={} timeout_s={:?}", p.task_id, p.timeout_s),
+        );
+        let task = self.visible_task(&caller, p.task_id)?;
+        let out = tasks::wait_for_task(&self.store, task.id, tasks::wait_timeout(p.timeout_s))
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&serde_json::json!({
+            "status": if out.satisfied { "satisfied" } else { "timeout" },
+            "task": out.row,
+        }))
+    }
+
+    #[tool(description = "List tasks, newest-first (default 50 rows). Filters: \
+        requester_session_id, state (queued | running | done | failed | \
+        cancelled). Read-only. A per-host token sees only tasks it requested \
+        from its host or whose worker is on its host.")]
+    async fn list_tasks(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<ListTasksParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "list_tasks",
+            &format!(
+                "requester_session_id={:?} state={:?} limit={:?}",
+                p.requester_session_id, p.state, p.limit
+            ),
+        );
+        let rows = tasks::list_tasks_for(
+            &self.store,
+            p.requester_session_id,
+            p.state.as_deref(),
+            p.limit.unwrap_or(50).max(1),
+            caller.host_alias.as_deref(),
+        )
+        .map_err(to_mcp_err)?;
+        ok_json_compact(&rows)
+    }
+
+    #[tool(description = "Cancel a queued or running task: marks it cancelled \
+        (E_TASK_TERMINAL if it already finished). The worker session keeps \
+        running — kill or re-prompt it separately if needed. May return \
+        E_CONFIRM_REQUIRED when desktop confirmation is on. A per-host token \
+        may only cancel tasks it can see (E_FORBIDDEN).")]
+    async fn cancel_task(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<CancelTaskParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("cancel_task", &format!("task_id={}", p.task_id));
+        let task = self.visible_task(&caller, p.task_id)?;
+        self.confirm_gate(
+            "cancel_task",
+            p.confirm_nonce.as_deref(),
+            &format!("task_id={} worker={:?}", task.id, task.worker_session_id),
+            &caller,
+        )?;
+        let s = self
+            .store
+            .lock()
+            .map_err(|_| to_mcp_err(IpcError::lock()))?;
+        let row = tasks::cancel_task(&s, task.id, &format!("cancelled by {}", caller.label()))
+            .map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
+    #[tool(description = "Replace a session's tags (short labels such as \
+        `review`, `infra`, `wip`; up to 16 of 1–32 chars from [A-Za-z0-9_.:-]; \
+        an empty list clears). Tags show in list_sessions rows and \
+        list_sessions { tag } filters on them. Returns the updated row. \
+        Address the session with session_id OR host_alias + tmux_name.")]
+    async fn set_session_tags(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<SetSessionTagsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "set_session_tags",
+            &format!(
+                "session_id={:?} host={:?} tmux={:?} tags={:?}",
+                p.session_id, p.host_alias, p.tmux_name, p.tags
+            ),
+        );
+        let row = self.resolve_target_row(
+            &caller,
+            p.session_id,
+            p.host_alias.as_deref(),
+            p.tmux_name.as_deref(),
+            "the session to tag",
+        )?;
+        let tags = normalize_tags(p.tags)?;
+        let s = self
+            .store
+            .lock()
+            .map_err(|_| to_mcp_err(IpcError::lock()))?;
+        let updated = s
+            .set_session_tags(row.id, &tags)
+            .map_err(|e| to_mcp_err(IpcError::from(e)))?
+            .ok_or_else(|| mcp_err("E_NOTFOUND", format!("session {} vanished", row.id), None))?;
+        ok_json(&updated)
     }
 
     #[tool(description = "List a session's changed files (git status) in its \
@@ -2295,7 +3015,7 @@ impl FleetTools {
         self.confirm_gate(
             "set_clipboard",
             p.confirm_nonce.as_deref(),
-            &format!("host={} bytes={}", p.host_alias, p.content.len()),
+            &clipboard_summary(&p.host_alias, &p.content),
             &caller,
         )?;
         crate::service::clipboard::set_clipboard(
@@ -2312,8 +3032,8 @@ impl FleetTools {
         )]))
     }
 
-    #[tool(description = "Install fleet skills, the Stop/WorktreeCreate http \
-        hooks, and this fleet's MCP server entry (with a per-host bearer \
+    #[tool(description = "Install fleet skills, the Stop / UserPromptSubmit / \
+        WorktreeCreate http hooks, and this fleet's MCP server entry (with a per-host bearer \
         token) into every reachable host's ~/.claude.json (reverse SSH tunnel \
         for remote hosts). rotate=true mints fresh per-host tokens. Returns a \
         per-host status list; each host must restart Claude to load the \
@@ -2567,10 +3287,22 @@ mod tests {
         assert!(enforce_mode(&ro, "list_sessions").is_ok());
         assert!(enforce_mode(&ro, "capture_session").is_ok());
         for t in [
+            "wait_for_session",
+            "session_transcript",
+            "wait_for_task",
+            "list_tasks",
+        ] {
+            assert!(enforce_mode(&ro, t).is_ok(), "{t} is a read");
+        }
+        for t in [
             "send_prompt",
             "kill_session",
             "provision_hosts",
             "register_self",
+            "run_prompt",
+            "dispatch_task",
+            "cancel_task",
+            "set_session_tags",
         ] {
             let err = enforce_mode(&ro, t).expect_err(t);
             assert!(
@@ -2852,6 +3584,68 @@ mod tests {
                 "SKILL.md documents a value that does not exist: {bogus}"
             );
         }
+    }
+
+    // ---- orchestration helpers ----
+
+    #[test]
+    fn confirm_summaries_bind_the_content_digest() {
+        let a = clipboard_summary("local", "ls -la ~");
+        let b = clipboard_summary("local", "rm -rf /");
+        assert_ne!(a, b, "same length, different content ⇒ different summary");
+        assert!(a.starts_with("host=local bytes=8 sha="), "{a}");
+        assert!(!a.contains("ls -la"), "content never appears: {a}");
+        let x = broadcast_summary(Some("m"), Some(1), Some("idle"), "continue");
+        let y = broadcast_summary(Some("m"), Some(1), Some("idle"), "rm -rf /");
+        assert_ne!(x, y);
+        assert!(x.starts_with("host=Some(\"m\") project_id=Some(1) status=Some(\"idle\") prompt="));
+        assert!(!x.contains("continue"));
+    }
+
+    #[test]
+    fn normalize_tags_validates_dedups_and_trims() {
+        assert_eq!(
+            normalize_tags(vec![" review ".into(), "wip".into(), "review".into()]).unwrap(),
+            vec!["review".to_string(), "wip".to_string()]
+        );
+        assert!(normalize_tags(vec![]).unwrap().is_empty());
+        for bad in [
+            "",
+            "has space",
+            "x".repeat(33).as_str(),
+            "semi;colon",
+            "a\nb",
+        ] {
+            let err = normalize_tags(vec![bad.into()]).expect_err(bad);
+            assert!(
+                err.message.starts_with("E_VALIDATE"),
+                "{bad}: {}",
+                err.message
+            );
+        }
+        let many: Vec<String> = (0..17).map(|i| format!("t{i}")).collect();
+        assert!(normalize_tags(many)
+            .unwrap_err()
+            .message
+            .starts_with("E_VALIDATE"));
+    }
+
+    #[test]
+    fn resolve_row_and_gate_returns_turn_seq_for_the_completion_signal() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_host("mefistos").unwrap();
+        let id = store
+            .upsert_session("dev-a", "mefistos", None, None, 1, 1, "running", None)
+            .unwrap();
+        store.set_claude_session_id(id, "uuid-a").unwrap();
+        store.record_stop_hook("uuid-a").unwrap();
+        let c = host_caller("mefistos", TokenMode::Full);
+        let row = resolve_row_and_gate(&store, &c, Some(id), None, None, "x").unwrap();
+        assert_eq!((row.id, row.turn_seq), (id, 1));
+        let other = host_caller("turanga", TokenMode::Full);
+        let err =
+            resolve_row_and_gate(&store, &other, Some(id), None, None, "the session").unwrap_err();
+        assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
     }
 
     // ---- response caps ----

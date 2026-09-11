@@ -13,7 +13,7 @@ function bgSession(over: Partial<SessionRow> = {}): SessionRow {
     created_at: 1, last_activity_at: 1, status: 'running', notes: null, account_uuid: null,
     kind: 'bg', reviews_session_id: null, worktree_key: null, lost_at: null,
     claude_session_id: 'sess-abc', claude_status: 'working', effort_level: null,
-    pr_url: null, current_activity: 'editing files', friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, ...over,
+    pr_url: null, current_activity: 'editing files', friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [], ...over,
   };
 }
 

@@ -6,7 +6,7 @@ use crate::ipc_error::IpcError;
 use crate::mcp::hooks::HookPayload;
 use crate::mcp::Caller;
 use crate::ssh::SshClient;
-use crate::store::{ProjectRow, Store};
+use crate::store::{ProjectRow, SessionRow, Store};
 use std::sync::{Arc, Mutex};
 
 /// Dispatch a hook event to the appropriate handler. `caller` is the
@@ -21,6 +21,7 @@ pub fn apply_hook(
 ) -> Result<(), IpcError> {
     match payload.hook_event_name.as_deref() {
         Some("Stop") => apply_stop_hook(store, ssh, payload, caller),
+        Some("UserPromptSubmit") => apply_prompt_submit_hook(store, payload, caller),
         Some("PostToolUse") if payload.tool_name.as_deref() == Some("WorktreeCreate") => {
             apply_worktree_hook(store, payload)
         }
@@ -28,8 +29,37 @@ pub fn apply_hook(
     }
 }
 
-/// Mark the matching session's `claude_status` as "idle".
-/// Matches by `claude_session_id`. No-ops if no session has this ID.
+/// Look up the session a hook is about and apply the caller's host binding:
+/// a host token may only flip sessions on ITS host — host A's token must
+/// not be able to mark host B's session idle (and so trigger B's safe-kill
+/// finalisation or complete B's tasks). Unknown session → `None` (the hook
+/// arrived before reconcile enriched the row; a no-op, as before).
+fn host_checked_row(
+    s: &Store,
+    claude_session_id: &str,
+    caller: &Caller,
+) -> Result<Option<SessionRow>, IpcError> {
+    let row = s.get_session_by_claude_id(claude_session_id)?;
+    if let (Some(row), Some(h)) = (&row, &caller.host_alias) {
+        if &row.host_alias != h {
+            return Err(IpcError::new(
+                "E_FORBIDDEN",
+                format!(
+                    "session {} is on host {}; this token is bound to {h}",
+                    row.tmux_name, row.host_alias
+                ),
+            ));
+        }
+    }
+    Ok(row)
+}
+
+/// The Stop hook: a turn just completed. Marks the session `idle`, bumps
+/// `turn_seq` and stamps `last_stop_at` (the completion signal `send_prompt`
+/// / `wait_for_session` / `run_prompt` build on), then kicks off the
+/// background checks that read the pane / transcript: the safe-kill marker
+/// scan and the task-completion marker scan. Both are spawned so the HTTP
+/// response returns fast.
 ///
 /// Claude Code's `Stop` hook fires when the agent finishes a turn and is ready
 /// for input again — NOT when the session terminates. So the right status is
@@ -46,31 +76,20 @@ fn apply_stop_hook(
         Some(id) => id.clone(),
         None => return Ok(()),
     };
-    // Snapshot whether a safe-kill is in flight BEFORE we update status —
-    // if it is, we spawn the marker check off the hook handler so the HTTP
-    // response returns fast (the work involves pane capture + SSH).
-    let safe_kill_in_flight = {
+    // Snapshot whether a safe-kill / open task is in flight BEFORE we update
+    // status; the follow-ups (pane capture + SSH) run off the hook handler.
+    let (safe_kill_in_flight, task_worker) = {
         let s = store.lock().map_err(|_| IpcError::lock())?;
-        let row = s.get_session_by_claude_id(&session_id).ok().flatten();
-        // A host token may only flip sessions on ITS host: host A's token
-        // must not be able to mark host B's session idle (and so trigger
-        // B's safe-kill finalisation). Unknown session → no-op as before.
-        if let (Some(row), Some(h)) = (&row, &caller.host_alias) {
-            if &row.host_alias != h {
-                return Err(IpcError::new(
-                    "E_FORBIDDEN",
-                    format!(
-                        "session {} is on host {}; this token is bound to {h}",
-                        row.tmux_name, row.host_alias
-                    ),
-                ));
-            }
-        }
-        let in_flight = row
-            .map(|r| r.safe_kill_state.as_deref() == Some("requested"))
+        let Some(before) = host_checked_row(&s, &session_id, caller)? else {
+            return Ok(());
+        };
+        let in_flight = before.safe_kill_state.as_deref() == Some("requested");
+        let after = s.record_stop_hook(&session_id)?;
+        let has_open_tasks = s
+            .open_tasks_for_worker(before.id)
+            .map(|v| !v.is_empty())
             .unwrap_or(false);
-        s.set_claude_status_by_session_id(&session_id, "idle")?;
-        in_flight
+        (in_flight, after.filter(|_| has_open_tasks))
     };
     if safe_kill_in_flight {
         let store = Arc::clone(store);
@@ -80,6 +99,36 @@ fn apply_stop_hook(
             crate::service::safe_kill::handle_stop_marker_check(store, ssh, sid).await;
         });
     }
+    if let Some(worker) = task_worker {
+        let store = Arc::clone(store);
+        let ssh = Arc::clone(ssh);
+        let cwd = payload.cwd.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::service::tasks::handle_stop_for_worker(store, ssh, worker, cwd).await;
+        });
+    }
+    Ok(())
+}
+
+/// The UserPromptSubmit hook: a turn is starting. Marks the session
+/// `working` so an idle-looking pane between the submit and the first
+/// spinner frame is not mistaken for "still idle" — and so `wait_for_session
+/// { until: "idle" }` after a `send_prompt` does not return before the turn
+/// even begins.
+fn apply_prompt_submit_hook(
+    store: &Arc<Mutex<Store>>,
+    payload: &HookPayload,
+    caller: &Caller,
+) -> Result<(), IpcError> {
+    let session_id = match &payload.session_id {
+        Some(id) => id.clone(),
+        None => return Ok(()),
+    };
+    let s = store.lock().map_err(|_| IpcError::lock())?;
+    if host_checked_row(&s, &session_id, caller)?.is_none() {
+        return Ok(());
+    }
+    s.record_prompt_submit_hook(&session_id)?;
     Ok(())
 }
 
@@ -302,8 +351,96 @@ mod tests {
     #[test]
     fn unknown_event_is_noop() {
         let store = make_store();
-        let payload = make_payload("UserPromptSubmit", "s1");
+        let payload = make_payload("SessionStart", "s1");
         assert!(apply_hook(&store, &make_ssh(), &payload, &Caller::master()).is_ok());
+    }
+
+    #[test]
+    fn stop_hook_bumps_turn_seq_and_stamps_last_stop_at() {
+        let store = make_store();
+        let id = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let id = s
+                .upsert_session("sess", "local", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.set_claude_session_id(id, "uuid-1").unwrap();
+            id
+        };
+        for expected in 1..=3 {
+            apply_hook(
+                &store,
+                &make_ssh(),
+                &make_payload("Stop", "uuid-1"),
+                &Caller::master(),
+            )
+            .unwrap();
+            let s = store.lock().unwrap();
+            let row = s.get_session_by_id(id).unwrap().unwrap();
+            assert_eq!(row.turn_seq, expected);
+            assert!(row.last_stop_at.is_some());
+            assert_eq!(row.last_stop_at, row.last_turn_at);
+            assert_eq!(row.claude_status.as_deref(), Some("idle"));
+        }
+    }
+
+    #[test]
+    fn user_prompt_submit_marks_the_session_working_and_is_host_checked() {
+        let store = make_store();
+        let id = {
+            let s = store.lock().unwrap();
+            s.upsert_host("hostb").unwrap();
+            let id = s
+                .upsert_session("sess", "hostb", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.set_claude_session_id(id, "uuid-b").unwrap();
+            s.set_claude_status_by_session_id("uuid-b", "idle").unwrap();
+            id
+        };
+        let host_a = Caller {
+            host_alias: Some("hosta".into()),
+            mode: crate::mcp::TokenMode::Full,
+        };
+        let err = apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("UserPromptSubmit", "uuid-b"),
+            &host_a,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "E_FORBIDDEN");
+        {
+            let s = store.lock().unwrap();
+            let row = s.get_session_by_id(id).unwrap().unwrap();
+            assert_eq!(row.claude_status.as_deref(), Some("idle"), "untouched");
+            assert!(row.idle_since.is_some());
+        }
+        let host_b = Caller {
+            host_alias: Some("hostb".into()),
+            mode: crate::mcp::TokenMode::Readonly,
+        };
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("UserPromptSubmit", "uuid-b"),
+            &host_b,
+        )
+        .unwrap();
+        let s = store.lock().unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.claude_status.as_deref(), Some("working"));
+        assert_eq!(row.idle_since, None);
+        // A submit does not count as a turn.
+        assert_eq!(row.turn_seq, 0);
+        drop(s);
+        // Unknown session: no-op for any caller.
+        assert!(apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("UserPromptSubmit", "nope"),
+            &host_a
+        )
+        .is_ok());
     }
 
     #[test]

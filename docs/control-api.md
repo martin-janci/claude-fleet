@@ -48,8 +48,10 @@ Each host's token has a **mode**, shown in the **Token** column of
   etc. remain allowed by design.
 - `readonly` — only tools that observe the fleet (`list_*`, `capture_session`,
   `session_history`, `inbox`, `peer_status`, `peek_session`, `repo_*`,
-  `get_clipboard`, `set_friendly_name`, …). Anything that sends, kills,
-  deletes, provisions, or writes the clipboard returns `E_FORBIDDEN`.
+  `get_clipboard`, `set_friendly_name`, `wait_for_session`,
+  `session_transcript`, `wait_for_task`, `list_tasks`, …). Anything that
+  sends, kills, deletes, provisions, dispatches, or writes the clipboard
+  returns `E_FORBIDDEN`.
 
 The fleet-admin tools — `provision_hosts`, `add_host`, `remove_host`,
 `hide_host` — are **master-token only** in either mode: a token lifted from
@@ -122,9 +124,14 @@ Index by area (names only; see the reference for details):
   `repo_file`, `repo_diff`, `repo_log`, `repo_branches`, `repo_commit`,
   `repo_commit_diff`.
 - **Host clipboard** — `get_clipboard`, `set_clipboard`.
+- **Orchestration** — `wait_for_session`, `session_transcript`, `run_prompt`,
+  `dispatch_task`, `wait_for_task`, `list_tasks`, `cancel_task`,
+  `set_session_tags`.
 
 A typical loop: `list_sessions` to see state → `new_session` to spawn one →
-`send_prompt` to steer it → `capture_session` to read the reply.
+`run_prompt` to steer it and get the reply back (or `send_prompt` →
+`wait_for_session` → `session_transcript` step by step; `capture_session`
+for the raw screen).
 
 ### Status vocabulary
 
@@ -140,8 +147,63 @@ skill quote them, and a test fails if any of those drift.
 Responses are sized for MCP token limits: `list_sessions` returns slim summary
 rows by default and accepts `limit`; `capture_session` returns plain text
 capped to the last 200 lines (`max_lines`, 0 = no cap); `repo_log` returns 50
-commits by default (`limit`, `skip`); `session_history` and `inbox` default to
-50 rows.
+commits by default (`limit`, `skip`); `session_history`, `inbox` and
+`list_tasks` default to 50 rows; `session_transcript` / `run_prompt` return at
+most `max_chars` characters (default 8000, max 64000).
+
+### Orchestration
+
+**Completion signal.** Every session row carries `turn_seq` (completed turns)
+and `last_stop_at`. Two Claude Code hooks maintain them: `Stop` marks the
+session `idle`, bumps `turn_seq` and stamps `last_stop_at`; `UserPromptSubmit`
+marks it `working`, so "idle because never started" and "idle after a turn"
+are distinguishable from "busy". A hook-stamped status that is newer than a
+reconcile pass's pane observation is never overwritten by the pane heuristic.
+`send_prompt` returns `{ delivered, session_id, turn_seq_before }`;
+`wait_for_session { session_id, until: "idle" | "turn_gt", turn?, timeout_s? }`
+is a bounded long-poll (500 ms polls, default 120 s, max 600 s) returning
+`{ status: satisfied | timeout, claude_status, turn_seq, last_stop_at,
+stuck_kind }`. Sessions on hosts provisioned before this hook set exist keep
+working through reconcile alone; re-provision to get the `UserPromptSubmit`
+hook (see *Provisioning hosts*).
+
+**Transcript.** `session_transcript { session_id, since_turn?, max_chars? }`
+reads the session's Claude Code JSONL transcript
+(`~/.claude/projects/<cwd with every non-alphanumeric char replaced by
+"-">/<claude_session_id>.jsonl`) on its host and returns the last assistant
+turn (or every turn after `since_turn`) as plain text: text blocks verbatim,
+one `[tool_use] Name(...)` line per tool call, no thinking. `E_INVALID_STATE`
+when the row has no `claude_session_id` yet, `E_NO_TRANSCRIPT` when the file
+does not exist. `run_prompt { session_id, prompt, timeout_s?, max_chars?,
+raw? }` composes the three: deliver, wait for `turn_seq` to grow, return
+`{ turn_seq, status, transcript }`.
+
+**Tasks.** `dispatch_task { worker_session_id | new_worker { host_alias,
+project_id, name? }, prompt, requester_session_id?, raw? }` creates a task
+row (states `queued → running → done | failed | cancelled`), spawns the worker
+when asked (recording `requester_session_id` as the worker's
+`parent_session_id`), and delivers the prompt with an appended instruction:
+*"When finished, print exactly `FLEET_TASK_DONE_<nonce>` on its own line
+followed by a one-paragraph result."* The nonce is per task and never sent to
+the UI. On the worker's next `Stop` fleet reads its last transcript turn (pane
+capture as fallback), looks for the marker on its own line — which the prompt
+echo, where it is followed by more text, never satisfies — and flips the task
+to `done` with the paragraph as `result`; the result is also delivered to the
+requester's inbox as `kind: task_result`. A `Stop` without the marker leaves
+the task `running`. `wait_for_task { task_id, timeout_s? }` long-polls for a
+terminal state; `list_tasks { requester_session_id?, state?, limit? }` lists;
+`cancel_task { task_id }` marks a task cancelled (`E_TASK_TERMINAL` if it
+already finished; the worker keeps running) and is confirm-gated like
+`kill_session`. A per-host token only sees, waits on and cancels tasks it
+requested from its host or whose worker is on its host (`E_FORBIDDEN`). The
+desktop shows the same rows in the Tasks panel (per session in the details
+pane, fleet-wide from the sidebar header).
+
+**Threads and tags.** `send_message` accepts `reply_to` (an inbox message id
+the sender took part in; `E_NOTFOUND` / `E_INVALID` otherwise) and `inbox`
+rows carry it back. `set_session_tags { session_id, tags }` replaces a
+session's labels (up to 16 of 1–32 chars from `[A-Za-z0-9_.:-]`) and
+`list_sessions { tag }` filters on them; summary rows include `tags`.
 
 ## Provisioning hosts
 
@@ -158,7 +220,7 @@ commits by default (`limit`, `skip`); `session_history` and `inbox` default to
    }
    ```
 4. **`~/.tmux.conf` clipboard passthrough** — ensures `set -g set-clipboard on` is present (appended if missing, file created if absent) so OSC 52 clipboard writes from inside tmux reach the host clipboard.
-5. **Hooks in `~/.claude/settings.json`** — merges fleet's `Stop` and `PostToolUse(WorktreeCreate)` hooks as Claude Code `type: "http"` hooks, leaving the user's own hooks alone. Each entry POSTs the hook payload to `http://127.0.0.1:<port>/hook` with `"headers": { "Authorization": "Bearer <host-token>" }` and a 5 s timeout — the token never appears in a process argv. On a remote host the URL's `127.0.0.1:<port>` is the reverse tunnel's loopback end (step 6). Any older fleet entry for the same port (including the pre-0.3 `curl … /hook?token=` command form) is replaced, so re-running upgrades in place; the file is written `0600`. Required for `safe_kill_session` to finalize and for real-time `idle` status on every host that runs Claude Code. **Settings → Install Hook (local)** performs only this step for the `local` host, using the `local` host token.
+5. **Hooks in `~/.claude/settings.json`** — merges fleet's `Stop`, `UserPromptSubmit` and `PostToolUse(WorktreeCreate)` hooks as Claude Code `type: "http"` hooks, leaving the user's own hooks alone. Each entry POSTs the hook payload to `http://127.0.0.1:<port>/hook` with `"headers": { "Authorization": "Bearer <host-token>" }` and a 5 s timeout — the token never appears in a process argv. On a remote host the URL's `127.0.0.1:<port>` is the reverse tunnel's loopback end (step 6). Any older fleet entry for the same port (including the pre-0.3 `curl … /hook?token=` command form) is replaced, so re-running upgrades in place; the file is written `0600`. Required for `safe_kill_session` to finalize, for real-time `idle` / `working` status, `turn_seq` and task completion on every host that runs Claude Code. **Settings → Install Hook (local)** performs only this step for the `local` host, using the `local` host token. **Hosts provisioned before the `UserPromptSubmit` hook existed must be re-provisioned** (no rotate needed) to get the busy signal; until then their status only flips to `working` on the next reconcile pass.
 6. **Reverse SSH tunnel** (remote hosts only) — starts an `ssh -R` tunnel so the remote host's `127.0.0.1:<port>` is forwarded to the central machine's MCP server. The server stays bound to `127.0.0.1` on the central machine; remote hosts reach it only through this authenticated tunnel.
 
 **After provisioning, each host must restart Claude** to load the MCP server (skill files and CLAUDE.md are picked up live, but the MCP server entry requires a restart).
@@ -215,9 +277,12 @@ Per-host failures do not abort provisioning of other hosts.
   master token may pass `raw: true` to skip it. The Settings toggle **"Ask me
   before agents broadcast, kill sessions, delete worktrees or write the
   clipboard"** (`mcp.confirm_destructive`, off by default) makes
-  `broadcast_prompt`, `kill_session`, `delete_worktree` and `set_clipboard`
-  return `E_CONFIRM_REQUIRED` with a one-time `confirm_nonce`; approve the
-  request in the desktop dialog, then retry the call with that nonce.
+  `broadcast_prompt`, `kill_session`, `delete_worktree`, `set_clipboard` and
+  `cancel_task` return `E_CONFIRM_REQUIRED` with a one-time `confirm_nonce`;
+  approve the request in the desktop dialog, then retry the call with that
+  nonce. The nonce is bound to the call's arguments — for `set_clipboard` and
+  `broadcast_prompt` including a digest of the content / prompt — so an
+  approval cannot be replayed with different text.
 - **File modes.** `~/.claude.json`, its backup and `~/.claude/settings.json`
   are written `0600` on every host; `state.db` is `0600` on the central
   machine.

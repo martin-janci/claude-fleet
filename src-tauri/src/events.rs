@@ -6,7 +6,7 @@
 //! `NoopEventBus` (silent) or `RecordingEventBus` (captures every emit for
 //! assertion).
 
-use crate::store::{AccountRow, HostRow, ProjectRow, SessionRow, WorktreeRow};
+use crate::store::{AccountRow, HostRow, ProjectRow, SessionRow, TaskRow, WorktreeRow};
 use serde::Serialize;
 
 /// A row mutation captured during a batched write (e.g. reconcile's
@@ -49,6 +49,9 @@ pub trait EventBus: Send + Sync {
     fn project_updated(&self, row: &ProjectRow);
     fn worktree_updated(&self, row: &WorktreeRow);
     fn worktree_removed(&self, id: i64);
+    /// A task row was created or changed state (migration 020). There is no
+    /// `task:removed` — tasks only ever move to a terminal state.
+    fn task_updated(&self, row: &TaskRow);
 
     /// Flush a single deferred `RowChange` through the matching typed method.
     /// Used by batched (transactional) writes to emit AFTER commit. The
@@ -79,6 +82,7 @@ impl EventBus for NoopEventBus {
     fn project_updated(&self, _: &ProjectRow) {}
     fn worktree_updated(&self, _: &WorktreeRow) {}
     fn worktree_removed(&self, _: i64) {}
+    fn task_updated(&self, _: &TaskRow) {}
 }
 
 /// Production event bus: forwards every event to the Tauri frontend.
@@ -160,6 +164,9 @@ impl EventBus for AppHandleEventBus {
     }
     fn worktree_removed(&self, id: i64) {
         self.queue("worktree:removed", &WorktreeRemovedPayload { id });
+    }
+    fn task_updated(&self, row: &TaskRow) {
+        self.queue("task:updated", row);
     }
 }
 
@@ -243,5 +250,11 @@ impl EventBus for RecordingEventBus {
             .lock()
             .unwrap()
             .push(format!("worktree:removed:{}", id));
+    }
+    fn task_updated(&self, r: &TaskRow) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("task:updated:{}:{}", r.id, r.state));
     }
 }

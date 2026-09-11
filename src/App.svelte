@@ -12,6 +12,7 @@
   import { loadSessions, bootstrapSessions, applySessionEvents, sessions } from './lib/sessions';
   import { bootstrapHosts, applyHostEvents, hosts } from './lib/hosts';
   import { bootstrapAccounts, applyAccountEvents } from './lib/accounts';
+  import { loadTasks, applyTaskEvents } from './lib/tasks';
   import { subscribeToRowEvents } from './lib/events';
   import Toasts from './lib/Toasts.svelte';
   import QuickSwitcher from './lib/QuickSwitcher.svelte';
@@ -158,7 +159,12 @@
       onHostEvents: applyHostEvents,
       onAccountEvents: applyAccountEvents,
       onProjectEvents: applyProjectEvents,
+      onTaskEvents: applyTaskEvents,
     });
+    // Tasks are secondary to the session list: load after the row
+    // subscription is live so no `task:updated` is missed, and never block
+    // startup on it (a failure only leaves the Tasks panel empty).
+    void loadTasks();
   });
 
   // Catch-up net for missed Tauri events (e.g. sleep/wake, dropped events).

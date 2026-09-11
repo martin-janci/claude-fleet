@@ -9,5 +9,6 @@ pub mod onboarding;
 pub mod projects;
 pub mod repo;
 pub mod sessions;
+pub mod tasks;
 pub mod upload;
 pub mod worktrees;
