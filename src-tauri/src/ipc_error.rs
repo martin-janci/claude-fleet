@@ -71,6 +71,23 @@ pub mod codes {
     pub const E_WORKTREE_BUSY: &str = "E_WORKTREE_BUSY";
     /// `git worktree remove` failed.
     pub const E_WORKTREE_REMOVE: &str = "E_WORKTREE_REMOVE";
+    /// Workspace repair: the project's main checkout is missing or not a git
+    /// repository. Never faked with `mkdir`; restore or re-clone it.
+    pub const E_REPO_MISSING: &str = "E_REPO_MISSING";
+    /// Workspace repair: the worktree's branch is checked out in the main
+    /// checkout, so git refuses a second checkout and we refuse to hijack it.
+    pub const E_BRANCH_CHECKED_OUT: &str = "E_BRANCH_CHECKED_OUT";
+    /// Workspace repair: the worktree is locked (`git worktree lock`) and its
+    /// directory is gone; unlock it to allow the repair.
+    pub const E_WORKSPACE_LOCKED: &str = "E_WORKSPACE_LOCKED";
+    /// Workspace repair: a git step failed, the result did not verify, or the
+    /// directory is not a worktree and not empty (never deleted automatically).
+    pub const E_REPAIR_FAILED: &str = "E_REPAIR_FAILED";
+    /// Workspace repair: an automatic check (new session, restart, recreate)
+    /// found a problem only an explicit repair may fix (unregister a stale
+    /// entry, adopt a moved checkout, recreate a branch, re-link). Run
+    /// Repair workspace.
+    pub const E_REPAIR_REQUIRED: &str = "E_REPAIR_REQUIRED";
     /// The worktree has uncommitted / unpushed work.
     pub const E_DIRTY: &str = "E_DIRTY";
     /// The `claude` CLI exited non-zero.

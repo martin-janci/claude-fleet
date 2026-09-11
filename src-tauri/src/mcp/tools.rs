@@ -2354,6 +2354,91 @@ impl FleetTools {
         .map_err(to_mcp_err)?;
         ok_json(&res)
     }
+
+    // ---- workspace repair ----
+
+    #[tool(description = "Explicitly repair a session's workspace (the same \
+        action as the Repair workspace button): make its directory a healthy \
+        git worktree on its branch and its tmux session run there. Unlike the \
+        automatic checks on create/restart/recreate/attach (which only re-add a \
+        missing worktree from its existing branch), this may unregister this \
+        worktree's own stale git entry (git worktree remove --force; never a \
+        blanket prune), adopt its branch's checkout elsewhere (refused when \
+        another fleet workspace uses it), recreate the branch from the base \
+        branch once origin confirms it is gone, run git worktree repair, and \
+        respawn a live pane whose directory vanished. No-op on a healthy \
+        session. Gated by mcp.confirm_destructive (retry with confirm_nonce). \
+        Returns a JSON RepairReport: cwd, healthy, actions (in order), \
+        warnings, branch_source, tmux (created|respawned), sibling_session_ids. \
+        Errors: E_REPO_MISSING (never faked with mkdir), E_BRANCH_CHECKED_OUT, \
+        E_WORKSPACE_LOCKED, E_REPAIR_FAILED, E_HOST_OFFLINE, E_CONFIRM_REQUIRED.")]
+    async fn repair_session(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<RepairSessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "repair_session",
+            &format!(
+                "session_id={:?} host={:?} name={:?}",
+                p.session_id, p.host_alias, p.name
+            ),
+        );
+        // Mutating tool (not in READONLY_TOOLS): resolve + host-bind the
+        // target like restart_session, then repair by the resolved row's id.
+        let (host_alias, name) = self.resolve_target(
+            &caller,
+            p.session_id,
+            p.host_alias.as_deref(),
+            p.name.as_deref(),
+            "the session to repair",
+        )?;
+        // Explicit repair can unregister a worktree entry, re-path a row and
+        // respawn a live pane: destructive, so behind the desktop confirmation.
+        self.confirm_gate(
+            "repair_session",
+            p.confirm_nonce.as_deref(),
+            &format!("host={host_alias} name={name}"),
+            &caller,
+        )?;
+        let id = {
+            let s = self
+                .store
+                .lock()
+                .map_err(|_| to_mcp_err(IpcError::lock()))?;
+            s.get_session(&name, &host_alias)
+                .map_err(|e| to_mcp_err(IpcError::from(e)))?
+                .map(|r| r.id)
+                .ok_or_else(|| {
+                    to_mcp_err(IpcError::new(
+                        "E_NOTFOUND",
+                        format!("session {name} on {host_alias} not found"),
+                    ))
+                })?
+        };
+        let rep = crate::service::repair::repair_session(id, true, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&rep)
+    }
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RepairSessionParams {
+    /// Fleet session id (from list_sessions / whoami). Alternative to
+    /// host_alias + name.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// Host alias the session lives on (with `name`).
+    #[serde(default)]
+    pub host_alias: Option<String>,
+    /// tmux session name to repair (with `host_alias`).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Nonce from a previous E_CONFIRM_REQUIRED, once approved on the
+    /// desktop (only when mcp.confirm_destructive is on).
+    #[serde(default)]
+    pub confirm_nonce: Option<String>,
 }
 
 /// Hand-written (not `#[tool_handler]`) so every call passes through one

@@ -6,7 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { sessions, loadSessions, killSession, renameSession, restartSession, newSessionAbortable, newBgSession, peekSession, purgeProject, showBgAgents, resetTombstonesForTests } from './sessions';
+import { sessions, loadSessions, killSession, renameSession, restartSession, repairSession, newSessionAbortable, newBgSession, peekSession, purgeProject, showBgAgents, resetTombstonesForTests } from './sessions';
 
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
@@ -55,6 +55,46 @@ describe('sessions store', () => {
     expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
       'restart_session',
       { args: { host_alias: 'local', name: 'dev-foo' } },
+    ]);
+  });
+
+  it('repairSession passes the session id and returns the report untouched', async () => {
+    sessions.set(sample);
+    const report = {
+      session_id: 1, host_alias: 'local', tmux_name: 'dev-foo', project_root: '/repo', cwd: '/repo/.worktrees/x',
+      healthy: false, actions: ['git worktree prune', 'git worktree add /repo/.worktrees/x x'],
+      warnings: [], branch_source: 'branch_local', tmux: 'respawned', tmux_alive: true,
+      tmux_cwd_stale: false, worktree_row_updated: false, sibling_session_ids: [],
+    };
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(report); // repair_session
+    const r = await repairSession(1);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value).toEqual(report);
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
+      'repair_session',
+      { args: { session_id: 1, explicit: false } },
+    ]);
+    // Row events carry any store change; the wrapper itself merges nothing.
+    expect(get(sessions)).toEqual(sample);
+  });
+
+  it('repairSession surfaces the backend E_* code on failure', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockRejectedValueOnce({
+      code: 'E_REPO_MISSING',
+      message: 'project repository is missing',
+    });
+    const r = await repairSession(1);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe('E_REPO_MISSING');
+  });
+
+  it('repairSession defaults to the automatic check; explicit must be asked for', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    await repairSession(3, { explicit: true });
+    await repairSession(4, {});
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls).toEqual([
+      ['repair_session', { args: { session_id: 3, explicit: true } }],
+      ['repair_session', { args: { session_id: 4, explicit: false } }],
     ]);
   });
 

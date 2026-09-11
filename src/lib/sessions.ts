@@ -192,6 +192,59 @@ export async function restartSession(hostAlias: string, name: string): Promise<R
   return r;
 }
 
+/** What `repair_session` found and did (mirrors `service::repair::RepairReport`). */
+export interface RepairReport {
+  session_id: number | null;
+  host_alias: string;
+  tmux_name: string;
+  /** Project root the repair resolved on the host (shows which base path / setting was used). */
+  project_root: string;
+  /** The verified directory the pane runs in (user-facing form). */
+  cwd: string;
+  /** The same directory as the host resolves it (`pwd -P`), when known. */
+  cwd_physical: string | null;
+  /** True when nothing needed doing. */
+  healthy: boolean;
+  /** Ordered, human-readable actions that were applied. */
+  actions: string[];
+  warnings: string[];
+  /** Automatic check only: the workspace needs an explicit repair (Repair
+   *  workspace); nothing git-side was applied. `deferred` says what it would do. */
+  needs_explicit_repair: boolean;
+  deferred: string[];
+  /** `branch_local` | `branch_remote` | `branch_from_base:<start>` when a worktree was (re)created. */
+  branch_source: string | null;
+  /** `created` | `respawned` when tmux was touched. */
+  tmux: string | null;
+  tmux_alive: boolean;
+  /** The tmux session is confirmed gone (not merely unknown). */
+  tmux_dead: boolean;
+  /** A live pane's reported working directory no longer exists. */
+  tmux_cwd_stale: boolean;
+  worktree_row_updated: boolean;
+  /** Alive sessions on the same host sharing this workspace. */
+  sibling_session_ids: number[];
+}
+
+/** Make the session's directory a healthy git worktree on its branch and its
+ *  tmux session run there (recreating tmux when it is gone). A no-op on a
+ *  healthy session; the backend emits the row events for anything it fixed,
+ *  so nothing is merged here. */
+export async function repairSession(
+  sessionId: number,
+  opts: {
+    /** `true` only for the Repair workspace button: an explicit repair that
+     *  may unregister a stale entry, adopt a moved checkout, recreate the
+     *  branch and respawn a live pane. Default `false`: the automatic check,
+     *  which only creates what is confirmed missing. */
+    explicit?: boolean;
+  } = {},
+): Promise<Result<RepairReport>> {
+  return invokeCmd<RepairReport>('repair_session', {
+    args: { session_id: sessionId, explicit: opts.explicit ?? false },
+  });
+}
+
 export interface NewSessionArgs {
   host_alias: string;
   project_id: number;

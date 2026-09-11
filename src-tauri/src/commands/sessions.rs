@@ -5,6 +5,7 @@
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::IpcError;
 use crate::service::bg_sessions::{self, NewBgSessionArgs, PeekSessionArgs, PurgeProjectArgs};
+use crate::service::repair::{self, RepairReport};
 use crate::service::safe_kill::{
     self, DiscardKillSessionArgs, InspectSafeKillArgs, SafeKillInspection, SafeKillSessionArgs,
 };
@@ -155,6 +156,30 @@ pub fn dismiss_ghost_session(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<(), IpcError> {
     sessions::dismiss_ghost_session(args, &store)
+}
+
+/// Make the session's directory a healthy git worktree on its branch and its
+/// tmux session run there (creating tmux when it is gone). A no-op on a
+/// healthy session. Logic lives in `service::repair`.
+#[tauri::command]
+pub async fn repair_session(
+    args: RepairSessionArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<RepairReport, IpcError> {
+    repair::repair_session(args.session_id, args.explicit, &store, &ssh).await
+}
+
+#[derive(serde::Deserialize)]
+pub struct RepairSessionArgs {
+    pub session_id: i64,
+    /// `true`: the Repair workspace button — an explicit repair that may
+    /// unregister this worktree's stale entry, adopt a moved checkout,
+    /// recreate the branch from its base, re-link, and respawn a live pane.
+    /// `false` (default): the automatic pre-attach check, which only creates
+    /// what is confirmed missing and reports the rest.
+    #[serde(default)]
+    pub explicit: bool,
 }
 
 /// Launch a Claude background session on the given host.

@@ -10,7 +10,8 @@
   import { nativeWriteText, nativeReadText } from './clipboard_native';
   import { hintAnchor } from './hints';
   import { toIpcError } from './result';
-  import { pushError } from './toasts';
+  import { push, pushError } from './toasts';
+  import { repairSession } from './sessions';
   import { keyToBytes, detectMac } from './terminal_keys';
   import { copyOnSelect } from './prefs';
   import { get } from 'svelte/store';
@@ -518,6 +519,34 @@
       resizeTimer = setTimeout(applyResize, RESIZE_DEBOUNCE_MS);
     });
     resizeObserver.observe(container);
+
+    // Automatic workspace check before attach. It only CREATES what is
+    // confirmed missing: re-adds a deleted, unregistered worktree from its
+    // existing branch, and starts a tmux session that is confirmed dead. It
+    // never respawns a live pane (that would kill a running Claude just
+    // because it was selected), never unregisters, adopts or rebranches —
+    // those are Repair workspace only; we say so instead. A healthy session
+    // costs one probe; orphans and background rows have nothing to check. An
+    // offline host is left to the attach error.
+    if (sess.project_id != null && sess.kind !== 'bg') {
+      const rep = await repairSession(sess.id);
+      if (rep.ok) {
+        const v = rep.value;
+        const actions = v?.actions ?? [];
+        if (actions.length > 0) {
+          const branch = v?.branch_source ? ` [branch: ${v.branch_source}]` : '';
+          push({ kind: 'info', message: `Repaired workspace for ${sess.tmux_name}: ${actions.join('; ')}${branch}` });
+        }
+        if (v?.needs_explicit_repair || v?.tmux_cwd_stale) {
+          push({
+            kind: 'info',
+            message: `${sess.tmux_name} needs Repair workspace: ${(v.warnings ?? []).join('; ')}`,
+          });
+        }
+      } else if (rep.error.code !== 'E_HOST_OFFLINE') {
+        pushError(rep.error, 'Workspace check failed');
+      }
+    }
 
     try {
       await invoke('pty_open', {

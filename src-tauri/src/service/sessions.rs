@@ -327,7 +327,7 @@ async fn capture_pane_intel(
     map
 }
 
-fn exec_for(host: &str, ssh: &Arc<SshClient>) -> Box<dyn TmuxExec> {
+pub(crate) fn exec_for(host: &str, ssh: &Arc<SshClient>) -> Box<dyn TmuxExec> {
     if host == "local" {
         Box::new(LocalTmux)
     } else {
@@ -1054,7 +1054,7 @@ pub struct NewSessionArgs {
 }
 
 /// Look up `(owner, repo)` for a given project id.
-fn fetch_owner_repo(s: &Store, project_id: i64) -> Result<(String, String), IpcError> {
+pub(crate) fn fetch_owner_repo(s: &Store, project_id: i64) -> Result<(String, String), IpcError> {
     let mut stmt = s
         .conn_ref()
         .prepare("SELECT owner, repo FROM projects WHERE id=?1")?;
@@ -1080,7 +1080,7 @@ fn fetch_worktree(s: &Store, worktree_id: i64) -> Result<(String, Option<String>
 /// `~/projects/github.com/<owner>/<repo>` for the project root and
 /// `~/projects/github.com/<owner>/<repo>/.claude/worktrees/<wt>` for non-main
 /// worktrees. Returns just the project root if `wt_name` is None or "main".
-fn remote_project_path(
+pub(crate) fn remote_project_path(
     home: &str,
     owner: &str,
     repo: &str,
@@ -1517,10 +1517,49 @@ async fn new_session_inner(
         crate::tmux::pane_command_for(claude_id.as_deref())
     };
 
+    // Automatic self-repair for an EXISTING worktree row / main checkout: the
+    // row may point at a directory that was deleted since it was written.
+    // Automatic means create-only (re-add a missing worktree from its existing
+    // branch); anything more returns E_REPAIR_REQUIRED before tmux starts.
+    // A brand-new worktree was just created by `worktree_add_script`.
+    let (path, repaired) = if args.new_worktree.is_none() {
+        let rep = crate::service::repair::ensure_for_new_session(
+            store,
+            ssh,
+            crate::service::repair::NewSessionWorkspace {
+                host_alias: &args.host_alias,
+                project_id: args.project_id,
+                worktree_id: args.worktree_id,
+                tmux_name: &args.name,
+                pane_cmd: &pane_cmd,
+                cwd: &path.to_string_lossy(),
+                base_branch: args.base_branch.as_deref(),
+            },
+        )
+        .await?;
+        (
+            PathBuf::from(rep.cwd.clone()),
+            Some(rep).filter(|r| !r.actions.is_empty()),
+        )
+    } else {
+        (path, None)
+    };
+
     let tmux = exec_for(&args.host_alias, ssh);
     tmux.new_session(&args.name, &path, &pane_cmd).await?;
 
     reconcile_one_host(store, ssh, &args.host_alias).await?;
+    if let Some(rep) = &repaired {
+        // Same detail as every other workspace_repaired event (branch_source
+        // included), attached now that reconcile created the row.
+        record_session_event(
+            store,
+            &args.host_alias,
+            &args.name,
+            crate::service::repair::EVENT_REPAIRED,
+            Some(crate::service::repair::event_detail(rep)),
+        );
+    }
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
@@ -1907,7 +1946,7 @@ pub async fn restart_session(
     // restarted shell session comes back as a shell, not a Claude pane. Read
     // the controller under the same lock and refuse to restart ourselves
     // unless forced.
-    let (kind, claude_id) = {
+    let (kind, claude_id, session_id) = {
         let s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
@@ -1918,13 +1957,44 @@ pub async fn restart_session(
             args.force,
         )?;
         match s.get_session(&args.name, &args.host_alias)? {
-            Some(r) => (r.kind, r.claude_session_id),
-            None => ("work".to_string(), None),
+            Some(r) => (r.kind, r.claude_session_id, Some(r.id)),
+            None => ("work".to_string(), None, None),
         }
     };
     let pane_cmd: String = recreate_pane_command(&kind, claude_id.as_deref());
     let tmux = exec_for(&args.host_alias, ssh);
-    tmux.restart_session(&args.name, &pane_cmd).await?;
+    // Automatic self-repair (create-only) before the pane is respawned, then
+    // respawn INTO the verified directory (a pane whose cwd was deleted keeps
+    // the dead inode until respawned with an explicit `-c`). A dead tmux
+    // session is created instead of failing with "can't find session". A
+    // workspace that needs more returns E_REPAIR_REQUIRED. Sessions with
+    // nothing to repair (orphans, bg rows) keep the plain respawn.
+    let repaired = match session_id {
+        Some(id) => match crate::service::repair::ensure_session_workspace(
+            id,
+            crate::service::repair::Entry::Restart,
+            store,
+            ssh,
+        )
+        .await
+        {
+            Ok(rep) => Some(rep),
+            Err(e) if e.code == codes::E_NOREPO || e.code == codes::E_BG_SESSION => None,
+            Err(e) => return Err(e),
+        },
+        None => None,
+    };
+    match repaired {
+        Some(rep) if !rep.tmux_alive => {
+            tmux.new_session(&args.name, std::path::Path::new(&rep.cwd), &pane_cmd)
+                .await?
+        }
+        Some(rep) => {
+            tmux.respawn_pane_in(&args.name, std::path::Path::new(&rep.cwd), &pane_cmd)
+                .await?
+        }
+        None => tmux.restart_session(&args.name, &pane_cmd).await?,
+    }
     reconcile_one_host(store, ssh, &args.host_alias).await?;
     let s = store
         .lock()
@@ -2453,7 +2523,25 @@ pub async fn spawn_review(
         let cwd_src = cwd_source_for_session(&s, &source)?;
         (source, cwd_src)
     };
-    let cwd = resolve_cwd_source(cwd_src, &source.host_alias, ssh).await?;
+    // Automatic workspace check (create-only) in the SOURCE's workspace, and
+    // use the directory the probe resolved on the host. The remote guess in
+    // `resolve_cwd_source` assumes `.claude/worktrees/`, so on a
+    // `.worktrees/`-layout host it named a missing dir and tmux silently fell
+    // back to $HOME. Orphans / bg rows keep the plain resolution.
+    let cwd = match crate::service::repair::ensure_session_workspace(
+        source.id,
+        crate::service::repair::Entry::SpawnReview,
+        store,
+        ssh,
+    )
+    .await
+    {
+        Ok(rep) => rep.cwd,
+        Err(e) if e.code == codes::E_NOREPO || e.code == codes::E_BG_SESSION => {
+            resolve_cwd_source(cwd_src, &source.host_alias, ssh).await?
+        }
+        Err(e) => return Err(e),
+    };
 
     // 2. Spawn the review tmux session (off-lock).
     //    A review runs Claude Code — same pane command as any "work" session.
@@ -2518,7 +2606,7 @@ pub async fn spawn_review(
 /// shell; otherwise resume the session's own Claude id (or `--continue` for a
 /// legacy session with no stored id). A stored id is validated before use so a
 /// tampered DB value can't inject shell — an invalid id degrades to `None`.
-fn recreate_pane_command(kind: &str, claude_session_id: Option<&str>) -> String {
+pub(crate) fn recreate_pane_command(kind: &str, claude_session_id: Option<&str>) -> String {
     if kind == "shell" {
         return crate::tmux::shell_pane_command(None);
     }
@@ -2570,7 +2658,23 @@ pub async fn recreate_session(
         let pane_cmd = recreate_pane_command(&sess.kind, sess.claude_session_id.as_deref());
         (sess, cwd_src, pane_cmd)
     };
-    let cwd = resolve_cwd_source(cwd_src, &sess.host_alias, ssh).await?;
+    // Automatic self-repair (create-only): re-add a deleted worktree from its
+    // existing branch and use the verified path; anything more returns
+    // E_REPAIR_REQUIRED. Orphans (no project) keep the plain resolution.
+    let cwd = match crate::service::repair::ensure_session_workspace(
+        sess.id,
+        crate::service::repair::Entry::Recreate,
+        store,
+        ssh,
+    )
+    .await
+    {
+        Ok(rep) => rep.cwd,
+        Err(e) if e.code == codes::E_NOREPO => {
+            resolve_cwd_source(cwd_src, &sess.host_alias, ssh).await?
+        }
+        Err(e) => return Err(e),
+    };
 
     let tmux = exec_for(&sess.host_alias, ssh);
     // Tear down any live session first (frees the old process tree / wedged

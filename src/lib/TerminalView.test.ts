@@ -95,6 +95,17 @@ afterEach(() => {
 });
 
 describe('TerminalView session identity (FE-1)', () => {
+  it('runs only the automatic workspace check (never explicit) before attaching', async () => {
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    const repair = calls('repair_session');
+    expect(repair).toHaveLength(1);
+    expect(repair[0][1]).toEqual({ args: { session_id: 1, explicit: false } });
+    const order = inv().mock.calls.map((c) => c[0]);
+    expect(order.indexOf('repair_session')).toBeLessThan(order.indexOf('pty_open'));
+  });
+
   it('attaches to the selected session by host + name', async () => {
     render(TerminalView);
     selectSession(onAlpha);

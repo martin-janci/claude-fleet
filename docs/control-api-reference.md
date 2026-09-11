@@ -171,6 +171,12 @@ Rename a tmux session on a host. Returns the updated session row as JSON. Addres
 
 Parameters: `host_alias`, `new_name`, `old_name`, `session_id`
 
+### `repair_session`
+
+Explicitly repair a session's workspace (the same action as the Repair workspace button): make its directory a healthy git worktree on its branch and its tmux session run there. Unlike the automatic checks on create/restart/recreate/attach (which only re-add a missing worktree from its existing branch), this may unregister this worktree's own stale git entry (git worktree remove --force; never a blanket prune), adopt its branch's checkout elsewhere (refused when another fleet workspace uses it), recreate the branch from the base branch once origin confirms it is gone, run git worktree repair, and respawn a live pane whose directory vanished. No-op on a healthy session. Gated by mcp.confirm_destructive (retry with confirm_nonce). Returns a JSON RepairReport: cwd, healthy, actions (in order), warnings, branch_source, tmux (created|respawned), sibling_session_ids. Errors: E_REPO_MISSING (never faked with mkdir), E_BRANCH_CHECKED_OUT, E_WORKSPACE_LOCKED, E_REPAIR_FAILED, E_HOST_OFFLINE, E_CONFIRM_REQUIRED.
+
+Parameters: `confirm_nonce`, `host_alias`, `name`, `session_id`
+
 ### `repo_branches`
 
 List local + remote branches for a session's worktree with ahead/behind. Returns JSON array.
@@ -291,6 +297,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::discard_kill_session`
 - `commands::worktrees::list_worktrees`
 - `commands::worktrees::delete_worktree`
+- `commands::sessions::repair_session`
 - `commands::sessions::rename_session`
 - `commands::sessions::set_session_friendly_name`
 - `commands::sessions::restart_session`

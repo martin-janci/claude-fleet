@@ -70,6 +70,9 @@ pub const CONFIRM_TOOLS: &[&str] = &[
     "kill_session",
     "delete_worktree",
     "set_clipboard",
+    // Explicit workspace repair: may unregister a worktree entry, re-path a
+    // row, recreate a branch and respawn a live pane.
+    "repair_session",
 ];
 
 pub fn needs_confirmation(name: &str) -> bool {
@@ -372,11 +375,21 @@ mod tests {
     }
 
     #[test]
-    fn confirm_gated_tools_are_the_four_destructive_ones() {
+    fn confirm_gated_tools_are_the_destructive_ones() {
         for t in CONFIRM_TOOLS {
             assert!(needs_confirmation(t));
             assert!(!is_readonly_tool(t));
         }
+        for t in [
+            "broadcast_prompt",
+            "kill_session",
+            "delete_worktree",
+            "set_clipboard",
+            "repair_session",
+        ] {
+            assert!(needs_confirmation(t), "{t} must be confirm-gated");
+        }
+        assert_eq!(CONFIRM_TOOLS.len(), 5);
         assert!(!needs_confirmation("send_prompt"));
     }
 

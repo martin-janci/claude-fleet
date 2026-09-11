@@ -23,6 +23,7 @@ it.
 | Hosts **offline** right after the laptop wakes | SSH ControlMasters went stale during sleep | Wait one or two reconcile passes, or click **Re-probe**. See [after sleep / wake](#after-laptop-sleep--wake). |
 | Sidebar looks **stale** | Cache-first `list_sessions` inside the reconcile interval | Click **Refresh** (forced pass). See [reconcile tick](#the-reconcile-tick-reconcileinterval_secs-and-refresh). |
 | Need logs / reporting a bug | n/a | **Settings → Diagnostics → Copy diagnostics**; logs under `<app data>/logs/`. See [Logs](#logs-where-they-live-and-how-to-raise-verbosity). |
+| Session's **worktree directory vanished** (git errors in the pane, `cd: no such directory`, new panes fail) | The worktree was deleted, pruned, or moved on disk while the fleet row (and possibly the tmux session) survived | New session, Restart, Recreate and opening the terminal re-create only what is confirmed missing; anything more (a stale git entry, a moved checkout, a deleted branch, a pane in a removed directory) needs **Repair workspace** in the session details (or the `repair_session` tool). See [Repairing a session whose directory vanished](#repairing-a-session-whose-directory-vanished). (`E_REPAIR_REQUIRED`, `E_REPO_MISSING`, `E_BRANCH_CHECKED_OUT`, `E_WORKSPACE_LOCKED`, `E_REPAIR_FAILED`) |
 | *(Developers)* `Failed to resolve import "@tauri-apps/plugin-clipboard-manager"` in `App.test.ts` / `clipboard_native.test.ts` | Stale `node_modules` after pulling | Run `pnpm install --frozen-lockfile` (pnpm 10; `corepack pnpm@10 install --frozen-lockfile` if your pnpm is older), then re-run `pnpm test`. `localStorage` is polyfilled in `vitest.setup.ts`, so a missing-`localStorage` failure is not expected. |
 
 ---
@@ -227,6 +228,80 @@ Tokens are never included. The master token and every per-host token are
 masked even when they show up in a log line or error message. Hostnames, SSH
 aliases and file paths **are** included, so read the bundle before you post
 it publicly.
+### Repairing a session whose directory vanished
+
+A session row can outlive its directory: someone ran `git worktree remove`
+or `rm -rf` on the worktree, a cleanup job pruned it, the checkout was moved
+to the other layout (`.worktrees/` vs `.claude/worktrees/`), or the branch was
+deleted after a merge. The tmux pane then sits in a deleted inode — git
+commands fail, `cd` errors, new windows cannot start — and a plain Recreate
+or Restart would rebuild the session at the repo root.
+
+One probe script inspects the host (paths are compared in their resolved
+form, so a project under a symlinked directory is fine); a healthy workspace
+is a no-op. What happens next depends on who asked.
+
+**Automatically** — new session on an existing worktree, Restart, Recreate,
+and opening the terminal — fleet only *creates* what is confirmed missing:
+
+- `git worktree add` for the session's branch when that branch still exists
+  locally or as `origin/<branch>`, and the target directory is absent and not
+  registered with git;
+- `tmux new-session -c <dir>` (terminal open only) when `tmux has-session`
+  confirms the session is gone.
+
+Anything else is reported, never done: New session / Restart / Recreate
+stop with `E_REPAIR_REQUIRED` and say what an explicit repair would do;
+opening the terminal shows a notice and attaches anyway. A live pane is never
+restarted just because you opened it.
+
+**Explicitly** — **Repair workspace** in the session details (or the
+`repair_session` control-API tool, which is behind the desktop confirmation
+when that is on) — fleet may also:
+
+1. `git worktree remove --force -- <path>` for this worktree's own stale
+   entry (never a repo-wide prune, so other worktrees' stale entries — for
+   example ones on an unmounted volume — are left alone);
+2. recreate a branch that exists nowhere locally: it asks origin first
+   (`git ls-remote`); if origin has it, it is fetched and tracked; only when
+   origin confirms it is gone is a new branch made from the project's base
+   branch (recorded as `branch_from_base:<start>` on the timeline and in the
+   notice). A fetch or connection error stops the repair;
+3. `git worktree repair` when the directory exists but its `.git` link is
+   stale;
+4. adopt the existing checkout when the branch is checked out in another
+   linked worktree (the row's path is corrected) — only after that checkout
+   verifies as healthy, and never when another fleet worktree or session uses
+   it;
+5. `tmux respawn-pane -k -c <dir>` for a live pane whose reported directory
+   no longer exists (the pane's process restarts; Claude resumes its
+   conversation).
+
+Each run that changed something appends a `workspace_repaired` event (with
+the actions and the branch source) to the session timeline; a refused or
+failed repair appends `workspace_repair_failed`. The repair never deletes
+files and never ghosts or removes the session row.
+
+Cases that are reported rather than fixed:
+
+- `E_REPAIR_REQUIRED` — an automatic check found something only **Repair
+  workspace** may fix (see above).
+
+- `E_REPO_MISSING` — the project's main checkout is missing or is not a git
+  repository. It is never faked with `mkdir`; restore or re-clone it (a new
+  session on a remote host clones automatically).
+- `E_BRANCH_CHECKED_OUT` — the worktree's branch is checked out in the main
+  checkout. Switch the main checkout to another branch, then repair again.
+- `E_WORKSPACE_LOCKED` — the worktree is `git worktree lock`ed and its
+  directory is gone. Run `git worktree unlock -- <path>` if the lock is stale.
+- `E_REPAIR_FAILED` — a git step failed (permissions, disk full: the message
+  carries git's stderr), origin could not be asked about a missing branch, the
+  result did not verify, or the directory exists, is not empty and is not a
+  worktree (move it aside; it is never deleted). If the connection dropped
+  while the repair was being applied, the message says it may be partially
+  applied — run **Repair workspace** again.
+- `E_HOST_OFFLINE` — the host could not be reached before anything ran;
+  nothing was changed.
 
 ### Releases and tags
 
