@@ -488,6 +488,7 @@ impl Store {
             tx.execute_batch(sql)?;
             tx.commit()?;
         }
+        self.reap_orphan_session_events()?;
         Ok(())
     }
 
@@ -2444,11 +2445,38 @@ impl Store {
         self.conn.execute(&sql, params.as_slice())
     }
 
+    /// Hard-delete one session row (ghost dismissal) together with what dies
+    /// with it, in one transaction: its `session_events` timeline and the
+    /// messages addressed TO it (an inbox nobody can read). Neither table has
+    /// an FK cascade, and `sessions.id` has no AUTOINCREMENT, so leftovers
+    /// would surface on the next session that reuses the id. Kept: messages it
+    /// SENT (they live in the recipients' inboxes) and tasks it requested or
+    /// worked — the task sweep fails a task whose worker row is gone.
     pub fn delete_session(&self, id: i64) -> Result<(), rusqlite::Error> {
-        self.conn
-            .execute("DELETE FROM sessions WHERE id=?1", rusqlite::params![id])?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM session_events WHERE session_id=?1",
+            rusqlite::params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM session_messages WHERE to_session_id=?1",
+            rusqlite::params![id],
+        )?;
+        tx.execute("DELETE FROM sessions WHERE id=?1", rusqlite::params![id])?;
+        tx.commit()?;
         self.bus.session_killed(id);
         Ok(())
+    }
+
+    /// Drop `session_events` rows whose session no longer exists. Deletes that
+    /// predate `delete_session` reaping the timeline left such orphans behind;
+    /// a reused session id would inherit them. Idempotent, runs on open.
+    fn reap_orphan_session_events(&self) -> Result<usize> {
+        self.conn.execute(
+            "DELETE FROM session_events \
+             WHERE NOT EXISTS (SELECT 1 FROM sessions WHERE sessions.id = session_events.session_id)",
+            [],
+        )
     }
 
     pub fn delete_sessions_not_in(
@@ -4310,6 +4338,71 @@ mod tests {
         let evts = bus.take();
         assert_eq!(evts.len(), 1);
         assert_eq!(evts[0], format!("session:killed:{id}"));
+    }
+
+    #[test]
+    fn delete_session_reaps_timeline_and_inbox_but_keeps_sent_messages_and_tasks() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let dead = store
+            .upsert_session("dead", "alpha", None, None, 1, 1, "ghost", None)
+            .unwrap();
+        let peer = store
+            .upsert_session("peer", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store
+            .insert_session_event(dead, "status_change", Some("idle"))
+            .unwrap();
+        store
+            .insert_session_event(peer, "status_change", Some("idle"))
+            .unwrap();
+        store
+            .insert_message(peer, dead, "to the dead", "message", None)
+            .unwrap();
+        store
+            .insert_message(dead, peer, "from the dead", "message", None)
+            .unwrap();
+        let task = store.insert_task(Some(peer), Some(dead), "p", "n").unwrap();
+
+        store.delete_session(dead).unwrap();
+
+        assert!(store.list_session_events(dead, 10).unwrap().is_empty());
+        assert!(store.list_inbox(dead, false, 10).unwrap().is_empty());
+        assert_eq!(store.list_session_events(peer, 10).unwrap().len(), 1);
+        assert_eq!(
+            store.list_inbox(peer, false, 10).unwrap().len(),
+            1,
+            "a message the dead session SENT stays in the recipient's inbox"
+        );
+        assert!(
+            store.get_task(task.id).unwrap().is_some(),
+            "the task sweep needs the task to fail it"
+        );
+    }
+
+    #[test]
+    fn open_reaps_orphaned_session_events_idempotently() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let live = store
+            .upsert_session("live", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store
+            .insert_session_event(live, "status_change", Some("idle"))
+            .unwrap();
+        // Left behind by a delete that predates the reap in delete_session.
+        store
+            .insert_session_event(live + 1000, "killed", None)
+            .unwrap();
+
+        store.migrate().unwrap();
+        store.migrate().unwrap();
+
+        assert_eq!(store.list_session_events(live, 10).unwrap().len(), 1);
+        assert!(store
+            .list_session_events(live + 1000, 10)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
