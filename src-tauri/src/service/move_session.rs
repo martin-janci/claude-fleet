@@ -21,10 +21,13 @@
 //!    the source HEAD when it lags, and tmux starts `cl --resume <id>` there
 //!    (the recreate pane command). The move then waits, bounded, for the row
 //!    to be `running` and the transcript to be in place.
-//! 4. **Source** — only once the target is confirmed: a `session_moved` event
-//!    on both rows (the new row's `parent_session_id` is the source), then —
-//!    unless `keep_source`, and only if the source transcript still has the
-//!    size and mtime the copy was taken at — the normal kill path.
+//! 4. **Source** — only once the target is confirmed (the new row's
+//!    `parent_session_id` is the source): unless `keep_source`, and only if
+//!    the source transcript still has the size and mtime the copy was taken
+//!    at, the normal kill path, followed by one more look (a write that
+//!    slipped in before the kill becomes a report warning). Then — and only
+//!    then — a `session_moved` event on both rows. A partial move records
+//!    `session_move_partial` (with the failing step) instead.
 //!
 //! Failure handling: every step before the target tmux session starts leaves
 //! the source untouched and returns the step's own error. Any failure after
@@ -855,7 +858,10 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
     let stored_transcript = s
         .session_transcript_path(row.id)?
         .filter(|p| p.ends_with(&format!("/{claude_id}.jsonl")));
-    let cap = max_transcript_bytes(s.get_setting(SETTING_MAX_TRANSCRIPT_MB)?.as_deref());
+    let cap = max_transcript_bytes(Some(&crate::service::settings::get_string(
+        s,
+        SETTING_MAX_TRANSCRIPT_MB,
+    )));
     let target_taken = s
         .list_sessions_for_host(target)?
         .into_iter()
@@ -923,8 +929,79 @@ fn before_target(step: &str, e: IpcError) -> IpcError {
     out
 }
 
-/// [`move_session`] over any transport and hooks.
+/// Timeline event recorded instead of [`EVENT_MOVED`] when a move stops after
+/// the target started (`E_MOVE_PARTIAL`): on the source, and on the target
+/// row when it was registered. Carries the failing step.
+pub const EVENT_MOVE_PARTIAL: &str = "session_move_partial";
+
+/// Run [`locate_script`] on `host` and parse it (the post-copy checks).
+async fn locate_on(
+    ssh: &dyn SshExec,
+    host: &str,
+    stored_path: Option<&str>,
+    claude_id: &str,
+) -> Result<Located, IpcError> {
+    let out = sh(
+        ssh,
+        host,
+        &locate_script(stored_path, claude_id),
+        GIT_TIMEOUT,
+    )
+    .await?;
+    if !out.status.success() {
+        return Err(IpcError::new(
+            codes::E_SHELL,
+            format!(
+                "re-locating the source transcript failed: {}",
+                stderr_of(&out)
+            ),
+        ));
+    }
+    parse_locate(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Record [`EVENT_MOVE_PARTIAL`] for a partial move. Best effort.
+fn record_partial(store: &Mutex<Store>, source_id: i64, to_host: &str, e: &IpcError) {
+    let d = e.details.clone().unwrap_or_default();
+    let target_id = d["target_session_id"].as_i64();
+    let detail = serde_json::json!({
+        "step": d["step"],
+        "to_host": to_host,
+        "from_session_id": source_id,
+        "to_session_id": target_id,
+        "cause_code": d["cause_code"],
+    })
+    .to_string();
+    let Ok(s) = store.lock() else { return };
+    for sid in std::iter::once(source_id).chain(target_id) {
+        if let Err(err) = s.insert_session_event(sid, EVENT_MOVE_PARTIAL, Some(&detail)) {
+            eprintln!("[event] insert {EVENT_MOVE_PARTIAL} failed for session {sid}: {err}");
+        }
+    }
+}
+
+/// [`move_session`] over any transport and hooks. A partial move
+/// (`E_MOVE_PARTIAL`) is recorded on the timeline as [`EVENT_MOVE_PARTIAL`].
 pub async fn move_session_with(
+    args: MoveSessionArgs,
+    store: &Mutex<Store>,
+    ssh: &dyn SshExec,
+    hooks: &dyn MoveHooks,
+    opts: MoveOptions,
+) -> Result<MoveReport, IpcError> {
+    let source_id = args.session_id;
+    let to_host = args.target_host_alias.clone();
+    move_session_steps(args, store, ssh, hooks, opts)
+        .await
+        .inspect_err(|e| {
+            if e.code == codes::E_MOVE_PARTIAL {
+                record_partial(store, source_id, &to_host, e);
+            }
+        })
+}
+
+/// The move's steps (see the module docs).
+async fn move_session_steps(
     args: MoveSessionArgs,
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
@@ -1232,59 +1309,24 @@ pub async fn move_session_with(
         ));
     };
 
-    // 6. Timeline on both rows, then the source.
-    let detail = serde_json::json!({
-        "from_host": src,
-        "to_host": target,
-        "from_session_id": snap.row.id,
-        "to_session_id": target_row.id,
-        "claude_session_id": id,
-        "branch": snap.branch,
-        "bytes": copied,
-        "kept_source": args.keep_source,
-    })
-    .to_string();
-    if let Ok(s) = store.lock() {
-        for sid in [snap.row.id, target_row.id] {
-            if let Err(e) = s.insert_session_event(sid, EVENT_MOVED, Some(&detail)) {
-                eprintln!("[event] insert {EVENT_MOVED} failed for session {sid}: {e}");
-            }
-        }
-    }
+    // 6. The source: check it wrote nothing since the copy, kill it (unless
+    //    keep_source), and only then record the move.
     let mut source_killed = false;
     if !args.keep_source {
         // The source kept running through the copy: if its transcript moved
         // on since, it took a turn the target does not have. Killing it would
         // lose that turn, so stop here with both sessions alive.
-        let recheck = async {
-            let out = sh(
-                ssh,
-                &src,
-                &locate_script(snap.stored_transcript.as_deref(), &id),
-                GIT_TIMEOUT,
-            )
-            .await?;
-            if !out.status.success() {
-                return Err(IpcError::new(
-                    codes::E_SHELL,
-                    format!(
-                        "re-locating the source transcript failed: {}",
-                        stderr_of(&out)
-                    ),
-                ));
-            }
-            parse_locate(&String::from_utf8_lossy(&out.stdout))
-        }
-        .await
-        .map_err(|e| {
-            partial(
-                "re-checking the source transcript",
-                &target,
-                &tmux_name,
-                Some(target_row.id),
-                &e,
-            )
-        })?;
+        let recheck = locate_on(ssh, &src, snap.stored_transcript.as_deref(), &id)
+            .await
+            .map_err(|e| {
+                partial(
+                    "re-checking the source transcript",
+                    &target,
+                    &tmux_name,
+                    Some(target_row.id),
+                    &e,
+                )
+            })?;
         if recheck.size != located.size || recheck.mtime != located.mtime {
             return Err(partial(
                 "source transcript changed after copy",
@@ -1313,6 +1355,43 @@ pub async fn move_session_with(
                 )
             })?;
         source_killed = true;
+        // One last look: a write between the final check and the kill means
+        // the target may lack the source's last turn. Nothing is left to undo,
+        // so say so in the report.
+        match locate_on(ssh, &src, snap.stored_transcript.as_deref(), &id).await {
+            Ok(after) if after.size != recheck.size || after.mtime != recheck.mtime => {
+                warnings.push(format!(
+                    "the source wrote after the final check and before the kill (transcript {} -> {} bytes, mtime {} -> {}); the target may be missing its last turn — compare the two with session_transcript",
+                    recheck.size, after.size, recheck.mtime, after.mtime
+                ));
+            }
+            Ok(_) => {}
+            Err(e) => warnings.push(format!(
+                "could not re-check the source transcript after the kill ({}: {}); the target may be missing its last turn",
+                e.code, e.message
+            )),
+        }
+    }
+
+    // 7. The move is complete: record it on both rows.
+    let detail = serde_json::json!({
+        "from_host": src,
+        "to_host": target,
+        "from_session_id": snap.row.id,
+        "to_session_id": target_row.id,
+        "claude_session_id": id,
+        "branch": snap.branch,
+        "bytes": copied,
+        "kept_source": args.keep_source,
+        "source_killed": source_killed,
+    })
+    .to_string();
+    if let Ok(s) = store.lock() {
+        for sid in [snap.row.id, target_row.id] {
+            if let Err(e) = s.insert_session_event(sid, EVENT_MOVED, Some(&detail)) {
+                eprintln!("[event] insert {EVENT_MOVED} failed for session {sid}: {e}");
+            }
+        }
     }
 
     Ok(MoveReport {
@@ -1363,6 +1442,12 @@ mod tests {
         /// Starting the target makes the source transcript grow (a turn
         /// taken on the source after the copy).
         grow_source_on_start: bool,
+        /// Killing the source makes its transcript grow (a write that
+        /// slipped in after the final check).
+        grow_source_on_kill: bool,
+        /// Whether `session_moved` was already on the source when the kill
+        /// ran (`None` = no kill).
+        moved_at_kill: Mutex<Option<bool>>,
         started: Mutex<Vec<(String, String)>>,
         log: Mutex<Vec<String>>,
     }
@@ -1376,6 +1461,8 @@ mod tests {
                 target_status: "running",
                 kill_fails: false,
                 grow_source_on_start: false,
+                grow_source_on_kill: false,
+                moved_at_kill: Mutex::new(None),
                 started: Mutex::new(Vec::new()),
                 log: Mutex::new(Vec::new()),
             }
@@ -1446,12 +1533,30 @@ mod tests {
         }
         async fn kill_source(
             &self,
-            _: &Mutex<Store>,
+            store: &Mutex<Store>,
             host: &str,
             name: &str,
         ) -> Result<(), IpcError> {
             if self.kill_fails {
                 return Err(IpcError::new("E_TMUX", "can't find session"));
+            }
+            {
+                let s = store.lock().unwrap();
+                let id = s.get_session(name, host).unwrap().map(|r| r.id);
+                let moved = id.is_some_and(|id| {
+                    s.list_session_events(id, 50)
+                        .unwrap()
+                        .iter()
+                        .any(|e| e.kind == EVENT_MOVED)
+                });
+                *self.moved_at_kill.lock().unwrap() = Some(moved);
+            }
+            if self.grow_source_on_kill {
+                self.fake.on_host(
+                    "alpha",
+                    Match::script_contains("# cf-move:locate"),
+                    Reply::ok(&locate_out(TRANSCRIPT.len() + 99, MTIME + 9)),
+                );
             }
             self.log.lock().unwrap().push(format!("kill {host} {name}"));
             Ok(())
@@ -1671,8 +1776,68 @@ mod tests {
             assert_eq!(d["to_session_id"], rep.target_session_id);
             assert_eq!(d["bytes"], TRANSCRIPT.len() as u64);
         }
-        // Source killed through the normal path, after the target confirmed.
+        // Source killed through the normal path, after the target confirmed —
+        // and session_moved was recorded only after that kill succeeded.
         assert_eq!(hooks.log().last().unwrap(), "kill alpha dev-o-r--feat");
+        assert_eq!(
+            *hooks.moved_at_kill.lock().unwrap(),
+            Some(false),
+            "session_moved must not be recorded before the kill"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_write_between_the_final_check_and_the_kill_is_a_warning() {
+        let f = fixture();
+        let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        hooks.grow_source_on_kill = true;
+        let rep = run(&f, &hooks, false)
+            .await
+            .expect("the move still completes");
+        assert!(rep.source_killed);
+        assert!(
+            rep.warnings
+                .iter()
+                .any(|w| w.contains("after the final check") && w.contains("last turn")),
+            "{:?}",
+            rep.warnings
+        );
+        assert!(events(&f, f.source_id)
+            .iter()
+            .any(|(k, _)| k == EVENT_MOVED));
+    }
+
+    #[tokio::test]
+    async fn a_partial_move_records_session_move_partial_not_session_moved() {
+        for case in ["kill_fails", "source_changed", "never_confirmed"] {
+            let f = fixture();
+            let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+            match case {
+                "kill_fails" => hooks.kill_fails = true,
+                "source_changed" => hooks.grow_source_on_start = true,
+                _ => hooks.target_status = "ghost",
+            }
+            let err = run(&f, &hooks, false).await.unwrap_err();
+            assert_eq!(err.code, codes::E_MOVE_PARTIAL, "{case}: {}", err.message);
+            let details = err.details.clone().expect("details");
+            let tid = details["target_session_id"].as_i64().expect("target id");
+            for id in [f.source_id, tid] {
+                let ev = events(&f, id);
+                assert!(
+                    ev.iter().all(|(k, _)| k != EVENT_MOVED),
+                    "{case}: no session_moved on {id}: {ev:?}"
+                );
+                let (_, detail) = ev
+                    .iter()
+                    .find(|(k, _)| k == EVENT_MOVE_PARTIAL)
+                    .unwrap_or_else(|| panic!("{case}: session_move_partial on {id}: {ev:?}"));
+                let d: serde_json::Value =
+                    serde_json::from_str(detail.as_deref().unwrap()).unwrap();
+                assert_eq!(d["step"], details["step"], "{case}");
+                assert_eq!(d["to_session_id"], tid);
+                assert_eq!(d["to_host"], "beta");
+            }
+        }
     }
 
     #[tokio::test]
