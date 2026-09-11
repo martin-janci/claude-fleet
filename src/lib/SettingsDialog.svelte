@@ -29,9 +29,14 @@
     setFleetSetting,
     settingBool,
     settingSecs,
+    settingInt,
+    parseHoursInput,
+    parseIntInput,
     secsToHours,
     hoursToSecs,
     SETTING_KEYS,
+    MAX_SECS,
+    MOVE_MAX_TRANSCRIPT_MB_MAX,
     PROJECTS_LOCAL_ENV_KEY,
     settingPathMap,
     settingLayout,
@@ -230,6 +235,38 @@
     if (!Number.isFinite(secs) || secs < 0) return;
     void applySetting(key, String(secs));
   }
+  // --- Limits: task TTL + move transcript cap (backend settings table) ---
+  // Values go to the backend as entered: it owns the range check, and its
+  // E_INVALID message is what the row shows.
+  let limitsError: string | null = $state(null);
+  let limitsBusy = $state(false);
+  async function applyLimit(key: SettingKey, value: string) {
+    limitsBusy = true;
+    limitsError = null;
+    const r = await setFleetSetting(key, value);
+    limitsBusy = false;
+    if (!r.ok) limitsError = r.error.message;
+  }
+  // Nothing is dropped silently: an input that cannot be sent (empty,
+  // negative hours, a value that rounds to 0 s = "never", a non-integer)
+  // gets a message naming the field instead.
+  function onLimitHoursChange(key: SettingKey, label: string, e: Event) {
+    const r = parseHoursInput((e.currentTarget as HTMLInputElement).value);
+    if ('error' in r) {
+      limitsError = `${label}: ${r.error}`;
+      return;
+    }
+    void applyLimit(key, String(r.secs));
+  }
+  function onLimitIntChange(key: SettingKey, label: string, e: Event) {
+    const r = parseIntInput((e.currentTarget as HTMLInputElement).value);
+    if ('error' in r) {
+      limitsError = `${label}: ${r.error}`;
+      return;
+    }
+    void applyLimit(key, r.value);
+  }
+
   function onIdleMinutesChange(e: Event) {
     const v = Number.parseInt((e.currentTarget as HTMLInputElement).value, 10);
     if (Number.isFinite(v) && v >= 0) attentionIdleMinutes.set(v);
@@ -713,6 +750,34 @@
         <span class="hook-desc">seconds between reconcile passes (0 disables; restart to apply)</span>
       </div>
       {#if automationError}<p class="err">{automationError}</p>{/if}
+    </section>
+
+    <section class="block" data-testid="limits-section">
+      <div class="section-header">
+        <h4>Limits</h4>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="limit-tasks-hours">tasks</label>
+        <input class="port" id="limit-tasks-hours" type="number" min="0" max={secsToHours(MAX_SECS)} step="0.5"
+          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.tasksMaxAgeSecs))}
+          disabled={limitsBusy}
+          aria-describedby="limit-tasks-desc"
+          data-testid="tasks-max-age-hours"
+          onchange={(e) => onLimitHoursChange(SETTING_KEYS.tasksMaxAgeSecs, 'Task timeout', e)} />
+        <span class="hook-desc" id="limit-tasks-desc">hours before an open task (counted from its start, else its creation) is failed by the liveness sweep (0 = never)</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="limit-move-mb">move</label>
+        <input class="port" id="limit-move-mb" type="number" min="1" max={MOVE_MAX_TRANSCRIPT_MB_MAX} step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.moveMaxTranscriptMb)}
+          disabled={limitsBusy}
+          aria-describedby="limit-move-desc"
+          data-testid="move-max-transcript-mb"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.moveMaxTranscriptMb, 'Move transcript cap', e)} />
+        <span class="hook-desc" id="limit-move-desc">largest transcript (MiB, 1–{MOVE_MAX_TRANSCRIPT_MB_MAX}) Move to host… copies; a bigger one is refused (E_MOVE_TOO_LARGE)</span>
+      </div>
+      <!-- TODO(#60): the usage.* rows (per-session usage) go here. -->
+      {#if limitsError}<p class="err" role="alert" data-testid="limits-error">{limitsError}</p>{/if}
     </section>
 
     <section class="block" data-testid="mcp-section">

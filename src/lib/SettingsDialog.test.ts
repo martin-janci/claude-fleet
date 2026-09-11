@@ -227,6 +227,91 @@ describe('SettingsDialog automation + notifications (W2 Track D)', () => {
     expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'gc.bg_idle_secs', value: '5400' });
   });
 
+  it('renders the task TTL and move cap rows with the backend defaults and bounds', async () => {
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick(); await tick();
+    expect(screen.getByTestId('limits-section')).toBeInTheDocument();
+    const tasks = screen.getByTestId('tasks-max-age-hours') as HTMLInputElement;
+    expect(tasks.value).toBe('24');
+    expect(tasks.min).toBe('0');
+    expect(tasks.max).toBe('87600'); // settings::MAX_SECS in hours
+    const mb = screen.getByTestId('move-max-transcript-mb') as HTMLInputElement;
+    expect(mb.value).toBe('200');
+    expect(mb.min).toBe('1');
+    expect(mb.max).toBe('4096');
+  });
+
+  it('writes the task TTL in seconds and the move cap as typed', async () => {
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    inv.mockImplementation(async (cmd: string, args?: { key?: string; value?: string }) => {
+      if (cmd === 'set_fleet_setting') return { [args!.key!]: args!.value! };
+      if (cmd === 'mcp_status') return mcpStatusObj;
+      return null;
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick(); await tick();
+    const tasks = screen.getByTestId('tasks-max-age-hours') as HTMLInputElement;
+    tasks.value = '2';
+    await fireEvent.change(tasks);
+    expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'tasks.max_age_secs', value: '7200' });
+    const mb = screen.getByTestId('move-max-transcript-mb') as HTMLInputElement;
+    mb.value = '64';
+    await fireEvent.change(mb);
+    expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'move.max_transcript_mb', value: '64' });
+  });
+
+  it('shows the backend validation error for an out-of-range move cap', async () => {
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'set_fleet_setting') {
+        throw { code: 'E_INVALID', message: 'move.max_transcript_mb must be an integer between 1 and 4096' };
+      }
+      if (cmd === 'mcp_status') return mcpStatusObj;
+      return null;
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick(); await tick();
+    const mb = screen.getByTestId('move-max-transcript-mb') as HTMLInputElement;
+    mb.value = '5000';
+    await fireEvent.change(mb);
+    // Sent as typed: the backend is the authority on the range.
+    expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'move.max_transcript_mb', value: '5000' });
+    await waitFor(() =>
+      expect(screen.getByTestId('limits-error').textContent).toContain('between 1 and 4096'),
+    );
+  });
+
+  it('never sends a limit it cannot represent, and says why', async () => {
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    inv.mockImplementation(async (cmd: string, args?: { key?: string; value?: string }) => {
+      if (cmd === 'set_fleet_setting') return { [args!.key!]: args!.value! };
+      if (cmd === 'mcp_status') return mcpStatusObj;
+      return null;
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick(); await tick();
+    const tasks = screen.getByLabelText('tasks') as HTMLInputElement;
+    const mb = screen.getByLabelText('move') as HTMLInputElement;
+    expect(tasks).toBe(screen.getByTestId('tasks-max-age-hours'));
+    expect(mb).toBe(screen.getByTestId('move-max-transcript-mb'));
+    const cases: [HTMLInputElement, string, RegExp][] = [
+      // -1 h must not be clamped to 0 s ("never").
+      [tasks, '-1', /Task timeout: hours must be 0 or more/],
+      // A positive value that rounds to 0 s would also mean "never".
+      [tasks, '0.00001', /Task timeout: too small/],
+      [tasks, '', /Task timeout: enter a number of hours/],
+      [mb, '', /Move transcript cap: enter a whole number/],
+      [mb, '1.5', /Move transcript cap: "1.5" is not a whole number/],
+    ];
+    for (const [input, value, message] of cases) {
+      input.value = value;
+      await fireEvent.change(input);
+      await tick();
+      expect(screen.getByRole('alert').textContent).toMatch(message);
+    }
+    expect(inv).not.toHaveBeenCalledWith('set_fleet_setting', expect.anything());
+  });
+
   it('renders the notifications section with the toast toggle on and OS off', async () => {
     render(SettingsDialog, { props: { onClose: () => {} } });
     await tick();
