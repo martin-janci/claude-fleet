@@ -66,6 +66,11 @@ pub const PROJECTS_LAYOUT: &str = "projects.layout";
 /// `SPECS`, so `set` refuses it.
 pub const PROJECTS_RESOLVED_BASE: &str = "projects.resolved_base";
 
+/// Derived, read-only: `$CLAUDE_FLEET_PROJECTS_BASE` as the app sees it
+/// (trimmed), or `""` when unset. Lets the Settings dialog preview the local
+/// fallback for a layout that is not saved yet.
+pub const PROJECTS_LOCAL_ENV_BASE: &str = "projects.local_env_base";
+
 const LAYOUTS: &[&str] = &["github", "flat"];
 
 /// Every editable setting. Order is the display order.
@@ -232,6 +237,10 @@ pub fn read_all(s: &Store) -> BTreeMap<String, String> {
         .iter()
         .map(|spec| (spec.key.to_string(), get_string(s, spec.key)))
         .collect();
+    all.insert(
+        PROJECTS_LOCAL_ENV_BASE.to_string(),
+        crate::service::projects::local_env_base().unwrap_or_default(),
+    );
     let resolved = crate::service::projects::resolved_bases(s);
     all.insert(
         PROJECTS_RESOLVED_BASE.to_string(),
@@ -370,8 +379,13 @@ mod tests {
     fn store_roundtrip_and_read_all_defaults() {
         let s = Store::open_in_memory().unwrap();
         let all = read_all(&s);
-        // every spec plus the derived projects preview
-        assert_eq!(all.len(), SPECS.len() + 1);
+        // every spec plus the two derived projects preview entries
+        assert_eq!(all.len(), SPECS.len() + 2);
+        assert!(all.contains_key(PROJECTS_LOCAL_ENV_BASE));
+        assert_eq!(
+            set(&s, PROJECTS_LOCAL_ENV_BASE, "/x").unwrap_err().code,
+            "E_INVALID"
+        );
         assert_eq!(all[GC_BG_IDLE_SECS], "86400");
         assert_eq!(all[PROJECTS_BASE_PATH], "{}");
         assert_eq!(all[PROJECTS_LAYOUT], "github");

@@ -23,6 +23,13 @@ export const SETTING_KEYS = {
  *  host alias → resolved projects root (setting → env var → default). */
 export const PROJECTS_RESOLVED_KEY = 'projects.resolved_base';
 
+/** Derived, read-only entry: `$CLAUDE_FLEET_PROJECTS_BASE` as the app sees it
+ *  (trimmed), or `''` when unset. */
+export const PROJECTS_LOCAL_ENV_KEY = 'projects.local_env_base';
+
+/** Mirror of `settings::MAX_PATH_LEN`. */
+export const BASE_PATH_MAX_LEN = 1024;
+
 export type ProjectsLayout = 'github' | 'flat';
 
 export type SettingKey = (typeof SETTING_KEYS)[keyof typeof SETTING_KEYS];
@@ -94,10 +101,12 @@ export function basePathError(path: string): string | null {
   if (!(p.startsWith('/') || p === '~' || p.startsWith('~/'))) {
     return 'must be absolute or start with ~/';
   }
+  if (p.length > BASE_PATH_MAX_LEN) return 'path is too long';
   if (p.split('/').includes('..')) return "must not contain '..'";
+  // C0, DEL and C1 (U+0080..U+009F): Rust's `char::is_control`.
   const isControl = (ch: string) => {
     const c = ch.charCodeAt(0);
-    return c < 32 || c === 127;
+    return c < 32 || (c >= 127 && c <= 159);
   };
   if ([...p].some(isControl)) return 'must not contain control characters';
   return null;
@@ -107,6 +116,12 @@ export function basePathError(path: string): string | null {
  *  setting nor (on `local`) `$CLAUDE_FLEET_PROJECTS_BASE` names one. */
 export function projectsDefaultRoot(layout: ProjectsLayout): string {
   return layout === 'flat' ? '~/projects' : '~/projects/github.com';
+}
+
+/** Mirror of `projects::Layout::project_dir`: one project's directory. */
+export function projectDir(root: string, layout: ProjectsLayout, owner: string, repo: string): string {
+  const r = root.replace(/\/+$/, '');
+  return layout === 'flat' ? `${r}/${repo}` : `${r}/${owner}/${repo}`;
 }
 
 /** Example project path under `root` for the preview line. */

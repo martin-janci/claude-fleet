@@ -33,6 +33,106 @@ fn deps_over(fake: FakeSsh, probe_timeout: Duration) -> Arc<ReconcileDeps> {
 
 const LIST_SCRIPT: &str = "tmux list-sessions -F '#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}' 2>&1";
 
+/// A fleet where `local` has no tmux server and `host` answers
+/// `list-sessions` with the single `line` (no agents, a plain pane).
+fn one_session_host(host: &str, line: &str) -> FakeSsh {
+    let fake = FakeSsh::new();
+    fake.set_wall_clock(Duration::from_millis(200));
+    fake.on_host(
+        "local",
+        Match::script(LIST_SCRIPT),
+        Reply::Exit {
+            code: 1,
+            stdout: b"no server running on /tmp/tmux-1000/default\n".to_vec(),
+            stderr: Vec::new(),
+        },
+    );
+    fake.on_host(
+        host,
+        Match::script(LIST_SCRIPT),
+        Reply::ok(&format!("{line}\n")),
+    )
+    .on_host(
+        host,
+        Match::script_contains("claude agents --json"),
+        Reply::ok("[]\n"),
+    )
+    .on_host(
+        host,
+        Match::script_contains("tmux capture-pane"),
+        Reply::ok("❯ \n"),
+    );
+    fake
+}
+
+/// Two full reconcile passes over `FakeSsh` for one `vps` session at `cwd`
+/// under the given `projects.*` settings. Returns the row's
+/// (project_id, worktree_key) and the project id it must link to. Two passes:
+/// the reconcile upsert overwrites project_id, so a link that only survives
+/// the first pass is the bug this guards.
+async fn linked_after_two_passes(
+    base_map: Option<&str>,
+    layout: &str,
+    cwd: &str,
+) -> (Option<i64>, Option<String>, i64) {
+    use crate::service::settings;
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let pid = {
+        let s = store.lock().unwrap();
+        s.insert_host("vps", Some("vps")).unwrap();
+        if let Some(m) = base_map {
+            settings::set(&s, settings::PROJECTS_BASE_PATH, m).unwrap();
+        }
+        settings::set(&s, settings::PROJECTS_LAYOUT, layout).unwrap();
+        s.upsert_project("acme", "repo", "/local/acme/repo")
+            .unwrap()
+    };
+    let fake = one_session_host("vps", &format!("dev-a|1700000000|1700000100|0|{cwd}"));
+    let deps = deps_over(fake, Duration::from_secs(5));
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let s = store.lock().unwrap();
+    let row = s.get_session("dev-a", "vps").unwrap().expect("row");
+    (row.project_id, row.worktree_key, pid)
+}
+
+#[tokio::test]
+async fn reconcile_over_fake_ssh_links_sessions_under_a_custom_root() {
+    let (pid, key, want) = linked_after_two_passes(
+        Some(r#"{"vps":"~/code"}"#),
+        "github",
+        "/home/u/code/acme/repo/.worktrees/feat",
+    )
+    .await;
+    assert_eq!(pid, Some(want), "project link survives both passes");
+    assert_eq!(key.as_deref(), Some("feat"));
+}
+
+#[tokio::test]
+async fn reconcile_over_fake_ssh_links_sessions_under_the_flat_layout() {
+    // No base set: the flat default `~/projects`.
+    let (pid, key, want) = linked_after_two_passes(None, "flat", "/home/u/projects/repo").await;
+    assert_eq!(pid, Some(want));
+    assert_eq!(key.as_deref(), Some("main"));
+    // A `~/code` base with a `.claude/worktrees` worktree.
+    let (pid, key, want) = linked_after_two_passes(
+        Some(r#"{"vps":"~/code"}"#),
+        "flat",
+        "/home/u/code/repo/.claude/worktrees/x",
+    )
+    .await;
+    assert_eq!(pid, Some(want));
+    assert_eq!(key.as_deref(), Some("x"));
+}
+
+#[tokio::test]
+async fn reconcile_over_fake_ssh_default_config_is_unchanged() {
+    let (pid, key, want) =
+        linked_after_two_passes(None, "github", "/home/u/projects/github.com/acme/repo").await;
+    assert_eq!(pid, Some(want));
+    assert_eq!(key.as_deref(), Some("main"));
+}
+
 #[tokio::test]
 async fn reconcile_pass_updates_reachable_hosts_and_keeps_unreachable_ones() {
     // Fleet: `local` (no tmux server), `alpha` (one live session, one

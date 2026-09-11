@@ -9,6 +9,15 @@
   import Modal from './Modal.svelte';
   import PickerList from './PickerList.svelte';
   import type { PickerItem } from './PickerList.svelte';
+  import {
+    fleetSettings,
+    loadFleetSettings,
+    settingPathMap,
+    settingLayout,
+    projectDir,
+    projectsDefaultRoot,
+    PROJECTS_RESOLVED_KEY,
+  } from './fleet_settings';
 
   let {
     project,
@@ -193,14 +202,24 @@
   const name = $derived(nameOverride ?? derivedName);
 
   // Where the pane's cwd will be. Local paths come from the DB; remote ones
-  // follow proj-clean's `~/projects/github.com/<owner>/<repo>` convention
-  // (see `remote_project_path` in service/sessions.rs). New worktrees land
-  // in whichever of `.worktrees` / `.claude/worktrees` the repo already uses.
+  // are derived like `remote_project_path` in service/sessions.rs: the host's
+  // projects root (Settings → Projects, default `~/projects/github.com`) in
+  // the configured layout. New worktrees land in whichever of `.worktrees` /
+  // `.claude/worktrees` the repo already uses.
   const worktreeDir = $derived(
     project.worktrees.some((w) => w.path.includes('/.claude/worktrees/')) ? '.claude/worktrees' : '.worktrees',
   );
+  const projectsLayout = $derived(settingLayout($fleetSettings));
+  const remoteRoot = $derived(
+    settingPathMap($fleetSettings, PROJECTS_RESOLVED_KEY)[chosenHost] ?? projectsDefaultRoot(projectsLayout),
+  );
+  onMount(() => {
+    // The remote preview needs the backend's per-host roots; best effort.
+    void loadFleetSettings();
+  });
   const pathPreview = $derived.by(() => {
-    const root = chosenHost === 'local' ? project.project.base_path : `~/projects/github.com/${owner}/${repo}`;
+    const root =
+      chosenHost === 'local' ? project.project.base_path : projectDir(remoteRoot, projectsLayout, owner, repo);
     if (inNewMode) {
       const slug = finalizeBranchSlug(newWorktreeName);
       return slug ? `${root}/${worktreeDir}/${slug}` : root;

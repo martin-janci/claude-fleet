@@ -10,6 +10,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import NewSessionDialog from './NewSessionDialog.svelte';
 import { hosts } from './hosts';
+import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
@@ -24,6 +25,46 @@ const project = {
   project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: null },
   worktrees: [{ id: 11, project_id: 1, name: 'main', path: '/r/cf', branch: 'main' }],
 };
+
+describe('NewSessionDialog remote path preview (W5 G3)', () => {
+  async function pickMefistos() {
+    const btn = Array.from(document.querySelectorAll('.host-pick')).find(
+      (p) => p.textContent?.trim() === 'mefistos',
+    ) as HTMLButtonElement;
+    await fireEvent.click(btn);
+    await tick();
+  }
+
+  it('is ~/projects/github.com/<owner>/<repo> when no projects setting exists', async () => {
+    fleetSettings.set({ ...SETTING_DEFAULTS });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickMefistos();
+    expect(screen.getByTestId('path-preview').textContent).toContain(
+      '~/projects/github.com/martin-janci/claude-fleet',
+    );
+  });
+
+  it('follows the host projects root and the flat layout from settings', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_fleet_settings') {
+        return {
+          'projects.layout': 'flat',
+          'projects.resolved_base': JSON.stringify({ local: '/home/u/projects', mefistos: '~/code' }),
+        };
+      }
+      return null;
+    });
+    fleetSettings.set({ ...SETTING_DEFAULTS });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickMefistos();
+    await vi.waitFor(() =>
+      expect(screen.getByTestId('path-preview').textContent).toContain('~/code/claude-fleet'),
+    );
+    expect(screen.getByTestId('path-preview').textContent).not.toContain('github.com');
+  });
+});
 
 describe('NewSessionDialog', () => {
   it('renders one host-pick button per non-hidden host', async () => {

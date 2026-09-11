@@ -32,7 +32,7 @@
     secsToHours,
     hoursToSecs,
     SETTING_KEYS,
-    PROJECTS_RESOLVED_KEY,
+    PROJECTS_LOCAL_ENV_KEY,
     settingPathMap,
     settingLayout,
     basePathError,
@@ -143,7 +143,7 @@
   let projectsError: string | null = $state(null);
   let projectsMsg: string | null = $state(null);
   const savedBases = $derived(settingPathMap($fleetSettings, SETTING_KEYS.projectsBasePath));
-  const resolvedBases = $derived(settingPathMap($fleetSettings, PROJECTS_RESOLVED_KEY));
+  const localEnv = $derived(($fleetSettings[PROJECTS_LOCAL_ENV_KEY] ?? '').trim());
   const savedLayout = $derived(settingLayout($fleetSettings));
   const projectsInvalid = $derived(
     Object.values(baseDrafts).some((p) => basePathError(p) !== null),
@@ -155,13 +155,11 @@
     projectsLoaded = true;
   }
 
-  // Root a host uses when its field is blank. Remote hosts: the layout
-  // default. Local: whatever the backend resolved (env var or default) while
-  // no local override is saved; the backend preview refreshes on Save.
+  // Root a host uses when its field is blank: on this machine the env var
+  // if set, otherwise (and on every remote host) the default for the layout
+  // currently selected, so the preview tracks an unsaved layout change.
   function fallbackRoot(alias: string): string {
-    if (alias === 'local' && !savedBases['local'] && resolvedBases['local']) {
-      return resolvedBases['local'];
-    }
+    if (alias === 'local' && localEnv) return localEnv;
     return projectsDefaultRoot(layoutDraft);
   }
 

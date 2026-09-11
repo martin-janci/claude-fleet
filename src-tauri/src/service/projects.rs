@@ -71,6 +71,27 @@ pub fn expand_home(root: &str, home: &str) -> String {
     }
 }
 
+/// `$CLAUDE_FLEET_PROJECTS_BASE`, trimmed; `None` when unset or blank.
+pub fn local_env_base() -> Option<String> {
+    std::env::var(ENV_BASE)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// `Some(rest)` when `path` is `root` itself (`""`) or lies below it, compared
+/// by whole path components: root `/b/x` does not contain `/b/x-build`.
+pub(crate) fn strip_root<'a>(path: &'a str, root: &str) -> Option<&'a str> {
+    let root = root.trim_end_matches('/');
+    if root.is_empty() {
+        return Some(path.trim_start_matches('/'));
+    }
+    if path == root {
+        return Some("");
+    }
+    path.strip_prefix(root)?.strip_prefix('/')
+}
+
 /// The configured `projects.layout`.
 pub fn layout(s: &Store) -> Layout {
     Layout::parse(&settings::get_string(s, settings::PROJECTS_LAYOUT))
@@ -82,11 +103,7 @@ pub fn layout(s: &Store) -> Layout {
 pub fn project_base_for(s: &Store, host_alias: &str) -> String {
     let is_local = host_alias == LOCAL_HOST;
     let setting = settings::base_path_map(s).remove(host_alias);
-    let env = if is_local {
-        std::env::var(ENV_BASE).ok()
-    } else {
-        None
-    };
+    let env = if is_local { local_env_base() } else { None };
     resolve_base(setting.as_deref(), env.as_deref(), layout(s), is_local)
 }
 
@@ -133,6 +150,7 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
     // 2. Scan the filesystem for new/removed projects (IO-only, no lock needed).
     //    `read_dir` over the whole projects tree is blocking std::fs, so it
     //    runs on the blocking pool rather than stalling a tokio worker.
+    let root_str = base.to_string_lossy().into_owned();
     let discovered = tokio::task::spawn_blocking(move || scan_projects(&base, layout))
         .await
         .map_err(|e| IpcError::new("E_IO", format!("project scan task failed: {e}")))??;
@@ -165,9 +183,11 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
     // 4. Apply all writes under a single brief lock.
     {
         let s = store.lock().map_err(|_| IpcError::lock())?;
+        let mut fresh_ids = std::collections::HashSet::new();
         for (dp, worktrees) in &upserts {
             let project_id =
                 s.upsert_project(&dp.owner, &dp.repo, &dp.base_path.to_string_lossy())?;
+            fresh_ids.insert(project_id);
             let mut keep_names = Vec::with_capacity(worktrees.len());
             for wt in worktrees {
                 keep_names.push(wt.name.clone());
@@ -179,6 +199,29 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
                 )?;
             }
             s.delete_worktrees_not_in(project_id, &keep_names)?;
+        }
+
+        // Stale rows: projects from an earlier scan that were not found again,
+        // whose base_path is outside the (possibly changed) root, and that no
+        // session references. Left in place they would keep capturing
+        // sessions through prefix linking. Rows with sessions are kept.
+        for p in &snapshot {
+            let row = &p.project;
+            if fresh_ids.contains(&row.id) || strip_root(&row.base_path, &root_str).is_some() {
+                continue;
+            }
+            let in_use: bool = s.conn_ref().query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE project_id = ?1)",
+                rusqlite::params![row.id],
+                |r| r.get(0),
+            )?;
+            if !in_use {
+                s.delete_project(row.id)?;
+                eprintln!(
+                    "[projects] removed stale project {}/{} at {} (outside {root_str})",
+                    row.owner, row.repo, row.base_path
+                );
+            }
         }
     }
 
@@ -294,6 +337,47 @@ mod tests {
         let r = resolved_bases(&s);
         assert_eq!(r["mefistos"], "/data/git");
         assert!(r.contains_key(LOCAL_HOST));
+    }
+
+    #[test]
+    fn strip_root_compares_whole_components() {
+        assert_eq!(strip_root("/b/x/src", "/b/x"), Some("src"));
+        assert_eq!(strip_root("/b/x", "/b/x/"), Some(""));
+        assert_eq!(strip_root("/b/x-build", "/b/x"), None);
+        assert_eq!(strip_root("/c/x", "/b/x"), None);
+    }
+
+    #[tokio::test]
+    async fn refresh_projects_drops_stale_rows_outside_the_new_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let (gone, busy, inside) = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let gone = s.upsert_project("o", "old", "/old/root/o/old").unwrap();
+            let busy = s.upsert_project("o", "busy", "/old/root/o/busy").unwrap();
+            s.upsert_session("dev", "local", Some(busy), None, 1, 1, "running", None)
+                .unwrap();
+            // Under the new root but not rediscovered (no .git): kept.
+            let inside_path = tmp.path().join("o").join("gone-from-disk");
+            let inside = s
+                .upsert_project("o", "gone-from-disk", &inside_path.to_string_lossy())
+                .unwrap();
+            let map = serde_json::json!({ "local": tmp.path().to_string_lossy() }).to_string();
+            settings::set(&s, settings::PROJECTS_BASE_PATH, &map).unwrap();
+            (gone, busy, inside)
+        };
+        let rows = refresh_projects(&store).await.unwrap();
+        let ids: Vec<i64> = rows.iter().map(|r| r.project.id).collect();
+        assert!(
+            !ids.contains(&gone),
+            "stale, unused row outside the root is removed"
+        );
+        assert!(
+            ids.contains(&busy),
+            "a project with sessions is never dropped"
+        );
+        assert!(ids.contains(&inside), "rows under the root are left alone");
     }
 
     #[tokio::test]

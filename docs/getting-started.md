@@ -10,26 +10,23 @@ For background on the core concepts (hosts, sessions, projects, the Control API)
 
 The shortest path to a working fleet is this machine plus one remote host, such as a VPS. Your repositories do not need to follow any particular layout.
 
-### 1. Install the app
+### 1. Build and launch the app
 
-Download the build for your platform from the [latest GitHub release](https://github.com/martin-janci/claude-fleet/releases/latest):
+No release has been published yet, so for now run claude-fleet from source. You need Node with pnpm, a stable Rust toolchain, and the Tauri system libraries. The [README](../README.md) lists the exact versions.
 
-| Platform | Asset |
-|---|---|
-| macOS | `.dmg`, or `.app.tar.gz` |
-| Linux | `.AppImage` or `.deb` |
-
-The builds are not code-signed yet.
-
-- **macOS:** Gatekeeper blocks the first launch. Right-click the app and choose **Open**, or clear the quarantine flag:
-
-  ```bash
-  xattr -d com.apple.quarantine /Applications/claude-fleet.app
-  ```
-
-- **Linux:** mark the AppImage executable (`chmod +x claude-fleet_*.AppImage`) before running it, or install the `.deb` with `sudo apt install ./claude-fleet_*.deb`.
+```bash
+git clone https://github.com/martin-janci/claude-fleet.git
+cd claude-fleet
+pnpm install
+pnpm tauri dev
+```
 
 The app drives the `claude` CLI and `tmux`, so both must be on your local `PATH` (`claude --version`, `tmux -V`).
+
+Once releases are published (see [RELEASING.md](RELEASING.md)), you will be able to download a build from the [releases page](https://github.com/martin-janci/claude-fleet/releases) instead: `.dmg` or `.app.tar.gz` on macOS, `.AppImage` or `.deb` on Linux. Those builds are not code-signed:
+
+- **macOS:** Gatekeeper blocks the first launch. Right-click the app and choose **Open**, or clear the quarantine flag with `xattr -d com.apple.quarantine /Applications/claude-fleet.app`.
+- **Linux:** mark the AppImage executable (`chmod +x`) before running it, or install the `.deb` with `sudo apt install ./claude-fleet_*.deb`.
 
 ### 2. Add one host
 
@@ -133,18 +130,3 @@ Once you have at least one session running:
 - **Filter** — use the host picker and recency filter in the sidebar to narrow the session list when you manage many machines.
 
 For a deeper explanation of how hosts, sessions, projects, and the event bus fit together, see [concepts.md](concepts.md). If something is not working as expected, see [troubleshooting.md](troubleshooting.md).
-
----
-
-## Run from source
-
-Build from source to work on claude-fleet itself, or on a platform the release does not cover. You need Node with pnpm, a stable Rust toolchain, and the Tauri system libraries. The [README](../README.md) lists the exact versions.
-
-```bash
-git clone https://github.com/martin-janci/claude-fleet.git
-cd claude-fleet
-pnpm install
-pnpm tauri dev
-```
-
-Setup is otherwise the same as the quickstart above.

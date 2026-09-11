@@ -1543,12 +1543,16 @@ pub fn require_no_explicit(report: RepairReport) -> Result<RepairReport, IpcErro
 /// host, resolved with the exact function `new_session_inner` uses
 /// (`sessions::remote_project_path`), so repair never disagrees with where a
 /// session is created. This is the ONLY place `repair` derives a remote
-/// path: when the projects-base setting changes that function's signature,
-/// only this helper follows. The local `worktrees.path` column is a local
-/// path and is never used for a remote host.
+/// path. `root` / `layout` are the host's `projects.*` settings, snapshotted
+/// under the store lock by the caller (`project_base_for` + `layout`); `root`
+/// may start with `~/`, which is expanded against the remote `$HOME` here. The
+/// local `worktrees.path` column is a local path and is never used for a
+/// remote host.
 async fn resolve_remote_paths(
     ssh: &dyn SshExec,
     host: &str,
+    root: &str,
+    layout: crate::projects::Layout,
     owner: &str,
     repo: &str,
     wt_name: Option<&str>,
@@ -1559,8 +1563,9 @@ async fn resolve_remote_paths(
         crate::validate::path_component("worktree name", name)?;
     }
     let home = ssh.remote_home(host).await?;
+    let root = crate::service::projects::expand_home(root, &home);
     Ok(crate::service::sessions::remote_project_path(
-        &home, owner, repo, wt_name,
+        &root, layout, owner, repo, wt_name,
     ))
 }
 
@@ -1570,6 +1575,11 @@ struct SpecSeed {
     owner: String,
     repo: String,
     base_path: String,
+    /// The session host's projects root (`projects.base_path` entry, env var
+    /// for `local`, or the layout default; unexpanded) and layout, taken under
+    /// the lock for `resolve_remote_paths`.
+    projects_root: String,
+    layout: crate::projects::Layout,
     /// `(name, path-from-row, branch)` for a linked worktree.
     worktree: Option<(String, Option<String>, Option<String>)>,
     siblings: Vec<i64>,
@@ -1634,6 +1644,8 @@ fn seed_for_session(s: &Store, row: &SessionRow) -> Result<SpecSeed, IpcError> {
         owner,
         repo,
         base_path,
+        projects_root: crate::service::projects::project_base_for(s, &row.host_alias),
+        layout: crate::service::projects::layout(s),
         worktree,
         siblings,
     })
@@ -1641,7 +1653,7 @@ fn seed_for_session(s: &Store, row: &SessionRow) -> Result<SpecSeed, IpcError> {
 
 /// Build the [`WorkspaceSpec`] for an existing session row: paths from the
 /// local `projects` / `worktrees` tables for `local`, from the
-/// `~/projects/github.com/<owner>/<repo>` convention (plus the remote `$HOME`)
+/// host's `projects.*` root and layout (plus the remote `$HOME`)
 /// for any other host. Returns the spec and the ids of alive sibling
 /// sessions sharing the workspace.
 ///
@@ -1689,8 +1701,16 @@ pub async fn spec_for_session(
         (root, wt)
     } else {
         let wt_name = seed.worktree.as_ref().map(|(n, _, _)| n.as_str());
-        let (root, cwd) =
-            resolve_remote_paths(&**ssh, &row.host_alias, &seed.owner, &seed.repo, wt_name).await?;
+        let (root, cwd) = resolve_remote_paths(
+            &**ssh,
+            &row.host_alias,
+            &seed.projects_root,
+            seed.layout,
+            &seed.owner,
+            &seed.repo,
+            wt_name,
+        )
+        .await?;
         let wt = seed
             .worktree
             .as_ref()
@@ -1730,8 +1750,8 @@ pub struct NewSessionWorkspace<'a> {
     pub tmux_name: &'a str,
     pub pane_cmd: &'a str,
     /// The cwd `new_session` resolved: the row's path locally, the
-    /// `~/projects/github.com/<owner>/<repo>[/.claude/worktrees/<name>]`
-    /// convention remotely.
+    /// settings-derived `<root>/[<owner>/]<repo>[/.claude/worktrees/<name>]`
+    /// remotely (`sessions::remote_project_path_for`).
     pub cwd: &'a str,
     pub base_branch: Option<&'a str>,
 }
@@ -1801,12 +1821,18 @@ pub async fn ensure_for_new_session(
     let remote_root = if w.host_alias == "local" {
         None
     } else {
-        let (owner, repo) = {
+        let (owner, repo, root, layout) = {
             let s = store.lock().map_err(|_| IpcError::lock())?;
-            crate::service::sessions::fetch_owner_repo(&s, w.project_id)?
+            let (owner, repo) = crate::service::sessions::fetch_owner_repo(&s, w.project_id)?;
+            (
+                owner,
+                repo,
+                crate::service::projects::project_base_for(&s, w.host_alias),
+                crate::service::projects::layout(&s),
+            )
         };
         Some(
-            resolve_remote_paths(&**ssh, w.host_alias, &owner, &repo, None)
+            resolve_remote_paths(&**ssh, w.host_alias, &root, layout, &owner, &repo, None)
                 .await?
                 .0,
         )
@@ -2585,6 +2611,59 @@ mod tests {
         tmux_cwd=/repo/.claude/worktrees/feat\ntmux_cwd_exists=0\n@@worktrees\n\
         worktree /repo\nHEAD a\nbranch refs/heads/main\n\n\
         worktree /repo/.claude/worktrees/feat\nHEAD b\nbranch refs/heads/feat\nprunable gone\n";
+
+    #[tokio::test]
+    async fn repair_remote_paths_follow_projects_base_path() {
+        use crate::service::settings;
+        use crate::ssh_fake::FakeSsh;
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("vps").unwrap();
+        let pid = s.upsert_project("o", "r", "/local/o/r").unwrap();
+        let sid = s
+            .upsert_session("dev-x", "vps", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
+        s.set_worktree_key(sid, Some("feat")).unwrap();
+        let fake = FakeSsh::new();
+        fake.with_home("/home/me");
+        // Mirrors `spec_for_session`: seed under the lock, resolve off-lock.
+        async fn resolve(s: &Store, sid: i64, fake: &FakeSsh) -> (String, String) {
+            let row = s.get_session_by_id(sid).unwrap().unwrap();
+            let seed = seed_for_session(s, &row).unwrap();
+            let wt = seed.worktree.as_ref().map(|(n, _, _)| n.as_str());
+            resolve_remote_paths(
+                fake,
+                &row.host_alias,
+                &seed.projects_root,
+                seed.layout,
+                &seed.owner,
+                &seed.repo,
+                wt,
+            )
+            .await
+            .unwrap()
+        }
+
+        // No setting: exactly the pre-setting convention.
+        let (root, cwd) = resolve(&s, sid, &fake).await;
+        assert_eq!(root, "/home/me/projects/github.com/o/r");
+        assert_eq!(
+            cwd,
+            "/home/me/projects/github.com/o/r/.claude/worktrees/feat"
+        );
+
+        // The host's `projects.base_path` entry + flat layout.
+        settings::set(&s, settings::PROJECTS_BASE_PATH, r#"{"vps":"~/code"}"#).unwrap();
+        settings::set(&s, settings::PROJECTS_LAYOUT, "flat").unwrap();
+        let (root, cwd) = resolve(&s, sid, &fake).await;
+        assert_eq!(root, "/home/me/code/r");
+        assert_eq!(cwd, "/home/me/code/r/.claude/worktrees/feat");
+
+        // An absolute root under the github layout.
+        settings::set(&s, settings::PROJECTS_BASE_PATH, r#"{"vps":"/srv/git"}"#).unwrap();
+        settings::set(&s, settings::PROJECTS_LAYOUT, "github").unwrap();
+        let (root, _) = resolve(&s, sid, &fake).await;
+        assert_eq!(root, "/srv/git/o/r");
+    }
 
     /// Store with one project + worktree row + running session; returns
     /// `(store, session_id, project_id)`.

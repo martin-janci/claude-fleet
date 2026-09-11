@@ -11,6 +11,7 @@ import {
   basePathError,
   hoursToSecs,
   loadFleetSettings,
+  projectDir,
   projectPathPreview,
   projectsDefaultRoot,
   secsToHours,
@@ -98,6 +99,18 @@ describe('projects settings helpers (W5 G3)', () => {
     expect(basePathError('~user/x')).toMatch(/absolute/);
     expect(basePathError('/a/../b')).toMatch(/\.\./);
     expect(basePathError('/a\nb')).toMatch(/control/);
+    // C1 controls (U+0080..U+009F) and DEL, like Rust's char::is_control
+    expect(basePathError('/a' + String.fromCharCode(0x85) + 'b')).toMatch(/control/);
+    expect(basePathError('/a' + String.fromCharCode(0x7f) + 'b')).toMatch(/control/);
+    expect(basePathError('/a' + String.fromCharCode(0xa0) + 'b')).toBeNull();
+    // the backend's 1024-char cap
+    expect(basePathError('/' + 'a'.repeat(1023))).toBeNull();
+    expect(basePathError('/' + 'a'.repeat(1024))).toMatch(/too long/);
+  });
+
+  it('projectDir mirrors Layout::project_dir', () => {
+    expect(projectDir('~/code/', 'flat', 'o', 'r')).toBe('~/code/r');
+    expect(projectDir('~/projects/github.com', 'github', 'o', 'r')).toBe('~/projects/github.com/o/r');
   });
 
   it('previews per layout and exposes the layout defaults', () => {

@@ -248,7 +248,13 @@ describe('SettingsDialog projects (W5 G3)', () => {
         case 'mcp_status':
           return mcpStatusObj;
         case 'get_fleet_settings':
-          return { 'projects.base_path': '{}', 'projects.layout': 'github', 'projects.resolved_base': resolved, ...extra };
+          return {
+            'projects.base_path': '{}',
+            'projects.layout': 'github',
+            'projects.resolved_base': resolved,
+            'projects.local_env_base': '',
+            ...extra,
+          };
         case 'set_fleet_setting':
           return { [args!.key!]: args!.value!, 'projects.resolved_base': resolved };
         case 'refresh_projects':
@@ -272,7 +278,7 @@ describe('SettingsDialog projects (W5 G3)', () => {
     render(SettingsDialog, { props: { onClose: () => {} } });
     await ready();
     expect(screen.getByTestId('projects-section')).toBeInTheDocument();
-    expect(screen.getByTestId('projects-preview-local')).toHaveTextContent('/home/u/projects/github.com/<owner>/<repo>');
+    expect(screen.getByTestId('projects-preview-local')).toHaveTextContent('~/projects/github.com/<owner>/<repo>');
     expect(screen.getByTestId('projects-preview-mefistos')).toHaveTextContent('~/projects/github.com/<owner>/<repo>');
     expect((screen.getByTestId('projects-base-mefistos') as HTMLInputElement).value).toBe('');
   });
@@ -310,5 +316,27 @@ describe('SettingsDialog projects (W5 G3)', () => {
     expect((screen.getByTestId('projects-base-mefistos') as HTMLInputElement).value).toBe('/data/git');
     expect((screen.getByTestId('projects-layout') as HTMLSelectElement).value).toBe('flat');
     expect(screen.getByTestId('projects-preview-mefistos')).toHaveTextContent('/data/git/<repo>');
+  });
+
+  it('local preview follows an unsaved layout change (no env var)', async () => {
+    routeProjects();
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await ready();
+    await fireEvent.change(screen.getByTestId('projects-layout'), { target: { value: 'flat' } });
+    await tick();
+    expect(screen.getByTestId('projects-preview-local')).toHaveTextContent('~/projects/<repo>');
+    expect(screen.getByTestId('projects-preview-local')).not.toHaveTextContent('github.com');
+  });
+
+  it('local preview uses the env var before the layout default', async () => {
+    routeProjects({ 'projects.local_env_base': '/srv/env' });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await ready();
+    expect(screen.getByTestId('projects-preview-local')).toHaveTextContent('/srv/env/<owner>/<repo>');
+    await fireEvent.change(screen.getByTestId('projects-layout'), { target: { value: 'flat' } });
+    await tick();
+    expect(screen.getByTestId('projects-preview-local')).toHaveTextContent('/srv/env/<repo>');
+    // remote hosts never see the env var
+    expect(screen.getByTestId('projects-preview-mefistos')).toHaveTextContent('~/projects/<repo>');
   });
 });
