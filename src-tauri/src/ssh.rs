@@ -52,9 +52,10 @@ struct SshClientInner {
     /// timeout must not reset the shared ControlMaster while other commands
     /// (an upload, another probe) are still multiplexed through it.
     in_flight: DashMap<String, usize>,
-    /// How many times a master was actually reset after a timeout. Tests use
-    /// it to prove the reset is skipped when it would collateral-damage.
-    master_resets: std::sync::atomic::AtomicUsize,
+    /// Per-host count of masters actually reset after a timeout since
+    /// launch. Reported in the diagnostics bundle; tests use it to prove the
+    /// reset is skipped when it would collateral-damage.
+    master_resets: DashMap<String, usize>,
 }
 
 /// RAII decrement for `SshClientInner::in_flight`.
@@ -95,7 +96,7 @@ impl SshClient {
                 seen: DashMap::new(),
                 homes: DashMap::new(),
                 in_flight: DashMap::new(),
-                master_resets: std::sync::atomic::AtomicUsize::new(0),
+                master_resets: DashMap::new(),
             }),
         }
     }
@@ -396,12 +397,20 @@ impl SshClient {
         self.inner.in_flight.get(host).map(|n| *n).unwrap_or(0)
     }
 
-    /// How many times `maybe_reset_master` actually reset a master.
-    #[cfg(test)]
+    /// How many times `maybe_reset_master` actually reset a master since
+    /// launch, across all hosts.
     pub(crate) fn master_reset_count(&self) -> usize {
+        self.inner.master_resets.iter().map(|e| *e.value()).sum()
+    }
+
+    /// Per-host [`Self::master_reset_count`], ordered by host alias. Only
+    /// hosts that had at least one reset appear.
+    pub(crate) fn master_reset_counts(&self) -> std::collections::BTreeMap<String, usize> {
         self.inner
             .master_resets
-            .load(std::sync::atomic::Ordering::SeqCst)
+            .iter()
+            .map(|e| (e.key().clone(), *e.value()))
+            .collect()
     }
 
     /// After a wall-clock timeout on `host`: decide whether the shared
@@ -425,9 +434,11 @@ impl SshClient {
             eprintln!("[ssh] {host}: command timed out but the master still answers; keeping it");
             return false;
         }
-        self.inner
+        *self
+            .inner
             .master_resets
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            .entry(host.to_string())
+            .or_insert(0) += 1;
         self.reset_master(host).await;
         true
     }
@@ -1009,6 +1020,7 @@ mod tests {
             0,
             "reset skipped while another command is live on the host"
         );
+        assert!(c.master_reset_counts().is_empty(), "no per-host reset");
         assert!(
             !err.message.contains("connection reset"),
             "message must not claim a reset: {}",
@@ -1036,7 +1048,27 @@ mod tests {
             .expect_err("times out");
         assert_eq!(err.code, "E_SSH_TIMEOUT");
         assert_eq!(c.master_reset_count(), 1, "wedged/missing master is reset");
+        assert_eq!(
+            c.master_reset_counts(),
+            std::collections::BTreeMap::from([(host.to_string(), 1)]),
+            "the reset is attributed to its host"
+        );
         assert_eq!(c.others_in_flight(host), 0);
+    }
+
+    #[test]
+    fn master_reset_counts_start_empty_and_sum_per_host() {
+        let c = SshClient::new();
+        assert_eq!(c.master_reset_count(), 0);
+        assert!(c.master_reset_counts().is_empty());
+        c.inner.master_resets.insert("b-host".into(), 2);
+        c.inner.master_resets.insert("a-host".into(), 1);
+        assert_eq!(c.master_reset_count(), 3);
+        assert_eq!(
+            c.master_reset_counts().into_iter().collect::<Vec<_>>(),
+            [("a-host".to_string(), 1), ("b-host".to_string(), 2)],
+            "ordered by alias"
+        );
     }
 
     #[tokio::test]

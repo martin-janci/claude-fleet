@@ -66,6 +66,14 @@ and is not derivable from `hostname`. Look it up:
 
 The `fleet-friendly-name` skill uses the same lookup.
 
+**Per-host tokens.** On a provisioned host, your MCP client authenticates with
+that host's own token, not the master token. The token is bound to its host:
+`register_self`, `send_message` (`from_session_id`) and `inbox` refuse sessions
+on other hosts with `E_FORBIDDEN`. The fleet-admin tools (`provision_hosts`,
+`add_host`, `remove_host`, `hide_host`) are master-token only. A `readonly`
+token also refuses anything that sends, kills or writes. Treat `E_FORBIDDEN`
+as a permission answer and do not retry it.
+
 **Addressing a session.** Every name-addressed tool — `send_prompt`,
 `kill_session`, `safe_kill_session`, `restart_session`, `rename_session`,
 `set_friendly_name`, `register_self` — accepts **either** `session_id` **or**

@@ -109,18 +109,33 @@ on the host with `ssh <alias> tmux ls`.
 
 ### Logs: where they live and how to raise verbosity
 
-claude-fleet writes a daily-rotated log file into its app data directory and
-keeps the newest five files:
+claude-fleet writes an hourly-rotated log file into its app data directory
+and keeps the newest 72 files, which is three days:
 
 | OS | Log folder |
 |---|---|
 | Linux | `~/.local/share/claude-fleet/logs/` |
 | macOS | `~/Library/Application Support/sk.rlt.claude-fleet/logs/` |
 
-Files are named `claude-fleet.YYYY-MM-DD.log`. **Settings → Diagnostics → Open
-log folder** opens the folder (the path is also shown there, with a copy
-button). Bearer tokens, `?token=` query values and 64-character hex strings
-are masked as `[REDACTED]` before a line is written.
+Files are named `claude-fleet.YYYY-MM-DD-HH.log`, where the hour is in UTC.
+Older builds wrote one `claude-fleet.YYYY-MM-DD.log` per day. Those files are
+still read, and they are deleted first when the folder is pruned.
+**Settings → Diagnostics → Open log folder** opens the folder. The path is
+also shown there, with a copy button.
+
+Rotation is hourly because the logging library has no per-file size cap. With
+daily rotation, a `RUST_LOG=debug` run could grow one day's file without
+limit. With hourly rotation, one file holds at most an hour of output. Total
+disk use still grows with the level you choose, since up to 72 hours of it are
+kept, so unset `RUST_LOG` once you have the log you need.
+
+Before a line is written, these are masked as `[REDACTED]`:
+
+- a token-shaped value after `Bearer`: one that contains a digit or is at
+  least 24 characters long, so prose such as "Bearer authentication" is kept;
+- `?token=` / `&token=` query values;
+- runs of exactly 64 hex digits, including one glued to other letters
+  (`tok_<64 hex>`). A longer hex run, such as a SHA-512 digest, is kept.
 
 The default level is `info` for claude-fleet itself and `warn` for its
 libraries. Override it with the standard `RUST_LOG` syntax, then relaunch:
@@ -134,9 +149,21 @@ RUST_LOG=warn,claude_fleet_lib=info,rmcp=debug     # plus the MCP library
 A Finder-launched macOS app does not see your shell's environment. Run the
 binary from a terminal instead
 (`RUST_LOG=debug /Applications/claude-fleet.app/Contents/MacOS/claude-fleet`),
-or `launchctl setenv RUST_LOG debug` and relaunch. Debug builds (`pnpm tauri
-dev`) also log to stderr; set `CLAUDE_FLEET_LOG_STDERR=1` to get that in a
-release build.
+or `launchctl setenv RUST_LOG debug` and relaunch.
+
+**Release builds do not log to stderr.** Debug builds (`pnpm tauri dev`) write
+every log line to stderr as well as to the file. A release build writes only
+to the file, unless you launch it with `CLAUDE_FLEET_LOG_STDERR=1` (or
+`true`). Some lines used to be printed straight to stderr. These are the
+`[startup]` instance-reaper and friendly-name backfill lines, the
+`[reconcile-tick]` lines, and the `[mcp]` tunnel and start-failure errors. They
+are now log lines, without those bracketed prefixes. A release build started
+from a terminal no longer shows them unless you set the variable, so read
+them in the log file instead.
+
+The reconcile tick's `a reconcile pass is already running; skipping tick`
+line is logged at `debug`, so the default level hides it. To see skipped
+ticks, run with `RUST_LOG=warn,claude_fleet_lib=debug`.
 
 Not every subsystem logs to the file yet. Older code in the SSH client, PTY,
 reconcile and MCP handlers still prints to stderr only, and moving it to the

@@ -97,6 +97,8 @@ Starts a localhost-only MCP server that lets an AI assistant drive the fleet. It
 
 Once enabled, the checklist shows the port and a masked bearer token with a **Copy config** button. The default port is **4180** and the endpoint is `http://127.0.0.1:4180/mcp`. You can change the port and regenerate the token in Settings → **Control API (MCP)**.
 
+That token is the **master token**, for the assistant you configure yourself. Hosts use their own tokens instead. **Provision hosts** (Settings → Control API) creates a separate **per-host token** for each host, `local` included, and writes only that token into the host's `~/.claude.json` and hook config. A per-host token can only act as sessions on its own host, and it cannot run fleet-admin tools such as `add_host` or `provision_hosts`. That way a token copied from one machine cannot pose as another. You can set each host's token to `full` or `readonly` in the **Token** column of Settings → **Hosts**. After upgrading from a build without per-host tokens, re-provision every host. See [Per-host tokens](control-api.md#per-host-tokens).
+
 See [control-api.md](control-api.md) for a full reference.
 
 ### Create first session
