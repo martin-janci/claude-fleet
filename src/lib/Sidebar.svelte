@@ -6,18 +6,11 @@
     loadSessions,
     killSession,
     renameSession,
-    restartSession,
     recreateSession,
-    dismissGhostSession,
     peekSession,
-    newBgSession,
     purgeProject,
     showBgAgents,
-    showFriendlyNames,
     sameSession,
-    formatCostMicros,
-    formatTokens,
-    sessionUsageTokens,
     type SessionRow,
   } from './sessions';
   import { describePurge, purgeHostsForProject } from './purge';
@@ -29,10 +22,9 @@
   import NewSessionDialog from './NewSessionDialog.svelte';
   import SettingsDialog from './SettingsDialog.svelte';
   import OnboardingCard from './OnboardingCard.svelte';
-  import { hosts, hostFilter, hostByAlias } from './hosts';
+  import { hostFilter } from './hosts';
   import { onboardingDismissed } from './onboarding';
   import { hintAnchor } from './hints';
-  import { accounts, type AccountRow } from './accounts';
   import {
     buildSessionsByProject,
     buildRelatedCountById,
@@ -42,26 +34,18 @@
   } from './sidebar_index';
   import {
     attentionReason,
-    claudeStatusColor,
-    claudeStatusLabel,
-    contextColor,
-    contextLevel,
-    ciStatusColor,
-    ciStatusLabel,
-    formatElapsed,
-    promptPreview,
-    sessionStart,
-    stuckKindLabel,
     worstSeverityByProject,
-    STUCK_COLOR,
   } from './attention';
   import { attentionIdleMinutes } from './notify';
   import { push, pushError } from './toasts';
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
-  import Attention from './Attention.svelte';
   import BulkPromptDialog from './BulkPromptDialog.svelte';
   import TasksPanel from './TasksPanel.svelte';
+  import SidebarFilters from './SidebarFilters.svelte';
+  import SessionRowItem from './SessionRowItem.svelte';
+  import NewBgSessionDialog from './NewBgSessionDialog.svelte';
+  import { isRecency, matchesRecency, type Recency } from './session_status';
 
   let showSettings = $state(false);
   let showTasks = $state(false);
@@ -70,12 +54,6 @@
   // present, a ‹ button appears in the sidebar header so the user can
   // hide the whole sidebar to make room for the terminal.
   let { onCollapse }: { onCollapse?: () => void } = $props();
-
-  type Recency = 'all' | '8h' | '1d' | '3d' | '7d' | '30d';
-  const RECENCY_VALUES: readonly Recency[] = ['all', '8h', '1d', '3d', '7d', '30d'];
-  function isRecency(v: unknown): v is Recency {
-    return typeof v === 'string' && (RECENCY_VALUES as readonly string[]).includes(v);
-  }
 
   let loadError: string | null = $state(null);
   let loading = $state(false);
@@ -239,23 +217,6 @@
     }
   }
 
-  const RECENCY_WINDOW: Record<Recency, number | null> = {
-    all: null,
-    '8h': 60 * 60 * 8,
-    '1d': 60 * 60 * 24,
-    '3d': 60 * 60 * 24 * 3,
-    '7d': 60 * 60 * 24 * 7,
-    '30d': 60 * 60 * 24 * 30,
-  };
-
-  function matchesRecency(p: ProjectTreeRow, r: Recency): boolean {
-    const window = RECENCY_WINDOW[r];
-    if (window === null) return true;
-    if (p.project.last_session_at === null) return false;
-    const ageSec = Math.floor(Date.now() / 1000) - p.project.last_session_at;
-    return ageSec >= 0 && ageSec <= window;
-  }
-
   function matchesSearch(p: ProjectTreeRow, q: string): boolean {
     if (!q) return true;
     const needle = q.toLowerCase();
@@ -306,19 +267,6 @@
     }
     return new Set(Array.from(counts.entries()).filter(([, c]) => c > 1).map(([n]) => n));
   });
-
-  // Lookup map for tooltips + components that resolve a host's account.
-  const accountByUuid = $derived(
-    new Map<string, AccountRow>($accounts.map((a) => [a.uuid, a])),
-  );
-
-  function accountLabel(host: { account_uuid: string | null }): string {
-    if (!host.account_uuid) return '';
-    const acc = accountByUuid.get(host.account_uuid);
-    if (!acc) return `\n${host.account_uuid}`;
-    const email = acc.email ?? acc.uuid;
-    return acc.seat_tier ? `\n${email} (${acc.seat_tier})` : `\n${email}`;
-  }
 
   // --- Memoised indices (rebuilt once per $sessions change, not per row) ---
 
@@ -478,12 +426,6 @@
     }
   }
 
-  async function doRestart(sess: SessionRow, e?: Event) {
-    e?.stopPropagation();
-    const r = await restartSession(sess.host_alias, sess.tmux_name);
-    if (!r.ok) pushError(r.error, 'Restart failed');
-  }
-
   function askKill(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
     pendingKill = sess;
@@ -543,12 +485,6 @@
     }
   }
 
-  async function doRecreate(sess: SessionRow, e?: Event) {
-    e?.stopPropagation();
-    const r = await recreateSession(sess.id);
-    if (!r.ok) pushError(r.error, 'Recreate failed');
-  }
-
   // Per-session peek panel state: row id → log text | "loading" | null
   let peekState = $state<Record<number, string | "loading" | null>>({});
 
@@ -571,20 +507,6 @@
     peekState[sessId] = null;
   }
 
-  async function doDismissGhost(sess: SessionRow, e?: Event) {
-    e?.stopPropagation();
-    const r = await dismissGhostSession(sess.id);
-    if (!r.ok) {
-      pushError(r.error, 'Dismiss failed');
-      return;
-    }
-    forgetSessionUi(sess.host_alias, sess.tmux_name);
-  }
-
-  function hostIsReachable(alias: string): boolean {
-    return $hostByAlias.get(alias)?.reachable ?? false;
-  }
-
   // --- New BG Session modal ---
   let showBgModal = $state(false);
   let bgModalHost = $state('local');
@@ -592,25 +514,6 @@
   let bgModalPrompt = $state('');
   let bgModalError = $state<string | null>(null);
   let bgModalLoading = $state(false);
-
-  async function doNewBgSession() {
-    bgModalError = null;
-    bgModalLoading = true;
-    try {
-      const result = await newBgSession(bgModalHost, bgModalName, bgModalPrompt);
-      if (result.ok) {
-        showBgModal = false;
-        bgModalName = '';
-        bgModalPrompt = '';
-      } else {
-        bgModalError = result.error.message;
-      }
-    } catch (e: unknown) {
-      bgModalError = e instanceof Error ? e.message : String(e);
-    } finally {
-      bgModalLoading = false;
-    }
-  }
 
   // --- Purge Project ---
   let pendingPurge: ProjectRow | null = $state(null);
@@ -639,386 +542,56 @@
   function cancelPurge() {
     pendingPurge = null;
   }
-
-  function timeAgo(unixSecs: number): string {
-    const diffMs = Date.now() - unixSecs * 1000;
-    const diffMins = Math.floor(diffMs / 60_000);
-    if (diffMins < 1) return 'just now';
-    if (diffMins < 60) return `${diffMins}m ago`;
-    const diffHours = Math.floor(diffMins / 60);
-    if (diffHours < 24) return `${diffHours}h ago`;
-    const diffDays = Math.floor(diffHours / 24);
-    return `${diffDays}d ago`;
-  }
-
-  /** Secondary row text: elapsed since start + the last prompt's first line. */
-  function rowMeta(sess: SessionRow): string {
-    const parts: string[] = [];
-    if (sess.started_at !== null) parts.push(formatElapsed(sessionStart(sess), nowSec));
-    const preview = promptPreview(sess.last_prompt, 48);
-    if (preview) parts.push(preview);
-    return parts.join(' · ');
-  }
 </script>
 
 <div class="sidebar" data-testid="sidebar-tree" bind:this={sidebarEl}>
   {#snippet sessionRow(sess: SessionRow)}
-    {@const sessSelected = $selectedSession?.id === sess.id}
-    {@const isRenaming = renaming !== null && renaming.id === sess.id}
-    {@const isChecked = selectedIds.has(sess.id)}
-    {@const ctxLevel = contextLevel(sess.context_pct)}
-    {@const meta = rowMeta(sess)}
-    <div
-      class="sess-row"
-      class:selected={sessSelected}
-      class:renaming={isRenaming}
-      class:checked={isChecked}
-      class:stuck={sess.stuck_kind !== null}
-      data-testid="sess-row"
-      data-session-id={sess.id}
-      data-stuck={sess.stuck_kind ?? undefined}
-      role="button"
-      tabindex="0"
-      ondblclick={(e) => sess.status !== 'ghost' && beginRename(sess, e)}
-      onclick={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onSelectSession(sess, e)}
-      onkeydown={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onKeySession(e, sess)}
-      use:hintAnchor={{ id: 'session-actions', when: !!sess.claude_session_id && sess.status !== 'ghost' }}
-    >
-      {#if selectMode}
-        <!-- a11y smell, known: an <input> nested in a role="button" row. The
-             row is the click target for open/toggle; the box is a visible
-             affordance for the same toggle and stops propagation so the two
-             never double-fire. Splitting the row into a real <button> plus a
-             sibling checkbox is the proper fix (F5 sidebar split). -->
-        <input
-          type="checkbox"
-          class="select-box"
-          checked={isChecked}
-          data-testid="select-box"
-          aria-label="Select {sess.tmux_name}"
-          onclick={(e) => { e.stopPropagation(); toggleSelected(sess); }}
-        />
-      {/if}
-      {#if isRenaming}
-        <input
-          bind:this={renameInput}
-          class="rename-input"
-          data-testid="rename-input"
-          bind:value={renameValue}
-          onkeydown={onRenameKey}
-          onblur={commitRename}
-        />
-      {:else}
-        {#if sess.status === 'ghost'}
-          <span class="status-dot status-ghost" title="ghost — session lost" aria-hidden="true"></span>
-          <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
-          <span class="sess-name" title={sess.tmux_name}>{
-            $showFriendlyNames && sess.friendly_name ? sess.friendly_name : sess.tmux_name
-          }</span>
-          {#if sess.lost_at}
-            <span class="lost-at" title="Lost at {new Date(sess.lost_at * 1000).toLocaleString()}">
-              lost {timeAgo(sess.lost_at)}
-            </span>
-          {/if}
-          <div class="row-actions">
-            <button
-              class="icon-btn small"
-              data-testid="ghost-recreate"
-              onclick={(e) => doRecreate(sess, e)}
-              disabled={!hostIsReachable(sess.host_alias)}
-              title={hostIsReachable(sess.host_alias) ? 'Recreate tmux session' : 'Host is offline'}
-              aria-label="Recreate"
-            >↺</button>
-            <button
-              class="icon-btn small danger"
-              data-testid="ghost-dismiss"
-              onclick={(e) => doDismissGhost(sess, e)}
-              title="Dismiss ghost session"
-              aria-label="Dismiss"
-            >×</button>
-          </div>
-        {:else}
-          <span class="status-dot status-{sess.status}" title={sess.status} aria-hidden="true"></span>
-          {#if relatedCountFor(sess) > 0}
-            <span
-              class="related-badge"
-              data-testid="related-badge"
-              role="img"
-              title="{relatedCountFor(sess)} related session(s)"
-              aria-label="{relatedCountFor(sess)} related sessions"
-            >🔗{relatedCountFor(sess)}</span>
-          {/if}
-          {#if sess.kind === 'review'}
-            <span class="review-badge" role="img" title="review session" aria-label="review session">🔍</span>
-          {/if}
-          {#if sess.kind === 'shell'}
-            <span class="shell-badge" title="shell session">▶</span>
-          {/if}
-          {#if sess.kind === 'bg'}
-            <span class="bg-badge" role="img" title="background agent" aria-label="background agent">🤖</span>
-          {/if}
-          <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
-          <span class="sess-main">
-            <span class="sess-name" title={$showFriendlyNames && sess.friendly_name ? sess.tmux_name : undefined}>{
-              $showFriendlyNames && sess.friendly_name ? sess.friendly_name : sess.tmux_name
-            }</span>
-            {#if $showFriendlyNames && sess.friendly_name}
-              <span class="sess-secondary" data-testid="sess-tmux-name">{sess.tmux_name}</span>
-            {/if}
-            {#if meta}
-              <span class="sess-meta" data-testid="sess-meta" title={sess.last_prompt ?? undefined}>{meta}</span>
-            {/if}
-          </span>
-          {#if sess.stuck_kind}
-            <!-- Stuck outranks claude_status: one red chip, no green "working"
-                 next to it to soften the signal. -->
-            <span
-              class="claude-chip stuck-chip"
-              data-testid="stuck-chip"
-              style="background: {STUCK_COLOR}22; color: {STUCK_COLOR}; border-color: {STUCK_COLOR}66;"
-              title="Stuck: {stuckKindLabel(sess.stuck_kind)}{sess.current_activity ? ' — ' + sess.current_activity : ''}"
-            >⚠ stuck: {stuckKindLabel(sess.stuck_kind)}</span>
-          {:else if sess.claude_status}
-            <span
-              class="claude-chip"
-              data-testid="claude-chip"
-              style="background: {claudeStatusColor(sess.claude_status)}22; color: {claudeStatusColor(sess.claude_status)}; border-color: {claudeStatusColor(sess.claude_status)}44;"
-              title="Claude: {sess.claude_status}{sess.current_activity ? ' — ' + sess.current_activity : ''}"
-            >{claudeStatusLabel(sess.claude_status)}</span>
-          {/if}
-          {#if ctxLevel !== null && sess.context_pct !== null}
-            <span
-              class="ctx-badge ctx-{ctxLevel}"
-              data-testid="context-badge"
-              data-level={ctxLevel}
-              style="color: {contextColor(ctxLevel)}; border-color: {contextColor(ctxLevel)}55;"
-              title="Context window {Math.round(sess.context_pct)}% used"
-              role="meter"
-              aria-valuemin="0"
-              aria-valuemax="100"
-              aria-valuenow={Math.round(sess.context_pct)}
-              aria-label="context usage"
-            ><span class="ctx-bar" style="width: {Math.min(100, Math.max(0, sess.context_pct))}%; background: {contextColor(ctxLevel)};"></span><span class="ctx-pct">{Math.round(sess.context_pct)}%</span></span>
-          {/if}
-          {#if sessionUsageTokens(sess) > 0}
-            {@const priced = (sess.usage_cost_micros ?? 0) > 0}
-            <span
-              class="cost-badge"
-              data-testid="cost-badge"
-              data-priced={priced}
-              title={priced
-                ? `Estimated cost ${formatCostMicros(sess.usage_cost_micros)} · ${formatTokens(sessionUsageTokens(sess))} tokens${sess.usage_model ? ' · ' + sess.usage_model : ''}`
-                : `Unpriced: no price for ${sess.usage_model ?? 'an unknown model'} · ${formatTokens(sessionUsageTokens(sess))} tokens`}
-            >{priced ? formatCostMicros(sess.usage_cost_micros) : 'unpriced'}</span>
-          {/if}
-          {#if sess.effort_level}
-            <span class="effort-badge" title="Effort: {sess.effort_level}">{sess.effort_level}</span>
-          {/if}
-          {#if sess.pr_url}
-            <a
-              class="pr-link"
-              href={sess.pr_url}
-              onclick={(e) => e.stopPropagation()}
-              title="Open pull request"
-              target="_blank"
-              rel="noreferrer"
-            >PR↗</a>
-            {#if sess.ci_status}
-              <span
-                class="ci-badge"
-                data-testid="ci-badge"
-                style="color: {ciStatusColor(sess.ci_status)};"
-                title="CI checks: {sess.ci_status}"
-              >{ciStatusLabel(sess.ci_status)}</span>
-            {/if}
-          {/if}
-          <div class="row-actions">
-            {#if sess.claude_session_id && sess.status !== 'ghost'}
-              <button
-                class="icon-btn small peek-btn"
-                data-testid="peek-session"
-                title="Peek at session logs"
-                onclick={(e) => { e.stopPropagation(); doPeek(sess); }}
-                aria-label="Peek"
-              >📋</button>
-            {/if}
-            <button class="icon-btn small" onclick={(e) => doRestart(sess, e)} title="Restart claude in this session" aria-label="Restart">↻</button>
-            <button class="icon-btn small" onclick={(e) => beginRename(sess, e)} title="Rename session" aria-label="Rename">✎</button>
-            <button
-              class="icon-btn small"
-              data-testid="recreate-live"
-              onclick={(e) => askRecreate(sess, e)}
-              disabled={!hostIsReachable(sess.host_alias)}
-              title={hostIsReachable(sess.host_alias)
-                ? 'Recreate: kill the tmux session and start it fresh in the same worktree'
-                : 'Host is offline'}
-              aria-label="Recreate"
-            >♻</button>
-            <button class="icon-btn small danger" onclick={(e) => askKill(sess, e)} title="Kill session" aria-label="Kill">×</button>
-          </div>
-        {/if}
-      {/if}
-    </div>
-    {#if isRenaming && renameError}
-      <p class="err inline-err">{renameError}</p>
-    {/if}
-    {#if peekState[sess.id] !== undefined && peekState[sess.id] !== null}
-      <div class="peek-panel" data-testid="peek-panel">
-        <div class="peek-header">
-          <span>Logs — {sess.tmux_name}</span>
-          <button onclick={() => closePeek(sess.id)} class="peek-close">✕</button>
-        </div>
-        {#if peekState[sess.id] === "loading"}
-          <p class="peek-loading">Loading…</p>
-        {:else}
-          <pre class="peek-output">{peekState[sess.id]}</pre>
-        {/if}
-      </div>
-    {/if}
+    <SessionRowItem
+      {sess}
+      {selectMode}
+      isChecked={selectedIds.has(sess.id)}
+      isRenaming={renaming !== null && renaming.id === sess.id}
+      bind:renameValue
+      bind:renameInput
+      {renameError}
+      relatedCount={relatedCountFor(sess)}
+      {nowSec}
+      peek={peekState[sess.id]}
+      {onSelectSession}
+      {onKeySession}
+      {toggleSelected}
+      {beginRename}
+      {onRenameKey}
+      {commitRename}
+      {askRecreate}
+      {askKill}
+      {doPeek}
+      {closePeek}
+    />
   {/snippet}
 
-  <header class="sidebar-header" data-testid="sidebar-chrome-top">
-    <div class="row">
-      <input
-        class="search"
-        placeholder="Search sessions, projects…"
-        bind:value={search}
-        data-testid="sidebar-search"
-      />
-      <button class="icon-btn" onclick={onRefresh} disabled={loading} data-testid="sidebar-refresh" title="Refresh">
-        {#if loading}…{:else}↻{/if}
-      </button>
-      {#if onCollapse}
-        <button
-          class="icon-btn"
-          onclick={onCollapse}
-          title="Hide sidebar (more room for terminal)"
-          aria-label="Hide sidebar"
-          data-testid="sidebar-collapse"
-        >‹</button>
-      {/if}
-    </div>
-
-    <nav class="hosts" aria-label="host filter" use:hintAnchor={{ id: 'host-filter', when: $hosts.filter((h) => !h.hidden).length >= 2 }}>
-      <button
-        class="pill"
-        class:active={$hostFilter === 'all'}
-        onclick={() => hostFilter.set('all')}
-      >all</button>
-      {#each $hosts.filter((h) => !h.hidden) as h (h.alias)}
-        <button
-          class="pill"
-          class:active={$hostFilter === h.alias}
-          onclick={() => hostFilter.set(h.alias)}
-          title={`${h.alias}${h.tmux_version ? ` · tmux ${h.tmux_version}` : ''}${h.claude_version ? ` · claude ${h.claude_version}` : ''}${accountLabel(h)}`}
-        >
-          <span class="host-dot status-{h.reachable ? 'on' : 'off'}"></span>
-          {h.alias}
-        </button>
-      {/each}
-      <button
-        class="icon-btn"
-        onclick={() => (showTasks = true)}
-        title="Tasks (fleet-wide)"
-        aria-label="Tasks"
-        aria-expanded={showTasks}
-        data-testid="tasks-open"
-      >☑</button>
-      <button
-        class="icon-btn"
-        onclick={() => (showSettings = true)}
-        title="Settings"
-        aria-label="Settings"
-        aria-expanded={showSettings}
-        data-testid="settings-open"
-      >⚙</button>
-    </nav>
-
-    <nav class="recency" aria-label="recency filter" use:hintAnchor={{ id: 'recency-filter', when: $sessions.length > 0 }}>
-      {#each RECENCY_VALUES as opt (opt)}
-        <button
-          class="pill"
-          class:active={recency === opt}
-          onclick={() => (recency = opt)}
-        >
-          {opt}
-        </button>
-      {/each}
-    </nav>
-
-    <nav class="triage" aria-label="triage filter">
-      <button
-        class="pill stuck-pill"
-        class:active={stuckOnly}
-        class:hot={stuckCount > 0}
-        data-testid="stuck-filter"
-        aria-pressed={stuckOnly}
-        title={stuckOnly ? 'Show all sessions' : 'Show only stuck sessions'}
-        onclick={() => { stuckOnly = !stuckOnly; if (stuckOnly) attentionOnly = false; }}
-      >
-        ⚠ {stuckCount} stuck
-      </button>
-      <button
-        class="pill"
-        class:active={attentionOnly}
-        data-testid="attention-filter"
-        aria-pressed={attentionOnly}
-        title="Stuck, safe-remove pending/failed, lost, failed, or idle > {$attentionIdleMinutes} min"
-        onclick={() => { attentionOnly = !attentionOnly; if (attentionOnly) stuckOnly = false; }}
-      >
-        needs attention ({attentionCount})
-      </button>
-      <button
-        class="pill"
-        class:active={selectMode}
-        data-testid="select-mode"
-        aria-pressed={selectMode}
-        title="Select several sessions (or shift/cmd-click rows) for bulk actions"
-        onclick={toggleSelectMode}
-      >
-        ☑ select
-      </button>
-    </nav>
-    <Attention />
-
-    {#if selectedIds.size > 0}
-      <div class="bulk-bar" data-testid="bulk-bar" role="toolbar" aria-label="bulk actions">
-        <span class="bulk-count">{selectedIds.size} selected</span>
-        <button class="pill" data-testid="bulk-send" onclick={() => (bulkPromptOpen = true)}>→ Send prompt</button>
-        <button class="pill danger" data-testid="bulk-kill" onclick={() => (bulkKillOpen = true)}>× Kill</button>
-        <button class="pill" data-testid="bulk-clear" onclick={clearSelected}>clear</button>
-      </div>
-    {/if}
-
-    <nav class="bg-toggle" aria-label="background agents filter">
-      <button
-        class="pill"
-        class:active={$showBgAgents}
-        data-testid="bg-toggle"
-        aria-pressed={$showBgAgents}
-        title={$showBgAgents ? 'Hide background agents' : 'Show background agents'}
-        onclick={() => showBgAgents.update((v) => !v)}
-      >
-        🤖 bg {$showBgAgents ? 'on' : 'off'}
-      </button>
-      <button
-        class="pill"
-        class:active={$showFriendlyNames}
-        data-testid="friendly-name-toggle"
-        aria-pressed={$showFriendlyNames}
-        title={$showFriendlyNames
-          ? 'Show raw tmux names'
-          : 'Show agent-set friendly names'}
-        onclick={() => showFriendlyNames.update((v) => !v)}
-      >
-        🏷 friendly {$showFriendlyNames ? 'on' : 'off'}
-      </button>
-    </nav>
-
-    {#if loadError}
-      <p class="err">{loadError}</p>
-    {/if}
-  </header>
+  <SidebarFilters
+    bind:search
+    bind:recency
+    bind:stuckOnly
+    bind:attentionOnly
+    {loading}
+    {loadError}
+    {onRefresh}
+    {onCollapse}
+    {showTasks}
+    {showSettings}
+    onOpenTasks={() => (showTasks = true)}
+    onOpenSettings={() => (showSettings = true)}
+    {stuckCount}
+    {attentionCount}
+    {selectMode}
+    {toggleSelectMode}
+    selectedCount={selectedIds.size}
+    onBulkSend={() => (bulkPromptOpen = true)}
+    onBulkKill={() => (bulkKillOpen = true)}
+    {clearSelected}
+  />
 
   <div class="scroller">
     {#if !$onboardingDismissed}
@@ -1213,50 +786,14 @@
 {/if}
 
 {#if showBgModal}
-  <Modal title="New Background Session" onclose={() => (showBgModal = false)} width="420px" testid="bg-session-modal">
-    <div class="modal">
-      <label class="modal-field">
-        <span>Host</span>
-        <select bind:value={bgModalHost}>
-          {#each $hosts as host (host.alias)}
-            <option value={host.alias}>{host.alias}</option>
-          {/each}
-        </select>
-      </label>
-      <label class="modal-field">
-        <span>Session name</span>
-        <input
-          type="text"
-          bind:value={bgModalName}
-          placeholder="e.g. fix-auth-bug"
-          data-testid="bg-session-name"
-        />
-      </label>
-      <label class="modal-field">
-        <span>Initial prompt</span>
-        <textarea
-          bind:value={bgModalPrompt}
-          rows="4"
-          placeholder="What should Claude work on?"
-          data-testid="bg-session-prompt"
-        ></textarea>
-      </label>
-      {#if bgModalError}
-        <p class="err">{bgModalError}</p>
-      {/if}
-      <div class="modal-actions">
-        <button onclick={() => (showBgModal = false)}>Cancel</button>
-        <button
-          class="btn-primary"
-          onclick={doNewBgSession}
-          disabled={bgModalLoading || !bgModalName.trim() || !bgModalPrompt.trim()}
-          data-testid="bg-session-submit"
-        >
-          {bgModalLoading ? 'Launching…' : 'Launch'}
-        </button>
-      </div>
-    </div>
-  </Modal>
+  <NewBgSessionDialog
+    bind:bgModalHost
+    bind:bgModalName
+    bind:bgModalPrompt
+    bind:bgModalError
+    bind:bgModalLoading
+    onClose={() => (showBgModal = false)}
+  />
 {/if}
 
 <style>
@@ -1271,30 +808,6 @@
        That way search/filter and theme/new-session are always visible no
        matter how long the project list grows. */
   }
-  .sidebar-header {
-    flex: 0 0 auto;
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-    padding: 0.5rem 0.6rem 0.4rem;
-    border-bottom: 1px solid var(--border);
-    background: var(--bg-pane);
-  }
-  .sidebar-header .row {
-    display: flex;
-    gap: 0.3rem;
-    align-items: center;
-  }
-  .search {
-    flex: 1;
-    font-size: 0.85rem;
-    padding: 0.3rem 0.5rem;
-    border: 1px solid var(--border);
-    background: var(--bg);
-    color: var(--fg);
-    border-radius: 5px;
-  }
-  .search::placeholder { color: var(--fg-muted); }
 
   .icon-btn {
     background: transparent;
@@ -1320,74 +833,6 @@
     border-color: transparent;
   }
   .icon-btn.small:hover { border-color: var(--border); }
-  .icon-btn.danger:hover { color: #e64a4a; border-color: #e64a4a; }
-
-  .recency { display: flex; gap: 0.25rem; }
-  .bg-toggle { display: flex; gap: 0.25rem; }
-  .triage { display: flex; gap: 0.25rem; flex-wrap: wrap; align-items: center; }
-  .stuck-pill.hot { color: #e64a4a; border-color: rgba(230, 74, 74, 0.5); }
-  .stuck-pill.active { background: rgba(230, 74, 74, 0.12); }
-  .pill.danger { color: #e64a4a; }
-  .pill.danger:hover { border-color: #e64a4a; }
-  .bulk-bar {
-    display: flex;
-    gap: 0.3rem;
-    align-items: center;
-    padding: 0.25rem 0.4rem;
-    border: 1px solid var(--accent);
-    border-radius: 5px;
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    font-size: 0.75rem;
-  }
-  .bulk-count { flex: 1; color: var(--fg); }
-  .select-box { margin: 0; flex-shrink: 0; }
-  .sess-row.checked { outline: 1px solid var(--accent); }
-  .sess-row.stuck { background: rgba(230, 74, 74, 0.06); }
-  .pill {
-    font-size: 0.7rem;
-    padding: 0.15rem 0.55rem;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--fg-muted);
-    border-radius: 999px;
-    cursor: pointer;
-  }
-  .pill.active { color: var(--fg); border-color: var(--accent); }
-
-  .hosts { display: flex; flex-wrap: wrap; gap: 0.25rem; align-items: center; }
-  .host-dot {
-    display: inline-block;
-    width: 0.4rem;
-    height: 0.4rem;
-    border-radius: 50%;
-    margin-right: 0.3rem;
-    vertical-align: middle;
-  }
-  .host-dot.status-on { background: rgb(80, 200, 110); }
-  .host-dot.status-off { background: rgb(220, 130, 130); }
-
-  .host-badge {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
-    color: var(--fg-muted);
-    border: 1px solid var(--border);
-    padding: 0.05rem 0.3rem;
-    border-radius: 3px;
-    flex-shrink: 0;
-  }
-
-  .related-badge {
-    font-size: 0.65rem;
-    color: var(--fg-muted);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    padding: 0.05rem 0.3rem;
-    border-radius: 3px;
-    flex-shrink: 0;
-  }
-
-  .review-badge { font-size: 0.7rem; margin-left: 0.2rem; }
-  .shell-badge { font-size: 0.7rem; margin-left: 0.2rem; color: var(--fg-muted); }
-  .bg-badge { font-size: 0.7rem; margin-left: 0.2rem; }
 
   .scroller {
     flex: 1 1 auto;
@@ -1439,150 +884,8 @@
     text-align: center;
   }
 
-  .err { color: #e64a4a; font-size: 0.8rem; padding: 0.2rem 0; margin: 0; }
-  .inline-err { padding-left: 1.6rem; font-size: 0.75rem; }
   .empty { color: var(--fg-muted); font-size: 0.85rem; padding: 0.5rem 0.4rem; }
   .pad { padding: 0.5rem 0.6rem; }
-
-  .sess-row {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    font-size: 0.82rem;
-    padding: 0.22rem 0.4rem 0.22rem 1.4rem;
-    color: var(--fg);
-    border-radius: 4px;
-    cursor: pointer;
-    user-select: none;
-  }
-  .sess-row:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
-  .sess-row.selected { background: color-mix(in srgb, var(--accent) 22%, transparent); }
-  .sess-row.renaming { background: var(--bg-pane); }
-  .sess-row .row-actions {
-    display: none;
-    gap: 0.05rem;
-  }
-  .sess-row:hover .row-actions,
-  .sess-row.selected .row-actions { display: flex; }
-
-  .status-dot {
-    width: 0.45rem;
-    height: 0.45rem;
-    border-radius: 50%;
-    flex-shrink: 0;
-    background: var(--fg-muted);
-  }
-  .status-dot.status-running { background: rgb(80, 200, 110); }
-  .status-dot.status-frozen { background: rgb(140, 180, 240); }
-  .status-dot.status-orphan { background: rgb(220, 130, 130); }
-  .status-dot.status-ghost { background: rgb(160, 120, 200); opacity: 0.55; }
-  .lost-at {
-    font-size: 0.7em;
-    opacity: 0.6;
-    margin-left: auto;
-    padding-right: 0.25rem;
-    white-space: nowrap;
-  }
-
-  .claude-chip {
-    font-size: 0.65rem;
-    padding: 0.05rem 0.3rem;
-    border-radius: 3px;
-    border: 1px solid;
-    flex-shrink: 0;
-    white-space: nowrap;
-  }
-  .stuck-chip { font-weight: 600; }
-  .ctx-badge {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 2.6rem;
-    height: 0.95rem;
-    font-size: 0.6rem;
-    border: 1px solid;
-    border-radius: 3px;
-    overflow: hidden;
-    flex-shrink: 0;
-    font-variant-numeric: tabular-nums;
-  }
-  .ctx-bar {
-    position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    opacity: 0.25;
-  }
-  .ctx-pct { position: relative; }
-  .cost-badge {
-    font-size: 0.6rem;
-    flex-shrink: 0;
-    white-space: nowrap;
-    opacity: 0.75;
-    font-variant-numeric: tabular-nums;
-  }
-  .ci-badge {
-    font-size: 0.6rem;
-    flex-shrink: 0;
-    white-space: nowrap;
-  }
-  .effort-badge {
-    font-size: 0.6rem;
-    padding: 0.05rem 0.25rem;
-    border-radius: 3px;
-    background: color-mix(in srgb, var(--fg) 10%, transparent);
-    color: var(--fg-muted);
-    flex-shrink: 0;
-    white-space: nowrap;
-    text-transform: uppercase;
-  }
-  .pr-link {
-    font-size: 0.65rem;
-    color: var(--accent);
-    text-decoration: none;
-    flex-shrink: 0;
-    white-space: nowrap;
-  }
-  .pr-link:hover { text-decoration: underline; }
-
-  .sess-main {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.05rem;
-  }
-  .sess-name {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.8rem;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .sess-secondary,
-  .sess-meta {
-    font-size: 0.65rem;
-    color: var(--fg-muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .sess-secondary { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-
-  .rename-input {
-    flex: 1;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.8rem;
-    padding: 0.1rem 0.3rem;
-    border: 1px solid var(--accent);
-    background: var(--bg);
-    color: var(--fg);
-    border-radius: 3px;
-    outline: none;
-    min-width: 0;
-  }
 
   .orphan-section {
     border-top: 1px solid var(--border);
@@ -1673,88 +976,4 @@
     cursor: pointer;
   }
   .picker-item:hover { background: var(--bg-pane); }
-
-  .peek-btn {
-    opacity: 0.6;
-  }
-  .peek-btn:hover { opacity: 1; }
-  .peek-panel {
-    background: var(--color-surface-2, #1e1e2e);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    margin: 2px 8px 4px 8px;
-    padding: 8px;
-    font-size: 12px;
-  }
-  .peek-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 6px;
-    font-weight: 600;
-  }
-  .peek-close {
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--fg-muted);
-  }
-  .peek-loading {
-    color: var(--fg-muted);
-    font-style: italic;
-    margin: 0;
-  }
-  .peek-output {
-    white-space: pre-wrap;
-    word-break: break-all;
-    max-height: 200px;
-    overflow-y: auto;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
-    margin: 0;
-  }
-
-  .modal {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-  .modal-field {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    font-size: 12px;
-  }
-  .modal-field input,
-  .modal-field select,
-  .modal-field textarea {
-    padding: 6px 8px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--bg-pane);
-    color: var(--fg);
-    font-family: inherit;
-    font-size: 12px;
-  }
-  .modal-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-    margin-top: 4px;
-  }
-  .modal-actions button {
-    font-size: 0.85rem;
-    padding: 0.3rem 0.8rem;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--fg);
-    border-radius: 4px;
-    cursor: pointer;
-  }
-  .btn-primary {
-    color: var(--accent) !important;
-    border-color: var(--accent) !important;
-  }
-  .btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 14%, transparent) !important; }
-  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>
