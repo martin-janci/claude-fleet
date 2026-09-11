@@ -17,13 +17,13 @@
 //! 3. bg-agent surfacing, pruning and the `known_agent_status` filter;
 //! 4. a multi-host pass with a healthy, a timing-out and a garbage host.
 //!
-//! Tests marked `#[ignore = "BUG: …"]` pin behaviour that is wrong today;
-//! they are the spec for the fix, not flaky tests.
+//! The four bugs these tests originally pinned with `#[ignore = "BUG: …"]`
+//! are fixed; the tests now guard against regressions.
 
 use crate::events::RecordingEventBus;
 use crate::service::sessions::{
-    dismiss_ghost_session, reconcile_sessions_with, DismissGhostSessionArgs, ReconcileDeps,
-    ReconcileGate,
+    dismiss_ghost_session, reconcile_sessions_with, run_full_reconcile_for_test,
+    DismissGhostSessionArgs, ReconcileDeps, ReconcileGate,
 };
 use crate::ssh_fake::{FakeSsh, Match, Reply};
 use crate::store::{SessionRow, Store};
@@ -136,6 +136,26 @@ impl Fleet {
             Match::script_contains(&format!("tmux capture-pane -t '{name}'")),
             Reply::ok(tail),
         );
+    }
+
+    /// Wait until the fake has recorded a call on `host` whose command
+    /// contains `needle`. The fake records a call before its reply starts
+    /// (e.g. before a `Reply::Hang` sleeps), so this gates a concurrent
+    /// writer on "the probe is in flight" instead of a guessed timer.
+    async fn called(&self, host: &str, needle: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !self
+            .fake
+            .calls_for(host)
+            .iter()
+            .any(|c| c.command().contains(needle))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no {needle:?} call on {host}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     fn try_row(&self, name: &str, host: &str) -> Option<SessionRow> {
@@ -358,17 +378,20 @@ async fn failed_pane_capture_preserves_status_and_stuck_flag() {
         "an unobserved pane keeps the stuck flag and its episode start"
     );
     assert_eq!(after.claude_status.as_deref(), Some("blocked"));
+    assert_eq!(
+        f.timeline(before.id).len(),
+        2,
+        "an unobserved pane changes no stored value, so no status_change"
+    );
 }
 
 #[tokio::test]
-#[ignore = "BUG: a pass with no status signal logs a phantom status_change(None) every pass (reconcile_write_one_host compares prior vs pre-COALESCE value)"]
 async fn pane_without_a_status_signal_does_not_log_phantom_status_changes() {
     // The upsert COALESCEs a NULL claude_status onto the stored one, so the
-    // row stays `idle` — but the transition detector compares the prior row
-    // against the pre-COALESCE `None` and queues `status_change` with a NULL
-    // detail on EVERY such pass. That is the flap `SESSION_EVENTS_CAP` was
-    // added to contain (200k rows per session). The same happens on a
-    // failed pane capture with no agent status.
+    // row stays `idle`. The transition detector used to compare the prior row
+    // against the pre-COALESCE `None` and queue `status_change` with a NULL
+    // detail on EVERY such pass — the flap `SESSION_EVENTS_CAP` was added to
+    // contain (200k rows per session). It now compares stored values.
     let f = Fleet::new(&["alpha"]);
     f.list("alpha", "work|1|2|0|/tmp/w\n");
     f.agents("alpha", "[]\n");
@@ -388,6 +411,57 @@ async fn pane_without_a_status_signal_does_not_log_phantom_status_changes() {
         f.timeline(id),
         Vec::<(String, Option<String>)>::new(),
         "no status actually changed, so no status_change may be recorded"
+    );
+}
+
+#[tokio::test]
+async fn no_phantom_status_change_when_the_last_hook_at_guard_wins() {
+    // The #50 guard: a hook that lands while a probe is in flight keeps its
+    // claude_status over the probe's pane guess. The detector used to compare
+    // the (post-hook) stored row with the discarded pane value and log a
+    // status_change although the row did not change.
+    let f = Fleet::new(&["alpha"]);
+    f.list("alpha", "work|1|2|0|/tmp/w\n");
+    f.agents(
+        "alpha",
+        r#"[{"sessionId":"c1","name":"work","cwd":"/tmp/w"}]"#,
+    );
+    f.pane("alpha", "work", IDLE);
+    f.pass().await;
+    let r1 = f.row("work", "alpha");
+    assert_eq!(r1.claude_session_id.as_deref(), Some("c1"));
+    assert_eq!(r1.claude_status.as_deref(), Some("idle"));
+
+    // Pass 2: the probe stalls on `claude agents` (after `started_at` is
+    // taken) and a UserPromptSubmit hook lands meanwhile. The pane still
+    // says idle.
+    f.fake.on_host(
+        "alpha",
+        Match::script_contains("claude agents --json"),
+        Reply::Hang {
+            for_: Duration::from_millis(300),
+        },
+    );
+    f.fake.clear_calls();
+    let hook = async {
+        f.called("alpha", "claude agents --json").await;
+        f.store
+            .lock()
+            .unwrap()
+            .record_prompt_submit_hook("c1")
+            .unwrap()
+            .expect("the hook matches the row");
+    };
+    tokio::join!(f.pass(), hook);
+    assert_eq!(
+        f.row("work", "alpha").claude_status.as_deref(),
+        Some("working"),
+        "the hook-stamped status wins over the pane"
+    );
+    assert_eq!(
+        f.timeline(r1.id),
+        Vec::<(String, Option<String>)>::new(),
+        "the guard kept the stored status, so nothing transitioned"
     );
 }
 
@@ -454,13 +528,11 @@ async fn ghost_lifecycle_ghosts_unghosts_and_dismissed_rows_stay_gone() {
 }
 
 #[tokio::test]
-#[ignore = "BUG: dismiss_ghost_session deletes the row but not its session_events; the orphans leak onto a reused session id"]
 async fn dismissing_a_ghost_reaps_its_session_events() {
-    // `Store::delete_session` (behind `dismiss_ghost_session`) has no
-    // `DELETE FROM session_events`, and the table has no FK cascade. The
-    // reconcile hard-delete path reaps them; dismissal does not. Because
-    // `sessions.id` is a plain INTEGER PRIMARY KEY (no AUTOINCREMENT), the
-    // next session can reuse the id and inherit the dead one's timeline.
+    // `session_events` has no FK cascade, and `sessions.id` is a plain
+    // INTEGER PRIMARY KEY (no AUTOINCREMENT), so the next session can reuse
+    // the id. `Store::delete_session` (behind `dismiss_ghost_session`) must
+    // reap the timeline or the new session inherits the dead one's.
     let f = Fleet::new(&["alpha"]);
     f.agents("alpha", "[]\n");
     f.list("alpha", "s1|1|2|0|/tmp/s1\n");
@@ -510,8 +582,10 @@ async fn stale_probe_does_not_ghost_a_row_stamped_after_it_started() {
             for_: Duration::from_millis(600),
         },
     );
+    f.fake.clear_calls();
     let concurrent_create = async {
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // The probe has taken `started_at` and is blocked in list-sessions.
+        f.called("alpha", "tmux list-sessions").await;
         let s = f.store.lock().unwrap();
         s.upsert_session("fresh", "alpha", None, None, 1, 1, "running", None)
             .unwrap();
@@ -618,12 +692,11 @@ async fn bg_agents_surface_prune_and_filter_unknown_statuses() {
 }
 
 #[tokio::test]
-#[ignore = "BUG: reconcile_bg_agents stores the raw `claude agents` status on bg rows, bypassing known_agent_status"]
 async fn bg_agent_with_unknown_status_is_not_stored_verbatim() {
-    // Tmux rows run the agent status through `known_agent_status`; bg rows
-    // (`reconcile_bg_agents` → `upsert_bg_session`) pass `agent.status`
-    // straight through, so an out-of-vocabulary value lands in
-    // `claude_status` and reaches the MCP/UI contract.
+    // bg rows (`reconcile_bg_agents` → `upsert_bg_session`) run the agent
+    // status through `known_agent_status` like tmux rows, so an
+    // out-of-vocabulary value never lands in `claude_status` and never
+    // reaches the MCP/UI contract.
     let f = Fleet::new(&["alpha"]);
     f.list("alpha", "");
     f.agents(
@@ -696,14 +769,28 @@ async fn multi_host_pass_isolates_timeout_and_garbage_hosts_and_frees_the_gate()
     let delta_before = f.row("delta-old", "delta");
     f.session_row_events();
 
-    // The pass runs under the gate exactly like `run_full_reconcile`.
+    // The pass runs through the real gate entry point (`run_full_reconcile`).
+    // A second call made while the first is in flight (gamma's probe is
+    // hanging on the ssh wall clock) must not queue a second pass.
     let gate = ReconcileGate::new();
-    let pass = gate.try_begin().expect("free gate");
-    assert!(gate.try_begin().is_none(), "single slot while a pass runs");
+    assert!(!gate.is_fresh(Duration::from_secs(60)));
+    let concurrent = async {
+        f.called("gamma", "list-sessions").await;
+        run_full_reconcile_for_test(&f.store, &f.deps, &gate).await
+    };
     let start = std::time::Instant::now();
-    f.pass().await;
+    let (first, second) = tokio::join!(
+        run_full_reconcile_for_test(&f.store, &f.deps, &gate),
+        concurrent
+    );
     let elapsed = start.elapsed();
-    drop(pass);
+    assert!(first.expect("the pass completes"), "a free gate runs");
+    assert!(
+        !second.expect("a skipped call is not an error"),
+        "a concurrent call is skipped while a pass runs"
+    );
+    assert_eq!(gate.passes(), 1, "only the completed pass is counted");
+    assert!(gate.is_fresh(Duration::from_secs(60)));
     assert!(
         gate.try_begin().is_some(),
         "gate released after a pass with erroring probes"
@@ -757,13 +844,34 @@ async fn multi_host_pass_isolates_timeout_and_garbage_hosts_and_frees_the_gate()
 }
 
 #[tokio::test]
-#[ignore = "BUG: `tmux list-sessions` exiting 0 with unparseable output parses as 'no sessions' and ghosts every row on the host"]
+async fn a_failed_full_pass_is_not_marked_fresh_and_frees_the_gate() {
+    let f = Fleet::new(&[]);
+    // Poison the store mutex so the pass fails at its first lock.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = f.store.lock().unwrap();
+        panic!("poison the store mutex");
+    }));
+    assert!(f.store.is_poisoned());
+    let gate = ReconcileGate::new();
+    let err = run_full_reconcile_for_test(&f.store, &f.deps, &gate)
+        .await
+        .expect_err("a poisoned store fails the pass");
+    assert_eq!(err.code, crate::ipc_error::IpcError::lock().code);
+    assert!(
+        !gate.is_fresh(Duration::from_secs(60)),
+        "a failed pass must not make the fleet look fresh"
+    );
+    assert_eq!(gate.passes(), 0);
+    assert!(gate.try_begin().is_some(), "a failed pass frees the gate");
+}
+
+#[tokio::test]
 async fn garbage_list_output_with_exit_zero_does_not_ghost_host_rows() {
-    // `RemoteTmux::list_sessions` → `parse_sessions` silently drops every
-    // line it cannot parse, so a success exit whose stdout is not the
-    // `-F` format at all (a tmux wrapper/alias, a banner-only reply, a
-    // version whose format vars differ) becomes `Ok(vec![])` — "the host has
-    // no sessions" — and the reconcile ghosts (then deletes) all of them.
+    // A success exit whose stdout is not the `-F` format at all (a tmux
+    // wrapper/alias, a banner-only reply, a version whose format vars
+    // differ) must not read as "the host has no sessions" — the reconcile
+    // would ghost (then delete) all of them. `list_sessions` returns E_TMUX
+    // and the host counts as unreachable for the pass.
     let f = Fleet::new(&["delta"]);
     {
         let s = f.store.lock().unwrap();
@@ -782,4 +890,5 @@ async fn garbage_list_output_with_exit_zero_does_not_ghost_host_rows() {
         before.status,
         "unparseable list output is not evidence the sessions are gone"
     );
+    assert!(!f.reachable("delta"), "unparseable output → unreachable");
 }

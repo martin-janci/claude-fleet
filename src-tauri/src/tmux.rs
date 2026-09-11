@@ -164,7 +164,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
         let output = self.remote_bash(script).await?;
         let combined = String::from_utf8_lossy(&output.stdout).into_owned();
         if output.status.success() {
-            return Ok(parse_sessions(&combined));
+            return parse_sessions_checked(&combined);
         }
         if is_no_server_running(&combined) {
             return Ok(Vec::new());
@@ -338,7 +338,7 @@ pub async fn list_local_sessions() -> Result<Vec<TmuxSession>, IpcError> {
     match output {
         Ok(o) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout).into_owned();
-            Ok(parse_sessions(&stdout))
+            parse_sessions_checked(&stdout)
         }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr).to_string();
@@ -393,6 +393,28 @@ fn parse_sessions(input: &str) -> Vec<TmuxSession> {
             })
         })
         .collect()
+}
+
+/// `parse_sessions` for a SUCCESSFUL `list-sessions`, refusing output that
+/// has content but not one parseable line (a tmux wrapper/alias, a login
+/// banner, a format mismatch). Treating that as "no sessions" would ghost,
+/// then delete, every row on the host; an `E_TMUX` makes the reconcile count
+/// the host unreachable for this pass instead. Blank output and "no server
+/// running" still mean zero sessions.
+fn parse_sessions_checked(input: &str) -> Result<Vec<TmuxSession>, IpcError> {
+    let sessions = parse_sessions(input);
+    let mut lines = input.lines().map(str::trim).filter(|l| !l.is_empty());
+    let Some(first) = lines.next() else {
+        return Ok(sessions);
+    };
+    if !sessions.is_empty() || is_no_server_running(input) {
+        return Ok(sessions);
+    }
+    let sample: String = first.chars().take(80).collect();
+    Err(IpcError::new(
+        "E_TMUX",
+        format!("unparseable tmux list-sessions output: {sample:?}"),
+    ))
 }
 
 /// tmux `-S` start offset for `lines` rows of scrollback (a negative count).
@@ -612,6 +634,39 @@ mod tests {
     #[test]
     fn parse_empty_input() {
         assert!(parse_sessions("").is_empty());
+    }
+
+    #[test]
+    fn checked_parse_accepts_blank_and_no_server_as_zero_sessions() {
+        for blank in ["", "\n", "  \n\n"] {
+            assert!(
+                parse_sessions_checked(blank).unwrap().is_empty(),
+                "{blank:?}"
+            );
+        }
+        assert!(
+            parse_sessions_checked("no server running on /tmp/tmux-1000/default\n")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn checked_parse_keeps_good_lines_among_noise() {
+        let out = parse_sessions_checked("warning: x\ngood|1|2|0|/x\n").unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "good");
+    }
+
+    #[test]
+    fn checked_parse_rejects_content_with_no_parseable_line() {
+        let err = parse_sessions_checked("Welcome to delta!\nsession list unavailable: ???\n")
+            .unwrap_err();
+        assert_eq!(err.code, "E_TMUX");
+        assert!(err.message.contains("Welcome to delta!"), "{}", err.message);
+        let long = "x".repeat(500);
+        let err = parse_sessions_checked(&long).unwrap_err();
+        assert!(err.message.len() < 200, "sample is truncated");
     }
 
     #[test]

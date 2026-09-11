@@ -356,13 +356,16 @@ fn reconcile_write_one_host(
             let mut keep: Vec<String> = Vec::with_capacity(live.len());
             let mut sessions: Vec<ReconcileSession> = Vec::with_capacity(live.len());
             // ── Task G: reconcile transition-detection (event timeline) ──
-            // Per session, the (kind, detail) events whose stored value differs
-            // from the about-to-be-upserted value. Collected DURING the loop
-            // (so we can read the prior row before the upsert overwrites it) and
-            // flushed AFTER apply_host_reconcile commits — at which point we can
-            // resolve each tmux_name to its session id. Keyed by tmux_name.
-            // (Task H builds on this: keep it self-contained here.)
-            let mut pending_events: Vec<(String, &'static str, Option<String>)> = Vec::new();
+            // The PRIOR stored `(claude_status, stuck_kind)` of every already
+            // known session, read before the write. Events are derived after
+            // the write from the STORED values, never from this pass's
+            // candidates: the upsert COALESCEs a missing status onto the
+            // stored one and the hook guard keeps a hook-stamped status, so a
+            // candidate that differs from the prior row does not mean the row
+            // changed. `s` is the store guard held for this whole function, so
+            // no other writer lands between this read, the write and the
+            // read-back.
+            let mut priors: Vec<(String, Option<String>, Option<String>)> = Vec::new();
             for sess in live {
                 keep.push(sess.name.clone());
                 let project_id =
@@ -399,23 +402,11 @@ fn reconcile_write_one_host(
                 let claude_status = agent_status
                     .or_else(|| pane.and_then(|p| p.derived_status).map(|s| s.to_string()));
                 let stuck_kind = pane.and_then(|p| p.stuck.map(|k| k.as_str().to_string()));
-                // Transition-detection: compare the PRIOR stored row (read here,
-                // before the upsert below overwrites it) against the new values
-                // and queue an event when claude_status / stuck_kind changed.
-                // Append-only + best-effort: a read failure just skips detection.
+                // Transition-detection: remember the PRIOR stored values (the
+                // upsert below overwrites them). A read failure or a first
+                // sighting just skips detection for this session.
                 if let Ok(Some(prior)) = s.get_session(&sess.name, &host.alias) {
-                    if prior.claude_status != claude_status {
-                        pending_events.push((
-                            sess.name.clone(),
-                            "status_change",
-                            claude_status.clone(),
-                        ));
-                    }
-                    // A newly-set (or changed) stuck_kind is the alert-worthy
-                    // event; clearing it back to None is not recorded.
-                    if prior.stuck_kind != stuck_kind && stuck_kind.is_some() {
-                        pending_events.push((sess.name.clone(), "stuck", stuck_kind.clone()));
-                    }
+                    priors.push((sess.name.clone(), prior.claude_status, prior.stuck_kind));
                 }
                 sessions.push(ReconcileSession {
                     tmux_name: &sess.name,
@@ -449,13 +440,25 @@ fn reconcile_write_one_host(
                 sessions: &sessions,
                 keep: &keep,
             })?;
-            // Task G: flush queued transition events now that the upsert has
-            // committed and each tmux_name resolves to a session id. Append-only
-            // and best-effort — a failed insert is logged and skipped, never
-            // blocking reconcile.
-            for (tmux_name, kind, detail) in &pending_events {
-                if let Ok(Some(row)) = s.get_session(tmux_name, &host.alias) {
-                    if let Err(e) = s.insert_session_event(row.id, kind, detail.as_deref()) {
+            // Task G: the write has committed — read each known row back and
+            // record a transition only where the STORED value changed.
+            // Append-only and best-effort — a failed insert is logged and
+            // skipped, never blocking reconcile.
+            for (tmux_name, old_status, old_stuck) in &priors {
+                let Ok(Some(row)) = s.get_session(tmux_name, &host.alias) else {
+                    continue;
+                };
+                let mut events: Vec<(&str, Option<&str>)> = Vec::new();
+                if row.claude_status != *old_status {
+                    events.push(("status_change", row.claude_status.as_deref()));
+                }
+                // A newly-set (or changed) stuck_kind is the alert-worthy
+                // event; clearing it back to None is not recorded.
+                if row.stuck_kind.is_some() && row.stuck_kind != *old_stuck {
+                    events.push(("stuck", row.stuck_kind.as_deref()));
+                }
+                for (kind, detail) in events {
+                    if let Err(e) = s.insert_session_event(row.id, kind, detail) {
                         eprintln!(
                             "[reconcile] session_event insert failed for {}/{tmux_name}: {e}",
                             host.alias
@@ -558,12 +561,15 @@ fn reconcile_bg_agents(
         let project_id = agent.cwd.as_deref().and_then(|cwd| {
             find_project_id_for_path(projects, host_alias, std::path::Path::new(cwd), &paths)
         });
+        // Same vocabulary filter as tmux rows: an unknown value is logged and
+        // dropped (the upsert's COALESCE then keeps the prior status).
+        let status = known_agent_status(&tmux_name, agent.status.as_deref());
         if let Err(e) = s.upsert_bg_session(
             host_alias,
             &tmux_name,
             project_id,
             session_id,
-            agent.status.as_deref(),
+            status.as_deref(),
             now_unix(),
         ) {
             eprintln!("[reconcile] bg upsert failed for {host_alias}/{session_id}: {e}");
@@ -801,6 +807,17 @@ async fn run_full_reconcile(
     reconcile_sessions_with(store, deps).await?;
     pass.complete();
     Ok(true)
+}
+
+/// Test access to the private gate entry point, so reconcile tests exercise
+/// the real claim → pass → complete sequence.
+#[cfg(test)]
+pub(crate) async fn run_full_reconcile_for_test(
+    store: &Mutex<Store>,
+    deps: &Arc<ReconcileDeps>,
+    gate: &ReconcileGate,
+) -> Result<bool, IpcError> {
+    run_full_reconcile(store, deps, gate).await
 }
 
 /// Freshness window for `list_sessions`: the configured tick interval, or the
