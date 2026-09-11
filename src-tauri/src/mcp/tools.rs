@@ -174,6 +174,18 @@ fn require_host(caller: &Caller, session_host: &str, what: &str) -> Result<(), M
     }
 }
 
+/// A move touches two hosts, so the caller must be allowed on both: a
+/// per-host token can only "move" within its own host, which `move_session`
+/// refuses — in practice only the master token can move a session.
+fn require_move_hosts(
+    caller: &Caller,
+    source_host: &str,
+    target_host: &str,
+) -> Result<(), McpError> {
+    require_host(caller, source_host, "the session to move")?;
+    require_host(caller, target_host, "the move target host")
+}
+
 /// `resolve_session_target` + `require_host` on the RESOLVED row: the host
 /// binding is checked against where the session actually lives, never
 /// against the caller-supplied `host_alias` (which is optional and ignored
@@ -3252,6 +3264,81 @@ impl FleetTools {
             .map_err(to_mcp_err)?;
         ok_json(&rep)
     }
+
+    #[tool(description = "Move a work session to another host (replaces the \
+        unbuilt Handoff): copy its Claude transcript to the target, create the \
+        worktree there from the same branch, start it with --resume so the same \
+        conversation continues, and only once the target is confirmed running \
+        kill the source (keep_source=true leaves it running). Refused unless the \
+        source worktree is clean (E_MOVE_DIRTY) and its branch is on origin with \
+        nothing unpushed (E_MOVE_UNPUSHED; it never pushes for you); a \
+        transcript over move.max_transcript_mb (default 200) is refused \
+        (E_MOVE_TOO_LARGE). Nothing on the source changes before the target is \
+        confirmed; a failure after the target started returns E_MOVE_PARTIAL \
+        and leaves both sessions. Needs a token allowed on BOTH hosts (in \
+        practice the master token). Gated by mcp.confirm_destructive (retry with \
+        confirm_nonce). Returns a JSON MoveReport: source_session_id, \
+        target_session_id, from_host, to_host, tmux_name, transcript_bytes, \
+        source_killed, warnings, target (the new row, parent_session_id = source).")]
+    async fn move_session(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<MoveSessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "move_session",
+            &format!(
+                "session_id={} target={} keep_source={}",
+                p.session_id, p.target_host_alias, p.keep_source
+            ),
+        );
+        crate::validate::host_alias(&p.target_host_alias).map_err(to_mcp_err)?;
+        let row = self.resolve_target_row(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            "the session to move",
+        )?;
+        require_move_hosts(&caller, &row.host_alias, &p.target_host_alias)?;
+        self.confirm_gate(
+            "move_session",
+            p.confirm_nonce.as_deref(),
+            &format!(
+                "session_id={} from={} to={} keep_source={}",
+                row.id, row.host_alias, p.target_host_alias, p.keep_source
+            ),
+            &caller,
+        )?;
+        let rep = crate::service::move_session::move_session(
+            crate::service::move_session::MoveSessionArgs {
+                session_id: row.id,
+                target_host_alias: p.target_host_alias,
+                keep_source: p.keep_source,
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&rep)
+    }
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct MoveSessionParams {
+    /// Fleet session id of the work session to move (from list_sessions).
+    pub session_id: i64,
+    /// Host alias to move it to (reachable and provisioned).
+    pub target_host_alias: String,
+    /// Leave the source session running after the target is confirmed.
+    /// Default false (the source is killed through the normal kill path).
+    #[serde(default)]
+    pub keep_source: bool,
+    /// Nonce from a previous E_CONFIRM_REQUIRED, once approved on the
+    /// desktop (only when mcp.confirm_destructive is on).
+    #[serde(default)]
+    pub confirm_nonce: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -3466,6 +3553,33 @@ mod tests {
         let err = resolve_and_gate(&store, &c, Some(9999), None, None, "x").unwrap_err();
         assert!(err.message.starts_with("E_NOTFOUND"), "{}", err.message);
         assert!(resolve_and_gate(&store, &Caller::master(), Some(other), None, None, "x").is_ok());
+    }
+
+    #[test]
+    fn move_needs_a_caller_allowed_on_both_hosts() {
+        let c = host_caller("mefistos", TokenMode::Full);
+        for (from, to) in [("mefistos", "turanga"), ("turanga", "mefistos")] {
+            let err = require_move_hosts(&c, from, to).unwrap_err();
+            assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+        }
+        assert!(require_move_hosts(&Caller::master(), "mefistos", "turanga").is_ok());
+        assert!(crate::mcp::guard::needs_confirmation("move_session"));
+        let tools = FleetTools::tool_router_for_doc().list_all();
+        let t = tools
+            .iter()
+            .find(|t| t.name == "move_session")
+            .expect("move_session is registered");
+        for p in [
+            "session_id",
+            "target_host_alias",
+            "keep_source",
+            "confirm_nonce",
+        ] {
+            assert!(
+                t.input_schema["properties"].get(p).is_some(),
+                "move_session schema lacks {p}"
+            );
+        }
     }
 
     #[test]

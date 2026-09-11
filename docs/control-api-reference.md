@@ -113,6 +113,12 @@ List git worktrees fleet knows about, each with its alive-session occupants (emp
 
 Parameters: `project_id`
 
+### `move_session`
+
+Move a work session to another host (replaces the unbuilt Handoff): copy its Claude transcript to the target, create the worktree there from the same branch, start it with --resume so the same conversation continues, and only once the target is confirmed running kill the source (keep_source=true leaves it running). Refused unless the source worktree is clean (E_MOVE_DIRTY) and its branch is on origin with nothing unpushed (E_MOVE_UNPUSHED; it never pushes for you); a transcript over move.max_transcript_mb (default 200) is refused (E_MOVE_TOO_LARGE). Nothing on the source changes before the target is confirmed; a failure after the target started returns E_MOVE_PARTIAL and leaves both sessions. Needs a token allowed on BOTH hosts (in practice the master token). Gated by mcp.confirm_destructive (retry with confirm_nonce). Returns a JSON MoveReport: source_session_id, target_session_id, from_host, to_host, tmux_name, transcript_bytes, source_killed, warnings, target (the new row, parent_session_id = source).
+
+Parameters: `confirm_nonce`, `keep_source`, `session_id`, `target_host_alias`
+
 ### `new_bg_session`
 
 Launch a supervised headless (background) Claude session on a host with an initial prompt. Returns JSON with the new claude_session_id AND the fleet row (`session`, registered by an immediate reconcile; the key is absent if the agent was not matched yet — it appears on the next tick) so the next call can be peek_session { session_id }. The prompt becomes the row's default friendly name and last_prompt.
@@ -352,6 +358,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::send_prompt`
 - `commands::sessions::spawn_review`
 - `commands::sessions::recreate_session`
+- `commands::move_session::move_session`
 - `commands::sessions::dismiss_ghost_session`
 - `commands::sessions::new_bg_session`
 - `commands::sessions::peek_session`

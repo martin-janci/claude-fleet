@@ -263,6 +263,11 @@ For both local and remote sessions:
 
 ### 8.3 Handoff
 
+> **Superseded (2026-09-11).** Handoff was never built. It is replaced by
+> `move_session` (copy the transcript, start the target with `--resume`,
+> then kill the source); the `handoffs` table is dropped by migration 022.
+> See [ADR 0001](../adr/0001-descope-freeze-ship-move.md).
+
 User clicks **Send to…**, picks destination host + mode:
 
 **Live mirror (default):**
@@ -290,6 +295,11 @@ After a successful handoff, the user can optionally:
 All handoffs append a row to `handoffs`.
 
 ### 8.4 Freeze
+
+> **Descoped (2026-09-11).** Freeze will not be built: recreate resumes by
+> `claude_session_id` and the capture / transcript tools cover inspection.
+> The `frozen_scrollback` column is dropped by migration 022. See
+> [ADR 0001](../adr/0001-descope-freeze-ship-move.md).
 
 Mark a session as frozen for later inspection without killing tmux:
 

@@ -419,6 +419,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (19, include_str!("../migrations/019_lifecycle_fields.sql")),
     (20, include_str!("../migrations/020_tasks_and_turns.sql")),
     (21, include_str!("../migrations/021_repair_backoff.sql")),
+    (
+        22,
+        include_str!("../migrations/022_drop_handoff_freeze.sql"),
+    ),
 ];
 
 /// The schema version a fully migrated database reports.
@@ -3050,7 +3054,6 @@ mod tests {
         "projects",
         "worktrees",
         "sessions",
-        "handoffs",
         "settings",
         "schema_version",
         "session_events",
@@ -3065,6 +3068,91 @@ mod tests {
         for t in EXPECTED_TABLES {
             assert!(store.has_table(t).expect("has_table"), "missing table: {t}");
         }
+    }
+
+    fn session_columns(s: &Store) -> Vec<String> {
+        let mut stmt = s.conn.prepare("PRAGMA table_info(sessions)").unwrap();
+        let mut out = Vec::new();
+        for c in stmt.query_map([], |r| r.get::<_, String>(1)).unwrap() {
+            out.push(c.unwrap());
+        }
+        out
+    }
+
+    /// The handoff/freeze drop (W5 G2) on an existing database at version
+    /// 20 that still has the dead `handoffs` table (with a row) and
+    /// `sessions.frozen_scrollback` (with a value): every later migration
+    /// applies cleanly, both are gone, the session row survives, and a
+    /// relaunch — which re-runs the 001 bootstrap — is a strict no-op and
+    /// does not bring the table back.
+    #[test]
+    fn handoff_freeze_drop_applies_on_an_existing_v20_db_and_is_idempotent() {
+        const SEED_AT: i64 = 20;
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        for (version, sql) in MIGRATIONS.iter().copied().filter(|(v, _)| *v <= SEED_AT) {
+            conn.execute_batch(sql)
+                .unwrap_or_else(|e| panic!("migration {version}: {e}"));
+        }
+        // The table exactly as the pre-022 bootstrap created it.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS handoffs (
+               id INTEGER PRIMARY KEY,
+               session_id INTEGER NOT NULL REFERENCES sessions(id),
+               from_host TEXT NOT NULL, to_host TEXT NOT NULL, mode TEXT NOT NULL,
+               started_at INTEGER NOT NULL, finished_at INTEGER,
+               status TEXT NOT NULL, error TEXT);
+             INSERT INTO hosts (alias) VALUES ('h');
+             INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status, frozen_scrollback)
+               VALUES ('s', 'h', 1, 1, 'running', 'frozen text');
+             INSERT INTO handoffs (session_id, from_host, to_host, mode, started_at, status)
+               VALUES (1, 'h', 'x', 'mirror', 1, 'done');",
+        )
+        .unwrap();
+        let store = Store {
+            conn,
+            bus: Arc::new(NoopEventBus),
+        };
+        assert!(store.has_table("handoffs").unwrap());
+        assert!(session_columns(&store).contains(&"frozen_scrollback".to_string()));
+        assert_eq!(store.schema_version().unwrap(), SEED_AT);
+
+        store.migrate().expect("migrate a v20 db");
+        assert!(!store.has_table("handoffs").unwrap());
+        assert!(!session_columns(&store).contains(&"frozen_scrollback".to_string()));
+        let row = store.get_session("s", "h").unwrap().expect("row survives");
+        assert_eq!(row.status, "running");
+        assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+
+        // Relaunch: the bootstrap re-runs; nothing changes, the table stays gone.
+        let objects = |s: &Store| -> i64 {
+            s.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table','index')",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let before = (objects(&store), session_columns(&store));
+        store.migrate().expect("second migrate");
+        assert!(!store.has_table("handoffs").unwrap());
+        assert_eq!((objects(&store), session_columns(&store)), before);
+        assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// A fresh database: 001 still lists `frozen_scrollback` (so the drop
+    /// can be an unconditional DROP COLUMN) and no longer creates
+    /// `handoffs`; after the full migrate neither exists, and a second
+    /// migrate keeps it that way.
+    #[test]
+    fn fresh_db_has_no_handoffs_or_frozen_scrollback() {
+        let store = Store::open_in_memory().expect("open");
+        assert!(!store.has_table("handoffs").unwrap());
+        assert!(!session_columns(&store).contains(&"frozen_scrollback".to_string()));
+        store.migrate().expect("second migrate");
+        assert!(!store.has_table("handoffs").unwrap());
+        assert!(!session_columns(&store).contains(&"frozen_scrollback".to_string()));
     }
 
     #[test]
@@ -4501,7 +4589,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 21, "schema_version should be 21 after migration");
+        assert_eq!(v, 22, "schema_version should be 22 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store

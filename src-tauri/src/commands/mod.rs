@@ -4,6 +4,7 @@ pub mod health;
 pub mod history;
 pub mod hosts;
 pub mod mcp;
+pub mod move_session;
 pub mod mutate;
 pub mod onboarding;
 pub mod projects;

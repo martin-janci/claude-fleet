@@ -152,6 +152,78 @@ describe('SessionDetails', () => {
     expect(done?.message).toContain('branch_local');
   });
 
+  it('offers Move to host… for resumable worktree sessions and invokes move_session', async () => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const mockInvoke = invoke as ReturnType<typeof vi.fn>;
+    const { toasts, clearToasts } = await import('./toasts');
+    const { get } = await import('svelte/store');
+    clearToasts();
+    const host = (alias: string, reachable: boolean, provisioned: boolean) => ({
+      alias, ssh_alias: alias, reachable, claude_version: null, tmux_version: null,
+      hidden: false, last_pinged_at: 1, account_uuid: null, provisioned,
+    });
+    hosts.set([
+      host('mefistos', true, true),
+      host('turanga', true, true),
+      host('down', false, true),
+      host('bare', true, false),
+    ]);
+    // No Claude session id → nothing to resume, no menu item.
+    render(SessionDetails, { props: { session: { ...sampleSession, project_id: 1, worktree_id: 10 } } });
+    await tick();
+    expect(screen.queryByTestId('move-from-details')).toBeNull();
+
+    const movable = {
+      ...sampleSession, id: 5, project_id: 1, worktree_id: 10,
+      claude_session_id: '550e8400-e29b-41d4-a716-446655440000',
+    };
+    const target = { ...movable, id: 6, host_alias: 'turanga', parent_session_id: 5 };
+    mockInvoke.mockImplementation(async (cmd: string) =>
+      cmd === 'move_session'
+        ? {
+            source_session_id: 5, target_session_id: 6, from_host: 'mefistos', to_host: 'turanga',
+            tmux_name: 'dev-foo', claude_session_id: movable.claude_session_id, branch: 'feat',
+            target_cwd: '/r/.claude/worktrees/feat', transcript_bytes: 10, source_killed: true,
+            warnings: [], target,
+          }
+        : undefined,
+    );
+    try {
+      render(SessionDetails, { props: { session: movable } });
+      await tick();
+      (await screen.findByTestId('move-from-details')).click();
+      await tick();
+      // Only reachable, provisioned hosts other than the source are offered.
+      const select = (await screen.findByTestId('move-target')) as HTMLSelectElement;
+      expect(Array.from(select.options, (o) => o.value)).toEqual(['turanga']);
+      screen.getByTestId('confirm-move').click();
+      await tick();
+      await tick();
+      expect(mockInvoke.mock.calls).toContainEqual([
+        'move_session',
+        { args: { session_id: 5, target_host_alias: 'turanga', keep_source: false } },
+      ]);
+      const done = get(toasts).find((t) => t.kind === 'success' && t.message.includes('Moved to turanga'));
+      expect(done).toBeTruthy();
+      expect(get(sessions).some((s) => s.id === 6 && s.parent_session_id === 5)).toBe(true);
+    } finally {
+      mockInvoke.mockReset();
+    }
+  });
+
+  it('hides Move to host… for shell sessions', async () => {
+    render(SessionDetails, {
+      props: {
+        session: {
+          ...sampleSession, kind: 'shell', project_id: 1, worktree_id: 10,
+          claude_session_id: '550e8400-e29b-41d4-a716-446655440000',
+        },
+      },
+    });
+    await tick();
+    expect(screen.queryByTestId('move-from-details')).toBeNull();
+  });
+
   it('shows the Review button', async () => {
     sessions.set([sampleSession]);
     render(SessionDetails, { props: { session: sampleSession } });
