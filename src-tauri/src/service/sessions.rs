@@ -270,9 +270,11 @@ fn reconcile_write_one_host(
                 // capture failed — then all four intel fields stay None and the
                 // upsert's COALESCE preserves the session's prior values).
                 let pane = intel.get(&sess.name);
-                let agent_status = agent.and_then(|a| a.status.clone());
+                let agent_status =
+                    known_agent_status(&sess.name, agent.and_then(|a| a.status.as_deref()));
                 // Prefer the authoritative `claude agents` status; fall back to
-                // the status derived from the pane tail only when it is absent.
+                // the status derived from the pane tail only when it is absent
+                // (or outside the documented vocabulary).
                 let claude_status = agent_status
                     .or_else(|| pane.and_then(|p| p.derived_status).map(|s| s.to_string()));
                 let stuck_kind = pane.and_then(|p| p.stuck.map(|k| k.as_str().to_string()));
@@ -2214,10 +2216,52 @@ pub async fn capture_session_output(
     }
 }
 
+/// Accept a `claude agents --json` status only when it is in the documented
+/// `ClaudeStatus` vocabulary. An unknown value (a newer CLI, a typo upstream)
+/// is logged once per reconcile and dropped so the pane-derived fallback wins
+/// instead of the DB silently diverging from what the MCP docs promise.
+fn known_agent_status(tmux_name: &str, status: Option<&str>) -> Option<String> {
+    let raw = status?;
+    match raw.parse::<crate::service::pane_intel::ClaudeStatus>() {
+        Ok(st) => Some(st.as_str().to_string()),
+        Err(_) => {
+            eprintln!(
+                "[reconcile] {tmux_name}: dropping unknown claude agents status {raw:?} \
+                 (not in vocabulary {})",
+                crate::service::pane_intel::ClaudeStatus::vocabulary_doc()
+            );
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::store::Store;
+
+    #[test]
+    fn known_agent_status_keeps_vocabulary_and_drops_the_rest() {
+        for good in [
+            "working",
+            "blocked",
+            "completed",
+            "failed",
+            "stopped",
+            "idle",
+        ] {
+            assert_eq!(
+                known_agent_status("dev", Some(good)).as_deref(),
+                Some(good),
+                "{good} is in the vocabulary and must be stored verbatim"
+            );
+        }
+        // Unknown CLI values fall through to None so the pane-derived
+        // fallback (or the COALESCE-preserved prior value) is used instead.
+        assert_eq!(known_agent_status("dev", Some("awaiting_input")), None);
+        assert_eq!(known_agent_status("dev", Some("")), None);
+        assert_eq!(known_agent_status("dev", None), None);
+    }
 
     #[test]
     fn bg_claude_session_id_prefers_row_id_falls_back_to_name() {

@@ -316,8 +316,8 @@ pub struct ListSessionsParams {
     /// Only return sessions in this project id.
     #[serde(default)]
     pub project_id: Option<i64>,
-    /// Only return sessions whose store-level `status` equals this (e.g.
-    /// "alive", "dead").
+    /// Only return sessions whose store-level `status` equals this
+    /// ("running", "ghost").
     #[serde(default)]
     pub status: Option<String>,
     /// Only return sessions whose `claude_status` equals this. Vocabulary:

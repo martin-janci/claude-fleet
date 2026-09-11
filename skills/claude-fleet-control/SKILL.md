@@ -72,7 +72,7 @@ The `fleet-friendly-name` skill uses the same lookup and covers the edge cases
   `start_command` runs once and the shell stays alive after it exits (dev
   servers, watchers). Steer it with `send_prompt` / `capture_session` exactly
   like a Claude session.
-- `new_bg_session { host, name, prompt }` — supervised headless run; rows are
+- `new_bg_session { host_alias, name, prompt }` — supervised headless run; rows are
   named `bg:<uuid>`. Track with `peek_session`; `capture_session` does not
   apply (no pane). `kill_session` stops it via `claude stop`.
 
@@ -97,8 +97,9 @@ prompting a peer that may be mid-stream. For one-to-many use
 
 `session_history { session_id, limit? }` is the per-session event log
 (`status_change`, `prompt_sent`, `stuck`, `killed`, `recreated`,
-`message_sent`, `message_received`; newest first) — the *story*, where
-`capture_session` is only the current screen.
+`message_sent`, `message_received`, `safe_kill_requested`, `safe_kill_ready`,
+`safe_kill_failed`, `safe_kill_send_failed`; newest first) — the *story*,
+where `capture_session` is only the current screen.
 
 ## Recovering — escalation ladder
 
