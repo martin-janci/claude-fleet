@@ -14,6 +14,7 @@ import {
   needsYou,
   newlyStuck,
   NEEDS_YOU_BUCKETS,
+  NEEDS_YOU_COUNTED_BUCKETS,
   promptPreview,
   rank,
   sessionStart,
@@ -230,6 +231,24 @@ describe('triage rank', () => {
     expect(
       countNeedsYou([row({ stuck_kind: 'oom' }), row({ claude_status: 'working' }), row({ status: 'ghost' })], opts),
     ).toBe(2);
+  });
+
+  // The pill and the filter answer different questions, so they cover
+  // different buckets. If this test ever "fails" because the two were made to
+  // agree, read NEEDS_YOU_COUNTED_BUCKETS before changing it.
+  it('counts one bucket narrower than it filters: idle_long is shown, not counted', () => {
+    expect([...NEEDS_YOU_COUNTED_BUCKETS]).toEqual([...TRIAGE_BUCKETS].slice(0, 5));
+    const idleRows = Array.from({ length: 6 }, () => row({ idle_since: 0 }));
+    const blocked = row({ claude_status: 'blocked' });
+    const rows = [...idleRows, blocked];
+    // A fleet of idle sessions plus one thing actually waiting on the user:
+    // the filter surfaces all seven...
+    expect(rows.filter((s) => needsYou(s, opts))).toHaveLength(7);
+    // ...while the pill reads 1, so idle rows cannot inflate the number.
+    expect(countNeedsYou(rows, opts)).toBe(1);
+    // And an idle_long row alone is filtered in but never counted.
+    expect(needsYou(idleRows[0], opts)).toBe(true);
+    expect(countNeedsYou([idleRows[0]], opts)).toBe(0);
   });
 
   it('orders by bucket first, then by the longest wait', () => {

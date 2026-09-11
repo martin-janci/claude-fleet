@@ -140,7 +140,7 @@
       class:hot={needsYouCount > 0}
       data-testid="needs-you-filter"
       aria-pressed={needsYouOnly}
-      title="Waiting on you, stuck, failed, lost, safe-remove pending/failed, or idle > {$attentionIdleMinutes} min"
+      title="Counts what is waiting on you now: blocked, stuck, failed, lost, safe-remove pending/failed. Toggling also shows sessions idle > {$attentionIdleMinutes} min."
       onclick={() => (needsYouOnly = !needsYouOnly)}
     >
       ⚠ Needs you ({needsYouCount})

@@ -130,13 +130,24 @@ export const TRIAGE_BUCKETS = [
 
 export type TriageBucket = (typeof TRIAGE_BUCKETS)[number];
 
-/** Buckets that put a row in the "Needs you" queue and its counter.
- *  `idle_long` is in, so the operator-configured idle nudge keeps the reach it
- *  had in the "needs attention" pill this replaces. `working` and `idle` are
- *  never in it. */
+/** Buckets the "Needs you" FILTER shows. `idle_long` is in: the toggle is the
+ *  only surface for the operator-configured idle nudge, so leaving it out
+ *  would delete that reach and reduce `attentionIdleMinutes` to a sort knob.
+ *  `working` and `idle` are never in it. */
 export const NEEDS_YOU_BUCKETS: readonly TriageBucket[] = TRIAGE_BUCKETS.slice(0, 6);
 
+/** Buckets the "Needs you" COUNTER reports — deliberately one narrower than
+ *  the filter, excluding `idle_long`.
+ *
+ *  The divergence is intentional, not an oversight. The pill answers "which
+ *  sessions need me NOW"; on a fleet of ~60 sessions most are idle, so
+ *  counting them would read "Needs you (34)" and the number would stop
+ *  meaning anything. The rows are still one toggle away, because the filter
+ *  above does include them. Do not "reconcile" these two sets. */
+export const NEEDS_YOU_COUNTED_BUCKETS: readonly TriageBucket[] = TRIAGE_BUCKETS.slice(0, 5);
+
 const NEEDS_YOU = new Set<TriageBucket>(NEEDS_YOU_BUCKETS);
+const NEEDS_YOU_COUNTED = new Set<TriageBucket>(NEEDS_YOU_COUNTED_BUCKETS);
 
 /** Age is capped so that no wait, however long, lets a row jump its bucket. */
 const AGE_CAP_SECS = 1_000_000;
@@ -215,9 +226,11 @@ export function needsYou(s: SessionRow, opts: AttentionOptions): boolean {
   return NEEDS_YOU.has(classify(s, opts));
 }
 
+/** How many rows are waiting on the operator right now. Narrower than
+ *  `needsYou()` on purpose — see NEEDS_YOU_COUNTED_BUCKETS. */
 export function countNeedsYou(rows: readonly SessionRow[], opts: AttentionOptions): number {
   let n = 0;
-  for (const s of rows) if (needsYou(s, opts)) n++;
+  for (const s of rows) if (NEEDS_YOU_COUNTED.has(classify(s, opts))) n++;
   return n;
 }
 
