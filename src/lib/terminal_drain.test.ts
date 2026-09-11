@@ -88,6 +88,31 @@ describe('createDrainLoop', () => {
     expect(ticks[2] - t1).toBe(30);
   });
 
+  it('does not double-schedule when a restart claims the loop mid-tick', async () => {
+    const ticks: number[] = [];
+    let restart: (() => void) | null = null;
+    const loop = createDrainLoop({
+      drainOnce: async () => {
+        ticks.push(Date.now());
+        // A concurrent openTerm() would start its own loop while this tick
+        // is still awaiting; the finished tick must not add a second timer.
+        restart?.();
+        restart = null;
+        return false;
+      },
+      attached: () => true,
+    });
+    restart = () => loop.start();
+    const t0 = Date.now();
+    loop.start();
+    await vi.advanceTimersByTimeAsync(30);
+    expect(loop.pending()).toBe(true);
+    // Past the restarted loop's tick at +60 and past +90, where the timer the
+    // finished tick would have queued (at its backed-off 60 ms) would fire.
+    await vi.advanceTimersByTimeAsync(90);
+    expect(gaps(t0, ticks)).toEqual([30, 30]);
+  });
+
   it('does not reschedule once the host is detached', async () => {
     const { loop, ticks, detach } = setup();
     loop.start();

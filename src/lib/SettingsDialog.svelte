@@ -59,8 +59,11 @@
     const r = await mcpStatus();
     mcpSettings?.applyStatus(r);
     // Independent fetches, in parallel: a failed token fetch must not hide
-    // the automation section's state and vice versa.
-    const [fs] = await Promise.all([loadFleetSettings(), hostsTable!.loadHostTokens()]);
+    // the automation section's state and vice versa. The optional call is
+    // deliberate: Svelte nulls a `bind:this` ref on teardown, so closing
+    // Settings while the mcpStatus() above is in flight leaves it unset —
+    // and a throw here would also skip resetProjectDrafts() below.
+    const [fs] = await Promise.all([loadFleetSettings(), hostsTable?.loadHostTokens()]);
     if (!fs.ok) automationError = fs.error.message;
     resetProjectDrafts();
   });
@@ -563,9 +566,12 @@
       {#if limitsError}<p class="err" role="alert" data-testid="limits-error">{limitsError}</p>{/if}
     </section>
 
+    <!-- onProvisioned is optional-chained for the same reason: a slow
+         multi-host provision can outlive the dialog, and the awaiting side
+         needs a promise back either way. -->
     <McpSettings
       bind:this={mcpSettings}
-      onProvisioned={() => hostsTable!.loadHostTokens()} />
+      onProvisioned={() => hostsTable?.loadHostTokens() ?? Promise.resolve()} />
 
     <section class="block" data-testid="diagnostics-section">
       <div class="section-header">
