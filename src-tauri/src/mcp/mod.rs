@@ -22,6 +22,9 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
+pub use auth::Caller;
+#[cfg(test)]
+pub use auth::TokenMode;
 pub use guard::{ConfirmNotify, PendingConfirms, RateLimiter};
 pub use tools::FleetTools;
 
@@ -152,10 +155,14 @@ async fn authorize(
     };
     let caller = match auth::check_request(request.headers(), &state.master, &host_tokens) {
         Ok(c) => c,
-        // Header missing/unknown on /hook: try the legacy query form.
+        // Header missing/unknown on /hook: try the legacy query form. Only
+        // the MASTER token is accepted here — that is the only token the
+        // pre-0.3 `curl …?token=` command hooks ever carried, and a per-host
+        // token must never travel in a URL. TRANSITIONAL: removed in 0.4;
+        // re-provision every host before then.
         Err(StatusCode::UNAUTHORIZED) if request.uri().path() == "/hook" => {
             query_token(request.uri().query())
-                .and_then(|t| auth::resolve_token(t, &state.master, &host_tokens))
+                .and_then(|t| auth::resolve_token(t, &state.master, &[]))
                 .ok_or_else(|| {
                     eprintln!("[mcp] rejected /hook request: no valid token");
                     StatusCode::UNAUTHORIZED
@@ -383,7 +390,13 @@ mod tests {
             hook_q.contains("204"),
             "expected 204 on /hook?token=:\n{hook_q}"
         );
-        // …but /mcp never accepts a query token.
+        // …but a per-host token is header-only, even on /hook…
+        let hook_hq = round_trip(addr, &post("/hook?token=host-tok", None, None, stop)).await;
+        assert!(
+            hook_hq.contains("401"),
+            "per-host token must not authorize via query:\n{hook_hq}"
+        );
+        // …and /mcp never accepts a query token.
         let mcp_q = round_trip(addr, &post("/mcp?token=s3cret", None, None, "{}")).await;
         assert!(
             mcp_q.contains("401"),

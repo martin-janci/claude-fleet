@@ -5,8 +5,15 @@
   // E_CONFIRM_REQUIRED and emits `mcp:confirm-required`; this dialog shows
   // the queue and answers via `mcp_confirm`. Always mounted (App.svelte) so
   // a request is never missed while Settings is closed.
+  //
+  // TRUST BOUNDARY: `mcp_confirm` is a plain Tauri command, so any script
+  // running in this webview could auto-approve a nonce. The toggle protects
+  // against agents on the MCP side, not against code running in the desktop
+  // itself — the desktop is the trusted party here, by design. Do not expose
+  // `mcp_confirm` to anything less trusted than this window.
   import { onMount } from 'svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import Modal from './Modal.svelte';
   import {
     mcpConfirm,
     mcpPendingConfirms,
@@ -53,8 +60,9 @@
 </script>
 
 {#if current}
-  <div class="modal-backdrop" role="presentation">
-    <div class="dialog" role="dialog" aria-label="Confirm control-API call" data-testid="mcp-confirm">
+  <!-- Escape / backdrop = Deny: dismissing must never count as approval. -->
+  <Modal label="Confirm control-API call" onclose={() => answer(false)} width="440px" testid="mcp-confirm">
+    <div class="body">
       <h3>Approve <code>{current.tool}</code>?</h3>
       <p class="who">
         An agent{current.caller ? ` (${current.caller})` : ''} asked the control API to run
@@ -70,32 +78,16 @@
         <button class="deny" disabled={busy} onclick={() => answer(false)} data-testid="mcp-confirm-deny">
           Deny
         </button>
-        <button class="approve" disabled={busy} onclick={() => answer(true)} data-testid="mcp-confirm-approve">
+        <button class="approve" disabled={busy} onclick={() => answer(true)} data-testid="mcp-confirm-approve" data-autofocus>
           Approve
         </button>
       </div>
     </div>
-  </div>
+  </Modal>
 {/if}
 
 <style>
-  .modal-backdrop {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.45);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 30;
-  }
-  .dialog {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 1rem;
-    width: 440px;
-    max-width: calc(100vw - 32px);
-    color: var(--fg);
-    display: flex;
-    flex-direction: column;
-    gap: 0.6rem;
-  }
+  .body { display: flex; flex-direction: column; gap: 0.6rem; }
   h3 { margin: 0; font-size: 1rem; }
   .who { margin: 0; font-size: 0.85rem; }
   .muted { margin: 0; font-size: 0.75rem; color: var(--fg-muted); }

@@ -58,11 +58,15 @@ pub async fn handle_hook(
         payload.session_id,
         payload.tool_name
     );
-    match crate::service::hooks::apply_hook(&state.store, &state.ssh, &payload) {
+    match crate::service::hooks::apply_hook(&state.store, &state.ssh, &payload, &caller) {
         Ok(()) => StatusCode::NO_CONTENT,
         Err(e) if e.code == "E_VALIDATE" || e.code == "E_INVALID" => {
             eprintln!("[hook] rejected payload: {} {}", e.code, e.message);
             StatusCode::BAD_REQUEST
+        }
+        Err(e) if e.code == "E_FORBIDDEN" => {
+            eprintln!("[hook] refused: {} {}", e.code, e.message);
+            StatusCode::FORBIDDEN
         }
         Err(e) => {
             eprintln!("[hook] apply_hook error: {} {}", e.code, e.message);

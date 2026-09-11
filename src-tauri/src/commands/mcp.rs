@@ -407,10 +407,17 @@ pub(crate) fn merge_hook_into_settings_json(
     let mut settings: serde_json::Value = if existing.trim().is_empty() {
         serde_json::json!({})
     } else {
-        // A garbage settings.json shouldn't brick fleet install; treat as
-        // empty so we overwrite with a valid object. The caller's filesystem
-        // backup (if any) is the user's safety net.
-        serde_json::from_str(existing).unwrap_or(serde_json::json!({}))
+        // Never "repair" a settings.json we cannot parse: it holds the user's
+        // permissions, env and their own hooks, and replacing it with `{}`
+        // would silently drop all of that. Refuse (the host is reported
+        // failed) and let the user fix the file — same policy as
+        // `merge_mcp_entry` for ~/.claude.json.
+        serde_json::from_str(existing).map_err(|e| {
+            IpcError::new(
+                "E_PROVISION",
+                format!("~/.claude/settings.json is not valid JSON, refusing to overwrite it: {e}"),
+            )
+        })?
     };
 
     if !settings.is_object() {
@@ -548,9 +555,15 @@ pub fn install_fleet_hook(
         std::fs::create_dir_all(parent)
             .map_err(|e| IpcError::new("E_IO", format!("create .claude dir: {e}")))?;
     }
-    std::fs::write(&settings_path, &merged)
+    // Back up the previous file before touching it (it may carry the user's
+    // permissions/env), then write the merged file 0600 from creation.
+    if !existing.trim().is_empty() {
+        let bak = settings_path.with_extension("json.fleet-bak");
+        crate::service::provision::write_private_file(&bak, &existing)
+            .map_err(|e| IpcError::new("E_IO", format!("write settings.json.fleet-bak: {e}")))?;
+    }
+    crate::service::provision::write_private_file(&settings_path, &merged)
         .map_err(|e| IpcError::new("E_IO", format!("write settings.json: {e}")))?;
-    crate::service::provision::set_private_mode(&settings_path);
 
     Ok(format!(
         "Hook installed at {} (http hook, bearer header)\nSettings written to {}",
@@ -687,12 +700,19 @@ mod tests {
     }
 
     #[test]
-    fn merge_hook_into_garbage_json_resets_to_empty() {
-        // Don't brick install if settings.json is corrupted — overwrite with
-        // a minimal valid object containing just our hook.
-        let out = merge_hook_into_settings_json("not json at all", 4180, "tok").unwrap();
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert!(v["hooks"]["Stop"].is_array());
+    fn merge_hook_refuses_malformed_settings_json() {
+        // A corrupted settings.json must never be replaced with `{}` — that
+        // would wipe the user's permissions / env / own hooks. The merge
+        // errors before any write and names the file.
+        let err = merge_hook_into_settings_json("not json at all", 4180, "tok").unwrap_err();
+        assert_eq!(err.code, "E_PROVISION");
+        assert!(err.message.contains("settings.json"), "{}", err.message);
+        // A truncated file is malformed too.
+        let err =
+            merge_hook_into_settings_json(r#"{"hooks": {"Stop": ["#, 4180, "tok").unwrap_err();
+        assert_eq!(err.code, "E_PROVISION");
+        // A non-object root is refused as well (existing E_PARSE path).
+        assert!(merge_hook_into_settings_json("[1,2]", 4180, "tok").is_err());
     }
 
     #[test]

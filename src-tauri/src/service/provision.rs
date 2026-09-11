@@ -106,7 +106,20 @@ pub async fn provision_hook(
     token: &str,
 ) -> Result<(), IpcError> {
     let existing = read_host_file(ssh, host, SETTINGS_JSON).await?;
+    // Errors (malformed JSON → E_PROVISION) fire BEFORE any write.
     let merged = crate::commands::mcp::merge_hook_into_settings_json(&existing, mcp_port, token)?;
+    if !existing.trim().is_empty() {
+        // The file carries the user's permissions/env/hooks: back it up
+        // first, like ~/.claude.json.
+        write_host_file_secret(
+            ssh,
+            host,
+            CLAUDE_DIR,
+            &format!("{SETTINGS_JSON}.fleet-bak"),
+            &existing,
+        )
+        .await?;
+    }
     write_host_file_secret(ssh, host, CLAUDE_DIR, SETTINGS_JSON, &merged).await
 }
 
@@ -367,9 +380,14 @@ pub async fn write_host_file(
 }
 
 /// Like [`write_host_file`] for a file that carries a secret (the bearer
-/// token): the remote script runs under `umask 077` and `chmod 600`s the
-/// result; the local path sets mode 0600 after the write (unix only,
-/// best-effort elsewhere).
+/// token). The content never appears in a process argv on either side:
+///
+/// - remote: the file is first created empty under `umask 077` + `chmod 600`
+///   (a script with only paths in it), then the content is streamed over
+///   stdin through `SshClient::upload_file` (`cat > path`, which keeps the
+///   0600 mode when truncating);
+/// - local: the file is opened with mode 0600 from creation
+///   ([`write_private_file`]).
 pub async fn write_host_file_secret(
     ssh: &Arc<SshClient>,
     host: &str,
@@ -378,13 +396,79 @@ pub async fn write_host_file_secret(
     content: &str,
 ) -> Result<(), IpcError> {
     if host == "local" {
-        write_host_file(ssh, host, dir, path, content).await?;
+        let edir = expand_home_local(dir)?;
+        std::fs::create_dir_all(&edir)
+            .map_err(|e| IpcError::new("E_PROVISION", format!("mkdir {edir}: {e}")))?;
         let epath = expand_home_local(path)?;
-        set_private_mode(std::path::Path::new(&epath));
-        return Ok(());
+        return write_private_file(std::path::Path::new(&epath), content)
+            .map_err(|e| IpcError::new("E_PROVISION", format!("write {epath}: {e}")));
     }
-    let script = quote(&remote_write_script_secret(dir, path, content));
-    run_remote_write(ssh, host, path, &script).await
+    // 1. Create the (empty) file 0600 — paths only, no secret in argv.
+    let script = quote(&remote_touch_private_script(dir, path));
+    run_remote_write(ssh, host, path, &script).await?;
+    // 2. Stream the content over stdin. `upload_file` runs `cat > '<abs>'`;
+    //    `~` is not expanded in a quoted word, so resolve $HOME first.
+    let abs = match path.strip_prefix("~/") {
+        Some(rest) => format!("{}/{rest}", ssh.remote_home(host).await?),
+        None => path.to_string(),
+    };
+    let tmp = PrivateTempFile::create(content)
+        .map_err(|e| IpcError::new("E_PROVISION", format!("spool secret for {path}: {e}")))?;
+    ssh.upload_file(host, tmp.path(), &abs, PROVISION_TIMEOUT)
+        .await
+        .map_err(|e| {
+            IpcError::new(
+                "E_PROVISION",
+                format!("write {path} on {host}: {}", e.message),
+            )
+        })
+}
+
+/// Write `content` to `path`, creating the file with mode 0600 (unix) so it is
+/// never world-readable, not even between create and chmod. An existing file
+/// is truncated in place and tightened to 0600.
+pub fn write_private_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(content.as_bytes())?;
+    f.flush()?;
+    // `mode()` only applies at creation; tighten a pre-existing file too.
+    set_private_mode(path);
+    Ok(())
+}
+
+/// A 0600 temp file holding secret content for the duration of an upload;
+/// removed on drop.
+struct PrivateTempFile(std::path::PathBuf);
+
+impl PrivateTempFile {
+    fn create(content: &str) -> std::io::Result<Self> {
+        let name = format!(
+            "claude-fleet-{}-{}.secret",
+            std::process::id(),
+            crate::mcp::generate_token()
+        );
+        let path = std::env::temp_dir().join(name);
+        write_private_file(&path, content)?;
+        Ok(Self(path))
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for PrivateTempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// `chmod 600` a local file. Best-effort: a failure is logged, never fatal
@@ -451,15 +535,16 @@ fn remote_write_script(dir: &str, path: &str, content: &str) -> String {
     )
 }
 
-/// [`remote_write_script`] for secret-bearing files: `umask 077` so a NEW
-/// file is born 0600 (no window where it is world-readable), then `chmod
-/// 600` so an EXISTING file is tightened too.
-fn remote_write_script_secret(dir: &str, path: &str, content: &str) -> String {
+/// Remote `bash -lc` script body that makes sure `path` exists with mode
+/// 0600 WITHOUT writing any content: `umask 077` so a NEW file is born 0600
+/// (no window where it is world-readable), `chmod 600` so an EXISTING file
+/// is tightened too. The secret itself follows over stdin
+/// (see [`write_host_file_secret`]), so it is never part of this argv.
+fn remote_touch_private_script(dir: &str, path: &str) -> String {
     let p = remote_path(path);
     format!(
-        "umask 077 && mkdir -p {} && printf '%s' {} > {p} && chmod 600 {p}",
+        "umask 077 && mkdir -p {} && touch {p} && chmod 600 {p}",
         remote_path(dir),
-        quote(content),
     )
 }
 
@@ -596,17 +681,43 @@ mod tests {
     }
 
     #[test]
-    fn remote_write_script_secret_sets_umask_and_chmods() {
-        let s = remote_write_script_secret("~/.claude", "~/.claude.json", "{\"t\":1}");
+    fn remote_touch_private_script_sets_umask_and_chmods_without_content() {
+        let s = remote_touch_private_script("~/.claude", "~/.claude.json");
         assert_eq!(
             s,
-            "umask 077 && mkdir -p \"$HOME\"/'.claude' && printf '%s' '{\"t\":1}' > \
-             \"$HOME\"/'.claude.json' && chmod 600 \"$HOME\"/'.claude.json'"
+            "umask 077 && mkdir -p \"$HOME\"/'.claude' && touch \"$HOME\"/'.claude.json' \
+             && chmod 600 \"$HOME\"/'.claude.json'"
         );
         assert!(s.starts_with("umask 077 && "));
-        // A token-looking content string is quoted inert, never a shell word.
-        let s = remote_write_script_secret("~/.claude", "~/.claude.json", "a'b; rm -rf /");
-        assert!(s.contains("printf '%s' 'a'\\''b; rm -rf /'"));
+        // Paths only: the secret content is streamed over stdin, never argv.
+        assert!(!s.contains("printf"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_file_creates_0600_and_tightens_existing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        // Fresh file: 0600 from creation.
+        let p = dir.path().join("new.json");
+        write_private_file(&p, "{\"a\":1}").unwrap();
+        assert_eq!(mode(&p), 0o600);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "{\"a\":1}");
+        // Existing world-readable file: truncated, rewritten, tightened.
+        let q = dir.path().join("old.json");
+        std::fs::write(&q, "old longer content").unwrap();
+        std::fs::set_permissions(&q, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private_file(&q, "new").unwrap();
+        assert_eq!(mode(&q), 0o600);
+        assert_eq!(std::fs::read_to_string(&q).unwrap(), "new");
+        // The upload spool file is 0600 and removed on drop.
+        let spool_path = {
+            let t = PrivateTempFile::create("s3cret").unwrap();
+            assert_eq!(mode(t.path()), 0o600);
+            t.path().to_path_buf()
+        };
+        assert!(!spool_path.exists(), "spool file must be removed on drop");
     }
 
     #[test]

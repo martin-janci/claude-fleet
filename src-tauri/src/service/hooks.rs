@@ -4,19 +4,23 @@
 
 use crate::ipc_error::IpcError;
 use crate::mcp::hooks::HookPayload;
+use crate::mcp::Caller;
 use crate::ssh::SshClient;
 use crate::store::{ProjectRow, Store};
 use std::sync::{Arc, Mutex};
 
-/// Dispatch a hook event to the appropriate handler.
-/// Unknown events are silently ignored.
+/// Dispatch a hook event to the appropriate handler. `caller` is the
+/// identity behind the request's bearer token; a per-host caller may only
+/// report about sessions on its own host. Unknown events are silently
+/// ignored.
 pub fn apply_hook(
     store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
     payload: &HookPayload,
+    caller: &Caller,
 ) -> Result<(), IpcError> {
     match payload.hook_event_name.as_deref() {
-        Some("Stop") => apply_stop_hook(store, ssh, payload),
+        Some("Stop") => apply_stop_hook(store, ssh, payload, caller),
         Some("PostToolUse") if payload.tool_name.as_deref() == Some("WorktreeCreate") => {
             apply_worktree_hook(store, payload)
         }
@@ -36,6 +40,7 @@ fn apply_stop_hook(
     store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
     payload: &HookPayload,
+    caller: &Caller,
 ) -> Result<(), IpcError> {
     let session_id = match &payload.session_id {
         Some(id) => id.clone(),
@@ -46,10 +51,22 @@ fn apply_stop_hook(
     // response returns fast (the work involves pane capture + SSH).
     let safe_kill_in_flight = {
         let s = store.lock().map_err(|_| IpcError::lock())?;
-        let in_flight = s
-            .get_session_by_claude_id(&session_id)
-            .ok()
-            .flatten()
+        let row = s.get_session_by_claude_id(&session_id).ok().flatten();
+        // A host token may only flip sessions on ITS host: host A's token
+        // must not be able to mark host B's session idle (and so trigger
+        // B's safe-kill finalisation). Unknown session → no-op as before.
+        if let (Some(row), Some(h)) = (&row, &caller.host_alias) {
+            if &row.host_alias != h {
+                return Err(IpcError::new(
+                    "E_FORBIDDEN",
+                    format!(
+                        "session {} is on host {}; this token is bound to {h}",
+                        row.tmux_name, row.host_alias
+                    ),
+                ));
+            }
+        }
+        let in_flight = row
             .map(|r| r.safe_kill_state.as_deref() == Some("requested"))
             .unwrap_or(false);
         s.set_claude_status_by_session_id(&session_id, "idle")?;
@@ -199,7 +216,7 @@ mod tests {
     fn stop_hook_on_unknown_session_is_noop() {
         let store = make_store();
         let payload = make_payload("Stop", "no-such-id");
-        assert!(apply_hook(&store, &make_ssh(), &payload).is_ok());
+        assert!(apply_hook(&store, &make_ssh(), &payload, &Caller::master()).is_ok());
     }
 
     #[test]
@@ -218,17 +235,75 @@ mod tests {
             s.set_claude_status_by_session_id("uuid-1", "working")
                 .unwrap();
         }
-        apply_hook(&store, &make_ssh(), &make_payload("Stop", "uuid-1")).unwrap();
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("Stop", "uuid-1"),
+            &Caller::master(),
+        )
+        .unwrap();
         let s = store.lock().unwrap();
         let row = s.get_session("sess", "local").unwrap().unwrap();
         assert_eq!(row.claude_status.as_deref(), Some("idle"));
     }
 
     #[test]
+    fn stop_hook_from_another_hosts_token_is_forbidden() {
+        // Host A's token must not be able to flip host B's session to idle
+        // (which would also trigger B's safe-kill finalisation).
+        let store = make_store();
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("hostb").unwrap();
+            let id = s
+                .upsert_session("sess", "hostb", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.set_claude_session_id(id, "uuid-b").unwrap();
+            s.set_claude_status_by_session_id("uuid-b", "working")
+                .unwrap();
+        }
+        let host_a = Caller {
+            host_alias: Some("hosta".into()),
+            mode: crate::mcp::TokenMode::Full,
+        };
+        let err = apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("Stop", "uuid-b"),
+            &host_a,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "E_FORBIDDEN");
+        {
+            let s = store.lock().unwrap();
+            let row = s.get_session("sess", "hostb").unwrap().unwrap();
+            assert_eq!(row.claude_status.as_deref(), Some("working"), "untouched");
+        }
+        // The session's own host token (and the master token) may.
+        let host_b = Caller {
+            host_alias: Some("hostb".into()),
+            mode: crate::mcp::TokenMode::Readonly,
+        };
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("Stop", "uuid-b"),
+            &host_b,
+        )
+        .unwrap();
+        let s = store.lock().unwrap();
+        let row = s.get_session("sess", "hostb").unwrap().unwrap();
+        assert_eq!(row.claude_status.as_deref(), Some("idle"));
+        // An unknown session stays a no-op for any caller.
+        drop(s);
+        assert!(apply_hook(&store, &make_ssh(), &make_payload("Stop", "nope"), &host_a).is_ok());
+    }
+
+    #[test]
     fn unknown_event_is_noop() {
         let store = make_store();
         let payload = make_payload("UserPromptSubmit", "s1");
-        assert!(apply_hook(&store, &make_ssh(), &payload).is_ok());
+        assert!(apply_hook(&store, &make_ssh(), &payload, &Caller::master()).is_ok());
     }
 
     #[test]
@@ -242,7 +317,7 @@ mod tests {
             tool_response: None,
             cwd: None,
         };
-        assert!(apply_hook(&store, &make_ssh(), &payload).is_ok());
+        assert!(apply_hook(&store, &make_ssh(), &payload, &Caller::master()).is_ok());
     }
 
     fn worktree_payload(path: &str, branch: Option<&str>) -> HookPayload {
@@ -293,6 +368,7 @@ mod tests {
             &store,
             &make_ssh(),
             &worktree_payload("/home/u/elsewhere/.worktrees/feat", None),
+            &Caller::master(),
         )
         .unwrap_err();
         assert_eq!(err.code, "E_VALIDATE");
@@ -300,6 +376,7 @@ mod tests {
             &store,
             &make_ssh(),
             &worktree_payload("../../etc/passwd", None),
+            &Caller::master(),
         )
         .unwrap_err();
         assert_eq!(err.code, "E_VALIDATE");
@@ -308,6 +385,7 @@ mod tests {
             &store,
             &make_ssh(),
             &worktree_payload("/home/u/proj/.worktrees/feat", Some("--upload-pack=x")),
+            &Caller::master(),
         )
         .unwrap_err();
         assert_eq!(err.code, "E_VALIDATE");
@@ -324,6 +402,7 @@ mod tests {
             &store,
             &make_ssh(),
             &worktree_payload("/home/u/proj/.worktrees/feat", Some("feat")),
+            &Caller::master(),
         )
         .unwrap();
         let s = store.lock().unwrap();

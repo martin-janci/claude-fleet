@@ -43,11 +43,17 @@ machine cannot impersonate another.
 Each host's token has a **mode**, shown in the **Token** column of
 **Settings → Hosts**:
 
-- `full` (default) — every tool.
+- `full` (default) — whole-fleet **session** control: every tool except the
+  fleet-admin set. Cross-host `send_prompt`, `kill_session`, `new_session`
+  etc. remain allowed by design.
 - `readonly` — only tools that observe the fleet (`list_*`, `capture_session`,
   `session_history`, `inbox`, `peer_status`, `peek_session`, `repo_*`,
   `get_clipboard`, `set_friendly_name`, …). Anything that sends, kills,
   deletes, provisions, or writes the clipboard returns `E_FORBIDDEN`.
+
+The fleet-admin tools — `provision_hosts`, `add_host`, `remove_host`,
+`hide_host` — are **master-token only** in either mode: a token lifted from
+one host must not be able to rotate, re-provision or remove the others.
 
 **Rotate** next to a host mints a fresh token and re-provisions that host with
 it (the new token is only persisted once the host's files were rewritten, so an
@@ -153,7 +159,7 @@ commits by default (`limit`, `skip`); `session_history` and `inbox` default to
 
 **After provisioning, each host must restart Claude** to load the MCP server (skill files and CLAUDE.md are picked up live, but the MCP server entry requires a restart).
 
-**After upgrading claude-fleet to a build with per-host tokens, re-provision every host** (Settings → Control API → **Provision hosts**; no rotate needed). Until a host is re-provisioned it keeps authenticating with the master token and its old command hook keeps posting `?token=` — both still work on `/hook` for the transition — but it has no host identity, cannot be set `readonly`, and its hook still carries the token in argv.
+**After upgrading claude-fleet to a build with per-host tokens, re-provision every host** (Settings → Control API → **Provision hosts**; no rotate needed). Until a host is re-provisioned it keeps authenticating with the master token and its old command hook keeps posting `?token=` — the master token is still accepted in that query form on `/hook` (only there, and only the master token) for the transition — but it has no host identity, cannot be set `readonly`, and its hook still carries the token in argv. **The `?token=` form is removed in 0.4.**
 
 ### Host-alias mismatch (`set_friendly_name` / `register_self` return `E_NOTFOUND`)
 

@@ -76,6 +76,17 @@ pub fn needs_confirmation(name: &str) -> bool {
     CONFIRM_TOOLS.contains(&name)
 }
 
+/// Fleet-administration tools: reachable with the master token only. A
+/// per-host token — even in `full` mode — must not be able to re-provision,
+/// rotate, add or remove other hosts, or it could lock the whole fleet out.
+/// `full` therefore means whole-fleet *session* control (send / kill /
+/// new_session across hosts stay allowed by design), not fleet admin.
+pub const ADMIN_TOOLS: &[&str] = &["provision_hosts", "add_host", "remove_host", "hide_host"];
+
+pub fn is_admin_tool(name: &str) -> bool {
+    ADMIN_TOOLS.contains(&name)
+}
+
 /// Resolve the broadcast interval from the raw setting value.
 pub fn broadcast_interval(raw: Option<String>) -> Duration {
     let secs = raw
@@ -154,6 +165,10 @@ pub enum ConfirmState {
 
 struct Pending {
     tool: String,
+    /// The argument summary the user saw and approved. A retry must present
+    /// the same summary — otherwise an approval for `kill_session name=x`
+    /// could be replayed as `kill_session name=controller force=true`.
+    summary: String,
     created: Instant,
     approved: Option<bool>,
 }
@@ -181,6 +196,7 @@ impl PendingConfirms {
             nonce.clone(),
             Pending {
                 tool: tool.to_string(),
+                summary: summary.to_string(),
                 created: Instant::now(),
                 approved: None,
             },
@@ -211,7 +227,11 @@ impl PendingConfirms {
 
     /// Present a nonce on the retry call. An answered nonce is consumed
     /// (single use) whatever the answer; a pending one is left in place.
-    pub fn consume(&self, nonce: &str, tool: &str) -> ConfirmState {
+    ///
+    /// The nonce is bound to BOTH the tool and the argument `summary` it was
+    /// issued for; a retry with different arguments is `Unknown` (and the
+    /// original approval stays consumable only with the approved arguments).
+    pub fn consume(&self, nonce: &str, tool: &str, summary: &str) -> ConfirmState {
         let mut entries = self
             .entries
             .lock()
@@ -220,7 +240,7 @@ impl PendingConfirms {
         let Some(p) = entries.get(nonce) else {
             return ConfirmState::Unknown;
         };
-        if p.tool != tool {
+        if p.tool != tool || p.summary != summary {
             return ConfirmState::Unknown;
         }
         match p.approved {
@@ -277,6 +297,9 @@ pub fn mark_untrusted(text: &str, from: &str) -> String {
 /// Argument keys whose values are free text an agent authored (or a secret):
 /// never persisted, only their length.
 const REDACT_KEYS: &[&str] = &["prompt", "body", "content", "start_command"];
+/// Argument keys dropped from the summary entirely: a confirmation nonce is
+/// a one-time credential and must not land in the timeline.
+const SKIP_KEYS: &[&str] = &["confirm_nonce"];
 const SUMMARY_MAX_CHARS: usize = 240;
 
 /// One-line, key-sorted `k=v` summary of tool arguments with free-text
@@ -289,6 +312,9 @@ pub fn redact_args(args: Option<&serde_json::Map<String, serde_json::Value>>) ->
     keys.sort();
     let mut parts = Vec::with_capacity(keys.len());
     for k in keys {
+        if SKIP_KEYS.contains(&k.as_str()) {
+            continue;
+        }
         let v = &map[k];
         let rendered = if REDACT_KEYS.contains(&k.as_str()) {
             match v {
@@ -407,16 +433,17 @@ mod tests {
     #[test]
     fn confirm_nonce_round_trip_is_single_use_and_tool_bound() {
         let pc = PendingConfirms::new();
-        let req = pc.request("kill_session", "host=local name=x", "host:mefistos");
+        let args = "host=local name=x force=false";
+        let req = pc.request("kill_session", args, "host:mefistos");
         assert_eq!(req.tool, "kill_session");
         assert_eq!(pc.pending_tools().len(), 1);
         // Unanswered: still pending; wrong tool: unknown.
         assert_eq!(
-            pc.consume(&req.nonce, "kill_session"),
+            pc.consume(&req.nonce, "kill_session", args),
             ConfirmState::Pending
         );
         assert_eq!(
-            pc.consume(&req.nonce, "delete_worktree"),
+            pc.consume(&req.nonce, "delete_worktree", args),
             ConfirmState::Unknown
         );
         assert!(pc.resolve(&req.nonce, true));
@@ -425,12 +452,12 @@ mod tests {
             "answered nonces leave the queue"
         );
         assert_eq!(
-            pc.consume(&req.nonce, "kill_session"),
+            pc.consume(&req.nonce, "kill_session", args),
             ConfirmState::Approved
         );
         // Consumed: a replay is refused.
         assert_eq!(
-            pc.consume(&req.nonce, "kill_session"),
+            pc.consume(&req.nonce, "kill_session", args),
             ConfirmState::Unknown
         );
         assert!(!pc.resolve("never-issued", true));
@@ -438,13 +465,52 @@ mod tests {
         let denied = pc.request("set_clipboard", "", "master");
         assert!(pc.resolve(&denied.nonce, false));
         assert_eq!(
-            pc.consume(&denied.nonce, "set_clipboard"),
+            pc.consume(&denied.nonce, "set_clipboard", ""),
             ConfirmState::Denied
         );
         assert_eq!(
-            pc.consume(&denied.nonce, "set_clipboard"),
+            pc.consume(&denied.nonce, "set_clipboard", ""),
             ConfirmState::Unknown
         );
+    }
+
+    #[test]
+    fn approved_nonce_rejects_different_args() {
+        // The user approved `kill_session name=scratch`; the agent must not
+        // be able to spend that approval on `name=prod-controller force=true`.
+        let pc = PendingConfirms::new();
+        let approved = "host=local name=scratch force=false";
+        let req = pc.request("kill_session", approved, "host:mefistos");
+        assert!(pc.resolve(&req.nonce, true));
+        assert_eq!(
+            pc.consume(
+                &req.nonce,
+                "kill_session",
+                "host=local name=prod-controller force=true"
+            ),
+            ConfirmState::Unknown
+        );
+        // The approval is still there for the arguments actually approved…
+        assert_eq!(
+            pc.consume(&req.nonce, "kill_session", approved),
+            ConfirmState::Approved
+        );
+        // …and single-use.
+        assert_eq!(
+            pc.consume(&req.nonce, "kill_session", approved),
+            ConfirmState::Unknown
+        );
+    }
+
+    #[test]
+    fn admin_tools_are_the_fleet_admin_set_and_mutating() {
+        for t in ["provision_hosts", "add_host", "remove_host", "hide_host"] {
+            assert!(is_admin_tool(t), "{t}");
+            assert!(!is_readonly_tool(t), "{t}");
+        }
+        for t in ["kill_session", "send_prompt", "new_session", "list_hosts"] {
+            assert!(!is_admin_tool(t), "{t} is not fleet admin");
+        }
     }
 
     #[test]
@@ -455,6 +521,7 @@ mod tests {
             "old".to_string(),
             Pending {
                 tool: "kill_session".into(),
+                summary: String::new(),
                 created: now,
                 approved: None,
             },
@@ -491,6 +558,9 @@ mod tests {
         assert!(s.contains("submit=true"), "{s}");
         assert!(s.contains("limit=5"), "{s}");
         assert_eq!(redact_args(None), "");
+        // A confirmation nonce is a credential: dropped, not even as a length.
+        let with_nonce = serde_json::json!({ "confirm_nonce": "abc123", "name": "x" });
+        assert_eq!(redact_args(with_nonce.as_object()), "name=x");
         for k in ["body", "content", "start_command"] {
             let a = serde_json::json!({ k: "xyz" });
             assert_eq!(redact_args(a.as_object()), format!("{k}=<3 chars>"));

@@ -70,6 +70,18 @@ impl UploadAllowList {
         e.get(path)
             .is_some_and(|at| now.saturating_duration_since(*at) < UPLOAD_ALLOW_TTL)
     }
+
+    /// Remove `paths` from the list once an upload has used them: one drop
+    /// authorises one upload, not a window of re-reads.
+    pub fn consume(&self, paths: &[String]) {
+        let mut e = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for p in paths {
+            e.remove(Path::new(p));
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -108,6 +120,10 @@ pub async fn upload_to_session(
         return Ok(vec![]);
     }
     check_paths_allowed(&allow, &args.local_paths)?;
+    // Consumed up front (not after the upload) so a failed transfer does
+    // not leave a re-usable authorisation behind; the user simply drops
+    // the file again.
+    allow.consume(&args.local_paths);
 
     // Collision-free destination basenames.
     let basenames: Vec<String> = args
@@ -267,5 +283,13 @@ mod tests {
             check_paths_allowed(&al, &["/tmp/a.png".into(), "/etc/passwd".into()]).unwrap_err();
         assert_eq!(err.code, "E_FORBIDDEN");
         assert!(check_paths_allowed(&al, &[]).is_ok());
+        // One drop authorises one upload: consumed entries are gone.
+        al.consume(&["/tmp/a.png".into()]);
+        assert_eq!(
+            check_paths_allowed(&al, &["/tmp/a.png".into()])
+                .unwrap_err()
+                .code,
+            "E_FORBIDDEN"
+        );
     }
 }

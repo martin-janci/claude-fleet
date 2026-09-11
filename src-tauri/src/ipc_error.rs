@@ -95,6 +95,17 @@ pub mod codes {
     pub const E_HOME: &str = "E_HOME";
     /// The operation is not supported on this platform / session kind.
     pub const E_UNSUPPORTED: &str = "E_UNSUPPORTED";
+    /// The caller's identity/mode does not permit the operation (readonly
+    /// token on a mutating tool, per-host token acting on another host or
+    /// on a fleet-admin tool, a denied confirmation, an upload path that
+    /// was never dropped onto the window).
+    pub const E_FORBIDDEN: &str = "E_FORBIDDEN";
+    /// The caller exceeded a per-caller rate limit (`broadcast_prompt`);
+    /// `details.retry_after_secs` says when to retry.
+    pub const E_RATE_LIMITED: &str = "E_RATE_LIMITED";
+    /// The call needs a desktop confirmation first (`mcp.confirm_destructive`);
+    /// retry with the `confirm_nonce` from `details` once approved.
+    pub const E_CONFIRM_REQUIRED: &str = "E_CONFIRM_REQUIRED";
 }
 
 #[derive(Debug, Serialize)]
