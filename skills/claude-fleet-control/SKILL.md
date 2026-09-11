@@ -90,8 +90,9 @@ reply**, and the output is the live tmux screen, not a transcript:
 
 For coordination between sessions prefer the inbox over interrupting a peer:
 `send_message { from_session_id, to_session_id, body, kind?, deliver? }` and
-`inbox { session_id, unread_only?, mark_read? }`. Check `peer_status` before
-prompting a peer that may be mid-stream. For one-to-many use
+`inbox { session_id, unread_only?, mark_read? }`. `from == to` returns
+`E_SELF_TARGET`; there is no `force` override for this case. Check
+`peer_status` before prompting a peer that may be mid-stream. For one-to-many use
 `broadcast_prompt { host?, project_id?, status?, prompt }` — `status` filters on
 `claude_status` (e.g. `"idle"`); work sessions only, controller excluded.
 
