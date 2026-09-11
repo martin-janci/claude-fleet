@@ -34,7 +34,7 @@ for it.
 | Read-only probe | yes | yes |
 | `git worktree add` from an existing local or `origin/` branch, target absent on disk and not registered | yes | yes |
 | `tmux new-session` when `tmux has-session` confirms the session is gone | attach only (other callers own tmux) | yes |
-| `git worktree remove --force -- <path>` for this worktree's own stale entry (never a blanket prune) | only from the opt-in reconcile tick (`repair.auto_on_tick`) and only when the [vanished-directory guard](#vanished-directory-guard-automatic) holds, immediately followed by the add from the existing branch; every click-driven entry point (new session, spawn review, restart, recreate, attach) defers it — warning / `E_REPAIR_REQUIRED` | yes |
+| `git worktree remove --force -- <path>` for this worktree's own stale entry (never a blanket prune) | only when the [vanished-directory guard](#vanished-directory-guard-automatic) holds, including a parent `dev:inode` matching the one recorded while healthy; the expected pair is re-checked in the apply script before the remove and before the add, which follows immediately from the existing branch; otherwise warning / `E_REPAIR_REQUIRED` | yes |
 | `git worktree add` into an empty leftover dir | no — warning | yes |
 | Adopt the branch's checkout elsewhere, re-path the row | no — warning | yes, guarded |
 | Recreate a branch that exists nowhere locally (`ls-remote`, fetch, or fork from base) | no — warning | yes |
@@ -57,13 +57,14 @@ warning, never a step.
 ### Vanished-directory guard (automatic)
 
 The common real case is `rm -rf` of a worktree directory: git still lists the
-entry, so a plain add would fail. The opt-in reconcile tick, and only the
-tick, may remove that one entry (`git worktree remove --force -- <path>`,
-never `prune`) and re-add it from the existing local or `origin/` branch. It
-passes `AutoContext::allow_auto_unregister` through
-`repair::ensure_session_workspace_for_tick`; every click-driven entry point
-leaves it false and keeps #49's rule (explicit only). Even for the tick, every
-condition must hold (`repair::VanishedGuard`, evaluated in `plan_with`):
+entry, so a plain add would fail. Any automatic entry point (new session,
+spawn review, restart, recreate, attach, the opt-in reconcile tick) may remove
+that one entry (`git worktree remove --force -- <path>`, never `prune`) and
+re-add it from the existing local or `origin/` branch, but only when every
+condition holds (`repair::VanishedGuard`, evaluated in `plan_with`). The
+primary one is the **parent fingerprint** (9): without it, the removal stays
+explicit-only as #49 designed. A context-free plan (plain `plan()`, no store)
+never removes (`AutoContext::allow_auto_unregister` is false there).
 
 1. `dir_absent` — the probe reported a non-empty canonical path (`pwd -P` of
    the nearest existing parent plus the remainder) and `test -e` / `test -L`
@@ -84,6 +85,21 @@ condition must hold (`repair::VanishedGuard`, evaluated in `plan_with`):
    root's (`stat -L -c %d` on Linux / BusyBox, `stat -L -f %d` on macOS; the
    probe picks the flavour by trying `-c` first). Either stat failing fails
    the guard.
+8. `siblings_present` — every OTHER registered worktree whose canonical path
+   shares this one's parent still exists on disk (the probe prints
+   `present 1|0` after each porcelain entry). An unmounted volume makes all
+   of its worktrees vanish at once; an `rm -rf` leaves the others in place.
+   The refusal names the missing siblings: a stale registration of a
+   worktree deleted long ago also trips it (prune it, or use Repair).
+9. `fingerprint_matches` — the canonical parent's current `dev:inode`
+   (`stat -L -c '%d:%i'`, falling back to `stat -L -f '%d:%i'`) equals the
+   one recorded while this worktree was healthy. Every probe that finds the
+   registered worktree healthy (create, attach, restart, recreate, explicit
+   repair, and the verify after a repair) records it, keyed by host and
+   canonical worktree path (migration `023_worktree_parent_fingerprints`).
+   `fingerprint_check` says which: `match`, `mismatch` (remounted or
+   replaced parent), `missing` (never seen healthy), `stat_failed`. Only
+   `match` passes.
 
 If any condition fails the run stays explicit-only (`E_REPAIR_REQUIRED` for
 new session / restart / recreate / spawn review, a notice on attach) and the
@@ -100,12 +116,25 @@ blocks a parent that is another volume: a mounted `.worktrees/` volume whose
 worktree vanished, or an autofs mountpoint (autofs has its own device id even
 before it mounts). A person decides through the explicit Repair workspace.
 
-Known residuals, not distinguishable by device id: a bind mount of the same
-filesystem shares the root's device id; and a plain (non-autofs) mountpoint
-that is currently unmounted is an ordinary empty directory on the root's
-filesystem, so an add there would land under the mountpoint. With
-`repair.auto_on_tick` on, that hole stays open for the tick until the
-parent-fingerprint check lands; click-driven entry points never remove.
+**The parent fingerprint closes the unmounted-mountpoint hole.** A plain
+(non-autofs) mountpoint that is currently unmounted is an ordinary empty
+directory on the root's filesystem, so `same_filesystem` passes; but its
+inode is the mountpoint directory's, not the mounted volume root's that was
+recorded while the worktree was healthy, so `fingerprint_matches` fails. A
+remount, or a parent directory deleted and recreated, likewise gets a new
+inode. The apply script re-checks the expected pair (quoted into the script)
+right before `git worktree remove` and again before `git worktree add`, so a
+volume that unmounts or remounts between the probe and the apply refuses
+before the next git step (`E_REPAIR_REQUIRED`: "reappeared" before the
+remove, "nothing was re-added" before the add).
+
+Known residuals: a worktree that vanished before any probe saw it healthy has
+no fingerprint and needs one Repair click (then it is recorded); a legitimate
+rename or recreation of the parent directory also needs one Repair click; an
+inode number reused by a new directory at the same path on the same
+filesystem would match (a remount of a different filesystem cannot, since
+the device id differs); and a bind mount shares the underlying directory's
+`dev:inode`.
 
 **Re-check at apply time.** The probe runs one round trip before the apply,
 and a late-mounting path (autofs, NFS) can reappear in between; `git worktree
@@ -197,10 +226,10 @@ workspace group (reviews, twins).
 
 | # | Case | Before | Automatic now | Explicit now |
 |---|---|---|---|---|
-| a | row + tmux alive, worktree dir deleted | new panes fail; rebuilt at the stale path | reconcile tick only, guard holds: remove our entry → add → verify (live pane left, `tmux_cwd_stale`); click-driven entry points: warning, `E_REPAIR_REQUIRED` for lifecycles | remove our entry → add → verify → respawn (pane cwd confirmed missing) |
+| a | row + tmux alive, worktree dir deleted | new panes fail; rebuilt at the stale path | guard holds (parent fingerprint matches): remove our entry → add → verify (live pane left, `tmux_cwd_stale`); otherwise warning, `E_REPAIR_REQUIRED` for lifecycles | remove our entry → add → verify → respawn (pane cwd confirmed missing) |
 | b | tmux gone, dir deleted, entry gone | tmux in a missing cwd | add from the existing branch; attach creates tmux | same, plus create tmux |
 | c | dir present, git no longer lists it / stale `.git` link | undetected | warning | `git worktree repair --`; verify decides; a checkout whose admin dir was pruned is reported, never deleted |
-| d | registered but directory missing (`prunable`, or older git without the flag) | `worktree add` failed | reconcile tick only, guard holds: remove our entry only → add; otherwise warning (an empty leftover dir is not "absent") | remove our entry only → add |
+| d | registered but directory missing (`prunable`, or older git without the flag) | `worktree add` failed | guard holds (parent fingerprint matches): remove our entry only → add; otherwise warning (an empty leftover dir is not "absent") | remove our entry only → add |
 | e | branch only on the remote (`origin/<b>` present) | failed | add with `--track` | same |
 | f | branch deleted everywhere | failed | warning | `ls-remote` confirms absent (or no origin) → fork from base, recorded; unreachable origin / failed fetch → `E_REPAIR_FAILED` |
 | g | branch checked out elsewhere | git refused | main checkout: `E_BRANCH_CHECKED_OUT`; linked worktree: warning | main checkout: `E_BRANCH_CHECKED_OUT`; linked: adopt after the guard + verify |
@@ -235,7 +264,10 @@ workspace group (reviews, twins).
   `sessions.ts`; the Repair workspace button (explicit, shows the branch
   source); the automatic pre-attach check in `TerminalView.svelte`.
 - `repair::{plan_with, AutoContext, VanishedGuard, ensure_workspace_with,
-  ensure_session_workspace_for_tick}`; `RepairReport.vanished_guard`.
+  ensure_session_workspace_for_tick, render_git_script_expecting, parse_fp,
+  fp_string}`; `RepairReport.vanished_guard`.
+- Store: `worktree_parent_fingerprints` (migration 023),
+  `Store::{record_parent_fingerprint, parent_fingerprint}`.
 - Reconcile tick: `service::repair_tick` (settings `repair.auto_on_tick`,
   `repair.tick_interval_secs`; migration `021_repair_backoff` for the
   per-session backoff stamp). The repair itself needs no migration.
@@ -263,9 +295,13 @@ workspace group (reviews, twins).
 - `ensure_workspace` with a scripted executor: exact scripts in order,
   tmux calls, row writes, events; automatic runs never apply explicit steps;
   failures keep the row; probe vs apply transport failures map differently.
-- Vanished-directory guard: `plan_with` removes-then-adds only with the
-  tick's `allow_auto_unregister` when all conditions hold, and every
-  click-driven entry point defers it even then; each condition alone
+- Vanished-directory guard: `plan_with` removes-then-adds under every
+  automatic entry point only with a matching parent fingerprint (plan tests
+  for match / mismatch / missing / failed stat; a click-driven path with no
+  recorded fingerprint or a mismatch stays explicit-only); the apply script
+  re-checks the quoted pair before remove and add; a healthy probe records
+  it; real git: a sole `rm -rf`'d worktree is re-added, a replaced parent
+  directory refuses, two siblings vanishing together refuse; each condition alone
   (parent missing, absence unconfirmed, outside the root, `..`, another
   session mapped, mapping unknown) leaves no steps and `E_REPAIR_REQUIRED`;
   root missing and locked are refused earlier; the event detail carries the

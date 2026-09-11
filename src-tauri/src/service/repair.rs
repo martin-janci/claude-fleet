@@ -20,11 +20,12 @@
 //! recreate, attach, the opt-in reconcile tick — [`Policy::Auto`]) may only
 //! CREATE what is confirmed missing: `git worktree add` from an existing local
 //! or remote-tracking branch into a target that is absent on disk, and a tmux
-//! session that `tmux has-session` confirms is dead. Only the opt-in
-//! reconcile tick ([`ensure_session_workspace_for_tick`]) may make one
-//! removal: this worktree's OWN stale registration (`git worktree remove
+//! session that `tmux has-session` confirms is dead. The one removal it may
+//! make is this worktree's OWN stale registration (`git worktree remove
 //! --force -- <path>`, never a prune) right before that add, and only when
-//! every [`VanishedGuard`] condition holds: the directory is confirmed absent,
+//! every [`VanishedGuard`] condition holds: the parent directory's `dev:inode`
+//! matches the one recorded while the worktree was healthy (re-checked inside
+//! the apply script), the directory is confirmed absent,
 //! its parent exists on the project root's filesystem (no unmounted or other
 //! volume), the repository is usable, the path
 //! is under the project root, the entry is not locked, and no other session
@@ -58,6 +59,20 @@ pub const EVENT_REPAIR_FAILED: &str = "workspace_repair_failed";
 /// stale registration: the directory came back (or its parent vanished)
 /// after the probe, so nothing was removed.
 pub const UNREGISTER_REFUSED: &str = "reappeared or parent missing; not removing";
+/// stderr marker of the apply script's fingerprint re-check right before the
+/// re-add: the parent changed after the stale entry was removed.
+pub const ADD_REFUSED: &str = "parent changed since the check; not re-adding";
+
+/// `"dev:inode"` → `(dev, inode)`; `None` for anything else.
+pub fn parse_fp(s: &str) -> Option<(u64, u64)> {
+    let (d, i) = s.trim().split_once(':')?;
+    Some((d.parse().ok()?, i.parse().ok()?))
+}
+
+/// `(dev, inode)` → `"dev:inode"` (the stored and scripted form).
+pub fn fp_string(fp: (u64, u64)) -> String {
+    format!("{}:{}", fp.0, fp.1)
+}
 /// Part of the `E_REPAIR_FAILED` message of an apply that was cut off.
 pub const PARTIALLY_APPLIED: &str = "the repair may be partially applied";
 
@@ -174,6 +189,9 @@ pub struct RegisteredWorktree {
     pub prunable: bool,
     pub locked: bool,
     pub bare: bool,
+    /// The probe's `test -e || test -L` on this registration's path. `None`
+    /// when the probe did not report it.
+    pub present: Option<bool>,
 }
 
 impl RegisteredWorktree {
@@ -234,6 +252,10 @@ pub struct Probe {
     /// must equal `root_dev` for the automatic removal (another volume, an
     /// autofs mountpoint).
     pub wt_parent_dev: Option<String>,
+    /// `(dev, inode)` of the worktree's canonical parent directory (`stat -L`),
+    /// `None` when stat failed. Recorded while the worktree is healthy; an
+    /// automatic removal requires the current value to match it.
+    pub wt_parent_fp: Option<(u64, u64)>,
     pub worktrees: Vec<RegisteredWorktree>,
 }
 
@@ -317,6 +339,9 @@ echo "wt_parent_exists=$(yn test -d "$(dirname -- "$wt")")"
 if stat -L -c %d / >/dev/null 2>&1; then devof() {{ stat -L -c %d -- "$1" 2>/dev/null; }}; else devof() {{ stat -L -f %d -- "$1" 2>/dev/null; }}; fi
 echo "root_dev=$(devof "$root")"
 echo "wt_parent_dev=$(devof "$(dirname -- "$wt")")"
+# Parent fingerprint `dev:inode` of the canonical parent; empty on failure.
+if stat -L -c %d / >/dev/null 2>&1; then fpof() {{ stat -L -c '%d:%i' -- "$1" 2>/dev/null; }}; else fpof() {{ stat -L -f '%d:%i' -- "$1" 2>/dev/null; }}; fi
+echo "wt_parent_fp=$(fpof "$(dirname -- "$(canon "$wt")")")"
 echo "wt_git=$(yn test -e "$wt/.git")"
 if [ -d "$wt" ] && [ -z "$(ls -A "$wt" 2>/dev/null)" ]; then echo wt_empty=1; else echo wt_empty=0; fi
 echo "wt_gitdir_ok=$(yn git -C "$wt" rev-parse --git-dir)"
@@ -350,7 +375,7 @@ fi
 echo '{marker}'
 git -C "$root" worktree list --porcelain 2>/dev/null | while IFS= read -r l; do
   printf '%s\n' "$l"
-  case "$l" in "worktree "*) echo "canon $(canon "${{l#worktree }}")";; esac
+  case "$l" in "worktree "*) echo "canon $(canon "${{l#worktree }}")"; _w="${{l#worktree }}"; if [ -e "$_w" ] || [ -L "$_w" ]; then echo "present 1"; else echo "present 0"; fi;; esac
 done
 exit 0
 "#,
@@ -388,6 +413,7 @@ pub fn parse_probe(stdout: &str) -> Probe {
                 let v = v.trim();
                 p.wt_parent_dev = (!v.is_empty()).then(|| v.to_string());
             }
+            "wt_parent_fp" => p.wt_parent_fp = parse_fp(v),
             "wt_gitdir_ok" => p.wt_gitdir_ok = flag(v),
             "index_lock" => p.index_lock = flag(v),
             "branch_local" => p.branch_local = flag(v),
@@ -432,7 +458,10 @@ pub fn parse_porcelain(input: &str) -> Vec<RegisteredWorktree> {
         let Some(w) = cur.as_mut() else {
             continue;
         };
-        if let Some(rest) = line.strip_prefix("canon ") {
+        if let Some(rest) = line.strip_prefix("present ") {
+            // Emitted by the probe: does that registered path exist on disk?
+            w.present = Some(rest.trim() == "1");
+        } else if let Some(rest) = line.strip_prefix("canon ") {
             // Emitted by the probe right after each `worktree` line.
             if !rest.is_empty() {
                 w.canon = Some(rest.to_string());
@@ -590,10 +619,14 @@ pub struct AutoContext {
     /// or canonical path). `None` = unknown.
     pub other_sessions_mapped: Option<bool>,
     /// May this run drop our own stale registration automatically at all?
-    /// Only the opt-in reconcile tick sets it; every click-driven entry point
-    /// (new session, spawn review, restart, recreate, attach) leaves it false,
-    /// so that removal stays behind Repair workspace (the #49 rule).
+    /// Every store-backed run (the reconcile tick and the click-driven entry
+    /// points) passes `true`: the removal then still requires every
+    /// [`VanishedGuard`] condition, above all the parent fingerprint match.
+    /// Only a context-free plan (plain [`plan`]) leaves it false.
     pub allow_auto_unregister: bool,
+    /// The parent `(dev, inode)` recorded while this worktree was healthy
+    /// (keyed by host + canonical path). `None`: never recorded.
+    pub recorded_parent_fp: Option<(u64, u64)>,
 }
 
 /// When an AUTOMATIC run may drop this worktree's own stale registration
@@ -618,6 +651,15 @@ pub struct VanishedGuard {
     pub not_locked: bool,
     /// No other live or ghost session maps to the worktree.
     pub no_other_session: bool,
+    /// Every OTHER registered worktree under the same parent still exists.
+    /// An unmounted volume makes all of its worktrees vanish at once; an
+    /// `rm -rf` leaves the others in place. A sole worktree passes.
+    pub siblings_present: bool,
+    /// The parent's current `dev:inode` equals the one recorded while this
+    /// worktree was healthy. The primary unmounted / remounted discriminator.
+    pub fingerprint_matches: bool,
+    /// `match` / `mismatch` / `missing` (never recorded) / `stat_failed`.
+    pub fingerprint_check: &'static str,
 }
 
 impl VanishedGuard {
@@ -627,7 +669,17 @@ impl VanishedGuard {
 
     /// The conditions that failed, human-readable.
     pub fn failed(&self) -> Vec<&'static str> {
+        let fingerprint = match self.fingerprint_check {
+            "missing" => "no parent fingerprint was recorded while the worktree was healthy",
+            "stat_failed" => "could not read the parent's dev:inode",
+            _ => "the parent's dev:inode differs from the one recorded while healthy (remounted or replaced?)",
+        };
         [
+            (self.fingerprint_matches, fingerprint),
+            (
+                self.siblings_present,
+                "another worktree under the same parent is missing too (unmounted volume?)",
+            ),
             (self.dir_absent, "directory not confirmed absent"),
             (
                 self.parent_exists,
@@ -659,11 +711,45 @@ fn clean_canon(c: &str) -> Option<&str> {
         .then_some(c)
 }
 
+/// Parent directory of a canonical path (`/` for a top-level entry).
+fn parent_of(c: &str) -> &str {
+    let c = norm(c);
+    match c.rfind('/') {
+        Some(0) => "/",
+        Some(i) => &c[..i],
+        None => "",
+    }
+}
+
+/// Other registered worktrees under our parent that are not confirmed
+/// present on disk (git's path form, for the refusal message).
+fn missing_siblings(p: &Probe) -> Vec<String> {
+    let Some(w) = p.wt_canon.as_deref().and_then(clean_canon) else {
+        return Vec::new();
+    };
+    let parent = parent_of(w);
+    p.worktrees
+        .iter()
+        .filter(|o| !o.bare && norm(o.key()) != w && parent_of(o.key()) == parent)
+        .filter(|o| o.present != Some(true))
+        .map(|o| o.path.clone())
+        .collect()
+}
+
 /// Pure: evaluate the [`VanishedGuard`] for our registration `r`.
 fn vanished_guard(p: &Probe, r: &RegisteredWorktree, ctx: AutoContext) -> VanishedGuard {
     let wt = p.wt_canon.as_deref().and_then(clean_canon);
     let root = p.root_canon.as_deref().and_then(clean_canon);
+    let fingerprint_check = match (p.wt_parent_fp, ctx.recorded_parent_fp) {
+        (None, _) => "stat_failed",
+        (Some(_), None) => "missing",
+        (Some(now), Some(then)) if now == then => "match",
+        _ => "mismatch",
+    };
     VanishedGuard {
+        siblings_present: missing_siblings(p).is_empty(),
+        fingerprint_matches: fingerprint_check == "match",
+        fingerprint_check,
         dir_absent: wt.is_some() && p.wt_entry_exists == Some(false) && !p.wt_exists,
         parent_exists: p.wt_parent_exists,
         same_filesystem: matches!(
@@ -884,26 +970,41 @@ pub fn plan_with(
                         // predates the flag) or left empty. Dropping our own
                         // registration is automatic only when the directory is
                         // confirmed vanished, every [`VanishedGuard`] condition
-                        // holds and the branch already exists; otherwise it is
-                        // explicit-only.
+                        // holds (above all: the parent's dev:inode matches the
+                        // one recorded while healthy) and the branch already
+                        // exists; otherwise it is explicit-only.
                         let guard = vanished_guard(p, r, ctx);
                         let auto =
                             ctx.allow_auto_unregister && guard.holds() && from_existing_branch;
                         if !auto {
-                            // Without the tick's permission: exactly #49's warning.
+                            // Without a store context: exactly #49's warning.
                             let failed = if ctx.allow_auto_unregister {
                                 guard.failed()
                             } else {
                                 Vec::new()
                             };
+                            let siblings = if ctx.allow_auto_unregister {
+                                missing_siblings(p)
+                            } else {
+                                Vec::new()
+                            };
                             warnings.push(format!(
                                 "git still lists {} but its directory is gone; only an explicit \
-                                 repair unregisters that entry and re-adds the worktree{}",
+                                 repair unregisters that entry and re-adds the worktree{}{}",
                                 r.path,
                                 if failed.is_empty() {
                                     String::new()
                                 } else {
                                     format!(" (not automatic: {})", failed.join(", "))
+                                },
+                                if siblings.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(
+                                        "; also missing (stale registrations cause this too — \
+                                         prune them if they are gone for good): {}",
+                                        siblings.join(", ")
+                                    )
                                 }
                             ));
                         }
@@ -1026,8 +1127,29 @@ pub fn plan_with(
 /// time (which branch source the add used). `--` separates options from
 /// paths / refs wherever git accepts it.
 pub fn render_git_script(root: &str, steps: &[Step]) -> String {
+    render_git_script_expecting(root, steps, None)
+}
+
+/// [`render_git_script`] for an automatic removal: `parent_fp` is the parent
+/// `(dev, inode)` the plan matched against the recorded fingerprint. The
+/// script re-checks it in the same shell right before `worktree remove` and
+/// again before `worktree add`, closing the probe-to-apply window (a volume
+/// unmounting or remounting in between refuses before the next git step).
+pub fn render_git_script_expecting(
+    root: &str,
+    steps: &[Step],
+    parent_fp: Option<(u64, u64)>,
+) -> String {
     let rq = quote(root);
     let mut s = String::from("set -e\n");
+    if let Some(fp) = parent_fp {
+        s.push_str(&format!(
+            "if stat -L -c %d / >/dev/null 2>&1; then fpof() {{ stat -L -c '%d:%i' -- \"$1\" 2>/dev/null; }}; \
+             else fpof() {{ stat -L -f '%d:%i' -- \"$1\" 2>/dev/null; }}; fi\n\
+             fp_expect={}\n",
+            quote(&fp_string(fp))
+        ));
+    }
     for step in steps {
         match step {
             Step::Unregister { path } => {
@@ -1037,9 +1159,15 @@ pub fn render_git_script(root: &str, steps: &[Step]) -> String {
                 // right before the remove: anything but an empty directory,
                 // a symlink, or a missing parent refuses before any git step.
                 let pq = quote(path);
+                s.push_str(&format!("p={pq}\n"));
+                if parent_fp.is_some() {
+                    s.push_str(&format!(
+                        "if [ \"$(fpof \"$(dirname -- \"$p\")\")\" != \"$fp_expect\" ]; \
+                         then echo \"repair: $p parent changed since the check; {UNREGISTER_REFUSED}\" >&2; exit 1; fi\n"
+                    ));
+                }
                 s.push_str(&format!(
-                    "p={pq}\n\
-                     if [ -L \"$p\" ] || [ ! -d \"$(dirname -- \"$p\")\" ] || \
+                    "if [ -L \"$p\" ] || [ ! -d \"$(dirname -- \"$p\")\" ] || \
                      {{ [ -e \"$p\" ] && [ -n \"$(ls -A -- \"$p\" 2>/dev/null || echo x)\" ]; }}; \
                      then echo \"repair: $p {UNREGISTER_REFUSED}\" >&2; exit 1; fi\n\
                      git -C {rq} worktree remove --force -- {pq} 1>&2\n"
@@ -1052,6 +1180,12 @@ pub fn render_git_script(root: &str, steps: &[Step]) -> String {
             Step::AddWorktree { path, branch, from } => {
                 let pq = quote(path);
                 let bq = quote(branch);
+                if parent_fp.is_some() {
+                    s.push_str(&format!(
+                        "if [ \"$(fpof \"$(dirname -- {pq})\")\" != \"$fp_expect\" ]; \
+                         then echo \"repair: {ADD_REFUSED}\" >&2; exit 1; fi\n"
+                    ));
+                }
                 match from {
                     BranchSource::Local => {
                         s.push_str(&format!(
@@ -1465,12 +1599,15 @@ pub async fn ensure_workspace(
     store: &Mutex<Store>,
     exec: &dyn RepairExec,
 ) -> Result<RepairReport, IpcError> {
-    ensure_workspace_with(spec, policy, siblings, store, exec, false).await
+    // Click-driven entry points may drop our own stale registration too, but
+    // only under the full [`VanishedGuard`], i.e. with a matching parent
+    // fingerprint recorded while the worktree was healthy.
+    ensure_workspace_with(spec, policy, siblings, store, exec, true).await
 }
 
-/// [`ensure_workspace`] with the tick-only permission to drop our own stale
-/// registration automatically ([`AutoContext::allow_auto_unregister`]).
-/// Only [`ensure_session_workspace_for_tick`] passes `true`.
+/// [`ensure_workspace`] with an explicit permission to drop our own stale
+/// registration automatically ([`AutoContext::allow_auto_unregister`]); the
+/// [`VanishedGuard`] (with the parent fingerprint) still decides.
 pub async fn ensure_workspace_with(
     spec: &WorkspaceSpec,
     policy: Policy,
@@ -1480,11 +1617,12 @@ pub async fn ensure_workspace_with(
     allow_auto_unregister: bool,
 ) -> Result<RepairReport, IpcError> {
     let probe = run_probe(exec, spec).await?;
+    record_healthy_fingerprint(store, spec, &probe);
     let ctx = {
         let s = store.lock().map_err(|_| IpcError::lock())?;
         AutoContext {
             allow_auto_unregister,
-            ..auto_context(&s, spec)
+            ..auto_context(&s, spec, &probe)
         }
     };
     let fix = plan_with(spec, &probe, policy, ctx).map_err(|e| fail(store, spec, e))?;
@@ -1559,7 +1697,18 @@ pub async fn ensure_workspace_with(
     if fix.has_git_steps() || adopting {
         let git_steps: Vec<Step> = fix.steps.iter().filter(|s| s.is_git()).cloned().collect();
         if !git_steps.is_empty() {
-            let script = render_git_script(&spec.project_root, &git_steps);
+            // An automatic removal re-checks the matched parent fingerprint
+            // inside the script, before the remove and before the add.
+            let expect_fp = if !explicit
+                && git_steps
+                    .iter()
+                    .any(|s| matches!(s, Step::Unregister { .. }))
+            {
+                probe.wt_parent_fp
+            } else {
+                None
+            };
+            let script = render_git_script_expecting(&spec.project_root, &git_steps, expect_fp);
             let out = exec
                 .apply_script(&script)
                 .await
@@ -1568,7 +1717,19 @@ pub async fn ensure_workspace_with(
                 // The re-check before `remove --force` refused: the directory
                 // reappeared between the probe and the apply. Nothing ran; a
                 // refusal (not transient), so the tick backs off.
-                let e = if out.stderr.contains(UNREGISTER_REFUSED) {
+                let e = if out.stderr.contains(ADD_REFUSED) {
+                    IpcError::new(
+                        codes::E_REPAIR_REQUIRED,
+                        format!(
+                            "the parent of {} changed between the check and the re-add on {} \
+                             (remounted?); the stale entry was removed but nothing was \
+                             re-added. Check it, then use Repair workspace ({})",
+                            fix.cwd,
+                            spec.host_alias,
+                            out.stderr.trim()
+                        ),
+                    )
+                } else if out.stderr.contains(UNREGISTER_REFUSED) {
                     IpcError::new(
                         codes::E_REPAIR_REQUIRED,
                         format!(
@@ -1640,6 +1801,8 @@ pub async fn ensure_workspace_with(
         report.tmux_alive = after.tmux_alive;
         report.tmux_dead = after.tmux_dead;
         report.cwd_physical = after.wt_canon.clone();
+        // The repaired worktree is healthy: refresh its parent fingerprint.
+        record_healthy_fingerprint(store, spec, &after);
         dir_changed = true;
     }
     if adopting {
@@ -1752,13 +1915,49 @@ pub fn event_detail(report: &RepairReport) -> String {
     v.to_string()
 }
 
-/// What the store says about other sessions on this workspace, for the
-/// [`VanishedGuard`]. No worktree / project id, or a store error, reads as
+/// A registered, healthy worktree: remember its canonical parent's
+/// `dev:inode`, the evidence a later automatic removal must match.
+/// Best-effort; never fails the caller.
+fn record_healthy_fingerprint(store: &Mutex<Store>, spec: &WorkspaceSpec, p: &Probe) {
+    if spec.worktree.is_none() || !(p.wt_exists && p.wt_gitdir_ok) {
+        return;
+    }
+    let (Some(canon), Some(fp)) = (p.wt_canon.as_deref().and_then(clean_canon), p.wt_parent_fp)
+    else {
+        return;
+    };
+    let registered = p
+        .worktrees
+        .iter()
+        .any(|r| norm(r.key()) == canon && !r.prunable && !r.bare);
+    if !registered {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    if let Ok(s) = store.lock() {
+        if let Err(e) = s.record_parent_fingerprint(&spec.host_alias, canon, &fp_string(fp), now) {
+            tracing::warn!("[repair] recording the parent fingerprint of {canon} failed: {e}");
+        }
+    }
+}
+
+/// What the store says about this workspace, for the [`VanishedGuard`]:
+/// other sessions mapped to it, and the parent fingerprint recorded while it
+/// was healthy. No worktree / project id, or a store error, reads as
 /// "unknown", which blocks the automatic removal.
-fn auto_context(s: &Store, spec: &WorkspaceSpec) -> AutoContext {
+fn auto_context(s: &Store, spec: &WorkspaceSpec, probe: &Probe) -> AutoContext {
     let (Some(w), Some(pid)) = (&spec.worktree, spec.project_id) else {
         return AutoContext::default();
     };
+    let recorded_parent_fp = probe
+        .wt_canon
+        .as_deref()
+        .and_then(clean_canon)
+        .and_then(|c| s.parent_fingerprint(&spec.host_alias, c).ok().flatten())
+        .and_then(|v| parse_fp(&v));
     let (Ok(rows), Ok(sessions)) = (
         s.list_worktrees_for_project(pid),
         s.list_sessions_for_host(&spec.host_alias),
@@ -1784,8 +1983,9 @@ fn auto_context(s: &Store, spec: &WorkspaceSpec) -> AutoContext {
     });
     AutoContext {
         other_sessions_mapped: Some(mapped),
-        // Set by the caller: only the reconcile tick passes `true`.
+        // Set by the caller (`ensure_workspace_with`).
         allow_auto_unregister: false,
+        recorded_parent_fp,
     }
 }
 
@@ -2181,9 +2381,9 @@ pub async fn ensure_session_workspace(
     require_no_explicit(report)
 }
 
-/// The opt-in reconcile tick's repair (`repair.auto_on_tick`): the automatic
-/// pre-check, and the ONLY caller allowed to drop the worktree's own stale
-/// registration automatically (under the [`VanishedGuard`]).
+/// The opt-in reconcile tick's repair (`repair.auto_on_tick`): the same
+/// automatic pre-check as [`ensure_session_workspace`]; dropping a stale
+/// registration still needs the full [`VanishedGuard`] (parent fingerprint).
 pub async fn ensure_session_workspace_for_tick(
     session_id: i64,
     entry: Entry,
@@ -3700,8 +3900,9 @@ mod tests {
             }
         );
         assert_eq!(policy_for(Entry::Explicit), Policy::Explicit);
-        // Click-driven entry points never drop our own vanished registration,
-        // even with every guard holding; only the tick's permission does.
+        // Every automatic entry point (click-driven or the tick) drops our own
+        // vanished registration ONLY with a matching parent fingerprint; with
+        // none recorded or a mismatch it stays explicit-only.
         for entry in [
             Entry::NewSession,
             Entry::SpawnReview,
@@ -3709,24 +3910,27 @@ mod tests {
             Entry::Recreate,
             Entry::Attach,
         ] {
-            let p = plan_with(&spec(true), &vanished(), policy_for(entry), CLICK).unwrap();
-            assert!(
-                p.needs_explicit_repair && p.steps.is_empty(),
-                "{entry:?}: {:?}",
-                p.steps
-            );
-            assert!(
-                matches!(p.deferred.first(), Some(Step::Unregister { .. })),
-                "{entry:?}: {:?}",
-                p.deferred
-            );
-            assert!(
-                p.warnings
-                    .iter()
-                    .any(|w| w.contains("only an explicit repair unregisters that entry")),
-                "{entry:?}: {:?}",
-                p.warnings
-            );
+            for (ctx, why) in [
+                (NO_FP, "no parent fingerprint was recorded"),
+                (OTHER_FP, "differs from the one recorded"),
+            ] {
+                let p = plan_with(&spec(true), &vanished(), policy_for(entry), ctx).unwrap();
+                assert!(
+                    p.needs_explicit_repair && p.steps.is_empty(),
+                    "{entry:?}: {:?}",
+                    p.steps
+                );
+                assert!(
+                    matches!(p.deferred.first(), Some(Step::Unregister { .. })),
+                    "{entry:?}: {:?}",
+                    p.deferred
+                );
+                assert!(
+                    p.warnings.iter().any(|w| w.contains(why)),
+                    "{entry:?}: {:?}",
+                    p.warnings
+                );
+            }
             let t = plan_with(&spec(true), &vanished(), policy_for(entry), NO_OTHERS).unwrap();
             assert!(!t.needs_explicit_repair, "{entry:?}: {:?}", t.warnings);
             assert!(
@@ -3735,8 +3939,8 @@ mod tests {
                 t.steps
             );
         }
-        // Explicit is unchanged by the flag.
-        for ctx in [CLICK, NO_OTHERS] {
+        // Explicit is unchanged by the fingerprint and the flag.
+        for ctx in [NO_FP, OTHER_FP, NO_OTHERS, AutoContext::default()] {
             let p = plan_with(&spec(true), &vanished(), Policy::Explicit, ctx).unwrap();
             assert_eq!(
                 &p.steps[..2],
@@ -4970,22 +5174,36 @@ mod tests {
     // ── automatic removal of our own vanished registration ────────────────
 
     const VANISHED_WT: &str = "/repo/.claude/worktrees/feat";
-    /// The reconcile tick's context: no other session, removal permitted.
+    /// A store-backed context with no other session and the parent
+    /// fingerprint recorded while healthy matching `vanished()`'s.
     const NO_OTHERS: AutoContext = AutoContext {
         other_sessions_mapped: Some(false),
         allow_auto_unregister: true,
+        recorded_parent_fp: Some((42, 7)),
     };
-    /// Every click-driven entry point: removal never automatic.
-    const CLICK: AutoContext = AutoContext {
-        other_sessions_mapped: Some(false),
-        allow_auto_unregister: false,
+    /// Never recorded while healthy.
+    const NO_FP: AutoContext = AutoContext {
+        recorded_parent_fp: None,
+        ..NO_OTHERS
+    };
+    /// Recorded, but the parent's inode differs now (remounted / replaced).
+    const OTHER_FP: AutoContext = AutoContext {
+        recorded_parent_fp: Some((42, 8)),
+        ..NO_OTHERS
     };
 
+    fn record_vanished_fp(store: &Mutex<Store>, fp: &str) {
+        store
+            .lock()
+            .unwrap()
+            .record_parent_fingerprint("local", VANISHED_WT, fp, 1)
+            .unwrap();
+    }
+
     #[tokio::test]
-    async fn click_driven_entry_points_never_remove_a_stale_entry_automatically() {
+    async fn click_driven_entry_points_remove_only_with_a_matching_fingerprint() {
         // new_session, spawn_review, restart, recreate, and attach (also the
-        // non-explicit repair_session Tauri call): every guard holds, yet
-        // only the probe runs and the lifecycle answer is E_REPAIR_REQUIRED.
+        // non-explicit repair_session Tauri call).
         for entry in [
             Entry::NewSession,
             Entry::SpawnReview,
@@ -4993,8 +5211,48 @@ mod tests {
             Entry::Recreate,
             Entry::Attach,
         ] {
+            // No fingerprint recorded, or a different one: probe only,
+            // E_REPAIR_REQUIRED naming why.
+            for (recorded, why) in [
+                (None, "no parent fingerprint was recorded"),
+                (Some("42:8"), "differs from the one recorded"),
+            ] {
+                let (store, sid, pid) = seeded_store(VANISHED_WT);
+                if let Some(fp) = recorded {
+                    record_vanished_fp(&store, fp);
+                }
+                let exec = FakeExec::new(vec![ok(&vanished_out(true))]);
+                let rep = ensure_workspace(
+                    &spec_with_ids(sid, pid),
+                    policy_for(entry),
+                    vec![],
+                    &store,
+                    &exec,
+                )
+                .await
+                .unwrap();
+                assert_eq!(exec.scripts().len(), 1, "{entry:?}: probe only");
+                assert!(exec.tmux_calls().is_empty(), "{entry:?}");
+                assert!(rep.needs_explicit_repair, "{entry:?}");
+                assert!(
+                    rep.deferred
+                        .iter()
+                        .any(|d| d.contains("worktree remove --force")),
+                    "{entry:?}: {:?}",
+                    rep.deferred
+                );
+                let err = require_no_explicit(rep).unwrap_err();
+                assert_eq!(err.code, codes::E_REPAIR_REQUIRED, "{entry:?}");
+                assert!(err.message.contains(why), "{entry:?}: {}", err.message);
+            }
+            // The matching fingerprint: remove + re-add, re-checked in-script.
             let (store, sid, pid) = seeded_store(VANISHED_WT);
-            let exec = FakeExec::new(vec![ok(&vanished_out(true))]);
+            record_vanished_fp(&store, "42:7");
+            let exec = FakeExec::new(vec![
+                ok(&vanished_out(true)),
+                ok("outcome=branch_local\n"),
+                ok(HEALTHY_OUT),
+            ]);
             let rep = ensure_workspace(
                 &spec_with_ids(sid, pid),
                 policy_for(entry),
@@ -5004,18 +5262,18 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(exec.scripts().len(), 1, "{entry:?}: probe only");
-            assert!(exec.tmux_calls().is_empty(), "{entry:?}");
-            assert!(rep.needs_explicit_repair, "{entry:?}");
+            let rep = require_no_explicit(rep).unwrap();
             assert!(
-                rep.deferred
+                rep.actions
                     .iter()
-                    .any(|d| d.contains("worktree remove --force")),
+                    .any(|a| a.contains("worktree remove --force")),
                 "{entry:?}: {:?}",
-                rep.deferred
+                rep.actions
             );
-            let err = require_no_explicit(rep).unwrap_err();
-            assert_eq!(err.code, codes::E_REPAIR_REQUIRED, "{entry:?}");
+            assert!(
+                exec.scripts()[1].contains("fp_expect='42:7'\n"),
+                "{entry:?}"
+            );
         }
     }
 
@@ -5034,6 +5292,7 @@ mod tests {
         p.wt_parent_exists = true;
         p.root_dev = Some("42".into());
         p.wt_parent_dev = Some("42".into());
+        p.wt_parent_fp = Some((42, 7));
         p
     }
 
@@ -5043,7 +5302,8 @@ mod tests {
             "@@worktrees\n",
             &format!(
                 "root_canon=/repo\nwt_canon={VANISHED_WT}\nwt_entry_exists=0\n\
-                 root_dev=42\nwt_parent_dev=42\nwt_parent_exists={}\n@@worktrees\n",
+                 root_dev=42\nwt_parent_dev=42\nwt_parent_fp=42:7\nwt_parent_exists={}\n\
+                 @@worktrees\n",
                 u8::from(parent_exists)
             ),
             1,
@@ -5234,6 +5494,7 @@ mod tests {
     #[tokio::test]
     async fn auto_repair_of_a_vanished_registration_end_to_end_records_the_guard() {
         let (store, sid, pid) = seeded_store(VANISHED_WT);
+        record_vanished_fp(&store, "42:7");
         let exec = FakeExec::new(vec![
             ok(&vanished_out(true)),      // probe
             ok("outcome=branch_local\n"), // git steps
@@ -5248,14 +5509,15 @@ mod tests {
         assert_eq!(scripts.len(), 3, "probe, apply, verify");
         assert_eq!(
             scripts[1],
-            render_git_script(
+            render_git_script_expecting(
                 "/repo",
                 &[
                     Step::Unregister {
                         path: VANISHED_WT.into()
                     },
                     add_local()
-                ]
+                ],
+                Some((42, 7))
             )
         );
         assert!(!scripts[1].contains("prune"), "{}", scripts[1]);
@@ -5273,9 +5535,12 @@ mod tests {
             "not_locked",
             "no_other_session",
             "same_filesystem",
+            "siblings_present",
+            "fingerprint_matches",
         ] {
             assert_eq!(d["vanished_guard"][k], true, "{k}: {d}");
         }
+        assert_eq!(d["vanished_guard"]["fingerprint_check"], "match", "{d}");
     }
 
     #[tokio::test]
@@ -5330,7 +5595,6 @@ mod tests {
             &root,
             &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feat"],
         );
-        std::fs::remove_dir_all(&wt).unwrap();
         let store = Mutex::new(Store::open_in_memory().unwrap());
         let pid = store
             .lock()
@@ -5339,8 +5603,15 @@ mod tests {
             .unwrap();
         let mut s = local_spec(&root, &wt, "auto-vanished");
         s.project_id = Some(pid);
-        // The reconcile tick's path (the only automatic remover).
-        let rep = ensure_workspace_with(&s, AUTO, vec![], &store, &LocalExec, true)
+        // A healthy probe (any attach / restart) records the fingerprint.
+        let healthy = ensure_workspace(&s, AUTO, vec![], &store, &LocalExec)
+            .await
+            .unwrap();
+        assert!(healthy.healthy, "{:?}", healthy.warnings);
+        // The owner's case: `rm -rf` of the ONLY worktree, then a
+        // click-driven restart re-adds it (the fingerprint matches).
+        std::fs::remove_dir_all(&wt).unwrap();
+        let rep = ensure_workspace(&s, AUTO, vec![], &store, &LocalExec)
             .await
             .unwrap();
         let rep = require_no_explicit(rep).unwrap();
@@ -5479,6 +5750,7 @@ mod tests {
     #[tokio::test]
     async fn reappeared_refusal_from_the_apply_is_e_repair_required() {
         let (store, sid, pid) = seeded_store(VANISHED_WT);
+        record_vanished_fp(&store, "42:7");
         let exec = FakeExec::new(vec![
             ok(&vanished_out(true)),
             Ok(ScriptOutput {
@@ -5538,7 +5810,6 @@ mod tests {
             &root,
             &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feat"],
         );
-        std::fs::remove_dir_all(&wt).unwrap();
         let store = Mutex::new(Store::open_in_memory().unwrap());
         let pid = store
             .lock()
@@ -5547,6 +5818,11 @@ mod tests {
             .unwrap();
         let mut s = local_spec(&root, &wt, "auto-reappear");
         s.project_id = Some(pid);
+        // Healthy first, so the fingerprint is recorded and the guard holds.
+        ensure_workspace(&s, AUTO, vec![], &store, &LocalExec)
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(&wt).unwrap();
         let exec = ReappearExec { dir: wt.clone() };
         let err = ensure_workspace_with(&s, AUTO, vec![], &store, &exec, true)
             .await
@@ -5568,5 +5844,358 @@ mod tests {
             String::from_utf8_lossy(&list.stdout).contains("/.claude/worktrees/feat"),
             "nothing was removed"
         );
+    }
+
+    // ── the parent fingerprint ───────────────────────────────────────────
+
+    #[test]
+    fn fingerprint_parse_and_render_round_trip() {
+        assert_eq!(parse_fp("42:7"), Some((42, 7)));
+        assert_eq!(parse_fp(" 2049:131 \n"), Some((2049, 131)));
+        for bad in ["", "42", "42:", ":7", "a:b", "42:7:1"] {
+            assert_eq!(parse_fp(bad), None, "{bad:?}");
+        }
+        assert_eq!(fp_string((42, 7)), "42:7");
+        let p = parse_probe("wt_parent_fp=42:7\n@@worktrees\n");
+        assert_eq!(p.wt_parent_fp, Some((42, 7)));
+        assert_eq!(parse_probe("wt_parent_fp=\n").wt_parent_fp, None);
+    }
+
+    #[test]
+    fn probe_script_records_the_parent_fingerprint_and_sibling_presence() {
+        let script = probe_script(&spec(true));
+        assert!(script.contains("fpof() { stat -L -c '%d:%i' -- \"$1\" 2>/dev/null; }"));
+        assert!(script.contains("fpof() { stat -L -f '%d:%i' -- \"$1\" 2>/dev/null; }"));
+        assert!(
+            script.contains("echo \"wt_parent_fp=$(fpof \"$(dirname -- \"$(canon \"$wt\")\")\")\"")
+        );
+        assert!(script.contains(
+            "_w=\"${l#worktree }\"; if [ -e \"$_w\" ] || [ -L \"$_w\" ]; \
+             then echo \"present 1\"; else echo \"present 0\"; fi;;"
+        ));
+        let p = parse_probe(
+            "@@worktrees\nworktree /r/a\ncanon /r/a\npresent 0\n\nworktree /r/b\npresent 1\n",
+        );
+        assert_eq!(p.worktrees[0].present, Some(false));
+        assert_eq!(p.worktrees[1].present, Some(true));
+        assert_eq!(
+            parse_probe("@@worktrees\nworktree /r\n").worktrees[0].present,
+            None
+        );
+    }
+
+    /// Match / mismatch / missing / failed stat: only a match lets an
+    /// automatic removal run; the refusal names which.
+    #[test]
+    fn parent_fingerprint_gates_the_automatic_removal() {
+        let g = vanished_guard(&vanished(), &feat_wt(), NO_OTHERS);
+        assert_eq!(g.fingerprint_check, "match");
+        assert!(g.fingerprint_matches && g.holds());
+        let stat_failed = Probe {
+            wt_parent_fp: None,
+            ..vanished()
+        };
+        for (name, probe, ctx, check, why) in [
+            (
+                "mismatch",
+                vanished(),
+                OTHER_FP,
+                "mismatch",
+                "differs from the one recorded",
+            ),
+            (
+                "missing",
+                vanished(),
+                NO_FP,
+                "missing",
+                "no parent fingerprint was recorded",
+            ),
+            (
+                "stat failed",
+                stat_failed,
+                NO_OTHERS,
+                "stat_failed",
+                "could not read the parent's dev:inode",
+            ),
+        ] {
+            let g = vanished_guard(&probe, &feat_wt(), ctx);
+            assert_eq!(g.fingerprint_check, check, "{name}");
+            assert!(!g.fingerprint_matches && !g.holds(), "{name}");
+            for policy in [AUTO, ATTACH] {
+                let plan = plan_with(&spec(true), &probe, policy, ctx).unwrap();
+                assert!(
+                    plan.steps.is_empty() && plan.needs_explicit_repair,
+                    "{name}: {:?}",
+                    plan.steps
+                );
+                assert!(
+                    plan.warnings.iter().any(|w| w.contains(why)),
+                    "{name}: {:?}",
+                    plan.warnings
+                );
+            }
+        }
+    }
+
+    /// (h): a missing sibling under the same parent blocks the removal and
+    /// is named in the refusal.
+    #[test]
+    fn a_missing_sibling_blocks_and_is_named() {
+        let mut p = vanished();
+        p.worktrees.push(RegisteredWorktree {
+            path: "/repo/.claude/worktrees/other".into(),
+            branch: Some("other".into()),
+            present: Some(false),
+            ..Default::default()
+        });
+        let plan = plan_with(&spec(true), &p, AUTO, NO_OTHERS).unwrap();
+        assert!(plan.steps.is_empty() && plan.needs_explicit_repair);
+        let w = plan.warnings.join("\n");
+        assert!(w.contains("missing too"), "{w}");
+        assert!(w.contains("/repo/.claude/worktrees/other"), "{w}");
+        // A present sibling (the rm -rf shape) does not block.
+        p.worktrees[2].present = Some(true);
+        let plan = plan_with(&spec(true), &p, AUTO, NO_OTHERS).unwrap();
+        assert!(!plan.needs_explicit_repair, "{:?}", plan.warnings);
+    }
+
+    #[test]
+    fn apply_script_re_checks_the_quoted_fingerprint_before_remove_and_add() {
+        let steps = [
+            Step::Unregister {
+                path: "/r/.claude/worktrees/f".into(),
+            },
+            Step::AddWorktree {
+                path: "/r/.claude/worktrees/f".into(),
+                branch: "f".into(),
+                from: BranchSource::Local,
+            },
+        ];
+        let s = render_git_script_expecting("/r", &steps, Some((42, 7)));
+        let fp = s.find("fp_expect='42:7'\n").expect("expected pair quoted");
+        let before_rm = s
+            .find(
+                "if [ \"$(fpof \"$(dirname -- \"$p\")\")\" != \"$fp_expect\" ]; then echo \
+                 \"repair: $p parent changed since the check; reappeared or parent missing; \
+                 not removing\" >&2; exit 1; fi\n",
+            )
+            .expect("check before remove");
+        let rm = s.find("worktree remove --force").unwrap();
+        let before_add = s
+            .find(
+                "if [ \"$(fpof \"$(dirname -- '/r/.claude/worktrees/f')\")\" != \"$fp_expect\" ]; \
+                 then echo \"repair: parent changed since the check; not re-adding\" >&2; exit 1; fi\n",
+            )
+            .expect("check before add");
+        let add = s.find("worktree add --").unwrap();
+        assert!(
+            fp < before_rm && before_rm < rm && rm < before_add && before_add < add,
+            "{s}"
+        );
+        // Without an expected pair (explicit) the script is unchanged.
+        assert_eq!(
+            render_git_script_expecting("/r", &steps, None),
+            render_git_script("/r", &steps)
+        );
+        assert!(!render_git_script("/r", &steps).contains("fp_expect"));
+    }
+
+    #[tokio::test]
+    async fn parent_changed_before_the_re_add_is_e_repair_required() {
+        let (store, sid, pid) = seeded_store(VANISHED_WT);
+        record_vanished_fp(&store, "42:7");
+        let exec = FakeExec::new(vec![
+            ok(&vanished_out(true)),
+            Ok(ScriptOutput {
+                ok: false,
+                stdout: String::new(),
+                stderr: format!("repair: {ADD_REFUSED}\n"),
+            }),
+        ]);
+        let err = ensure_workspace(&spec_with_ids(sid, pid), AUTO, vec![], &store, &exec)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_REPAIR_REQUIRED, "{}", err.message);
+        assert!(
+            err.message.contains("nothing was re-added"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn fingerprint_is_recorded_only_for_a_healthy_registered_worktree() {
+        let (store, _sid, _pid) = seeded_store(VANISHED_WT);
+        let healthy = HEALTHY_OUT.replacen(
+            "@@worktrees\n",
+            &format!("wt_canon={VANISHED_WT}\nwt_parent_fp=42:7\n@@worktrees\n"),
+            1,
+        );
+        let exec = FakeExec::new(vec![ok(&healthy)]);
+        let rep = ensure_workspace(&spec(true), AUTO, vec![], &store, &exec)
+            .await
+            .unwrap();
+        assert!(rep.healthy);
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.parent_fingerprint("local", VANISHED_WT)
+                .unwrap()
+                .as_deref(),
+            Some("42:7")
+        );
+        drop(s);
+        // A vanished worktree never overwrites what was recorded.
+        let (store2, _, _) = seeded_store(VANISHED_WT);
+        let exec = FakeExec::new(vec![ok(&vanished_out(true))]);
+        ensure_workspace(&spec(true), AUTO, vec![], &store2, &exec)
+            .await
+            .unwrap();
+        assert_eq!(
+            store2
+                .lock()
+                .unwrap()
+                .parent_fingerprint("local", VANISHED_WT)
+                .unwrap(),
+            None
+        );
+    }
+
+    /// Against real git: a healthy probe records the canonical parent's
+    /// real `dev:inode`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn real_git_healthy_probe_records_the_parent_dev_inode() {
+        use std::os::unix::fs::MetadataExt;
+        let base = tempfile::TempDir::new().unwrap();
+        let root = base.path().join("repo");
+        init_repo(&root);
+        let wt = root.join(".claude/worktrees/feat");
+        git_in(
+            &root,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feat"],
+        );
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let s = local_spec(&root, &wt, "fp-record");
+        let rep = ensure_workspace(&s, AUTO, vec![], &store, &LocalExec)
+            .await
+            .unwrap();
+        assert!(rep.healthy, "{:?}", rep.warnings);
+        let canon = std::fs::canonicalize(&wt).unwrap();
+        let parent = std::fs::metadata(canon.parent().unwrap()).unwrap();
+        let recorded = store
+            .lock()
+            .unwrap()
+            .parent_fingerprint("local", canon.to_str().unwrap())
+            .unwrap();
+        assert_eq!(recorded, Some(format!("{}:{}", parent.dev(), parent.ino())));
+    }
+
+    /// Against real git: the parent directory is replaced (a new inode, as a
+    /// remount gives). Automatic repair refuses; the registration stays.
+    #[tokio::test]
+    async fn real_git_replaced_parent_directory_stays_explicit() {
+        let base = tempfile::TempDir::new().unwrap();
+        let root = base.path().join("repo");
+        init_repo(&root);
+        let wt = root.join(".claude/worktrees/feat");
+        git_in(
+            &root,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feat"],
+        );
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let pid = store
+            .lock()
+            .unwrap()
+            .upsert_project("o", "r", root.to_str().unwrap())
+            .unwrap();
+        let mut s = local_spec(&root, &wt, "fp-replaced");
+        s.project_id = Some(pid);
+        assert!(
+            ensure_workspace(&s, AUTO, vec![], &store, &LocalExec)
+                .await
+                .unwrap()
+                .healthy
+        );
+        // Move the old parent aside (keeping its inode allocated, so the new
+        // directory cannot reuse it) and create a fresh, empty one.
+        let parent = root.join(".claude/worktrees");
+        std::fs::rename(&parent, root.join(".claude/worktrees.old")).unwrap();
+        std::fs::create_dir(&parent).unwrap();
+        let rep = ensure_workspace(&s, AUTO, vec![], &store, &LocalExec)
+            .await
+            .unwrap();
+        let err = require_no_explicit(rep).unwrap_err();
+        assert_eq!(err.code, codes::E_REPAIR_REQUIRED);
+        assert!(
+            err.message.contains("differs from the one recorded"),
+            "{}",
+            err.message
+        );
+        assert!(!wt.exists(), "nothing was re-added under the new parent");
+        assert!(worktree_list(&root).contains("/.claude/worktrees/feat"));
+    }
+
+    /// Against real git: two worktrees under one parent vanish together (the
+    /// unmounted-volume shape); automatic refuses and names the sibling.
+    #[tokio::test]
+    async fn real_git_siblings_vanishing_together_stay_explicit() {
+        let base = tempfile::TempDir::new().unwrap();
+        let root = base.path().join("repo");
+        init_repo(&root);
+        let wt = root.join(".claude/worktrees/feat");
+        let other = root.join(".claude/worktrees/other");
+        git_in(
+            &root,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feat"],
+        );
+        git_in(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                other.to_str().unwrap(),
+                "-b",
+                "other",
+            ],
+        );
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let pid = store
+            .lock()
+            .unwrap()
+            .upsert_project("o", "r", root.to_str().unwrap())
+            .unwrap();
+        let mut s = local_spec(&root, &wt, "fp-siblings");
+        s.project_id = Some(pid);
+        assert!(
+            ensure_workspace(&s, AUTO, vec![], &store, &LocalExec)
+                .await
+                .unwrap()
+                .healthy
+        );
+        std::fs::remove_dir_all(&wt).unwrap();
+        std::fs::remove_dir_all(&other).unwrap();
+        let rep = ensure_workspace(&s, AUTO, vec![], &store, &LocalExec)
+            .await
+            .unwrap();
+        let err = require_no_explicit(rep).unwrap_err();
+        assert_eq!(err.code, codes::E_REPAIR_REQUIRED);
+        assert!(err.message.contains("missing too"), "{}", err.message);
+        assert!(
+            err.message.contains("/.claude/worktrees/other"),
+            "{}",
+            err.message
+        );
+        assert!(!wt.exists());
+    }
+
+    fn worktree_list(root: &std::path::Path) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["worktree", "list", "--porcelain"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
     }
 }
