@@ -7,6 +7,7 @@ mod events;
 mod fleet_e2e_tests;
 mod humanize;
 mod ipc_error;
+mod logging;
 mod mcp;
 mod projects;
 mod pty;
@@ -27,12 +28,17 @@ use pty::PtyState;
 use std::sync::Mutex;
 use store::Store;
 
-fn appdata_db_path() -> std::path::PathBuf {
+/// The platform app data directory (`state.db`, `logs/`), created if missing.
+pub(crate) fn appdata_dir() -> std::path::PathBuf {
     let dirs = ProjectDirs::from("sk", "rlt", "claude-fleet")
         .expect("could not resolve platform appdata dir");
     let dir = dirs.data_dir();
     std::fs::create_dir_all(dir).unwrap_or_else(|e| panic!("create appdata dir {dir:?}: {e}"));
-    dir.join("state.db")
+    dir.to_path_buf()
+}
+
+fn appdata_db_path() -> std::path::PathBuf {
+    appdata_dir().join("state.db")
 }
 
 /// Pure: compute a new PATH that appends any of `common_bin_dirs` that are not
@@ -83,7 +89,7 @@ fn kill_other_instances() {
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
     let Some(my_name) = my_name else {
-        eprintln!("[startup] could not resolve own exe name; skipping instance reaper");
+        tracing::warn!("could not resolve own exe name; skipping instance reaper");
         return;
     };
 
@@ -116,7 +122,7 @@ fn kill_other_instances() {
     for pid in &targets {
         if let Some(proc_) = sys.process(Pid::from_u32(*pid)) {
             proc_.kill_with(Signal::Term);
-            eprintln!("[startup] sent SIGTERM to prior instance pid {pid}");
+            tracing::info!("sent SIGTERM to prior instance pid {pid}");
         }
     }
 
@@ -140,7 +146,7 @@ fn kill_other_instances() {
     for pid in &targets {
         if let Some(proc_) = sys.process(Pid::from_u32(*pid)) {
             proc_.kill();
-            eprintln!("[startup] SIGKILLed unresponsive prior instance pid {pid}");
+            tracing::warn!("SIGKILLed unresponsive prior instance pid {pid}");
         }
     }
 }
@@ -160,10 +166,10 @@ fn spawn_reconcile_tick(store: std::sync::Arc<Mutex<Store>>, ssh: std::sync::Arc
         service::sessions::read_reconcile_interval_secs(raw)
     };
     let Some(period) = service::sessions::reconcile_tick_interval(interval_secs) else {
-        eprintln!("[reconcile-tick] disabled (reconcile.interval_secs={interval_secs})");
+        tracing::info!("reconcile tick disabled (reconcile.interval_secs={interval_secs})");
         return;
     };
-    eprintln!("[reconcile-tick] enabled every {}s", period.as_secs());
+    tracing::info!("reconcile tick enabled every {}s", period.as_secs());
 
     // `tauri::async_runtime::spawn`, NOT bare `tokio::spawn`: this runs from the
     // Tauri `setup` closure on the main thread (inside the macOS
@@ -181,9 +187,9 @@ fn spawn_reconcile_tick(store: std::sync::Arc<Mutex<Store>>, ssh: std::sync::Arc
             match service::sessions::reconcile_now(&store, &ssh).await {
                 Ok(true) => {}
                 Ok(false) => {
-                    eprintln!("[reconcile-tick] a reconcile pass is already running; skipping tick")
+                    tracing::debug!("a reconcile pass is already running; skipping tick")
                 }
-                Err(e) => eprintln!("[reconcile-tick] reconcile failed: {e}"),
+                Err(e) => tracing::warn!("reconcile tick: reconcile failed: {e}"),
             }
             // Wave 2 Track D: lifecycle automation rides the same tick, after
             // the pass so it sees fresh `stuck_kind` / `idle_since` stamps.
@@ -192,7 +198,7 @@ fn spawn_reconcile_tick(store: std::sync::Arc<Mutex<Store>>, ssh: std::sync::Arc
             // stops the loop.
             let n = service::playbooks::run(&store, &ssh).await;
             if n > 0 {
-                eprintln!("[reconcile-tick] applied {n} stuck playbook(s)");
+                tracing::info!("reconcile tick: applied {n} stuck playbook(s)");
             }
             let _ = service::gc::maybe_sweep(&store, &ssh).await;
         }
@@ -377,6 +383,7 @@ fn maybe_start_mcp(
         (enabled, port, token)
     };
     if !enabled {
+        tracing::info!("control API disabled (mcp.enabled is not true)");
         return;
     }
     // Ensure a token exists before the listener binds — never a tokenless API.
@@ -403,7 +410,7 @@ fn maybe_start_mcp(
         .await;
         if r.is_ok() {
             if let Err(e) = crate::service::provision::reestablish_tunnels(store, tunnels, port) {
-                eprintln!("[mcp] reestablish_tunnels: {e}");
+                tracing::warn!("control API: reestablish_tunnels failed: {e}");
             }
         }
         r
@@ -411,9 +418,12 @@ fn maybe_start_mcp(
     if let Some(runtime) = app.try_state::<Mutex<mcp::McpRuntime>>() {
         if let Ok(mut rt) = runtime.lock() {
             match result {
-                Ok(shutdown) => rt.set_running(shutdown),
+                Ok(shutdown) => {
+                    tracing::info!("control API bound on http://127.0.0.1:{port}/mcp");
+                    rt.set_running(shutdown);
+                }
                 Err(e) => {
-                    eprintln!("[mcp] {e}");
+                    tracing::warn!("control API failed to start: {e}");
                     rt.set_error(e);
                 }
             }
@@ -423,6 +433,17 @@ fn maybe_start_mcp(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // File logging first, so the instance reaper and env recovery below are
+    // captured too. A failure is non-fatal: the app runs without a log file.
+    let data_dir = appdata_dir();
+    let log_dir = match logging::init(&data_dir) {
+        Ok(dir) => Some(dir),
+        Err(e) => {
+            eprintln!("[startup] file logging unavailable: {e}");
+            None
+        }
+    };
+
     // Win the singleton race before opening the DB or binding the MCP port:
     // kill any other running instance of this app (any build).
     kill_other_instances();
@@ -485,6 +506,17 @@ pub fn run() {
             // SEC-11: the DB holds bearer tokens and account metadata in
             // plaintext — keep it owner-only. Best-effort, logged on failure.
             crate::service::provision::set_private_mode(&db_path);
+            tracing::info!(
+                version = env!("CARGO_PKG_VERSION"),
+                schema_version = store.schema_version().unwrap_or(0),
+                os = std::env::consts::OS,
+                data_dir = %data_dir.display(),
+                log_dir = %log_dir
+                    .as_deref()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_else(|| "(file logging unavailable)".into()),
+                "claude-fleet starting"
+            );
             // Destructive-call confirmations reach the desktop as a Tauri
             // event; the frontend answers via `mcp_confirm`.
             let confirm_handle = app.handle().clone();
@@ -506,8 +538,8 @@ pub fn run() {
             if let Ok(s) = store.lock() {
                 match s.backfill_friendly_names() {
                     Ok(0) => {}
-                    Ok(n) => eprintln!("[startup] backfilled {n} friendly_name row(s)"),
-                    Err(e) => eprintln!("[startup] friendly_name backfill failed: {e}"),
+                    Ok(n) => tracing::info!("backfilled {n} friendly_name row(s)"),
+                    Err(e) => tracing::warn!("friendly_name backfill failed: {e}"),
                 }
             }
             app.manage(std::sync::Arc::clone(&store));
@@ -551,6 +583,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::health::health_check,
+            commands::diagnostics::collect_diagnostics,
+            commands::diagnostics::open_log_folder,
             commands::projects::list_projects,
             commands::projects::refresh_projects,
             commands::sessions::list_sessions,

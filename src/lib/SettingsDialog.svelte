@@ -19,6 +19,8 @@
     type HostTokenInfo,
     type TokenMode,
   } from './mcp';
+  import { collectDiagnostics, copyDiagnostics, openLogFolder } from './diagnostics';
+  import { pushError } from './toasts';
   import AddHostPicker from './AddHostPicker.svelte';
   import Modal from './Modal.svelte';
   import {
@@ -187,6 +189,34 @@
       await navigator.clipboard.writeText(text);
     } catch {
       /* clipboard unavailable — no-op */
+    }
+  }
+
+  // --- Diagnostics ---
+  let diagBusy = $state(false);
+  // Shown once known (after a copy, or when opening the folder failed) so the
+  // user can always find the logs by hand.
+  let logDir: string | null = $state(null);
+
+  async function onCopyDiagnostics() {
+    diagBusy = true;
+    const b = await copyDiagnostics();
+    if (b) logDir = b.log_dir;
+    diagBusy = false;
+  }
+
+  async function onOpenLogFolder() {
+    const r = await openLogFolder();
+    if (r.ok) {
+      logDir = r.value;
+    } else {
+      pushError(r.error, 'Open log folder failed');
+      // Fall back to showing the path (with a copy button) so the logs can
+      // still be found by hand. Collect only; nothing is copied here.
+      if (!logDir) {
+        const b = await collectDiagnostics();
+        if (b.ok) logDir = b.value.log_dir;
+      }
     }
   }
 
@@ -701,6 +731,36 @@
       {/if}
       {#if mcpError}<p class="err">{mcpError}</p>{/if}
     </section>
+
+    <section class="block" data-testid="diagnostics-section">
+      <div class="section-header">
+        <h4>Diagnostics</h4>
+      </div>
+      <p class="hook-desc">
+        Copy a plain-text report for a bug report: app version, schema, hosts,
+        tunnels, control-API state, session counts and the last 200 log lines.
+        Tokens are never included; hostnames and paths are.
+      </p>
+      <div class="hook-actions">
+        <button
+          class="hook-btn"
+          onclick={onCopyDiagnostics}
+          disabled={diagBusy}
+          data-testid="copy-diagnostics"
+        >
+          {diagBusy ? 'Collecting…' : 'Copy diagnostics'}
+        </button>
+        <button class="hook-btn" onclick={onOpenLogFolder} data-testid="open-log-folder">
+          Open log folder
+        </button>
+      </div>
+      {#if logDir}
+        <p class="hook-desc log-path" data-testid="log-dir">
+          Logs: <code>{logDir}</code>
+          <button onclick={() => copyText(logDir ?? '')} aria-label="Copy log folder path">Copy path</button>
+        </p>
+      {/if}
+    </section>
   </div>
 </Modal>
 
@@ -807,6 +867,7 @@
   .token-cell button:hover:not(:disabled) { border-color: var(--border); color: var(--fg); }
   .token-cell button:disabled { opacity: 0.5; cursor: default; }
   .hook-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+  .log-path code { word-break: break-all; }
 
   .row-actions { display: flex; gap: 0.2rem; }
   .row-actions button {
