@@ -1,17 +1,21 @@
 //! `/hook` endpoint — receives Claude Code hook events and forwards them to
 //! the service layer.
+//!
+//! The route sits behind the same Origin/Host + bearer middleware as `/mcp`
+//! (see `mcp::start`); the middleware puts the authenticated [`Caller`] into
+//! the request extensions and this handler reads it from there. Hooks are
+//! installed as Claude Code `type: "http"` hooks carrying
+//! `Authorization: Bearer <per-host token>` (see
+//! `commands::mcp::merge_hook_into_settings_json`), so the token never
+//! appears in a process argv. The legacy `?token=` query form written by
+//! older installs is still accepted by the middleware until every host is
+//! re-provisioned.
 
-use axum::{
-    extract::{Query, State},
-    http::StatusCode,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, Extension, Json};
 use serde::Deserialize;
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
+use super::auth::Caller;
 use crate::ssh::SshClient;
 use crate::store::Store;
 
@@ -20,7 +24,6 @@ use crate::store::Store;
 pub struct HookState {
     pub store: Arc<Mutex<Store>>,
     pub ssh: Arc<SshClient>,
-    pub token: Arc<String>,
 }
 
 /// Body deserialized from a POST to `/hook`.
@@ -40,42 +43,31 @@ pub struct HookPayload {
     pub cwd: Option<String>,
 }
 
-/// Constant-time comparison of two token strings.
-///
-/// Returns `false` immediately if either string is empty, preventing
-/// acceptance of blank tokens regardless of configuration.
-pub fn check_query_token(expected: &str, provided: &str) -> bool {
-    if provided.is_empty() || expected.is_empty() {
-        return false;
-    }
-    provided.len() == expected.len()
-        && provided
-            .bytes()
-            .zip(expected.bytes())
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            == 0
-}
-
-/// Axum handler for `POST /hook?token=<token>`.
-///
-/// Validates the query-param token, then delegates to
-/// [`crate::service::hooks::apply_hook`].
+/// Axum handler for `POST /hook`. Auth has already happened in the
+/// middleware; the [`Caller`] extension says which host's token signed the
+/// request (or the master token).
 pub async fn handle_hook(
-    Query(params): Query<HashMap<String, String>>,
     State(state): State<HookState>,
+    Extension(caller): Extension<Caller>,
     Json(payload): Json<HookPayload>,
 ) -> StatusCode {
-    let provided = params.get("token").map(String::as_str).unwrap_or("");
-    if !check_query_token(&state.token, provided) {
-        eprintln!("[hook] rejected: bad token");
-        return StatusCode::UNAUTHORIZED;
-    }
     eprintln!(
-        "[hook] event={:?} session={:?} tool={:?}",
-        payload.hook_event_name, payload.session_id, payload.tool_name
+        "[hook] caller={} event={:?} session={:?} tool={:?}",
+        caller.label(),
+        payload.hook_event_name,
+        payload.session_id,
+        payload.tool_name
     );
-    match crate::service::hooks::apply_hook(&state.store, &state.ssh, &payload) {
+    match crate::service::hooks::apply_hook(&state.store, &state.ssh, &payload, &caller) {
         Ok(()) => StatusCode::NO_CONTENT,
+        Err(e) if e.code == "E_VALIDATE" || e.code == "E_INVALID" => {
+            eprintln!("[hook] rejected payload: {} {}", e.code, e.message);
+            StatusCode::BAD_REQUEST
+        }
+        Err(e) if e.code == "E_FORBIDDEN" => {
+            eprintln!("[hook] refused: {} {}", e.code, e.message);
+            StatusCode::FORBIDDEN
+        }
         Err(e) => {
             eprintln!("[hook] apply_hook error: {} {}", e.code, e.message);
             StatusCode::INTERNAL_SERVER_ERROR
@@ -119,20 +111,5 @@ mod tests {
         let json = r#"{"unknown_future_field":"x","session_id":"s1"}"#;
         let p: HookPayload = serde_json::from_str(json).unwrap();
         assert_eq!(p.session_id.as_deref(), Some("s1"));
-    }
-
-    #[test]
-    fn check_query_token_correct() {
-        assert!(check_query_token("mysecret", "mysecret"));
-    }
-
-    #[test]
-    fn check_query_token_wrong() {
-        assert!(!check_query_token("mysecret", "wrong"));
-    }
-
-    #[test]
-    fn check_query_token_empty_provided_rejected() {
-        assert!(!check_query_token("mysecret", ""));
     }
 }

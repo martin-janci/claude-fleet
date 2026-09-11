@@ -35,13 +35,18 @@ If you run inside a fleet tmux session, use the **fleet-friendly-name** skill to
 label this session; it defines when to fire and how to look up your `host_alias`.";
 
 /// Install the skill + merge the MCP entry on one host. `url` is the MCP
-/// endpoint that host should use. Reads `~/.claude.json`, merges (preserving
-/// siblings), backs it up, writes it back. Parse errors abort BEFORE any write.
+/// endpoint that host should use; `token` is that host's own bearer token
+/// (see [`resolve_host_token`]). Reads `~/.claude.json`, merges (preserving
+/// siblings), backs it up, writes it back. Parse errors abort BEFORE any
+/// write. Files that carry the token are written with `umask 077` and
+/// `chmod 600` (SEC-2).
 ///
-/// `mcp_port` is also installed as a Stop / PostToolUse(WorktreeCreate) hook
-/// in `~/.claude/settings.json` so the host's Claude Code can notify fleet
-/// over the reverse tunnel — without this, safe-kill on remote hosts never
-/// finalizes (the marker check is gated on the Stop hook firing).
+/// `mcp_port` is also installed as a Stop / PostToolUse(WorktreeCreate)
+/// `type: "http"` hook in `~/.claude/settings.json` so the host's Claude Code
+/// can notify fleet over the reverse tunnel — without this, safe-kill on
+/// remote hosts never finalizes (the marker check is gated on the Stop hook
+/// firing). On a remote host `127.0.0.1:<mcp_port>` IS the tunnel's loopback
+/// end (see `tunnel_argv`), so the same URL works on every host.
 pub async fn provision_one(
     ssh: &Arc<SshClient>,
     host: &str,
@@ -68,7 +73,8 @@ pub async fn provision_one(
     let existing = read_host_file(ssh, host, CLAUDE_JSON).await?;
     let merged = merge_mcp_entry(&existing, url, token)?; // errors before any write
     if !existing.trim().is_empty() {
-        write_host_file(
+        // The backup carries the previous token too — same mode.
+        write_host_file_secret(
             ssh,
             host,
             CLAUDE_DIR,
@@ -77,7 +83,7 @@ pub async fn provision_one(
         )
         .await?;
     }
-    write_host_file(ssh, host, CLAUDE_DIR, CLAUDE_JSON, &merged).await?;
+    write_host_file_secret(ssh, host, CLAUDE_DIR, CLAUDE_JSON, &merged).await?;
     // 3. Ensure tmux clipboard passthrough for OSC 52.
     provision_tmux_clipboard(ssh, host).await?;
     // 4. Stop / WorktreeCreate hooks. Required for safe-kill finalization on
@@ -88,9 +94,11 @@ pub async fn provision_one(
 
 const SETTINGS_JSON: &str = "~/.claude/settings.json";
 
-/// Merge fleet's Stop + PostToolUse(WorktreeCreate) hooks into the host's
-/// `~/.claude/settings.json`. Idempotent — re-running replaces fleet entries
-/// pointing at the same `mcp_port` and leaves the user's own hooks alone.
+/// Merge fleet's Stop + PostToolUse(WorktreeCreate) http hooks into the
+/// host's `~/.claude/settings.json`. Idempotent — re-running replaces fleet
+/// entries pointing at the same `mcp_port` and leaves the user's own hooks
+/// alone. The block carries the host's bearer token, so the file is written
+/// 0600.
 pub async fn provision_hook(
     ssh: &Arc<SshClient>,
     host: &str,
@@ -98,8 +106,76 @@ pub async fn provision_hook(
     token: &str,
 ) -> Result<(), IpcError> {
     let existing = read_host_file(ssh, host, SETTINGS_JSON).await?;
+    // Errors (malformed JSON → E_PROVISION) fire BEFORE any write.
     let merged = crate::commands::mcp::merge_hook_into_settings_json(&existing, mcp_port, token)?;
-    write_host_file(ssh, host, CLAUDE_DIR, SETTINGS_JSON, &merged).await
+    if !existing.trim().is_empty() {
+        // The file carries the user's permissions/env/hooks: back it up
+        // first, like ~/.claude.json.
+        write_host_file_secret(
+            ssh,
+            host,
+            CLAUDE_DIR,
+            &format!("{SETTINGS_JSON}.fleet-bak"),
+            &existing,
+        )
+        .await?;
+    }
+    write_host_file_secret(ssh, host, CLAUDE_DIR, SETTINGS_JSON, &merged).await
+}
+
+/// The token a host should be provisioned with: its existing row unless
+/// `rotate` (or none yet), in which case a fresh one is minted. The mint is
+/// NOT persisted here — [`commit_host_token`] runs after the host's files
+/// were written successfully, so a failed provision never strands a host on
+/// a token it never received.
+pub fn resolve_host_token(
+    store: &Mutex<Store>,
+    host: &str,
+    rotate: bool,
+) -> Result<(String, bool), IpcError> {
+    let s = store.lock().map_err(|_| IpcError::lock())?;
+    match s.get_host_token(host)? {
+        Some(row) if !rotate => Ok((row.token, false)),
+        _ => Ok((crate::mcp::generate_token(), true)),
+    }
+}
+
+/// Persist a freshly minted host token (no-op when `minted` is false).
+pub fn commit_host_token(
+    store: &Mutex<Store>,
+    host: &str,
+    token: &str,
+    minted: bool,
+) -> Result<(), IpcError> {
+    if !minted {
+        return Ok(());
+    }
+    let s = store.lock().map_err(|_| IpcError::lock())?;
+    s.upsert_host_token(host, token)
+}
+
+/// Provision ONE host end to end with its own token: resolve/mint → write
+/// files → persist the token → ensure the tunnel (remote) → mark
+/// provisioned. Shared by [`provision_hosts`] and the per-host Rotate action.
+pub async fn provision_host_with_token(
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    tunnels: &Arc<TunnelSupervisor>,
+    host: &str,
+    mcp_port: u16,
+    rotate: bool,
+) -> Result<(), IpcError> {
+    let (token, minted) = resolve_host_token(store, host, rotate)?;
+    let url = format!("http://127.0.0.1:{mcp_port}/mcp");
+    provision_one(ssh, host, &url, &token, mcp_port).await?;
+    commit_host_token(store, host, &token, minted)?;
+    if host != "local" {
+        tunnels.ensure(host, mcp_port, mcp_port);
+    }
+    if let Ok(s) = store.lock() {
+        let _ = s.set_host_provisioned(host, true);
+    }
+    Ok(())
 }
 
 /// Ensure `~/.tmux.conf` has `set -g set-clipboard on` for OSC 52 passthrough.
@@ -190,15 +266,16 @@ pub struct HostProvisionResult {
     pub detail: Option<String>,
 }
 
-/// Provision every non-hidden host. `local` gets a direct localhost URL + no
-/// tunnel; remote hosts get the reverse tunnel + a localhost:<mcp_port> URL.
-/// Per-host failures never abort the others.
+/// Provision every non-hidden host, each with its OWN bearer token (reused
+/// unless `rotate`). `local` gets a direct localhost URL + no tunnel; remote
+/// hosts get the reverse tunnel + a localhost:<mcp_port> URL. Per-host
+/// failures never abort the others.
 pub async fn provision_hosts(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
     tunnels: &Arc<TunnelSupervisor>,
     mcp_port: u16,
-    token: &str,
+    rotate: bool,
 ) -> Result<Vec<HostProvisionResult>, IpcError> {
     let hosts = {
         let s = store
@@ -219,15 +296,8 @@ pub async fn provision_hosts(
             });
             continue;
         }
-        let url = format!("http://127.0.0.1:{mcp_port}/mcp");
-        match provision_one(ssh, &h.alias, &url, token, mcp_port).await {
+        match provision_host_with_token(store, ssh, tunnels, &h.alias, mcp_port, rotate).await {
             Ok(()) => {
-                if h.alias != "local" {
-                    tunnels.ensure(&h.alias, mcp_port, mcp_port);
-                }
-                if let Ok(s) = store.lock() {
-                    let _ = s.set_host_provisioned(&h.alias, true);
-                }
                 results.push(HostProvisionResult {
                     host: h.alias,
                     status: "provisioned".into(),
@@ -306,8 +376,125 @@ pub async fn write_host_file(
         return Ok(());
     }
     let script = quote(&remote_write_script(dir, path, content));
+    run_remote_write(ssh, host, path, &script).await
+}
+
+/// Like [`write_host_file`] for a file that carries a secret (the bearer
+/// token). The content never appears in a process argv on either side:
+///
+/// - remote: the file is first created empty under `umask 077` + `chmod 600`
+///   (a script with only paths in it), then the content is streamed over
+///   stdin through `SshClient::upload_file` (`cat > path`, which keeps the
+///   0600 mode when truncating);
+/// - local: the file is opened with mode 0600 from creation
+///   ([`write_private_file`]).
+pub async fn write_host_file_secret(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    dir: &str,
+    path: &str,
+    content: &str,
+) -> Result<(), IpcError> {
+    if host == "local" {
+        let edir = expand_home_local(dir)?;
+        std::fs::create_dir_all(&edir)
+            .map_err(|e| IpcError::new("E_PROVISION", format!("mkdir {edir}: {e}")))?;
+        let epath = expand_home_local(path)?;
+        return write_private_file(std::path::Path::new(&epath), content)
+            .map_err(|e| IpcError::new("E_PROVISION", format!("write {epath}: {e}")));
+    }
+    // 1. Create the (empty) file 0600 — paths only, no secret in argv.
+    let script = quote(&remote_touch_private_script(dir, path));
+    run_remote_write(ssh, host, path, &script).await?;
+    // 2. Stream the content over stdin. `upload_file` runs `cat > '<abs>'`;
+    //    `~` is not expanded in a quoted word, so resolve $HOME first.
+    let abs = match path.strip_prefix("~/") {
+        Some(rest) => format!("{}/{rest}", ssh.remote_home(host).await?),
+        None => path.to_string(),
+    };
+    let tmp = PrivateTempFile::create(content)
+        .map_err(|e| IpcError::new("E_PROVISION", format!("spool secret for {path}: {e}")))?;
+    ssh.upload_file(host, tmp.path(), &abs, PROVISION_TIMEOUT)
+        .await
+        .map_err(|e| {
+            IpcError::new(
+                "E_PROVISION",
+                format!("write {path} on {host}: {}", e.message),
+            )
+        })
+}
+
+/// Write `content` to `path`, creating the file with mode 0600 (unix) so it is
+/// never world-readable, not even between create and chmod. An existing file
+/// is truncated in place and tightened to 0600.
+pub fn write_private_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(content.as_bytes())?;
+    f.flush()?;
+    // `mode()` only applies at creation; tighten a pre-existing file too.
+    set_private_mode(path);
+    Ok(())
+}
+
+/// A 0600 temp file holding secret content for the duration of an upload;
+/// removed on drop.
+struct PrivateTempFile(std::path::PathBuf);
+
+impl PrivateTempFile {
+    fn create(content: &str) -> std::io::Result<Self> {
+        let name = format!(
+            "claude-fleet-{}-{}.secret",
+            std::process::id(),
+            crate::mcp::generate_token()
+        );
+        let path = std::env::temp_dir().join(name);
+        write_private_file(&path, content)?;
+        Ok(Self(path))
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for PrivateTempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// `chmod 600` a local file. Best-effort: a failure is logged, never fatal
+/// (the write itself already succeeded). No-op off unix.
+pub fn set_private_mode(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            eprintln!("[provision] chmod 600 {}: {e}", path.display());
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+async fn run_remote_write(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    path: &str,
+    script: &str,
+) -> Result<(), IpcError> {
     let out = ssh
-        .run(host, &["bash", "-lc", &script], PROVISION_TIMEOUT)
+        .run(host, &["bash", "-lc", script], PROVISION_TIMEOUT)
         .await?;
     if !out.status.success() {
         return Err(IpcError::new(
@@ -345,6 +532,19 @@ fn remote_write_script(dir: &str, path: &str, content: &str) -> String {
         remote_path(dir),
         quote(content),
         remote_path(path)
+    )
+}
+
+/// Remote `bash -lc` script body that makes sure `path` exists with mode
+/// 0600 WITHOUT writing any content: `umask 077` so a NEW file is born 0600
+/// (no window where it is world-readable), `chmod 600` so an EXISTING file
+/// is tightened too. The secret itself follows over stdin
+/// (see [`write_host_file_secret`]), so it is never part of this argv.
+fn remote_touch_private_script(dir: &str, path: &str) -> String {
+    let p = remote_path(path);
+    format!(
+        "umask 077 && mkdir -p {} && touch {p} && chmod 600 {p}",
+        remote_path(dir),
     )
 }
 
@@ -478,6 +678,105 @@ mod tests {
         let quoted = crate::shell::quote(&s);
         assert!(quoted.starts_with('\'') && quoted.ends_with('\''));
         assert!(quoted.contains("\"$HOME\""));
+    }
+
+    #[test]
+    fn remote_touch_private_script_sets_umask_and_chmods_without_content() {
+        let s = remote_touch_private_script("~/.claude", "~/.claude.json");
+        assert_eq!(
+            s,
+            "umask 077 && mkdir -p \"$HOME\"/'.claude' && touch \"$HOME\"/'.claude.json' \
+             && chmod 600 \"$HOME\"/'.claude.json'"
+        );
+        assert!(s.starts_with("umask 077 && "));
+        // Paths only: the secret content is streamed over stdin, never argv.
+        assert!(!s.contains("printf"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_file_creates_0600_and_tightens_existing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        // Fresh file: 0600 from creation.
+        let p = dir.path().join("new.json");
+        write_private_file(&p, "{\"a\":1}").unwrap();
+        assert_eq!(mode(&p), 0o600);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "{\"a\":1}");
+        // Existing world-readable file: truncated, rewritten, tightened.
+        let q = dir.path().join("old.json");
+        std::fs::write(&q, "old longer content").unwrap();
+        std::fs::set_permissions(&q, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private_file(&q, "new").unwrap();
+        assert_eq!(mode(&q), 0o600);
+        assert_eq!(std::fs::read_to_string(&q).unwrap(), "new");
+        // The upload spool file is 0600 and removed on drop.
+        let spool_path = {
+            let t = PrivateTempFile::create("s3cret").unwrap();
+            assert_eq!(mode(t.path()), 0o600);
+            t.path().to_path_buf()
+        };
+        assert!(!spool_path.exists(), "spool file must be removed on drop");
+    }
+
+    #[test]
+    fn resolve_host_token_reuses_unless_rotate_and_commit_persists_only_mints() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        // No row yet → minted.
+        let (t1, minted) = resolve_host_token(&store, "mefistos", false).unwrap();
+        assert!(minted);
+        assert_eq!(t1.len(), 64);
+        // Not committed until the host's files were written.
+        assert!(store
+            .lock()
+            .unwrap()
+            .get_host_token("mefistos")
+            .unwrap()
+            .is_none());
+        commit_host_token(&store, "mefistos", &t1, minted).unwrap();
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .get_host_token("mefistos")
+                .unwrap()
+                .unwrap()
+                .token,
+            t1
+        );
+        // Existing row, no rotate → reused verbatim, nothing to commit.
+        let (t2, minted) = resolve_host_token(&store, "mefistos", false).unwrap();
+        assert_eq!(t2, t1);
+        assert!(!minted);
+        commit_host_token(&store, "mefistos", "ignored", minted).unwrap();
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .get_host_token("mefistos")
+                .unwrap()
+                .unwrap()
+                .token,
+            t1
+        );
+        // rotate → fresh token.
+        let (t3, minted) = resolve_host_token(&store, "mefistos", true).unwrap();
+        assert!(minted);
+        assert_ne!(t3, t1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_private_mode_chmods_600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("secret.json");
+        std::fs::write(&p, "{}").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        set_private_mode(&p);
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

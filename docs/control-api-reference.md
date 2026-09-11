@@ -15,9 +15,9 @@ Parameters: `alias`, `ssh_alias`
 
 ### `broadcast_prompt`
 
-Send the same prompt to every matching work session (excludes the controller). Returns per-session results.
+Send the same prompt to every matching work session (excludes the controller). Returns per-session results. Rate-limited per caller (default one call per 30 s; E_RATE_LIMITED with retry_after_secs). Marked as untrusted unless raw=true (master token only). May return E_CONFIRM_REQUIRED when desktop confirmation is on.
 
-Parameters: `host`, `project_id`, `prompt`, `status`, `submit`
+Parameters: `confirm_nonce`, `host`, `project_id`, `prompt`, `raw`, `status`, `submit`
 
 ### `capture_session`
 
@@ -27,9 +27,9 @@ Parameters: `max_lines`, `scrollback_lines`, `session_id`
 
 ### `delete_worktree`
 
-Delete a git worktree on its host (no --force) and drop fleet's row. Refuses if an alive session points at it (override with force=true). Errors: E_WORKTREE_BUSY, E_NOTFOUND, E_GIT.
+Delete a git worktree on its host (no --force) and drop fleet's row. Refuses if an alive session points at it (override with force=true). Errors: E_WORKTREE_BUSY, E_NOTFOUND, E_GIT, E_CONFIRM_REQUIRED (desktop confirmation on).
 
-Parameters: `force`, `worktree_id`
+Parameters: `confirm_nonce`, `force`, `worktree_id`
 
 ### `discover_hosts`
 
@@ -59,15 +59,15 @@ Parameters: `alias`, `hidden`
 
 ### `inbox`
 
-Read a session's inbox — messages sent TO session_id, newest-first. Slim rows by default (metadata + 80-char body preview); pass summary=false for full bodies. mark_read (default true) flips returned unread rows to read — pass false to peek without consuming.
+Read a session's inbox — messages sent TO session_id, newest-first. Slim rows by default (metadata + 80-char body preview); pass summary=false for full bodies. mark_read (default true) flips returned unread rows to read — pass false to peek without consuming. A per-host token may only read inboxes of sessions on its own host (E_FORBIDDEN).
 
 Parameters: `limit`, `mark_read`, `session_id`, `summary`, `unread_only`
 
 ### `kill_session`
 
-Kill a session on a host: a tmux session by name, or a background agent row (name `bg:<uuid>`) via `claude stop` — the latter is idempotent, so it also clears a stale row whose process already died. Returns the killed session's id.
+Kill a session on a host: a tmux session by name, or a background agent row (name `bg:<uuid>`) via `claude stop` — the latter is idempotent, so it also clears a stale row whose process already died. Returns the killed session's id. May return E_CONFIRM_REQUIRED when desktop confirmation is on.
 
-Parameters: `force`, `host_alias`, `name`
+Parameters: `confirm_nonce`, `force`, `host_alias`, `name`
 
 ### `list_accounts`
 
@@ -133,7 +133,9 @@ Parameters: `alias`
 
 ### `provision_hosts`
 
-Install fleet skills and register this fleet's MCP server into every reachable host's ~/.claude.json (reverse SSH tunnel for remote hosts). Returns a per-host status list; each host must restart Claude to load the server.
+Install fleet skills, the Stop/WorktreeCreate http hooks, and this fleet's MCP server entry (with a per-host bearer token) into every reachable host's ~/.claude.json (reverse SSH tunnel for remote hosts). rotate=true mints fresh per-host tokens. Returns a per-host status list; each host must restart Claude to load the server.
+
+Parameters: `rotate`
 
 ### `recreate_session`
 
@@ -147,7 +149,7 @@ Rescan the local projects directory for new or removed repositories and worktree
 
 ### `register_self`
 
-Mark the calling session as the fleet controller; kill/recreate/restart refuse to target it without force.
+Mark the calling session as the fleet controller; kill/recreate/restart refuse to target it without force. A per-host token may only register a session on its own host (E_FORBIDDEN).
 
 Parameters: `host_alias`, `tmux_name`
 
@@ -231,15 +233,15 @@ Parameters: `host_alias`, `tmux_name`
 
 ### `send_message`
 
-Send a peer-to-peer message from one session to another. The message is persisted to the recipient's inbox (read with `inbox`); set `deliver: true` to ALSO type the message into the recipient's tmux pane with a `[msg #id from name@host]:` header. The inbox row is the source of truth — it lands even if the pane delivery fails. Returns JSON with the new message id and the delivery outcome.
+Send a peer-to-peer message from one session to another. The message is persisted to the recipient's inbox (read with `inbox`); set `deliver: true` to ALSO type the message into the recipient's tmux pane with a `[msg #id from name@host]:` header. The inbox row is the source of truth — it lands even if the pane delivery fails. Returns JSON with the new message id and the delivery outcome. A per-host token must send from a session on its own host (E_FORBIDDEN). The body is prefixed with an untrusted-content marker line unless raw=true (master token only).
 
-Parameters: `body`, `deliver`, `from_session_id`, `kind`, `submit`, `to_session_id`
+Parameters: `body`, `deliver`, `from_session_id`, `kind`, `raw`, `submit`, `to_session_id`
 
 ### `send_prompt`
 
-Send and SUBMIT a prompt to a running Claude session's REPL (literal text, then one Enter). This is how you steer a session. Set submit=false to stage text in the REPL without submitting it.
+Send and SUBMIT a prompt to a running Claude session's REPL (literal text, then one Enter). This is how you steer a session. Set submit=false to stage text in the REPL without submitting it. The text is prefixed with an untrusted-content marker line unless raw=true (master token only).
 
-Parameters: `host_alias`, `prompt`, `submit`, `tmux_name`
+Parameters: `host_alias`, `prompt`, `raw`, `submit`, `tmux_name`
 
 ### `session_history`
 
@@ -249,9 +251,9 @@ Parameters: `limit`, `session_id`
 
 ### `set_clipboard`
 
-Write text to a host's system clipboard. Probes wl-copy, xclip, xsel, pbcopy in order. Capped at 64 KiB. E_CLIPBOARD_UNAVAILABLE if no clipboard helper is installed.
+Write text to a host's system clipboard. Probes wl-copy, xclip, xsel, pbcopy in order. Capped at 64 KiB. E_CLIPBOARD_UNAVAILABLE if no clipboard helper is installed. May return E_CONFIRM_REQUIRED when desktop confirmation is on.
 
-Parameters: `content`, `host_alias`
+Parameters: `confirm_nonce`, `content`, `host_alias`
 
 ### `set_friendly_name`
 
@@ -322,6 +324,11 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mcp::mcp_configure`
 - `commands::mcp::install_fleet_hook`
 - `commands::mcp::provision_hosts`
+- `commands::mcp::list_host_tokens`
+- `commands::mcp::set_host_token_mode`
+- `commands::mcp::rotate_host_token`
+- `commands::mcp::mcp_confirm`
+- `commands::mcp::mcp_pending_confirms`
 - `commands::onboarding::check_local_prereqs`
 - `commands::onboarding::tunnel_status`
 - `pty::pty_open`

@@ -4,19 +4,23 @@
 
 use crate::ipc_error::IpcError;
 use crate::mcp::hooks::HookPayload;
+use crate::mcp::Caller;
 use crate::ssh::SshClient;
 use crate::store::{ProjectRow, Store};
 use std::sync::{Arc, Mutex};
 
-/// Dispatch a hook event to the appropriate handler.
-/// Unknown events are silently ignored.
+/// Dispatch a hook event to the appropriate handler. `caller` is the
+/// identity behind the request's bearer token; a per-host caller may only
+/// report about sessions on its own host. Unknown events are silently
+/// ignored.
 pub fn apply_hook(
     store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
     payload: &HookPayload,
+    caller: &Caller,
 ) -> Result<(), IpcError> {
     match payload.hook_event_name.as_deref() {
-        Some("Stop") => apply_stop_hook(store, ssh, payload),
+        Some("Stop") => apply_stop_hook(store, ssh, payload, caller),
         Some("PostToolUse") if payload.tool_name.as_deref() == Some("WorktreeCreate") => {
             apply_worktree_hook(store, payload)
         }
@@ -36,6 +40,7 @@ fn apply_stop_hook(
     store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
     payload: &HookPayload,
+    caller: &Caller,
 ) -> Result<(), IpcError> {
     let session_id = match &payload.session_id {
         Some(id) => id.clone(),
@@ -46,10 +51,22 @@ fn apply_stop_hook(
     // response returns fast (the work involves pane capture + SSH).
     let safe_kill_in_flight = {
         let s = store.lock().map_err(|_| IpcError::lock())?;
-        let in_flight = s
-            .get_session_by_claude_id(&session_id)
-            .ok()
-            .flatten()
+        let row = s.get_session_by_claude_id(&session_id).ok().flatten();
+        // A host token may only flip sessions on ITS host: host A's token
+        // must not be able to mark host B's session idle (and so trigger
+        // B's safe-kill finalisation). Unknown session → no-op as before.
+        if let (Some(row), Some(h)) = (&row, &caller.host_alias) {
+            if &row.host_alias != h {
+                return Err(IpcError::new(
+                    "E_FORBIDDEN",
+                    format!(
+                        "session {} is on host {}; this token is bound to {h}",
+                        row.tmux_name, row.host_alias
+                    ),
+                ));
+            }
+        }
+        let in_flight = row
             .map(|r| r.safe_kill_state.as_deref() == Some("requested"))
             .unwrap_or(false);
         s.set_claude_status_by_session_id(&session_id, "idle")?;
@@ -66,7 +83,49 @@ fn apply_stop_hook(
     Ok(())
 }
 
+/// Validate a `worktree_path` from a hook body before it becomes a row:
+/// absolute, no `..` component, no control characters, and its basename a
+/// safe path component. The hook body is network input signed only by a
+/// host token, so it gets the same scrutiny as a frontend value.
+pub fn validate_worktree_path(path: &str) -> Result<(), IpcError> {
+    if path.is_empty() || path.len() > 4096 {
+        return Err(IpcError::new(
+            "E_VALIDATE",
+            "worktree_path must be a non-empty path under 4096 bytes",
+        ));
+    }
+    if !path.starts_with('/') {
+        return Err(IpcError::new(
+            "E_VALIDATE",
+            "worktree_path must be absolute",
+        ));
+    }
+    if path.chars().any(|c| c.is_control()) {
+        return Err(IpcError::new(
+            "E_VALIDATE",
+            "worktree_path must not contain control characters",
+        ));
+    }
+    if path.split('/').any(|c| c == "..") {
+        return Err(IpcError::new(
+            "E_VALIDATE",
+            "worktree_path must not contain a '..' component",
+        ));
+    }
+    let name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| IpcError::new("E_VALIDATE", "worktree_path has no final component"))?;
+    crate::validate::path_component("worktree name", name)
+        .map_err(|e| IpcError::new("E_VALIDATE", e.message))?;
+    Ok(())
+}
+
 /// Auto-register a worktree created by Claude Code's WorktreeCreate tool.
+///
+/// The path must validate ([`validate_worktree_path`]) AND sit under a known
+/// project's `base_path`; anything else is `E_VALIDATE` (the handler answers
+/// 400) rather than a silent upsert of an arbitrary row.
 fn apply_worktree_hook(store: &Arc<Mutex<Store>>, payload: &HookPayload) -> Result<(), IpcError> {
     let input = match &payload.tool_input {
         Some(v) => v,
@@ -76,10 +135,14 @@ fn apply_worktree_hook(store: &Arc<Mutex<Store>>, payload: &HookPayload) -> Resu
         Some(p) => p.to_string(),
         None => return Ok(()),
     };
+    validate_worktree_path(&path)?;
     let branch = input
         .get("branch")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
+    if let Some(b) = branch {
+        crate::validate::git_ref(b).map_err(|e| IpcError::new("E_VALIDATE", e.message))?;
+    }
     let name = std::path::Path::new(&path)
         .file_name()
         .and_then(|n| n.to_str())
@@ -91,8 +154,10 @@ fn apply_worktree_hook(store: &Arc<Mutex<Store>>, payload: &HookPayload) -> Resu
     let project_id = match find_project_id_for_path(&projects, &path) {
         Some(id) => id,
         None => {
-            eprintln!("[hook] WorktreeCreate: no project found for path {path}");
-            return Ok(());
+            return Err(IpcError::new(
+                "E_VALIDATE",
+                format!("worktree_path {path} is not under any known project base"),
+            ));
         }
     };
     s.upsert_worktree(project_id, &name, &path, branch)
@@ -151,7 +216,7 @@ mod tests {
     fn stop_hook_on_unknown_session_is_noop() {
         let store = make_store();
         let payload = make_payload("Stop", "no-such-id");
-        assert!(apply_hook(&store, &make_ssh(), &payload).is_ok());
+        assert!(apply_hook(&store, &make_ssh(), &payload, &Caller::master()).is_ok());
     }
 
     #[test]
@@ -170,17 +235,75 @@ mod tests {
             s.set_claude_status_by_session_id("uuid-1", "working")
                 .unwrap();
         }
-        apply_hook(&store, &make_ssh(), &make_payload("Stop", "uuid-1")).unwrap();
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("Stop", "uuid-1"),
+            &Caller::master(),
+        )
+        .unwrap();
         let s = store.lock().unwrap();
         let row = s.get_session("sess", "local").unwrap().unwrap();
         assert_eq!(row.claude_status.as_deref(), Some("idle"));
     }
 
     #[test]
+    fn stop_hook_from_another_hosts_token_is_forbidden() {
+        // Host A's token must not be able to flip host B's session to idle
+        // (which would also trigger B's safe-kill finalisation).
+        let store = make_store();
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("hostb").unwrap();
+            let id = s
+                .upsert_session("sess", "hostb", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.set_claude_session_id(id, "uuid-b").unwrap();
+            s.set_claude_status_by_session_id("uuid-b", "working")
+                .unwrap();
+        }
+        let host_a = Caller {
+            host_alias: Some("hosta".into()),
+            mode: crate::mcp::TokenMode::Full,
+        };
+        let err = apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("Stop", "uuid-b"),
+            &host_a,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "E_FORBIDDEN");
+        {
+            let s = store.lock().unwrap();
+            let row = s.get_session("sess", "hostb").unwrap().unwrap();
+            assert_eq!(row.claude_status.as_deref(), Some("working"), "untouched");
+        }
+        // The session's own host token (and the master token) may.
+        let host_b = Caller {
+            host_alias: Some("hostb".into()),
+            mode: crate::mcp::TokenMode::Readonly,
+        };
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("Stop", "uuid-b"),
+            &host_b,
+        )
+        .unwrap();
+        let s = store.lock().unwrap();
+        let row = s.get_session("sess", "hostb").unwrap().unwrap();
+        assert_eq!(row.claude_status.as_deref(), Some("idle"));
+        // An unknown session stays a no-op for any caller.
+        drop(s);
+        assert!(apply_hook(&store, &make_ssh(), &make_payload("Stop", "nope"), &host_a).is_ok());
+    }
+
+    #[test]
     fn unknown_event_is_noop() {
         let store = make_store();
         let payload = make_payload("UserPromptSubmit", "s1");
-        assert!(apply_hook(&store, &make_ssh(), &payload).is_ok());
+        assert!(apply_hook(&store, &make_ssh(), &payload, &Caller::master()).is_ok());
     }
 
     #[test]
@@ -194,7 +317,99 @@ mod tests {
             tool_response: None,
             cwd: None,
         };
-        assert!(apply_hook(&store, &make_ssh(), &payload).is_ok());
+        assert!(apply_hook(&store, &make_ssh(), &payload, &Caller::master()).is_ok());
+    }
+
+    fn worktree_payload(path: &str, branch: Option<&str>) -> HookPayload {
+        let mut input = serde_json::json!({ "worktree_path": path });
+        if let Some(b) = branch {
+            input["branch"] = serde_json::Value::String(b.into());
+        }
+        HookPayload {
+            session_id: Some("s1".into()),
+            hook_event_name: Some("PostToolUse".into()),
+            tool_name: Some("WorktreeCreate".into()),
+            tool_input: Some(input),
+            tool_response: None,
+            cwd: None,
+        }
+    }
+
+    #[test]
+    fn validate_worktree_path_accepts_absolute_clean_paths() {
+        assert!(validate_worktree_path("/home/u/proj/.worktrees/feat").is_ok());
+        assert!(validate_worktree_path("/home/u/proj/.worktrees/feat-x.y_z").is_ok());
+    }
+
+    #[test]
+    fn validate_worktree_path_rejects_relative_traversal_and_control() {
+        for bad in [
+            "",
+            "relative/path",
+            "~/proj/.worktrees/feat",
+            "/home/u/proj/../../etc",
+            "/home/u/proj/.worktrees/..",
+            "/home/u/proj/.worktrees/bad\nname",
+            "/home/u/proj/.worktrees/-rf",
+        ] {
+            let err = validate_worktree_path(bad).expect_err(bad);
+            assert_eq!(err.code, "E_VALIDATE", "{bad}");
+        }
+    }
+
+    #[test]
+    fn worktree_hook_rejects_path_outside_known_projects() {
+        let store = make_store();
+        {
+            let s = store.lock().unwrap();
+            s.upsert_project("o", "r", "/home/u/proj").unwrap();
+        }
+        let err = apply_hook(
+            &store,
+            &make_ssh(),
+            &worktree_payload("/home/u/elsewhere/.worktrees/feat", None),
+            &Caller::master(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "E_VALIDATE");
+        let err = apply_hook(
+            &store,
+            &make_ssh(),
+            &worktree_payload("../../etc/passwd", None),
+            &Caller::master(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "E_VALIDATE");
+        // A branch that looks like a git option is refused too.
+        let err = apply_hook(
+            &store,
+            &make_ssh(),
+            &worktree_payload("/home/u/proj/.worktrees/feat", Some("--upload-pack=x")),
+            &Caller::master(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "E_VALIDATE");
+    }
+
+    #[test]
+    fn worktree_hook_upserts_row_under_known_project() {
+        let store = make_store();
+        let pid = {
+            let s = store.lock().unwrap();
+            s.upsert_project("o", "r", "/home/u/proj").unwrap()
+        };
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &worktree_payload("/home/u/proj/.worktrees/feat", Some("feat")),
+            &Caller::master(),
+        )
+        .unwrap();
+        let s = store.lock().unwrap();
+        let rows = s.list_worktrees_for_project(pid).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, "/home/u/proj/.worktrees/feat");
+        assert_eq!(rows[0].branch.as_deref(), Some("feat"));
     }
 
     #[test]

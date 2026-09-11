@@ -340,6 +340,7 @@ fn maybe_start_mcp(
     ssh: &std::sync::Arc<ssh::SshClient>,
     reg: &std::sync::Arc<cancel::CancellationRegistry>,
     tunnels: &std::sync::Arc<crate::service::tunnel::TunnelSupervisor>,
+    guards: &mcp::McpGuards,
 ) {
     use tauri::Manager;
     let (enabled, port, token) = {
@@ -381,6 +382,7 @@ fn maybe_start_mcp(
             std::sync::Arc::clone(ssh),
             std::sync::Arc::clone(reg),
             std::sync::Arc::clone(tunnels),
+            guards.clone(),
             port,
             token,
         )
@@ -439,6 +441,12 @@ pub fn run() {
     let tunnels = std::sync::Arc::new(crate::service::tunnel::TunnelSupervisor::new());
     let tunnels_for_exit = std::sync::Arc::clone(&tunnels);
     let tunnels_for_setup = std::sync::Arc::clone(&tunnels);
+    // SEC-9: the only local paths `upload_to_session` may read are the ones
+    // the OS drag-drop handed the window (recorded below in the window /
+    // webview event handlers).
+    let upload_allow = std::sync::Arc::new(commands::upload::UploadAllowList::new());
+    let upload_allow_for_window = std::sync::Arc::clone(&upload_allow);
+    let upload_allow_for_webview = std::sync::Arc::clone(&upload_allow);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -460,6 +468,16 @@ pub fn run() {
                     db_path.display()
                 )
             });
+            // SEC-11: the DB holds bearer tokens and account metadata in
+            // plaintext — keep it owner-only. Best-effort, logged on failure.
+            crate::service::provision::set_private_mode(&db_path);
+            // Destructive-call confirmations reach the desktop as a Tauri
+            // event; the frontend answers via `mcp_confirm`.
+            let confirm_handle = app.handle().clone();
+            let guards = mcp::McpGuards::new(std::sync::Arc::new(move |req| {
+                let _ = tauri::Emitter::emit(&confirm_handle, "mcp:confirm-required", req);
+            }));
+            app.manage(guards.clone());
             // Managed as Arc<Mutex<Store>> (not bare Mutex<Store>) so the
             // embedded MCP server can hold a clone of the same store handle.
             let store = std::sync::Arc::new(Mutex::new(store));
@@ -488,6 +506,7 @@ pub fn run() {
                 &ssh_client_for_setup,
                 &reg_for_setup,
                 &tunnels_for_setup,
+                &guards,
             );
             // Task H: proactive background reconcile tick. A Tauri-runtime
             // spawned interval drives `service::sessions::reconcile_now` on the same
@@ -507,6 +526,15 @@ pub fn run() {
         .manage(ssh_client)
         .manage(reg)
         .manage(tunnels)
+        .manage(upload_allow)
+        // Drag-drop reaches a `WebviewWindow` as a window event (and, for a
+        // standalone webview, as a webview event) — record dropped paths from
+        // both so `upload_to_session` can verify them.
+        .on_webview_event(move |_, event| {
+            if let tauri::WebviewEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                upload_allow_for_webview.allow(paths);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::health::health_check,
             commands::projects::list_projects,
@@ -561,6 +589,11 @@ pub fn run() {
             commands::mcp::mcp_configure,
             commands::mcp::install_fleet_hook,
             commands::mcp::provision_hosts,
+            commands::mcp::list_host_tokens,
+            commands::mcp::set_host_token_mode,
+            commands::mcp::rotate_host_token,
+            commands::mcp::mcp_confirm,
+            commands::mcp::mcp_pending_confirms,
             commands::onboarding::check_local_prereqs,
             commands::onboarding::tunnel_status,
             pty::pty_open,
@@ -571,6 +604,9 @@ pub fn run() {
             cancel_command,
         ])
         .on_window_event(move |window, event| {
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                upload_allow_for_window.allow(paths);
+            }
             // On exit: close ssh masters AND any open PTY, so we don't leak
             // background ssh processes or an orphaned `tmux attach` / `ssh
             // -tt` child after quit.

@@ -5,7 +5,20 @@
   import { hintsEnabled, resetHints } from './hints';
   import { copyOnSelect } from './prefs';
   import { accounts, type AccountRow } from './accounts';
-  import { mcpStatus, mcpConfigure, mcpClientConfig, installFleetHook, provisionHosts, type McpStatus, type HostProvisionResult } from './mcp';
+  import {
+    mcpStatus,
+    mcpConfigure,
+    mcpClientConfig,
+    installFleetHook,
+    provisionHosts,
+    listHostTokens,
+    setHostTokenMode,
+    rotateHostToken,
+    type McpStatus,
+    type HostProvisionResult,
+    type HostTokenInfo,
+    type TokenMode,
+  } from './mcp';
   import AddHostPicker from './AddHostPicker.svelte';
   import Modal from './Modal.svelte';
 
@@ -38,6 +51,43 @@
   // value when valid, else `undefined` so the backend keeps the current one.
   const safePort = $derived(portValid ? (portInput ?? undefined) : undefined);
 
+  // --- Per-host control-API tokens ---
+  // alias -> token info; a host absent here has never been provisioned.
+  let hostTokens = $state<Map<string, HostTokenInfo>>(new Map());
+  let tokenBusy: string | null = $state(null);
+  let tokenError: string | null = $state(null);
+
+  async function loadHostTokens() {
+    const r = await listHostTokens();
+    if (r.ok && Array.isArray(r.value)) {
+      hostTokens = new Map(r.value.map((t) => [t.host_alias, t]));
+    }
+  }
+
+  async function onTokenMode(alias: string, mode: TokenMode) {
+    tokenBusy = alias;
+    tokenError = null;
+    const r = await setHostTokenMode(alias, mode);
+    tokenBusy = null;
+    if (r.ok && r.value) {
+      hostTokens = new Map(hostTokens).set(alias, r.value);
+    } else if (!r.ok) {
+      tokenError = r.error.message;
+    }
+  }
+
+  async function onRotateToken(alias: string) {
+    tokenBusy = alias;
+    tokenError = null;
+    const r = await rotateHostToken(alias);
+    tokenBusy = null;
+    if (r.ok && r.value) {
+      hostTokens = new Map(hostTokens).set(alias, r.value);
+    } else if (!r.ok) {
+      tokenError = r.error.message;
+    }
+  }
+
   onMount(async () => {
     const r = await mcpStatus();
     if (r.ok && r.value) {
@@ -46,12 +96,14 @@
     } else if (!r.ok) {
       mcpError = r.error.message;
     }
+    await loadHostTokens();
   });
 
   async function applyMcp(opts: {
     enabled: boolean;
     port?: number;
     regenerateToken?: boolean;
+    confirmDestructive?: boolean;
   }) {
     mcpBusy = true;
     mcpError = null;
@@ -138,17 +190,18 @@
   let provisionBusy = $state(false);
   let provisionError: string | null = $state(null);
 
-  async function doProvisionHosts() {
+  async function doProvisionHosts(rotate = false) {
     provisionBusy = true;
     provisionError = null;
     provisionResults = null;
-    const r = await provisionHosts();
+    const r = await provisionHosts(rotate);
     provisionBusy = false;
     if (r.ok && r.value) {
       provisionResults = r.value;
     } else if (!r.ok) {
       provisionError = r.error.message;
     }
+    await loadHostTokens();
   }
 </script>
 
@@ -176,6 +229,7 @@
             <th>claude</th>
             <th>Account</th>
             <th>Status</th>
+            <th title="Control-API token: full = every tool, readonly = observe only">Token</th>
             <th></th>
           </tr>
         </thead>
@@ -190,6 +244,27 @@
                 <span class="status status-{h.reachable ? 'on' : 'off'}">
                   {h.reachable ? 'online' : 'offline'}
                 </span>
+              </td>
+              <td class="token-cell" data-testid="token-cell">
+                {#if hostTokens.get(h.alias)}
+                  <select
+                    class="mode"
+                    value={hostTokens.get(h.alias)!.mode}
+                    disabled={tokenBusy === h.alias}
+                    onchange={(e) => onTokenMode(h.alias, (e.currentTarget as HTMLSelectElement).value as TokenMode)}
+                    aria-label="Token mode"
+                  >
+                    <option value="full">full</option>
+                    <option value="readonly">readonly</option>
+                  </select>
+                  <button
+                    disabled={tokenBusy === h.alias}
+                    onclick={() => onRotateToken(h.alias)}
+                    title="Mint a new token and re-provision this host"
+                    aria-label="Rotate token">Rotate</button>
+                {:else}
+                  <span class="muted" title="Provision hosts to mint one">none</span>
+                {/if}
               </td>
               <td class="row-actions">
                 <button
@@ -216,6 +291,7 @@
         </tbody>
       </table>
       {#if error}<p class="err">{error}</p>{/if}
+      {#if tokenError}<p class="err">{tokenError}</p>{/if}
     </section>
 
     <section class="block" data-testid="onboarding-section">
@@ -332,6 +408,23 @@
           <button onclick={() => copyText(configBlock)}>Copy config</button>
         </details>
 
+        <div class="mcp-row">
+          <label class="toggle">
+            <input
+              type="checkbox"
+              checked={mcp.confirm_destructive}
+              disabled={mcpBusy}
+              onchange={() =>
+                applyMcp({
+                  enabled: mcp!.enabled,
+                  port: safePort,
+                  confirmDestructive: !mcp!.confirm_destructive,
+                })}
+              data-testid="mcp-confirm-destructive" />
+            Ask me before agents broadcast, kill sessions, delete worktrees or write the clipboard
+          </label>
+        </div>
+
         <div class="hook-section">
           <p class="hook-desc">
             Install a real-time hook so local Claude Code sessions notify fleet
@@ -355,17 +448,30 @@
 
         <div class="hook-section">
           <p class="hook-desc">
-            Push the MCP server config to every host so agents can connect to
-            the control API.
+            Push the MCP server config, a per-host bearer token and the
+            Stop/WorktreeCreate hooks to every host so agents can connect to
+            the control API. Existing tokens are reused; "Rotate all" mints
+            fresh ones.
           </p>
-          <button
-            class="hook-btn"
-            onclick={doProvisionHosts}
-            disabled={provisionBusy || !mcp.enabled}
-            data-testid="provision-hosts"
-          >
-            {provisionBusy ? "Provisioning…" : "Provision hosts"}
-          </button>
+          <div class="hook-actions">
+            <button
+              class="hook-btn"
+              onclick={() => doProvisionHosts(false)}
+              disabled={provisionBusy || !mcp.enabled}
+              data-testid="provision-hosts"
+            >
+              {provisionBusy ? "Provisioning…" : "Provision hosts"}
+            </button>
+            <button
+              class="hook-btn"
+              onclick={() => doProvisionHosts(true)}
+              disabled={provisionBusy || !mcp.enabled}
+              title="Mint a fresh token for every host and re-provision"
+              data-testid="provision-hosts-rotate"
+            >
+              Rotate all tokens
+            </button>
+          </div>
           {#if provisionError}
             <p class="hook-err">{provisionError}</p>
           {/if}
@@ -484,6 +590,28 @@
   }
   .status-on { background: rgba(60,180,90,0.18); color: rgb(80,200,110); }
   .status-off { background: rgba(180,100,100,0.18); color: rgb(220,130,130); }
+
+  .token-cell { display: flex; gap: 0.3rem; align-items: center; white-space: nowrap; }
+  .token-cell select.mode {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 4px;
+    font-size: 0.75rem;
+    padding: 0.1rem 0.2rem;
+  }
+  .token-cell button {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--fg-muted);
+    cursor: pointer;
+    padding: 0.1rem 0.4rem;
+    font-size: 0.75rem;
+    border-radius: 4px;
+  }
+  .token-cell button:hover:not(:disabled) { border-color: var(--border); color: var(--fg); }
+  .token-cell button:disabled { opacity: 0.5; cursor: default; }
+  .hook-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
 
   .row-actions { display: flex; gap: 0.2rem; }
   .row-actions button {

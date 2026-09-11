@@ -22,6 +22,7 @@
   import { readPref, writePref } from './lib/prefs';
   import WelcomeDialog from './lib/WelcomeDialog.svelte';
   import HintLayer from './lib/HintLayer.svelte';
+  import McpConfirmDialog from './lib/McpConfirmDialog.svelte';
   import { onboardingWelcomed, onboardingDismissed } from './lib/onboarding';
   import { get } from 'svelte/store';
 
@@ -238,6 +239,7 @@
 
 <HintLayer />
 <Toasts />
+<McpConfirmDialog />
 
 {#if showWelcome}
   <!-- "Skip for now" closes the welcome dialog but intentionally leaves the
