@@ -1,19 +1,24 @@
 import { describe, it, expect } from 'vitest';
 import {
-  attentionReason,
+  byTriage,
   ciStatusLabel,
+  classify,
   claudeStatusColor,
   claudeStatusLabel,
   contextLevel,
+  countNeedsYou,
   displayName,
   formatElapsed,
   isClaudeStatus,
   isStuckKind,
-  needsAttention,
+  needsYou,
   newlyStuck,
+  NEEDS_YOU_BUCKETS,
   promptPreview,
+  rank,
   sessionStart,
   severity,
+  TRIAGE_BUCKETS,
   stuckKindLabel,
   stuckMessage,
   stuckSnapshot,
@@ -97,55 +102,21 @@ describe('contextLevel', () => {
   });
 });
 
-describe('attentionReason', () => {
-  const opts = { idleSecs: 1800, now: 10_000 };
-
-  it('returns null for a healthy working session', () => {
-    expect(attentionReason(row({ claude_status: 'working' }), opts)).toBeNull();
-    expect(needsAttention(row({ claude_status: 'working' }), opts)).toBe(false);
-  });
-
-  it('ranks stuck above everything else', () => {
-    const r = row({ stuck_kind: 'oom', safe_kill_state: 'failed', status: 'ghost' });
-    expect(attentionReason(r, opts)).toBe('stuck');
-  });
-
-  it('flags safe-kill pending/failed, ghosts and failed agents', () => {
-    expect(attentionReason(row({ safe_kill_state: 'requested' }), opts)).toBe('safe_kill');
-    expect(attentionReason(row({ safe_kill_state: 'failed' }), opts)).toBe('safe_kill');
-    expect(attentionReason(row({ safe_kill_state: 'ready' }), opts)).toBeNull();
-    expect(attentionReason(row({ status: 'ghost' }), opts)).toBe('ghost');
-    expect(attentionReason(row({ lost_at: 5 }), opts)).toBe('ghost');
-    expect(attentionReason(row({ claude_status: 'failed' }), opts)).toBe('failed');
-  });
-
-  it('flags work sessions idle past the threshold only', () => {
-    const idle = row({ claude_status: 'idle', idle_since: 10_000 - 1800 });
-    expect(attentionReason(idle, opts)).toBe('idle');
-    const fresh = row({ claude_status: 'idle', idle_since: 10_000 - 1799 });
-    expect(attentionReason(fresh, opts)).toBeNull();
-    // Shell / bg sessions are not nudged for being idle.
-    expect(attentionReason(row({ kind: 'shell', idle_since: 0 }), opts)).toBeNull();
-    expect(attentionReason(row({ kind: 'bg', idle_since: 0 }), opts)).toBeNull();
-    // Threshold 0 disables the rule.
-    expect(attentionReason(idle, { idleSecs: 0, now: 10_000 })).toBeNull();
-    // No idle stamp ⇒ not idle.
-    expect(attentionReason(row({ claude_status: 'idle' }), opts)).toBeNull();
-  });
-});
-
 describe('severity', () => {
-  it('orders stuck > blocked > lost > failed > working > idle > unknown', () => {
+  // Derived from TRIAGE_BUCKETS, so this order is P13's, not the old one:
+  // a session waiting on the user now outranks a stuck one.
+  it('follows the triage bucket order: waiting > stuck > failed > lifecycle > working > idle', () => {
     const order = [
-      row({ stuck_kind: 'press_enter' }),
       row({ claude_status: 'blocked' }),
-      row({ status: 'ghost' }),
+      row({ stuck_kind: 'press_enter' }),
       row({ claude_status: 'failed' }),
+      row({ status: 'ghost' }),
       row({ claude_status: 'working' }),
       row({ claude_status: 'idle' }),
-      row(),
     ].map(severity);
     for (let i = 1; i < order.length; i++) expect(order[i - 1]).toBeGreaterThan(order[i]);
+    // A row with no signals at all ranks with the idle ones, not below them.
+    expect(severity(row())).toBe(severity(row({ claude_status: 'idle' })));
   });
 
   it('worstSeverityByProject takes the max per project and skips orphans', () => {
@@ -211,5 +182,76 @@ describe('outcome display', () => {
     expect(ciStatusLabel('failing')).toContain('CI');
     expect(ciStatusLabel('pending')).toContain('CI');
     expect(ciStatusLabel(null)).toBe('');
+  });
+});
+
+
+describe('triage rank', () => {
+  const opts = { idleSecs: 1800, now: 10_000 };
+
+  it('classifies every bucket reachable from today\'s fields', () => {
+    expect(classify(row({ claude_status: 'blocked' }), opts)).toBe('waiting');
+    expect(classify(row({ stuck_kind: 'oom' }), opts)).toBe('stuck');
+    expect(classify(row({ claude_status: 'failed' }), opts)).toBe('failed');
+    expect(classify(row({ safe_kill_state: 'requested' }), opts)).toBe('lifecycle');
+    expect(classify(row({ safe_kill_state: 'failed' }), opts)).toBe('lifecycle');
+    expect(classify(row({ status: 'ghost' }), opts)).toBe('lifecycle');
+    expect(classify(row({ lost_at: 5 }), opts)).toBe('lifecycle');
+    expect(classify(row({ idle_since: 0 }), opts)).toBe('idle_long');
+    expect(classify(row({ claude_status: 'working' }), opts)).toBe('working');
+    expect(classify(row(), opts)).toBe('idle');
+  });
+
+  it('keeps the rules the pill it replaces had', () => {
+    // A safe-kill that is merely 'ready' is not a lifecycle problem.
+    expect(classify(row({ safe_kill_state: 'ready' }), opts)).toBe('idle');
+    // Only work and review sessions get the idle nudge...
+    expect(classify(row({ kind: 'shell', idle_since: 0 }), opts)).toBe('idle');
+    expect(classify(row({ kind: 'bg', idle_since: 0 }), opts)).toBe('idle');
+    // ...a fresh idle stamp is not long enough...
+    expect(classify(row({ idle_since: 9_000 }), opts)).toBe('idle');
+    // ...and a threshold of 0 disables the rule.
+    expect(classify(row({ idle_since: 0 }), { idleSecs: 0, now: 10_000 })).toBe('idle');
+  });
+
+  it('leaves done_unread empty until A2 lands last_viewed_at', () => {
+    for (const s of [row({ last_stop_at: 9_999 }), row({ last_turn_at: 9_999 }), row()]) {
+      expect(classify(s, opts)).not.toBe('done_unread');
+    }
+  });
+
+  it('needsYou covers every bucket above working, and nothing below', () => {
+    expect([...NEEDS_YOU_BUCKETS]).toEqual([...TRIAGE_BUCKETS].slice(0, 6));
+    expect(needsYou(row({ claude_status: 'blocked' }), opts)).toBe(true);
+    expect(needsYou(row({ stuck_kind: 'oom' }), opts)).toBe(true);
+    expect(needsYou(row({ idle_since: 0 }), opts)).toBe(true);
+    expect(needsYou(row({ claude_status: 'working' }), opts)).toBe(false);
+    expect(needsYou(row(), opts)).toBe(false);
+    expect(
+      countNeedsYou([row({ stuck_kind: 'oom' }), row({ claude_status: 'working' }), row({ status: 'ghost' })], opts),
+    ).toBe(2);
+  });
+
+  it('orders by bucket first, then by the longest wait', () => {
+    const oldStuck = row({ stuck_kind: 'oom', stuck_since: 1_000 });
+    const newStuck = row({ stuck_kind: 'oom', stuck_since: 9_000 });
+    const blocked = row({ claude_status: 'blocked', idle_since: 9_500 });
+    const working = row({ claude_status: 'working' });
+    const ordered = byTriage([working, newStuck, blocked, oldStuck], opts);
+    expect(ordered.map((s) => s.id)).toEqual([blocked.id, oldStuck.id, newStuck.id, working.id]);
+  });
+
+  it('is stable: equal rank falls back to the session id, whatever the input order', () => {
+    const a = row({ stuck_kind: 'oom', stuck_since: 1_000 });
+    const b = row({ stuck_kind: 'oom', stuck_since: 1_000 });
+    expect(byTriage([b, a], opts).map((s) => s.id)).toEqual([a.id, b.id]);
+    expect(byTriage([a, b], opts).map((s) => s.id)).toEqual([a.id, b.id]);
+  });
+
+  it('caps age so no wait lets a row jump its bucket', () => {
+    const ancientWorking = row({ claude_status: 'working', last_activity_at: -5_000_000 });
+    const freshStuck = row({ stuck_kind: 'oom', stuck_since: 10_000 });
+    expect(rank(freshStuck, opts).score).toBeGreaterThan(rank(ancientWorking, opts).score);
+    expect(rank(ancientWorking, opts).ageSecs).toBeLessThan(1_000_000);
   });
 });

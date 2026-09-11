@@ -34,7 +34,8 @@
     type SessionPredicate,
   } from './sidebar_index';
   import {
-    attentionReason,
+    countNeedsYou,
+    needsYou,
     worstSeverityByProject,
   } from './attention';
   import { attentionIdleMinutes } from './notify';
@@ -112,13 +113,13 @@
   let pendingKill: SessionRow | null = $state(null);
   let pendingRecreate: SessionRow | null = $state(null);
 
-  // ── Triage (FE-3 / FE-4) ──
-  // "N stuck" counter doubles as a stuck-only filter; "needs attention" is
-  // the wider pill (stuck, safe-kill pending/failed, ghost, failed, idle >
-  // N min). Both are session-scoped (not persisted): a filter that hides
-  // healthy sessions should not survive a restart unnoticed.
-  let stuckOnly = $state(false);
-  let attentionOnly = $state(false);
+  // ── Triage (FE-3 / FE-4, now P13 / T1) ──
+  // One ranked queue. The "Needs you" pill counts and filters the rows that
+  // rank() places in a needs-you bucket: waiting on you, stuck, failed,
+  // done-unread, broken lifecycle, or idle > N min. Session-scoped (not
+  // persisted): a filter that hides healthy sessions should not survive a
+  // restart unnoticed.
+  let needsYouOnly = $state(false);
   // Coarse clock for the idle rule; a 30 s tick is plenty for a minutes-level
   // threshold and keeps the derived tree from re-running every second.
   let nowSec = $state(Math.floor(Date.now() / 1000));
@@ -128,12 +129,9 @@
   });
   const attentionOpts = $derived({ idleSecs: $attentionIdleMinutes * 60, now: nowSec });
   const rowPredicate = $derived.by((): SessionPredicate => {
-    if (stuckOnly) return (s) => s.stuck_kind !== null;
-    if (attentionOnly) {
-      const opts = attentionOpts;
-      return (s) => attentionReason(s, opts) !== null;
-    }
-    return null;
+    if (!needsYouOnly) return null;
+    const opts = attentionOpts;
+    return (s) => needsYou(s, opts);
   });
 
   // Multi-select for bulk Kill / Send prompt. Rows are toggled with
@@ -248,11 +246,7 @@
   const hostVisibleSessions = $derived(
     $sessions.filter((s) => sessionVisible(s, $hostFilter, $showBgAgents)),
   );
-  const stuckCount = $derived(hostVisibleSessions.filter((s) => s.stuck_kind !== null).length);
-  const attentionCount = $derived.by(() => {
-    const opts = attentionOpts;
-    return hostVisibleSessions.filter((s) => attentionReason(s, opts) !== null).length;
-  });
+  const needsYouTotal = $derived(countNeedsYou(hostVisibleSessions, attentionOpts));
   const severityByProject = $derived(worstSeverityByProject(hostVisibleSessions));
 
   // Only show projects that either match the filter directly OR have at least
@@ -618,8 +612,7 @@
   <SidebarFilters
     bind:search
     bind:recency
-    bind:stuckOnly
-    bind:attentionOnly
+    bind:needsYouOnly
     {loading}
     {loadError}
     {onRefresh}
@@ -628,8 +621,7 @@
     {showSettings}
     onOpenTasks={() => (showTasks = true)}
     onOpenSettings={() => (showSettings = true)}
-    {stuckCount}
-    {attentionCount}
+    needsYouCount={needsYouTotal}
     {selectMode}
     {toggleSelectMode}
     selectedCount={selectedIds.size}
