@@ -433,6 +433,7 @@ describe('SettingsDialog projects (W5 G3)', () => {
     expect(screen.getByTestId('projects-section')).toBeInTheDocument();
     expect(screen.getByTestId('projects-preview-local')).toHaveTextContent('~/projects/github.com/<owner>/<repo>');
     expect(screen.getByTestId('projects-preview-mefistos')).toHaveTextContent('~/projects/github.com/<owner>/<repo>');
+    expect(screen.getByTestId('projects-preview-local')).not.toHaveClass('err');
     expect((screen.getByTestId('projects-base-mefistos') as HTMLInputElement).value).toBe('');
   });
 
@@ -458,6 +459,9 @@ describe('SettingsDialog projects (W5 G3)', () => {
     await fireEvent.input(screen.getByTestId('projects-base-local'), { target: { value: 'relative/dir' } });
     await tick();
     expect(screen.getByTestId('projects-preview-local')).toHaveTextContent('must be absolute');
+    // The error message is styled red through `.project-preview.err`; without
+    // that qualifier `.hook-desc`'s muted colour wins the specificity tie.
+    expect(screen.getByTestId('projects-preview-local')).toHaveClass('err');
     expect(screen.getByTestId('projects-save')).toBeDisabled();
     expect(inv).not.toHaveBeenCalledWith('set_fleet_setting', expect.objectContaining({ key: 'projects.base_path' }));
   });

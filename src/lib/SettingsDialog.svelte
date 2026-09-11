@@ -647,12 +647,18 @@
     width: auto;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
-  .project-preview {
+  /* Qualified with .hook-desc: the preview span carries both classes, and the
+     later `.hook-desc { margin: 0 }` used to win the equal-specificity tie and
+     cancel the indent that lines the preview up under the input. */
+  .hook-desc.project-preview {
     display: block;
     margin-left: 6.4rem;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     word-break: break-all;
   }
+  /* Same tie, for the invalid-path message: .hook-desc's muted colour used to
+     beat the .err red the class:err toggle asks for. */
+  .project-preview.err { color: #e64a4a; }
   .layout-select {
     background: transparent;
     border: 1px solid var(--border);
