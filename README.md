@@ -45,7 +45,9 @@ On first launch the app walks you through setup — see the **[Getting Started g
 
 ### Requirements
 
-- macOS 13+ (primary) or Linux
+- macOS 13+ (primary) or Linux — CI runs on both (`macos-latest`,
+  `ubuntu-24.04`) and tagged releases ship unsigned macOS `.dmg` (arm64 and
+  x86_64) plus Linux `.AppImage`/`.deb` bundles (see `docs/RELEASING.md`)
 - Rust 1.83+ (`rustup install stable`)
 - Node 20+ and pnpm 10 (`npm i -g pnpm@10`, or `corepack enable`). The
   workspace file uses the pnpm 10 `allowBuilds` key; if a local pnpm 9 prints
