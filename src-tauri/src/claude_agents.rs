@@ -36,14 +36,19 @@ pub fn find_by_name<'a>(rows: &'a [ClaudeAgentRow], tmux_name: &str) -> Option<&
 /// before `--name` was passed — fall back to a UNIQUE `cwd` match: return the
 /// single agent whose `cwd == cwd`, or `None` when zero or more than one match
 /// (ambiguous, e.g. several Claude sessions share that directory — we refuse to
-/// guess rather than resume the wrong conversation). When no cwd matches
-/// exactly, the canonical forms are compared, so a logical spelling (a pane's
-/// `$PWD` under a symlinked root) still finds the agent `claude agents`
-/// reports under the physical path. Exact matches cost no syscalls.
+/// guess rather than resume the wrong conversation). For a LOCAL session
+/// (`is_local`), when no cwd matches exactly the canonical forms are
+/// compared, so a logical spelling (a pane's `$PWD` under a symlinked root)
+/// still finds the agent `claude agents` reports under the physical path.
+/// Exact matches cost no syscalls. A remote cwd is never canonicalized: it is
+/// a path on another machine, and resolving it here would stat the LOCAL
+/// filesystem under the store lock (on macOS `/home` is an autofs mount that
+/// can stall).
 pub fn find_for_session<'a>(
     rows: &'a [ClaudeAgentRow],
     tmux_name: &str,
     cwd: &str,
+    is_local: bool,
 ) -> Option<&'a ClaudeAgentRow> {
     if let Some(by_name) = find_by_name(rows, tmux_name) {
         return Some(by_name);
@@ -56,6 +61,7 @@ pub fn find_for_session<'a>(
     match (in_cwd.next(), in_cwd.next()) {
         (Some(only), None) => Some(only),
         (Some(_), Some(_)) => None,
+        (None, _) if !is_local => None,
         (None, _) => {
             use crate::projects::path_identity::canonical;
             use std::path::Path;
@@ -96,7 +102,7 @@ mod tests {
         ];
         // Exact name match wins, even if cwd differs.
         assert_eq!(
-            find_for_session(&rows, "dev-x", "/zzz")
+            find_for_session(&rows, "dev-x", "/zzz", true)
                 .unwrap()
                 .session_id
                 .as_deref(),
@@ -104,35 +110,44 @@ mod tests {
         );
         // No name match → unique cwd match.
         assert_eq!(
-            find_for_session(&rows, "no-name", "/b")
+            find_for_session(&rows, "no-name", "/b", true)
                 .unwrap()
                 .session_id
                 .as_deref(),
             Some("bycwd")
         );
         // Ambiguous cwd (two agents) → None (refuse to guess).
-        assert!(find_for_session(&rows, "no-name", "/c").is_none());
+        assert!(find_for_session(&rows, "no-name", "/c", true).is_none());
         // No match at all → None.
-        assert!(find_for_session(&rows, "no-name", "/nope").is_none());
+        assert!(find_for_session(&rows, "no-name", "/nope", true).is_none());
+    }
+
+    /// `(physical, logical)` spellings of one directory reached through a
+    /// symlinked root, like `~/projects -> /mnt/sda4/projects`.
+    #[cfg(unix)]
+    fn symlinked_dir(tmp: &tempfile::TempDir) -> (String, String) {
+        use crate::projects::path_identity::canonical;
+        let real = tmp.path().join("mnt").join("r");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = tmp.path().join("projects");
+        std::os::unix::fs::symlink(tmp.path().join("mnt"), &link).unwrap();
+        (
+            canonical(&real).to_string_lossy().into_owned(),
+            link.join("r").to_string_lossy().into_owned(),
+        )
     }
 
     #[cfg(unix)]
     #[test]
     fn find_for_session_matches_a_logical_cwd_to_the_physical_agent_cwd() {
-        use crate::projects::path_identity::canonical;
         let tmp = tempfile::TempDir::new().unwrap();
-        let real = tmp.path().join("mnt").join("r");
-        std::fs::create_dir_all(&real).unwrap();
-        let link = tmp.path().join("projects");
-        std::os::unix::fs::symlink(tmp.path().join("mnt"), &link).unwrap();
-        let physical = canonical(&real).to_string_lossy().into_owned();
-        let logical = link.join("r").to_string_lossy().into_owned();
+        let (physical, logical) = symlinked_dir(&tmp);
         let rows = vec![
             row("a", None, Some(&physical)),
             row("b", None, Some("/elsewhere")),
         ];
         assert_eq!(
-            find_for_session(&rows, "no-name", &logical)
+            find_for_session(&rows, "no-name", &logical, true)
                 .unwrap()
                 .session_id
                 .as_deref(),
@@ -143,9 +158,30 @@ mod tests {
             row("a", None, Some(&physical)),
             row("c", None, Some(&physical)),
         ];
-        assert!(find_for_session(&rows, "no-name", &logical).is_none());
-        // An empty cwd never matches through canonicalization.
-        assert!(find_for_session(&[row("e", None, Some(""))], "no-name", "").is_none());
+        assert!(find_for_session(&rows, "no-name", &logical, true).is_none());
+        // An empty cwd never matches.
+        assert!(find_for_session(&[row("e", None, Some(""))], "no-name", "", true).is_none());
+    }
+
+    /// A remote cwd is a path on another machine, so the canonical fallback
+    /// must never run for it (it would stat the LOCAL filesystem). The same
+    /// logical/physical pair that matches for a local session does not match
+    /// for a remote one; exact matches still do.
+    #[cfg(unix)]
+    #[test]
+    fn find_for_session_never_canonicalizes_a_remote_cwd() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (physical, logical) = symlinked_dir(&tmp);
+        let rows = vec![row("a", None, Some(&physical))];
+        assert!(find_for_session(&rows, "no-name", &logical, false).is_none());
+        assert!(find_for_session(&rows, "no-name", &logical, true).is_some());
+        assert_eq!(
+            find_for_session(&rows, "no-name", &physical, false)
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("a")
+        );
     }
 
     #[test]

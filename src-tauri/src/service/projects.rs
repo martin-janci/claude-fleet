@@ -253,7 +253,10 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
                 s.upsert_worktree(project_id, &wt.name, &path, wt.branch.as_deref())?;
                 owner_of.insert(path, project_id);
             }
-            s.delete_worktrees_not_in(project_id, &keep_names)?;
+            // Renamed rows (e.g. the old basename-named main row, now `main`)
+            // hand their session references to the surviving row with the
+            // same canonical path before they go.
+            s.delete_worktrees_not_in(project_id, &keep_names, canon)?;
         }
 
         // Duplicates, the self-heal for rows an earlier scan left behind:
@@ -611,8 +614,57 @@ mod tests {
             "only the session-referenced copy survives"
         );
 
-        // Idempotent: a second refresh changes nothing.
+        // Idempotent: a second refresh changes nothing, row for row.
+        let before = serde_json::to_value(&rows).unwrap();
         let again = refresh_projects(&store).await.unwrap();
-        assert_eq!(again.len(), rows.len());
+        assert_eq!(serde_json::to_value(&again).unwrap(), before);
+    }
+
+    /// Main-first naming replaces the old basename-named main row with
+    /// `main`. A session still pointing at the old row must not abort the
+    /// refresh on the foreign key (which then failed every later refresh
+    /// too); it moves to the `main` row of the same checkout.
+    #[tokio::test]
+    async fn refresh_projects_repoints_sessions_from_a_renamed_main_row() {
+        use crate::projects::test_git::init_repo;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("o").join("claude-fleet");
+        if !init_repo(&repo) {
+            return; // no git on this box
+        }
+        let repo_c = canonical(&repo).to_string_lossy().into_owned();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let (pid, sid) = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let map = serde_json::json!({ "local": tmp.path().to_string_lossy() }).to_string();
+            settings::set(&s, settings::PROJECTS_BASE_PATH, &map).unwrap();
+            let pid = s.upsert_project("o", "claude-fleet", &repo_c).unwrap();
+            // What the old scan stored: main named after the directory.
+            let old = s
+                .upsert_worktree(pid, "claude-fleet", &repo.to_string_lossy(), None)
+                .unwrap();
+            let sid = s
+                .upsert_session("dev", "local", Some(pid), Some(old), 1, 1, "running", None)
+                .unwrap();
+            (pid, sid)
+        };
+        let rows = refresh_projects(&store)
+            .await
+            .expect("a referenced renamed row must not abort the refresh");
+        let row = rows.iter().find(|r| r.project.id == pid).unwrap();
+        let names: Vec<_> = row.worktrees.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, vec!["main"]);
+        let main_id = row.worktrees[0].id;
+        {
+            let s = store.lock().unwrap();
+            assert_eq!(
+                s.get_session_by_id(sid).unwrap().unwrap().worktree_id,
+                Some(main_id),
+                "the session moved to the main row"
+            );
+        }
+        // Later refreshes keep working.
+        refresh_projects(&store).await.unwrap();
     }
 }

@@ -71,11 +71,14 @@ impl Layout {
     }
 }
 
-/// Scans `base` according to `layout` and returns every repository's main
-/// checkout: a directory whose `.git` is a DIRECTORY. A linked worktree (its
-/// `.git` is a file pointing into another checkout's git dir) is skipped. Its
-/// main checkout's `git worktree list` already names it, so scanning it as
-/// well registered every worktree of that repo under a second project.
+/// Scans `base` according to `layout` and returns every checkout: a
+/// directory with a `.git` entry. That is a main checkout (`.git` is a
+/// directory) or a checkout whose `.git` is a file: a linked worktree, or a
+/// worktree of a bare repository (a bare-repo layout has no `.git` directory
+/// anywhere, so filtering on one dropped such repos entirely). Several
+/// checkouts of one repository are collapsed later by
+/// `service::projects::refresh_projects`, which keeps one project per git
+/// common dir and prefers the main checkout.
 ///
 /// The base is canonicalized first, so a symlinked root stores the physical
 /// `base_path` that tmux, git and `claude agents` report.
@@ -91,13 +94,16 @@ pub fn scan_projects(base: &Path, layout: Layout) -> Result<Vec<DiscoveredProjec
     Ok(out)
 }
 
-/// A repository's main checkout: `.git` is a directory. A linked worktree's
-/// `.git` is a file, and it is not a project of its own.
-fn is_main_checkout(path: &Path) -> bool {
-    path.join(".git").is_dir()
+/// A checkout of some repository: `path/.git` exists, as a directory (main
+/// checkout) or a file (linked worktree, bare-repo worktree).
+fn is_checkout(path: &Path) -> bool {
+    path.join(".git").exists()
 }
 
-/// Non-hidden subdirectories of `dir`, as `(name, path)`.
+/// Non-hidden subdirectories of `dir`, as `(name, path)`. `file_type()` does
+/// not follow symlinks, so an entry that is itself a symlink (a repo folder
+/// linked in from elsewhere) is skipped; its target is scanned only if it
+/// also sits under the root.
 fn child_dirs(dir: &Path) -> Result<Vec<(String, PathBuf)>, IpcError> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(dir)? {
@@ -122,7 +128,7 @@ fn scan_owner_repo(base: &Path) -> Result<Vec<DiscoveredProject>, IpcError> {
     }
     for (owner, owner_path) in child_dirs(base)? {
         for (repo, path) in child_dirs(&owner_path)? {
-            if is_main_checkout(&path) {
+            if is_checkout(&path) {
                 out.push(DiscoveredProject {
                     owner: owner.clone(),
                     repo,
@@ -151,7 +157,7 @@ fn scan_flat(base: &Path, owner_hint: &Path) -> Result<Vec<DiscoveredProject>, I
         .filter(|n| crate::validate::path_component("owner", n).is_ok())
         .unwrap_or_else(|| "local".to_string());
     for (repo, path) in child_dirs(base)? {
-        if !is_main_checkout(&path) {
+        if !is_checkout(&path) {
             continue;
         }
         let git = path.join(".git");
@@ -326,20 +332,30 @@ mod tests {
         assert_eq!(wts[0].name, "f");
     }
 
+    /// Checkouts whose `.git` is a FILE are scanned: a linked worktree (the
+    /// dedupe in `refresh_projects` folds it into its main checkout) and the
+    /// bare-repo layout, which has no `.git` directory anywhere and was
+    /// dropped entirely when the scan required one.
     #[test]
-    fn scan_skips_linked_worktree_dirs() {
+    fn scan_includes_checkouts_whose_git_is_a_file() {
         let tmp = TempDir::new().unwrap();
         make_project(tmp.path(), "o", "app");
-        // A linked worktree next to its main checkout: `.git` is a FILE.
+        // A linked worktree next to its main checkout.
         let wt = tmp.path().join("o").join("app-wt");
         fs::create_dir_all(&wt).unwrap();
         fs::write(wt.join(".git"), "gitdir: ../app/.git/worktrees/app-wt\n").unwrap();
+        // Bare-repo layout: `tool/.bare` is the repository, `tool/.git` a file.
+        let bare = tmp.path().join("o").join("tool");
+        fs::create_dir_all(bare.join(".bare")).unwrap();
+        fs::write(bare.join(".git"), "gitdir: ./.bare\n").unwrap();
+        // Not a checkout at all.
+        fs::create_dir_all(tmp.path().join("o").join("notes")).unwrap();
         let got: Vec<_> = scan_projects(tmp.path(), Layout::Github)
             .unwrap()
             .into_iter()
             .map(|p| p.repo)
             .collect();
-        assert_eq!(got, vec!["app"]);
+        assert_eq!(got, vec!["app", "app-wt", "tool"]);
         // Flat layout too.
         let flat = tmp.path().join("o");
         let got: Vec<_> = scan_projects(&flat, Layout::Flat)
@@ -347,7 +363,7 @@ mod tests {
             .into_iter()
             .map(|p| p.repo)
             .collect();
-        assert_eq!(got, vec!["app"]);
+        assert_eq!(got, vec!["app", "app-wt", "tool"]);
     }
 
     #[cfg(unix)]

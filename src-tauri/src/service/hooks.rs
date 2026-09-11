@@ -314,19 +314,21 @@ fn apply_worktree_hook(
 
 /// The project whose `base_path` contains the LOCAL `worktree_path` (already
 /// canonical), by whole components (`/home/u/proj` does not contain
-/// `/home/u/project/...`); the longest base wins. Each base is tried raw and
-/// canonical, since rows stored before the scan canonicalized hold the
-/// logical spelling of a symlinked root.
+/// `/home/u/project/...`); the longest base wins. The raw base_paths are
+/// tried first; only when none contains the path are the bases
+/// canonicalized (rows stored before the scan canonicalized hold the logical
+/// spelling of a symlinked root), so the common case costs no syscalls.
 fn find_project_id_for_path(projects: &[ProjectRow], worktree_path: &str) -> Option<i64> {
     let path = Path::new(worktree_path);
-    projects
-        .iter()
-        .filter(|p| {
-            let base = Path::new(&p.base_path);
-            is_within(path, base) || is_within(path, &canonical(base))
-        })
-        .max_by_key(|p| p.base_path.len())
-        .map(|p| p.id)
+    let longest = |within: &dyn Fn(&ProjectRow) -> bool| {
+        projects
+            .iter()
+            .filter(|p| within(p))
+            .max_by_key(|p| p.base_path.len())
+            .map(|p| p.id)
+    };
+    longest(&|p| is_within(path, Path::new(&p.base_path)))
+        .or_else(|| longest(&|p| is_within(path, &canonical(Path::new(&p.base_path)))))
 }
 
 #[cfg(test)]

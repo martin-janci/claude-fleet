@@ -385,6 +385,7 @@ fn reconcile_write_one_host(
                     agent_rows,
                     &sess.name,
                     &sess.path.to_string_lossy(),
+                    host.alias == "local",
                 );
                 // Pane-tail intel from the off-lock probe (may be absent if the
                 // capture failed — then all four intel fields stay None and the
@@ -508,17 +509,22 @@ fn reconcile_write_one_host(
 /// session — i.e. real background sessions that have no pane. An agent counts
 /// as "matched" if `find_for_session` would resolve some tmux session to it
 /// (by name or unique cwd). Agents without a `session_id` are skipped (we can't
-/// build a stable sentinel / track them). Pure so it's unit-testable.
+/// build a stable sentinel / track them). `is_local` gates the canonical cwd
+/// fallback (never for a remote host's paths). Pure so it's unit-testable.
 fn unmatched_bg_agents<'a>(
     live: &[crate::tmux::TmuxSession],
     agents: &'a [crate::claude_agents::ClaudeAgentRow],
+    is_local: bool,
 ) -> Vec<&'a crate::claude_agents::ClaudeAgentRow> {
     // Collect the set of agent session_ids that a tmux session resolved to.
     let mut matched: std::collections::HashSet<String> = std::collections::HashSet::new();
     for sess in live {
-        if let Some(agent) =
-            crate::claude_agents::find_for_session(agents, &sess.name, &sess.path.to_string_lossy())
-        {
+        if let Some(agent) = crate::claude_agents::find_for_session(
+            agents,
+            &sess.name,
+            &sess.path.to_string_lossy(),
+            is_local,
+        ) {
             if let Some(id) = agent.session_id.as_deref() {
                 matched.insert(id.to_string());
             }
@@ -550,7 +556,7 @@ fn reconcile_bg_agents(
 ) -> Result<(), IpcError> {
     let mut keep: Vec<String> = Vec::new();
     let paths = HostPaths::for_host(s, host_alias);
-    for agent in unmatched_bg_agents(live, agents) {
+    for agent in unmatched_bg_agents(live, agents, host_alias == "local") {
         let Some(session_id) = agent.session_id.as_deref() else {
             continue;
         };
@@ -3235,7 +3241,7 @@ mod tests {
             agent("bg-1", Some("bg-job-1"), Some("/a")),
             agent("bg-2", None, Some("/b")),
         ];
-        let unmatched = unmatched_bg_agents(&[], &agents);
+        let unmatched = unmatched_bg_agents(&[], &agents, true);
         assert_eq!(unmatched.len(), 2);
 
         // A tmux session whose name matches an agent → that agent is matched
@@ -3247,7 +3253,7 @@ mod tests {
             attached: false,
             path: std::path::PathBuf::from("/a"),
         }];
-        let unmatched = unmatched_bg_agents(&live, &agents);
+        let unmatched = unmatched_bg_agents(&live, &agents, true);
         let ids: Vec<&str> = unmatched
             .iter()
             .map(|a| a.session_id.as_deref().unwrap())
@@ -3263,7 +3269,7 @@ mod tests {
             status: None,
             cwd: None,
         }];
-        assert!(unmatched_bg_agents(&[], &agents).is_empty());
+        assert!(unmatched_bg_agents(&[], &agents, true).is_empty());
     }
 
     #[test]
