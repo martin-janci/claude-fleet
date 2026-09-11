@@ -240,3 +240,58 @@ pub fn set_fleet_setting(
     crate::service::settings::set(&s, &key, &value)?;
     Ok(crate::service::settings::read_all(&s))
 }
+
+// ── Session timeline (Q9) ───────────────────────────────────────────────────
+
+/// Default and ceiling for `session_history`'s `limit`. The store caps the
+/// timeline at 500 rows per session, so asking for more returns nothing extra.
+const HISTORY_DEFAULT_LIMIT: i64 = 200;
+const HISTORY_MAX_LIMIT: i64 = 500;
+
+#[derive(serde::Deserialize)]
+pub struct SessionHistoryArgs {
+    pub session_id: i64,
+    /// Newest-first cap; `None` or non-positive means the default.
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// Pure: clamp the requested timeline length into `1..=HISTORY_MAX_LIMIT`.
+fn history_limit(requested: Option<i64>) -> i64 {
+    match requested {
+        Some(n) if n > 0 => n.min(HISTORY_MAX_LIMIT),
+        _ => HISTORY_DEFAULT_LIMIT,
+    }
+}
+
+/// The recorded event timeline for one session, newest first. Same data as
+/// the MCP `session_history` tool; rendered by the details pane's Timeline.
+#[tauri::command]
+pub fn session_history(
+    args: SessionHistoryArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<crate::store::SessionEvent>, IpcError> {
+    let s = store.lock().map_err(|_| IpcError::lock())?;
+    s.list_session_events(args.session_id, history_limit(args.limit))
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    #[test]
+    fn history_limit_defaults_and_clamps() {
+        assert_eq!(history_limit(None), HISTORY_DEFAULT_LIMIT);
+        assert_eq!(history_limit(Some(0)), HISTORY_DEFAULT_LIMIT);
+        assert_eq!(history_limit(Some(-3)), HISTORY_DEFAULT_LIMIT);
+        assert_eq!(history_limit(Some(25)), 25);
+        assert_eq!(history_limit(Some(10_000)), HISTORY_MAX_LIMIT);
+    }
+
+    #[test]
+    fn session_history_args_accept_a_missing_limit() {
+        let a: SessionHistoryArgs = serde_json::from_str(r#"{"session_id":7}"#).unwrap();
+        assert_eq!(a.session_id, 7);
+        assert!(a.limit.is_none());
+    }
+}

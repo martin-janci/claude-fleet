@@ -6,6 +6,7 @@
     loadSessions,
     killSession,
     renameSession,
+    setFriendlyName,
     recreateSession,
     peekSession,
     purgeProject,
@@ -85,7 +86,18 @@
   // host + old name) — a bare tmux_name is ambiguous across hosts, since
   // default names are project-derived and the same name on two hosts is
   // the normal case.
-  let renaming: { id: number; host_alias: string; tmux_name: string } | null = $state(null);
+  //
+  // `mode` picks what the inline editor changes: double-click edits the
+  // display label (`friendly_name`, empty clears it); the row's ✎ action
+  // renames the tmux session itself. `original` is the value the editor
+  // opened with, so an unchanged commit is a no-op.
+  let renaming: {
+    id: number;
+    host_alias: string;
+    tmux_name: string;
+    mode: 'label' | 'tmux';
+    original: string;
+  } | null = $state(null);
   let renameValue = $state('');
   let renameError: string | null = $state(null);
   // The live rename <input> (only one renders at a time). Bound directly so
@@ -367,14 +379,25 @@
     }
   }
 
-  async function beginRename(sess: SessionRow, e?: Event) {
+  async function beginEdit(sess: SessionRow, mode: 'label' | 'tmux', e?: Event) {
     e?.stopPropagation();
-    renaming = { id: sess.id, host_alias: sess.host_alias, tmux_name: sess.tmux_name };
-    renameValue = sess.tmux_name;
+    const original = mode === 'label' ? (sess.friendly_name ?? '') : sess.tmux_name;
+    renaming = { id: sess.id, host_alias: sess.host_alias, tmux_name: sess.tmux_name, mode, original };
+    renameValue = original;
     renameError = null;
     await tick();
     renameInput?.focus();
     renameInput?.select();
+  }
+
+  /** ✎ action: rename the tmux session (new row identity on the backend). */
+  function beginRename(sess: SessionRow, e?: Event) {
+    return beginEdit(sess, 'tmux', e);
+  }
+
+  /** Double-click: edit the display label. */
+  function beginLabelEdit(sess: SessionRow, e?: Event) {
+    return beginEdit(sess, 'label', e);
   }
 
   function cancelRename() {
@@ -386,6 +409,26 @@
   async function commitRename() {
     if (committingRename || !renaming) return;
     const next = renameValue.trim();
+    if (renaming.mode === 'label') {
+      // Empty is meaningful here: it clears the label.
+      if (next === renaming.original.trim()) {
+        cancelRename();
+        return;
+      }
+      committingRename = true;
+      try {
+        const r = await setFriendlyName(renaming.host_alias, renaming.tmux_name, next);
+        if (!r.ok) {
+          renameError = r.error.message;
+          pushError(r.error, 'Label update failed');
+          return;
+        }
+        cancelRename();
+      } finally {
+        committingRename = false;
+      }
+      return;
+    }
     if (!next || next === renaming.tmux_name) {
       cancelRename();
       return;
@@ -551,6 +594,7 @@
       {selectMode}
       isChecked={selectedIds.has(sess.id)}
       isRenaming={renaming !== null && renaming.id === sess.id}
+      renameMode={renaming !== null && renaming.id === sess.id ? renaming.mode : null}
       bind:renameValue
       bind:renameInput
       {renameError}
@@ -561,6 +605,7 @@
       {onKeySession}
       {toggleSelected}
       {beginRename}
+      {beginLabelEdit}
       {onRenameKey}
       {commitRename}
       {askRecreate}
