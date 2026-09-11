@@ -7,18 +7,35 @@ on:
 
 jobs:
   rust:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: src-tauri
     steps:
       - uses: actions/checkout@v4
+      # Tauri 2 Linux prerequisites (https://v2.tauri.app/start/prerequisites/)
+      # plus the gtk/soup/jsc dev packages its build scripts probe via
+      # pkg-config. macOS runners ship everything needed. Keep this list in
+      # sync with release.yml.
+      - name: Install Tauri Linux prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev \
+            libssl-dev libayatana-appindicator3-dev librsvg2-dev \
+            libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          key: ${{ matrix.os }}
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
@@ -33,7 +50,11 @@ jobs:
         working-directory: ${{ github.workspace }}
 
   frontend:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       # pnpm version comes from "packageManager" in package.json.

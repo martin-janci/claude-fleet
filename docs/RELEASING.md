@@ -1,9 +1,10 @@
 # Releasing claude-fleet
 
-Releases are cut **manually** with `scripts/release.sh`. GitHub Actions on this
-repo is currently billing-blocked and the former CI release bot never ran,
-so the script is the single source of truth for version bumps and the
-changelog. Never edit the version fields by hand.
+Releases are cut **manually** with `scripts/release.sh`: it is the single
+source of truth for version bumps and the changelog. Never edit the version
+fields by hand. Pushing the tag it creates triggers the
+[GitHub release job](#github-release-job), which builds the desktop bundles
+and attaches them to a draft release for the owner to publish.
 
 ## Steps
 
@@ -35,13 +36,51 @@ changelog. Never edit the version fields by hand.
    git push origin main --follow-tags
    ```
 
-5. Create the GitHub Release from the tag (notes = the CHANGELOG section):
+5. Wait for the `release` workflow to finish (it starts on the tag push), then
+   open the draft release it created, check the attached bundles, paste the
+   CHANGELOG section into the notes if you want them inline, and **Publish**.
+   See [GitHub release job](#github-release-job) below.
 
-   ```bash
-   gh release create v0.3.0 --title "v0.3.0" --notes-from-tag
-   ```
+## GitHub release job
 
-   No binaries are attached — releases are tag + notes only.
+`.github/workflows/release.yml` runs on `push` of any `v*` tag — i.e. the tag
+`scripts/release.sh` creates, pushed in step 4 — and on `workflow_dispatch`
+(pick the tag under "Use workflow from" so the run sees the tag, not `main`).
+
+It uses `tauri-apps/tauri-action` on three runners and attaches every bundle
+to **one draft release** named `claude-fleet vX.Y.Z`:
+
+| Runner | Target | Assets |
+|--------|--------|--------|
+| `macos-latest` | `aarch64-apple-darwin` | `.app` (zipped), `.dmg` |
+| `macos-latest` | `x86_64-apple-darwin` | `.app` (zipped), `.dmg` |
+| `ubuntu-24.04` | native x86_64 | `.AppImage`, `.deb` |
+
+The release is created as a **draft** (`releaseDraft: true`) so nothing is
+visible until the owner reviews the assets and clicks Publish. Publishing
+fires `docs.yml` (`release: published`), which rebuilds the rustdoc site. If a
+leg fails, fix and re-run the workflow from the same tag; tauri-action reuses
+the existing draft and replaces its assets.
+
+### Signing caveat
+
+**Nothing is code-signed or notarized.** There is no Apple Developer ID for
+this project yet, so `release.yml` deliberately contains no signing step
+(ad-hoc signing would only fake provenance). Until that changes:
+
+- macOS: Gatekeeper blocks the downloaded app on first launch. Right-click the
+  app and choose **Open**, or clear the quarantine flag:
+
+  ```bash
+  xattr -d com.apple.quarantine /Applications/claude-fleet.app
+  ```
+
+- Linux: the AppImage and `.deb` are unsigned, which is normal for those
+  formats. Mark the AppImage executable (`chmod +x`) before running it.
+
+When a Developer ID exists, add the `APPLE_*` secrets documented at
+https://v2.tauri.app/distribute/sign/macos/ and pass them via `env:` on the
+`tauri-action` step; nothing else in the workflow needs to change.
 
 ## What the script touches
 
@@ -77,10 +116,9 @@ re-run.
 ## Docs workflow
 
 `.github/workflows/docs.yml` builds rustdoc and deploys it to GitHub Pages on
-`release: published`. It will start running again automatically once Actions
-billing is restored; until then it can be triggered by hand via
-`workflow_dispatch` on the Actions tab (once billing allows) or the rustdoc
-site simply stays at its last published version.
+`release: published` — i.e. when the owner publishes the draft that the
+release job created. It can also be triggered by hand via `workflow_dispatch`
+on the Actions tab.
 
 ## Generated docs
 
