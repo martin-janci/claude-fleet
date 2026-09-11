@@ -193,6 +193,33 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(screen.queryAllByTestId('sess-row')).toHaveLength(1);
   });
 
+  it('selecting a session in a collapsed project expands the project and scrolls the row into view', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-reveal')]);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(await screen.findByTestId('proj-row'));
+    await tick();
+    expect(screen.queryAllByTestId('sess-row')).toHaveLength(0);
+
+    const scrolled: string[] = [];
+    const orig = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push((this as HTMLElement).dataset.sessionId ?? '');
+    };
+    try {
+      // Select from outside the sidebar, as the quick switcher does.
+      const row = get(sessions).find((x) => x.tmux_name === 'dev-reveal')!;
+      selectSession(row);
+      await tick(); await tick(); await Promise.resolve();
+      const rows = screen.queryAllByTestId('sess-row');
+      expect(rows).toHaveLength(1);
+      expect(rows[0].getAttribute('data-session-id')).toBe(String(row.id));
+      expect(scrolled).toContain(String(row.id));
+    } finally {
+      Element.prototype.scrollIntoView = orig;
+    }
+  });
+
   it('clicking a session row selects it in the store', async () => {
     const sess = sessionFor(1, 'dev-foo');
     mockBackend(fakeProjects, [sess]);

@@ -82,6 +82,8 @@ See [control-api.md](control-api.md) for a full reference.
 
 The finish line. Click the row to open the new-session picker, choose a host and project, and start your first Claude Code session running in tmux.
 
+The dialog offers a generated name ("blue sirius") so you never have to invent one — press **🎲** or **Ctrl/⌘+R** to roll another, type over it to use your own, and **Enter** to create. The name becomes the session label, the branch/worktree slug (`blue-sirius`) and the tail of the tmux name (`dev-<owner>-<repo>--blue-sirius`); leave the tmux name empty and fleet picks one. The dialog remembers the host, worktree and type you last used per project.
+
 ---
 
 ## Feature hints
@@ -100,6 +102,7 @@ Manage hints in Settings:
 Once you have at least one session running:
 
 - **Attach** — click a session row to open the live terminal view and watch the session in real time.
+- **Quick switcher (⌘K / ⌘P on macOS, Ctrl+Shift+K / Ctrl+Shift+P on Linux and Windows)** — works even while the terminal has focus; plain Ctrl+K and Ctrl+P still go to the terminal (readline kill-line / previous history). Type any part of a session's name, project, host, branch or status; recently opened sessions come first. **Enter** attaches and reveals the session in the sidebar (its project is expanded and the row scrolled into view), **Ctrl/⌘+Enter** opens the new-session dialog with what you typed as the name, and the "New session in <project>" rows start one for that project.
 - **Send a prompt** — type in the prompt bar to send text to the active session. To send the same prompt to several sessions at once, use the broadcast feature.
 - **Background sessions (⚡)** — sessions marked with ⚡ run without an attached terminal. They continue working while you watch other sessions.
 - **Files, diffs, commit graph, branches** — the sidebar panels give you a read-only view of the repository state on the host where the session is running.
