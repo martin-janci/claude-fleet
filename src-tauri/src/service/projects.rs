@@ -667,4 +667,51 @@ mod tests {
         // Later refreshes keep working.
         refresh_projects(&store).await.unwrap();
     }
+
+    /// Remote hosts' worktree rows (stored by their EnterWorktree hooks) are
+    /// not the local scan's to prune: a local refresh keeps them, even one
+    /// named like a local row, and the local project tree never lists them.
+    #[tokio::test]
+    async fn refresh_projects_never_deletes_remote_worktree_rows() {
+        use crate::projects::test_git::init_repo;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("o").join("app");
+        if !init_repo(&repo) {
+            return; // no git on this box
+        }
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let (pid, remote) = {
+            let s = store.lock().unwrap();
+            let map = serde_json::json!({ "local": tmp.path().to_string_lossy() }).to_string();
+            settings::set(&s, settings::PROJECTS_BASE_PATH, &map).unwrap();
+            let pid = s
+                .upsert_project("o", "app", &canonical(&repo).to_string_lossy())
+                .unwrap();
+            // Same name as the local main row: host-scoped, so no clash.
+            let remote = s
+                .upsert_worktree_on(
+                    "mefistos",
+                    pid,
+                    "main",
+                    "/home/m/projects/github.com/o/app",
+                    None,
+                )
+                .unwrap();
+            (pid, remote)
+        };
+        let rows = refresh_projects(&store).await.unwrap();
+        let row = rows.iter().find(|r| r.project.id == pid).unwrap();
+        assert_eq!(row.worktrees.len(), 1, "only the local main checkout");
+        assert_eq!(row.worktrees[0].host_alias, "local");
+        assert_ne!(row.worktrees[0].id, remote);
+        let s = store.lock().unwrap();
+        let kept = s
+            .get_worktree_row(remote)
+            .unwrap()
+            .expect("the remote row survives the local refresh");
+        assert_eq!(
+            (kept.host_alias.as_str(), kept.name.as_str()),
+            ("mefistos", "main")
+        );
+    }
 }

@@ -49,7 +49,7 @@ function sess(over: Partial<SessionRow> & { id: number }): SessionRow {
 
 const project = {
   project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: 1 },
-  worktrees: [{ id: 11, project_id: 1, name: 'main', path: '/r/cf', branch: 'main' }],
+  worktrees: [{ id: 11, project_id: 1, host_alias: 'local', name: 'main', path: '/r/cf', branch: 'main' }],
 };
 
 const rows = Array.from({ length: 40 }, (_, i) =>

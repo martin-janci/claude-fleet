@@ -38,6 +38,13 @@ pub fn apply_hook(
         {
             apply_worktree_hook(store, payload, caller)
         }
+        // `ExitWorktree { action: "remove" }` deleted the worktree: drop its
+        // row on the caller's host. The `WorktreeRemove` hook EVENT is never
+        // installed: removal fails when its hook leaves the directory behind,
+        // so fleet cannot be (or sit beside) that hook.
+        Some("PostToolUse") if payload.tool_name.as_deref() == Some("ExitWorktree") => {
+            apply_worktree_exit_hook(store, payload, caller)
+        }
         _ => Ok(()),
     }
 }
@@ -234,7 +241,53 @@ pub fn worktree_fields(payload: &HookPayload) -> (Option<String>, Option<String>
     (pick(&PATH_KEYS), pick(&BRANCH_KEYS))
 }
 
-/// Auto-register a worktree Claude Code entered via its `EnterWorktree` tool.
+/// The host a hook's paths live on: the per-host token's host, or `local`
+/// for the master token (desktop / local agent use).
+fn caller_host(caller: &Caller) -> &str {
+    caller.host_alias.as_deref().unwrap_or(LOCAL_HOST)
+}
+
+/// `ExitWorktree` returned. When it REMOVED the worktree
+/// (`tool_input.action == "remove"`), delete that checkout's row on the
+/// caller's host; `keep` leaves the row. The removed path comes from the tool
+/// result ([`worktree_fields`]); without one this is a no-op, as for
+/// EnterWorktree. Sessions still pointing at the row are cleared, since the
+/// directory is gone. Only the caller's own host is touched, so one host's
+/// token can never drop another host's rows.
+fn apply_worktree_exit_hook(
+    store: &Arc<Mutex<Store>>,
+    payload: &HookPayload,
+    caller: &Caller,
+) -> Result<(), IpcError> {
+    let removed = payload
+        .tool_input
+        .as_ref()
+        .and_then(|v| v.get("action"))
+        .and_then(|a| a.as_str())
+        == Some("remove");
+    if !removed {
+        return Ok(());
+    }
+    let (path, _) = worktree_fields(payload);
+    let Some(path) = path else {
+        return Ok(());
+    };
+    validate_worktree_path(&path)?;
+    let host = caller_host(caller);
+    // Local rows are stored canonically; a removed directory resolves
+    // through its nearest existing ancestor.
+    let path = if host == LOCAL_HOST {
+        canonical_str(&path)
+    } else {
+        path
+    };
+    let s = store.lock().map_err(|_| IpcError::lock())?;
+    s.delete_worktrees_at(host, &path).map_err(IpcError::from)?;
+    Ok(())
+}
+
+/// Register a worktree Claude Code entered via its `EnterWorktree` tool, as a
+/// row of the CALLER's host.
 ///
 /// The path must validate ([`validate_worktree_path`]) and belong to a known
 /// project; anything else is `E_VALIDATE` (the handler answers 400) rather
@@ -249,11 +302,9 @@ pub fn worktree_fields(payload: &HookPayload) -> (Option<String>, Option<String>
 ///   machine's `base_path`s say nothing about it. It must resolve to a known
 ///   project's owner/repo under that host's configured projects root and
 ///   layout (`HostPaths`, the matcher reconcile links remote sessions with).
-///   A valid remote hook is accepted but writes no row: `worktrees` rows
-///   mirror the LOCAL checkout's `git worktree list` and have no host
-///   column, so a remote path would overwrite a same-named local row and be
-///   pruned by the next project refresh. A remote session's worktree comes
-///   from its cwd on reconcile (`worktree_key`).
+///   The row is stored for that host only: rows are keyed (project, host,
+///   name), so it never overwrites the local checkout's same-named row, and
+///   the local project refresh never prunes it.
 fn apply_worktree_hook(
     store: &Arc<Mutex<Store>>,
     payload: &HookPayload,
@@ -269,22 +320,30 @@ fn apply_worktree_hook(
         crate::validate::git_ref(b).map_err(|e| IpcError::new("E_VALIDATE", e.message))?;
     }
 
-    if let Some(host) = caller.host_alias.as_deref().filter(|h| *h != LOCAL_HOST) {
+    let host = caller_host(caller);
+    if host != LOCAL_HOST {
         let s = store.lock().map_err(|_| IpcError::lock())?;
         let projects = s.list_projects().map_err(IpcError::from)?;
         let paths = HostPaths::for_host(&s, host);
-        return match crate::service::sessions::find_project_id_for_path(
+        let Some(project_id) = crate::service::sessions::find_project_id_for_path(
             &projects,
             host,
             Path::new(&path),
             &paths,
-        ) {
-            Some(_) => Ok(()),
-            None => Err(IpcError::new(
+        ) else {
+            return Err(IpcError::new(
                 "E_VALIDATE",
                 format!("worktree_path {path} is not under a known project on host {host}"),
-            )),
+            ));
         };
+        let name = Path::new(&path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unnamed")
+            .to_string();
+        s.upsert_worktree_on(host, project_id, &name, &path, branch)
+            .map_err(IpcError::from)?;
+        return Ok(());
     }
 
     // Local: resolve symlinks (off-lock; it is filesystem IO), then validate
@@ -656,6 +715,103 @@ mod tests {
         }
     }
 
+    fn exit_payload(action: &str, path: Option<&str>) -> HookPayload {
+        HookPayload {
+            session_id: Some("s1".into()),
+            hook_event_name: Some("PostToolUse".into()),
+            tool_name: Some("ExitWorktree".into()),
+            tool_input: Some(serde_json::json!({ "action": action })),
+            tool_response: path.map(|p| serde_json::json!({ "worktreePath": p })),
+            cwd: None,
+            transcript_path: None,
+        }
+    }
+
+    #[test]
+    fn exit_worktree_remove_drops_only_the_callers_row() {
+        let store = make_store();
+        let wt = "/home/m/projects/github.com/o/r/.claude/worktrees/feat";
+        let local_row = {
+            let s = store.lock().unwrap();
+            s.upsert_host("mefistos").unwrap();
+            s.upsert_host("other").unwrap();
+            let pid = s
+                .upsert_project("o", "r", "/Users/me/projects/github.com/o/r")
+                .unwrap();
+            s.upsert_worktree_on("mefistos", pid, "feat", wt, None)
+                .unwrap();
+            // Another host reporting the same path, and the local row of the
+            // same name: neither is the caller's.
+            s.upsert_worktree_on("other", pid, "feat", wt, None)
+                .unwrap();
+            s.upsert_worktree(
+                pid,
+                "feat",
+                "/Users/me/projects/github.com/o/r/.claude/worktrees/feat",
+                None,
+            )
+            .unwrap()
+        };
+        let mef = host_caller("mefistos");
+        let on = |host: &str| {
+            store
+                .lock()
+                .unwrap()
+                .list_worktrees_on_host(host)
+                .unwrap()
+                .len()
+        };
+        // `keep` leaves the row; a result without a path is a no-op.
+        apply_hook(&store, &make_ssh(), &exit_payload("keep", Some(wt)), &mef).unwrap();
+        apply_hook(&store, &make_ssh(), &exit_payload("remove", None), &mef).unwrap();
+        assert_eq!(on("mefistos"), 1);
+        // `remove` drops the caller's row, and only that one.
+        apply_hook(&store, &make_ssh(), &exit_payload("remove", Some(wt)), &mef).unwrap();
+        assert_eq!(on("mefistos"), 0);
+        assert_eq!(on("other"), 1);
+        assert!(store
+            .lock()
+            .unwrap()
+            .get_worktree_row(local_row)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn exit_worktree_remove_matches_local_rows_canonically_and_validates() {
+        let store = make_store();
+        let gone = "/home/u/proj/.worktrees/gone";
+        let id = {
+            let s = store.lock().unwrap();
+            let pid = s.upsert_project("o", "r", "/home/u/proj").unwrap();
+            // Local rows hold the canonical path (the directory is removed,
+            // so it resolves through its nearest existing ancestor).
+            s.upsert_worktree(pid, "gone", &canonical_str(gone), None)
+                .unwrap()
+        };
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &exit_payload("remove", Some(gone)),
+            &Caller::master(),
+        )
+        .unwrap();
+        assert!(store
+            .lock()
+            .unwrap()
+            .get_worktree_row(id)
+            .unwrap()
+            .is_none());
+        let err = apply_hook(
+            &store,
+            &make_ssh(),
+            &exit_payload("remove", Some("../../etc")),
+            &host_caller("mefistos"),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "E_VALIDATE");
+    }
+
     #[test]
     fn remote_worktree_hook_is_accepted_by_owner_repo_on_the_callers_host() {
         use crate::service::settings;
@@ -679,13 +835,20 @@ mod tests {
             &mef,
         )
         .unwrap();
-        // Accepted, but no local row is written for a remote path.
-        assert!(store
-            .lock()
-            .unwrap()
-            .list_worktrees_for_project(pid)
-            .unwrap()
-            .is_empty());
+        // Stored as a row of the CALLER's host, never a local one.
+        {
+            let s = store.lock().unwrap();
+            assert!(s.list_worktrees_for_project(pid).unwrap().is_empty());
+            let rows = s.list_worktrees_on_host("mefistos").unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].project_id, pid);
+            assert_eq!(rows[0].name, "feat");
+            assert_eq!(
+                rows[0].path,
+                "/home/m/projects/github.com/o/r/.claude/worktrees/feat"
+            );
+            assert_eq!(rows[0].branch.as_deref(), Some("feat"));
+        }
         // An unknown repo on that host is still refused.
         let err = apply_hook(
             &store,

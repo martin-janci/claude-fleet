@@ -617,6 +617,46 @@ mod tests {
         assert_eq!(project_state(&store, pid, &["alpha", "beta"]), (false, 0));
     }
 
+    /// A session of ANOTHER project pointing at one of this project's
+    /// worktree rows (the old duplicate scan left such references) must not
+    /// make the row delete fail on the foreign key after the transcripts are
+    /// already purged. The reference is cleared; the other session stays.
+    #[tokio::test]
+    async fn purge_project_clears_cross_project_worktree_references() {
+        let store = make_store();
+        let pid = seed_project(&store, &["alpha"]);
+        let other = {
+            let s = store.lock().unwrap();
+            let wt = s.upsert_worktree(pid, "main", "/home/u/p/r", None).unwrap();
+            let other_pid = s.upsert_project("o", "other", "/home/u/p/other").unwrap();
+            s.upsert_session(
+                "dev-other",
+                "alpha",
+                Some(other_pid),
+                Some(wt),
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap()
+        };
+        purge_project_with(
+            purge_args(&["alpha"], "/home/u/p/r", pid),
+            &store,
+            |host, path| async move { Ok(report_for(&host, &path)) },
+        )
+        .await
+        .expect("the purge must not fail on the foreign key");
+        assert_eq!(project_state(&store, pid, &["alpha"]), (false, 1));
+        let s = store.lock().unwrap();
+        let row = s
+            .get_session_by_id(other)
+            .unwrap()
+            .expect("the other project's session stays");
+        assert_eq!(row.worktree_id, None);
+    }
+
     #[tokio::test]
     async fn purge_project_rejects_invalid_or_unknown_hosts_before_purging() {
         let store = make_store();

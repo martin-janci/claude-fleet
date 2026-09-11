@@ -383,25 +383,33 @@ pub fn build_hook_config(port: u16, token: &str) -> String {
         "hooks": {
             "Stop": build_hook_block(port, token, ""),
             "UserPromptSubmit": build_hook_block(port, token, ""),
-            "PostToolUse": build_hook_block(port, token, "EnterWorktree")
+            "PostToolUse": build_hook_block(port, token, WORKTREE_TOOL_MATCHER)
         }
     });
     serde_json::to_string_pretty(&v).unwrap()
 }
 
+/// Matcher of fleet's PostToolUse hook (Claude Code matchers are regexes):
+/// `EnterWorktree` registers a worktree row for the calling host,
+/// `ExitWorktree` with `action: "remove"` drops it. The `WorktreeCreate` /
+/// `WorktreeRemove` hook EVENTS are deliberately never installed: they
+/// replace git's own worktree creation / removal, so an http hook there would
+/// break it on every host.
+pub(crate) const WORKTREE_TOOL_MATCHER: &str = "EnterWorktree|ExitWorktree";
+
 /// The hook events fleet installs, with their matcher. `Stop` is the
 /// completion signal (turn over → idle, `turn_seq` bump), `UserPromptSubmit`
-/// the busy signal (turn starting → working), `PostToolUse(EnterWorktree)`
-/// the worktree auto-registration.
+/// the busy signal (turn starting → working), `PostToolUse(EnterWorktree|
+/// ExitWorktree)` the worktree registration and removal.
 pub(crate) const FLEET_HOOK_EVENTS: &[(&str, &str)] = &[
     ("Stop", ""),
     ("UserPromptSubmit", ""),
-    ("PostToolUse", "EnterWorktree"),
+    ("PostToolUse", WORKTREE_TOOL_MATCHER),
 ];
 
 /// Pure merge: given `existing` (current `~/.claude/settings.json` content,
 /// possibly empty), return new pretty-JSON with fleet's Stop +
-/// UserPromptSubmit + PostToolUse(EnterWorktree) http hooks
+/// UserPromptSubmit + PostToolUse(EnterWorktree|ExitWorktree) http hooks
 /// installed/refreshed.
 ///
 /// Any prior fleet hook entries pointing at the same port URL — the current
@@ -614,7 +622,10 @@ mod tests {
         assert_eq!(h["type"], "http");
         assert!(h["url"].as_str().unwrap().contains("4180"));
         assert_eq!(h["headers"]["Authorization"], "Bearer abc");
-        assert_eq!(v["hooks"]["PostToolUse"][0]["matcher"], "EnterWorktree");
+        assert_eq!(
+            v["hooks"]["PostToolUse"][0]["matcher"],
+            WORKTREE_TOOL_MATCHER
+        );
     }
 
     #[test]
@@ -628,7 +639,7 @@ mod tests {
         assert_eq!(h["url"], "http://127.0.0.1:4180/hook");
         assert_eq!(h["headers"]["Authorization"], "Bearer tok");
         let ptu = v["hooks"]["PostToolUse"].as_array().unwrap();
-        assert_eq!(ptu[0]["matcher"], "EnterWorktree");
+        assert_eq!(ptu[0]["matcher"], WORKTREE_TOOL_MATCHER);
         // The busy signal (Wave 3 Track E) rides the same bearer entry.
         let ups = v["hooks"]["UserPromptSubmit"].as_array().unwrap();
         assert_eq!(ups.len(), 1);
@@ -674,7 +685,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         let ptu = v["hooks"]["PostToolUse"].as_array().unwrap();
         assert_eq!(ptu.len(), 1, "{ptu:?}");
-        assert_eq!(ptu[0]["matcher"], "EnterWorktree");
+        assert_eq!(ptu[0]["matcher"], WORKTREE_TOOL_MATCHER);
         assert!(!out.contains("WorktreeCreate"));
         assert_eq!(
             out,
@@ -704,7 +715,7 @@ mod tests {
         );
         // Fleet's EnterWorktree hook landed.
         assert!(
-            ptu.iter().any(|b| b["matcher"] == "EnterWorktree"),
+            ptu.iter().any(|b| b["matcher"] == WORKTREE_TOOL_MATCHER),
             "fleet EnterWorktree hook must be present: {ptu:?}"
         );
         // Unrelated top-level keys preserved.
@@ -717,7 +728,7 @@ mod tests {
         let ptu2 = v2["hooks"]["PostToolUse"].as_array().unwrap();
         let fleet_count = ptu2
             .iter()
-            .filter(|b| b["matcher"] == "EnterWorktree")
+            .filter(|b| b["matcher"] == WORKTREE_TOOL_MATCHER)
             .count();
         assert_eq!(
             fleet_count, 1,
@@ -730,7 +741,7 @@ mod tests {
         // Token updated on the surviving entry.
         let fleet_hdr = ptu2
             .iter()
-            .find(|b| b["matcher"] == "EnterWorktree")
+            .find(|b| b["matcher"] == WORKTREE_TOOL_MATCHER)
             .unwrap()["hooks"][0]["headers"]["Authorization"]
             .as_str()
             .unwrap();

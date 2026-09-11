@@ -98,6 +98,18 @@ pub async fn delete_worktree(
                     format!("worktree {} not found", args.worktree_id),
                 )
             })?;
+        // A remote host's row names a checkout on that host, reported by its
+        // EnterWorktree hook; the `git -C <local project base>` below would
+        // aim at the wrong filesystem. Its ExitWorktree hook removes it.
+        if wt.host_alias != crate::service::projects::LOCAL_HOST {
+            return Err(IpcError::new(
+                "E_INVALID",
+                format!(
+                    "worktree {} is a checkout on host {}; remove it there (ExitWorktree)",
+                    wt.id, wt.host_alias
+                ),
+            ));
+        }
         if !args.force {
             let occupants = s
                 .alive_sessions_for_worktree(wt.id)
@@ -173,6 +185,37 @@ pub async fn delete_worktree(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A remote host's row (from its EnterWorktree hook) is never removed
+    /// through the local project base: refused before any git runs, row kept.
+    #[tokio::test]
+    async fn delete_worktree_refuses_a_remote_hosts_row() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let id = {
+            let s = store.lock().unwrap();
+            let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+            s.upsert_worktree_on("vps", pid, "feat", "/home/u/r/.worktrees/feat", None)
+                .unwrap()
+        };
+        let ssh = Arc::new(SshClient::new());
+        let err = delete_worktree(
+            DeleteWorktreeArgs {
+                worktree_id: id,
+                force: true,
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+        assert!(store
+            .lock()
+            .unwrap()
+            .get_worktree_row(id)
+            .unwrap()
+            .is_some());
+    }
     use crate::store::Store;
 
     #[test]
