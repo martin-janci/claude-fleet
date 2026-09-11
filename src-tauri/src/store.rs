@@ -89,6 +89,17 @@ fn migration_already_in_schema(conn: &Connection, version: i64) -> rusqlite::Res
             )?;
             Ok(n > 0)
         }
+        // 025 (session usage) adds columns in one transaction; its last
+        // column present means the whole migration is.
+        25 => {
+            let n: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('sessions') \
+                 WHERE name = 'usage_last_msg_usage'",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok(n > 0)
+        }
         _ => Ok(false),
     }
 }
@@ -6206,6 +6217,44 @@ mod tests {
             "vps"
         );
         assert_eq!(s.list_worktrees_for_project(pid).unwrap().len(), 1);
+    }
+
+    /// Rolling the recorded version back re-runs 025 (session usage); it
+    /// must not try to add its columns again, and counted usage survives.
+    #[test]
+    fn migration_025_rerun_is_a_no_op_and_keeps_usage() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("sess", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.apply_usage(
+            id,
+            "local",
+            &UsageDelta {
+                reset: false,
+                totals: UsageTotals {
+                    input_tokens: 9,
+                    cost_micros: 45,
+                    ..Default::default()
+                },
+                model: None,
+                offset: 3,
+                source: "x.jsonl".into(),
+                last_msg_id: None,
+                last_msg_usage: None,
+                now: 86_400,
+            },
+        )
+        .unwrap();
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 25;")
+            .unwrap();
+        s.migrate().expect("re-running 025 is safe");
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.usage.usage_input_tokens, 9);
+        assert_eq!(s.usage_daily_since(0, None).unwrap().len(), 1);
     }
 
     #[test]
