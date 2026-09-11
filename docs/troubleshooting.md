@@ -23,6 +23,7 @@ it.
 | Hosts **offline** right after the laptop wakes | SSH ControlMasters went stale during sleep | Wait one or two reconcile passes, or click **Re-probe**. See [after sleep / wake](#after-laptop-sleep--wake). |
 | Sidebar looks **stale** | Cache-first `list_sessions` inside the reconcile interval | Click **Refresh** (forced pass). See [reconcile tick](#the-reconcile-tick-reconcileinterval_secs-and-refresh). |
 | Need logs / reporting a bug | n/a | **Settings → Diagnostics → Copy diagnostics**; logs under `<app data>/logs/`. See [Logs](#logs-where-they-live-and-how-to-raise-verbosity). |
+| Session's **worktree directory vanished** (git errors in the pane, `cd: no such directory`, new panes fail) | The worktree was deleted, pruned, or moved on disk while the fleet row (and possibly the tmux session) survived | Click **Repair workspace** in the session details (or call the `repair_session` tool). It also runs automatically on create, restart, recreate and attach. (`E_REPO_MISSING`, `E_BRANCH_CHECKED_OUT`, `E_WORKSPACE_LOCKED`, `E_REPAIR_FAILED`) |
 | *(Developers)* `Failed to resolve import "@tauri-apps/plugin-clipboard-manager"` in `App.test.ts` / `clipboard_native.test.ts` | Stale `node_modules` after pulling | Run `pnpm install --frozen-lockfile` (pnpm 10; `corepack pnpm@10 install --frozen-lockfile` if your pnpm is older), then re-run `pnpm test`. `localStorage` is polyfilled in `vitest.setup.ts`, so a missing-`localStorage` failure is not expected. |
 
 ---
@@ -227,6 +228,52 @@ Tokens are never included. The master token and every per-host token are
 masked even when they show up in a log line or error message. Hostnames, SSH
 aliases and file paths **are** included, so read the bundle before you post
 it publicly.
+### Repairing a session whose directory vanished
+
+A session row can outlive its directory: someone ran `git worktree remove`
+or `rm -rf` on the worktree, a cleanup job pruned it, the checkout was moved
+to the other layout (`.worktrees/` vs `.claude/worktrees/`), or the branch was
+deleted after a merge. The tmux pane then sits in a deleted inode — git
+commands fail, `cd` errors, new windows cannot start — and a plain Recreate
+or Restart would rebuild the session at the repo root.
+
+Every lifecycle entry point now runs a self-repair first (new session on an
+existing worktree row, Restart, Recreate, and the terminal attach), and
+**Repair workspace** in the session details runs it on demand. One probe
+script inspects the host; a healthy workspace is a no-op. Otherwise the
+minimal fix is applied, in order:
+
+1. `git worktree prune` when the registration is stale;
+2. `git worktree add` on the session's branch — checking out the local
+   branch, tracking `origin/<branch>` when only the remote has it (after a
+   `git fetch origin <branch>`), or, when the branch is gone everywhere,
+   creating it fresh from the project's base branch (recorded on the session
+   timeline as `branch_from_base:<start>`);
+3. `git worktree repair` when the directory exists but its `.git` link is
+   stale;
+4. adopting the existing checkout when the branch is already checked out in
+   another linked worktree (the row's path is corrected);
+5. `tmux respawn-pane -k -c <dir>` for a pane whose cwd is gone, or
+   `tmux new-session -c <dir>` when the tmux session itself is gone.
+
+Each run that changed something appends a `workspace_repaired` event (with
+the actions) to the session timeline; a refused or failed repair appends
+`workspace_repair_failed`. The repair never deletes files and never ghosts
+or removes the session row.
+
+Cases that are reported rather than fixed:
+
+- `E_REPO_MISSING` — the project's main checkout is missing or is not a git
+  repository. It is never faked with `mkdir`; restore or re-clone it (a new
+  session on a remote host clones automatically).
+- `E_BRANCH_CHECKED_OUT` — the worktree's branch is checked out in the main
+  checkout. Switch the main checkout to another branch, then repair again.
+- `E_WORKSPACE_LOCKED` — the worktree is `git worktree lock`ed and its
+  directory is gone. Run `git worktree unlock <path>` if the lock is stale.
+- `E_REPAIR_FAILED` — a git step failed (permissions, disk full: the message
+  carries git's stderr), the result did not verify, or the directory exists,
+  is not empty and is not a worktree (move it aside; it is never deleted).
+- `E_HOST_OFFLINE` — the host could not be reached; nothing was changed.
 
 ### Releases and tags
 

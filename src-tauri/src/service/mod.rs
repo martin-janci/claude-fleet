@@ -23,6 +23,7 @@ pub mod pane_intel;
 pub mod playbooks;
 pub mod projects;
 pub mod provision;
+pub mod repair;
 pub mod safe_kill;
 pub mod sessions;
 pub mod settings;

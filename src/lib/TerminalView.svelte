@@ -10,7 +10,8 @@
   import { nativeWriteText, nativeReadText } from './clipboard_native';
   import { hintAnchor } from './hints';
   import { toIpcError } from './result';
-  import { pushError } from './toasts';
+  import { push, pushError } from './toasts';
+  import { repairSession } from './sessions';
   import { keyToBytes, detectMac } from './terminal_keys';
   import { copyOnSelect } from './prefs';
   import { get } from 'svelte/store';
@@ -518,6 +519,23 @@
       resizeTimer = setTimeout(applyResize, RESIZE_DEBOUNCE_MS);
     });
     resizeObserver.observe(container);
+
+    // Self-repair before attach: if the session's worktree directory or the
+    // pane's cwd vanished — or the tmux session itself is gone — bring it
+    // back so the attach lands in a working checkout instead of a dead
+    // inode. A healthy session costs one probe; orphans and background rows
+    // have nothing to repair. An offline host is left to the attach error.
+    if (sess.project_id != null && sess.kind !== 'bg') {
+      const rep = await repairSession(sess.id);
+      if (rep.ok) {
+        const actions = rep.value?.actions ?? [];
+        if (actions.length > 0) {
+          push({ kind: 'info', message: `Repaired workspace for ${sess.tmux_name}: ${actions.join('; ')}` });
+        }
+      } else if (rep.error.code !== 'E_HOST_OFFLINE') {
+        pushError(rep.error, 'Workspace check failed');
+      }
+    }
 
     try {
       await invoke('pty_open', {

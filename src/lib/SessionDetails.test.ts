@@ -117,6 +117,36 @@ describe('SessionDetails', () => {
     expect(screen.queryByTestId('related-sessions')).toBeNull();
   });
 
+  it('shows Repair workspace only for project-backed, non-bg sessions and reports the outcome', async () => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const { toasts, clearToasts } = await import('./toasts');
+    const { get } = await import('svelte/store');
+    clearToasts();
+    // Orphan (no project): nothing to repair, no button.
+    render(SessionDetails, { props: { session: { ...sampleSession, project_id: null } } });
+    await tick();
+    expect(screen.queryByTestId('repair-from-details')).toBeNull();
+    // Project-backed work session: button present; click → repair_session(id) → toast.
+    (invoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      session_id: 7, host_alias: 'mefistos', tmux_name: 'dev-foo', cwd: '/r/.worktrees/x',
+      healthy: false, actions: ['git worktree prune', 'tmux respawn-pane -k -c /r/.worktrees/x'],
+      warnings: [], branch_source: 'branch_local', tmux: 'respawned', tmux_alive: true,
+      tmux_cwd_stale: false, worktree_row_updated: false, sibling_session_ids: [],
+    });
+    render(SessionDetails, { props: { session: { ...sampleSession, id: 7, project_id: 1 } } });
+    await tick();
+    const btn = await screen.findByTestId('repair-from-details');
+    btn.click();
+    await tick();
+    await tick();
+    expect((invoke as ReturnType<typeof vi.fn>).mock.calls).toContainEqual([
+      'repair_session',
+      { args: { session_id: 7 } },
+    ]);
+    const shown = get(toasts);
+    expect(shown.some((t) => t.kind === 'success' && t.message.includes('git worktree prune'))).toBe(true);
+  });
+
   it('shows the Review button', async () => {
     sessions.set([sampleSession]);
     render(SessionDetails, { props: { session: sampleSession } });

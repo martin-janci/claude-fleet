@@ -171,6 +171,12 @@ Rename a tmux session on a host. Returns the updated session row as JSON. Addres
 
 Parameters: `host_alias`, `new_name`, `old_name`, `session_id`
 
+### `repair_session`
+
+Repair a session's workspace: make its directory a healthy git worktree on its branch and its tmux session run there. Prunes stale registrations, re-adds a deleted worktree (fetching the branch, or recreating it from the project's base branch when it was deleted everywhere), adopts a checkout that moved, recreates a dead tmux session and respawns a pane whose cwd vanished. No-op on a healthy session. Returns a JSON RepairReport: cwd, healthy, actions (in order), warnings, branch_source, tmux (created|respawned), sibling_session_ids. Errors: E_REPO_MISSING (main checkout gone — never faked with mkdir), E_BRANCH_CHECKED_OUT, E_WORKSPACE_LOCKED, E_REPAIR_FAILED, E_HOST_OFFLINE.
+
+Parameters: `host_alias`, `name`, `session_id`
+
 ### `repo_branches`
 
 List local + remote branches for a session's worktree with ahead/behind. Returns JSON array.
@@ -291,6 +297,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::discard_kill_session`
 - `commands::worktrees::list_worktrees`
 - `commands::worktrees::delete_worktree`
+- `commands::sessions::repair_session`
 - `commands::sessions::rename_session`
 - `commands::sessions::set_session_friendly_name`
 - `commands::sessions::restart_session`

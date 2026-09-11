@@ -24,6 +24,18 @@ pub trait TmuxExec: Send + Sync {
     async fn kill_session(&self, name: &str) -> Result<(), IpcError>;
     async fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError>;
     async fn restart_session(&self, name: &str, pane_cmd: &str) -> Result<(), IpcError>;
+    /// `restart_session` with an explicit start directory (`respawn-pane -k
+    /// -c <cwd>`), for a pane whose cwd was deleted or recreated. The default
+    /// ignores `cwd` so test doubles need not implement it.
+    async fn respawn_pane_in(
+        &self,
+        name: &str,
+        cwd: &std::path::Path,
+        pane_cmd: &str,
+    ) -> Result<(), IpcError> {
+        let _ = cwd;
+        self.restart_session(name, pane_cmd).await
+    }
     async fn capture_pane(&self, name: &str) -> Result<String, IpcError>;
     /// Capture the pane plus `lines` rows of scrollback history.
     async fn capture_pane_scrollback(&self, name: &str, lines: u32) -> Result<String, IpcError>;
@@ -56,6 +68,14 @@ impl TmuxExec for LocalTmux {
     }
     async fn restart_session(&self, name: &str, pane_cmd: &str) -> Result<(), IpcError> {
         restart_session(name, pane_cmd).await
+    }
+    async fn respawn_pane_in(
+        &self,
+        name: &str,
+        cwd: &std::path::Path,
+        pane_cmd: &str,
+    ) -> Result<(), IpcError> {
+        respawn_pane_in(name, cwd, pane_cmd).await
     }
     async fn capture_pane(&self, name: &str) -> Result<String, IpcError> {
         let output = tokio::process::Command::new("tmux")
@@ -230,6 +250,24 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             quote(name),
             quote(pane_cmd)
         );
+        let output = self.remote_bash(&script).await?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(IpcError::new(
+                "E_TMUX",
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ))
+        }
+    }
+
+    async fn respawn_pane_in(
+        &self,
+        name: &str,
+        cwd: &std::path::Path,
+        pane_cmd: &str,
+    ) -> Result<(), IpcError> {
+        let script = respawn_pane_in_script(name, cwd, pane_cmd);
         let output = self.remote_bash(&script).await?;
         if output.status.success() {
             Ok(())
@@ -488,6 +526,45 @@ pub async fn restart_session(name: &str, pane_cmd: &str) -> Result<(), IpcError>
     }
 }
 
+/// The remote form of [`respawn_pane_in`]: one shell word per argument.
+pub(crate) fn respawn_pane_in_script(name: &str, cwd: &std::path::Path, pane_cmd: &str) -> String {
+    format!(
+        "tmux respawn-pane -k -c {} -t {}: {}",
+        quote(&cwd.to_string_lossy()),
+        quote(name),
+        quote(pane_cmd)
+    )
+}
+
+/// `restart_session` with an explicit start directory. Used by the workspace
+/// repair path when the pane's cwd was deleted (or just recreated under it —
+/// a process keeps the dead inode as its cwd until it is respawned).
+pub async fn respawn_pane_in(
+    name: &str,
+    cwd: &std::path::Path,
+    pane_cmd: &str,
+) -> Result<(), IpcError> {
+    let output = tokio::process::Command::new("tmux")
+        .args([
+            "respawn-pane",
+            "-k",
+            "-c",
+            &cwd.to_string_lossy(),
+            "-t",
+            &format!("{name}:"),
+            pane_cmd,
+        ])
+        .output()
+        .await
+        .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Err(IpcError::new("E_TMUX", stderr.trim()))
+    }
+}
+
 pub async fn kill_session(name: &str) -> Result<(), IpcError> {
     let output = tokio::process::Command::new("tmux")
         .args(["kill-session", "-t", name])
@@ -622,6 +699,19 @@ mod tests {
         );
         assert!(cmd.contains("|| cl;"), "bare fallback missing: {cmd}");
         assert!(cmd.contains("exec ${SHELL"), "got: {cmd}");
+    }
+
+    #[test]
+    fn respawn_pane_in_script_quotes_cwd_name_and_command() {
+        let s = respawn_pane_in_script(
+            "dev-x",
+            std::path::Path::new("/re po/it's"),
+            "cl; exec $SHELL",
+        );
+        assert_eq!(
+            s,
+            "tmux respawn-pane -k -c '/re po/it'\\''s' -t 'dev-x': 'cl; exec $SHELL'"
+        );
     }
 
     #[test]

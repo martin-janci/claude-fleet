@@ -2354,6 +2354,74 @@ impl FleetTools {
         .map_err(to_mcp_err)?;
         ok_json(&res)
     }
+
+    // ---- workspace repair ----
+
+    #[tool(description = "Repair a session's workspace: make its directory a \
+        healthy git worktree on its branch and its tmux session run there. \
+        Prunes stale registrations, re-adds a deleted worktree (fetching the \
+        branch, or recreating it from the project's base branch when it was \
+        deleted everywhere), adopts a checkout that moved, recreates a dead \
+        tmux session and respawns a pane whose cwd vanished. No-op on a healthy \
+        session. Returns a JSON RepairReport: cwd, healthy, actions (in order), \
+        warnings, branch_source, tmux (created|respawned), sibling_session_ids. \
+        Errors: E_REPO_MISSING (main checkout gone — never faked with mkdir), \
+        E_BRANCH_CHECKED_OUT, E_WORKSPACE_LOCKED, E_REPAIR_FAILED, E_HOST_OFFLINE.")]
+    async fn repair_session(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<RepairSessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "repair_session",
+            &format!(
+                "session_id={:?} host={:?} name={:?}",
+                p.session_id, p.host_alias, p.name
+            ),
+        );
+        // Mutating tool (not in READONLY_TOOLS): resolve + host-bind the
+        // target like restart_session, then repair by the resolved row's id.
+        let (host_alias, name) = self.resolve_target(
+            &caller,
+            p.session_id,
+            p.host_alias.as_deref(),
+            p.name.as_deref(),
+            "the session to repair",
+        )?;
+        let id = {
+            let s = self
+                .store
+                .lock()
+                .map_err(|_| to_mcp_err(IpcError::lock()))?;
+            s.get_session(&name, &host_alias)
+                .map_err(|e| to_mcp_err(IpcError::from(e)))?
+                .map(|r| r.id)
+                .ok_or_else(|| {
+                    to_mcp_err(IpcError::new(
+                        "E_NOTFOUND",
+                        format!("session {name} on {host_alias} not found"),
+                    ))
+                })?
+        };
+        let rep = crate::service::repair::repair_session(id, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&rep)
+    }
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RepairSessionParams {
+    /// Fleet session id (from list_sessions / whoami). Alternative to
+    /// host_alias + name.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// Host alias the session lives on (with `name`).
+    #[serde(default)]
+    pub host_alias: Option<String>,
+    /// tmux session name to repair (with `host_alias`).
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// Hand-written (not `#[tool_handler]`) so every call passes through one

@@ -5,6 +5,7 @@
     killSession,
     renameSession,
     restartSession,
+    repairSession,
     recreateSession,
     safeKillSession,
     inspectSafeKill,
@@ -147,6 +148,34 @@
   async function onRestart() {
     const r = await restartSession(session.host_alias, session.tmux_name);
     if (!r.ok) pushError(r.error, 'Restart failed');
+  }
+
+  // Make the worktree directory + tmux pane healthy again (deleted dir,
+  // pruned registration, moved checkout, dead tmux). The backend emits the
+  // row events; the toast just says what it did.
+  let repairing = $state(false);
+  async function onRepair() {
+    if (repairing) return;
+    repairing = true;
+    const r = await repairSession(session.id);
+    repairing = false;
+    if (!r.ok) {
+      pushError(r.error, 'Repair failed');
+      return;
+    }
+    const rep = r.value;
+    if (rep.actions.length === 0) {
+      push({ kind: 'success', message: `Workspace is healthy: ${rep.cwd}` });
+      return;
+    }
+    push({ kind: 'success', message: `Repaired workspace: ${rep.actions.join('; ')}` });
+    if (rep.tmux === 'created') {
+      // A recreated tmux session needs a fresh attach (same tmux_name, so
+      // the selection effect would not fire on its own).
+      selectSession(null);
+      await tick();
+      selectSession(session);
+    }
   }
 
   let composerOpen = $state(false);
@@ -451,6 +480,17 @@
     <button class="ghost" onclick={onRestart} data-testid="restart-from-details">
       ↻ Restart
     </button>
+    {#if session.kind !== 'bg' && session.project_id !== null}
+      <button
+        class="ghost"
+        onclick={onRepair}
+        disabled={repairing}
+        title="Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it"
+        data-testid="repair-from-details"
+      >
+        🩹 Repair workspace
+      </button>
+    {/if}
     {#if session.kind !== 'shell'}
       <button class="ghost" onclick={openComposer} data-testid="send-prompt-from-details">
         → Send prompt

@@ -192,6 +192,39 @@ export async function restartSession(hostAlias: string, name: string): Promise<R
   return r;
 }
 
+/** What `repair_session` found and did (mirrors `service::repair::RepairReport`). */
+export interface RepairReport {
+  session_id: number | null;
+  host_alias: string;
+  tmux_name: string;
+  /** Project root the repair resolved on the host (shows which base path / setting was used). */
+  project_root: string;
+  /** The verified directory the pane runs in. */
+  cwd: string;
+  /** True when nothing needed doing. */
+  healthy: boolean;
+  /** Ordered, human-readable actions that were applied. */
+  actions: string[];
+  warnings: string[];
+  /** `branch_local` | `branch_remote` | `branch_from_base:<start>` when a worktree was (re)created. */
+  branch_source: string | null;
+  /** `created` | `respawned` when tmux was touched. */
+  tmux: string | null;
+  tmux_alive: boolean;
+  tmux_cwd_stale: boolean;
+  worktree_row_updated: boolean;
+  /** Alive sessions on the same host sharing this workspace. */
+  sibling_session_ids: number[];
+}
+
+/** Make the session's directory a healthy git worktree on its branch and its
+ *  tmux session run there (recreating tmux when it is gone). A no-op on a
+ *  healthy session; the backend emits the row events for anything it fixed,
+ *  so nothing is merged here. */
+export async function repairSession(sessionId: number): Promise<Result<RepairReport>> {
+  return invokeCmd<RepairReport>('repair_session', { args: { session_id: sessionId } });
+}
+
 export interface NewSessionArgs {
   host_alias: string;
   project_id: number;
