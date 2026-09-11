@@ -3,6 +3,8 @@ mod claude_agents;
 mod claude_cli;
 mod commands;
 mod events;
+#[cfg(test)]
+mod fleet_e2e_tests;
 mod humanize;
 mod ipc_error;
 mod mcp;
@@ -12,6 +14,8 @@ mod service;
 mod shell;
 mod ssh;
 mod ssh_config;
+#[cfg(test)]
+mod ssh_fake;
 mod store;
 mod tmux;
 mod validate;

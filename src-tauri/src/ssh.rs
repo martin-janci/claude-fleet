@@ -33,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 const DEFAULT_WALL_CLOCK_FLOOR: Duration = Duration::from_secs(30);
 /// Wall-clock bound for `upload_file`: a large file over a slow link needs
 /// far more than a probe, but it still must not hang forever.
-const UPLOAD_WALL_CLOCK: Duration = Duration::from_secs(300);
+pub(crate) const UPLOAD_WALL_CLOCK: Duration = Duration::from_secs(300);
 /// Bound on each of the two best-effort control requests issued after a
 /// wall-clock timeout (`ssh -O check`, then `ssh -O exit` if needed). A
 /// timed-out call can therefore take up to `wall_clock + 2 × this` before it
@@ -110,22 +110,7 @@ impl SshClient {
         let out = self
             .run(host, &["printenv", "HOME"], Duration::from_secs(5))
             .await?;
-        if !out.status.success() {
-            return Err(IpcError::new(
-                "E_SSH",
-                format!(
-                    "couldn't read $HOME on {host}: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ),
-            ));
-        }
-        let home = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if home.is_empty() {
-            return Err(IpcError::new(
-                "E_SSH",
-                format!("remote $HOME on {host} is empty"),
-            ));
-        }
+        let home = home_from_output(host, &out)?;
         self.inner.homes.insert(host.to_string(), home.clone());
         Ok(home)
     }
@@ -393,14 +378,7 @@ impl SshClient {
                 // This call no longer counts as live on the host.
                 drop(in_flight);
                 let reset = self.maybe_reset_master(host).await;
-                Err(IpcError::new(
-                    "E_SSH_TIMEOUT",
-                    format!(
-                        "ssh {host}: command exceeded {}s wall clock{}",
-                        wall_clock.as_secs(),
-                        if reset { "; connection reset" } else { "" }
-                    ),
-                ))
+                Err(wall_clock_error(host, wall_clock, reset))
             }
             status = child.wait() => {
                 let status = status
@@ -548,6 +526,340 @@ impl SshClient {
 impl Default for SshClient {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The transport the service layer talks to a host through. `SshClient` is
+/// the production implementation (ControlMaster-multiplexed `ssh`);
+/// tests use `LocalExec` (the same argv through a local `bash -c`) and a
+/// scripted `FakeSsh`, which records every call and answers from canned
+/// replies. Services take `&dyn SshExec` so all three are interchangeable.
+///
+/// Semantics every implementation must keep, because the callers rely on
+/// them:
+///
+/// - `run` / `run_cancellable` return `Ok(Output)` for ANY exit status — an
+///   unreachable host is ssh exiting 255 with its message on stderr, not an
+///   `Err`. `Err` is reserved for spawn failures (`E_SSH`), the wall-clock
+///   bound (`E_SSH_TIMEOUT`) and cancellation (`E_CANCELLED`).
+/// - `args` are space-joined and re-tokenised by the remote login shell, so
+///   a multi-word script must already be `shell::quote`d by the caller.
+/// - `upload_file` streams the local file over stdin into `cat > <path>` and
+///   fails with `E_UPLOAD` on a non-zero exit.
+/// - `remote_home` resolves `$HOME` on the host (`E_SSH` if it cannot).
+#[async_trait::async_trait]
+pub trait SshExec: Send + Sync {
+    async fn run(&self, host: &str, args: &[&str], timeout: Duration) -> Result<Output, IpcError>;
+
+    async fn run_cancellable(
+        &self,
+        host: &str,
+        args: &[&str],
+        timeout: Duration,
+        token: CancellationToken,
+    ) -> Result<Output, IpcError>;
+
+    async fn upload_file(
+        &self,
+        host: &str,
+        local_path: &Path,
+        remote_path: &str,
+        timeout: Duration,
+    ) -> Result<(), IpcError>;
+
+    async fn remote_home(&self, host: &str) -> Result<String, IpcError>;
+}
+
+// The inherent methods stay (so `Arc<SshClient>` callers in `commands/`,
+// `mcp/` and `pty.rs` need no trait import); the trait impl just forwards.
+#[async_trait::async_trait]
+impl SshExec for SshClient {
+    async fn run(&self, host: &str, args: &[&str], timeout: Duration) -> Result<Output, IpcError> {
+        SshClient::run(self, host, args, timeout).await
+    }
+
+    async fn run_cancellable(
+        &self,
+        host: &str,
+        args: &[&str],
+        timeout: Duration,
+        token: CancellationToken,
+    ) -> Result<Output, IpcError> {
+        SshClient::run_cancellable(self, host, args, timeout, token).await
+    }
+
+    async fn upload_file(
+        &self,
+        host: &str,
+        local_path: &Path,
+        remote_path: &str,
+        timeout: Duration,
+    ) -> Result<(), IpcError> {
+        SshClient::upload_file(self, host, local_path, remote_path, timeout).await
+    }
+
+    async fn remote_home(&self, host: &str) -> Result<String, IpcError> {
+        SshClient::remote_home(self, host).await
+    }
+}
+
+/// `Arc<T>` forwards to `T`, so a `&Arc<SshClient>` (the Tauri state and the
+/// MCP `FleetTools` field) unsizes straight to `&dyn SshExec` at the call
+/// boundary, and an `Arc<dyn SshExec>` is itself an `SshExec`.
+#[async_trait::async_trait]
+impl<T: SshExec + ?Sized> SshExec for Arc<T> {
+    async fn run(&self, host: &str, args: &[&str], timeout: Duration) -> Result<Output, IpcError> {
+        (**self).run(host, args, timeout).await
+    }
+
+    async fn run_cancellable(
+        &self,
+        host: &str,
+        args: &[&str],
+        timeout: Duration,
+        token: CancellationToken,
+    ) -> Result<Output, IpcError> {
+        (**self).run_cancellable(host, args, timeout, token).await
+    }
+
+    async fn upload_file(
+        &self,
+        host: &str,
+        local_path: &Path,
+        remote_path: &str,
+        timeout: Duration,
+    ) -> Result<(), IpcError> {
+        (**self)
+            .upload_file(host, local_path, remote_path, timeout)
+            .await
+    }
+
+    async fn remote_home(&self, host: &str) -> Result<String, IpcError> {
+        (**self).remote_home(host).await
+    }
+}
+
+/// Parse a `printenv HOME` round-trip into the home directory. Shared by
+/// every `SshExec` implementation so they agree on the error shape.
+pub(crate) fn home_from_output(host: &str, out: &Output) -> Result<String, IpcError> {
+    if !out.status.success() {
+        return Err(IpcError::new(
+            "E_SSH",
+            format!(
+                "couldn't read $HOME on {host}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        ));
+    }
+    let home = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if home.is_empty() {
+        return Err(IpcError::new(
+            "E_SSH",
+            format!("remote $HOME on {host} is empty"),
+        ));
+    }
+    Ok(home)
+}
+
+/// The `E_SSH_TIMEOUT` every `SshExec` returns when a command outlives its
+/// wall clock. `reset` records whether the ControlMaster was torn down.
+pub(crate) fn wall_clock_error(host: &str, wall_clock: Duration, reset: bool) -> IpcError {
+    IpcError::new(
+        "E_SSH_TIMEOUT",
+        format!(
+            "ssh {host}: command exceeded {}s wall clock{}",
+            wall_clock.as_secs(),
+            if reset { "; connection reset" } else { "" }
+        ),
+    )
+}
+
+/// `SshExec` over the local machine: the argv is space-joined exactly as ssh
+/// would join it and handed to `bash -c`, so the same re-tokenisation the
+/// remote login shell performs happens here too (a script that is not
+/// `quote`d breaks identically on both). `upload_file` is `cat > <path>` fed
+/// from the local file. No ControlMaster, no keepalives — the only failure
+/// modes are a missing `bash`, a non-zero exit, and the wall clock.
+///
+/// Used by the opt-in `tmux_roundtrip` integration test to drive the real
+/// `RemoteTmux` command builder against a private local tmux server.
+///
+/// Test-only on purpose: production `local` commands go through `LocalTmux`,
+/// which execs tmux with a plain argv and never involves a shell. Routing
+/// them through `bash -c` would widen the shell-injection surface.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub struct LocalExec {
+    /// Extra environment for every spawned `bash` (e.g. `TMUX_TMPDIR` to
+    /// point tmux at a private server).
+    env: Vec<(String, String)>,
+    /// Variables removed from every spawned `bash` (e.g. `TMUX`, which
+    /// would otherwise make tmux target the server this process runs in).
+    env_remove: Vec<String>,
+}
+
+#[cfg(test)]
+impl LocalExec {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_env(mut self, key: &str, value: &str) -> Self {
+        self.env.push((key.to_string(), value.to_string()));
+        self
+    }
+
+    pub fn without_env(mut self, key: &str) -> Self {
+        self.env_remove.push(key.to_string());
+        self
+    }
+
+    fn command(&self, args: &[&str]) -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c").arg(args.join(" "));
+        for k in &self.env_remove {
+            cmd.env_remove(k);
+        }
+        for (k, v) in &self.env {
+            cmd.env(k, v);
+        }
+        cmd
+    }
+
+    async fn bounded(
+        &self,
+        host: &str,
+        mut cmd: tokio::process::Command,
+        wall_clock: Duration,
+        token: Option<CancellationToken>,
+        spawn_code: &str,
+    ) -> Result<Output, IpcError> {
+        // Same shape as `SshClient::run_child`: drain the pipes off to the
+        // side, race exit / wall clock / cancel, and kill + reap on the two
+        // early exits so no zombie is left behind.
+        let mut child = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| IpcError::new(spawn_code, format!("bash spawn ({host}): {e}")))?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let stdout_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut s) = stdout {
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut s, &mut buf).await;
+            }
+            buf
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut s) = stderr {
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut s, &mut buf).await;
+            }
+            buf
+        });
+        let cancelled = async {
+            match token {
+                Some(t) => t.cancelled().await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        let kill_and_reap = |mut child: tokio::process::Child| async move {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        };
+        tokio::select! {
+            biased;
+            _ = cancelled => {
+                kill_and_reap(child).await;
+                stdout_task.abort();
+                stderr_task.abort();
+                Err(IpcError::new("E_CANCELLED", format!("ssh {host} cancelled")))
+            }
+            _ = tokio::time::sleep(wall_clock) => {
+                kill_and_reap(child).await;
+                stdout_task.abort();
+                stderr_task.abort();
+                Err(wall_clock_error(host, wall_clock, false))
+            }
+            status = child.wait() => {
+                let status = status
+                    .map_err(|e| IpcError::new(spawn_code, format!("bash wait ({host}): {e}")))?;
+                let stdout = stdout_task.await.unwrap_or_default();
+                let stderr = stderr_task.await.unwrap_or_default();
+                Ok(Output { status, stdout, stderr })
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl SshExec for LocalExec {
+    async fn run(&self, host: &str, args: &[&str], timeout: Duration) -> Result<Output, IpcError> {
+        let cmd = self.command(args);
+        self.bounded(
+            host,
+            cmd,
+            SshClient::default_wall_clock(timeout),
+            None,
+            "E_SSH",
+        )
+        .await
+    }
+
+    async fn run_cancellable(
+        &self,
+        host: &str,
+        args: &[&str],
+        timeout: Duration,
+        token: CancellationToken,
+    ) -> Result<Output, IpcError> {
+        let cmd = self.command(args);
+        self.bounded(
+            host,
+            cmd,
+            SshClient::default_wall_clock(timeout),
+            Some(token),
+            "E_SSH",
+        )
+        .await
+    }
+
+    async fn upload_file(
+        &self,
+        host: &str,
+        local_path: &Path,
+        remote_path: &str,
+        _timeout: Duration,
+    ) -> Result<(), IpcError> {
+        let file = std::fs::File::open(local_path).map_err(|e| {
+            IpcError::new("E_UPLOAD", format!("open {}: {e}", local_path.display()))
+        })?;
+        let remote_cmd = format!("cat > {}", crate::shell::quote(remote_path));
+        let mut cmd = self.command(&[remote_cmd.as_str()]);
+        cmd.stdin(std::process::Stdio::from(file));
+        let out = self
+            .bounded(host, cmd, UPLOAD_WALL_CLOCK, None, "E_UPLOAD")
+            .await?;
+        if !out.status.success() {
+            return Err(IpcError::new(
+                "E_UPLOAD",
+                format!(
+                    "upload to {host} failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn remote_home(&self, host: &str) -> Result<String, IpcError> {
+        let out = self
+            .run(host, &["printenv", "HOME"], Duration::from_secs(5))
+            .await?;
+        home_from_output(host, &out)
     }
 }
 

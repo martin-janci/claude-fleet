@@ -1,11 +1,11 @@
 //! Service layer for SSH host management — transport-agnostic logic over
-//! `store.rs` helpers plus `ssh_config.rs` (discovery) and `ssh::SshClient`
+//! `store.rs` helpers plus `ssh_config.rs` (discovery) and any `ssh::SshExec`
 //! (probing). Called by both the Tauri command wrappers and the MCP server.
 
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::IpcError;
 use crate::shell::quote;
-use crate::ssh::SshClient;
+use crate::ssh::SshExec;
 use crate::ssh_config::{self, SshHost};
 use crate::store::{HostRow, Store};
 use serde::Deserialize;
@@ -40,7 +40,7 @@ pub struct AddHostArgs {
 pub async fn add_host(
     args: AddHostArgs,
     store: &Mutex<Store>,
-    ssh: &Arc<SshClient>,
+    ssh: &dyn SshExec,
 ) -> Result<HostRow, IpcError> {
     // Reject hostile aliases (e.g. `-oProxyCommand=…`) before they reach ssh.
     crate::validate::host_alias(&args.alias)?;
@@ -76,7 +76,7 @@ pub async fn add_host(
 /// Preview-only probe used by AddHostPicker before the user confirms `Add`.
 /// Does NOT persist anything; just runs the strict probe and returns versions
 /// + the detected account so the picker can show it for confirmation.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Debug)]
 pub struct ProbePreview {
     pub reachable: bool,
     pub claude_version: Option<String>,
@@ -92,7 +92,7 @@ pub struct ProbeSshAliasArgs {
 
 pub async fn probe_ssh_alias(
     args: ProbeSshAliasArgs,
-    ssh: &Arc<SshClient>,
+    ssh: &dyn SshExec,
     reg: &Arc<CancellationRegistry>,
 ) -> Result<ProbePreview, IpcError> {
     crate::validate::host_alias(&args.ssh_alias)?;
@@ -127,7 +127,7 @@ pub struct HostAliasArgs {
 pub async fn probe_host(
     args: HostAliasArgs,
     store: &Mutex<Store>,
-    ssh: &Arc<SshClient>,
+    ssh: &dyn SshExec,
     reg: &Arc<CancellationRegistry>,
 ) -> Result<HostRow, IpcError> {
     let ssh_alias = {
@@ -225,7 +225,7 @@ fn list_one(store: &Mutex<Store>, alias: &str) -> Result<HostRow, IpcError> {
 /// add_host. Reads tmux + claude versions AND the oauthAccount in a single
 /// round trip (sections separated by literal `---`).
 async fn probe(
-    ssh: &Arc<SshClient>,
+    ssh: &dyn SshExec,
     host: &str,
 ) -> Result<(bool, Option<String>, Option<String>, Option<OauthAccount>), IpcError> {
     let token = CancellationToken::new();
@@ -249,7 +249,7 @@ echo ---
 /// Like `probe` but uses the provided `CancellationToken` so the caller can
 /// cancel the SSH round trip.
 async fn probe_with_token(
-    ssh: &Arc<SshClient>,
+    ssh: &dyn SshExec,
     host: &str,
     token: CancellationToken,
 ) -> Result<(bool, Option<String>, Option<String>, Option<OauthAccount>), IpcError> {
@@ -301,7 +301,7 @@ async fn probe_with_token(
 /// An SSH failure collapses to "unreachable, nothing known" rather than an
 /// error, so a Re-probe of a down host updates `reachable=false` in the UI.
 async fn probe_lenient_with_token(
-    ssh: &Arc<SshClient>,
+    ssh: &dyn SshExec,
     host: &str,
     token: CancellationToken,
 ) -> (bool, Option<String>, Option<String>, Option<OauthAccount>) {
@@ -555,6 +555,282 @@ mod tests {
         );
     }
 
+    // ── end-to-end through the real service functions over `FakeSsh` ────────
+
+    use crate::ssh_fake::{FakeSsh, Match, Reply};
+
+    /// What a healthy host's probe script prints: the three `---`-separated
+    /// sections `probe_with_token` parses.
+    const HEALTHY_PROBE: &str = "tmux 3.4\n---\n2.1.144 (Claude Code)\n---\n{\"accountUuid\":\"acc-1\",\"emailAddress\":\"a@b.c\",\"organizationName\":\"32bit\"}\n";
+
+    fn fake_fleet() -> FakeSsh {
+        let fake = FakeSsh::new();
+        fake.on(Match::script(PROBE_SCRIPT), Reply::ok(HEALTHY_PROBE));
+        fake
+    }
+
+    fn host_row(store: &Mutex<Store>, alias: &str) -> Option<HostRow> {
+        store
+            .lock()
+            .unwrap()
+            .list_hosts()
+            .unwrap()
+            .into_iter()
+            .find(|h| h.alias == alias)
+    }
+
+    #[tokio::test]
+    async fn add_host_persists_the_parsed_probe_and_links_the_account() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let fake = fake_fleet();
+        let row = add_host(
+            AddHostArgs {
+                alias: "alpha".into(),
+                ssh_alias: "alpha.example".into(),
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .expect("reachable host is added");
+        assert!(row.reachable);
+        assert_eq!(row.ssh_alias.as_deref(), Some("alpha.example"));
+        assert_eq!(row.tmux_version.as_deref(), Some("3.4"));
+        assert_eq!(row.claude_version.as_deref(), Some("2.1.144"));
+        assert_eq!(row.account_uuid.as_deref(), Some("acc-1"));
+        assert!(row.last_pinged_at.is_some());
+        let accounts = store.lock().unwrap().list_accounts().unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].email.as_deref(), Some("a@b.c"));
+
+        // Exactly one round trip, against the ssh alias (not the fleet
+        // alias), as `bash -lc` with the WHOLE probe script as one quoted
+        // word — the re-tokenisation bug the quoting fixed.
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 1, "probe is a single round trip: {calls:?}");
+        assert_eq!(calls[0].host, "alpha.example");
+        assert_eq!(&calls[0].args[..2], ["bash", "-lc"]);
+        assert_eq!(calls[0].script().as_deref(), Some(PROBE_SCRIPT));
+    }
+
+    #[tokio::test]
+    async fn add_host_unreachable_is_e_probe_and_persists_nothing() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let fake = fake_fleet();
+        fake.unreachable("down.example");
+        let err = add_host(
+            AddHostArgs {
+                alias: "down".into(),
+                ssh_alias: "down.example".into(),
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "E_PROBE");
+        assert!(
+            err.message.contains("exited Some(255)") && err.message.contains("connect to host"),
+            "ssh's own diagnostic must survive: {}",
+            err.message
+        );
+        assert!(
+            host_row(&store, "down").is_none(),
+            "no row for a host we can't reach"
+        );
+        assert!(store.lock().unwrap().list_accounts().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn probe_host_marks_a_now_unreachable_host_and_keeps_its_row() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("beta", Some("beta.example")).unwrap();
+            s.update_host_probe("beta", true, Some("2.1.0"), Some("3.4"), 1)
+                .unwrap();
+        }
+        let fake = fake_fleet();
+        fake.unreachable("beta.example");
+        let reg = CancellationRegistry::new();
+        let row = probe_host(
+            HostAliasArgs {
+                alias: "beta".into(),
+            },
+            &store,
+            &fake,
+            &reg,
+        )
+        .await
+        .expect("lenient probe never errors on an unreachable host");
+        assert!(!row.reachable);
+        assert_eq!(row.alias, "beta");
+        assert_eq!(row.ssh_alias.as_deref(), Some("beta.example"));
+        assert!(row.last_pinged_at.unwrap() > 1, "probe time stamped");
+        assert!(host_row(&store, "beta").is_some_and(|h| !h.reachable));
+        assert_eq!(fake.calls_for("beta.example").len(), 1);
+        // The registry slot was released (CancelGuard) — nothing to cancel.
+        reg.cancel(0);
+    }
+
+    #[tokio::test]
+    async fn probe_host_reachable_again_flips_the_row_back() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        store
+            .lock()
+            .unwrap()
+            .insert_host("alpha", Some("alpha.example"))
+            .unwrap();
+        assert!(!host_row(&store, "alpha").unwrap().reachable);
+        let fake = fake_fleet();
+        let reg = CancellationRegistry::new();
+        let row = probe_host(
+            HostAliasArgs {
+                alias: "alpha".into(),
+            },
+            &store,
+            &fake,
+            &reg,
+        )
+        .await
+        .unwrap();
+        assert!(row.reachable);
+        assert_eq!(row.tmux_version.as_deref(), Some("3.4"));
+        assert_eq!(row.account_uuid.as_deref(), Some("acc-1"));
+    }
+
+    #[tokio::test]
+    async fn hanging_host_is_bounded_by_the_wall_clock() {
+        // The ssh layer's wall clock (E_SSH_TIMEOUT) is the only thing that
+        // gets a probe out of a black-holed host. The fake applies the same
+        // bound the real client does; shortened here so the test is fast.
+        let bound = Duration::from_millis(100);
+        let fake = fake_fleet();
+        fake.hanging("slow.example").set_wall_clock(bound);
+        let reg = CancellationRegistry::new();
+
+        // Strict probe (AddHostPicker preview): E_PROBE wrapping the timeout.
+        let start = std::time::Instant::now();
+        let err = probe_ssh_alias(
+            ProbeSshAliasArgs {
+                ssh_alias: "slow.example".into(),
+                call_id: Some(7),
+            },
+            &fake,
+            &reg,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "bounded by the wall clock"
+        );
+        assert_eq!(err.code, "E_PROBE");
+        assert!(
+            err.message.contains("wall clock"),
+            "timeout diagnostic must surface: {}",
+            err.message
+        );
+
+        // Lenient probe (re-probe of a known host): row marked unreachable.
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("slow", Some("slow.example")).unwrap();
+            s.update_host_probe("slow", true, None, None, 1).unwrap();
+        }
+        let start = std::time::Instant::now();
+        let row = probe_host(
+            HostAliasArgs {
+                alias: "slow".into(),
+            },
+            &store,
+            &fake,
+            &reg,
+        )
+        .await
+        .unwrap();
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert!(!row.reachable);
+    }
+
+    #[tokio::test]
+    async fn probe_ssh_alias_is_cancellable_through_the_registry() {
+        let fake = fake_fleet();
+        fake.hanging("slow.example")
+            .set_wall_clock(Duration::from_secs(60));
+        let reg = CancellationRegistry::new();
+        let reg_for_cancel = Arc::clone(&reg);
+        let canceller = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            reg_for_cancel.cancel(42);
+        });
+        let start = std::time::Instant::now();
+        let err = probe_ssh_alias(
+            ProbeSshAliasArgs {
+                ssh_alias: "slow.example".into(),
+                call_id: Some(42),
+            },
+            &fake,
+            &reg,
+        )
+        .await
+        .unwrap_err();
+        canceller.await.unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "cancel beats the 60s wall clock"
+        );
+        assert_eq!(err.code, "E_PROBE");
+        assert!(err.message.contains("cancelled"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn probe_ssh_alias_preview_does_not_persist() {
+        let fake = fake_fleet();
+        let reg = CancellationRegistry::new();
+        let preview = probe_ssh_alias(
+            ProbeSshAliasArgs {
+                ssh_alias: "alpha.example".into(),
+                call_id: None,
+            },
+            &fake,
+            &reg,
+        )
+        .await
+        .unwrap();
+        assert!(preview.reachable);
+        assert_eq!(preview.claude_version.as_deref(), Some("2.1.144"));
+        assert_eq!(preview.tmux_version.as_deref(), Some("3.4"));
+        assert_eq!(
+            preview.account.as_ref().and_then(|a| a.uuid.as_deref()),
+            Some("acc-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_tolerates_a_host_without_tmux_claude_or_account() {
+        // Each probe section is `|| true`-guarded on the remote, so a bare
+        // host yields empty sections — reachable, but nothing known.
+        let fake = FakeSsh::new();
+        fake.on(Match::script(PROBE_SCRIPT), Reply::ok("\n---\n\n---\n\n"));
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let row = add_host(
+            AddHostArgs {
+                alias: "bare".into(),
+                ssh_alias: "bare.example".into(),
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert!(row.reachable);
+        assert!(row.tmux_version.is_none());
+        assert!(row.claude_version.is_none());
+        assert!(row.account_uuid.is_none());
+    }
+
     #[tokio::test]
     #[ignore = "requires network + a reachable 'mefistos' ssh host with claude logged in"]
     async fn probe_mefistos_end_to_end() {
@@ -565,7 +841,7 @@ mod tests {
         // a degraded/partial probe. After the fix the whole script runs as one
         // bash program and every section is populated. Run with:
         //   cargo test -- --ignored probe_mefistos_end_to_end --nocapture
-        let ssh = Arc::new(SshClient::new());
+        let ssh = crate::ssh::SshClient::new();
         let (reachable, claude_v, tmux_v, account) =
             probe(&ssh, "mefistos").await.expect("probe mefistos");
         eprintln!("reachable={reachable} claude={claude_v:?} tmux={tmux_v:?} account={account:?}");
