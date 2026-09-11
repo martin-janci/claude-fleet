@@ -19,6 +19,12 @@ export const SETTING_KEYS = {
   projectsLayout: 'projects.layout',
   repairAutoOnTick: 'repair.auto_on_tick',
   repairTickIntervalSecs: 'repair.tick_interval_secs',
+  tasksMaxAgeSecs: 'tasks.max_age_secs',
+  moveMaxTranscriptMb: 'move.max_transcript_mb',
+  // TODO(#60): the `usage.*` settings arrive with per-session usage (#60),
+  // which adds their keys, defaults and Settings rows here. Until then the
+  // registry test (`settings::tests::every_spec_has_a_settings_dialog_row`)
+  // allowlists the `usage.` prefix.
 } as const;
 
 /** Derived, read-only entry in the `get_fleet_settings` map: JSON object of
@@ -31,6 +37,12 @@ export const PROJECTS_LOCAL_ENV_KEY = 'projects.local_env_base';
 
 /** Mirror of `settings::MAX_PATH_LEN`. */
 export const BASE_PATH_MAX_LEN = 1024;
+
+/** Mirror of `settings::MAX_SECS` (ten years): the cap on a `Kind::Secs` value. */
+export const MAX_SECS = 10 * 365 * 24 * 3600;
+
+/** Mirror of `settings::MOVE_MAX_TRANSCRIPT_MB_MAX` (`Kind::Int { min: 1, max }`). */
+export const MOVE_MAX_TRANSCRIPT_MB_MAX = 4096;
 
 export type ProjectsLayout = 'github' | 'flat';
 
@@ -51,6 +63,8 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'projects.layout': 'github',
   'repair.auto_on_tick': 'false',
   'repair.tick_interval_secs': '600',
+  'tasks.max_age_secs': '86400',
+  'move.max_transcript_mb': '200',
 };
 
 export type FleetSettings = Record<string, string>;

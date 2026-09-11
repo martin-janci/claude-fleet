@@ -330,6 +330,47 @@ pub fn set(s: &Store, key: &str, value: &str) -> Result<(), IpcError> {
 mod tests {
     use super::*;
 
+    /// Every registered setting has a Settings dialog row: a `SETTING_KEYS`
+    /// entry and a matching `SETTING_DEFAULTS` value in `fleet_settings.ts`,
+    /// and a control in `SettingsDialog.svelte` addressing that key. Fails when
+    /// a new `SPECS` entry ships without its row.
+    #[test]
+    fn every_spec_has_a_settings_dialog_row() {
+        const TS: &str = include_str!("../../../src/lib/fleet_settings.ts");
+        const DIALOG: &str = include_str!("../../../src/lib/SettingsDialog.svelte");
+        // The `usage.*` settings (per-session usage, #60) land together with
+        // their rows in that PR. Remove this entry once #60 has merged.
+        const PENDING_ROWS: &[&str] = &["usage."];
+        for spec in SPECS {
+            if PENDING_ROWS.iter().any(|p| spec.key.starts_with(p)) {
+                continue;
+            }
+            // `  camelName: 'the.key',` (SETTING_DEFAULTS lines start with a quote).
+            let entry = format!(": '{}',", spec.key);
+            let line = TS
+                .lines()
+                .find(|l| l.trim_end().ends_with(&entry) && !l.trim_start().starts_with('\''))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} has no SETTING_KEYS entry in src/lib/fleet_settings.ts",
+                        spec.key
+                    )
+                });
+            let name = line.trim().split(':').next().unwrap_or_default().trim();
+            assert!(
+                TS.contains(&format!("'{}': '{}',", spec.key, spec.default)),
+                "{}: SETTING_DEFAULTS must mirror the backend default {:?}",
+                spec.key,
+                spec.default
+            );
+            assert!(
+                DIALOG.contains(&format!("SETTING_KEYS.{name}")),
+                "{} (SETTING_KEYS.{name}) has no row in src/lib/SettingsDialog.svelte",
+                spec.key
+            );
+        }
+    }
+
     #[test]
     fn move_transcript_cap_is_a_bounded_integer_of_mib() {
         assert_eq!(spec(MOVE_MAX_TRANSCRIPT_MB).unwrap().default, "200");

@@ -42,6 +42,8 @@ describe('fleet settings', () => {
     expect(settingSecs(m, SETTING_KEYS.reconcileIntervalSecs)).toBe(20);
     expect(settingBool(m, SETTING_KEYS.repairAutoOnTick)).toBe(false);
     expect(settingSecs(m, SETTING_KEYS.repairTickIntervalSecs)).toBe(600);
+    expect(settingSecs(m, SETTING_KEYS.tasksMaxAgeSecs)).toBe(86400);
+    expect(settingSecs(m, SETTING_KEYS.moveMaxTranscriptMb)).toBe(200);
   });
 
   it('settingSecs falls back to the default on garbage', () => {

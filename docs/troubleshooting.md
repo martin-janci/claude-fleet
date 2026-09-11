@@ -159,9 +159,13 @@ on the same tick, right after the pass, if you enabled them.
   `list_sessions` tool serve the stored rows as long as the last completed
   pass is younger than the interval (or 20 s when the tick is off). They
   never stack a second fleet-wide probe on top of one that is already running.
-- **Refresh (forced):** the sidebar **Refresh** button (and `list_sessions`
-  with `force: true` over MCP) always starts a pass, ignoring freshness. If a
-  pass is already running it waits for that one instead of starting another.
+- **Refresh (forced):** the sidebar **Refresh** button (it also rescans the
+  projects, like the `refresh_projects` tool) and `list_sessions` with
+  `force: true` over MCP start a pass right away, ignoring freshness. If a pass
+  is already running they neither start a second one nor wait for it: they
+  return the stored rows at once, and the running pass updates the sidebar as
+  it writes its results. A forced MCP call in that case gets the rows from
+  before the pass; call `list_sessions` again a moment later for fresh ones.
 
 If the sidebar looks stale, click Refresh first. If Refresh does not change
 anything, check the log for `reconcile failed` lines and probe the host from
