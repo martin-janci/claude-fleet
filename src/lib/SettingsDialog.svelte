@@ -695,12 +695,12 @@
       </p>
       <div class="mcp-field">
         <span class="lbl">repair</span>
-        <input class="port" type="number" min="0"
+        <input class="port" type="number" min="60"
           value={settingSecs($fleetSettings, SETTING_KEYS.repairTickIntervalSecs)}
           disabled={automationBusy}
           data-testid="repair-tick-secs"
           onchange={(e) => onSecsChange(SETTING_KEYS.repairTickIntervalSecs, e)} />
-        <span class="hook-desc">seconds between workspace checks (at most 5 repairs each)</span>
+        <span class="hook-desc">seconds between workspace checks (60 or more; at most 5 repairs each)</span>
       </div>
       <div class="mcp-field">
         <span class="lbl">tick</span>

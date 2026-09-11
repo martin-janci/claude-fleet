@@ -24,7 +24,8 @@
 //! make is this worktree's OWN stale registration (`git worktree remove
 //! --force -- <path>`, never a prune) right before that add, and only when
 //! every [`VanishedGuard`] condition holds: the directory is confirmed absent,
-//! its parent exists (no unmounted volume), the repository is usable, the path
+//! its parent exists on the project root's filesystem (no unmounted or other
+//! volume), the repository is usable, the path
 //! is under the project root, the entry is not locked, and no other session
 //! maps to it. Anything else that can destroy, unregister, redirect or
 //! rebranch — the same removal when a guard fails,
@@ -52,6 +53,12 @@ use std::time::Duration;
 pub const EVENT_REPAIRED: &str = "workspace_repaired";
 /// `session_events.kind` written when a repair was refused or failed.
 pub const EVENT_REPAIR_FAILED: &str = "workspace_repair_failed";
+/// stderr marker of the apply script's re-check right before it removes our
+/// stale registration: the directory came back (or its parent vanished)
+/// after the probe, so nothing was removed.
+pub const UNREGISTER_REFUSED: &str = "reappeared or parent missing; not removing";
+/// Part of the `E_REPAIR_FAILED` message of an apply that was cut off.
+pub const PARTIALLY_APPLIED: &str = "the repair may be partially applied";
 
 /// ssh `ConnectTimeout` for the read-only probe on a remote host. The client
 /// bounds the whole command by `SshClient::default_wall_clock` (3× this, at
@@ -220,6 +227,12 @@ pub struct Probe {
     /// The worktree path's parent directory exists. A missing parent (an
     /// unmounted volume, a vanished mountpoint) blocks the automatic removal.
     pub wt_parent_exists: bool,
+    /// Device id of the project root (`stat -L`), `None` when stat failed.
+    pub root_dev: Option<String>,
+    /// Device id of the worktree path's parent, `None` when stat failed. It
+    /// must equal `root_dev` for the automatic removal (another volume, an
+    /// autofs mountpoint).
+    pub wt_parent_dev: Option<String>,
     pub worktrees: Vec<RegisteredWorktree>,
 }
 
@@ -299,6 +312,10 @@ echo "layout_dot_worktrees=$(yn test -d "$root/.worktrees")"
 echo "wt_exists=$(yn test -d "$wt")"
 if [ -e "$wt" ] || [ -L "$wt" ]; then echo wt_entry_exists=1; else echo wt_entry_exists=0; fi
 echo "wt_parent_exists=$(yn test -d "$(dirname -- "$wt")")"
+# Device ids (GNU/BusyBox `stat -c`, else BSD/macOS `stat -f`); empty on failure.
+if stat -L -c %d / >/dev/null 2>&1; then devof() {{ stat -L -c %d -- "$1" 2>/dev/null; }}; else devof() {{ stat -L -f %d -- "$1" 2>/dev/null; }}; fi
+echo "root_dev=$(devof "$root")"
+echo "wt_parent_dev=$(devof "$(dirname -- "$wt")")"
 echo "wt_git=$(yn test -e "$wt/.git")"
 if [ -d "$wt" ] && [ -z "$(ls -A "$wt" 2>/dev/null)" ]; then echo wt_empty=1; else echo wt_empty=0; fi
 echo "wt_gitdir_ok=$(yn git -C "$wt" rev-parse --git-dir)"
@@ -362,6 +379,14 @@ pub fn parse_probe(stdout: &str) -> Probe {
             "wt_empty" => p.wt_empty = flag(v),
             "wt_entry_exists" => p.wt_entry_exists = Some(flag(v)),
             "wt_parent_exists" => p.wt_parent_exists = flag(v),
+            "root_dev" => {
+                let v = v.trim();
+                p.root_dev = (!v.is_empty()).then(|| v.to_string());
+            }
+            "wt_parent_dev" => {
+                let v = v.trim();
+                p.wt_parent_dev = (!v.is_empty()).then(|| v.to_string());
+            }
             "wt_gitdir_ok" => p.wt_gitdir_ok = flag(v),
             "index_lock" => p.index_lock = flag(v),
             "branch_local" => p.branch_local = flag(v),
@@ -575,6 +600,9 @@ pub struct VanishedGuard {
     pub dir_absent: bool,
     /// The worktree path's parent directory exists.
     pub parent_exists: bool,
+    /// The parent's device id equals the project root's (not another volume
+    /// or an autofs mountpoint). Unknown (either stat failed) fails.
+    pub same_filesystem: bool,
     /// The project root exists and `git rev-parse --git-dir` works there.
     pub repo_ok: bool,
     /// The canonical path lies strictly under the canonical project root
@@ -598,6 +626,10 @@ impl VanishedGuard {
             (
                 self.parent_exists,
                 "parent directory missing (unmounted volume?)",
+            ),
+            (
+                self.same_filesystem,
+                "parent not confirmed on the project root's filesystem (mount point?)",
             ),
             (self.repo_ok, "project repository not usable"),
             (self.under_root, "path not under the project root"),
@@ -628,6 +660,10 @@ fn vanished_guard(p: &Probe, r: &RegisteredWorktree, ctx: AutoContext) -> Vanish
     VanishedGuard {
         dir_absent: wt.is_some() && p.wt_entry_exists == Some(false) && !p.wt_exists,
         parent_exists: p.wt_parent_exists,
+        same_filesystem: matches!(
+            (p.root_dev.as_deref(), p.wt_parent_dev.as_deref()),
+            (Some(a), Some(b)) if a == b
+        ),
         repo_ok: p.root_exists && p.root_gitdir_ok,
         under_root: match (wt, root) {
             (Some(w), Some(rt)) => w
@@ -982,10 +1018,21 @@ pub fn render_git_script(root: &str, steps: &[Step]) -> String {
     let mut s = String::from("set -e\n");
     for step in steps {
         match step {
-            Step::Unregister { path } => s.push_str(&format!(
-                "git -C {rq} worktree remove --force -- {} 1>&2\n",
-                quote(path)
-            )),
+            Step::Unregister { path } => {
+                // TOCTOU: the probe ran one round trip ago. A late-mounting
+                // path (autofs, NFS) may be back now, and `remove --force`
+                // would delete whatever is there. Re-check in this shell,
+                // right before the remove: anything but an empty directory,
+                // a symlink, or a missing parent refuses before any git step.
+                let pq = quote(path);
+                s.push_str(&format!(
+                    "p={pq}\n\
+                     if [ -L \"$p\" ] || [ ! -d \"$(dirname -- \"$p\")\" ] || \
+                     {{ [ -e \"$p\" ] && [ -n \"$(ls -A -- \"$p\" 2>/dev/null || echo x)\" ]; }}; \
+                     then echo \"repair: $p {UNREGISTER_REFUSED}\" >&2; exit 1; fi\n\
+                     git -C {rq} worktree remove --force -- {pq} 1>&2\n"
+                ));
+            }
             Step::RepairLinks { path } => s.push_str(&format!(
                 "git -C {rq} worktree repair -- {} 1>&2\n",
                 quote(path)
@@ -1252,8 +1299,8 @@ fn apply_interrupted(spec: &WorkspaceSpec, e: IpcError) -> IpcError {
         IpcError::new(
             codes::E_REPAIR_FAILED,
             format!(
-                "lost {} while applying the workspace repair ({}); the repair may be \
-                 partially applied — run Repair workspace again",
+                "lost {} while applying the workspace repair ({}); {PARTIALLY_APPLIED} \
+                 — run Repair workspace again",
                 spec.host_alias, e.message
             ),
         )
@@ -1489,9 +1536,22 @@ pub async fn ensure_workspace(
                 .await
                 .map_err(|e| fail(store, spec, apply_interrupted(spec, e)))?;
             if !out.ok {
-                return Err(fail(
-                    store,
-                    spec,
+                // The re-check before `remove --force` refused: the directory
+                // reappeared between the probe and the apply. Nothing ran; a
+                // refusal (not transient), so the tick backs off.
+                let e = if out.stderr.contains(UNREGISTER_REFUSED) {
+                    IpcError::new(
+                        codes::E_REPAIR_REQUIRED,
+                        format!(
+                            "the worktree directory at {} reappeared (or its parent vanished) \
+                             between the check and the repair on {}; nothing was removed. \
+                             Check it, then use Repair workspace ({})",
+                            fix.cwd,
+                            spec.host_alias,
+                            out.stderr.trim()
+                        ),
+                    )
+                } else {
                     IpcError::new(
                         codes::E_REPAIR_FAILED,
                         format!(
@@ -1499,8 +1559,9 @@ pub async fn ensure_workspace(
                             spec.host_alias,
                             out.stderr.trim()
                         ),
-                    ),
-                ));
+                    )
+                };
+                return Err(fail(store, spec, e));
             }
             for step in &git_steps {
                 report.actions.push(step.describe());
@@ -2185,6 +2246,10 @@ mod tests {
         assert!(script.contains("worktree list --porcelain"));
         assert!(script.contains("then echo wt_entry_exists=1; else echo wt_entry_exists=0; fi"));
         assert!(script.contains("wt_parent_exists=$(yn test -d \"$(dirname -- \"$wt\")\")"));
+        assert!(script.contains("if stat -L -c %d / >/dev/null 2>&1; then"));
+        assert!(script.contains("stat -L -f %d -- \"$1\""));
+        assert!(script.contains("echo \"root_dev=$(devof \"$root\")\""));
+        assert!(script.contains("echo \"wt_parent_dev=$(devof \"$(dirname -- \"$wt\")\")\""));
         assert!(script.trim_end().ends_with("exit 0"));
     }
 
@@ -3889,6 +3954,8 @@ mod tests {
         assert_eq!(
             render_git_script("/r", &steps),
             "set -e\n\
+             p='/r/.claude/worktrees/f'\n\
+             if [ -L \"$p\" ] || [ ! -d \"$(dirname -- \"$p\")\" ] || { [ -e \"$p\" ] && [ -n \"$(ls -A -- \"$p\" 2>/dev/null || echo x)\" ]; }; then echo \"repair: $p reappeared or parent missing; not removing\" >&2; exit 1; fi\n\
              git -C '/r' worktree remove --force -- '/r/.claude/worktrees/f' 1>&2\n\
              git -C '/r' worktree add -- '/r/.claude/worktrees/f' 'f' 1>&2\n\
              echo outcome=branch_local\n"
@@ -4828,6 +4895,8 @@ mod tests {
         p.wt_canon = Some(VANISHED_WT.into());
         p.wt_entry_exists = Some(false);
         p.wt_parent_exists = true;
+        p.root_dev = Some("42".into());
+        p.wt_parent_dev = Some("42".into());
         p
     }
 
@@ -4837,7 +4906,7 @@ mod tests {
             "@@worktrees\n",
             &format!(
                 "root_canon=/repo\nwt_canon={VANISHED_WT}\nwt_entry_exists=0\n\
-                 wt_parent_exists={}\n@@worktrees\n",
+                 root_dev=42\nwt_parent_dev=42\nwt_parent_exists={}\n@@worktrees\n",
                 u8::from(parent_exists)
             ),
             1,
@@ -5061,6 +5130,7 @@ mod tests {
             "under_root",
             "not_locked",
             "no_other_session",
+            "same_filesystem",
         ] {
             assert_eq!(d["vanished_guard"][k], true, "{k}: {d}");
         }
@@ -5200,6 +5270,157 @@ mod tests {
         assert!(
             String::from_utf8_lossy(&list.stdout).contains("/.claude/worktrees/feat"),
             "the registration is left alone"
+        );
+    }
+
+    #[test]
+    fn parse_probe_reads_device_ids_and_empty_means_unknown() {
+        let p = parse_probe("root_dev=2049\nwt_parent_dev=2049\n");
+        assert_eq!(p.root_dev.as_deref(), Some("2049"));
+        assert_eq!(p.wt_parent_dev.as_deref(), Some("2049"));
+        let p = parse_probe("root_dev=\nwt_parent_dev=\n");
+        assert_eq!((p.root_dev, p.wt_parent_dev), (None, None));
+    }
+
+    /// Guard (g): a parent on another device (a mounted volume, an autofs
+    /// mountpoint) or an unknown device id blocks the automatic removal.
+    #[test]
+    fn same_filesystem_guard_blocks_a_parent_on_another_device() {
+        assert!(vanished_guard(&vanished(), &feat_wt(), NO_OTHERS).same_filesystem);
+        let cases = [
+            (
+                "other device",
+                Probe {
+                    wt_parent_dev: Some("43".into()),
+                    ..vanished()
+                },
+            ),
+            (
+                "parent stat failed",
+                Probe {
+                    wt_parent_dev: None,
+                    ..vanished()
+                },
+            ),
+            (
+                "root stat failed",
+                Probe {
+                    root_dev: None,
+                    ..vanished()
+                },
+            ),
+        ];
+        for (name, probe) in cases {
+            for policy in [AUTO, ATTACH] {
+                let plan = plan_with(&spec(true), &probe, policy, NO_OTHERS).unwrap();
+                assert!(
+                    plan.steps.is_empty() && plan.needs_explicit_repair,
+                    "{name}: {:?}",
+                    plan.steps
+                );
+                assert!(
+                    plan.warnings
+                        .iter()
+                        .any(|w| w.contains("project root's filesystem")),
+                    "{name}: {:?}",
+                    plan.warnings
+                );
+                let g = plan.vanished_guard.unwrap();
+                assert!(!g.same_filesystem && !g.holds(), "{name}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reappeared_refusal_from_the_apply_is_e_repair_required() {
+        let (store, sid, pid) = seeded_store(VANISHED_WT);
+        let exec = FakeExec::new(vec![
+            ok(&vanished_out(true)),
+            Ok(ScriptOutput {
+                ok: false,
+                stdout: String::new(),
+                stderr: format!("repair: {VANISHED_WT} {UNREGISTER_REFUSED}\n"),
+            }),
+        ]);
+        let err = ensure_workspace(&spec_with_ids(sid, pid), AUTO, vec![], &store, &exec)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_REPAIR_REQUIRED, "{}", err.message);
+        assert!(err.message.contains("reappeared"), "{}", err.message);
+        assert_eq!(exec.scripts().len(), 2, "probe + refused apply, no verify");
+        let ev = store.lock().unwrap().list_session_events(sid, 10).unwrap();
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].kind, EVENT_REPAIR_FAILED);
+        assert!(ev[0]
+            .detail
+            .as_deref()
+            .unwrap()
+            .starts_with("E_REPAIR_REQUIRED"));
+    }
+
+    /// Real probe, then the directory reappears (with untracked work) right
+    /// before the apply — an autofs / NFS path mounting late.
+    struct ReappearExec {
+        dir: std::path::PathBuf,
+    }
+
+    #[async_trait]
+    impl RepairExec for ReappearExec {
+        async fn run_script(&self, script: &str) -> Result<ScriptOutput, IpcError> {
+            LocalExec.run_script(script).await
+        }
+        async fn apply_script(&self, script: &str) -> Result<ScriptOutput, IpcError> {
+            std::fs::create_dir_all(&self.dir).unwrap();
+            std::fs::write(self.dir.join("untracked.txt"), "work").unwrap();
+            LocalExec.run_script(script).await
+        }
+        async fn tmux_new_session(&self, _: &str, _: &str, _: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn tmux_respawn(&self, _: &str, _: &str, _: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn real_git_directory_reappearing_before_the_apply_is_never_removed() {
+        let base = tempfile::TempDir::new().unwrap();
+        let root = base.path().join("repo");
+        init_repo(&root);
+        let wt = root.join(".claude/worktrees/feat");
+        git_in(
+            &root,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feat"],
+        );
+        std::fs::remove_dir_all(&wt).unwrap();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let pid = store
+            .lock()
+            .unwrap()
+            .upsert_project("o", "r", root.to_str().unwrap())
+            .unwrap();
+        let mut s = local_spec(&root, &wt, "auto-reappear");
+        s.project_id = Some(pid);
+        let exec = ReappearExec { dir: wt.clone() };
+        let err = ensure_workspace(&s, AUTO, vec![], &store, &exec)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_REPAIR_REQUIRED, "{}", err.message);
+        assert!(err.message.contains("reappeared"), "{}", err.message);
+        assert_eq!(
+            std::fs::read_to_string(wt.join("untracked.txt")).unwrap(),
+            "work",
+            "the reappeared work is never deleted"
+        );
+        let list = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["worktree", "list", "--porcelain"])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&list.stdout).contains("/.claude/worktrees/feat"),
+            "nothing was removed"
         );
     }
 }

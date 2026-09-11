@@ -77,6 +77,10 @@ existing local or `origin/` branch only when every condition holds
    the worktree (same project and `worktree_key`, or a `worktree_id` whose
    row has that name or canonical path). Unknown (no project id, a store
    error) counts as mapped.
+7. `same_filesystem` — the parent directory's device id equals the project
+   root's (`stat -L -c %d` on Linux / BusyBox, `stat -L -f %d` on macOS; the
+   probe picks the flavour by trying `-c` first). Either stat failing fails
+   the guard.
 
 If any condition fails the run stays explicit-only (`E_REPAIR_REQUIRED` for
 new session / restart / recreate / spawn review, a notice on attach) and the
@@ -88,8 +92,27 @@ exactly like a deleted one: the path is gone. Removing its registration would
 detach a checkout that still exists on the unmounted disk. The
 `parent_exists` condition blocks that case: when the volume or its mountpoint
 is missing, the parent directory is missing too, so nothing is removed. The
-same holds when a whole `.worktrees/` directory is gone. A person decides
-through the explicit Repair workspace.
+same holds when a whole `.worktrees/` directory is gone. `same_filesystem`
+blocks a parent that is another volume: a mounted `.worktrees/` volume whose
+worktree vanished, or an autofs mountpoint (autofs has its own device id even
+before it mounts). A person decides through the explicit Repair workspace.
+
+Known residuals, not distinguishable by device id: a bind mount of the same
+filesystem shares the root's device id; and a plain (non-autofs) mountpoint
+that is currently unmounted is an ordinary empty directory on the root's
+filesystem, so an add there would land under the mountpoint.
+
+**Re-check at apply time.** The probe runs one round trip before the apply,
+and a late-mounting path (autofs, NFS) can reappear in between; `git worktree
+remove --force` would then delete whatever is there. So the apply script
+re-checks in the same shell, immediately before the remove: if the path is a
+symlink, exists as anything but an empty directory, or its parent is gone, it
+prints `reappeared or parent missing; not removing` and exits before any git
+step. That maps to `E_REPAIR_REQUIRED` ("reappeared"), which the reconcile
+tick backs off like any refusal. (An empty directory is allowed so the
+explicit repair of an empty leftover keeps working.) An interrupted apply
+(`E_REPAIR_FAILED`, "may be partially applied") is retried at the next tick
+interval instead; the interval has a 60 s floor.
 
 ## Design
 
@@ -99,7 +122,7 @@ Probe → plan → apply → verify → record, in `service::repair`:
    `shell::quote`, always exits 0. It prints `key=value` lines
    (`wt_path`, `root_exists`, `root_git`, `root_gitdir_ok`, `root_canon`,
    `wt_canon`, `layout_dot_worktrees`, `wt_exists`, `wt_entry_exists`,
-   `wt_parent_exists`, `wt_git`, `wt_empty`,
+   `wt_parent_exists`, `root_dev`, `wt_parent_dev`, `wt_git`, `wt_empty`,
    `wt_gitdir_ok`, `index_lock`, `branch_local`, `branch_remote`,
    `default_branch`, `tmux_alive`, `tmux_dead`, `tmux_cwd`,
    `tmux_cwd_exists`) and then `git worktree list --porcelain`, with a

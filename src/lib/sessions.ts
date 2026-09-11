@@ -243,6 +243,7 @@ export interface RepairReport {
 export interface VanishedGuard {
   dir_absent: boolean;
   parent_exists: boolean;
+  same_filesystem: boolean;
   repo_ok: boolean;
   under_root: boolean;
   not_locked: boolean;

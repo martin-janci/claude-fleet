@@ -202,7 +202,8 @@ elsewhere, recreate the branch from base once origin confirms it is gone, run
 `actions`, `warnings`, `branch_source`, `tmux`). Refusals need a human, so do
 not loop on them: `E_REPO_MISSING` (the main checkout is gone; it is never
 faked with mkdir), `E_BRANCH_CHECKED_OUT` (the branch is checked out in the
-main checkout), `E_WORKSPACE_LOCKED` (`git worktree unlock` first),
+main checkout, or adoption was refused because another fleet workspace uses
+that checkout), `E_WORKSPACE_LOCKED` (`git worktree unlock` first),
 `E_REPAIR_FAILED` (a step or the verify failed; read the message). A
 restart/recreate answering `E_REPAIR_REQUIRED` means only the explicit repair
 can fix the workspace: call `repair_session`, then retry. Each attempt shows in

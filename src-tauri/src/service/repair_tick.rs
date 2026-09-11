@@ -267,18 +267,19 @@ pub fn backoff_sig(row: &SessionRow, t: &Target) -> String {
 }
 
 /// Errors worth retrying at the next interval: the host or transport, not
-/// the workspace. Everything else is a refusal that needs a human (or a row
-/// change), so it is stamped and backed off.
-pub fn is_transient(code: &str) -> bool {
+/// the workspace, and an apply that was cut off mid-way (the next attach
+/// re-adds anyway). Everything else is a refusal that needs a human (or a
+/// row change), so it is stamped and backed off.
+pub fn is_transient(e: &IpcError) -> bool {
     matches!(
-        code,
+        e.code.as_str(),
         codes::E_HOST_OFFLINE
             | codes::E_SSH
             | codes::E_SSH_TIMEOUT
             | codes::E_TIMEOUT
             | codes::E_LOCK
             | codes::E_SHELL
-    )
+    ) || (e.code == codes::E_REPAIR_FAILED && e.message.contains(repair::PARTIALLY_APPLIED))
 }
 
 /// The backoff stamp of a session: `(signature, unix secs)`.
@@ -478,7 +479,7 @@ pub async fn run_with(
                             &format!("{}: {}", e.code, e.message),
                         );
                     }
-                    if !is_transient(&e.code) {
+                    if !is_transient(&e) {
                         set_backoff(store, row.id, Some(&sig), now);
                     }
                     tracing::warn!("[repair-tick] {host}/{}: {e}", row.tmux_name);
@@ -908,8 +909,9 @@ mod tests {
 
     #[test]
     fn transient_codes_are_transport_only() {
+        let err = |c: &str| IpcError::new(c, "x");
         for c in [codes::E_HOST_OFFLINE, codes::E_SSH, codes::E_TIMEOUT] {
-            assert!(is_transient(c), "{c}");
+            assert!(is_transient(&err(c)), "{c}");
         }
         for c in [
             codes::E_REPAIR_REQUIRED,
@@ -918,8 +920,23 @@ mod tests {
             codes::E_WORKSPACE_LOCKED,
             codes::E_REPAIR_FAILED,
         ] {
-            assert!(!is_transient(c), "{c}");
+            assert!(!is_transient(&err(c)), "{c}");
         }
+        // An interrupted apply is retried, not backed off.
+        let interrupted = IpcError::new(
+            codes::E_REPAIR_FAILED,
+            format!(
+                "lost h while applying the workspace repair (timeout); {} — run Repair \
+                 workspace again",
+                repair::PARTIALLY_APPLIED
+            ),
+        );
+        assert!(is_transient(&interrupted));
+        // The apply-time "reappeared" refusal is backed off.
+        assert!(!is_transient(&IpcError::new(
+            codes::E_REPAIR_REQUIRED,
+            "the worktree directory at /w reappeared"
+        )));
     }
 
     #[test]
@@ -1085,6 +1102,8 @@ mod tests {
             wt_canon: Some(WT.into()),
             wt_entry_exists: Some(false),
             wt_parent_exists: true,
+            root_dev: Some("42".into()),
+            wt_parent_dev: Some("42".into()),
             ..gone()
         };
         let no_others = AutoContext {
