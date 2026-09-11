@@ -1262,7 +1262,7 @@ async fn move_session_steps(
             snap.row.id,
             i64::try_from(copied).unwrap_or(i64::MAX),
         ) {
-            eprintln!(
+            tracing::warn!(
                 "move_session: inheriting the usage cursor on {} failed: {e}",
                 row.id
             );
@@ -1404,7 +1404,7 @@ async fn move_session_steps(
         if let Ok(s) = store.lock() {
             if let Some(u) = source_usage.as_ref() {
                 if let Err(e) = s.add_usage_totals(target_row.id, u) {
-                    eprintln!(
+                    tracing::warn!(
                         "move_session: carrying usage totals to {} failed: {e}",
                         target_row.id
                     );
@@ -1414,7 +1414,7 @@ async fn move_session_steps(
             // lines the target's cursor still points before: catch up.
             if let Some(c) = source_cursor.as_ref() {
                 if let Err(e) = s.raise_usage_cursor(target_row.id, c) {
-                    eprintln!(
+                    tracing::warn!(
                         "move_session: raising the usage cursor on {} failed: {e}",
                         target_row.id
                     );
