@@ -267,6 +267,59 @@ describe('SessionDetails outcome + triage fields (W2 Track D)', () => {
     expect(screen.queryByTestId('details-claude-status')).toBeNull();
   });
 
+  it('shows token usage and the estimated cost once usage was counted', async () => {
+    render(SessionDetails, {
+      props: {
+        session: {
+          ...sampleSession,
+          usage_input_tokens: 1_234,
+          usage_output_tokens: 56_000,
+          usage_cache_write_tokens: 2_000_000,
+          usage_cache_read_tokens: 45_000_000,
+          usage_cost_micros: 12_340_000,
+          usage_model: 'claude-opus-5',
+          usage_updated_at: 1,
+        },
+      },
+    });
+    await tick();
+    const usage = screen.getByTestId('details-usage');
+    expect(screen.getByTestId('details-cost')).toHaveTextContent('$12.34 estimated');
+    expect(usage).toHaveTextContent('1.2k in');
+    expect(usage).toHaveTextContent('56k out');
+    expect(usage).toHaveTextContent('2.00M cache write');
+    expect(usage).toHaveTextContent('45.0M cache read');
+    expect(usage).toHaveTextContent('claude-opus-5');
+    expect(usage.getAttribute('title')).toContain('Estimated');
+  });
+
+  it('says "unpriced (model)" when tokens were counted but the model has no price', async () => {
+    render(SessionDetails, {
+      props: {
+        session: {
+          ...sampleSession,
+          usage_input_tokens: 500,
+          usage_output_tokens: 10,
+          usage_cache_write_tokens: 0,
+          usage_cache_read_tokens: 0,
+          usage_cost_micros: 0,
+          usage_model: 'local-llm-7b',
+          usage_updated_at: 1,
+        },
+      },
+    });
+    await tick();
+    const cost = screen.getByTestId('details-cost');
+    expect(cost).toHaveTextContent('unpriced (local-llm-7b)');
+    expect(cost).not.toHaveTextContent('$0.00');
+  });
+
+  it('hides the usage row when nothing was counted', async () => {
+    render(SessionDetails, { props: { session: sampleSession } });
+    await tick();
+    expect(screen.queryByTestId('details-usage')).toBeNull();
+  });
+
   it('shows the claude status chip and the context percentage when not stuck', async () => {
     render(SessionDetails, {
       props: { session: { ...sampleSession, claude_status: 'blocked', context_pct: 91 } },

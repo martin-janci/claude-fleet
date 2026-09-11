@@ -15,7 +15,9 @@ use super::McpGuards;
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::IpcError;
 use crate::service::pane_intel::{ClaudeStatus, StuckKind};
-use crate::service::{health, hosts, projects, safe_kill, sessions, tasks, transcript, worktrees};
+use crate::service::{
+    health, hosts, projects, safe_kill, sessions, tasks, transcript, usage, worktrees,
+};
 use crate::ssh::SshClient;
 use crate::store::Store;
 use rmcp::{
@@ -912,6 +914,32 @@ pub struct SessionHistoryParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct UsageReportParams {
+    /// Only this host. A per-host token is always limited to its own host
+    /// (asking for another is E_FORBIDDEN).
+    #[serde(default)]
+    pub host_alias: Option<String>,
+    /// Only sessions whose usage changed in the last N seconds, and per-day
+    /// totals over that window. Omit for every session and the last 30 days.
+    #[serde(default)]
+    pub since_secs: Option<u64>,
+}
+
+/// The host a `usage_report` covers: a per-host caller is pinned to its own
+/// host (another host is `E_FORBIDDEN`); the master token may pick any host
+/// or none.
+fn usage_scope(caller: &Caller, requested: Option<&str>) -> Result<Option<String>, McpError> {
+    if let Some(h) = requested {
+        require_host(caller, h, "the requested host")?;
+        crate::validate::host_alias(h).map_err(to_mcp_err)?;
+    }
+    Ok(caller
+        .host_alias
+        .clone()
+        .or_else(|| requested.map(str::to_string)))
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SendMessageParams {
     /// Caller's fleet session id (the sender). Recorded on the inbox row and
     /// included in the pane-delivery header so the recipient can see who
@@ -1486,11 +1514,55 @@ impl FleetTools {
     }
 
     #[tool(
-        description = "Report claude-fleet backend health: application version, SQLite schema version, and database readiness. Returns JSON."
+        description = "Report claude-fleet backend health: application version, SQLite schema version, database readiness, the cached fleet roll-up, and ESTIMATED token usage and cost (micro-USD) per host and per UTC day for the last 7 days. For a per-host token the usage fields cover only its own host. Returns JSON."
     )]
-    async fn fleet_health(&self) -> Result<CallToolResult, McpError> {
+    async fn fleet_health(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
         audit("fleet_health", "");
-        ok_json(&health::health_check(&self.store))
+        let mut h = health::health_check(&self.store);
+        if let Some(host) = caller.host_alias.as_deref() {
+            if let Ok(s) = self.store.lock() {
+                health::scope_usage_to_host(&mut h, &s, host);
+            }
+        }
+        ok_json(&h)
+    }
+
+    #[tool(description = "Report ESTIMATED token usage and cost per session, \
+        host and UTC day, summed from each session's Claude Code transcript \
+        (collected every usage.interval_secs). Costs are micro-USD from a \
+        built-in per-model price table (override: usage.prices_json), not a \
+        bill. total and by_host sum the live session rows, each over its \
+        whole lifetime; by_day comes from the durable daily roll-up (killed \
+        sessions included). Optional host_alias; since_secs keeps only \
+        sessions whose usage changed in the last N seconds and scopes by_day \
+        to that window (default: every session, last 30 days). Sessions are \
+        sorted by cost, at most 200. A per-host token only sees its own \
+        host. Returns JSON.")]
+    async fn usage_report(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<UsageReportParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "usage_report",
+            &format!("host={:?} since_secs={:?}", p.host_alias, p.since_secs),
+        );
+        let host = usage_scope(&caller, p.host_alias.as_deref())?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let report = {
+            let s = self
+                .store
+                .lock()
+                .map_err(|_| mcp_err("E_LOCK", "store mutex poisoned", None))?;
+            usage::report(&s, host.as_deref(), p.since_secs, now).map_err(to_mcp_err)?
+        };
+        ok_json(&report)
     }
 
     // ---- hosts ----
@@ -3591,6 +3663,28 @@ mod tests {
         assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
         assert!(err.message.contains("turanga") && err.message.contains("mefistos"));
         assert!(require_host(&Caller::master(), "anything", "x").is_ok());
+    }
+
+    #[test]
+    fn usage_report_is_a_read_scoped_to_the_callers_host() {
+        assert!(guard::is_readonly_tool("usage_report"));
+        assert!(!guard::needs_confirmation("usage_report"));
+        assert!(!guard::is_admin_tool("usage_report"));
+        let c = host_caller("mefistos", TokenMode::Readonly);
+        assert_eq!(usage_scope(&c, None).unwrap().as_deref(), Some("mefistos"));
+        assert_eq!(
+            usage_scope(&c, Some("mefistos")).unwrap().as_deref(),
+            Some("mefistos")
+        );
+        let err = usage_scope(&c, Some("turanga")).unwrap_err();
+        assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+        let m = Caller::master();
+        assert_eq!(usage_scope(&m, None).unwrap(), None);
+        assert_eq!(
+            usage_scope(&m, Some("turanga")).unwrap().as_deref(),
+            Some("turanga")
+        );
+        assert!(usage_scope(&m, Some("-oProxy")).is_err());
     }
 
     #[test]

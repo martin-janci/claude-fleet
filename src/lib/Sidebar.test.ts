@@ -818,6 +818,49 @@ describe('Sidebar triage (W2 Track D)', () => {
     expect(badges.find((b) => b.getAttribute('data-level') === 'crit')).toHaveTextContent('95%');
   });
 
+  it('shows a compact estimated-cost badge only for sessions with counted usage', async () => {
+    const spent = {
+      ...sessionFor(1, 'dev-spent'),
+      usage_input_tokens: 10,
+      usage_output_tokens: 20,
+      usage_cache_write_tokens: 0,
+      usage_cache_read_tokens: 1_000,
+      usage_cost_micros: 3_450_000,
+      usage_model: 'claude-sonnet-5',
+      usage_updated_at: 1,
+    };
+    const free = sessionFor(1, 'dev-free');
+    mockBackend(fakeProjects, [spent, free]);
+    render(Sidebar);
+    await tick(); await tick();
+    const badges = screen.getAllByTestId('cost-badge');
+    expect(badges).toHaveLength(1);
+    expect(badges[0]).toHaveTextContent('$3.45');
+    expect(badges[0].getAttribute('title')).toContain('Estimated cost $3.45');
+    expect(badges[0].getAttribute('title')).toContain('claude-sonnet-5');
+  });
+
+  it('shows an "unpriced" badge when tokens were counted for a model with no price', async () => {
+    const unpriced = {
+      ...sessionFor(1, 'dev-local-llm'),
+      usage_input_tokens: 900,
+      usage_output_tokens: 100,
+      usage_cache_write_tokens: 0,
+      usage_cache_read_tokens: 0,
+      usage_cost_micros: 0,
+      usage_model: 'local-llm-7b',
+      usage_updated_at: 1,
+    };
+    mockBackend(fakeProjects, [unpriced]);
+    render(Sidebar);
+    await tick(); await tick();
+    const badge = screen.getByTestId('cost-badge');
+    expect(badge).toHaveTextContent('unpriced');
+    expect(badge).not.toHaveTextContent('$');
+    expect(badge.getAttribute('data-priced')).toBe('false');
+    expect(badge.getAttribute('title')).toContain('no price for local-llm-7b');
+  });
+
   it('"N stuck" counter reports the count and toggles a stuck-only filter', async () => {
     const stuck = { ...sessionFor(1, 'dev-stuck'), stuck_kind: 'oom' as const };
     const fine = sessionFor(2, 'dev-fine');

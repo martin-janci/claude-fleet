@@ -1,4 +1,5 @@
-use crate::store::{HostRow, SessionRow, Store};
+use crate::service::usage;
+use crate::store::{HostRow, SessionRow, Store, UsageTotals};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -21,6 +22,14 @@ pub struct Health {
     pub context_red: u32,
     /// Sessions with a `stuck_kind` set.
     pub stuck: u32,
+    /// Estimated token usage and cost (micro-USD) per host, summed over the
+    /// sessions currently in the store. Hosts with nothing counted are
+    /// omitted.
+    pub usage_by_host: BTreeMap<String, UsageTotals>,
+    /// Estimated usage per UTC day (`day` = `YYYY-MM-DD`), all hosts, over
+    /// the last `usage::HEALTH_DAYS` days — from the durable daily roll-up,
+    /// so killed sessions still count.
+    pub usage_by_day: Vec<usage::DayUsage>,
 }
 
 /// Pure fleet aggregates derived from cached session + host rows.
@@ -33,6 +42,7 @@ pub struct FleetSummary {
     pub ghosts: u32,
     pub context_red: u32,
     pub stuck: u32,
+    pub usage_by_host: BTreeMap<String, UsageTotals>,
 }
 
 /// Threshold (percent) at or above which a session's context window counts as
@@ -67,6 +77,7 @@ pub fn summarize(sessions: &[SessionRow], hosts: &[HostRow]) -> FleetSummary {
             summary.stuck += 1;
         }
     }
+    summary.usage_by_host = usage::per_host_totals(sessions);
 
     summary
 }
@@ -91,7 +102,24 @@ pub fn health_from_store(s: &Store) -> Health {
         ghosts: summary.ghosts,
         context_red: summary.context_red,
         stuck: summary.stuck,
+        usage_by_host: summary.usage_by_host,
+        usage_by_day: usage::recent_days(s, now_unix(), usage::HEALTH_DAYS, None),
     }
+}
+
+/// Restrict the usage roll-ups to one host: a per-host control-API token
+/// must not read other hosts' spend (same scoping as `usage_report`). The
+/// session and host counts stay fleet-wide, as before.
+pub fn scope_usage_to_host(h: &mut Health, s: &Store, host: &str) {
+    h.usage_by_host.retain(|k, _| k == host);
+    h.usage_by_day = usage::recent_days(s, now_unix(), usage::HEALTH_DAYS, Some(host));
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 pub fn health_check(store: &Mutex<Store>) -> Health {
@@ -110,6 +138,8 @@ pub fn health_check(store: &Mutex<Store>) -> Health {
             ghosts: 0,
             context_red: 0,
             stuck: 0,
+            usage_by_host: BTreeMap::new(),
+            usage_by_day: Vec::new(),
         },
     }
 }
@@ -162,6 +192,7 @@ mod tests {
             last_stop_at: None,
             parent_session_id: None,
             tags: Vec::new(),
+            usage: Default::default(),
         }
     }
 
@@ -235,13 +266,82 @@ mod tests {
     }
 
     #[test]
+    fn summarize_rolls_up_usage_per_host_and_skips_hosts_without_usage() {
+        let mut a = session(Some("working"), None, None);
+        a.usage.usage_input_tokens = 10;
+        a.usage.usage_cost_micros = 50;
+        let mut b = session(Some("idle"), None, None);
+        b.usage.usage_output_tokens = 4;
+        b.usage.usage_cost_micros = 100;
+        let mut c = session(None, None, None);
+        c.host_alias = "beta".into();
+        let s = summarize(&[a, b, c], &[]);
+        assert_eq!(s.usage_by_host.len(), 1, "beta counted nothing");
+        let alpha = s.usage_by_host["alpha"];
+        assert_eq!(alpha.input_tokens, 10);
+        assert_eq!(alpha.output_tokens, 4);
+        assert_eq!(alpha.cost_micros, 150);
+    }
+
+    #[test]
+    fn health_from_store_reports_usage_by_host_and_day() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let id = store
+            .upsert_session("t", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store
+            .apply_usage(
+                id,
+                "alpha",
+                &crate::store::UsageDelta {
+                    reset: false,
+                    totals: UsageTotals {
+                        input_tokens: 7,
+                        cost_micros: 35,
+                        ..Default::default()
+                    },
+                    model: Some("claude-opus-5".into()),
+                    offset: 10,
+                    source: "x.jsonl".into(),
+                    last_msg_id: None,
+                    last_msg_usage: None,
+                    now: now_unix(),
+                },
+            )
+            .unwrap();
+        let h = health_from_store(&store);
+        assert_eq!(h.usage_by_host["alpha"].cost_micros, 35);
+        assert_eq!(h.usage_by_day.len(), 1);
+        assert_eq!(h.usage_by_day[0].totals.input_tokens, 7);
+        assert_eq!(
+            h.usage_by_day[0].day,
+            usage::day_string(now_unix().div_euclid(86_400))
+        );
+        let v = serde_json::to_value(&h).unwrap();
+        assert_eq!(v["usage_by_day"][0]["cost_micros"], 35);
+
+        // Scoped to its own host, a per-host caller keeps alpha's usage…
+        let mut own = health_from_store(&store);
+        scope_usage_to_host(&mut own, &store, "alpha");
+        assert_eq!(own.usage_by_host.len(), 1);
+        assert_eq!(own.usage_by_day.len(), 1);
+        // …and another host's caller sees none of it.
+        let mut other = health_from_store(&store);
+        scope_usage_to_host(&mut other, &store, "beta");
+        assert!(other.usage_by_host.is_empty());
+        assert!(other.usage_by_day.is_empty());
+        assert_eq!(other.sessions_total, 1, "counts stay fleet-wide");
+    }
+
+    #[test]
     fn health_from_store_reports_version_db_ready_and_schema() {
         let store = Mutex::new(Store::open_in_memory().expect("in-memory store"));
         let s = store.lock().unwrap();
         let h = health_from_store(&s);
         assert_eq!(h.version, env!("CARGO_PKG_VERSION"));
         assert!(h.db_ready);
-        assert_eq!(h.schema_version, 24);
+        assert_eq!(h.schema_version, 25);
         // Empty store → empty roll-up.
         assert_eq!(h.sessions_total, 0);
         assert_eq!(h.hosts_total, 0);

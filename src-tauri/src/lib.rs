@@ -201,6 +201,9 @@ fn spawn_reconcile_tick(store: std::sync::Arc<Mutex<Store>>, ssh: std::sync::Arc
                 tracing::info!("reconcile tick: applied {n} stuck playbook(s)");
             }
             let _ = service::gc::maybe_sweep(&store, &ssh).await;
+            // Wave 5 G1: per-session token usage, once per usage.interval_secs,
+            // in its own single-flight task so a slow host never stalls the tick.
+            service::usage::spawn_collect(&store, &ssh);
             // Wave 3 Track E: fail open tasks whose worker died or that
             // outlived `tasks.max_age_secs` (also swept by list/wait calls).
             if let Ok(s) = store.lock() {

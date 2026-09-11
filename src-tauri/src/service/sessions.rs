@@ -3148,6 +3148,7 @@ mod tests {
             last_stop_at: None,
             parent_session_id: None,
             tags: Vec::new(),
+            usage: Default::default(),
         }
     }
 

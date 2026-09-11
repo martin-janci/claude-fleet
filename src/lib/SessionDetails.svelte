@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { sessions, type SessionRow, type SafeKillInspection } from './sessions';
+  import { formatCostMicros, formatTokens, sessionUsageTokens } from './sessions';
   import {
     killSession,
     renameSession,
@@ -446,6 +447,17 @@
     {#if session.last_prompt}
       <dt>Last prompt</dt>
       <dd class="last-prompt" data-testid="details-last-prompt">{session.last_prompt}</dd>
+    {/if}
+
+    {#if sessionUsageTokens(session) > 0}
+      <dt>Usage</dt>
+      <dd
+        data-testid="details-usage"
+        title="Estimated from the Claude Code transcript's token counts and a built-in per-model price table (override: usage.prices_json). Not a bill."
+      >
+        <span data-testid="details-cost">{#if (session.usage_cost_micros ?? 0) > 0}{formatCostMicros(session.usage_cost_micros)} estimated{:else}unpriced ({session.usage_model ?? 'unknown model'}){/if}</span>
+        <span class="muted">· {formatTokens(session.usage_input_tokens)} in · {formatTokens(session.usage_output_tokens)} out · {formatTokens(session.usage_cache_write_tokens)} cache write · {formatTokens(session.usage_cache_read_tokens)} cache read{#if session.usage_model} · {session.usage_model}{/if}</span>
+      </dd>
     {/if}
 
     {#if session.pr_url}

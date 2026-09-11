@@ -55,7 +55,7 @@ Parameters: `new_worker`, `prompt`, `raw`, `requester_session_id`, `worker_sessi
 
 ### `fleet_health`
 
-Report claude-fleet backend health: application version, SQLite schema version, and database readiness. Returns JSON.
+Report claude-fleet backend health: application version, SQLite schema version, database readiness, the cached fleet roll-up, and ESTIMATED token usage and cost (micro-USD) per host and per UTC day for the last 7 days. For a per-host token the usage fields cover only its own host. Returns JSON.
 
 ### `get_clipboard`
 
@@ -314,6 +314,12 @@ Parameters: `host_alias`, `session_id`, `tags`, `tmux_name`
 Spawn a review session: a new Claude session in the source session's worktree, seeded with a review prompt. Returns the new review session row as JSON.
 
 Parameters: `prompt`, `source_session_id`
+
+### `usage_report`
+
+Report ESTIMATED token usage and cost per session, host and UTC day, summed from each session's Claude Code transcript (collected every usage.interval_secs). Costs are micro-USD from a built-in per-model price table (override: usage.prices_json), not a bill. total and by_host sum the live session rows, each over its whole lifetime; by_day comes from the durable daily roll-up (killed sessions included). Optional host_alias; since_secs keeps only sessions whose usage changed in the last N seconds and scopes by_day to that window (default: every session, last 30 days). Sessions are sorted by cost, at most 200. A per-host token only sees its own host. Returns JSON.
+
+Parameters: `host_alias`, `since_secs`
 
 ### `wait_for_session`
 

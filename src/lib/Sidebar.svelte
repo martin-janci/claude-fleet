@@ -15,6 +15,9 @@
     showBgAgents,
     showFriendlyNames,
     sameSession,
+    formatCostMicros,
+    formatTokens,
+    sessionUsageTokens,
     type SessionRow,
   } from './sessions';
   import { describePurge, purgeHostsForProject } from './purge';
@@ -797,6 +800,17 @@
               aria-label="context usage"
             ><span class="ctx-bar" style="width: {Math.min(100, Math.max(0, sess.context_pct))}%; background: {contextColor(ctxLevel)};"></span><span class="ctx-pct">{Math.round(sess.context_pct)}%</span></span>
           {/if}
+          {#if sessionUsageTokens(sess) > 0}
+            {@const priced = (sess.usage_cost_micros ?? 0) > 0}
+            <span
+              class="cost-badge"
+              data-testid="cost-badge"
+              data-priced={priced}
+              title={priced
+                ? `Estimated cost ${formatCostMicros(sess.usage_cost_micros)} · ${formatTokens(sessionUsageTokens(sess))} tokens${sess.usage_model ? ' · ' + sess.usage_model : ''}`
+                : `Unpriced: no price for ${sess.usage_model ?? 'an unknown model'} · ${formatTokens(sessionUsageTokens(sess))} tokens`}
+            >{priced ? formatCostMicros(sess.usage_cost_micros) : 'unpriced'}</span>
+          {/if}
           {#if sess.effort_level}
             <span class="effort-badge" title="Effort: {sess.effort_level}">{sess.effort_level}</span>
           {/if}
@@ -1501,6 +1515,13 @@
     opacity: 0.25;
   }
   .ctx-pct { position: relative; }
+  .cost-badge {
+    font-size: 0.6rem;
+    flex-shrink: 0;
+    white-space: nowrap;
+    opacity: 0.75;
+    font-variant-numeric: tabular-nums;
+  }
   .ci-badge {
     font-size: 0.6rem;
     flex-shrink: 0;

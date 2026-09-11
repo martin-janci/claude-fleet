@@ -31,6 +31,10 @@ pub enum Kind {
     /// pass `validate::host_alias`, every path `validate_base_path`. `{}`
     /// means "no per-host overrides".
     PathMap,
+    /// JSON object `{ "<model fragment>": {input, output, cache_write,
+    /// cache_read} }` in USD per million tokens (`service::usage`). `{}`
+    /// means "built-in prices only".
+    PriceMap,
 }
 
 /// Upper bound for `Kind::Secs` (ten years): keeps every `secs as i64`
@@ -92,6 +96,15 @@ pub const TASKS_MAX_AGE_SECS: &str = "tasks.max_age_secs";
 pub const MOVE_MAX_TRANSCRIPT_MB: &str = crate::service::move_session::SETTING_MAX_TRANSCRIPT_MB;
 /// Upper bound for [`MOVE_MAX_TRANSCRIPT_MB`]: the copy is held in memory.
 pub const MOVE_MAX_TRANSCRIPT_MB_MAX: u64 = 4096;
+
+/// Collect per-session token usage from Claude transcripts (Wave 5 G1).
+pub const USAGE_ENABLED: &str = "usage.enabled";
+/// Seconds between usage passes (one batched script per host). `0` stops
+/// collection.
+pub const USAGE_INTERVAL_SECS: &str = "usage.interval_secs";
+/// Per-model price overrides for the estimated cost; see
+/// `service::usage::BUILTIN_PRICES`.
+pub const USAGE_PRICES_JSON: &str = "usage.prices_json";
 
 /// Every editable setting. Order is the display order.
 pub const SPECS: &[Spec] = &[
@@ -167,6 +180,21 @@ pub const SPECS: &[Spec] = &[
             min: 1,
             max: MOVE_MAX_TRANSCRIPT_MB_MAX,
         },
+    },
+    Spec {
+        key: USAGE_ENABLED,
+        default: "true",
+        kind: Kind::Bool,
+    },
+    Spec {
+        key: USAGE_INTERVAL_SECS,
+        default: "300",
+        kind: Kind::Secs,
+    },
+    Spec {
+        key: USAGE_PRICES_JSON,
+        default: "{}",
+        kind: Kind::PriceMap,
     },
 ];
 
@@ -259,6 +287,7 @@ pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
             format!("{key} must be one of: {}", options.join(", ")),
         )),
         Kind::PathMap => parse_path_map(key, v).map(|_| ()),
+        Kind::PriceMap => crate::service::usage::parse_price_overrides(v).map(|_| ()),
     }
 }
 
@@ -320,6 +349,10 @@ pub fn set(s: &Store, key: &str, value: &str) -> Result<(), IpcError> {
     let stored = match spec(key).map(|sp| sp.kind) {
         Some(Kind::PathMap) => serde_json::to_string(&parse_path_map(key, v)?)
             .map_err(|e| IpcError::new("E_INVALID", e.to_string()))?,
+        Some(Kind::PriceMap) => {
+            serde_json::to_string(&crate::service::usage::parse_price_overrides(v)?)
+                .map_err(|e| IpcError::new("E_INVALID", e.to_string()))?
+        }
         _ => v.to_string(),
     };
     s.set_setting(key, &stored)?;
@@ -521,6 +554,31 @@ mod tests {
             set(&s, PROJECTS_RESOLVED_BASE, "{}").unwrap_err().code,
             "E_INVALID"
         );
+    }
+
+    #[test]
+    fn usage_settings_default_on_and_validate_price_overrides() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(get_bool(&s, USAGE_ENABLED));
+        assert_eq!(get_secs(&s, USAGE_INTERVAL_SECS), 300);
+        assert_eq!(get_string(&s, USAGE_PRICES_JSON), "{}");
+        assert_eq!(
+            validate(USAGE_PRICES_JSON, r#"{"opus":{"input":1}}"#)
+                .unwrap_err()
+                .code,
+            "E_INVALID"
+        );
+        set(
+            &s,
+            USAGE_PRICES_JSON,
+            r#" {"Opus-4-1":{"input":15,"output":75,"cache_write":30,"cache_read":1.5}} "#,
+        )
+        .unwrap();
+        // Stored normalised: lower-cased keys.
+        assert!(get_string(&s, USAGE_PRICES_JSON).starts_with(r#"{"opus-4-1":"#));
+        assert_eq!(resolve(USAGE_PRICES_JSON, Some("garbage")), "{}");
+        set(&s, USAGE_INTERVAL_SECS, "0").unwrap();
+        assert_eq!(get_secs(&s, USAGE_INTERVAL_SECS), 0);
     }
 
     #[test]
