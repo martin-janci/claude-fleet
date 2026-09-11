@@ -58,70 +58,61 @@ tools.
 
 ## Tools
 
-| Tool | What it does |
-|---|---|
-| `fleet_health` | App version, schema version, DB readiness. |
-| `list_hosts` / `discover_hosts` | Registered hosts; SSH-config candidates. |
-| `add_host` / `remove_host` / `probe_host` / `hide_host` | Host management. |
-| `list_accounts` | Cached Claude accounts across hosts. |
-| `list_projects` / `refresh_projects` | Projects + worktrees; rescan. |
-| `list_sessions` | Reconcile + list all tmux sessions (primary fleet view). |
-| `related_sessions` | Sessions sharing a project + worktree. |
-| `new_session` / `kill_session` / `rename_session` / `restart_session` | Session lifecycle. |
-| `send_prompt` | Deliver a prompt to a running session's Claude REPL. |
-| `spawn_review` | Spawn a review session in another session's worktree. |
+The authoritative per-tool documentation — description and parameter list for
+every tool, straight from the tool router — is the generated
+[`control-api-reference.md`](control-api-reference.md). It is regenerated with
+`REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_current`
+and CI fails when it is stale. The workflows that tie the tools together
+(steering, recovery, safe-kill, self-identification) live in the
+`claude-fleet-control` skill (`skills/claude-fleet-control/SKILL.md`), which
+`provision_hosts` installs on every host.
 
-**Read session output**
+Index by area (names only; see the reference for details):
 
-| Tool | What it does |
-|---|---|
-| `capture_session` | Capture a session's terminal output — the visible tmux pane, or include scrollback history. |
-| `peek_session` | Peek at a session's background Claude logs. |
-
-**Session lifecycle**
-
-| Tool | What it does |
-|---|---|
-| `recreate_session` | Recreate a session: kill its tmux session and rebuild it fresh in the same worktree, resuming the same Claude conversation. |
-| `dismiss_ghost_session` | Dismiss a ghost session (lost from tmux): permanently delete its row. |
-| `new_bg_session` | Launch a supervised headless (background) Claude session on a host with an initial prompt. |
-
-**Peer-to-peer messaging**
-
-| Tool | What it does |
-|---|---|
-| `send_message` | Send a message from one session's id to another's. Persisted to the recipient's inbox; set `deliver: true` to ALSO type it into the recipient's pane with a `[msg #id from name@host]:` header. |
-| `inbox` | Read the caller's inbox. Returns messages addressed to `session_id`, newest-first; `unread_only` filters and `mark_read` (default true) consumes them. |
-| `peer_status` | What is a peer doing right now? Returns its `claude_status`, `current_activity`, `stuck_kind`, and `context_pct` — no need to capture and parse the pane. |
-
-**Files & git (read-only)**
-
-| Tool | What it does |
-|---|---|
-| `repo_changes` | List a session's changed files (git status) in its worktree. |
-| `repo_tree` | List a session's worktree files (tracked + untracked, gitignore respected). |
-| `repo_file` | Read one worktree file's contents (capped). |
-| `repo_diff` | Unified diff for one worktree file vs HEAD (untracked files render as all-added). |
-| `repo_log` | Commit log (branch graph) for a session's worktree. |
-| `repo_branches` | List local + remote branches for a session's worktree with ahead/behind. |
-| `repo_commit` | One commit's metadata + changed files. |
-| `repo_commit_diff` | Diff of one file within a commit. |
-
-**Host provisioning**
-
-| Tool | What it does |
-|---|---|
-| `provision_hosts` | Install the fleet-control skill + MCP server entry on every reachable host and start reverse SSH tunnels for remote hosts. |
+- **Fleet & hosts** — `fleet_health`, `list_hosts`, `discover_hosts`,
+  `add_host`, `remove_host`, `probe_host`, `hide_host`, `provision_hosts`,
+  `list_accounts`.
+- **Projects & worktrees** — `list_projects`, `refresh_projects`,
+  `list_worktrees`, `delete_worktree`.
+- **Sessions** — `list_sessions`, `related_sessions`, `new_session`,
+  `new_shell_session`, `new_bg_session`, `spawn_review`, `rename_session`,
+  `set_friendly_name`, `register_self`.
+- **Steering & observing** — `send_prompt`, `broadcast_prompt`,
+  `capture_session`, `peek_session`, `peer_status`, `session_history`,
+  `send_message`, `inbox`.
+- **Lifecycle & recovery** — `restart_session`, `recreate_session`,
+  `kill_session`, `safe_kill_session`, `dismiss_ghost_session`.
+- **Worktree files & git (read-only)** — `repo_changes`, `repo_tree`,
+  `repo_file`, `repo_diff`, `repo_log`, `repo_branches`, `repo_commit`,
+  `repo_commit_diff`.
+- **Host clipboard** — `get_clipboard`, `set_clipboard`.
 
 A typical loop: `list_sessions` to see state → `new_session` to spawn one →
-`send_prompt` to steer it.
+`send_prompt` to steer it → `capture_session` to read the reply.
+
+### Status vocabulary
+
+Session rows carry `claude_status` (one of `working`, `blocked`, `completed`,
+`failed`, `stopped`, `idle`, or null when unknown) and `stuck_kind` (one of
+`auth_menu`, `reconnect`, `trust_prompt`, `oom`, `press_enter`, or null when
+not stuck). The enums in `src-tauri/src/service/pane_intel.rs` are the single
+source of truth; the tool descriptions, server instructions and the control
+skill quote them, and a test fails if any of those drift.
+
+### Response caps
+
+Responses are sized for MCP token limits: `list_sessions` returns slim summary
+rows by default and accepts `limit`; `capture_session` returns plain text
+capped to the last 200 lines (`max_lines`, 0 = no cap); `repo_log` returns 50
+commits by default (`limit`, `skip`); `session_history` and `inbox` default to
+50 rows.
 
 ## Provisioning hosts
 
-`provision_hosts` (also reachable via Settings → Control API → **Provision hosts**) makes a Claude on every managed host able to drive the fleet. For each non-hidden, reachable host it performs four steps:
+`provision_hosts` (also reachable via Settings → Control API → **Provision hosts**) makes a Claude on every managed host able to drive the fleet. For each non-hidden, reachable host it performs these steps:
 
 1. **Skills** — writes both `~/.claude/skills/claude-fleet-control/SKILL.md` and `~/.claude/skills/fleet-friendly-name/SKILL.md` on that host. Claude picks up skills from this directory live, without a restart. The fleet-friendly-name skill is the path agents use to set the session's sidebar label via the `set_friendly_name` MCP tool.
-2. **`~/.claude/CLAUDE.md` managed block** — appends (or refreshes in place) a sentinel-delimited block telling Claude to invoke fleet-friendly-name at every task start. Content outside the sentinels is the user's own and is preserved verbatim; the block is idempotent and only re-written when its body drifts.
+2. **`~/.claude/CLAUDE.md` managed block** — appends (or refreshes in place) a short sentinel-delimited block saying what claude-fleet is and pointing at the two skills. Content outside the sentinels is the user's own and is preserved verbatim; the block is idempotent and only re-written when its body drifts.
 3. **`~/.claude.json` entry** — reads the host's `~/.claude.json`, merges an `mcpServers.claude-fleet` entry (preserving all sibling keys), backs the original up to `~/.claude.json.fleet-bak`, then writes the updated file. The entry added is:
    ```json
    {
@@ -130,17 +121,15 @@ A typical loop: `list_sessions` to see state → `new_session` to spawn one →
      "headers": { "Authorization": "Bearer <token>" }
    }
    ```
-4. **Reverse SSH tunnel** (remote hosts only) — starts an `ssh -R` tunnel so the remote host's `127.0.0.1:<port>` is forwarded to the central machine's MCP server. The server stays bound to `127.0.0.1` on the central machine; remote hosts reach it only through this authenticated tunnel.
+4. **`~/.tmux.conf` clipboard passthrough** — ensures `set -g set-clipboard on` is present (appended if missing, file created if absent) so OSC 52 clipboard writes from inside tmux reach the host clipboard.
+5. **Hooks in `~/.claude/settings.json`** — merges fleet's `Stop` and `PostToolUse(WorktreeCreate)` hooks pointing at the MCP port, leaving the user's own hooks alone. Required for `safe_kill_session` to finalize on remote hosts.
+6. **Reverse SSH tunnel** (remote hosts only) — starts an `ssh -R` tunnel so the remote host's `127.0.0.1:<port>` is forwarded to the central machine's MCP server. The server stays bound to `127.0.0.1` on the central machine; remote hosts reach it only through this authenticated tunnel.
 
 **After provisioning, each host must restart Claude** to load the MCP server (skill files and CLAUDE.md are picked up live, but the MCP server entry requires a restart).
 
-### Host-alias mismatch (set_friendly_name returns `E_NOTFOUND`)
+### Host-alias mismatch (`set_friendly_name` / `register_self` return `E_NOTFOUND`)
 
-The fleet-friendly-name skill discovers its session identity by running `tmux display-message -p '#S'` and `hostname -s` in the tmux session, then calls `set_friendly_name` with that `(tmux_name, host_alias)` pair. If both `hostname -s` and the full `hostname` return `E_NOTFOUND`, the claude-fleet alias for this machine does not match either value. To fix it:
-
-1. Open the claude-fleet app and find the offending row in **Settings → Hosts** (or the host picker).
-2. Either rename the host (the alias) to match `hostname -s` on that machine, or change the machine's hostname to match the alias. Aliases are arbitrary identifiers — pick whatever is least disruptive.
-3. The skill stops after the second `E_NOTFOUND` and emits a short notice to the user; it never retries blindly. Once the alias is fixed, the next task pickup on that host succeeds without further action.
+A session identifies itself by its tmux session name (`tmux display-message -p '#S'`) and the fleet **host alias**. The alias is configuration — whatever the host was named in the host picker — and is never derived from `hostname`. The skills look it up by calling `list_sessions` and taking the `host_alias` of the row whose `tmux_name` matches. `E_NOTFOUND` from `set_friendly_name` or `register_self` therefore means no row matched: the session is not (yet) known to fleet, was renamed, or the pair was guessed rather than looked up. Re-run `list_sessions` (with `include_lost: true` if the session may have ghosted) and retry with the row's values; do not fall back to `hostname`.
 
 ### Per-host results
 
@@ -148,7 +137,7 @@ Each call returns a status for every non-hidden host:
 
 | Status | Meaning |
 |---|---|
-| `provisioned` | All three steps succeeded; tunnel established (remote hosts). |
+| `provisioned` | All steps succeeded; tunnel established (remote hosts). |
 | `skipped` | Host was unreachable at the time of the call; no changes made. |
 | `failed` | One of the steps returned an error (see `detail`). |
 

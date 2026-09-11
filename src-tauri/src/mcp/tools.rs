@@ -11,6 +11,7 @@
 
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::IpcError;
+use crate::service::pane_intel::{ClaudeStatus, StuckKind};
 use crate::service::{health, hosts, projects, safe_kill, sessions, worktrees};
 use crate::ssh::SshClient;
 use crate::store::Store;
@@ -51,6 +52,61 @@ fn audit(tool: &str, detail: &str) {
 /// Map a backend `IpcError` to an MCP tool error, preserving the `E_*` code.
 fn to_mcp_err(e: IpcError) -> McpError {
     McpError::internal_error(format!("{}: {}", e.code, e.message), None)
+}
+
+/// Server-level instructions handed to every MCP client on `initialize`.
+///
+/// The status vocabularies are rendered from `ClaudeStatus::vocabulary_doc()`
+/// / `StuckKind::vocabulary_doc()` so they cannot drift from the enums. Keep
+/// the surrounding wording stable — every edit invalidates connected clients'
+/// cached tool definitions.
+fn server_instructions() -> String {
+    format!(
+        "claude-fleet control API. Drives long-lived Claude Code sessions \
+         running in tmux across multiple hosts. Call list_sessions to see \
+         fleet state, new_session to spawn one, and send_prompt to steer it. \
+         Session rows carry two status fields: claude_status is one of {} \
+         (null when unknown), and stuck_kind is one of {} (null when not stuck).",
+        ClaudeStatus::vocabulary_doc(),
+        StuckKind::vocabulary_doc(),
+    )
+}
+
+/// Default `limit` for `repo_log` when the caller passes none. The Tauri UI
+/// asks for more, but an MCP caller gets a token-capped page by default.
+const REPO_LOG_DEFAULT_LIMIT: u32 = 50;
+
+/// Default `max_lines` for `capture_session`: the tail of the pane that is
+/// returned when the caller does not choose a cap.
+const CAPTURE_DEFAULT_MAX_LINES: u32 = 200;
+
+/// Keep only the last `max` lines of `text`. Returns the kept text plus the
+/// total line count so the caller can say how much was dropped. `max == 0`
+/// means no cap.
+fn tail_lines(text: &str, max: u32) -> (String, usize) {
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    if max == 0 || total <= max as usize {
+        return (text.to_string(), total);
+    }
+    (lines[total - max as usize..].join("\n"), total)
+}
+
+/// Render a pane capture for the caller: the last `max` lines, prefixed with
+/// a truncation note when lines were dropped.
+fn capture_response(text: &str, max: u32) -> String {
+    let (kept, total) = tail_lines(text, max);
+    if total > kept.lines().count() {
+        format!(
+            "[capture_session: showing the last {} of {} lines — raise max_lines \
+             (0 = no cap) to see more]\n{}",
+            kept.lines().count(),
+            total,
+            kept
+        )
+    } else {
+        kept
+    }
 }
 
 /// Substituted for an otherwise-empty text block. The Anthropic API rejects
@@ -260,12 +316,13 @@ pub struct ListSessionsParams {
     /// Only return sessions in this project id.
     #[serde(default)]
     pub project_id: Option<i64>,
-    /// Only return sessions whose store-level `status` equals this (e.g.
-    /// "alive", "dead").
+    /// Only return sessions whose store-level `status` equals this
+    /// ("running", "ghost").
     #[serde(default)]
     pub status: Option<String>,
-    /// Only return sessions whose `claude_status` equals this (e.g. "idle",
-    /// "working", "stuck", "awaiting_input").
+    /// Only return sessions whose `claude_status` equals this. Vocabulary:
+    /// working | blocked | completed | failed | stopped | idle (rows with an
+    /// unknown status carry null and never match a filter).
     #[serde(default)]
     pub claude_status: Option<String>,
     /// Include lost sessions (those with a non-null `lost_at`). Default false.
@@ -274,8 +331,16 @@ pub struct ListSessionsParams {
     /// Return slim rows (id, host_alias, tmux_name, project_id, worktree_id,
     /// status, claude_status, stuck_kind, lost_at, is_controller). Default
     /// true to keep responses inside MCP token caps; set false for full rows.
+    /// Summary rows also carry `stuck_kind`, whose vocabulary is
+    /// auth_menu | reconnect | trust_prompt | oom | press_enter
+    /// (null when the session is not stuck).
     #[serde(default = "default_true")]
     pub summary: bool,
+    /// Maximum number of rows to return, applied after all filters. Omit for
+    /// every matching row (the default). Use with the filters to page a large
+    /// fleet inside MCP token caps.
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -419,6 +484,7 @@ pub struct BroadcastPromptParams {
     /// Only target sessions in this project id (omit for all projects).
     pub project_id: Option<i64>,
     /// Only target sessions whose claude_status equals this (omit for any).
+    /// Vocabulary: working | blocked | completed | failed | stopped | idle.
     pub status: Option<String>,
     /// The prompt text to deliver to every matching session.
     pub prompt: String,
@@ -440,6 +506,10 @@ pub struct CaptureSessionParams {
     pub session_id: i64,
     /// Rows of scrollback history to include; omit for just the visible pane.
     pub scrollback_lines: Option<u32>,
+    /// Cap on the number of lines returned — the LAST `max_lines` of the
+    /// capture are kept. Default 200; pass 0 for no cap. When the capture is
+    /// longer than the cap the result starts with a one-line truncation note.
+    pub max_lines: Option<u32>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -569,7 +639,7 @@ pub struct RepoLogParams {
     pub session_id: i64,
     /// Show all branches/refs (default true) instead of just HEAD.
     pub all: Option<bool>,
-    /// Max commits to return (default 200).
+    /// Max commits to return (default 50, hard cap 2000).
     pub limit: Option<u32>,
     /// Commits to skip (pagination).
     pub skip: Option<u32>,
@@ -740,7 +810,10 @@ impl FleetTools {
     #[tool(description = "List tmux sessions across reachable hosts. Slim \
         summary rows by default; pass summary=false for the full SessionRow. \
         Optional filters: host_alias, project_id, status, claude_status, \
-        include_lost (default false drops ghosts).")]
+        include_lost (default false drops ghosts); `limit` caps the row count \
+        after filtering (default: all). claude_status is one of working | \
+        blocked | completed | failed | stopped | idle; stuck_kind is one of \
+        auth_menu | reconnect | trust_prompt | oom | press_enter.")]
     async fn list_sessions(
         &self,
         Parameters(p): Parameters<ListSessionsParams>,
@@ -748,8 +821,14 @@ impl FleetTools {
         audit(
             "list_sessions",
             &format!(
-                "host={:?} project={:?} status={:?} claude_status={:?} include_lost={} summary={}",
-                p.host_alias, p.project_id, p.status, p.claude_status, p.include_lost, p.summary,
+                "host={:?} project={:?} status={:?} claude_status={:?} include_lost={} summary={} limit={:?}",
+                p.host_alias,
+                p.project_id,
+                p.status,
+                p.claude_status,
+                p.include_lost,
+                p.summary,
+                p.limit,
             ),
         );
         let rows = sessions::list_sessions(&self.store, &self.ssh)
@@ -796,7 +875,10 @@ impl FleetTools {
                     .as_ref()
                     .is_some_and(|(h, t)| *h == row.host_alias && *t == row.tmux_name);
                 SessionWithController { is_controller, row }
-            });
+            })
+            // `limit` applies AFTER the filters so a filtered page is a real
+            // page of matches, not the first N rows of the whole fleet.
+            .take(p.limit.unwrap_or(usize::MAX));
         if p.summary {
             let slim: Vec<SessionSummary> = tagged.map(SessionSummary::from).collect();
             ok_json_compact(&slim)
@@ -1137,13 +1219,20 @@ impl FleetTools {
     }
 
     #[tool(description = "Capture a session's terminal output — the visible \
-        tmux pane, or include scrollback history. Use after send_prompt to read \
-        the session's reply. Returns the pane text.")]
+        tmux pane, or include scrollback history (scrollback_lines). Use after \
+        send_prompt to read the session's reply. Returns the pane as plain \
+        text (not JSON), capped to the last max_lines lines (default 200).")]
     async fn capture_session(
         &self,
         Parameters(p): Parameters<CaptureSessionParams>,
     ) -> Result<CallToolResult, McpError> {
-        audit("capture_session", &format!("session_id={}", p.session_id));
+        audit(
+            "capture_session",
+            &format!(
+                "session_id={} scrollback_lines={:?} max_lines={:?}",
+                p.session_id, p.scrollback_lines, p.max_lines
+            ),
+        );
         let text = sessions::capture_session_output(
             p.session_id,
             &self.store,
@@ -1161,7 +1250,12 @@ impl FleetTools {
                 "(session pane is empty — nothing to capture)",
             )]));
         }
-        ok_json(&text)
+        // Plain text, not `ok_json`: a JSON-encoded string turns every newline
+        // into `\n` and doubles the token cost of a pane dump for no benefit.
+        let max = p.max_lines.unwrap_or(CAPTURE_DEFAULT_MAX_LINES);
+        Ok(CallToolResult::success(vec![text_content(
+            capture_response(&text, max),
+        )]))
     }
 
     #[tool(
@@ -1453,8 +1547,9 @@ impl FleetTools {
     }
 
     #[tool(description = "Commit log (branch graph) for a session's worktree. \
-        all=true (default) includes every branch. Returns JSON array of commits \
-        with parents + ref decorations.")]
+        all=true (default) includes every branch. Returns a JSON array of \
+        commits with parents + ref decorations, newest first; `limit` defaults \
+        to 50 and `skip` pages through older history.")]
     async fn repo_log(
         &self,
         Parameters(p): Parameters<RepoLogParams>,
@@ -1464,7 +1559,7 @@ impl FleetTools {
             crate::commands::history::RepoLogArgs {
                 session_id: p.session_id,
                 all: p.all.unwrap_or(true),
-                limit: p.limit.unwrap_or(0),
+                limit: p.limit.unwrap_or(REPO_LOG_DEFAULT_LIMIT),
                 skip: p.skip.unwrap_or(0),
             },
             &self.store,
@@ -1644,12 +1739,7 @@ impl ServerHandler for FleetTools {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
-            .with_instructions(
-                "claude-fleet control API. Drives long-lived Claude Code sessions \
-                 running in tmux across multiple hosts. Call list_sessions to see \
-                 fleet state, new_session to spawn one, and send_prompt to steer it."
-                    .to_string(),
-            )
+            .with_instructions(server_instructions())
     }
 }
 
@@ -1736,5 +1826,121 @@ mod tests {
                 text_of(block)
             );
         }
+    }
+
+    // ---- status vocabulary (single source of truth: service::pane_intel) ----
+
+    const CONTROL_SKILL: &str = include_str!("../../../skills/claude-fleet-control/SKILL.md");
+
+    /// Property description of one `list_sessions` parameter, from the live
+    /// JSON schema the macro generates out of the field doc comment.
+    fn list_sessions_param_doc(param: &str) -> String {
+        let tools = FleetTools::tool_router_for_doc().list_all();
+        let t = tools
+            .iter()
+            .find(|t| t.name == "list_sessions")
+            .expect("list_sessions tool");
+        t.input_schema["properties"][param]["description"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{param} has a description"))
+            .to_string()
+    }
+
+    #[test]
+    fn instructions_quote_status_vocabulary() {
+        let text = server_instructions();
+        assert!(text.contains(
+            "claude_status is one of working | blocked | completed | failed | stopped | idle"
+        ));
+        assert!(text.contains(
+            "stuck_kind is one of auth_menu | reconnect | trust_prompt | oom | press_enter"
+        ));
+    }
+
+    #[test]
+    fn list_sessions_docs_quote_status_vocabulary() {
+        assert!(
+            list_sessions_param_doc("claude_status").contains(&ClaudeStatus::vocabulary_doc()),
+            "ListSessionsParams.claude_status doc must quote the vocabulary verbatim"
+        );
+        assert!(
+            list_sessions_param_doc("summary").contains(&StuckKind::vocabulary_doc()),
+            "ListSessionsParams.summary doc must quote the stuck_kind vocabulary verbatim"
+        );
+        let tools = FleetTools::tool_router_for_doc().list_all();
+        let desc = tools
+            .iter()
+            .find(|t| t.name == "list_sessions")
+            .and_then(|t| t.description.clone())
+            .expect("list_sessions description");
+        assert!(desc.contains(&ClaudeStatus::vocabulary_doc()));
+        assert!(desc.contains(&StuckKind::vocabulary_doc()));
+    }
+
+    #[test]
+    fn control_skill_quotes_status_vocabulary() {
+        for v in ClaudeStatus::ALL {
+            assert!(
+                CONTROL_SKILL.contains(&format!("`{}`", v.as_str())),
+                "SKILL.md must mention claude_status value `{}`",
+                v.as_str()
+            );
+        }
+        for v in StuckKind::ALL {
+            assert!(
+                CONTROL_SKILL.contains(&format!("`{}`", v.as_str())),
+                "SKILL.md must mention stuck_kind value `{}`",
+                v.as_str()
+            );
+        }
+        assert!(
+            CONTROL_SKILL.contains(&ClaudeStatus::vocabulary_doc()),
+            "SKILL.md must quote ClaudeStatus::vocabulary_doc() verbatim"
+        );
+        assert!(
+            CONTROL_SKILL.contains(&StuckKind::vocabulary_doc()),
+            "SKILL.md must quote StuckKind::vocabulary_doc() verbatim"
+        );
+        // Values that were documented at some point but never existed in code.
+        for bogus in [
+            "`awaiting_input`",
+            "`confirmation`",
+            "claude_status: stuck",
+            "claude_status: `stuck`",
+            "`stuck_kind: none`",
+            "`E_VALIDATION`",
+        ] {
+            assert!(
+                !CONTROL_SKILL.contains(bogus),
+                "SKILL.md documents a value that does not exist: {bogus}"
+            );
+        }
+    }
+
+    // ---- response caps ----
+
+    #[test]
+    fn tail_lines_keeps_last_n_and_reports_total() {
+        let text = "a\nb\nc\nd";
+        assert_eq!(tail_lines(text, 2), ("c\nd".to_string(), 4));
+        assert_eq!(tail_lines(text, 10), (text.to_string(), 4));
+        assert_eq!(tail_lines(text, 0), (text.to_string(), 4));
+    }
+
+    #[test]
+    fn capture_response_notes_truncation_only_when_it_drops_lines() {
+        let text = "l1\nl2\nl3";
+        assert_eq!(capture_response(text, 3), text);
+        let cut = capture_response(text, 2);
+        assert!(cut.starts_with("[capture_session: showing the last 2 of 3 lines"));
+        assert!(cut.ends_with("l2\nl3"));
+        // Plain text: newlines are real, not JSON-escaped.
+        assert!(!cut.contains("\\n"));
+    }
+
+    #[test]
+    fn capture_default_cap_matches_docs() {
+        assert_eq!(CAPTURE_DEFAULT_MAX_LINES, 200);
+        assert_eq!(REPO_LOG_DEFAULT_LIMIT, 50);
     }
 }

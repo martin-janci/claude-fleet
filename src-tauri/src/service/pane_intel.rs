@@ -7,7 +7,7 @@
 //! heavily unit-tested; the reconcile wiring that calls it is intentionally thin.
 //!
 //! All parsers return `None` rather than guess. A misread pane that silently
-//! produced a wrong "blocked" status or a bogus context % would be worse than no
+//! produced a wrong `blocked` status or a bogus context % would be worse than no
 //! signal at all, since Wave-2 self-heal will eventually act on these.
 
 /// Cap on the stored activity string so a runaway pane line can't bloat a row.
@@ -15,7 +15,12 @@ const ACTIVITY_MAX: usize = 200;
 
 /// Stuck states detectable from the pane tail. Detection only — auto-remedy
 /// keystrokes are a deliberately-deferred follow-up (see plan self-review).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+///
+/// This enum is the single source of truth for the `stuck_kind` vocabulary:
+/// the DB column, the MCP `list_sessions` / `peer_status` output, the server
+/// instructions and the control skill all quote [`StuckKind::vocabulary_doc`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StuckKind {
     /// Claude is showing an account/login selection menu.
     AuthMenu,
@@ -30,6 +35,15 @@ pub enum StuckKind {
 }
 
 impl StuckKind {
+    /// Every value, in documentation order.
+    pub const ALL: &'static [StuckKind] = &[
+        StuckKind::AuthMenu,
+        StuckKind::Reconnect,
+        StuckKind::TrustPrompt,
+        StuckKind::Oom,
+        StuckKind::PressEnter,
+    ];
+
     /// Stable lowercase tag stored in `sessions.stuck_kind`.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -40,6 +54,124 @@ impl StuckKind {
             StuckKind::PressEnter => "press_enter",
         }
     }
+
+    /// The value list rendered as `a | b | c`, for quoting verbatim in docs.
+    pub fn vocabulary_doc() -> String {
+        join_vocabulary(Self::ALL.iter().map(|k| k.as_str()))
+    }
+}
+
+impl std::fmt::Display for StuckKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for StuckKind {
+    type Err = UnknownValue;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|k| k.as_str() == s)
+            .ok_or_else(|| UnknownValue {
+                field: "stuck_kind",
+                value: s.to_string(),
+            })
+    }
+}
+
+/// Coarse Claude REPL status stored in `sessions.claude_status`.
+///
+/// Authoritative values come from `claude agents --json` (`status` field);
+/// the pane-tail fallback in [`analyze`] only ever derives `working`, `idle`
+/// or `blocked`, and the Stop hook (`service::hooks`) stamps `idle`. This enum
+/// is the single source of truth for the vocabulary: every doc string and the
+/// control skill quote [`ClaudeStatus::vocabulary_doc`] verbatim, and a test
+/// fails if they drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeStatus {
+    /// Actively generating / running tools.
+    Working,
+    /// Waiting on user input (permission prompt, question, stuck state).
+    Blocked,
+    /// The agent finished its task (background sessions).
+    Completed,
+    /// The agent exited with an error (background sessions).
+    Failed,
+    /// The process was stopped by a hook or the user.
+    Stopped,
+    /// Turn over; the REPL is showing its input prompt.
+    Idle,
+}
+
+impl ClaudeStatus {
+    /// Every value, in documentation order.
+    pub const ALL: &'static [ClaudeStatus] = &[
+        ClaudeStatus::Working,
+        ClaudeStatus::Blocked,
+        ClaudeStatus::Completed,
+        ClaudeStatus::Failed,
+        ClaudeStatus::Stopped,
+        ClaudeStatus::Idle,
+    ];
+
+    /// Stable lowercase tag stored in `sessions.claude_status`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ClaudeStatus::Working => "working",
+            ClaudeStatus::Blocked => "blocked",
+            ClaudeStatus::Completed => "completed",
+            ClaudeStatus::Failed => "failed",
+            ClaudeStatus::Stopped => "stopped",
+            ClaudeStatus::Idle => "idle",
+        }
+    }
+
+    /// The value list rendered as `a | b | c`, for quoting verbatim in docs.
+    pub fn vocabulary_doc() -> String {
+        join_vocabulary(Self::ALL.iter().map(|k| k.as_str()))
+    }
+}
+
+impl std::fmt::Display for ClaudeStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ClaudeStatus {
+    type Err = UnknownValue;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|k| k.as_str() == s)
+            .ok_or_else(|| UnknownValue {
+                field: "claude_status",
+                value: s.to_string(),
+            })
+    }
+}
+
+/// Error for a string that is not in a status vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownValue {
+    pub field: &'static str,
+    pub value: String,
+}
+
+impl std::fmt::Display for UnknownValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown {} value: {:?}", self.field, self.value)
+    }
+}
+
+impl std::error::Error for UnknownValue {}
+
+fn join_vocabulary<'a>(values: impl Iterator<Item = &'a str>) -> String {
+    values.collect::<Vec<_>>().join(" | ")
 }
 
 /// Everything we can infer from one pane tail.
@@ -51,9 +183,9 @@ pub struct PaneIntel {
     pub stuck: Option<StuckKind>,
     /// Context usage 0..100 derived from the REPL footer, if present.
     pub context_pct: Option<f64>,
-    /// Inferred status: `"working"` | `"idle"` | `"blocked"` | `None`.
+    /// Inferred status: `Working` | `Idle` | `Blocked` | `None`.
     /// Only a *fallback* — the authoritative status comes from `claude agents`.
-    pub derived_status: Option<&'static str>,
+    pub derived_status: Option<ClaudeStatus>,
 }
 
 /// Strip ANSI/VT escape sequences (CSI `ESC[…m`, OSC, and bare control chars)
@@ -289,9 +421,9 @@ fn is_decoration(c: char) -> bool {
 
 /// Derive a coarse status from the tail. Used ONLY as a fallback when the
 /// authoritative `claude agents` status is absent.
-fn derive_status(stuck: Option<StuckKind>, stripped: &str) -> Option<&'static str> {
+fn derive_status(stuck: Option<StuckKind>, stripped: &str) -> Option<ClaudeStatus> {
     if stuck.is_some() {
-        return Some("blocked");
+        return Some(ClaudeStatus::Blocked);
     }
     let lower = stripped.to_lowercase();
     if lower.trim().is_empty() {
@@ -306,7 +438,7 @@ fn derive_status(stuck: Option<StuckKind>, stripped: &str) -> Option<&'static st
     // after the work finished (e.g. a completed "⏺ Bash(…)" line, or the summary
     // text "41 tool uses"), which made idle sessions read as "working" forever.
     if lower.contains("esc to interrupt") {
-        return Some("working");
+        return Some(ClaudeStatus::Working);
     }
     // IDLE: the REPL is showing its input chrome — the status bar, the
     // permissions/mode footer, the shortcut hint, or a selection menu waiting on
@@ -318,7 +450,7 @@ fn derive_status(stuck: Option<StuckKind>, stripped: &str) -> Option<&'static st
         || lower.contains("enter to select")
         || lower.contains("esc to cancel")
     {
-        return Some("idle");
+        return Some(ClaudeStatus::Idle);
     }
     None
 }
@@ -373,7 +505,7 @@ mod tests {
     fn reconnect_is_blocked() {
         let intel = analyze("Some output\nReconnecting…\n");
         assert_eq!(intel.stuck, Some(StuckKind::Reconnect));
-        assert_eq!(intel.derived_status, Some("blocked"));
+        assert_eq!(intel.derived_status, Some(ClaudeStatus::Blocked));
     }
 
     #[test]
@@ -381,7 +513,7 @@ mod tests {
         let intel =
             analyze("Select login method:\n  1. Claude account with subscription\n  2. API key\n");
         assert_eq!(intel.stuck, Some(StuckKind::AuthMenu));
-        assert_eq!(intel.derived_status, Some("blocked"));
+        assert_eq!(intel.derived_status, Some(ClaudeStatus::Blocked));
     }
 
     #[test]
@@ -389,14 +521,14 @@ mod tests {
         let intel =
             analyze("Do you trust the files in this folder?\n  ❯ 1. Yes, proceed\n  2. No\n");
         assert_eq!(intel.stuck, Some(StuckKind::TrustPrompt));
-        assert_eq!(intel.derived_status, Some("blocked"));
+        assert_eq!(intel.derived_status, Some(ClaudeStatus::Blocked));
     }
 
     #[test]
     fn press_enter_detected() {
         let intel = analyze("Update available.\nPress Enter to continue\n");
         assert_eq!(intel.stuck, Some(StuckKind::PressEnter));
-        assert_eq!(intel.derived_status, Some("blocked"));
+        assert_eq!(intel.derived_status, Some(ClaudeStatus::Blocked));
     }
 
     #[test]
@@ -421,7 +553,7 @@ mod tests {
         let intel =
             analyze("<--- Last few GCs --->\nFATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\n");
         assert_eq!(intel.stuck, Some(StuckKind::Oom));
-        assert_eq!(intel.derived_status, Some("blocked"));
+        assert_eq!(intel.derived_status, Some(ClaudeStatus::Blocked));
     }
 
     #[test]
@@ -460,7 +592,7 @@ mod tests {
         let tail = "⏺ Bash(cargo test)\n  ⎿ Running…\n✶ Cooking… (3s · esc to interrupt)\n";
         let intel = analyze(tail);
         assert!(intel.stuck.is_none());
-        assert_eq!(intel.derived_status, Some("working"));
+        assert_eq!(intel.derived_status, Some(ClaudeStatus::Working));
         let activity = intel.activity.expect("activity");
         assert!(
             activity.contains("interrupt")
@@ -475,7 +607,7 @@ mod tests {
         // the footer shows the idle status bar. Must be idle, not working — this
         // exact case made sessions hang in "working".
         let tail = "⏺ Yes — all merged, queue empty.\n  - 7 work PRs MERGED\n  [███████░░] 59% used  |  Opus 4.7  |  /Users/me/proj\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents";
-        assert_eq!(analyze(tail).derived_status, Some("idle"));
+        assert_eq!(analyze(tail).derived_status, Some(ClaudeStatus::Idle));
     }
 
     #[test]
@@ -484,7 +616,7 @@ mod tests {
         // permissions hint but NO "% used". Previously yielded None → the upsert
         // COALESCE froze the prior status. Must classify as idle.
         let tail = "❯ \n────────\n  Opus 4.7 (1M context)  |  /Users/me/proj\n  ⏵⏵ bypass permissions on (shift+tab to cycle)";
-        assert_eq!(analyze(tail).derived_status, Some("idle"));
+        assert_eq!(analyze(tail).derived_status, Some(ClaudeStatus::Idle));
     }
 
     #[test]
@@ -493,7 +625,7 @@ mod tests {
         // question) is waiting on a keystroke. The "41 tool uses" summary text
         // previously tripped the "tool use" working heuristic.
         let tail = "⏺ Explore(bg sessions)\n  ⎿  Done (41 tool uses · 133.5k tokens · 2m 1s)\n❯ 1. Show bg, toggle to hide\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel";
-        assert_eq!(analyze(tail).derived_status, Some("idle"));
+        assert_eq!(analyze(tail).derived_status, Some(ClaudeStatus::Idle));
     }
 
     #[test]
@@ -519,5 +651,70 @@ mod tests {
         assert_eq!(StuckKind::TrustPrompt.as_str(), "trust_prompt");
         assert_eq!(StuckKind::Oom.as_str(), "oom");
         assert_eq!(StuckKind::PressEnter.as_str(), "press_enter");
+    }
+
+    // ---- status vocabulary ------------------------------------------------
+
+    #[test]
+    fn stuck_kind_round_trips_through_str_and_serde() {
+        for k in StuckKind::ALL {
+            assert_eq!(k.as_str().parse::<StuckKind>().unwrap(), *k);
+            let json = serde_json::to_string(k).unwrap();
+            assert_eq!(json, format!("\"{}\"", k.as_str()));
+            assert_eq!(serde_json::from_str::<StuckKind>(&json).unwrap(), *k);
+        }
+        assert!("confirmation".parse::<StuckKind>().is_err());
+        assert!("none".parse::<StuckKind>().is_err());
+    }
+
+    #[test]
+    fn claude_status_round_trips_through_str_and_serde() {
+        for k in ClaudeStatus::ALL {
+            assert_eq!(k.as_str().parse::<ClaudeStatus>().unwrap(), *k);
+            let json = serde_json::to_string(k).unwrap();
+            assert_eq!(json, format!("\"{}\"", k.as_str()));
+            assert_eq!(serde_json::from_str::<ClaudeStatus>(&json).unwrap(), *k);
+        }
+        assert!("stuck".parse::<ClaudeStatus>().is_err());
+        assert!("awaiting_input".parse::<ClaudeStatus>().is_err());
+    }
+
+    #[test]
+    fn vocabulary_doc_lists_every_value_once() {
+        assert_eq!(
+            ClaudeStatus::vocabulary_doc(),
+            "working | blocked | completed | failed | stopped | idle"
+        );
+        assert_eq!(
+            StuckKind::vocabulary_doc(),
+            "auth_menu | reconnect | trust_prompt | oom | press_enter"
+        );
+    }
+
+    /// Write sites outside this module still use string literals (files owned
+    /// by other work streams). Pin them here so a renamed value becomes a test
+    /// failure instead of silent drift.
+    #[test]
+    fn external_write_site_literals_are_in_vocabulary() {
+        // service/hooks.rs: the Stop hook stamps "idle".
+        assert_eq!("idle".parse::<ClaudeStatus>().unwrap(), ClaudeStatus::Idle);
+        // claude_agents.rs: the documented `claude agents --json` status set.
+        for lit in [
+            "working",
+            "blocked",
+            "completed",
+            "failed",
+            "stopped",
+            "idle",
+        ] {
+            assert!(
+                lit.parse::<ClaudeStatus>().is_ok(),
+                "{lit} not in vocabulary"
+            );
+        }
+        // `claude_status` filter values callers pass to list_sessions and
+        // broadcast_prompt must be real values, so the doc examples parse.
+        assert!("idle".parse::<ClaudeStatus>().is_ok());
+        assert!("working".parse::<ClaudeStatus>().is_ok());
     }
 }
