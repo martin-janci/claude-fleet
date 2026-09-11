@@ -9,7 +9,7 @@
 //! drag-drop event into [`UploadAllowList`] with a short TTL — are accepted.
 //! Anything else is `E_FORBIDDEN` (SEC-9).
 
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use serde::Deserialize;
@@ -98,7 +98,7 @@ pub fn check_paths_allowed(allow: &UploadAllowList, paths: &[String]) -> Result<
     for p in paths {
         if !allow.is_allowed(Path::new(p)) {
             return Err(IpcError::new(
-                "E_FORBIDDEN",
+                codes::E_FORBIDDEN,
                 format!("{p} was not dropped onto the window; only dropped files can be uploaded"),
             ));
         }

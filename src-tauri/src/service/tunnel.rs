@@ -124,12 +124,19 @@ impl TunnelSupervisor {
             loop {
                 let argv = tunnel_argv(&host_s, remote_port, mcp_port);
                 let status = spawner(argv).await;
-                tracing::warn!(
-                    host = %host_s,
-                    exit_code = ?status,
-                    restart_in = ?backoff,
-                    "[tunnel] ssh exited; restarting"
-                );
+                match status {
+                    Some(code) => tracing::warn!(
+                        host = %host_s,
+                        exit_code = code,
+                        restart_in = ?backoff,
+                        "[tunnel] ssh exited; restarting"
+                    ),
+                    None => tracing::warn!(
+                        host = %host_s,
+                        restart_in = ?backoff,
+                        "[tunnel] ssh ended without an exit code (killed by a signal, or it never spawned); restarting"
+                    ),
+                }
                 tokio::time::sleep(backoff).await;
                 backoff = next_backoff(backoff);
             }

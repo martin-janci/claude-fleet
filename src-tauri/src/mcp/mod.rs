@@ -169,7 +169,8 @@ async fn authorize(
                 })?
         }
         Err(status) => {
-            tracing::warn!(%status, "[mcp] rejected request");
+            // The path only: the URI / query can carry the legacy `?token=`.
+            tracing::warn!(%status, path = %request.uri().path(), "[mcp] rejected request");
             return Err(status);
         }
     };
