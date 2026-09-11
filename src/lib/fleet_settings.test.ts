@@ -23,6 +23,7 @@ import {
   settingInt,
   parseHoursInput,
   parseIntInput,
+  parsePricesJsonInput,
   SETTING_DEFAULTS,
   SETTING_KEYS,
 } from './fleet_settings';
@@ -47,6 +48,9 @@ describe('fleet settings', () => {
     expect(settingSecs(m, SETTING_KEYS.repairTickIntervalSecs)).toBe(600);
     expect(settingSecs(m, SETTING_KEYS.tasksMaxAgeSecs)).toBe(86400);
     expect(settingSecs(m, SETTING_KEYS.moveMaxTranscriptMb)).toBe(200);
+    expect(settingBool(m, SETTING_KEYS.usageEnabled)).toBe(true);
+    expect(settingSecs(m, SETTING_KEYS.usageIntervalSecs)).toBe(300);
+    expect(m[SETTING_KEYS.usagePricesJson]).toBe('{}');
   });
 
   it('settingSecs falls back to the default on garbage', () => {
@@ -109,6 +113,15 @@ describe('fleet settings', () => {
     expect(parseIntInput('-1')).toEqual({ value: '-1' });
     expect(parseIntInput('')).toEqual({ error: 'enter a whole number' });
     expect(parseIntInput('1.5')).toEqual({ error: '"1.5" is not a whole number' });
+  });
+
+  it('parsePricesJsonInput maps empty to {} and refuses what is not a JSON object', () => {
+    expect(parsePricesJsonInput('  ')).toEqual({ value: '{}' });
+    expect(parsePricesJsonInput(' {"opus":{"input":1}} ')).toEqual({ value: '{"opus":{"input":1}}' });
+    expect(parsePricesJsonInput('{oops')).toEqual({ error: 'not valid JSON' });
+    for (const raw of ['[]', 'null', '42', '"x"']) {
+      expect('error' in parsePricesJsonInput(raw)).toBe(true);
+    }
   });
 
   it('hours <-> seconds round-trip', () => {

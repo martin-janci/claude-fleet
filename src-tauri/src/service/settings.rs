@@ -371,13 +371,7 @@ mod tests {
     fn every_spec_has_a_settings_dialog_row() {
         const TS: &str = include_str!("../../../src/lib/fleet_settings.ts");
         const DIALOG: &str = include_str!("../../../src/lib/SettingsDialog.svelte");
-        // The `usage.*` settings (per-session usage, #60) land together with
-        // their rows in that PR. Remove this entry once #60 has merged.
-        const PENDING_ROWS: &[&str] = &["usage."];
         for spec in SPECS {
-            if PENDING_ROWS.iter().any(|p| spec.key.starts_with(p)) {
-                continue;
-            }
             // `  camelName: 'the.key',` (SETTING_DEFAULTS lines start with a quote).
             let entry = format!(": '{}',", spec.key);
             let line = TS

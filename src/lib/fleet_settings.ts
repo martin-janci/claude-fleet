@@ -21,10 +21,9 @@ export const SETTING_KEYS = {
   repairTickIntervalSecs: 'repair.tick_interval_secs',
   tasksMaxAgeSecs: 'tasks.max_age_secs',
   moveMaxTranscriptMb: 'move.max_transcript_mb',
-  // TODO(#60): the `usage.*` settings arrive with per-session usage (#60),
-  // which adds their keys, defaults and Settings rows here. Until then the
-  // registry test (`settings::tests::every_spec_has_a_settings_dialog_row`)
-  // allowlists the `usage.` prefix.
+  usageEnabled: 'usage.enabled',
+  usageIntervalSecs: 'usage.interval_secs',
+  usagePricesJson: 'usage.prices_json',
 } as const;
 
 /** Derived, read-only entry in the `get_fleet_settings` map: JSON object of
@@ -65,6 +64,9 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'repair.tick_interval_secs': '600',
   'tasks.max_age_secs': '86400',
   'move.max_transcript_mb': '200',
+  'usage.enabled': 'true',
+  'usage.interval_secs': '300',
+  'usage.prices_json': '{}',
 };
 
 export type FleetSettings = Record<string, string>;
@@ -190,4 +192,24 @@ export function parseIntInput(raw: string): { value: string } | { error: string 
   if (t === '') return { error: 'enter a whole number' };
   if (!/^-?\d+$/.test(t)) return { error: `"${t}" is not a whole number` };
   return { value: String(Number.parseInt(t, 10)) };
+}
+
+/** The `usage.prices_json` textarea (`Kind::PriceMap`). Empty means "no
+ *  overrides" (`{}`); text that is not a JSON object is refused here with a
+ *  message. Anything object-shaped goes to the backend as typed, and its
+ *  E_INVALID (bad model key, missing or out-of-range price) is what the row
+ *  shows. */
+export function parsePricesJsonInput(raw: string): { value: string } | { error: string } {
+  const t = raw.trim();
+  if (t === '') return { value: '{}' };
+  let v: unknown;
+  try {
+    v = JSON.parse(t);
+  } catch {
+    return { error: 'not valid JSON' };
+  }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) {
+    return { error: 'must be a JSON object of model name to prices' };
+  }
+  return { value: t };
 }
