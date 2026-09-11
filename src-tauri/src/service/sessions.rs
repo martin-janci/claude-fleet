@@ -460,9 +460,11 @@ fn reconcile_write_one_host(
                 }
                 for (kind, detail) in events {
                     if let Err(e) = s.insert_session_event(row.id, kind, detail) {
-                        eprintln!(
-                            "[reconcile] session_event insert failed for {}/{tmux_name}: {e}",
-                            host.alias
+                        tracing::warn!(
+                            host = %host.alias,
+                            session = %tmux_name,
+                            error = %e,
+                            "[reconcile] session_event insert failed"
                         );
                     }
                 }
@@ -481,9 +483,10 @@ fn reconcile_write_one_host(
             // also the BE-3 ghost guard's evidence (`probe_started_at` above).
             // Best-effort: a failure here must not abort reconcile.
             if let Err(e) = s.mark_sessions_reconciled(&host.alias, &keep, now_unix()) {
-                eprintln!(
-                    "[reconcile] mark_sessions_reconciled failed for {}: {e}",
-                    host.alias
+                tracing::warn!(
+                    host = %host.alias,
+                    error = %e,
+                    "[reconcile] mark_sessions_reconciled failed"
                 );
             }
         }
@@ -578,11 +581,16 @@ fn reconcile_bg_agents(
             status.as_deref(),
             now_unix(),
         ) {
-            eprintln!("[reconcile] bg upsert failed for {host_alias}/{session_id}: {e}");
+            tracing::warn!(
+                host = %host_alias,
+                claude_session_id = %session_id,
+                error = %e,
+                "[reconcile] bg upsert failed"
+            );
         }
     }
     if let Err(e) = s.ghost_and_clean_bg_sessions(host_alias, &keep, now_unix()) {
-        eprintln!("[reconcile] bg cleanup failed for {host_alias}: {e}");
+        tracing::warn!(host = %host_alias, error = %e, "[reconcile] bg cleanup failed");
     }
     Ok(())
 }
@@ -636,7 +644,8 @@ async fn probe_pr_info(
     let stdout = match shell.run_script(host, &script).await {
         Ok(out) => out,
         Err(e) => {
-            eprintln!("[reconcile] pr probe failed on {host}: {e}");
+            // Best-effort and retried every pass: debug, not warn.
+            tracing::debug!(host = %host, error = %e, "[reconcile] pr probe failed");
             return PrInfoMap::new();
         }
     };
@@ -689,9 +698,10 @@ async fn probe_with_timeout(
             started_at,
         },
         Err(_elapsed) => {
-            eprintln!(
-                "[reconcile] host {alias} probe exceeded {timeout:?}; marking unreachable (last-known sessions kept)",
-                alias = host.alias,
+            tracing::warn!(
+                host = %host.alias,
+                timeout = ?timeout,
+                "[reconcile] host probe exceeded its wall clock; marking unreachable (last-known sessions kept)"
             );
             return HostProbe {
                 host,
@@ -714,9 +724,10 @@ async fn probe_with_timeout(
         .await
         {
             Ok(map) => probe.pr_info = map,
-            Err(_elapsed) => eprintln!(
-                "[reconcile] pr probe on {} exceeded {PR_PROBE_TIMEOUT:?}; outcome fields kept",
-                probe.host.alias
+            Err(_elapsed) => tracing::debug!(
+                host = %probe.host.alias,
+                timeout = ?PR_PROBE_TIMEOUT,
+                "[reconcile] pr probe timed out; outcome fields kept"
             ),
         }
     }
@@ -768,7 +779,7 @@ pub(crate) async fn reconcile_sessions_with(
     while let Some(join) = set.join_next().await {
         match join {
             Ok(probe) => probed.push(probe),
-            Err(e) => eprintln!("[reconcile] probe task panicked: {e}"),
+            Err(e) => tracing::error!(error = %e, "[reconcile] probe task panicked"),
         }
     }
 
@@ -794,7 +805,11 @@ pub(crate) async fn reconcile_sessions_with(
         // every other host. apply_host_reconcile is transactional, so a
         // failed host rolls back cleanly; we log it and carry on.
         if let Err(e) = reconcile_write_one_host(&mut s, probe, &projects) {
-            eprintln!("[reconcile] write failed for {}: {e}", probe.host.alias);
+            tracing::error!(
+                host = %probe.host.alias,
+                error = %e,
+                "[reconcile] write failed (rolled back; retried next pass)"
+            );
         }
     }
     Ok(())
@@ -1860,9 +1875,10 @@ async fn new_session_inner(
 
     // PROD-5: the fleet created this session now. Soft-fail (cosmetic).
     if let Err(e) = s.set_started_at(row.id, now_unix()) {
-        eprintln!(
-            "new_session: storing started_at for {} failed: {e:?}",
-            args.name
+        tracing::warn!(
+            session = %args.name,
+            error = %e,
+            "[new_session] storing started_at failed"
         );
     }
 
@@ -1873,9 +1889,10 @@ async fn new_session_inner(
     let derived_friendly = derive_friendly_name(&s, &args, row.worktree_id)?;
     if let Some(ref value) = derived_friendly {
         if let Err(e) = s.set_friendly_name(&args.host_alias, &args.name, Some(value)) {
-            eprintln!(
-                "new_session: storing friendly_name for {} failed: {e:?}",
-                args.name
+            tracing::warn!(
+                session = %args.name,
+                error = %e,
+                "[new_session] storing friendly_name failed"
             );
         }
     }
@@ -1893,9 +1910,10 @@ async fn new_session_inner(
     let mut row = row;
     if let Some(ref cid) = claude_id {
         if let Err(e) = s.set_claude_session_id(row.id, cid) {
-            eprintln!(
-                "new_session: storing claude_session_id for {} failed: {e:?}",
-                args.name
+            tracing::warn!(
+                session = %args.name,
+                error = %e,
+                "[new_session] storing claude_session_id failed"
             );
         } else {
             row.claude_session_id = Some(cid.clone());
@@ -2112,7 +2130,7 @@ pub async fn kill_session(
         crate::claude_cli::claude_stop(ssh, &args.host_alias, &sid).await?;
         if let Ok(s) = store.lock() {
             if let Err(e) = s.insert_session_event(id, "killed", None) {
-                eprintln!("[event] insert killed failed for session {id}: {e}");
+                tracing::warn!(session_id = id, error = %e, "[event] insert killed failed");
             }
         }
         reconcile_one_host(store, ssh, &args.host_alias).await?;
@@ -2123,7 +2141,7 @@ pub async fn kill_session(
     // Task G: record the kill before reconcile reaps the row. Best-effort.
     if let Ok(s) = store.lock() {
         if let Err(e) = s.insert_session_event(id, "killed", None) {
-            eprintln!("[event] insert killed failed for session {id}: {e}");
+            tracing::warn!(session_id = id, error = %e, "[event] insert killed failed");
         }
     }
     reconcile_one_host(store, ssh, &args.host_alias).await?;
@@ -2399,19 +2417,34 @@ pub fn friendly_name_from_prompt(prompt: &str) -> Option<String> {
 /// landed in the pane.
 fn record_prompt_outcome(store: &Mutex<Store>, host_alias: &str, tmux_name: &str, prompt: &str) {
     let Ok(s) = store.lock() else {
-        eprintln!("[prompt] store mutex poisoned recording outcome for {host_alias}/{tmux_name}");
+        tracing::error!(
+            host = %host_alias,
+            session = %tmux_name,
+            "[prompt] store mutex poisoned recording the outcome"
+        );
         return;
     };
     let row = match s.get_session(tmux_name, host_alias) {
         Ok(Some(row)) => row,
         Ok(None) => return,
         Err(e) => {
-            eprintln!("[prompt] lookup failed for {host_alias}/{tmux_name}: {e}");
+            tracing::warn!(
+                host = %host_alias,
+                session = %tmux_name,
+                error = %e,
+                "[prompt] lookup failed"
+            );
             return;
         }
     };
     if let Err(e) = s.set_last_prompt(row.id, prompt) {
-        eprintln!("[prompt] set_last_prompt failed for {host_alias}/{tmux_name}: {e}");
+        // Never the prompt text itself: identifiers only.
+        tracing::warn!(
+            host = %host_alias,
+            session = %tmux_name,
+            error = %e,
+            "[prompt] set_last_prompt failed"
+        );
     }
     // The prompt-derived label replaces NO name or the deterministic
     // branch-derived default every fleet-created session starts with; a
@@ -2425,8 +2458,11 @@ fn record_prompt_outcome(store: &Mutex<Store>, host_alias: &str, tmux_name: &str
     if replaceable {
         if let Some(name) = friendly_name_from_prompt(prompt) {
             if let Err(e) = s.set_friendly_name(host_alias, tmux_name, Some(&name)) {
-                eprintln!(
-                    "[prompt] default friendly_name failed for {host_alias}/{tmux_name}: {e}"
+                tracing::warn!(
+                    host = %host_alias,
+                    session = %tmux_name,
+                    error = %e,
+                    "[prompt] setting the default friendly_name failed"
                 );
             }
         }
@@ -2448,18 +2484,35 @@ fn record_session_event(
     let s = match store.lock() {
         Ok(s) => s,
         Err(_) => {
-            eprintln!("[event] store mutex poisoned recording {kind} for {host_alias}/{tmux_name}");
+            tracing::error!(
+                kind,
+                host = %host_alias,
+                session = %tmux_name,
+                "[event] store mutex poisoned recording an event"
+            );
             return;
         }
     };
     match s.get_session(tmux_name, host_alias) {
         Ok(Some(row)) => {
             if let Err(e) = s.insert_session_event(row.id, kind, detail.as_deref()) {
-                eprintln!("[event] insert {kind} failed for {host_alias}/{tmux_name}: {e}");
+                tracing::warn!(
+                    kind,
+                    host = %host_alias,
+                    session = %tmux_name,
+                    error = %e,
+                    "[event] insert failed"
+                );
             }
         }
         Ok(None) => {} // no row yet (e.g. brand-new session) — nothing to attach to
-        Err(e) => eprintln!("[event] lookup failed for {host_alias}/{tmux_name}: {e}"),
+        Err(e) => tracing::warn!(
+            kind,
+            host = %host_alias,
+            session = %tmux_name,
+            error = %e,
+            "[event] lookup failed"
+        ),
     }
 }
 
@@ -2882,7 +2935,11 @@ pub async fn spawn_review(
     )
     .await
     {
-        eprintln!("spawn_review: seeding prompt to {review_name} failed (session is live, seed manually): {e:?}");
+        tracing::warn!(
+            session = %review_name,
+            error = %e,
+            "[spawn_review] seeding the review prompt failed (the session is live; seed it manually)"
+        );
     }
 
     // 6. Return the tagged review row.
@@ -2988,9 +3045,10 @@ pub async fn recreate_session(
             .ok_or_else(|| IpcError::new("E_INTERNAL", "session vanished after restore"))?;
         // Task G: record the recreate on the (preserved) row. Best-effort.
         if let Err(e) = s.insert_session_event(sess.id, "recreated", None) {
-            eprintln!(
-                "[event] insert recreated failed for session {}: {e}",
-                sess.id
+            tracing::warn!(
+                session_id = sess.id,
+                error = %e,
+                "[event] insert recreated failed"
             );
         }
         row
@@ -3051,10 +3109,12 @@ fn known_agent_status(tmux_name: &str, status: Option<&str>) -> Option<String> {
     match raw.parse::<crate::service::pane_intel::ClaudeStatus>() {
         Ok(st) => Some(st.as_str().to_string()),
         Err(_) => {
-            eprintln!(
-                "[reconcile] {tmux_name}: dropping unknown claude agents status {raw:?} \
-                 (not in vocabulary {})",
-                crate::service::pane_intel::ClaudeStatus::vocabulary_doc()
+            // Repeats every pass while the CLI keeps reporting it: debug.
+            tracing::debug!(
+                session = %tmux_name,
+                status = ?raw,
+                vocabulary = %crate::service::pane_intel::ClaudeStatus::vocabulary_doc(),
+                "[reconcile] dropping an unknown claude agents status"
             );
             None
         }

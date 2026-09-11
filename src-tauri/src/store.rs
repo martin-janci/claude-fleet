@@ -2654,7 +2654,11 @@ impl Store {
             rusqlite::params![at, id],
         )?;
         if let Err(e) = self.insert_session_event(id, "playbook_applied", Some(detail)) {
-            eprintln!("[playbook] session_event insert failed for {id}: {e}");
+            tracing::warn!(
+                session_id = id,
+                error = %e,
+                "[playbook] session_event insert failed"
+            );
         }
         let row = fetch_session_by_id(&self.conn, id)?;
         if let Some(ref r) = row {
