@@ -102,7 +102,7 @@ Manage hints in Settings:
 Once you have at least one session running:
 
 - **Attach** — click a session row to open the live terminal view and watch the session in real time.
-- **Quick switcher (Ctrl/⌘+K or Ctrl/⌘+P)** — works even while the terminal has focus. Type any part of a session's name, project, host, branch or status; recently opened sessions come first. **Enter** attaches, **Ctrl/⌘+Enter** opens the new-session dialog with what you typed as the name, and the "New session in <project>" rows start one for that project.
+- **Quick switcher (⌘K / ⌘P on macOS, Ctrl+Shift+K / Ctrl+Shift+P on Linux and Windows)** — works even while the terminal has focus; plain Ctrl+K and Ctrl+P still go to the terminal (readline kill-line / previous history). Type any part of a session's name, project, host, branch or status; recently opened sessions come first. **Enter** attaches and reveals the session in the sidebar (its project is expanded and the row scrolled into view), **Ctrl/⌘+Enter** opens the new-session dialog with what you typed as the name, and the "New session in <project>" rows start one for that project.
 - **Send a prompt** — type in the prompt bar to send text to the active session. To send the same prompt to several sessions at once, use the broadcast feature.
 - **Background sessions (⚡)** — sessions marked with ⚡ run without an attached terminal. They continue working while you watch other sessions.
 - **Files, diffs, commit graph, branches** — the sidebar panels give you a read-only view of the repository state on the host where the session is running.

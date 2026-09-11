@@ -19,6 +19,43 @@ const WORDS_JSON: &str = include_str!("../../../src/lib/names.json");
 pub const SEPARATOR: &str = "-";
 /// Random draws before falling back to a numeric suffix.
 pub const MAX_TRIES: usize = 24;
+/// Shared-prefix length that makes a pair redundant ("lunar luna").
+pub const SAME_ROOT_PREFIX: usize = 4;
+
+/// True when the adjective and noun share a root and read as a stutter.
+pub fn same_root(adjective: &str, noun: &str) -> bool {
+    adjective
+        .bytes()
+        .zip(noun.bytes())
+        .take_while(|(a, b)| a == b)
+        .count()
+        >= SAME_ROOT_PREFIX
+}
+
+/// Lowercase, every run of non-alphanumerics becomes one `-`, no leading or
+/// trailing dash: `"Blue Sirius"` → `"blue-sirius"`. Used to put friendly
+/// names in the same slug space as generated pairs (the TS side uses
+/// `finalizeBranchSlug`, which agrees on every value the generator emits).
+pub fn slugify(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
+/// Make a name acceptable to `validate::tmux_name`: `.` and `:` (tmux's
+/// target separators) become `-`.
+pub fn tmux_safe(s: &str) -> String {
+    s.replace(['.', ':'], "-")
+}
 
 #[derive(serde::Deserialize)]
 struct Words {
@@ -51,10 +88,17 @@ pub fn generate_name<R: Rng + ?Sized>(existing: &HashSet<String>, rng: &mut R) -
     for _ in 0..MAX_TRIES {
         let a = &adj[rng.random_range(0..adj.len())];
         let n = &noun[rng.random_range(0..noun.len())];
+        // A same-root draw still spends a try, so the budget stays MAX_TRIES.
+        if same_root(a, n) {
+            continue;
+        }
         last = format!("{a}{SEPARATOR}{n}");
         if !taken.contains(&last) {
             return last;
         }
+    }
+    if last.is_empty() {
+        last = format!("{}{SEPARATOR}{}", adj[0], noun[0]);
     }
     let mut n = 2u64;
     loop {
@@ -112,7 +156,7 @@ mod tests {
         // Same numbers as `src/lib/names.test.ts` asserts. Both read one JSON
         // file, so this can only fail if someone edits the list and forgets
         // to update one of the two assertions — which is the intended tripwire.
-        assert_eq!(adjectives().len(), 68);
+        assert_eq!(adjectives().len(), 67);
         assert_eq!(nouns().len(), 124);
     }
 
@@ -158,6 +202,34 @@ mod tests {
             assert!(!existing.contains(&n));
             existing.insert(n);
         }
+    }
+
+    #[test]
+    fn never_pairs_same_root_words() {
+        assert!(same_root("lunar", "luna"));
+        assert!(same_root("cosmic", "cosmos"));
+        assert!(!same_root("coral", "corona"));
+        for _ in 0..500 {
+            let n = generate_name_default(&HashSet::new());
+            let (a, b) = n.split_once('-').unwrap();
+            assert!(!same_root(a, b), "{n}");
+        }
+    }
+
+    #[test]
+    fn adjectives_are_sorted_without_fleet() {
+        let mut sorted = adjectives().to_vec();
+        sorted.sort();
+        assert_eq!(sorted, adjectives());
+        assert!(!adjectives().iter().any(|a| a == "fleet"));
+    }
+
+    #[test]
+    fn slugify_and_tmux_safe() {
+        assert_eq!(slugify("Blue Sirius"), "blue-sirius");
+        assert_eq!(slugify("  Fix: the login bug! "), "fix-the-login-bug");
+        assert_eq!(slugify(""), "");
+        assert_eq!(tmux_safe("dev-o-r--v1.2:x"), "dev-o-r--v1-2-x");
     }
 
     #[test]

@@ -447,6 +447,124 @@ describe('NewSessionDialog — generated names', () => {
     spy.mockRestore();
   });
 
+  const twoWt = {
+    ...project,
+    worktrees: [
+      ...project.worktrees,
+      { id: 12, project_id: 1, name: 'feat-x', path: '/r/cf/.worktrees/feat-x', branch: 'feat-x' },
+    ],
+  };
+  const pickWorktree = async (name: string) => {
+    const row = screen.getAllByTestId('worktree-row').find((r) => r.textContent?.includes(name))!;
+    await fireEvent.click(row);
+    await tick();
+  };
+
+  it('a typed name survives a worktree switch and entering new-worktree mode', async () => {
+    render(NewSessionDialog, { props: { project: twoWt, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    const input = screen.getByTestId('friendly-name') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'red comet' } });
+    await pickWorktree('feat-x');
+    expect(input.value).toBe('red comet');
+    await fireEvent.click(screen.getByTestId('new-worktree-chip'));
+    await tick();
+    expect(input.value).toBe('red comet');
+    expect((screen.getByTestId('new-worktree-name') as HTMLInputElement).value).toBe('red-comet');
+  });
+
+  it('the quick-switcher initialName survives a worktree switch', async () => {
+    render(NewSessionDialog, { props: { project: twoWt, initialName: 'Fix login', onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickWorktree('feat-x');
+    expect((screen.getByTestId('friendly-name') as HTMLInputElement).value).toBe('Fix login');
+  });
+
+  it('after a re-roll (or clearing the field) worktree switches regenerate again', async () => {
+    render(NewSessionDialog, { props: { project: twoWt, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    const input = screen.getByTestId('friendly-name') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'red comet' } });
+    await fireEvent.click(screen.getByTestId('reroll-name'));
+    await tick();
+    await pickWorktree('feat-x');
+    // Not dirty → the worktree's humanised branch is offered.
+    expect(input.value).toBe('Feat x');
+    await fireEvent.input(input, { target: { value: '' } });
+    await pickWorktree('main');
+    expect(isGeneratedName(slugOf(input.value))).toBe(true);
+  });
+
+  it('remembered host is used only while it is visible and reachable, else last-host, else local', async () => {
+    hosts.update((h) => [
+      ...h,
+      { alias: 'hetzner', ssh_alias: 'hetzner', reachable: false, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
+      { alias: 'hidden-box', ssh_alias: 'hidden-box', reachable: true, claude_version: null, tmux_version: null, hidden: true, last_pinged_at: 1, account_uuid: null, provisioned: false },
+    ] as typeof h);
+    const active = () => document.querySelector('.host-pick.active')?.textContent?.trim();
+    const open = async () => {
+      const r = render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+      await tick();
+      const a = active();
+      r.unmount();
+      return a;
+    };
+    const remember = (host: string) =>
+      localStorage.setItem('cf:pref:newsession.project.1', JSON.stringify({ host, worktree: 11, kind: 'work' }));
+
+    remember('mefistos');
+    expect(await open()).toBe('mefistos'); // usable → honoured
+
+    remember('hetzner'); // unreachable
+    localStorage.setItem('cf:pref:last-host', JSON.stringify('mefistos'));
+    expect(await open()).toBe('mefistos'); // → last-host
+
+    remember('hidden-box'); // hidden
+    localStorage.setItem('cf:pref:last-host', JSON.stringify('gone'));
+    expect(await open()).toBe('local'); // last-host unknown too → local
+  });
+
+  it('a second-session name that is itself taken gets a numeric suffix', async () => {
+    sessions.set([
+      okRow({ id: 7, tmux_name: 'dev-martin-janci-claude-fleet', worktree_id: 11 }),
+      okRow({ id: 8, tmux_name: 'dev-martin-janci-claude-fleet--red-comet', worktree_id: 11 }),
+      okRow({ id: 9, tmux_name: 'dev-martin-janci-claude-fleet--red-comet-2', worktree_id: 11 }),
+    ]);
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.input(screen.getByTestId('friendly-name'), { target: { value: 'red comet' } });
+    await tick();
+    expect((screen.getByTestId('new-session-name') as HTMLInputElement).value)
+      .toBe('dev-martin-janci-claude-fleet--red-comet-3');
+  });
+
+  it('dots in a worktree name never reach the tmux name', async () => {
+    const dotted = {
+      ...project,
+      worktrees: [{ id: 13, project_id: 1, name: 'v1.2', path: '/r/cf/.worktrees/v1.2', branch: 'v1.2' }],
+    };
+    render(NewSessionDialog, { props: { project: dotted, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    expect((screen.getByTestId('new-session-name') as HTMLInputElement).value)
+      .toBe('dev-martin-janci-claude-fleet--v1-2');
+  });
+
+  it('Ctrl/Cmd+R re-rolls even with focus on the dialog element itself (never a reload)', async () => {
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    const input = screen.getByTestId('friendly-name') as HTMLInputElement;
+    const dialog = document.querySelector('dialog') as HTMLDialogElement;
+    const before = input.value;
+    let changed = false;
+    for (let i = 0; i < 6 && !changed; i++) {
+      const notPrevented = await fireEvent.keyDown(dialog, { key: 'r', ctrlKey: true });
+      expect(notPrevented).toBe(false); // preventDefault → no webview reload
+      await tick();
+      changed = input.value !== before;
+    }
+    expect(changed).toBe(true);
+  });
+
   it('initialName pre-fills the friendly name (quick switcher hand-off)', async () => {
     render(NewSessionDialog, { props: { project, initialName: 'Fix the login bug', onCreate: () => {}, onCancel: () => {} } });
     await tick();

@@ -8,6 +8,7 @@ import {
   nameWords,
   isGeneratedName,
   tmuxNameSuffix,
+  sameRoot,
 } from './names';
 
 // Deterministic rng: cycles through the given fractions.
@@ -21,7 +22,7 @@ describe('word lists', () => {
     // Keep in sync with `service/names.rs::lists_match_frontend`. Both sides
     // read the same JSON, so this only fails if someone edits one list and
     // forgets the other assertion — which is the point.
-    expect(ADJECTIVES.length).toBe(68);
+    expect(ADJECTIVES.length).toBe(67);
     expect(NOUNS.length).toBe(124);
   });
 
@@ -68,6 +69,26 @@ describe('generateName', () => {
       expect(existing.has(n)).toBe(false);
       existing.add(n);
     }
+  });
+
+  it('never pairs same-root words ("lunar luna", "cosmic cosmos")', () => {
+    expect(sameRoot('lunar', 'luna')).toBe(true);
+    expect(sameRoot('cosmic', 'cosmos')).toBe(true);
+    expect(sameRoot('coral', 'corona')).toBe(false);
+    const li = ADJECTIVES.indexOf('lunar');
+    const ni = NOUNS.indexOf('luna');
+    // First draw is lunar-luna (skipped), second is amber-sirius.
+    const rng = seq([li / ADJECTIVES.length, ni / NOUNS.length, 0, 0]);
+    expect(generateName(new Set(), rng)).toBe(`${ADJECTIVES[0]}-${NOUNS[0]}`);
+    for (let i = 0; i < 500; i++) {
+      const [a, n] = generateName().split('-');
+      expect(sameRoot(a, n), `${a}-${n}`).toBe(false);
+    }
+  });
+
+  it('the adjective list is sorted and has no "fleet"', () => {
+    expect([...ADJECTIVES].sort()).toEqual(ADJECTIVES);
+    expect(ADJECTIVES).not.toContain('fleet');
   });
 
   it('honours MAX_TRIES as the retry budget', () => {

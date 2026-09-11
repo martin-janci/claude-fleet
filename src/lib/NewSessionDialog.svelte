@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import type { ProjectTreeRow, WorktreeRow } from './projects';
   import { newSessionAbortable, sessions, type SessionRow } from './sessions';
   import { hosts } from './hosts';
@@ -49,8 +49,17 @@
   const memoryKey = `newsession.project.${projectId}`;
   const memory = readPref<ProjectMemory | null>(memoryKey, null, (v): v is ProjectMemory | null => v === null || isMemory(v));
 
+  // A remembered host is only honoured while it is still pickable (visible,
+  // and reachable unless it is `local`) — otherwise fall back to the global
+  // last-host, then `local`. Mirrors the chip `disabled` rule below.
+  function usableHost(alias: string | null | undefined): alias is string {
+    return (
+      !!alias &&
+      $hosts.some((h) => h.alias === alias && !h.hidden && (h.reachable || h.alias === 'local'))
+    );
+  }
   let chosenHost = $state<string>(
-    untrack(() => memory?.host ?? readPref('last-host', 'local', isString)),
+    untrack(() => [memory?.host, readPref('last-host', '', isString)].find(usableHost) ?? 'local'),
   );
   $effect(() => {
     writePref('last-host', chosenHost);
@@ -131,12 +140,17 @@
   // A hand-edited tmux name sticks until the next mode/kind change; null
   // means "derived from the other fields" (the normal case).
   let nameOverride = $state<string | null>(null);
+  // The user owns the friendly name once they type one (or the quick
+  // switcher handed one over); worktree/mode switches then keep it instead
+  // of regenerating. The dice clears it.
+  let nameDirty = $state(false);
 
   // Initial fill (untracked: reads stores once, on open).
   untrack(() => {
     const wt = project.worktrees.find((w) => w.id === chosenWorktreeId) ?? null;
     if (initialName?.trim()) {
       friendlyName = initialName.trim();
+      nameDirty = true;
     } else if (chosenWorktreeId === null) {
       friendlyName = freshName();
     } else {
@@ -152,19 +166,29 @@
   // main), and when that name is already live on the chosen host — a second
   // session on the same worktree — `…--<worktree>--<name-slug>` so the two
   // never collide. In new-worktree mode the slug IS the worktree name.
+  // `.` and `:` are tmux target separators (the backend rejects them).
+  const tmuxSafe = (s: string) => s.replace(/[.:]/g, '-');
+  const takenOnHost = $derived(
+    new Set($sessions.filter((s) => s.host_alias === chosenHost).map((s) => s.tmux_name)),
+  );
+  /** `stem` + suffix, or `stem-2`, `stem-3`… + suffix when that is live on the host. */
+  function freeName(stem: string): string {
+    if (!takenOnHost.has(stem + termSuffix)) return stem + termSuffix;
+    for (let n = 2; ; n++) {
+      const candidate = `${stem}-${n}${termSuffix}`;
+      if (!takenOnHost.has(candidate)) return candidate;
+    }
+  }
   const derivedName = $derived.by(() => {
     if (inNewMode) {
       const slug = finalizeBranchSlug(newWorktreeName);
-      return slug ? `${base}--${slug}${termSuffix}` : `${base}${termSuffix}`;
+      return tmuxSafe(slug ? `${base}--${slug}` : base) + termSuffix;
     }
     const wt = chosenWorktree;
     const isMain = !wt || wt.name === 'main';
-    const deterministic = isMain ? `${base}${termSuffix}` : `${base}--${wt.name}${termSuffix}`;
-    const taken = $sessions.some((s) => s.host_alias === chosenHost && s.tmux_name === deterministic);
-    if (!taken || !friendlySlug) return deterministic;
-    return isMain
-      ? `${base}--${friendlySlug}${termSuffix}`
-      : `${base}--${wt.name}--${friendlySlug}${termSuffix}`;
+    const deterministic = tmuxSafe(isMain ? base : `${base}--${wt.name}`) + termSuffix;
+    if (!takenOnHost.has(deterministic) || !friendlySlug) return deterministic;
+    return freeName(tmuxSafe(isMain ? `${base}--${friendlySlug}` : `${base}--${wt.name}--${friendlySlug}`));
   });
   const name = $derived(nameOverride ?? derivedName);
 
@@ -221,7 +245,7 @@
     slugDirty = false;
     nameOverride = null;
     const wt = project.worktrees.find((w) => w.id === id) ?? null;
-    friendlyName = defaultFriendly(wt);
+    if (!nameDirty) friendlyName = defaultFriendly(wt);
   }
 
   function onPickNew() {
@@ -229,12 +253,13 @@
     baseBranch = '';
     slugDirty = false;
     nameOverride = null;
-    friendlyName = freshName();
+    if (!nameDirty) friendlyName = freshName();
     newWorktreeName = finalizeBranchSlug(friendlyName);
   }
 
   function reroll() {
     friendlyName = freshName();
+    nameDirty = false;
     slugDirty = false;
     nameOverride = null;
     if (inNewMode) newWorktreeName = finalizeBranchSlug(friendlyName);
@@ -242,6 +267,8 @@
 
   function onFriendlyNameInput(value: string) {
     friendlyName = value;
+    // Clearing the field hands it back to the generator.
+    nameDirty = value.trim() !== '';
     if (inNewMode && !slugDirty) {
       // Use the canonical branch-slug helper so the auto-derived slug is
       // git-safe the same way the user's direct edits are. Run it through
@@ -327,14 +354,23 @@
     createController?.abort();
   }
 
-  // Enter in any field creates; Cmd/Ctrl+R re-rolls the name (and never
-  // reloads the webview). Escape is handled by <Modal>.
-  function onKeydown(e: KeyboardEvent) {
+  // Cmd/Ctrl+R re-rolls the name. Bound on the window (capture phase) for
+  // as long as the dialog is mounted, so it wins wherever focus sits —
+  // including the <dialog> element itself — and never reloads the webview.
+  function onWindowKeydown(e: KeyboardEvent) {
     if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'r') {
       e.preventDefault();
+      e.stopPropagation();
       reroll();
-      return;
     }
+  }
+  onMount(() => {
+    window.addEventListener('keydown', onWindowKeydown, true);
+    return () => window.removeEventListener('keydown', onWindowKeydown, true);
+  });
+
+  // Enter in any field creates. Escape is handled by <Modal>.
+  function onKeydown(e: KeyboardEvent) {
     if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === 'INPUT') {
@@ -499,6 +535,11 @@
     flex: 1 1 auto;
     padding-right: 0.2rem;
   }
+  /* Children keep their natural height (the worktree list and host chips
+     are capped by their own max-height); when the window is short, .fields
+     scrolls instead of squeezing them toward zero. :global so it reaches
+     PickerList's root too. */
+  .fields > :global(*) { flex-shrink: 0; }
   label { font-size: 0.7rem; color: var(--fg-muted); text-transform: uppercase; }
   input {
     font: inherit;

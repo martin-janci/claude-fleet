@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { projects, refreshProjects, type ProjectTreeRow } from './projects';
   import {
     sessions,
@@ -192,6 +192,27 @@
   // is open by default — most users have one or two projects and want to
   // see their sessions immediately.
   let collapsed: Set<number> = $state(new Set());
+
+  // Reveal the selected session wherever the selection came from (quick
+  // switcher, restore-on-launch, a click): expand its project if collapsed,
+  // then scroll its row into view. Keyed on the id so reconcile updates (a
+  // new row object every tick) neither re-scroll nor undo a later collapse.
+  let sidebarEl: HTMLElement | undefined = $state();
+  const revealId = $derived($selectedSession?.id ?? null);
+  $effect(() => {
+    const id = revealId;
+    if (id === null) return;
+    const pid = untrack(() => $selectedSession?.project_id ?? null);
+    if (pid !== null && untrack(() => collapsed.has(pid))) {
+      const next = new Set(untrack(() => collapsed));
+      next.delete(pid);
+      collapsed = next;
+    }
+    void tick().then(() => {
+      const el = sidebarEl?.querySelector<HTMLElement>(`[data-session-id="${id}"]`);
+      if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest' });
+    });
+  });
 
   // Stores are bootstrapped once by App.svelte's onMount; Sidebar just reads
   // them. (A second bootstrap here would double every startup IPC call.)
@@ -627,7 +648,7 @@
   }
 </script>
 
-<div class="sidebar" data-testid="sidebar-tree">
+<div class="sidebar" data-testid="sidebar-tree" bind:this={sidebarEl}>
   {#snippet sessionRow(sess: SessionRow)}
     {@const sessSelected = $selectedSession?.id === sess.id}
     {@const isRenaming = renaming !== null && renaming.id === sess.id}
@@ -641,6 +662,7 @@
       class:checked={isChecked}
       class:stuck={sess.stuck_kind !== null}
       data-testid="sess-row"
+      data-session-id={sess.id}
       data-stuck={sess.stuck_kind ?? undefined}
       role="button"
       tabindex="0"

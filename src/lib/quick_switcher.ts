@@ -171,16 +171,31 @@ export function contextProject(
   );
 }
 
-/** True for the open-switcher chords: Cmd/Ctrl+K and Cmd/Ctrl+P. */
-export function isSwitcherChord(e: {
-  key: string;
-  metaKey: boolean;
-  ctrlKey: boolean;
-  altKey: boolean;
-  shiftKey: boolean;
-}): boolean {
-  if (e.altKey || e.shiftKey) return false;
-  if (!(e.metaKey || e.ctrlKey) || (e.metaKey && e.ctrlKey)) return false;
+/**
+ * True for the open-switcher chords. Platform-correct, following
+ * TerminalView's copy/paste convention: on macOS Cmd+K / Cmd+P (Cmd is
+ * reserved for the app, never sent to the pty); elsewhere Ctrl+Shift+K /
+ * Ctrl+Shift+P, so plain Ctrl+K (readline kill-line) and Ctrl+P (previous
+ * history) keep reaching the terminal.
+ */
+export function isSwitcherChord(
+  e: {
+    key: string;
+    metaKey: boolean;
+    ctrlKey: boolean;
+    altKey: boolean;
+    shiftKey: boolean;
+  },
+  isMac: boolean,
+): boolean {
   const k = e.key.toLowerCase();
-  return k === 'k' || k === 'p';
+  if (k !== 'k' && k !== 'p') return false;
+  if (e.altKey) return false;
+  if (isMac) return e.metaKey && !e.ctrlKey && !e.shiftKey;
+  return e.ctrlKey && e.shiftKey && !e.metaKey;
+}
+
+/** Human label for the open chord, for hints and docs. */
+export function chordLabel(isMac: boolean): string {
+  return isMac ? '⌘K' : 'Ctrl+Shift+K';
 }

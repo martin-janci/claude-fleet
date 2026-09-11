@@ -1,13 +1,15 @@
 <script lang="ts">
-  // Cmd/Ctrl+K / Cmd/Ctrl+P quick switcher: one text box, fuzzy-ranked
-  // sessions (recent first) plus "New session in <project>" rows. Enter
-  // attaches the highlighted session; Cmd/Ctrl+Enter opens the new-session
-  // dialog with the query as the name. The chord is taken even while the
-  // terminal has focus (VS Code does the same for its quick open), so the
-  // switcher is reachable from the state the user is in 90% of the time.
+  // Quick switcher — ⌘K / ⌘P on macOS, Ctrl+Shift+K / Ctrl+Shift+P elsewhere
+  // (plain Ctrl+K / Ctrl+P stay with the terminal: readline kill-line and
+  // previous-history). One text box, fuzzy-ranked sessions (recent first)
+  // plus "New session in <project>" rows. Enter attaches the highlighted
+  // session; Cmd/Ctrl+Enter opens the new-session dialog with the query as
+  // the name. The chord is taken even while the terminal has focus (VS Code
+  // does the same for its quick open), so the switcher is reachable from the
+  // state the user is in 90% of the time.
   import { onMount, onDestroy } from 'svelte';
   import Modal from './Modal.svelte';
-  import PickerList from './PickerList.svelte';
+  import PickerList, { optionId } from './PickerList.svelte';
   import type { PickerItem } from './PickerList.svelte';
   import { sessions } from './sessions';
   import { projects } from './projects';
@@ -22,15 +24,23 @@
     recentSessions,
     noteRecent,
     isSwitcherChord,
+    chordLabel,
     type SwitcherEntry,
   } from './quick_switcher';
+
+  let {
+    // Injectable for tests; defaults to the real platform.
+    isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator),
+  }: { isMac?: boolean } = $props();
+
+  const LIST_ID = 'quick-switcher-list';
 
   let open = $state(false);
   let query = $state('');
   let activeKey = $state<string | null>(null);
 
-  const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
-  const modKey = isMac ? '⌘' : 'Ctrl';
+  const modKey = $derived(isMac ? '⌘' : 'Ctrl');
+  const chord = $derived(chordLabel(isMac));
 
   // Any selection (sidebar click, switcher, restore-on-launch) feeds the
   // MRU list, so "recent first" reflects what the user actually opened.
@@ -53,7 +63,10 @@
   );
 
   // Keep the highlight on a row that still exists; default to the first.
+  // Only while open: a closed switcher must not re-rank on every session
+  // event (reading `ranked` here is what would make it recompute).
   $effect(() => {
+    if (!open) return;
     const keys = ranked.map((e) => e.key);
     if (activeKey === null || !keys.includes(activeKey)) {
       activeKey = keys[0] ?? null;
@@ -70,7 +83,7 @@
   }
 
   function onWindowKeydown(e: KeyboardEvent) {
-    if (!isSwitcherChord(e)) return;
+    if (!isSwitcherChord(e, isMac)) return;
     // Another modal (settings, new-session…) owns the keyboard while open;
     // don't stack the switcher on top of it.
     if (!open && (e.target as Element | null)?.closest?.('dialog')) return;
@@ -143,6 +156,11 @@
       class="query"
       data-testid="switcher-input"
       data-autofocus
+      role="combobox"
+      aria-expanded="true"
+      aria-controls={LIST_ID}
+      aria-autocomplete="list"
+      aria-activedescendant={activeKey !== null ? optionId(LIST_ID, activeKey) : undefined}
       bind:value={query}
       onkeydown={onInputKeydown}
       placeholder="Jump to a session… (name, project, host, branch, status)"
@@ -157,13 +175,14 @@
       maxHeight="min(60vh, 24rem)"
       emptyText={query ? `No session matches “${query}” — ${modKey}↵ creates one with that name.` : 'No sessions yet.'}
       ariaLabel="Sessions"
+      listId={LIST_ID}
       testid="switcher-list"
     />
     <div class="hint">
       <span>↑↓ move</span>
       <span>↵ attach / open</span>
       <span>{modKey}↵ new session named “{query.trim() || '…'}”</span>
-      <span>esc close</span>
+      <span>esc / {chord} close</span>
     </div>
   </Modal>
 {/if}

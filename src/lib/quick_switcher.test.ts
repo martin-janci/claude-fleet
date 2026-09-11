@@ -7,6 +7,7 @@ import {
   noteRecent,
   recentSessions,
   isSwitcherChord,
+  chordLabel,
   RECENT_MAX,
 } from './quick_switcher';
 import type { SessionRow } from './sessions';
@@ -175,12 +176,27 @@ describe('isSwitcherChord', () => {
     shiftKey: false,
     ...over,
   });
-  it('accepts Cmd/Ctrl + K or P only', () => {
-    expect(isSwitcherChord(ev({ metaKey: true }))).toBe(true);
-    expect(isSwitcherChord(ev({ ctrlKey: true, key: 'p' }))).toBe(true);
-    expect(isSwitcherChord(ev({ ctrlKey: true, key: 'P' }))).toBe(true);
-    expect(isSwitcherChord(ev({ key: 'k' }))).toBe(false);
-    expect(isSwitcherChord(ev({ ctrlKey: true, shiftKey: true }))).toBe(false);
-    expect(isSwitcherChord(ev({ ctrlKey: true, key: 'j' }))).toBe(false);
+
+  it('Linux/Windows: Ctrl+Shift+K / Ctrl+Shift+P only; plain Ctrl+K/P belong to the terminal', () => {
+    expect(isSwitcherChord(ev({ ctrlKey: true, shiftKey: true, key: 'K' }), false)).toBe(true);
+    expect(isSwitcherChord(ev({ ctrlKey: true, shiftKey: true, key: 'P' }), false)).toBe(true);
+    expect(isSwitcherChord(ev({ ctrlKey: true, key: 'k' }), false)).toBe(false);
+    expect(isSwitcherChord(ev({ ctrlKey: true, key: 'p' }), false)).toBe(false);
+    expect(isSwitcherChord(ev({ metaKey: true, key: 'k' }), false)).toBe(false);
+    expect(isSwitcherChord(ev({ ctrlKey: true, shiftKey: true, altKey: true, key: 'K' }), false)).toBe(false);
+    expect(isSwitcherChord(ev({ ctrlKey: true, shiftKey: true, key: 'J' }), false)).toBe(false);
+  });
+
+  it('macOS: Cmd+K / Cmd+P only; Ctrl+K/P still reach the terminal', () => {
+    expect(isSwitcherChord(ev({ metaKey: true, key: 'k' }), true)).toBe(true);
+    expect(isSwitcherChord(ev({ metaKey: true, key: 'p' }), true)).toBe(true);
+    expect(isSwitcherChord(ev({ ctrlKey: true, key: 'k' }), true)).toBe(false);
+    expect(isSwitcherChord(ev({ metaKey: true, ctrlKey: true, key: 'k' }), true)).toBe(false);
+    expect(isSwitcherChord(ev({ metaKey: true, shiftKey: true, key: 'K' }), true)).toBe(false);
+  });
+
+  it('chordLabel names the platform chord', () => {
+    expect(chordLabel(true)).toBe('⌘K');
+    expect(chordLabel(false)).toBe('Ctrl+Shift+K');
   });
 });

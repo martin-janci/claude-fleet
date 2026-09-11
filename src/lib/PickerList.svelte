@@ -11,6 +11,11 @@
     group?: string;
     testid?: string;
   }
+
+  /** DOM id of the option for `key` in the list `listId` (for aria-activedescendant). */
+  export function optionId(listId: string, key: string): string {
+    return `${listId}-opt-${key.replace(/[^A-Za-z0-9_-]/g, '_')}`;
+  }
 </script>
 
 <script lang="ts">
@@ -31,6 +36,7 @@
     maxHeight = '18rem',
     emptyText = 'Nothing matches.',
     ariaLabel,
+    listId,
     testid,
   }: {
     items: readonly PickerItem[];
@@ -42,6 +48,8 @@
     maxHeight?: string;
     emptyText?: string;
     ariaLabel?: string;
+    /** DOM id of the listbox; also prefixes option ids (see `optionId`). */
+    listId?: string;
     testid?: string;
   } = $props();
 
@@ -65,6 +73,7 @@
 <div
   class="picker-list"
   role="listbox"
+  id={listId}
   aria-label={ariaLabel}
   style:max-height={maxHeight}
   bind:this={root}
@@ -81,6 +90,7 @@
       class="row"
       class:active={item.key === activeKey}
       role="option"
+      id={listId ? optionId(listId, item.key) : undefined}
       aria-selected={item.key === activeKey}
       tabindex="-1"
       data-key={item.key}

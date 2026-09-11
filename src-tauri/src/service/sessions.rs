@@ -1264,9 +1264,7 @@ pub async fn new_session(
     // caller that doesn't care): mint it here so every caller shares the
     // same convention and the same collision policy.
     if args.name.trim().is_empty() {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = store.lock().map_err(|_| IpcError::lock())?;
         args.name = fill_session_name(&s, &args)?;
     }
     crate::validate::tmux_name(&args.name)?;
@@ -1309,11 +1307,12 @@ pub async fn new_session(
 /// session of that name exists on the host (the dialog's own convention).
 /// When it is taken — a second session on the same worktree — a memorable
 /// `<adjective>-<noun>` pair from `names::generate_name` is appended instead,
-/// avoiding every slug already in use on the project (worktree names and
-/// the suffixes of existing tmux names), so the result is unique and reads
-/// like `dev-owner-repo--blue-sirius` rather than `…--main-2`.
+/// avoiding every slug already in use on the project (see
+/// `project_taken_slugs`), so the result is unique and reads like
+/// `dev-owner-repo--blue-sirius` rather than `…--main-2`. `.` and `:` are
+/// mapped to `-` so the result always passes `validate::tmux_name`.
 pub(crate) fn fill_session_name(s: &Store, args: &NewSessionArgs) -> Result<String, IpcError> {
-    use std::collections::HashSet;
+    use super::names::{generate_name_default, tmux_safe};
     let (owner, repo) = fetch_owner_repo(s, args.project_id)?;
     let base = format!("dev-{owner}-{repo}");
     let term = if args.kind.as_deref() == Some("shell") {
@@ -1334,31 +1333,52 @@ pub(crate) fn fill_session_name(s: &Store, args: &NewSessionArgs) -> Result<Stri
     } else {
         None
     };
-    let deterministic = match &wt {
+    let deterministic = tmux_safe(&match &wt {
         Some(w) => format!("{base}--{w}{term}"),
         None => format!("{base}{term}"),
-    };
+    });
     let on_host = s.list_sessions_for_host(&args.host_alias)?;
     if !on_host.iter().any(|r| r.tmux_name == deterministic) {
         return Ok(deterministic);
     }
-    let mut taken: HashSet<String> = s
-        .list_worktrees_for_project(args.project_id)?
+    let taken = project_taken_slugs(s, args.project_id, &owner, &repo)?;
+    let pair = generate_name_default(&taken);
+    Ok(tmux_safe(&match &wt {
+        Some(w) => format!("{base}--{w}--{pair}{term}"),
+        None => format!("{base}--{pair}{term}"),
+    }))
+}
+
+/// Every slug already in use on a project — worktree names, the suffix of
+/// each session's tmux name, and each slugified friendly name — i.e. the set
+/// a freshly generated pair must avoid. Mirrors `takenSlugs` in
+/// `NewSessionDialog.svelte`.
+fn project_taken_slugs(
+    s: &Store,
+    project_id: i64,
+    owner: &str,
+    repo: &str,
+) -> Result<std::collections::HashSet<String>, IpcError> {
+    use super::names::{slugify, tmux_name_suffix};
+    let mut taken: std::collections::HashSet<String> = s
+        .list_worktrees_for_project(project_id)?
         .into_iter()
-        .map(|w| w.name)
+        .map(|w| w.name.to_lowercase())
         .collect();
     for r in s.list_all_sessions()? {
-        if r.project_id == Some(args.project_id) {
-            if let Some(suffix) = super::names::tmux_name_suffix(&r.tmux_name, &owner, &repo) {
-                taken.insert(suffix);
+        if r.project_id != Some(project_id) {
+            continue;
+        }
+        if let Some(suffix) = tmux_name_suffix(&r.tmux_name, owner, repo) {
+            taken.insert(suffix.to_lowercase());
+        }
+        if let Some(slug) = r.friendly_name.as_deref().map(slugify) {
+            if !slug.is_empty() {
+                taken.insert(slug);
             }
         }
     }
-    let pair = super::names::generate_name_default(&taken);
-    Ok(match &wt {
-        Some(w) => format!("{base}--{w}--{pair}{term}"),
-        None => format!("{base}--{pair}{term}"),
-    })
+    Ok(taken)
 }
 
 async fn new_session_inner(
@@ -4913,6 +4933,73 @@ mod fill_session_name_tests {
             fill_session_name(&s, &args(None, Some("feat-x"), None)).unwrap(),
             "dev-o-r--feat-x"
         );
+    }
+
+    #[test]
+    fn taken_slugs_include_worktrees_tmux_suffixes_and_friendly_names() {
+        let (s, main_id, _) = seeded();
+        s.upsert_session(
+            "dev-o-r--amber-vega",
+            "local",
+            Some(1),
+            Some(main_id),
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap();
+        s.set_friendly_name("local", "dev-o-r--amber-vega", Some("Blue Sirius"))
+            .unwrap();
+        let taken = project_taken_slugs(&s, 1, "o", "r").unwrap();
+        assert!(taken.contains("feat-x"), "worktree name");
+        assert!(taken.contains("main"), "worktree name");
+        assert!(taken.contains("amber-vega"), "tmux suffix");
+        assert!(taken.contains("blue-sirius"), "slugified friendly name");
+    }
+
+    #[test]
+    fn dots_and_colons_are_mapped_so_the_name_validates() {
+        let (s, _, _) = seeded();
+        let v12 = s
+            .upsert_worktree(1, "v1.2", "/tmp/o/r/.worktrees/v1.2", Some("v1.2"))
+            .unwrap();
+        let name = fill_session_name(&s, &args(Some(v12), None, None)).unwrap();
+        assert_eq!(name, "dev-o-r--v1-2");
+        crate::validate::tmux_name(&name).expect("filled name validates");
+    }
+
+    #[tokio::test]
+    async fn new_session_with_empty_name_is_filled_and_validated_end_to_end() {
+        // Drive the real service entry point. The project's base_path does not
+        // exist, so the call fails at the worktree step (E_GIT_SETUP, from
+        // bash) — AFTER the empty name was minted and passed
+        // `validate::tmux_name`. Before this change the same call failed with
+        // E_INVALID ("session name must not be empty"). No tmux, no network.
+        let s = Store::open_in_memory().expect("store");
+        s.upsert_host("local").unwrap();
+        s.upsert_project("o", "r", "/nonexistent/claude-fleet-test/o/r")
+            .unwrap();
+        let store = Mutex::new(s);
+        let ssh = Arc::new(SshClient::new());
+        let reg = CancellationRegistry::new();
+
+        let err = new_session(args(None, Some("blue-sirius"), None), &store, &ssh, &reg)
+            .await
+            .expect_err("repo is not on disk");
+        assert_eq!(err.code, "E_GIT_SETUP", "{err:?}");
+
+        // Whitespace-only is treated as empty too.
+        let mut ws = args(None, Some("red-comet"), None);
+        ws.name = "   ".into();
+        let err = new_session(ws, &store, &ssh, &reg).await.unwrap_err();
+        assert_eq!(err.code, "E_GIT_SETUP", "{err:?}");
+
+        // Control: an explicit invalid name is still rejected up front.
+        let mut bad = args(None, Some("red-comet"), None);
+        bad.name = "bad.name".into();
+        let err = new_session(bad, &store, &ssh, &reg).await.unwrap_err();
+        assert_eq!(err.code, "E_INVALID", "{err:?}");
     }
 
     #[test]

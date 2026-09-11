@@ -56,8 +56,11 @@ const rows = Array.from({ length: 40 }, (_, i) =>
   sess({ id: i + 1, friendly_name: i === 5 ? 'Blue sirius' : `Session ${i + 1}` }),
 );
 
+// jsdom is not a Mac (detectMac → false), so the default chord is Ctrl+Shift+K.
+const LINUX_CHORD = { key: 'K', ctrlKey: true, shiftKey: true };
+
 async function openSwitcher() {
-  await fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
+  await fireEvent.keyDown(window, LINUX_CHORD);
   await tick();
   return screen.getByTestId('switcher-input') as HTMLInputElement;
 }
@@ -72,31 +75,101 @@ beforeEach(() => {
 });
 
 describe('QuickSwitcher', () => {
-  it('is hidden until Ctrl/Cmd+K or Ctrl/Cmd+P, then toggles', async () => {
+  it('is hidden until Ctrl+Shift+K or Ctrl+Shift+P (Linux), then toggles', async () => {
     render(QuickSwitcher);
     expect(screen.queryByTestId('quick-switcher')).toBeNull();
     await openSwitcher();
     expect(screen.getByTestId('quick-switcher')).toBeTruthy();
-    await fireEvent.keyDown(window, { key: 'p', metaKey: true });
+    await fireEvent.keyDown(window, { key: 'P', ctrlKey: true, shiftKey: true });
     await tick();
     expect(screen.queryByTestId('quick-switcher')).toBeNull();
   });
 
-  it('the chord is taken in the capture phase (before a focused terminal sees it)', async () => {
-    render(QuickSwitcher);
-    // A "terminal": an element with its own keydown handler. The chord
-    // must be consumed by the switcher's capture listener before it
-    // reaches this handler; a plain key must still get through.
+  // A "terminal": an element with its own keydown handler, like TerminalView.
+  function fakeTerminal() {
     const seen = vi.fn();
     const term = document.createElement('div');
+    term.tabIndex = 0;
     term.addEventListener('keydown', seen);
     document.body.appendChild(term);
-    await fireEvent.keyDown(term, { key: 'k', ctrlKey: true });
-    expect(seen).not.toHaveBeenCalled();
+    return { term, seen };
+  }
+
+  it('Linux: plain Ctrl+K / Ctrl+P reach the terminal untouched; Ctrl+Shift+K is captured first', async () => {
+    render(QuickSwitcher);
+    const { term, seen } = fakeTerminal();
+    // readline kill-line / previous-history must not be eaten.
+    expect(await fireEvent.keyDown(term, { key: 'k', ctrlKey: true })).toBe(true); // not defaultPrevented
+    expect(await fireEvent.keyDown(term, { key: 'p', ctrlKey: true })).toBe(true);
+    expect(seen).toHaveBeenCalledTimes(2);
+    await tick();
+    expect(screen.queryByTestId('quick-switcher')).toBeNull();
+    // The real chord is consumed in the capture phase — the terminal never sees it.
+    await fireEvent.keyDown(term, LINUX_CHORD);
+    await tick();
+    expect(seen).toHaveBeenCalledTimes(2);
     expect(screen.getByTestId('quick-switcher')).toBeTruthy();
-    await fireEvent.keyDown(term, { key: 'k' });
-    expect(seen).toHaveBeenCalledOnce();
     term.remove();
+  });
+
+  it('macOS: Cmd+K opens, Ctrl+K still reaches the terminal', async () => {
+    render(QuickSwitcher, { props: { isMac: true } });
+    const { term, seen } = fakeTerminal();
+    expect(await fireEvent.keyDown(term, { key: 'k', ctrlKey: true })).toBe(true);
+    expect(await fireEvent.keyDown(term, LINUX_CHORD)).toBe(true);
+    expect(seen).toHaveBeenCalledTimes(2);
+    await tick();
+    expect(screen.queryByTestId('quick-switcher')).toBeNull();
+    await fireEvent.keyDown(term, { key: 'k', metaKey: true });
+    await tick();
+    expect(seen).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId('quick-switcher')).toBeTruthy();
+    term.remove();
+  });
+
+  it('the chord is ignored while another modal is open', async () => {
+    render(QuickSwitcher);
+    const other = document.createElement('dialog');
+    other.setAttribute('open', '');
+    const field = document.createElement('input');
+    other.appendChild(field);
+    document.body.appendChild(other);
+    field.focus();
+    await fireEvent.keyDown(field, LINUX_CHORD);
+    await tick();
+    expect(screen.queryByTestId('quick-switcher')).toBeNull();
+    other.remove();
+  });
+
+  it('Escape closes the switcher and restores focus to where the user was', async () => {
+    render(QuickSwitcher);
+    const { term } = fakeTerminal();
+    term.focus();
+    expect(document.activeElement).toBe(term);
+    await fireEvent.keyDown(term, LINUX_CHORD);
+    await tick();
+    const dialog = screen.getByTestId('quick-switcher');
+    expect(document.activeElement).toBe(screen.getByTestId('switcher-input'));
+    // Escape on a <dialog> surfaces as its `cancel` event.
+    dialog.dispatchEvent(new Event('cancel', { cancelable: true }));
+    await tick();
+    expect(screen.queryByTestId('quick-switcher')).toBeNull();
+    expect(document.activeElement).toBe(term);
+    term.remove();
+  });
+
+  it('the input is a combobox whose active descendant is the highlighted option', async () => {
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    expect(input.getAttribute('role')).toBe('combobox');
+    const listId = input.getAttribute('aria-controls')!;
+    expect(document.getElementById(listId)?.getAttribute('role')).toBe('listbox');
+    const active = () => document.querySelector('.row.active') as HTMLElement;
+    expect(input.getAttribute('aria-activedescendant')).toBe(active().id);
+    await fireEvent.keyDown(input, { key: 'ArrowDown' });
+    await tick();
+    expect(active().id).toBeTruthy();
+    expect(input.getAttribute('aria-activedescendant')).toBe(active().id);
   });
 
   it('lists every session plus a project row, first row active', async () => {

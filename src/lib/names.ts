@@ -20,6 +20,15 @@ export const NOUNS: readonly string[] = words.nouns;
 export const SEPARATOR = '-';
 /** Random draws before falling back to a numeric suffix. */
 export const MAX_TRIES = 24;
+/** Shared-prefix length that makes a pair redundant ("lunar luna", "cosmic cosmos"). */
+export const SAME_ROOT_PREFIX = 4;
+
+/** True when the adjective and noun share a root and read as a stutter. */
+export function sameRoot(adjective: string, noun: string): boolean {
+  let i = 0;
+  while (i < adjective.length && i < noun.length && adjective[i] === noun[i]) i++;
+  return i >= SAME_ROOT_PREFIX;
+}
 
 /** Uniform random in [0, 1). Injectable so tests are deterministic. */
 export type Rng = () => number;
@@ -43,9 +52,14 @@ export function generateName(
   for (const e of existing) taken.add(e.toLowerCase());
   let last = '';
   for (let i = 0; i < MAX_TRIES; i++) {
-    last = `${pick(ADJECTIVES, rng)}${SEPARATOR}${pick(NOUNS, rng)}`;
+    const adjective = pick(ADJECTIVES, rng);
+    const noun = pick(NOUNS, rng);
+    // A same-root draw still spends a try, so the budget stays MAX_TRIES.
+    if (sameRoot(adjective, noun)) continue;
+    last = `${adjective}${SEPARATOR}${noun}`;
     if (!taken.has(last)) return last;
   }
+  if (!last) last = `${ADJECTIVES[0]}${SEPARATOR}${NOUNS[0]}`;
   // Every draw collided (tiny pool, or a hostile rng). Count up from 2 so the
   // result is still readable and still unique.
   for (let n = 2; ; n++) {
