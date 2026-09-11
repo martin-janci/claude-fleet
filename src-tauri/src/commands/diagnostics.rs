@@ -1,8 +1,9 @@
 //! Tauri IPC wrappers for Settings → Diagnostics. The report itself is built
 //! in `service::diagnostics`; this file only gathers managed state. These
-//! are Tauri commands, not MCP tools: `docs/control-api-reference.md` is
-//! generated from the MCP tool router only, so changing them needs no
-//! `REGEN_DOCS` run.
+//! are Tauri commands, not MCP tools. `docs/control-api-reference.md` lists
+//! them by name only (its "Tauri IPC commands" section is read from the
+//! `generate_handler!` list in `lib.rs`), so adding, removing or renaming one
+//! needs a `REGEN_DOCS` run; changing a signature or body does not.
 
 use crate::ipc_error::{codes, IpcError};
 use crate::mcp::McpRuntime;
