@@ -106,6 +106,18 @@ fn sessions_has_usage_columns(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 026: `worktrees` already has its
+/// `updated_at_ms` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
+/// See [`Migration`].
+fn worktrees_has_updated_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('worktrees') WHERE name = 'updated_at_ms'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// Ids of the sessions whose `worktree_id` is `worktree_id`: the rows a
 /// re-point or clear is about to change, for the `session:updated` events
 /// emitted after the commit.
@@ -633,6 +645,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 25,
         sql: include_str!("../migrations/025_session_usage.sql"),
         already_applied: Some(sessions_has_usage_columns),
+    },
+    Migration {
+        version: 26,
+        sql: include_str!("../migrations/026_worktree_updated_at.sql"),
+        already_applied: Some(worktrees_has_updated_at),
     },
 ];
 
@@ -1290,10 +1307,12 @@ impl Store {
 
     /// Upsert a worktree row of `host_alias`, keyed (project, host, name), so
     /// a remote host's worktree never overwrites the local checkout's
-    /// same-named row. `worktree:updated` fires for local rows only: the
-    /// project tree lists local rows (`list_projects_joined`) and the
-    /// frontend patches it in place from these events, so a remote row event
-    /// would add a row the next list does not have.
+    /// same-named row. Every write stamps `updated_at_ms` (migration 026),
+    /// which the remote prune's race guard compares with its probe's start.
+    /// `worktree:updated` fires for local rows only: the project tree lists
+    /// local rows (`list_projects_joined`) and the frontend patches it in
+    /// place from these events, so a remote row event would add a row the
+    /// next list does not have.
     pub fn upsert_worktree_on(
         &self,
         host_alias: &str,
@@ -1302,12 +1321,17 @@ impl Store {
         path: &str,
         branch: Option<&str>,
     ) -> Result<i64, rusqlite::Error> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
         self.conn.execute(
-            "INSERT INTO worktrees (project_id, host_alias, name, path, branch)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO worktrees (project_id, host_alias, name, path, branch, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(project_id, host_alias, name)
-             DO UPDATE SET path=excluded.path, branch=excluded.branch",
-            rusqlite::params![project_id, host_alias, name, path, branch],
+             DO UPDATE SET path=excluded.path, branch=excluded.branch,
+                           updated_at_ms=excluded.updated_at_ms",
+            rusqlite::params![project_id, host_alias, name, path, branch, now_ms],
         )?;
         let id: i64 = self.conn.query_row(
             "SELECT id FROM worktrees WHERE project_id=?1 AND host_alias=?2 AND name=?3",
@@ -1320,6 +1344,30 @@ impl Store {
             }
         }
         Ok(id)
+    }
+
+    /// When a worktree row was last written, in unix milliseconds (migration
+    /// 026). `None` for a row last written before that migration, or for a
+    /// row that does not exist.
+    pub fn worktree_updated_at_ms(&self, id: i64) -> Result<Option<i64>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT updated_at_ms FROM worktrees WHERE id=?1",
+                rusqlite::params![id],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()
+            .map(Option::flatten)
+    }
+
+    /// Test hook: backdate or postdate a row's `updated_at_ms`.
+    #[cfg(test)]
+    pub fn set_worktree_updated_at_ms(&self, id: i64, ms: i64) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE worktrees SET updated_at_ms=?1 WHERE id=?2",
+            rusqlite::params![ms, id],
+        )?;
+        Ok(())
     }
 
     /// This project's LOCAL worktree rows. Every caller (the refresh prune,
@@ -6597,6 +6645,43 @@ mod tests {
         );
     }
 
+    /// 026 stamps every worktree write, insert and update, with
+    /// `updated_at_ms`, and a re-run on a table that already has the column
+    /// is only recorded: the stamp survives.
+    #[test]
+    fn migration_026_stamps_worktree_writes_and_reruns_safely() {
+        let s = Store::open_in_memory().unwrap();
+        let pid = s.upsert_project("o", "r", "/p/r").unwrap();
+        let id = s
+            .upsert_worktree_on("vps", pid, "feat", "/h/r/feat", None)
+            .unwrap();
+        assert!(
+            s.worktree_updated_at_ms(id)
+                .unwrap()
+                .is_some_and(|ms| ms > 0),
+            "stamped on insert"
+        );
+        s.set_worktree_updated_at_ms(id, 1).unwrap();
+        s.upsert_worktree_on("vps", pid, "feat", "/h/r/feat2", None)
+            .unwrap();
+        let stamped = s
+            .worktree_updated_at_ms(id)
+            .unwrap()
+            .expect("stamped on update");
+        assert!(stamped > 1, "an update restamps: {stamped}");
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 26;")
+            .unwrap();
+        s.migrate().expect("re-running 026 is safe");
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert_eq!(
+            s.worktree_updated_at_ms(id).unwrap(),
+            Some(stamped),
+            "the stamp survives a re-run"
+        );
+        assert_eq!(s.worktree_updated_at_ms(999_999).unwrap(), None);
+    }
+
     #[test]
     fn migration_008_adds_lost_at_column() {
         let store = Store::open_in_memory().expect("store");
@@ -6604,7 +6689,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 25, "schema_version should be 25 after migration");
+        assert_eq!(v, 26, "schema_version should be 26 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store
