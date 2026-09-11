@@ -7,11 +7,38 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import { sessions, loadSessions, killSession, renameSession, restartSession, repairSession, newSessionAbortable, newBgSession, peekSession, purgeProject, showBgAgents, resetTombstonesForTests } from './sessions';
+import { formatCostMicros, formatTokens, sessionUsageTokens } from './sessions';
 
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
   resetTombstonesForTests();
   sessions.set([]);
+});
+
+describe('usage formatting', () => {
+  it('formats token counts compactly', () => {
+    expect(formatTokens(0)).toBe('0');
+    expect(formatTokens(null)).toBe('0');
+    expect(formatTokens(950)).toBe('950');
+    expect(formatTokens(1_234)).toBe('1.2k');
+    expect(formatTokens(123_456)).toBe('123k');
+    expect(formatTokens(4_560_000)).toBe('4.56M');
+    expect(formatTokens(245_000_000)).toBe('245.0M');
+    expect(formatTokens(2_500_000_000)).toBe('2.50B');
+  });
+
+  it('formats estimated cost from micro-USD', () => {
+    expect(formatCostMicros(0)).toBe('$0.00');
+    expect(formatCostMicros(undefined)).toBe('$0.00');
+    expect(formatCostMicros(5_000)).toBe('<$0.01');
+    expect(formatCostMicros(1_234_567)).toBe('$1.23');
+    expect(formatCostMicros(1_234_000_000)).toBe('$1,234');
+  });
+
+  it('sums every token counter and treats missing fields as zero', () => {
+    expect(sessionUsageTokens({ usage_input_tokens: 1, usage_output_tokens: 2, usage_cache_write_tokens: 3, usage_cache_read_tokens: 4 })).toBe(10);
+    expect(sessionUsageTokens({})).toBe(0);
+  });
 });
 
 const sample = [

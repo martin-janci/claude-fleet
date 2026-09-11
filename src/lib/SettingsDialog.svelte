@@ -32,6 +32,7 @@
     settingInt,
     parseHoursInput,
     parseIntInput,
+    parsePricesJsonInput,
     secsToHours,
     hoursToSecs,
     SETTING_KEYS,
@@ -265,6 +266,14 @@
       return;
     }
     void applyLimit(key, r.value);
+  }
+  function onUsagePricesChange(e: Event) {
+    const r = parsePricesJsonInput((e.currentTarget as HTMLTextAreaElement).value);
+    if ('error' in r) {
+      limitsError = `Usage prices: ${r.error}`;
+      return;
+    }
+    void applyLimit(SETTING_KEYS.usagePricesJson, r.value);
   }
 
   function onIdleMinutesChange(e: Event) {
@@ -776,7 +785,36 @@
           onchange={(e) => onLimitIntChange(SETTING_KEYS.moveMaxTranscriptMb, 'Move transcript cap', e)} />
         <span class="hook-desc" id="limit-move-desc">largest transcript (MiB, 1–{MOVE_MAX_TRANSCRIPT_MB_MAX}) Move to host… copies; a bigger one is refused (E_MOVE_TOO_LARGE)</span>
       </div>
-      <!-- TODO(#60): the usage.* rows (per-session usage) go here. -->
+      <div class="mcp-field">
+        <label class="lbl" for="usage-enabled">usage</label>
+        <input id="usage-enabled" type="checkbox"
+          checked={settingBool($fleetSettings, SETTING_KEYS.usageEnabled)}
+          disabled={limitsBusy}
+          aria-describedby="usage-enabled-desc"
+          data-testid="usage-enabled"
+          onchange={(e) => void applyLimit(SETTING_KEYS.usageEnabled, String((e.currentTarget as HTMLInputElement).checked))} />
+        <span class="hook-desc" id="usage-enabled-desc">sum each session's token usage from its Claude transcript and show an estimated cost</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="usage-interval-secs">usage every</label>
+        <input class="port" id="usage-interval-secs" type="number" min="0" max={MAX_SECS} step="1"
+          value={settingSecs($fleetSettings, SETTING_KEYS.usageIntervalSecs)}
+          disabled={limitsBusy}
+          aria-describedby="usage-interval-desc"
+          data-testid="usage-interval-secs"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.usageIntervalSecs, 'Usage interval', e)} />
+        <span class="hook-desc" id="usage-interval-desc">seconds between usage passes (one batched read per host; 0 = off)</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="usage-prices-json">prices</label>
+        <textarea id="usage-prices-json" rows="3" spellcheck="false"
+          value={$fleetSettings[SETTING_KEYS.usagePricesJson] ?? '{}'}
+          disabled={limitsBusy}
+          aria-describedby="usage-prices-desc"
+          data-testid="usage-prices-json"
+          onchange={onUsagePricesChange}></textarea>
+        <span class="hook-desc" id="usage-prices-desc">per-model price overrides for the estimated cost, USD per million tokens, e.g. {'{"opus-4-1":{"input":15,"output":75,"cache_write":30,"cache_read":1.5}}'} ({'{}'} = built-in prices only)</span>
+      </div>
       {#if limitsError}<p class="err" role="alert" data-testid="limits-error">{limitsError}</p>{/if}
     </section>
 

@@ -1254,6 +1254,19 @@ async fn move_session_steps(
                 row.id
             );
         }
+        // Usage (G1): the target's transcript is a whole-line prefix copy of
+        // the source's, so its usage cursor starts where the source's stands
+        // and the copied history is not counted twice.
+        if let Err(e) = s.inherit_usage_cursor(
+            row.id,
+            snap.row.id,
+            i64::try_from(copied).unwrap_or(i64::MAX),
+        ) {
+            tracing::warn!(
+                "move_session: inheriting the usage cursor on {} failed: {e}",
+                row.id
+            );
+        }
         if let Err(e) = s.set_started_at(row.id, now) {
             eprintln!("move_session: storing started_at on {} failed: {e}", row.id);
         }
@@ -1342,6 +1355,21 @@ async fn move_session_steps(
                 ),
             ));
         }
+        // Snapshot the source's lifetime usage and usage cursor before the
+        // kill drops its row.
+        let (source_usage, source_cursor) = store
+            .lock()
+            .ok()
+            .map(|s| {
+                (
+                    s.get_session_by_id(snap.row.id)
+                        .ok()
+                        .flatten()
+                        .map(|r| r.usage),
+                    s.usage_cursor(snap.row.id).ok().flatten(),
+                )
+            })
+            .unwrap_or((None, None));
         hooks
             .kill_source(store, &src, &snap.row.tmux_name)
             .await
@@ -1370,6 +1398,28 @@ async fn move_session_steps(
                 "could not re-check the source transcript after the kill ({}: {}); the target may be missing its last turn",
                 e.code, e.message
             )),
+        }
+        // The spend follows the session. Never under keep_source: both rows
+        // stay live there and would report it twice.
+        if let Ok(s) = store.lock() {
+            if let Some(u) = source_usage.as_ref() {
+                if let Err(e) = s.add_usage_totals(target_row.id, u) {
+                    tracing::warn!(
+                        "move_session: carrying usage totals to {} failed: {e}",
+                        target_row.id
+                    );
+                }
+            }
+            // A source usage pass between the inherit and the kill counted
+            // lines the target's cursor still points before: catch up.
+            if let Some(c) = source_cursor.as_ref() {
+                if let Err(e) = s.raise_usage_cursor(target_row.id, c) {
+                    tracing::warn!(
+                        "move_session: raising the usage cursor on {} failed: {e}",
+                        target_row.id
+                    );
+                }
+            }
         }
     }
 
@@ -1707,6 +1757,55 @@ mod tests {
                 .all(|c| !c.command().contains("kill-session")),
             "no tmux kill on the source"
         );
+    }
+
+    #[tokio::test]
+    async fn the_target_inherits_the_usage_cursor_and_carries_totals_only_when_the_source_dies() {
+        for keep_source in [false, true] {
+            let f = fixture();
+            f.store
+                .lock()
+                .unwrap()
+                .apply_usage(
+                    f.source_id,
+                    "alpha",
+                    &crate::store::UsageDelta {
+                        reset: false,
+                        totals: crate::store::UsageTotals {
+                            input_tokens: 40,
+                            cost_micros: 200,
+                            ..Default::default()
+                        },
+                        model: Some("claude-opus-5".into()),
+                        offset: 3,
+                        source: "older.jsonl".into(),
+                        last_msg_id: Some("msg_1".into()),
+                        last_msg_usage: Some("40,0,0,0,0".into()),
+                        now: 1,
+                    },
+                )
+                .unwrap();
+            let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+            let rep = run(&f, &hooks, keep_source).await.expect("move");
+            let s = f.store.lock().unwrap();
+            let c = s
+                .list_usage_cursors("beta")
+                .unwrap()
+                .into_iter()
+                .find(|c| c.session_id == rep.target_session_id)
+                .expect("target cursor");
+            // The source was reading another file: the target starts after
+            // the copied prefix, so only lines appended after the move count.
+            assert_eq!(c.offset_bytes, TRANSCRIPT.len() as i64, "{keep_source}");
+            assert_eq!(c.source.as_deref(), Some(format!("{SID}.jsonl").as_str()));
+            let usage = s
+                .get_session_by_id(rep.target_session_id)
+                .unwrap()
+                .unwrap()
+                .usage;
+            let expected = if keep_source { 0 } else { 40 };
+            assert_eq!(usage.usage_input_tokens, expected, "{keep_source}");
+        }
     }
 
     #[tokio::test]

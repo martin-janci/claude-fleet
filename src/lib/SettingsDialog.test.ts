@@ -312,6 +312,74 @@ describe('SettingsDialog automation + notifications (W2 Track D)', () => {
     expect(inv).not.toHaveBeenCalledWith('set_fleet_setting', expect.anything());
   });
 
+  it('renders the usage rows with the backend defaults', async () => {
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick(); await tick();
+    const enabled = screen.getByLabelText('usage') as HTMLInputElement;
+    expect(enabled).toBe(screen.getByTestId('usage-enabled'));
+    expect(enabled).toBeChecked();
+    const interval = screen.getByLabelText('usage every') as HTMLInputElement;
+    expect(interval).toBe(screen.getByTestId('usage-interval-secs'));
+    expect(interval.value).toBe('300');
+    const prices = screen.getByLabelText('prices') as HTMLTextAreaElement;
+    expect(prices).toBe(screen.getByTestId('usage-prices-json'));
+    expect(prices.value).toBe('{}');
+  });
+
+  it('writes the usage settings through set_fleet_setting', async () => {
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    inv.mockImplementation(async (cmd: string, args?: { key?: string; value?: string }) => {
+      if (cmd === 'set_fleet_setting') return { [args!.key!]: args!.value! };
+      if (cmd === 'mcp_status') return mcpStatusObj;
+      return null;
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('usage-enabled'));
+    expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'usage.enabled', value: 'false' });
+    const interval = screen.getByTestId('usage-interval-secs') as HTMLInputElement;
+    interval.value = '600';
+    await fireEvent.change(interval);
+    expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'usage.interval_secs', value: '600' });
+    const prices = screen.getByTestId('usage-prices-json') as HTMLTextAreaElement;
+    const json = '{"opus-4-1":{"input":15,"output":75,"cache_write":30,"cache_read":1.5}}';
+    prices.value = ` ${json} `;
+    await fireEvent.change(prices);
+    expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'usage.prices_json', value: json });
+  });
+
+  it('refuses prices that are not a JSON object and shows the backend error for a bad one', async () => {
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'set_fleet_setting') {
+        throw { code: 'E_INVALID', message: 'usage.prices_json: prices for opus must be between 0 and 10000' };
+      }
+      if (cmd === 'mcp_status') return mcpStatusObj;
+      return null;
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick(); await tick();
+    const prices = screen.getByTestId('usage-prices-json') as HTMLTextAreaElement;
+    for (const [value, message] of [
+      ['{oops', /Usage prices: not valid JSON/],
+      ['[1, 2]', /Usage prices: must be a JSON object/],
+    ] as const) {
+      prices.value = value;
+      await fireEvent.change(prices);
+      await tick();
+      expect(screen.getByRole('alert').textContent).toMatch(message);
+    }
+    expect(inv).not.toHaveBeenCalledWith('set_fleet_setting', expect.anything());
+    // Object-shaped but invalid: sent as typed, the backend's message shows.
+    const bad = '{"opus":{"input":-1,"output":1,"cache_write":1,"cache_read":1}}';
+    prices.value = bad;
+    await fireEvent.change(prices);
+    expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'usage.prices_json', value: bad });
+    await waitFor(() =>
+      expect(screen.getByTestId('limits-error').textContent).toContain('between 0 and 10000'),
+    );
+  });
+
   it('renders the notifications section with the toast toggle on and OS off', async () => {
     render(SettingsDialog, { props: { onClose: () => {} } });
     await tick();

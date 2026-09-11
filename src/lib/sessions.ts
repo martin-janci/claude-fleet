@@ -79,6 +79,58 @@ export interface SessionRow {
   parent_session_id: number | null;
   /** Labels set via `set_session_tags`; empty when none. */
   tags: string[];
+  // Token usage + ESTIMATED cost (migration 025), summed from the Claude
+  // transcript by the backend every `usage.interval_secs`. The backend
+  // always sends them; they are optional here so rows built client-side
+  // (tests, optimistic patches) need not spell out zeros — read them with
+  // `?? 0` / the helpers below.
+  usage_input_tokens?: number;
+  usage_output_tokens?: number;
+  usage_cache_write_tokens?: number;
+  usage_cache_read_tokens?: number;
+  /** Estimated cost in millionths of a USD (built-in per-model price table). */
+  usage_cost_micros?: number;
+  /** Model of the most recent counted message. */
+  usage_model?: string | null;
+  /** Unix secs the usage totals last changed. */
+  usage_updated_at?: number | null;
+}
+
+type UsageFields = Partial<
+  Pick<
+    SessionRow,
+    'usage_input_tokens' | 'usage_output_tokens' | 'usage_cache_write_tokens' | 'usage_cache_read_tokens'
+  >
+>;
+
+/** Every token counter of a session summed (0 for a row without usage). */
+export function sessionUsageTokens(s: UsageFields): number {
+  return (
+    (s.usage_input_tokens ?? 0) +
+    (s.usage_output_tokens ?? 0) +
+    (s.usage_cache_write_tokens ?? 0) +
+    (s.usage_cache_read_tokens ?? 0)
+  );
+}
+
+/** Compact token count: 950 → "950", 1_234 → "1.2k", 123_456 → "123k", 4_560_000 → "4.56M". */
+export function formatTokens(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n) || n <= 0) return '0';
+  if (n < 1_000) return String(Math.round(n));
+  if (n < 10_000) return `${(n / 1_000).toFixed(1)}k`;
+  if (n < 1_000_000) return `${Math.round(n / 1_000)}k`;
+  if (n < 10_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  return `${(n / 1_000_000_000).toFixed(2)}B`;
+}
+
+/** Estimated cost from micro-USD: "$0.00", "<$0.01", "$1.23", "$1,234". */
+export function formatCostMicros(micros: number | null | undefined): string {
+  if (micros == null || !Number.isFinite(micros) || micros <= 0) return '$0.00';
+  const usd = micros / 1_000_000;
+  if (usd < 0.01) return '<$0.01';
+  if (usd < 100) return `$${usd.toFixed(2)}`;
+  return `$${Math.round(usd).toLocaleString('en-US')}`;
 }
 
 export const sessions = writable<SessionRow[]>([]);

@@ -64,6 +64,8 @@ pub const READONLY_TOOLS: &[&str] = &[
     "session_transcript",
     "wait_for_task",
     "list_tasks",
+    // Estimated token usage / cost roll-up (Wave 5 G1).
+    "usage_report",
 ];
 
 pub fn is_readonly_tool(name: &str) -> bool {
