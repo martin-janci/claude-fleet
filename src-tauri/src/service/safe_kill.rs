@@ -500,7 +500,7 @@ pub async fn handle_stop_marker_check(
     if let Err(e) = handle_stop_marker_check_inner(&store, &ssh, &claude_session_id).await {
         tracing::warn!(
             claude_session_id = %claude_session_id,
-            error = %e.message,
+            error = %e,
             "[safe_kill] marker check failed"
         );
     }
@@ -545,7 +545,7 @@ async fn handle_stop_marker_check_inner(
             tracing::warn!(
                 host = %host_alias,
                 session = %tmux_name,
-                error = %e.message,
+                error = %e,
                 "[safe_kill] capture_pane failed; retrying on the next Stop"
             );
             return Ok(());
@@ -687,7 +687,7 @@ async fn finalize_safe_kill(
         tracing::error!(
             host = %host_alias,
             session = %tmux_name,
-            error = %e.message,
+            error = %e,
             "[safe_kill] tmux kill after READY failed; the worktree is gone but the session still runs"
         );
     }

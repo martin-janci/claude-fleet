@@ -12,12 +12,13 @@
 //! Hourly rotation bounds a single file to one hour of output, and keeping
 //! [`MAX_LOG_FILES`] files still covers the last three days.
 //!
-//! **New code should log with `tracing::{error,warn,info,debug}!`** (the
-//! `log::` macros also work through the bridge). Do not add new `eprintln!`
-//! calls. The existing production `eprintln!` sites in `service/`, `mcp/`,
-//! `commands/`, `ssh.rs` and `store.rs` still write to stderr only and are
-//! NOT in the log file yet. Converting them is a separate mechanical PR (plan
-//! Track H1 follow-up).
+//! **Log with `tracing::{error,warn,info,debug}!`** (the `log::` macros also
+//! work through the bridge). The print family (`eprintln!`, `eprint!`,
+//! `println!`, `print!`, `dbg!`) is not allowed in production code:
+//! `no_eprintln_tests.rs` fails the build on any, with no allowlist, so every
+//! line reaches the redacting layers below. When [`init`] itself fails,
+//! [`init_stderr_fallback`] installs a stderr-only subscriber so startup
+//! errors still go through `tracing`.
 //!
 //! Redaction: every formatted line goes through [`redact`], which masks
 //! `Bearer <token>`, `?token=` / `&token=` query values and bare 64-hex
@@ -346,6 +347,25 @@ pub fn init(data_dir: &Path) -> Result<PathBuf, String> {
         tracing::warn!("RUST_LOG is set but invalid; using the default filter {DEFAULT_FILTER:?}");
     }
     Ok(dir)
+}
+
+/// Fallback when [`init`] failed: a stderr-only subscriber with the same
+/// redaction and filter, so startup errors (why file logging is unavailable
+/// above all) still go through `tracing` instead of being dropped. A no-op
+/// when a subscriber is already installed.
+pub fn init_stderr_fallback() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let (filter, _) = env_filter();
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(RedactingMakeWriter(std::io::stderr))
+                .with_target(true),
+        )
+        .try_init();
 }
 
 #[cfg(test)]

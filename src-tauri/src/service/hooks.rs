@@ -189,34 +189,34 @@ fn apply_prompt_submit_hook(
 pub fn validate_worktree_path(path: &str) -> Result<(), IpcError> {
     if path.is_empty() || path.len() > 4096 {
         return Err(IpcError::new(
-            "E_VALIDATE",
+            codes::E_VALIDATE,
             "worktree_path must be a non-empty path under 4096 bytes",
         ));
     }
     if !path.starts_with('/') {
         return Err(IpcError::new(
-            "E_VALIDATE",
+            codes::E_VALIDATE,
             "worktree_path must be absolute",
         ));
     }
     if path.chars().any(|c| c.is_control()) {
         return Err(IpcError::new(
-            "E_VALIDATE",
+            codes::E_VALIDATE,
             "worktree_path must not contain control characters",
         ));
     }
     if path.split('/').any(|c| c == "..") {
         return Err(IpcError::new(
-            "E_VALIDATE",
+            codes::E_VALIDATE,
             "worktree_path must not contain a '..' component",
         ));
     }
     let name = std::path::Path::new(path)
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| IpcError::new("E_VALIDATE", "worktree_path has no final component"))?;
+        .ok_or_else(|| IpcError::new(codes::E_VALIDATE, "worktree_path has no final component"))?;
     crate::validate::path_component("worktree name", name)
-        .map_err(|e| IpcError::new("E_VALIDATE", e.message))?;
+        .map_err(|e| IpcError::new(codes::E_VALIDATE, e.message))?;
     Ok(())
 }
 
@@ -317,7 +317,7 @@ fn apply_worktree_hook(
     validate_worktree_path(&path)?;
     let branch = branch.as_deref().filter(|s| !s.is_empty());
     if let Some(b) = branch {
-        crate::validate::git_ref(b).map_err(|e| IpcError::new("E_VALIDATE", e.message))?;
+        crate::validate::git_ref(b).map_err(|e| IpcError::new(codes::E_VALIDATE, e.message))?;
     }
 
     let host = caller_host(caller);
@@ -332,7 +332,7 @@ fn apply_worktree_hook(
             &paths,
         ) else {
             return Err(IpcError::new(
-                "E_VALIDATE",
+                codes::E_VALIDATE,
                 format!("worktree_path {path} is not under a known project on host {host}"),
             ));
         };
@@ -361,7 +361,7 @@ fn apply_worktree_hook(
     };
     let Some(project_id) = find_project_id_for_path(&projects, &path) else {
         return Err(IpcError::new(
-            "E_VALIDATE",
+            codes::E_VALIDATE,
             format!("worktree_path {path} is not under any known project base"),
         ));
     };

@@ -13,7 +13,7 @@ use super::auth::{Caller, TokenMode};
 use super::guard::{self, ConfirmState};
 use super::McpGuards;
 use crate::cancel::CancellationRegistry;
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::service::pane_intel::{ClaudeStatus, StuckKind};
 use crate::service::{
     health, hosts, projects, safe_kill, sessions, tasks, transcript, usage, worktrees,
@@ -57,10 +57,12 @@ pub struct FleetTools {
 /// The persisted counterpart (`session_events` kind `mcp_call`) is written
 /// centrally in `ServerHandler::call_tool` — see [`persist_audit`].
 fn audit(tool: &str, detail: &str) {
-    if detail.is_empty() {
-        eprintln!("[mcp] tool call: {tool}");
+    // Mutating calls are the audit trail (info); read-only calls are what
+    // agents poll all the time (debug). Identifying args only, never bodies.
+    if guard::is_readonly_tool(tool) {
+        tracing::debug!(tool, detail, "[mcp] tool call");
     } else {
-        eprintln!("[mcp] tool call: {tool} {detail}");
+        tracing::info!(tool, detail, "[mcp] tool call");
     }
 }
 
@@ -1317,7 +1319,7 @@ impl FleetTools {
                 }
                 ConfirmState::Pending => {
                     return Err(mcp_err(
-                        "E_CONFIRM_REQUIRED",
+                        codes::E_CONFIRM_REQUIRED,
                         format!(
                             "{tool} is awaiting approval on the desktop; retry with the same confirm_nonce once approved"
                         ),
@@ -1330,7 +1332,7 @@ impl FleetTools {
         let req = confirms.request(tool, summary, &caller.label());
         (self.guards.notify)(&req);
         Err(mcp_err(
-            "E_CONFIRM_REQUIRED",
+            codes::E_CONFIRM_REQUIRED,
             format!(
                 "{tool} needs approval on the claude-fleet desktop (mcp.confirm_destructive is on); \
                  ask the user to approve it there, then retry with confirm_nonce={}",
@@ -1473,7 +1475,7 @@ impl FleetTools {
     ) -> Result<guard::LongPollPermit, McpError> {
         self.long_polls.try_acquire(&caller.label()).ok_or_else(|| {
             mcp_err(
-                "E_RATE_LIMITED",
+                codes::E_RATE_LIMITED,
                 format!(
                     "{tool}: {} already has {} bounded waits in flight; let one return first",
                     caller.label(),
@@ -2235,7 +2237,7 @@ impl FleetTools {
         if let Err(wait) = self.guards.rate.check(&caller.label(), interval) {
             let secs = wait.as_secs().max(1);
             return Err(mcp_err(
-                "E_RATE_LIMITED",
+                codes::E_RATE_LIMITED,
                 format!(
                     "broadcast_prompt is limited to one call per {}s per caller; retry in {secs}s",
                     interval.as_secs()

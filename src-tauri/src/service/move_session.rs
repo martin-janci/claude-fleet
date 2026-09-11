@@ -975,7 +975,12 @@ fn record_partial(store: &Mutex<Store>, source_id: i64, to_host: &str, e: &IpcEr
     let Ok(s) = store.lock() else { return };
     for sid in std::iter::once(source_id).chain(target_id) {
         if let Err(err) = s.insert_session_event(sid, EVENT_MOVE_PARTIAL, Some(&detail)) {
-            eprintln!("[event] insert {EVENT_MOVE_PARTIAL} failed for session {sid}: {err}");
+            tracing::warn!(
+                kind = EVENT_MOVE_PARTIAL,
+                session_id = sid,
+                error = %err,
+                "[event] insert failed"
+            );
         }
     }
 }
@@ -1249,9 +1254,10 @@ async fn move_session_steps(
             .unwrap_or(0);
         // Soft-fail like new_session: the session is live either way.
         if let Err(e) = s.set_claude_session_id(row.id, &id) {
-            eprintln!(
-                "move_session: storing claude_session_id on {} failed: {e}",
-                row.id
+            tracing::warn!(
+                session_id = row.id,
+                error = %e,
+                "[move_session] storing claude_session_id failed"
             );
         }
         // Usage (G1): the target's transcript is a whole-line prefix copy of
@@ -1268,13 +1274,18 @@ async fn move_session_steps(
             );
         }
         if let Err(e) = s.set_started_at(row.id, now) {
-            eprintln!("move_session: storing started_at on {} failed: {e}", row.id);
+            tracing::warn!(
+                session_id = row.id,
+                error = %e,
+                "[move_session] storing started_at failed"
+            );
         }
         if let Some(f) = snap.row.friendly_name.as_deref() {
             if let Err(e) = s.set_friendly_name(&target, &tmux_name, Some(f)) {
-                eprintln!(
-                    "move_session: copying friendly_name to {} failed: {e}",
-                    row.id
+                tracing::warn!(
+                    session_id = row.id,
+                    error = %e,
+                    "[move_session] copying friendly_name failed"
                 );
             }
         }
@@ -1439,7 +1450,12 @@ async fn move_session_steps(
     if let Ok(s) = store.lock() {
         for sid in [snap.row.id, target_row.id] {
             if let Err(e) = s.insert_session_event(sid, EVENT_MOVED, Some(&detail)) {
-                eprintln!("[event] insert {EVENT_MOVED} failed for session {sid}: {e}");
+                tracing::warn!(
+                    kind = EVENT_MOVED,
+                    session_id = sid,
+                    error = %e,
+                    "[event] insert failed"
+                );
             }
         }
     }

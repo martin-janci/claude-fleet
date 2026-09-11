@@ -464,7 +464,10 @@ pub fn run() {
     let log_dir = match logging::init(&data_dir) {
         Ok(dir) => Some(dir),
         Err(e) => {
-            eprintln!("[startup] file logging unavailable: {e}");
+            // `init` failed before installing a subscriber: install the stderr
+            // fallback first, or this line would go nowhere.
+            logging::init_stderr_fallback();
+            tracing::error!(error = %e, "[startup] file logging unavailable; logging to stderr only");
             None
         }
     };

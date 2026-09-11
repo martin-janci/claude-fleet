@@ -295,9 +295,11 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
                 && s.delete_project_if_unused(id, &fp_keys)?
             {
                 removed.insert(id);
-                eprintln!(
-                    "[projects] removed duplicate project {}/{} at {} (a worktree of another project)",
-                    p.project.owner, p.project.repo, p.project.base_path
+                tracing::info!(
+                    owner = %p.project.owner,
+                    repo = %p.project.repo,
+                    path = %p.project.base_path,
+                    "[projects] removed a duplicate project (a worktree of another project)"
                 );
             }
         }
@@ -316,9 +318,12 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
             let inside = strip_root(&row.base_path, &root_raw).is_some()
                 || strip_root(&canon(&row.base_path), &root_canon).is_some();
             if !inside && s.delete_project_if_unused(row.id, &fp_keys)? {
-                eprintln!(
-                    "[projects] removed stale project {}/{} at {} (outside {root_raw})",
-                    row.owner, row.repo, row.base_path
+                tracing::info!(
+                    owner = %row.owner,
+                    repo = %row.repo,
+                    path = %row.base_path,
+                    root = %root_raw,
+                    "[projects] removed a stale project outside the projects root"
                 );
             }
         }
