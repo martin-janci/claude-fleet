@@ -2213,6 +2213,27 @@ impl Store {
         })
         .map_err(crate::ipc_error::IpcError::from)
     }
+
+    /// Run `f` against this store inside one SQLite transaction: commit when
+    /// `f` returns `Ok`, roll back (drop the transaction) when it returns
+    /// `Err`. Unlike [`Store::with_transaction`] the closure receives the
+    /// `&Store` itself, so it can compose the ordinary `&self` write helpers
+    /// (`insert_message`, `insert_session_event`, …) atomically without
+    /// `_in_tx` twins. Must not be nested, and `f` must not call a helper
+    /// that opens its own transaction (`BEGIN` inside `BEGIN` errors). Bus
+    /// emission is unaffected — none of the helpers this is meant for emit.
+    pub fn atomically<F, R>(&self, f: F) -> Result<R, crate::ipc_error::IpcError>
+    where
+        F: FnOnce(&Store) -> Result<R, crate::ipc_error::IpcError>,
+    {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(crate::ipc_error::IpcError::from)?;
+        let r = f(self)?;
+        tx.commit().map_err(crate::ipc_error::IpcError::from)?;
+        Ok(r)
+    }
 }
 
 // ---- Connection-level row fetch helpers ----
