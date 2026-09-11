@@ -676,8 +676,10 @@ impl VanishedGuard {
         };
         [
             (self.fingerprint_matches, fingerprint),
+            // A missing sibling blocks only alongside a failed fingerprint;
+            // with a match it is a stale registration, reported as a warning.
             (
-                self.siblings_present,
+                self.siblings_present || self.fingerprint_matches,
                 "another worktree under the same parent is missing too (unmounted volume?)",
             ),
             (self.dir_absent, "directory not confirmed absent"),
@@ -1007,6 +1009,18 @@ pub fn plan_with(
                                     )
                                 }
                             ));
+                        } else {
+                            // The fingerprint matched, so a missing sibling is a
+                            // stale registration: say so, but do not block.
+                            let siblings = missing_siblings(p);
+                            if !siblings.is_empty() {
+                                warnings.push(format!(
+                                    "git also lists {} under the same parent, missing on disk \
+                                     (not blocking: the parent fingerprint matches; prune them \
+                                     if they are gone for good)",
+                                    siblings.join(", ")
+                                ));
+                            }
                         }
                         vanished = Some(guard);
                         git.push((
@@ -5953,10 +5967,11 @@ mod tests {
         }
     }
 
-    /// (h): a missing sibling under the same parent blocks the removal and
-    /// is named in the refusal.
+    /// (h): with a matching parent fingerprint a missing sibling is a stale
+    /// registration, only a warning naming it; alongside a failed fingerprint
+    /// it blocks and is named in the refusal.
     #[test]
-    fn a_missing_sibling_blocks_and_is_named() {
+    fn a_missing_sibling_is_a_warning_when_the_fingerprint_matches() {
         let mut p = vanished();
         p.worktrees.push(RegisteredWorktree {
             path: "/repo/.claude/worktrees/other".into(),
@@ -5965,14 +5980,21 @@ mod tests {
             ..Default::default()
         });
         let plan = plan_with(&spec(true), &p, AUTO, NO_OTHERS).unwrap();
-        assert!(plan.steps.is_empty() && plan.needs_explicit_repair);
-        let w = plan.warnings.join("\n");
-        assert!(w.contains("missing too"), "{w}");
-        assert!(w.contains("/repo/.claude/worktrees/other"), "{w}");
-        // A present sibling (the rm -rf shape) does not block.
-        p.worktrees[2].present = Some(true);
-        let plan = plan_with(&spec(true), &p, AUTO, NO_OTHERS).unwrap();
         assert!(!plan.needs_explicit_repair, "{:?}", plan.warnings);
+        assert!(matches!(plan.steps.first(), Some(Step::Unregister { .. })));
+        let w = plan.warnings.join("\n");
+        assert!(w.contains("not blocking"), "{w}");
+        assert!(w.contains("/repo/.claude/worktrees/other"), "{w}");
+        let g = plan.vanished_guard.unwrap();
+        assert!(!g.siblings_present && g.holds(), "reported, not blocking");
+        // Without the fingerprint it blocks and names the sibling.
+        for ctx in [NO_FP, OTHER_FP] {
+            let plan = plan_with(&spec(true), &p, AUTO, ctx).unwrap();
+            assert!(plan.steps.is_empty() && plan.needs_explicit_repair);
+            let w = plan.warnings.join("\n");
+            assert!(w.contains("missing too"), "{w}");
+            assert!(w.contains("/repo/.claude/worktrees/other"), "{w}");
+        }
     }
 
     #[test]
@@ -6155,10 +6177,11 @@ mod tests {
         assert!(worktree_list(&root).contains("/.claude/worktrees/feat"));
     }
 
-    /// Against real git: two worktrees under one parent vanish together (the
-    /// unmounted-volume shape); automatic refuses and names the sibling.
+    /// Against real git: two worktrees under one parent are deleted, but the
+    /// parent is the same directory (its fingerprint matches), so the other
+    /// is a stale registration: ours is re-added, the sibling only warned.
     #[tokio::test]
-    async fn real_git_siblings_vanishing_together_stay_explicit() {
+    async fn real_git_stale_sibling_is_only_a_warning_when_the_fingerprint_matches() {
         let base = tempfile::TempDir::new().unwrap();
         let root = base.path().join("repo");
         init_repo(&root);
@@ -6198,15 +6221,12 @@ mod tests {
         let rep = ensure_workspace(&s, AUTO, vec![], &store, &LocalExec)
             .await
             .unwrap();
-        let err = require_no_explicit(rep).unwrap_err();
-        assert_eq!(err.code, codes::E_REPAIR_REQUIRED);
-        assert!(err.message.contains("missing too"), "{}", err.message);
-        assert!(
-            err.message.contains("/.claude/worktrees/other"),
-            "{}",
-            err.message
-        );
-        assert!(!wt.exists());
+        let rep = require_no_explicit(rep).unwrap();
+        assert!(wt.join(".git").exists(), "ours is re-added");
+        let w = rep.warnings.join("\n");
+        assert!(w.contains("not blocking"), "{w}");
+        assert!(w.contains("/.claude/worktrees/other"), "{w}");
+        assert!(!other.exists(), "the sibling is only reported");
     }
 
     fn worktree_list(root: &std::path::Path) -> String {
