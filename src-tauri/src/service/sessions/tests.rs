@@ -2137,6 +2137,36 @@ fn find_session_by_tmux_name_prefers_running_rows_over_ghosts() {
     );
 }
 
+/// D8 / Q2: an MCP-delivered prompt carries the untrusted marker as its first
+/// line. The session is shown it, but the label and `last_prompt` must read as
+/// what was asked, not as the marker sentence.
+#[test]
+fn marked_prompt_records_the_body_not_the_marker() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session("dev-marked", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+    }
+    let body = "Rewrite the auth flow!";
+    let marked = crate::mcp::guard::mark_untrusted(body, "session 12 on mefistos");
+    record_prompt_outcome(&store, "local", "dev-marked", &marked);
+    {
+        let s = store.lock().unwrap();
+        let row = s.get_session("dev-marked", "local").unwrap().unwrap();
+        assert_eq!(row.last_prompt.as_deref(), Some(body));
+        assert_eq!(row.friendly_name.as_deref(), Some("rewrite the auth flow"));
+    }
+    // An unmarked prompt is recorded verbatim, and a body that merely opens
+    // with similar words keeps every character.
+    let lookalike = "[claude-fleet: message from me] ship it";
+    record_prompt_outcome(&store, "local", "dev-marked", lookalike);
+    let s = store.lock().unwrap();
+    let row = s.get_session("dev-marked", "local").unwrap().unwrap();
+    assert_eq!(row.last_prompt.as_deref(), Some(lookalike));
+}
+
 #[test]
 fn prompt_derived_name_replaces_only_the_branch_default() {
     let store = Mutex::new(Store::open_in_memory().unwrap());
