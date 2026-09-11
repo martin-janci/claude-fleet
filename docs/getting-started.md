@@ -6,39 +6,63 @@ For background on the core concepts (hosts, sessions, projects, the Control API)
 
 ---
 
-## Prerequisites
+## Quickstart: one host
 
-### Local machine
+The shortest path to a working fleet is this machine plus one remote host, such as a VPS. Your repositories do not need to follow any particular layout.
 
-- **`claude` CLI** installed and on your `PATH` (run `claude --version` to verify).
-- **`tmux`** installed and on your `PATH`.
-- A **projects directory** laid out as `~/projects/github.com/<owner>/<repo>`. This is the default; override it by setting the environment variable `CLAUDE_FLEET_PROJECTS_BASE` to any absolute path before launching the app.
+### 1. Install the app
 
-### Remote hosts
+Download the build for your platform from the [latest GitHub release](https://github.com/martin-janci/claude-fleet/releases/latest):
 
-- Each remote machine must be reachable by **key-based SSH** (no password prompt).
-- The host must have an entry in `~/.ssh/config` — that is how the app discovers it.
-- `claude` and `tmux` must be installed on the remote machine (the app probes for them when you add the host).
+| Platform | Asset |
+|---|---|
+| macOS | `.dmg`, or `.app.tar.gz` |
+| Linux | `.AppImage` or `.deb` |
 
----
+The builds are not code-signed yet.
 
-## Install & launch
+- **macOS:** Gatekeeper blocks the first launch. Right-click the app and choose **Open**, or clear the quarantine flag:
 
-Clone the repository, then:
+  ```bash
+  xattr -d com.apple.quarantine /Applications/claude-fleet.app
+  ```
 
-```bash
-pnpm install
-pnpm tauri dev
-```
+- **Linux:** mark the AppImage executable (`chmod +x claude-fleet_*.AppImage`) before running it, or install the `.deb` with `sudo apt install ./claude-fleet_*.deb`.
 
-Packaged binaries will be available in a future release; for now, run from source.
+The app drives the `claude` CLI and `tmux`, so both must be on your local `PATH` (`claude --version`, `tmux -V`).
 
-**First launch on an empty fleet:** The app shows the "Welcome to claude-fleet" dialog.
+### 2. Add one host
 
-- Click **"Let's set up →"** to open the guided setup checklist in the sidebar.
-- Click **"Skip for now"** to close the dialog and leave the checklist available in the sidebar whenever you are ready.
+The remote host needs:
 
-The dialog only appears once, on first launch, when no hosts have been added yet.
+- **key-based SSH** with no password prompt,
+- an entry in `~/.ssh/config`, which is how the app discovers it,
+- `claude` and `tmux` installed. The app checks for both when you add the host.
+
+On first launch the app shows the "Welcome to claude-fleet" dialog. Click **"Let's set up →"** to open the **Get started** checklist in the sidebar, or **"Skip for now"** to open it later. The dialog appears once, and only while no hosts have been added.
+
+In the checklist, click **Add a host**, pick the alias from your `~/.ssh/config`, and confirm with **Add** once the probe shows the `claude` and `tmux` versions.
+
+### 3. Set the host's projects base
+
+Open **Settings → Projects**. Pick a layout, then enter the directory that holds the repositories for each host:
+
+| Layout | Where a project lives | Example base |
+|---|---|---|
+| `github` (default) | `<base>/<owner>/<repo>` | `~/projects/github.com` |
+| `flat` | `<base>/<repo>` | `~/code`, for `~/code/my-app` |
+
+- A path must be absolute or start with `~/`. The `~/` part is expanded against that host's home directory.
+- The line under each field previews where a project ends up.
+- Click **Save & rescan** to apply.
+
+A host left blank uses the default: `~/projects/github.com` (`~/projects` with the `flat` layout). On this machine, the `CLAUDE_FLEET_PROJECTS_BASE` environment variable is checked before that default, so existing setups keep working unchanged.
+
+Repositories on this machine are found by scanning the base. On a remote host, the app clones `git@github.com:<owner>/<repo>.git` into that host's base the first time you start a session there. The host therefore needs GitHub SSH access for any repository that is not already present.
+
+### 4. Create a session
+
+Click **Create first session** in the checklist, or use the new-session button in the sidebar. Choose the host and a project, then start. Claude Code launches in a tmux session on that host and the terminal attaches to it.
 
 ---
 
@@ -68,7 +92,7 @@ The tunnel badge reflects the current state:
 
 ### Pick projects
 
-Scans the projects path (default `~/projects/github.com`) and registers every `<owner>/<repo>` directory it finds. Click the row to re-scan after adding repositories. The sublabel shows how many projects were found.
+Scans this machine's projects base and registers every repository it finds in the configured layout. The base is set in **Settings → Projects** and defaults to `~/projects/github.com`. Click the row to re-scan after adding repositories. The sublabel shows how many projects were found.
 
 ### Enable Control API (optional)
 
@@ -109,3 +133,18 @@ Once you have at least one session running:
 - **Filter** — use the host picker and recency filter in the sidebar to narrow the session list when you manage many machines.
 
 For a deeper explanation of how hosts, sessions, projects, and the event bus fit together, see [concepts.md](concepts.md). If something is not working as expected, see [troubleshooting.md](troubleshooting.md).
+
+---
+
+## Run from source
+
+Build from source to work on claude-fleet itself, or on a platform the release does not cover. You need Node with pnpm, a stable Rust toolchain, and the Tauri system libraries. The [README](../README.md) lists the exact versions.
+
+```bash
+git clone https://github.com/martin-janci/claude-fleet.git
+cd claude-fleet
+pnpm install
+pnpm tauri dev
+```
+
+Setup is otherwise the same as the quickstart above.

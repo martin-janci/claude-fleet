@@ -12,7 +12,7 @@ Hosts are discovered from `~/.ssh/config` plus a built-in `local` entry for the 
 
 ## Projects & worktrees
 
-The app scans a conventional path (`~/projects/github.com/<owner>/<repo>`) on each host and discovers git worktrees within those directories. Sessions are associated with the project whose working directory they were started from, so the UI can group and filter sessions by repository and branch.
+Each host has a **projects base**, the directory that holds its repositories, set in Settings → Projects. The layout under that base is either `github` (`<base>/<owner>/<repo>`) or `flat` (`<base>/<repo>`). When a host has no base configured, the default is `~/projects/github.com` (`~/projects` for `flat`). On the local machine the `CLAUDE_FLEET_PROJECTS_BASE` environment variable is checked before that default. The app scans the local base for repositories and their git worktrees. For a remote host it derives the project directory from that host's base and clones the repository on first use. Sessions are associated with the project whose working directory they were started from, so the UI can group and filter sessions by repository and branch.
 
 ## Control API & tunnels
 

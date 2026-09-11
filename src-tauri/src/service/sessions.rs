@@ -1076,17 +1076,20 @@ fn fetch_worktree(s: &Store, worktree_id: i64) -> Result<(String, Option<String>
 }
 
 /// Build the absolute path on the remote host where a project (and optional
-/// worktree) should live. Mirrors the local convention `proj-clean` enforces:
-/// `~/projects/github.com/<owner>/<repo>` for the project root and
-/// `~/projects/github.com/<owner>/<repo>/.claude/worktrees/<wt>` for non-main
-/// worktrees. Returns just the project root if `wt_name` is None or "main".
+/// worktree) should live: `<root>/<owner>/<repo>` (`github` layout) or
+/// `<root>/<repo>` (`flat`) for the project root, plus
+/// `.claude/worktrees/<wt>` for non-main worktrees (a best-effort guess;
+/// `service::repair` resolves the real worktree dir on the host). `root` must
+/// already be absolute (see `remote_project_path_for`). Returns just the
+/// project root if `wt_name` is None or "main".
 pub(crate) fn remote_project_path(
-    home: &str,
+    root: &str,
+    layout: crate::projects::Layout,
     owner: &str,
     repo: &str,
     wt_name: Option<&str>,
 ) -> (String, String) {
-    let project_root = format!("{home}/projects/github.com/{owner}/{repo}");
+    let project_root = layout.project_dir(root, owner, repo);
     let cwd = match wt_name {
         Some(name) if name != "main" => {
             format!("{project_root}/.claude/worktrees/{name}")
@@ -1094,6 +1097,22 @@ pub(crate) fn remote_project_path(
         _ => project_root.clone(),
     };
     (project_root, cwd)
+}
+
+/// `remote_project_path` with the host's projects root resolved from the
+/// `projects.*` settings (default `~/projects/github.com`) and expanded
+/// against the remote `$HOME`.
+fn remote_project_path_for(
+    s: &Store,
+    host: &str,
+    home: &str,
+    owner: &str,
+    repo: &str,
+    wt_name: Option<&str>,
+) -> (String, String) {
+    use crate::service::projects::{expand_home, layout, project_base_for};
+    let root = expand_home(&project_base_for(s, host), home);
+    remote_project_path(&root, layout(s), owner, repo, wt_name)
 }
 
 /// Ensure the remote host has the project cloned at `<project_root>` and,
@@ -1439,7 +1458,10 @@ async fn new_session_inner(
                 fetch_owner_repo(&s, args.project_id)?
             };
             let home = ssh.remote_home(&args.host_alias).await?;
-            let (project_root, _) = remote_project_path(&home, &owner, &repo, None);
+            let (project_root, _) = {
+                let s = store.lock().map_err(|_| IpcError::lock())?;
+                remote_project_path_for(&s, &args.host_alias, &home, &owner, &repo, None)
+            };
             ensure_remote_project(
                 ssh,
                 &args.host_alias,
@@ -1484,7 +1506,10 @@ async fn new_session_inner(
             };
             let home = ssh.remote_home(&args.host_alias).await?;
             let wt_name_str = wt_info.as_ref().map(|(name, _)| name.as_str());
-            let (project_root, cwd) = remote_project_path(&home, &owner, &repo, wt_name_str);
+            let (project_root, cwd) = {
+                let s = store.lock().map_err(|_| IpcError::lock())?;
+                remote_project_path_for(&s, &args.host_alias, &home, &owner, &repo, wt_name_str)
+            };
             let worktree_for_clone = wt_info
                 .as_ref()
                 .map(|(name, branch)| (name.as_str(), branch.as_deref()));
@@ -2414,6 +2439,10 @@ fn worktree_path_on_disk(base: &str, key: &str, exists: impl Fn(&str) -> bool) -
 enum CwdSource {
     Local(String),
     Remote {
+        /// Host's projects root from the `projects.*` settings, unexpanded
+        /// (may start with `~/`; expanded against the remote `$HOME`).
+        root: String,
+        layout: crate::projects::Layout,
         owner: String,
         repo: String,
         wt_name: Option<String>,
@@ -2450,6 +2479,8 @@ fn cwd_source_for_session(
             .map(str::to_string),
     };
     Ok(CwdSource::Remote {
+        root: crate::service::projects::project_base_for(s, &row.host_alias),
+        layout: crate::service::projects::layout(s),
         owner,
         repo,
         wt_name,
@@ -2467,12 +2498,16 @@ async fn resolve_cwd_source(
     match src {
         CwdSource::Local(p) => Ok(p),
         CwdSource::Remote {
+            root,
+            layout,
             owner,
             repo,
             wt_name,
         } => {
             let home = ssh.remote_home(host_alias).await?;
-            let (_root, cwd) = remote_project_path(&home, &owner, &repo, wt_name.as_deref());
+            let root = crate::service::projects::expand_home(&root, &home);
+            let (_root, cwd) =
+                remote_project_path(&root, layout, &owner, &repo, wt_name.as_deref());
             Ok(cwd)
         }
     }
@@ -3142,22 +3177,36 @@ mod tests {
 
     #[test]
     fn remote_project_path_returns_project_root_for_main_or_no_worktree() {
-        let (root, cwd) = remote_project_path("/home/mjanci", "martin-janci", "claude-fleet", None);
+        use crate::projects::Layout;
+        let root_dir = "/home/mjanci/projects/github.com";
+        let (root, cwd) = remote_project_path(
+            root_dir,
+            Layout::Github,
+            "martin-janci",
+            "claude-fleet",
+            None,
+        );
         assert_eq!(
             root,
             "/home/mjanci/projects/github.com/martin-janci/claude-fleet"
         );
         assert_eq!(cwd, root);
 
-        let (root, cwd) =
-            remote_project_path("/home/mjanci", "papayapos", "pos-frontend", Some("main"));
+        let (root, cwd) = remote_project_path(
+            root_dir,
+            Layout::Github,
+            "papayapos",
+            "pos-frontend",
+            Some("main"),
+        );
         assert_eq!(cwd, root);
     }
 
     #[test]
     fn remote_project_path_uses_worktree_subdir_for_non_main() {
         let (root, cwd) = remote_project_path(
-            "/home/mjanci",
+            "/home/mjanci/projects/github.com",
+            crate::projects::Layout::Github,
             "martin-janci",
             "sales-twins-app",
             Some("feature-x"),
@@ -3170,6 +3219,45 @@ mod tests {
             cwd,
             "/home/mjanci/projects/github.com/martin-janci/sales-twins-app/.claude/worktrees/feature-x"
         );
+    }
+
+    #[test]
+    fn remote_new_session_path_unchanged_without_a_setting() {
+        // Existing configs: exactly the pre-setting `{home}/projects/github.com/...`.
+        let s = Store::open_in_memory().unwrap();
+        let (root, cwd) =
+            remote_project_path_for(&s, "mefistos", "/home/mjanci", "o", "r", Some("wt"));
+        assert_eq!(root, "/home/mjanci/projects/github.com/o/r");
+        assert_eq!(
+            cwd,
+            "/home/mjanci/projects/github.com/o/r/.claude/worktrees/wt"
+        );
+    }
+
+    #[test]
+    fn remote_new_session_path_follows_the_projects_settings() {
+        use crate::service::settings;
+        let s = Store::open_in_memory().unwrap();
+        settings::set(
+            &s,
+            settings::PROJECTS_BASE_PATH,
+            r#"{"mefistos":"~/code","other":"/data/git"}"#,
+        )
+        .unwrap();
+        // github layout under the host's own root, `~/` expanded remotely
+        let (root, _) = remote_project_path_for(&s, "mefistos", "/home/mjanci", "o", "r", None);
+        assert_eq!(root, "/home/mjanci/code/o/r");
+        // flat layout
+        settings::set(&s, settings::PROJECTS_LAYOUT, "flat").unwrap();
+        let (root, cwd) =
+            remote_project_path_for(&s, "mefistos", "/home/mjanci", "o", "r", Some("feat"));
+        assert_eq!(root, "/home/mjanci/code/r");
+        assert_eq!(cwd, "/home/mjanci/code/r/.claude/worktrees/feat");
+        // absolute per-host root; a host without an entry gets the flat default
+        let (root, _) = remote_project_path_for(&s, "other", "/home/x", "o", "r", None);
+        assert_eq!(root, "/data/git/r");
+        let (root, _) = remote_project_path_for(&s, "third", "/home/x", "o", "r", None);
+        assert_eq!(root, "/home/x/projects/r");
     }
 
     #[test]
@@ -3948,6 +4036,7 @@ mod tests {
                 owner,
                 repo,
                 wt_name,
+                ..
             } => {
                 assert_eq!(owner, "acme");
                 assert_eq!(repo, "repo");
@@ -3961,6 +4050,51 @@ mod tests {
         rm.worktree_key = Some("main".into());
         match cwd_source_for_session(&store, &rm).unwrap() {
             CwdSource::Remote { wt_name, .. } => assert_eq!(wt_name, None),
+            CwdSource::Local(_) => panic!("expected Remote for host=mefistos"),
+        }
+    }
+
+    #[test]
+    fn cwd_source_remote_follows_projects_settings() {
+        // recreate/restart derive the remote cwd through `cwd_source_for_session`
+        // + `resolve_cwd_source`; the path must follow `projects.*`.
+        use crate::projects::Layout;
+        use crate::service::settings;
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_host("mefistos").unwrap();
+        let pid = store.upsert_project("acme", "repo", "/base/repo").unwrap();
+        let mut r = row(1, "mefistos", "dev", "work", Some(pid), Some("idle"));
+        r.worktree_key = Some("feat-x".into());
+
+        // No setting: the historical remote root, unchanged.
+        match cwd_source_for_session(&store, &r).unwrap() {
+            CwdSource::Remote { root, layout, .. } => {
+                assert_eq!(root, "~/projects/github.com");
+                assert_eq!(layout, Layout::Github);
+            }
+            CwdSource::Local(_) => panic!("expected Remote for host=mefistos"),
+        }
+
+        settings::set(
+            &store,
+            settings::PROJECTS_BASE_PATH,
+            r#"{"mefistos":"~/code"}"#,
+        )
+        .unwrap();
+        settings::set(&store, settings::PROJECTS_LAYOUT, "flat").unwrap();
+        match cwd_source_for_session(&store, &r).unwrap() {
+            CwdSource::Remote {
+                root,
+                layout,
+                owner,
+                repo,
+                wt_name,
+            } => {
+                let root = crate::service::projects::expand_home(&root, "/home/m");
+                let (_, cwd) =
+                    remote_project_path(&root, layout, &owner, &repo, wt_name.as_deref());
+                assert_eq!(cwd, "/home/m/code/repo/.claude/worktrees/feat-x");
+            }
             CwdSource::Local(_) => panic!("expected Remote for host=mefistos"),
         }
     }
@@ -4005,6 +4139,7 @@ mod tests {
                 owner,
                 repo,
                 wt_name,
+                ..
             } => {
                 assert_eq!(owner, "acme");
                 assert_eq!(repo, "repo");

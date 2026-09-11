@@ -17,32 +17,95 @@ pub struct DiscoveredWorktree {
     pub branch: Option<String>,
 }
 
-/// Walks `base/<owner>/<repo>` two levels deep and returns every directory
-/// that contains a `.git` entry (regular dir or worktree gitfile).
-pub fn scan_projects(base: &Path) -> Result<Vec<DiscoveredProject>, IpcError> {
+/// On-disk arrangement of repositories under a projects root.
+///
+/// The root is the directory whose children are the layout's top-level
+/// entries, i.e. the same thing the `CLAUDE_FLEET_PROJECTS_BASE` env var has
+/// always named:
+///   - `Github`: `<root>/<owner>/<repo>`. With the default root
+///     `~/projects/github.com` this is the historical
+///     `~/projects/github.com/<owner>/<repo>` convention.
+///   - `Flat`:   `<root>/<repo>`.
+///
+/// The layout only says where a *repository* sits under the root. It says
+/// nothing about where that repo's git worktrees live (`.worktrees/<name>` or
+/// `.claude/worktrees/<name>`); that is a separate, per-repo convention
+/// resolved elsewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    Github,
+    Flat,
+}
+
+impl Layout {
+    pub const FLAT: &'static str = "flat";
+
+    /// Parse a stored `projects.layout` value; anything unknown is `Github`
+    /// (the historical behaviour).
+    pub fn parse(value: &str) -> Layout {
+        match value.trim() {
+            Self::FLAT => Layout::Flat,
+            _ => Layout::Github,
+        }
+    }
+
+    /// Default projects root when neither the setting nor (for `local`) the
+    /// env var names one. `~/` is expanded against the host's `$HOME`.
+    pub fn default_root(self) -> &'static str {
+        match self {
+            Layout::Github => "~/projects/github.com",
+            Layout::Flat => "~/projects",
+        }
+    }
+
+    /// Directory of one project under `root` in this layout.
+    pub fn project_dir(self, root: &str, owner: &str, repo: &str) -> String {
+        let root = root.trim_end_matches('/');
+        match self {
+            Layout::Github => format!("{root}/{owner}/{repo}"),
+            Layout::Flat => format!("{root}/{repo}"),
+        }
+    }
+}
+
+/// Scans `base` according to `layout` and returns every directory that
+/// contains a `.git` entry (regular dir or worktree gitfile).
+pub fn scan_projects(base: &Path, layout: Layout) -> Result<Vec<DiscoveredProject>, IpcError> {
+    let mut out = match layout {
+        Layout::Github => scan_owner_repo(base)?,
+        Layout::Flat => scan_flat(base)?,
+    };
+    out.sort_by(|a, b| {
+        (a.owner.as_str(), a.repo.as_str()).cmp(&(b.owner.as_str(), b.repo.as_str()))
+    });
+    Ok(out)
+}
+
+/// Non-hidden subdirectories of `dir`, as `(name, path)`.
+fn child_dirs(dir: &Path) -> Result<Vec<(String, PathBuf)>, IpcError> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        out.push((name, entry.path()));
+    }
+    Ok(out)
+}
+
+/// `Layout::Github`: walks `base/<owner>/<repo>` two levels deep.
+fn scan_owner_repo(base: &Path) -> Result<Vec<DiscoveredProject>, IpcError> {
     let mut out = Vec::new();
     if !base.exists() {
         return Ok(out);
     }
-    for owner_entry in std::fs::read_dir(base)? {
-        let owner_entry = owner_entry?;
-        if !owner_entry.file_type()?.is_dir() {
-            continue;
-        }
-        let owner = owner_entry.file_name().to_string_lossy().into_owned();
-        if owner.starts_with('.') {
-            continue;
-        }
-        for repo_entry in std::fs::read_dir(owner_entry.path())? {
-            let repo_entry = repo_entry?;
-            if !repo_entry.file_type()?.is_dir() {
-                continue;
-            }
-            let repo = repo_entry.file_name().to_string_lossy().into_owned();
-            if repo.starts_with('.') {
-                continue;
-            }
-            let path = repo_entry.path();
+    for (owner, owner_path) in child_dirs(base)? {
+        for (repo, path) in child_dirs(&owner_path)? {
             if path.join(".git").exists() {
                 out.push(DiscoveredProject {
                     owner: owner.clone(),
@@ -52,10 +115,71 @@ pub fn scan_projects(base: &Path) -> Result<Vec<DiscoveredProject>, IpcError> {
             }
         }
     }
-    out.sort_by(|a, b| {
-        (a.owner.as_str(), a.repo.as_str()).cmp(&(b.owner.as_str(), b.repo.as_str()))
-    });
     Ok(out)
+}
+
+/// `Layout::Flat`: walks `base/<repo>` one level deep. The owner comes from
+/// the repo's `origin` remote URL, so a remote host can still clone
+/// `git@github.com:<owner>/<repo>.git`. A repo without a parseable origin
+/// falls back to the base directory's name.
+fn scan_flat(base: &Path) -> Result<Vec<DiscoveredProject>, IpcError> {
+    let mut out = Vec::new();
+    if !base.exists() {
+        return Ok(out);
+    }
+    let fallback_owner = base
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| crate::validate::path_component("owner", n).is_ok())
+        .unwrap_or_else(|| "local".to_string());
+    for (repo, path) in child_dirs(base)? {
+        let git = path.join(".git");
+        if !git.exists() {
+            continue;
+        }
+        let owner = std::fs::read_to_string(git.join("config"))
+            .ok()
+            .and_then(|cfg| origin_owner(&cfg))
+            .unwrap_or_else(|| fallback_owner.clone());
+        out.push(DiscoveredProject {
+            owner,
+            repo,
+            base_path: path,
+        });
+    }
+    Ok(out)
+}
+
+/// Owner segment of the `[remote "origin"]` URL in a `.git/config` body:
+/// `git@github.com:<owner>/<repo>.git`, `https://github.com/<owner>/<repo>`,
+/// `ssh://git@host/<owner>/<repo>.git`. `None` when absent or unparseable.
+fn origin_owner(config: &str) -> Option<String> {
+    let mut in_origin = false;
+    for line in config.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_origin = line == "[remote \"origin\"]";
+            continue;
+        }
+        if !in_origin {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        if k.trim() != "url" {
+            continue;
+        }
+        let url = v.trim().trim_end_matches('/');
+        let url = url.strip_suffix(".git").unwrap_or(url);
+        let mut parts = url.rsplit(['/', ':']);
+        let _repo = parts.next()?;
+        let owner = parts.next()?;
+        return crate::validate::path_component("owner", owner)
+            .ok()
+            .map(|_| owner.to_string());
+    }
+    None
 }
 
 /// Runs `git worktree list --porcelain` in `repo_path` and parses the result.
@@ -129,7 +253,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         make_project(tmp.path(), "martin-janci", "claude-fleet");
         make_project(tmp.path(), "papayapos", "pos-frontend");
-        let projects = scan_projects(tmp.path()).unwrap();
+        let projects = scan_projects(tmp.path(), Layout::Github).unwrap();
         assert_eq!(projects.len(), 2);
         assert_eq!(projects[0].owner, "martin-janci");
         assert_eq!(projects[0].repo, "claude-fleet");
@@ -142,7 +266,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         fs::create_dir_all(tmp.path().join("o1").join("not-a-repo")).unwrap();
         make_project(tmp.path(), "o1", "real-repo");
-        let projects = scan_projects(tmp.path()).unwrap();
+        let projects = scan_projects(tmp.path(), Layout::Github).unwrap();
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].repo, "real-repo");
     }
@@ -151,8 +275,82 @@ mod tests {
     fn scan_returns_empty_for_missing_base() {
         let tmp = TempDir::new().unwrap();
         let missing = tmp.path().join("does-not-exist");
-        let projects = scan_projects(&missing).unwrap();
-        assert!(projects.is_empty());
+        assert!(scan_projects(&missing, Layout::Github).unwrap().is_empty());
+        assert!(scan_projects(&missing, Layout::Flat).unwrap().is_empty());
+    }
+
+    #[test]
+    fn scan_flat_finds_repos_one_level_deep() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path().join("code");
+        // origin-derived owner
+        let a = base.join("alpha");
+        fs::create_dir_all(a.join(".git")).unwrap();
+        fs::write(
+            a.join(".git").join("config"),
+            "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = git@github.com:acme/alpha.git\n",
+        )
+        .unwrap();
+        // no origin -> base dir name
+        fs::create_dir_all(base.join("beta").join(".git")).unwrap();
+        // not a repo
+        fs::create_dir_all(base.join("notes")).unwrap();
+        // github-layout nesting is not a flat repo
+        make_project(&base, "someone", "nested");
+
+        let projects = scan_projects(&base, Layout::Flat).unwrap();
+        let got: Vec<_> = projects
+            .iter()
+            .map(|p| (p.owner.as_str(), p.repo.as_str()))
+            .collect();
+        assert_eq!(got, vec![("acme", "alpha"), ("code", "beta")]);
+        assert_eq!(projects[0].base_path, a);
+    }
+
+    #[test]
+    fn scan_github_ignores_flat_repos() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("flat-repo").join(".git")).unwrap();
+        make_project(tmp.path(), "o", "r");
+        let projects = scan_projects(tmp.path(), Layout::Github).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(
+            (projects[0].owner.as_str(), projects[0].repo.as_str()),
+            ("o", "r")
+        );
+    }
+
+    #[test]
+    fn origin_owner_parses_common_url_forms() {
+        let cfg = |u: &str| format!("[remote \"origin\"]\n\turl = {u}\n");
+        assert_eq!(
+            origin_owner(&cfg("git@github.com:acme/r.git")).as_deref(),
+            Some("acme")
+        );
+        assert_eq!(
+            origin_owner(&cfg("https://github.com/acme/r")).as_deref(),
+            Some("acme")
+        );
+        assert_eq!(
+            origin_owner(&cfg("ssh://git@host/acme/r.git/")).as_deref(),
+            Some("acme")
+        );
+        assert_eq!(
+            origin_owner("[remote \"upstream\"]\n\turl = git@x:acme/r.git\n"),
+            None
+        );
+        assert_eq!(origin_owner(""), None);
+    }
+
+    #[test]
+    fn layout_parse_defaults_and_project_dir() {
+        assert_eq!(Layout::parse("flat"), Layout::Flat);
+        assert_eq!(Layout::parse("github"), Layout::Github);
+        assert_eq!(Layout::parse("garbage"), Layout::Github);
+        assert_eq!(Layout::Github.default_root(), "~/projects/github.com");
+        assert_eq!(Layout::Flat.default_root(), "~/projects");
+        assert_eq!(Layout::Github.project_dir("/h/p/", "o", "r"), "/h/p/o/r");
+        assert_eq!(Layout::Flat.project_dir("/h/code", "o", "r"), "/h/code/r");
     }
 
     #[test]

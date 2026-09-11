@@ -8,9 +8,14 @@ vi.mock('@tauri-apps/api/core', () => ({
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import {
   fleetSettings,
+  basePathError,
   hoursToSecs,
   loadFleetSettings,
+  projectPathPreview,
+  projectsDefaultRoot,
   secsToHours,
+  settingLayout,
+  settingPathMap,
   setFleetSetting,
   settingBool,
   settingSecs,
@@ -71,5 +76,34 @@ describe('fleet settings', () => {
     expect(secsToHours(5400)).toBe(1.5);
     expect(hoursToSecs(1.5)).toBe(5400);
     expect(hoursToSecs(-1)).toBe(0);
+  });
+});
+
+describe('projects settings helpers (W5 G3)', () => {
+  it('defaults: no per-host overrides, github layout', () => {
+    const m = get(fleetSettings);
+    expect(settingPathMap(m, SETTING_KEYS.projectsBasePath)).toEqual({});
+    expect(settingLayout(m)).toBe('github');
+  });
+
+  it('settingPathMap tolerates garbage and drops non-string values', () => {
+    expect(settingPathMap({ k: '{oops' }, 'k')).toEqual({});
+    expect(settingPathMap({ k: '[1]' }, 'k')).toEqual({});
+    expect(settingPathMap({ k: '{"a":"/x","b":2}' }, 'k')).toEqual({ a: '/x' });
+  });
+
+  it('basePathError mirrors the backend validation', () => {
+    for (const ok of ['', '/srv/repos', '~', '~/code', '/a b/c-d!']) expect(basePathError(ok)).toBeNull();
+    expect(basePathError('code')).toMatch(/absolute/);
+    expect(basePathError('~user/x')).toMatch(/absolute/);
+    expect(basePathError('/a/../b')).toMatch(/\.\./);
+    expect(basePathError('/a\nb')).toMatch(/control/);
+  });
+
+  it('previews per layout and exposes the layout defaults', () => {
+    expect(projectPathPreview('~/code/', 'flat')).toBe('~/code/<repo>');
+    expect(projectPathPreview('/p', 'github')).toBe('/p/<owner>/<repo>');
+    expect(projectsDefaultRoot('github')).toBe('~/projects/github.com');
+    expect(projectsDefaultRoot('flat')).toBe('~/projects');
   });
 });

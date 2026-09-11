@@ -10,8 +10,10 @@ use std::sync::{Arc, Mutex};
 use tauri::State;
 
 #[tauri::command]
-pub async fn check_local_prereqs() -> Result<LocalPrereqs, IpcError> {
-    Ok(onboarding::local_prereqs().await)
+pub async fn check_local_prereqs(
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<LocalPrereqs, IpcError> {
+    Ok(onboarding::local_prereqs(&store).await)
 }
 
 #[tauri::command]

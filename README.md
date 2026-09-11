@@ -18,8 +18,10 @@ On first launch the app walks you through setup — see the **[Getting Started g
 
 - **Multi-host** — attach to tmux sessions on any host in `~/.ssh/config`, plus
   `local`. SSH connections are multiplexed via per-host ControlMaster.
-- **Project tree** — scans `~/projects/github.com/<owner>/<repo>` (and git
-  worktrees) on each host; sessions are grouped under their project.
+- **Project tree** — finds repos (and git worktrees) under a per-host projects
+  base set in Settings → Projects, laid out as `<base>/<owner>/<repo>` (default
+  `~/projects/github.com`) or flat `<base>/<repo>`; sessions are grouped under
+  their project.
 - **Account model** — each host's logged-in Claude account (email / org / tier)
   is auto-detected by probing the remote `~/.claude.json`. No credentials are
   ever read or stored.
