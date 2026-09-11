@@ -16,6 +16,7 @@ pub mod health;
 pub mod hooks;
 pub mod hosts;
 pub mod messages;
+pub mod move_session;
 pub mod names;
 pub mod onboarding;
 pub mod outcome;

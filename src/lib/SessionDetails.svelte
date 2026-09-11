@@ -11,9 +11,10 @@
     inspectSafeKill,
     discardKillSession,
   } from './sessions';
+  import { moveSession } from './moveSession';
   import { projectById } from './projects';
   import { selectSession, clearSelection } from './selection';
-  import { hostByAlias } from './hosts';
+  import { hosts, hostByAlias } from './hosts';
   import { accountByUuid, type AccountRow } from './accounts';
   import PromptComposer from './PromptComposer.svelte';
   import ReviewDialog from './ReviewDialog.svelte';
@@ -295,6 +296,56 @@
     confirmingRecreate = false;
   }
 
+  // Move to host…: continue this conversation on another host (same branch,
+  // same Claude session id). Only a worktree-backed work session with a
+  // Claude id can move; the backend refuses dirty or unpushed worktrees.
+  const canMove = $derived(
+    session.kind === 'work' && session.worktree_id !== null && session.claude_session_id !== null,
+  );
+  const moveTargets = $derived(
+    $hosts.filter(
+      (h) =>
+        h.alias !== session.host_alias &&
+        !h.hidden &&
+        h.reachable &&
+        (h.provisioned || h.alias === 'local'),
+    ),
+  );
+  let moveOpen = $state(false);
+  let moveTarget = $state('');
+  let moveKeepSource = $state(false);
+  let moving = $state(false);
+
+  function openMove() {
+    moveTarget = moveTargets[0]?.alias ?? '';
+    moveKeepSource = false;
+    moveOpen = true;
+  }
+
+  function closeMove() {
+    if (!moving) moveOpen = false;
+  }
+
+  async function doMove() {
+    if (moving || !moveTarget) return;
+    moving = true;
+    const r = await moveSession(session.id, moveTarget, { keepSource: moveKeepSource });
+    moving = false;
+    if (!r.ok) {
+      pushError(r.error, 'Move failed');
+      return;
+    }
+    moveOpen = false;
+    const rep = r.value;
+    const kept = rep.source_killed ? '' : '; the source keeps running';
+    const notes = rep.warnings.length > 0 ? ` (${rep.warnings.join('; ')})` : '';
+    push({
+      kind: 'success',
+      message: `Moved to ${rep.to_host} as ${rep.tmux_name}${kept}${notes}`,
+    });
+    selectSession(rep.target);
+  }
+
   async function doRecreate() {
     confirmingRecreate = false;
     const r = await recreateSession(session.id);
@@ -509,6 +560,16 @@
     <button class="ghost" onclick={askRecreate} data-testid="recreate-from-details">
       ♻ Recreate
     </button>
+    {#if canMove}
+      <button
+        class="ghost"
+        onclick={openMove}
+        title="Continue this conversation on another host: same branch, same Claude session"
+        data-testid="move-from-details"
+      >
+        ⇄ Move to host…
+      </button>
+    {/if}
     {#if session.kind !== 'shell' && session.status === 'running' && session.safe_kill_state !== 'requested'}
       <button class="ghost" onclick={askSafeKill} data-testid="safe-kill-from-details">
         ⏏ Safe remove
@@ -662,6 +723,38 @@
   </Modal>
 {/if}
 
+{#if moveOpen}
+  <Modal title="Move {session.tmux_name} to another host" onclose={closeMove} width="480px" testid="move-dialog">
+    <p class="move-note">
+      Copies this conversation to the chosen host, creates the worktree there from the same
+      branch and resumes it with <code>--resume</code>. This session is killed only once the
+      new one is running. The worktree must be clean and pushed; nothing is pushed for you.
+    </p>
+    {#if moveTargets.length === 0}
+      <p class="move-note" data-testid="move-no-targets">No other reachable, provisioned host.</p>
+    {:else}
+      <label class="move-field">
+        Target host
+        <select bind:value={moveTarget} disabled={moving} data-testid="move-target">
+          {#each moveTargets as h (h.alias)}
+            <option value={h.alias}>{h.alias}</option>
+          {/each}
+        </select>
+      </label>
+      <label class="move-field">
+        <input type="checkbox" bind:checked={moveKeepSource} disabled={moving} data-testid="move-keep-source" />
+        Keep this session running
+      </label>
+    {/if}
+    <div class="move-buttons">
+      <button onclick={closeMove} disabled={moving}>Cancel</button>
+      <button onclick={doMove} disabled={moving || !moveTarget} data-testid="confirm-move">
+        {moving ? 'Moving…' : 'Move'}
+      </button>
+    </div>
+  </Modal>
+{/if}
+
 {#if confirmingRecreate}
   <ConfirmDialog
     title="Recreate session?"
@@ -678,6 +771,9 @@
 {/if}
 
 <style>
+  .move-note { margin: 0 0 0.75rem; font-size: 0.85rem; color: var(--fg-muted); }
+  .move-field { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.6rem; font-size: 0.85rem; }
+  .move-buttons { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.75rem; }
   .details {
     display: flex;
     flex-direction: column;

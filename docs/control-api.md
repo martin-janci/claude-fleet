@@ -119,7 +119,10 @@ Index by area (names only; see the reference for details):
   may unregister this worktree's stale entry, adopt a moved checkout,
   recreate the branch and respawn the pane; behind the desktop confirmation
   when `mcp.confirm_destructive` is on), `kill_session`, `safe_kill_session`,
-  `dismiss_ghost_session`.
+  `dismiss_ghost_session`, `move_session` (continue a work session on another
+  host: clean + pushed worktree required, transcript copied, `--resume` on
+  the target, source killed once the target runs; master token only, since
+  the caller must be allowed on both hosts).
 - **Worktree files & git (read-only)** — `repo_changes`, `repo_tree`,
   `repo_file`, `repo_diff`, `repo_log`, `repo_branches`, `repo_commit`,
   `repo_commit_diff`.
@@ -277,8 +280,8 @@ Per-host failures do not abort provisioning of other hosts.
   master token may pass `raw: true` to skip it. The Settings toggle **"Ask me
   before agents broadcast, kill sessions, delete worktrees or write the
   clipboard"** (`mcp.confirm_destructive`, off by default) makes
-  `broadcast_prompt`, `kill_session`, `delete_worktree`, `set_clipboard` and
-  `cancel_task` return `E_CONFIRM_REQUIRED` with a one-time `confirm_nonce`;
+  `broadcast_prompt`, `kill_session`, `delete_worktree`, `set_clipboard`,
+  `repair_session`, `cancel_task` and `move_session` return `E_CONFIRM_REQUIRED` with a one-time `confirm_nonce`;
   approve the request in the desktop dialog, then retry the call with that
   nonce. The nonce is bound to the call's arguments — for `set_clipboard` and
   `broadcast_prompt` including a digest of the content / prompt — so an

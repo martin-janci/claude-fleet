@@ -120,6 +120,21 @@ pub mod codes {
     /// The caller exceeded a per-caller rate limit (`broadcast_prompt`);
     /// `details.retry_after_secs` says when to retry.
     pub const E_RATE_LIMITED: &str = "E_RATE_LIMITED";
+    /// `move_session`: the source worktree has uncommitted changes
+    /// (`details.dirty_files`). A move never carries uncommitted work.
+    pub const E_MOVE_DIRTY: &str = "E_MOVE_DIRTY";
+    /// `move_session`: the branch is not on origin, or has commits origin
+    /// lacks. Push first; a move never pushes.
+    pub const E_MOVE_UNPUSHED: &str = "E_MOVE_UNPUSHED";
+    /// `move_session`: the transcript is over `move.max_transcript_mb`
+    /// (`details.bytes`, `details.cap_bytes`).
+    pub const E_MOVE_TOO_LARGE: &str = "E_MOVE_TOO_LARGE";
+    /// `move_session`: a step failed after the target session was started;
+    /// both sessions were left running (`details.target_session_id`).
+    pub const E_MOVE_PARTIAL: &str = "E_MOVE_PARTIAL";
+    /// No Claude transcript was found for the session (it has not written a
+    /// turn yet, or runs on another cwd), or it is empty.
+    pub const E_NO_TRANSCRIPT: &str = "E_NO_TRANSCRIPT";
     /// The call needs a desktop confirmation first (`mcp.confirm_destructive`);
     /// retry with the `confirm_nonce` from `details` once approved.
     pub const E_CONFIRM_REQUIRED: &str = "E_CONFIRM_REQUIRED";

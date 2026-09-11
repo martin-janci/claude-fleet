@@ -17,9 +17,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// `settings` key: when `"true"`, `broadcast_prompt`, `kill_session`,
-/// `delete_worktree`, `set_clipboard` and `cancel_task` need a desktop
-/// confirmation.
+/// `settings` key: when `"true"`, every tool in [`CONFIRM_TOOLS`] needs a
+/// desktop confirmation.
 pub const SETTING_CONFIRM_DESTRUCTIVE: &str = "mcp.confirm_destructive";
 /// `settings` key: minimum seconds between two `broadcast_prompt` calls from
 /// the same caller. Absent / unparseable → [`DEFAULT_BROADCAST_INTERVAL_SECS`].
@@ -82,6 +81,8 @@ pub const CONFIRM_TOOLS: &[&str] = &[
     "repair_session",
     // Marks a dispatched task cancelled (the worker session keeps running).
     "cancel_task",
+    // Starts a session on another host and kills the source.
+    "move_session",
 ];
 
 pub fn needs_confirmation(name: &str) -> bool {
@@ -495,10 +496,11 @@ mod tests {
             "set_clipboard",
             "repair_session",
             "cancel_task",
+            "move_session",
         ] {
             assert!(needs_confirmation(t), "{t} must be confirm-gated");
         }
-        assert_eq!(CONFIRM_TOOLS.len(), 6);
+        assert_eq!(CONFIRM_TOOLS.len(), 7);
         assert!(!needs_confirmation("send_prompt"));
         assert!(!needs_confirmation("dispatch_task"));
     }
