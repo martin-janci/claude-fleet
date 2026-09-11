@@ -8,6 +8,8 @@ use crate::validate;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
+pub use crate::claude_cli::PurgeReport;
+
 // ─── args / result types ─────────────────────────────────────────────────────
 //
 // Every arg struct validates the host alias (it becomes an `ssh` operand) and
@@ -236,12 +238,15 @@ pub async fn purge_project(
     args: PurgeProjectArgs,
     store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
-) -> Result<(), IpcError> {
+) -> Result<PurgeReport, IpcError> {
+    // Validates host_alias (validate::host_alias) and the path before any
+    // command is built, so a bad host never reaches ssh or bash.
     args.validate()?;
-    claude_cli::claude_purge_project(ssh, &args.host_alias, &args.project_path).await?;
+    let report =
+        claude_cli::claude_purge_project(ssh, &args.host_alias, &args.project_path).await?;
     let s = store.lock().map_err(|_| IpcError::lock())?;
     s.delete_project(args.project_id)?;
-    Ok(())
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -478,5 +483,32 @@ mod tests {
             project_id: 1,
         };
         assert_eq!(bad_host.validate().unwrap_err().code, "E_INVALID");
+    }
+
+    #[tokio::test]
+    async fn purge_project_rejects_invalid_host_and_keeps_the_project() {
+        let store = make_store();
+        let pid = store
+            .lock()
+            .unwrap()
+            .upsert_project("o", "r", "/home/u/p/r")
+            .unwrap();
+        let ssh = Arc::new(SshClient::new());
+        for bad in ["-oProxyCommand=id", "has space", "", "a;b", "x\ny"] {
+            let err = purge_project(
+                PurgeProjectArgs {
+                    host_alias: bad.into(),
+                    project_path: "/home/u/p/r".into(),
+                    project_id: pid,
+                },
+                &store,
+                &ssh,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, "E_INVALID", "{bad:?}");
+        }
+        let projects = store.lock().unwrap().list_projects().unwrap();
+        assert!(projects.iter().any(|p| p.id == pid), "row must survive");
     }
 }

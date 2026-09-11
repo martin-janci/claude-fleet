@@ -88,13 +88,114 @@ pub fn stop_script(session_id: &str) -> Result<String, IpcError> {
     Ok(format!("claude stop {}", quote(session_id)))
 }
 
-/// `claude project purge --yes -- <project_path>`.
+/// Marker prefixing every machine-readable line the purge script prints, so a
+/// login shell's own stdout chatter (motd, profile echoes) is ignored.
+const PURGE_MARK: &str = "CFPURGE";
+
+/// What `claude project purge` prints (exit 1) when it holds no state for a
+/// path — Claude Code 2.1.x: "No Claude Code project state found for <p> under <dir>."
+const PURGE_NOT_FOUND: &str = "No Claude Code project state found";
+
+/// Purge Claude Code state for `project_path` under BOTH of its path forms.
+///
+/// Claude keys `~/.claude/projects/<encoded>` on the *physical* cwd it was
+/// launched in, while the fleet project scan records the *logical* path; the
+/// two differ whenever a component is a symlink (`~/projects` ->
+/// `/mnt/sda4/projects`). The script resolves the physical form on the target
+/// host (`cd -- <path> && pwd -P`), runs `claude project purge --yes -- "$p"`,
+/// and also purges the logical form when it differs. If the directory is gone
+/// only the logical form is purged and an `unresolved` line is printed. "No
+/// state found" from either purge counts as success; any other failure aborts
+/// with claude's output on stderr (so the caller keeps the fleet row).
+///
+/// Stdout protocol, one tab-separated line each, prefixed with [`PURGE_MARK`]:
+/// `physical <p>` or `unresolved`, then `purged <form>` / `not_found <form>`
+/// per form attempted. Parsed by [`parse_purge_output`].
 pub fn purge_script(project_path: &str) -> Result<String, IpcError> {
     validate::not_option_like("project_path", project_path)?;
+    // Control characters (newline, tab) would break the line protocol and
+    // have no business in a project path.
+    if project_path.chars().any(|c| c.is_control()) {
+        return Err(IpcError::new(
+            "E_INVALID",
+            "project_path must not contain control characters",
+        ));
+    }
+    let q = quote(project_path);
     Ok(format!(
-        "claude project purge --yes -- {}",
-        quote(project_path)
+        r#"l={q}
+p=$(CDPATH= cd -- {q} 2>/dev/null && pwd -P)
+cf_purge() {{
+out=$(claude project purge --yes -- "$1" 2>&1); rc=$?
+if [ "$rc" -eq 0 ]; then printf '{m}\tpurged\t%s\n' "$1"; return 0; fi
+case "$out" in
+*'{nf}'*|*'No such project'*|*'no such project'*) printf '{m}\tnot_found\t%s\n' "$1" ;;
+*) printf '%s\n' "$out" >&2; exit "$rc" ;;
+esac
+}}
+if [ -z "$p" ]; then
+printf '{m}\tunresolved\n'
+cf_purge "$l"
+else
+printf '{m}\tphysical\t%s\n' "$p"
+cf_purge "$p"
+if [ "$p" != "$l" ]; then cf_purge "$l"; fi
+fi
+"#,
+        m = PURGE_MARK,
+        nf = PURGE_NOT_FOUND,
     ))
+}
+
+/// Outcome of a project purge on one host, returned to the UI for its toast.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PurgeReport {
+    pub host_alias: String,
+    /// The path fleet recorded (from the projects scan).
+    pub logical_path: String,
+    /// `pwd -P` of `logical_path` on the target host; `None` when the
+    /// directory no longer exists there, so only the logical form was tried.
+    pub physical_path: Option<String>,
+    /// Path forms whose Claude state was deleted.
+    pub purged: Vec<String>,
+    /// Path forms Claude held no state for (treated as success).
+    pub not_found: Vec<String>,
+}
+
+/// Parse the [`purge_script`] stdout protocol. Errors when no form was
+/// reported at all — the script exited 0 without running a purge, so the
+/// caller must not assume Claude's state is gone.
+pub fn parse_purge_output(
+    host_alias: &str,
+    logical_path: &str,
+    stdout: &str,
+) -> Result<PurgeReport, IpcError> {
+    let mut report = PurgeReport {
+        host_alias: host_alias.to_string(),
+        logical_path: logical_path.to_string(),
+        physical_path: None,
+        purged: Vec::new(),
+        not_found: Vec::new(),
+    };
+    for line in stdout.lines() {
+        let mut parts = line.splitn(3, '\t');
+        if parts.next() != Some(PURGE_MARK) {
+            continue;
+        }
+        match (parts.next(), parts.next()) {
+            (Some("physical"), Some(p)) => report.physical_path = Some(p.to_string()),
+            (Some("purged"), Some(p)) => report.purged.push(p.to_string()),
+            (Some("not_found"), Some(p)) => report.not_found.push(p.to_string()),
+            _ => {}
+        }
+    }
+    if report.purged.is_empty() && report.not_found.is_empty() {
+        return Err(IpcError::new(
+            "E_CLAUDE_CLI",
+            format!("claude project purge on {host_alias} reported no result"),
+        ));
+    }
+    Ok(report)
 }
 
 /// Launch `claude --bg --name <name> -- <prompt>` on `host_alias`.
@@ -157,15 +258,17 @@ pub async fn claude_stop(
     }
 }
 
-/// Run `claude project purge --yes -- <project_path>` on `host_alias`.
+/// Purge Claude Code state for `project_path` on `host_alias`, under both
+/// its physical and logical forms (see [`purge_script`]).
 pub async fn claude_purge_project(
     ssh: &Arc<SshClient>,
     host_alias: &str,
     project_path: &str,
-) -> Result<(), IpcError> {
+) -> Result<PurgeReport, IpcError> {
     let script = purge_script(project_path)?;
-    run_claude_script(ssh, host_alias, &script, CLAUDE_TIMEOUT).await?;
-    Ok(())
+    // Up to two purges back to back, so twice the single-call budget.
+    let out = run_claude_script(ssh, host_alias, &script, CLAUDE_TIMEOUT * 2).await?;
+    parse_purge_output(host_alias, project_path, &out)
 }
 
 /// Run `script` via `bash -lc` either locally or over SSH depending on
@@ -359,11 +462,205 @@ mod tests {
     }
 
     #[test]
-    fn purge_script_places_end_of_options_before_path() {
+    fn purge_script_resolves_physical_path_and_keeps_end_of_options() {
         let s = purge_script("/home/me/projects/x").unwrap();
-        assert_eq!(s, "claude project purge --yes -- '/home/me/projects/x'");
-        for bad in ["--all", "-rf", ""] {
+        assert!(s.starts_with("l='/home/me/projects/x'\n"), "{s}");
+        assert!(
+            s.contains("p=$(CDPATH= cd -- '/home/me/projects/x' 2>/dev/null && pwd -P)"),
+            "{s}"
+        );
+        // Every purge goes through `--` with the path as a quoted expansion.
+        assert!(s.contains(r#"claude project purge --yes -- "$1""#), "{s}");
+        assert!(
+            !s.contains("purge --yes '"),
+            "path must never follow a bare option"
+        );
+        for bad in ["--all", "-rf", "", "  ", "/a\nb", "/a\tb"] {
             assert_eq!(purge_script(bad).unwrap_err().code, "E_INVALID", "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn purge_script_quotes_hostile_paths() {
+        let s = purge_script("/p/it's $(rm -rf ~) `x`").unwrap();
+        let q = "'/p/it'\\''s $(rm -rf ~) `x`'";
+        assert!(s.starts_with(&format!("l={q}\n")), "{s}");
+        assert!(s.contains(&format!("cd -- {q} 2>/dev/null")), "{s}");
+    }
+
+    #[test]
+    fn parse_purge_output_ignores_shell_chatter_and_requires_a_result() {
+        let out = "Welcome to box!\nCFPURGE\tphysical\t/mnt/p/x\nnoise\n\
+                   CFPURGE\tpurged\t/mnt/p/x\nCFPURGE\tnot_found\t/home/u/p/x\n";
+        let r = parse_purge_output("box", "/home/u/p/x", out).unwrap();
+        assert_eq!(r.host_alias, "box");
+        assert_eq!(r.physical_path.as_deref(), Some("/mnt/p/x"));
+        assert_eq!(r.purged, vec!["/mnt/p/x"]);
+        assert_eq!(r.not_found, vec!["/home/u/p/x"]);
+
+        let err = parse_purge_output("box", "/x", "motd only\n").unwrap_err();
+        assert_eq!(err.code, "E_CLAUDE_CLI");
+    }
+
+    /// Runs the real purge script under `bash -c` with a stub `claude` on PATH
+    /// that logs each purged path (one per line) and answers "no state" for
+    /// paths containing `CF_STUB_NOTFOUND`, or fails hard for `CF_STUB_FAIL`.
+    #[cfg(unix)]
+    mod purge_exec {
+        use super::super::*;
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        use std::path::{Path, PathBuf};
+        use std::process::Output;
+
+        const STUB: &str = r#"#!/bin/sh
+[ "$#" -eq 5 ] && [ "$1 $2 $3 $4" = "project purge --yes --" ] || { echo "bad argv: $*" >&2; exit 64; }
+printf '%s\n' "$5" >> "$CF_STUB_LOG"
+if [ -n "$CF_STUB_NOTFOUND" ]; then case "$5" in *"$CF_STUB_NOTFOUND"*)
+  echo "No Claude Code project state found for $5 under /stub/.claude." >&2; exit 1 ;; esac; fi
+if [ -n "$CF_STUB_FAIL" ]; then case "$5" in *"$CF_STUB_FAIL"*) echo "kaboom" >&2; exit 3 ;; esac; fi
+echo "Purged $5"
+"#;
+
+        struct Sandbox {
+            _dir: tempfile::TempDir,
+            root: PathBuf,
+        }
+
+        impl Sandbox {
+            fn new() -> Self {
+                let dir = tempfile::tempdir().unwrap();
+                // Canonicalise so the sandbox root itself has no symlinks.
+                let root = std::fs::canonicalize(dir.path()).unwrap();
+                let bin = root.join("bin");
+                std::fs::create_dir(&bin).unwrap();
+                let stub = bin.join("claude");
+                std::fs::write(&stub, STUB).unwrap();
+                std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+                std::fs::create_dir(root.join("work")).unwrap();
+                Sandbox { _dir: dir, root }
+            }
+
+            fn run(&self, logical: &Path, notfound: &str, fail: &str) -> (Output, Vec<String>) {
+                let log = self.root.join("purge.log");
+                let _ = std::fs::remove_file(&log);
+                let script = purge_script(logical.to_str().unwrap()).unwrap();
+                let out = std::process::Command::new("bash")
+                    .arg("-c")
+                    .arg(&script)
+                    .current_dir(self.root.join("work"))
+                    .env(
+                        "PATH",
+                        format!("{}:/usr/bin:/bin", self.root.join("bin").display()),
+                    )
+                    .env("CF_STUB_LOG", &log)
+                    .env("CF_STUB_NOTFOUND", notfound)
+                    .env("CF_STUB_FAIL", fail)
+                    .output()
+                    .unwrap();
+                let calls = std::fs::read_to_string(&log)
+                    .unwrap_or_default()
+                    .lines()
+                    .map(str::to_string)
+                    .collect();
+                (out, calls)
+            }
+
+            /// `<root>/real/<name>` plus a symlink `<root>/link -> real`;
+            /// returns (logical via the link, physical).
+            fn symlinked(&self, name: &str) -> (PathBuf, PathBuf) {
+                let physical = self.root.join("real").join(name);
+                std::fs::create_dir_all(&physical).unwrap();
+                symlink(self.root.join("real"), self.root.join("link")).unwrap();
+                (self.root.join("link").join(name), physical)
+            }
+        }
+
+        fn report(logical: &Path, out: &Output) -> PurgeReport {
+            assert!(
+                out.status.success(),
+                "script failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            parse_purge_output(
+                "local",
+                logical.to_str().unwrap(),
+                &String::from_utf8_lossy(&out.stdout),
+            )
+            .unwrap()
+        }
+
+        fn s(p: &Path) -> String {
+            p.to_str().unwrap().to_string()
+        }
+
+        #[test]
+        fn same_form_path_is_purged_once() {
+            let sb = Sandbox::new();
+            let dir = sb.root.join("real").join("proj");
+            std::fs::create_dir_all(&dir).unwrap();
+            let (out, calls) = sb.run(&dir, "", "");
+            let r = report(&dir, &out);
+            assert_eq!(calls, vec![s(&dir)]);
+            assert_eq!(r.physical_path, Some(s(&dir)));
+            assert_eq!(r.purged, vec![s(&dir)]);
+            assert!(r.not_found.is_empty());
+        }
+
+        #[test]
+        fn differing_forms_purge_physical_then_logical() {
+            let sb = Sandbox::new();
+            let (logical, physical) = sb.symlinked("proj");
+            let (out, calls) = sb.run(&logical, "", "");
+            let r = report(&logical, &out);
+            assert_eq!(calls, vec![s(&physical), s(&logical)]);
+            assert_eq!(r.physical_path, Some(s(&physical)));
+            assert_eq!(r.purged, vec![s(&physical), s(&logical)]);
+        }
+
+        #[test]
+        fn no_state_for_a_form_is_success_not_failure() {
+            let sb = Sandbox::new();
+            let (logical, physical) = sb.symlinked("proj");
+            // The logical form (through `link`) has no Claude state.
+            let (out, _) = sb.run(&logical, "/link/", "");
+            let r = report(&logical, &out);
+            assert_eq!(r.purged, vec![s(&physical)]);
+            assert_eq!(r.not_found, vec![s(&logical)]);
+        }
+
+        #[test]
+        fn missing_directory_purges_logical_form_only() {
+            let sb = Sandbox::new();
+            let gone = sb.root.join("gone").join("proj");
+            let (out, calls) = sb.run(&gone, "", "");
+            let r = report(&gone, &out);
+            assert_eq!(calls, vec![s(&gone)]);
+            assert_eq!(r.physical_path, None);
+            assert_eq!(r.purged, vec![s(&gone)]);
+        }
+
+        #[test]
+        fn other_claude_failures_abort_with_its_output() {
+            let sb = Sandbox::new();
+            let (logical, physical) = sb.symlinked("proj");
+            let (out, calls) = sb.run(&logical, "", "/real/");
+            assert!(!out.status.success());
+            assert!(String::from_utf8_lossy(&out.stderr).contains("kaboom"));
+            // Stopped at the failing physical purge; logical never attempted.
+            assert_eq!(calls, vec![s(&physical)]);
+        }
+
+        #[test]
+        fn hostile_path_reaches_claude_verbatim_and_runs_nothing() {
+            let sb = Sandbox::new();
+            let name = "it's $(touch pwned) `touch pwned2` \"q\" ; & *";
+            let (logical, physical) = sb.symlinked(name);
+            let (out, calls) = sb.run(&logical, "", "");
+            let r = report(&logical, &out);
+            assert_eq!(calls, vec![s(&physical), s(&logical)]);
+            assert_eq!(r.purged, vec![s(&physical), s(&logical)]);
+            assert!(!sb.root.join("work").join("pwned").exists());
+            assert!(!sb.root.join("work").join("pwned2").exists());
         }
     }
 

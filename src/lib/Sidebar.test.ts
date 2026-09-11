@@ -63,6 +63,7 @@ import { selectedSession, selectSession } from './selection';
 import { hosts, bootstrapHosts, hostFilter, resetTombstonesForTests as resetHostTombstones } from './hosts';
 import { accounts, bootstrapAccounts } from './accounts';
 import { onboardingDismissed } from './onboarding';
+import { toasts, clearToasts } from './toasts';
 
 function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof sessionFor>[]) {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: { args?: { id?: number; new_name?: string; alias?: string } }) => {
@@ -338,6 +339,41 @@ describe('Sidebar (sessions-grouped view)', () => {
     await fireEvent.click(confirmBtn);
     const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls;
     expect(calls.some((c) => c[0] === 'kill_session')).toBe(true);
+  });
+
+  it("purging a project targets its sessions' host, not 'local', and toasts the report", async () => {
+    clearToasts();
+    const remote = { ...sessionFor(1, 'dev-remote'), host_alias: 'mefistos' };
+    mockBackend(fakeProjects, [remote]);
+    const backend = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (
+      cmd: string,
+      a?: unknown,
+    ) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, a?: unknown) => {
+      if (cmd === 'purge_project') {
+        return {
+          host_alias: 'mefistos',
+          logical_path: '/r/cf',
+          physical_path: '/mnt/r/cf',
+          purged: ['/mnt/r/cf'],
+          not_found: ['/r/cf'],
+        };
+      }
+      // The post-purge refresh: the project is gone.
+      if (cmd === 'refresh_projects') return [];
+      return backend(cmd, a);
+    });
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(await screen.findByTestId('purge-project'));
+    await fireEvent.click(await screen.findByTestId('confirm-purge'));
+    await tick(); await tick();
+    const purges = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'purge_project');
+    expect(purges).toHaveLength(1);
+    expect(purges[0][1]).toEqual({ args: { host_alias: 'mefistos', project_path: '/r/cf', project_id: 1 } });
+    const t = get(toasts).find((x) => x.message.startsWith('Project removed.'));
+    expect(t?.message).toBe('Project removed. mefistos: purged /mnt/r/cf; no Claude state for /r/cf');
+    expect(t?.kind).toBe('success');
   });
 
   it('double-click on a session enters rename mode', async () => {

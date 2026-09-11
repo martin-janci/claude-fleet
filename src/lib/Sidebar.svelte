@@ -15,8 +15,10 @@
     showBgAgents,
     showFriendlyNames,
     sameSession,
+    type PurgeReport,
     type SessionRow,
   } from './sessions';
+  import { describePurge, purgeHostsForProject } from './purge';
   import { type ProjectRow } from './projects';
   import { selectedSession, selectSession } from './selection';
   import { forgetSessionUi, migrateSessionUi } from './session_ui';
@@ -52,7 +54,7 @@
     STUCK_COLOR,
   } from './attention';
   import { attentionIdleMinutes } from './notify';
-  import { pushError } from './toasts';
+  import { push, pushError } from './toasts';
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import Attention from './Attention.svelte';
@@ -615,10 +617,18 @@
     if (!pendingPurge) return;
     const project = pendingPurge;
     pendingPurge = null;
-    const result = await purgeProject('local', project.base_path, project.id);
-    if (!result.ok) {
-      pushError(result.error, 'Purge failed');
-    } else {
+    // Projects carry no host; purge on every host the project's sessions ran on.
+    const reports: PurgeReport[] = [];
+    for (const host of purgeHostsForProject(project.id, $sessions)) {
+      const result = await purgeProject(host, project.base_path, project.id);
+      if (!result.ok) {
+        pushError(result.error, `Purge failed on ${host}`);
+        break;
+      }
+      reports.push(result.value);
+    }
+    if (reports.length > 0) {
+      push(describePurge(reports));
       // Refresh stores since the backend doesn't emit row-level events for project deletion
       await loadSessions();
       await refreshProjects();

@@ -207,7 +207,7 @@ pub async fn purge_project(
     args: PurgeProjectArgs,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
-) -> Result<(), IpcError> {
+) -> Result<bg_sessions::PurgeReport, IpcError> {
     bg_sessions::purge_project(args, &store, &ssh).await
 }
 

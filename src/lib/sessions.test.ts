@@ -161,13 +161,21 @@ describe('peekSession', () => {
 });
 
 describe('purgeProject', () => {
-  it('calls purge_project with correct args', async () => {
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
-    const r = await purgeProject('local', '/home/user/my-project', 42);
+  it('calls purge_project with correct args and returns the report', async () => {
+    const report = {
+      host_alias: 'box',
+      logical_path: '/home/user/my-project',
+      physical_path: '/mnt/user/my-project',
+      purged: ['/mnt/user/my-project'],
+      not_found: ['/home/user/my-project'],
+    };
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(report);
+    const r = await purgeProject('box', '/home/user/my-project', 42);
     expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value).toEqual(report);
     expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
       'purge_project',
-      { args: { host_alias: 'local', project_path: '/home/user/my-project', project_id: 42 } },
+      { args: { host_alias: 'box', project_path: '/home/user/my-project', project_id: 42 } },
     ]);
   });
 });
