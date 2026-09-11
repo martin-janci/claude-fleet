@@ -93,6 +93,11 @@ session is not registered with claude-fleet (you're running outside the
 fleet, or the fleet backend hasn't reconciled yet). Skip the label silently —
 the sidebar doesn't have a row to update anyway.
 
+If `set_friendly_name` returns `E_FORBIDDEN`, this host's control-API token is
+`readonly`: the label is a write to the session row, so it is refused. Skip
+the label silently and do **not** retry — a permission answer never becomes a
+different answer.
+
 If multiple rows match and you cannot disambiguate, emit a single short
 notice to the user and stop:
 
