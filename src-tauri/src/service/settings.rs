@@ -363,6 +363,67 @@ pub fn set(s: &Store, key: &str, value: &str) -> Result<(), IpcError> {
 mod tests {
     use super::*;
 
+    /// `text` with its comments removed: whole `//` lines, and `/* … */` and
+    /// `<!-- … -->` blocks (also across lines). Line structure is kept.
+    fn code_only(text: &str) -> String {
+        const BLOCKS: [(&str, &str); 2] = [("/*", "*/"), ("<!--", "-->")];
+        let mut out = String::new();
+        let mut in_block: Option<&str> = None;
+        for line in text.lines() {
+            let mut rest = line;
+            let mut kept = String::new();
+            loop {
+                if let Some(close) = in_block {
+                    match rest.find(close) {
+                        Some(p) => {
+                            rest = &rest[p + close.len()..];
+                            in_block = None;
+                        }
+                        None => break,
+                    }
+                } else {
+                    let open = BLOCKS
+                        .iter()
+                        .filter_map(|(o, c)| rest.find(o).map(|p| (p, *o, *c)))
+                        .min_by_key(|(p, _, _)| *p);
+                    match open {
+                        Some((p, o, c)) => {
+                            kept.push_str(&rest[..p]);
+                            rest = &rest[p + o.len()..];
+                            in_block = Some(c);
+                        }
+                        None => {
+                            kept.push_str(rest);
+                            break;
+                        }
+                    }
+                }
+            }
+            if !kept.trim_start().starts_with("//") {
+                out.push_str(&kept);
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn code_only_drops_every_comment_form() {
+        let text = "  a: 'x.key',\n\
+                    // b: 'y.key',\n\
+                    /* c: 'z.key', */ d\n\
+                    /*\n e: 'w.key',\n*/\n\
+                    <!-- SETTING_KEYS.hidden -->\n\
+                    <input value={SETTING_KEYS.shown} />\n";
+        let code = code_only(text);
+        assert!(code.contains("a: 'x.key',"));
+        assert!(code.contains(" d"));
+        assert!(code.contains("SETTING_KEYS.shown"));
+        for gone in ["y.key", "z.key", "w.key", "SETTING_KEYS.hidden"] {
+            assert!(!code.contains(gone), "{gone} survived: {code}");
+        }
+    }
+
     /// Every registered setting has a Settings dialog row: a `SETTING_KEYS`
     /// entry and a matching `SETTING_DEFAULTS` value in `fleet_settings.ts`,
     /// and a control in `SettingsDialog.svelte` addressing that key. Fails when
@@ -371,10 +432,14 @@ mod tests {
     fn every_spec_has_a_settings_dialog_row() {
         const TS: &str = include_str!("../../../src/lib/fleet_settings.ts");
         const DIALOG: &str = include_str!("../../../src/lib/SettingsDialog.svelte");
+        // Comments cannot satisfy the check: a key only mentioned in a
+        // `// …`, `/* … */` or `<!-- … -->` does not count as a row.
+        let ts = code_only(TS);
+        let dialog = code_only(DIALOG);
         for spec in SPECS {
             // `  camelName: 'the.key',` (SETTING_DEFAULTS lines start with a quote).
             let entry = format!(": '{}',", spec.key);
-            let line = TS
+            let line = ts
                 .lines()
                 .find(|l| l.trim_end().ends_with(&entry) && !l.trim_start().starts_with('\''))
                 .unwrap_or_else(|| {
@@ -385,13 +450,13 @@ mod tests {
                 });
             let name = line.trim().split(':').next().unwrap_or_default().trim();
             assert!(
-                TS.contains(&format!("'{}': '{}',", spec.key, spec.default)),
+                ts.contains(&format!("'{}': '{}',", spec.key, spec.default)),
                 "{}: SETTING_DEFAULTS must mirror the backend default {:?}",
                 spec.key,
                 spec.default
             );
             assert!(
-                DIALOG.contains(&format!("SETTING_KEYS.{name}")),
+                dialog.contains(&format!("SETTING_KEYS.{name}")),
                 "{} (SETTING_KEYS.{name}) has no row in src/lib/SettingsDialog.svelte",
                 spec.key
             );

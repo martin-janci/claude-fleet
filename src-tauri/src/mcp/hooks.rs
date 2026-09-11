@@ -55,25 +55,33 @@ pub async fn handle_hook(
     Extension(caller): Extension<Caller>,
     Json(payload): Json<HookPayload>,
 ) -> StatusCode {
-    eprintln!(
-        "[hook] caller={} event={:?} session={:?} tool={:?}",
-        caller.label(),
-        payload.hook_event_name,
-        payload.session_id,
-        payload.tool_name
+    use crate::ipc_error::codes;
+    // Every hook event lands here (several per turn): debug, not info. Only
+    // identifiers are logged, never the payload body.
+    tracing::debug!(
+        caller = %caller.label(),
+        event = ?payload.hook_event_name,
+        session = ?payload.session_id,
+        tool = ?payload.tool_name,
+        "[hook] received"
     );
     match crate::service::hooks::apply_hook(&state.store, &state.ssh, &payload, &caller) {
         Ok(()) => StatusCode::NO_CONTENT,
-        Err(e) if e.code == "E_VALIDATE" || e.code == "E_INVALID" => {
-            eprintln!("[hook] rejected payload: {} {}", e.code, e.message);
+        Err(e) if e.code == codes::E_VALIDATE || e.code == codes::E_INVALID => {
+            tracing::warn!(code = %e.code, error = %e.message, "[hook] rejected payload");
             StatusCode::BAD_REQUEST
         }
-        Err(e) if e.code == "E_FORBIDDEN" => {
-            eprintln!("[hook] refused: {} {}", e.code, e.message);
+        Err(e) if e.code == codes::E_FORBIDDEN => {
+            tracing::warn!(
+                caller = %caller.label(),
+                code = %e.code,
+                error = %e.message,
+                "[hook] refused"
+            );
             StatusCode::FORBIDDEN
         }
         Err(e) => {
-            eprintln!("[hook] apply_hook error: {} {}", e.code, e.message);
+            tracing::error!(code = %e.code, error = %e.message, "[hook] apply_hook failed");
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }

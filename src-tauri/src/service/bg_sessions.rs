@@ -157,7 +157,11 @@ pub async fn new_bg_session_tracked(
         return Ok(res);
     };
     if let Err(e) = crate::service::sessions::reconcile_one_host(store, ssh, &host_alias).await {
-        eprintln!("[bg] post-launch reconcile of {host_alias} failed: {e}");
+        tracing::warn!(
+            host = %host_alias,
+            error = %e,
+            "[bg] post-launch reconcile failed; the row appears on the next pass"
+        );
         return Ok(res);
     }
     res.session = stamp_bg_row(store, claude_id, &prompt);

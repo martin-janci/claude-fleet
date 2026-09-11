@@ -425,13 +425,17 @@ impl SshClient {
     /// same ControlPath.
     async fn maybe_reset_master(&self, host: &str) -> bool {
         if self.others_in_flight(host) > 0 {
-            eprintln!(
-                "[ssh] {host}: command timed out but other commands are in flight; keeping the master"
+            tracing::info!(
+                host = %host,
+                "[ssh] command timed out but other commands are in flight; keeping the master"
             );
             return false;
         }
         if self.master_alive(host).await {
-            eprintln!("[ssh] {host}: command timed out but the master still answers; keeping it");
+            tracing::info!(
+                host = %host,
+                "[ssh] command timed out but the master still answers; keeping it"
+            );
             return false;
         }
         *self

@@ -2,7 +2,7 @@
 //!
 //! Called from `mcp::hooks::handle_hook` after token auth passes.
 
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::mcp::hooks::HookPayload;
 use crate::mcp::Caller;
 use crate::projects::path_identity::{canonical, canonical_str, is_within};
@@ -91,7 +91,7 @@ fn host_checked_row(
     if let (Some(row), Some(h)) = (&row, &caller.host_alias) {
         if &row.host_alias != h {
             return Err(IpcError::new(
-                "E_FORBIDDEN",
+                codes::E_FORBIDDEN,
                 format!(
                     "session {} is on host {}; this token is bound to {h}",
                     row.tmux_name, row.host_alias

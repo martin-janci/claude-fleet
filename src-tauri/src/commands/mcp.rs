@@ -171,7 +171,7 @@ pub async fn mcp_configure(
                 if let Err(e) =
                     crate::service::provision::reestablish_tunnels(&store, &tunnels, port)
                 {
-                    eprintln!("[mcp] reestablish_tunnels: {e}");
+                    tracing::warn!(error = %e, "[mcp] re-establishing host tunnels failed");
                 }
                 rt.set_running(shutdown);
             }
