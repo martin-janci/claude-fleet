@@ -48,19 +48,24 @@ pub struct SendMessageResult {
 /// Maximum number of characters of a message body recorded in the
 /// `message_sent` / `message_received` timeline events. The full body lives
 /// in `session_messages`; the timeline only needs enough to be recognisable.
-pub const TIMELINE_DETAIL_CHARS: usize = 120;
+pub(crate) const TIMELINE_DETAIL_CHARS: usize = 120;
 
 /// PURE: the body excerpt stored in the timeline events — the first
 /// [`TIMELINE_DETAIL_CHARS`] characters (not bytes, so a multi-byte
 /// character is never split).
-pub fn timeline_detail(body: &str) -> String {
+pub(crate) fn timeline_detail(body: &str) -> String {
     body.chars().take(TIMELINE_DETAIL_CHARS).collect()
 }
 
 /// PURE: the line typed into the recipient's pane when `deliver` is set. The
 /// header makes the source visible to the recipient; the id lets the
 /// receiver correlate the pane line with the inbox entry.
-pub fn pane_header(id: i64, from_tmux_name: &str, from_host_alias: &str, body: &str) -> String {
+pub(crate) fn pane_header(
+    id: i64,
+    from_tmux_name: &str,
+    from_host_alias: &str,
+    body: &str,
+) -> String {
     format!("[msg #{id} from {from_tmux_name}@{from_host_alias}]: {body}")
 }
 

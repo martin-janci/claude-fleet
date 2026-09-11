@@ -480,6 +480,14 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    fn bash_available() -> bool {
+        std::process::Command::new("bash")
+            .args(["-c", "true"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
     fn mux() -> Vec<String> {
         vec![
             "-o".into(),
@@ -528,6 +536,10 @@ mod tests {
         // The last argv element must be a SINGLE shell word: sshd re-joins
         // argv with spaces and the remote bash re-tokenizes. Prove it by
         // letting bash itself unquote it.
+        if !bash_available() {
+            eprintln!("SKIP remote_script_is_one_quoted_word_that_unquotes_to_the_attach_command: bash not on PATH");
+            return;
+        }
         let argv = attach_argv("hetzner", "dev-foo", &mux());
         let script = argv.last().unwrap();
         let out = std::process::Command::new("bash")
@@ -555,11 +567,15 @@ mod tests {
         let script = remote_attach_script("x'; rm -rf / #");
         assert!(script.ends_with("tmux attach -t 'x'\\''; rm -rf / #'"));
         // And the outer quoting keeps the whole thing a single word.
+        if !bash_available() {
+            eprintln!("SKIP remote_script_neutralises_a_hostile_session_name: bash not on PATH");
+            return;
+        }
         let argv = attach_argv("h", "x'; rm -rf / #", &[]);
         let out = std::process::Command::new("bash")
             .args(["-c", &format!("printf %s {}", argv.last().unwrap())])
             .output()
-            .unwrap();
+            .expect("spawn bash");
         assert_eq!(String::from_utf8(out.stdout).unwrap(), script);
     }
 
@@ -720,6 +736,18 @@ mod tests {
         Some((pair.master, writer, child, pid))
     }
 
+    /// Kills the sleeper on drop so a failed assertion never leaves a
+    /// `sleep 30` behind. Killing an already-reaped pid is a harmless ESRCH.
+    struct KillOnDrop(u32);
+
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", &self.0.to_string()])
+                .status();
+        }
+    }
+
     fn alive(pid: u32) -> bool {
         std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
@@ -733,6 +761,7 @@ mod tests {
         let Some((m1, w1, c1, pid1)) = spawn_sleeper() else {
             return;
         };
+        let _guard1 = KillOnDrop(pid1);
         let state = Mutex::new(PtyState::new());
         let buf1 = Arc::new(Mutex::new(b"stale".to_vec()));
         state.lock().unwrap().install(m1, w1, c1, Arc::clone(&buf1));
@@ -746,6 +775,7 @@ mod tests {
             state.lock().unwrap().close();
             return;
         };
+        let _guard2 = KillOnDrop(pid2);
         let buf2 = Arc::new(Mutex::new(Vec::new()));
         state.lock().unwrap().install(m2, w2, c2, Arc::clone(&buf2));
         // Single-PTY invariant: the first child is gone (killed + reaped) and
