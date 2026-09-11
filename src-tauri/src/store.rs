@@ -418,6 +418,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (18, include_str!("../migrations/018_host_tokens.sql")),
     (19, include_str!("../migrations/019_lifecycle_fields.sql")),
     (20, include_str!("../migrations/020_tasks_and_turns.sql")),
+    (21, include_str!("../migrations/020_repair_backoff.sql")),
 ];
 
 /// The schema version a fully migrated database reports.

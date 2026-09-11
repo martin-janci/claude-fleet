@@ -40,6 +40,8 @@ describe('fleet settings', () => {
     expect(settingSecs(m, SETTING_KEYS.gcWorkIdleSecs)).toBe(0);
     expect(settingSecs(m, SETTING_KEYS.gcSweepIntervalSecs)).toBe(300);
     expect(settingSecs(m, SETTING_KEYS.reconcileIntervalSecs)).toBe(20);
+    expect(settingBool(m, SETTING_KEYS.repairAutoOnTick)).toBe(false);
+    expect(settingSecs(m, SETTING_KEYS.repairTickIntervalSecs)).toBe(600);
   });
 
   it('settingSecs falls back to the default on garbage', () => {

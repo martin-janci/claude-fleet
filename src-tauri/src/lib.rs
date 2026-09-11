@@ -216,6 +216,9 @@ fn spawn_reconcile_tick(store: std::sync::Arc<Mutex<Store>>, ssh: std::sync::Arc
                     Err(e) => tracing::warn!("reconcile tick: task sweep failed: {e}"),
                 }
             }
+            // Opt-in (`repair.auto_on_tick`): re-add vanished worktrees with
+            // the create-only automatic policy. Detached and rate-limited.
+            service::repair_tick::maybe_run(&store, &ssh);
         }
     });
 }

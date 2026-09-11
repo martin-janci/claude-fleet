@@ -607,8 +607,8 @@
         <h4>Automation</h4>
       </div>
       <p class="mcp-blurb">
-        Stuck-session playbooks and the idle-session GC run from the background
-        reconcile tick. Everything here is off by default; changes apply on the
+        Stuck-session playbooks, the idle-session GC and workspace repair run
+        from the background reconcile tick. Everything here is off by default; changes apply on the
         next tick.
       </p>
       <label class="toggle">
@@ -675,6 +675,30 @@
           data-testid="gc-sweep-secs"
           onchange={(e) => onSecsChange(SETTING_KEYS.gcSweepIntervalSecs, e)} />
         <span class="hook-desc">seconds between GC sweeps</span>
+      </div>
+
+      <label class="toggle gc-toggle">
+        <input
+          type="checkbox"
+          checked={settingBool($fleetSettings, SETTING_KEYS.repairAutoOnTick)}
+          disabled={automationBusy}
+          data-testid="repair-auto-on-tick"
+          onchange={() => toggleSetting(SETTING_KEYS.repairAutoOnTick)} />
+        Re-create vanished worktree directories automatically
+      </label>
+      <p class="hook-desc">
+        Only re-adds a missing worktree from its existing branch; anything
+        destructive still needs Repair workspace. Never touches the
+        controller, review sessions or a session being safely removed.
+      </p>
+      <div class="mcp-field">
+        <span class="lbl">repair</span>
+        <input class="port" type="number" min="0"
+          value={settingSecs($fleetSettings, SETTING_KEYS.repairTickIntervalSecs)}
+          disabled={automationBusy}
+          data-testid="repair-tick-secs"
+          onchange={(e) => onSecsChange(SETTING_KEYS.repairTickIntervalSecs, e)} />
+        <span class="hook-desc">seconds between workspace checks (at most 5 repairs each)</span>
       </div>
       <div class="mcp-field">
         <span class="lbl">tick</span>
