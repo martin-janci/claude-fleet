@@ -180,7 +180,7 @@ mod tests {
             // context red (>= 85)
             session(Some("working"), Some(90.0), None),
             // stuck
-            session(Some("idle"), None, Some("waiting_on_input")),
+            session(Some("idle"), None, Some("press_enter")),
         ];
         let hosts = vec![
             host("alpha", true),

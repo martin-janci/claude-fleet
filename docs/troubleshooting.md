@@ -97,6 +97,16 @@ spawn a fresh tmux session in the same window, or **Dismiss** to remove the
 database entry. If Recreate fails with `E_TMUX`, confirm tmux is still running
 on the host with `ssh <alias> tmux ls`.
 
+### Releases and tags
+
+`origin` currently has no `v0.2.x` tags even though the version fields moved
+past 0.2.4, so `git describe --tags` and the changelog prefill in
+`scripts/release.sh` see a stale baseline. Going forward the owner should cut
+releases with `scripts/release.sh <version>`, which bumps the version files,
+commits, and creates the `vX.Y.Z` tag; pushing that tag
+(`git push origin main --follow-tags`) is what triggers the release workflow.
+See [docs/RELEASING.md](RELEASING.md).
+
 ---
 
 ## See also

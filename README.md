@@ -49,10 +49,12 @@ On first launch the app walks you through setup — see the **[Getting Started g
   `ubuntu-24.04`) and tagged releases ship unsigned macOS `.dmg` (arm64 and
   x86_64) plus Linux `.AppImage`/`.deb` bundles (see `docs/RELEASING.md`)
 - Rust 1.83+ (`rustup install stable`)
-- Node 20+ and pnpm 10 (`npm i -g pnpm@10`, or `corepack enable`). The
-  workspace file uses the pnpm 10 `allowBuilds` key; if a local pnpm 9 prints
-  `packages field missing or empty`, run `corepack pnpm@10 <cmd>` or
-  `npx -y pnpm@10 <cmd>` instead.
+- Node 20 (`.node-version`) and pnpm 10 via `corepack enable` (or
+  `npm i -g pnpm@10`). The workspace file uses the pnpm 10 `allowBuilds` key;
+  if a local pnpm 9 prints `packages field missing or empty`, run
+  `corepack pnpm@10 <cmd>` or `npx -y pnpm@10 <cmd>` instead.
+- `cargo install cargo-deny --locked` for the local license/advisory audit
+  step (`cargo deny check`, run by `scripts/ci-local.sh` and CI).
 - Tauri 2 prerequisites: https://v2.tauri.app/start/prerequisites/
 
 ### Build & run
@@ -71,7 +73,12 @@ pnpm check                     # frontend Svelte/TS type-check
 cd src-tauri && cargo test     # backend (rusqlite + commands)
 cd src-tauri && cargo clippy --all-targets -- -D warnings
 cd src-tauri && cargo fmt --check
+cargo deny --manifest-path src-tauri/Cargo.toml check   # licenses + advisories
 ```
+
+Run `scripts/ci-local.sh` (or `--rust-only` / `--frontend-only`) before
+pushing; it mirrors CI. Opt in to the fast pre-commit hook with
+`git config core.hooksPath .githooks`.
 
 ### Project layout
 
@@ -79,7 +86,7 @@ cd src-tauri && cargo fmt --check
 src/lib/            # Svelte 5 components + TS stores (hosts, sessions, projects, accounts, events)
 src-tauri/src/      # Rust backend: Tauri commands, ssh/tmux/pty, SQLite store, event bus
 src-tauri/src/commands/  # IPC command handlers (hosts, sessions, projects, health)
-src-tauri/migrations/    # SQLite migrations (001–017)
+src-tauri/migrations/    # SQLite migrations (registered in the MIGRATIONS table in src-tauri/src/store.rs)
 docs/specs/         # per-iteration design specs
 docs/plans/         # per-iteration implementation plans
 CLAUDE.md           # orientation for Claude Code working in this repo
@@ -104,4 +111,5 @@ Freeze (original spec §8.3–8.4) remain unimplemented.
 
 ## License
 
-Personal project. No license declared yet.
+Personal project. `package.json` and `src-tauri/Cargo.toml` declare MIT; a
+`LICENSE` file has not been added to the repository yet.
