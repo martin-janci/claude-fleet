@@ -1114,6 +1114,41 @@ impl Store {
         Ok(())
     }
 
+    /// Delete a project row unless a session references it (a session keeps
+    /// its project). Returns whether the row went. `refresh_projects` uses it
+    /// for stale rows outside the projects root and for duplicate rows naming
+    /// a checkout another project owns.
+    pub fn delete_project_if_unused(
+        &self,
+        project_id: i64,
+    ) -> Result<bool, crate::ipc_error::IpcError> {
+        let in_use: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE project_id = ?1)",
+            rusqlite::params![project_id],
+            |r| r.get(0),
+        )?;
+        if in_use {
+            return Ok(false);
+        }
+        self.delete_project(project_id)?;
+        Ok(true)
+    }
+
+    /// Delete one worktree row unless any session row (alive, ghost or dead)
+    /// references it. Emits `worktree:removed` when the row goes. Returns
+    /// whether it went.
+    pub fn delete_worktree_if_unused(&self, id: i64) -> Result<bool, rusqlite::Error> {
+        let n = self.conn.execute(
+            "DELETE FROM worktrees WHERE id = ?1
+               AND NOT EXISTS (SELECT 1 FROM sessions WHERE worktree_id = ?1)",
+            rusqlite::params![id],
+        )?;
+        if n > 0 {
+            self.bus.worktree_removed(id);
+        }
+        Ok(n > 0)
+    }
+
     pub fn conn_ref(&self) -> &rusqlite::Connection {
         &self.conn
     }

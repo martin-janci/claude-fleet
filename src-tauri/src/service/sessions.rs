@@ -959,9 +959,10 @@ fn worktree_key_from_remainder(remainder: &str) -> String {
 /// A host's projects root and layout (the `projects.*` settings), captured
 /// under the store lock so cwd → project linking also works off-lock (the PR
 /// probe). `local` holds the absolute scan root; remote roots stay
-/// unexpanded, since `$HOME` is not known here, so a `~/rest` root is located
-/// by its `/rest/` segment run. The layout only says where a repo sits under
-/// the root; worktree subdirs are recognised separately.
+/// unexpanded, since `$HOME` is not known here, so a `~` / `~/rest` root is
+/// anchored right after the path's home directory ([`below_home`]). The
+/// layout only says where a repo sits under the root; worktree subdirs are
+/// recognised separately.
 #[derive(Debug, Clone)]
 pub(crate) struct HostPaths {
     root: String,
@@ -969,7 +970,7 @@ pub(crate) struct HostPaths {
 }
 
 impl HostPaths {
-    fn for_host(s: &Store, alias: &str) -> Self {
+    pub(crate) fn for_host(s: &Store, alias: &str) -> Self {
         use crate::service::projects::{layout, local_projects_root, project_base_for, LOCAL_HOST};
         let root = if alias == LOCAL_HOST {
             local_projects_root(s).to_string_lossy().into_owned()
@@ -986,10 +987,26 @@ impl HostPaths {
     /// whole components, so root `/data/git` does not match `/data/git-old`.
     fn below_root<'a>(&self, path: &'a str) -> Option<Vec<&'a str>> {
         let root = self.root.trim_end_matches('/');
-        let rest = if let Some(tail) = root.strip_prefix("~/") {
-            let needle = format!("/{tail}/");
-            let idx = path.find(&needle)?;
-            &path[idx + needle.len()..]
+        let rest = if root == "~" {
+            // The home directory itself is the root. Where home ends is only
+            // known for the standard layouts; elsewhere it cannot be told
+            // apart from the projects below it, so nothing matches.
+            below_home(path)?
+        } else if let Some(tail) = root.strip_prefix("~/") {
+            match below_home(path) {
+                // Anchored right after $HOME: root `~/code` never matches a
+                // `/code/` run deeper in the path, nor a user named `code`.
+                Some(home_rest) => crate::service::projects::strip_root(home_rest, tail)?,
+                // Unrecognised home layout: fall back to the first `/tail/`
+                // run anywhere in the path. This can mis-anchor when the home
+                // path itself contains that run; the github.com regex
+                // fallback in the callers has the same limit.
+                None => {
+                    let needle = format!("/{tail}/");
+                    let idx = path.find(&needle)?;
+                    &path[idx + needle.len()..]
+                }
+            }
         } else if root.starts_with('/') {
             crate::service::projects::strip_root(path, root)?
         } else {
@@ -1017,6 +1034,29 @@ impl HostPaths {
     }
 }
 
+/// The part of an absolute path below its home directory, for the standard
+/// home layouts `/home/<u>`, `/Users/<u>`, `/var/home/<u>` and `/root`: `""`
+/// for the home itself, `None` for any other path. A remote `$HOME` is not
+/// known when paths are matched, so this is how `~` roots are anchored.
+fn below_home(path: &str) -> Option<&str> {
+    let p = path.strip_prefix('/')?;
+    let depth = match p.split('/').next()? {
+        "root" => 1,
+        "home" | "Users" => 2,
+        "var" if p.starts_with("var/home/") => 3,
+        _ => return None,
+    };
+    let mut rest = p;
+    for i in 0..depth {
+        match rest.split_once('/') {
+            Some((head, tail)) if !head.is_empty() => rest = tail,
+            None if !rest.is_empty() && i + 1 == depth => rest = "",
+            _ => return None,
+        }
+    }
+    Some(rest)
+}
+
 /// `worktree_key_for_path` for a cwd on a host with a (possibly custom)
 /// projects root / layout. The github.com regex stays the fallback.
 fn worktree_key_for_host(path: &str, paths: &HostPaths) -> Option<String> {
@@ -1028,7 +1068,7 @@ fn worktree_key_for_host(path: &str, paths: &HostPaths) -> Option<String> {
 
 /// Match a session's cwd to a known project id. `projects` is passed in by the
 /// caller (fetched once per reconcile) rather than queried per session.
-fn find_project_id_for_path(
+pub(crate) fn find_project_id_for_path(
     projects: &[ProjectRow],
     host_alias: &str,
     path: &std::path::Path,
@@ -1038,10 +1078,22 @@ fn find_project_id_for_path(
     if host_alias == "local" {
         // Local paths: component-wise prefix match against the scanned
         // base_path (handles worktrees nested under repos; `/b/x` does not
-        // capture `/b/x-build`).
+        // capture `/b/x-build`), in the raw AND the canonical spelling of the
+        // cwd. The scan stores physical base_paths, while a pane under a
+        // symlinked root can report the logical one; without this every
+        // local session there was orphaned (E_NOREPO on recreate/restart).
+        // Rows stored before the scan canonicalized still match raw, and heal
+        // on the next refresh. One canonicalize per session: a few local
+        // stat calls, no await, so fine under the store lock.
+        let canon = crate::projects::path_identity::canonical(path);
+        let canon_str = canon.to_string_lossy();
+        let within = |base: &str| {
+            crate::service::projects::strip_root(&path_str, base).is_some()
+                || crate::service::projects::strip_root(&canon_str, base).is_some()
+        };
         return projects
             .iter()
-            .filter(|p| crate::service::projects::strip_root(&path_str, &p.base_path).is_some())
+            .filter(|p| within(&p.base_path))
             .max_by_key(|p| p.base_path.len())
             .map(|p| p.id);
     }
@@ -1349,8 +1401,10 @@ async fn ensure_remote_project(
 /// NEW branch `name` off the repo's default branch, under `.worktrees/` or
 /// `.claude/worktrees/` (auto-detected, fallback `.worktrees/`). Idempotent:
 /// if the worktree dir already exists it's reused. Git's chatter goes to
-/// stderr; the ONLY stdout is the absolute path of the worktree (last line),
-/// which the caller uses as the tmux cwd.
+/// stderr; the ONLY stdout is the absolute PHYSICAL path of the worktree
+/// (`pwd -P`, last line), which the caller uses as the tmux cwd. The logical
+/// `pwd` echoed a symlinked root's spelling, a second identity for the same
+/// checkout next to the physical one tmux and git report.
 fn worktree_add_script(root: &str, name: &str, base: Option<&str>) -> String {
     // Requested base branch, shell-quoted; empty string when unset (= default
     // branch). The shell var is `basebr` to avoid colliding with `base`, which
@@ -1379,7 +1433,7 @@ fn worktree_add_script(root: &str, name: &str, base: Option<&str>) -> String {
          fi\n\
          git worktree add \"$wt\" -b \"$name\" \"$start\" 1>&2\n\
          fi\n\
-         ( cd \"$wt\" && pwd )\n",
+         ( cd \"$wt\" && pwd -P )\n",
         root = quote(root),
         name = quote(name),
     )
@@ -4268,6 +4322,90 @@ mod tests {
     }
 
     #[test]
+    fn host_paths_tilde_roots_anchor_after_home() {
+        use crate::projects::Layout;
+        let home = host_paths("~", Layout::Flat);
+        assert_eq!(
+            home.locate("/home/u/r/src"),
+            Some((None, "r", "/src".to_string()))
+        );
+        assert_eq!(home.locate("/Users/u/r"), Some((None, "r", String::new())));
+        assert_eq!(home.locate("/root/r"), Some((None, "r", String::new())));
+        assert_eq!(
+            home.locate("/var/home/u/r"),
+            Some((None, "r", String::new()))
+        );
+        assert_eq!(home.locate("/home/u"), None, "the home itself is no repo");
+        assert_eq!(home.locate("/srv/r"), None, "unknown home layout");
+        let gh = host_paths("~/", Layout::Github);
+        assert_eq!(
+            gh.locate("/home/u/o/r"),
+            Some((Some("o"), "r", String::new()))
+        );
+        let code = host_paths("~/code", Layout::Github);
+        assert_eq!(
+            code.locate("/home/u/work/code/o/r"),
+            None,
+            "a `/code/` run deeper in the path is not the root"
+        );
+        assert_eq!(
+            code.locate("/home/code/code/o/r"),
+            Some((Some("o"), "r", String::new())),
+            "a user named `code` is not mistaken for the root"
+        );
+        // Unknown home layout: the unanchored fallback still applies.
+        assert_eq!(
+            code.locate("/data/users/u/code/o/r"),
+            Some((Some("o"), "r", String::new()))
+        );
+    }
+
+    #[test]
+    fn below_home_handles_standard_layouts() {
+        assert_eq!(below_home("/home/u/a/b"), Some("a/b"));
+        assert_eq!(below_home("/home/u/"), Some(""));
+        assert_eq!(below_home("/home/u"), Some(""));
+        assert_eq!(below_home("/home"), None);
+        assert_eq!(below_home("/root"), Some(""));
+        assert_eq!(below_home("/Users/u/p"), Some("p"));
+        assert_eq!(below_home("/opt/x"), None);
+        assert_eq!(below_home("relative/x"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_project_local_matches_through_a_symlinked_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let real = tmp.path().join("mnt").join("o").join("r");
+        std::fs::create_dir_all(real.join(".worktrees").join("f")).unwrap();
+        let link = tmp.path().join("projects");
+        std::os::unix::fs::symlink(tmp.path().join("mnt"), &link).unwrap();
+        let s = Store::open_in_memory().unwrap();
+        // refresh_projects stores the physical base_path.
+        let base = crate::projects::path_identity::canonical(&real);
+        let pid = s.upsert_project("o", "r", &base.to_string_lossy()).unwrap();
+        let xb = s
+            .upsert_project(
+                "o",
+                "r-build",
+                &base.with_file_name("r-build").to_string_lossy(),
+            )
+            .unwrap();
+        let projects = s.list_projects().unwrap();
+        let paths = HostPaths::for_host(&s, "local");
+        let find = |p: &std::path::Path| find_project_id_for_path(&projects, "local", p, &paths);
+        let logical = link.join("o").join("r");
+        assert_eq!(
+            find(&logical.join(".worktrees").join("f")),
+            Some(pid),
+            "a logical pane PWD links to the physical row"
+        );
+        assert_eq!(find(&base), Some(pid));
+        assert_eq!(find(&link.join("o").join("r-build").join("src")), Some(xb));
+        assert_eq!(find(&link.join("o").join("rx")), None);
+    }
+
+    #[test]
     fn find_project_local_prefix_is_component_aware() {
         let s = Store::open_in_memory().unwrap();
         let x = s.upsert_project("o", "x", "/b/x").unwrap();
@@ -4595,6 +4733,10 @@ mod tests {
         assert!(
             script.contains("refs/remotes/origin/HEAD"),
             "default branch detection: {script}"
+        );
+        assert!(
+            script.contains("( cd \"$wt\" && pwd -P )"),
+            "reports the physical path: {script}"
         );
     }
 

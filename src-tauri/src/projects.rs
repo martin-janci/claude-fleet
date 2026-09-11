@@ -3,6 +3,9 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
+pub mod path_identity;
+use path_identity::canonical;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DiscoveredProject {
     pub owner: String,
@@ -68,17 +71,30 @@ impl Layout {
     }
 }
 
-/// Scans `base` according to `layout` and returns every directory that
-/// contains a `.git` entry (regular dir or worktree gitfile).
+/// Scans `base` according to `layout` and returns every repository's main
+/// checkout: a directory whose `.git` is a DIRECTORY. A linked worktree (its
+/// `.git` is a file pointing into another checkout's git dir) is skipped. Its
+/// main checkout's `git worktree list` already names it, so scanning it as
+/// well registered every worktree of that repo under a second project.
+///
+/// The base is canonicalized first, so a symlinked root stores the physical
+/// `base_path` that tmux, git and `claude agents` report.
 pub fn scan_projects(base: &Path, layout: Layout) -> Result<Vec<DiscoveredProject>, IpcError> {
+    let canon = canonical(base);
     let mut out = match layout {
-        Layout::Github => scan_owner_repo(base)?,
-        Layout::Flat => scan_flat(base)?,
+        Layout::Github => scan_owner_repo(&canon)?,
+        Layout::Flat => scan_flat(&canon, base)?,
     };
     out.sort_by(|a, b| {
         (a.owner.as_str(), a.repo.as_str()).cmp(&(b.owner.as_str(), b.repo.as_str()))
     });
     Ok(out)
+}
+
+/// A repository's main checkout: `.git` is a directory. A linked worktree's
+/// `.git` is a file, and it is not a project of its own.
+fn is_main_checkout(path: &Path) -> bool {
+    path.join(".git").is_dir()
 }
 
 /// Non-hidden subdirectories of `dir`, as `(name, path)`.
@@ -106,7 +122,7 @@ fn scan_owner_repo(base: &Path) -> Result<Vec<DiscoveredProject>, IpcError> {
     }
     for (owner, owner_path) in child_dirs(base)? {
         for (repo, path) in child_dirs(&owner_path)? {
-            if path.join(".git").exists() {
+            if is_main_checkout(&path) {
                 out.push(DiscoveredProject {
                     owner: owner.clone(),
                     repo,
@@ -121,22 +137,24 @@ fn scan_owner_repo(base: &Path) -> Result<Vec<DiscoveredProject>, IpcError> {
 /// `Layout::Flat`: walks `base/<repo>` one level deep. The owner comes from
 /// the repo's `origin` remote URL, so a remote host can still clone
 /// `git@github.com:<owner>/<repo>.git`. A repo without a parseable origin
-/// falls back to the base directory's name.
-fn scan_flat(base: &Path) -> Result<Vec<DiscoveredProject>, IpcError> {
+/// falls back to the base directory's name, taken from `owner_hint` (the
+/// configured spelling of the root, so resolving a symlinked root does not
+/// rename the owner).
+fn scan_flat(base: &Path, owner_hint: &Path) -> Result<Vec<DiscoveredProject>, IpcError> {
     let mut out = Vec::new();
     if !base.exists() {
         return Ok(out);
     }
-    let fallback_owner = base
+    let fallback_owner = owner_hint
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .filter(|n| crate::validate::path_component("owner", n).is_ok())
         .unwrap_or_else(|| "local".to_string());
     for (repo, path) in child_dirs(base)? {
-        let git = path.join(".git");
-        if !git.exists() {
+        if !is_main_checkout(&path) {
             continue;
         }
+        let git = path.join(".git");
         let owner = std::fs::read_to_string(git.join("config"))
             .ok()
             .and_then(|cfg| origin_owner(&cfg))
@@ -183,7 +201,10 @@ fn origin_owner(config: &str) -> Option<String> {
 }
 
 /// Runs `git worktree list --porcelain` in `repo_path` and parses the result.
-/// The main checkout is normalized to `name = "main"`; extras use the dir name.
+/// The FIRST entry is named `main`: git always lists the main worktree first,
+/// whichever checkout the command ran in. Extras use the dir name. Paths are
+/// canonical: git reports each worktree in the form it was added from
+/// (through a symlink or not), and one checkout must not become two rows.
 ///
 /// Async via `tokio::process` so the per-project fan-out in
 /// `service::projects::refresh_projects` awaits N git children instead of
@@ -201,38 +222,79 @@ pub async fn list_worktrees(repo_path: &Path) -> Result<Vec<DiscoveredWorktree>,
         return Err(IpcError::new("E_GIT", stderr.trim()));
     }
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    Ok(parse_worktree_porcelain(&stdout, repo_path))
+    Ok(parse_worktree_porcelain(&stdout)
+        .into_iter()
+        .map(|mut wt| {
+            wt.path = canonical(&wt.path);
+            wt
+        })
+        .collect())
 }
 
-fn parse_worktree_porcelain(input: &str, main_path: &Path) -> Vec<DiscoveredWorktree> {
-    let mut out = Vec::new();
-    let mut cur_path: Option<PathBuf> = None;
-    let mut cur_branch: Option<String> = None;
+/// Canonical `git rev-parse --git-common-dir` of the checkout at `repo_path`:
+/// the one git dir that a main checkout and all of its linked worktrees
+/// share, so it identifies the repository whichever checkout is asked.
+/// `None` when git cannot answer.
+///
+/// `--path-format=absolute` needs git 2.31+. Older git echoes the unknown
+/// flag back and prints the dir relative to `repo_path`, so the last output
+/// line is taken and joined onto `repo_path` when relative.
+pub async fn git_common_dir(repo_path: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let line = stdout.lines().map(str::trim).rfind(|l| !l.is_empty())?;
+    let dir = Path::new(line);
+    let abs = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        repo_path.join(dir)
+    };
+    Some(canonical(&abs))
+}
+
+/// Parse `git worktree list --porcelain`. The first entry is the main
+/// worktree (git's ordering guarantee) and is named `main`; comparing paths
+/// against the scanned directory instead misnamed the real main checkout
+/// whenever the scan reached the repo through a linked worktree or another
+/// spelling of the path. A bare main entry has no checkout and is skipped.
+fn parse_worktree_porcelain(input: &str) -> Vec<DiscoveredWorktree> {
+    // (path, branch, bare)
+    let mut entries: Vec<(PathBuf, Option<String>, bool)> = Vec::new();
     for line in input.lines() {
         if let Some(rest) = line.strip_prefix("worktree ") {
-            if let Some(path) = cur_path.take() {
-                out.push(make_worktree(path, cur_branch.take(), main_path));
+            entries.push((PathBuf::from(rest), None, false));
+        } else if let Some(entry) = entries.last_mut() {
+            if let Some(rest) = line.strip_prefix("branch ") {
+                entry.1 = Some(rest.trim_start_matches("refs/heads/").to_string());
+            } else if line == "bare" {
+                entry.2 = true;
             }
-            cur_path = Some(PathBuf::from(rest));
-        } else if let Some(rest) = line.strip_prefix("branch ") {
-            cur_branch = Some(rest.trim_start_matches("refs/heads/").to_string());
         }
     }
-    if let Some(path) = cur_path {
-        out.push(make_worktree(path, cur_branch, main_path));
-    }
-    out
-}
-
-fn make_worktree(path: PathBuf, branch: Option<String>, main_path: &Path) -> DiscoveredWorktree {
-    let name = if path == main_path {
-        "main".to_string()
-    } else {
-        path.file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "unknown".to_string())
-    };
-    DiscoveredWorktree { name, path, branch }
+    entries
+        .into_iter()
+        .enumerate()
+        .filter(|(_, (_, _, bare))| !bare)
+        .map(|(i, (path, branch, _))| {
+            let name = if i == 0 {
+                "main".to_string()
+            } else {
+                path.file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "unknown".to_string())
+            };
+            DiscoveredWorktree { name, path, branch }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -240,6 +302,112 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn parse_worktree_porcelain_first_entry_is_main_wherever_it_ran() {
+        // Listed from the linked worktree `app-wt`: git still puts the main
+        // checkout first, and that one is `main`.
+        let input = "worktree /repos/app\nHEAD a\nbranch refs/heads/dev\n\n\
+                     worktree /repos/app-wt\nHEAD b\nbranch refs/heads/wt\n";
+        let wts = parse_worktree_porcelain(input);
+        assert_eq!(wts.len(), 2);
+        assert_eq!(wts[0].name, "main");
+        assert_eq!(wts[0].path, PathBuf::from("/repos/app"));
+        assert_eq!(wts[0].branch.as_deref(), Some("dev"));
+        assert_eq!(wts[1].name, "app-wt");
+    }
+
+    #[test]
+    fn parse_worktree_porcelain_skips_a_bare_main() {
+        let input = "worktree /repos/app.git\nbare\n\n\
+                     worktree /repos/app/.worktrees/f\nHEAD b\nbranch refs/heads/f\n";
+        let wts = parse_worktree_porcelain(input);
+        assert_eq!(wts.len(), 1);
+        assert_eq!(wts[0].name, "f");
+    }
+
+    #[test]
+    fn scan_skips_linked_worktree_dirs() {
+        let tmp = TempDir::new().unwrap();
+        make_project(tmp.path(), "o", "app");
+        // A linked worktree next to its main checkout: `.git` is a FILE.
+        let wt = tmp.path().join("o").join("app-wt");
+        fs::create_dir_all(&wt).unwrap();
+        fs::write(wt.join(".git"), "gitdir: ../app/.git/worktrees/app-wt\n").unwrap();
+        let got: Vec<_> = scan_projects(tmp.path(), Layout::Github)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.repo)
+            .collect();
+        assert_eq!(got, vec!["app"]);
+        // Flat layout too.
+        let flat = tmp.path().join("o");
+        let got: Vec<_> = scan_projects(&flat, Layout::Flat)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.repo)
+            .collect();
+        assert_eq!(got, vec!["app"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_canonicalizes_a_symlinked_base() {
+        let tmp = TempDir::new().unwrap();
+        let real = tmp.path().join("real");
+        make_project(&real, "o", "r");
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let projects = scan_projects(&link, Layout::Github).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].base_path, canonical(&real).join("o").join("r"));
+        // The flat fallback owner keeps the configured root's name.
+        fs::create_dir_all(real.join("solo").join(".git")).unwrap();
+        let flat = scan_projects(&link, Layout::Flat).unwrap();
+        assert_eq!(flat[0].owner, "link");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn list_worktrees_is_main_first_canonical_and_shares_a_common_dir() {
+        use super::test_git::{init_repo, run};
+        let tmp = TempDir::new().unwrap();
+        let mnt = tmp.path().join("mnt");
+        let app = mnt.join("app");
+        if !init_repo(&app) {
+            return; // no git on this box
+        }
+        let link = tmp.path().join("projects");
+        std::os::unix::fs::symlink(&mnt, &link).unwrap();
+        // Added through the logical spelling, like a fleet-spawned pane does.
+        let wt_logical = link.join("app-wt");
+        assert!(run(
+            &app,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                &wt_logical.to_string_lossy(),
+                "-b",
+                "wt"
+            ]
+        ));
+        let app_c = canonical(&app);
+        let wt_c = canonical(&mnt.join("app-wt"));
+        // Listed from the linked worktree: main is still the main checkout.
+        let wts = list_worktrees(&wt_logical).await.unwrap();
+        let got: Vec<_> = wts
+            .iter()
+            .map(|w| (w.name.as_str(), w.path.clone()))
+            .collect();
+        assert_eq!(got, vec![("main", app_c.clone()), ("app-wt", wt_c)]);
+        let a = git_common_dir(&app).await.expect("common dir of main");
+        let b = git_common_dir(&wt_logical)
+            .await
+            .expect("common dir of worktree");
+        assert_eq!(a, b);
+        assert_eq!(a, app_c.join(".git"));
+    }
 
     fn make_project(base: &Path, owner: &str, repo: &str) -> PathBuf {
         let path = base.join(owner).join(repo);
@@ -304,7 +472,7 @@ mod tests {
             .map(|p| (p.owner.as_str(), p.repo.as_str()))
             .collect();
         assert_eq!(got, vec![("acme", "alpha"), ("code", "beta")]);
-        assert_eq!(projects[0].base_path, a);
+        assert_eq!(projects[0].base_path, canonical(&a));
     }
 
     #[test]
@@ -356,7 +524,7 @@ mod tests {
     #[test]
     fn parse_worktree_porcelain_main_only() {
         let input = "worktree /repos/foo\nHEAD abc123\nbranch refs/heads/main\n\n";
-        let wts = parse_worktree_porcelain(input, Path::new("/repos/foo"));
+        let wts = parse_worktree_porcelain(input);
         assert_eq!(wts.len(), 1);
         assert_eq!(wts[0].name, "main");
         assert_eq!(wts[0].branch.as_deref(), Some("main"));
@@ -377,11 +545,37 @@ worktree /repos/foo/.worktrees/bugfix
 HEAD 789abc
 branch refs/heads/bugfix
 ";
-        let wts = parse_worktree_porcelain(input, Path::new("/repos/foo"));
+        let wts = parse_worktree_porcelain(input);
         assert_eq!(wts.len(), 3);
         assert_eq!(wts[0].name, "main");
         assert_eq!(wts[1].name, "feature-x");
         assert_eq!(wts[2].name, "bugfix");
         assert_eq!(wts[1].branch.as_deref(), Some("feature-x"));
+    }
+}
+
+/// Real-git fixtures shared by the scan and refresh tests.
+#[cfg(test)]
+pub(crate) mod test_git {
+    use std::path::Path;
+
+    /// Run git in `dir` with a throwaway identity. `false` when git is
+    /// missing or the command fails.
+    pub fn run(dir: &Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .status()
+            .map(|st| st.success())
+            .unwrap_or(false)
+    }
+
+    /// A repository at `dir` with one commit. `false` when git is unavailable.
+    pub fn init_repo(dir: &Path) -> bool {
+        std::fs::create_dir_all(dir).is_ok()
+            && run(dir, &["init", "-q"])
+            && run(dir, &["commit", "--allow-empty", "-q", "-m", "init"])
     }
 }

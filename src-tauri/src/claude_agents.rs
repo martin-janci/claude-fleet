@@ -36,7 +36,10 @@ pub fn find_by_name<'a>(rows: &'a [ClaudeAgentRow], tmux_name: &str) -> Option<&
 /// before `--name` was passed — fall back to a UNIQUE `cwd` match: return the
 /// single agent whose `cwd == cwd`, or `None` when zero or more than one match
 /// (ambiguous, e.g. several Claude sessions share that directory — we refuse to
-/// guess rather than resume the wrong conversation).
+/// guess rather than resume the wrong conversation). When no cwd matches
+/// exactly, the canonical forms are compared, so a logical spelling (a pane's
+/// `$PWD` under a symlinked root) still finds the agent `claude agents`
+/// reports under the physical path. Exact matches cost no syscalls.
 pub fn find_for_session<'a>(
     rows: &'a [ClaudeAgentRow],
     tmux_name: &str,
@@ -45,10 +48,28 @@ pub fn find_for_session<'a>(
     if let Some(by_name) = find_by_name(rows, tmux_name) {
         return Some(by_name);
     }
+    // An empty cwd identifies nothing; never pair two unknowns.
+    if cwd.is_empty() {
+        return None;
+    }
     let mut in_cwd = rows.iter().filter(|r| r.cwd.as_deref() == Some(cwd));
     match (in_cwd.next(), in_cwd.next()) {
         (Some(only), None) => Some(only),
-        _ => None,
+        (Some(_), Some(_)) => None,
+        (None, _) => {
+            use crate::projects::path_identity::canonical;
+            use std::path::Path;
+            let key = canonical(Path::new(cwd));
+            let mut same = rows.iter().filter(|r| {
+                r.cwd
+                    .as_deref()
+                    .is_some_and(|c| !c.is_empty() && canonical(Path::new(c)) == key)
+            });
+            match (same.next(), same.next()) {
+                (Some(only), None) => Some(only),
+                _ => None,
+            }
+        }
     }
 }
 
@@ -93,6 +114,38 @@ mod tests {
         assert!(find_for_session(&rows, "no-name", "/c").is_none());
         // No match at all → None.
         assert!(find_for_session(&rows, "no-name", "/nope").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_for_session_matches_a_logical_cwd_to_the_physical_agent_cwd() {
+        use crate::projects::path_identity::canonical;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let real = tmp.path().join("mnt").join("r");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = tmp.path().join("projects");
+        std::os::unix::fs::symlink(tmp.path().join("mnt"), &link).unwrap();
+        let physical = canonical(&real).to_string_lossy().into_owned();
+        let logical = link.join("r").to_string_lossy().into_owned();
+        let rows = vec![
+            row("a", None, Some(&physical)),
+            row("b", None, Some("/elsewhere")),
+        ];
+        assert_eq!(
+            find_for_session(&rows, "no-name", &logical)
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("a")
+        );
+        // Two agents that are the same directory stay ambiguous.
+        let rows = vec![
+            row("a", None, Some(&physical)),
+            row("c", None, Some(&physical)),
+        ];
+        assert!(find_for_session(&rows, "no-name", &logical).is_none());
+        // An empty cwd never matches through canonicalization.
+        assert!(find_for_session(&[row("e", None, Some(""))], "no-name", "").is_none());
     }
 
     #[test]
