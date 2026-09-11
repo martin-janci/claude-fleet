@@ -4,9 +4,15 @@ name: release
 #
 # Trigger: pushing the `vX.Y.Z` tag that `scripts/release.sh` creates
 # (`git push origin main --follow-tags`). `workflow_dispatch` is a manual
-# re-run: pick the tag under "Use workflow from" so `github.ref_name` is the
-# tag, not a branch. The draft is published by hand by the repo owner after
-# checking the assets; publishing it fires docs.yml (release: published).
+# re-run: pick the tag under "Use workflow from". Both jobs are gated on
+# `github.ref_type == 'tag'`, so dispatching from a branch is a no-op rather
+# than creating a draft named after the branch. The draft is published by
+# hand by the repo owner after checking the assets; publishing it fires
+# docs.yml (release: published).
+#
+# `create-release` creates the draft exactly once (or reuses an existing
+# draft for the same tag on a re-run) and passes its id to the three build
+# legs, so concurrent legs never race to create duplicate drafts.
 #
 # CODE SIGNING IS INTENTIONALLY ABSENT. There is no Apple Developer ID
 # (and no Windows certificate) for this project yet, so nothing here is
@@ -29,8 +35,53 @@ on:
 permissions:
   contents: write
 
+# One release run per tag at a time; a second push of the same tag queues
+# behind the first instead of racing it for the draft's assets.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
+  create-release:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    outputs:
+      release_id: ${{ steps.draft.outputs.result }}
+    steps:
+      - name: Create (or reuse) the draft release for this tag
+        id: draft
+        uses: actions/github-script@v7
+        with:
+          result-encoding: string
+          script: |
+            const tag = context.ref.replace(/^refs\/tags\//, '');
+            const { owner, repo } = context.repo;
+            // getReleaseByTag() does not return drafts, so scan the list.
+            const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
+            const existing = releases.find(r => r.tag_name === tag && r.draft);
+            if (existing) {
+              core.info(`Reusing existing draft release ${existing.id} for ${tag}`);
+              return existing.id;
+            }
+            const body = [
+              'Unsigned builds (no Apple Developer ID yet). On macOS, right-click the app and choose Open, or run `xattr -d com.apple.quarantine /Applications/claude-fleet.app`.',
+              '',
+              `Release notes: see the matching section of [CHANGELOG.md](https://github.com/${owner}/${repo}/blob/${tag}/CHANGELOG.md).`,
+            ].join('\n');
+            const { data } = await github.rest.repos.createRelease({
+              owner, repo,
+              tag_name: tag,
+              name: `claude-fleet ${tag}`,
+              body,
+              draft: true,
+              prerelease: false,
+            });
+            core.info(`Created draft release ${data.id} for ${tag}`);
+            return data.id;
+
   build:
+    if: github.ref_type == 'tag'
+    needs: create-release
     name: bundle (${{ matrix.os }}${{ matrix.target && format(', {0}', matrix.target) || '' }})
     strategy:
       fail-fast: false
@@ -74,18 +125,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # tauri-action runs `beforeBuildCommand` (pnpm build) from
       # src-tauri/tauri.conf.json, then `cargo tauri build`, and uploads the
-      # bundles to the release named by tagName (created as a draft if it
-      # does not exist yet). All matrix legs attach to the same draft.
+      # bundles to the draft created by the create-release job. All matrix
+      # legs attach to that same draft.
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'claude-fleet ${{ github.ref_name }}'
-          releaseBody: |
-            Unsigned builds (no Apple Developer ID yet). On macOS, right-click the app and choose Open, or run `xattr -d com.apple.quarantine /Applications/claude-fleet.app`.
-
-            Release notes: see the matching section of [CHANGELOG.md](https://github.com/martin-janci/claude-fleet/blob/${{ github.ref_name }}/CHANGELOG.md).
-          releaseDraft: true
-          prerelease: false
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}

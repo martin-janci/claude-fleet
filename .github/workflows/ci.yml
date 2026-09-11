@@ -35,18 +35,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-          key: ${{ matrix.os }}
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
-      # Runner-agnostic cargo-deny install (the cargo-deny-action container
-      # only runs on Linux). Runs from the repo root, where cargo-deny picks
-      # up ./deny.toml on its own; no --config flag because cargo-deny 0.20
-      # moved it from `check` to the root command.
+      # cargo-deny checks Cargo.lock, which is platform-independent, so it
+      # runs on the Linux leg only. Runs from the repo root, where cargo-deny
+      # picks up ./deny.toml on its own; no --config flag because cargo-deny
+      # 0.20 moved it from `check` to the root command.
       - uses: taiki-e/install-action@v2
+        if: runner.os == 'Linux'
         with:
           tool: cargo-deny
       - run: cargo deny --manifest-path src-tauri/Cargo.toml check
+        if: runner.os == 'Linux'
         working-directory: ${{ github.workspace }}
 
   frontend:

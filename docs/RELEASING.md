@@ -44,23 +44,26 @@ and attaches them to a draft release for the owner to publish.
 ## GitHub release job
 
 `.github/workflows/release.yml` runs on `push` of any `v*` tag — i.e. the tag
-`scripts/release.sh` creates, pushed in step 4 — and on `workflow_dispatch`
-(pick the tag under "Use workflow from" so the run sees the tag, not `main`).
+`scripts/release.sh` creates, pushed in step 4 — and on `workflow_dispatch`.
+Both jobs are gated on `github.ref_type == 'tag'`: when dispatching by hand,
+pick the tag under "Use workflow from"; dispatching from a branch is a no-op.
+Runs are serialised per tag (`concurrency: release-<tag>`).
 
-It uses `tauri-apps/tauri-action` on three runners and attaches every bundle
-to **one draft release** named `claude-fleet vX.Y.Z`:
+A small `create-release` job creates **one draft release** named
+`claude-fleet vX.Y.Z` (or reuses an existing draft for that tag on a re-run)
+and passes its id to three `tauri-apps/tauri-action` build legs, which attach
+their bundles to it:
 
 | Runner | Target | Assets |
 |--------|--------|--------|
-| `macos-latest` | `aarch64-apple-darwin` | `.app` (zipped), `.dmg` |
-| `macos-latest` | `x86_64-apple-darwin` | `.app` (zipped), `.dmg` |
+| `macos-latest` | `aarch64-apple-darwin` | `.app.tar.gz`, `.dmg` |
+| `macos-latest` | `x86_64-apple-darwin` | `.app.tar.gz`, `.dmg` |
 | `ubuntu-24.04` | native x86_64 | `.AppImage`, `.deb` |
 
-The release is created as a **draft** (`releaseDraft: true`) so nothing is
-visible until the owner reviews the assets and clicks Publish. Publishing
-fires `docs.yml` (`release: published`), which rebuilds the rustdoc site. If a
-leg fails, fix and re-run the workflow from the same tag; tauri-action reuses
-the existing draft and replaces its assets.
+Nothing is visible until the owner reviews the assets and clicks Publish.
+Publishing fires `docs.yml` (`release: published`), which rebuilds the rustdoc
+site. If a leg fails, fix and re-run the workflow from the same tag; the
+existing draft is reused and its assets replaced.
 
 ### Signing caveat
 
