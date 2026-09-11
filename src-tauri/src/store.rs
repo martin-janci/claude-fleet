@@ -3468,6 +3468,58 @@ impl Store {
         }
     }
 
+    /// One session's usage cursor (same shape as `list_usage_cursors`),
+    /// whether or not the row is live. `None` for an unknown id.
+    pub fn usage_cursor(&self, id: i64) -> Result<Option<UsageCursor>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT id, transcript_path, claude_session_id, usage_offset_bytes, usage_source, \
+                 usage_last_msg_id, usage_last_msg_usage FROM sessions WHERE id = ?1",
+                rusqlite::params![id],
+                |r| {
+                    Ok(UsageCursor {
+                        session_id: r.get(0)?,
+                        transcript_path: r.get(1)?,
+                        claude_session_id: r.get(2)?,
+                        offset_bytes: r.get(3)?,
+                        source: r.get(4)?,
+                        last_msg_id: r.get(5)?,
+                        last_msg_usage: r.get(6)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    /// Close a move's window: a usage pass on the source between
+    /// `inherit_usage_cursor` and the kill counted lines the target's
+    /// inherited cursor still points before. Raise the target's cursor to
+    /// the source's pre-kill snapshot when both read the same transcript
+    /// file name and the source got further (never lowers it). Returns
+    /// whether the cursor moved.
+    pub fn raise_usage_cursor(
+        &self,
+        target_id: i64,
+        src: &UsageCursor,
+    ) -> Result<bool, rusqlite::Error> {
+        let Some(file) = src.source.as_deref() else {
+            return Ok(false);
+        };
+        let n = self.conn.execute(
+            "UPDATE sessions SET usage_offset_bytes = ?2, usage_last_msg_id = ?3, \
+             usage_last_msg_usage = ?4 \
+             WHERE id = ?1 AND usage_source = ?5 AND usage_offset_bytes < ?2",
+            rusqlite::params![
+                target_id,
+                src.offset_bytes,
+                src.last_msg_id,
+                src.last_msg_usage,
+                file
+            ],
+        )?;
+        Ok(n == 1)
+    }
+
     /// Add a usage snapshot (taken from a row that is about to be killed) to
     /// `target_id`'s totals; the model and `usage_updated_at` fill in when
     /// the target has none / an older one. `usage_daily` is untouched. Emits
@@ -5015,6 +5067,56 @@ mod tests {
         assert_eq!(row.usage.usage_input_tokens, 40);
         // Neither helper touches the daily roll-up.
         assert_eq!(s.usage_daily_since(0, None).unwrap(), daily_before);
+    }
+
+    #[test]
+    fn raise_usage_cursor_closes_the_window_between_inherit_and_kill() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("a", Some("a")).unwrap();
+        s.insert_host("b", Some("b")).unwrap();
+        let src = s
+            .upsert_session("dev-y", "a", None, None, 1, 1, "running", None)
+            .unwrap();
+        let dst = s
+            .upsert_session("dev-y", "b", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_claude_session_id(src, "uuid-w").unwrap();
+        s.set_claude_session_id(dst, "uuid-w").unwrap();
+        let pass = |offset: i64, last: &str| UsageDelta {
+            reset: false,
+            totals: UsageTotals::default(),
+            model: None,
+            offset,
+            source: "uuid-w.jsonl".into(),
+            last_msg_id: Some(last.into()),
+            last_msg_usage: Some("1,0,0,0,0".into()),
+            now: 1,
+        };
+        s.apply_usage(src, "a", &pass(100, "msg_a")).unwrap();
+        assert!(s.inherit_usage_cursor(dst, src, 500).unwrap());
+        assert_eq!(s.usage_cursor(dst).unwrap().unwrap().offset_bytes, 100);
+        // A source pass between the inherit and the kill reached 300.
+        s.apply_usage(src, "a", &pass(300, "msg_b")).unwrap();
+        let snap = s.usage_cursor(src).unwrap().unwrap();
+        assert!(s.raise_usage_cursor(dst, &snap).unwrap());
+        let c = s.usage_cursor(dst).unwrap().unwrap();
+        assert_eq!(c.offset_bytes, 300);
+        assert_eq!(c.last_msg_id.as_deref(), Some("msg_b"));
+        // Never lowers the target.
+        let behind = UsageCursor {
+            offset_bytes: 50,
+            ..snap.clone()
+        };
+        assert!(!s.raise_usage_cursor(dst, &behind).unwrap());
+        // A different transcript file leaves it alone.
+        let other = UsageCursor {
+            offset_bytes: 900,
+            source: Some("other.jsonl".into()),
+            ..snap.clone()
+        };
+        assert!(!s.raise_usage_cursor(dst, &other).unwrap());
+        assert_eq!(s.usage_cursor(dst).unwrap().unwrap().offset_bytes, 300);
+        assert!(s.usage_cursor(9_999).unwrap().is_none());
     }
 
     #[test]
@@ -6848,37 +6950,34 @@ mod tests {
 
     #[test]
     fn migration_023_upgrades_an_existing_db_and_keeps_its_rows() {
-        let s = Store::open_in_memory().unwrap();
-        s.upsert_host("local").unwrap();
-        let id = s
-            .upsert_session("sess", "local", None, None, 1, 1, "running", None)
-            .unwrap();
-        // Roll the database back to version 22 (before this migration): undo
-        // it AND every later one, since migrate() re-runs everything above
-        // the recorded maximum (025 session usage adds columns + a table).
-        s.conn
-            .execute_batch(
-                "DROP TABLE worktree_parent_fingerprints;
-                 DROP TABLE usage_daily;
-                 ALTER TABLE sessions DROP COLUMN usage_input_tokens;
-                 ALTER TABLE sessions DROP COLUMN usage_output_tokens;
-                 ALTER TABLE sessions DROP COLUMN usage_cache_write_tokens;
-                 ALTER TABLE sessions DROP COLUMN usage_cache_read_tokens;
-                 ALTER TABLE sessions DROP COLUMN usage_cost_micros;
-                 ALTER TABLE sessions DROP COLUMN usage_model;
-                 ALTER TABLE sessions DROP COLUMN usage_offset_bytes;
-                 ALTER TABLE sessions DROP COLUMN usage_updated_at;
-                 ALTER TABLE sessions DROP COLUMN usage_source;
-                 ALTER TABLE sessions DROP COLUMN usage_last_msg_id;
-                 ALTER TABLE sessions DROP COLUMN usage_last_msg_usage;
-                 DELETE FROM schema_version WHERE version >= 23;",
-            )
-            .unwrap();
+        // Seed a real v22 database from MIGRATIONS (as the 022 test does), so
+        // no later migration ever needs an edit here.
+        const SEED_AT: i64 = 22;
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        for (version, sql) in MIGRATIONS.iter().copied().filter(|(v, _)| *v <= SEED_AT) {
+            conn.execute_batch(sql)
+                .unwrap_or_else(|e| panic!("migration {version}: {e}"));
+        }
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO hosts (alias) VALUES ('local');
+             INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status)
+               VALUES ('sess', 'local', 1, 1, 'running');",
+        )
+        .unwrap();
+        let s = Store {
+            conn,
+            bus: Arc::new(NoopEventBus),
+        };
+        assert_eq!(s.schema_version().unwrap(), SEED_AT);
         assert!(!s.has_table("worktree_parent_fingerprints").unwrap());
         s.migrate().unwrap();
         assert!(s.has_table("worktree_parent_fingerprints").unwrap());
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
-        assert!(s.get_session_by_id(id).unwrap().is_some(), "rows survive");
+        assert!(
+            s.get_session("sess", "local").unwrap().is_some(),
+            "rows survive"
+        );
     }
 
     #[test]

@@ -1355,12 +1355,21 @@ async fn move_session_steps(
                 ),
             ));
         }
-        // Snapshot the source's lifetime usage before the kill drops its row.
-        let source_usage = store
+        // Snapshot the source's lifetime usage and usage cursor before the
+        // kill drops its row.
+        let (source_usage, source_cursor) = store
             .lock()
             .ok()
-            .and_then(|s| s.get_session_by_id(snap.row.id).ok().flatten())
-            .map(|r| r.usage);
+            .map(|s| {
+                (
+                    s.get_session_by_id(snap.row.id)
+                        .ok()
+                        .flatten()
+                        .map(|r| r.usage),
+                    s.usage_cursor(snap.row.id).ok().flatten(),
+                )
+            })
+            .unwrap_or((None, None));
         hooks
             .kill_source(store, &src, &snap.row.tmux_name)
             .await
@@ -1392,12 +1401,24 @@ async fn move_session_steps(
         }
         // The spend follows the session. Never under keep_source: both rows
         // stay live there and would report it twice.
-        if let (Some(u), Ok(s)) = (source_usage.as_ref(), store.lock()) {
-            if let Err(e) = s.add_usage_totals(target_row.id, u) {
-                eprintln!(
-                    "move_session: carrying usage totals to {} failed: {e}",
-                    target_row.id
-                );
+        if let Ok(s) = store.lock() {
+            if let Some(u) = source_usage.as_ref() {
+                if let Err(e) = s.add_usage_totals(target_row.id, u) {
+                    eprintln!(
+                        "move_session: carrying usage totals to {} failed: {e}",
+                        target_row.id
+                    );
+                }
+            }
+            // A source usage pass between the inherit and the kill counted
+            // lines the target's cursor still points before: catch up.
+            if let Some(c) = source_cursor.as_ref() {
+                if let Err(e) = s.raise_usage_cursor(target_row.id, c) {
+                    eprintln!(
+                        "move_session: raising the usage cursor on {} failed: {e}",
+                        target_row.id
+                    );
+                }
             }
         }
     }
