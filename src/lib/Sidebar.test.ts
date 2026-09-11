@@ -227,6 +227,27 @@ describe('Sidebar (sessions-grouped view)', () => {
     }
   });
 
+  it('selecting a session on a host hidden by the host filter widens the filter to all', async () => {
+    // The persisted host filter outlives the New-session dialog: a session
+    // created (and auto-selected) on another host used to vanish from the
+    // tree with no feedback, so the user kept creating it again.
+    const shown = sessionFor(1, 'dev-local');
+    const created = { ...sessionFor(1, 'dev-new'), host_alias: 'mefistos' };
+    mockBackend(fakeProjects, [shown, created]);
+    hostFilter.set('local');
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryAllByTestId('sess-row')).toHaveLength(1);
+
+    // Select from outside the tree, as onCreated / the quick switcher do.
+    selectSession(created);
+    await tick(); await tick(); await Promise.resolve();
+    expect(get(hostFilter)).toBe('all');
+    const ids = screen.queryAllByTestId('sess-row').map((r) => r.getAttribute('data-session-id'));
+    expect(ids).toContain(String(created.id));
+    expect(ids).toContain(String(shown.id));
+  });
+
   it('clicking a session row selects it in the store', async () => {
     const sess = sessionFor(1, 'dev-foo');
     mockBackend(fakeProjects, [sess]);

@@ -190,14 +190,19 @@
   let collapsed: Set<number> = $state(new Set());
 
   // Reveal the selected session wherever the selection came from (quick
-  // switcher, restore-on-launch, a click): expand its project if collapsed,
-  // then scroll its row into view. Keyed on the id so reconcile updates (a
-  // new row object every tick) neither re-scroll nor undo a later collapse.
+  // switcher, restore-on-launch, a fresh New-session create, a click): widen
+  // the host filter if it hides the session's host, expand its project if
+  // collapsed, then scroll its row into view. Keyed on the id so reconcile
+  // updates (a new row object every tick) neither re-scroll nor undo a
+  // later collapse or re-filter.
   let sidebarEl: HTMLElement | undefined = $state();
   const revealId = $derived($selectedSession?.id ?? null);
   $effect(() => {
     const id = revealId;
     if (id === null) return;
+    const host = untrack(() => $selectedSession?.host_alias ?? null);
+    const filter = untrack(() => $hostFilter);
+    if (host !== null && filter !== 'all' && filter !== host) hostFilter.set('all');
     const pid = untrack(() => $selectedSession?.project_id ?? null);
     if (pid !== null && untrack(() => collapsed.has(pid))) {
       const next = new Set(untrack(() => collapsed));
