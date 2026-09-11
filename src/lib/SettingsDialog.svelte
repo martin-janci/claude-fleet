@@ -687,11 +687,13 @@
         Re-create vanished worktree directories automatically
       </label>
       <p class="hook-desc">
-        Re-adds a missing worktree from its existing branch (dropping its
-        stale git entry only when the directory is confirmed gone and its
-        parent folder still exists); anything else still needs Repair
-        workspace. Never touches the controller, review sessions or a
-        session being safely removed.
+        The only automatic path that re-adds a deleted worktree git still
+        lists: it drops that one stale entry under strict checks, then
+        re-adds it from its branch. Opening, restarting or recreating a
+        session never does that; use Repair workspace. Known gap until the
+        parent-fingerprint check lands: a worktree on a plain mountpoint
+        that is currently unmounted can look deleted. Never touches the
+        controller, review sessions or a session being safely removed.
       </p>
       <div class="mcp-field">
         <span class="lbl">repair</span>

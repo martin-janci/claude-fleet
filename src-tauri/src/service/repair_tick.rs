@@ -141,7 +141,9 @@ impl RepairTickExec for RealRepairTickExec {
     }
 
     async fn repair(&self, session_id: i64) -> Result<RepairReport, IpcError> {
-        repair::ensure_session_workspace(session_id, TICK_ENTRY, &self.store, &self.ssh).await
+        // The only caller allowed to drop a stale entry automatically.
+        repair::ensure_session_workspace_for_tick(session_id, TICK_ENTRY, &self.store, &self.ssh)
+            .await
     }
 }
 
@@ -1106,9 +1108,21 @@ mod tests {
             wt_parent_dev: Some("42".into()),
             ..gone()
         };
+        // The tick's own context: removal permitted (a click never is).
         let no_others = AutoContext {
             other_sessions_mapped: Some(false),
+            allow_auto_unregister: true,
         };
+        let click = AutoContext {
+            allow_auto_unregister: false,
+            ..no_others
+        };
+        let p = plan_with(&spec, &guarded, policy, click).unwrap();
+        assert!(
+            p.steps.is_empty() && p.needs_explicit_repair,
+            "{:?}",
+            p.steps
+        );
         let p = plan_with(&spec, &guarded, policy, no_others).unwrap();
         assert!(
             matches!(

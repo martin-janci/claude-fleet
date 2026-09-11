@@ -20,8 +20,9 @@
 //! recreate, attach, the opt-in reconcile tick — [`Policy::Auto`]) may only
 //! CREATE what is confirmed missing: `git worktree add` from an existing local
 //! or remote-tracking branch into a target that is absent on disk, and a tmux
-//! session that `tmux has-session` confirms is dead. The one removal it may
-//! make is this worktree's OWN stale registration (`git worktree remove
+//! session that `tmux has-session` confirms is dead. Only the opt-in
+//! reconcile tick ([`ensure_session_workspace_for_tick`]) may make one
+//! removal: this worktree's OWN stale registration (`git worktree remove
 //! --force -- <path>`, never a prune) right before that add, and only when
 //! every [`VanishedGuard`] condition holds: the directory is confirmed absent,
 //! its parent exists on the project root's filesystem (no unmounted or other
@@ -588,6 +589,11 @@ pub struct AutoContext {
     /// project and `worktree_key`, or a `worktree_id` whose row has that name
     /// or canonical path). `None` = unknown.
     pub other_sessions_mapped: Option<bool>,
+    /// May this run drop our own stale registration automatically at all?
+    /// Only the opt-in reconcile tick sets it; every click-driven entry point
+    /// (new session, spawn review, restart, recreate, attach) leaves it false,
+    /// so that removal stays behind Repair workspace (the #49 rule).
+    pub allow_auto_unregister: bool,
 }
 
 /// When an AUTOMATIC run may drop this worktree's own stale registration
@@ -881,9 +887,15 @@ pub fn plan_with(
                         // holds and the branch already exists; otherwise it is
                         // explicit-only.
                         let guard = vanished_guard(p, r, ctx);
-                        let auto = guard.holds() && from_existing_branch;
+                        let auto =
+                            ctx.allow_auto_unregister && guard.holds() && from_existing_branch;
                         if !auto {
-                            let failed = guard.failed();
+                            // Without the tick's permission: exactly #49's warning.
+                            let failed = if ctx.allow_auto_unregister {
+                                guard.failed()
+                            } else {
+                                Vec::new()
+                            };
                             warnings.push(format!(
                                 "git still lists {} but its directory is gone; only an explicit \
                                  repair unregisters that entry and re-adds the worktree{}",
@@ -1453,10 +1465,27 @@ pub async fn ensure_workspace(
     store: &Mutex<Store>,
     exec: &dyn RepairExec,
 ) -> Result<RepairReport, IpcError> {
+    ensure_workspace_with(spec, policy, siblings, store, exec, false).await
+}
+
+/// [`ensure_workspace`] with the tick-only permission to drop our own stale
+/// registration automatically ([`AutoContext::allow_auto_unregister`]).
+/// Only [`ensure_session_workspace_for_tick`] passes `true`.
+pub async fn ensure_workspace_with(
+    spec: &WorkspaceSpec,
+    policy: Policy,
+    siblings: Vec<i64>,
+    store: &Mutex<Store>,
+    exec: &dyn RepairExec,
+    allow_auto_unregister: bool,
+) -> Result<RepairReport, IpcError> {
     let probe = run_probe(exec, spec).await?;
     let ctx = {
         let s = store.lock().map_err(|_| IpcError::lock())?;
-        auto_context(&s, spec)
+        AutoContext {
+            allow_auto_unregister,
+            ..auto_context(&s, spec)
+        }
     };
     let fix = plan_with(spec, &probe, policy, ctx).map_err(|e| fail(store, spec, e))?;
     let explicit = policy == Policy::Explicit;
@@ -1755,6 +1784,8 @@ fn auto_context(s: &Store, spec: &WorkspaceSpec) -> AutoContext {
     });
     AutoContext {
         other_sessions_mapped: Some(mapped),
+        // Set by the caller: only the reconcile tick passes `true`.
+        allow_auto_unregister: false,
     }
 }
 
@@ -2147,6 +2178,22 @@ pub async fn ensure_session_workspace(
     let (spec, siblings) = spec_for_session(store, ssh, session_id).await?;
     let exec = HostExec::new(&spec.host_alias, ssh);
     let report = ensure_workspace(&spec, policy_for(entry), siblings, store, &exec).await?;
+    require_no_explicit(report)
+}
+
+/// The opt-in reconcile tick's repair (`repair.auto_on_tick`): the automatic
+/// pre-check, and the ONLY caller allowed to drop the worktree's own stale
+/// registration automatically (under the [`VanishedGuard`]).
+pub async fn ensure_session_workspace_for_tick(
+    session_id: i64,
+    entry: Entry,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<RepairReport, IpcError> {
+    let (spec, siblings) = spec_for_session(store, ssh, session_id).await?;
+    let exec = HostExec::new(&spec.host_alias, ssh);
+    let report =
+        ensure_workspace_with(&spec, policy_for(entry), siblings, store, &exec, true).await?;
     require_no_explicit(report)
 }
 
@@ -3653,22 +3700,52 @@ mod tests {
             }
         );
         assert_eq!(policy_for(Entry::Explicit), Policy::Explicit);
-        // Every automatic entry point (and explicit) may drop our own
-        // vanished registration once the guard is confirmed.
+        // Click-driven entry points never drop our own vanished registration,
+        // even with every guard holding; only the tick's permission does.
         for entry in [
             Entry::NewSession,
             Entry::SpawnReview,
             Entry::Restart,
             Entry::Recreate,
             Entry::Attach,
-            Entry::Explicit,
         ] {
-            let p = plan_with(&spec(true), &vanished(), policy_for(entry), NO_OTHERS).unwrap();
-            assert!(!p.needs_explicit_repair, "{entry:?}: {:?}", p.warnings);
+            let p = plan_with(&spec(true), &vanished(), policy_for(entry), CLICK).unwrap();
             assert!(
-                matches!(p.steps.first(), Some(Step::Unregister { .. })),
+                p.needs_explicit_repair && p.steps.is_empty(),
                 "{entry:?}: {:?}",
                 p.steps
+            );
+            assert!(
+                matches!(p.deferred.first(), Some(Step::Unregister { .. })),
+                "{entry:?}: {:?}",
+                p.deferred
+            );
+            assert!(
+                p.warnings
+                    .iter()
+                    .any(|w| w.contains("only an explicit repair unregisters that entry")),
+                "{entry:?}: {:?}",
+                p.warnings
+            );
+            let t = plan_with(&spec(true), &vanished(), policy_for(entry), NO_OTHERS).unwrap();
+            assert!(!t.needs_explicit_repair, "{entry:?}: {:?}", t.warnings);
+            assert!(
+                matches!(t.steps.first(), Some(Step::Unregister { .. })),
+                "{entry:?}: {:?}",
+                t.steps
+            );
+        }
+        // Explicit is unchanged by the flag.
+        for ctx in [CLICK, NO_OTHERS] {
+            let p = plan_with(&spec(true), &vanished(), Policy::Explicit, ctx).unwrap();
+            assert_eq!(
+                &p.steps[..2],
+                &[
+                    Step::Unregister {
+                        path: VANISHED_WT.into()
+                    },
+                    add_local()
+                ]
             );
         }
         // Without the store context (plain `plan`) no automatic entry point may.
@@ -3705,6 +3782,21 @@ mod tests {
         let tools = include_str!("../mcp/tools.rs");
         assert!(tools.contains("repair::repair_session(id, true"));
         assert!(tools.contains("\"repair_session\",\n            p.confirm_nonce.as_deref(),"));
+        // Only the opt-in tick may drop a stale entry automatically.
+        for (name, src) in [
+            ("sessions.rs", sessions),
+            ("commands/sessions.rs", commands),
+            ("mcp/tools.rs", tools),
+        ] {
+            assert!(
+                !src.contains("for_tick"),
+                "{name} must not use the tick path"
+            );
+            assert!(!src.contains("ensure_workspace_with("), "{name}");
+        }
+        assert!(
+            include_str!("repair_tick.rs").contains("repair::ensure_session_workspace_for_tick(")
+        );
     }
 
     #[test]
@@ -4878,9 +4970,54 @@ mod tests {
     // ── automatic removal of our own vanished registration ────────────────
 
     const VANISHED_WT: &str = "/repo/.claude/worktrees/feat";
+    /// The reconcile tick's context: no other session, removal permitted.
     const NO_OTHERS: AutoContext = AutoContext {
         other_sessions_mapped: Some(false),
+        allow_auto_unregister: true,
     };
+    /// Every click-driven entry point: removal never automatic.
+    const CLICK: AutoContext = AutoContext {
+        other_sessions_mapped: Some(false),
+        allow_auto_unregister: false,
+    };
+
+    #[tokio::test]
+    async fn click_driven_entry_points_never_remove_a_stale_entry_automatically() {
+        // new_session, spawn_review, restart, recreate, and attach (also the
+        // non-explicit repair_session Tauri call): every guard holds, yet
+        // only the probe runs and the lifecycle answer is E_REPAIR_REQUIRED.
+        for entry in [
+            Entry::NewSession,
+            Entry::SpawnReview,
+            Entry::Restart,
+            Entry::Recreate,
+            Entry::Attach,
+        ] {
+            let (store, sid, pid) = seeded_store(VANISHED_WT);
+            let exec = FakeExec::new(vec![ok(&vanished_out(true))]);
+            let rep = ensure_workspace(
+                &spec_with_ids(sid, pid),
+                policy_for(entry),
+                vec![],
+                &store,
+                &exec,
+            )
+            .await
+            .unwrap();
+            assert_eq!(exec.scripts().len(), 1, "{entry:?}: probe only");
+            assert!(exec.tmux_calls().is_empty(), "{entry:?}");
+            assert!(rep.needs_explicit_repair, "{entry:?}");
+            assert!(
+                rep.deferred
+                    .iter()
+                    .any(|d| d.contains("worktree remove --force")),
+                "{entry:?}: {:?}",
+                rep.deferred
+            );
+            let err = require_no_explicit(rep).unwrap_err();
+            assert_eq!(err.code, codes::E_REPAIR_REQUIRED, "{entry:?}");
+        }
+    }
 
     /// `spec(true)`'s registered worktree whose directory vanished, with every
     /// guard condition confirmed by the probe.
@@ -4971,6 +5108,7 @@ mod tests {
         dotdot.worktrees[1].canon = Some("/repo/x/../../etc/feat".into());
         let mapped = AutoContext {
             other_sessions_mapped: Some(true),
+            ..NO_OTHERS
         };
         let cases: Vec<(&str, Probe, AutoContext, &str)> = vec![
             (
@@ -5029,7 +5167,10 @@ mod tests {
             (
                 "mapping unknown",
                 vanished(),
-                AutoContext::default(),
+                AutoContext {
+                    other_sessions_mapped: None,
+                    ..NO_OTHERS
+                },
                 "another session",
             ),
         ];
@@ -5098,9 +5239,10 @@ mod tests {
             ok("outcome=branch_local\n"), // git steps
             ok(HEALTHY_OUT),              // verify
         ]);
-        let rep = ensure_workspace(&spec_with_ids(sid, pid), AUTO, vec![], &store, &exec)
-            .await
-            .unwrap();
+        let rep =
+            ensure_workspace_with(&spec_with_ids(sid, pid), AUTO, vec![], &store, &exec, true)
+                .await
+                .unwrap();
         let rep = require_no_explicit(rep).unwrap();
         let scripts = exec.scripts();
         assert_eq!(scripts.len(), 3, "probe, apply, verify");
@@ -5141,9 +5283,10 @@ mod tests {
         // Parent missing (an unmounted volume looks exactly like this).
         let (store, sid, pid) = seeded_store(VANISHED_WT);
         let exec = FakeExec::new(vec![ok(&vanished_out(false))]);
-        let rep = ensure_workspace(&spec_with_ids(sid, pid), AUTO, vec![], &store, &exec)
-            .await
-            .unwrap();
+        let rep =
+            ensure_workspace_with(&spec_with_ids(sid, pid), AUTO, vec![], &store, &exec, true)
+                .await
+                .unwrap();
         assert_eq!(exec.scripts().len(), 1, "probe only");
         let err = require_no_explicit(rep).unwrap_err();
         assert_eq!(err.code, codes::E_REPAIR_REQUIRED);
@@ -5163,9 +5306,10 @@ mod tests {
             s.set_worktree_key(other, Some("feat")).unwrap();
         }
         let exec = FakeExec::new(vec![ok(&vanished_out(true))]);
-        let rep = ensure_workspace(&spec_with_ids(sid, pid), AUTO, vec![], &store, &exec)
-            .await
-            .unwrap();
+        let rep =
+            ensure_workspace_with(&spec_with_ids(sid, pid), AUTO, vec![], &store, &exec, true)
+                .await
+                .unwrap();
         assert_eq!(exec.scripts().len(), 1, "probe only");
         let err = require_no_explicit(rep).unwrap_err();
         assert_eq!(err.code, codes::E_REPAIR_REQUIRED);
@@ -5195,7 +5339,8 @@ mod tests {
             .unwrap();
         let mut s = local_spec(&root, &wt, "auto-vanished");
         s.project_id = Some(pid);
-        let rep = ensure_workspace(&s, AUTO, vec![], &store, &LocalExec)
+        // The reconcile tick's path (the only automatic remover).
+        let rep = ensure_workspace_with(&s, AUTO, vec![], &store, &LocalExec, true)
             .await
             .unwrap();
         let rep = require_no_explicit(rep).unwrap();
@@ -5251,7 +5396,7 @@ mod tests {
             .unwrap();
         let mut s = local_spec(&root, &wt, "auto-unmounted");
         s.project_id = Some(pid);
-        let rep = ensure_workspace(&s, AUTO, vec![], &store, &LocalExec)
+        let rep = ensure_workspace_with(&s, AUTO, vec![], &store, &LocalExec, true)
             .await
             .unwrap();
         let err = require_no_explicit(rep).unwrap_err();
@@ -5342,9 +5487,10 @@ mod tests {
                 stderr: format!("repair: {VANISHED_WT} {UNREGISTER_REFUSED}\n"),
             }),
         ]);
-        let err = ensure_workspace(&spec_with_ids(sid, pid), AUTO, vec![], &store, &exec)
-            .await
-            .unwrap_err();
+        let err =
+            ensure_workspace_with(&spec_with_ids(sid, pid), AUTO, vec![], &store, &exec, true)
+                .await
+                .unwrap_err();
         assert_eq!(err.code, codes::E_REPAIR_REQUIRED, "{}", err.message);
         assert!(err.message.contains("reappeared"), "{}", err.message);
         assert_eq!(exec.scripts().len(), 2, "probe + refused apply, no verify");
@@ -5402,7 +5548,7 @@ mod tests {
         let mut s = local_spec(&root, &wt, "auto-reappear");
         s.project_id = Some(pid);
         let exec = ReappearExec { dir: wt.clone() };
-        let err = ensure_workspace(&s, AUTO, vec![], &store, &exec)
+        let err = ensure_workspace_with(&s, AUTO, vec![], &store, &exec, true)
             .await
             .unwrap_err();
         assert_eq!(err.code, codes::E_REPAIR_REQUIRED, "{}", err.message);

@@ -3189,11 +3189,10 @@ impl FleetTools {
     #[tool(description = "Explicitly repair a session's workspace (the same \
         action as the Repair workspace button): make its directory a healthy \
         git worktree on its branch and its tmux session run there. Unlike the \
-        automatic checks on create/restart/recreate/attach (which re-add a \
-        missing worktree from its existing branch, dropping its own stale git \
-        entry first only when the directory is confirmed gone under the \
-        project root, its parent exists and no other session maps to it), \
-        this may unregister this worktree's own stale git entry in any case \
+        automatic checks on create/restart/recreate/attach (which only re-add \
+        a missing worktree git no longer lists, from its existing branch; only \
+        the opt-in reconcile tick also drops a stale entry automatically), \
+        this may unregister this worktree's own stale git entry \
         (git worktree remove --force; never a blanket prune), adopt its \
         branch's checkout elsewhere (refused when \
         another fleet workspace uses it), recreate the branch from the base \
