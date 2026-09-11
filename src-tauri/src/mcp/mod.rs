@@ -164,12 +164,12 @@ async fn authorize(
             query_token(request.uri().query())
                 .and_then(|t| auth::resolve_token(t, &state.master, &[]))
                 .ok_or_else(|| {
-                    eprintln!("[mcp] rejected /hook request: no valid token");
+                    tracing::warn!("[mcp] rejected /hook request: no valid token");
                     StatusCode::UNAUTHORIZED
                 })?
         }
         Err(status) => {
-            eprintln!("[mcp] rejected request: {status}");
+            tracing::warn!(%status, "[mcp] rejected request");
             return Err(status);
         }
     };
@@ -236,14 +236,14 @@ pub async fn start(
         );
         let app = build_app(axum::routing::any_service(service), hook_state, auth_state);
 
-        eprintln!("[mcp] control API listening on http://{addr}/mcp");
+        tracing::info!("[mcp] control API listening on http://{addr}/mcp");
         let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
             serve_shutdown.cancelled().await;
         });
         if let Err(e) = serve.await {
-            eprintln!("[mcp] server error: {e}");
+            tracing::error!(error = %e, "[mcp] server error");
         }
-        eprintln!("[mcp] control API stopped");
+        tracing::info!("[mcp] control API stopped");
     });
 
     Ok(shutdown)

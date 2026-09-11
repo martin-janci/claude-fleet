@@ -474,7 +474,11 @@ pub fn set_private_mode(path: &std::path::Path) {
     {
         use std::os::unix::fs::PermissionsExt;
         if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
-            eprintln!("[provision] chmod 600 {}: {e}", path.display());
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "[provision] chmod 600 failed; the file may be readable by other users"
+            );
         }
     }
     #[cfg(not(unix))]

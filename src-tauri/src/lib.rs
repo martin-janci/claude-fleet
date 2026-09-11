@@ -9,6 +9,8 @@ mod humanize;
 mod ipc_error;
 mod logging;
 mod mcp;
+#[cfg(test)]
+mod no_eprintln_tests;
 mod projects;
 mod pty;
 mod service;

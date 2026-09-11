@@ -260,9 +260,11 @@ pub async fn sweep_with(
             GcAction::InspectThenKill => match exec.inspect(&p.host_alias, &p.tmux_name).await {
                 Ok(insp) => needs_safe_remove(&insp),
                 Err(e) => {
-                    eprintln!(
-                        "[gc] inspect {}/{} failed ({e}); using safe-remove",
-                        p.host_alias, p.tmux_name
+                    tracing::warn!(
+                        host = %p.host_alias,
+                        session = %p.tmux_name,
+                        error = %e,
+                        "[gc] inspect failed; using safe-remove"
                     );
                     true
                 }
@@ -276,7 +278,11 @@ pub async fn sweep_with(
         );
         if let Ok(s) = store.lock() {
             if let Err(e) = s.insert_session_event(p.session_id, "gc_killed", Some(&detail)) {
-                eprintln!("[gc] session_event insert failed for {}: {e}", p.session_id);
+                tracing::warn!(
+                    session_id = p.session_id,
+                    error = %e,
+                    "[gc] session_event insert failed"
+                );
             }
         }
         let result = if via_claude {
@@ -289,9 +295,12 @@ pub async fn sweep_with(
             Ok(()) => report.killed += 1,
             Err(e) => {
                 report.failed += 1;
-                eprintln!(
-                    "[gc] {} of {}/{} failed: {e}",
-                    detail, p.host_alias, p.tmux_name
+                tracing::warn!(
+                    host = %p.host_alias,
+                    session = %p.tmux_name,
+                    action = %detail,
+                    error = %e,
+                    "[gc] action failed"
                 );
                 if let Ok(s) = store.lock() {
                     let _ = s.insert_session_event(p.session_id, "gc_failed", Some(&e.message));
@@ -330,9 +339,12 @@ pub async fn maybe_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Opt
     };
     let report = sweep_with(store, &exec, &cfg, now_unix()).await;
     if report != GcReport::default() {
-        eprintln!(
-            "[gc] sweep: killed={} safe_kill_requested={} failed={}",
-            report.killed, report.safe_kill_requested, report.failed
+        // Only when the sweep acted: a no-op sweep stays silent.
+        tracing::info!(
+            killed = report.killed,
+            safe_kill_requested = report.safe_kill_requested,
+            failed = report.failed,
+            "[gc] sweep"
         );
     }
     Some(report)
