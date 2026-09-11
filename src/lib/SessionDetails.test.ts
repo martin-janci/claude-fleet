@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/svelte';
+import { render, screen, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tick } from 'svelte';
 
@@ -6,6 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
 }));
 
+import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import SessionDetails from './SessionDetails.svelte';
 import { hosts } from './hosts';
 import { accounts } from './accounts';
@@ -127,6 +128,11 @@ describe('SessionDetails', () => {
     await tick();
     expect(screen.queryByTestId('repair-from-details')).toBeNull();
     // Project-backed work session: button present; click → repair_session(id) → toast.
+    render(SessionDetails, { props: { session: { ...sampleSession, id: 7, project_id: 1 } } });
+    await tick();
+    const btn = await screen.findByTestId('repair-from-details');
+    // Queue the repair response only now: the Timeline's mount-time
+    // session_history call would otherwise consume a once-value set earlier.
     (invoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       session_id: 7, host_alias: 'mefistos', tmux_name: 'dev-foo', cwd: '/r/.worktrees/x',
       healthy: false,
@@ -135,9 +141,6 @@ describe('SessionDetails', () => {
       tmux: 'respawned', tmux_alive: true, tmux_dead: false,
       tmux_cwd_stale: false, worktree_row_updated: false, sibling_session_ids: [],
     });
-    render(SessionDetails, { props: { session: { ...sampleSession, id: 7, project_id: 1 } } });
-    await tick();
-    const btn = await screen.findByTestId('repair-from-details');
     btn.click();
     await tick();
     await tick();
@@ -363,5 +366,87 @@ describe('SessionDetails outcome + triage fields (W2 Track D)', () => {
     expect(screen.queryByTestId('details-last-prompt')).toBeNull();
     expect(screen.queryByTestId('details-pr')).toBeNull();
     expect(screen.queryByTestId('details-stuck')).toBeNull();
+  });
+});
+
+describe('SessionDetails label editing and timeline', () => {
+  const inv = () => mockedInvoke as ReturnType<typeof vi.fn>;
+  const events = [
+    { id: 3, session_id: 1, at: 1_700_000_300, kind: 'stuck', detail: 'auth_menu' },
+    { id: 2, session_id: 1, at: 1_700_000_200, kind: 'prompt_sent', detail: 'fix the login bug' },
+    { id: 1, session_id: 1, at: 1_700_000_100, kind: 'status_change', detail: 'working' },
+  ];
+
+  beforeEach(() => {
+    inv().mockReset();
+    inv().mockImplementation(async (cmd: string, args?: { args?: { friendly_name?: string } }) => {
+      if (cmd === 'session_history') return events;
+      if (cmd === 'set_session_friendly_name') {
+        return { ...sampleSession, friendly_name: args?.args?.friendly_name || null };
+      }
+      return undefined;
+    });
+  });
+
+  it('double-clicking the title edits the label, focused', async () => {
+    render(SessionDetails, { props: { session: { ...sampleSession, friendly_name: 'Fix login' } } });
+    await tick();
+    await fireEvent.dblClick(document.querySelector('h2.title')!);
+    const input = (await screen.findByTestId('details-label')) as HTMLInputElement;
+    expect(input.value).toBe('Fix login');
+    expect(document.activeElement).toBe(input);
+    expect(input.getAttribute('aria-label')).toContain('Label for dev-foo');
+  });
+
+  it('Enter saves the label through set_session_friendly_name', async () => {
+    render(SessionDetails, { props: { session: sampleSession } });
+    await tick();
+    await fireEvent.click(await screen.findByTestId('label-from-details'));
+    const input = await screen.findByTestId('details-label');
+    await fireEvent.input(input, { target: { value: 'New label' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    const calls = inv().mock.calls;
+    const call = calls.filter((c) => c[0] === 'set_session_friendly_name');
+    expect(call).toHaveLength(1);
+    expect(call[0][1]).toEqual({
+      args: { host_alias: 'mefistos', tmux_name: 'dev-foo', friendly_name: 'New label' },
+    });
+    expect(calls.some((c) => c[0] === 'rename_session')).toBe(false);
+  });
+
+  it('Rename tmux session opens the tmux-name editor; Escape cancels', async () => {
+    render(SessionDetails, { props: { session: sampleSession } });
+    await tick();
+    await fireEvent.click(await screen.findByTestId('rename-from-details'));
+    const input = (await screen.findByTestId('details-rename')) as HTMLInputElement;
+    expect(input.value).toBe('dev-foo');
+    expect(document.activeElement).toBe(input);
+    await fireEvent.keyDown(input, { key: 'Escape' });
+    expect(screen.queryByTestId('details-rename')).toBeNull();
+    expect(inv().mock.calls.some((c) => c[0] === 'rename_session')).toBe(false);
+  });
+
+  it('renders the session_history timeline with filter chips', async () => {
+    render(SessionDetails, { props: { session: sampleSession } });
+    const rows = await screen.findAllByTestId('timeline-event');
+    expect(rows.map((r) => r.getAttribute('data-kind'))).toEqual(['stuck', 'prompt_sent', 'status_change']);
+    expect(inv().mock.calls.find((c) => c[0] === 'session_history')![1]).toEqual({
+      args: { session_id: 1, limit: null },
+    });
+    const errors = screen.getByTestId('timeline-chip-errors');
+    await fireEvent.click(errors);
+    expect(errors.getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getAllByTestId('timeline-event').map((r) => r.getAttribute('data-kind'))).toEqual(['stuck']);
+    // Chips are additive: swap errors for ops, which matches nothing here.
+    await fireEvent.click(errors);
+    await fireEvent.click(screen.getByTestId('timeline-chip-ops'));
+    expect(screen.getByTestId('timeline-empty').textContent).toContain('No events match');
+  });
+
+  it('shows an empty state when nothing was recorded', async () => {
+    inv().mockImplementation(async (cmd: string) => (cmd === 'session_history' ? [] : undefined));
+    render(SessionDetails, { props: { session: sampleSession } });
+    expect((await screen.findByTestId('timeline-empty')).textContent).toContain('No events recorded');
   });
 });

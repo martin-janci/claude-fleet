@@ -5,6 +5,7 @@
   import {
     killSession,
     renameSession,
+    setFriendlyName,
     restartSession,
     repairSession,
     recreateSession,
@@ -22,6 +23,7 @@
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import TasksPanel from './TasksPanel.svelte';
+  import Timeline from './Timeline.svelte';
   import { push, pushError } from './toasts';
   import { copyText } from './clipboard';
   import {
@@ -96,9 +98,14 @@
   });
   const ctxLevel = $derived(contextLevel(session.context_pct));
 
-  // Title rename state — same UX as the sidebar's inline rename.
-  let renaming = $state(false);
+  // Inline editor state — same UX as the sidebar's. Double-clicking the
+  // title edits the display label (empty clears it); "Rename tmux session"
+  // renames tmux itself.
+  let renaming: 'label' | 'tmux' | null = $state(null);
   let renameValue = $state('');
+  // Enter commits and then the input unmounts, which can fire blur → a
+  // second commit. Same synchronous guard as the sidebar.
+  let committingRename = false;
 
   async function onCopy() {
     const ok = await copyText(attachCommand, (e) => {
@@ -109,33 +116,55 @@
     setTimeout(() => (copied = false), 1500);
   }
 
-  async function beginRename() {
-    renaming = true;
-    renameValue = session.tmux_name;
+  let renameInput: HTMLInputElement | undefined = $state();
+
+  async function beginEdit(mode: 'label' | 'tmux') {
+    renaming = mode;
+    renameValue = mode === 'label' ? (session.friendly_name ?? '') : session.tmux_name;
     await tick();
-    const input = document.querySelector<HTMLInputElement>('[data-testid="details-rename"]');
-    input?.focus();
-    input?.select();
+    renameInput?.focus();
+    renameInput?.select();
   }
 
+  const beginRename = () => beginEdit('tmux');
+  const beginLabelEdit = () => beginEdit('label');
+
   async function commitRename() {
-    if (!renaming) return;
+    if (!renaming || committingRename) return;
     const next = renameValue.trim();
-    if (!next || next === session.tmux_name) {
-      renaming = false;
-      return;
+    committingRename = true;
+    try {
+      if (renaming === 'label') {
+        if (next === (session.friendly_name ?? '').trim()) {
+          renaming = null;
+          return;
+        }
+        const r = await setFriendlyName(session.host_alias, session.tmux_name, next);
+        if (!r.ok) {
+          pushError(r.error, 'Label update failed');
+          return;
+        }
+        renaming = null;
+        return;
+      }
+      if (!next || next === session.tmux_name) {
+        renaming = null;
+        return;
+      }
+      const r = await renameSession(session.host_alias, session.tmux_name, next);
+      if (!r.ok) {
+        pushError(r.error, 'Rename failed');
+        return;
+      }
+      selectSession(r.value);
+      renaming = null;
+    } finally {
+      committingRename = false;
     }
-    const r = await renameSession(session.host_alias, session.tmux_name, next);
-    if (!r.ok) {
-      pushError(r.error, 'Rename failed');
-      return;
-    }
-    selectSession(r.value);
-    renaming = false;
   }
 
   function cancelRename() {
-    renaming = false;
+    renaming = null;
   }
 
   function onRenameKey(e: KeyboardEvent) {
@@ -366,8 +395,13 @@
   <header class="header">
     {#if renaming}
       <input
+        bind:this={renameInput}
         class="title-input"
-        data-testid="details-rename"
+        data-testid={renaming === 'label' ? 'details-label' : 'details-rename'}
+        aria-label={renaming === 'label'
+          ? `Label for ${session.tmux_name} (empty clears it)`
+          : `New tmux session name for ${session.tmux_name}`}
+        placeholder={renaming === 'label' ? session.tmux_name : undefined}
         bind:value={renameValue}
         onkeydown={onRenameKey}
         onblur={commitRename}
@@ -375,11 +409,11 @@
     {:else}
       <h2
         class="title"
-        ondblclick={beginRename}
-        title="Double-click to rename"
+        ondblclick={beginLabelEdit}
+        title="Double-click to edit the label"
       >{session.tmux_name}</h2>
     {/if}
-    {#if session.friendly_name}
+    {#if session.friendly_name && renaming !== 'label'}
       <p class="friendly" data-testid="details-friendly-name">{session.friendly_name}</p>
     {/if}
     <div class="sub">
@@ -533,6 +567,11 @@
 
   <TasksPanel sessionId={session.id} />
 
+  <Timeline
+    sessionId={session.id}
+    refreshKey={`${session.turn_seq}|${session.status}|${session.claude_status}|${session.stuck_kind}|${session.last_prompt}|${session.safe_kill_state}`}
+  />
+
   <section class="block">
     <h3>Attach from another terminal</h3>
     <div class="cmd-row">
@@ -544,8 +583,11 @@
   </section>
 
   <section class="block actions">
+    <button class="ghost" onclick={beginLabelEdit} data-testid="label-from-details">
+      🏷 Edit label
+    </button>
     <button class="ghost" onclick={beginRename} data-testid="rename-from-details">
-      ✎ Rename
+      ✎ Rename tmux session
     </button>
     <button class="ghost" onclick={onRestart} data-testid="restart-from-details">
       ↻ Restart

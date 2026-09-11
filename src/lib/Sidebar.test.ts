@@ -79,6 +79,12 @@ function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof session
     // patch even though these tests only assert that the IPC was invoked.
     const id = args?.args?.id ?? 0;
     if (cmd === 'kill_session') return id;
+    if (cmd === 'set_session_friendly_name') {
+      const a = (args?.args ?? {}) as { tmux_name?: string; friendly_name?: string };
+      const found = sess.find((s) => s.tmux_name === a.tmux_name) ?? sess[0];
+      const label = a.friendly_name?.trim() ? a.friendly_name.trim() : null;
+      return found ? { ...found, friendly_name: label } : null;
+    }
     if (cmd === 'new_session' || cmd === 'rename_session' || cmd === 'restart_session') {
       const found = sess.find((s) => s.id === id) ?? sess[0];
       return found ?? null;
@@ -275,7 +281,8 @@ describe('Sidebar (sessions-grouped view)', () => {
       render(Sidebar);
       await tick(); await tick();
       const rows = await screen.findAllByTestId('sess-row');
-      await fireEvent.dblClick(rows[1]);
+      // Tmux rename is the row's ✎ action (double-click edits the label).
+      await fireEvent.click(rows[1].querySelector('[data-testid="rename-tmux"]')!);
       const input = await screen.findByTestId('rename-input');
       // Only the second row is in rename mode.
       expect(rows[1].className).toContain('renaming');
@@ -380,31 +387,82 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(t?.kind).toBe('success');
   });
 
-  it('double-click on a session enters rename mode', async () => {
-    mockBackend(fakeProjects, [sessionFor(1, 'dev-foo')]);
+  it('double-click on a session edits its label, with the input focused', async () => {
+    mockBackend(fakeProjects, [{ ...sessionFor(1, 'dev-foo'), friendly_name: 'Fix login' }]);
     render(Sidebar);
     await tick(); await tick();
     const sessRow = await screen.findByTestId('sess-row');
     await fireEvent.dblClick(sessRow);
-    const input = await screen.findByTestId('rename-input');
-    expect((input as HTMLInputElement).value).toBe('dev-foo');
-    // Pins the bind:this → $bindable → beginRename chain: the row's input ref
-    // must reach Sidebar so beginRename can focus it after its tick().
+    const input = (await screen.findByTestId('label-input')) as HTMLInputElement;
+    expect(input.value).toBe('Fix login');
+    // Pins the bind:this → $bindable → beginEdit chain: the row's input ref
+    // must reach Sidebar so beginEdit can focus it after its tick().
     await tick();
     expect(input).toHaveFocus();
+    expect(input.getAttribute('aria-label')).toContain('Label for dev-foo');
+    expect(input.placeholder).toBe('dev-foo');
+    expect(screen.queryByTestId('rename-input')).toBeNull();
   });
 
-  it('pressing Escape in rename mode cancels without calling backend', async () => {
+  it('Enter in label mode saves via set_session_friendly_name, never rename_session', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-foo')]);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.dblClick(await screen.findByTestId('sess-row'));
+    const input = await screen.findByTestId('label-input');
+    await fireEvent.input(input, { target: { value: '  Fix login  ' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick(); await tick();
+    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls;
+    const call = calls.filter((c) => c[0] === 'set_session_friendly_name');
+    expect(call).toHaveLength(1);
+    expect(call[0][1]).toEqual({
+      args: { host_alias: 'local', tmux_name: 'dev-foo', friendly_name: 'Fix login' },
+    });
+    expect(calls.some((c) => c[0] === 'rename_session')).toBe(false);
+    expect(screen.queryByTestId('label-input')).toBeNull();
+  });
+
+  it('an emptied label is sent as empty, which clears it', async () => {
+    mockBackend(fakeProjects, [{ ...sessionFor(1, 'dev-foo'), friendly_name: 'Old label' }]);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.dblClick(await screen.findByTestId('sess-row'));
+    const input = await screen.findByTestId('label-input');
+    await fireEvent.input(input, { target: { value: '   ' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick(); await tick();
+    const call = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.find((c) => c[0] === 'set_session_friendly_name');
+    expect((call![1] as { args: { friendly_name: string } }).args.friendly_name).toBe('');
+  });
+
+  it('pressing Escape in label mode cancels without calling backend', async () => {
     mockBackend(fakeProjects, [sessionFor(1, 'dev-foo')]);
     render(Sidebar);
     await tick(); await tick();
     const sessRow = await screen.findByTestId('sess-row');
     await fireEvent.dblClick(sessRow);
-    const input = await screen.findByTestId('rename-input');
+    const input = await screen.findByTestId('label-input');
+    await fireEvent.input(input, { target: { value: 'typed' } });
+    await fireEvent.keyDown(input, { key: 'Escape' });
+    expect(screen.queryByTestId('label-input')).toBeNull();
+    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.some((c) => c[0] === 'rename_session' || c[0] === 'set_session_friendly_name')).toBe(false);
+  });
+
+  it('the rename-tmux action edits the tmux name, focused', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-foo')]);
+    render(Sidebar);
+    await tick(); await tick();
+    const row = await screen.findByTestId('sess-row');
+    const btn = row.querySelector('[data-testid="rename-tmux"]') as HTMLButtonElement;
+    expect(btn.getAttribute('aria-label')).toBe('Rename tmux session');
+    await fireEvent.click(btn);
+    const input = (await screen.findByTestId('rename-input')) as HTMLInputElement;
+    expect(input.value).toBe('dev-foo');
+    expect(document.activeElement).toBe(input);
     await fireEvent.keyDown(input, { key: 'Escape' });
     expect(screen.queryByTestId('rename-input')).toBeNull();
-    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls;
-    expect(calls.some((c) => c[0] === 'rename_session')).toBe(false);
   });
 
   it('restart button invokes restart_session', async () => {

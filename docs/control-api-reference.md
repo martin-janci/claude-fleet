@@ -360,6 +360,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::repair_session`
 - `commands::sessions::rename_session`
 - `commands::sessions::set_session_friendly_name`
+- `commands::sessions::session_history`
 - `commands::sessions::restart_session`
 - `commands::sessions::send_prompt`
 - `commands::sessions::spawn_review`

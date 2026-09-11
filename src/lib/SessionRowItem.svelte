@@ -34,6 +34,7 @@
     selectMode,
     isChecked,
     isRenaming,
+    renameMode = null,
     renameValue = $bindable(),
     renameInput = $bindable(),
     renameError,
@@ -44,6 +45,7 @@
     onKeySession,
     toggleSelected,
     beginRename,
+    beginLabelEdit,
     onRenameKey,
     commitRename,
     askRecreate,
@@ -55,6 +57,8 @@
     selectMode: boolean;
     isChecked: boolean;
     isRenaming: boolean;
+    /** What the inline editor changes: the display label or the tmux name. */
+    renameMode?: 'label' | 'tmux' | null;
     renameValue: string;
     renameInput: HTMLInputElement | undefined;
     renameError: string | null;
@@ -65,6 +69,7 @@
     onKeySession: (e: KeyboardEvent, sess: SessionRow) => void;
     toggleSelected: (sess: SessionRow) => void;
     beginRename: (sess: SessionRow, e?: Event) => unknown;
+    beginLabelEdit: (sess: SessionRow, e?: Event) => unknown;
     onRenameKey: (e: KeyboardEvent) => void;
     commitRename: () => unknown;
     askRecreate: (sess: SessionRow, e?: Event) => void;
@@ -115,7 +120,7 @@
   data-stuck={sess.stuck_kind ?? undefined}
   role="button"
   tabindex="0"
-  ondblclick={(e) => sess.status !== 'ghost' && beginRename(sess, e)}
+  ondblclick={(e) => sess.status !== 'ghost' && beginLabelEdit(sess, e)}
   onclick={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onSelectSession(sess, e)}
   onkeydown={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onKeySession(e, sess)}
   use:hintAnchor={{ id: 'session-actions', when: !!sess.claude_session_id && sess.status !== 'ghost' }}
@@ -139,7 +144,11 @@
     <input
       bind:this={renameInput}
       class="rename-input"
-      data-testid="rename-input"
+      data-testid={renameMode === 'label' ? 'label-input' : 'rename-input'}
+      aria-label={renameMode === 'label'
+        ? `Label for ${sess.tmux_name} (empty clears it)`
+        : `New tmux session name for ${sess.tmux_name}`}
+      placeholder={renameMode === 'label' ? sess.tmux_name : undefined}
       bind:value={renameValue}
       onkeydown={onRenameKey}
       onblur={commitRename}
@@ -279,7 +288,20 @@
           >📋</button>
         {/if}
         <button class="icon-btn small" onclick={(e) => doRestart(sess, e)} title="Restart claude in this session" aria-label="Restart">↻</button>
-        <button class="icon-btn small" onclick={(e) => beginRename(sess, e)} title="Rename session" aria-label="Rename">✎</button>
+        <button
+          class="icon-btn small"
+          data-testid="edit-label"
+          onclick={(e) => beginLabelEdit(sess, e)}
+          title="Edit label (double-click the row)"
+          aria-label="Edit label"
+        >🏷</button>
+        <button
+          class="icon-btn small"
+          data-testid="rename-tmux"
+          onclick={(e) => beginRename(sess, e)}
+          title="Rename tmux session"
+          aria-label="Rename tmux session"
+        >✎</button>
         <button
           class="icon-btn small"
           data-testid="recreate-live"

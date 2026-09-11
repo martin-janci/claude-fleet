@@ -245,6 +245,23 @@ export async function renameSession(
   return r;
 }
 
+/**
+ * Set the session's display label (`friendly_name`). An empty or
+ * whitespace-only value clears it, so the row falls back to the tmux name.
+ * Unlike `renameSession` this never touches tmux and keeps the row id.
+ */
+export async function setFriendlyName(
+  hostAlias: string,
+  tmuxName: string,
+  friendlyName: string,
+): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('set_session_friendly_name', {
+    args: { host_alias: hostAlias, tmux_name: tmuxName, friendly_name: friendlyName },
+  });
+  if (r.ok) acceptCommandRow(r.value);
+  return r;
+}
+
 export async function restartSession(hostAlias: string, name: string): Promise<Result<SessionRow>> {
   const r = await invokeCmd<SessionRow>('restart_session', {
     args: { host_alias: hostAlias, name },
