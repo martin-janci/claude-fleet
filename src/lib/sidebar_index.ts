@@ -7,17 +7,35 @@
 // deterministically instead of measuring jsdom wall-clock.
 import type { SessionRow } from './sessions';
 
-/** project_id → sessions visible under the current host / bg-agent filter. */
+/** Optional per-row predicate layered on top of the host / bg filters
+ *  (the "N stuck" and "needs attention" pills). `null` = no extra filter. */
+export type SessionPredicate = ((s: SessionRow) => boolean) | null;
+
+/** True when the row passes the host, bg-agent and optional extra filters. */
+export function sessionVisible(
+  s: SessionRow,
+  hostFilter: string,
+  showBgAgents: boolean,
+  predicate: SessionPredicate = null,
+): boolean {
+  if (hostFilter !== 'all' && s.host_alias !== hostFilter) return false;
+  if (!showBgAgents && s.kind === 'bg') return false;
+  if (predicate && !predicate(s)) return false;
+  return true;
+}
+
+/** project_id → sessions visible under the current host / bg-agent filter
+ *  (plus the optional predicate). */
 export function buildSessionsByProject(
   sessions: readonly SessionRow[],
   hostFilter: string,
   showBgAgents: boolean,
+  predicate: SessionPredicate = null,
 ): Map<number, SessionRow[]> {
   const m = new Map<number, SessionRow[]>();
   for (const s of sessions) {
     if (s.project_id == null) continue;
-    if (hostFilter !== 'all' && s.host_alias !== hostFilter) continue;
-    if (!showBgAgents && s.kind === 'bg') continue;
+    if (!sessionVisible(s, hostFilter, showBgAgents, predicate)) continue;
     if (!m.has(s.project_id)) m.set(s.project_id, []);
     m.get(s.project_id)!.push(s);
   }
@@ -38,4 +56,18 @@ export function buildRelatedCountById(sessions: readonly SessionRow[]): Map<numb
     for (const s of list) out.set(s.id, list.length - 1);
   }
   return out;
+}
+
+/** Stable sort of project rows by the worst severity among their visible
+ *  sessions (descending); ties keep the incoming order. `severityByProject`
+ *  comes from `attention.worstSeverityByProject` over the VISIBLE sessions so
+ *  a stuck session hidden by the host filter does not float its project. */
+export function sortProjectsBySeverity<T extends { project: { id: number } }>(
+  rows: readonly T[],
+  severityByProject: ReadonlyMap<number, number>,
+): T[] {
+  return rows
+    .map((row, i) => ({ row, i, sev: severityByProject.get(row.project.id) ?? -1 }))
+    .sort((a, b) => b.sev - a.sev || a.i - b.i)
+    .map((x) => x.row);
 }

@@ -59,7 +59,7 @@ describe('App bootstrap failure', () => {
       kind: 'work', reviews_session_id: null, worktree_key: null, lost_at: null,
       claude_session_id: null, claude_status: null, effort_level: null, pr_url: null,
       current_activity: null, friendly_name: null, safe_kill_state: null, safe_kill_nonce: null,
-      safe_kill_detail: null, safe_kill_requested_at: null,
+      safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null,
     };
     inv.mockImplementation(async (cmd: string, ...rest: unknown[]) => {
       if (cmd === 'list_sessions') return [row];

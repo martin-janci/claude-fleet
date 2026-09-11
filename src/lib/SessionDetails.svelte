@@ -19,6 +19,18 @@
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import { push, pushError } from './toasts';
+  import {
+    ciStatusColor,
+    ciStatusLabel,
+    claudeStatusColor,
+    claudeStatusLabel,
+    contextColor,
+    contextLevel,
+    formatElapsed,
+    sessionStart,
+    stuckKindLabel,
+    STUCK_COLOR,
+  } from './attention';
 
   let { session }: { session: SessionRow } = $props();
 
@@ -69,6 +81,15 @@
   }
 
   let copied = $state(false);
+
+  // Coarse clock for the elapsed / idle counters (a minute-level readout
+  // does not need a per-second re-render).
+  let nowSec = $state(Math.floor(Date.now() / 1000));
+  $effect(() => {
+    const t = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 30_000);
+    return () => clearInterval(t);
+  });
+  const ctxLevel = $derived(contextLevel(session.context_pct));
 
   // Title rename state — same UX as the sidebar's inline rename.
   let renaming = $state(false);
@@ -272,9 +293,36 @@
         title="Double-click to rename"
       >{session.tmux_name}</h2>
     {/if}
+    {#if session.friendly_name}
+      <p class="friendly" data-testid="details-friendly-name">{session.friendly_name}</p>
+    {/if}
     <div class="sub">
       <span class="host">{session.host_alias}</span>
       <span class="status status-{session.status}">{session.status}</span>
+      {#if session.stuck_kind}
+        <span
+          class="chip"
+          data-testid="details-stuck"
+          style="background: {STUCK_COLOR}22; color: {STUCK_COLOR}; border-color: {STUCK_COLOR}66;"
+          title={session.current_activity ?? undefined}
+        >⚠ stuck: {stuckKindLabel(session.stuck_kind)}{#if session.stuck_since !== null} · {formatElapsed(session.stuck_since, nowSec)}{/if}</span>
+      {:else if session.claude_status}
+        <span
+          class="chip"
+          data-testid="details-claude-status"
+          style="background: {claudeStatusColor(session.claude_status)}22; color: {claudeStatusColor(session.claude_status)}; border-color: {claudeStatusColor(session.claude_status)}44;"
+          title={session.current_activity ?? undefined}
+        >{claudeStatusLabel(session.claude_status)}</span>
+      {/if}
+      {#if ctxLevel !== null && session.context_pct !== null}
+        <span
+          class="chip"
+          data-testid="details-context"
+          data-level={ctxLevel}
+          style="color: {contextColor(ctxLevel)}; border-color: {contextColor(ctxLevel)}55;"
+          title="Context window used"
+        >ctx {Math.round(session.context_pct)}%</span>
+      {/if}
     </div>
   </header>
 
@@ -299,6 +347,36 @@
 
     <dt>Last activity</dt>
     <dd>{formatRelative(session.last_activity_at)}</dd>
+
+    <dt>Elapsed</dt>
+    <dd data-testid="details-elapsed" title={session.started_at === null ? 'since tmux created the session (fleet did not start it)' : 'since fleet started the session'}>
+      {formatElapsed(sessionStart(session), nowSec)}
+    </dd>
+
+    {#if session.last_turn_at !== null}
+      <dt>Last turn</dt>
+      <dd data-testid="details-last-turn">{formatRelative(session.last_turn_at)}</dd>
+    {/if}
+
+    {#if session.last_prompt}
+      <dt>Last prompt</dt>
+      <dd class="last-prompt" data-testid="details-last-prompt">{session.last_prompt}</dd>
+    {/if}
+
+    {#if session.pr_url}
+      <dt>Pull request</dt>
+      <dd data-testid="details-pr">
+        <a class="pr-link" href={session.pr_url} target="_blank" rel="noreferrer">{session.pr_url.replace(/^https:\/\/github\.com\//, '')}</a>
+        {#if session.ci_status}
+          <span
+            class="chip"
+            data-testid="details-ci"
+            style="color: {ciStatusColor(session.ci_status)}; border-color: {ciStatusColor(session.ci_status)}55;"
+            title="CI checks: {session.ci_status}"
+          >{ciStatusLabel(session.ci_status)}</span>
+        {/if}
+      </dd>
+    {/if}
 
     {#if reviewedSource}
       <dt class="meta-label">Reviewing</dt>
@@ -581,7 +659,24 @@
     border-radius: 4px;
     outline: none;
   }
-  .sub { display: flex; gap: 0.5rem; align-items: center; font-size: 0.75rem; }
+  .sub { display: flex; gap: 0.5rem; align-items: center; font-size: 0.75rem; flex-wrap: wrap; }
+  .friendly { margin: 0; font-size: 0.85rem; color: var(--fg-muted); }
+  .chip {
+    padding: 0.1rem 0.4rem;
+    border-radius: 999px;
+    border: 1px solid;
+    font-size: 0.65rem;
+    white-space: nowrap;
+  }
+  .last-prompt {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 0.8rem;
+    color: var(--fg-muted);
+    max-height: 6rem;
+    overflow: auto;
+  }
+  .pr-link { color: var(--accent); font-size: 0.85rem; overflow-wrap: anywhere; }
   .host {
     color: var(--fg-muted);
     border: 1px solid var(--border);

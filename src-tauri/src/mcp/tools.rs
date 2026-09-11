@@ -60,8 +60,14 @@ fn audit(tool: &str, detail: &str) {
 }
 
 /// Map a backend `IpcError` to an MCP tool error, preserving the `E_*` code.
+/// Structured `details` (e.g. `E_AMBIGUOUS` candidates) ride along as the
+/// error's data so a caller can act on them without parsing prose.
 fn to_mcp_err(e: IpcError) -> McpError {
-    McpError::internal_error(format!("{}: {}", e.code, e.message), None)
+    let msg = match &e.details {
+        Some(d) => format!("{}: {} {}", e.code, e.message, d),
+        None => format!("{}: {}", e.code, e.message),
+    };
+    McpError::internal_error(msg, e.details)
 }
 
 /// Server-level instructions handed to every MCP client on `initialize`.
@@ -163,6 +169,24 @@ fn require_host(caller: &Caller, session_host: &str, what: &str) -> Result<(), M
         )),
         _ => Ok(()),
     }
+}
+
+/// `resolve_session_target` + `require_host` on the RESOLVED row: the host
+/// binding is checked against where the session actually lives, never
+/// against the caller-supplied `host_alias` (which is optional and ignored
+/// when `session_id` is given). Pure over a `&Store` so it is unit-testable.
+fn resolve_and_gate(
+    s: &Store,
+    caller: &Caller,
+    session_id: Option<i64>,
+    host_alias: Option<&str>,
+    tmux_name: Option<&str>,
+    what: &str,
+) -> Result<(String, String), McpError> {
+    let row = sessions::resolve_session_target(s, session_id, host_alias, tmux_name)
+        .map_err(to_mcp_err)?;
+    require_host(caller, &row.host_alias, what)?;
+    Ok((row.host_alias, row.tmux_name))
 }
 
 /// Which session an audit row should attach to, resolved from the tool's
@@ -488,6 +512,17 @@ pub struct ListSessionsParams {
     /// fleet inside MCP token caps.
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Run a fleet reconcile pass NOW before listing (ignores the freshness
+    /// window; a pass already in flight is not duplicated). Default false —
+    /// rows are served from the store when the last pass is recent.
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct WhoamiParams {
+    /// Your tmux session name — `tmux display-message -p '#S'`.
+    pub tmux_name: String,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -541,10 +576,16 @@ pub struct NewShellSessionParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct KillSessionParams {
-    /// Host alias the session lives on.
-    pub host_alias: String,
-    /// tmux session name to kill.
-    pub name: String,
+    /// Fleet session id (from list_sessions / whoami). Alternative to
+    /// host_alias + name.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// Host alias the session lives on (with `name`).
+    #[serde(default)]
+    pub host_alias: Option<String>,
+    /// tmux session name to kill (with `host_alias`).
+    #[serde(default)]
+    pub name: Option<String>,
     /// Kill even if this is the registered fleet controller. Default false.
     #[serde(default)]
     pub force: bool,
@@ -564,10 +605,16 @@ pub struct ProvisionHostsParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SafeKillSessionParams {
-    /// Host alias the session lives on.
-    pub host_alias: String,
-    /// tmux session name to safely retire.
-    pub tmux_name: String,
+    /// Fleet session id (from list_sessions / whoami). Alternative to
+    /// host_alias + tmux_name.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// Host alias the session lives on (with `tmux_name`).
+    #[serde(default)]
+    pub host_alias: Option<String>,
+    /// tmux session name to safely retire (with `host_alias`).
+    #[serde(default)]
+    pub tmux_name: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -592,20 +639,32 @@ pub struct DeleteWorktreeParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RenameSessionParams {
-    /// Host alias the session lives on.
-    pub host_alias: String,
-    /// Current tmux session name.
-    pub old_name: String,
+    /// Fleet session id (from list_sessions / whoami). Alternative to
+    /// host_alias + old_name.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// Host alias the session lives on (with `old_name`).
+    #[serde(default)]
+    pub host_alias: Option<String>,
+    /// Current tmux session name (with `host_alias`).
+    #[serde(default)]
+    pub old_name: Option<String>,
     /// New tmux session name.
     pub new_name: String,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SetFriendlyNameParams {
-    /// Host alias the session lives on.
-    pub host_alias: String,
-    /// tmux session name (the row's stable identity).
-    pub tmux_name: String,
+    /// Fleet session id (from list_sessions / whoami). Alternative to
+    /// host_alias + tmux_name.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// Host alias the session lives on (with `tmux_name`).
+    #[serde(default)]
+    pub host_alias: Option<String>,
+    /// tmux session name (with `host_alias`).
+    #[serde(default)]
+    pub tmux_name: Option<String>,
     /// 3–6 word human-readable label describing the current task.
     /// Empty / whitespace clears the label.
     pub friendly_name: String,
@@ -613,10 +672,16 @@ pub struct SetFriendlyNameParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RestartSessionParams {
-    /// Host alias the session lives on.
-    pub host_alias: String,
-    /// tmux session name to restart.
-    pub name: String,
+    /// Fleet session id (from list_sessions / whoami). Alternative to
+    /// host_alias + name.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// Host alias the session lives on (with `name`).
+    #[serde(default)]
+    pub host_alias: Option<String>,
+    /// tmux session name to restart (with `host_alias`).
+    #[serde(default)]
+    pub name: Option<String>,
     /// Restart even if this is the registered fleet controller. Default false.
     #[serde(default)]
     pub force: bool,
@@ -628,10 +693,16 @@ fn default_true() -> bool {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SendPromptParams {
-    /// Host alias the session lives on.
-    pub host_alias: String,
-    /// tmux session name to send the prompt to.
-    pub tmux_name: String,
+    /// Fleet session id (from list_sessions / whoami). Alternative to
+    /// host_alias + tmux_name.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// Host alias the session lives on (with `tmux_name`).
+    #[serde(default)]
+    pub host_alias: Option<String>,
+    /// tmux session name to send the prompt to (with `host_alias`).
+    #[serde(default)]
+    pub tmux_name: Option<String>,
     /// The prompt text to deliver to the session's Claude REPL.
     pub prompt: String,
     /// Whether to submit the prompt (press Enter). Defaults to true. Set
@@ -777,10 +848,33 @@ pub struct RecreateSessionParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RegisterSelfParams {
-    /// Host alias of the calling (controller) session.
-    pub host_alias: String,
-    /// tmux session name of the calling (controller) session.
-    pub tmux_name: String,
+    /// Your fleet session id (from whoami / list_sessions). Alternative to
+    /// host_alias + tmux_name.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// Host alias of the calling (controller) session (with `tmux_name`).
+    #[serde(default)]
+    pub host_alias: Option<String>,
+    /// tmux session name of the calling (controller) session (with
+    /// `host_alias`).
+    #[serde(default)]
+    pub tmux_name: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct PeekSessionParams {
+    /// Fleet session id (from list_sessions). Alternative to
+    /// claude_session_id.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// The Claude session id returned by new_bg_session — usable before the
+    /// fleet row exists. Pass host_alias with it unless the row is already
+    /// tracked.
+    #[serde(default)]
+    pub claude_session_id: Option<String>,
+    /// Host the background session runs on (with `claude_session_id`).
+    #[serde(default)]
+    pub host_alias: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -938,6 +1032,25 @@ impl FleetTools {
         ))
     }
 
+    /// Resolve a session-addressed tool's target (MCP-6) to the stored
+    /// `(host_alias, tmux_name)` pair and apply the caller's host binding to
+    /// the RESOLVED row — a per-host token cannot reach a session on another
+    /// host by naming its fleet id. See `sessions::resolve_session_target`.
+    fn resolve_target(
+        &self,
+        caller: &Caller,
+        session_id: Option<i64>,
+        host_alias: Option<&str>,
+        tmux_name: Option<&str>,
+        what: &str,
+    ) -> Result<(String, String), McpError> {
+        let s = self
+            .store
+            .lock()
+            .map_err(|_| to_mcp_err(IpcError::lock()))?;
+        resolve_and_gate(&s, caller, session_id, host_alias, tmux_name, what)
+    }
+
     #[tool(
         description = "Report claude-fleet backend health: application version, SQLite schema version, and database readiness. Returns JSON."
     )]
@@ -1067,9 +1180,12 @@ impl FleetTools {
         summary rows by default; pass summary=false for the full SessionRow. \
         Optional filters: host_alias, project_id, status, claude_status, \
         include_lost (default false drops ghosts); `limit` caps the row count \
-        after filtering (default: all). claude_status is one of working | \
+        after filtering (default: all); `force` runs a reconcile pass first \
+        instead of serving the recent cache. claude_status is one of working | \
         blocked | completed | failed | stopped | idle; stuck_kind is one of \
-        auth_menu | reconnect | trust_prompt | oom | press_enter.")]
+        auth_menu | reconnect | trust_prompt | oom | press_enter; ci_status \
+        (full rows) is one of passing | failing | pending (null when the \
+        session has no PR or its PR has no checks).")]
     async fn list_sessions(
         &self,
         Parameters(p): Parameters<ListSessionsParams>,
@@ -1077,7 +1193,7 @@ impl FleetTools {
         audit(
             "list_sessions",
             &format!(
-                "host={:?} project={:?} status={:?} claude_status={:?} include_lost={} summary={} limit={:?}",
+                "host={:?} project={:?} status={:?} claude_status={:?} include_lost={} summary={} limit={:?} force={}",
                 p.host_alias,
                 p.project_id,
                 p.status,
@@ -1085,11 +1201,15 @@ impl FleetTools {
                 p.include_lost,
                 p.summary,
                 p.limit,
+                p.force,
             ),
         );
-        let rows = sessions::list_sessions(&self.store, &self.ssh)
-            .await
-            .map_err(to_mcp_err)?;
+        let rows = if p.force {
+            sessions::refresh_sessions(&self.store, &self.ssh).await
+        } else {
+            sessions::list_sessions(&self.store, &self.ssh).await
+        }
+        .map_err(to_mcp_err)?;
         let controller = {
             let s = self
                 .store
@@ -1158,8 +1278,10 @@ impl FleetTools {
     }
 
     #[tool(description = "Mark the calling session as the fleet controller; \
-        kill/recreate/restart refuse to target it without force. A per-host \
-        token may only register a session on its own host (E_FORBIDDEN).")]
+        kill/recreate/restart refuse to target it without force. Address \
+        yourself with session_id (from whoami) OR host_alias + tmux_name. A \
+        per-host token may only register a session on its own host \
+        (E_FORBIDDEN).")]
     async fn register_self(
         &self,
         Extension(caller): Extension<Caller>,
@@ -1167,20 +1289,54 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit(
             "register_self",
-            &format!("host={} tmux={}", p.host_alias, p.tmux_name),
+            &format!(
+                "session_id={:?} host={:?} tmux={:?}",
+                p.session_id, p.host_alias, p.tmux_name
+            ),
         );
-        require_host(&caller, &p.host_alias, "the session to register")?;
+        let (host_alias, tmux_name) = self.resolve_target(
+            &caller,
+            p.session_id,
+            p.host_alias.as_deref(),
+            p.tmux_name.as_deref(),
+            "the session to register",
+        )?;
         {
             let s = self
                 .store
                 .lock()
                 .map_err(|_| McpError::internal_error("E_LOCK: store mutex poisoned", None))?;
-            s.set_controller(&p.host_alias, &p.tmux_name)
+            s.set_controller(&host_alias, &tmux_name)
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?;
         }
         ok_json(&serde_json::json!({
-            "controller": { "host_alias": p.host_alias, "tmux_name": p.tmux_name }
+            "controller": { "host_alias": host_alias, "tmux_name": tmux_name }
         }))
+    }
+
+    #[tool(description = "Find your own fleet row from your tmux session name \
+        (`tmux display-message -p '#S'`). Returns the single matching session \
+        as JSON (id, host_alias, is_controller, …). E_NOTFOUND when fleet has \
+        not reconciled the session yet; E_AMBIGUOUS when the same name exists \
+        on several hosts — the error's details list {session_id, host_alias} \
+        candidates, pick yours and use session_id from then on.")]
+    async fn whoami(
+        &self,
+        Parameters(p): Parameters<WhoamiParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("whoami", &format!("tmux={}", p.tmux_name));
+        let s = self
+            .store
+            .lock()
+            .map_err(|_| to_mcp_err(IpcError::lock()))?;
+        let row = sessions::find_session_by_tmux_name(&s, &p.tmux_name).map_err(to_mcp_err)?;
+        let controller = s
+            .get_controller()
+            .map_err(|e| to_mcp_err(IpcError::from(e)))?;
+        let is_controller = controller
+            .as_ref()
+            .is_some_and(|(h, t)| *h == row.host_alias && *t == row.tmux_name);
+        ok_json(&SessionWithController { is_controller, row })
     }
 
     #[tool(description = "Create a Claude Code tmux session on a host, in a \
@@ -1255,8 +1411,9 @@ impl FleetTools {
     #[tool(description = "Kill a session on a host: a tmux session by name, or \
         a background agent row (name `bg:<uuid>`) via `claude stop` — the \
         latter is idempotent, so it also clears a stale row whose process \
-        already died. Returns the killed session's id. May return \
-        E_CONFIRM_REQUIRED when desktop confirmation is on.")]
+        already died. Returns the killed session's id. Address the session \
+        with session_id OR host_alias + name. May return E_CONFIRM_REQUIRED \
+        when desktop confirmation is on.")]
     async fn kill_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -1264,17 +1421,27 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit(
             "kill_session",
-            &format!("host={} name={}", p.host_alias, p.name),
+            &format!(
+                "session_id={:?} host={:?} name={:?}",
+                p.session_id, p.host_alias, p.name
+            ),
         );
+        let (host_alias, name) = self.resolve_target(
+            &caller,
+            p.session_id,
+            p.host_alias.as_deref(),
+            p.name.as_deref(),
+            "the session to kill",
+        )?;
         self.confirm_gate(
             "kill_session",
             p.confirm_nonce.as_deref(),
-            &format!("host={} name={} force={}", p.host_alias, p.name, p.force),
+            &format!("host={host_alias} name={name} force={}", p.force),
             &caller,
         )?;
         let args = sessions::KillSessionArgs {
-            host_alias: p.host_alias,
-            name: p.name,
+            host_alias,
+            name,
             force: p.force,
         };
         let id = sessions::kill_session(args, &self.store, &self.ssh)
@@ -1287,18 +1454,30 @@ impl FleetTools {
         work (commit + push), then arm deletion of its worktree + tmux session. \
         Returns the row with safe_kill_state=requested; the actual delete \
         fires only after the SAFE_REMOVE_READY marker AND a clean-tree check. \
-        Transitions ('ready', 'failed') arrive via row events.")]
+        Transitions ('ready', 'failed') arrive via row events. Address the \
+        session with session_id OR host_alias + tmux_name.")]
     async fn safe_kill_session(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<SafeKillSessionParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "safe_kill_session",
-            &format!("host={} session={}", p.host_alias, p.tmux_name),
+            &format!(
+                "session_id={:?} host={:?} session={:?}",
+                p.session_id, p.host_alias, p.tmux_name
+            ),
         );
+        let (host_alias, tmux_name) = self.resolve_target(
+            &caller,
+            p.session_id,
+            p.host_alias.as_deref(),
+            p.tmux_name.as_deref(),
+            "the session to retire",
+        )?;
         let args = safe_kill::SafeKillSessionArgs {
-            host_alias: p.host_alias,
-            tmux_name: p.tmux_name,
+            host_alias,
+            tmux_name,
         };
         let row = safe_kill::safe_kill_session(args, &self.store, &self.ssh)
             .await
@@ -1353,18 +1532,30 @@ impl FleetTools {
     }
 
     #[tool(description = "Rename a tmux session on a host. Returns the updated \
-        session row as JSON.")]
+        session row as JSON. Address the session with session_id OR host_alias \
+        + old_name.")]
     async fn rename_session(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<RenameSessionParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "rename_session",
-            &format!("host={} {} -> {}", p.host_alias, p.old_name, p.new_name),
+            &format!(
+                "session_id={:?} host={:?} {:?} -> {}",
+                p.session_id, p.host_alias, p.old_name, p.new_name
+            ),
         );
+        let (host_alias, old_name) = self.resolve_target(
+            &caller,
+            p.session_id,
+            p.host_alias.as_deref(),
+            p.old_name.as_deref(),
+            "the session to rename",
+        )?;
         let args = sessions::RenameSessionArgs {
-            host_alias: p.host_alias,
-            old_name: p.old_name,
+            host_alias,
+            old_name,
             new_name: p.new_name,
         };
         let row = sessions::rename_session(args, &self.store, &self.ssh)
@@ -1376,21 +1567,30 @@ impl FleetTools {
     #[tool(description = "Set the session's friendly display name (shown when \
         the user toggles friendly names on). Called once per task by the \
         in-session agent — short (3–6 words). Empty string clears. Returns \
-        the updated row.")]
+        the updated row. Address the session with session_id OR host_alias + \
+        tmux_name.")]
     async fn set_friendly_name(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<SetFriendlyNameParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "set_friendly_name",
             &format!(
-                "host={} tmux={} label={:?}",
-                p.host_alias, p.tmux_name, p.friendly_name
+                "session_id={:?} host={:?} tmux={:?} label={:?}",
+                p.session_id, p.host_alias, p.tmux_name, p.friendly_name
             ),
         );
+        let (host_alias, tmux_name) = self.resolve_target(
+            &caller,
+            p.session_id,
+            p.host_alias.as_deref(),
+            p.tmux_name.as_deref(),
+            "the session to label",
+        )?;
         let args = sessions::SetFriendlyNameArgs {
-            host_alias: p.host_alias,
-            tmux_name: p.tmux_name,
+            host_alias,
+            tmux_name,
             friendly_name: p.friendly_name,
         };
         let row = sessions::set_session_friendly_name(args, &self.store).map_err(to_mcp_err)?;
@@ -1398,18 +1598,30 @@ impl FleetTools {
     }
 
     #[tool(description = "Restart a tmux session (kill and recreate it in the \
-        same place). Returns the updated session row as JSON.")]
+        same place). Returns the updated session row as JSON. Address the \
+        session with session_id OR host_alias + name.")]
     async fn restart_session(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<RestartSessionParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "restart_session",
-            &format!("host={} name={}", p.host_alias, p.name),
+            &format!(
+                "session_id={:?} host={:?} name={:?}",
+                p.session_id, p.host_alias, p.name
+            ),
         );
+        let (host_alias, name) = self.resolve_target(
+            &caller,
+            p.session_id,
+            p.host_alias.as_deref(),
+            p.name.as_deref(),
+            "the session to restart",
+        )?;
         let args = sessions::RestartSessionArgs {
-            host_alias: p.host_alias,
-            name: p.name,
+            host_alias,
+            name,
             force: p.force,
         };
         let row = sessions::restart_session(args, &self.store, &self.ssh)
@@ -1421,7 +1633,9 @@ impl FleetTools {
     #[tool(description = "Send and SUBMIT a prompt to a running Claude \
         session's REPL (literal text, then one Enter). This is how you steer a \
         session. Set submit=false to stage text in the REPL without submitting \
-        it. The text is prefixed with an untrusted-content marker line unless \
+        it. Address the session with session_id OR host_alias + tmux_name. The \
+        first prompt to a still-unnamed session also becomes its friendly name. \
+        The text is prefixed with an untrusted-content marker line unless \
         raw=true (master token only).")]
     async fn send_prompt(
         &self,
@@ -1431,12 +1645,22 @@ impl FleetTools {
         // Prompt body intentionally not logged.
         audit(
             "send_prompt",
-            &format!("host={} session={}", p.host_alias, p.tmux_name),
+            &format!(
+                "session_id={:?} host={:?} session={:?}",
+                p.session_id, p.host_alias, p.tmux_name
+            ),
         );
+        let (host_alias, tmux_name) = self.resolve_target(
+            &caller,
+            p.session_id,
+            p.host_alias.as_deref(),
+            p.tmux_name.as_deref(),
+            "the session to prompt",
+        )?;
         let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
         let args = sessions::SendPromptArgs {
-            host_alias: p.host_alias,
-            tmux_name: p.tmux_name,
+            host_alias,
+            tmux_name,
             prompt,
             submit: p.submit,
         };
@@ -1728,29 +1952,45 @@ impl FleetTools {
     }
 
     #[tool(
-        description = "Peek at a session's background Claude logs. Returns an \
-        informational message for interactive sessions with no background job."
+        description = "Peek at a session's background Claude logs. Address it \
+        with session_id (from list_sessions) OR claude_session_id (the id \
+        new_bg_session returned; add host_alias while the fleet row does not \
+        exist yet). Returns an informational message for interactive sessions \
+        with no background job."
     )]
     async fn peek_session(
         &self,
-        Parameters(p): Parameters<SessionIdParams>,
+        Parameters(p): Parameters<PeekSessionParams>,
     ) -> Result<CallToolResult, McpError> {
-        audit("peek_session", &format!("session_id={}", p.session_id));
-        let (host_alias, claude_id) = {
+        audit(
+            "peek_session",
+            &format!(
+                "session_id={:?} claude_session_id={:?} host={:?}",
+                p.session_id, p.claude_session_id, p.host_alias
+            ),
+        );
+        let resolved = {
             let s = self
                 .store
                 .lock()
-                .map_err(|_| to_mcp_err(IpcError::new("E_LOCK", "store mutex poisoned")))?;
-            let row = s
-                .get_session_by_id(p.session_id)
-                .map_err(|e| to_mcp_err(IpcError::from(e)))?
-                .ok_or_else(|| to_mcp_err(IpcError::new("E_NOTFOUND", "session not found")))?;
-            (row.host_alias, row.claude_session_id)
+                .map_err(|_| to_mcp_err(IpcError::lock()))?;
+            crate::service::bg_sessions::resolve_peek_target(
+                &s,
+                p.session_id,
+                p.host_alias.as_deref(),
+                p.claude_session_id.as_deref(),
+            )
         };
-        let Some(claude_id) = claude_id else {
-            return ok_json(
-                &"This session has no Claude session id yet — nothing to peek.".to_string(),
-            );
+        let (host_alias, claude_id) = match resolved {
+            Ok(pair) => pair,
+            // A tracked interactive session with no Claude id is not an
+            // error for the caller — say so instead of failing.
+            Err(e) if e.code == "E_INVALID_STATE" => {
+                return ok_json(
+                    &"This session has no Claude session id yet — nothing to peek.".to_string(),
+                );
+            }
+            Err(e) => return Err(to_mcp_err(e)),
         };
         let logs = crate::service::bg_sessions::peek_session(
             crate::service::bg_sessions::PeekSessionArgs {
@@ -1806,8 +2046,12 @@ impl FleetTools {
     }
 
     #[tool(description = "Launch a supervised headless (background) Claude \
-        session on a host with an initial prompt. Returns the new Claude \
-        session id as JSON; track progress with peek_session.")]
+        session on a host with an initial prompt. Returns JSON with the new \
+        claude_session_id AND the fleet row (`session`, registered by an \
+        immediate reconcile; the key is absent if the agent was not matched \
+        yet — it appears on the next tick) so the next call can be \
+        peek_session { session_id }. The prompt becomes the row's default \
+        friendly name and last_prompt.")]
     async fn new_bg_session(
         &self,
         Parameters(p): Parameters<NewBgSessionParams>,
@@ -1816,12 +2060,13 @@ impl FleetTools {
             "new_bg_session",
             &format!("host={} name={}", p.host_alias, p.name),
         );
-        let res = crate::service::bg_sessions::new_bg_session(
+        let res = crate::service::bg_sessions::new_bg_session_tracked(
             crate::service::bg_sessions::NewBgSessionArgs {
                 host_alias: p.host_alias,
                 name: p.name,
                 prompt: p.prompt,
             },
+            &self.store,
             &self.ssh,
         )
         .await
@@ -2253,6 +2498,46 @@ mod tests {
         let full = host_caller("mefistos", TokenMode::Full);
         assert!(enforce_mode(&full, "kill_session").is_ok());
         assert!(enforce_mode(&Caller::master(), "provision_hosts").is_ok());
+    }
+
+    #[test]
+    fn session_id_addressing_is_gated_on_the_resolved_host() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_host("mefistos").unwrap();
+        store.upsert_host("turanga").unwrap();
+        let mine = store
+            .upsert_session("dev-a", "mefistos", None, None, 1, 1, "running", None)
+            .unwrap();
+        let other = store
+            .upsert_session("dev-b", "turanga", None, None, 1, 1, "running", None)
+            .unwrap();
+        let c = host_caller("mefistos", TokenMode::Full);
+        // Own host by id, and by pair.
+        assert_eq!(
+            resolve_and_gate(&store, &c, Some(mine), None, None, "x").unwrap(),
+            ("mefistos".to_string(), "dev-a".to_string())
+        );
+        assert!(resolve_and_gate(&store, &c, None, Some("mefistos"), Some("dev-a"), "x").is_ok());
+        // Another host's session by id: the gate runs on the RESOLVED host,
+        // not on the (absent) host_alias argument.
+        let err = resolve_and_gate(&store, &c, Some(other), None, None, "the session").unwrap_err();
+        assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+        assert!(err.message.contains("turanga"));
+        // A lying host_alias alongside the id changes nothing.
+        let err = resolve_and_gate(
+            &store,
+            &c,
+            Some(other),
+            Some("mefistos"),
+            Some("dev-b"),
+            "x",
+        )
+        .unwrap_err();
+        assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+        // Unknown id surfaces as E_NOTFOUND before any host check; master passes.
+        let err = resolve_and_gate(&store, &c, Some(9999), None, None, "x").unwrap_err();
+        assert!(err.message.starts_with("E_NOTFOUND"), "{}", err.message);
+        assert!(resolve_and_gate(&store, &Caller::master(), Some(other), None, None, "x").is_ok());
     }
 
     #[test]

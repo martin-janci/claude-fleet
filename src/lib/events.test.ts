@@ -51,7 +51,7 @@ function row(over: Partial<SessionRow> = {}): SessionRow {
     safe_kill_state: null,
     safe_kill_nonce: null,
     safe_kill_detail: null,
-    safe_kill_requested_at: null,
+    safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null,
     ...over,
   };
 }

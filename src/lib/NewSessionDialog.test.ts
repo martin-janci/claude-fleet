@@ -44,7 +44,7 @@ describe('NewSessionDialog', () => {
   it('clicking a host pick + Create sends host_alias to new_session', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
       if (cmd === 'new_session') {
-        return { id: 99, tmux_name: 'dev-foo', host_alias: 'mefistos', project_id: 1, worktree_id: null, created_at: 1, last_activity_at: 1, status: 'running', notes: null, account_uuid: null, kind: 'work', reviews_session_id: null, worktree_key: null, lost_at: null, claude_session_id: null, claude_status: null, effort_level: null, pr_url: null, current_activity: null, friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null };
+        return { id: 99, tmux_name: 'dev-foo', host_alias: 'mefistos', project_id: 1, worktree_id: null, created_at: 1, last_activity_at: 1, status: 'running', notes: null, account_uuid: null, kind: 'work', reviews_session_id: null, worktree_key: null, lost_at: null, claude_session_id: null, claude_status: null, effort_level: null, pr_url: null, current_activity: null, friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null };
       }
       if (cmd === 'list_sessions') return [];
       return null;
@@ -82,7 +82,7 @@ describe('NewSessionDialog', () => {
         effort_level: null,
         pr_url: null,
         current_activity: null,
-        friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null,
+        friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null,
       },
     });
 
@@ -124,7 +124,7 @@ describe('NewSessionDialog', () => {
         worktree_key: null, lost_at: null, claude_session_id: null,
         claude_status: null, effort_level: null, pr_url: null, current_activity: null,
         friendly_name: null, safe_kill_state: null, safe_kill_nonce: null,
-        safe_kill_detail: null, safe_kill_requested_at: null,
+        safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null,
       },
     });
 
@@ -161,7 +161,7 @@ describe('NewSessionDialog', () => {
         worktree_key: null, lost_at: null, claude_session_id: null,
         claude_status: null, effort_level: null, pr_url: null, current_activity: null,
         friendly_name: null, safe_kill_state: null, safe_kill_nonce: null,
-        safe_kill_detail: null, safe_kill_requested_at: null,
+        safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null,
       },
     });
 
@@ -208,7 +208,7 @@ describe('NewSessionDialog', () => {
         safe_kill_state: null,
         safe_kill_nonce: null,
         safe_kill_detail: null,
-        safe_kill_requested_at: null,
+        safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null,
       },
     });
 
@@ -246,7 +246,7 @@ describe('NewSessionDialog', () => {
         status: 'running', notes: null, account_uuid: null, kind: 'work',
         reviews_session_id: null, worktree_key: null, lost_at: null,
         claude_session_id: null, claude_status: null, effort_level: null, pr_url: null, current_activity: null,
-        friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null,
+        friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null,
       },
     });
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
@@ -266,7 +266,7 @@ describe('NewSessionDialog', () => {
         status: 'running', notes: null, account_uuid: null, kind: 'shell',
         reviews_session_id: null, worktree_key: null, lost_at: null,
         claude_session_id: null, claude_status: null, effort_level: null, pr_url: null, current_activity: null,
-        friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null,
+        friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null,
       },
     });
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
@@ -290,7 +290,7 @@ describe('NewSessionDialog', () => {
         status: 'running', notes: null, account_uuid: null, kind: 'shell',
         reviews_session_id: null, worktree_key: null, lost_at: null,
         claude_session_id: null, claude_status: null, effort_level: null, pr_url: null, current_activity: null,
-        friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null,
+        friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null,
       },
     });
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });

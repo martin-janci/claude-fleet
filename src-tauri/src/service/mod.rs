@@ -10,15 +10,19 @@
 
 pub mod bg_sessions;
 pub mod clipboard;
+pub mod gc;
 pub mod health;
 pub mod hooks;
 pub mod hosts;
 pub mod messages;
 pub mod onboarding;
+pub mod outcome;
 pub mod pane_intel;
+pub mod playbooks;
 pub mod projects;
 pub mod provision;
 pub mod safe_kill;
 pub mod sessions;
+pub mod settings;
 pub mod tunnel;
 pub mod worktrees;

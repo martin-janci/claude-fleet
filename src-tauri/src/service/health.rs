@@ -151,6 +151,13 @@ mod tests {
             safe_kill_nonce: None,
             safe_kill_detail: None,
             safe_kill_requested_at: None,
+            idle_since: None,
+            stuck_since: None,
+            last_playbook_at: None,
+            last_prompt: None,
+            started_at: None,
+            last_turn_at: None,
+            ci_status: None,
         }
     }
 
@@ -230,7 +237,7 @@ mod tests {
         let h = health_from_store(&s);
         assert_eq!(h.version, env!("CARGO_PKG_VERSION"));
         assert!(h.db_ready);
-        assert_eq!(h.schema_version, 18);
+        assert_eq!(h.schema_version, 19);
         // Empty store → empty roll-up.
         assert_eq!(h.sessions_total, 0);
         assert_eq!(h.hosts_total, 0);

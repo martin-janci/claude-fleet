@@ -41,7 +41,7 @@ function sessionFor(projectId: number | null, name = `dev-${projectId ?? 'orphan
     effort_level: null,
     pr_url: null,
     current_activity: null,
-    friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null,
+    friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null,
   };
 }
 
@@ -689,7 +689,7 @@ describe('Sidebar (sessions-grouped view)', () => {
           effort_level: null,
           pr_url: null,
           current_activity: null,
-          friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null,
+          friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null,
         });
       }
     }
@@ -714,5 +714,162 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(vi.mocked(buildRelatedCountById).mock.calls.length).toBeLessThanOrEqual(2);
     expect(buildSessionsByProject).toHaveBeenCalled();
     expect(buildRelatedCountById).toHaveBeenCalled();
+    // Rendering 500 rows in jsdom is load-sensitive (6 s+ on a busy box); the
+    // regression signal is the call count above, so give the render room.
+  }, 20_000);
+});
+
+describe('Sidebar triage (W2 Track D)', () => {
+  it('renders a red stuck chip that replaces the claude_status chip', async () => {
+    const stuck = { ...sessionFor(1, 'dev-stuck'), claude_status: 'working' as const, stuck_kind: 'press_enter' as const };
+    const fine = { ...sessionFor(1, 'dev-fine'), claude_status: 'working' as const };
+    mockBackend(fakeProjects, [stuck, fine]);
+    render(Sidebar);
+    await tick(); await tick();
+    const chips = screen.getAllByTestId('stuck-chip');
+    expect(chips).toHaveLength(1);
+    expect(chips[0]).toHaveTextContent('stuck: press Enter');
+    // The stuck row shows no claude chip; the healthy one does.
+    const rows = screen.getAllByTestId('sess-row');
+    const stuckRow = rows.find((r) => r.getAttribute('data-stuck') === 'press_enter')!;
+    expect(stuckRow.querySelector('[data-testid="claude-chip"]')).toBeNull();
+    expect(screen.getAllByTestId('claude-chip')).toHaveLength(1);
+  });
+
+  it('shows a context badge with amber at 70 and red at 90', async () => {
+    const warn = { ...sessionFor(1, 'dev-warn'), context_pct: 72 };
+    const crit = { ...sessionFor(1, 'dev-crit'), context_pct: 95 };
+    const ok = { ...sessionFor(1, 'dev-ok'), context_pct: 10 };
+    const none = sessionFor(1, 'dev-none');
+    mockBackend(fakeProjects, [warn, crit, ok, none]);
+    render(Sidebar);
+    await tick(); await tick();
+    const badges = screen.getAllByTestId('context-badge');
+    expect(badges).toHaveLength(3);
+    const levels = badges.map((b) => b.getAttribute('data-level')).sort();
+    expect(levels).toEqual(['crit', 'ok', 'warn']);
+    expect(badges.find((b) => b.getAttribute('data-level') === 'crit')).toHaveTextContent('95%');
+  });
+
+  it('"N stuck" counter reports the count and toggles a stuck-only filter', async () => {
+    const stuck = { ...sessionFor(1, 'dev-stuck'), stuck_kind: 'oom' as const };
+    const fine = sessionFor(2, 'dev-fine');
+    mockBackend(fakeProjects, [stuck, fine]);
+    render(Sidebar);
+    await tick(); await tick();
+    const pill = screen.getByTestId('stuck-filter');
+    expect(pill).toHaveTextContent('1 stuck');
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(2);
+    await fireEvent.click(pill);
+    await tick();
+    const rows = screen.getAllByTestId('sess-row');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent('dev-stuck');
+    // Project without a stuck child disappears from the tree.
+    expect(screen.getAllByTestId('proj-row')).toHaveLength(1);
+    await fireEvent.click(pill);
+    await tick();
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(2);
+  });
+
+  it('"needs attention" filter keeps stuck, safe-kill, ghost and failed rows', async () => {
+    const stuck = { ...sessionFor(1, 'dev-stuck'), stuck_kind: 'auth_menu' as const };
+    const sk = { ...sessionFor(1, 'dev-sk'), safe_kill_state: 'failed' };
+    const ghost = { ...sessionFor(2, 'dev-ghost'), status: 'ghost', lost_at: 5 };
+    const failed = { ...sessionFor(2, 'dev-failed'), claude_status: 'failed' as const };
+    const fine = { ...sessionFor(2, 'dev-fine'), claude_status: 'working' as const };
+    mockBackend(fakeProjects, [stuck, sk, ghost, failed, fine]);
+    render(Sidebar);
+    await tick(); await tick();
+    const pill = screen.getByTestId('attention-filter');
+    expect(pill).toHaveTextContent('needs attention (4)');
+    await fireEvent.click(pill);
+    await tick();
+    const names = screen.getAllByTestId('sess-row').map((r) => r.textContent ?? '');
+    expect(names.some((n) => n.includes('dev-fine'))).toBe(false);
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(4);
+  });
+
+  it('orders projects by their worst child status', async () => {
+    // Project 1 (claude-fleet) is idle; project 2 (pos-frontend) has a stuck
+    // session and must float to the top despite coming second.
+    const idle = { ...sessionFor(1, 'dev-idle'), claude_status: 'idle' as const };
+    const stuck = { ...sessionFor(2, 'dev-stuck'), stuck_kind: 'reconnect' as const };
+    mockBackend(fakeProjects, [idle, stuck]);
+    render(Sidebar);
+    await tick(); await tick();
+    const rows = screen.getAllByTestId('proj-row');
+    expect(rows[0]).toHaveTextContent('pos-frontend');
+    expect(rows[1]).toHaveTextContent('claude-fleet');
+  });
+
+  it('shift-click multi-selects rows and bulk kill confirms then kills each', async () => {
+    const a = sessionFor(1, 'dev-a');
+    const b = sessionFor(1, 'dev-b');
+    mockBackend(fakeProjects, [a, b]);
+    render(Sidebar);
+    await tick(); await tick();
+    const rows = screen.getAllByTestId('sess-row');
+    await fireEvent.click(rows[0], { shiftKey: true });
+    await fireEvent.click(rows[1], { metaKey: true });
+    await tick();
+    // Neither click opened the session.
+    expect(get(selectedSession)).toBeNull();
+    const bar = screen.getByTestId('bulk-bar');
+    expect(bar).toHaveTextContent('2 selected');
+    await fireEvent.click(screen.getByTestId('bulk-kill'));
+    const confirm = await screen.findByTestId('confirm-bulk-kill');
+    await fireEvent.click(confirm);
+    await tick(); await tick();
+    const kills = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'kill_session');
+    expect(kills.map((c) => (c[1] as { args: { name: string } }).args.name).sort()).toEqual(['dev-a', 'dev-b']);
+    expect(screen.queryByTestId('bulk-bar')).toBeNull();
+  });
+
+  it('select mode shows checkboxes and bulk send opens the prompt dialog', async () => {
+    const a = sessionFor(1, 'dev-a');
+    mockBackend(fakeProjects, [a]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryAllByTestId('select-box')).toHaveLength(0);
+    await fireEvent.click(screen.getByTestId('select-mode'));
+    await tick();
+    const box = screen.getByTestId('select-box');
+    await fireEvent.click(box);
+    await tick();
+    expect(screen.getByTestId('bulk-bar')).toHaveTextContent('1 selected');
+    await fireEvent.click(screen.getByTestId('bulk-send'));
+    const dialog = await screen.findByTestId('bulk-prompt-dialog');
+    expect(dialog).toBeInTheDocument();
+    expect(screen.getByTestId('bulk-target-' + a.id)).toHaveTextContent('dev-a');
+  });
+
+  it('shows the friendly name by default with tmux_name as secondary text', async () => {
+    const named = { ...sessionFor(1, 'dev-martin-janci-claude-fleet--fix-login'), friendly_name: 'Fix login' };
+    mockBackend(fakeProjects, [named]);
+    render(Sidebar);
+    await tick(); await tick();
+    const row = screen.getByTestId('sess-row');
+    expect(row.querySelector('.sess-name')).toHaveTextContent('Fix login');
+    expect(screen.getByTestId('sess-tmux-name')).toHaveTextContent('dev-martin-janci-claude-fleet--fix-login');
+  });
+
+  it('shows elapsed time, last prompt and a CI badge as secondary row text', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const s = {
+      ...sessionFor(1, 'dev-a'),
+      started_at: now - 3 * 3600 - 5 * 60,
+      last_prompt: 'Implement the triage filter\nsecond line',
+      pr_url: 'https://github.com/o/r/pull/3',
+      ci_status: 'failing' as const,
+    };
+    mockBackend(fakeProjects, [s]);
+    render(Sidebar);
+    await tick(); await tick();
+    const meta = screen.getByTestId('sess-meta');
+    expect(meta).toHaveTextContent('3h 5m');
+    expect(meta).toHaveTextContent('Implement the triage filter');
+    expect(meta).not.toHaveTextContent('second line');
+    expect(screen.getByTestId('ci-badge')).toHaveTextContent('CI');
   });
 });

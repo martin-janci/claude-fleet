@@ -108,7 +108,7 @@ Index by area (names only; see the reference for details):
   `list_worktrees`, `delete_worktree`.
 - **Sessions** — `list_sessions`, `related_sessions`, `new_session`,
   `new_shell_session`, `new_bg_session`, `spawn_review`, `rename_session`,
-  `set_friendly_name`, `register_self`.
+  `set_friendly_name`, `register_self`, `whoami`.
 - **Steering & observing** — `send_prompt`, `broadcast_prompt`,
   `capture_session`, `peek_session`, `peer_status`, `session_history`,
   `send_message`, `inbox`.
@@ -163,7 +163,7 @@ commits by default (`limit`, `skip`); `session_history` and `inbox` default to
 
 ### Host-alias mismatch (`set_friendly_name` / `register_self` return `E_NOTFOUND`)
 
-A session identifies itself by its tmux session name (`tmux display-message -p '#S'`) and the fleet **host alias**. The alias is configuration — whatever the host was named in the host picker — and is never derived from `hostname`. The skills look it up by calling `list_sessions` and taking the `host_alias` of the row whose `tmux_name` matches. `E_NOTFOUND` from `set_friendly_name` or `register_self` therefore means no row matched: the session is not (yet) known to fleet, was renamed, or the pair was guessed rather than looked up. Re-run `list_sessions` (with `include_lost: true` if the session may have ghosted) and retry with the row's values; do not fall back to `hostname`.
+A session identifies itself by its tmux session name (`tmux display-message -p '#S'`) and the fleet **host alias**. The alias is configuration — whatever the host was named in the host picker — and is never derived from `hostname`. The skills look it up with `whoami { tmux_name }` (or `list_sessions`, taking the `host_alias` of the row whose `tmux_name` matches); every session-addressed tool also accepts the row's `session_id` instead of the pair. `E_NOTFOUND` from `set_friendly_name` or `register_self` therefore means no row matched: the session is not (yet) known to fleet, was renamed, or the pair was guessed rather than looked up. Re-run `list_sessions` (with `include_lost: true` if the session may have ghosted) and retry with the row's values; do not fall back to `hostname`.
 
 ### Per-host results
 

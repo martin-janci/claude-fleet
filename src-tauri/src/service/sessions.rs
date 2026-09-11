@@ -38,19 +38,103 @@ pub const DEFAULT_RECONCILE_INTERVAL_SECS: i64 = 20;
 /// (see `reconcile_tick_interval`). Shared by the tick spawner in `lib.rs`
 /// and the `list_sessions` freshness window so the two can never disagree.
 pub fn read_reconcile_interval_secs(raw: Option<String>) -> i64 {
-    match raw {
-        Some(v) => v
-            .trim()
-            .parse::<i64>()
-            .unwrap_or(DEFAULT_RECONCILE_INTERVAL_SECS),
-        None => DEFAULT_RECONCILE_INTERVAL_SECS,
-    }
+    // Same registry the Settings dialog writes through, so the spec's
+    // default / validation (non-negative seconds) cannot drift from here.
+    crate::service::settings::resolve(
+        crate::service::settings::RECONCILE_INTERVAL_SECS,
+        raw.as_deref(),
+    )
+    .parse::<i64>()
+    .unwrap_or(DEFAULT_RECONCILE_INTERVAL_SECS)
 }
 
 /// Map of `tmux_name` → analyzed pane intel, gathered off-lock during a host
 /// probe. A name absent from the map (capture failed) leaves the session's
 /// intel fields untouched (COALESCE in the upsert preserves prior values).
 type PaneIntelMap = std::collections::HashMap<String, crate::service::pane_intel::PaneIntel>;
+
+/// Map of `tmux_name` → PR probe result, gathered off-lock (see `outcome.rs`).
+type PrInfoMap = std::collections::HashMap<String, crate::service::outcome::PrInfo>;
+
+/// Runs one shell script on a host and returns its stdout. Abstracted so the
+/// reconcile PR probe (and the playbook / GC helpers) are testable without a
+/// real host. The production impl is `RealHostShell`.
+#[async_trait::async_trait]
+pub(crate) trait HostShell: Send + Sync {
+    async fn run_script(&self, host: &str, script: &str) -> Result<String, IpcError>;
+}
+
+/// `bash -lc <script>` locally or over ssh, bounded by `timeout`.
+pub(crate) struct RealHostShell {
+    ssh: Arc<SshClient>,
+    timeout: std::time::Duration,
+}
+
+#[async_trait::async_trait]
+impl HostShell for RealHostShell {
+    async fn run_script(&self, host: &str, script: &str) -> Result<String, IpcError> {
+        let out = run_host_script(&self.ssh, host, script, self.timeout).await?;
+        if !out.status.success() {
+            return Err(IpcError::new(
+                "E_SHELL",
+                String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+}
+
+/// A shell that always fails — the default for test deps that don't exercise
+/// the PR probe (a failed probe leaves the stored outcome fields untouched).
+#[cfg(test)]
+pub(crate) struct NoHostShell;
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl HostShell for NoHostShell {
+    async fn run_script(&self, _host: &str, _script: &str) -> Result<String, IpcError> {
+        Err(IpcError::new("E_SHELL", "no shell in this test"))
+    }
+}
+
+/// Run `script` through `bash -lc` on `host` (local spawn or ssh), bounded by
+/// `timeout`. Every value interpolated into `script` must already be quoted
+/// by the caller; the script itself is quoted here for the ssh hop. Shared by
+/// the PR probe, the stuck playbooks and the GC sweeper.
+pub(crate) async fn run_host_script(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    script: &str,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, IpcError> {
+    crate::validate::host_alias(host)?;
+    if host == "local" {
+        let child = tokio::process::Command::new("bash")
+            .args(["-lc", script])
+            .output();
+        match tokio::time::timeout(timeout, child).await {
+            Ok(res) => res.map_err(|e| IpcError::new("E_SHELL", format!("spawn bash: {e}"))),
+            Err(_) => Err(IpcError::new(
+                "E_TIMEOUT",
+                format!("local script exceeded {}s", timeout.as_secs()),
+            )),
+        }
+    } else {
+        ssh.run(host, &["bash", "-lc", &quote(script)], timeout)
+            .await
+    }
+}
+
+/// Wall clock for one host's PR probe script (one `gh pr view` per due
+/// session, sequential). Runs AFTER the reachability probe, outside
+/// `HOST_PROBE_TIMEOUT`, so a slow GitHub API can never flip a host to
+/// unreachable.
+const PR_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Most sessions probed for a PR per host per pass. Bounds the script's
+/// worst case (`PR_PROBE_BATCH` sequential `gh` calls); the rest are picked
+/// up on later passes as the per-session cache expires.
+const PR_PROBE_BATCH: usize = 12;
 
 /// One host's probe result, carried from the off-lock probe task to the
 /// under-lock writer.
@@ -59,6 +143,11 @@ struct HostProbe {
     result: Result<Vec<crate::tmux::TmuxSession>, IpcError>,
     agent_rows: Vec<crate::claude_agents::ClaudeAgentRow>,
     intel: PaneIntelMap,
+    /// `tmux_name → gh pr view` result for the sessions probed THIS pass
+    /// (PROD-5). A name absent from the map was not probed (cache still
+    /// fresh, host has no `gh`, or the probe failed) and keeps its stored
+    /// `pr_url` / `ci_status`.
+    pr_info: PrInfoMap,
     /// Unix-epoch second the probe STARTED. Forwarded as
     /// `HostReconcile::probe_started_at` so the writer never ghosts a row that
     /// a newer probe (e.g. `new_session`'s own reconcile) stamped after this
@@ -73,6 +162,11 @@ struct HostProbe {
 pub(crate) struct ReconcileDeps {
     exec: ExecFactory,
     probe_timeout: std::time::Duration,
+    /// Shell used for the per-host `gh pr view` probe (PROD-5).
+    shell: Arc<dyn HostShell>,
+    /// Per-session probe throttle; production shares one process-wide cache,
+    /// tests get a fresh one per deps.
+    pr_cache: Arc<crate::service::outcome::PrProbeCache>,
 }
 
 /// `host alias → tmux executor` factory used by `ReconcileDeps`.
@@ -81,9 +175,15 @@ type ExecFactory = Box<dyn Fn(&str) -> Box<dyn TmuxExec> + Send + Sync>;
 impl ReconcileDeps {
     fn real(ssh: &Arc<SshClient>) -> Arc<Self> {
         let ssh = Arc::clone(ssh);
+        let shell = Arc::new(RealHostShell {
+            ssh: Arc::clone(&ssh),
+            timeout: PR_PROBE_TIMEOUT,
+        });
         Arc::new(Self {
             exec: Box::new(move |alias| exec_for(alias, &ssh)),
             probe_timeout: HOST_PROBE_TIMEOUT,
+            shell,
+            pr_cache: crate::service::outcome::pr_probe_cache(),
         })
     }
 
@@ -92,9 +192,24 @@ impl ReconcileDeps {
         exec: impl Fn(&str) -> Box<dyn TmuxExec> + Send + Sync + 'static,
         probe_timeout: std::time::Duration,
     ) -> Arc<Self> {
+        Self::fake_with_shell(exec, probe_timeout, Arc::new(NoHostShell))
+    }
+
+    /// Test deps with an injected shell for the PR probe. Each call gets its
+    /// own probe cache so tests never share throttle state.
+    #[cfg(test)]
+    fn fake_with_shell(
+        exec: impl Fn(&str) -> Box<dyn TmuxExec> + Send + Sync + 'static,
+        probe_timeout: std::time::Duration,
+        shell: Arc<dyn HostShell>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             exec: Box::new(exec),
             probe_timeout,
+            shell,
+            pr_cache: Arc::new(crate::service::outcome::PrProbeCache::new(
+                crate::service::outcome::PR_PROBE_TTL,
+            )),
         })
     }
 }
@@ -270,6 +385,10 @@ fn reconcile_write_one_host(
                 // capture failed — then all four intel fields stay None and the
                 // upsert's COALESCE preserves the session's prior values).
                 let pane = intel.get(&sess.name);
+                // PR probe result for this pass (PROD-5). `pr_observed`
+                // makes the values authoritative so a closed PR's stale
+                // link clears; an unprobed session keeps its stored fields.
+                let pr = probe.pr_info.get(&sess.name);
                 let agent_status =
                     known_agent_status(&sess.name, agent.and_then(|a| a.status.as_deref()));
                 // Prefer the authoritative `claude agents` status; fall back to
@@ -306,7 +425,7 @@ fn reconcile_write_one_host(
                     claude_session_id: agent.and_then(|a| a.session_id.clone()),
                     claude_status,
                     effort_level: None, // not in claude agents --json; reserved for future
-                    pr_url: None,       // not in claude agents --json; reserved for future
+                    pr_url: pr.and_then(|p| p.pr_url.clone()),
                     current_activity: pane.and_then(|p| p.activity.clone()),
                     context_pct: pane.and_then(|p| p.context_pct),
                     stuck_kind,
@@ -314,6 +433,8 @@ fn reconcile_write_one_host(
                     // None clears any stale flag; a failed capture (pane absent)
                     // leaves intel_observed false so the prior flag is preserved.
                     intel_observed: pane.is_some(),
+                    ci_status: pr.and_then(|p| p.ci_status.clone()),
+                    pr_observed: pr.is_some(),
                 });
             }
             s.apply_host_reconcile(HostReconcile {
@@ -461,7 +582,60 @@ fn reconcile_bg_agents(
 /// reconcile and the single-host refresh so both are bounded identically.
 async fn probe_one_host(host: HostRow, deps: &ReconcileDeps) -> HostProbe {
     let tmux = (deps.exec)(&host.alias);
-    probe_with_timeout(host, tmux, deps.probe_timeout).await
+    probe_with_timeout(
+        host,
+        tmux,
+        deps.probe_timeout,
+        Some((deps.shell.as_ref(), deps.pr_cache.as_ref())),
+    )
+    .await
+}
+
+/// The `gh pr view` probe for one host (PROD-5): pick the live sessions that
+/// sit in a github-layout worktree and are due per the cache, run ONE script
+/// for all of them, and fold the result into a `tmux_name → PrInfo` map.
+/// Best-effort throughout — any failure yields an empty map and the stored
+/// outcome fields survive untouched.
+async fn probe_pr_info(
+    host: &str,
+    live: &[crate::tmux::TmuxSession],
+    shell: &dyn HostShell,
+    cache: &crate::service::outcome::PrProbeCache,
+) -> PrInfoMap {
+    use crate::service::outcome::{build_pr_probe_script, parse_pr_probe_output, ProbeOutput};
+    let live_names: Vec<String> = live.iter().map(|s| s.name.clone()).collect();
+    cache.retain_host(host, &live_names);
+    let candidates: Vec<(String, String)> = live
+        .iter()
+        .filter(|s| worktree_key_for_path(&s.path.to_string_lossy()).is_some())
+        .map(|s| (s.name.clone(), s.path.to_string_lossy().into_owned()))
+        .collect();
+    let mut due: Vec<(String, String)> =
+        cache.due(host, &candidates).into_iter().cloned().collect();
+    if due.is_empty() {
+        return PrInfoMap::new();
+    }
+    due.truncate(PR_PROBE_BATCH);
+    let script = build_pr_probe_script(&due);
+    let stdout = match shell.run_script(host, &script).await {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!("[reconcile] pr probe failed on {host}: {e}");
+            return PrInfoMap::new();
+        }
+    };
+    match parse_pr_probe_output(&stdout) {
+        ProbeOutput::NoGh | ProbeOutput::NoAuth => {
+            cache.mark_no_gh(host);
+            PrInfoMap::new()
+        }
+        ProbeOutput::Results(map) => {
+            // Every target the script ran for is throttled, observed or not:
+            // a transport failure must not be retried on every 20 s pass.
+            cache.mark_probed(host, due.iter().map(|(n, _)| n.as_str()));
+            map
+        }
+    }
 }
 
 /// Inner probe with an injectable executor + timeout, so the wedged-host path
@@ -470,6 +644,7 @@ async fn probe_with_timeout(
     host: HostRow,
     tmux: Box<dyn TmuxExec>,
     timeout: std::time::Duration,
+    pr_probe: Option<(&dyn HostShell, &crate::service::outcome::PrProbeCache)>,
 ) -> HostProbe {
     // Recorded BEFORE the first await: this is the instant the probe's view of
     // the host stops being current (BE-3 ghost guard).
@@ -484,12 +659,13 @@ async fn probe_with_timeout(
         };
         (tmux_result, agent_rows, intel)
     };
-    match tokio::time::timeout(timeout, probe).await {
+    let mut probe = match tokio::time::timeout(timeout, probe).await {
         Ok((result, agent_rows, intel)) => HostProbe {
             host,
             result,
             agent_rows,
             intel,
+            pr_info: PrInfoMap::new(),
             started_at,
         },
         Err(_elapsed) => {
@@ -497,15 +673,34 @@ async fn probe_with_timeout(
                 "[reconcile] host {alias} probe exceeded {timeout:?}; marking unreachable (last-known sessions kept)",
                 alias = host.alias,
             );
-            HostProbe {
+            return HostProbe {
                 host,
                 result: Err(IpcError::new("E_TIMEOUT", "host probe timed out")),
                 agent_rows: Vec::new(),
                 intel: PaneIntelMap::new(),
+                pr_info: PrInfoMap::new(),
                 started_at,
-            }
+            };
+        }
+    };
+    // The PR probe is its own bounded step AFTER reachability is settled: it
+    // talks to GitHub, not to the host, and must never cost the host its
+    // "reachable" verdict. On timeout the stored outcome fields survive.
+    if let (Ok(live), Some((shell, cache))) = (&probe.result, pr_probe) {
+        match tokio::time::timeout(
+            PR_PROBE_TIMEOUT,
+            probe_pr_info(&probe.host.alias, live, shell, cache),
+        )
+        .await
+        {
+            Ok(map) => probe.pr_info = map,
+            Err(_elapsed) => eprintln!(
+                "[reconcile] pr probe on {} exceeded {PR_PROBE_TIMEOUT:?}; outcome fields kept",
+                probe.host.alias
+            ),
         }
     }
+    probe
 }
 
 /// Full fleet pass: probe every non-hidden host in parallel, then apply each
@@ -657,7 +852,7 @@ async fn reconcile_one_host_with(
 /// …) so the caller can return the fresh row. Not gated: it is one host, not
 /// the fleet, and the BE-3 probe-start guard makes it safe to interleave with
 /// a full pass.
-async fn reconcile_one_host(
+pub(crate) async fn reconcile_one_host(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
     alias: &str,
@@ -1256,6 +1451,14 @@ async fn new_session_inner(
             )
         })?;
 
+    // PROD-5: the fleet created this session now. Soft-fail (cosmetic).
+    if let Err(e) = s.set_started_at(row.id, now_unix()) {
+        eprintln!(
+            "new_session: storing started_at for {} failed: {e:?}",
+            args.name
+        );
+    }
+
     // Deterministic friendly name: trust an explicit user value, otherwise
     // derive from the branch so the sidebar never shows the raw slug. Soft-
     // fail like the claude_session_id write below — a missing label is
@@ -1338,6 +1541,83 @@ fn derive_friendly_name(
         Ok(None)
     } else {
         Ok(Some(derived))
+    }
+}
+
+/// Session addressing for the control API (MCP-6). Every name-addressed
+/// tool accepts EITHER a fleet `session_id` OR the `(host_alias, tmux_name)`
+/// pair; this resolves whichever was given to the stored row. Precedence:
+/// `session_id` when present (host/name are then ignored), else both parts
+/// of the pair are required.
+///
+/// Errors: `E_INVALID` when neither form is complete, `E_NOTFOUND` when the
+/// id / pair matches no row.
+pub fn resolve_session_target(
+    s: &Store,
+    session_id: Option<i64>,
+    host_alias: Option<&str>,
+    tmux_name: Option<&str>,
+) -> Result<SessionRow, IpcError> {
+    if let Some(id) = session_id {
+        return s
+            .get_session_by_id(id)?
+            .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("session {id} not found")));
+    }
+    match (host_alias, tmux_name) {
+        (Some(host), Some(name)) if !host.trim().is_empty() && !name.trim().is_empty() => {
+            crate::validate::host_alias(host)?;
+            crate::validate::tmux_name_lookup(name)?;
+            s.get_session(name, host)?.ok_or_else(|| {
+                IpcError::new("E_NOTFOUND", format!("session {name} not found on {host}"))
+            })
+        }
+        _ => Err(IpcError::new(
+            "E_INVALID",
+            "pass session_id, or both host_alias and tmux_name",
+        )),
+    }
+}
+
+/// `whoami` for an in-session agent (MCP-6): the ONE fleet row whose
+/// `tmux_name` matches. Default names are project-derived, so the same name
+/// can exist on several hosts — that is `E_AMBIGUOUS`, with the candidates'
+/// `(session_id, host_alias)` in `details` so the caller can retry with
+/// `session_id`.
+pub fn find_session_by_tmux_name(s: &Store, tmux_name: &str) -> Result<SessionRow, IpcError> {
+    crate::validate::tmux_name_lookup(tmux_name)?;
+    let all: Vec<SessionRow> = s
+        .list_all_sessions()?
+        .into_iter()
+        .filter(|r| r.tmux_name == tmux_name)
+        .collect();
+    // A ghost left behind on another host must not make a live session
+    // ambiguous: prefer running rows, fall back to everything.
+    let running: Vec<SessionRow> = all
+        .iter()
+        .filter(|r| r.status == "running")
+        .cloned()
+        .collect();
+    let matches = if running.is_empty() { all } else { running };
+    match matches.len() {
+        0 => Err(IpcError::new(
+            "E_NOTFOUND",
+            format!("no session named {tmux_name} on any host"),
+        )),
+        1 => Ok(matches.into_iter().next().expect("one match")),
+        _ => {
+            let candidates: Vec<serde_json::Value> = matches
+                .iter()
+                .map(|r| serde_json::json!({ "session_id": r.id, "host_alias": r.host_alias }))
+                .collect();
+            Err(IpcError::new(
+                "E_AMBIGUOUS",
+                format!(
+                    "{} sessions are named {tmux_name}; pass session_id or host_alias",
+                    matches.len()
+                ),
+            )
+            .with_details(serde_json::json!({ "candidates": candidates })))
+        }
     }
 }
 
@@ -1649,7 +1929,70 @@ async fn send_prompt_inner(
         let truncated: String = prompt.chars().take(120).collect();
         Some(truncated)
     });
+    record_prompt_outcome(store, host_alias, tmux_name, prompt);
     Ok(())
+}
+
+/// Derive a default sidebar label from a prompt (PROD-4): the first five
+/// words, lowercased, punctuation stripped, capped to the friendly-name
+/// limit. `None` when nothing printable is left.
+pub fn friendly_name_from_prompt(prompt: &str) -> Option<String> {
+    let words: Vec<String> = prompt
+        .split_whitespace()
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        })
+        .filter(|w| !w.is_empty())
+        .take(5)
+        .collect();
+    if words.is_empty() {
+        return None;
+    }
+    let joined = words.join(" ");
+    Some(joined.chars().take(80).collect())
+}
+
+/// Post-send bookkeeping (PROD-4 / PROD-5): stamp `last_prompt`, and give a
+/// still-unnamed session a default friendly name derived from the prompt.
+/// Best-effort: every failure is logged and swallowed — the prompt already
+/// landed in the pane.
+fn record_prompt_outcome(store: &Mutex<Store>, host_alias: &str, tmux_name: &str, prompt: &str) {
+    let Ok(s) = store.lock() else {
+        eprintln!("[prompt] store mutex poisoned recording outcome for {host_alias}/{tmux_name}");
+        return;
+    };
+    let row = match s.get_session(tmux_name, host_alias) {
+        Ok(Some(row)) => row,
+        Ok(None) => return,
+        Err(e) => {
+            eprintln!("[prompt] lookup failed for {host_alias}/{tmux_name}: {e}");
+            return;
+        }
+    };
+    if let Err(e) = s.set_last_prompt(row.id, prompt) {
+        eprintln!("[prompt] set_last_prompt failed for {host_alias}/{tmux_name}: {e}");
+    }
+    // The prompt-derived label replaces NO name or the deterministic
+    // branch-derived default every fleet-created session starts with; a
+    // label a human or the in-session agent chose (set_friendly_name) stays.
+    let replaceable = match &row.friendly_name {
+        None => true,
+        Some(current) => {
+            s.default_friendly_name(row.id).ok().flatten().as_deref() == Some(current.as_str())
+        }
+    };
+    if replaceable {
+        if let Some(name) = friendly_name_from_prompt(prompt) {
+            if let Err(e) = s.set_friendly_name(host_alias, tmux_name, Some(&name)) {
+                eprintln!(
+                    "[prompt] default friendly_name failed for {host_alias}/{tmux_name}: {e}"
+                );
+            }
+        }
+    }
 }
 
 /// Append one event to a session's timeline, resolving the row by
@@ -2053,6 +2396,7 @@ pub async fn spawn_review(
             .ok_or_else(|| IpcError::new("E_INTERNAL", "review session vanished after spawn"))?;
         s.set_session_kind(row.id, "review", Some(source.id))?;
         let _ = s.set_claude_session_id(row.id, &claude_id);
+        let _ = s.set_started_at(row.id, now_unix());
         row.id
     };
 
@@ -2311,6 +2655,13 @@ mod tests {
             safe_kill_nonce: None,
             safe_kill_detail: None,
             safe_kill_requested_at: None,
+            idle_since: None,
+            stuck_since: None,
+            last_playbook_at: None,
+            last_prompt: None,
+            started_at: None,
+            last_turn_at: None,
+            ci_status: None,
         }
     }
 
@@ -2846,7 +3197,7 @@ mod tests {
         let start = std::time::Instant::now();
         let before = now_unix();
         let probe =
-            probe_with_timeout(host, Box::new(HangingTmux), Duration::from_millis(80)).await;
+            probe_with_timeout(host, Box::new(HangingTmux), Duration::from_millis(80), None).await;
         let elapsed = start.elapsed();
 
         assert_eq!(
@@ -3123,6 +3474,7 @@ mod tests {
             result: Ok(Vec::new()),
             agent_rows: Vec::new(),
             intel: PaneIntelMap::new(),
+            pr_info: PrInfoMap::new(),
             started_at: now_unix(),
         };
         // 2. `new_session` creates the tmux session and runs its own
@@ -3166,6 +3518,7 @@ mod tests {
             result: Ok(Vec::new()),
             agent_rows: Vec::new(),
             intel: PaneIntelMap::new(),
+            pr_info: PrInfoMap::new(),
             started_at: now_unix() + 5,
         };
         let mut s = store.lock().unwrap();
@@ -3866,6 +4219,307 @@ mod tests {
             reconcile_now(&store, &ssh),
         )
         .await;
+    }
+
+    // ── Wave 2 Track D: addressing (MCP-6) ──
+
+    fn seeded_store() -> Mutex<Store> {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_host("mefistos").unwrap();
+        s.upsert_session("dev-a", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.upsert_session("dev-a", "mefistos", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.upsert_session("dev-only", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        Mutex::new(s)
+    }
+
+    #[test]
+    fn resolve_session_target_prefers_id_then_requires_full_pair() {
+        let store = seeded_store();
+        let s = store.lock().unwrap();
+        let only = s.get_session("dev-only", "local").unwrap().unwrap();
+        // id wins even when a (wrong) pair is also supplied
+        let r = resolve_session_target(&s, Some(only.id), Some("mefistos"), Some("dev-a")).unwrap();
+        assert_eq!(r.id, only.id);
+        let r = resolve_session_target(&s, None, Some("mefistos"), Some("dev-a")).unwrap();
+        assert_eq!(r.host_alias, "mefistos");
+        assert_eq!(
+            resolve_session_target(&s, None, Some("local"), None)
+                .unwrap_err()
+                .code,
+            "E_INVALID"
+        );
+        assert_eq!(
+            resolve_session_target(&s, None, None, Some("dev-a"))
+                .unwrap_err()
+                .code,
+            "E_INVALID"
+        );
+        assert_eq!(
+            resolve_session_target(&s, Some(9999), None, None)
+                .unwrap_err()
+                .code,
+            "E_NOTFOUND"
+        );
+        assert_eq!(
+            resolve_session_target(&s, None, Some("local"), Some("nope"))
+                .unwrap_err()
+                .code,
+            "E_NOTFOUND"
+        );
+        assert_eq!(
+            resolve_session_target(&s, None, Some("-oProxyCommand=x"), Some("dev-a"))
+                .unwrap_err()
+                .code,
+            "E_INVALID"
+        );
+    }
+
+    #[test]
+    fn find_session_by_tmux_name_prefers_running_rows_over_ghosts() {
+        let store = seeded_store();
+        let s = store.lock().unwrap();
+        // Ghost the mefistos copy: whoami must now resolve to the live one.
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET status='ghost', lost_at=5 WHERE tmux_name='dev-a' AND host_alias='mefistos'",
+                [],
+            )
+            .unwrap();
+        let row = find_session_by_tmux_name(&s, "dev-a").unwrap();
+        assert_eq!(row.host_alias, "local");
+        // Only ghosts left ⇒ they are still findable (one match).
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET status='ghost', lost_at=5 WHERE tmux_name='dev-a'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            find_session_by_tmux_name(&s, "dev-a").unwrap_err().code,
+            "E_AMBIGUOUS"
+        );
+    }
+
+    #[test]
+    fn prompt_derived_name_replaces_only_the_branch_default() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+            let wid = s
+                .upsert_worktree(
+                    pid,
+                    "fix-login",
+                    "/p/o/r/.worktrees/fix-login",
+                    Some("dev-o-r--fix-login"),
+                )
+                .unwrap();
+            s.upsert_session(
+                "dev-o-r--fix-login",
+                "local",
+                Some(pid),
+                Some(wid),
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+            let default = s
+                .default_friendly_name(
+                    s.get_session("dev-o-r--fix-login", "local")
+                        .unwrap()
+                        .unwrap()
+                        .id,
+                )
+                .unwrap()
+                .expect("branch default");
+            s.set_friendly_name("local", "dev-o-r--fix-login", Some(&default))
+                .unwrap();
+        }
+        record_prompt_outcome(
+            &store,
+            "local",
+            "dev-o-r--fix-login",
+            "Rewrite the auth flow!",
+        );
+        {
+            let s = store.lock().unwrap();
+            let row = s
+                .get_session("dev-o-r--fix-login", "local")
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.friendly_name.as_deref(), Some("rewrite the auth flow"));
+            assert_eq!(row.last_prompt.as_deref(), Some("Rewrite the auth flow!"));
+            // A chosen label survives the next prompt.
+            s.set_friendly_name("local", "dev-o-r--fix-login", Some("My label"))
+                .unwrap();
+        }
+        record_prompt_outcome(&store, "local", "dev-o-r--fix-login", "Another prompt here");
+        let s = store.lock().unwrap();
+        let row = s
+            .get_session("dev-o-r--fix-login", "local")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.friendly_name.as_deref(), Some("My label"));
+        assert_eq!(row.last_prompt.as_deref(), Some("Another prompt here"));
+    }
+
+    #[test]
+    fn find_session_by_tmux_name_returns_the_single_match_or_lists_candidates() {
+        let store = seeded_store();
+        let s = store.lock().unwrap();
+        assert_eq!(
+            find_session_by_tmux_name(&s, "dev-only")
+                .unwrap()
+                .host_alias,
+            "local"
+        );
+        assert_eq!(
+            find_session_by_tmux_name(&s, "ghost-name")
+                .unwrap_err()
+                .code,
+            "E_NOTFOUND"
+        );
+        let err = find_session_by_tmux_name(&s, "dev-a").unwrap_err();
+        assert_eq!(err.code, "E_AMBIGUOUS");
+        let cands = err.details.unwrap()["candidates"].as_array().unwrap().len();
+        assert_eq!(cands, 2);
+    }
+
+    // ── Wave 2 Track D: naming + PR probe ──
+
+    #[test]
+    fn friendly_name_from_prompt_takes_five_lowercase_words_without_punctuation() {
+        assert_eq!(
+            friendly_name_from_prompt("Fix the login bug, then add tests for it!").as_deref(),
+            Some("fix the login bug then")
+        );
+        assert_eq!(
+            friendly_name_from_prompt("  Refactor   SSH   layer  ").as_deref(),
+            Some("refactor ssh layer")
+        );
+        assert_eq!(friendly_name_from_prompt("!!! ... ---"), None);
+        assert_eq!(friendly_name_from_prompt(""), None);
+        // Unicode letters survive, symbols do not.
+        assert_eq!(
+            friendly_name_from_prompt("Oprav chybu v prihlásení (rýchlo)").as_deref(),
+            Some("oprav chybu v prihlásení rýchlo")
+        );
+    }
+
+    /// A host shell that answers the PR probe with canned stdout and counts
+    /// invocations, so the throttle is observable.
+    struct CannedShell {
+        stdout: String,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl HostShell for CannedShell {
+        async fn run_script(&self, _host: &str, script: &str) -> Result<String, IpcError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert!(script.contains("gh pr view"), "probe script runs gh");
+            Ok(self.stdout.clone())
+        }
+    }
+
+    fn repo_session(name: &str, path: &str) -> crate::tmux::TmuxSession {
+        crate::tmux::TmuxSession {
+            name: name.to_string(),
+            created: 1,
+            last_activity: 1,
+            attached: false,
+            path: PathBuf::from(path),
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_populates_pr_url_and_ci_status_and_throttles_the_probe() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let stdout = "__FLEET_PR__\tdev-a\t0\t{\"url\":\"https://github.com/o/r/pull/9\",\
+                      \"statusCheckRollup\":[{\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}\n\
+                      __FLEET_PR__\tdev-b\t1\tno pull requests found for branch \"main\"\n";
+        let shell = Arc::new(CannedShell {
+            stdout: stdout.to_string(),
+            calls: Arc::clone(&calls),
+        });
+        let live = vec![
+            repo_session("dev-a", "/home/u/projects/github.com/o/r/.worktrees/a"),
+            repo_session("dev-b", "/home/u/projects/github.com/o/r"),
+            // Not a github-layout path: never probed.
+            repo_session("scratch", "/tmp"),
+        ];
+        let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probes_for_exec = Arc::clone(&probes);
+        let deps = ReconcileDeps::fake_with_shell(
+            move |_alias| {
+                Box::new(ScriptedTmux {
+                    sessions: live.clone(),
+                    delay: std::time::Duration::from_millis(0),
+                    hang: false,
+                    probes: Arc::clone(&probes_for_exec),
+                })
+            },
+            std::time::Duration::from_secs(5),
+            shell,
+        );
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+        }
+        reconcile_sessions_with(&store, &deps).await.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        {
+            let s = store.lock().unwrap();
+            let a = s.get_session("dev-a", "local").unwrap().unwrap();
+            assert_eq!(a.pr_url.as_deref(), Some("https://github.com/o/r/pull/9"));
+            assert_eq!(a.ci_status.as_deref(), Some("passing"));
+            let b = s.get_session("dev-b", "local").unwrap().unwrap();
+            assert_eq!(b.pr_url, None);
+            let c = s.get_session("scratch", "local").unwrap().unwrap();
+            assert_eq!(c.pr_url, None);
+        }
+        // Second pass within the TTL: the cache says nothing is due, so the
+        // shell is not consulted and the stored fields survive.
+        reconcile_sessions_with(&store, &deps).await.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let s = store.lock().unwrap();
+        let a = s.get_session("dev-a", "local").unwrap().unwrap();
+        assert_eq!(a.pr_url.as_deref(), Some("https://github.com/o/r/pull/9"));
+    }
+
+    #[tokio::test]
+    async fn reconcile_survives_a_failing_pr_probe_shell() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let live = vec![repo_session("dev-a", "/home/u/projects/github.com/o/r")];
+        let deps = ReconcileDeps::fake(
+            move |_alias| {
+                Box::new(ScriptedTmux {
+                    sessions: live.clone(),
+                    delay: std::time::Duration::from_millis(0),
+                    hang: false,
+                    probes: Arc::clone(&probes),
+                })
+            },
+            std::time::Duration::from_secs(5),
+        );
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+        }
+        reconcile_sessions_with(&store, &deps).await.unwrap();
+        let s = store.lock().unwrap();
+        let a = s.get_session("dev-a", "local").unwrap().unwrap();
+        assert_eq!(a.status, "running");
+        assert_eq!(a.pr_url, None);
     }
 }
 

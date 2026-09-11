@@ -56,11 +56,21 @@ unless `force: true`), and excludes you from `broadcast_prompt`.
 and is not derivable from `hostname`. Look it up:
 
 1. `tmux display-message -p '#S'` — your `tmux_name`.
-2. `list_sessions {}` — find the row whose `tmux_name` matches; take its `host_alias`.
-3. `register_self { host_alias: "<discovered>", tmux_name: "<#S>" }`.
+2. `whoami { tmux_name: "<#S>" }` — returns your fleet row (`session_id`,
+   `host_alias`, …). `E_NOTFOUND`: fleet has not reconciled you yet (retry after
+   `list_sessions`). `E_AMBIGUOUS`: the same name exists on several hosts — pick
+   yours from the error's `details.candidates` (`{ session_id, host_alias }`).
+3. `register_self { session_id }` (or the `host_alias` + `tmux_name` pair).
 
-The `fleet-friendly-name` skill uses the same lookup and covers the edge cases
-(no matching row, multiple matches).
+The `fleet-friendly-name` skill uses the same lookup.
+
+**Addressing a session.** Every name-addressed tool — `send_prompt`,
+`kill_session`, `safe_kill_session`, `restart_session`, `rename_session`,
+`set_friendly_name`, `register_self` — accepts **either** `session_id` **or**
+the `host_alias` + `tmux_name` pair. `session_id` (from `list_sessions` /
+`whoami`) is the stable form and wins when both are given. `peek_session`
+likewise takes `session_id` or `claude_session_id` (+ `host_alias` until the
+row exists).
 
 ## Spawning — `new_session` / `new_shell_session` / `new_bg_session`
 
@@ -73,8 +83,11 @@ The `fleet-friendly-name` skill uses the same lookup and covers the edge cases
   servers, watchers). Steer it with `send_prompt` / `capture_session` exactly
   like a Claude session.
 - `new_bg_session { host_alias, name, prompt }` — supervised headless run; rows are
-  named `bg:<uuid>`. Track with `peek_session`; `capture_session` does not
-  apply (no pane). `kill_session` stops it via `claude stop`.
+  named `bg:<uuid>`. Returns the Claude id **and** the fleet row (`session`),
+  so the very next call can be `peek_session { session_id }`; the launch
+  prompt becomes the row's default friendly name and `last_prompt`. Track
+  with `peek_session`; `capture_session` does not apply (no pane).
+  `kill_session` stops it via `claude stop`.
 
 ## Steering — the act, wait, observe loop
 

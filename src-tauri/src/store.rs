@@ -62,6 +62,89 @@ pub struct SessionRow {
     pub safe_kill_nonce: Option<String>,
     pub safe_kill_detail: Option<String>,
     pub safe_kill_requested_at: Option<i64>,
+    // ── Lifecycle + outcome fields (migration 019) ──
+    /// When `claude_status` last entered idle/completed/stopped; NULL while
+    /// working/blocked/unknown. Drives the GC sweeper.
+    pub idle_since: Option<i64>,
+    /// When the current `stuck_kind` episode began; NULL when not stuck.
+    pub stuck_since: Option<i64>,
+    /// When a stuck playbook last acted on this row. One stamp shared by
+    /// every playbook kind: it gates "once per stuck episode" for all of
+    /// them and the 1 h spacing for `oom`.
+    pub last_playbook_at: Option<i64>,
+    /// First 200 chars of the last prompt sent through fleet.
+    pub last_prompt: Option<String>,
+    /// When fleet created the session (NULL for tmux-discovered rows).
+    pub started_at: Option<i64>,
+    /// Last Stop hook (turn completed).
+    pub last_turn_at: Option<i64>,
+    /// `passing` | `failing` | `pending` from the PR's check rollup.
+    pub ci_status: Option<String>,
+}
+
+/// The `sessions` column list every `SessionRow` read shares, in the order
+/// `map_session_row` consumes it. One definition so a new column is added in
+/// exactly two places (here and the mapper) instead of six.
+const SESSION_COLUMNS: &str = "id, tmux_name, host_alias, project_id, worktree_id, created_at, \
+     last_activity_at, status, notes, account_uuid, kind, reviews_session_id, \
+     worktree_key, lost_at, \
+     claude_session_id, claude_status, effort_level, pr_url, current_activity, \
+     context_pct, stuck_kind, friendly_name, \
+     safe_kill_state, safe_kill_nonce, safe_kill_detail, safe_kill_requested_at, \
+     idle_since, stuck_since, last_playbook_at, last_prompt, started_at, last_turn_at, ci_status";
+
+/// Map one `SELECT {SESSION_COLUMNS}` row to a `SessionRow`.
+fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
+    Ok(SessionRow {
+        id: row.get(0)?,
+        tmux_name: row.get(1)?,
+        host_alias: row.get(2)?,
+        project_id: row.get(3)?,
+        worktree_id: row.get(4)?,
+        created_at: row.get(5)?,
+        last_activity_at: row.get(6)?,
+        status: row.get(7)?,
+        notes: row.get(8)?,
+        account_uuid: row.get(9)?,
+        kind: row.get(10)?,
+        reviews_session_id: row.get(11)?,
+        worktree_key: row.get(12)?,
+        lost_at: row.get(13)?,
+        claude_session_id: row.get(14)?,
+        claude_status: row.get(15)?,
+        effort_level: row.get(16)?,
+        pr_url: row.get(17)?,
+        current_activity: row.get(18)?,
+        context_pct: row.get(19)?,
+        stuck_kind: row.get(20)?,
+        friendly_name: row.get(21)?,
+        safe_kill_state: row.get(22)?,
+        safe_kill_nonce: row.get(23)?,
+        safe_kill_detail: row.get(24)?,
+        safe_kill_requested_at: row.get(25)?,
+        idle_since: row.get(26)?,
+        stuck_since: row.get(27)?,
+        last_playbook_at: row.get(28)?,
+        last_prompt: row.get(29)?,
+        started_at: row.get(30)?,
+        last_turn_at: row.get(31)?,
+        ci_status: row.get(32)?,
+    })
+}
+
+/// `claude_status` values that mean "no turn in progress" — the states
+/// `idle_since` is stamped on (see migration 019).
+pub const IDLE_STATUSES: [&str; 3] = ["idle", "completed", "stopped"];
+
+/// SQL fragment: the new `idle_since` given the OLD row's `idle_since` and the
+/// status expression `{st}` (which must resolve to the post-write status).
+/// Entering an idle status stamps `now` once; staying idle keeps the stamp;
+/// leaving clears it.
+fn idle_since_sql(st: &str, now_param: &str) -> String {
+    format!(
+        "CASE WHEN ({st}) IN ('idle','completed','stopped') \
+              THEN COALESCE(idle_since, {now_param}) ELSE NULL END"
+    )
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -149,6 +232,12 @@ pub struct ReconcileSession<'a> {
     /// flag; when `false` (capture failed / pane absent) the prior `stuck_kind`
     /// is preserved. Without this, a once-set stuck flag could never clear.
     pub intel_observed: bool,
+    /// `passing` | `failing` | `pending` reduced from the PR check rollup.
+    pub ci_status: Option<String>,
+    /// Whether this pass ran the `gh pr view` probe for the session. When
+    /// `true`, `pr_url` / `ci_status` are authoritative (a `None` clears a
+    /// closed PR's stale link); when `false` the prior values are preserved.
+    pub pr_observed: bool,
 }
 
 /// All inputs for applying one host's probe result atomically. Consumed by
@@ -179,6 +268,16 @@ pub struct HostReconcile<'a> {
 /// `insert_session_event` (oldest rows beyond the cap are pruned) so a
 /// status-flapping session cannot grow the table without bound.
 pub const SESSION_EVENTS_CAP: i64 = 500;
+
+/// Max chars of a prompt kept in `sessions.last_prompt`.
+pub const LAST_PROMPT_CHARS: usize = 200;
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 /// Ordered schema migrations, `(version, sql)`. Versions are contiguous from
 /// 1 and every script must end by recording its own version with
@@ -218,6 +317,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
     (17, include_str!("../migrations/017_safe_kill.sql")),
     (18, include_str!("../migrations/018_host_tokens.sql")),
+    (19, include_str!("../migrations/019_lifecycle_fields.sql")),
 ];
 
 /// The schema version a fully migrated database reports.
@@ -1217,11 +1317,12 @@ impl Store {
             )
             .optional()?;
 
-        let id: i64 = self.conn.query_row(
+        let sql = format!(
             "INSERT INTO sessions (tmux_name, host_alias, project_id, worktree_id,
                                    created_at, last_activity_at, status, kind,
-                                   claude_session_id, claude_status)
-             VALUES (?1, ?2, ?3, NULL, ?4, ?4, 'running', 'bg', ?5, ?6)
+                                   claude_session_id, claude_status, idle_since)
+             VALUES (?1, ?2, ?3, NULL, ?4, ?4, 'running', 'bg', ?5, ?6,
+                     CASE WHEN ?6 IN ('idle','completed','stopped') THEN ?7 ELSE NULL END)
              ON CONFLICT(host_alias, tmux_name) DO UPDATE SET
                project_id=COALESCE(excluded.project_id, project_id),
                last_activity_at=excluded.last_activity_at,
@@ -1229,15 +1330,21 @@ impl Store {
                status='running',
                lost_at=NULL,
                claude_session_id=COALESCE(excluded.claude_session_id, claude_session_id),
-               claude_status=COALESCE(excluded.claude_status, claude_status)
+               claude_status=COALESCE(excluded.claude_status, claude_status),
+               idle_since={idle}
              RETURNING id",
+            idle = idle_since_sql("COALESCE(excluded.claude_status, claude_status)", "?7"),
+        );
+        let id: i64 = self.conn.query_row(
+            &sql,
             rusqlite::params![
                 tmux_name,
                 host_alias,
                 project_id,
                 last_activity_at,
                 claude_session_id,
-                claude_status
+                claude_status,
+                now_unix()
             ],
             |row| row.get(0),
         )?;
@@ -1390,89 +1497,20 @@ impl Store {
         host_alias: &str,
     ) -> Result<Vec<SessionRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
-                    last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                    worktree_key, lost_at,
-                    claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind, friendly_name,
-                    safe_kill_state, safe_kill_nonce, safe_kill_detail, safe_kill_requested_at
-             FROM sessions WHERE host_alias=?1 ORDER BY last_activity_at DESC",
+            &format!(
+             "SELECT {SESSION_COLUMNS} FROM sessions WHERE host_alias=?1 ORDER BY last_activity_at DESC"),
         )?;
-        let rows = stmt.query_map(rusqlite::params![host_alias], |row| {
-            Ok(SessionRow {
-                id: row.get(0)?,
-                tmux_name: row.get(1)?,
-                host_alias: row.get(2)?,
-                project_id: row.get(3)?,
-                worktree_id: row.get(4)?,
-                created_at: row.get(5)?,
-                last_activity_at: row.get(6)?,
-                status: row.get(7)?,
-                notes: row.get(8)?,
-                account_uuid: row.get(9)?,
-                kind: row.get(10)?,
-                reviews_session_id: row.get(11)?,
-                worktree_key: row.get(12)?,
-                lost_at: row.get(13)?,
-                claude_session_id: row.get(14)?,
-                claude_status: row.get(15)?,
-                effort_level: row.get(16)?,
-                pr_url: row.get(17)?,
-                current_activity: row.get(18)?,
-                context_pct: row.get(19)?,
-                stuck_kind: row.get(20)?,
-                friendly_name: row.get(21)?,
-                safe_kill_state: row.get(22)?,
-                safe_kill_nonce: row.get(23)?,
-                safe_kill_detail: row.get(24)?,
-                safe_kill_requested_at: row.get(25)?,
-            })
-        })?;
+        let rows = stmt.query_map(rusqlite::params![host_alias], map_session_row)?;
         rows.collect()
     }
 
     /// All sessions across every host, in one query. Used by `reconcile_sessions`
     /// to collect its return value once at the end instead of N per-host reads.
     pub fn list_all_sessions(&self) -> Result<Vec<SessionRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
-                    last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                    worktree_key, lost_at,
-                    claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind, friendly_name,
-                    safe_kill_state, safe_kill_nonce, safe_kill_detail, safe_kill_requested_at
-             FROM sessions ORDER BY last_activity_at DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(SessionRow {
-                id: row.get(0)?,
-                tmux_name: row.get(1)?,
-                host_alias: row.get(2)?,
-                project_id: row.get(3)?,
-                worktree_id: row.get(4)?,
-                created_at: row.get(5)?,
-                last_activity_at: row.get(6)?,
-                status: row.get(7)?,
-                notes: row.get(8)?,
-                account_uuid: row.get(9)?,
-                kind: row.get(10)?,
-                reviews_session_id: row.get(11)?,
-                worktree_key: row.get(12)?,
-                lost_at: row.get(13)?,
-                claude_session_id: row.get(14)?,
-                claude_status: row.get(15)?,
-                effort_level: row.get(16)?,
-                pr_url: row.get(17)?,
-                current_activity: row.get(18)?,
-                context_pct: row.get(19)?,
-                stuck_kind: row.get(20)?,
-                friendly_name: row.get(21)?,
-                safe_kill_state: row.get(22)?,
-                safe_kill_nonce: row.get(23)?,
-                safe_kill_detail: row.get(24)?,
-                safe_kill_requested_at: row.get(25)?,
-            })
-        })?;
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions ORDER BY last_activity_at DESC"
+        ))?;
+        let rows = stmt.query_map([], map_session_row)?;
         rows.collect()
     }
 
@@ -1495,46 +1533,13 @@ impl Store {
         let Some(key) = key else {
             return Ok(Vec::new());
         };
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
-                    last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                    worktree_key, lost_at,
-                    claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind, friendly_name,
-                    safe_kill_state, safe_kill_nonce, safe_kill_detail, safe_kill_requested_at
-             FROM sessions
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions
              WHERE project_id=?1 AND worktree_key=?2 AND id<>?3
-             ORDER BY host_alias ASC, tmux_name ASC",
-        )?;
+             ORDER BY host_alias ASC, tmux_name ASC"
+        ))?;
         let rows = stmt.query_map(rusqlite::params![project_id, key, session_id], |row| {
-            Ok(SessionRow {
-                id: row.get(0)?,
-                tmux_name: row.get(1)?,
-                host_alias: row.get(2)?,
-                project_id: row.get(3)?,
-                worktree_id: row.get(4)?,
-                created_at: row.get(5)?,
-                last_activity_at: row.get(6)?,
-                status: row.get(7)?,
-                notes: row.get(8)?,
-                account_uuid: row.get(9)?,
-                kind: row.get(10)?,
-                reviews_session_id: row.get(11)?,
-                worktree_key: row.get(12)?,
-                lost_at: row.get(13)?,
-                claude_session_id: row.get(14)?,
-                claude_status: row.get(15)?,
-                effort_level: row.get(16)?,
-                pr_url: row.get(17)?,
-                current_activity: row.get(18)?,
-                context_pct: row.get(19)?,
-                stuck_kind: row.get(20)?,
-                friendly_name: row.get(21)?,
-                safe_kill_state: row.get(22)?,
-                safe_kill_nonce: row.get(23)?,
-                safe_kill_detail: row.get(24)?,
-                safe_kill_requested_at: row.get(25)?,
-            })
+            map_session_row(row)
         })?;
         rows.collect()
     }
@@ -1628,6 +1633,46 @@ impl Store {
             updated += 1;
         }
         Ok(updated)
+    }
+
+    /// The deterministic branch-derived label `new_session` /
+    /// `backfill_friendly_names` would give this row (PR #28), or `None` for
+    /// bg rows and rows whose humanised name is empty. Lets callers tell a
+    /// still-default label from one a human or agent chose.
+    pub fn default_friendly_name(&self, id: i64) -> Result<Option<String>, rusqlite::Error> {
+        let row: Option<(String, String, String, Option<String>, String)> = self
+            .conn
+            .query_row(
+                "SELECT s.tmux_name,
+                        COALESCE(p.owner, '') AS owner,
+                        COALESCE(p.repo, '') AS repo,
+                        COALESCE(w.branch, w.name) AS branch,
+                        COALESCE(s.kind, 'work')
+                   FROM sessions s
+                   LEFT JOIN projects p ON p.id = s.project_id
+                   LEFT JOIN worktrees w ON w.id = s.worktree_id
+                  WHERE s.id = ?1",
+                rusqlite::params![id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((tmux_name, owner, repo, branch, kind)) = row else {
+            return Ok(None);
+        };
+        if kind == "bg" {
+            return Ok(None);
+        }
+        let source = branch.unwrap_or(tmux_name);
+        let label = crate::humanize::humanize_branch(&source, &owner, &repo);
+        Ok(if label.is_empty() { None } else { Some(label) })
     }
 
     /// Set the session's display label (migration 016). `None` clears it.
@@ -1736,6 +1781,58 @@ impl Store {
 
     pub fn get_session_by_id(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
         fetch_session_by_id(&self.conn, id)
+    }
+
+    /// Remember the most recent prompt sent to a session (first 200 chars,
+    /// migration 019). Emits `session_updated`.
+    pub fn set_last_prompt(
+        &self,
+        id: i64,
+        prompt: &str,
+    ) -> Result<Option<SessionRow>, rusqlite::Error> {
+        let truncated: String = prompt.chars().take(LAST_PROMPT_CHARS).collect();
+        self.conn.execute(
+            "UPDATE sessions SET last_prompt=?1 WHERE id=?2",
+            rusqlite::params![truncated, id],
+        )?;
+        let row = fetch_session_by_id(&self.conn, id)?;
+        if let Some(ref r) = row {
+            self.bus.session_updated(r);
+        }
+        Ok(row)
+    }
+
+    /// Stamp when fleet created this session (migration 019). Only sets the
+    /// value once — a re-create keeps the original start.
+    pub fn set_started_at(&self, id: i64, at: i64) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET started_at=COALESCE(started_at, ?1) WHERE id=?2",
+            rusqlite::params![at, id],
+        )?;
+        Ok(())
+    }
+
+    /// Record that a stuck playbook acted on this row: stamps
+    /// `last_playbook_at`, appends a `playbook_applied` timeline event carrying
+    /// the kind, and emits `session_updated`.
+    pub fn mark_playbook_applied(
+        &self,
+        id: i64,
+        at: i64,
+        detail: &str,
+    ) -> Result<Option<SessionRow>, rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET last_playbook_at=?1 WHERE id=?2",
+            rusqlite::params![at, id],
+        )?;
+        if let Err(e) = self.insert_session_event(id, "playbook_applied", Some(detail)) {
+            eprintln!("[playbook] session_event insert failed for {id}: {e}");
+        }
+        let row = fetch_session_by_id(&self.conn, id)?;
+        if let Some(ref r) = row {
+            self.bus.session_updated(r);
+        }
+        Ok(row)
     }
 
     pub fn get_host_row(&self, alias: &str) -> Result<Option<HostRow>, rusqlite::Error> {
@@ -1873,6 +1970,8 @@ impl Store {
         context_pct: Option<f64>,
         stuck_kind: Option<&str>,
         intel_observed: bool,
+        ci_status: Option<&str>,
+        pr_observed: bool,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
         // Read the prior row (not just its id) before the write: it tells us
@@ -1886,13 +1985,20 @@ impl Store {
         // away — one event per host, not per session.
         let prior: Option<SessionRow> = fetch_session(tx, tmux_name, host_alias)?;
 
-        tx.execute(
+        // The post-write stuck_kind, spelled out once and reused: SQLite's
+        // upsert SET clauses see the OLD row (unqualified) and the candidate
+        // (`excluded`), never each other's results.
+        const NEW_STUCK: &str = "CASE WHEN ?16 THEN excluded.stuck_kind \
+                                 ELSE COALESCE(excluded.stuck_kind, stuck_kind) END";
+        let sql = format!(
             "INSERT INTO sessions (tmux_name, host_alias, project_id, worktree_id,
                                    created_at, last_activity_at, status, account_uuid,
                                    worktree_key, lost_at,
                                    claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                                   context_pct, stuck_kind)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8, NULL, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                                   context_pct, stuck_kind, ci_status, idle_since, stuck_since)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8, NULL, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?17,
+                     CASE WHEN ?10 IN ('idle','completed','stopped') THEN ?19 ELSE NULL END,
+                     CASE WHEN ?15 IS NULL THEN NULL ELSE ?19 END)
              ON CONFLICT(host_alias, tmux_name) DO UPDATE SET
                project_id=excluded.project_id,
                last_activity_at=excluded.last_activity_at,
@@ -1903,14 +2009,30 @@ impl Store {
                claude_session_id=COALESCE(excluded.claude_session_id, claude_session_id),
                claude_status=COALESCE(excluded.claude_status, claude_status),
                effort_level=COALESCE(excluded.effort_level, effort_level),
-               pr_url=COALESCE(excluded.pr_url, pr_url),
+               -- pr_url / ci_status are authoritative when the gh probe ran
+               -- this pass (?18) so a closed PR's link clears; otherwise the
+               -- prior values are preserved.
+               pr_url=CASE WHEN ?18 THEN excluded.pr_url ELSE COALESCE(excluded.pr_url, pr_url) END,
+               ci_status=CASE WHEN ?18 THEN excluded.ci_status
+                              ELSE COALESCE(excluded.ci_status, ci_status) END,
                current_activity=COALESCE(excluded.current_activity, current_activity),
                context_pct=COALESCE(excluded.context_pct, context_pct),
                -- stuck_kind is authoritative when the pane was observed this
                -- pass (?16): a NULL then CLEARS a stale flag. When the pane was
                -- NOT observed (capture failed) we preserve the prior value.
-               stuck_kind=CASE WHEN ?16 THEN excluded.stuck_kind
-                               ELSE COALESCE(excluded.stuck_kind, stuck_kind) END",
+               stuck_kind={new_stuck},
+               -- stuck_since: keep the episode start while the kind is
+               -- unchanged, restart it when the kind changes, clear when the
+               -- flag clears.
+               stuck_since=CASE WHEN ({new_stuck}) IS NULL THEN NULL
+                                WHEN ({new_stuck}) IS stuck_kind THEN COALESCE(stuck_since, ?19)
+                                ELSE ?19 END,
+               idle_since={idle}",
+            new_stuck = NEW_STUCK,
+            idle = idle_since_sql("COALESCE(excluded.claude_status, claude_status)", "?19"),
+        );
+        tx.execute(
+            &sql,
             rusqlite::params![
                 tmux_name,
                 host_alias,
@@ -1927,7 +2049,10 @@ impl Store {
                 current_activity,
                 context_pct,
                 stuck_kind,
-                intel_observed
+                intel_observed,
+                ci_status,
+                pr_observed,
+                now_unix()
             ],
         )?;
         if let Some(row) = fetch_session(tx, tmux_name, host_alias)? {
@@ -2132,6 +2257,8 @@ impl Store {
                         sess.context_pct,
                         sess.stuck_kind.as_deref(),
                         sess.intel_observed,
+                        sess.ci_status.as_deref(),
+                        sess.pr_observed,
                         &mut out,
                     )?;
                     if let Some(pid) = sess.project_id {
@@ -2243,12 +2370,19 @@ impl Store {
         claude_session_id: &str,
         status: &str,
     ) -> Result<(), crate::ipc_error::IpcError> {
+        // Only the Stop hook calls this (a turn just completed), so the
+        // write doubles as the `last_turn_at` stamp and maintains `idle_since`
+        // for the GC sweeper — the hook handler lives in another track's
+        // file, so the lifecycle bookkeeping is kept here in the store.
+        let now = now_unix();
+        let sql = format!(
+            "UPDATE sessions SET claude_status = ?1, last_turn_at = ?3, idle_since = {idle} \
+             WHERE claude_session_id = ?2",
+            idle = idle_since_sql("?1", "?3"),
+        );
         let changed = self
             .conn
-            .execute(
-                "UPDATE sessions SET claude_status = ?1 WHERE claude_session_id = ?2",
-                rusqlite::params![status, claude_session_id],
-            )
+            .execute(&sql, rusqlite::params![status, claude_session_id, now])
             .map_err(crate::ipc_error::IpcError::from)?;
         if changed > 0 {
             // Emit session_updated so the frontend patches the row in real-time.
@@ -2286,45 +2420,12 @@ impl Store {
     ) -> Result<SessionRow, crate::ipc_error::IpcError> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
-                        last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                        worktree_key, lost_at,
-                        claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind, friendly_name,
-                    safe_kill_state, safe_kill_nonce, safe_kill_detail, safe_kill_requested_at
-                 FROM sessions WHERE claude_session_id = ?1",
-            )
+            .prepare(&format!(
+                "SELECT {SESSION_COLUMNS} FROM sessions WHERE claude_session_id = ?1"
+            ))
             .map_err(crate::ipc_error::IpcError::from)?;
         stmt.query_row(rusqlite::params![claude_session_id], |row| {
-            Ok(SessionRow {
-                id: row.get(0)?,
-                tmux_name: row.get(1)?,
-                host_alias: row.get(2)?,
-                project_id: row.get(3)?,
-                worktree_id: row.get(4)?,
-                created_at: row.get(5)?,
-                last_activity_at: row.get(6)?,
-                status: row.get(7)?,
-                notes: row.get(8)?,
-                account_uuid: row.get(9)?,
-                kind: row.get(10)?,
-                reviews_session_id: row.get(11)?,
-                worktree_key: row.get(12)?,
-                lost_at: row.get(13)?,
-                claude_session_id: row.get(14)?,
-                claude_status: row.get(15)?,
-                effort_level: row.get(16)?,
-                pr_url: row.get(17)?,
-                current_activity: row.get(18)?,
-                context_pct: row.get(19)?,
-                stuck_kind: row.get(20)?,
-                friendly_name: row.get(21)?,
-                safe_kill_state: row.get(22)?,
-                safe_kill_nonce: row.get(23)?,
-                safe_kill_detail: row.get(24)?,
-                safe_kill_requested_at: row.get(25)?,
-            })
+            map_session_row(row)
         })
         .map_err(crate::ipc_error::IpcError::from)
     }
@@ -2363,44 +2464,11 @@ fn fetch_session(
     tmux_name: &str,
     host_alias: &str,
 ) -> Result<Option<SessionRow>, rusqlite::Error> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
-                last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                worktree_key, lost_at,
-                claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind, friendly_name,
-                    safe_kill_state, safe_kill_nonce, safe_kill_detail, safe_kill_requested_at
-         FROM sessions WHERE tmux_name=?1 AND host_alias=?2",
-    )?;
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {SESSION_COLUMNS} FROM sessions WHERE tmux_name=?1 AND host_alias=?2"
+    ))?;
     let mut rows = stmt.query_map(rusqlite::params![tmux_name, host_alias], |row| {
-        Ok(SessionRow {
-            id: row.get(0)?,
-            tmux_name: row.get(1)?,
-            host_alias: row.get(2)?,
-            project_id: row.get(3)?,
-            worktree_id: row.get(4)?,
-            created_at: row.get(5)?,
-            last_activity_at: row.get(6)?,
-            status: row.get(7)?,
-            notes: row.get(8)?,
-            account_uuid: row.get(9)?,
-            kind: row.get(10)?,
-            reviews_session_id: row.get(11)?,
-            worktree_key: row.get(12)?,
-            lost_at: row.get(13)?,
-            claude_session_id: row.get(14)?,
-            claude_status: row.get(15)?,
-            effort_level: row.get(16)?,
-            pr_url: row.get(17)?,
-            current_activity: row.get(18)?,
-            context_pct: row.get(19)?,
-            stuck_kind: row.get(20)?,
-            friendly_name: row.get(21)?,
-            safe_kill_state: row.get(22)?,
-            safe_kill_nonce: row.get(23)?,
-            safe_kill_detail: row.get(24)?,
-            safe_kill_requested_at: row.get(25)?,
-        })
+        map_session_row(row)
     })?;
     match rows.next() {
         Some(r) => Ok(Some(r?)),
@@ -2420,45 +2488,10 @@ fn ghost_cutoff(probe_started_at: i64) -> i64 {
 }
 
 fn fetch_session_by_id(conn: &Connection, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT id, tmux_name, host_alias, project_id, worktree_id, created_at,
-                last_activity_at, status, notes, account_uuid, kind, reviews_session_id,
-                worktree_key, lost_at,
-                claude_session_id, claude_status, effort_level, pr_url, current_activity,
-                    context_pct, stuck_kind, friendly_name,
-                    safe_kill_state, safe_kill_nonce, safe_kill_detail, safe_kill_requested_at
-         FROM sessions WHERE id=?1",
-    )?;
-    let mut rows = stmt.query_map(rusqlite::params![id], |row| {
-        Ok(SessionRow {
-            id: row.get(0)?,
-            tmux_name: row.get(1)?,
-            host_alias: row.get(2)?,
-            project_id: row.get(3)?,
-            worktree_id: row.get(4)?,
-            created_at: row.get(5)?,
-            last_activity_at: row.get(6)?,
-            status: row.get(7)?,
-            notes: row.get(8)?,
-            account_uuid: row.get(9)?,
-            kind: row.get(10)?,
-            reviews_session_id: row.get(11)?,
-            worktree_key: row.get(12)?,
-            lost_at: row.get(13)?,
-            claude_session_id: row.get(14)?,
-            claude_status: row.get(15)?,
-            effort_level: row.get(16)?,
-            pr_url: row.get(17)?,
-            current_activity: row.get(18)?,
-            context_pct: row.get(19)?,
-            stuck_kind: row.get(20)?,
-            friendly_name: row.get(21)?,
-            safe_kill_state: row.get(22)?,
-            safe_kill_nonce: row.get(23)?,
-            safe_kill_detail: row.get(24)?,
-            safe_kill_requested_at: row.get(25)?,
-        })
-    })?;
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {SESSION_COLUMNS} FROM sessions WHERE id=?1"
+    ))?;
+    let mut rows = stmt.query_map(rusqlite::params![id], map_session_row)?;
     match rows.next() {
         Some(r) => Ok(Some(r?)),
         None => Ok(None),
@@ -3536,6 +3569,8 @@ mod tests {
             context_pct: Some(12.5),
             stuck_kind: None,
             intel_observed: true,
+            ci_status: None,
+            pr_observed: false,
         }
     }
 
@@ -3568,6 +3603,8 @@ mod tests {
                         Some(12.5),
                         None,
                         true,
+                        None,
+                        false,
                         &mut out,
                     )?;
                     Ok(out)
@@ -3896,7 +3933,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 18, "schema_version should be 18 after migration");
+        assert_eq!(v, 19, "schema_version should be 19 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store
@@ -4005,6 +4042,8 @@ mod tests {
                 context_pct: None,
                 stuck_kind: stuck.map(|s| s.to_string()),
                 intel_observed: observed,
+                ci_status: None,
+                pr_observed: false,
             }];
             store
                 .apply_host_reconcile(HostReconcile {
@@ -4081,6 +4120,8 @@ mod tests {
                 context_pct: None,
                 stuck_kind: None,
                 intel_observed: false,
+                ci_status: None,
+                pr_observed: false,
             },
             // brand new → create
             ReconcileSession {
@@ -4098,6 +4139,8 @@ mod tests {
                 context_pct: None,
                 stuck_kind: None,
                 intel_observed: false,
+                ci_status: None,
+                pr_observed: false,
             },
         ];
         let keep = vec!["keep-existing".to_string(), "fresh".to_string()];
@@ -4274,6 +4317,8 @@ mod tests {
                 context_pct: None,
                 stuck_kind: None,
                 intel_observed: false,
+                ci_status: None,
+                pr_observed: false,
             },
             ReconcileSession {
                 tmux_name: "bad",
@@ -4290,6 +4335,8 @@ mod tests {
                 context_pct: None,
                 stuck_kind: None,
                 intel_observed: false,
+                ci_status: None,
+                pr_observed: false,
             },
         ];
         let keep = vec!["good".to_string(), "bad".to_string()];
@@ -4521,5 +4568,215 @@ mod tests {
                 .as_deref(),
             Some("Already set")
         );
+    }
+
+    // ── migration 019: lifecycle + outcome fields ──
+
+    #[test]
+    fn migration_019_adds_lifecycle_columns_defaulting_to_null() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("sess", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.idle_since, None);
+        assert_eq!(row.stuck_since, None);
+        assert_eq!(row.last_playbook_at, None);
+        assert_eq!(row.last_prompt, None);
+        assert_eq!(row.started_at, None);
+        assert_eq!(row.last_turn_at, None);
+        assert_eq!(row.ci_status, None);
+    }
+
+    fn reconcile_one(
+        s: &mut Store,
+        name: &'static str,
+        status: Option<&str>,
+        stuck: Option<&str>,
+        pr: Option<(Option<&str>, Option<&str>)>,
+    ) -> SessionRow {
+        let (pr_url, ci_status, pr_observed) = match pr {
+            Some((u, c)) => (u.map(String::from), c.map(String::from), true),
+            None => (None, None, false),
+        };
+        s.apply_host_reconcile(HostReconcile {
+            alias: "local",
+            reachable: true,
+            claude_version: None,
+            tmux_version: None,
+            last_pinged_at: 1,
+            probe_started_at: 0,
+            sessions: &[ReconcileSession {
+                tmux_name: name,
+                project_id: None,
+                created_at: 1,
+                last_activity_at: 1,
+                account_uuid: None,
+                worktree_key: None,
+                claude_session_id: None,
+                claude_status: status.map(String::from),
+                effort_level: None,
+                pr_url,
+                current_activity: None,
+                context_pct: None,
+                stuck_kind: stuck.map(String::from),
+                intel_observed: true,
+                ci_status,
+                pr_observed,
+            }],
+            keep: &[name.to_string()],
+        })
+        .unwrap();
+        s.get_session(name, "local").unwrap().unwrap()
+    }
+
+    #[test]
+    fn reconcile_stamps_idle_since_on_entering_idle_and_clears_on_leaving() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let r = reconcile_one(&mut s, "a", Some("working"), None, None);
+        assert_eq!(r.idle_since, None);
+        let r = reconcile_one(&mut s, "a", Some("idle"), None, None);
+        let stamp = r.idle_since.expect("stamped on entering idle");
+        assert!(stamp > 0);
+        // Staying idle keeps the ORIGINAL stamp (the GC TTL counts from it).
+        let r = reconcile_one(&mut s, "a", Some("completed"), None, None);
+        assert_eq!(r.idle_since, Some(stamp));
+        let r = reconcile_one(&mut s, "a", Some("working"), None, None);
+        assert_eq!(r.idle_since, None);
+        // A fresh row inserted already idle is stamped on insert.
+        let r = reconcile_one(&mut s, "b", Some("stopped"), None, None);
+        assert!(r.idle_since.is_some());
+    }
+
+    #[test]
+    fn reconcile_tracks_stuck_since_per_episode() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let r = reconcile_one(&mut s, "a", Some("blocked"), None, None);
+        assert_eq!(r.stuck_since, None);
+        let r = reconcile_one(&mut s, "a", Some("blocked"), Some("press_enter"), None);
+        let start = r.stuck_since.expect("episode start stamped");
+        // Same kind on the next pass: the episode start is preserved.
+        let r = reconcile_one(&mut s, "a", Some("blocked"), Some("press_enter"), None);
+        assert_eq!(r.stuck_since, Some(start));
+        // The flag clearing (pane observed, no stuck) clears the stamp …
+        let r = reconcile_one(&mut s, "a", Some("working"), None, None);
+        assert_eq!(r.stuck_kind, None);
+        assert_eq!(r.stuck_since, None);
+        // … and a different kind later starts a new episode.
+        let r = reconcile_one(&mut s, "a", Some("blocked"), Some("oom"), None);
+        assert!(r.stuck_since.is_some());
+    }
+
+    #[test]
+    fn reconcile_pr_fields_are_authoritative_only_when_probed() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let r = reconcile_one(
+            &mut s,
+            "a",
+            None,
+            None,
+            Some((Some("https://github.com/o/r/pull/1"), Some("pending"))),
+        );
+        assert_eq!(r.pr_url.as_deref(), Some("https://github.com/o/r/pull/1"));
+        assert_eq!(r.ci_status.as_deref(), Some("pending"));
+        // Unprobed pass (cache fresh): both survive.
+        let r = reconcile_one(&mut s, "a", None, None, None);
+        assert_eq!(r.pr_url.as_deref(), Some("https://github.com/o/r/pull/1"));
+        assert_eq!(r.ci_status.as_deref(), Some("pending"));
+        // Probed again, PR now closed: both clear.
+        let r = reconcile_one(&mut s, "a", None, None, Some((None, None)));
+        assert_eq!(r.pr_url, None);
+        assert_eq!(r.ci_status, None);
+    }
+
+    #[test]
+    fn stop_hook_status_write_stamps_last_turn_and_idle_since() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("sess", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_claude_session_id(id, "uuid-1").unwrap();
+        s.set_claude_status_by_session_id("uuid-1", "idle").unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert!(row.last_turn_at.is_some());
+        let idle = row.idle_since.expect("idle stamped by the hook");
+        s.set_claude_status_by_session_id("uuid-1", "working")
+            .unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.idle_since, None);
+        s.set_claude_status_by_session_id("uuid-1", "idle").unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert!(row.idle_since.unwrap() >= idle);
+    }
+
+    #[test]
+    fn bg_upsert_maintains_idle_since_from_agent_status() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 1)
+            .unwrap();
+        assert_eq!(
+            s.get_session("bg:u1", "local").unwrap().unwrap().idle_since,
+            None
+        );
+        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("completed"), 2)
+            .unwrap();
+        let stamp = s
+            .get_session("bg:u1", "local")
+            .unwrap()
+            .unwrap()
+            .idle_since
+            .expect("stamped");
+        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("completed"), 3)
+            .unwrap();
+        assert_eq!(
+            s.get_session("bg:u1", "local").unwrap().unwrap().idle_since,
+            Some(stamp)
+        );
+        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 4)
+            .unwrap();
+        assert_eq!(
+            s.get_session("bg:u1", "local").unwrap().unwrap().idle_since,
+            None
+        );
+    }
+
+    #[test]
+    fn last_prompt_is_truncated_started_at_set_once_and_playbook_stamp_emits() {
+        let (s, bus) = store_with_recorder();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("sess", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let long: String = "x".repeat(LAST_PROMPT_CHARS + 50);
+        let row = s.set_last_prompt(id, &long).unwrap().unwrap();
+        assert_eq!(
+            row.last_prompt.as_deref().map(|p| p.chars().count()),
+            Some(LAST_PROMPT_CHARS)
+        );
+
+        s.set_started_at(id, 100).unwrap();
+        s.set_started_at(id, 200).unwrap();
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().started_at,
+            Some(100)
+        );
+
+        let _ = bus.take();
+        let row = s
+            .mark_playbook_applied(id, 555, "oom:recreate")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.last_playbook_at, Some(555));
+        assert_eq!(bus.take(), vec![format!("session:updated:{id}")]);
+        let events = s.list_session_events(id, 10).unwrap();
+        assert!(events
+            .iter()
+            .any(|e| e.kind == "playbook_applied" && e.detail.as_deref() == Some("oom:recreate")));
     }
 }

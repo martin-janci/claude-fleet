@@ -2,6 +2,25 @@ import { writable } from 'svelte/store';
 import { invokeCmd, invokeCmdAbortable, type Result } from './result';
 import { readPref, writePref } from './prefs';
 
+/** The `claude_status` vocabulary (pane_intel `ClaudeStatus`). Anything the
+ *  backend has not classified arrives as `null`. */
+export const CLAUDE_STATUSES = [
+  'working',
+  'blocked',
+  'completed',
+  'failed',
+  'stopped',
+  'idle',
+] as const;
+export type ClaudeStatus = (typeof CLAUDE_STATUSES)[number];
+
+/** The `stuck_kind` vocabulary (pane_intel `StuckKind`). */
+export const STUCK_KINDS = ['auth_menu', 'reconnect', 'trust_prompt', 'oom', 'press_enter'] as const;
+export type StuckKind = (typeof STUCK_KINDS)[number];
+
+/** Reduced PR check status populated by reconcile (migration 019). */
+export type CiStatus = 'passing' | 'failing' | 'pending';
+
 export interface SessionRow {
   id: number;
   tmux_name: string;
@@ -19,10 +38,15 @@ export interface SessionRow {
   lost_at: number | null;
   // Claude agent fields — null when claude CLI not installed or session not managed by Claude Code
   claude_session_id: string | null;
-  claude_status: string | null;
+  claude_status: ClaudeStatus | null;
   effort_level: string | null;
   pr_url: string | null;
   current_activity: string | null;
+  // Pane-tail intel (migration 012): context window usage 0..100 and the
+  // detected stuck state. Both are authoritative when the pane was observed
+  // on the last reconcile pass and preserved otherwise.
+  context_pct: number | null;
+  stuck_kind: StuckKind | null;
   // Display label set by the in-session agent via the `set_friendly_name`
   // MCP tool. When the sidebar toggle is on, this is shown instead of
   // tmux_name; null falls back to tmux_name.
@@ -32,9 +56,29 @@ export interface SessionRow {
   safe_kill_nonce: string | null;
   safe_kill_detail: string | null;
   safe_kill_requested_at: number | null;
+  // Lifecycle + outcome fields (migration 019), unix seconds unless noted.
+  /** When claude_status last entered idle/completed/stopped; null while working. */
+  idle_since: number | null;
+  /** When the current stuck_kind episode began; null when not stuck. */
+  stuck_since: number | null;
+  /** When a stuck playbook last acted on this session. */
+  last_playbook_at: number | null;
+  /** First 200 chars of the last prompt sent through fleet. */
+  last_prompt: string | null;
+  /** When fleet created the session (null for tmux-discovered rows). */
+  started_at: number | null;
+  /** Last Stop hook (turn completed). */
+  last_turn_at: number | null;
+  ci_status: CiStatus | null;
 }
 
 export const sessions = writable<SessionRow[]>([]);
+
+/** True once the first successful `list_sessions` has populated the store.
+ *  Consumers that react to *transitions* (Attention.svelte) treat everything
+ *  before this as baseline, so a launch never replays every already-stuck
+ *  row as a fresh alert. */
+export const sessionsLoaded = writable<boolean>(false);
 
 // Sidebar filter — when false, background (`kind === 'bg'`) sessions are
 // hidden from the tree. Defaults to true (shown). Persisted across restarts.
@@ -56,7 +100,10 @@ showFriendlyNames.subscribe((v) => writePref('show-friendly-names', v));
 // within the configured interval, so window-focus reloads stay cheap.
 export async function loadSessions(opts: { force?: boolean } = {}): Promise<Result<SessionRow[]>> {
   const r = await invokeCmd<SessionRow[]>('list_sessions', { force: opts.force ?? false });
-  if (r.ok) sessions.set(r.value);
+  if (r.ok) {
+    sessions.set(r.value);
+    sessionsLoaded.set(true);
+  }
   return r;
 }
 
@@ -182,7 +229,10 @@ export async function newSessionAbortable(
 
 export async function bootstrapSessions(): Promise<Result<SessionRow[]>> {
   const r = await invokeCmd<SessionRow[]>('list_sessions');
-  if (r.ok) sessions.set(r.value);
+  if (r.ok) {
+    sessions.set(r.value);
+    sessionsLoaded.set(true);
+  }
   return r;
 }
 
@@ -355,6 +405,10 @@ export async function dismissGhostSession(sessionId: number): Promise<Result<voi
 
 export interface NewBgSessionResult {
   claude_session_id: string | null;
+  /** The fleet row, registered by the post-launch reconcile (MCP-7). Null
+   *  when the agent could not be matched yet — it appears on the next tick. */
+  session?: SessionRow | null;
+  warning?: string | null;
 }
 
 /** Launch a supervised Claude background session on `hostAlias`. */
@@ -363,9 +417,11 @@ export async function newBgSession(
   name: string,
   prompt: string,
 ): Promise<Result<NewBgSessionResult>> {
-  return invokeCmd<NewBgSessionResult>('new_bg_session', {
+  const r = await invokeCmd<NewBgSessionResult>('new_bg_session', {
     args: { host_alias: hostAlias, name, prompt },
   });
+  if (r.ok && r.value?.session) acceptCommandRow(r.value.session);
+  return r;
 }
 
 /** Fetch recent log output from a background Claude session (no PTY). */
