@@ -16,7 +16,9 @@ pub struct Health {
     /// Session counts keyed by `claude_status`; a null/None status falls into
     /// the "unknown" bucket.
     pub by_status: BTreeMap<String, u32>,
-    /// Sessions with `claude_status == "ghost"`.
+    /// Sessions whose lifecycle `status` is `"ghost"` (the tmux session
+    /// vanished from a reachable host). Ghost is a `status` value, never a
+    /// `claude_status` one, so this must not be derived from `by_status`.
     pub ghosts: u32,
     /// Sessions whose `context_pct >= 85.0`.
     pub context_red: u32,
@@ -67,7 +69,7 @@ pub fn summarize(sessions: &[SessionRow], hosts: &[HostRow]) -> FleetSummary {
         let status = s.claude_status.as_deref().unwrap_or("unknown");
         *summary.by_status.entry(status.to_string()).or_insert(0) += 1;
 
-        if status == "ghost" {
+        if s.status == "ghost" {
             summary.ghosts += 1;
         }
         if s.context_pct.is_some_and(|p| p >= CONTEXT_RED_THRESHOLD) {
@@ -196,6 +198,11 @@ mod tests {
         }
     }
 
+    fn ghost(mut row: SessionRow) -> SessionRow {
+        row.status = "ghost".to_string();
+        row
+    }
+
     fn host(alias: &str, reachable: bool) -> HostRow {
         HostRow {
             alias: alias.to_string(),
@@ -217,8 +224,8 @@ mod tests {
             session(None, None, None),
             // working
             session(Some("working"), Some(10.0), None),
-            // a ghost
-            session(Some("ghost"), None, None),
+            // a ghost: lifecycle status, with its last known claude_status
+            ghost(session(Some("idle"), None, None)),
             // context red (>= 85)
             session(Some("working"), Some(90.0), None),
             // stuck
@@ -239,12 +246,43 @@ mod tests {
         // null → unknown bucket; "working" counted twice.
         assert_eq!(s.by_status.get("unknown"), Some(&1));
         assert_eq!(s.by_status.get("working"), Some(&2));
-        assert_eq!(s.by_status.get("ghost"), Some(&1));
-        assert_eq!(s.by_status.get("idle"), Some(&1));
+        assert_eq!(s.by_status.get("idle"), Some(&2));
 
         assert_eq!(s.ghosts, 1);
         assert_eq!(s.context_red, 1);
         assert_eq!(s.stuck, 1);
+    }
+
+    /// Regression (R1/D15): `ghosts` used to count `claude_status ==
+    /// "ghost"`, a value that column never holds, so it was always 0.
+    #[test]
+    fn ghosts_are_counted_by_lifecycle_status_not_claude_status() {
+        let sessions = vec![
+            ghost(session(None, None, None)),
+            ghost(session(Some("working"), None, None)),
+            session(Some("idle"), None, None),
+            // A stray "ghost" in claude_status is not a ghost session.
+            session(Some("ghost"), None, None),
+        ];
+        let s = summarize(&sessions, &[]);
+        assert_eq!(s.ghosts, 2);
+        assert_eq!(s.sessions_total, 4);
+    }
+
+    #[test]
+    fn health_from_store_counts_a_ghosted_session() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        store
+            .upsert_session("live", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store
+            .upsert_session("gone", "alpha", None, None, 1, 1, "ghost", None)
+            .unwrap();
+        let h = health_from_store(&store);
+        assert_eq!(h.sessions_total, 2);
+        assert_eq!(h.ghosts, 1);
+        assert_eq!(serde_json::to_value(&h).unwrap()["ghosts"], 1);
     }
 
     #[test]

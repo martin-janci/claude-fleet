@@ -186,6 +186,31 @@ pub struct PaneIntel {
     /// Inferred status: `Working` | `Idle` | `Blocked` | `None`.
     /// Only a *fallback* — the authoritative status comes from `claude agents`.
     pub derived_status: Option<ClaudeStatus>,
+    /// What a `Blocked` pane waits on when the cause is a permission or
+    /// question dialog (not a stuck state). No session column holds it yet,
+    /// so [`analyze`] also puts it in `activity` as
+    /// `waiting for <reason>: <question>`.
+    pub waiting_for: Option<WaitingFor>,
+}
+
+/// Why a pane showing a Claude Code dialog is waiting on the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitingFor {
+    /// A tool-permission dialog ("Do you want to proceed?", "No, and tell
+    /// Claude what to do differently"), including plan approval.
+    Permission,
+    /// A question with numbered answers (AskUserQuestion-style menu).
+    Input,
+}
+
+impl WaitingFor {
+    /// Stable lowercase tag; `input` matches the CLI's "input needed".
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WaitingFor::Permission => "permission",
+            WaitingFor::Input => "input",
+        }
+    }
 }
 
 /// Strip ANSI/VT escape sequences (CSI `ESC[…m`, OSC, and bare control chars)
@@ -419,10 +444,136 @@ fn is_decoration(c: char) -> bool {
         )
 }
 
+/// Footer cues that only the live REPL shows below its input box: the
+/// spinner's interrupt hint, the shortcut hint, the status line and the
+/// permission-mode line. A dialog replaces the input box and its footer, so
+/// one of these BELOW dialog-looking text means that text is scrollback
+/// (Claude's prose, a diff), not a dialog on screen.
+const LIVE_REPL_CUES: &[&str] = &[
+    "esc to interrupt",
+    "? for shortcuts",
+    "% used",
+    "bypass permissions",
+    "shift+tab to cycle",
+];
+
+/// A permission or question dialog seen on screen.
+struct Dialog {
+    kind: WaitingFor,
+    /// The dialog's question line, or the selected answer when no line of it
+    /// ends with `?`.
+    prompt: Option<String>,
+}
+
+impl Dialog {
+    /// The activity line recorded for a blocked pane.
+    fn activity(&self) -> String {
+        let s = match &self.prompt {
+            Some(p) => format!("waiting for {}: {p}", self.kind.as_str()),
+            None => format!("waiting for {}", self.kind.as_str()),
+        };
+        s.chars().take(ACTIVITY_MAX).collect()
+    }
+}
+
+/// A pane line without surrounding whitespace or box-drawing borders, so a
+/// boxed dialog (`│ ❯ 1. Yes   │`) reads like an unboxed one.
+fn clean_line(line: &str) -> &str {
+    line.trim_matches(|c: char| c.is_whitespace() || c == '│' || c == '║')
+}
+
+/// `Some(selected)` when a cleaned line is a numbered choice such as
+/// `❯ 1. Yes` (`selected` = true) or `2. No`. `1.5 GB` and `42 + x` are not.
+fn numbered_choice(line: &str) -> Option<bool> {
+    let rest = line.trim_start_matches(['❯', '›']);
+    let selected = rest.len() != line.len();
+    let rest = rest.trim_start();
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 || digits > 2 {
+        return None;
+    }
+    let mut after = rest[digits..].chars();
+    match (after.next(), after.next()) {
+        (Some('.' | ')'), Some(' ') | None) => Some(selected),
+        _ => None,
+    }
+}
+
+/// Detect a Claude Code permission or question dialog on screen.
+///
+/// Cues, on ANSI-stripped and box-trimmed lines:
+/// * permission: the "No, and tell Claude what to do differently" choice, or
+///   a "Do you want to …" / "Would you like to …" line followed by at least
+///   two numbered choices (plan approval included);
+/// * question: an "Enter to select" hint plus a selected numbered choice.
+///
+/// Because a dialog replaces the REPL's input box and footer, a live-REPL
+/// cue ([`LIVE_REPL_CUES`], or an input prompt line `❯ …` that is not a
+/// choice) BELOW the last dialog line means the text is scrollback, and no
+/// dialog is reported.
+fn detect_dialog(stripped: &str) -> Option<Dialog> {
+    let lines: Vec<&str> = stripped.lines().map(clean_line).collect();
+    let lower: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
+    let choices: Vec<(usize, bool)> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| numbered_choice(l).map(|sel| (i, sel)))
+        .collect();
+    let is_choice = |i: usize| choices.iter().any(|(j, _)| *j == i);
+    let last = |pred: &dyn Fn(&str) -> bool| lower.iter().rposition(|l| pred(l));
+
+    let tell_claude = last(&|l| l.contains("no, and tell claude"));
+    let ask = last(&|l| l.contains("do you want to") || l.contains("would you like to"));
+    let select_hint = last(&|l| l.contains("enter to select"));
+
+    let kind = if tell_claude.is_some()
+        || ask.is_some_and(|a| choices.iter().filter(|(j, _)| *j > a).count() >= 2)
+    {
+        WaitingFor::Permission
+    } else if select_hint.is_some() && choices.iter().any(|(_, sel)| *sel) {
+        WaitingFor::Input
+    } else {
+        return None;
+    };
+
+    let dialog_end = [tell_claude, ask, select_hint, choices.last().map(|c| c.0)]
+        .into_iter()
+        .flatten()
+        .max()?;
+    let live_below = lower.iter().enumerate().skip(dialog_end + 1).any(|(i, l)| {
+        !is_choice(i) && (LIVE_REPL_CUES.iter().any(|c| l.contains(c)) || lines[i].starts_with('❯'))
+    });
+    if live_below {
+        return None;
+    }
+
+    let question = lines[..=dialog_end]
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(i, l)| l.ends_with('?') && !is_choice(*i))
+        .map(|(_, l)| l.to_string());
+    let selected = choices
+        .iter()
+        .find(|(_, sel)| *sel)
+        .map(|(i, _)| lines[*i].trim_start_matches(['❯', '›']).trim().to_string());
+    Some(Dialog {
+        kind,
+        prompt: question.or(selected),
+    })
+}
+
 /// Derive a coarse status from the tail. Used ONLY as a fallback when the
 /// authoritative `claude agents` status is absent.
-fn derive_status(stuck: Option<StuckKind>, stripped: &str) -> Option<ClaudeStatus> {
-    if stuck.is_some() {
+fn derive_status(
+    stuck: Option<StuckKind>,
+    dialog: Option<&Dialog>,
+    stripped: &str,
+) -> Option<ClaudeStatus> {
+    // A stuck state or an on-screen permission/question dialog: Claude is
+    // waiting on the user. Checked before the idle cues below, because a
+    // dialog's own footer ("Enter to select", "Esc to cancel") matches them.
+    if stuck.is_some() || dialog.is_some() {
         return Some(ClaudeStatus::Blocked);
     }
     let lower = stripped.to_lowercase();
@@ -441,8 +592,9 @@ fn derive_status(stuck: Option<StuckKind>, stripped: &str) -> Option<ClaudeStatu
         return Some(ClaudeStatus::Working);
     }
     // IDLE: the REPL is showing its input chrome — the status bar, the
-    // permissions/mode footer, the shortcut hint, or a selection menu waiting on
-    // a keystroke. Any of these means the turn is over and Claude wants input.
+    // permissions/mode footer, the shortcut hint, or a menu hint with no
+    // dialog behind it (a real permission/question dialog returned Blocked
+    // above). Any of these means the turn is over and Claude wants input.
     if lower.contains("? for shortcuts")
         || lower.contains("% used")
         || lower.contains("bypass permissions")
@@ -455,18 +607,30 @@ fn derive_status(stuck: Option<StuckKind>, stripped: &str) -> Option<ClaudeStatu
     None
 }
 
-/// Analyze a captured pane tail into the four reconcile signals.
+/// Analyze a captured pane tail into the reconcile signals.
 pub fn analyze(pane_tail: &str) -> PaneIntel {
     let stripped = strip_ansi(pane_tail);
     let stuck = detect_stuck(&stripped);
     let context_pct = parse_context_pct(&stripped);
-    let activity = pick_activity(&stripped);
-    let derived_status = derive_status(stuck, &stripped);
+    // A stuck state (trust prompt, auth menu, …) is the more specific reading
+    // of a screen that may also look like a generic dialog.
+    let dialog = if stuck.is_none() {
+        detect_dialog(&stripped)
+    } else {
+        None
+    };
+    // For a dialog, the question beats the last line (its key-hint footer).
+    let activity = match &dialog {
+        Some(d) => Some(d.activity()),
+        None => pick_activity(&stripped),
+    };
+    let derived_status = derive_status(stuck, dialog.as_ref(), &stripped);
     PaneIntel {
         activity,
         stuck,
         context_pct,
         derived_status,
+        waiting_for: dialog.map(|d| d.kind),
     }
 }
 
@@ -620,12 +784,158 @@ mod tests {
     }
 
     #[test]
-    fn selection_menu_waiting_for_input_is_idle() {
-        // LIVE-CAPTURED shape: an interactive menu (e.g. a brainstorming
+    fn selection_menu_question_is_blocked_not_idle() {
+        // LIVE-CAPTURED shape: an interactive question menu (a brainstorming
         // question) is waiting on a keystroke. The "41 tool uses" summary text
-        // previously tripped the "tool use" working heuristic.
+        // once tripped the "tool use" working heuristic, and the menu's
+        // "Enter to select · … · Esc to cancel" footer then read as idle.
+        // Claude is waiting on an answer, so it is blocked (Q6/D3).
         let tail = "⏺ Explore(bg sessions)\n  ⎿  Done (41 tool uses · 133.5k tokens · 2m 1s)\n❯ 1. Show bg, toggle to hide\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel";
-        assert_eq!(analyze(tail).derived_status, Some(ClaudeStatus::Idle));
+        let intel = analyze(tail);
+        assert_eq!(intel.derived_status, Some(ClaudeStatus::Blocked));
+        assert_eq!(intel.waiting_for, Some(WaitingFor::Input));
+        assert_eq!(intel.stuck, None);
+        assert_eq!(
+            intel.activity.as_deref(),
+            Some("waiting for input: 1. Show bg, toggle to hide")
+        );
+    }
+
+    // ---- permission / question dialogs (fixtures in testdata/pane_intel) ----
+
+    fn fixture_intel(name: &str, text: &str) -> PaneIntel {
+        let intel = analyze(text);
+        assert_eq!(intel.stuck, None, "{name}: a dialog is not a stuck_kind");
+        intel
+    }
+
+    fn assert_dialog(name: &str, text: &str, kind: WaitingFor, activity: &str) {
+        let intel = fixture_intel(name, text);
+        assert_eq!(intel.derived_status, Some(ClaudeStatus::Blocked), "{name}");
+        assert_eq!(intel.waiting_for, Some(kind), "{name}");
+        assert_eq!(intel.activity.as_deref(), Some(activity), "{name}");
+    }
+
+    #[test]
+    fn bash_permission_dialog_is_blocked_on_permission() {
+        assert_dialog(
+            "permission_bash",
+            include_str!("testdata/pane_intel/permission_bash.txt"),
+            WaitingFor::Permission,
+            "waiting for permission: Do you want to proceed?",
+        );
+    }
+
+    #[test]
+    fn boxed_edit_permission_dialog_is_blocked_on_permission() {
+        assert_dialog(
+            "permission_edit_boxed",
+            include_str!("testdata/pane_intel/permission_edit_boxed.txt"),
+            WaitingFor::Permission,
+            "waiting for permission: Do you want to make this edit to health.rs?",
+        );
+    }
+
+    #[test]
+    fn permission_dialog_with_esc_to_cancel_footer_is_not_idle() {
+        // No "tell Claude" choice here: the "Do you want to" line plus
+        // numbered choices carries it, over the "Esc to cancel" idle cue.
+        assert_dialog(
+            "permission_create_footer",
+            include_str!("testdata/pane_intel/permission_create_footer.txt"),
+            WaitingFor::Permission,
+            "waiting for permission: Do you want to create notes.md?",
+        );
+    }
+
+    #[test]
+    fn ask_user_question_menu_is_blocked_on_input() {
+        assert_dialog(
+            "question_ask_user",
+            include_str!("testdata/pane_intel/question_ask_user.txt"),
+            WaitingFor::Input,
+            "waiting for input: Keep ghosted sessions for how long before deleting them?",
+        );
+    }
+
+    #[test]
+    fn plan_approval_is_blocked_even_when_a_choice_says_bypass_permissions() {
+        // "bypass permissions" is a live-REPL cue, but here it is a choice
+        // line inside the dialog, which must not cancel the dialog.
+        assert_dialog(
+            "plan_approval_bypass",
+            include_str!("testdata/pane_intel/plan_approval_bypass.txt"),
+            WaitingFor::Permission,
+            "waiting for permission: Would you like to proceed?",
+        );
+    }
+
+    #[test]
+    fn prose_question_above_the_idle_prompt_stays_idle() {
+        // Claude asked in prose, with a numbered list, and the turn is over:
+        // the input prompt and "? for shortcuts" sit below the text.
+        let intel = fixture_intel(
+            "prose_question_idle",
+            include_str!("testdata/pane_intel/prose_question_idle.txt"),
+        );
+        assert_eq!(intel.derived_status, Some(ClaudeStatus::Idle));
+        assert_eq!(intel.waiting_for, None);
+        assert_eq!(intel.activity.as_deref(), Some("? for shortcuts"));
+    }
+
+    #[test]
+    fn dialog_text_in_scrollback_while_generating_is_working() {
+        // A diff that quotes dialog text, with the live spinner below it.
+        let intel = fixture_intel(
+            "dialog_text_in_scrollback_working",
+            include_str!("testdata/pane_intel/dialog_text_in_scrollback_working.txt"),
+        );
+        assert_eq!(intel.derived_status, Some(ClaudeStatus::Working));
+        assert_eq!(intel.waiting_for, None);
+    }
+
+    #[test]
+    fn typed_input_prompt_below_dialog_text_means_scrollback() {
+        // No footer hint at all, but the input box (`❯ …`) is below.
+        let tail = " Do you want to proceed?\n ❯ 1. Yes\n   2. No, and tell Claude what to do differently (esc)\n⏺ Done.\n────────\n❯ now fix the tests\n────────\n";
+        let intel = analyze(tail);
+        assert_eq!(intel.waiting_for, None);
+        assert_ne!(intel.derived_status, Some(ClaudeStatus::Blocked));
+    }
+
+    #[test]
+    fn menu_hint_without_a_dialog_is_still_idle() {
+        assert_eq!(
+            analyze("Select a theme\nEnter to select · Esc to cancel").derived_status,
+            Some(ClaudeStatus::Idle)
+        );
+    }
+
+    #[test]
+    fn stuck_trust_prompt_wins_over_the_generic_dialog() {
+        let intel = analyze(
+            "Do you trust the files in this folder?\n ❯ 1. Yes, proceed\n   2. No\nEnter to select",
+        );
+        assert_eq!(intel.stuck, Some(StuckKind::TrustPrompt));
+        assert_eq!(intel.waiting_for, None);
+        assert_eq!(intel.derived_status, Some(ClaudeStatus::Blocked));
+    }
+
+    #[test]
+    fn numbered_choice_shapes() {
+        assert_eq!(numbered_choice("❯ 1. Yes"), Some(true));
+        assert_eq!(numbered_choice("2. No"), Some(false));
+        assert_eq!(numbered_choice("3) Maybe"), Some(false));
+        assert_eq!(numbered_choice("1.5 GB free"), None);
+        assert_eq!(numbered_choice("42 +  ❯ 1. Yes"), None);
+        assert_eq!(numbered_choice("❯ fix it"), None);
+        assert_eq!(numbered_choice(""), None);
+    }
+
+    #[test]
+    fn waiting_for_tags_are_stable() {
+        assert_eq!(WaitingFor::Permission.as_str(), "permission");
+        assert_eq!(WaitingFor::Input.as_str(), "input");
     }
 
     #[test]
