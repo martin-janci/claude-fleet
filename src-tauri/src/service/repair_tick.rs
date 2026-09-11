@@ -141,7 +141,7 @@ impl RepairTickExec for RealRepairTickExec {
     }
 
     async fn repair(&self, session_id: i64) -> Result<RepairReport, IpcError> {
-        // The only caller allowed to drop a stale entry automatically.
+        // Dropping a stale entry still needs the parent fingerprint match.
         repair::ensure_session_workspace_for_tick(session_id, TICK_ENTRY, &self.store, &self.ssh)
             .await
     }
@@ -1106,12 +1106,15 @@ mod tests {
             wt_parent_exists: true,
             root_dev: Some("42".into()),
             wt_parent_dev: Some("42".into()),
+            wt_parent_fp: Some((42, 7)),
             ..gone()
         };
-        // The tick's own context: removal permitted (a click never is).
+        // A store-backed context whose recorded parent fingerprint matches;
+        // `click` is the context-free plan (no permission at all).
         let no_others = AutoContext {
             other_sessions_mapped: Some(false),
             allow_auto_unregister: true,
+            recorded_parent_fp: Some((42, 7)),
         };
         let click = AutoContext {
             allow_auto_unregister: false,

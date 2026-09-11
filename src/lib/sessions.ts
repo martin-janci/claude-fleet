@@ -248,6 +248,12 @@ export interface VanishedGuard {
   under_root: boolean;
   not_locked: boolean;
   no_other_session: boolean;
+  /** No other worktree under the same parent is missing too. */
+  siblings_present: boolean;
+  /** The parent's dev:inode equals the one recorded while healthy. */
+  fingerprint_matches: boolean;
+  /** `match` | `mismatch` | `missing` | `stat_failed`. */
+  fingerprint_check: string;
 }
 
 /** Make the session's directory a healthy git worktree on its branch and its

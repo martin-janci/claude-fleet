@@ -54,9 +54,9 @@ pub const GC_BG_IDLE_SECS: &str = "gc.bg_idle_secs";
 pub const GC_SHELL_IDLE_SECS: &str = "gc.shell_idle_secs";
 pub const GC_WORK_IDLE_SECS: &str = "gc.work_idle_secs";
 pub const GC_SWEEP_INTERVAL_SECS: &str = "gc.sweep_interval_secs";
-/// Opt-in reconcile-tick repair: the ONLY automatic path that re-adds a
-/// deleted worktree git still lists (it drops that one stale entry under the
-/// vanished-directory guard). Click-driven repairs leave that explicit.
+/// Opt-in reconcile-tick repair: re-adds deleted worktrees without anyone
+/// opening them. Dropping a stale entry first (tick or click) always needs
+/// the vanished-directory guard, including the parent fingerprint match.
 pub const REPAIR_AUTO_ON_TICK: &str = "repair.auto_on_tick";
 pub const REPAIR_TICK_INTERVAL_SECS: &str = "repair.tick_interval_secs";
 /// Per-host projects root, one JSON map (host alias → path). A host with no

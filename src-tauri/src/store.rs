@@ -423,6 +423,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         22,
         include_str!("../migrations/022_drop_handoff_freeze.sql"),
     ),
+    (
+        23,
+        include_str!("../migrations/023_worktree_parent_fingerprints.sql"),
+    ),
 ];
 
 /// The schema version a fully migrated database reports.
@@ -1185,6 +1189,42 @@ impl Store {
 
     pub fn conn_ref(&self) -> &rusqlite::Connection {
         &self.conn
+    }
+
+    /// Remember the parent directory's `dev:inode` of a worktree a probe found
+    /// healthy (migration 023). Keyed by host and canonical worktree path.
+    pub fn record_parent_fingerprint(
+        &self,
+        host_alias: &str,
+        wt_path: &str,
+        parent_fp: &str,
+        recorded_at: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO worktree_parent_fingerprints (host_alias, wt_path, parent_fp, recorded_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(host_alias, wt_path)
+             DO UPDATE SET parent_fp = excluded.parent_fp, recorded_at = excluded.recorded_at",
+            rusqlite::params![host_alias, wt_path, parent_fp, recorded_at],
+        )?;
+        Ok(())
+    }
+
+    /// The recorded parent `dev:inode` of a worktree, if any.
+    pub fn parent_fingerprint(
+        &self,
+        host_alias: &str,
+        wt_path: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .query_row(
+                "SELECT parent_fp FROM worktree_parent_fingerprints
+                 WHERE host_alias = ?1 AND wt_path = ?2",
+                rusqlite::params![host_alias, wt_path],
+                |r| r.get(0),
+            )
+            .optional()
     }
 
     pub fn upsert_host(&self, alias: &str) -> Result<(), rusqlite::Error> {
@@ -3125,6 +3165,7 @@ mod tests {
         "session_messages",
         "host_tokens",
         "tasks",
+        "worktree_parent_fingerprints",
     ];
 
     #[test]
@@ -4726,7 +4767,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 22, "schema_version should be 22 after migration");
+        assert_eq!(v, 23, "schema_version should be 23 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store
@@ -5378,6 +5419,67 @@ mod tests {
         assert_eq!(row.parent_session_id, None);
         assert!(row.tags.is_empty());
         assert!(s.has_table("tasks").unwrap());
+    }
+
+    #[test]
+    fn migration_023_fresh_db_stores_and_updates_parent_fingerprints() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.has_table("worktree_parent_fingerprints").unwrap());
+        assert_eq!(s.parent_fingerprint("local", "/r/w").unwrap(), None);
+        s.record_parent_fingerprint("local", "/r/w", "42:7", 1)
+            .unwrap();
+        assert_eq!(
+            s.parent_fingerprint("local", "/r/w").unwrap().as_deref(),
+            Some("42:7")
+        );
+        // Re-recording replaces; other hosts / paths are separate keys.
+        s.record_parent_fingerprint("local", "/r/w", "42:9", 2)
+            .unwrap();
+        s.record_parent_fingerprint("vps", "/r/w", "1:1", 2)
+            .unwrap();
+        assert_eq!(
+            s.parent_fingerprint("local", "/r/w").unwrap().as_deref(),
+            Some("42:9")
+        );
+        assert_eq!(
+            s.parent_fingerprint("vps", "/r/w").unwrap().as_deref(),
+            Some("1:1")
+        );
+    }
+
+    #[test]
+    fn migration_023_upgrades_an_existing_db_and_keeps_its_rows() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("sess", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        // Roll the database back to version 22 (before this migration).
+        s.conn
+            .execute_batch(
+                "DROP TABLE worktree_parent_fingerprints;
+                 DELETE FROM schema_version WHERE version >= 23;",
+            )
+            .unwrap();
+        assert!(!s.has_table("worktree_parent_fingerprints").unwrap());
+        s.migrate().unwrap();
+        assert!(s.has_table("worktree_parent_fingerprints").unwrap());
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(s.get_session_by_id(id).unwrap().is_some(), "rows survive");
+    }
+
+    #[test]
+    fn migration_023_double_migrate_keeps_recorded_fingerprints() {
+        let s = Store::open_in_memory().unwrap();
+        s.record_parent_fingerprint("local", "/r/w", "42:7", 1)
+            .unwrap();
+        s.migrate().unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert_eq!(
+            s.parent_fingerprint("local", "/r/w").unwrap().as_deref(),
+            Some("42:7")
+        );
     }
 
     #[test]
