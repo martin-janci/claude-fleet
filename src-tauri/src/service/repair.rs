@@ -5895,7 +5895,21 @@ mod tests {
             wt_parent_fp: None,
             ..vanished()
         };
+        // The unmounted-volume shape: the leftover mountpoint dir lives on the
+        // root's device, the recorded parent was the volume's (other device),
+        // and the inode number happens to be equal. Must refuse.
+        let other_device_same_inode = Probe {
+            wt_parent_fp: Some((43, 7)),
+            ..vanished()
+        };
         for (name, probe, ctx, check, why) in [
+            (
+                "device differs, inode equal",
+                other_device_same_inode,
+                NO_OTHERS,
+                "mismatch",
+                "differs from the one recorded",
+            ),
             (
                 "mismatch",
                 vanished(),
@@ -6116,11 +6130,14 @@ mod tests {
                 .unwrap()
                 .healthy
         );
-        // Move the old parent aside (keeping its inode allocated, so the new
-        // directory cannot reuse it) and create a fresh, empty one.
+        // Move the old parent aside and create the new one WHILE the old
+        // still exists (both inodes alive at once, so ext4 cannot hand the
+        // freed inode straight back), and only then delete the old.
         let parent = root.join(".claude/worktrees");
-        std::fs::rename(&parent, root.join(".claude/worktrees.old")).unwrap();
+        let old = root.join(".claude/worktrees.old");
+        std::fs::rename(&parent, &old).unwrap();
         std::fs::create_dir(&parent).unwrap();
+        std::fs::remove_dir_all(&old).unwrap();
         let rep = ensure_workspace(&s, AUTO, vec![], &store, &LocalExec)
             .await
             .unwrap();
