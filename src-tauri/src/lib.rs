@@ -222,6 +222,10 @@ fn spawn_reconcile_tick(store: std::sync::Arc<Mutex<Store>>, ssh: std::sync::Arc
             // Opt-in (`repair.auto_on_tick`): re-add vanished worktrees with
             // the create-only automatic policy. Detached and rate-limited.
             service::repair_tick::maybe_run(&store, &ssh);
+            // Drop remote worktree rows whose checkout is gone and no longer
+            // registered with git (removed without ExitWorktree). One
+            // read-only probe per reachable host; detached and rate-limited.
+            service::worktree_prune::maybe_run(&store, &ssh);
         }
     });
 }

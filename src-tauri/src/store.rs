@@ -78,35 +78,32 @@ fn fk_violations(conn: &Connection) -> rusqlite::Result<Vec<FkViolation>> {
     rows.collect()
 }
 
-/// Whether a migration's schema change is already present, for migrations
-/// that cannot be written idempotently in SQL. Tests roll the recorded
-/// version back and migrate again, which re-runs every later migration. 024
-/// rebuilds `worktrees` and would reset every row's host to 'local' (and
-/// collide remote rows with same-named local ones), so on a table that
-/// already has `host_alias` it only records its version.
-fn migration_already_in_schema(conn: &Connection, version: i64) -> rusqlite::Result<bool> {
-    match version {
-        24 => {
-            let n: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('worktrees') WHERE name = 'host_alias'",
-                [],
-                |r| r.get(0),
-            )?;
-            Ok(n > 0)
-        }
-        // 025 (session usage) adds columns in one transaction; its last
-        // column present means the whole migration is.
-        25 => {
-            let n: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('sessions') \
-                 WHERE name = 'usage_last_msg_usage'",
-                [],
-                |r| r.get(0),
-            )?;
-            Ok(n > 0)
-        }
-        _ => Ok(false),
-    }
+/// `already_applied` guard of migration 024: `worktrees` already has its
+/// `host_alias` column. 024 rebuilds the table, and running it again would
+/// reset every row's host to 'local' (and collide remote rows with
+/// same-named local ones), so on such a table a re-run only records the
+/// version. See [`Migration`].
+fn worktrees_has_host_alias(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('worktrees') WHERE name = 'host_alias'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 025 (session usage): it adds its
+/// columns in one transaction, so its last column present means the whole
+/// migration is, and a re-run (`ALTER TABLE ... ADD COLUMN` again) would
+/// fail. See [`Migration`].
+fn sessions_has_usage_columns(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') \
+         WHERE name = 'usage_last_msg_usage'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
 }
 
 /// Ids of the sessions whose `worktree_id` is `worktree_id`: the rows a
@@ -582,55 +579,89 @@ fn now_unix() -> i64 {
 /// and bootstraps `schema_version`) and each later entry in its own
 /// transaction iff its version is above the recorded maximum. To add one:
 /// drop `NNN_name.sql` into `migrations/` and append it here.
-const MIGRATIONS: &[(i64, &str)] = &[
-    (1, include_str!("../migrations/001_init.sql")),
-    (2, include_str!("../migrations/002_hosts_ssh.sql")),
-    (3, include_str!("../migrations/003_accounts.sql")),
-    (4, include_str!("../migrations/004_session_account.sql")),
-    (5, include_str!("../migrations/005_session_reviews.sql")),
-    (
+const MIGRATIONS: &[Migration] = &[
+    Migration::plain(1, include_str!("../migrations/001_init.sql")),
+    Migration::plain(2, include_str!("../migrations/002_hosts_ssh.sql")),
+    Migration::plain(3, include_str!("../migrations/003_accounts.sql")),
+    Migration::plain(4, include_str!("../migrations/004_session_account.sql")),
+    Migration::plain(5, include_str!("../migrations/005_session_reviews.sql")),
+    Migration::plain(
         6,
         include_str!("../migrations/006_session_worktree_key.sql"),
     ),
-    (7, include_str!("../migrations/007_indexes.sql")),
-    (8, include_str!("../migrations/008_ghost_sessions.sql")),
-    (9, include_str!("../migrations/009_session_claude_id.sql")),
-    (
+    Migration::plain(7, include_str!("../migrations/007_indexes.sql")),
+    Migration::plain(8, include_str!("../migrations/008_ghost_sessions.sql")),
+    Migration::plain(9, include_str!("../migrations/009_session_claude_id.sql")),
+    Migration::plain(
         10,
         include_str!("../migrations/010_claude_agent_fields.sql"),
     ),
-    (11, include_str!("../migrations/011_host_provisioned.sql")),
-    (
+    Migration::plain(11, include_str!("../migrations/011_host_provisioned.sql")),
+    Migration::plain(
         12,
         include_str!("../migrations/012_session_context_pressure.sql"),
     ),
-    (13, include_str!("../migrations/013_session_events.sql")),
-    (14, include_str!("../migrations/014_last_reconciled_at.sql")),
-    (15, include_str!("../migrations/015_session_messages.sql")),
-    (
+    Migration::plain(13, include_str!("../migrations/013_session_events.sql")),
+    Migration::plain(14, include_str!("../migrations/014_last_reconciled_at.sql")),
+    Migration::plain(15, include_str!("../migrations/015_session_messages.sql")),
+    Migration::plain(
         16,
         include_str!("../migrations/016_session_friendly_name.sql"),
     ),
-    (17, include_str!("../migrations/017_safe_kill.sql")),
-    (18, include_str!("../migrations/018_host_tokens.sql")),
-    (19, include_str!("../migrations/019_lifecycle_fields.sql")),
-    (20, include_str!("../migrations/020_tasks_and_turns.sql")),
-    (21, include_str!("../migrations/021_repair_backoff.sql")),
-    (
+    Migration::plain(17, include_str!("../migrations/017_safe_kill.sql")),
+    Migration::plain(18, include_str!("../migrations/018_host_tokens.sql")),
+    Migration::plain(19, include_str!("../migrations/019_lifecycle_fields.sql")),
+    Migration::plain(20, include_str!("../migrations/020_tasks_and_turns.sql")),
+    Migration::plain(21, include_str!("../migrations/021_repair_backoff.sql")),
+    Migration::plain(
         22,
         include_str!("../migrations/022_drop_handoff_freeze.sql"),
     ),
-    (
+    Migration::plain(
         23,
         include_str!("../migrations/023_worktree_parent_fingerprints.sql"),
     ),
-    (24, include_str!("../migrations/024_worktree_host.sql")),
-    (25, include_str!("../migrations/025_session_usage.sql")),
+    // A table rebuild cannot be written idempotently in SQL, and re-running
+    // it would reset every row's host to 'local'.
+    Migration {
+        version: 24,
+        sql: include_str!("../migrations/024_worktree_host.sql"),
+        already_applied: Some(worktrees_has_host_alias),
+    },
+    // `ALTER TABLE ... ADD COLUMN` fails if the column is already there.
+    Migration {
+        version: 25,
+        sql: include_str!("../migrations/025_session_usage.sql"),
+        already_applied: Some(sessions_has_usage_columns),
+    },
 ];
+
+/// One schema migration. `already_applied`, when set, reports whether the
+/// migration's change is already in the schema, for a migration that cannot
+/// be written idempotently in SQL. Tests roll the recorded version back and
+/// migrate again, which re-runs every later migration; such a migration is
+/// then only recorded, not re-run. `None` (the usual case) always runs it.
+#[derive(Clone, Copy)]
+struct Migration {
+    version: i64,
+    sql: &'static str,
+    already_applied: Option<fn(&Connection) -> rusqlite::Result<bool>>,
+}
+
+impl Migration {
+    /// A migration that is safe to run as written.
+    const fn plain(version: i64, sql: &'static str) -> Self {
+        Migration {
+            version,
+            sql,
+            already_applied: None,
+        }
+    }
+}
 
 /// The schema version a fully migrated database reports.
 #[cfg(test)]
-const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
+const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].version;
 
 pub struct Store {
     conn: Connection,
@@ -673,7 +704,7 @@ impl Store {
         // The bootstrap migration is idempotent (`CREATE TABLE IF NOT EXISTS`
         // + `INSERT OR IGNORE`) and always runs: on a fresh DB it also creates
         // `schema_version`, which the gate below needs to exist.
-        let (_, bootstrap) = MIGRATIONS[0];
+        let bootstrap = MIGRATIONS[0].sql;
         self.conn.execute_batch(bootstrap)?;
         // Newer migrations are applied only if not yet recorded. We can't
         // wrap them in CREATE-OR-IGNORE because they ALTER existing tables.
@@ -699,10 +730,10 @@ impl Store {
         // default to off, can leave one) are logged and never fatal: failing
         // on them would stop the app from starting with no way out short of
         // manual SQL.
-        let pending: Vec<(i64, &str)> = MIGRATIONS
+        let pending: Vec<Migration> = MIGRATIONS
             .iter()
             .copied()
-            .filter(|(version, _)| *version > v)
+            .filter(|m| m.version > v)
             .collect();
         if !pending.is_empty() {
             self.conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
@@ -725,11 +756,20 @@ impl Store {
     /// before and after each migration: only rows the migration added roll it
     /// back (SQLite's table-rebuild procedure); rows present before it are
     /// left alone and returned for the caller to log.
-    fn apply_migrations(&self, pending: &[(i64, &str)]) -> Result<Vec<FkViolation>> {
+    fn apply_migrations(&self, pending: &[Migration]) -> Result<Vec<FkViolation>> {
         let mut preexisting: Vec<FkViolation> = Vec::new();
-        for (version, sql) in pending {
+        for &Migration {
+            version,
+            sql,
+            already_applied,
+        } in pending
+        {
             let tx = self.conn.unchecked_transaction()?;
-            if migration_already_in_schema(&tx, *version)? {
+            if already_applied
+                .map(|applied| applied(&tx))
+                .transpose()?
+                .unwrap_or(false)
+            {
                 // Re-run on a schema that already has this change (a test
                 // rolled the recorded version back): only record it.
                 tx.execute(
@@ -1311,8 +1351,8 @@ impl Store {
     }
 
     /// Delete `host_alias`'s worktree rows at `path` (an `ExitWorktree`
-    /// removal on that host). Sessions still pointing at them are cleared, as
-    /// [`Self::delete_worktree`] does, and get a `session:updated` so the
+    /// removal on that host), through [`Self::delete_worktree`]: sessions
+    /// still pointing at them are cleared and get a `session:updated`, so the
     /// sidebar drops the worktree at once. Returns how many went.
     pub fn delete_worktrees_at(
         &self,
@@ -1326,26 +1366,24 @@ impl Store {
             let rows = stmt.query_map(rusqlite::params![host_alias, path], |r| r.get(0))?;
             rows.collect::<Result<_, _>>()?
         };
-        let mut touched: Vec<i64> = Vec::new();
         for id in &ids {
-            touched.extend(session_ids_on_worktree(&self.conn, *id)?);
             // Called under the store lock with the host's own spelling of the
             // path: no local resolution here, the stored path only.
             self.delete_worktree(*id, &[])?;
         }
-        self.emit_sessions_updated(&touched);
         Ok(ids.len())
     }
 
     /// Hard-delete one worktree row by id. Emits `worktree:removed`. Returns
     /// the row that was removed (or `None` if it didn't exist).
     ///
-    /// Does NOT touch sessions referencing this worktree; the caller is
-    /// expected to have checked for live occupants first (see
-    /// `service::worktrees::delete_worktree`). Dead/ghost session rows that
-    /// still point here have their `worktree_id` cleared so the FK stays
-    /// consistent. `fp_keys`: the row's parent-fingerprint keys, precomputed
-    /// by the caller off-lock ([`Self::fingerprint_keys_of_worktree`]).
+    /// Does NOT check for live occupants; the caller is expected to have
+    /// done so first (see `service::worktrees::delete_worktree`). Session
+    /// rows that still point here have their `worktree_id` cleared so the FK
+    /// stays consistent, and get a `session:updated` after the commit so the
+    /// sidebar does not keep showing the gone worktree. `fp_keys`: the row's
+    /// parent-fingerprint keys, precomputed by the caller off-lock
+    /// ([`Self::fingerprint_keys_of_worktree`]).
     pub fn delete_worktree(
         &self,
         id: i64,
@@ -1355,6 +1393,7 @@ impl Store {
             return Ok(None);
         };
         let tx = self.conn.unchecked_transaction()?;
+        let touched = session_ids_on_worktree(&tx, id)?;
         tx.execute(
             "UPDATE sessions SET worktree_id=NULL WHERE worktree_id=?1",
             rusqlite::params![id],
@@ -1364,6 +1403,7 @@ impl Store {
         tx.execute("DELETE FROM worktrees WHERE id=?1", rusqlite::params![id])?;
         tx.commit()?;
         self.bus.worktree_removed(id);
+        self.emit_sessions_updated(&touched);
         Ok(Some(row))
     }
 
@@ -4086,7 +4126,7 @@ mod tests {
         const SEED_AT: i64 = 20;
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-        for (version, sql) in MIGRATIONS.iter().copied().filter(|(v, _)| *v <= SEED_AT) {
+        for &Migration { version, sql, .. } in MIGRATIONS.iter().filter(|m| m.version <= SEED_AT) {
             conn.execute_batch(sql)
                 .unwrap_or_else(|e| panic!("migration {version}: {e}"));
         }
@@ -4164,9 +4204,9 @@ mod tests {
     #[test]
     fn migrations_are_contiguous_from_one() {
         assert!(!MIGRATIONS.is_empty());
-        for (i, (version, _)) in MIGRATIONS.iter().enumerate() {
+        for (i, &Migration { version, .. }) in MIGRATIONS.iter().enumerate() {
             assert_eq!(
-                *version,
+                version,
                 i as i64 + 1,
                 "MIGRATIONS[{i}] has version {version}"
             );
@@ -4176,7 +4216,7 @@ mod tests {
 
     #[test]
     fn every_migration_records_its_own_version() {
-        for (version, sql) in MIGRATIONS {
+        for &Migration { version, sql, .. } in MIGRATIONS {
             // Normalise whitespace so formatting differences between scripts
             // (line breaks, double spaces) do not matter.
             let flat = sql.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -6115,7 +6155,7 @@ mod tests {
     fn store_at_version(version: i64) -> Store {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-        for (_, sql) in MIGRATIONS.iter().filter(|(v, _)| *v <= version) {
+        for &Migration { sql, .. } in MIGRATIONS.iter().filter(|m| m.version <= version) {
             conn.execute_batch(sql).unwrap();
         }
         Store {
@@ -6324,7 +6364,9 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
         let bad = "INSERT INTO worktrees (project_id, name, path) VALUES (424242, 'x', '/x');";
-        let err = s.apply_migrations(&[(999, bad)]).unwrap_err();
+        let err = s
+            .apply_migrations(&[Migration::plain(999, bad)])
+            .unwrap_err();
         s.conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         assert!(err.to_string().contains("dangling"), "{err}");
         let n: i64 = s
@@ -6336,6 +6378,45 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 0, "the migration rolled back");
+    }
+
+    /// The per-entry `already_applied` guard: when it says the change is
+    /// already in the schema, the entry is only recorded and its SQL never
+    /// runs (here it would fail); when it says no, the SQL runs as usual.
+    #[test]
+    fn apply_migrations_only_records_an_entry_its_guard_says_is_applied() {
+        fn yes(_: &Connection) -> rusqlite::Result<bool> {
+            Ok(true)
+        }
+        fn no(_: &Connection) -> rusqlite::Result<bool> {
+            Ok(false)
+        }
+        let s = Store::open_in_memory().unwrap();
+        let guarded = Migration {
+            version: 998,
+            sql: "THIS IS NOT SQL;",
+            already_applied: Some(yes),
+        };
+        s.apply_migrations(&[guarded])
+            .expect("an entry its guard says is applied is not run");
+        let stamped: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_version WHERE version = 998",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stamped, 1, "but its version is recorded");
+        let unguarded = Migration {
+            version: 997,
+            sql: "THIS IS NOT SQL;",
+            already_applied: Some(no),
+        };
+        assert!(
+            s.apply_migrations(&[unguarded]).is_err(),
+            "a guard that says no runs the SQL"
+        );
     }
 
     /// Seed one dangling reference, as a hand edit in the sqlite3 CLI (foreign
@@ -6362,10 +6443,10 @@ mod tests {
     fn migration_024_applies_over_a_preexisting_dangling_reference() {
         let old = store_at_version(23);
         seed_dangling_session(&old);
-        let pending: Vec<(i64, &str)> = MIGRATIONS
+        let pending: Vec<Migration> = MIGRATIONS
             .iter()
             .copied()
-            .filter(|(v, _)| *v > 23)
+            .filter(|m| m.version > 23)
             .collect();
         old.conn
             .execute_batch("PRAGMA foreign_keys = OFF;")
@@ -7206,7 +7287,7 @@ mod tests {
         const SEED_AT: i64 = 22;
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-        for (version, sql) in MIGRATIONS.iter().copied().filter(|(v, _)| *v <= SEED_AT) {
+        for &Migration { version, sql, .. } in MIGRATIONS.iter().filter(|m| m.version <= SEED_AT) {
             conn.execute_batch(sql)
                 .unwrap_or_else(|e| panic!("migration {version}: {e}"));
         }
