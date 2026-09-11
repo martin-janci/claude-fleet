@@ -6645,6 +6645,43 @@ mod tests {
         );
     }
 
+    /// 026 on a database with worktree rows (stopped at 025): the column is
+    /// added, existing rows keep their data with no stamp (written before
+    /// 026), and their next write stamps them.
+    #[test]
+    fn migration_026_on_an_existing_db_keeps_rows_and_stamps_on_next_write() {
+        let old = store_at_version(25);
+        old.conn
+            .execute_batch(
+                "INSERT INTO projects (id, owner, repo, base_path) VALUES (1, 'o', 'r', '/p/r');
+                 INSERT INTO worktrees (id, project_id, host_alias, name, path, branch)
+                   VALUES (7, 1, 'vps', 'feat', '/h/r/feat', 'feat');",
+            )
+            .unwrap();
+        old.migrate().expect("026 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let row = old.get_worktree_row(7).unwrap().expect("the row survives");
+        assert_eq!(
+            (
+                row.host_alias.as_str(),
+                row.path.as_str(),
+                row.branch.as_deref()
+            ),
+            ("vps", "/h/r/feat", Some("feat"))
+        );
+        assert_eq!(
+            old.worktree_updated_at_ms(7).unwrap(),
+            None,
+            "written before 026: no stamp"
+        );
+        old.upsert_worktree_on("vps", 1, "feat", "/h/r/feat", Some("feat"))
+            .unwrap();
+        assert!(
+            old.worktree_updated_at_ms(7).unwrap().is_some(),
+            "the next write stamps it"
+        );
+    }
+
     /// 026 stamps every worktree write, insert and update, with
     /// `updated_at_ms`, and a re-run on a table that already has the column
     /// is only recorded: the stamp survives.

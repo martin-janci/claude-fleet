@@ -15,14 +15,18 @@
 //!
 //! **Spellings.** A hook stores the path as Claude reported it; git lists
 //! each worktree as it was added. Through a symlinked root
-//! (`~/projects -> /mnt/sda4/projects`) one is logical and the other
-//! physical, so a raw string compare would call a registered worktree
-//! unregistered. Both sides are therefore resolved ON THE HOST and compared
-//! canonically: every listed entry is printed as listed and with its parent
-//! resolved by `pwd -P`; a missing row's parent is resolved the same way,
-//! plus its leaf name. When a row's parent is gone too, git is the only
-//! authority, and the row is compared under both the logical and the
-//! physical spelling of its repo root (`pwd -P` of the root).
+//! (`~/projects -> /mnt/sda4/projects`) the two can differ in EITHER
+//! direction: Claude reports physical cwds, while fleet's remote
+//! `git worktree add` runs from the logical `$HOME` root, so git may keep
+//! the logical spelling. A raw string compare would call a registered
+//! worktree unregistered. Both sides are therefore resolved ON THE HOST and
+//! compared symmetrically. Every listed entry is printed as listed and with
+//! its parent resolved by `pwd -P`; a missing row's parent is resolved the
+//! same way, plus its leaf name. Then every entry and every row spelling is
+//! also taken under the other spelling of its repo root (logical to
+//! physical and physical to logical, via the root's `pwd -P`). This covers a
+//! row whose parent is gone too, where git is the only authority. A row is
+//! stale only when no spelling of it matches any spelling of git's entries.
 //!
 //! **Unknown means keep.** An unreachable host (ssh exit 255), a failed or
 //! empty listing, a `$HOME` that cannot be resolved, output that does not
@@ -227,8 +231,27 @@ pub fn parse_probe(stdout: &str, n_roots: usize, n_rows: usize) -> Option<Probe>
 
 /// Pure: the rows to delete. A row goes only when its path is gone AND its
 /// repo root listed (successfully, non-empty) without registering it under
-/// ANY of its spellings ([`row_spellings`]).
+/// ANY spelling. The comparison is symmetric ([`both_spellings`]): every
+/// entry git listed, and every spelling of the row (as stored, and with its
+/// parent resolved on the host when the parent exists), is taken in both the
+/// logical and the physical spelling of the repo root. So a row stored under
+/// either spelling matches a worktree git registered under either.
 pub fn stale_rows(plan: &HostPlan, probe: &Probe) -> Vec<WorktreeRow> {
+    // Each root's registered entries in both root spellings, built once.
+    let registered: Vec<Option<HashSet<String>>> = probe
+        .registered
+        .iter()
+        .enumerate()
+        .map(|(i, set)| {
+            let root = plan.roots.get(i)?;
+            let rc = probe.root_canon.get(i).cloned().flatten();
+            set.as_ref().map(|set| {
+                set.iter()
+                    .flat_map(|e| both_spellings(e, root, rc.as_deref()))
+                    .collect()
+            })
+        })
+        .collect();
     plan.rows
         .iter()
         .enumerate()
@@ -236,43 +259,42 @@ pub fn stale_rows(plan: &HostPlan, probe: &Probe) -> Vec<WorktreeRow> {
             if *probe.present.get(j)? {
                 return None;
             }
-            let registered = probe.registered.get(*root)?.as_ref()?;
-            let spellings = row_spellings(
-                &row.path,
-                probe.canon.get(j).cloned().flatten(),
-                plan.roots.get(*root)?,
-                probe.root_canon.get(*root).cloned().flatten(),
-            );
+            let registered = registered.get(*root)?.as_ref()?;
+            let root_path = plan.roots.get(*root)?;
+            let rc = probe.root_canon.get(*root).cloned().flatten();
+            let mut spellings = both_spellings(&row.path, root_path, rc.as_deref());
+            if let Some(c) = probe.canon.get(j).cloned().flatten() {
+                spellings.extend(both_spellings(&c, root_path, rc.as_deref()));
+            }
             (!spellings.iter().any(|p| registered.contains(p))).then(|| row.clone())
         })
         .collect()
 }
 
-/// Every spelling a missing row's path may be registered under: as stored;
-/// with its parent resolved on the host (`canon`, when the parent exists);
-/// and, when the parent is gone too, with the repo root's logical prefix
-/// (`root`) swapped for its physical spelling (`root_canon`), so git's
-/// listing stays the authority in either spelling.
-fn row_spellings(
-    path: &str,
-    canon: Option<String>,
-    root: &str,
-    root_canon: Option<String>,
-) -> Vec<String> {
+/// A path in both spellings of its repo root: as given, plus, when it lies
+/// under one spelling, the same path under the other. That means the logical
+/// `root` prefix swapped for the physical `root_canon`, or the reverse. Git
+/// keeps a worktree under whichever spelling it was added from (fleet adds
+/// from the logical `$HOME` root, while Claude reports physical cwds), so
+/// both sides of the comparison go through this. Without `root_canon` (the
+/// root itself is gone) only the path as given.
+fn both_spellings(path: &str, root: &str, root_canon: Option<&str>) -> Vec<String> {
     let mut out = vec![norm(path)];
-    match canon {
-        Some(c) => out.push(norm(&c)),
-        None => {
-            if let (Some(rc), Some(rest)) =
-                (root_canon, crate::service::projects::strip_root(path, root))
-            {
-                let physical = if rest.is_empty() {
-                    rc
-                } else {
-                    format!("{}/{rest}", rc.trim_end_matches('/'))
-                };
-                out.push(norm(&physical));
+    let Some(rc) = root_canon else {
+        return out;
+    };
+    let swap = |from: &str, to: &str| {
+        crate::service::projects::strip_root(path, from).map(|rest| {
+            if rest.is_empty() {
+                norm(to)
+            } else {
+                norm(&format!("{}/{rest}", to.trim_end_matches('/')))
             }
+        })
+    };
+    for p in [swap(root, rc), swap(rc, root)].into_iter().flatten() {
+        if !out.contains(&p) {
+            out.push(p);
         }
     }
     out
@@ -631,6 +653,83 @@ mod tests {
             "registered under the physical spelling: kept"
         );
         assert!(s.get_worktree_row(alive).unwrap().is_some());
+    }
+
+    /// The comparison is symmetric. A row stored PHYSICALLY (Claude reports
+    /// physical cwds) is kept when git registered the worktree LOGICALLY
+    /// (fleet adds from the logical `$HOME` root), and so is the mirror case,
+    /// even with the whole worktrees dir gone. A row registered under no
+    /// spelling still goes.
+    #[test]
+    fn a_registered_worktree_is_kept_whichever_side_is_logical() {
+        const PHYS: &str = "/mnt/sda4/projects/github.com/o/r";
+        let phys_row = format!("{PHYS}/.claude/worktrees/x"); // git: logical
+        let logical_row = format!("{ROOT}/.claude/worktrees/y"); // git: physical
+        let gone = format!("{PHYS}/.claude/worktrees/z"); // git: neither
+        let plan = one_root_plan(&[phys_row.as_str(), logical_row.as_str(), gone.as_str()]);
+        // `.claude/worktrees/` is gone: no `@@canon` lines, and git's entries
+        // are printed only as listed (their parents do not resolve either).
+        let out = format!(
+            "@@root 0\n@@rootcanon 0 {PHYS}\nworktree {ROOT}\n\
+             worktree {ROOT}/.claude/worktrees/x\nworktree {PHYS}/.claude/worktrees/y\n\
+             @@rootrc 0 0\n@@missing 0\n@@missing 1\n@@missing 2\n{DONE_MARKER}\n"
+        );
+        let probe = parse_probe(&out, 1, 3).expect("complete output");
+        let ids: Vec<i64> = stale_rows(&plan, &probe).iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![3], "only the row registered under no spelling");
+    }
+
+    /// The reviewer's case end to end through `prune_host`: the rows are
+    /// stored physically, git registered the worktree under the logical
+    /// root, and the worktrees dir is gone. The still-registered row is kept;
+    /// only the unregistered one goes.
+    #[tokio::test]
+    async fn prune_host_keeps_a_physical_row_git_registered_logically() {
+        const PHYS: &str = "/mnt/sda4/projects/github.com/o/r";
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("vps").unwrap();
+        let pid = s.upsert_project("o", "r", "/Users/me/p/o/r").unwrap();
+        let kept = s
+            .upsert_worktree_on(
+                "vps",
+                pid,
+                "x",
+                &format!("{PHYS}/.claude/worktrees/x"),
+                None,
+            )
+            .unwrap();
+        let gone = s
+            .upsert_worktree_on(
+                "vps",
+                pid,
+                "z",
+                &format!("{PHYS}/.claude/worktrees/z"),
+                None,
+            )
+            .unwrap();
+        let store = Mutex::new(s);
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u");
+        fake.on_host(
+            "vps",
+            Match::script_contains(DONE_MARKER),
+            Reply::ok(&format!(
+                "@@root 0\n@@rootcanon 0 {PHYS}\nworktree {ROOT}\n\
+                 worktree {ROOT}/.claude/worktrees/x\n@@rootrc 0 0\n\
+                 @@missing 0\n@@missing 1\n{DONE_MARKER}\n"
+            )),
+        );
+        let deleted = prune_host(&store, &fake, "vps").await.unwrap();
+        assert_eq!(deleted, vec![gone], "only the unregistered row");
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get_worktree_row(kept)
+                .unwrap()
+                .is_some(),
+            "registered under the logical spelling: kept"
+        );
     }
 
     /// The race: a row written after the probe started (a hook re-created
