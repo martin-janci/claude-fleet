@@ -1042,7 +1042,7 @@
     {:else if !loadError && orphanSessions.length === 0}
       <p class="empty">
         {$projects.length === 0
-          ? 'No projects yet — click ↻ to scan ~/projects/github.com.'
+          ? 'No projects yet. Set a projects base in Settings → Projects, or click ↻ to scan.'
           : 'No active sessions. Click + below to start one.'}
       </p>
     {/if}

@@ -32,8 +32,16 @@
     secsToHours,
     hoursToSecs,
     SETTING_KEYS,
+    PROJECTS_LOCAL_ENV_KEY,
+    settingPathMap,
+    settingLayout,
+    basePathError,
+    projectPathPreview,
+    projectsDefaultRoot,
     type SettingKey,
+    type ProjectsLayout,
   } from './fleet_settings';
+  import { refreshProjects } from './projects';
   import {
     attentionIdleMinutes,
     notificationPermission,
@@ -121,7 +129,72 @@
     // the automation section's state and vice versa.
     const [fs] = await Promise.all([loadFleetSettings(), loadHostTokens()]);
     if (!fs.ok) automationError = fs.error.message;
+    resetProjectDrafts();
   });
+
+  // --- Projects: per-host projects root + layout (backend settings) ---
+  // Drafts are edited locally and written together by "Save & rescan".
+  let baseDrafts = $state<Record<string, string>>({});
+  let layoutDraft = $state<ProjectsLayout>('github');
+  let projectsBusy = $state(false);
+  // Controls stay disabled until the drafts are seeded from the backend, so
+  // typing during the initial load cannot be wiped by the seeding.
+  let projectsLoaded = $state(false);
+  let projectsError: string | null = $state(null);
+  let projectsMsg: string | null = $state(null);
+  const savedBases = $derived(settingPathMap($fleetSettings, SETTING_KEYS.projectsBasePath));
+  const localEnv = $derived(($fleetSettings[PROJECTS_LOCAL_ENV_KEY] ?? '').trim());
+  const savedLayout = $derived(settingLayout($fleetSettings));
+  const projectsInvalid = $derived(
+    Object.values(baseDrafts).some((p) => basePathError(p) !== null),
+  );
+
+  function resetProjectDrafts() {
+    baseDrafts = { ...savedBases };
+    layoutDraft = savedLayout;
+    projectsLoaded = true;
+  }
+
+  // Root a host uses when its field is blank: on this machine the env var
+  // if set, otherwise (and on every remote host) the default for the layout
+  // currently selected, so the preview tracks an unsaved layout change.
+  function fallbackRoot(alias: string): string {
+    if (alias === 'local' && localEnv) return localEnv;
+    return projectsDefaultRoot(layoutDraft);
+  }
+
+  function previewRoot(alias: string): string {
+    return (baseDrafts[alias] ?? '').trim() || fallbackRoot(alias);
+  }
+
+  function onBaseInput(alias: string, e: Event) {
+    baseDrafts = { ...baseDrafts, [alias]: (e.currentTarget as HTMLInputElement).value };
+  }
+
+  async function saveProjects() {
+    projectsBusy = true;
+    projectsError = null;
+    projectsMsg = null;
+    const map: Record<string, string> = {};
+    for (const [alias, p] of Object.entries(baseDrafts)) {
+      const t = p.trim();
+      if (t) map[alias] = t;
+    }
+    const wantLayout = layoutDraft;
+    let r = await setFleetSetting(SETTING_KEYS.projectsBasePath, JSON.stringify(map));
+    if (r.ok && wantLayout !== savedLayout) {
+      r = await setFleetSetting(SETTING_KEYS.projectsLayout, wantLayout);
+    }
+    if (r.ok) {
+      const pr = await refreshProjects();
+      if (pr.ok) projectsMsg = `Saved. Rescanned ${pr.value?.length ?? 0} local project(s).`;
+      else projectsError = pr.error.message;
+      resetProjectDrafts();
+    } else {
+      projectsError = r.error.message;
+    }
+    projectsBusy = false;
+  }
 
   // --- Notifications (stuck transitions) ---
   let permission = $state<NotificationPermissionState>(notificationPermission());
@@ -383,6 +456,64 @@
       </table>
       {#if error}<p class="err">{error}</p>{/if}
       {#if tokenError}<p class="err">{tokenError}</p>{/if}
+    </section>
+
+    <section class="block" data-testid="projects-section">
+      <div class="section-header">
+        <h4>Projects</h4>
+      </div>
+      <p class="mcp-blurb">
+        Where each host keeps its git repositories. Leave a host blank for the
+        default (<code>~/projects/github.com</code>, or
+        <code>$CLAUDE_FLEET_PROJECTS_BASE</code> on this machine). Paths must be
+        absolute or start with <code>~/</code>.
+      </p>
+      <div class="mcp-field">
+        <span class="lbl">Layout</span>
+        <select
+          class="layout-select"
+          bind:value={layoutDraft}
+          disabled={projectsBusy || !projectsLoaded}
+          data-testid="projects-layout"
+          aria-label="Projects layout">
+          <option value="github">github: &lt;base&gt;/&lt;owner&gt;/&lt;repo&gt;</option>
+          <option value="flat">flat: &lt;base&gt;/&lt;repo&gt;</option>
+        </select>
+      </div>
+      {#each $hosts as h (h.alias)}
+        {@const draft = baseDrafts[h.alias] ?? ''}
+        {@const pathErr = basePathError(draft)}
+        <div class="project-base-row">
+          <div class="mcp-field">
+            <span class="lbl project-alias" title={h.alias}>{h.alias}</span>
+            <input
+              class="port base-input"
+              class:invalid={pathErr !== null}
+              type="text"
+              spellcheck="false"
+              value={draft}
+              placeholder={fallbackRoot(h.alias)}
+              disabled={projectsBusy || !projectsLoaded}
+              data-testid="projects-base-{h.alias}"
+              aria-label="Projects base path for {h.alias}"
+              oninput={(e) => onBaseInput(h.alias, e)} />
+          </div>
+          <span
+            class="hook-desc project-preview"
+            class:err={pathErr !== null}
+            data-testid="projects-preview-{h.alias}">
+            {pathErr ?? projectPathPreview(previewRoot(h.alias), layoutDraft)}
+          </span>
+        </div>
+      {/each}
+      <div class="mcp-field">
+        <button
+          onclick={saveProjects}
+          disabled={projectsBusy || projectsInvalid || !projectsLoaded}
+          data-testid="projects-save">Save &amp; rescan</button>
+        {#if projectsMsg}<span class="hook-desc" data-testid="projects-msg">{projectsMsg}</span>{/if}
+      </div>
+      {#if projectsError}<p class="err">{projectsError}</p>{/if}
     </section>
 
     <section class="block" data-testid="onboarding-section">
@@ -940,6 +1071,35 @@
   }
   .mcp-field .port.invalid {
     border-color: #e64a4a;
+  }
+  .project-base-row { margin-bottom: 0.3rem; }
+  .project-base-row .mcp-field { margin-bottom: 0.1rem; }
+  .mcp-field .project-alias {
+    width: 6rem;
+    text-transform: none;
+    letter-spacing: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .mcp-field .base-input {
+    flex: 1;
+    min-width: 0;
+    width: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .project-preview {
+    display: block;
+    margin-left: 6.4rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    word-break: break-all;
+  }
+  .layout-select {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 4px;
+    padding: 0.2rem 0.4rem;
   }
   .mcp-field button {
     background: transparent;

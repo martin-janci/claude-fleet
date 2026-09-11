@@ -8,9 +8,15 @@ vi.mock('@tauri-apps/api/core', () => ({
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import {
   fleetSettings,
+  basePathError,
   hoursToSecs,
   loadFleetSettings,
+  projectDir,
+  projectPathPreview,
+  projectsDefaultRoot,
   secsToHours,
+  settingLayout,
+  settingPathMap,
   setFleetSetting,
   settingBool,
   settingSecs,
@@ -71,5 +77,46 @@ describe('fleet settings', () => {
     expect(secsToHours(5400)).toBe(1.5);
     expect(hoursToSecs(1.5)).toBe(5400);
     expect(hoursToSecs(-1)).toBe(0);
+  });
+});
+
+describe('projects settings helpers (W5 G3)', () => {
+  it('defaults: no per-host overrides, github layout', () => {
+    const m = get(fleetSettings);
+    expect(settingPathMap(m, SETTING_KEYS.projectsBasePath)).toEqual({});
+    expect(settingLayout(m)).toBe('github');
+  });
+
+  it('settingPathMap tolerates garbage and drops non-string values', () => {
+    expect(settingPathMap({ k: '{oops' }, 'k')).toEqual({});
+    expect(settingPathMap({ k: '[1]' }, 'k')).toEqual({});
+    expect(settingPathMap({ k: '{"a":"/x","b":2}' }, 'k')).toEqual({ a: '/x' });
+  });
+
+  it('basePathError mirrors the backend validation', () => {
+    for (const ok of ['', '/srv/repos', '~', '~/code', '/a b/c-d!']) expect(basePathError(ok)).toBeNull();
+    expect(basePathError('code')).toMatch(/absolute/);
+    expect(basePathError('~user/x')).toMatch(/absolute/);
+    expect(basePathError('/a/../b')).toMatch(/\.\./);
+    expect(basePathError('/a\nb')).toMatch(/control/);
+    // C1 controls (U+0080..U+009F) and DEL, like Rust's char::is_control
+    expect(basePathError('/a' + String.fromCharCode(0x85) + 'b')).toMatch(/control/);
+    expect(basePathError('/a' + String.fromCharCode(0x7f) + 'b')).toMatch(/control/);
+    expect(basePathError('/a' + String.fromCharCode(0xa0) + 'b')).toBeNull();
+    // the backend's 1024-char cap
+    expect(basePathError('/' + 'a'.repeat(1023))).toBeNull();
+    expect(basePathError('/' + 'a'.repeat(1024))).toMatch(/too long/);
+  });
+
+  it('projectDir mirrors Layout::project_dir', () => {
+    expect(projectDir('~/code/', 'flat', 'o', 'r')).toBe('~/code/r');
+    expect(projectDir('~/projects/github.com', 'github', 'o', 'r')).toBe('~/projects/github.com/o/r');
+  });
+
+  it('previews per layout and exposes the layout defaults', () => {
+    expect(projectPathPreview('~/code/', 'flat')).toBe('~/code/<repo>');
+    expect(projectPathPreview('/p', 'github')).toBe('/p/<owner>/<repo>');
+    expect(projectsDefaultRoot('github')).toBe('~/projects/github.com');
+    expect(projectsDefaultRoot('flat')).toBe('~/projects');
   });
 });

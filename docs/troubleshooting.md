@@ -17,7 +17,7 @@ it.
 | **Provisioning failed** | Cannot write `~/.claude.json`, `~/.claude/CLAUDE.md`, `~/.tmux.conf`, or the skills directory | Read the `detail` string in the per-host result; fix the permissions or path involved. (`E_PROVISION`) |
 | Tunnel shows **"down — retrying"** | Control API is disabled, or the host `sshd` blocks remote port forwarding | Enable the Control API in Settings; check `AllowTcpForwarding` / `GatewayPorts` in the host's `sshd_config`. |
 | **MCP bind error** — server enabled but not listening | Port 4180 (or configured port) already in use | Change the port in **Settings → Control API (MCP)**. The `bind_error` field in `McpStatus` shows the exact OS error. |
-| **No projects found** | Scan path is empty or the base directory does not exist | Place repos under `~/projects/github.com/<owner>/<repo>`, or set `CLAUDE_FLEET_PROJECTS_BASE` to your projects root. (`E_FLEET_PROJECTS_BASE`) |
+| **No projects found** | The projects base is empty, does not exist, or uses a different layout | Set this machine's projects base and layout in **Settings → Projects**, then click **Save & rescan**. With no base set, `CLAUDE_FLEET_PROJECTS_BASE` and then `~/projects/github.com` are used. (`E_FLEET_PROJECTS_BASE`) |
 | Session **won't attach** / appears as a ghost | The underlying tmux session has been destroyed | Use **Recreate** to replace the session, or **Dismiss** to remove the ghost entry. |
 | **Every** session on one host turned into a ghost | The host rebooted or its tmux server restarted | See [tmux server restarted](#a-hosts-tmux-server-restarted-all-sessions-become-ghosts). Recreate before the next pass removes the rows. |
 | Hosts **offline** right after the laptop wakes | SSH ControlMasters went stale during sleep | Wait one or two reconcile passes, or click **Re-probe**. See [after sleep / wake](#after-laptop-sleep--wake). |
@@ -88,11 +88,16 @@ Control API**.
 
 ### No projects found (`E_FLEET_PROJECTS_BASE`)
 
-The project scanner expects repos at
-`$CLAUDE_FLEET_PROJECTS_BASE/<owner>/<repo>`. The default base is
-`~/projects/github.com`. If your repos live elsewhere, set the environment
-variable before launching the app (e.g. add
-`export CLAUDE_FLEET_PROJECTS_BASE=~/code` to your shell profile and relaunch).
+The project scanner looks under this machine's projects base, in the
+configured layout: `github` scans `<base>/<owner>/<repo>`, `flat` scans
+`<base>/<repo>`. Set both in **Settings → Projects** and click **Save &
+rescan**. The line under each field previews where projects are expected.
+
+With no base set for this machine, the scanner uses the
+`CLAUDE_FLEET_PROJECTS_BASE` environment variable (trimmed, with `~/`
+expanded), then `~/projects/github.com` (`~/projects` for `flat`). Remote hosts
+use their own Settings entry or that default; the environment variable only
+applies to the machine running the app.
 
 ### Session won't attach / ghost session
 

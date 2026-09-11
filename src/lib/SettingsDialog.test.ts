@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tick } from 'svelte';
 
@@ -236,5 +236,107 @@ describe('SettingsDialog automation + notifications (W2 Track D)', () => {
     // jsdom has no Notification API ⇒ the OS toggle is disabled + labelled.
     expect(screen.getByTestId('notify-permission')).toHaveTextContent('unsupported');
     expect(screen.getByTestId('notify-os')).toBeDisabled();
+  });
+});
+
+describe('SettingsDialog projects (W5 G3)', () => {
+  const resolved = JSON.stringify({ local: '/home/u/projects/github.com', mefistos: '~/projects/github.com' });
+  function routeProjects(extra: Record<string, unknown> = {}) {
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    inv.mockImplementation(async (cmd: string, args?: { key?: string; value?: string }) => {
+      switch (cmd) {
+        case 'mcp_status':
+          return mcpStatusObj;
+        case 'get_fleet_settings':
+          return {
+            'projects.base_path': '{}',
+            'projects.layout': 'github',
+            'projects.resolved_base': resolved,
+            'projects.local_env_base': '',
+            ...extra,
+          };
+        case 'set_fleet_setting':
+          return { [args!.key!]: args!.value!, 'projects.resolved_base': resolved };
+        case 'refresh_projects':
+          return [];
+        default:
+          return null;
+      }
+    });
+    return inv;
+  }
+
+  // onMount loads settings, then seeds the drafts; the inputs stay disabled
+  // until then, so "enabled" is the deterministic ready signal.
+  async function ready() {
+    await waitFor(() => expect(screen.getByTestId('projects-base-local')).not.toBeDisabled());
+    await tick();
+  }
+
+  it('previews the resolved root per host with no setting stored', async () => {
+    routeProjects();
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await ready();
+    expect(screen.getByTestId('projects-section')).toBeInTheDocument();
+    expect(screen.getByTestId('projects-preview-local')).toHaveTextContent('~/projects/github.com/<owner>/<repo>');
+    expect(screen.getByTestId('projects-preview-mefistos')).toHaveTextContent('~/projects/github.com/<owner>/<repo>');
+    expect((screen.getByTestId('projects-base-mefistos') as HTMLInputElement).value).toBe('');
+  });
+
+  it('saves the per-host map and layout, then rescans projects', async () => {
+    const inv = routeProjects();
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await ready();
+    await fireEvent.input(screen.getByTestId('projects-base-mefistos'), { target: { value: ' ~/code ' } });
+    await fireEvent.change(screen.getByTestId('projects-layout'), { target: { value: 'flat' } });
+    await tick();
+    expect(screen.getByTestId('projects-preview-mefistos')).toHaveTextContent('~/code/<repo>');
+    await fireEvent.click(screen.getByTestId('projects-save'));
+    await waitFor(() => expect(inv).toHaveBeenCalledWith('refresh_projects', undefined));
+    expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'projects.base_path', value: '{"mefistos":"~/code"}' });
+    expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'projects.layout', value: 'flat' });
+    expect(inv).toHaveBeenCalledWith('refresh_projects', undefined);
+  });
+
+  it('flags an invalid path and disables Save', async () => {
+    const inv = routeProjects();
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await ready();
+    await fireEvent.input(screen.getByTestId('projects-base-local'), { target: { value: 'relative/dir' } });
+    await tick();
+    expect(screen.getByTestId('projects-preview-local')).toHaveTextContent('must be absolute');
+    expect(screen.getByTestId('projects-save')).toBeDisabled();
+    expect(inv).not.toHaveBeenCalledWith('set_fleet_setting', expect.objectContaining({ key: 'projects.base_path' }));
+  });
+
+  it('pre-fills a stored per-host path', async () => {
+    routeProjects({ 'projects.base_path': '{"mefistos":"/data/git"}', 'projects.layout': 'flat' });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await ready();
+    expect((screen.getByTestId('projects-base-mefistos') as HTMLInputElement).value).toBe('/data/git');
+    expect((screen.getByTestId('projects-layout') as HTMLSelectElement).value).toBe('flat');
+    expect(screen.getByTestId('projects-preview-mefistos')).toHaveTextContent('/data/git/<repo>');
+  });
+
+  it('local preview follows an unsaved layout change (no env var)', async () => {
+    routeProjects();
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await ready();
+    await fireEvent.change(screen.getByTestId('projects-layout'), { target: { value: 'flat' } });
+    await tick();
+    expect(screen.getByTestId('projects-preview-local')).toHaveTextContent('~/projects/<repo>');
+    expect(screen.getByTestId('projects-preview-local')).not.toHaveTextContent('github.com');
+  });
+
+  it('local preview uses the env var before the layout default', async () => {
+    routeProjects({ 'projects.local_env_base': '/srv/env' });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await ready();
+    expect(screen.getByTestId('projects-preview-local')).toHaveTextContent('/srv/env/<owner>/<repo>');
+    await fireEvent.change(screen.getByTestId('projects-layout'), { target: { value: 'flat' } });
+    await tick();
+    expect(screen.getByTestId('projects-preview-local')).toHaveTextContent('/srv/env/<repo>');
+    // remote hosts never see the env var
+    expect(screen.getByTestId('projects-preview-mefistos')).toHaveTextContent('~/projects/<repo>');
   });
 });

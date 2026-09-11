@@ -87,13 +87,24 @@ async fn tool_version(bin: &str, arg: &str) -> Option<String> {
 
 /// Detect local prerequisites: the `claude` CLI, `tmux`, and the projects scan
 /// directory. Never errors — a missing tool is reported as `*_ok = false`.
-pub async fn local_prereqs() -> LocalPrereqs {
+pub async fn local_prereqs(store: &std::sync::Mutex<crate::store::Store>) -> LocalPrereqs {
     let (claude_version, tmux_version) = tokio::join!(
         tool_version("claude", "--version"),
         tool_version("tmux", "-V"),
     );
 
-    let base = crate::service::projects::projects_base();
+    // Resolved root (setting → env → default), same as `refresh_projects`.
+    // A poisoned store degrades to the historical default rather than
+    // failing the whole checklist.
+    let base = match store.lock() {
+        Ok(s) => crate::service::projects::local_projects_root(&s),
+        Err(_) => {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+            std::path::PathBuf::from(home)
+                .join("projects")
+                .join("github.com")
+        }
+    };
     let projects_path = base.to_string_lossy().to_string();
     let (projects_readable, projects_count) = match std::fs::read_dir(&base) {
         Ok(rd) => (true, rd.filter_map(|e| e.ok()).count() as u32),

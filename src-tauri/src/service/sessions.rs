@@ -348,6 +348,7 @@ fn reconcile_write_one_host(
     projects: &[ProjectRow],
 ) -> Result<(), IpcError> {
     let host = &probe.host;
+    let paths = HostPaths::for_host(s, &host.alias);
     let agent_rows = &probe.agent_rows;
     let intel = &probe.intel;
     match &probe.result {
@@ -364,14 +365,15 @@ fn reconcile_write_one_host(
             let mut pending_events: Vec<(String, &'static str, Option<String>)> = Vec::new();
             for sess in live {
                 keep.push(sess.name.clone());
-                let project_id = find_project_id_for_path(projects, &host.alias, &sess.path);
+                let project_id =
+                    find_project_id_for_path(projects, &host.alias, &sess.path, &paths);
                 // Preservation invariant: if the session already has an
                 // account_uuid in the DB, keep it; only capture the host's
                 // current account for newly-discovered sessions.
                 let account_uuid = s
                     .get_session_account(&host.alias, &sess.name)?
                     .or_else(|| host.account_uuid.clone());
-                let worktree_key = worktree_key_for_path(&sess.path.to_string_lossy());
+                let worktree_key = worktree_key_for_host(&sess.path.to_string_lossy(), &paths);
                 // Match the running Claude agent by name (sessions launched
                 // with `--name <tmux_name>`) or, for older sessions without a
                 // name, by a unique cwd — so `recreate`/`restart` can resume
@@ -544,6 +546,7 @@ fn reconcile_bg_agents(
     agents: &[crate::claude_agents::ClaudeAgentRow],
 ) -> Result<(), IpcError> {
     let mut keep: Vec<String> = Vec::new();
+    let paths = HostPaths::for_host(s, host_alias);
     for agent in unmatched_bg_agents(live, agents) {
         let Some(session_id) = agent.session_id.as_deref() else {
             continue;
@@ -553,7 +556,7 @@ fn reconcile_bg_agents(
         // existing row over a transient write error would be wrong.
         keep.push(tmux_name.clone());
         let project_id = agent.cwd.as_deref().and_then(|cwd| {
-            find_project_id_for_path(projects, host_alias, std::path::Path::new(cwd))
+            find_project_id_for_path(projects, host_alias, std::path::Path::new(cwd), &paths)
         });
         if let Err(e) = s.upsert_bg_session(
             host_alias,
@@ -580,13 +583,13 @@ fn reconcile_bg_agents(
 /// we return an `Err` probe result, which `reconcile_write_one_host` turns
 /// into "host unreachable, keep last-known sessions". Shared by the multi-host
 /// reconcile and the single-host refresh so both are bounded identically.
-async fn probe_one_host(host: HostRow, deps: &ReconcileDeps) -> HostProbe {
+async fn probe_one_host(host: HostRow, paths: HostPaths, deps: &ReconcileDeps) -> HostProbe {
     let tmux = (deps.exec)(&host.alias);
     probe_with_timeout(
         host,
         tmux,
         deps.probe_timeout,
-        Some((deps.shell.as_ref(), deps.pr_cache.as_ref())),
+        Some((deps.shell.as_ref(), deps.pr_cache.as_ref(), &paths)),
     )
     .await
 }
@@ -601,13 +604,14 @@ async fn probe_pr_info(
     live: &[crate::tmux::TmuxSession],
     shell: &dyn HostShell,
     cache: &crate::service::outcome::PrProbeCache,
+    paths: &HostPaths,
 ) -> PrInfoMap {
     use crate::service::outcome::{build_pr_probe_script, parse_pr_probe_output, ProbeOutput};
     let live_names: Vec<String> = live.iter().map(|s| s.name.clone()).collect();
     cache.retain_host(host, &live_names);
     let candidates: Vec<(String, String)> = live
         .iter()
-        .filter(|s| worktree_key_for_path(&s.path.to_string_lossy()).is_some())
+        .filter(|s| worktree_key_for_host(&s.path.to_string_lossy(), paths).is_some())
         .map(|s| (s.name.clone(), s.path.to_string_lossy().into_owned()))
         .collect();
     let mut due: Vec<(String, String)> =
@@ -644,7 +648,11 @@ async fn probe_with_timeout(
     host: HostRow,
     tmux: Box<dyn TmuxExec>,
     timeout: std::time::Duration,
-    pr_probe: Option<(&dyn HostShell, &crate::service::outcome::PrProbeCache)>,
+    pr_probe: Option<(
+        &dyn HostShell,
+        &crate::service::outcome::PrProbeCache,
+        &HostPaths,
+    )>,
 ) -> HostProbe {
     // Recorded BEFORE the first await: this is the instant the probe's view of
     // the host stops being current (BE-3 ghost guard).
@@ -686,10 +694,10 @@ async fn probe_with_timeout(
     // The PR probe is its own bounded step AFTER reachability is settled: it
     // talks to GitHub, not to the host, and must never cost the host its
     // "reachable" verdict. On timeout the stored outcome fields survive.
-    if let (Ok(live), Some((shell, cache))) = (&probe.result, pr_probe) {
+    if let (Ok(live), Some((shell, cache, paths))) = (&probe.result, pr_probe) {
         match tokio::time::timeout(
             PR_PROBE_TIMEOUT,
-            probe_pr_info(&probe.host.alias, live, shell, cache),
+            probe_pr_info(&probe.host.alias, live, shell, cache, paths),
         )
         .await
         {
@@ -716,6 +724,12 @@ pub(crate) async fn reconcile_sessions_with(
         let s = store.lock().map_err(|_| IpcError::lock())?;
         s.upsert_host("local")?;
         s.list_hosts()?
+            .into_iter()
+            .map(|h| {
+                let paths = HostPaths::for_host(&s, &h.alias);
+                (h, paths)
+            })
+            .collect::<Vec<_>>()
     };
 
     // 2. Fan out probes (off-lock) via JoinSet for parallel execution.
@@ -731,9 +745,9 @@ pub(crate) async fn reconcile_sessions_with(
     //    children by itself; the ssh layer's own wall clock
     //    (`SshClient::run_child`) kills and reaps them and resets the master.
     let mut set = tokio::task::JoinSet::new();
-    for host in hosts.into_iter().filter(|h| !h.hidden) {
+    for (host, paths) in hosts.into_iter().filter(|(h, _)| !h.hidden) {
         let deps = Arc::clone(deps);
-        set.spawn(async move { probe_one_host(host, &deps).await });
+        set.spawn(async move { probe_one_host(host, paths, &deps).await });
     }
 
     // Collect per-host probe results. Join errors (task panics) are logged
@@ -830,16 +844,19 @@ async fn reconcile_one_host_with(
     alias: &str,
 ) -> Result<(), IpcError> {
     // 1. Snapshot the host under lock (brief).
-    let host = {
+    let (host, paths) = {
         let s = store.lock().map_err(|_| IpcError::lock())?;
-        s.list_hosts()?
+        let host = s
+            .list_hosts()?
             .into_iter()
             .find(|h| h.alias == alias)
-            .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("host {alias} not found")))?
+            .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("host {alias} not found")))?;
+        let paths = HostPaths::for_host(&s, alias);
+        (host, paths)
     };
 
     // 2. Probe off-lock, under the same hard cap as the multi-host reconcile.
-    let probe = probe_one_host(host, deps).await;
+    let probe = probe_one_host(host, paths, deps).await;
 
     // 3. Apply writes under one brief lock, via the SAME per-host write path
     //    as the multi-host reconcile (single transaction + emit-after-commit).
@@ -899,7 +916,14 @@ fn worktree_key_for_path(path: &str) -> Option<String> {
         regex::Regex::new(r"/projects/github\.com/[^/]+/[^/]+(/.*)?$").expect("static regex")
     });
     let caps = RE.captures(path)?;
-    let remainder = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+    Some(worktree_key_from_remainder(
+        caps.get(1).map(|m| m.as_str()).unwrap_or(""),
+    ))
+}
+
+/// Worktree name from the part of a cwd below the repo directory (`""`,
+/// `/src/lib`, `/.worktrees/feat/src`, …).
+fn worktree_key_from_remainder(remainder: &str) -> String {
     // Check `.claude/worktrees/` first — it is the more specific marker, and
     // `/.worktrees/` is not a substring of `/.claude/worktrees/`.
     for marker in ["/.claude/worktrees/", "/.worktrees/"] {
@@ -907,12 +931,82 @@ fn worktree_key_for_path(path: &str) -> Option<String> {
             let after = &remainder[idx + marker.len()..];
             if let Some(name) = after.split('/').next() {
                 if !name.is_empty() {
-                    return Some(name.to_string());
+                    return name.to_string();
                 }
             }
         }
     }
-    Some("main".to_string())
+    "main".to_string()
+}
+
+/// A host's projects root and layout (the `projects.*` settings), captured
+/// under the store lock so cwd → project linking also works off-lock (the PR
+/// probe). `local` holds the absolute scan root; remote roots stay
+/// unexpanded, since `$HOME` is not known here, so a `~/rest` root is located
+/// by its `/rest/` segment run. The layout only says where a repo sits under
+/// the root; worktree subdirs are recognised separately.
+#[derive(Debug, Clone)]
+pub(crate) struct HostPaths {
+    root: String,
+    layout: crate::projects::Layout,
+}
+
+impl HostPaths {
+    fn for_host(s: &Store, alias: &str) -> Self {
+        use crate::service::projects::{layout, local_projects_root, project_base_for, LOCAL_HOST};
+        let root = if alias == LOCAL_HOST {
+            local_projects_root(s).to_string_lossy().into_owned()
+        } else {
+            project_base_for(s, alias)
+        };
+        HostPaths {
+            root,
+            layout: layout(s),
+        }
+    }
+
+    /// Path components below the root, when `path` lies under it. Compares
+    /// whole components, so root `/data/git` does not match `/data/git-old`.
+    fn below_root<'a>(&self, path: &'a str) -> Option<Vec<&'a str>> {
+        let root = self.root.trim_end_matches('/');
+        let rest = if let Some(tail) = root.strip_prefix("~/") {
+            let needle = format!("/{tail}/");
+            let idx = path.find(&needle)?;
+            &path[idx + needle.len()..]
+        } else if root.starts_with('/') {
+            crate::service::projects::strip_root(path, root)?
+        } else {
+            return None;
+        };
+        Some(rest.split('/').filter(|c| !c.is_empty()).collect())
+    }
+
+    /// `(owner, repo, remainder below the repo)` for a cwd under the root;
+    /// `owner` is `None` under the flat layout.
+    fn locate<'a>(&self, path: &'a str) -> Option<(Option<&'a str>, &'a str, String)> {
+        use crate::projects::Layout;
+        let comps = self.below_root(path)?;
+        let (owner, repo, rest) = match self.layout {
+            Layout::Github if comps.len() >= 2 => (Some(comps[0]), comps[1], &comps[2..]),
+            Layout::Flat if !comps.is_empty() => (None, comps[0], &comps[1..]),
+            _ => return None,
+        };
+        let remainder = if rest.is_empty() {
+            String::new()
+        } else {
+            format!("/{}", rest.join("/"))
+        };
+        Some((owner, repo, remainder))
+    }
+}
+
+/// `worktree_key_for_path` for a cwd on a host with a (possibly custom)
+/// projects root / layout. The github.com regex stays the fallback.
+fn worktree_key_for_host(path: &str, paths: &HostPaths) -> Option<String> {
+    match paths.locate(path) {
+        Some((_, _, remainder)) => Some(worktree_key_from_remainder(&remainder)),
+        None => worktree_key_for_path(path),
+    }
 }
 
 /// Match a session's cwd to a known project id. `projects` is passed in by the
@@ -921,19 +1015,42 @@ fn find_project_id_for_path(
     projects: &[ProjectRow],
     host_alias: &str,
     path: &std::path::Path,
+    paths: &HostPaths,
 ) -> Option<i64> {
     let path_str = path.to_string_lossy();
     if host_alias == "local" {
-        // Local paths: prefix match (handles worktrees nested under repos).
+        // Local paths: component-wise prefix match against the scanned
+        // base_path (handles worktrees nested under repos; `/b/x` does not
+        // capture `/b/x-build`).
         return projects
             .iter()
-            .filter(|p| path_str.starts_with(&p.base_path))
+            .filter(|p| crate::service::projects::strip_root(&path_str, &p.base_path).is_some())
             .max_by_key(|p| p.base_path.len())
             .map(|p| p.id);
     }
-    // Remote paths: match by owner+repo extracted from the conventional
-    // `.../projects/github.com/<owner>/<repo>/...` layout. Falls through
-    // to `None` (orphan) if the path doesn't follow the convention.
+    // Remote paths: locate (owner, repo) under the host's configured root and
+    // layout, then fall back to the conventional
+    // `.../projects/github.com/<owner>/<repo>/...` regex. `None` (orphan) if
+    // neither matches.
+    if let Some((owner, repo, _)) = paths.locate(&path_str) {
+        let hit = match owner {
+            Some(o) => projects
+                .iter()
+                .find(|p| p.owner == o && p.repo == repo)
+                .map(|p| p.id),
+            None => {
+                // Flat: repo name only; never guess between same-named repos.
+                let mut same = projects.iter().filter(|p| p.repo == repo);
+                match (same.next(), same.next()) {
+                    (Some(p), None) => Some(p.id),
+                    _ => None,
+                }
+            }
+        };
+        if hit.is_some() {
+            return hit;
+        }
+    }
     let (owner, repo) = extract_owner_repo(&path_str)?;
     projects
         .iter()
@@ -1076,17 +1193,20 @@ fn fetch_worktree(s: &Store, worktree_id: i64) -> Result<(String, Option<String>
 }
 
 /// Build the absolute path on the remote host where a project (and optional
-/// worktree) should live. Mirrors the local convention `proj-clean` enforces:
-/// `~/projects/github.com/<owner>/<repo>` for the project root and
-/// `~/projects/github.com/<owner>/<repo>/.claude/worktrees/<wt>` for non-main
-/// worktrees. Returns just the project root if `wt_name` is None or "main".
+/// worktree) should live: `<root>/<owner>/<repo>` (`github` layout) or
+/// `<root>/<repo>` (`flat`) for the project root, plus
+/// `.claude/worktrees/<wt>` for non-main worktrees (a best-effort guess;
+/// `service::repair` resolves the real worktree dir on the host). `root` must
+/// already be absolute (see `remote_project_path_for`). Returns just the
+/// project root if `wt_name` is None or "main".
 pub(crate) fn remote_project_path(
-    home: &str,
+    root: &str,
+    layout: crate::projects::Layout,
     owner: &str,
     repo: &str,
     wt_name: Option<&str>,
 ) -> (String, String) {
-    let project_root = format!("{home}/projects/github.com/{owner}/{repo}");
+    let project_root = layout.project_dir(root, owner, repo);
     let cwd = match wt_name {
         Some(name) if name != "main" => {
             format!("{project_root}/.claude/worktrees/{name}")
@@ -1094,6 +1214,22 @@ pub(crate) fn remote_project_path(
         _ => project_root.clone(),
     };
     (project_root, cwd)
+}
+
+/// `remote_project_path` with the host's projects root resolved from the
+/// `projects.*` settings (default `~/projects/github.com`) and expanded
+/// against the remote `$HOME`.
+fn remote_project_path_for(
+    s: &Store,
+    host: &str,
+    home: &str,
+    owner: &str,
+    repo: &str,
+    wt_name: Option<&str>,
+) -> (String, String) {
+    use crate::service::projects::{expand_home, layout, project_base_for};
+    let root = expand_home(&project_base_for(s, host), home);
+    remote_project_path(&root, layout(s), owner, repo, wt_name)
 }
 
 /// Ensure the remote host has the project cloned at `<project_root>` and,
@@ -1439,7 +1575,10 @@ async fn new_session_inner(
                 fetch_owner_repo(&s, args.project_id)?
             };
             let home = ssh.remote_home(&args.host_alias).await?;
-            let (project_root, _) = remote_project_path(&home, &owner, &repo, None);
+            let (project_root, _) = {
+                let s = store.lock().map_err(|_| IpcError::lock())?;
+                remote_project_path_for(&s, &args.host_alias, &home, &owner, &repo, None)
+            };
             ensure_remote_project(
                 ssh,
                 &args.host_alias,
@@ -1484,7 +1623,10 @@ async fn new_session_inner(
             };
             let home = ssh.remote_home(&args.host_alias).await?;
             let wt_name_str = wt_info.as_ref().map(|(name, _)| name.as_str());
-            let (project_root, cwd) = remote_project_path(&home, &owner, &repo, wt_name_str);
+            let (project_root, cwd) = {
+                let s = store.lock().map_err(|_| IpcError::lock())?;
+                remote_project_path_for(&s, &args.host_alias, &home, &owner, &repo, wt_name_str)
+            };
             let worktree_for_clone = wt_info
                 .as_ref()
                 .map(|(name, branch)| (name.as_str(), branch.as_deref()));
@@ -2414,6 +2556,10 @@ fn worktree_path_on_disk(base: &str, key: &str, exists: impl Fn(&str) -> bool) -
 enum CwdSource {
     Local(String),
     Remote {
+        /// Host's projects root from the `projects.*` settings, unexpanded
+        /// (may start with `~/`; expanded against the remote `$HOME`).
+        root: String,
+        layout: crate::projects::Layout,
         owner: String,
         repo: String,
         wt_name: Option<String>,
@@ -2450,6 +2596,8 @@ fn cwd_source_for_session(
             .map(str::to_string),
     };
     Ok(CwdSource::Remote {
+        root: crate::service::projects::project_base_for(s, &row.host_alias),
+        layout: crate::service::projects::layout(s),
         owner,
         repo,
         wt_name,
@@ -2467,12 +2615,16 @@ async fn resolve_cwd_source(
     match src {
         CwdSource::Local(p) => Ok(p),
         CwdSource::Remote {
+            root,
+            layout,
             owner,
             repo,
             wt_name,
         } => {
             let home = ssh.remote_home(host_alias).await?;
-            let (_root, cwd) = remote_project_path(&home, &owner, &repo, wt_name.as_deref());
+            let root = crate::service::projects::expand_home(&root, &home);
+            let (_root, cwd) =
+                remote_project_path(&root, layout, &owner, &repo, wt_name.as_deref());
             Ok(cwd)
         }
     }
@@ -3142,22 +3294,36 @@ mod tests {
 
     #[test]
     fn remote_project_path_returns_project_root_for_main_or_no_worktree() {
-        let (root, cwd) = remote_project_path("/home/mjanci", "martin-janci", "claude-fleet", None);
+        use crate::projects::Layout;
+        let root_dir = "/home/mjanci/projects/github.com";
+        let (root, cwd) = remote_project_path(
+            root_dir,
+            Layout::Github,
+            "martin-janci",
+            "claude-fleet",
+            None,
+        );
         assert_eq!(
             root,
             "/home/mjanci/projects/github.com/martin-janci/claude-fleet"
         );
         assert_eq!(cwd, root);
 
-        let (root, cwd) =
-            remote_project_path("/home/mjanci", "papayapos", "pos-frontend", Some("main"));
+        let (root, cwd) = remote_project_path(
+            root_dir,
+            Layout::Github,
+            "papayapos",
+            "pos-frontend",
+            Some("main"),
+        );
         assert_eq!(cwd, root);
     }
 
     #[test]
     fn remote_project_path_uses_worktree_subdir_for_non_main() {
         let (root, cwd) = remote_project_path(
-            "/home/mjanci",
+            "/home/mjanci/projects/github.com",
+            crate::projects::Layout::Github,
             "martin-janci",
             "sales-twins-app",
             Some("feature-x"),
@@ -3170,6 +3336,45 @@ mod tests {
             cwd,
             "/home/mjanci/projects/github.com/martin-janci/sales-twins-app/.claude/worktrees/feature-x"
         );
+    }
+
+    #[test]
+    fn remote_new_session_path_unchanged_without_a_setting() {
+        // Existing configs: exactly the pre-setting `{home}/projects/github.com/...`.
+        let s = Store::open_in_memory().unwrap();
+        let (root, cwd) =
+            remote_project_path_for(&s, "mefistos", "/home/mjanci", "o", "r", Some("wt"));
+        assert_eq!(root, "/home/mjanci/projects/github.com/o/r");
+        assert_eq!(
+            cwd,
+            "/home/mjanci/projects/github.com/o/r/.claude/worktrees/wt"
+        );
+    }
+
+    #[test]
+    fn remote_new_session_path_follows_the_projects_settings() {
+        use crate::service::settings;
+        let s = Store::open_in_memory().unwrap();
+        settings::set(
+            &s,
+            settings::PROJECTS_BASE_PATH,
+            r#"{"mefistos":"~/code","other":"/data/git"}"#,
+        )
+        .unwrap();
+        // github layout under the host's own root, `~/` expanded remotely
+        let (root, _) = remote_project_path_for(&s, "mefistos", "/home/mjanci", "o", "r", None);
+        assert_eq!(root, "/home/mjanci/code/o/r");
+        // flat layout
+        settings::set(&s, settings::PROJECTS_LAYOUT, "flat").unwrap();
+        let (root, cwd) =
+            remote_project_path_for(&s, "mefistos", "/home/mjanci", "o", "r", Some("feat"));
+        assert_eq!(root, "/home/mjanci/code/r");
+        assert_eq!(cwd, "/home/mjanci/code/r/.claude/worktrees/feat");
+        // absolute per-host root; a host without an entry gets the flat default
+        let (root, _) = remote_project_path_for(&s, "other", "/home/x", "o", "r", None);
+        assert_eq!(root, "/data/git/r");
+        let (root, _) = remote_project_path_for(&s, "third", "/home/x", "o", "r", None);
+        assert_eq!(root, "/home/x/projects/r");
     }
 
     #[test]
@@ -3948,6 +4153,7 @@ mod tests {
                 owner,
                 repo,
                 wt_name,
+                ..
             } => {
                 assert_eq!(owner, "acme");
                 assert_eq!(repo, "repo");
@@ -3963,6 +4169,199 @@ mod tests {
             CwdSource::Remote { wt_name, .. } => assert_eq!(wt_name, None),
             CwdSource::Local(_) => panic!("expected Remote for host=mefistos"),
         }
+    }
+
+    #[test]
+    fn cwd_source_remote_follows_projects_settings() {
+        // recreate/restart derive the remote cwd through `cwd_source_for_session`
+        // + `resolve_cwd_source`; the path must follow `projects.*`.
+        use crate::projects::Layout;
+        use crate::service::settings;
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_host("mefistos").unwrap();
+        let pid = store.upsert_project("acme", "repo", "/base/repo").unwrap();
+        let mut r = row(1, "mefistos", "dev", "work", Some(pid), Some("idle"));
+        r.worktree_key = Some("feat-x".into());
+
+        // No setting: the historical remote root, unchanged.
+        match cwd_source_for_session(&store, &r).unwrap() {
+            CwdSource::Remote { root, layout, .. } => {
+                assert_eq!(root, "~/projects/github.com");
+                assert_eq!(layout, Layout::Github);
+            }
+            CwdSource::Local(_) => panic!("expected Remote for host=mefistos"),
+        }
+
+        settings::set(
+            &store,
+            settings::PROJECTS_BASE_PATH,
+            r#"{"mefistos":"~/code"}"#,
+        )
+        .unwrap();
+        settings::set(&store, settings::PROJECTS_LAYOUT, "flat").unwrap();
+        match cwd_source_for_session(&store, &r).unwrap() {
+            CwdSource::Remote {
+                root,
+                layout,
+                owner,
+                repo,
+                wt_name,
+            } => {
+                let root = crate::service::projects::expand_home(&root, "/home/m");
+                let (_, cwd) =
+                    remote_project_path(&root, layout, &owner, &repo, wt_name.as_deref());
+                assert_eq!(cwd, "/home/m/code/repo/.claude/worktrees/feat-x");
+            }
+            CwdSource::Local(_) => panic!("expected Remote for host=mefistos"),
+        }
+    }
+
+    fn host_paths(root: &str, layout: crate::projects::Layout) -> HostPaths {
+        HostPaths {
+            root: root.into(),
+            layout,
+        }
+    }
+
+    #[test]
+    fn host_paths_locate_custom_roots_and_layouts() {
+        use crate::projects::Layout;
+        let def = host_paths("~/projects/github.com", Layout::Github);
+        assert_eq!(
+            def.locate("/home/u/projects/github.com/o/r/.worktrees/f"),
+            Some((Some("o"), "r", "/.worktrees/f".to_string()))
+        );
+        let code = host_paths("~/code", Layout::Github);
+        assert_eq!(
+            code.locate("/home/u/code/o/r"),
+            Some((Some("o"), "r", String::new()))
+        );
+        assert_eq!(code.locate("/home/u/code/o"), None, "owner dir, no repo");
+        let abs = host_paths("/data/git/", Layout::Flat);
+        assert_eq!(
+            abs.locate("/data/git/r/src"),
+            Some((None, "r", "/src".to_string()))
+        );
+        assert_eq!(abs.locate("/data/git-old/r"), None, "whole components only");
+        assert_eq!(abs.locate("/data/git"), None);
+    }
+
+    #[test]
+    fn find_project_local_prefix_is_component_aware() {
+        let s = Store::open_in_memory().unwrap();
+        let x = s.upsert_project("o", "x", "/b/x").unwrap();
+        let xb = s.upsert_project("o", "x-build", "/b/x-build").unwrap();
+        let projects = s.list_projects().unwrap();
+        let paths = HostPaths::for_host(&s, "local");
+        let find =
+            |p: &str| find_project_id_for_path(&projects, "local", std::path::Path::new(p), &paths);
+        assert_eq!(find("/b/x-build/src"), Some(xb));
+        assert_eq!(find("/b/x/.worktrees/f"), Some(x));
+        assert_eq!(find("/b/x"), Some(x));
+        assert_eq!(find("/b/xy"), None);
+    }
+
+    #[test]
+    fn find_project_remote_flat_matches_unique_repo_name() {
+        let s = Store::open_in_memory().unwrap();
+        let a = s.upsert_project("acme", "alpha", "/l/alpha").unwrap();
+        s.upsert_project("one", "dup", "/l/dup").unwrap();
+        s.upsert_project("two", "dup", "/l2/dup").unwrap();
+        let projects = s.list_projects().unwrap();
+        let paths = host_paths("~/code", crate::projects::Layout::Flat);
+        let find =
+            |p: &str| find_project_id_for_path(&projects, "vps", std::path::Path::new(p), &paths);
+        assert_eq!(find("/home/u/code/alpha/src"), Some(a));
+        assert_eq!(
+            find("/home/u/code/dup"),
+            None,
+            "an ambiguous repo name is not guessed"
+        );
+        assert_eq!(find("/home/u/elsewhere/alpha"), None);
+        // The github.com convention stays the fallback.
+        assert_eq!(find("/home/u/projects/github.com/acme/alpha"), Some(a));
+    }
+
+    /// Run two reconcile ticks for one remote session at `cwd` under the given
+    /// `projects.*` settings; returns (project_id, worktree_key, expected pid).
+    fn reconcile_linking(
+        base_map: Option<&str>,
+        layout: &str,
+        cwd: &str,
+    ) -> (Option<i64>, Option<String>, i64) {
+        use crate::service::settings;
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_host("vps").unwrap();
+        let pid = s
+            .upsert_project("acme", "repo", "/local/acme/repo")
+            .unwrap();
+        if let Some(m) = base_map {
+            settings::set(&s, settings::PROJECTS_BASE_PATH, m).unwrap();
+        }
+        settings::set(&s, settings::PROJECTS_LAYOUT, layout).unwrap();
+        let host = s
+            .list_hosts()
+            .unwrap()
+            .into_iter()
+            .find(|h| h.alias == "vps")
+            .unwrap();
+        let projects = s.list_projects().unwrap();
+        let probe = HostProbe {
+            host,
+            result: Ok(vec![crate::tmux::TmuxSession {
+                name: "dev-a".into(),
+                created: 1,
+                last_activity: 1,
+                attached: false,
+                path: PathBuf::from(cwd),
+            }]),
+            agent_rows: Vec::new(),
+            intel: PaneIntelMap::new(),
+            pr_info: PrInfoMap::new(),
+            started_at: now_unix(),
+        };
+        // Two ticks: the second must keep the link, not null it.
+        reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+        reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+        let row = s.get_session("dev-a", "vps").unwrap().unwrap();
+        (row.project_id, row.worktree_key, pid)
+    }
+
+    #[test]
+    fn reconcile_keeps_links_under_custom_root() {
+        let (pid, key, want) = reconcile_linking(
+            Some(r#"{"vps":"~/code"}"#),
+            "github",
+            "/home/u/code/acme/repo/.worktrees/feat",
+        );
+        assert_eq!(pid, Some(want));
+        assert_eq!(key.as_deref(), Some("feat"));
+    }
+
+    #[test]
+    fn reconcile_keeps_links_under_flat_layout() {
+        // No base set: the flat default `~/projects`.
+        let (pid, key, want) =
+            reconcile_linking(None, "flat", "/home/u/projects/repo/.claude/worktrees/x");
+        assert_eq!(pid, Some(want));
+        assert_eq!(key.as_deref(), Some("x"));
+        // Absolute per-host root.
+        let (pid, key, want) =
+            reconcile_linking(Some(r#"{"vps":"/srv/git"}"#), "flat", "/srv/git/repo");
+        assert_eq!(pid, Some(want));
+        assert_eq!(key.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn reconcile_default_config_links_exactly_as_before() {
+        let (pid, key, want) =
+            reconcile_linking(None, "github", "/home/u/projects/github.com/acme/repo/src");
+        assert_eq!(pid, Some(want));
+        assert_eq!(key.as_deref(), Some("main"));
+        // Outside any root and outside the convention: orphan, as before.
+        let (pid, key, _) = reconcile_linking(None, "github", "/tmp/elsewhere");
+        assert_eq!(pid, None);
+        assert_eq!(key, None);
     }
 
     #[test]
@@ -4005,6 +4404,7 @@ mod tests {
                 owner,
                 repo,
                 wt_name,
+                ..
             } => {
                 assert_eq!(owner, "acme");
                 assert_eq!(repo, "repo");
