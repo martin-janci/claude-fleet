@@ -4031,14 +4031,37 @@ mod tests {
     /// `Policy::Explicit`.
     #[test]
     fn call_sites_use_their_documented_entry_points() {
-        let sessions = include_str!("sessions.rs");
+        // Every production file of the `sessions` module, read from disk so a
+        // later move needs no edit here. The test modules are excluded: they
+        // may legitimately name the tick path.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/service/sessions");
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .expect("read src/service/sessions")
+            .map(|e| e.expect("dir entry").path())
+            .filter(|p| {
+                p.extension().is_some_and(|x| x == "rs")
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n != "tests.rs" && !n.ends_with("_tests.rs"))
+            })
+            .collect();
+        files.sort();
+        assert!(
+            files.len() > 1,
+            "src/service/sessions/ should hold the split module"
+        );
+        let sessions_src: String = files
+            .iter()
+            .map(|p| std::fs::read_to_string(p).expect("read a sessions module file"))
+            .collect();
+        let sessions = sessions_src.as_str();
         for needle in [
             "Entry::Restart",
             "Entry::Recreate",
             "Entry::SpawnReview",
             "repair::ensure_for_new_session(",
         ] {
-            assert!(sessions.contains(needle), "sessions.rs must use {needle}");
+            assert!(sessions.contains(needle), "sessions/ must use {needle}");
         }
         assert!(
             !sessions.contains("Entry::Explicit"),
@@ -4055,7 +4078,7 @@ mod tests {
         assert!(tools.contains("\"repair_session\",\n            p.confirm_nonce.as_deref(),"));
         // Only the opt-in tick may drop a stale entry automatically.
         for (name, src) in [
-            ("sessions.rs", sessions),
+            ("sessions/", sessions),
             ("commands/sessions.rs", commands),
             ("mcp/tools.rs", tools),
         ] {
