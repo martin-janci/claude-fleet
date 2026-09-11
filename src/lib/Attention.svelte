@@ -5,12 +5,21 @@
   // and on every newly-stuck row announces it through an `aria-live` region,
   // an in-app toast, and — when enabled and permitted — an OS notification.
   //
-  // The first snapshot after mount is NOT announced: rows that were already
-  // stuck when the app opened are visible in the tree, and a burst of
-  // notifications on every launch would train the operator to ignore them.
+  // Rows that were already stuck when the app opened are NOT announced: they
+  // are visible in the tree, and a burst of notifications on every launch
+  // would train the operator to ignore them. Every snapshot that arrives
+  // before `sessionsLoaded` (the empty store at mount, the bootstrap fill)
+  // only re-seeds the baseline; announcements start with the first change
+  // after the fleet is known.
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
-  import { sessions, showFriendlyNames, type SessionRow, type StuckKind } from './sessions';
+  import {
+    sessions,
+    sessionsLoaded,
+    showFriendlyNames,
+    type SessionRow,
+    type StuckKind,
+  } from './sessions';
   import { newlyStuck, stuckMessage, stuckSnapshot } from './attention';
   import { notifyStuckOs, notifyStuckToast, showOsNotification } from './notify';
   import { push } from './toasts';
@@ -35,7 +44,7 @@
 
   onMount(() => {
     const unsub = sessions.subscribe((rows) => {
-      if (prev === null) {
+      if (prev === null || !get(sessionsLoaded)) {
         prev = stuckSnapshot(rows);
         return;
       }

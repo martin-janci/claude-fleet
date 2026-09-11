@@ -1183,7 +1183,9 @@ impl FleetTools {
         after filtering (default: all); `force` runs a reconcile pass first \
         instead of serving the recent cache. claude_status is one of working | \
         blocked | completed | failed | stopped | idle; stuck_kind is one of \
-        auth_menu | reconnect | trust_prompt | oom | press_enter.")]
+        auth_menu | reconnect | trust_prompt | oom | press_enter; ci_status \
+        (full rows) is one of passing | failing | pending (null when the \
+        session has no PR or its PR has no checks).")]
     async fn list_sessions(
         &self,
         Parameters(p): Parameters<ListSessionsParams>,
@@ -2044,9 +2046,10 @@ impl FleetTools {
     #[tool(description = "Launch a supervised headless (background) Claude \
         session on a host with an initial prompt. Returns JSON with the new \
         claude_session_id AND the fleet row (`session`, registered by an \
-        immediate reconcile; null only if the agent was not matched yet) so \
-        the next call can be peek_session { session_id }. The prompt becomes \
-        the row's default friendly name and last_prompt.")]
+        immediate reconcile; the key is absent if the agent was not matched \
+        yet — it appears on the next tick) so the next call can be \
+        peek_session { session_id }. The prompt becomes the row's default \
+        friendly name and last_prompt.")]
     async fn new_bg_session(
         &self,
         Parameters(p): Parameters<NewBgSessionParams>,

@@ -68,7 +68,9 @@ pub struct SessionRow {
     pub idle_since: Option<i64>,
     /// When the current `stuck_kind` episode began; NULL when not stuck.
     pub stuck_since: Option<i64>,
-    /// When a stuck playbook last acted on this row.
+    /// When a stuck playbook last acted on this row. One stamp shared by
+    /// every playbook kind: it gates "once per stuck episode" for all of
+    /// them and the 1 h spacing for `oom`.
     pub last_playbook_at: Option<i64>,
     /// First 200 chars of the last prompt sent through fleet.
     pub last_prompt: Option<String>,
@@ -1631,6 +1633,46 @@ impl Store {
             updated += 1;
         }
         Ok(updated)
+    }
+
+    /// The deterministic branch-derived label `new_session` /
+    /// `backfill_friendly_names` would give this row (PR #28), or `None` for
+    /// bg rows and rows whose humanised name is empty. Lets callers tell a
+    /// still-default label from one a human or agent chose.
+    pub fn default_friendly_name(&self, id: i64) -> Result<Option<String>, rusqlite::Error> {
+        let row: Option<(String, String, String, Option<String>, String)> = self
+            .conn
+            .query_row(
+                "SELECT s.tmux_name,
+                        COALESCE(p.owner, '') AS owner,
+                        COALESCE(p.repo, '') AS repo,
+                        COALESCE(w.branch, w.name) AS branch,
+                        COALESCE(s.kind, 'work')
+                   FROM sessions s
+                   LEFT JOIN projects p ON p.id = s.project_id
+                   LEFT JOIN worktrees w ON w.id = s.worktree_id
+                  WHERE s.id = ?1",
+                rusqlite::params![id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((tmux_name, owner, repo, branch, kind)) = row else {
+            return Ok(None);
+        };
+        if kind == "bg" {
+            return Ok(None);
+        }
+        let source = branch.unwrap_or(tmux_name);
+        let label = crate::humanize::humanize_branch(&source, &owner, &repo);
+        Ok(if label.is_empty() { None } else { Some(label) })
     }
 
     /// Set the session's display label (migration 016). `None` clears it.

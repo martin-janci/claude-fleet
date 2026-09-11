@@ -8,7 +8,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import Attention from './Attention.svelte';
-import { sessions, type SessionRow } from './sessions';
+import { sessions, sessionsLoaded, type SessionRow } from './sessions';
 import { toasts, clearToasts } from './toasts';
 import { notifyStuckOs, notifyStuckToast } from './notify';
 
@@ -54,6 +54,7 @@ function row(over: Partial<SessionRow> = {}): SessionRow {
 
 beforeEach(() => {
   sessions.set([]);
+  sessionsLoaded.set(true);
   clearToasts();
   notifyStuckToast.set(true);
   notifyStuckOs.set(false);
@@ -78,6 +79,30 @@ describe('Attention', () => {
     sessions.set([{ ...a, stuck_kind: 'press_enter', last_activity_at: 2 }]);
     await tick();
     expect(get(toasts)).toHaveLength(1);
+  });
+
+  it('does not replay stuck rows delivered by the bootstrap fill', async () => {
+    // App.svelte mounts the sidebar (and this watcher) before the first
+    // list_sessions resolves: the store goes [] -> [rows]. That fill is
+    // baseline, not a burst of transitions.
+    sessionsLoaded.set(false);
+    render(Attention);
+    await tick();
+    const a = row({ tmux_name: 'dev-boot', stuck_kind: 'oom' });
+    const b = row({ tmux_name: 'dev-boot2', stuck_kind: 'trust_prompt' });
+    sessions.set([a, b]);
+    await tick();
+    expect(screen.getByTestId('stuck-announcer')).toHaveTextContent('');
+    expect(get(toasts)).toHaveLength(0);
+    // Bootstrap completes; the same rows re-delivered are still baseline.
+    sessionsLoaded.set(true);
+    sessions.set([a, b]);
+    await tick();
+    expect(get(toasts)).toHaveLength(0);
+    // A genuinely new transition after load is announced.
+    sessions.set([a, b, row({ tmux_name: 'dev-new', stuck_kind: 'reconnect' })]);
+    await tick();
+    expect(get(toasts).map((t) => t.message)).toEqual(['dev-new on local is stuck: reconnecting']);
   });
 
   it('does not announce rows that were already stuck at mount', async () => {

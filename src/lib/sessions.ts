@@ -74,6 +74,12 @@ export interface SessionRow {
 
 export const sessions = writable<SessionRow[]>([]);
 
+/** True once the first successful `list_sessions` has populated the store.
+ *  Consumers that react to *transitions* (Attention.svelte) treat everything
+ *  before this as baseline, so a launch never replays every already-stuck
+ *  row as a fresh alert. */
+export const sessionsLoaded = writable<boolean>(false);
+
 // Sidebar filter — when false, background (`kind === 'bg'`) sessions are
 // hidden from the tree. Defaults to true (shown). Persisted across restarts.
 const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
@@ -94,7 +100,10 @@ showFriendlyNames.subscribe((v) => writePref('show-friendly-names', v));
 // within the configured interval, so window-focus reloads stay cheap.
 export async function loadSessions(opts: { force?: boolean } = {}): Promise<Result<SessionRow[]>> {
   const r = await invokeCmd<SessionRow[]>('list_sessions', { force: opts.force ?? false });
-  if (r.ok) sessions.set(r.value);
+  if (r.ok) {
+    sessions.set(r.value);
+    sessionsLoaded.set(true);
+  }
   return r;
 }
 
@@ -220,7 +229,10 @@ export async function newSessionAbortable(
 
 export async function bootstrapSessions(): Promise<Result<SessionRow[]>> {
   const r = await invokeCmd<SessionRow[]>('list_sessions');
-  if (r.ok) sessions.set(r.value);
+  if (r.ok) {
+    sessions.set(r.value);
+    sessionsLoaded.set(true);
+  }
   return r;
 }
 

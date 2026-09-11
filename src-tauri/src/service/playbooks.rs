@@ -119,11 +119,24 @@ pub fn plan(
     out
 }
 
+/// What `press_enter` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PressEnterOutcome {
+    Sent,
+    /// A human is attached to the tmux session: a synthetic keystroke would
+    /// land in whatever they are typing, so nothing was sent.
+    SkippedAttached,
+}
+
 /// Side effects a playbook can perform. Injected so the runner is testable
 /// without tmux or ssh.
 #[async_trait::async_trait]
 pub trait PlaybookExec: Send + Sync {
-    async fn press_enter(&self, host_alias: &str, tmux_name: &str) -> Result<(), IpcError>;
+    async fn press_enter(
+        &self,
+        host_alias: &str,
+        tmux_name: &str,
+    ) -> Result<PressEnterOutcome, IpcError>;
     async fn recreate(&self, session_id: i64) -> Result<(), IpcError>;
 }
 
@@ -139,10 +152,41 @@ pub fn press_enter_script(tmux_name: &str) -> String {
     format!("tmux send-keys -t {} Enter", quote(tmux_name))
 }
 
+/// Script that prints the number of clients attached to the session.
+pub fn attached_probe_script(tmux_name: &str) -> String {
+    format!(
+        "tmux display -p -t {} '#{{session_attached}}'",
+        quote(tmux_name)
+    )
+}
+
+/// Pure: decide from `tmux display '#{session_attached}'` output whether a
+/// keystroke may be sent. Anything but a clean `0` (an attached client, a
+/// vanished session, garbage) means "do not type into this pane".
+pub fn pane_is_attached(stdout: &str) -> bool {
+    !matches!(stdout.trim().parse::<u32>(), Ok(0))
+}
+
 #[async_trait::async_trait]
 impl PlaybookExec for RealPlaybookExec {
-    async fn press_enter(&self, host_alias: &str, tmux_name: &str) -> Result<(), IpcError> {
+    async fn press_enter(
+        &self,
+        host_alias: &str,
+        tmux_name: &str,
+    ) -> Result<PressEnterOutcome, IpcError> {
         crate::validate::tmux_name_addressable(tmux_name)?;
+        let attached = crate::service::sessions::run_host_script(
+            &self.ssh,
+            host_alias,
+            &attached_probe_script(tmux_name),
+            std::time::Duration::from_secs(10),
+        )
+        .await?;
+        if !attached.status.success()
+            || pane_is_attached(&String::from_utf8_lossy(&attached.stdout))
+        {
+            return Ok(PressEnterOutcome::SkippedAttached);
+        }
         let out = crate::service::sessions::run_host_script(
             &self.ssh,
             host_alias,
@@ -156,7 +200,7 @@ impl PlaybookExec for RealPlaybookExec {
                 String::from_utf8_lossy(&out.stderr).trim().to_string(),
             ));
         }
-        Ok(())
+        Ok(PressEnterOutcome::Sent)
     }
 
     async fn recreate(&self, session_id: i64) -> Result<(), IpcError> {
@@ -196,11 +240,17 @@ pub async fn run_with(
     for p in planned {
         let result = match p.action {
             PlaybookAction::PressEnter => exec.press_enter(&p.host_alias, &p.tmux_name).await,
-            PlaybookAction::Recreate => exec.recreate(p.session_id).await,
-            PlaybookAction::Notify => Ok(()),
+            PlaybookAction::Recreate => exec
+                .recreate(p.session_id)
+                .await
+                .map(|()| PressEnterOutcome::Sent),
+            PlaybookAction::Notify => Ok(PressEnterOutcome::Sent),
         };
         let detail = match &result {
-            Ok(()) => format!("{}:{}", p.stuck_kind, p.action.as_str()),
+            Ok(PressEnterOutcome::Sent) => format!("{}:{}", p.stuck_kind, p.action.as_str()),
+            Ok(PressEnterOutcome::SkippedAttached) => {
+                format!("{}:{}:skipped:attached", p.stuck_kind, p.action.as_str())
+            }
             Err(e) => format!(
                 "{}:{}:failed:{}",
                 p.stuck_kind,
@@ -381,6 +431,38 @@ mod tests {
     }
 
     #[test]
+    fn pane_is_attached_only_trusts_a_clean_zero() {
+        assert!(!pane_is_attached("0\n"));
+        assert!(pane_is_attached("1\n"));
+        assert!(pane_is_attached("2"));
+        assert!(pane_is_attached(""));
+        assert!(pane_is_attached("can't find session: x"));
+        assert_eq!(
+            attached_probe_script("dev-x"),
+            "tmux display -p -t 'dev-x' '#{session_attached}'"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_with_records_an_attached_skip_without_retrying() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let id = seed_stuck(&store, "dev-att", "press_enter");
+        let exec = FakeExec {
+            enters: AtomicUsize::new(0),
+            recreates: AtomicUsize::new(0),
+            fail: false,
+            attached: true,
+        };
+        let now = now_unix() + 10;
+        assert_eq!(run_with(&store, &exec, &ALL_ON, now).await, 1);
+        assert_eq!(run_with(&store, &exec, &ALL_ON, now + 1).await, 0);
+        let s = store.lock().unwrap();
+        let events = s.list_session_events(id, 10).unwrap();
+        assert!(events.iter().any(|e| e.kind == "playbook_applied"
+            && e.detail.as_deref() == Some("press_enter:press_enter:skipped:attached")));
+    }
+
+    #[test]
     fn press_enter_script_quotes_the_session_name() {
         assert_eq!(
             press_enter_script("dev-x's"),
@@ -392,16 +474,19 @@ mod tests {
         enters: AtomicUsize,
         recreates: AtomicUsize,
         fail: bool,
+        attached: bool,
     }
 
     #[async_trait::async_trait]
     impl PlaybookExec for FakeExec {
-        async fn press_enter(&self, _h: &str, _t: &str) -> Result<(), IpcError> {
+        async fn press_enter(&self, _h: &str, _t: &str) -> Result<PressEnterOutcome, IpcError> {
             self.enters.fetch_add(1, Ordering::SeqCst);
             if self.fail {
                 Err(IpcError::new("E_TMUX", "boom"))
+            } else if self.attached {
+                Ok(PressEnterOutcome::SkippedAttached)
             } else {
-                Ok(())
+                Ok(PressEnterOutcome::Sent)
             }
         }
         async fn recreate(&self, _id: i64) -> Result<(), IpcError> {
@@ -454,6 +539,7 @@ mod tests {
             enters: AtomicUsize::new(0),
             recreates: AtomicUsize::new(0),
             fail: false,
+            attached: false,
         };
         let now = now_unix() + 10;
         assert_eq!(run_with(&store, &exec, &ALL_ON, now).await, 1);
@@ -482,6 +568,7 @@ mod tests {
             enters: AtomicUsize::new(0),
             recreates: AtomicUsize::new(0),
             fail: true,
+            attached: false,
         };
         let now = now_unix() + 10;
         assert_eq!(run_with(&store, &exec, &ALL_ON, now).await, 1);
@@ -508,6 +595,7 @@ mod tests {
             enters: AtomicUsize::new(0),
             recreates: AtomicUsize::new(0),
             fail: false,
+            attached: false,
         };
         assert_eq!(
             run_with(&store, &exec, &PlaybookConfig::default(), now_unix() + 5).await,

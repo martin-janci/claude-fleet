@@ -646,10 +646,15 @@
       tabindex="0"
       ondblclick={(e) => sess.status !== 'ghost' && beginRename(sess, e)}
       onclick={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onSelectSession(sess, e)}
-      onkeydown={(e) => !isRenaming && sess.status !== 'ghost' && onKeySession(e, sess)}
+      onkeydown={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onKeySession(e, sess)}
       use:hintAnchor={{ id: 'session-actions', when: !!sess.claude_session_id && sess.status !== 'ghost' }}
     >
       {#if selectMode}
+        <!-- a11y smell, known: an <input> nested in a role="button" row. The
+             row is the click target for open/toggle; the box is a visible
+             affordance for the same toggle and stops propagation so the two
+             never double-fire. Splitting the row into a real <button> plus a
+             sibling checkbox is the proper fix (F5 sidebar split). -->
         <input
           type="checkbox"
           class="select-box"

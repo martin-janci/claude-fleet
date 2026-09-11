@@ -49,8 +49,9 @@ pub struct NewBgSessionResult {
     pub warning: Option<String>,
     /// The fleet row (MCP-7): `new_bg_session_tracked` runs a single-host
     /// reconcile right after launch so the `bg:<id>` sentinel exists before
-    /// the caller's next tool call. `None` when the agent could not be matched
-    /// yet (it appears on the next tick) or when the untracked path was used.
+    /// the caller's next tool call. The key is ABSENT from the JSON (not
+    /// `null`) when the agent could not be matched yet (it appears on the
+    /// next tick) or when the untracked path was used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<crate::store::SessionRow>,
 }

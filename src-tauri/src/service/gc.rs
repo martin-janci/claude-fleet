@@ -86,8 +86,13 @@ fn idle_reference(row: &SessionRow) -> Option<i64> {
 }
 
 /// Pure: which rows are past their TTL this sweep. Skips ghosts, rows with a
-/// safe-kill in flight, the registered controller, and hosts that are not
-/// reachable (a kill would fail and an offline host's idle stamps are stale).
+/// safe-kill in flight, the registered controller, hosts that are not
+/// reachable (a kill would fail and an offline host's idle stamps are stale),
+/// and work sessions with no tracked worktree (main-checkout / orphan rows:
+/// `inspect_safe_kill` cannot see their tree, so nothing may kill them
+/// unattended). Review sessions share their source's worktree and are only
+/// ever plain-killed — a safe-remove would arm deletion of a tree another
+/// session is using.
 pub fn plan(
     rows: &[SessionRow],
     cfg: &GcConfig,
@@ -116,6 +121,9 @@ pub fn plan(
         if ttl == 0 {
             continue;
         }
+        if !matches!(r.kind.as_str(), "bg" | "shell") && r.worktree_id.is_none() {
+            continue;
+        }
         let Some(since) = idle_reference(r) else {
             continue;
         };
@@ -124,7 +132,7 @@ pub fn plan(
             continue;
         }
         let action = match r.kind.as_str() {
-            "bg" | "shell" => GcAction::Kill,
+            "bg" | "shell" | "review" => GcAction::Kill,
             _ => GcAction::InspectThenKill,
         };
         out.push(Planned {
@@ -348,7 +356,13 @@ mod tests {
             tmux_name: format!("s{id}"),
             host_alias: "local".into(),
             project_id: None,
-            worktree_id: None,
+            // Work/review rows get a tracked worktree by default; the
+            // no-worktree case is exercised explicitly below.
+            worktree_id: if matches!(kind, "bg" | "shell") {
+                None
+            } else {
+                Some(1)
+            },
             created_at: 0,
             last_activity_at,
             status: "running".into(),
@@ -434,6 +448,26 @@ mod tests {
             10_000
         )
         .is_empty());
+    }
+
+    #[test]
+    fn work_rows_without_a_tracked_worktree_are_never_collected() {
+        let mut orphan = row(1, "work", Some(0), 0);
+        orphan.worktree_id = None;
+        assert!(plan(&[orphan], &CFG, None, &local(), 10_000).is_empty());
+        // bg / shell rows never have a worktree and are still eligible.
+        assert_eq!(
+            plan(&[row(2, "bg", Some(0), 0)], &CFG, None, &local(), 10_000).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn review_rows_are_plain_killed_never_safe_removed() {
+        let review = row(3, "review", Some(0), 0);
+        let planned = plan(&[review], &CFG, None, &local(), 10_000);
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].action, GcAction::Kill);
     }
 
     #[test]
@@ -537,8 +571,21 @@ mod tests {
         let s = store.lock().unwrap();
         s.upsert_host("local").unwrap();
         s.update_host_probe("local", true, None, None, 1).unwrap();
+        let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+        let wid = s
+            .upsert_worktree(pid, "idle", "/p/o/r/.worktrees/idle", Some("idle"))
+            .unwrap();
         let id = s
-            .upsert_session("dev-idle", "local", None, None, 1, 1, "running", None)
+            .upsert_session(
+                "dev-idle",
+                "local",
+                Some(pid),
+                Some(wid),
+                1,
+                1,
+                "running",
+                None,
+            )
             .unwrap();
         s.set_claude_session_id(id, "uuid-idle").unwrap();
         s.set_claude_status_by_session_id("uuid-idle", "idle")

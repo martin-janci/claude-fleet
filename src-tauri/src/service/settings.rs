@@ -16,9 +16,14 @@ use std::collections::BTreeMap;
 pub enum Kind {
     /// `"true"` / `"false"`.
     Bool,
-    /// Non-negative integer seconds (`0` usually means "disabled" / "never").
+    /// Integer seconds in `0..=MAX_SECS` (`0` usually means "disabled" /
+    /// "never").
     Secs,
 }
+
+/// Upper bound for `Kind::Secs` (ten years): keeps every `secs as i64`
+/// arithmetic in the sweeper far from overflow.
+pub const MAX_SECS: u64 = 10 * 365 * 24 * 3600;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Spec {
@@ -97,10 +102,10 @@ pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
             "E_INVALID",
             format!("{key} must be \"true\" or \"false\""),
         )),
-        Kind::Secs if v.parse::<u64>().is_ok() => Ok(()),
+        Kind::Secs if v.parse::<u64>().is_ok_and(|n| n <= MAX_SECS) => Ok(()),
         Kind::Secs => Err(IpcError::new(
             "E_INVALID",
-            format!("{key} must be a non-negative integer (seconds)"),
+            format!("{key} must be an integer number of seconds between 0 and {MAX_SECS}"),
         )),
     }
 }
@@ -169,6 +174,13 @@ mod tests {
             "E_INVALID"
         );
         assert!(validate(GC_BG_IDLE_SECS, " 3600 ").is_ok());
+        assert!(validate(GC_BG_IDLE_SECS, &MAX_SECS.to_string()).is_ok());
+        assert_eq!(
+            validate(GC_BG_IDLE_SECS, &(MAX_SECS + 1).to_string())
+                .unwrap_err()
+                .code,
+            "E_INVALID"
+        );
         assert!(validate(PLAYBOOK_PRESS_ENTER, "true").is_ok());
     }
 
