@@ -177,6 +177,14 @@ pub async fn mcp_configure(
             }
             Err(e) => rt.set_error(e),
         }
+        let started = rt.is_running();
+        drop(rt);
+        // Q8 / R10: a local host with no fleet hook never reports turns, so
+        // `turn_seq` never moves. Enabling the API installs it (best-effort,
+        // same idempotent merge as the Settings button, user hooks kept).
+        if started {
+            auto_install_local_hook(&store, port);
+        }
     }
 
     // 4. Return the resulting status.
@@ -517,31 +525,13 @@ pub fn install_fleet_hook(
         ));
     }
 
-    let (port, token) = {
+    let port = {
         let s = store.lock().map_err(|_| IpcError::lock())?;
-        let port = s
-            .get_setting(mcp::SETTING_PORT)?
+        s.get_setting(mcp::SETTING_PORT)?
             .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(mcp::DEFAULT_PORT);
-        let has_master = s
-            .get_setting(mcp::SETTING_TOKEN)?
-            .is_some_and(|t| !t.is_empty());
-        if !has_master {
-            return Err(IpcError::new(
-                "E_NO_TOKEN",
-                "MCP token not configured — enable the MCP server first",
-            ));
-        }
-        let token = match s.get_host_token("local")? {
-            Some(row) => row.token,
-            None => {
-                let fresh = mcp::generate_token();
-                s.upsert_host_token("local", &fresh)?;
-                fresh
-            }
-        };
-        (port, token)
+            .unwrap_or(mcp::DEFAULT_PORT)
     };
+    let token = local_hook_token(&store)?;
 
     {
         let rt = runtime.lock().map_err(|_| IpcError::lock())?;
@@ -553,19 +543,78 @@ pub fn install_fleet_hook(
         }
     }
 
-    let settings_path = dirs::home_dir()
+    let settings_path = local_settings_path()?;
+    install_hook_at(&settings_path, port, &token)?;
+
+    Ok(format!(
+        "Hook installed at {} (http hook, bearer header)\nSettings written to {}",
+        hook_url(port),
+        settings_path.display()
+    ))
+}
+
+/// The `local` host's per-host token, minted on first use. Refuses when the
+/// control API has never been enabled (no master token yet).
+fn local_hook_token(store: &Mutex<Store>) -> Result<String, IpcError> {
+    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let has_master = s
+        .get_setting(mcp::SETTING_TOKEN)?
+        .is_some_and(|t| !t.is_empty());
+    if !has_master {
+        return Err(IpcError::new(
+            "E_NO_TOKEN",
+            "MCP token not configured — enable the MCP server first",
+        ));
+    }
+    Ok(match s.get_host_token("local")? {
+        Some(row) => row.token,
+        None => {
+            let fresh = mcp::generate_token();
+            s.upsert_host_token("local", &fresh)?;
+            fresh
+        }
+    })
+}
+
+/// `~/.claude/settings.json` on this machine.
+fn local_settings_path() -> Result<std::path::PathBuf, IpcError> {
+    Ok(dirs::home_dir()
         .ok_or_else(|| IpcError::new("E_HOME", "cannot determine home directory"))?
         .join(".claude")
-        .join("settings.json");
+        .join("settings.json"))
+}
 
+/// What `install_hook_at` did to the settings file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HookInstall {
+    /// The file was created or its fleet hook entries were (re)written.
+    Written,
+    /// The file already carried exactly this hook config; nothing touched.
+    Unchanged,
+}
+
+/// Merge fleet's hooks into the settings file at `settings_path` (shared by
+/// the Settings button and the enable-time auto-install). Idempotent: when
+/// the merge changes nothing the file (and its backup) are left alone. The
+/// user's own hooks, permissions and env survive via
+/// `merge_hook_into_settings_json`; an unparseable file is refused, never
+/// replaced.
+pub(crate) fn install_hook_at(
+    settings_path: &std::path::Path,
+    port: u16,
+    token: &str,
+) -> Result<HookInstall, IpcError> {
     let existing = if settings_path.exists() {
-        std::fs::read_to_string(&settings_path)
+        std::fs::read_to_string(settings_path)
             .map_err(|e| IpcError::new("E_IO", format!("read settings.json: {e}")))?
     } else {
         String::new()
     };
 
-    let merged = merge_hook_into_settings_json(&existing, port, &token)?;
+    let merged = merge_hook_into_settings_json(&existing, port, token)?;
+    if merged == existing {
+        return Ok(HookInstall::Unchanged);
+    }
 
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent)
@@ -578,19 +627,103 @@ pub fn install_fleet_hook(
         crate::service::provision::write_private_file(&bak, &existing)
             .map_err(|e| IpcError::new("E_IO", format!("write settings.json.fleet-bak: {e}")))?;
     }
-    crate::service::provision::write_private_file(&settings_path, &merged)
+    crate::service::provision::write_private_file(settings_path, &merged)
         .map_err(|e| IpcError::new("E_IO", format!("write settings.json: {e}")))?;
+    Ok(HookInstall::Written)
+}
 
-    Ok(format!(
-        "Hook installed at {} (http hook, bearer header)\nSettings written to {}",
-        hook_url(port),
-        settings_path.display()
-    ))
+/// Enable-time auto-install of the local hook (Q8). Best-effort: a failure
+/// (malformed settings.json, unwritable home) is logged and never fails the
+/// enable itself; the Settings button still reports the error verbatim.
+/// Skipped when `~/.claude` does not exist, i.e. Claude Code was never run
+/// on this machine, so fleet does not create a config dir nobody uses.
+fn auto_install_local_hook(store: &Mutex<Store>, port: u16) {
+    let result = (|| -> Result<Option<HookInstall>, IpcError> {
+        let path = local_settings_path()?;
+        if !path.parent().is_some_and(std::path::Path::is_dir) {
+            return Ok(None);
+        }
+        let token = local_hook_token(store)?;
+        install_hook_at(&path, port, &token).map(Some)
+    })();
+    match result {
+        Ok(Some(HookInstall::Written)) => {
+            tracing::info!(
+                port,
+                "[mcp] installed the fleet hook in local ~/.claude/settings.json"
+            );
+        }
+        Ok(Some(HookInstall::Unchanged)) => {
+            tracing::debug!("[mcp] local fleet hook already current");
+        }
+        Ok(None) => {
+            tracing::info!("[mcp] no local ~/.claude dir; skipping hook auto-install");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e.message, "[mcp] local hook auto-install failed");
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn install_hook_at_creates_then_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude").join("settings.json");
+        assert_eq!(
+            install_hook_at(&path, 4180, "tok").unwrap(),
+            HookInstall::Written
+        );
+        let first = std::fs::read_to_string(&path).unwrap();
+        assert!(first.contains("http://127.0.0.1:4180/hook"));
+        // No backup for a file that did not exist.
+        assert!(!path.with_extension("json.fleet-bak").exists());
+        // Second run: nothing to change, file untouched.
+        assert_eq!(
+            install_hook_at(&path, 4180, "tok").unwrap(),
+            HookInstall::Unchanged
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+        assert!(!path.with_extension("json.fleet-bak").exists());
+    }
+
+    #[test]
+    fn install_hook_at_keeps_user_hooks_and_backs_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let user = r#"{"permissions":{"allow":["Bash(ls)"]},"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"notify-send done"}]}]}}"#;
+        std::fs::write(&path, user).unwrap();
+        assert_eq!(
+            install_hook_at(&path, 4180, "tok").unwrap(),
+            HookInstall::Written
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["permissions"]["allow"][0], "Bash(ls)");
+        let stop = v["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(
+            stop.len(),
+            2,
+            "user Stop hook kept beside fleet's: {stop:?}"
+        );
+        assert_eq!(stop[0]["hooks"][0]["command"], "notify-send done");
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("json.fleet-bak")).unwrap(),
+            user
+        );
+    }
+
+    #[test]
+    fn install_hook_at_refuses_malformed_settings_without_touching_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        assert!(install_hook_at(&path, 4180, "tok").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+    }
 
     #[test]
     fn hook_entry_is_an_http_hook_with_bearer_header_and_no_token_in_url() {

@@ -8,6 +8,8 @@
     type HostTokenInfo,
     type TokenMode,
   } from './mcp';
+  import { sessions } from './sessions';
+  import { hookHealth, hookHealthLabel } from './hook_health';
 
   let { onAddHost }: { onAddHost: () => void } = $props();
 
@@ -19,6 +21,13 @@
   let hostTokens = $state<Map<string, HostTokenInfo>>(new Map());
   let tokenBusy: string | null = $state(null);
   let tokenError: string | null = $state(null);
+
+  // Coarse clock for the hooks column's "last event Ns ago".
+  let nowSec = $state(Math.floor(Date.now() / 1000));
+  $effect(() => {
+    const t = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 15_000);
+    return () => clearInterval(t);
+  });
 
   export async function loadHostTokens() {
     const r = await listHostTokens();
@@ -105,11 +114,13 @@
         <th>Account</th>
         <th>Status</th>
         <th title="Control-API token: full = every tool, readonly = observe only">Token</th>
+        <th title="Fleet hooks: installed with the host's token; last event = newest Stop hook from a session on this host">Hooks</th>
         <th></th>
       </tr>
     </thead>
     <tbody>
       {#each $hosts as h (h.alias)}
+        {@const hh = hookHealth(h.alias, hostTokens.has(h.alias), $sessions)}
         <tr class:hidden-row={h.hidden}>
           <td class="alias">{h.alias}{#if h.ssh_alias && h.ssh_alias !== h.alias}<span class="muted"> ({h.ssh_alias})</span>{/if}</td>
           <td>{h.tmux_version ?? '—'}</td>
@@ -140,6 +151,9 @@
             {:else}
               <span class="muted" title="Provision hosts to mint one">none</span>
             {/if}
+          </td>
+          <td data-testid="hooks-cell" data-state={hh.state}>
+            <span class:muted={hh.state !== 'seen'}>{hookHealthLabel(hh, nowSec)}</span>
           </td>
           <td class="row-actions">
             <button

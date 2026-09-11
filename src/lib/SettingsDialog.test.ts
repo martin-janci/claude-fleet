@@ -10,6 +10,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import SettingsDialog from './SettingsDialog.svelte';
 import { hosts } from './hosts';
 import { accounts as accountsStore } from './accounts';
+import { sessions as sessionsStore, type SessionRow } from './sessions';
 
 const sample = [
   { alias: 'local', ssh_alias: null, reachable: true, claude_version: '2.1.145', tmux_version: '3.5a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
@@ -495,5 +496,35 @@ describe('SettingsDialog projects (W5 G3)', () => {
     expect(screen.getByTestId('projects-preview-local')).toHaveTextContent('/srv/env/<repo>');
     // remote hosts never see the env var
     expect(screen.getByTestId('projects-preview-mefistos')).toHaveTextContent('~/projects/<repo>');
+  });
+});
+
+describe('SettingsDialog hosts table: hooks column', () => {
+  function hooksCell(alias: string): HTMLElement {
+    const row = Array.from(document.querySelectorAll('.hosts-table tbody tr')).find((r) =>
+      r.querySelector('.alias')?.textContent?.startsWith(alias),
+    )!;
+    return row.querySelector('[data-testid="hooks-cell"]') as HTMLElement;
+  }
+
+  it('shows not installed / installed · never seen from the host tokens', async () => {
+    sessionsStore.set([]);
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await screen.findByTestId('hosts-table');
+    await waitFor(() => expect(hooksCell('mefistos').textContent).toContain('installed · never seen'));
+    expect(hooksCell('local').textContent).toContain('not installed');
+    expect(hooksCell('local').dataset.state).toBe('not_installed');
+  });
+
+  it('shows the age of the newest Stop hook from a host session', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    sessionsStore.set([
+      { host_alias: 'mefistos', last_stop_at: now - 30 },
+    ] as unknown as SessionRow[]);
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await screen.findByTestId('hosts-table');
+    await waitFor(() => expect(hooksCell('mefistos').dataset.state).toBe('seen'));
+    expect(hooksCell('mefistos').textContent).toMatch(/last event \d+s ago/);
+    sessionsStore.set([]);
   });
 });
