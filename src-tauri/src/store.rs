@@ -1052,25 +1052,49 @@ impl Store {
         self.get_worktree(id)
     }
 
+    /// Delete this project's worktree rows whose name is not in `keep_names`
+    /// (the fresh `git worktree list`). A doomed row may still be referenced
+    /// by a session: `sessions.worktree_id` has no ON DELETE and foreign keys
+    /// are ON, so a plain DELETE failed and aborted this and every later
+    /// refresh (main-first naming replaces the old basename-named main row
+    /// while a session still points at it). So, in one transaction, each
+    /// doomed row's references move to the surviving row of the same project
+    /// with the same canonical path (`canon` maps a stored path to its
+    /// canonical form); any left over are cleared, as `delete_worktree` does.
+    /// Emits `worktree:removed` per deleted row. Returns how many went.
     pub fn delete_worktrees_not_in(
         &self,
         project_id: i64,
         keep_names: &[String],
+        canon: impl Fn(&str) -> String,
     ) -> Result<usize, rusqlite::Error> {
-        if keep_names.is_empty() {
-            return self.conn.execute(
-                "DELETE FROM worktrees WHERE project_id=?1",
-                rusqlite::params![project_id],
-            );
+        let (keep, doomed): (Vec<WorktreeRow>, Vec<WorktreeRow>) = self
+            .list_worktrees_for_project(project_id)?
+            .into_iter()
+            .partition(|w| keep_names.contains(&w.name));
+        if doomed.is_empty() {
+            return Ok(0);
         }
-        let placeholders = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql =
-            format!("DELETE FROM worktrees WHERE project_id=?1 AND name NOT IN ({placeholders})");
-        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&project_id];
-        for n in keep_names {
-            params.push(n);
+        let tx = self.conn.unchecked_transaction()?;
+        for d in &doomed {
+            let key = canon(&d.path);
+            if let Some(survivor) = keep.iter().find(|k| canon(&k.path) == key) {
+                tx.execute(
+                    "UPDATE sessions SET worktree_id=?1 WHERE worktree_id=?2",
+                    rusqlite::params![survivor.id, d.id],
+                )?;
+            }
+            tx.execute(
+                "UPDATE sessions SET worktree_id=NULL WHERE worktree_id=?1",
+                rusqlite::params![d.id],
+            )?;
+            tx.execute("DELETE FROM worktrees WHERE id=?1", rusqlite::params![d.id])?;
         }
-        self.conn.execute(&sql, params.as_slice())
+        tx.commit()?;
+        for d in &doomed {
+            self.bus.worktree_removed(d.id);
+        }
+        Ok(doomed.len())
     }
 
     pub fn touch_project_last_session_at(
@@ -1112,6 +1136,47 @@ impl Store {
         .map_err(crate::ipc_error::IpcError::from)?;
         tx.commit().map_err(crate::ipc_error::IpcError::from)?;
         Ok(())
+    }
+
+    /// Delete a project row unless a session references it, either directly
+    /// (`project_id`) or through one of its worktree rows (`worktree_id`).
+    /// The worktree check matters: the old duplicate-scan bug left sessions
+    /// whose `project_id` is another project (or NULL) pointing at this
+    /// project's worktree rows, and `delete_project` removing those rows
+    /// would violate the foreign key. Returns whether the row went.
+    /// `refresh_projects` uses it for stale rows outside the projects root and
+    /// for duplicate rows naming a checkout another project owns.
+    pub fn delete_project_if_unused(
+        &self,
+        project_id: i64,
+    ) -> Result<bool, crate::ipc_error::IpcError> {
+        let in_use: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions
+               WHERE project_id = ?1
+                  OR worktree_id IN (SELECT id FROM worktrees WHERE project_id = ?1))",
+            rusqlite::params![project_id],
+            |r| r.get(0),
+        )?;
+        if in_use {
+            return Ok(false);
+        }
+        self.delete_project(project_id)?;
+        Ok(true)
+    }
+
+    /// Delete one worktree row unless any session row (alive, ghost or dead)
+    /// references it. Emits `worktree:removed` when the row goes. Returns
+    /// whether it went.
+    pub fn delete_worktree_if_unused(&self, id: i64) -> Result<bool, rusqlite::Error> {
+        let n = self.conn.execute(
+            "DELETE FROM worktrees WHERE id = ?1
+               AND NOT EXISTS (SELECT 1 FROM sessions WHERE worktree_id = ?1)",
+            rusqlite::params![id],
+        )?;
+        if n > 0 {
+            self.bus.worktree_removed(id);
+        }
+        Ok(n > 0)
     }
 
     pub fn conn_ref(&self) -> &rusqlite::Connection {
@@ -3449,7 +3514,11 @@ mod tests {
             .unwrap();
         assert_eq!(s.list_worktrees_for_project(pid).unwrap().len(), 3);
         let removed = s
-            .delete_worktrees_not_in(pid, &["main".to_string(), "feature-x".to_string()])
+            .delete_worktrees_not_in(
+                pid,
+                &["main".to_string(), "feature-x".to_string()],
+                |p: &str| p.to_string(),
+            )
             .unwrap();
         assert_eq!(removed, 1);
         let names: Vec<String> = s
@@ -3459,6 +3528,74 @@ mod tests {
             .map(|w| w.name)
             .collect();
         assert_eq!(names, vec!["feature-x", "main"]);
+    }
+
+    #[test]
+    fn delete_worktrees_not_in_repoints_sessions_to_the_same_checkout() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let pid = s.upsert_project("o", "r", "/tmp/r").unwrap();
+        // The old basename-named main row (logical spelling) and a worktree
+        // that no longer exists, each referenced by a session.
+        let old = s.upsert_worktree(pid, "r", "/tmp/link/r", None).unwrap();
+        let gone = s
+            .upsert_worktree(pid, "gone", "/tmp/r/.worktrees/gone", None)
+            .unwrap();
+        let on_old = s
+            .upsert_session("dev", "local", Some(pid), Some(old), 1, 1, "running", None)
+            .unwrap();
+        let on_gone = s
+            .upsert_session(
+                "dev2",
+                "local",
+                Some(pid),
+                Some(gone),
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+        let main = s
+            .upsert_worktree(pid, "main", "/tmp/r", Some("main"))
+            .unwrap();
+        // `/tmp/link/r` is another spelling of `/tmp/r`.
+        let canon = |p: &str| p.replace("/tmp/link/", "/tmp/");
+        let removed = s
+            .delete_worktrees_not_in(pid, &["main".to_string()], canon)
+            .expect("referenced rows must not fail the foreign key");
+        assert_eq!(removed, 2);
+        assert_eq!(
+            s.get_session_by_id(on_old).unwrap().unwrap().worktree_id,
+            Some(main),
+            "moved to the surviving row of the same checkout"
+        );
+        assert_eq!(
+            s.get_session_by_id(on_gone).unwrap().unwrap().worktree_id,
+            None,
+            "no survivor: the reference is cleared"
+        );
+    }
+
+    #[test]
+    fn delete_project_if_unused_counts_worktree_references_from_other_projects() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        // The duplicate-scan bug: a session of ANOTHER project points at a
+        // worktree row of `dup`.
+        let dup = s.upsert_project("o", "dup", "/tmp/dup").unwrap();
+        let w = s.upsert_worktree(dup, "main", "/tmp/dup", None).unwrap();
+        let real = s.upsert_project("o", "real", "/tmp/real").unwrap();
+        s.upsert_session("dev", "local", Some(real), Some(w), 1, 1, "running", None)
+            .unwrap();
+        assert!(
+            !s.delete_project_if_unused(dup).unwrap(),
+            "still referenced"
+        );
+        assert!(s.get_worktree_row(w).unwrap().is_some());
+        let free = s.upsert_project("o", "free", "/tmp/free").unwrap();
+        s.upsert_worktree(free, "main", "/tmp/free", None).unwrap();
+        assert!(s.delete_project_if_unused(free).unwrap());
     }
 
     #[test]

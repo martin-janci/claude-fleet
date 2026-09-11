@@ -5,8 +5,12 @@
 use crate::ipc_error::IpcError;
 use crate::mcp::hooks::HookPayload;
 use crate::mcp::Caller;
+use crate::projects::path_identity::{canonical, canonical_str, is_within};
+use crate::service::projects::LOCAL_HOST;
+use crate::service::sessions::HostPaths;
 use crate::ssh::SshClient;
 use crate::store::{ProjectRow, SessionRow, Store};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// Dispatch a hook event to the appropriate handler. `caller` is the
@@ -32,7 +36,7 @@ pub fn apply_hook(
                 Some("EnterWorktree") | Some("WorktreeCreate")
             ) =>
         {
-            apply_worktree_hook(store, payload)
+            apply_worktree_hook(store, payload, caller)
         }
         _ => Ok(()),
     }
@@ -232,14 +236,29 @@ pub fn worktree_fields(payload: &HookPayload) -> (Option<String>, Option<String>
 
 /// Auto-register a worktree Claude Code entered via its `EnterWorktree` tool.
 ///
-/// Remote hosts: the path is the HOST's path, and #45's validation requires
-/// it under a known project `base_path` (the central machine's layout), so
-/// remote worktree hooks are refused until the path-identity work lands.
+/// The path must validate ([`validate_worktree_path`]) and belong to a known
+/// project; anything else is `E_VALIDATE` (the handler answers 400) rather
+/// than a silent upsert of an arbitrary row. "Belongs" depends on whose
+/// filesystem the path is on:
 ///
-/// The path must validate ([`validate_worktree_path`]) AND sit under a known
-/// project's `base_path`; anything else is `E_VALIDATE` (the handler answers
-/// 400) rather than a silent upsert of an arbitrary row.
-fn apply_worktree_hook(store: &Arc<Mutex<Store>>, payload: &HookPayload) -> Result<(), IpcError> {
+/// - Local (the master token, or the `local` host token): the path is
+///   canonicalized (under a symlinked root Claude may report the logical
+///   spelling while the scan stores physical ones), must sit under a
+///   project's `base_path`, and the row stores the canonical path.
+/// - Remote (another host's token): the path is on THAT host, so the central
+///   machine's `base_path`s say nothing about it. It must resolve to a known
+///   project's owner/repo under that host's configured projects root and
+///   layout (`HostPaths`, the matcher reconcile links remote sessions with).
+///   A valid remote hook is accepted but writes no row: `worktrees` rows
+///   mirror the LOCAL checkout's `git worktree list` and have no host
+///   column, so a remote path would overwrite a same-named local row and be
+///   pruned by the next project refresh. A remote session's worktree comes
+///   from its cwd on reconcile (`worktree_key`).
+fn apply_worktree_hook(
+    store: &Arc<Mutex<Store>>,
+    payload: &HookPayload,
+    caller: &Caller,
+) -> Result<(), IpcError> {
     let (path, branch) = worktree_fields(payload);
     let Some(path) = path else {
         return Ok(());
@@ -249,46 +268,67 @@ fn apply_worktree_hook(store: &Arc<Mutex<Store>>, payload: &HookPayload) -> Resu
     if let Some(b) = branch {
         crate::validate::git_ref(b).map_err(|e| IpcError::new("E_VALIDATE", e.message))?;
     }
-    let name = std::path::Path::new(&path)
+
+    if let Some(host) = caller.host_alias.as_deref().filter(|h| *h != LOCAL_HOST) {
+        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let projects = s.list_projects().map_err(IpcError::from)?;
+        let paths = HostPaths::for_host(&s, host);
+        return match crate::service::sessions::find_project_id_for_path(
+            &projects,
+            host,
+            Path::new(&path),
+            &paths,
+        ) {
+            Some(_) => Ok(()),
+            None => Err(IpcError::new(
+                "E_VALIDATE",
+                format!("worktree_path {path} is not under a known project on host {host}"),
+            )),
+        };
+    }
+
+    // Local: resolve symlinks (off-lock; it is filesystem IO), then validate
+    // the physical form too, since that is what gets stored.
+    let path = canonical_str(&path);
+    validate_worktree_path(&path)?;
+    let name = Path::new(&path)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unnamed")
         .to_string();
-
-    let s = store.lock().map_err(|_| IpcError::lock())?;
-    let projects = s.list_projects().map_err(IpcError::from)?;
-    let project_id = match find_project_id_for_path(&projects, &path) {
-        Some(id) => id,
-        None => {
-            return Err(IpcError::new(
-                "E_VALIDATE",
-                format!("worktree_path {path} is not under any known project base"),
-            ));
-        }
+    let projects = {
+        let s = store.lock().map_err(|_| IpcError::lock())?;
+        s.list_projects().map_err(IpcError::from)?
     };
+    let Some(project_id) = find_project_id_for_path(&projects, &path) else {
+        return Err(IpcError::new(
+            "E_VALIDATE",
+            format!("worktree_path {path} is not under any known project base"),
+        ));
+    };
+    let s = store.lock().map_err(|_| IpcError::lock())?;
     s.upsert_worktree(project_id, &name, &path, branch)
         .map_err(IpcError::from)?;
     Ok(())
 }
 
+/// The project whose `base_path` contains the LOCAL `worktree_path` (already
+/// canonical), by whole components (`/home/u/proj` does not contain
+/// `/home/u/project/...`); the longest base wins. The raw base_paths are
+/// tried first; only when none contains the path are the bases
+/// canonicalized (rows stored before the scan canonicalized hold the logical
+/// spelling of a symlinked root), so the common case costs no syscalls.
 fn find_project_id_for_path(projects: &[ProjectRow], worktree_path: &str) -> Option<i64> {
-    projects
-        .iter()
-        .filter(|p| is_path_prefix(&p.base_path, worktree_path))
-        .max_by_key(|p| p.base_path.len())
-        .map(|p| p.id)
-}
-
-/// True iff `base` is a path-component prefix of `path`.
-/// Prevents "/home/u/proj" from matching "/home/u/project/...".
-fn is_path_prefix(base: &str, path: &str) -> bool {
-    if path == base {
-        return true;
-    }
-    match path.strip_prefix(base) {
-        Some(rest) => rest.starts_with('/'),
-        None => false,
-    }
+    let path = Path::new(worktree_path);
+    let longest = |within: &dyn Fn(&ProjectRow) -> bool| {
+        projects
+            .iter()
+            .filter(|p| within(p))
+            .max_by_key(|p| p.base_path.len())
+            .map(|p| p.id)
+    };
+    longest(&|p| is_within(path, Path::new(&p.base_path)))
+        .or_else(|| longest(&|p| is_within(path, &canonical(Path::new(&p.base_path)))))
 }
 
 #[cfg(test)]
@@ -605,8 +645,110 @@ mod tests {
         let s = store.lock().unwrap();
         let rows = s.list_worktrees_for_project(pid).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].path, "/home/u/proj/.worktrees/feat");
+        assert_eq!(rows[0].path, canonical_str("/home/u/proj/.worktrees/feat"));
         assert_eq!(rows[0].branch.as_deref(), Some("feat"));
+    }
+
+    fn host_caller(host: &str) -> Caller {
+        Caller {
+            host_alias: Some(host.into()),
+            mode: crate::mcp::TokenMode::Full,
+        }
+    }
+
+    #[test]
+    fn remote_worktree_hook_is_accepted_by_owner_repo_on_the_callers_host() {
+        use crate::service::settings;
+        let store = make_store();
+        let pid = {
+            let s = store.lock().unwrap();
+            s.upsert_host("mefistos").unwrap();
+            // The central (Mac) checkout: nothing like the remote path.
+            s.upsert_project("o", "r", "/Users/me/projects/github.com/o/r")
+                .unwrap()
+        };
+        let mef = host_caller("mefistos");
+        // Default root on the host: accepted (was always 400 before).
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &worktree_payload(
+                "/home/m/projects/github.com/o/r/.claude/worktrees/feat",
+                Some("feat"),
+            ),
+            &mef,
+        )
+        .unwrap();
+        // Accepted, but no local row is written for a remote path.
+        assert!(store
+            .lock()
+            .unwrap()
+            .list_worktrees_for_project(pid)
+            .unwrap()
+            .is_empty());
+        // An unknown repo on that host is still refused.
+        let err = apply_hook(
+            &store,
+            &make_ssh(),
+            &worktree_payload("/home/m/projects/github.com/o/other/.worktrees/f", None),
+            &mef,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "E_VALIDATE");
+        // The host's own configured root + layout are honoured.
+        {
+            let s = store.lock().unwrap();
+            settings::set(&s, settings::PROJECTS_BASE_PATH, r#"{"mefistos":"~/code"}"#).unwrap();
+            settings::set(&s, settings::PROJECTS_LAYOUT, "flat").unwrap();
+        }
+        let custom = worktree_payload("/home/m/code/r/.worktrees/f", None);
+        apply_hook(&store, &make_ssh(), &custom, &mef).unwrap();
+        // The same path under the master token is judged against the LOCAL
+        // bases, where it belongs to nothing.
+        let err = apply_hook(&store, &make_ssh(), &custom, &Caller::master()).unwrap_err();
+        assert_eq!(err.code, "E_VALIDATE");
+        // A path that fails validation is refused before any matching.
+        let err = apply_hook(
+            &store,
+            &make_ssh(),
+            &worktree_payload("/home/m/code/r/../../etc", None),
+            &mef,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "E_VALIDATE");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_worktree_hook_stores_the_canonical_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let real = tmp.path().join("mnt").join("o").join("r");
+        std::fs::create_dir_all(real.join(".worktrees").join("feat")).unwrap();
+        let link = tmp.path().join("projects");
+        std::os::unix::fs::symlink(tmp.path().join("mnt"), &link).unwrap();
+        let base = canonical(&real);
+        let store = make_store();
+        let pid = store
+            .lock()
+            .unwrap()
+            .upsert_project("o", "r", &base.to_string_lossy())
+            .unwrap();
+        // Claude reports the logical spelling through the symlink.
+        let logical = link.join("o").join("r").join(".worktrees").join("feat");
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &worktree_payload(&logical.to_string_lossy(), Some("feat")),
+            &host_caller("local"),
+        )
+        .unwrap();
+        let s = store.lock().unwrap();
+        let rows = s.list_worktrees_for_project(pid).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].path,
+            base.join(".worktrees").join("feat").to_string_lossy()
+        );
     }
 
     #[test]
