@@ -3,12 +3,12 @@
 //! `gc.sweep_interval_secs`; opt-in via `gc.enabled` (default off).
 //!
 //! Idle reference per kind (see migration 018 `idle_since`):
-//!   - `bg`            `idle_since` (claude_status ∈ idle/completed/stopped),
-//!                     falling back to tmux/agent `last_activity_at` when the
-//!                     agent never reported a status
-//!   - `shell`         `last_activity_at` (tmux session_activity)
-//!   - `work`/`review` `idle_since` only — a session Claude is still driving
-//!                     is never touched
+//! - `bg`: `idle_since` (claude_status ∈ idle/completed/stopped), falling
+//!   back to tmux/agent `last_activity_at` when the agent never reported a
+//!   status
+//! - `shell`: `last_activity_at` (tmux session_activity)
+//! - `work`/`review`: `idle_since` only — a session Claude is still driving
+//!   is never touched
 //!
 //! A work session past its TTL whose worktree is dirty (or whose inspection
 //! failed) goes through the existing safe-remove flow (Claude is asked to
@@ -142,7 +142,11 @@ pub fn plan(
 /// Side effects the sweeper performs, injected for tests.
 #[async_trait::async_trait]
 pub trait GcExec: Send + Sync {
-    async fn inspect(&self, host_alias: &str, tmux_name: &str) -> Result<SafeKillInspection, IpcError>;
+    async fn inspect(
+        &self,
+        host_alias: &str,
+        tmux_name: &str,
+    ) -> Result<SafeKillInspection, IpcError>;
     async fn safe_kill(&self, host_alias: &str, tmux_name: &str) -> Result<(), IpcError>;
     async fn kill(&self, host_alias: &str, tmux_name: &str) -> Result<(), IpcError>;
 }
@@ -155,7 +159,11 @@ pub struct RealGcExec {
 
 #[async_trait::async_trait]
 impl GcExec for RealGcExec {
-    async fn inspect(&self, host_alias: &str, tmux_name: &str) -> Result<SafeKillInspection, IpcError> {
+    async fn inspect(
+        &self,
+        host_alias: &str,
+        tmux_name: &str,
+    ) -> Result<SafeKillInspection, IpcError> {
         crate::service::safe_kill::inspect_safe_kill(
             crate::service::safe_kill::InspectSafeKillArgs {
                 host_alias: host_alias.to_string(),
@@ -213,7 +221,12 @@ pub struct GcReport {
 /// Run one sweep against `exec`. Reads rows/hosts/controller under one brief
 /// lock, then acts off-lock. The `gc_killed` timeline entry is written before
 /// each action (a plain kill reaps the row, and its events, moments later).
-pub async fn sweep_with(store: &Mutex<Store>, exec: &dyn GcExec, cfg: &GcConfig, now: i64) -> GcReport {
+pub async fn sweep_with(
+    store: &Mutex<Store>,
+    exec: &dyn GcExec,
+    cfg: &GcConfig,
+    now: i64,
+) -> GcReport {
     let mut report = GcReport::default();
     if !cfg.enabled {
         return report;
@@ -239,7 +252,10 @@ pub async fn sweep_with(store: &Mutex<Store>, exec: &dyn GcExec, cfg: &GcConfig,
             GcAction::InspectThenKill => match exec.inspect(&p.host_alias, &p.tmux_name).await {
                 Ok(insp) => needs_safe_remove(&insp),
                 Err(e) => {
-                    eprintln!("[gc] inspect {}/{} failed ({e}); using safe-remove", p.host_alias, p.tmux_name);
+                    eprintln!(
+                        "[gc] inspect {}/{} failed ({e}); using safe-remove",
+                        p.host_alias, p.tmux_name
+                    );
                     true
                 }
             },
@@ -265,7 +281,10 @@ pub async fn sweep_with(store: &Mutex<Store>, exec: &dyn GcExec, cfg: &GcConfig,
             Ok(()) => report.killed += 1,
             Err(e) => {
                 report.failed += 1;
-                eprintln!("[gc] {} of {}/{} failed: {e}", detail, p.host_alias, p.tmux_name);
+                eprintln!(
+                    "[gc] {} of {}/{} failed: {e}",
+                    detail, p.host_alias, p.tmux_name
+                );
                 if let Ok(s) = store.lock() {
                     let _ = s.insert_session_event(p.session_id, "gc_failed", Some(&e.message));
                 }
@@ -375,7 +394,10 @@ mod tests {
 
     #[test]
     fn disabled_config_plans_nothing() {
-        let cfg = GcConfig { enabled: false, ..CFG };
+        let cfg = GcConfig {
+            enabled: false,
+            ..CFG
+        };
         let rows = vec![row(1, "bg", Some(0), 0)];
         assert!(plan(&rows, &cfg, None, &local(), 10_000).is_empty());
     }
@@ -383,12 +405,12 @@ mod tests {
     #[test]
     fn ttl_applies_per_kind_and_zero_means_never() {
         let rows = vec![
-            row(1, "bg", Some(0), 0),      // idle 500 ≥ 100 ⇒ kill
-            row(2, "bg", Some(450), 450),  // idle 50 < 100 ⇒ keep
-            row(3, "shell", None, 0),      // last activity 500 < 1000 ⇒ keep
-            row(4, "shell", None, -600),   // 1100 ≥ 1000 ⇒ kill
-            row(5, "work", Some(400), 0),  // idle 100 ≥ 50 ⇒ inspect
-            row(6, "work", None, 0),       // no idle stamp ⇒ never
+            row(1, "bg", Some(0), 0),     // idle 500 ≥ 100 ⇒ kill
+            row(2, "bg", Some(450), 450), // idle 50 < 100 ⇒ keep
+            row(3, "shell", None, 0),     // last activity 500 < 1000 ⇒ keep
+            row(4, "shell", None, -600),  // 1100 ≥ 1000 ⇒ kill
+            row(5, "work", Some(400), 0), // idle 100 ≥ 50 ⇒ inspect
+            row(6, "work", None, 0),      // no idle stamp ⇒ never
         ];
         let planned = plan(&rows, &CFG, None, &local(), 500);
         let got: Vec<_> = planned.iter().map(|p| (p.session_id, p.action)).collect();
@@ -400,8 +422,18 @@ mod tests {
                 (5, GcAction::InspectThenKill)
             ]
         );
-        let never = GcConfig { work_idle_secs: 0, ..CFG };
-        assert!(plan(&[row(7, "work", Some(0), 0)], &never, None, &local(), 10_000).is_empty());
+        let never = GcConfig {
+            work_idle_secs: 0,
+            ..CFG
+        };
+        assert!(plan(
+            &[row(7, "work", Some(0), 0)],
+            &never,
+            None,
+            &local(),
+            10_000
+        )
+        .is_empty());
     }
 
     #[test]
@@ -509,7 +541,8 @@ mod tests {
             .upsert_session("dev-idle", "local", None, None, 1, 1, "running", None)
             .unwrap();
         s.set_claude_session_id(id, "uuid-idle").unwrap();
-        s.set_claude_status_by_session_id("uuid-idle", "idle").unwrap();
+        s.set_claude_status_by_session_id("uuid-idle", "idle")
+            .unwrap();
         s.conn_ref()
             .execute(
                 "UPDATE sessions SET idle_since=?1 WHERE id=?2",
@@ -525,7 +558,14 @@ mod tests {
         let id = seed_idle_work(&store, 0);
         let exec = fake(false);
         let report = sweep_with(&store, &exec, &CFG, 10_000).await;
-        assert_eq!(report, GcReport { killed: 1, safe_kill_requested: 0, failed: 0 });
+        assert_eq!(
+            report,
+            GcReport {
+                killed: 1,
+                safe_kill_requested: 0,
+                failed: 0
+            }
+        );
         assert_eq!(exec.inspects.load(Ordering::SeqCst), 1);
         let s = store.lock().unwrap();
         let events = s.list_session_events(id, 10).unwrap();
@@ -540,13 +580,21 @@ mod tests {
         let id = seed_idle_work(&store, 0);
         let exec = fake(true);
         let report = sweep_with(&store, &exec, &CFG, 10_000).await;
-        assert_eq!(report, GcReport { killed: 0, safe_kill_requested: 1, failed: 0 });
+        assert_eq!(
+            report,
+            GcReport {
+                killed: 0,
+                safe_kill_requested: 1,
+                failed: 0
+            }
+        );
         assert_eq!(exec.kills.load(Ordering::SeqCst), 0);
         let s = store.lock().unwrap();
         let events = s.list_session_events(id, 10).unwrap();
         assert!(events
             .iter()
-            .any(|e| e.kind == "gc_killed" && e.detail.as_deref() == Some("work:safe_kill:idle_10000s")));
+            .any(|e| e.kind == "gc_killed"
+                && e.detail.as_deref() == Some("work:safe_kill:idle_10000s")));
     }
 
     #[tokio::test]
@@ -554,9 +602,18 @@ mod tests {
         let store = Mutex::new(Store::open_in_memory().unwrap());
         seed_idle_work(&store, 9_990);
         let exec = fake(false);
-        assert_eq!(sweep_with(&store, &exec, &CFG, 10_000).await, GcReport::default());
-        let off = GcConfig { enabled: false, ..CFG };
-        assert_eq!(sweep_with(&store, &exec, &off, 1_000_000).await, GcReport::default());
+        assert_eq!(
+            sweep_with(&store, &exec, &CFG, 10_000).await,
+            GcReport::default()
+        );
+        let off = GcConfig {
+            enabled: false,
+            ..CFG
+        };
+        assert_eq!(
+            sweep_with(&store, &exec, &off, 1_000_000).await,
+            GcReport::default()
+        );
         assert_eq!(exec.inspects.load(Ordering::SeqCst), 0);
     }
 }

@@ -602,11 +602,7 @@ async fn probe_pr_info(
         .filter(|s| worktree_key_for_path(&s.path.to_string_lossy()).is_some())
         .map(|s| (s.name.clone(), s.path.to_string_lossy().into_owned()))
         .collect();
-    let due: Vec<(String, String)> = cache
-        .due(host, &candidates)
-        .into_iter()
-        .cloned()
-        .collect();
+    let due: Vec<(String, String)> = cache.due(host, &candidates).into_iter().cloned().collect();
     if due.is_empty() {
         return PrInfoMap::new();
     }
@@ -1433,7 +1429,10 @@ async fn new_session_inner(
 
     // PROD-5: the fleet created this session now. Soft-fail (cosmetic).
     if let Err(e) = s.set_started_at(row.id, now_unix()) {
-        eprintln!("new_session: storing started_at for {} failed: {e:?}", args.name);
+        eprintln!(
+            "new_session: storing started_at for {} failed: {e:?}",
+            args.name
+        );
     }
 
     // Deterministic friendly name: trust an explicit user value, otherwise
@@ -1947,7 +1946,9 @@ fn record_prompt_outcome(store: &Mutex<Store>, host_alias: &str, tmux_name: &str
     if row.friendly_name.is_none() {
         if let Some(name) = friendly_name_from_prompt(prompt) {
             if let Err(e) = s.set_friendly_name(host_alias, tmux_name, Some(&name)) {
-                eprintln!("[prompt] default friendly_name failed for {host_alias}/{tmux_name}: {e}");
+                eprintln!(
+                    "[prompt] default friendly_name failed for {host_alias}/{tmux_name}: {e}"
+                );
             }
         }
     }
@@ -4205,19 +4206,27 @@ mod tests {
         let r = resolve_session_target(&s, None, Some("mefistos"), Some("dev-a")).unwrap();
         assert_eq!(r.host_alias, "mefistos");
         assert_eq!(
-            resolve_session_target(&s, None, Some("local"), None).unwrap_err().code,
+            resolve_session_target(&s, None, Some("local"), None)
+                .unwrap_err()
+                .code,
             "E_INVALID"
         );
         assert_eq!(
-            resolve_session_target(&s, None, None, Some("dev-a")).unwrap_err().code,
+            resolve_session_target(&s, None, None, Some("dev-a"))
+                .unwrap_err()
+                .code,
             "E_INVALID"
         );
         assert_eq!(
-            resolve_session_target(&s, Some(9999), None, None).unwrap_err().code,
+            resolve_session_target(&s, Some(9999), None, None)
+                .unwrap_err()
+                .code,
             "E_NOTFOUND"
         );
         assert_eq!(
-            resolve_session_target(&s, None, Some("local"), Some("nope")).unwrap_err().code,
+            resolve_session_target(&s, None, Some("local"), Some("nope"))
+                .unwrap_err()
+                .code,
             "E_NOTFOUND"
         );
         assert_eq!(
@@ -4232,8 +4241,18 @@ mod tests {
     fn find_session_by_tmux_name_returns_the_single_match_or_lists_candidates() {
         let store = seeded_store();
         let s = store.lock().unwrap();
-        assert_eq!(find_session_by_tmux_name(&s, "dev-only").unwrap().host_alias, "local");
-        assert_eq!(find_session_by_tmux_name(&s, "ghost-name").unwrap_err().code, "E_NOTFOUND");
+        assert_eq!(
+            find_session_by_tmux_name(&s, "dev-only")
+                .unwrap()
+                .host_alias,
+            "local"
+        );
+        assert_eq!(
+            find_session_by_tmux_name(&s, "ghost-name")
+                .unwrap_err()
+                .code,
+            "E_NOTFOUND"
+        );
         let err = find_session_by_tmux_name(&s, "dev-a").unwrap_err();
         assert_eq!(err.code, "E_AMBIGUOUS");
         let cands = err.details.unwrap()["candidates"].as_array().unwrap().len();
@@ -4271,8 +4290,7 @@ mod tests {
     #[async_trait::async_trait]
     impl HostShell for CannedShell {
         async fn run_script(&self, _host: &str, script: &str) -> Result<String, IpcError> {
-            self.calls
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             assert!(script.contains("gh pr view"), "probe script runs gh");
             Ok(self.stdout.clone())
         }

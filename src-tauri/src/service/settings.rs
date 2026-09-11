@@ -88,7 +88,8 @@ pub fn spec(key: &str) -> Option<&'static Spec> {
 /// Validate a `(key, value)` pair against the registry. `E_INVALID` on an
 /// unknown key or a value of the wrong shape.
 pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
-    let spec = spec(key).ok_or_else(|| IpcError::new("E_INVALID", format!("unknown setting {key}")))?;
+    let spec =
+        spec(key).ok_or_else(|| IpcError::new("E_INVALID", format!("unknown setting {key}")))?;
     let v = value.trim();
     match spec.kind {
         Kind::Bool if v == "true" || v == "false" => Ok(()),
@@ -159,8 +160,14 @@ mod tests {
     fn validate_rejects_unknown_keys_and_bad_shapes() {
         assert_eq!(validate("mcp.token", "x").unwrap_err().code, "E_INVALID");
         assert_eq!(validate(GC_ENABLED, "yes").unwrap_err().code, "E_INVALID");
-        assert_eq!(validate(GC_BG_IDLE_SECS, "-1").unwrap_err().code, "E_INVALID");
-        assert_eq!(validate(GC_BG_IDLE_SECS, "1.5").unwrap_err().code, "E_INVALID");
+        assert_eq!(
+            validate(GC_BG_IDLE_SECS, "-1").unwrap_err().code,
+            "E_INVALID"
+        );
+        assert_eq!(
+            validate(GC_BG_IDLE_SECS, "1.5").unwrap_err().code,
+            "E_INVALID"
+        );
         assert!(validate(GC_BG_IDLE_SECS, " 3600 ").is_ok());
         assert!(validate(PLAYBOOK_PRESS_ENTER, "true").is_ok());
     }

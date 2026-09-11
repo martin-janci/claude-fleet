@@ -201,7 +201,12 @@ pub async fn run_with(
         };
         let detail = match &result {
             Ok(()) => format!("{}:{}", p.stuck_kind, p.action.as_str()),
-            Err(e) => format!("{}:{}:failed:{}", p.stuck_kind, p.action.as_str(), e.message),
+            Err(e) => format!(
+                "{}:{}:failed:{}",
+                p.stuck_kind,
+                p.action.as_str(),
+                e.message
+            ),
         };
         if let Err(e) = &result {
             eprintln!(
@@ -248,7 +253,13 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn row(id: i64, name: &str, kind: Option<&str>, since: Option<i64>, last: Option<i64>) -> SessionRow {
+    fn row(
+        id: i64,
+        name: &str,
+        kind: Option<&str>,
+        since: Option<i64>,
+        last: Option<i64>,
+    ) -> SessionRow {
         SessionRow {
             id,
             tmux_name: name.into(),
@@ -326,7 +337,10 @@ mod tests {
             // A NEW episode (stuck_since moved past the last playbook) runs again.
             row(3, "c", Some("press_enter"), Some(300), Some(150)),
         ];
-        let ids: Vec<_> = plan(&rows, &ALL_ON, None, 400).iter().map(|p| p.session_id).collect();
+        let ids: Vec<_> = plan(&rows, &ALL_ON, None, 400)
+            .iter()
+            .map(|p| p.session_id)
+            .collect();
         assert_eq!(ids, vec![3]);
     }
 
@@ -480,7 +494,10 @@ mod tests {
             .find(|e| e.kind == "playbook_applied")
             .and_then(|e| e.detail.clone())
             .unwrap();
-        assert!(detail.starts_with("press_enter:press_enter:failed:"), "{detail}");
+        assert!(
+            detail.starts_with("press_enter:press_enter:failed:"),
+            "{detail}"
+        );
     }
 
     #[tokio::test]
@@ -492,13 +509,16 @@ mod tests {
             recreates: AtomicUsize::new(0),
             fail: false,
         };
-        assert_eq!(run_with(&store, &exec, &PlaybookConfig::default(), now_unix() + 5).await, 1);
+        assert_eq!(
+            run_with(&store, &exec, &PlaybookConfig::default(), now_unix() + 5).await,
+            1
+        );
         assert_eq!(exec.enters.load(Ordering::SeqCst), 0);
         assert_eq!(exec.recreates.load(Ordering::SeqCst), 0);
         let s = store.lock().unwrap();
         let events = s.list_session_events(id, 10).unwrap();
-        assert!(events
-            .iter()
-            .any(|e| e.kind == "playbook_applied" && e.detail.as_deref() == Some("auth_menu:notify")));
+        assert!(events.iter().any(
+            |e| e.kind == "playbook_applied" && e.detail.as_deref() == Some("auth_menu:notify")
+        ));
     }
 }

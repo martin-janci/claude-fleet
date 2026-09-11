@@ -137,7 +137,11 @@ pub fn reduce_ci_status(checks: &[serde_json::Value]) -> Option<String> {
             .and_then(|v| v.as_str())
             .map(|s| s.to_ascii_uppercase());
         match (conclusion.as_deref(), status.as_deref(), state.as_deref()) {
-            (Some("FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE"), _, _)
+            (
+                Some("FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE"),
+                _,
+                _,
+            )
             | (_, _, Some("FAILURE" | "ERROR")) => return Some("failing".into()),
             (_, Some("QUEUED" | "IN_PROGRESS" | "PENDING" | "WAITING" | "REQUESTED"), _)
             | (_, _, Some("PENDING" | "EXPECTED")) => pending = true,
@@ -173,7 +177,11 @@ impl PrProbeCache {
 
     /// The sessions on `host` (from `candidates`) whose last probe is older
     /// than the TTL. Empty when the host is memoised as having no `gh`.
-    pub fn due<'a>(&self, host: &str, candidates: &'a [(String, String)]) -> Vec<&'a (String, String)> {
+    pub fn due<'a>(
+        &self,
+        host: &str,
+        candidates: &'a [(String, String)],
+    ) -> Vec<&'a (String, String)> {
         let inner = match self.inner.lock() {
             Ok(g) => g,
             Err(_) => return Vec::new(),
@@ -253,7 +261,10 @@ mod tests {
 
     #[test]
     fn parse_detects_missing_gh() {
-        assert_eq!(parse_pr_probe_output("__FLEET_NO_GH__\n"), ProbeOutput::NoGh);
+        assert_eq!(
+            parse_pr_probe_output("__FLEET_NO_GH__\n"),
+            ProbeOutput::NoGh
+        );
     }
 
     #[test]
@@ -279,12 +290,18 @@ mod tests {
         let ProbeOutput::Results(map) = parse_pr_probe_output(stdout) else {
             panic!("expected results");
         };
-        assert_eq!(map.get("dev-a").unwrap().pr_url.as_deref(), Some("https://x/pull/1"));
+        assert_eq!(
+            map.get("dev-a").unwrap().pr_url.as_deref(),
+            Some("https://x/pull/1")
+        );
     }
 
     #[test]
     fn pr_info_rejects_non_https_url_and_bad_json() {
-        assert_eq!(pr_info_from_json("{\"url\":\"javascript:alert(1)\"}"), PrInfo::default());
+        assert_eq!(
+            pr_info_from_json("{\"url\":\"javascript:alert(1)\"}"),
+            PrInfo::default()
+        );
         assert_eq!(pr_info_from_json("not json"), PrInfo::default());
     }
 
@@ -342,10 +359,17 @@ mod tests {
     #[test]
     fn cache_throttles_per_session_and_memoises_missing_gh() {
         let cache = PrProbeCache::new(Duration::from_secs(60));
-        let cands = vec![("a".to_string(), "/a".to_string()), ("b".to_string(), "/b".to_string())];
+        let cands = vec![
+            ("a".to_string(), "/a".to_string()),
+            ("b".to_string(), "/b".to_string()),
+        ];
         assert_eq!(cache.due("h", &cands).len(), 2);
         cache.mark_probed("h", ["a"]);
-        let due: Vec<_> = cache.due("h", &cands).iter().map(|(n, _)| n.as_str()).collect();
+        let due: Vec<_> = cache
+            .due("h", &cands)
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
         assert_eq!(due, vec!["b"]);
         // A different host is independent.
         assert_eq!(cache.due("other", &cands).len(), 2);

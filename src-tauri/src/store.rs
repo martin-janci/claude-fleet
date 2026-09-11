@@ -1498,22 +1498,17 @@ impl Store {
             &format!(
              "SELECT {SESSION_COLUMNS} FROM sessions WHERE host_alias=?1 ORDER BY last_activity_at DESC"),
         )?;
-        let rows = stmt.query_map(rusqlite::params![host_alias], |row| {
-            map_session_row(row)
-        })?;
+        let rows = stmt.query_map(rusqlite::params![host_alias], map_session_row)?;
         rows.collect()
     }
 
     /// All sessions across every host, in one query. Used by `reconcile_sessions`
     /// to collect its return value once at the end instead of N per-host reads.
     pub fn list_all_sessions(&self) -> Result<Vec<SessionRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare_cached(
-            &format!(
-             "SELECT {SESSION_COLUMNS} FROM sessions ORDER BY last_activity_at DESC"),
-        )?;
-        let rows = stmt.query_map([], |row| {
-            map_session_row(row)
-        })?;
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions ORDER BY last_activity_at DESC"
+        ))?;
+        let rows = stmt.query_map([], map_session_row)?;
         rows.collect()
     }
 
@@ -1536,12 +1531,11 @@ impl Store {
         let Some(key) = key else {
             return Ok(Vec::new());
         };
-        let mut stmt = self.conn.prepare_cached(
-            &format!(
-             "SELECT {SESSION_COLUMNS} FROM sessions
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions
              WHERE project_id=?1 AND worktree_key=?2 AND id<>?3
-             ORDER BY host_alias ASC, tmux_name ASC"),
-        )?;
+             ORDER BY host_alias ASC, tmux_name ASC"
+        ))?;
         let rows = stmt.query_map(rusqlite::params![project_id, key, session_id], |row| {
             map_session_row(row)
         })?;
@@ -2384,10 +2378,9 @@ impl Store {
     ) -> Result<SessionRow, crate::ipc_error::IpcError> {
         let mut stmt = self
             .conn
-            .prepare(
-                &format!(
-                 "SELECT {SESSION_COLUMNS} FROM sessions WHERE claude_session_id = ?1"),
-            )
+            .prepare(&format!(
+                "SELECT {SESSION_COLUMNS} FROM sessions WHERE claude_session_id = ?1"
+            ))
             .map_err(crate::ipc_error::IpcError::from)?;
         stmt.query_row(rusqlite::params![claude_session_id], |row| {
             map_session_row(row)
@@ -2429,10 +2422,9 @@ fn fetch_session(
     tmux_name: &str,
     host_alias: &str,
 ) -> Result<Option<SessionRow>, rusqlite::Error> {
-    let mut stmt = conn.prepare_cached(
-        &format!(
-         "SELECT {SESSION_COLUMNS} FROM sessions WHERE tmux_name=?1 AND host_alias=?2"),
-    )?;
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {SESSION_COLUMNS} FROM sessions WHERE tmux_name=?1 AND host_alias=?2"
+    ))?;
     let mut rows = stmt.query_map(rusqlite::params![tmux_name, host_alias], |row| {
         map_session_row(row)
     })?;
@@ -2454,13 +2446,10 @@ fn ghost_cutoff(probe_started_at: i64) -> i64 {
 }
 
 fn fetch_session_by_id(conn: &Connection, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
-    let mut stmt = conn.prepare_cached(
-        &format!(
-         "SELECT {SESSION_COLUMNS} FROM sessions WHERE id=?1"),
-    )?;
-    let mut rows = stmt.query_map(rusqlite::params![id], |row| {
-        map_session_row(row)
-    })?;
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {SESSION_COLUMNS} FROM sessions WHERE id=?1"
+    ))?;
+    let mut rows = stmt.query_map(rusqlite::params![id], map_session_row)?;
     match rows.next() {
         Some(r) => Ok(Some(r?)),
         None => Ok(None),
@@ -4674,7 +4663,8 @@ mod tests {
         let row = s.get_session_by_id(id).unwrap().unwrap();
         assert!(row.last_turn_at.is_some());
         let idle = row.idle_since.expect("idle stamped by the hook");
-        s.set_claude_status_by_session_id("uuid-1", "working").unwrap();
+        s.set_claude_status_by_session_id("uuid-1", "working")
+            .unwrap();
         let row = s.get_session_by_id(id).unwrap().unwrap();
         assert_eq!(row.idle_since, None);
         s.set_claude_status_by_session_id("uuid-1", "idle").unwrap();
@@ -4688,7 +4678,10 @@ mod tests {
         s.upsert_host("local").unwrap();
         s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 1)
             .unwrap();
-        assert_eq!(s.get_session("bg:u1", "local").unwrap().unwrap().idle_since, None);
+        assert_eq!(
+            s.get_session("bg:u1", "local").unwrap().unwrap().idle_since,
+            None
+        );
         s.upsert_bg_session("local", "bg:u1", None, "u1", Some("completed"), 2)
             .unwrap();
         let stamp = s
@@ -4699,10 +4692,16 @@ mod tests {
             .expect("stamped");
         s.upsert_bg_session("local", "bg:u1", None, "u1", Some("completed"), 3)
             .unwrap();
-        assert_eq!(s.get_session("bg:u1", "local").unwrap().unwrap().idle_since, Some(stamp));
+        assert_eq!(
+            s.get_session("bg:u1", "local").unwrap().unwrap().idle_since,
+            Some(stamp)
+        );
         s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 4)
             .unwrap();
-        assert_eq!(s.get_session("bg:u1", "local").unwrap().unwrap().idle_since, None);
+        assert_eq!(
+            s.get_session("bg:u1", "local").unwrap().unwrap().idle_since,
+            None
+        );
     }
 
     #[test]
@@ -4714,14 +4713,23 @@ mod tests {
             .unwrap();
         let long: String = "x".repeat(LAST_PROMPT_CHARS + 50);
         let row = s.set_last_prompt(id, &long).unwrap().unwrap();
-        assert_eq!(row.last_prompt.as_deref().map(|p| p.chars().count()), Some(LAST_PROMPT_CHARS));
+        assert_eq!(
+            row.last_prompt.as_deref().map(|p| p.chars().count()),
+            Some(LAST_PROMPT_CHARS)
+        );
 
         s.set_started_at(id, 100).unwrap();
         s.set_started_at(id, 200).unwrap();
-        assert_eq!(s.get_session_by_id(id).unwrap().unwrap().started_at, Some(100));
+        assert_eq!(
+            s.get_session_by_id(id).unwrap().unwrap().started_at,
+            Some(100)
+        );
 
         let _ = bus.take();
-        let row = s.mark_playbook_applied(id, 555, "oom:recreate").unwrap().unwrap();
+        let row = s
+            .mark_playbook_applied(id, 555, "oom:recreate")
+            .unwrap()
+            .unwrap();
         assert_eq!(row.last_playbook_at, Some(555));
         assert_eq!(bus.take(), vec![format!("session:updated:{id}")]);
         let events = s.list_session_events(id, 10).unwrap();

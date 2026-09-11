@@ -714,7 +714,9 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(vi.mocked(buildRelatedCountById).mock.calls.length).toBeLessThanOrEqual(2);
     expect(buildSessionsByProject).toHaveBeenCalled();
     expect(buildRelatedCountById).toHaveBeenCalled();
-  });
+    // Rendering 500 rows in jsdom is load-sensitive (6 s+ on a busy box); the
+    // regression signal is the call count above, so give the render room.
+  }, 20_000);
 });
 
 describe('Sidebar triage (W2 Track D)', () => {

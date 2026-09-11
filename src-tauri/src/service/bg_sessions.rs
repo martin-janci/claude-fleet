@@ -150,7 +150,11 @@ pub async fn new_bg_session_tracked(
 /// Find the bg row for `claude_id` and record the launch prompt on it.
 /// Returns the refreshed row, or `None` when reconcile has not surfaced the
 /// agent yet.
-fn stamp_bg_row(store: &Mutex<Store>, claude_id: &str, prompt: &str) -> Option<crate::store::SessionRow> {
+fn stamp_bg_row(
+    store: &Mutex<Store>,
+    claude_id: &str,
+    prompt: &str,
+) -> Option<crate::store::SessionRow> {
     let s = store.lock().ok()?;
     let row = s.get_session_by_claude_id(claude_id).ok().flatten()?;
     let now = std::time::SystemTime::now()
@@ -164,7 +168,11 @@ fn stamp_bg_row(store: &Mutex<Store>, claude_id: &str, prompt: &str) -> Option<c
             let _ = s.set_friendly_name(&row.host_alias, &row.tmux_name, Some(&name));
         }
     }
-    let _ = s.insert_session_event(row.id, "prompt_sent", Some(&prompt.chars().take(120).collect::<String>()));
+    let _ = s.insert_session_event(
+        row.id,
+        "prompt_sent",
+        Some(&prompt.chars().take(120).collect::<String>()),
+    );
     s.get_session_by_id(row.id).ok().flatten()
 }
 
@@ -276,8 +284,14 @@ mod tests {
                 .unwrap();
         }
         let row = stamp_bg_row(&store, "u1", "Review the auth PR, carefully!").expect("row");
-        assert_eq!(row.friendly_name.as_deref(), Some("review the auth pr carefully"));
-        assert_eq!(row.last_prompt.as_deref(), Some("Review the auth PR, carefully!"));
+        assert_eq!(
+            row.friendly_name.as_deref(),
+            Some("review the auth pr carefully")
+        );
+        assert_eq!(
+            row.last_prompt.as_deref(),
+            Some("Review the auth PR, carefully!")
+        );
         assert!(row.started_at.is_some());
         // Unknown id ⇒ None, no panic.
         assert!(stamp_bg_row(&store, "nope", "x").is_none());
@@ -290,7 +304,14 @@ mod tests {
             let s = store.lock().unwrap();
             s.upsert_host("local").unwrap();
             let bg = s
-                .upsert_bg_session("local", &format!("bg:{UUID}"), None, UUID, Some("working"), 5)
+                .upsert_bg_session(
+                    "local",
+                    &format!("bg:{UUID}"),
+                    None,
+                    UUID,
+                    Some("working"),
+                    5,
+                )
                 .unwrap();
             let plain = s
                 .upsert_session("dev-plain", "local", None, None, 1, 1, "running", None)
@@ -303,11 +324,15 @@ mod tests {
             ("local".to_string(), UUID.to_string())
         );
         assert_eq!(
-            resolve_peek_target(&s, Some(untracked_id), None, None).unwrap_err().code,
+            resolve_peek_target(&s, Some(untracked_id), None, None)
+                .unwrap_err()
+                .code,
             "E_INVALID_STATE"
         );
         assert_eq!(
-            resolve_peek_target(&s, Some(999), None, None).unwrap_err().code,
+            resolve_peek_target(&s, Some(999), None, None)
+                .unwrap_err()
+                .code,
             "E_NOTFOUND"
         );
         // Claude id alone resolves through the tracked row …
@@ -318,7 +343,9 @@ mod tests {
         // … an untracked id needs its host …
         let other = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
         assert_eq!(
-            resolve_peek_target(&s, None, None, Some(other)).unwrap_err().code,
+            resolve_peek_target(&s, None, None, Some(other))
+                .unwrap_err()
+                .code,
             "E_INVALID"
         );
         assert_eq!(
@@ -327,10 +354,15 @@ mod tests {
         );
         // … and garbage is rejected before any lookup.
         assert_eq!(
-            resolve_peek_target(&s, None, Some("local"), Some("--foo")).unwrap_err().code,
+            resolve_peek_target(&s, None, Some("local"), Some("--foo"))
+                .unwrap_err()
+                .code,
             "E_INVALID"
         );
-        assert_eq!(resolve_peek_target(&s, None, None, None).unwrap_err().code, "E_INVALID");
+        assert_eq!(
+            resolve_peek_target(&s, None, None, None).unwrap_err().code,
+            "E_INVALID"
+        );
     }
 
     #[test]
