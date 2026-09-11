@@ -662,6 +662,9 @@ mod tests {
     /// Scripted executor. Directories are `/wt/<session id>`; `missing`
     /// holds the ids whose directory is gone. Repairs default to a
     /// successful create that records its event like the real one does.
+    /// Session id → (canonical path, parent fingerprint).
+    type FpMap = HashMap<i64, (String, (u64, u64))>;
+
     struct Fake {
         store: Arc<Mutex<Store>>,
         missing: Mutex<HashSet<i64>>,
@@ -672,7 +675,7 @@ mod tests {
         calls: Mutex<Vec<String>>,
         /// Session id → (canonical path, parent fingerprint) reported for a
         /// present target.
-        fps: Mutex<HashMap<i64, (String, (u64, u64))>>,
+        fps: Mutex<FpMap>,
     }
 
     impl Fake {
