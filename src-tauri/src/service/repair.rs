@@ -17,11 +17,17 @@
 //!    `workspace_repaired` / `workspace_repair_failed` event is written.
 //!
 //! **Automatic vs explicit.** Automatic repair (new session, restart,
-//! recreate, attach — [`Policy::Auto`]) may only CREATE what is confirmed
-//! missing: `git worktree add` from an existing local or remote-tracking
-//! branch into a target that is absent on disk and not registered, and a tmux
-//! session that `tmux has-session` confirms is dead. Anything that can
-//! destroy, unregister, redirect or rebranch — unregistering a stale entry,
+//! recreate, attach, the opt-in reconcile tick — [`Policy::Auto`]) may only
+//! CREATE what is confirmed missing: `git worktree add` from an existing local
+//! or remote-tracking branch into a target that is absent on disk, and a tmux
+//! session that `tmux has-session` confirms is dead. The one removal it may
+//! make is this worktree's OWN stale registration (`git worktree remove
+//! --force -- <path>`, never a prune) right before that add, and only when
+//! every [`VanishedGuard`] condition holds: the directory is confirmed absent,
+//! its parent exists (no unmounted volume), the repository is usable, the path
+//! is under the project root, the entry is not locked, and no other session
+//! maps to it. Anything else that can destroy, unregister, redirect or
+//! rebranch — the same removal when a guard fails,
 //! adopting a checkout elsewhere (and re-pathing the row), recreating a
 //! branch from its base, `git worktree repair`, respawning a live pane — is
 //! [`Policy::Explicit`] only (the Repair workspace button, or the
@@ -208,6 +214,12 @@ pub struct Probe {
     pub tmux_cwd: Option<String>,
     /// Only meaningful with `tmux_cwd`: that directory exists on the host.
     pub tmux_cwd_exists: bool,
+    /// `test -e || test -L` on the worktree path. `None` when the probe did
+    /// not report it (truncated or older output): never read as "absent".
+    pub wt_entry_exists: Option<bool>,
+    /// The worktree path's parent directory exists. A missing parent (an
+    /// unmounted volume, a vanished mountpoint) blocks the automatic removal.
+    pub wt_parent_exists: bool,
     pub worktrees: Vec<RegisteredWorktree>,
 }
 
@@ -285,6 +297,8 @@ echo "root_canon=$(canon "$root")"
 echo "wt_canon=$(canon "$wt")"
 echo "layout_dot_worktrees=$(yn test -d "$root/.worktrees")"
 echo "wt_exists=$(yn test -d "$wt")"
+if [ -e "$wt" ] || [ -L "$wt" ]; then echo wt_entry_exists=1; else echo wt_entry_exists=0; fi
+echo "wt_parent_exists=$(yn test -d "$(dirname -- "$wt")")"
 echo "wt_git=$(yn test -e "$wt/.git")"
 if [ -d "$wt" ] && [ -z "$(ls -A "$wt" 2>/dev/null)" ]; then echo wt_empty=1; else echo wt_empty=0; fi
 echo "wt_gitdir_ok=$(yn git -C "$wt" rev-parse --git-dir)"
@@ -346,6 +360,8 @@ pub fn parse_probe(stdout: &str) -> Probe {
             "wt_exists" => p.wt_exists = flag(v),
             "wt_git" => p.wt_git = flag(v),
             "wt_empty" => p.wt_empty = flag(v),
+            "wt_entry_exists" => p.wt_entry_exists = Some(flag(v)),
+            "wt_parent_exists" => p.wt_parent_exists = flag(v),
             "wt_gitdir_ok" => p.wt_gitdir_ok = flag(v),
             "index_lock" => p.index_lock = flag(v),
             "branch_local" => p.branch_local = flag(v),
@@ -506,6 +522,9 @@ pub struct Plan {
     pub needs_explicit_repair: bool,
     /// What an explicit repair would do (for the warning / report).
     pub deferred: Vec<Step>,
+    /// The vanished-directory guard, evaluated when our registration's
+    /// directory was found missing ([`VanishedGuard`]).
+    pub vanished_guard: Option<VanishedGuard>,
 }
 
 impl Plan {
@@ -536,10 +555,107 @@ fn refuse(code: &str, msg: impl Into<String>) -> IpcError {
 
 const INDEX_LOCK_WARNING: &str = "index.lock present (a git operation may be running)";
 
+/// What an automatic run knows beyond the probe (from the store). The
+/// default ("unknown") always blocks the guarded automatic removal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AutoContext {
+    /// Another live or ghost session on the host maps to this worktree (same
+    /// project and `worktree_key`, or a `worktree_id` whose row has that name
+    /// or canonical path). `None` = unknown.
+    pub other_sessions_mapped: Option<bool>,
+}
+
+/// When an AUTOMATIC run may drop this worktree's own stale registration
+/// (`git worktree remove --force -- <path>`, never a prune) and re-add it:
+/// the directory vanished, and nothing suggests an unmounted volume or
+/// someone else's checkout. Recorded in the `workspace_repaired` detail.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct VanishedGuard {
+    /// Non-empty canonical path, and `test -e` / `test -L` false for it.
+    pub dir_absent: bool,
+    /// The worktree path's parent directory exists.
+    pub parent_exists: bool,
+    /// The project root exists and `git rev-parse --git-dir` works there.
+    pub repo_ok: bool,
+    /// The canonical path lies strictly under the canonical project root
+    /// (which covers `.worktrees/` and `.claude/worktrees/`), no `.` / `..`.
+    pub under_root: bool,
+    /// The registration is not locked.
+    pub not_locked: bool,
+    /// No other live or ghost session maps to the worktree.
+    pub no_other_session: bool,
+}
+
+impl VanishedGuard {
+    pub fn holds(&self) -> bool {
+        self.failed().is_empty()
+    }
+
+    /// The conditions that failed, human-readable.
+    pub fn failed(&self) -> Vec<&'static str> {
+        [
+            (self.dir_absent, "directory not confirmed absent"),
+            (
+                self.parent_exists,
+                "parent directory missing (unmounted volume?)",
+            ),
+            (self.repo_ok, "project repository not usable"),
+            (self.under_root, "path not under the project root"),
+            (self.not_locked, "registration is locked"),
+            (
+                self.no_other_session,
+                "another session maps to this worktree",
+            ),
+        ]
+        .into_iter()
+        .filter(|(ok, _)| !ok)
+        .map(|(_, why)| why)
+        .collect()
+    }
+}
+
+/// A usable canonical path: absolute, not `/`, no `.` / `..` component.
+fn clean_canon(c: &str) -> Option<&str> {
+    let c = norm(c.trim());
+    (c.starts_with('/') && c != "/" && !c.split('/').any(|seg| seg == "." || seg == ".."))
+        .then_some(c)
+}
+
+/// Pure: evaluate the [`VanishedGuard`] for our registration `r`.
+fn vanished_guard(p: &Probe, r: &RegisteredWorktree, ctx: AutoContext) -> VanishedGuard {
+    let wt = p.wt_canon.as_deref().and_then(clean_canon);
+    let root = p.root_canon.as_deref().and_then(clean_canon);
+    VanishedGuard {
+        dir_absent: wt.is_some() && p.wt_entry_exists == Some(false) && !p.wt_exists,
+        parent_exists: p.wt_parent_exists,
+        repo_ok: p.root_exists && p.root_gitdir_ok,
+        under_root: match (wt, root) {
+            (Some(w), Some(rt)) => w
+                .strip_prefix(rt)
+                .is_some_and(|rest| rest.len() > 1 && rest.starts_with('/')),
+            _ => false,
+        },
+        not_locked: !r.locked,
+        no_other_session: ctx.other_sessions_mapped == Some(false),
+    }
+}
+
 /// Decide the fix. Pure: every branch of this function is covered by a unit
 /// test with a hand-built [`Probe`]. Refusals (`Err`) apply in every policy;
-/// explicit-only steps are deferred under [`Policy::Auto`].
+/// explicit-only steps are deferred under [`Policy::Auto`]. Without an
+/// [`AutoContext`] the guarded automatic removal never applies.
 pub fn plan(spec: &WorkspaceSpec, p: &Probe, policy: Policy) -> Result<Plan, IpcError> {
+    plan_with(spec, p, policy, AutoContext::default())
+}
+
+/// [`plan`] with what the store knows about the workspace; this is what
+/// [`ensure_workspace`] runs. Pure.
+pub fn plan_with(
+    spec: &WorkspaceSpec,
+    p: &Probe,
+    policy: Policy,
+    ctx: AutoContext,
+) -> Result<Plan, IpcError> {
     if !p.root_exists || !p.root_git || !p.root_gitdir_ok {
         return Err(refuse(
             codes::E_REPO_MISSING,
@@ -556,6 +672,7 @@ pub fn plan(spec: &WorkspaceSpec, p: &Probe, policy: Policy) -> Result<Plan, Ipc
     let mut git: Vec<(Step, bool)> = Vec::new();
     let mut warnings = Vec::new();
     let mut branch_drift = None;
+    let mut vanished: Option<VanishedGuard> = None;
     if p.index_lock {
         warnings.push(INDEX_LOCK_WARNING.to_string());
     }
@@ -720,20 +837,34 @@ pub fn plan(spec: &WorkspaceSpec, p: &Probe, policy: Policy) -> Result<Plan, Ipc
                     }
                     Some(r) => {
                         // (a)/(d) registered, directory gone (prunable, or git
-                        // predates the flag) or left empty. Clearing a
-                        // registration is explicit-only.
-                        warnings.push(format!(
-                            "git still lists {} but its directory is gone; only an explicit \
-                             repair unregisters that entry and re-adds the worktree",
-                            r.path
-                        ));
+                        // predates the flag) or left empty. Dropping our own
+                        // registration is automatic only when the directory is
+                        // confirmed vanished, every [`VanishedGuard`] condition
+                        // holds and the branch already exists; otherwise it is
+                        // explicit-only.
+                        let guard = vanished_guard(p, r, ctx);
+                        let auto = guard.holds() && from_existing_branch;
+                        if !auto {
+                            let failed = guard.failed();
+                            warnings.push(format!(
+                                "git still lists {} but its directory is gone; only an explicit \
+                                 repair unregisters that entry and re-adds the worktree{}",
+                                r.path,
+                                if failed.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" (not automatic: {})", failed.join(", "))
+                                }
+                            ));
+                        }
+                        vanished = Some(guard);
                         git.push((
                             Step::Unregister {
                                 path: r.path.clone(),
                             },
-                            false,
+                            auto,
                         ));
-                        git.push((add, false));
+                        git.push((add, auto));
                         add_path
                     }
                     None if !p.wt_exists => {
@@ -836,6 +967,7 @@ pub fn plan(spec: &WorkspaceSpec, p: &Probe, policy: Policy) -> Result<Plan, Ipc
         warnings,
         needs_explicit_repair: blocked,
         deferred,
+        vanished_guard: vanished,
     })
 }
 
@@ -1088,6 +1220,9 @@ pub struct RepairReport {
     /// Alive sessions on the same host sharing this workspace (reviews, twins)
     /// whose panes may also need a respawn.
     pub sibling_session_ids: Vec<i64>,
+    /// Set when our registered worktree directory was found missing: which
+    /// conditions of the automatic stale-entry removal held.
+    pub vanished_guard: Option<VanishedGuard>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1270,7 +1405,11 @@ pub async fn ensure_workspace(
     exec: &dyn RepairExec,
 ) -> Result<RepairReport, IpcError> {
     let probe = run_probe(exec, spec).await?;
-    let fix = plan(spec, &probe, policy).map_err(|e| fail(store, spec, e))?;
+    let ctx = {
+        let s = store.lock().map_err(|_| IpcError::lock())?;
+        auto_context(&s, spec)
+    };
+    let fix = plan_with(spec, &probe, policy, ctx).map_err(|e| fail(store, spec, e))?;
     let explicit = policy == Policy::Explicit;
 
     let mut report = RepairReport {
@@ -1296,6 +1435,7 @@ pub async fn ensure_workspace(
         tmux_cwd_stale: probe.tmux_alive && probe.tmux_cwd.is_some() && !probe.tmux_cwd_exists,
         worktree_row_updated: false,
         sibling_session_ids: siblings,
+        vanished_guard: fix.vanished_guard,
     };
     if fix.needs_explicit_repair {
         // Nothing git-side runs automatically; the caller decides.
@@ -1507,14 +1647,52 @@ pub async fn ensure_workspace(
 /// The `workspace_repaired` event detail. Always carries `branch_source`, so
 /// a branch recreated from its base is visible on the timeline.
 pub fn event_detail(report: &RepairReport) -> String {
-    serde_json::json!({
+    let mut v = serde_json::json!({
         "cwd": report.cwd,
         "actions": report.actions,
         "branch_source": report.branch_source,
         "tmux": report.tmux,
         "warnings": report.warnings,
-    })
-    .to_string()
+    });
+    if let Some(g) = &report.vanished_guard {
+        v["vanished_guard"] = serde_json::to_value(g).unwrap_or_default();
+    }
+    v.to_string()
+}
+
+/// What the store says about other sessions on this workspace, for the
+/// [`VanishedGuard`]. No worktree / project id, or a store error, reads as
+/// "unknown", which blocks the automatic removal.
+fn auto_context(s: &Store, spec: &WorkspaceSpec) -> AutoContext {
+    let (Some(w), Some(pid)) = (&spec.worktree, spec.project_id) else {
+        return AutoContext::default();
+    };
+    let (Ok(rows), Ok(sessions)) = (
+        s.list_worktrees_for_project(pid),
+        s.list_sessions_for_host(&spec.host_alias),
+    ) else {
+        return AutoContext::default();
+    };
+    let local = spec.host_alias == "local";
+    let target = if local {
+        local_canon(&w.path)
+    } else {
+        w.path.clone()
+    };
+    let mapped = sessions.iter().any(|o| {
+        Some(o.id) != spec.session_id
+            && o.kind != "bg"
+            && o.project_id == Some(pid)
+            && (o.worktree_key.as_deref() == Some(w.name.as_str())
+                || o.worktree_id
+                    .and_then(|wid| rows.iter().find(|r| r.id == wid))
+                    .is_some_and(|r| {
+                        r.name == w.name || (local && norm(&local_canon(&r.path)) == norm(&target))
+                    }))
+    });
+    AutoContext {
+        other_sessions_mapped: Some(mapped),
+    }
 }
 
 /// Lifecycle helpers (new session, restart, recreate) must not start or
@@ -2003,7 +2181,22 @@ mod tests {
         assert!(script.contains("tmux has-session -t \"=$sess\""));
         assert!(script.contains("#{pane_current_path}"));
         assert!(script.contains("worktree list --porcelain"));
+        assert!(script.contains("then echo wt_entry_exists=1; else echo wt_entry_exists=0; fi"));
+        assert!(script.contains("wt_parent_exists=$(yn test -d \"$(dirname -- \"$wt\")\")"));
         assert!(script.trim_end().ends_with("exit 0"));
+    }
+
+    #[test]
+    fn parse_probe_reads_the_vanished_guard_keys_and_never_assumes_absence() {
+        let p = parse_probe("wt_entry_exists=0\nwt_parent_exists=1\n@@worktrees\n");
+        assert_eq!(p.wt_entry_exists, Some(false));
+        assert!(p.wt_parent_exists);
+        let p = parse_probe("wt_entry_exists=1\n");
+        assert_eq!(p.wt_entry_exists, Some(true));
+        // Missing keys: unknown, not "absent".
+        let p = parse_probe("wt_exists=0\n");
+        assert_eq!(p.wt_entry_exists, None);
+        assert!(!p.wt_parent_exists);
     }
 
     #[test]
@@ -2153,7 +2346,8 @@ mod tests {
                 add_local()
             ]
         );
-        // Automatic: reported, not applied.
+        // Automatic without a confirmed vanished-directory guard: reported,
+        // not applied (see `each_vanished_guard_blocks_the_automatic_removal`).
         assert!(
             make_plan(&spec(true), &p, AUTO)
                 .unwrap()
@@ -3392,6 +3586,29 @@ mod tests {
             }
         );
         assert_eq!(policy_for(Entry::Explicit), Policy::Explicit);
+        // Every automatic entry point (and explicit) may drop our own
+        // vanished registration once the guard is confirmed.
+        for entry in [
+            Entry::NewSession,
+            Entry::SpawnReview,
+            Entry::Restart,
+            Entry::Recreate,
+            Entry::Attach,
+            Entry::Explicit,
+        ] {
+            let p = plan_with(&spec(true), &vanished(), policy_for(entry), NO_OTHERS).unwrap();
+            assert!(!p.needs_explicit_repair, "{entry:?}: {:?}", p.warnings);
+            assert!(
+                matches!(p.steps.first(), Some(Step::Unregister { .. })),
+                "{entry:?}: {:?}",
+                p.steps
+            );
+        }
+        // Without the store context (plain `plan`) no automatic entry point may.
+        for entry in [Entry::NewSession, Entry::Restart, Entry::Attach] {
+            let p = make_plan(&spec(true), &vanished(), policy_for(entry)).unwrap();
+            assert!(p.needs_explicit_repair && p.steps.is_empty(), "{entry:?}");
+        }
     }
 
     /// Wiring: each lifecycle call site passes its own entry point and starts
@@ -3425,7 +3642,9 @@ mod tests {
 
     #[test]
     fn auto_policy_never_applies_explicit_only_steps() {
-        // (a)/(d) stale registration: automatic runs report, never unregister.
+        // (a)/(d) stale registration without a confirmed vanished-directory
+        // guard (this probe reports no canonical path / absence): automatic
+        // runs report, never unregister.
         let mut p = healthy();
         p.wt_exists = false;
         p.wt_git = false;
@@ -4585,5 +4804,400 @@ mod tests {
             .await
             .unwrap();
         assert!(rep2.healthy);
+    }
+
+    // ── automatic removal of our own vanished registration ────────────────
+
+    const VANISHED_WT: &str = "/repo/.claude/worktrees/feat";
+    const NO_OTHERS: AutoContext = AutoContext {
+        other_sessions_mapped: Some(false),
+    };
+
+    /// `spec(true)`'s registered worktree whose directory vanished, with every
+    /// guard condition confirmed by the probe.
+    fn vanished() -> Probe {
+        let mut p = healthy();
+        p.wt_exists = false;
+        p.wt_git = false;
+        p.wt_gitdir_ok = false;
+        p.tmux_cwd_exists = false;
+        p.worktrees[1].prunable = true;
+        p.root_canon = Some("/repo".into());
+        p.wt_canon = Some(VANISHED_WT.into());
+        p.wt_entry_exists = Some(false);
+        p.wt_parent_exists = true;
+        p
+    }
+
+    /// `DIR_GONE_OUT` plus the canonical paths and the guard keys.
+    fn vanished_out(parent_exists: bool) -> String {
+        DIR_GONE_OUT.replacen(
+            "@@worktrees\n",
+            &format!(
+                "root_canon=/repo\nwt_canon={VANISHED_WT}\nwt_entry_exists=0\n\
+                 wt_parent_exists={}\n@@worktrees\n",
+                u8::from(parent_exists)
+            ),
+            1,
+        )
+    }
+
+    #[test]
+    fn auto_removes_our_vanished_registration_when_every_guard_holds() {
+        for policy in [AUTO, ATTACH] {
+            let plan = plan_with(&spec(true), &vanished(), policy, NO_OTHERS).unwrap();
+            assert!(
+                !plan.needs_explicit_repair,
+                "{policy:?}: {:?}",
+                plan.warnings
+            );
+            assert_eq!(
+                plan.steps,
+                vec![
+                    Step::Unregister {
+                        path: VANISHED_WT.into()
+                    },
+                    add_local()
+                ],
+                "{policy:?}"
+            );
+            let g = plan.vanished_guard.expect("guard recorded");
+            assert!(g.holds() && g.failed().is_empty());
+            // A live pane is still never respawned automatically.
+            assert!(plan
+                .deferred
+                .iter()
+                .any(|s| matches!(s, Step::TmuxRespawn { .. })));
+        }
+        // Only on origin: the same removal, then a tracking add.
+        let mut p = vanished();
+        p.branch_local = false;
+        p.branch_remote = true;
+        let plan = plan_with(&spec(true), &p, AUTO, NO_OTHERS).unwrap();
+        assert!(matches!(
+            plan.steps[1],
+            Step::AddWorktree {
+                from: BranchSource::Remote,
+                ..
+            }
+        ));
+        // Branch nowhere: recreating it stays explicit, so nothing runs.
+        let mut p = vanished();
+        p.branch_local = false;
+        let plan = plan_with(&spec(true), &p, AUTO, NO_OTHERS).unwrap();
+        assert!(plan.needs_explicit_repair && plan.steps.is_empty());
+    }
+
+    /// Each guard alone keeps the automatic run explicit-only: no steps, and
+    /// the warning (hence the `E_REPAIR_REQUIRED` message) names it.
+    #[test]
+    fn each_vanished_guard_blocks_the_automatic_removal() {
+        let mut outside = vanished();
+        outside.wt_canon = Some("/mnt/other/feat".into());
+        outside.worktrees[1].canon = Some("/mnt/other/feat".into());
+        let mut dotdot = vanished();
+        dotdot.wt_canon = Some("/repo/x/../../etc/feat".into());
+        dotdot.worktrees[1].canon = Some("/repo/x/../../etc/feat".into());
+        let mapped = AutoContext {
+            other_sessions_mapped: Some(true),
+        };
+        let cases: Vec<(&str, Probe, AutoContext, &str)> = vec![
+            (
+                "parent missing",
+                Probe {
+                    wt_parent_exists: false,
+                    ..vanished()
+                },
+                NO_OTHERS,
+                "parent directory missing",
+            ),
+            (
+                "absence not reported",
+                Probe {
+                    wt_entry_exists: None,
+                    ..vanished()
+                },
+                NO_OTHERS,
+                "not confirmed absent",
+            ),
+            (
+                "something still at the path",
+                Probe {
+                    wt_entry_exists: Some(true),
+                    ..vanished()
+                },
+                NO_OTHERS,
+                "not confirmed absent",
+            ),
+            (
+                "no canonical path",
+                Probe {
+                    wt_canon: None,
+                    ..vanished()
+                },
+                NO_OTHERS,
+                "not confirmed absent",
+            ),
+            (
+                "root canonical path unknown",
+                Probe {
+                    root_canon: None,
+                    ..vanished()
+                },
+                NO_OTHERS,
+                "not under the project root",
+            ),
+            (
+                "outside the root",
+                outside,
+                NO_OTHERS,
+                "not under the project root",
+            ),
+            ("dot-dot", dotdot, NO_OTHERS, "not under the project root"),
+            ("another session", vanished(), mapped, "another session"),
+            (
+                "mapping unknown",
+                vanished(),
+                AutoContext::default(),
+                "another session",
+            ),
+        ];
+        for (name, probe, ctx, why) in cases {
+            for policy in [AUTO, ATTACH] {
+                let plan = plan_with(&spec(true), &probe, policy, ctx)
+                    .unwrap_or_else(|e| panic!("{name}: {e}"));
+                assert!(plan.steps.is_empty(), "{name} {policy:?}: {:?}", plan.steps);
+                assert!(plan.needs_explicit_repair, "{name}");
+                assert!(
+                    plan.warnings.iter().any(|w| w.contains(why)),
+                    "{name}: {:?}",
+                    plan.warnings
+                );
+                assert!(!plan.vanished_guard.unwrap().holds(), "{name}");
+            }
+            // An explicit repair is unaffected by the guard.
+            let ex = plan_with(&spec(true), &probe, Policy::Explicit, ctx).unwrap();
+            assert!(
+                matches!(ex.steps.first(), Some(Step::Unregister { .. })),
+                "{name}"
+            );
+        }
+        // Root missing / not a repository: refused before any guard, in every
+        // policy (never faked).
+        for probe in [
+            Probe {
+                root_exists: false,
+                ..vanished()
+            },
+            Probe {
+                root_gitdir_ok: false,
+                ..vanished()
+            },
+        ] {
+            let err = plan_with(&spec(true), &probe, AUTO, NO_OTHERS).unwrap_err();
+            assert_eq!(err.code, codes::E_REPO_MISSING);
+        }
+        // Locked: refused first (`E_WORKSPACE_LOCKED`), in every policy; the
+        // guard itself also names it.
+        let mut locked = vanished();
+        locked.worktrees[1].prunable = false;
+        locked.worktrees[1].locked = true;
+        assert_eq!(
+            plan_with(&spec(true), &locked, AUTO, NO_OTHERS)
+                .unwrap_err()
+                .code,
+            codes::E_WORKSPACE_LOCKED
+        );
+        let g = vanished_guard(
+            &vanished(),
+            &RegisteredWorktree {
+                locked: true,
+                ..feat_wt()
+            },
+            NO_OTHERS,
+        );
+        assert_eq!(g.failed(), vec!["registration is locked"]);
+    }
+
+    #[tokio::test]
+    async fn auto_repair_of_a_vanished_registration_end_to_end_records_the_guard() {
+        let (store, sid, pid) = seeded_store(VANISHED_WT);
+        let exec = FakeExec::new(vec![
+            ok(&vanished_out(true)),      // probe
+            ok("outcome=branch_local\n"), // git steps
+            ok(HEALTHY_OUT),              // verify
+        ]);
+        let rep = ensure_workspace(&spec_with_ids(sid, pid), AUTO, vec![], &store, &exec)
+            .await
+            .unwrap();
+        let rep = require_no_explicit(rep).unwrap();
+        let scripts = exec.scripts();
+        assert_eq!(scripts.len(), 3, "probe, apply, verify");
+        assert_eq!(
+            scripts[1],
+            render_git_script(
+                "/repo",
+                &[
+                    Step::Unregister {
+                        path: VANISHED_WT.into()
+                    },
+                    add_local()
+                ]
+            )
+        );
+        assert!(!scripts[1].contains("prune"), "{}", scripts[1]);
+        assert!(exec.tmux_calls().is_empty(), "AUTO never touches tmux");
+        assert!(rep.tmux_cwd_stale, "the live pane is left to the caller");
+        let ev = store.lock().unwrap().list_session_events(sid, 10).unwrap();
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].kind, EVENT_REPAIRED);
+        let d: serde_json::Value = serde_json::from_str(ev[0].detail.as_deref().unwrap()).unwrap();
+        for k in [
+            "dir_absent",
+            "parent_exists",
+            "repo_ok",
+            "under_root",
+            "not_locked",
+            "no_other_session",
+        ] {
+            assert_eq!(d["vanished_guard"][k], true, "{k}: {d}");
+        }
+    }
+
+    #[tokio::test]
+    async fn vanished_guard_failures_are_e_repair_required_and_apply_nothing() {
+        // Parent missing (an unmounted volume looks exactly like this).
+        let (store, sid, pid) = seeded_store(VANISHED_WT);
+        let exec = FakeExec::new(vec![ok(&vanished_out(false))]);
+        let rep = ensure_workspace(&spec_with_ids(sid, pid), AUTO, vec![], &store, &exec)
+            .await
+            .unwrap();
+        assert_eq!(exec.scripts().len(), 1, "probe only");
+        let err = require_no_explicit(rep).unwrap_err();
+        assert_eq!(err.code, codes::E_REPAIR_REQUIRED);
+        assert!(
+            err.message.contains("parent directory missing"),
+            "{}",
+            err.message
+        );
+
+        // Another (ghost) session on the host maps to the same worktree.
+        let (store, sid, pid) = seeded_store(VANISHED_WT);
+        {
+            let s = store.lock().unwrap();
+            let other = s
+                .upsert_session("rev-x", "local", Some(pid), None, 1, 1, "ghost", None)
+                .unwrap();
+            s.set_worktree_key(other, Some("feat")).unwrap();
+        }
+        let exec = FakeExec::new(vec![ok(&vanished_out(true))]);
+        let rep = ensure_workspace(&spec_with_ids(sid, pid), AUTO, vec![], &store, &exec)
+            .await
+            .unwrap();
+        assert_eq!(exec.scripts().len(), 1, "probe only");
+        let err = require_no_explicit(rep).unwrap_err();
+        assert_eq!(err.code, codes::E_REPAIR_REQUIRED);
+        assert!(err.message.contains("another session"), "{}", err.message);
+    }
+
+    /// The owner's case against real git: `rm -rf` of a registered worktree
+    /// directory. The automatic policy removes that one entry and re-adds it
+    /// on the same branch; the second run is a no-op.
+    #[tokio::test]
+    async fn real_git_automatic_repair_recreates_a_vanished_registered_worktree() {
+        use std::process::Command;
+        let base = tempfile::TempDir::new().unwrap();
+        let root = base.path().join("repo");
+        init_repo(&root);
+        let wt = root.join(".claude/worktrees/feat");
+        git_in(
+            &root,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feat"],
+        );
+        std::fs::remove_dir_all(&wt).unwrap();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let pid = store
+            .lock()
+            .unwrap()
+            .upsert_project("o", "r", root.to_str().unwrap())
+            .unwrap();
+        let mut s = local_spec(&root, &wt, "auto-vanished");
+        s.project_id = Some(pid);
+        let rep = ensure_workspace(&s, AUTO, vec![], &store, &LocalExec)
+            .await
+            .unwrap();
+        let rep = require_no_explicit(rep).unwrap();
+        assert!(
+            rep.actions
+                .iter()
+                .any(|a| a.contains("worktree remove --force")),
+            "{:?}",
+            rep.actions
+        );
+        assert!(rep.vanished_guard.is_some_and(|g| g.holds()));
+        assert_eq!(rep.branch_source.as_deref(), Some("branch_local"));
+        assert!(wt.join(".git").exists(), "worktree is back");
+        let head = Command::new("git")
+            .args([
+                "-C",
+                wt.to_str().unwrap(),
+                "rev-parse",
+                "--abbrev-ref",
+                "HEAD",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "feat");
+        let rep2 = ensure_workspace(&s, AUTO, vec![], &store, &LocalExec)
+            .await
+            .unwrap();
+        assert!(
+            rep2.healthy && rep2.actions.is_empty(),
+            "{:?}",
+            rep2.actions
+        );
+    }
+
+    /// The unmounted-volume guard against real git: the whole worktrees dir
+    /// is gone, so the parent is missing and nothing is removed.
+    #[tokio::test]
+    async fn real_git_missing_parent_blocks_the_automatic_removal() {
+        let base = tempfile::TempDir::new().unwrap();
+        let root = base.path().join("repo");
+        init_repo(&root);
+        let wt = root.join(".claude/worktrees/feat");
+        git_in(
+            &root,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feat"],
+        );
+        std::fs::remove_dir_all(root.join(".claude/worktrees")).unwrap();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let pid = store
+            .lock()
+            .unwrap()
+            .upsert_project("o", "r", root.to_str().unwrap())
+            .unwrap();
+        let mut s = local_spec(&root, &wt, "auto-unmounted");
+        s.project_id = Some(pid);
+        let rep = ensure_workspace(&s, AUTO, vec![], &store, &LocalExec)
+            .await
+            .unwrap();
+        let err = require_no_explicit(rep).unwrap_err();
+        assert_eq!(err.code, codes::E_REPAIR_REQUIRED);
+        assert!(
+            err.message.contains("parent directory missing"),
+            "{}",
+            err.message
+        );
+        let list = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["worktree", "list", "--porcelain"])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&list.stdout).contains("/.claude/worktrees/feat"),
+            "the registration is left alone"
+        );
     }
 }

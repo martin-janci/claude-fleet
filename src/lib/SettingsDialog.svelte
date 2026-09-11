@@ -687,9 +687,11 @@
         Re-create vanished worktree directories automatically
       </label>
       <p class="hook-desc">
-        Only re-adds a missing worktree from its existing branch; anything
-        destructive still needs Repair workspace. Never touches the
-        controller, review sessions or a session being safely removed.
+        Re-adds a missing worktree from its existing branch (dropping its
+        stale git entry only when the directory is confirmed gone and its
+        parent folder still exists); anything else still needs Repair
+        workspace. Never touches the controller, review sessions or a
+        session being safely removed.
       </p>
       <div class="mcp-field">
         <span class="lbl">repair</span>

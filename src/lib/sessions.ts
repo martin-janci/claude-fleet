@@ -233,6 +233,20 @@ export interface RepairReport {
   worktree_row_updated: boolean;
   /** Alive sessions on the same host sharing this workspace. */
   sibling_session_ids: number[];
+  /** Set when this worktree's registered directory was found missing: which
+   *  conditions of the automatic stale-entry removal held. */
+  vanished_guard?: VanishedGuard | null;
+}
+
+/** Mirrors `service::repair::VanishedGuard`: an automatic repair may drop the
+ *  worktree's own stale registration only when every field is true. */
+export interface VanishedGuard {
+  dir_absent: boolean;
+  parent_exists: boolean;
+  repo_ok: boolean;
+  under_root: boolean;
+  not_locked: boolean;
+  no_other_session: boolean;
 }
 
 /** Make the session's directory a healthy git worktree on its branch and its

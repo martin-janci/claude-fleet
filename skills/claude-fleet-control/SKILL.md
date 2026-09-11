@@ -190,11 +190,13 @@ session-id resume; prefer `send_prompt` / `restart_session` for in-place fixes.
 in a deleted dir, git lists a stale entry): `repair_session { session_id }`
 (or `host_alias` + `name`) is the explicit repair, the same as the Repair
 workspace button. Create, restart, recreate and attach already re-add a
-missing worktree from its existing branch; so does the reconcile tick when
-`repair.auto_on_tick` is on (create-only, at most 5 per run). `repair_session`
-may also unregister this worktree's own stale git entry, adopt its branch's
-checkout elsewhere, recreate the branch from base once origin confirms it is
-gone, run `git worktree repair` and respawn the pane. It is gated by
+missing worktree from its existing branch, first dropping its own stale git
+entry when the directory is confirmed gone under the project root, its parent
+exists and no other session maps to it; so does the reconcile tick when
+`repair.auto_on_tick` is on (at most 5 per run). `repair_session` may also
+unregister that entry when those checks fail, adopt its branch's checkout
+elsewhere, recreate the branch from base once origin confirms it is gone, run
+`git worktree repair` and respawn the pane. It is gated by
 `mcp.confirm_destructive`: on `E_CONFIRM_REQUIRED`, retry with the returned
 `confirm_nonce` once approved. It returns a RepairReport (`cwd`, `healthy`,
 `actions`, `warnings`, `branch_source`, `tmux`). Refusals need a human, so do

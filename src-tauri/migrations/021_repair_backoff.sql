@@ -10,4 +10,4 @@
 ALTER TABLE sessions ADD COLUMN repair_backoff_sig TEXT;
 ALTER TABLE sessions ADD COLUMN repair_backoff_at INTEGER;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (20);
+INSERT OR IGNORE INTO schema_version (version) VALUES (21);

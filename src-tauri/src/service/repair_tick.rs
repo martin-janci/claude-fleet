@@ -5,9 +5,11 @@
 //! sessions whose worktree directory has vanished and runs the AUTOMATIC
 //! repair policy on them ([`repair::ensure_session_workspace`] with
 //! [`TICK_ENTRY`]): it may only `git worktree add` from an existing local or
-//! remote-tracking branch into a target that is absent on disk and not
-//! registered. It never creates or respawns tmux, never unregisters, adopts,
-//! rebranches or runs `git worktree repair` — those stay explicit-only.
+//! remote-tracking branch into a target that is absent on disk, first
+//! dropping the worktree's own stale registration only under the repair
+//! module's vanished-directory guard (`repair::VanishedGuard`). It never
+//! creates or respawns tmux, adopts, rebranches or runs `git worktree repair`
+//! — those stay explicit-only.
 //!
 //! **Signal.** The reconcile pass reads each pane's cwd but never checks that
 //! it exists, and does not persist it. So the tick adds ONE batched,
@@ -26,7 +28,7 @@
 //! **Record + backoff.** Every attempt leaves exactly one
 //! `workspace_repaired` / `workspace_repair_failed` event (the repair writes
 //! most of them; the tick fills the gaps, e.g. `E_REPAIR_REQUIRED`). A
-//! non-transient refusal stamps the row (`repair_backoff_sig`, migration 020)
+//! non-transient refusal stamps the row (`repair_backoff_sig`, migration 021)
 //! with a signature of its workspace; the tick skips the row until that
 //! signature changes, and clears the stamp once the directory is back.
 
@@ -565,7 +567,8 @@ fn now_unix() -> i64 {
 mod tests {
     use super::*;
     use crate::service::repair::{
-        plan, policy_for, BranchSource, Policy, Probe, RegisteredWorktree, Step, WorktreeSpec,
+        plan, plan_with, policy_for, AutoContext, BranchSource, Policy, Probe, RegisteredWorktree,
+        Step, WorktreeSpec,
     };
 
     const ON: RepairTickConfig = RepairTickConfig {
@@ -593,6 +596,7 @@ mod tests {
             tmux_cwd_stale: true,
             worktree_row_updated: false,
             sibling_session_ids: Vec::new(),
+            vanished_guard: None,
         }
     }
 
@@ -983,7 +987,7 @@ mod tests {
     }
 
     #[test]
-    fn tick_policy_never_plans_a_destructive_step() {
+    fn tick_policy_plans_no_destructive_step_beyond_the_guarded_removal() {
         let policy = policy_for(TICK_ENTRY);
         let spec = tick_spec();
         let registered_gone = Probe {
@@ -1062,6 +1066,51 @@ mod tests {
             assert_eq!(!p.steps.is_empty(), creates, "{name}: {:?}", p.steps);
             assert_eq!(p.needs_explicit_repair, !creates, "{name}");
         }
+
+        // The one removal the tick may make: our own registration, when its
+        // directory is confirmed vanished and every guard holds, immediately
+        // followed by the add from the existing branch.
+        let guarded = Probe {
+            worktrees: vec![
+                main_entry(),
+                RegisteredWorktree {
+                    path: WT.into(),
+                    branch: Some("feat".into()),
+                    prunable: true,
+                    ..Default::default()
+                },
+            ],
+            root_canon: Some("/repo".into()),
+            wt_canon: Some(WT.into()),
+            wt_entry_exists: Some(false),
+            wt_parent_exists: true,
+            ..gone()
+        };
+        let no_others = AutoContext {
+            other_sessions_mapped: Some(false),
+        };
+        let p = plan_with(&spec, &guarded, policy, no_others).unwrap();
+        assert!(
+            matches!(
+                &p.steps[..],
+                [
+                    Step::Unregister { path },
+                    Step::AddWorktree {
+                        from: BranchSource::Local,
+                        ..
+                    }
+                ] if path == WT
+            ),
+            "{:?}",
+            p.steps
+        );
+        // The same probe with the parent missing (an unmounted volume): nothing.
+        let unmounted = Probe {
+            wt_parent_exists: false,
+            ..guarded
+        };
+        let p = plan_with(&spec, &unmounted, policy, no_others).unwrap();
+        assert!(p.steps.is_empty() && p.needs_explicit_repair);
     }
 
     // ── the batched directory check ─────────────────────────────────────
