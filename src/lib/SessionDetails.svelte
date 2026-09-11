@@ -157,7 +157,9 @@
   async function onRepair() {
     if (repairing) return;
     repairing = true;
-    const r = await repairSession(session.id);
+    // Explicit: the user asked, so this may unregister a stale entry, adopt a
+    // moved checkout, recreate the branch and respawn a live pane.
+    const r = await repairSession(session.id, { explicit: true });
     repairing = false;
     if (!r.ok) {
       pushError(r.error, 'Repair failed');
@@ -165,10 +167,12 @@
     }
     const rep = r.value;
     if (rep.actions.length === 0) {
-      push({ kind: 'success', message: `Workspace is healthy: ${rep.cwd}` });
+      const notes = rep.warnings.length > 0 ? ` (${rep.warnings.join('; ')})` : '';
+      push({ kind: 'success', message: `Workspace is healthy: ${rep.cwd}${notes}` });
       return;
     }
-    push({ kind: 'success', message: `Repaired workspace: ${rep.actions.join('; ')}` });
+    const branch = rep.branch_source ? ` [branch: ${rep.branch_source}]` : '';
+    push({ kind: 'success', message: `Repaired workspace: ${rep.actions.join('; ')}${branch}` });
     if (rep.tmux === 'created') {
       // A recreated tmux session needs a fresh attach (same tmux_name, so
       // the selection effect would not fire on its own).

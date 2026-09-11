@@ -167,12 +167,19 @@ pub async fn repair_session(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<RepairReport, IpcError> {
-    repair::repair_session(args.session_id, &store, &ssh).await
+    repair::repair_session(args.session_id, args.explicit, &store, &ssh).await
 }
 
 #[derive(serde::Deserialize)]
 pub struct RepairSessionArgs {
     pub session_id: i64,
+    /// `true`: the Repair workspace button — an explicit repair that may
+    /// unregister this worktree's stale entry, adopt a moved checkout,
+    /// recreate the branch from its base, re-link, and respawn a live pane.
+    /// `false` (default): the automatic pre-attach check, which only creates
+    /// what is confirmed missing and reports the rest.
+    #[serde(default)]
+    pub explicit: bool,
 }
 
 /// Launch a Claude background session on the given host.

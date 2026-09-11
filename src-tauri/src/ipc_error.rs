@@ -83,6 +83,11 @@ pub mod codes {
     /// Workspace repair: a git step failed, the result did not verify, or the
     /// directory is not a worktree and not empty (never deleted automatically).
     pub const E_REPAIR_FAILED: &str = "E_REPAIR_FAILED";
+    /// Workspace repair: an automatic check (new session, restart, recreate)
+    /// found a problem only an explicit repair may fix (unregister a stale
+    /// entry, adopt a moved checkout, recreate a branch, re-link). Run
+    /// Repair workspace.
+    pub const E_REPAIR_REQUIRED: &str = "E_REPAIR_REQUIRED";
     /// The worktree has uncommitted / unpushed work.
     pub const E_DIRTY: &str = "E_DIRTY";
     /// The `claude` CLI exited non-zero.

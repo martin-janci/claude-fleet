@@ -113,8 +113,10 @@ Index by area (names only; see the reference for details):
   `capture_session`, `peek_session`, `peer_status`, `session_history`,
   `send_message`, `inbox`.
 - **Lifecycle & recovery** — `restart_session`, `recreate_session`,
-  `repair_session` (bring back a deleted / pruned / moved worktree directory
-  and respawn the pane in it), `kill_session`, `safe_kill_session`,
+  `repair_session` (explicit repair, same as the Repair workspace button:
+  may unregister this worktree's stale entry, adopt a moved checkout,
+  recreate the branch and respawn the pane; behind the desktop confirmation
+  when `mcp.confirm_destructive` is on), `kill_session`, `safe_kill_session`,
   `dismiss_ghost_session`.
 - **Worktree files & git (read-only)** — `repo_changes`, `repo_tree`,
   `repo_file`, `repo_diff`, `repo_log`, `repo_branches`, `repo_commit`,

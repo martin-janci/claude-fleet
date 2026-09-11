@@ -72,7 +72,7 @@ describe('sessions store', () => {
     if (r.ok) expect(r.value).toEqual(report);
     expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
       'repair_session',
-      { args: { session_id: 1 } },
+      { args: { session_id: 1, explicit: false } },
     ]);
     // Row events carry any store change; the wrapper itself merges nothing.
     expect(get(sessions)).toEqual(sample);
@@ -86,6 +86,16 @@ describe('sessions store', () => {
     const r = await repairSession(1);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe('E_REPO_MISSING');
+  });
+
+  it('repairSession defaults to the automatic check; explicit must be asked for', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    await repairSession(3, { explicit: true });
+    await repairSession(4, {});
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls).toEqual([
+      ['repair_session', { args: { session_id: 3, explicit: true } }],
+      ['repair_session', { args: { session_id: 4, explicit: false } }],
+    ]);
   });
 
   it('newSessionAbortable fires cancel_command on abort', async () => {

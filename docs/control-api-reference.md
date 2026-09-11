@@ -173,9 +173,9 @@ Parameters: `host_alias`, `new_name`, `old_name`, `session_id`
 
 ### `repair_session`
 
-Repair a session's workspace: make its directory a healthy git worktree on its branch and its tmux session run there. Prunes stale registrations, re-adds a deleted worktree (fetching the branch, or recreating it from the project's base branch when it was deleted everywhere), adopts a checkout that moved, recreates a dead tmux session and respawns a pane whose cwd vanished. No-op on a healthy session. Returns a JSON RepairReport: cwd, healthy, actions (in order), warnings, branch_source, tmux (created|respawned), sibling_session_ids. Errors: E_REPO_MISSING (main checkout gone — never faked with mkdir), E_BRANCH_CHECKED_OUT, E_WORKSPACE_LOCKED, E_REPAIR_FAILED, E_HOST_OFFLINE.
+Explicitly repair a session's workspace (the same action as the Repair workspace button): make its directory a healthy git worktree on its branch and its tmux session run there. Unlike the automatic checks on create/restart/recreate/attach (which only re-add a missing worktree from its existing branch), this may unregister this worktree's own stale git entry (git worktree remove --force; never a blanket prune), adopt its branch's checkout elsewhere (refused when another fleet workspace uses it), recreate the branch from the base branch once origin confirms it is gone, run git worktree repair, and respawn a live pane whose directory vanished. No-op on a healthy session. Gated by mcp.confirm_destructive (retry with confirm_nonce). Returns a JSON RepairReport: cwd, healthy, actions (in order), warnings, branch_source, tmux (created|respawned), sibling_session_ids. Errors: E_REPO_MISSING (never faked with mkdir), E_BRANCH_CHECKED_OUT, E_WORKSPACE_LOCKED, E_REPAIR_FAILED, E_HOST_OFFLINE, E_CONFIRM_REQUIRED.
 
-Parameters: `host_alias`, `name`, `session_id`
+Parameters: `confirm_nonce`, `host_alias`, `name`, `session_id`
 
 ### `repo_branches`
 

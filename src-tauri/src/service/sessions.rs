@@ -1517,11 +1517,12 @@ async fn new_session_inner(
         crate::tmux::pane_command_for(claude_id.as_deref())
     };
 
-    // Self-repair for an EXISTING worktree row / main checkout: the row may
-    // point at a directory that was deleted, pruned, or moved since it was
-    // written. Verified (and possibly re-pathed) before tmux starts there.
+    // Automatic self-repair for an EXISTING worktree row / main checkout: the
+    // row may point at a directory that was deleted since it was written.
+    // Automatic means create-only (re-add a missing worktree from its existing
+    // branch); anything more returns E_REPAIR_REQUIRED before tmux starts.
     // A brand-new worktree was just created by `worktree_add_script`.
-    let (path, repair_actions) = if args.new_worktree.is_none() {
+    let (path, repaired) = if args.new_worktree.is_none() {
         let rep = crate::service::repair::ensure_for_new_session(
             store,
             ssh,
@@ -1536,25 +1537,27 @@ async fn new_session_inner(
             },
         )
         .await?;
-        (PathBuf::from(rep.cwd), rep.actions)
+        (
+            PathBuf::from(rep.cwd.clone()),
+            Some(rep).filter(|r| !r.actions.is_empty()),
+        )
     } else {
-        (path, Vec::new())
+        (path, None)
     };
 
     let tmux = exec_for(&args.host_alias, ssh);
     tmux.new_session(&args.name, &path, &pane_cmd).await?;
 
     reconcile_one_host(store, ssh, &args.host_alias).await?;
-    if !repair_actions.is_empty() {
+    if let Some(rep) = &repaired {
+        // Same detail as every other workspace_repaired event (branch_source
+        // included), attached now that reconcile created the row.
         record_session_event(
             store,
             &args.host_alias,
             &args.name,
             crate::service::repair::EVENT_REPAIRED,
-            Some(
-                serde_json::json!({ "cwd": path.to_string_lossy(), "actions": repair_actions })
-                    .to_string(),
-            ),
+            Some(crate::service::repair::event_detail(rep)),
         );
     }
     let s = store
@@ -1960,13 +1963,21 @@ pub async fn restart_session(
     };
     let pane_cmd: String = recreate_pane_command(&kind, claude_id.as_deref());
     let tmux = exec_for(&args.host_alias, ssh);
-    // Self-repair: bring the session's directory back before the pane is
-    // respawned, and respawn INTO it (a pane whose cwd was deleted keeps the
-    // dead inode until respawned with an explicit `-c`). A dead tmux session
-    // is created instead of failing with "can't find session". Sessions with
+    // Automatic self-repair (create-only) before the pane is respawned, then
+    // respawn INTO the verified directory (a pane whose cwd was deleted keeps
+    // the dead inode until respawned with an explicit `-c`). A dead tmux
+    // session is created instead of failing with "can't find session". A
+    // workspace that needs more returns E_REPAIR_REQUIRED. Sessions with
     // nothing to repair (orphans, bg rows) keep the plain respawn.
     let repaired = match session_id {
-        Some(id) => match crate::service::repair::ensure_session_workspace(id, store, ssh).await {
+        Some(id) => match crate::service::repair::ensure_session_workspace(
+            id,
+            crate::service::repair::Entry::Restart,
+            store,
+            ssh,
+        )
+        .await
+        {
             Ok(rep) => Some(rep),
             Err(e) if e.code == codes::E_NOREPO || e.code == codes::E_BG_SESSION => None,
             Err(e) => return Err(e),
@@ -2512,7 +2523,25 @@ pub async fn spawn_review(
         let cwd_src = cwd_source_for_session(&s, &source)?;
         (source, cwd_src)
     };
-    let cwd = resolve_cwd_source(cwd_src, &source.host_alias, ssh).await?;
+    // Automatic workspace check (create-only) in the SOURCE's workspace, and
+    // use the directory the probe resolved on the host. The remote guess in
+    // `resolve_cwd_source` assumes `.claude/worktrees/`, so on a
+    // `.worktrees/`-layout host it named a missing dir and tmux silently fell
+    // back to $HOME. Orphans / bg rows keep the plain resolution.
+    let cwd = match crate::service::repair::ensure_session_workspace(
+        source.id,
+        crate::service::repair::Entry::SpawnReview,
+        store,
+        ssh,
+    )
+    .await
+    {
+        Ok(rep) => rep.cwd,
+        Err(e) if e.code == codes::E_NOREPO || e.code == codes::E_BG_SESSION => {
+            resolve_cwd_source(cwd_src, &source.host_alias, ssh).await?
+        }
+        Err(e) => return Err(e),
+    };
 
     // 2. Spawn the review tmux session (off-lock).
     //    A review runs Claude Code — same pane command as any "work" session.
@@ -2629,10 +2658,17 @@ pub async fn recreate_session(
         let pane_cmd = recreate_pane_command(&sess.kind, sess.claude_session_id.as_deref());
         (sess, cwd_src, pane_cmd)
     };
-    // Self-repair: the worktree may have been deleted, pruned or moved since
-    // the row was written; make it a healthy checkout (on its branch) and use
-    // the verified path. Orphans (no project) keep the plain resolution.
-    let cwd = match crate::service::repair::ensure_session_workspace(sess.id, store, ssh).await {
+    // Automatic self-repair (create-only): re-add a deleted worktree from its
+    // existing branch and use the verified path; anything more returns
+    // E_REPAIR_REQUIRED. Orphans (no project) keep the plain resolution.
+    let cwd = match crate::service::repair::ensure_session_workspace(
+        sess.id,
+        crate::service::repair::Entry::Recreate,
+        store,
+        ssh,
+    )
+    .await
+    {
         Ok(rep) => rep.cwd,
         Err(e) if e.code == codes::E_NOREPO => {
             resolve_cwd_source(cwd_src, &sess.host_alias, ssh).await?

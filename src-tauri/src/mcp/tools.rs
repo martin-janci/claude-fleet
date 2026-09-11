@@ -2357,16 +2357,21 @@ impl FleetTools {
 
     // ---- workspace repair ----
 
-    #[tool(description = "Repair a session's workspace: make its directory a \
-        healthy git worktree on its branch and its tmux session run there. \
-        Prunes stale registrations, re-adds a deleted worktree (fetching the \
-        branch, or recreating it from the project's base branch when it was \
-        deleted everywhere), adopts a checkout that moved, recreates a dead \
-        tmux session and respawns a pane whose cwd vanished. No-op on a healthy \
-        session. Returns a JSON RepairReport: cwd, healthy, actions (in order), \
+    #[tool(description = "Explicitly repair a session's workspace (the same \
+        action as the Repair workspace button): make its directory a healthy \
+        git worktree on its branch and its tmux session run there. Unlike the \
+        automatic checks on create/restart/recreate/attach (which only re-add a \
+        missing worktree from its existing branch), this may unregister this \
+        worktree's own stale git entry (git worktree remove --force; never a \
+        blanket prune), adopt its branch's checkout elsewhere (refused when \
+        another fleet workspace uses it), recreate the branch from the base \
+        branch once origin confirms it is gone, run git worktree repair, and \
+        respawn a live pane whose directory vanished. No-op on a healthy \
+        session. Gated by mcp.confirm_destructive (retry with confirm_nonce). \
+        Returns a JSON RepairReport: cwd, healthy, actions (in order), \
         warnings, branch_source, tmux (created|respawned), sibling_session_ids. \
-        Errors: E_REPO_MISSING (main checkout gone — never faked with mkdir), \
-        E_BRANCH_CHECKED_OUT, E_WORKSPACE_LOCKED, E_REPAIR_FAILED, E_HOST_OFFLINE.")]
+        Errors: E_REPO_MISSING (never faked with mkdir), E_BRANCH_CHECKED_OUT, \
+        E_WORKSPACE_LOCKED, E_REPAIR_FAILED, E_HOST_OFFLINE, E_CONFIRM_REQUIRED.")]
     async fn repair_session(
         &self,
         Extension(caller): Extension<Caller>,
@@ -2388,6 +2393,14 @@ impl FleetTools {
             p.name.as_deref(),
             "the session to repair",
         )?;
+        // Explicit repair can unregister a worktree entry, re-path a row and
+        // respawn a live pane: destructive, so behind the desktop confirmation.
+        self.confirm_gate(
+            "repair_session",
+            p.confirm_nonce.as_deref(),
+            &format!("host={host_alias} name={name}"),
+            &caller,
+        )?;
         let id = {
             let s = self
                 .store
@@ -2403,7 +2416,7 @@ impl FleetTools {
                     ))
                 })?
         };
-        let rep = crate::service::repair::repair_session(id, &self.store, &self.ssh)
+        let rep = crate::service::repair::repair_session(id, true, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
         ok_json(&rep)
@@ -2422,6 +2435,10 @@ pub struct RepairSessionParams {
     /// tmux session name to repair (with `host_alias`).
     #[serde(default)]
     pub name: Option<String>,
+    /// Nonce from a previous E_CONFIRM_REQUIRED, once approved on the
+    /// desktop (only when mcp.confirm_destructive is on).
+    #[serde(default)]
+    pub confirm_nonce: Option<String>,
 }
 
 /// Hand-written (not `#[tool_handler]`) so every call passes through one

@@ -5,43 +5,61 @@
 //! The design is probe → plan → apply → verify:
 //!
 //! 1. **Probe** — ONE `bash -lc` script per host (every value `quote`d)
-//!    prints a small `key=value` status block plus the raw
-//!    `git worktree list --porcelain` dump. Nothing in the probe writes.
-//! 2. **Plan** — [`plan`] is a pure function of the probe: it either returns
-//!    the ordered [`Step`]s that make the workspace healthy, or refuses with
-//!    an `E_*` code when a fix would need a guess (missing repo, branch
-//!    checked out in the main checkout, a locked worktree, a non-empty dir
-//!    that is not a worktree). Refusals never touch a row.
-//! 3. **Apply** — the steps are rendered into one more script (git) and one
-//!    or two tmux calls, then the probe runs once more to **verify**. A
-//!    failed or unverifiable repair returns `E_REPAIR_FAILED` (or the tmux
-//!    error) and never deletes or ghosts the session row.
-//! 4. **Record** — the worktree row's path/branch are corrected, the session
-//!    is linked to its worktree, and one `workspace_repaired` (or
-//!    `workspace_repair_failed`) event lands on the session timeline.
+//!    prints a small `key=value` status block plus the
+//!    `git worktree list --porcelain` dump, with every compared path
+//!    canonicalized ON THE HOST (`pwd -P`). Nothing in the probe writes.
+//! 2. **Plan** — [`plan`] is a pure function of the probe and a [`Policy`]:
+//!    the ordered [`Step`]s that make the workspace healthy, or a refusal
+//!    with an `E_*` code when a fix would need a guess.
+//! 3. **Apply** — the git steps run as one script, then the probe runs again
+//!    to **verify**; only then is tmux touched.
+//! 4. **Record** — rows are corrected (within the policy) and one
+//!    `workspace_repaired` / `workspace_repair_failed` event is written.
 //!
-//! A healthy workspace costs exactly one probe and no writes, so every
-//! lifecycle entry point can call [`ensure_workspace`] unconditionally.
+//! **Automatic vs explicit.** Automatic repair (new session, restart,
+//! recreate, attach — [`Policy::Auto`]) may only CREATE what is confirmed
+//! missing: `git worktree add` from an existing local or remote-tracking
+//! branch into a target that is absent on disk and not registered, and a tmux
+//! session that `tmux has-session` confirms is dead. Anything that can
+//! destroy, unregister, redirect or rebranch — unregistering a stale entry,
+//! adopting a checkout elsewhere (and re-pathing the row), recreating a
+//! branch from its base, `git worktree repair`, respawning a live pane — is
+//! [`Policy::Explicit`] only (the Repair workspace button, or the
+//! confirm-gated MCP tool). An automatic run that needs such a step returns a
+//! warning with `needs_explicit_repair`; an ambiguous probe (unknown tmux
+//! state, unreadable pane cwd, a failed fetch) never causes an action.
+//!
+//! A healthy workspace costs exactly one probe and no writes.
 //! Spec: `docs/specs/2026-09-11-session-worktree-repair.md`.
 
 use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
-use crate::ssh::SshClient;
+use crate::ssh::{SshClient, SshExec};
 use crate::store::{SessionRow, Store};
 use crate::tmux::TmuxExec;
 use async_trait::async_trait;
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// `session_events.kind` written when a repair changed something.
 pub const EVENT_REPAIRED: &str = "workspace_repaired";
 /// `session_events.kind` written when a repair was refused or failed.
 pub const EVENT_REPAIR_FAILED: &str = "workspace_repair_failed";
 
-/// Connect budget for the probe / apply scripts on a remote host. The ssh
-/// layer bounds the whole command by `default_wall_clock` on top, so a
-/// wedged host surfaces as `E_SSH_TIMEOUT` → `E_HOST_OFFLINE` here.
-const SCRIPT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// ssh `ConnectTimeout` for the read-only probe on a remote host. The client
+/// bounds the whole command by `SshClient::default_wall_clock` (3× this, at
+/// least 30 s): 45 s, the same bound as [`PROBE_WALL_CLOCK`] on `local`.
+const PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// ssh `ConnectTimeout` for the apply script; its 3× bound is the 180 s
+/// [`APPLY_WALL_CLOCK`].
+const APPLY_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Wall clock for the read-only probe on `local`.
+const PROBE_WALL_CLOCK: Duration = Duration::from_secs(45);
+/// Wall clock for the apply script on `local`. A fetch plus `worktree add` on
+/// a large repository can take a while; hitting this bound (local or remote)
+/// means the repair may be partially applied.
+const APPLY_WALL_CLOCK: Duration = Duration::from_secs(180);
 
 // ---------------------------------------------------------------------------
 // Spec: what the workspace SHOULD look like
@@ -58,8 +76,8 @@ pub struct WorkspaceSpec {
     pub project_root: String,
     /// `None` for a main-checkout session; `Some` for a linked worktree.
     pub worktree: Option<WorktreeSpec>,
-    /// Branch to fork from when the worktree's branch has to be recreated
-    /// (`None` = the repo's default branch).
+    /// Branch to fork from when an explicit repair has to recreate the
+    /// worktree's branch (`None` = the repo's default branch).
     pub base_branch: Option<String>,
     /// Pane command used when tmux must be created or respawned.
     pub pane_cmd: String,
@@ -73,7 +91,7 @@ pub struct WorkspaceSpec {
 pub struct WorktreeSpec {
     /// Worktree name (the `worktrees.name` / `sessions.worktree_key` value).
     pub name: String,
-    /// Expected absolute path on the host.
+    /// Expected absolute path on the host (the user-facing form).
     pub path: String,
     /// Branch that must be checked out there.
     pub branch: String,
@@ -81,20 +99,46 @@ pub struct WorktreeSpec {
     /// read from a row or seen on disk; the plan may then prefer the
     /// project's existing `.worktrees/` layout over `.claude/worktrees/`.
     pub path_is_guess: bool,
-    /// Whether the local `worktrees` table row may be rewritten with the
-    /// verified path. Only `local` paths belong in that table.
+    /// Whether the local `worktrees` table row may be written. Only `local`
+    /// paths belong in that table.
     pub row_is_local: bool,
 }
 
-/// What to do about tmux once the directory is healthy.
+/// How much a repair may do. See the module doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TmuxPolicy {
-    /// Fix the directory only; the caller creates / respawns tmux itself
-    /// (`new_session`, `recreate_session`, `restart_session`).
-    Leave,
-    /// Also make sure the tmux session exists and its pane runs in the
-    /// repaired directory (`repair_session`, the attach path).
-    Ensure,
+pub enum Policy {
+    /// A lifecycle side effect. Only creates what is confirmed missing (see
+    /// the module doc). With `create_dead_tmux` it also creates a tmux
+    /// session that is confirmed dead (the attach path); without it the
+    /// caller owns tmux (new session, restart, recreate).
+    Auto { create_dead_tmux: bool },
+    /// The Repair workspace button, or the confirm-gated MCP tool.
+    Explicit,
+}
+
+/// The entry points that run a repair. [`policy_for`] is the single mapping
+/// from an entry point to what it may do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Entry {
+    NewSession,
+    /// `spawn_review`: a new session in the source session's workspace.
+    SpawnReview,
+    Restart,
+    Recreate,
+    Attach,
+    Explicit,
+}
+
+pub fn policy_for(entry: Entry) -> Policy {
+    match entry {
+        Entry::NewSession | Entry::SpawnReview | Entry::Restart | Entry::Recreate => Policy::Auto {
+            create_dead_tmux: false,
+        },
+        Entry::Attach => Policy::Auto {
+            create_dead_tmux: true,
+        },
+        Entry::Explicit => Policy::Explicit,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -104,7 +148,13 @@ pub enum TmuxPolicy {
 /// One entry of `git worktree list --porcelain`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RegisteredWorktree {
+    /// The path exactly as git prints it (git records realpaths, so under a
+    /// symlinked root this differs from the path the user and the rows use).
     pub path: String,
+    /// The same path canonicalized ON THE HOST by the probe (`pwd -P` of the
+    /// nearest existing ancestor + the missing remainder). `None` when the
+    /// probe did not report one (older / hand-written output).
+    pub canon: Option<String>,
     /// `refs/heads/` stripped. `None` when detached or bare.
     pub branch: Option<String>,
     pub prunable: bool,
@@ -112,14 +162,31 @@ pub struct RegisteredWorktree {
     pub bare: bool,
 }
 
+impl RegisteredWorktree {
+    /// The form every comparison uses: canonical when known, else git's path.
+    pub fn key(&self) -> &str {
+        self.canon.as_deref().unwrap_or(&self.path)
+    }
+}
+
 /// Parsed probe output. Every boolean defaults to `false`, so a truncated
-/// or failed probe reads as "nothing is there" and the plan refuses rather
-/// than assuming health.
+/// or failed probe reads as "nothing is there / nothing confirmed" and the
+/// plan refuses or waits rather than assuming health or death.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Probe {
     pub root_exists: bool,
     pub root_git: bool,
     pub root_gitdir_ok: bool,
+    /// Host-canonical project root / worktree path (symlinks resolved, e.g.
+    /// macOS `/var` → `/private/var`, or `~/projects` → `/mnt/…`). Only for
+    /// comparisons; rows and reports keep the user-facing path.
+    pub root_canon: Option<String>,
+    pub wt_canon: Option<String>,
+    /// The worktree directory the probe used (user-facing form). For a
+    /// convention-derived (guessed) path it is resolved on the host: the
+    /// first of `.worktrees/<name>`, `.claude/worktrees/<name>` that exists
+    /// or is registered with git, else the guess.
+    pub wt_path: Option<String>,
     /// `<root>/.worktrees` exists (the alternate layout).
     pub layout_dot_worktrees: bool,
     pub wt_exists: bool,
@@ -131,8 +198,15 @@ pub struct Probe {
     pub branch_local: bool,
     pub branch_remote: bool,
     pub default_branch: Option<String>,
+    /// `tmux has-session` succeeded.
     pub tmux_alive: bool,
+    /// `tmux has-session` failed while the server answered (or no server
+    /// runs): the session is CONFIRMED gone. `tmux_alive == tmux_dead ==
+    /// false` means "unknown" (tmux missing / not answering) — no action.
+    pub tmux_dead: bool,
+    /// The live pane's cwd. `None` when tmux returned nothing: unknown.
     pub tmux_cwd: Option<String>,
+    /// Only meaningful with `tmux_cwd`: that directory exists on the host.
     pub tmux_cwd_exists: bool,
     pub worktrees: Vec<RegisteredWorktree>,
 }
@@ -158,16 +232,57 @@ pub fn probe_script(spec: &WorkspaceSpec) -> String {
             .unwrap_or(""),
     );
     let sess = quote(&spec.tmux_name);
+    let name = quote(
+        spec.worktree
+            .as_ref()
+            .map(|w| w.name.as_str())
+            .unwrap_or(""),
+    );
+    let guess = if spec.worktree.as_ref().is_some_and(|w| w.path_is_guess) {
+        "1"
+    } else {
+        "0"
+    };
     format!(
         r#"set +e
 root={root}
 wt={wt}
 br={br}
 sess={sess}
+name={name}
+guess={guess}
 yn() {{ if "$@" >/dev/null 2>&1; then echo 1; else echo 0; fi; }}
+# Canonical path on THIS host: `pwd -P` of the nearest existing ancestor plus
+# the missing remainder (realpath is absent on stock macOS < 13).
+canon() {{
+  [ -z "$1" ] && {{ echo; return; }}
+  _p="$1"; _r=""
+  while [ "$_p" != "/" ] && [ "$_p" != "." ] && [ ! -d "$_p" ]; do
+    _r="/$(basename -- "$_p")$_r"
+    _p="$(dirname -- "$_p")"
+  done
+  _c="$(CDPATH= cd -P -- "$_p" 2>/dev/null && pwd -P)" || _c="$_p"
+  [ -z "$_c" ] && _c="$_p"
+  if [ "$_c" = "/" ] && [ -n "$_r" ]; then _c=""; fi
+  printf '%s%s\n' "$_c" "$_r"
+}}
+# A convention-derived worktree path is only a guess: hosts use either
+# layout. Take the first of `.worktrees/<name>`, `.claude/worktrees/<name>`
+# that exists or that git has registered (in either path form).
+if [ "$guess" = 1 ] && [ -n "$name" ]; then
+  for cand in "$root/.worktrees/$name" "$root/.claude/worktrees/$name"; do
+    if [ -d "$cand" ] || git -C "$root" worktree list --porcelain 2>/dev/null | grep -Fxq -e "worktree $cand" -e "worktree $(canon "$cand")"; then
+      wt="$cand"
+      break
+    fi
+  done
+fi
+echo "wt_path=$wt"
 echo "root_exists=$(yn test -d "$root")"
 echo "root_git=$(yn test -e "$root/.git")"
 echo "root_gitdir_ok=$(yn git -C "$root" rev-parse --git-dir)"
+echo "root_canon=$(canon "$root")"
+echo "wt_canon=$(canon "$wt")"
 echo "layout_dot_worktrees=$(yn test -d "$root/.worktrees")"
 echo "wt_exists=$(yn test -d "$wt")"
 echo "wt_git=$(yn test -e "$wt/.git")"
@@ -182,16 +297,29 @@ fi
 def="$(git -C "$root" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
 [ -z "$def" ] && def="$(git -C "$root" rev-parse --abbrev-ref HEAD 2>/dev/null)"
 echo "default_branch=$def"
-if tmux has-session -t "=$sess" >/dev/null 2>&1; then
+if ! command -v tmux >/dev/null 2>&1; then
+  echo tmux_alive=0
+  echo tmux_dead=0
+elif tmux has-session -t "=$sess" >/dev/null 2>&1; then
   echo tmux_alive=1
+  echo tmux_dead=0
   cwd="$(tmux display-message -p -t "=$sess" '#{{pane_current_path}}' 2>/dev/null)"
   echo "tmux_cwd=$cwd"
-  echo "tmux_cwd_exists=$(yn test -n "$cwd" -a -d "$cwd")"
+  if [ -n "$cwd" ]; then echo "tmux_cwd_exists=$(yn test -d "$cwd")"; fi
 else
   echo tmux_alive=0
+  err="$(tmux list-sessions 2>&1 >/dev/null)"; rc=$?
+  if [ "$rc" -eq 0 ] || printf '%s' "$err" | grep -qiE 'no server running|error connecting to'; then
+    echo tmux_dead=1
+  else
+    echo tmux_dead=0
+  fi
 fi
 echo '{marker}'
-git -C "$root" worktree list --porcelain 2>/dev/null
+git -C "$root" worktree list --porcelain 2>/dev/null | while IFS= read -r l; do
+  printf '%s\n' "$l"
+  case "$l" in "worktree "*) echo "canon $(canon "${{l#worktree }}")";; esac
+done
 exit 0
 "#,
         marker = WORKTREES_MARKER,
@@ -227,11 +355,15 @@ pub fn parse_probe(stdout: &str) -> Probe {
                 p.default_branch = (!v.is_empty()).then(|| v.to_string());
             }
             "tmux_alive" => p.tmux_alive = flag(v),
+            "tmux_dead" => p.tmux_dead = flag(v),
             "tmux_cwd" => {
                 let v = v.trim();
                 p.tmux_cwd = (!v.is_empty()).then(|| v.to_string());
             }
             "tmux_cwd_exists" => p.tmux_cwd_exists = flag(v),
+            "root_canon" => p.root_canon = (!v.is_empty()).then(|| v.to_string()),
+            "wt_canon" => p.wt_canon = (!v.is_empty()).then(|| v.to_string()),
+            "wt_path" => p.wt_path = (!v.is_empty()).then(|| v.to_string()),
             _ => {}
         }
     }
@@ -258,7 +390,12 @@ pub fn parse_porcelain(input: &str) -> Vec<RegisteredWorktree> {
         let Some(w) = cur.as_mut() else {
             continue;
         };
-        if let Some(rest) = line.strip_prefix("branch ") {
+        if let Some(rest) = line.strip_prefix("canon ") {
+            // Emitted by the probe right after each `worktree` line.
+            if !rest.is_empty() {
+                w.canon = Some(rest.to_string());
+            }
+        } else if let Some(rest) = line.strip_prefix("branch ") {
             w.branch = Some(rest.trim_start_matches("refs/heads/").to_string());
         } else if line == "bare" {
             w.bare = true;
@@ -281,36 +418,44 @@ pub fn parse_porcelain(input: &str) -> Vec<RegisteredWorktree> {
 /// Where the branch for a recreated worktree comes from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum BranchSource {
-    /// `refs/heads/<branch>` exists: check it out.
+    /// `refs/heads/<branch>` exists: check it out. (automatic)
     Local,
     /// Only `refs/remotes/origin/<branch>` exists: create a tracking branch.
+    /// (automatic)
     Remote,
-    /// Neither exists: `git fetch origin <branch>` first; use `origin/<branch>`
-    /// if that produced it, else fork a NEW branch from `base` (local, then
-    /// `origin/<base>`), falling back to `default` and finally the main
-    /// checkout's `HEAD`.
+    /// Neither exists locally. Explicit only: ask origin with
+    /// `git ls-remote --exit-code`; if origin has it, fetch it and track it;
+    /// if origin confirms it is gone (or there is no origin), fork a NEW
+    /// branch from `base` (local, then `origin/<base>`), then `default`, then
+    /// `HEAD`. Any other ls-remote / fetch error aborts the repair.
     FetchOrBase { base: String, default: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Step {
-    /// `git worktree prune` — drop registrations whose directory is gone.
-    Prune,
-    /// `git worktree repair <path>` — re-link a moved / stale checkout.
+    /// `git worktree remove --force -- <path>` — drop OUR registration whose
+    /// directory is gone (`path` exactly as git lists it). Explicit only, and
+    /// never a repo-wide `git worktree prune`: that would also discard every
+    /// other worktree's stale registration (another session's, or one on an
+    /// unmounted volume).
+    Unregister { path: String },
+    /// `git worktree repair -- <path>` — re-link a moved / stale checkout.
+    /// Explicit only.
     RepairLinks { path: String },
-    /// `git worktree add <path> …` with the branch resolved per `from`.
+    /// `git worktree add -- <path> …` with the branch resolved per `from`.
     AddWorktree {
         path: String,
         branch: String,
         from: BranchSource,
     },
-    /// The branch is already checked out in another linked worktree: use
-    /// that directory instead of creating a second checkout.
+    /// The branch is checked out in another linked worktree: use that
+    /// directory (and re-path the row). Explicit only; guarded against
+    /// checkouts that belong to another fleet workspace.
     AdoptPath { path: String },
-    /// `tmux new-session -c <cwd>` — the session is gone.
+    /// `tmux new-session -c <cwd>` — the session is confirmed gone.
     TmuxCreate { cwd: String },
-    /// `tmux respawn-pane -k -c <cwd>` — the pane's cwd no longer exists
-    /// (or was just recreated under it).
+    /// `tmux respawn-pane -k -c <cwd>` — the live pane's cwd was reported and
+    /// is confirmed missing. Explicit only (it restarts the pane's process).
     TmuxRespawn { cwd: String },
 }
 
@@ -318,15 +463,15 @@ impl Step {
     /// Human-readable one-liner for the report / event detail.
     pub fn describe(&self) -> String {
         match self {
-            Step::Prune => "git worktree prune".into(),
-            Step::RepairLinks { path } => format!("git worktree repair {path}"),
+            Step::Unregister { path } => format!("git worktree remove --force -- {path}"),
+            Step::RepairLinks { path } => format!("git worktree repair -- {path}"),
             Step::AddWorktree { path, branch, from } => match from {
-                BranchSource::Local => format!("git worktree add {path} {branch}"),
+                BranchSource::Local => format!("git worktree add -- {path} {branch}"),
                 BranchSource::Remote => {
-                    format!("git worktree add --track -b {branch} {path} origin/{branch}")
+                    format!("git worktree add --track -b {branch} -- {path} origin/{branch}")
                 }
                 BranchSource::FetchOrBase { base, .. } => format!(
-                    "git fetch origin {branch}; git worktree add {path} (origin/{branch} or new branch from {base})"
+                    "git worktree add -- {path} (origin/{branch} if origin has it, else a new branch {branch} from {base})"
                 ),
             },
             Step::AdoptPath { path } => format!("adopt existing checkout at {path}"),
@@ -338,7 +483,7 @@ impl Step {
     fn is_git(&self) -> bool {
         matches!(
             self,
-            Step::Prune | Step::RepairLinks { .. } | Step::AddWorktree { .. }
+            Step::Unregister { .. } | Step::RepairLinks { .. } | Step::AddWorktree { .. }
         )
     }
 }
@@ -346,14 +491,21 @@ impl Step {
 /// The plan for one workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
+    /// Steps to apply now, in order.
     pub steps: Vec<Step>,
-    /// The directory the pane must run in once the steps are applied.
+    /// The directory the pane must run in once the steps are applied (the
+    /// user-facing form).
     pub cwd: String,
     /// Branch actually checked out at `cwd` when it differs from the spec
-    /// (the user switched branches inside the worktree). Reported and
-    /// written back to the row; never "fixed".
+    /// (the user switched branches inside the worktree). Reported, never
+    /// "fixed".
     pub branch_drift: Option<String>,
     pub warnings: Vec<String>,
+    /// Automatic policy only: the workspace needs a step that only an
+    /// explicit repair may take; nothing git-side is applied.
+    pub needs_explicit_repair: bool,
+    /// What an explicit repair would do (for the warning / report).
+    pub deferred: Vec<Step>,
 }
 
 impl Plan {
@@ -374,13 +526,20 @@ fn norm(p: &str) -> &str {
     }
 }
 
+fn basename(p: &str) -> &str {
+    norm(p).rsplit('/').next().unwrap_or("")
+}
+
 fn refuse(code: &str, msg: impl Into<String>) -> IpcError {
     IpcError::new(code, msg)
 }
 
-/// Decide the minimal fix. Pure: every branch of this function is covered
-/// by a unit test with a hand-built [`Probe`].
-pub fn plan(spec: &WorkspaceSpec, p: &Probe, policy: TmuxPolicy) -> Result<Plan, IpcError> {
+const INDEX_LOCK_WARNING: &str = "index.lock present (a git operation may be running)";
+
+/// Decide the fix. Pure: every branch of this function is covered by a unit
+/// test with a hand-built [`Probe`]. Refusals (`Err`) apply in every policy;
+/// explicit-only steps are deferred under [`Policy::Auto`].
+pub fn plan(spec: &WorkspaceSpec, p: &Probe, policy: Policy) -> Result<Plan, IpcError> {
     if !p.root_exists || !p.root_git || !p.root_gitdir_ok {
         return Err(refuse(
             codes::E_REPO_MISSING,
@@ -392,25 +551,66 @@ pub fn plan(spec: &WorkspaceSpec, p: &Probe, policy: TmuxPolicy) -> Result<Plan,
             ),
         ));
     }
-    let mut steps = Vec::new();
+    let explicit = policy == Policy::Explicit;
+    // (step, may an automatic repair take it?)
+    let mut git: Vec<(Step, bool)> = Vec::new();
     let mut warnings = Vec::new();
     let mut branch_drift = None;
-    let mut recreated_dir = false;
+    if p.index_lock {
+        warnings.push(INDEX_LOCK_WARNING.to_string());
+    }
+    // For a guessed (convention-derived) path the probe resolved the real
+    // layout on the host — `.worktrees/<name>` first, then
+    // `.claude/worktrees/<name>`, the first that exists or is registered.
+    let user_wt_path: Option<String> = spec.worktree.as_ref().map(|w| {
+        if w.path_is_guess {
+            p.wt_path.clone().unwrap_or_else(|| w.path.clone())
+        } else {
+            w.path.clone()
+        }
+    });
 
     let cwd = match &spec.worktree {
         None => spec.project_root.clone(),
-        Some(w) => {
-            let expected = norm(&w.path);
-            let registered = p.worktrees.iter().find(|r| norm(&r.path) == expected);
+        Some(w0) => {
+            // Every `w.path` below is the resolved, user-facing path.
+            let resolved = WorktreeSpec {
+                path: user_wt_path.clone().unwrap_or_else(|| w0.path.clone()),
+                ..w0.clone()
+            };
+            let w = &resolved;
+            // Compare canonical to canonical: git prints realpaths while the
+            // row keeps the user-facing path. A raw comparison under a
+            // symlinked root would miss our own registration and "adopt" it,
+            // or miss the main checkout and adopt THAT.
+            let expected_key = p.wt_canon.clone().unwrap_or_else(|| w.path.clone());
+            let expected = norm(&expected_key);
+            let root_key = p
+                .root_canon
+                .clone()
+                .unwrap_or_else(|| spec.project_root.clone());
+            let registered = p.worktrees.iter().find(|r| norm(r.key()) == expected);
+            // (o) A locked worktree whose directory is gone: real git lists it
+            // as `locked`, not `prunable`. Refused first, in every policy.
+            if let Some(r) = registered {
+                if r.locked && !p.wt_exists {
+                    return Err(refuse(
+                        codes::E_WORKSPACE_LOCKED,
+                        format!(
+                            "worktree {} is registered but its directory is missing and \
+                             it is locked (git worktree unlock -- {} to allow repair)",
+                            r.path, r.path
+                        ),
+                    ));
+                }
+            }
             let elsewhere = p.worktrees.iter().find(|r| {
-                norm(&r.path) != expected && !r.prunable && r.branch.as_deref() == Some(&w.branch)
+                norm(r.key()) != expected && !r.prunable && r.branch.as_deref() == Some(&w.branch)
             });
             if let Some(other) = elsewhere {
-                // The branch identifies the workspace; git refuses a second
-                // checkout of it. A linked worktree elsewhere IS this
-                // workspace (moved dir, other layout) — adopt it. The main
-                // checkout is the user's, so refuse rather than hijack it.
-                if norm(&other.path) == norm(&spec.project_root) {
+                // git refuses a second checkout of a branch. The main checkout
+                // is the user's: never hijack it.
+                if norm(other.key()) == norm(&root_key) {
                     return Err(refuse(
                         codes::E_BRANCH_CHECKED_OUT,
                         format!(
@@ -420,12 +620,19 @@ pub fn plan(spec: &WorkspaceSpec, p: &Probe, policy: TmuxPolicy) -> Result<Plan,
                         ),
                     ));
                 }
-                if p.index_lock {
-                    warnings.push("index.lock present (a git operation may be running)".into());
-                }
-                steps.push(Step::AdoptPath {
-                    path: other.path.clone(),
-                });
+                // A linked worktree elsewhere may be this workspace moved, or
+                // someone else's: ambiguous, so explicit-only (and guarded in
+                // `ensure_workspace`).
+                warnings.push(format!(
+                    "branch {} is checked out at {}, not at {}; only an explicit repair adopts it",
+                    w.branch, other.path, w.path
+                ));
+                git.push((
+                    Step::AdoptPath {
+                        path: other.path.clone(),
+                    },
+                    false,
+                ));
                 other.path.clone()
             } else {
                 let from = if p.branch_local {
@@ -446,10 +653,23 @@ pub fn plan(spec: &WorkspaceSpec, p: &Probe, policy: TmuxPolicy) -> Result<Plan,
                         default,
                     }
                 };
+                let from_existing_branch = !matches!(from, BranchSource::FetchOrBase { .. });
+                if !from_existing_branch {
+                    warnings.push(format!(
+                        "branch {} exists neither locally nor as origin/{}; only an explicit \
+                         repair asks origin for it (and recreates it from the base branch if \
+                         origin confirms it is gone)",
+                        w.branch, w.branch
+                    ));
+                }
                 // Where a fresh checkout goes: the expected path, unless the
                 // path was only guessed and the project already uses the
                 // `.worktrees/` layout.
-                let add_path = if w.path_is_guess && p.layout_dot_worktrees {
+                let add_path = if w.path_is_guess
+                    && p.layout_dot_worktrees
+                    && !p.wt_exists
+                    && registered.is_none()
+                {
                     format!("{}/.worktrees/{}", spec.project_root, w.name)
                 } else {
                     w.path.clone()
@@ -460,24 +680,7 @@ pub fn plan(spec: &WorkspaceSpec, p: &Probe, policy: TmuxPolicy) -> Result<Plan,
                     from,
                 };
                 match registered {
-                    Some(r) if r.prunable => {
-                        // (d) registered, directory gone.
-                        if r.locked {
-                            return Err(refuse(
-                                codes::E_WORKSPACE_LOCKED,
-                                format!(
-                                    "worktree {} is registered but its directory is missing and \
-                                     it is locked (git worktree unlock {} to allow repair)",
-                                    r.path, r.path
-                                ),
-                            ));
-                        }
-                        steps.push(Step::Prune);
-                        steps.push(add);
-                        recreated_dir = true;
-                        add_path
-                    }
-                    Some(r) if p.wt_exists && p.wt_gitdir_ok => {
+                    Some(r) if p.wt_exists && p.wt_gitdir_ok && !r.prunable => {
                         // Healthy. Note branch drift, never touch it.
                         if r.branch.as_deref() != Some(&w.branch) {
                             branch_drift = r.branch.clone();
@@ -487,42 +690,81 @@ pub fn plan(spec: &WorkspaceSpec, p: &Probe, policy: TmuxPolicy) -> Result<Plan,
                                 w.branch
                             ));
                         }
-                        if p.index_lock {
-                            warnings
-                                .push("index.lock present (a git operation may be running)".into());
-                        }
                         w.path.clone()
                     }
-                    Some(_) if p.wt_exists => {
+                    Some(_) if p.wt_exists && !p.wt_empty && p.wt_git => {
                         // (c) registered and present but the `.git` link is
                         // stale (moved repo / rewritten admin dir).
-                        steps.push(Step::RepairLinks {
-                            path: w.path.clone(),
-                        });
+                        warnings.push(format!(
+                            "{} is registered but its git link is stale; only an explicit \
+                             repair runs git worktree repair",
+                            w.path
+                        ));
+                        git.push((
+                            Step::RepairLinks {
+                                path: w.path.clone(),
+                            },
+                            false,
+                        ));
                         w.path.clone()
                     }
-                    Some(_) => {
-                        // Registered, not flagged prunable, directory gone —
-                        // git just has not noticed yet.
-                        steps.push(Step::Prune);
-                        steps.push(add);
-                        recreated_dir = true;
+                    Some(_) if p.wt_exists && !p.wt_empty => {
+                        return Err(refuse(
+                            codes::E_REPAIR_FAILED,
+                            format!(
+                                "{} exists, is not empty and has no .git link; move it aside \
+                                 (it is never deleted automatically) and repair again",
+                                w.path
+                            ),
+                        ));
+                    }
+                    Some(r) => {
+                        // (a)/(d) registered, directory gone (prunable, or git
+                        // predates the flag) or left empty. Clearing a
+                        // registration is explicit-only.
+                        warnings.push(format!(
+                            "git still lists {} but its directory is gone; only an explicit \
+                             repair unregisters that entry and re-adds the worktree",
+                            r.path
+                        ));
+                        git.push((
+                            Step::Unregister {
+                                path: r.path.clone(),
+                            },
+                            false,
+                        ));
+                        git.push((add, false));
                         add_path
                     }
-                    None if !p.wt_exists || p.wt_empty => {
-                        // (a)/(b)/(l) nothing there, or an empty leftover
-                        // from an interrupted add (git accepts an empty dir).
-                        steps.push(Step::Prune);
-                        steps.push(add);
-                        recreated_dir = true;
+                    None if !p.wt_exists => {
+                        // (b) absent on disk and not registered: a pure
+                        // create — automatic when the branch already exists.
+                        git.push((add, from_existing_branch));
+                        add_path
+                    }
+                    None if p.wt_empty => {
+                        // (l) empty leftover from an interrupted add. git
+                        // accepts an empty target; not "absent on disk", so
+                        // explicit only. TOCTOU: if the dir fills between the
+                        // probe and the add, git refuses a non-empty target —
+                        // benign, nothing deletes anything.
+                        git.push((add, false));
                         add_path
                     }
                     None if p.wt_git => {
                         // (c) a checkout with a `.git` file that git no
-                        // longer lists: try to re-link; verify decides.
-                        steps.push(Step::RepairLinks {
-                            path: w.path.clone(),
-                        });
+                        // longer lists: explicit re-link; verify decides.
+                        warnings.push(format!(
+                            "{} has a .git link git no longer lists; only an explicit repair \
+                             runs git worktree repair",
+                            w.path
+                        ));
+                        git.push((
+                            Step::RepairLinks {
+                                path: w.path.clone(),
+                            },
+                            false,
+                        ));
                         w.path.clone()
                     }
                     None => {
@@ -540,13 +782,50 @@ pub fn plan(spec: &WorkspaceSpec, p: &Probe, policy: TmuxPolicy) -> Result<Plan,
         }
     };
 
-    if policy == TmuxPolicy::Ensure {
-        if !p.tmux_alive {
-            steps.push(Step::TmuxCreate { cwd: cwd.clone() });
-        } else if recreated_dir || !p.tmux_cwd_exists {
-            // A pane whose cwd was deleted keeps a dead inode even after the
-            // path is recreated, so a recreated dir always means respawn.
-            steps.push(Step::TmuxRespawn { cwd: cwd.clone() });
+    let blocked = !explicit && git.iter().any(|(_, auto)| !*auto);
+    let mut steps = Vec::new();
+    let mut deferred = Vec::new();
+    let cwd = if blocked {
+        deferred.extend(git.into_iter().map(|(s, _)| s));
+        // Nothing moves: the pane's directory stays the expected one.
+        user_wt_path.clone().unwrap_or(cwd)
+    } else {
+        steps.extend(git.into_iter().map(|(s, _)| s));
+        cwd
+    };
+
+    // ── tmux: act only on confirmed facts ───────────────────────────────
+    let pane_cwd_missing = p.tmux_alive && p.tmux_cwd.is_some() && !p.tmux_cwd_exists;
+    if p.tmux_alive && p.tmux_cwd.is_none() {
+        warnings.push("could not read the pane's working directory; not respawning it".into());
+    }
+    if !p.tmux_alive && !p.tmux_dead {
+        warnings.push(
+            "tmux state unknown (tmux missing or not answering); not creating a session".into(),
+        );
+    }
+    match policy {
+        Policy::Explicit => {
+            if p.tmux_dead {
+                steps.push(Step::TmuxCreate { cwd: cwd.clone() });
+            } else if pane_cwd_missing {
+                // A pane whose cwd was deleted keeps the dead inode even after
+                // the path is recreated; respawn into the verified directory.
+                steps.push(Step::TmuxRespawn { cwd: cwd.clone() });
+            }
+        }
+        Policy::Auto { create_dead_tmux } => {
+            if create_dead_tmux && p.tmux_dead && !blocked {
+                steps.push(Step::TmuxCreate { cwd: cwd.clone() });
+            }
+            if pane_cwd_missing {
+                warnings.push(format!(
+                    "the pane's directory {} no longer exists; Repair workspace (or Restart) \
+                     respawns it",
+                    p.tmux_cwd.as_deref().unwrap_or_default()
+                ));
+                deferred.push(Step::TmuxRespawn { cwd: cwd.clone() });
+            }
         }
     }
 
@@ -555,20 +834,26 @@ pub fn plan(spec: &WorkspaceSpec, p: &Probe, policy: TmuxPolicy) -> Result<Plan,
         cwd,
         branch_drift,
         warnings,
+        needs_explicit_repair: blocked,
+        deferred,
     })
 }
 
 /// Render the git steps of a plan into one `bash` script. Prints
 /// `outcome=<...>` lines for the parts whose result is only known at run
-/// time (which branch source the add used).
+/// time (which branch source the add used). `--` separates options from
+/// paths / refs wherever git accepts it.
 pub fn render_git_script(root: &str, steps: &[Step]) -> String {
     let rq = quote(root);
     let mut s = String::from("set -e\n");
     for step in steps {
         match step {
-            Step::Prune => s.push_str(&format!("git -C {rq} worktree prune 1>&2\n")),
+            Step::Unregister { path } => s.push_str(&format!(
+                "git -C {rq} worktree remove --force -- {} 1>&2\n",
+                quote(path)
+            )),
             Step::RepairLinks { path } => s.push_str(&format!(
-                "git -C {rq} worktree repair {} 1>&2\n",
+                "git -C {rq} worktree repair -- {} 1>&2\n",
                 quote(path)
             )),
             Step::AddWorktree { path, branch, from } => {
@@ -577,23 +862,33 @@ pub fn render_git_script(root: &str, steps: &[Step]) -> String {
                 match from {
                     BranchSource::Local => {
                         s.push_str(&format!(
-                            "git -C {rq} worktree add {pq} {bq} 1>&2\necho outcome=branch_local\n"
+                            "git -C {rq} worktree add -- {pq} {bq} 1>&2\necho outcome=branch_local\n"
                         ));
                     }
                     BranchSource::Remote => {
                         s.push_str(&format!(
-                            "git -C {rq} worktree add --track -b {bq} {pq} origin/{bq} 1>&2\necho outcome=branch_remote\n"
+                            "b={bq}\ngit -C {rq} worktree add --track -b \"$b\" -- {pq} \"origin/$b\" 1>&2\necho outcome=branch_remote\n"
                         ));
                     }
                     BranchSource::FetchOrBase { base, default } => {
                         let baseq = quote(base);
                         let defq = quote(default);
                         s.push_str(&format!(
-                            "git -C {rq} fetch origin {bq} >/dev/null 2>&1 || true\n\
-                             if git -C {rq} show-ref --verify --quiet refs/remotes/origin/{bq}; then\n\
-                             \x20 git -C {rq} worktree add --track -b {bq} {pq} origin/{bq} 1>&2 || exit 1\n\
-                             \x20 echo outcome=branch_remote\n\
+                            "b={bq}\n\
+                             if git -C {rq} remote get-url origin >/dev/null 2>&1; then\n\
+                             \x20 lr=0; git -C {rq} ls-remote --exit-code --heads -- origin \"refs/heads/$b\" >/dev/null 2>&1 || lr=$?\n\
                              else\n\
+                             \x20 lr=2\n\
+                             fi\n\
+                             case \"$lr\" in\n\
+                             0)\n\
+                             \x20 if ! git -C {rq} fetch -- origin \"+refs/heads/$b:refs/remotes/origin/$b\" 1>&2; then\n\
+                             \x20   echo \"repair: fetching origin/$b failed; not recreating the branch\" >&2; exit 1\n\
+                             \x20 fi\n\
+                             \x20 git -C {rq} worktree add --track -b \"$b\" -- {pq} \"origin/$b\" 1>&2\n\
+                             \x20 echo outcome=branch_remote\n\
+                             \x20 ;;\n\
+                             2)\n\
                              \x20 basebr={baseq}\n\
                              \x20 defbr={defq}\n\
                              \x20 if git -C {rq} show-ref --verify --quiet \"refs/heads/$basebr\"; then start=\"$basebr\"\n\
@@ -601,9 +896,13 @@ pub fn render_git_script(root: &str, steps: &[Step]) -> String {
                              \x20 elif git -C {rq} show-ref --verify --quiet \"refs/heads/$defbr\"; then start=\"$defbr\"\n\
                              \x20 else start=HEAD\n\
                              \x20 fi\n\
-                             \x20 git -C {rq} worktree add {pq} -b {bq} \"$start\" 1>&2 || exit 1\n\
+                             \x20 git -C {rq} worktree add -b \"$b\" -- {pq} \"$start\" 1>&2\n\
                              \x20 echo \"outcome=branch_from_base:$start\"\n\
-                             fi\n"
+                             \x20 ;;\n\
+                             *)\n\
+                             \x20 echo \"repair: cannot confirm whether origin still has $b (git ls-remote exit $lr); not recreating it\" >&2; exit 1\n\
+                             \x20 ;;\n\
+                             esac\n"
                         ));
                     }
                 }
@@ -629,57 +928,104 @@ pub struct ScriptOutput {
 /// script the outputs and record every call.
 #[async_trait]
 pub trait RepairExec: Send + Sync {
-    /// Run a bash script (`bash -lc`) on the host.
+    /// Run the read-only probe script (`bash -lc`) on the host.
     async fn run_script(&self, script: &str) -> Result<ScriptOutput, IpcError>;
+    /// Run the git apply script. Separate so production can give it a longer
+    /// wall clock; test doubles share one queue with `run_script`.
+    async fn apply_script(&self, script: &str) -> Result<ScriptOutput, IpcError> {
+        self.run_script(script).await
+    }
     async fn tmux_new_session(&self, name: &str, cwd: &str, pane_cmd: &str)
         -> Result<(), IpcError>;
     async fn tmux_respawn(&self, name: &str, cwd: &str, pane_cmd: &str) -> Result<(), IpcError>;
 }
 
 /// Production executor: local `bash -lc`, or `ssh <host> bash -lc '<script>'`
-/// through the shared ControlMaster; tmux through the same `TmuxExec` the
-/// lifecycle commands use.
-pub struct HostExec {
+/// through any [`SshExec`] (the shared ControlMaster client in production,
+/// `FakeSsh` in tests); tmux through the same `TmuxExec` the lifecycle
+/// commands use. Every script is bounded by a wall clock.
+pub struct HostExec<'a> {
     host: String,
-    ssh: Arc<SshClient>,
+    ssh: &'a dyn SshExec,
     tmux: Box<dyn TmuxExec>,
 }
 
-impl HostExec {
-    pub fn new(host: &str, ssh: &Arc<SshClient>) -> Self {
+impl<'a> HostExec<'a> {
+    /// Production: the shared client, tmux via `sessions::exec_for`.
+    pub fn new(host: &str, ssh: &'a Arc<SshClient>) -> Self {
+        Self::with(host, &**ssh, crate::service::sessions::exec_for(host, ssh))
+    }
+
+    /// Any [`SshExec`] (callers pass `&*ssh`) and an explicit tmux executor.
+    pub fn with(host: &str, ssh: &'a dyn SshExec, tmux: Box<dyn TmuxExec>) -> Self {
         Self {
             host: host.to_string(),
-            ssh: Arc::clone(ssh),
-            tmux: crate::service::sessions::exec_for(host, ssh),
+            ssh,
+            tmux,
         }
     }
-}
 
-#[async_trait]
-impl RepairExec for HostExec {
-    async fn run_script(&self, script: &str) -> Result<ScriptOutput, IpcError> {
+    async fn run_bash(
+        &self,
+        script: &str,
+        local_wall: Duration,
+        connect: Duration,
+    ) -> Result<ScriptOutput, IpcError> {
         let out = if self.host == "local" {
-            tokio::process::Command::new("bash")
+            let child = tokio::process::Command::new("bash")
                 .args(["-lc", script])
-                .output()
+                .kill_on_drop(true)
+                .output();
+            tokio::time::timeout(local_wall, child)
                 .await
+                .map_err(|_| {
+                    IpcError::new(
+                        codes::E_TIMEOUT,
+                        format!("local bash exceeded {local_wall:?}"),
+                    )
+                })?
                 .map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}")))?
         } else {
             // Quote the WHOLE script so it crosses the ssh argv-join as one
-            // word (see RemoteTmux::remote_bash).
-            self.ssh
-                .run(
-                    &self.host,
-                    &["bash", "-lc", &quote(script)],
-                    SCRIPT_CONNECT_TIMEOUT,
-                )
-                .await?
+            // word (see RemoteTmux::remote_bash). The client bounds the whole
+            // command by `SshClient::default_wall_clock(connect)`.
+            let out = self
+                .ssh
+                .run(&self.host, &["bash", "-lc", &quote(script)], connect)
+                .await?;
+            // `SshExec` contract: an unreachable host is ssh exiting 255 with
+            // the connect error on stderr — `Ok`, not `Err`. Surface it as a
+            // transport failure, so the probe reports E_HOST_OFFLINE and an
+            // interrupted apply says it may be partially applied.
+            if out.status.code() == Some(255) {
+                return Err(IpcError::new(
+                    codes::E_SSH,
+                    format!(
+                        "ssh {} failed: {}",
+                        self.host,
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ),
+                ));
+            }
+            out
         };
         Ok(ScriptOutput {
             ok: out.status.success(),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         })
+    }
+}
+
+#[async_trait]
+impl RepairExec for HostExec<'_> {
+    async fn run_script(&self, script: &str) -> Result<ScriptOutput, IpcError> {
+        self.run_bash(script, PROBE_WALL_CLOCK, PROBE_CONNECT_TIMEOUT)
+            .await
+    }
+    async fn apply_script(&self, script: &str) -> Result<ScriptOutput, IpcError> {
+        self.run_bash(script, APPLY_WALL_CLOCK, APPLY_CONNECT_TIMEOUT)
+            .await
     }
     async fn tmux_new_session(
         &self,
@@ -712,22 +1058,31 @@ pub struct RepairReport {
     /// the error message carries the same value, so the user can see which
     /// base-path setting / convention produced it.
     pub project_root: String,
-    /// The verified directory the pane runs (or must run) in.
+    /// The directory the pane runs (or must run) in — user-facing form, and
+    /// always one the probe resolved on the host (never a bare layout guess).
     pub cwd: String,
+    /// The same directory as the host resolves it (`pwd -P`), when known.
+    pub cwd_physical: Option<String>,
     /// `true` when nothing needed doing.
     pub healthy: bool,
     /// Ordered, human-readable actions that were applied.
     pub actions: Vec<String>,
     pub warnings: Vec<String>,
+    /// Automatic run only: the workspace needs an explicit repair; nothing
+    /// git-side was applied. `deferred` says what the explicit repair would do.
+    pub needs_explicit_repair: bool,
+    pub deferred: Vec<String>,
     /// `branch_local` | `branch_remote` | `branch_from_base:<start>` when a
     /// worktree was (re)created.
     pub branch_source: Option<String>,
     /// `created` | `respawned` when tmux was touched.
     pub tmux: Option<String>,
-    /// tmux state after the repair (for `TmuxPolicy::Leave` callers).
+    /// tmux state after the repair (callers that own tmux read these).
     pub tmux_alive: bool,
-    /// The pane's cwd no longer exists or was recreated; a `Leave` caller
-    /// must respawn / recreate with `cwd`.
+    /// The session is confirmed gone (not merely unknown).
+    pub tmux_dead: bool,
+    /// A live pane's reported cwd no longer exists (or the dir under it was
+    /// recreated); it runs in a dead inode until respawned.
     pub tmux_cwd_stale: bool,
     pub worktree_row_updated: bool,
     /// Alive sessions on the same host sharing this workspace (reviews, twins)
@@ -739,12 +1094,29 @@ pub struct RepairReport {
 // ensure_workspace: probe → plan → apply → verify → record
 // ---------------------------------------------------------------------------
 
+/// Probe-time transport failure: nothing was changed.
 fn host_offline(spec: &WorkspaceSpec, e: IpcError) -> IpcError {
     if e.code == codes::E_SSH || e.code == codes::E_SSH_TIMEOUT {
         IpcError::new(
             codes::E_HOST_OFFLINE,
             format!(
                 "host {} unreachable during workspace repair ({}); nothing was changed",
+                spec.host_alias, e.message
+            ),
+        )
+    } else {
+        e
+    }
+}
+
+/// Apply-time transport failure / timeout: git steps may have run.
+fn apply_interrupted(spec: &WorkspaceSpec, e: IpcError) -> IpcError {
+    if e.code == codes::E_SSH || e.code == codes::E_SSH_TIMEOUT || e.code == codes::E_TIMEOUT {
+        IpcError::new(
+            codes::E_REPAIR_FAILED,
+            format!(
+                "lost {} while applying the workspace repair ({}); the repair may be \
+                 partially applied — run Repair workspace again",
                 spec.host_alias, e.message
             ),
         )
@@ -777,9 +1149,19 @@ fn record_event(store: &Mutex<Store>, session_id: Option<i64>, kind: &str, detai
     };
     if let Ok(s) = store.lock() {
         if let Err(e) = s.insert_session_event(id, kind, Some(detail)) {
-            eprintln!("[repair] event insert failed for session {id}: {e}");
+            tracing::warn!("[repair] event insert failed for session {id}: {e}");
         }
     }
+}
+
+fn fail(store: &Mutex<Store>, spec: &WorkspaceSpec, e: IpcError) -> IpcError {
+    record_event(
+        store,
+        spec.session_id,
+        EVENT_REPAIR_FAILED,
+        &format!("{}: {}", e.code, e.message),
+    );
+    e
 }
 
 fn healthy_after(spec: &WorkspaceSpec, cwd: &str, p: &Probe) -> bool {
@@ -791,144 +1173,244 @@ fn healthy_after(spec: &WorkspaceSpec, cwd: &str, p: &Probe) -> bool {
         Some(_) => {
             p.wt_exists
                 && p.wt_gitdir_ok
-                && p.worktrees
-                    .iter()
-                    .any(|r| norm(&r.path) == norm(cwd) && !r.prunable)
+                && p.worktrees.iter().any(|r| {
+                    norm(r.key()) == norm(p.wt_canon.as_deref().unwrap_or(cwd)) && !r.prunable
+                })
         }
     }
 }
 
-/// Make the workspace described by `spec` exist and be a healthy git
-/// worktree; with [`TmuxPolicy::Ensure`] also make the tmux session run in
-/// it. Idempotent: a healthy workspace costs one probe and writes nothing.
+/// Canonicalize a LOCAL path the way the probe does on a host: resolve the
+/// nearest existing ancestor, append the missing remainder.
+fn local_canon(p: &str) -> String {
+    let mut cur = std::path::PathBuf::from(p);
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(c) = std::fs::canonicalize(&cur) {
+            let mut out = c;
+            for r in rest.iter().rev() {
+                out.push(r);
+            }
+            return out.to_string_lossy().into_owned();
+        }
+        match (cur.file_name().map(|f| f.to_os_string()), cur.parent()) {
+            (Some(f), Some(parent)) => {
+                rest.push(f);
+                cur = parent.to_path_buf();
+            }
+            _ => return p.to_string(),
+        }
+    }
+}
+
+/// Explicit adoption guard: `Some(reason)` when the checkout at `adopt_key`
+/// (host-canonical) belongs to another workspace fleet knows about — another
+/// worktree row on the same branch, or any other running / not-yet-dismissed
+/// ghost session mapped to that checkout (by portable key, or by canonical
+/// local path). Two rows sharing one path would let a safe-kill of either
+/// delete the other's tree.
+fn adoption_conflict(
+    s: &Store,
+    spec: &WorkspaceSpec,
+    w: &WorktreeSpec,
+    adopt_key: &str,
+) -> Result<Option<String>, IpcError> {
+    let Some(pid) = spec.project_id else {
+        return Ok(None);
+    };
+    let rows = s.list_worktrees_for_project(pid)?;
+    if let Some(other) = rows
+        .iter()
+        .find(|r| r.name != w.name && r.branch.as_deref() == Some(w.branch.as_str()))
+    {
+        return Ok(Some(format!("fleet tracks it as worktree {}", other.name)));
+    }
+    let local = spec.host_alias == "local";
+    let adopt_name = basename(adopt_key);
+    let target = if local {
+        local_canon(adopt_key)
+    } else {
+        adopt_key.to_string()
+    };
+    for o in s.list_sessions_for_host(&spec.host_alias)? {
+        if Some(o.id) == spec.session_id || o.kind == "bg" || o.project_id != Some(pid) {
+            continue;
+        }
+        // A key equal to ours is our own workspace group (reviews, twins).
+        let by_key = adopt_name != w.name && o.worktree_key.as_deref() == Some(adopt_name);
+        let by_row = local
+            && o.worktree_id
+                .and_then(|wid| rows.iter().find(|r| r.id == wid))
+                .is_some_and(|r| r.name != w.name && norm(&local_canon(&r.path)) == norm(&target));
+        if by_key || by_row {
+            return Ok(Some(format!(
+                "session {} ({}) uses it",
+                o.tmux_name, o.status
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// Make the workspace described by `spec` healthy within `policy`.
+/// Idempotent: a healthy workspace costs one probe and writes nothing.
 ///
 /// Errors: `E_HOST_OFFLINE` (probe could not reach the host — no change),
 /// `E_REPO_MISSING`, `E_BRANCH_CHECKED_OUT`, `E_WORKSPACE_LOCKED`,
-/// `E_REPAIR_FAILED` (a git step failed or the result did not verify),
-/// `E_TMUX`. A failure never deletes or ghosts the session row.
+/// `E_REPAIR_FAILED` (a git step failed, the result did not verify, or the
+/// apply was interrupted — "may be partially applied"), `E_TMUX`. Under
+/// [`Policy::Auto`] a workspace that needs an explicit step is NOT an error:
+/// the report carries `needs_explicit_repair` (see [`require_no_explicit`]).
+/// A failure never deletes or ghosts the session row.
 pub async fn ensure_workspace(
     spec: &WorkspaceSpec,
-    policy: TmuxPolicy,
+    policy: Policy,
     siblings: Vec<i64>,
     store: &Mutex<Store>,
     exec: &dyn RepairExec,
 ) -> Result<RepairReport, IpcError> {
     let probe = run_probe(exec, spec).await?;
-    let fix = match plan(spec, &probe, policy) {
-        Ok(p) => p,
-        Err(e) => {
-            record_event(
-                store,
-                spec.session_id,
-                EVENT_REPAIR_FAILED,
-                &format!("{}: {}", e.code, e.message),
-            );
-            return Err(e);
-        }
-    };
+    let fix = plan(spec, &probe, policy).map_err(|e| fail(store, spec, e))?;
+    let explicit = policy == Policy::Explicit;
 
     let mut report = RepairReport {
         session_id: spec.session_id,
         host_alias: spec.host_alias.clone(),
-        project_root: spec.project_root.clone(),
         tmux_name: spec.tmux_name.clone(),
+        project_root: spec.project_root.clone(),
         cwd: fix.cwd.clone(),
-        healthy: fix.is_noop(),
+        cwd_physical: if spec.worktree.is_some() {
+            probe.wt_canon.clone()
+        } else {
+            probe.root_canon.clone()
+        },
+        healthy: fix.is_noop() && !fix.needs_explicit_repair,
         actions: Vec::new(),
         warnings: fix.warnings.clone(),
+        needs_explicit_repair: fix.needs_explicit_repair,
+        deferred: fix.deferred.iter().map(Step::describe).collect(),
         branch_source: None,
         tmux: None,
         tmux_alive: probe.tmux_alive,
-        tmux_cwd_stale: !probe.tmux_alive || !probe.tmux_cwd_exists,
+        tmux_dead: probe.tmux_dead,
+        tmux_cwd_stale: probe.tmux_alive && probe.tmux_cwd.is_some() && !probe.tmux_cwd_exists,
         worktree_row_updated: false,
         sibling_session_ids: siblings,
     };
+    if fix.needs_explicit_repair {
+        // Nothing git-side runs automatically; the caller decides.
+        return Ok(report);
+    }
 
-    // ── apply git steps, then verify ────────────────────────────────────
+    // ── adoption guard (explicit only: AdoptPath is never automatic) ────
+    let adopt_path = fix.steps.iter().find_map(|s| match s {
+        Step::AdoptPath { path } => Some(path.clone()),
+        _ => None,
+    });
+    if let (Some(path), Some(w)) = (&adopt_path, &spec.worktree) {
+        let adopt_key = probe
+            .worktrees
+            .iter()
+            .find(|r| &r.path == path)
+            .map(|r| r.key().to_string())
+            .unwrap_or_else(|| path.clone());
+        let conflict = {
+            let s = store.lock().map_err(|_| IpcError::lock())?;
+            adoption_conflict(&s, spec, w, &adopt_key)?
+        };
+        if let Some(reason) = conflict {
+            return Err(fail(
+                store,
+                spec,
+                IpcError::new(
+                    codes::E_BRANCH_CHECKED_OUT,
+                    format!(
+                        "branch {} is checked out at {}, but {reason}; not adopting another \
+                         workspace's checkout (repair or remove that one first)",
+                        w.branch, path
+                    ),
+                ),
+            ));
+        }
+    }
+    let adopting = adopt_path.is_some();
+
+    // ── apply git steps, then verify (adoption is verified too) ─────────
     let mut dir_changed = false;
     let mut final_branch: Option<String> = fix.branch_drift.clone();
-    if fix.has_git_steps() {
+    if fix.has_git_steps() || adopting {
         let git_steps: Vec<Step> = fix.steps.iter().filter(|s| s.is_git()).cloned().collect();
-        let script = render_git_script(&spec.project_root, &git_steps);
-        let out = match exec.run_script(&script).await {
-            Ok(o) => o,
-            Err(e) => {
-                let e = host_offline(spec, e);
-                record_event(
+        if !git_steps.is_empty() {
+            let script = render_git_script(&spec.project_root, &git_steps);
+            let out = exec
+                .apply_script(&script)
+                .await
+                .map_err(|e| fail(store, spec, apply_interrupted(spec, e)))?;
+            if !out.ok {
+                return Err(fail(
                     store,
-                    spec.session_id,
-                    EVENT_REPAIR_FAILED,
-                    &format!("{}: {}", e.code, e.message),
-                );
-                return Err(e);
+                    spec,
+                    IpcError::new(
+                        codes::E_REPAIR_FAILED,
+                        format!(
+                            "workspace repair step failed on {}: {}",
+                            spec.host_alias,
+                            out.stderr.trim()
+                        ),
+                    ),
+                ));
             }
-        };
-        if !out.ok {
-            let e = IpcError::new(
-                codes::E_REPAIR_FAILED,
-                format!(
-                    "workspace repair step failed on {}: {}",
-                    spec.host_alias,
-                    out.stderr.trim()
-                ),
-            );
-            record_event(
-                store,
-                spec.session_id,
-                EVENT_REPAIR_FAILED,
-                &format!("{}: {}", e.code, e.message),
-            );
-            return Err(e);
+            for step in &git_steps {
+                report.actions.push(step.describe());
+            }
+            report.branch_source = out
+                .stdout
+                .lines()
+                .filter_map(|l| l.trim().strip_prefix("outcome="))
+                .next_back()
+                .map(str::to_string);
         }
-        for step in &git_steps {
-            report.actions.push(step.describe());
-        }
-        report.branch_source = out
-            .stdout
-            .lines()
-            .filter_map(|l| l.trim().strip_prefix("outcome="))
-            .next_back()
-            .map(str::to_string);
-        // Verify against the (possibly re-pathed) cwd.
+        // Verify against the (possibly re-pathed or adopted) cwd. An adopted
+        // checkout must exist and be healthy before tmux is moved there:
+        // older git does not flag a missing checkout as `prunable`.
         let mut vspec = spec.clone();
         if let Some(w) = vspec.worktree.as_mut() {
+            // Verify exactly the planned directory; no layout re-guessing.
             w.path = fix.cwd.clone();
+            w.path_is_guess = false;
         }
-        let after = run_probe(exec, &vspec).await?;
+        let after = run_probe(exec, &vspec)
+            .await
+            .map_err(|e| fail(store, spec, e))?;
         if !healthy_after(spec, &fix.cwd, &after) {
-            let e = IpcError::new(
-                codes::E_REPAIR_FAILED,
-                format!(
-                    "workspace at {} on {} is still not a healthy worktree after repair \
-                     (steps: {})",
-                    fix.cwd,
-                    spec.host_alias,
-                    report.actions.join("; ")
-                ),
-            );
-            record_event(
+            return Err(fail(
                 store,
-                spec.session_id,
-                EVENT_REPAIR_FAILED,
-                &format!("{}: {}", e.code, e.message),
-            );
-            return Err(e);
+                spec,
+                IpcError::new(
+                    codes::E_REPAIR_FAILED,
+                    format!(
+                        "workspace at {} on {} is still not a healthy worktree after repair \
+                         (steps: {})",
+                        fix.cwd,
+                        spec.host_alias,
+                        report.actions.join("; ")
+                    ),
+                ),
+            ));
         }
         if final_branch.is_none() {
             final_branch = after
                 .worktrees
                 .iter()
-                .find(|r| norm(&r.path) == norm(&fix.cwd))
+                .find(|r| norm(r.key()) == norm(after.wt_canon.as_deref().unwrap_or(&fix.cwd)))
                 .and_then(|r| r.branch.clone());
         }
         report.tmux_alive = after.tmux_alive;
+        report.tmux_dead = after.tmux_dead;
+        report.cwd_physical = after.wt_canon.clone();
         dir_changed = true;
     }
-    if fix
-        .steps
-        .iter()
-        .any(|s| matches!(s, Step::AdoptPath { .. }))
-    {
+    if adopting {
         report
             .actions
             .push(format!("adopt existing checkout at {}", fix.cwd));
@@ -947,26 +1429,15 @@ pub async fn ensure_workspace(
                 .map(|_| "respawned"),
             _ => continue,
         };
-        match res {
-            Ok(what) => {
-                report.tmux = Some(what.to_string());
-                report.tmux_alive = true;
-                report.tmux_cwd_stale = false;
-                report.actions.push(step.describe());
-            }
-            Err(e) => {
-                record_event(
-                    store,
-                    spec.session_id,
-                    EVENT_REPAIR_FAILED,
-                    &format!("{}: {}", e.code, e.message),
-                );
-                return Err(e);
-            }
-        }
+        let what = res.map_err(|e| fail(store, spec, e))?;
+        report.tmux = Some(what.to_string());
+        report.tmux_alive = true;
+        report.tmux_dead = false;
+        report.tmux_cwd_stale = false;
+        report.actions.push(step.describe());
     }
-    if dir_changed && report.tmux.is_none() {
-        // The directory was recreated but tmux was left to the caller.
+    if dir_changed && report.tmux.is_none() && report.tmux_alive {
+        // The directory was (re)created under a live pane left to the caller.
         report.tmux_cwd_stale = true;
     }
 
@@ -979,18 +1450,20 @@ pub async fn ensure_workspace(
                 .list_worktrees_for_project(pid)?
                 .into_iter()
                 .find(|r| r.name == w.name);
-            // The `worktrees.path` column is a LOCAL path; a remote repair
-            // may only refresh the (portable) branch of an existing row.
+            // `worktrees.path` is a LOCAL path: a remote repair never writes
+            // it. Re-pathing an existing row happens only on explicit
+            // adoption; the branch field follows the checkout only on an
+            // explicit repair. A missing row is recorded in both policies
+            // (creation, not rewrite); refresh_projects later stores git's
+            // own (resolved) form, and all comparisons are canonical anyway.
             let write: Option<(String, String)> = match (&existing, w.row_is_local) {
-                (Some(row), true)
-                    if row.path != fix.cwd || row.branch.as_deref() != Some(&branch) =>
-                {
+                (Some(row), true) if explicit && adopting && norm(&row.path) != norm(&fix.cwd) => {
                     Some((fix.cwd.clone(), branch.clone()))
                 }
-                (None, true) => Some((fix.cwd.clone(), branch.clone())),
-                (Some(row), false) if row.branch.as_deref() != Some(&branch) => {
+                (Some(row), _) if explicit && row.branch.as_deref() != Some(branch.as_str()) => {
                     Some((row.path.clone(), branch.clone()))
                 }
+                (None, true) => Some((fix.cwd.clone(), branch.clone())),
                 _ => None,
             };
             let mut wt_id = existing.as_ref().map(|r| r.id);
@@ -1019,22 +1492,47 @@ pub async fn ensure_workspace(
                 s.restore_session(sid)?;
             }
             if !report.actions.is_empty() {
-                let detail = serde_json::json!({
-                    "cwd": report.cwd,
-                    "actions": report.actions,
-                    "branch_source": report.branch_source,
-                    "tmux": report.tmux,
-                    "warnings": report.warnings,
-                })
-                .to_string();
-                if let Err(e) = s.insert_session_event(sid, EVENT_REPAIRED, Some(&detail)) {
-                    eprintln!("[repair] event insert failed for session {sid}: {e}");
+                if let Err(e) =
+                    s.insert_session_event(sid, EVENT_REPAIRED, Some(&event_detail(&report)))
+                {
+                    tracing::warn!("[repair] event insert failed for session {sid}: {e}");
                 }
             }
         }
     }
     report.healthy = report.actions.is_empty();
     Ok(report)
+}
+
+/// The `workspace_repaired` event detail. Always carries `branch_source`, so
+/// a branch recreated from its base is visible on the timeline.
+pub fn event_detail(report: &RepairReport) -> String {
+    serde_json::json!({
+        "cwd": report.cwd,
+        "actions": report.actions,
+        "branch_source": report.branch_source,
+        "tmux": report.tmux,
+        "warnings": report.warnings,
+    })
+    .to_string()
+}
+
+/// Lifecycle helpers (new session, restart, recreate) must not start or
+/// respawn tmux in a workspace that still needs an explicit step: turn that
+/// into `E_REPAIR_REQUIRED`, naming what the explicit repair would do.
+pub fn require_no_explicit(report: RepairReport) -> Result<RepairReport, IpcError> {
+    if !report.needs_explicit_repair {
+        return Ok(report);
+    }
+    Err(IpcError::new(
+        codes::E_REPAIR_REQUIRED,
+        format!(
+            "the workspace at {} needs an explicit repair: {}. Use Repair workspace (it would: {})",
+            report.cwd,
+            report.warnings.join("; "),
+            report.deferred.join("; ")
+        ),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1049,7 +1547,7 @@ pub async fn ensure_workspace(
 /// only this helper follows. The local `worktrees.path` column is a local
 /// path and is never used for a remote host.
 async fn resolve_remote_paths(
-    ssh: &Arc<SshClient>,
+    ssh: &dyn SshExec,
     host: &str,
     owner: &str,
     repo: &str,
@@ -1192,7 +1690,7 @@ pub async fn spec_for_session(
     } else {
         let wt_name = seed.worktree.as_ref().map(|(n, _, _)| n.as_str());
         let (root, cwd) =
-            resolve_remote_paths(ssh, &row.host_alias, &seed.owner, &seed.repo, wt_name).await?;
+            resolve_remote_paths(&**ssh, &row.host_alias, &seed.owner, &seed.repo, wt_name).await?;
         let wt = seed
             .worktree
             .as_ref()
@@ -1266,12 +1764,24 @@ fn spec_for_new_session(
         path_is_guess: !is_local,
         row_is_local: is_local,
     });
+    // Same validation as `spec_for_session`: these values reach git.
+    if let Some(wt) = &worktree {
+        crate::validate::git_ref(&wt.branch)?;
+    }
+    let base_branch = w
+        .base_branch
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .map(str::to_string);
+    if let Some(b) = &base_branch {
+        crate::validate::git_ref(b)?;
+    }
     Ok(WorkspaceSpec {
         host_alias: w.host_alias.to_string(),
         tmux_name: w.tmux_name.to_string(),
         project_root,
         worktree,
-        base_branch: w.base_branch.map(str::to_string),
+        base_branch,
         pane_cmd: w.pane_cmd.to_string(),
         session_id: None,
         project_id: Some(w.project_id),
@@ -1279,9 +1789,10 @@ fn spec_for_new_session(
 }
 
 /// `new_session`'s pre-tmux check for an existing worktree row / main
-/// checkout: verify (and if needed rebuild) the directory, returning the
-/// path tmux must start in. No row exists yet, so nothing is recorded on a
-/// timeline here — the caller does that once the row appears.
+/// checkout ([`Entry::NewSession`]: automatic). Returns the path tmux must
+/// start in, or `E_REPAIR_REQUIRED` when only an explicit repair can make
+/// it usable. No row exists yet, so nothing is recorded on a timeline here —
+/// the caller does that once the row appears.
 pub async fn ensure_for_new_session(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
@@ -1295,7 +1806,7 @@ pub async fn ensure_for_new_session(
             crate::service::sessions::fetch_owner_repo(&s, w.project_id)?
         };
         Some(
-            resolve_remote_paths(ssh, w.host_alias, &owner, &repo, None)
+            resolve_remote_paths(&**ssh, w.host_alias, &owner, &repo, None)
                 .await?
                 .0,
         )
@@ -1305,15 +1816,26 @@ pub async fn ensure_for_new_session(
         spec_for_new_session(&s, &w, remote_root)?
     };
     let exec = HostExec::new(w.host_alias, ssh);
-    ensure_workspace(&spec, TmuxPolicy::Leave, Vec::new(), store, &exec).await
+    let report = ensure_workspace(
+        &spec,
+        policy_for(Entry::NewSession),
+        Vec::new(),
+        store,
+        &exec,
+    )
+    .await?;
+    require_no_explicit(report)
 }
 
-/// Explicit repair of one session (Tauri command `repair_session`, MCP tool
-/// `repair_session`, and the pre-attach check): make its directory a healthy
-/// worktree and its tmux session run there, creating tmux when it is gone.
+/// Repair of one session: [`Entry::Explicit`] (the Repair workspace button,
+/// the confirm-gated MCP tool) or [`Entry::Attach`] (the pre-attach check,
+/// automatic: never respawns a live pane, never unregisters / adopts /
+/// rebranches). An attach that finds work for an explicit repair returns
+/// `Ok` with `needs_explicit_repair` so the UI can say so and still attach.
 /// Refuses on an unreachable host (`E_HOST_OFFLINE`) before touching anything.
 pub async fn repair_session(
     session_id: i64,
+    explicit: bool,
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<RepairReport, IpcError> {
@@ -1337,20 +1859,28 @@ pub async fn repair_session(
     }
     let (spec, siblings) = spec_for_session(store, ssh, session_id).await?;
     let exec = HostExec::new(&spec.host_alias, ssh);
-    ensure_workspace(&spec, TmuxPolicy::Ensure, siblings, store, &exec).await
+    let entry = if explicit {
+        Entry::Explicit
+    } else {
+        Entry::Attach
+    };
+    ensure_workspace(&spec, policy_for(entry), siblings, store, &exec).await
 }
 
-/// Same as [`repair_session`] but with `TmuxPolicy::Leave`, for lifecycle
-/// callers that create / respawn tmux themselves. Returns the verified cwd
-/// inside the report.
+/// The automatic pre-check for lifecycle callers that own tmux (restart,
+/// recreate). Returns the verified cwd inside the report, or
+/// `E_REPAIR_REQUIRED` when only an explicit repair can make the workspace
+/// usable.
 pub async fn ensure_session_workspace(
     session_id: i64,
+    entry: Entry,
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<RepairReport, IpcError> {
     let (spec, siblings) = spec_for_session(store, ssh, session_id).await?;
     let exec = HostExec::new(&spec.host_alias, ssh);
-    ensure_workspace(&spec, TmuxPolicy::Leave, siblings, store, &exec).await
+    let report = ensure_workspace(&spec, policy_for(entry), siblings, store, &exec).await?;
+    require_no_explicit(report)
 }
 
 #[cfg(test)]
@@ -1358,6 +1888,15 @@ mod tests {
     use super::plan as make_plan;
     use super::*;
     use std::collections::VecDeque;
+
+    /// Lifecycle side effect that owns tmux (new session, restart, recreate).
+    const AUTO: Policy = Policy::Auto {
+        create_dead_tmux: false,
+    };
+    /// The attach path: automatic, may create a confirmed-dead session.
+    const ATTACH: Policy = Policy::Auto {
+        create_dead_tmux: true,
+    };
 
     // ── fixtures ──────────────────────────────────────────────────────────
 
@@ -1486,7 +2025,7 @@ mod tests {
 
     #[test]
     fn healthy_workspace_is_a_noop_under_both_policies() {
-        for policy in [TmuxPolicy::Leave, TmuxPolicy::Ensure] {
+        for policy in [AUTO, Policy::Explicit] {
             let p = make_plan(&spec(true), &healthy(), policy).unwrap();
             assert!(p.is_noop(), "{policy:?}: {:?}", p.steps);
             assert_eq!(p.cwd, "/repo/.claude/worktrees/feat");
@@ -1495,18 +2034,20 @@ mod tests {
     }
 
     #[test]
-    fn case_a_dir_deleted_tmux_alive_prunes_adds_and_respawns() {
+    fn case_a_dir_deleted_tmux_alive_unregisters_adds_and_respawns() {
         let mut p = healthy();
         p.wt_exists = false;
         p.wt_git = false;
         p.wt_gitdir_ok = false;
         p.tmux_cwd_exists = false;
         p.worktrees[1].prunable = true; // git already flags it
-        let plan = make_plan(&spec(true), &p, TmuxPolicy::Ensure).unwrap();
+        let plan = make_plan(&spec(true), &p, Policy::Explicit).unwrap();
         assert_eq!(
             plan.steps,
             vec![
-                Step::Prune,
+                Step::Unregister {
+                    path: "/repo/.claude/worktrees/feat".into()
+                },
                 add_local(),
                 Step::TmuxRespawn {
                     cwd: "/repo/.claude/worktrees/feat".into()
@@ -1516,29 +2057,29 @@ mod tests {
     }
 
     #[test]
-    fn case_b_dir_and_tmux_gone_prunes_adds_and_creates_tmux() {
+    fn case_b_dir_and_tmux_gone_adds_and_creates_tmux() {
         let mut p = healthy();
         p.wt_exists = false;
         p.wt_git = false;
         p.wt_gitdir_ok = false;
         p.tmux_alive = false;
+        p.tmux_dead = true;
         p.tmux_cwd = None;
         p.tmux_cwd_exists = false;
         p.worktrees.truncate(1); // already pruned
-        let plan = make_plan(&spec(true), &p, TmuxPolicy::Ensure).unwrap();
+        let plan = make_plan(&spec(true), &p, Policy::Explicit).unwrap();
         assert_eq!(
             plan.steps,
             vec![
-                Step::Prune,
                 add_local(),
                 Step::TmuxCreate {
                     cwd: "/repo/.claude/worktrees/feat".into()
                 }
             ]
         );
-        // Leave: the caller creates tmux.
-        let plan = make_plan(&spec(true), &p, TmuxPolicy::Leave).unwrap();
-        assert_eq!(plan.steps, vec![Step::Prune, add_local()]);
+        // Leave: the caller creates tmux. Not registered ⇒ nothing to unregister.
+        let plan = make_plan(&spec(true), &p, AUTO).unwrap();
+        assert_eq!(plan.steps, vec![add_local()]);
     }
 
     #[test]
@@ -1547,7 +2088,7 @@ mod tests {
         let mut p = healthy();
         p.wt_gitdir_ok = false;
         p.worktrees.truncate(1);
-        let plan = make_plan(&spec(true), &p, TmuxPolicy::Ensure).unwrap();
+        let plan = make_plan(&spec(true), &p, Policy::Explicit).unwrap();
         assert_eq!(
             plan.steps,
             vec![Step::RepairLinks {
@@ -1557,24 +2098,98 @@ mod tests {
         // Registered but the checkout's link is stale.
         let mut p = healthy();
         p.wt_gitdir_ok = false;
-        let plan = make_plan(&spec(true), &p, TmuxPolicy::Leave).unwrap();
+        let plan = make_plan(&spec(true), &p, Policy::Explicit).unwrap();
         assert_eq!(
             plan.steps,
             vec![Step::RepairLinks {
                 path: "/repo/.claude/worktrees/feat".into()
             }]
         );
+        // Re-linking is explicit-only.
+        let auto = make_plan(&spec(true), &p, AUTO).unwrap();
+        assert!(auto.needs_explicit_repair && auto.steps.is_empty());
     }
 
     #[test]
-    fn case_d_prunable_registration_is_pruned_before_add() {
+    fn case_d_prunable_registration_is_unregistered_before_add() {
         let mut p = healthy();
         p.wt_exists = false;
         p.wt_git = false;
         p.wt_gitdir_ok = false;
         p.worktrees[1].prunable = true;
-        let plan = make_plan(&spec(true), &p, TmuxPolicy::Leave).unwrap();
-        assert_eq!(plan.steps, vec![Step::Prune, add_local()]);
+        let plan = make_plan(&spec(true), &p, Policy::Explicit).unwrap();
+        assert_eq!(
+            plan.steps,
+            vec![
+                Step::Unregister {
+                    path: "/repo/.claude/worktrees/feat".into()
+                },
+                add_local()
+            ]
+        );
+        // Automatic: reported, not applied.
+        assert!(
+            make_plan(&spec(true), &p, AUTO)
+                .unwrap()
+                .needs_explicit_repair
+        );
+        // Older git without the `prunable` flag: same fix.
+        p.worktrees[1].prunable = false;
+        let plan = make_plan(&spec(true), &p, Policy::Explicit).unwrap();
+        assert_eq!(plan.steps.len(), 2);
+        assert!(matches!(plan.steps[0], Step::Unregister { .. }));
+    }
+
+    #[test]
+    fn unregister_is_scoped_to_our_own_registration() {
+        // Another worktree's stale registration must be left for its owner:
+        // no repo-wide prune.
+        let mut p = healthy();
+        p.wt_exists = false;
+        p.wt_git = false;
+        p.wt_gitdir_ok = false;
+        p.worktrees[1].prunable = true;
+        p.worktrees.push(RegisteredWorktree {
+            path: "/repo/.worktrees/other".into(),
+            branch: Some("other".into()),
+            prunable: true,
+            ..Default::default()
+        });
+        let plan = make_plan(&spec(true), &p, Policy::Explicit).unwrap();
+        assert_eq!(
+            plan.steps,
+            vec![
+                Step::Unregister {
+                    path: "/repo/.claude/worktrees/feat".into()
+                },
+                add_local()
+            ]
+        );
+        let script = render_git_script("/repo", &plan.steps);
+        assert!(
+            script.contains("worktree remove --force -- '/repo/.claude/worktrees/feat'"),
+            "{script}"
+        );
+        assert!(!script.contains("prune"), "{script}");
+        assert!(!script.contains("other"), "{script}");
+    }
+
+    #[test]
+    fn create_only_policy_creates_dead_sessions_but_never_respawns() {
+        // Live pane in a vanished cwd: left alone (no kill on attach).
+        let mut p = healthy();
+        p.tmux_cwd_exists = false;
+        assert!(make_plan(&spec(true), &p, ATTACH).unwrap().is_noop());
+        // Dead session: created.
+        let mut p = healthy();
+        p.tmux_alive = false;
+        p.tmux_dead = true;
+        assert_eq!(
+            make_plan(&spec(true), &p, ATTACH).unwrap().steps,
+            vec![Step::TmuxCreate {
+                cwd: "/repo/.claude/worktrees/feat".into()
+            }]
+        );
     }
 
     #[test]
@@ -1586,9 +2201,9 @@ mod tests {
         p.branch_local = false;
         p.branch_remote = true;
         p.worktrees.truncate(1);
-        let plan = make_plan(&spec(true), &p, TmuxPolicy::Leave).unwrap();
+        let plan = make_plan(&spec(true), &p, AUTO).unwrap();
         assert_eq!(
-            plan.steps[1],
+            plan.steps[0],
             Step::AddWorktree {
                 path: "/repo/.claude/worktrees/feat".into(),
                 branch: "feat".into(),
@@ -1607,9 +2222,9 @@ mod tests {
         p.branch_remote = false;
         p.worktrees.truncate(1);
         // Default branch from the repo…
-        let plan1 = make_plan(&spec(true), &p, TmuxPolicy::Leave).unwrap();
+        let plan1 = make_plan(&spec(true), &p, Policy::Explicit).unwrap();
         assert_eq!(
-            plan1.steps[1],
+            plan1.steps[0],
             Step::AddWorktree {
                 path: "/repo/.claude/worktrees/feat".into(),
                 branch: "feat".into(),
@@ -1622,9 +2237,9 @@ mod tests {
         // …or the caller's explicit base, with the default as fallback.
         let mut s = spec(true);
         s.base_branch = Some("dev".into());
-        let plan2 = make_plan(&s, &p, TmuxPolicy::Leave).unwrap();
+        let plan2 = make_plan(&s, &p, Policy::Explicit).unwrap();
         assert!(matches!(
-            &plan2.steps[1],
+            &plan2.steps[0],
             Step::AddWorktree {
                 from: BranchSource::FetchOrBase { base, default },
                 ..
@@ -1640,7 +2255,7 @@ mod tests {
         p.wt_gitdir_ok = false;
         p.tmux_cwd_exists = false;
         p.worktrees[1].path = "/repo/.worktrees/feat".into(); // other layout
-        let plan = make_plan(&spec(true), &p, TmuxPolicy::Ensure).unwrap();
+        let plan = make_plan(&spec(true), &p, Policy::Explicit).unwrap();
         assert_eq!(plan.cwd, "/repo/.worktrees/feat");
         assert_eq!(
             plan.steps,
@@ -1666,7 +2281,7 @@ mod tests {
             branch: Some("feat".into()),
             ..Default::default()
         }];
-        let err = make_plan(&spec(true), &p, TmuxPolicy::Ensure).unwrap_err();
+        let err = make_plan(&spec(true), &p, Policy::Explicit).unwrap_err();
         assert_eq!(err.code, codes::E_BRANCH_CHECKED_OUT);
     }
 
@@ -1677,7 +2292,7 @@ mod tests {
             p.root_exists = false;
             p.root_git = false;
             p.root_gitdir_ok = false;
-            let err = make_plan(&spec(wt), &p, TmuxPolicy::Ensure).unwrap_err();
+            let err = make_plan(&spec(wt), &p, Policy::Explicit).unwrap_err();
             assert_eq!(err.code, codes::E_REPO_MISSING);
             assert!(err.message.contains("never recreated by mkdir"));
             // The resolved root is named so the user can fix the right setting.
@@ -1688,9 +2303,7 @@ mod tests {
         p.root_git = false;
         p.root_gitdir_ok = false;
         assert_eq!(
-            make_plan(&spec(false), &p, TmuxPolicy::Leave)
-                .unwrap_err()
-                .code,
+            make_plan(&spec(false), &p, AUTO).unwrap_err().code,
             codes::E_REPO_MISSING
         );
     }
@@ -1700,7 +2313,7 @@ mod tests {
         let mut p = healthy();
         p.tmux_cwd = Some("/repo/.claude/worktrees/feat".into());
         p.tmux_cwd_exists = false;
-        let plan = make_plan(&spec(true), &p, TmuxPolicy::Ensure).unwrap();
+        let plan = make_plan(&spec(true), &p, Policy::Explicit).unwrap();
         assert_eq!(
             plan.steps,
             vec![Step::TmuxRespawn {
@@ -1710,37 +2323,44 @@ mod tests {
         // A pane that merely `cd`ed elsewhere is left alone.
         let mut p = healthy();
         p.tmux_cwd = Some("/repo/.claude/worktrees/feat/src".into());
-        assert!(make_plan(&spec(true), &p, TmuxPolicy::Ensure)
+        assert!(make_plan(&spec(true), &p, Policy::Explicit)
             .unwrap()
             .is_noop());
     }
 
     #[test]
     fn case_l_partial_add_empty_dir_is_reused_non_empty_is_refused() {
-        // Empty leftover dir: git accepts it, so just prune + add.
+        // Empty leftover dir: git accepts it, so an explicit repair just adds;
+        // it is not "absent on disk", so an automatic one only reports it.
         let mut p = healthy();
         p.wt_git = false;
         p.wt_gitdir_ok = false;
         p.wt_empty = true;
         p.worktrees.truncate(1);
-        let plan1 = make_plan(&spec(true), &p, TmuxPolicy::Leave).unwrap();
-        assert_eq!(plan1.steps, vec![Step::Prune, add_local()]);
+        let plan1 = make_plan(&spec(true), &p, Policy::Explicit).unwrap();
+        assert_eq!(plan1.steps, vec![add_local()]);
+        assert!(
+            make_plan(&spec(true), &p, AUTO)
+                .unwrap()
+                .needs_explicit_repair
+        );
         // Non-empty dir without `.git`: refuse, never delete user files.
         p.wt_empty = false;
-        let err = make_plan(&spec(true), &p, TmuxPolicy::Leave).unwrap_err();
+        let err = make_plan(&spec(true), &p, AUTO).unwrap_err();
         assert_eq!(err.code, codes::E_REPAIR_FAILED);
         assert!(err.message.contains("never deleted"));
     }
 
     #[test]
     fn case_m_main_checkout_session_is_healthy_when_root_is_a_repo() {
-        let plan = make_plan(&spec(false), &healthy(), TmuxPolicy::Ensure).unwrap();
+        let plan = make_plan(&spec(false), &healthy(), Policy::Explicit).unwrap();
         assert!(plan.is_noop());
         assert_eq!(plan.cwd, "/repo");
         // …and gets its tmux recreated when that is gone.
         let mut p = healthy();
         p.tmux_alive = false;
-        let plan = make_plan(&spec(false), &p, TmuxPolicy::Ensure).unwrap();
+        p.tmux_dead = true;
+        let plan = make_plan(&spec(false), &p, Policy::Explicit).unwrap();
         assert_eq!(
             plan.steps,
             vec![Step::TmuxCreate {
@@ -1755,15 +2375,23 @@ mod tests {
         p.wt_exists = false;
         p.wt_git = false;
         p.wt_gitdir_ok = false;
-        p.worktrees[1].prunable = true;
+        // Real git lists a locked worktree whose dir is gone as `locked`,
+        // NOT `prunable` (verified on git 2.54): refused in every policy.
+        p.worktrees[1].prunable = false;
         p.worktrees[1].locked = true;
-        let err = make_plan(&spec(true), &p, TmuxPolicy::Leave).unwrap_err();
+        for policy in [AUTO, ATTACH, Policy::Explicit] {
+            assert_eq!(
+                make_plan(&spec(true), &p, policy).unwrap_err().code,
+                codes::E_WORKSPACE_LOCKED
+            );
+        }
+        let err = make_plan(&spec(true), &p, AUTO).unwrap_err();
         assert_eq!(err.code, codes::E_WORKSPACE_LOCKED);
         assert!(err.message.contains("git worktree unlock"));
         // A healthy worktree with an index.lock is reported, not touched.
         let mut p = healthy();
         p.index_lock = true;
-        let plan = make_plan(&spec(true), &p, TmuxPolicy::Ensure).unwrap();
+        let plan = make_plan(&spec(true), &p, Policy::Explicit).unwrap();
         assert!(plan.is_noop());
         assert!(plan.warnings.iter().any(|w| w.contains("index.lock")));
     }
@@ -1772,7 +2400,7 @@ mod tests {
     fn branch_drift_is_reported_not_fixed() {
         let mut p = healthy();
         p.worktrees[1].branch = Some("feat-v2".into());
-        let plan = make_plan(&spec(true), &p, TmuxPolicy::Ensure).unwrap();
+        let plan = make_plan(&spec(true), &p, Policy::Explicit).unwrap();
         assert!(plan.is_noop());
         assert_eq!(plan.branch_drift.as_deref(), Some("feat-v2"));
         assert!(!plan.warnings.is_empty());
@@ -1788,10 +2416,10 @@ mod tests {
         p.wt_gitdir_ok = false;
         p.layout_dot_worktrees = true;
         p.worktrees.truncate(1);
-        let plan = make_plan(&s, &p, TmuxPolicy::Leave).unwrap();
+        let plan = make_plan(&s, &p, AUTO).unwrap();
         assert_eq!(plan.cwd, "/repo/.worktrees/feat");
         assert!(
-            matches!(&plan.steps[1], Step::AddWorktree { path, .. } if path == "/repo/.worktrees/feat")
+            matches!(&plan.steps[0], Step::AddWorktree { path, .. } if path == "/repo/.worktrees/feat")
         );
     }
 
@@ -1802,7 +2430,9 @@ mod tests {
         let script = render_git_script(
             "/re po",
             &[
-                Step::Prune,
+                Step::Unregister {
+                    path: "/re po/.claude/worktrees/it's".into(),
+                },
                 Step::AddWorktree {
                     path: "/re po/.claude/worktrees/it's".into(),
                     branch: "feat".into(),
@@ -1811,12 +2441,18 @@ mod tests {
             ],
         );
         assert!(script.starts_with("set -e\n"));
-        let prune = script.find("worktree prune").unwrap();
+        let unregister = script
+            .find("worktree remove --force -- '/re po/.claude/worktrees/it'\\''s'")
+            .unwrap_or_else(|| panic!("scoped, quoted unregister: {script}"));
         let add = script.find("worktree add").unwrap();
-        assert!(prune < add, "prune must precede add: {script}");
+        assert!(unregister < add, "unregister must precede add: {script}");
+        assert!(
+            !script.contains("prune"),
+            "never a repo-wide prune: {script}"
+        );
         assert!(
             script.contains(
-                "git -C '/re po' worktree add '/re po/.claude/worktrees/it'\\''s' 'feat'"
+                "git -C '/re po' worktree add -- '/re po/.claude/worktrees/it'\\''s' 'feat'"
             ),
             "{script}"
         );
@@ -1833,8 +2469,9 @@ mod tests {
                 from: BranchSource::Remote,
             }],
         );
+        assert!(remote.contains("b='feat'\n"), "{remote}");
         assert!(
-            remote.contains("worktree add --track -b 'feat' '/repo/w' origin/'feat'"),
+            remote.contains("worktree add --track -b \"$b\" -- '/repo/w' \"origin/$b\""),
             "{remote}"
         );
         let fob = render_git_script(
@@ -1853,16 +2490,17 @@ mod tests {
                 },
             ],
         );
-        assert!(fob.contains("worktree repair '/repo/w'"));
-        assert!(fob.contains("fetch origin 'feat'"));
-        assert!(fob.contains("refs/remotes/origin/'feat'"));
+        assert!(fob.contains("worktree repair -- '/repo/w'"), "{fob}");
+        assert!(fob.contains("ls-remote --exit-code --heads -- origin \"refs/heads/$b\""));
+        assert!(fob.contains("fetch -- origin \"+refs/heads/$b:refs/remotes/origin/$b\""));
         assert!(fob.contains("basebr='dev'"));
         assert!(fob.contains("defbr='main'"));
         assert!(fob.contains("else start=HEAD"));
-        assert!(fob.contains("worktree add '/repo/w' -b 'feat' \"$start\""));
+        assert!(fob.contains("worktree add -b \"$b\" -- '/repo/w' \"$start\""));
         assert!(fob.contains("outcome=branch_from_base:$start"));
-        // Failures inside the if-branches must abort (set -e does not cover `&&` lists).
-        assert!(fob.contains("|| exit 1"));
+        // A fetch / ls-remote failure aborts; it never falls through to a fork.
+        assert!(fob.contains("exit 1"));
+        assert!(!fob.contains("|| true"));
     }
 
     // ── end-to-end with a scripted executor ───────────────────────────────
@@ -1986,7 +2624,7 @@ mod tests {
         let exec = FakeExec::new(vec![ok(HEALTHY_OUT)]);
         let rep = ensure_workspace(
             &spec_with_ids(sid, pid),
-            TmuxPolicy::Ensure,
+            Policy::Explicit,
             vec![],
             &store,
             &exec,
@@ -2014,7 +2652,7 @@ mod tests {
         ]);
         let rep = ensure_workspace(
             &spec_with_ids(sid, pid),
-            TmuxPolicy::Ensure,
+            Policy::Explicit,
             vec![7],
             &store,
             &exec,
@@ -2025,10 +2663,19 @@ mod tests {
         let scripts = exec.scripts();
         assert_eq!(scripts.len(), 3);
         assert!(scripts[0].contains("worktree list --porcelain"));
-        let prune = scripts[1].find("worktree prune").unwrap();
-        let add = scripts[1].find("worktree add").unwrap();
-        assert!(prune < add);
-        assert!(scripts[1].contains("'/repo/.claude/worktrees/feat' 'feat'"));
+        // Exact apply script: this entry only, then the add.
+        assert_eq!(
+            scripts[1],
+            render_git_script(
+                "/repo",
+                &[
+                    Step::Unregister {
+                        path: "/repo/.claude/worktrees/feat".into()
+                    },
+                    add_local()
+                ]
+            )
+        );
         assert!(scripts[2].contains("worktree list --porcelain"));
         assert_eq!(
             exec.tmux_calls(),
@@ -2042,7 +2689,11 @@ mod tests {
         let ev = s.list_session_events(sid, 10).unwrap();
         assert_eq!(ev.len(), 1);
         assert_eq!(ev[0].kind, EVENT_REPAIRED);
-        assert!(ev[0].detail.as_deref().unwrap().contains("worktree prune"));
+        assert!(ev[0]
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("worktree remove --force"));
         let row = s.get_session_by_id(sid).unwrap().unwrap();
         assert_eq!(row.status, "running");
         assert!(row.worktree_id.is_some());
@@ -2060,11 +2711,11 @@ mod tests {
                 rusqlite::params![sid],
             )
             .unwrap();
-        let out = HEALTHY_OUT.replace("tmux_alive=1", "tmux_alive=0");
+        let out = HEALTHY_OUT.replace("tmux_alive=1", "tmux_alive=0\ntmux_dead=1");
         let exec = FakeExec::new(vec![ok(&out)]);
         let rep = ensure_workspace(
             &spec_with_ids(sid, pid),
-            TmuxPolicy::Ensure,
+            Policy::Explicit,
             vec![],
             &store,
             &exec,
@@ -2090,31 +2741,32 @@ mod tests {
             ok("outcome=branch_local\n"),
             ok(HEALTHY_OUT),
         ]);
-        let rep = ensure_workspace(
-            &spec_with_ids(sid, pid),
-            TmuxPolicy::Leave,
-            vec![],
-            &store,
-            &exec,
-        )
-        .await
-        .unwrap();
+        let rep = ensure_workspace(&spec_with_ids(sid, pid), AUTO, vec![], &store, &exec)
+            .await
+            .unwrap();
+        // A stale registration is explicit-only: nothing applied, tmux untouched.
+        assert_eq!(exec.scripts().len(), 1, "probe only");
+        assert!(rep.needs_explicit_repair);
         assert!(exec.tmux_calls().is_empty());
         assert!(rep.tmux.is_none());
         assert!(rep.tmux_alive);
-        assert!(rep.tmux_cwd_stale, "caller must respawn with the new cwd");
+        assert!(rep.tmux_cwd_stale, "the pane's reported cwd is missing");
     }
 
     #[tokio::test]
     async fn adopting_another_path_rewrites_the_local_worktree_row() {
         let (store, sid, pid) = seeded_store("/repo/.claude/worktrees/feat");
+        // The pane's cwd is REPORTED and missing, so the explicit repair may
+        // respawn it (an unreported cwd would be "unknown": no respawn).
         let out = "root_exists=1\nroot_git=1\nroot_gitdir_ok=1\nwt_exists=0\nbranch_local=1\n\
-                   tmux_alive=1\ntmux_cwd_exists=0\n@@worktrees\nworktree /repo\nbranch refs/heads/main\n\n\
+                   tmux_alive=1\ntmux_cwd=/repo/.claude/worktrees/feat\ntmux_cwd_exists=0\n\
+                   @@worktrees\nworktree /repo\nbranch refs/heads/main\n\n\
                    worktree /repo/.worktrees/feat\nbranch refs/heads/feat\n";
-        let exec = FakeExec::new(vec![ok(out)]);
+        // Probe, then the verify probe of the adopted checkout.
+        let exec = FakeExec::new(vec![ok(out), ok(ADOPTED_HEALTHY_OUT)]);
         let rep = ensure_workspace(
             &spec_with_ids(sid, pid),
-            TmuxPolicy::Ensure,
+            Policy::Explicit,
             vec![],
             &store,
             &exec,
@@ -2151,7 +2803,7 @@ mod tests {
             .replace("/repo/", "/home/me/repo/")
             .replace("worktree /repo\n", "worktree /home/me/repo\n");
         let exec = FakeExec::new(vec![ok(&out)]);
-        let rep = ensure_workspace(&s, TmuxPolicy::Ensure, vec![], &store, &exec)
+        let rep = ensure_workspace(&s, Policy::Explicit, vec![], &store, &exec)
             .await
             .unwrap();
         assert!(rep.healthy);
@@ -2184,7 +2836,7 @@ mod tests {
         let exec = FakeExec::new(vec![ok(HEALTHY_OUT)]);
         let rep = ensure_workspace(
             &spec_with_ids(sid, pid),
-            TmuxPolicy::Ensure,
+            Policy::Explicit,
             vec![],
             &store,
             &exec,
@@ -2205,6 +2857,108 @@ mod tests {
         );
     }
 
+    /// Probe of a workspace whose branch is checked out at another linked
+    /// worktree (`/repo/.worktrees/feat`) — the adopt case.
+    const ADOPT_OUT: &str =
+        "root_exists=1\nroot_git=1\nroot_gitdir_ok=1\nwt_exists=0\nbranch_local=1\n\
+        tmux_alive=1\ntmux_cwd_exists=0\n@@worktrees\nworktree /repo\nbranch refs/heads/main\n\n\
+        worktree /repo/.worktrees/feat\nbranch refs/heads/feat\n";
+    /// Verify probe of the adopted checkout: present and healthy.
+    const ADOPTED_HEALTHY_OUT: &str = "root_exists=1\nroot_git=1\nroot_gitdir_ok=1\nwt_exists=1\n\
+        wt_git=1\nwt_gitdir_ok=1\nbranch_local=1\ntmux_alive=1\ntmux_cwd_exists=0\n@@worktrees\n\
+        worktree /repo\nbranch refs/heads/main\n\n\
+        worktree /repo/.worktrees/feat\nbranch refs/heads/feat\n";
+
+    #[tokio::test]
+    async fn adoption_is_verified_before_tmux_moves_there() {
+        // Older git does not print `prunable`, so the checkout "elsewhere"
+        // may be a missing directory. The verify probe catches it before any
+        // respawn and before the row is re-pathed.
+        let (store, sid, pid) = seeded_store("/repo/.claude/worktrees/feat");
+        let gone = ADOPTED_HEALTHY_OUT.replace(
+            "wt_exists=1\nwt_git=1\nwt_gitdir_ok=1",
+            "wt_exists=0\nwt_git=0\nwt_gitdir_ok=0",
+        );
+        let exec = FakeExec::new(vec![ok(ADOPT_OUT), ok(&gone)]);
+        let err = ensure_workspace(
+            &spec_with_ids(sid, pid),
+            Policy::Explicit,
+            vec![],
+            &store,
+            &exec,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_REPAIR_FAILED);
+        assert_eq!(exec.scripts().len(), 2, "probe + verify, no git steps");
+        assert!(exec.tmux_calls().is_empty());
+        let s = store.lock().unwrap();
+        let wt = s
+            .list_worktrees_for_project(pid)
+            .unwrap()
+            .into_iter()
+            .find(|w| w.name == "feat")
+            .unwrap();
+        assert_eq!(wt.path, "/repo/.claude/worktrees/feat", "row not re-pathed");
+    }
+
+    #[tokio::test]
+    async fn adoption_is_refused_when_another_worktree_row_owns_the_branch() {
+        let (store, sid, pid) = seeded_store("/repo/.claude/worktrees/feat");
+        store
+            .lock()
+            .unwrap()
+            .upsert_worktree(pid, "feat-old", "/repo/.worktrees/feat", Some("feat"))
+            .unwrap();
+        let exec = FakeExec::new(vec![ok(ADOPT_OUT)]);
+        let err = ensure_workspace(
+            &spec_with_ids(sid, pid),
+            Policy::Explicit,
+            vec![],
+            &store,
+            &exec,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_BRANCH_CHECKED_OUT);
+        assert!(err.message.contains("feat-old"), "{}", err.message);
+        assert_eq!(exec.scripts().len(), 1, "refused before any change");
+        assert!(exec.tmux_calls().is_empty());
+        let s = store.lock().unwrap();
+        assert!(s.get_session_by_id(sid).unwrap().is_some());
+        assert_eq!(
+            s.list_session_events(sid, 10).unwrap()[0].kind,
+            EVENT_REPAIR_FAILED
+        );
+    }
+
+    #[tokio::test]
+    async fn create_only_policy_repairs_the_dir_but_never_kills_a_live_pane() {
+        // Attach path: dir deleted under a live Claude pane while git still
+        // lists it. Nothing is unregistered or respawned automatically; the
+        // report says the pane is stale and an explicit repair is needed.
+        let (store, sid, pid) = seeded_store("/repo/.claude/worktrees/feat");
+        let exec = FakeExec::new(vec![ok(DIR_GONE_OUT)]);
+        let rep = ensure_workspace(&spec_with_ids(sid, pid), ATTACH, vec![], &store, &exec)
+            .await
+            .unwrap();
+        assert_eq!(exec.scripts().len(), 1, "probe only");
+        assert!(rep.needs_explicit_repair);
+        assert!(
+            exec.tmux_calls().is_empty(),
+            "live pane must not be respawned"
+        );
+        assert!(rep.tmux.is_none());
+        assert!(rep.tmux_alive && rep.tmux_cwd_stale);
+        // A dead session is still created.
+        let out = HEALTHY_OUT.replace("tmux_alive=1", "tmux_alive=0\ntmux_dead=1");
+        let exec = FakeExec::new(vec![ok(&out)]);
+        let rep = ensure_workspace(&spec_with_ids(sid, pid), ATTACH, vec![], &store, &exec)
+            .await
+            .unwrap();
+        assert_eq!(rep.tmux.as_deref(), Some("created"));
+    }
+
     #[tokio::test]
     async fn host_unreachable_fails_clearly_and_changes_nothing() {
         let (store, sid, pid) = seeded_store("/repo/.claude/worktrees/feat");
@@ -2217,7 +2971,7 @@ mod tests {
         let exec = FakeExec::new(vec![Err(IpcError::new(codes::E_SSH_TIMEOUT, "ssh hung"))]);
         let err = ensure_workspace(
             &spec_with_ids(sid, pid),
-            TmuxPolicy::Ensure,
+            Policy::Explicit,
             vec![],
             &store,
             &exec,
@@ -2246,7 +3000,7 @@ mod tests {
         ]);
         let err = ensure_workspace(
             &spec_with_ids(sid, pid),
-            TmuxPolicy::Ensure,
+            Policy::Explicit,
             vec![],
             &store,
             &exec,
@@ -2272,7 +3026,7 @@ mod tests {
         let exec = FakeExec::new(vec![ok(DIR_GONE_OUT), ok(""), ok(DIR_GONE_OUT)]);
         let err = ensure_workspace(
             &spec_with_ids(sid, pid),
-            TmuxPolicy::Ensure,
+            Policy::Explicit,
             vec![],
             &store,
             &exec,
@@ -2294,7 +3048,7 @@ mod tests {
         let exec = FakeExec::new(vec![ok(out)]);
         let err = ensure_workspace(
             &spec_with_ids(sid, pid),
-            TmuxPolicy::Ensure,
+            Policy::Explicit,
             vec![],
             &store,
             &exec,
@@ -2316,12 +3070,12 @@ mod tests {
     #[tokio::test]
     async fn tmux_failure_after_a_good_dir_surfaces_e_tmux_without_deleting() {
         let (store, sid, pid) = seeded_store("/repo/.claude/worktrees/feat");
-        let out = HEALTHY_OUT.replace("tmux_alive=1", "tmux_alive=0");
+        let out = HEALTHY_OUT.replace("tmux_alive=1", "tmux_alive=0\ntmux_dead=1");
         let mut exec = FakeExec::new(vec![ok(&out)]);
         exec.tmux_fail = true;
         let err = ensure_workspace(
             &spec_with_ids(sid, pid),
-            TmuxPolicy::Ensure,
+            Policy::Explicit,
             vec![],
             &store,
             &exec,
@@ -2335,18 +3089,24 @@ mod tests {
 
     #[tokio::test]
     async fn new_session_spec_without_ids_records_no_events() {
-        // `new_session` calls with session_id = None: the fix runs, nothing
-        // is attached to a row (the row does not exist yet).
+        // `new_session` calls with session_id = None: the automatic create
+        // runs (dir absent, entry gone, branch exists), nothing is attached to
+        // a row (the row does not exist yet).
         let store = Mutex::new(Store::open_in_memory().unwrap());
+        let gone = DIR_GONE_OUT.replace(
+            "worktree /repo/.claude/worktrees/feat\nHEAD b\nbranch refs/heads/feat\nprunable gone\n",
+            "",
+        );
         let exec = FakeExec::new(vec![
-            ok(DIR_GONE_OUT),
+            ok(&gone),
             ok("outcome=branch_local\n"),
             ok(HEALTHY_OUT),
         ]);
-        let rep = ensure_workspace(&spec(true), TmuxPolicy::Leave, vec![], &store, &exec)
+        let rep = ensure_workspace(&spec(true), AUTO, vec![], &store, &exec)
             .await
             .unwrap();
-        assert_eq!(rep.actions.len(), 2);
+        assert!(!rep.needs_explicit_repair);
+        assert_eq!(rep.actions.len(), 1);
         assert_eq!(rep.cwd, "/repo/.claude/worktrees/feat");
     }
 
@@ -2531,72 +3291,1200 @@ mod tests {
             .execute("UPDATE hosts SET reachable=0 WHERE alias='local'", [])
             .unwrap();
         let ssh = Arc::new(SshClient::new());
-        let err = repair_session(sid, &store, &ssh).await.unwrap_err();
+        let err = repair_session(sid, true, &store, &ssh).await.unwrap_err();
         assert_eq!(err.code, codes::E_HOST_OFFLINE);
     }
 
+    // ── automatic vs explicit (review round 2) ────────────────────────────
+
+    #[test]
+    fn policy_for_each_entry_point() {
+        let auto = Policy::Auto {
+            create_dead_tmux: false,
+        };
+        assert_eq!(policy_for(Entry::NewSession), auto);
+        assert_eq!(policy_for(Entry::SpawnReview), auto);
+        assert_eq!(policy_for(Entry::Restart), auto);
+        assert_eq!(policy_for(Entry::Recreate), auto);
+        assert_eq!(
+            policy_for(Entry::Attach),
+            Policy::Auto {
+                create_dead_tmux: true
+            }
+        );
+        assert_eq!(policy_for(Entry::Explicit), Policy::Explicit);
+    }
+
+    /// Wiring: each lifecycle call site passes its own entry point and starts
+    /// tmux in the probe-resolved directory; only the explicit surfaces reach
+    /// `Policy::Explicit`.
+    #[test]
+    fn call_sites_use_their_documented_entry_points() {
+        let sessions = include_str!("sessions.rs");
+        for needle in [
+            "Entry::Restart",
+            "Entry::Recreate",
+            "Entry::SpawnReview",
+            "repair::ensure_for_new_session(",
+        ] {
+            assert!(sessions.contains(needle), "sessions.rs must use {needle}");
+        }
+        assert!(
+            !sessions.contains("Entry::Explicit"),
+            "lifecycles are never explicit"
+        );
+        assert!(!sessions.contains("Entry::Attach"));
+        // recreate + spawn_review use the resolved cwd; restart respawns into it.
+        assert!(sessions.contains("Ok(rep) => rep.cwd"));
+        assert!(sessions.contains("std::path::Path::new(&rep.cwd)"));
+        let commands = include_str!("../commands/sessions.rs");
+        assert!(commands.contains("repair::repair_session(args.session_id, args.explicit"));
+        let tools = include_str!("../mcp/tools.rs");
+        assert!(tools.contains("repair::repair_session(id, true"));
+        assert!(tools.contains("\"repair_session\",\n            p.confirm_nonce.as_deref(),"));
+    }
+
+    #[test]
+    fn auto_policy_never_applies_explicit_only_steps() {
+        // (a)/(d) stale registration: automatic runs report, never unregister.
+        let mut p = healthy();
+        p.wt_exists = false;
+        p.wt_git = false;
+        p.wt_gitdir_ok = false;
+        p.tmux_cwd_exists = false;
+        p.worktrees[1].prunable = true;
+        for policy in [AUTO, ATTACH] {
+            let plan = make_plan(&spec(true), &p, policy).unwrap();
+            assert!(plan.steps.is_empty(), "{policy:?}: {:?}", plan.steps);
+            assert!(plan.needs_explicit_repair);
+            assert_eq!(
+                plan.deferred[0],
+                Step::Unregister {
+                    path: "/repo/.claude/worktrees/feat".into()
+                }
+            );
+            assert!(plan
+                .deferred
+                .iter()
+                .any(|s| matches!(s, Step::TmuxRespawn { .. })));
+            assert_eq!(plan.cwd, "/repo/.claude/worktrees/feat");
+        }
+        // (f) branch gone everywhere: recreating it is explicit-only.
+        let mut p = healthy();
+        p.wt_exists = false;
+        p.wt_git = false;
+        p.wt_gitdir_ok = false;
+        p.branch_local = false;
+        p.branch_remote = false;
+        p.worktrees.truncate(1);
+        let plan = make_plan(&spec(true), &p, AUTO).unwrap();
+        assert!(plan.needs_explicit_repair && plan.steps.is_empty());
+        // (g) branch checked out in another linked worktree: ambiguous.
+        let mut p = healthy();
+        p.wt_exists = false;
+        p.wt_git = false;
+        p.wt_gitdir_ok = false;
+        p.worktrees[1].path = "/repo/.worktrees/feat".into();
+        let plan = make_plan(&spec(true), &p, ATTACH).unwrap();
+        assert!(plan.needs_explicit_repair && plan.steps.is_empty());
+        assert!(matches!(&plan.deferred[0], Step::AdoptPath { .. }));
+        // (l) empty leftover dir: not "absent on disk".
+        let mut p = healthy();
+        p.wt_git = false;
+        p.wt_gitdir_ok = false;
+        p.wt_empty = true;
+        p.worktrees.truncate(1);
+        assert!(
+            make_plan(&spec(true), &p, AUTO)
+                .unwrap()
+                .needs_explicit_repair
+        );
+        // (c) stale link: re-linking is explicit-only.
+        let mut p = healthy();
+        p.wt_gitdir_ok = false;
+        let plan = make_plan(&spec(true), &p, AUTO).unwrap();
+        assert!(plan.needs_explicit_repair && plan.steps.is_empty());
+    }
+
+    #[test]
+    fn auto_policy_creates_only_what_is_confirmed_missing() {
+        // Absent on disk, unregistered, branch exists: automatic add.
+        let mut p = healthy();
+        p.wt_exists = false;
+        p.wt_git = false;
+        p.wt_gitdir_ok = false;
+        p.tmux_alive = false;
+        p.tmux_dead = true;
+        p.tmux_cwd = None;
+        p.worktrees.truncate(1);
+        let plan = make_plan(&spec(true), &p, ATTACH).unwrap();
+        assert!(!plan.needs_explicit_repair);
+        assert_eq!(
+            plan.steps,
+            vec![
+                add_local(),
+                Step::TmuxCreate {
+                    cwd: "/repo/.claude/worktrees/feat".into()
+                }
+            ]
+        );
+        // Callers that own tmux (restart / recreate / new session): the add only.
+        assert_eq!(
+            make_plan(&spec(true), &p, AUTO).unwrap().steps,
+            vec![add_local()]
+        );
+        // tmux state unknown: no create, a warning.
+        p.tmux_dead = false;
+        let plan = make_plan(&spec(true), &p, ATTACH).unwrap();
+        assert_eq!(plan.steps, vec![add_local()]);
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|w| w.contains("tmux state unknown")));
+    }
+
+    #[test]
+    fn empty_pane_cwd_is_unknown_and_never_respawns() {
+        let mut p = healthy();
+        p.tmux_cwd = None;
+        p.tmux_cwd_exists = false;
+        for policy in [AUTO, ATTACH, Policy::Explicit] {
+            let plan = make_plan(&spec(true), &p, policy).unwrap();
+            assert!(plan.is_noop(), "{policy:?}: {:?}", plan.steps);
+            assert!(plan.deferred.is_empty());
+            assert!(plan
+                .warnings
+                .iter()
+                .any(|w| w.contains("could not read the pane")));
+        }
+        // A live pane on attach is never respawned, even when its cwd is gone.
+        let mut p = healthy();
+        p.tmux_cwd_exists = false;
+        let plan = make_plan(&spec(true), &p, ATTACH).unwrap();
+        assert!(plan.is_noop());
+        assert!(
+            !plan.needs_explicit_repair,
+            "a stale pane does not block the dir"
+        );
+        assert_eq!(
+            plan.deferred,
+            vec![Step::TmuxRespawn {
+                cwd: "/repo/.claude/worktrees/feat".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_probe_reads_tmux_state_and_resolved_path() {
+        let p = parse_probe("wt_path=/r/.worktrees/x\ntmux_alive=0\ntmux_dead=1\n@@worktrees\n");
+        assert_eq!(p.wt_path.as_deref(), Some("/r/.worktrees/x"));
+        assert!(!p.tmux_alive && p.tmux_dead);
+        let p = parse_probe("tmux_alive=1\ntmux_dead=0\ntmux_cwd=\n");
+        assert!(p.tmux_alive && p.tmux_cwd.is_none());
+    }
+
+    #[test]
+    fn probe_script_confirms_tmux_death_and_resolves_both_layouts() {
+        let mut s = spec(true);
+        s.worktree.as_mut().unwrap().path_is_guess = true;
+        let script = probe_script(&s);
+        assert!(script.contains("guess=1"));
+        assert!(script.contains("name='feat'"));
+        assert!(
+            script.contains(
+                "for cand in \"$root/.worktrees/$name\" \"$root/.claude/worktrees/$name\"; do"
+            ),
+            "{script}"
+        );
+        assert!(script.contains("echo \"wt_path=$wt\""));
+        assert!(script.contains("echo tmux_dead=1"));
+        assert!(script.contains("no server running|error connecting to"));
+        assert!(script.contains("if [ -n \"$cwd\" ]; then echo \"tmux_cwd_exists="));
+        // Row-backed paths are never re-guessed.
+        assert!(probe_script(&spec(true)).contains("guess=0"));
+    }
+
+    #[test]
+    fn dot_worktrees_layout_on_a_guessed_path_resolves_and_is_healthy() {
+        // mefistos: remote worktrees live under `.worktrees/<name>`; the spec
+        // guessed `.claude/worktrees/<name>`; the probe resolved the real dir.
+        let mut s = spec(true);
+        s.worktree.as_mut().unwrap().path_is_guess = true;
+        let mut p = healthy();
+        p.wt_path = Some("/repo/.worktrees/feat".into());
+        p.wt_canon = Some("/repo/.worktrees/feat".into());
+        p.worktrees[1].path = "/repo/.worktrees/feat".into();
+        p.tmux_cwd = Some("/repo/.worktrees/feat".into());
+        for policy in [AUTO, ATTACH, Policy::Explicit] {
+            let plan = make_plan(&s, &p, policy).unwrap();
+            assert!(plan.is_noop(), "{policy:?}: {:?}", plan.steps);
+            assert!(!plan.needs_explicit_repair, "{:?}", plan.warnings);
+            assert_eq!(plan.cwd, "/repo/.worktrees/feat", "resolved, not the guess");
+        }
+    }
+
+    #[test]
+    fn mixed_logical_and_physical_path_forms_are_healthy() {
+        // mefistos: rows and PWD use /home/me/projects/…, while git and
+        // `pwd -P` say /mnt/sda4/projects/…; one worktree is even listed in
+        // its logical form (it was added from a logical cwd).
+        let mut s = spec(true);
+        s.project_root = "/home/me/projects/o/r".into();
+        s.worktree.as_mut().unwrap().path = "/home/me/projects/o/r/.worktrees/feat".into();
+        let mut p = healthy();
+        p.root_canon = Some("/mnt/sda4/projects/o/r".into());
+        p.wt_canon = Some("/mnt/sda4/projects/o/r/.worktrees/feat".into());
+        p.tmux_cwd = Some("/mnt/sda4/projects/o/r/.worktrees/feat".into());
+        p.worktrees = vec![
+            RegisteredWorktree {
+                path: "/mnt/sda4/projects/o/r".into(),
+                canon: Some("/mnt/sda4/projects/o/r".into()),
+                branch: Some("main".into()),
+                ..Default::default()
+            },
+            RegisteredWorktree {
+                path: "/home/me/projects/o/r/.worktrees/feat".into(),
+                canon: Some("/mnt/sda4/projects/o/r/.worktrees/feat".into()),
+                branch: Some("feat".into()),
+                ..Default::default()
+            },
+        ];
+        for policy in [AUTO, Policy::Explicit] {
+            let plan = make_plan(&s, &p, policy).unwrap();
+            assert!(plan.is_noop(), "{policy:?}: {:?}", plan.steps);
+            assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+            assert_eq!(plan.cwd, "/home/me/projects/o/r/.worktrees/feat");
+        }
+        // P1: the branch is in the MAIN checkout, reported physically while
+        // the root is logical — recognised as the main checkout, never adopted.
+        p.wt_exists = false;
+        p.wt_git = false;
+        p.wt_gitdir_ok = false;
+        p.worktrees = vec![RegisteredWorktree {
+            path: "/mnt/sda4/projects/o/r".into(),
+            canon: Some("/mnt/sda4/projects/o/r".into()),
+            branch: Some("feat".into()),
+            ..Default::default()
+        }];
+        for policy in [AUTO, ATTACH, Policy::Explicit] {
+            assert_eq!(
+                make_plan(&s, &p, policy).unwrap_err().code,
+                codes::E_BRANCH_CHECKED_OUT
+            );
+        }
+    }
+
+    #[test]
+    fn git_script_is_exact_for_each_step_kind() {
+        let steps = vec![
+            Step::Unregister {
+                path: "/r/.claude/worktrees/f".into(),
+            },
+            Step::AddWorktree {
+                path: "/r/.claude/worktrees/f".into(),
+                branch: "f".into(),
+                from: BranchSource::Local,
+            },
+        ];
+        assert_eq!(
+            render_git_script("/r", &steps),
+            "set -e\n\
+             git -C '/r' worktree remove --force -- '/r/.claude/worktrees/f' 1>&2\n\
+             git -C '/r' worktree add -- '/r/.claude/worktrees/f' 'f' 1>&2\n\
+             echo outcome=branch_local\n"
+        );
+        assert_eq!(
+            render_git_script(
+                "/r",
+                &[Step::RepairLinks {
+                    path: "/r/w".into()
+                }]
+            ),
+            "set -e\ngit -C '/r' worktree repair -- '/r/w' 1>&2\n"
+        );
+        assert_eq!(
+            render_git_script(
+                "/r",
+                &[Step::AddWorktree {
+                    path: "/r/w".into(),
+                    branch: "f".into(),
+                    from: BranchSource::Remote,
+                }]
+            ),
+            "set -e\nb='f'\ngit -C '/r' worktree add --track -b \"$b\" -- '/r/w' \"origin/$b\" 1>&2\necho outcome=branch_remote\n"
+        );
+    }
+
+    #[test]
+    fn branch_recreation_asks_origin_and_aborts_on_errors() {
+        let script = render_git_script(
+            "/r",
+            &[Step::AddWorktree {
+                path: "/r/w".into(),
+                branch: "f".into(),
+                from: BranchSource::FetchOrBase {
+                    base: "dev".into(),
+                    default: "main".into(),
+                },
+            }],
+        );
+        for needle in [
+            "b='f'\n",
+            "if git -C '/r' remote get-url origin >/dev/null 2>&1; then\n",
+            "  lr=0; git -C '/r' ls-remote --exit-code --heads -- origin \"refs/heads/$b\" >/dev/null 2>&1 || lr=$?\n",
+            "  lr=2\n",
+            "  if ! git -C '/r' fetch -- origin \"+refs/heads/$b:refs/remotes/origin/$b\" 1>&2; then\n",
+            "  git -C '/r' worktree add --track -b \"$b\" -- '/r/w' \"origin/$b\" 1>&2\n",
+            "  basebr='dev'\n",
+            "  defbr='main'\n",
+            "  git -C '/r' worktree add -b \"$b\" -- '/r/w' \"$start\" 1>&2\n",
+            "  echo \"outcome=branch_from_base:$start\"\n",
+            "*)\n  echo \"repair: cannot confirm whether origin still has $b",
+        ] {
+            assert!(script.contains(needle), "missing {needle:?} in:\n{script}");
+        }
+        // A fetch failure is fatal, never a silent fall-through to a fork.
+        assert!(!script.contains("|| true"), "{script}");
+    }
+
+    #[tokio::test]
+    async fn auto_add_runs_the_exact_script_then_verifies() {
+        // (b) automatic: dir absent, unregistered, branch exists locally.
+        let (store, sid, pid) = seeded_store("/repo/.claude/worktrees/feat");
+        let gone = "root_exists=1\nroot_git=1\nroot_gitdir_ok=1\nwt_exists=0\nbranch_local=1\n\
+            default_branch=main\ntmux_alive=1\ntmux_dead=0\ntmux_cwd=/repo\ntmux_cwd_exists=1\n\
+            @@worktrees\nworktree /repo\nHEAD a\nbranch refs/heads/main\n";
+        let exec = FakeExec::new(vec![
+            ok(gone),
+            ok("outcome=branch_local\n"),
+            ok(HEALTHY_OUT),
+        ]);
+        let rep = ensure_workspace(&spec_with_ids(sid, pid), AUTO, vec![], &store, &exec)
+            .await
+            .unwrap();
+        let scripts = exec.scripts();
+        assert_eq!(scripts.len(), 3);
+        assert_eq!(scripts[1], render_git_script("/repo", &[add_local()]));
+        assert!(
+            scripts[2].contains("worktree list --porcelain"),
+            "verify probe"
+        );
+        assert!(exec.tmux_calls().is_empty(), "AUTO never touches tmux");
+        assert_eq!(rep.branch_source.as_deref(), Some("branch_local"));
+        assert!(!rep.needs_explicit_repair);
+        let s = store.lock().unwrap();
+        let ev = s.list_session_events(sid, 10).unwrap();
+        assert_eq!(ev[0].kind, EVENT_REPAIRED);
+        assert!(ev[0]
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("\"branch_source\":\"branch_local\""));
+    }
+
+    #[tokio::test]
+    async fn auto_run_needing_explicit_steps_applies_nothing_and_lifecycles_refuse() {
+        let (store, sid, pid) = seeded_store("/repo/.claude/worktrees/feat");
+        let exec = FakeExec::new(vec![ok(DIR_GONE_OUT)]);
+        let rep = ensure_workspace(&spec_with_ids(sid, pid), ATTACH, vec![], &store, &exec)
+            .await
+            .unwrap();
+        assert_eq!(exec.scripts().len(), 1, "probe only");
+        assert!(
+            exec.tmux_calls().is_empty(),
+            "attach never respawns a live pane"
+        );
+        assert!(rep.needs_explicit_repair && !rep.healthy);
+        assert!(
+            rep.deferred
+                .iter()
+                .any(|d| d.contains("worktree remove --force --")),
+            "{:?}",
+            rep.deferred
+        );
+        assert!(store
+            .lock()
+            .unwrap()
+            .list_session_events(sid, 10)
+            .unwrap()
+            .is_empty());
+        let err = require_no_explicit(rep).unwrap_err();
+        assert_eq!(err.code, codes::E_REPAIR_REQUIRED);
+        assert!(err.message.contains("Repair workspace"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn fetch_or_ls_remote_failure_is_e_repair_failed() {
+        let (store, sid, pid) = seeded_store("/repo/.claude/worktrees/feat");
+        let gone = "root_exists=1\nroot_git=1\nroot_gitdir_ok=1\nwt_exists=0\nbranch_local=0\n\
+            branch_remote=0\ndefault_branch=main\ntmux_alive=1\ntmux_dead=0\ntmux_cwd=/repo\n\
+            tmux_cwd_exists=1\n@@worktrees\nworktree /repo\nbranch refs/heads/main\n";
+        let exec = FakeExec::new(vec![
+            ok(gone),
+            Ok(ScriptOutput {
+                ok: false,
+                stdout: String::new(),
+                stderr: "repair: cannot confirm whether origin still has feat (git ls-remote exit 128); not recreating it".into(),
+            }),
+        ]);
+        let err = ensure_workspace(
+            &spec_with_ids(sid, pid),
+            Policy::Explicit,
+            vec![],
+            &store,
+            &exec,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_REPAIR_FAILED);
+        assert!(err.message.contains("cannot confirm whether origin"));
+        assert_eq!(exec.scripts().len(), 2, "no verify, no retry");
+        assert!(exec.tmux_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn interrupted_apply_says_it_may_be_partially_applied() {
+        let (store, sid, pid) = seeded_store("/repo/.claude/worktrees/feat");
+        let exec = FakeExec::new(vec![
+            ok(DIR_GONE_OUT),
+            Err(IpcError::new(codes::E_SSH_TIMEOUT, "wall clock")),
+        ]);
+        let err = ensure_workspace(
+            &spec_with_ids(sid, pid),
+            Policy::Explicit,
+            vec![],
+            &store,
+            &exec,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_REPAIR_FAILED);
+        assert!(err.message.contains("partially applied"), "{}", err.message);
+        assert!(!err.message.contains("nothing was changed"));
+        // A probe-time failure, by contrast, changed nothing.
+        let exec = FakeExec::new(vec![Err(IpcError::new(codes::E_SSH_TIMEOUT, "wall clock"))]);
+        let err = ensure_workspace(
+            &spec_with_ids(sid, pid),
+            Policy::Explicit,
+            vec![],
+            &store,
+            &exec,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_HOST_OFFLINE);
+    }
+
+    #[tokio::test]
+    async fn adoption_is_refused_when_another_session_uses_that_checkout() {
+        let (store, sid, pid) = seeded_store("/repo/.claude/worktrees/feat");
+        {
+            let s = store.lock().unwrap();
+            // A not-yet-dismissed ghost counts too.
+            let other = s
+                .upsert_session("other", "local", Some(pid), None, 1, 1, "ghost", None)
+                .unwrap();
+            s.set_worktree_key(other, Some("feat-moved")).unwrap();
+        }
+        let out = ADOPT_OUT.replace("/repo/.worktrees/feat", "/repo/.worktrees/feat-moved");
+        let exec = FakeExec::new(vec![ok(&out)]);
+        let err = ensure_workspace(
+            &spec_with_ids(sid, pid),
+            Policy::Explicit,
+            vec![],
+            &store,
+            &exec,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_BRANCH_CHECKED_OUT);
+        assert!(err.message.contains("session other"), "{}", err.message);
+        assert_eq!(exec.scripts().len(), 1, "refused before any change");
+        assert!(exec.tmux_calls().is_empty());
+    }
+
+    // ── HostExec over FakeSsh: the real transport, scripted ──────────────
+
+    #[test]
+    fn remote_wall_clocks_match_the_local_bounds() {
+        assert_eq!(
+            SshClient::default_wall_clock(PROBE_CONNECT_TIMEOUT),
+            PROBE_WALL_CLOCK
+        );
+        assert_eq!(
+            SshClient::default_wall_clock(APPLY_CONNECT_TIMEOUT),
+            APPLY_WALL_CLOCK
+        );
+        assert!(APPLY_WALL_CLOCK >= Duration::from_secs(120));
+    }
+
+    /// A remote spec: paths under the host's home, layout only guessed.
+    fn remote_spec() -> WorkspaceSpec {
+        let mut s = spec(true);
+        s.host_alias = "mefistos".into();
+        s.project_root = "/home/me/projects/github.com/o/r".into();
+        let w = s.worktree.as_mut().unwrap();
+        w.path = "/home/me/projects/github.com/o/r/.claude/worktrees/feat".into();
+        w.path_is_guess = true;
+        w.row_is_local = false;
+        s
+    }
+
+    /// Probe fixtures re-rooted under the remote project.
+    fn remote_out(out: &str) -> String {
+        out.replace("/repo", "/home/me/projects/github.com/o/r")
+    }
+
+    /// A `HostExec` whose ssh AND tmux both go through `fake`.
+    fn fake_host_exec(fake: &Arc<crate::ssh_fake::FakeSsh>) -> HostExec<'_> {
+        let tmux = Box::new(crate::tmux::RemoteTmux {
+            client: Arc::clone(fake),
+            host: "mefistos".to_string(),
+        });
+        HostExec::with("mefistos", &**fake, tmux)
+    }
+
+    #[tokio::test]
+    async fn host_exec_probe_goes_over_ssh_as_one_quoted_script() {
+        use crate::ssh_fake::{FakeSsh, Match, Reply};
+        let fake = Arc::new(FakeSsh::new());
+        fake.on_host(
+            "mefistos",
+            Match::script_contains("worktree list --porcelain"),
+            Reply::ok(&remote_out(HEALTHY_OUT)),
+        );
+        let s = remote_spec();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let exec = fake_host_exec(&fake);
+        let rep = ensure_workspace(&s, Policy::Explicit, vec![], &store, &exec)
+            .await
+            .unwrap();
+        assert!(rep.healthy, "{:?} {:?}", rep.actions, rep.warnings);
+        let calls = fake.calls_for("mefistos");
+        assert_eq!(
+            calls.len(),
+            1,
+            "one probe, nothing else: {:?}",
+            fake.commands()
+        );
+        assert_eq!(calls[0].args[0], "bash");
+        assert_eq!(calls[0].args[1], "-lc");
+        assert_eq!(
+            calls[0].script().as_deref(),
+            Some(probe_script(&s).as_str()),
+            "the whole probe crosses ssh as one quoted word"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_exec_explicit_repair_sends_probe_apply_verify_then_respawn() {
+        use crate::ssh_fake::{FakeSsh, Match, Reply};
+        let fake = Arc::new(FakeSsh::new());
+        let root = "/home/me/projects/github.com/o/r";
+        let wt = format!("{root}/.claude/worktrees/feat");
+        // The first probe re-guesses the layout (guess=1); the verify probe
+        // checks exactly the planned dir (guess=0).
+        fake.on_host(
+            "mefistos",
+            Match::script_contains("guess=1"),
+            Reply::ok(&remote_out(DIR_GONE_OUT)),
+        );
+        fake.on_host(
+            "mefistos",
+            Match::script_contains("guess=0"),
+            Reply::ok(&remote_out(HEALTHY_OUT)),
+        );
+        fake.on_host(
+            "mefistos",
+            Match::script_contains("worktree remove --force"),
+            Reply::ok("outcome=branch_local\n"),
+        );
+        let s = remote_spec();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let exec = fake_host_exec(&fake);
+        let rep = ensure_workspace(&s, Policy::Explicit, vec![], &store, &exec)
+            .await
+            .unwrap();
+        assert_eq!(rep.cwd, wt);
+        assert_eq!(rep.tmux.as_deref(), Some("respawned"));
+        let scripts: Vec<String> = fake
+            .calls_for("mefistos")
+            .iter()
+            .map(|c| c.script().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            scripts.len(),
+            4,
+            "probe, apply, verify, respawn: {scripts:?}"
+        );
+        assert!(scripts[0].contains("guess=1"));
+        assert_eq!(
+            scripts[1],
+            render_git_script(
+                root,
+                &[
+                    Step::Unregister { path: wt.clone() },
+                    Step::AddWorktree {
+                        path: wt.clone(),
+                        branch: "feat".into(),
+                        from: BranchSource::Local,
+                    },
+                ]
+            )
+        );
+        assert!(scripts[2].contains("guess=0"));
+        assert!(
+            scripts[3].contains(&format!("respawn-pane -k -c {}", quote(&wt))),
+            "respawned INTO the repaired dir: {}",
+            scripts[3]
+        );
+    }
+
+    #[tokio::test]
+    async fn host_exec_unreachable_host_is_e_host_offline_and_changes_nothing() {
+        use crate::ssh_fake::FakeSsh;
+        let fake = Arc::new(FakeSsh::new());
+        fake.unreachable("mefistos");
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let exec = fake_host_exec(&fake);
+        let err = ensure_workspace(&remote_spec(), Policy::Explicit, vec![], &store, &exec)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_HOST_OFFLINE, "{}", err.message);
+        assert!(err.message.contains("nothing was changed"));
+        assert_eq!(fake.calls_for("mefistos").len(), 1, "probe only");
+    }
+
+    #[tokio::test]
+    async fn host_exec_interrupted_apply_may_be_partially_applied() {
+        use crate::ssh_fake::{FakeSsh, Match, Reply};
+        for apply_reply in [Reply::hang(), Reply::Unreachable] {
+            let fake = Arc::new(FakeSsh::new());
+            fake.set_wall_clock(Duration::from_millis(50));
+            fake.on_host(
+                "mefistos",
+                Match::script_contains("guess=1"),
+                Reply::ok(&remote_out(DIR_GONE_OUT)),
+            );
+            fake.on_host(
+                "mefistos",
+                Match::script_contains("worktree remove --force"),
+                apply_reply.clone(),
+            );
+            let store = Mutex::new(Store::open_in_memory().unwrap());
+            let exec = fake_host_exec(&fake);
+            let err = ensure_workspace(&remote_spec(), Policy::Explicit, vec![], &store, &exec)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, codes::E_REPAIR_FAILED, "{apply_reply:?}");
+            assert!(
+                err.message.contains("partially applied"),
+                "{apply_reply:?}: {}",
+                err.message
+            );
+            assert_eq!(
+                fake.calls_for("mefistos").len(),
+                2,
+                "no verify, no tmux after a lost apply"
+            );
+        }
+    }
+
+    // ── symlinked roots (macOS /var → /private/var, ~/projects → /mnt/…) ──
+
+    #[test]
+    fn probe_script_canonicalizes_root_worktree_and_registrations() {
+        let script = probe_script(&spec(true));
+        assert!(script.contains("canon() {"), "{script}");
+        assert!(script.contains("pwd -P"), "{script}");
+        assert!(script.contains("echo \"root_canon=$(canon \"$root\")\""));
+        assert!(script.contains("echo \"wt_canon=$(canon \"$wt\")\""));
+        assert!(script.contains("echo \"canon $(canon \"${l#worktree }\")\""));
+    }
+
+    #[test]
+    fn parse_probe_reads_canonical_paths() {
+        let out = "root_canon=/private/var/r\nwt_canon=/private/var/r/w\n@@worktrees\n\
+                   worktree /private/var/r\ncanon /private/var/r\nbranch refs/heads/main\n\n\
+                   worktree /private/var/r/w\ncanon /private/var/r/w\nbranch refs/heads/w\n";
+        let p = parse_probe(out);
+        assert_eq!(p.root_canon.as_deref(), Some("/private/var/r"));
+        assert_eq!(p.wt_canon.as_deref(), Some("/private/var/r/w"));
+        assert_eq!(p.worktrees[1].key(), "/private/var/r/w");
+        // No canon line → git's own path is the key.
+        let p = parse_probe("@@worktrees\nworktree /a\n");
+        assert_eq!(p.worktrees[0].key(), "/a");
+    }
+
+    /// `healthy()`, but the host resolves `/repo` to `/real/repo` and git
+    /// prints the realpaths.
+    fn healthy_under_symlink() -> Probe {
+        let mut p = healthy();
+        p.root_canon = Some("/real/repo".into());
+        p.wt_canon = Some("/real/repo/.claude/worktrees/feat".into());
+        for w in p.worktrees.iter_mut() {
+            let real = w.path.replacen("/repo", "/real/repo", 1);
+            w.path = real.clone();
+            w.canon = Some(real);
+        }
+        p
+    }
+
+    #[test]
+    fn symlinked_root_healthy_is_noop_and_deleted_dir_prunes_and_adds() {
+        // Healthy: canonical-to-canonical match, nothing to do. (Comparing
+        // raw paths would have "adopted" our own registration elsewhere.)
+        let p = healthy_under_symlink();
+        let plan = make_plan(&spec(true), &p, Policy::Explicit).unwrap();
+        assert!(plan.is_noop(), "{:?}", plan.steps);
+        assert_eq!(
+            plan.cwd, "/repo/.claude/worktrees/feat",
+            "user-facing path kept"
+        );
+        // Deleted dir: the prunable registration is still recognised as ours.
+        let mut p = healthy_under_symlink();
+        p.wt_exists = false;
+        p.wt_git = false;
+        p.wt_gitdir_ok = false;
+        p.tmux_cwd_exists = false;
+        p.worktrees[1].prunable = true;
+        let plan = make_plan(&spec(true), &p, Policy::Explicit).unwrap();
+        assert_eq!(
+            plan.steps,
+            vec![
+                // git's own (realpath) form, so `worktree remove` matches it.
+                Step::Unregister {
+                    path: "/real/repo/.claude/worktrees/feat".into()
+                },
+                add_local(),
+                Step::TmuxRespawn {
+                    cwd: "/repo/.claude/worktrees/feat".into()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn symlinked_root_main_checkout_guard_still_refuses() {
+        // Branch checked out in the main checkout, reported via its realpath:
+        // must be recognised as the main checkout (refuse), never adopted.
+        let mut p = healthy_under_symlink();
+        p.wt_exists = false;
+        p.wt_git = false;
+        p.wt_gitdir_ok = false;
+        p.worktrees = vec![RegisteredWorktree {
+            path: "/real/repo".into(),
+            canon: Some("/real/repo".into()),
+            branch: Some("feat".into()),
+            ..Default::default()
+        }];
+        let err = make_plan(&spec(true), &p, Policy::Explicit).unwrap_err();
+        assert_eq!(err.code, codes::E_BRANCH_CHECKED_OUT);
+    }
+
+    #[tokio::test]
+    async fn host_reporting_private_var_for_a_var_row_is_healthy() {
+        // macOS: /var -> /private/var. Row and spec say /var/…; `pwd -P` and
+        // git say /private/var/…. Judged healthy: no prune, add or respawn,
+        // and the row keeps its user-facing path.
+        let wt_row = "/var/folders/x/repo/.claude/worktrees/feat";
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let pid = s.upsert_project("o", "r", "/var/folders/x/repo").unwrap();
+        let wid = s
+            .upsert_worktree(pid, "feat", wt_row, Some("feat"))
+            .unwrap();
+        let sid = s
+            .upsert_session(
+                "dev-x",
+                "local",
+                Some(pid),
+                Some(wid),
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+        let store = Mutex::new(s);
+        let mut sp = spec_with_ids(sid, pid);
+        sp.project_root = "/var/folders/x/repo".into();
+        sp.worktree.as_mut().unwrap().path = wt_row.into();
+        let out = "root_exists=1\nroot_git=1\nroot_gitdir_ok=1\n\
+            root_canon=/private/var/folders/x/repo\n\
+            wt_canon=/private/var/folders/x/repo/.claude/worktrees/feat\n\
+            wt_exists=1\nwt_git=1\nwt_gitdir_ok=1\nbranch_local=1\ndefault_branch=main\n\
+            tmux_alive=1\ntmux_cwd=/private/var/folders/x/repo/.claude/worktrees/feat\n\
+            tmux_cwd_exists=1\n@@worktrees\n\
+            worktree /private/var/folders/x/repo\ncanon /private/var/folders/x/repo\n\
+            HEAD a\nbranch refs/heads/main\n\n\
+            worktree /private/var/folders/x/repo/.claude/worktrees/feat\n\
+            canon /private/var/folders/x/repo/.claude/worktrees/feat\n\
+            HEAD b\nbranch refs/heads/feat\n";
+        let exec = FakeExec::new(vec![ok(out)]);
+        let rep = ensure_workspace(&sp, Policy::Explicit, vec![], &store, &exec)
+            .await
+            .unwrap();
+        assert!(rep.healthy, "{:?}", rep.actions);
+        assert_eq!(exec.scripts().len(), 1, "one probe, no git steps");
+        assert!(exec.tmux_calls().is_empty(), "no respawn");
+        assert_eq!(rep.cwd, wt_row, "user-facing path stays the row's");
+        assert!(!rep.worktree_row_updated);
+        let st = store.lock().unwrap();
+        assert_eq!(st.worktree_path(wid).unwrap().as_deref(), Some(wt_row));
+        assert!(st.list_session_events(sid, 10).unwrap().is_empty());
+    }
+
     // ── against a real git repo (local) ───────────────────────────────────
+
+    /// Runs scripts with the real local `bash`; tmux must never be touched
+    /// (callers use `AUTO`).
+    struct LocalExec;
+
+    #[async_trait]
+    impl RepairExec for LocalExec {
+        async fn run_script(&self, script: &str) -> Result<ScriptOutput, IpcError> {
+            let out = tokio::process::Command::new("bash")
+                .args(["-c", script])
+                .output()
+                .await
+                .unwrap();
+            Ok(ScriptOutput {
+                ok: out.status.success(),
+                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            })
+        }
+        // Explicit real-git runs may create a confirmed-dead session; the
+        // unique test session names never collide with a real one, and no
+        // real tmux call is made from here.
+        async fn tmux_new_session(&self, _: &str, _: &str, _: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn tmux_respawn(&self, _: &str, _: &str, _: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+    }
+
+    fn git_in(dir: &std::path::Path, args: &[&str]) {
+        let st = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?}");
+    }
+
+    /// `git init` + one commit on `main` at `root`.
+    fn init_repo(root: &std::path::Path) {
+        std::fs::create_dir_all(root).unwrap();
+        let st = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .arg(root)
+            .status()
+            .unwrap();
+        assert!(st.success(), "git init");
+        git_in(root, &["config", "user.email", "t@t"]);
+        git_in(root, &["config", "user.name", "t"]);
+        std::fs::write(root.join("f"), "x").unwrap();
+        git_in(root, &["add", "."]);
+        git_in(root, &["commit", "-q", "-m", "init"]);
+    }
+
+    fn local_spec(root: &std::path::Path, wt: &std::path::Path, tag: &str) -> WorkspaceSpec {
+        let mut s = spec(true);
+        s.project_root = root.to_str().unwrap().to_string();
+        s.tmux_name = format!("cf-repair-{tag}-{}", std::process::id());
+        s.worktree.as_mut().unwrap().path = wt.to_str().unwrap().to_string();
+        s
+    }
+
+    /// The owner's layout: the project lives under a symlinked directory
+    /// (`~/projects` → `/mnt/…`), and on macOS every tempdir does too. A
+    /// healthy worktree must be a no-op; a deleted one must be re-added (not
+    /// adopted, not refused) and then be a no-op again.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn real_git_under_a_symlinked_root_is_noop_when_healthy_and_repairs_when_deleted() {
+        let base = tempfile::TempDir::new().unwrap();
+        let real = base.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let root = link.join("repo");
+        init_repo(&root);
+        let wt = root.join(".claude/worktrees/feat");
+        git_in(
+            &root,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feat"],
+        );
+        let s = local_spec(&root, &wt, "sym");
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+
+        let rep = ensure_workspace(&s, AUTO, vec![], &store, &LocalExec)
+            .await
+            .unwrap();
+        assert!(
+            rep.healthy,
+            "healthy worktree under a symlinked root must be a no-op: {:?}",
+            rep.actions
+        );
+        assert_eq!(rep.cwd, wt.to_str().unwrap(), "user-facing path kept");
+
+        std::fs::remove_dir_all(&wt).unwrap();
+        // Automatic: git still lists the entry, so this is reported only.
+        let rep = ensure_workspace(&s, AUTO, vec![], &store, &LocalExec)
+            .await
+            .unwrap();
+        assert!(rep.needs_explicit_repair, "{:?}", rep.warnings);
+        assert!(!wt.exists(), "nothing applied automatically");
+        // Explicit: unregister this entry, re-add, verify (canonically).
+        let rep = ensure_workspace(&s, Policy::Explicit, vec![], &store, &LocalExec)
+            .await
+            .unwrap();
+        assert!(!rep.healthy);
+        assert!(
+            rep.actions.iter().any(|a| a.contains("worktree add")),
+            "{:?}",
+            rep.actions
+        );
+        assert!(
+            !rep.actions.iter().any(|a| a.starts_with("adopt")),
+            "must not adopt its own registration: {:?}",
+            rep.actions
+        );
+        assert_eq!(rep.cwd, wt.to_str().unwrap());
+        assert!(wt.join(".git").exists(), "worktree is back");
+
+        let rep = ensure_workspace(&s, AUTO, vec![], &store, &LocalExec)
+            .await
+            .unwrap();
+        assert!(rep.healthy, "{:?}", rep.actions);
+    }
+
+    /// P1 against real git, under a symlinked root: the branch is checked out
+    /// in the MAIN checkout. Refused in both policies; the row is untouched
+    /// and nothing is created.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn real_git_branch_in_main_checkout_under_symlink_is_refused_and_row_untouched() {
+        let base = tempfile::TempDir::new().unwrap();
+        let real = base.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let root = link.join("repo");
+        init_repo(&root);
+        git_in(&root, &["checkout", "-q", "-b", "feat"]);
+        let wt = root.join(".claude/worktrees/feat");
+        let wt_s = wt.to_str().unwrap().to_string();
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let pid = s.upsert_project("o", "r", root.to_str().unwrap()).unwrap();
+        let wid = s.upsert_worktree(pid, "feat", &wt_s, Some("feat")).unwrap();
+        let sid = s
+            .upsert_session(
+                "dev-x",
+                "local",
+                Some(pid),
+                Some(wid),
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+        let store = Mutex::new(s);
+        let mut sp = local_spec(&root, &wt, "p1");
+        sp.session_id = Some(sid);
+        sp.project_id = Some(pid);
+        for policy in [AUTO, Policy::Explicit] {
+            let err = ensure_workspace(&sp, policy, vec![], &store, &LocalExec)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err.code,
+                codes::E_BRANCH_CHECKED_OUT,
+                "{policy:?}: {}",
+                err.message
+            );
+        }
+        let st = store.lock().unwrap();
+        assert_eq!(
+            st.worktree_path(wid).unwrap().as_deref(),
+            Some(wt_s.as_str()),
+            "row untouched"
+        );
+        assert!(!wt.exists(), "nothing created");
+    }
+
+    /// `.worktrees` layout against real git: a key-only session whose path is
+    /// only guessed (`.claude/worktrees/<name>`) resolves to the real
+    /// `.worktrees/<name>` checkout — a no-op, never the missing guess.
+    #[tokio::test]
+    async fn real_git_guessed_path_resolves_the_dot_worktrees_layout() {
+        let base = tempfile::TempDir::new().unwrap();
+        let root = base.path().join("repo");
+        init_repo(&root);
+        let real_wt = root.join(".worktrees/feat");
+        git_in(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                real_wt.to_str().unwrap(),
+                "-b",
+                "feat",
+            ],
+        );
+        let mut s = local_spec(&root, &root.join(".claude/worktrees/feat"), "layout");
+        s.worktree.as_mut().unwrap().path_is_guess = true;
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let rep = ensure_workspace(&s, AUTO, vec![], &store, &LocalExec)
+            .await
+            .unwrap();
+        assert!(rep.healthy, "{:?} {:?}", rep.actions, rep.warnings);
+        assert_eq!(rep.cwd, real_wt.to_str().unwrap(), "the resolved dir");
+        assert!(!root.join(".claude/worktrees/feat").exists());
+    }
+
+    /// Branch gone everywhere with an unreachable origin: automatic runs only
+    /// report it, and the explicit repair aborts instead of silently forking
+    /// a new branch from base.
+    #[tokio::test]
+    async fn real_git_unreachable_origin_aborts_branch_recreation() {
+        let base = tempfile::TempDir::new().unwrap();
+        let root = base.path().join("repo");
+        init_repo(&root);
+        let nope = base.path().join("nope.git");
+        git_in(&root, &["remote", "add", "origin", nope.to_str().unwrap()]);
+        let wt = root.join(".claude/worktrees/feat");
+        let s = local_spec(&root, &wt, "fetchfail");
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let auto = ensure_workspace(&s, AUTO, vec![], &store, &LocalExec)
+            .await
+            .unwrap();
+        assert!(
+            auto.needs_explicit_repair,
+            "automatic never recreates a branch"
+        );
+        let err = ensure_workspace(&s, Policy::Explicit, vec![], &store, &LocalExec)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_REPAIR_FAILED, "{}", err.message);
+        assert!(err.message.contains("cannot confirm"), "{}", err.message);
+        assert!(!wt.exists());
+        let branches = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["branch", "--list", "feat"])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&branches.stdout).trim().is_empty(),
+            "no branch created"
+        );
+    }
+
+    /// Branch gone everywhere and no origin at all: the explicit repair
+    /// recreates it from the base branch and records that.
+    #[tokio::test]
+    async fn real_git_no_origin_recreates_branch_from_base_explicitly() {
+        let base = tempfile::TempDir::new().unwrap();
+        let root = base.path().join("repo");
+        init_repo(&root);
+        let wt = root.join(".claude/worktrees/feat");
+        let s = local_spec(&root, &wt, "frombase");
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let rep = ensure_workspace(&s, Policy::Explicit, vec![], &store, &LocalExec)
+            .await
+            .unwrap();
+        assert_eq!(rep.branch_source.as_deref(), Some("branch_from_base:main"));
+        assert!(wt.join(".git").exists());
+    }
+
+    /// Prune scope against real git: two worktrees are deleted; repairing
+    /// ours must leave the other's stale registration for its owner.
+    #[tokio::test]
+    async fn real_git_repair_leaves_other_stale_registrations_alone() {
+        let base = tempfile::TempDir::new().unwrap();
+        let root = base.path().join("repo");
+        init_repo(&root);
+        let ours = root.join(".claude/worktrees/feat");
+        let other = root.join(".claude/worktrees/other");
+        git_in(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                ours.to_str().unwrap(),
+                "-b",
+                "feat",
+            ],
+        );
+        git_in(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                other.to_str().unwrap(),
+                "-b",
+                "other",
+            ],
+        );
+        std::fs::remove_dir_all(&ours).unwrap();
+        std::fs::remove_dir_all(&other).unwrap();
+        let s = local_spec(&root, &ours, "scope");
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let rep = ensure_workspace(&s, Policy::Explicit, vec![], &store, &LocalExec)
+            .await
+            .unwrap();
+        assert!(ours.join(".git").exists(), "ours is back");
+        assert!(
+            rep.actions
+                .iter()
+                .any(|a| a.contains("worktree remove --force")),
+            "{:?}",
+            rep.actions
+        );
+        let list = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["worktree", "list", "--porcelain"])
+            .output()
+            .unwrap();
+        let list = String::from_utf8_lossy(&list.stdout);
+        assert!(
+            list.contains("/.claude/worktrees/other"),
+            "another worktree's stale registration must survive: {list}"
+        );
+    }
 
     /// Real `git` + a real `bash`, no tmux (policy Leave): delete a
     /// worktree directory and watch the repair bring it back on its branch.
     #[tokio::test]
     async fn real_git_repairs_a_deleted_worktree_directory() {
         use std::process::Command;
+        // On macOS the tempdir itself sits under /var -> /private/var, so this
+        // is also a symlinked-root test there.
         let base = tempfile::TempDir::new().unwrap();
         let root = base.path().join("repo");
-        std::fs::create_dir_all(&root).unwrap();
-        let r = root.to_str().unwrap();
-        let git = |args: &[&str]| {
-            let st = Command::new("git")
-                .args(["-C", r])
-                .args(args)
-                .status()
-                .unwrap();
-            assert!(st.success(), "git {args:?}");
-        };
-        assert!(Command::new("git")
-            .args(["init", "-q", "-b", "main", r])
-            .status()
-            .unwrap()
-            .success());
-        git(&["config", "user.email", "t@t"]);
-        git(&["config", "user.name", "t"]);
-        std::fs::write(root.join("f"), "x").unwrap();
-        git(&["add", "."]);
-        git(&["commit", "-q", "-m", "init"]);
+        init_repo(&root);
         let wt = root.join(".claude/worktrees/feat");
-        git(&["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feat"]);
+        git_in(
+            &root,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feat"],
+        );
         // Simulate the user (or a cleanup job) deleting the directory.
         std::fs::remove_dir_all(&wt).unwrap();
-
-        struct LocalExec;
-        #[async_trait]
-        impl RepairExec for LocalExec {
-            async fn run_script(&self, script: &str) -> Result<ScriptOutput, IpcError> {
-                let out = tokio::process::Command::new("bash")
-                    .args(["-c", script])
-                    .output()
-                    .await
-                    .unwrap();
-                Ok(ScriptOutput {
-                    ok: out.status.success(),
-                    stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-                    stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-                })
-            }
-            async fn tmux_new_session(&self, _: &str, _: &str, _: &str) -> Result<(), IpcError> {
-                unreachable!()
-            }
-            async fn tmux_respawn(&self, _: &str, _: &str, _: &str) -> Result<(), IpcError> {
-                unreachable!()
-            }
-        }
-        let mut s = spec(true);
-        s.project_root = r.to_string();
-        s.tmux_name = format!("cf-repair-test-{}", std::process::id());
-        s.worktree.as_mut().unwrap().path = wt.to_str().unwrap().to_string();
+        let s = local_spec(&root, &wt, "test");
         let store = Mutex::new(Store::open_in_memory().unwrap());
-        let rep = ensure_workspace(&s, TmuxPolicy::Leave, vec![], &store, &LocalExec)
+        // git still lists the deleted entry: that is an explicit repair.
+        let rep = ensure_workspace(&s, Policy::Explicit, vec![], &store, &LocalExec)
             .await
             .unwrap();
         assert!(!rep.healthy);
@@ -2614,7 +4502,7 @@ mod tests {
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "feat");
         // Second run: healthy, no-op.
-        let rep2 = ensure_workspace(&s, TmuxPolicy::Leave, vec![], &store, &LocalExec)
+        let rep2 = ensure_workspace(&s, AUTO, vec![], &store, &LocalExec)
             .await
             .unwrap();
         assert!(rep2.healthy);

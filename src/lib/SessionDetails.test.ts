@@ -129,8 +129,10 @@ describe('SessionDetails', () => {
     // Project-backed work session: button present; click → repair_session(id) → toast.
     (invoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       session_id: 7, host_alias: 'mefistos', tmux_name: 'dev-foo', cwd: '/r/.worktrees/x',
-      healthy: false, actions: ['git worktree prune', 'tmux respawn-pane -k -c /r/.worktrees/x'],
-      warnings: [], branch_source: 'branch_local', tmux: 'respawned', tmux_alive: true,
+      healthy: false,
+      actions: ['git worktree remove --force -- /r/.worktrees/x', 'tmux respawn-pane -k -c /r/.worktrees/x'],
+      warnings: [], needs_explicit_repair: false, deferred: [], branch_source: 'branch_local',
+      tmux: 'respawned', tmux_alive: true, tmux_dead: false,
       tmux_cwd_stale: false, worktree_row_updated: false, sibling_session_ids: [],
     });
     render(SessionDetails, { props: { session: { ...sampleSession, id: 7, project_id: 1 } } });
@@ -141,10 +143,13 @@ describe('SessionDetails', () => {
     await tick();
     expect((invoke as ReturnType<typeof vi.fn>).mock.calls).toContainEqual([
       'repair_session',
-      { args: { session_id: 7 } },
+      { args: { session_id: 7, explicit: true } },
     ]);
     const shown = get(toasts);
-    expect(shown.some((t) => t.kind === 'success' && t.message.includes('git worktree prune'))).toBe(true);
+    const done = shown.find((t) => t.kind === 'success' && t.message.includes('git worktree remove --force'));
+    expect(done).toBeTruthy();
+    // branch_source is always shown for a repair that re-added the worktree.
+    expect(done?.message).toContain('branch_local');
   });
 
   it('shows the Review button', async () => {
