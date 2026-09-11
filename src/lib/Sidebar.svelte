@@ -15,7 +15,6 @@
     showBgAgents,
     showFriendlyNames,
     sameSession,
-    type PurgeReport,
     type SessionRow,
   } from './sessions';
   import { describePurge, purgeHostsForProject } from './purge';
@@ -617,18 +616,17 @@
     if (!pendingPurge) return;
     const project = pendingPurge;
     pendingPurge = null;
-    // Projects carry no host; purge on every host the project's sessions ran on.
-    const reports: PurgeReport[] = [];
-    for (const host of purgeHostsForProject(project.id, $sessions)) {
-      const result = await purgeProject(host, project.base_path, project.id);
-      if (!result.ok) {
-        pushError(result.error, `Purge failed on ${host}`);
-        break;
-      }
-      reports.push(result.value);
-    }
-    if (reports.length > 0) {
-      push(describePurge(reports));
+    // Projects carry no host; purge on every host the project's sessions ran
+    // on, in one call. The backend keeps the row unless every host succeeds.
+    const result = await purgeProject(
+      purgeHostsForProject(project.id, $sessions),
+      project.base_path,
+      project.id,
+    );
+    if (!result.ok) {
+      pushError(result.error, 'Purge failed; project kept');
+    } else {
+      push(describePurge(result.value));
       // Refresh stores since the backend doesn't emit row-level events for project deletion
       await loadSessions();
       await refreshProjects();

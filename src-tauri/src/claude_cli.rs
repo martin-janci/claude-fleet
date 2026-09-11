@@ -104,9 +104,14 @@ const PURGE_NOT_FOUND: &str = "No Claude Code project state found";
 /// `/mnt/sda4/projects`). The script resolves the physical form on the target
 /// host (`cd -- <path> && pwd -P`), runs `claude project purge --yes -- "$p"`,
 /// and also purges the logical form when it differs. If the directory is gone
-/// only the logical form is purged and an `unresolved` line is printed. "No
-/// state found" from either purge counts as success; any other failure aborts
-/// with claude's output on stderr (so the caller keeps the fleet row).
+/// only the logical form is purged and an `unresolved` line is printed.
+///
+/// A purge counts as "not found" (success) only when claude exits 1 AND a
+/// line of its output *starts with* [`PURGE_NOT_FOUND`]` for `: the output
+/// echoes the path, so a substring match could be spoofed by a directory
+/// name. Any other failure aborts with claude's output on stderr, so the
+/// caller keeps the fleet row. `builtin cd` / `builtin pwd` keep a login
+/// profile's `cd` function (rvm) from polluting the resolved path.
 ///
 /// Stdout protocol, one tab-separated line each, prefixed with [`PURGE_MARK`]:
 /// `physical <p>` or `unresolved`, then `purged <form>` / `not_found <form>`
@@ -124,14 +129,14 @@ pub fn purge_script(project_path: &str) -> Result<String, IpcError> {
     let q = quote(project_path);
     Ok(format!(
         r#"l={q}
-p=$(CDPATH= cd -- {q} 2>/dev/null && pwd -P)
+p=$(CDPATH= builtin cd -- {q} 2>/dev/null && builtin pwd -P)
 cf_purge() {{
 out=$(claude project purge --yes -- "$1" 2>&1); rc=$?
 if [ "$rc" -eq 0 ]; then printf '{m}\tpurged\t%s\n' "$1"; return 0; fi
-case "$out" in
-*'{nf}'*|*'No such project'*|*'no such project'*) printf '{m}\tnot_found\t%s\n' "$1" ;;
-*) printf '%s\n' "$out" >&2; exit "$rc" ;;
-esac
+if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q '^{nf} for '; then
+printf '{m}\tnot_found\t%s\n' "$1"; return 0
+fi
+printf '%s\n' "$out" >&2; exit "$rc"
 }}
 if [ -z "$p" ]; then
 printf '{m}\tunresolved\n'
@@ -466,7 +471,9 @@ mod tests {
         let s = purge_script("/home/me/projects/x").unwrap();
         assert!(s.starts_with("l='/home/me/projects/x'\n"), "{s}");
         assert!(
-            s.contains("p=$(CDPATH= cd -- '/home/me/projects/x' 2>/dev/null && pwd -P)"),
+            s.contains(
+                "p=$(CDPATH= builtin cd -- '/home/me/projects/x' 2>/dev/null && builtin pwd -P)"
+            ),
             "{s}"
         );
         // Every purge goes through `--` with the path as a quoted expansion.
@@ -517,7 +524,8 @@ mod tests {
 printf '%s\n' "$5" >> "$CF_STUB_LOG"
 if [ -n "$CF_STUB_NOTFOUND" ]; then case "$5" in *"$CF_STUB_NOTFOUND"*)
   echo "No Claude Code project state found for $5 under /stub/.claude." >&2; exit 1 ;; esac; fi
-if [ -n "$CF_STUB_FAIL" ]; then case "$5" in *"$CF_STUB_FAIL"*) echo "kaboom" >&2; exit 3 ;; esac; fi
+if [ -n "$CF_STUB_FAIL" ]; then case "$5" in *"$CF_STUB_FAIL"*)
+  printf '%s\n' "${CF_STUB_FAIL_MSG:-kaboom while purging $5}" >&2; exit "${CF_STUB_FAIL_RC:-3}" ;; esac; fi
 echo "Purged $5"
 "#;
 
@@ -541,6 +549,16 @@ echo "Purged $5"
             }
 
             fn run(&self, logical: &Path, notfound: &str, fail: &str) -> (Output, Vec<String>) {
+                self.run_env(logical, notfound, fail, &[])
+            }
+
+            fn run_env(
+                &self,
+                logical: &Path,
+                notfound: &str,
+                fail: &str,
+                extra: &[(&str, &str)],
+            ) -> (Output, Vec<String>) {
                 let log = self.root.join("purge.log");
                 let _ = std::fs::remove_file(&log);
                 let script = purge_script(logical.to_str().unwrap()).unwrap();
@@ -555,6 +573,7 @@ echo "Purged $5"
                     .env("CF_STUB_LOG", &log)
                     .env("CF_STUB_NOTFOUND", notfound)
                     .env("CF_STUB_FAIL", fail)
+                    .envs(extra.iter().copied())
                     .output()
                     .unwrap();
                 let calls = std::fs::read_to_string(&log)
@@ -648,6 +667,36 @@ echo "Purged $5"
             assert!(String::from_utf8_lossy(&out.stderr).contains("kaboom"));
             // Stopped at the failing physical purge; logical never attempted.
             assert_eq!(calls, vec![s(&physical)]);
+        }
+
+        #[test]
+        fn not_found_phrase_in_the_path_cannot_mask_a_real_failure() {
+            let sb = Sandbox::new();
+            // A directory named after the not-found message, and a claude that
+            // fails with exit 1 while echoing the path mid-line.
+            let (logical, physical) =
+                sb.symlinked("x No Claude Code project state found for y no such project");
+            let (out, calls) = sb.run_env(&logical, "", "/real/", &[("CF_STUB_FAIL_RC", "1")]);
+            assert!(
+                !out.status.success(),
+                "a spoofed not-found must stay an error"
+            );
+            assert_eq!(out.status.code(), Some(1));
+            assert_eq!(calls, vec![s(&physical)]);
+            assert!(!String::from_utf8_lossy(&out.stdout).contains("not_found"));
+        }
+
+        #[test]
+        fn not_found_text_with_an_unexpected_exit_code_is_an_error() {
+            let sb = Sandbox::new();
+            let dir = sb.root.join("real").join("proj");
+            std::fs::create_dir_all(&dir).unwrap();
+            let msg = format!(
+                "No Claude Code project state found for {} under /x.",
+                dir.display()
+            );
+            let (out, _) = sb.run_env(&dir, "", "/real/", &[("CF_STUB_FAIL_MSG", &msg)]);
+            assert!(!out.status.success(), "exit 3 is not a not-found");
         }
 
         #[test]

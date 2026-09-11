@@ -33,12 +33,22 @@ describe('describePurge', () => {
     );
   });
 
-  it('reports an unresolved physical path and nothing purged as info', () => {
+  it('reports a missing local directory with nothing purged as info', () => {
+    const t = describePurge([{ ...base, physical_path: null, not_found: ['/home/u/p/x'] }]);
+    expect(t.kind).toBe('info');
+    expect(t.message).toContain('local: no Claude state for /home/u/p/x');
+    expect(t.message).toContain('physical path not resolved');
+  });
+
+  it('says transcripts were NOT purged when the directory is missing on a remote host', () => {
     const t = describePurge([
+      { ...base, purged: ['/mnt/p/x'] },
       { ...base, host_alias: 'box', physical_path: null, not_found: ['/home/u/p/x'] },
     ]);
     expect(t.kind).toBe('info');
-    expect(t.message).toContain('box: no Claude state for /home/u/p/x');
-    expect(t.message).toContain('physical path not resolved');
+    expect(t.message).toBe(
+      'Project removed. local: purged /mnt/p/x · ' +
+        'box: project directory not found; Claude transcripts there were NOT purged',
+    );
   });
 });

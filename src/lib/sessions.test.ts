@@ -169,13 +169,19 @@ describe('purgeProject', () => {
       purged: ['/mnt/user/my-project'],
       not_found: ['/home/user/my-project'],
     };
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(report);
-    const r = await purgeProject('box', '/home/user/my-project', 42);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce([report]);
+    const r = await purgeProject(['box', 'local'], '/home/user/my-project', 42);
     expect(r.ok).toBe(true);
-    if (r.ok) expect(r.value).toEqual(report);
+    if (r.ok) expect(r.value).toEqual([report]);
     expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
       'purge_project',
-      { args: { host_alias: 'box', project_path: '/home/user/my-project', project_id: 42 } },
+      {
+        args: {
+          host_aliases: ['box', 'local'],
+          project_path: '/home/user/my-project',
+          project_id: 42,
+        },
+      },
     ]);
   });
 });

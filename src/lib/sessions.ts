@@ -509,14 +509,15 @@ export interface PurgeReport {
   not_found: string[];
 }
 
-/** Delete Claude Code state for a project on `hostAlias` (under both its
- *  physical and logical path forms) and remove it from the DB. */
+/** Delete Claude Code state for a project on every host in `hostAliases`
+ *  (under both its physical and logical path forms). The backend removes the
+ *  project from the DB only if every host succeeds; one report per host. */
 export async function purgeProject(
-  hostAlias: string,
+  hostAliases: string[],
   projectPath: string,
   projectId: number,
-): Promise<Result<PurgeReport>> {
-  return invokeCmd<PurgeReport>('purge_project', {
-    args: { host_alias: hostAlias, project_path: projectPath, project_id: projectId },
+): Promise<Result<PurgeReport[]>> {
+  return invokeCmd<PurgeReport[]>('purge_project', {
+    args: { host_aliases: hostAliases, project_path: projectPath, project_id: projectId },
   });
 }

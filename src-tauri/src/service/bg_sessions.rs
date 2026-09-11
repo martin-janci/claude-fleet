@@ -74,15 +74,29 @@ impl PeekSessionArgs {
 
 #[derive(Debug, Deserialize)]
 pub struct PurgeProjectArgs {
-    pub host_alias: String,
+    /// Every host whose Claude state must go. The fleet row is deleted only
+    /// after all of them succeed.
+    pub host_aliases: Vec<String>,
     pub project_path: String,
     pub project_id: i64,
 }
 
 impl PurgeProjectArgs {
     pub fn validate(&self) -> Result<(), IpcError> {
-        validate::host_alias(&self.host_alias)?;
+        if self.host_aliases.is_empty() {
+            return Err(IpcError::new(
+                "E_INVALID",
+                "host_aliases must name at least one host",
+            ));
+        }
+        for host in &self.host_aliases {
+            validate::host_alias(host)?;
+        }
         validate::not_option_like("project_path", &self.project_path)?;
+        // A relative path would resolve against the remote $HOME.
+        if !self.project_path.starts_with('/') {
+            return Err(IpcError::new("E_INVALID", "project_path must be absolute"));
+        }
         if self.project_path.chars().any(|c| c.is_control()) {
             return Err(IpcError::new(
                 "E_INVALID",
@@ -234,19 +248,53 @@ pub async fn peek_session(args: PeekSessionArgs, ssh: &Arc<SshClient>) -> Result
     claude_cli::claude_logs(ssh, &args.host_alias, &args.claude_session_id).await
 }
 
+/// Purge Claude Code state for a project on every host in `host_aliases`,
+/// then delete the fleet row. The row (and its session rows) is deleted only
+/// when every host succeeded — purged, or held no state. On any failure it is
+/// kept, so the purge can be retried and the host list re-derived from the
+/// project's sessions.
 pub async fn purge_project(
     args: PurgeProjectArgs,
     store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
-) -> Result<PurgeReport, IpcError> {
-    // Validates host_alias (validate::host_alias) and the path before any
-    // command is built, so a bad host never reaches ssh or bash.
+) -> Result<Vec<PurgeReport>, IpcError> {
+    purge_project_with(args, store, |host, path| {
+        let ssh = Arc::clone(ssh);
+        async move { claude_cli::claude_purge_project(&ssh, &host, &path).await }
+    })
+    .await
+}
+
+/// [`purge_project`] with the per-host purge injected, so the
+/// all-or-nothing row deletion is testable without ssh or a real `claude`.
+async fn purge_project_with<F, Fut>(
+    args: PurgeProjectArgs,
+    store: &Mutex<Store>,
+    purge: F,
+) -> Result<Vec<PurgeReport>, IpcError>
+where
+    F: Fn(String, String) -> Fut,
+    Fut: std::future::Future<Output = Result<PurgeReport, IpcError>>,
+{
+    // Syntax (validate::host_alias) and path checks before anything runs.
     args.validate()?;
-    let report =
-        claude_cli::claude_purge_project(ssh, &args.host_alias, &args.project_path).await?;
+    // Syntax is not enough: only registered hosts may be reached over ssh.
+    // `local` never goes through ssh and has no guaranteed hosts row.
+    {
+        let s = store.lock().map_err(|_| IpcError::lock())?;
+        for host in args.host_aliases.iter().filter(|h| h.as_str() != "local") {
+            if s.get_host_row(host).map_err(IpcError::from)?.is_none() {
+                return Err(IpcError::new("E_NOTFOUND", format!("unknown host: {host}")));
+            }
+        }
+    }
+    let mut reports = Vec::with_capacity(args.host_aliases.len());
+    for host in &args.host_aliases {
+        reports.push(purge(host.clone(), args.project_path.clone()).await?);
+    }
     let s = store.lock().map_err(|_| IpcError::lock())?;
     s.delete_project(args.project_id)?;
-    Ok(report)
+    Ok(reports)
 }
 
 #[cfg(test)]
@@ -461,28 +509,136 @@ mod tests {
         assert_eq!(bad_host.validate().unwrap_err().code, "E_INVALID");
     }
 
-    #[test]
-    fn purge_project_args_rejects_option_like_path_and_bad_host() {
-        let ok = PurgeProjectArgs {
-            host_alias: "local".into(),
-            project_path: "/home/me/projects/x".into(),
-            project_id: 1,
-        };
-        assert!(ok.validate().is_ok());
-        for bad in ["", "  ", "--all", "-rf", "/a\nb"] {
-            let args = PurgeProjectArgs {
-                host_alias: "local".into(),
-                project_path: bad.into(),
-                project_id: 1,
-            };
-            assert_eq!(args.validate().unwrap_err().code, "E_INVALID", "{bad:?}");
+    fn purge_args(hosts: &[&str], path: &str, project_id: i64) -> PurgeProjectArgs {
+        PurgeProjectArgs {
+            host_aliases: hosts.iter().map(|h| h.to_string()).collect(),
+            project_path: path.into(),
+            project_id,
         }
-        let bad_host = PurgeProjectArgs {
-            host_alias: "has space".into(),
-            project_path: "/x".into(),
-            project_id: 1,
-        };
-        assert_eq!(bad_host.validate().unwrap_err().code, "E_INVALID");
+    }
+
+    #[test]
+    fn purge_project_args_validates_hosts_and_requires_an_absolute_path() {
+        assert!(purge_args(&["local"], "/home/me/projects/x", 1)
+            .validate()
+            .is_ok());
+        assert!(purge_args(&["local", "box"], "/x", 1).validate().is_ok());
+        for bad in ["", "  ", "--all", "-rf", "/a\nb", "rel/p", "~/p", "./p"] {
+            let err = purge_args(&["local"], bad, 1).validate().unwrap_err();
+            assert_eq!(err.code, "E_INVALID", "{bad:?}");
+        }
+        for hosts in [&[][..], &["has space"][..], &["local", "-tt"][..]] {
+            let err = purge_args(hosts, "/x", 1).validate().unwrap_err();
+            assert_eq!(err.code, "E_INVALID", "{hosts:?}");
+        }
+    }
+
+    /// A project with one session on each of `hosts`; returns its id.
+    fn seed_project(store: &Mutex<Store>, hosts: &[&str]) -> i64 {
+        let s = store.lock().unwrap();
+        let pid = s.upsert_project("o", "r", "/home/u/p/r").unwrap();
+        for (i, host) in hosts.iter().enumerate() {
+            s.upsert_host(host).unwrap();
+            s.upsert_session(
+                &format!("dev-{i}"),
+                host,
+                Some(pid),
+                None,
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+        }
+        pid
+    }
+
+    /// (project row still present, session rows left on `hosts`).
+    fn project_state(store: &Mutex<Store>, pid: i64, hosts: &[&str]) -> (bool, usize) {
+        let s = store.lock().unwrap();
+        let exists = s.list_projects().unwrap().iter().any(|p| p.id == pid);
+        let sessions = hosts
+            .iter()
+            .map(|h| s.list_sessions_for_host(h).unwrap().len())
+            .sum();
+        (exists, sessions)
+    }
+
+    fn report_for(host: &str, path: &str) -> PurgeReport {
+        PurgeReport {
+            host_alias: host.into(),
+            logical_path: path.into(),
+            physical_path: Some(path.into()),
+            purged: vec![path.into()],
+            not_found: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn purge_project_keeps_row_and_sessions_when_a_later_host_fails() {
+        let store = make_store();
+        let pid = seed_project(&store, &["alpha", "beta"]);
+        let calls = Mutex::new(Vec::new());
+        let err = purge_project_with(
+            purge_args(&["alpha", "beta"], "/home/u/p/r", pid),
+            &store,
+            |host, path| {
+                calls.lock().unwrap().push(host.clone());
+                async move {
+                    if host == "beta" {
+                        Err(IpcError::new("E_CLAUDE_CLI", "claude CLI failed on beta"))
+                    } else {
+                        Ok(report_for(&host, &path))
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "E_CLAUDE_CLI");
+        assert_eq!(*calls.lock().unwrap(), vec!["alpha", "beta"]);
+        assert_eq!(project_state(&store, pid, &["alpha", "beta"]), (true, 2));
+    }
+
+    #[tokio::test]
+    async fn purge_project_deletes_row_only_after_every_host_succeeds() {
+        let store = make_store();
+        let pid = seed_project(&store, &["alpha", "beta"]);
+        let reports = purge_project_with(
+            purge_args(&["alpha", "beta"], "/home/u/p/r", pid),
+            &store,
+            |host, path| async move { Ok(report_for(&host, &path)) },
+        )
+        .await
+        .unwrap();
+        let hosts: Vec<_> = reports.iter().map(|r| r.host_alias.as_str()).collect();
+        assert_eq!(hosts, vec!["alpha", "beta"]);
+        assert_eq!(project_state(&store, pid, &["alpha", "beta"]), (false, 0));
+    }
+
+    #[tokio::test]
+    async fn purge_project_rejects_invalid_or_unknown_hosts_before_purging() {
+        let store = make_store();
+        let pid = seed_project(&store, &["alpha"]);
+        let cases: [(&[&str], &str); 4] = [
+            (&["-oProxyCommand=id"], "E_INVALID"),
+            (&["has space"], "E_INVALID"),
+            (&["alpha", "a;b"], "E_INVALID"),
+            (&["alpha", "ghost"], "E_NOTFOUND"),
+        ];
+        let called = std::sync::atomic::AtomicBool::new(false);
+        for (hosts, code) in cases {
+            let err = purge_project_with(purge_args(hosts, "/home/u/p/r", pid), &store, |_, _| {
+                called.store(true, std::sync::atomic::Ordering::SeqCst);
+                async { Err::<PurgeReport, _>(IpcError::new("E_TEST", "must not run")) }
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, code, "{hosts:?}");
+        }
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(project_state(&store, pid, &["alpha"]), (true, 1));
     }
 
     #[tokio::test]
@@ -497,7 +653,7 @@ mod tests {
         for bad in ["-oProxyCommand=id", "has space", "", "a;b", "x\ny"] {
             let err = purge_project(
                 PurgeProjectArgs {
-                    host_alias: bad.into(),
+                    host_aliases: vec![bad.into()],
                     project_path: "/home/u/p/r".into(),
                     project_id: pid,
                 },

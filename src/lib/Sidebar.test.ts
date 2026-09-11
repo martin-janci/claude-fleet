@@ -351,13 +351,15 @@ describe('Sidebar (sessions-grouped view)', () => {
     ) => Promise<unknown>;
     (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, a?: unknown) => {
       if (cmd === 'purge_project') {
-        return {
-          host_alias: 'mefistos',
-          logical_path: '/r/cf',
-          physical_path: '/mnt/r/cf',
-          purged: ['/mnt/r/cf'],
-          not_found: ['/r/cf'],
-        };
+        return [
+          {
+            host_alias: 'mefistos',
+            logical_path: '/r/cf',
+            physical_path: '/mnt/r/cf',
+            purged: ['/mnt/r/cf'],
+            not_found: ['/r/cf'],
+          },
+        ];
       }
       // The post-purge refresh: the project is gone.
       if (cmd === 'refresh_projects') return [];
@@ -370,7 +372,9 @@ describe('Sidebar (sessions-grouped view)', () => {
     await tick(); await tick();
     const purges = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'purge_project');
     expect(purges).toHaveLength(1);
-    expect(purges[0][1]).toEqual({ args: { host_alias: 'mefistos', project_path: '/r/cf', project_id: 1 } });
+    expect(purges[0][1]).toEqual({
+      args: { host_aliases: ['mefistos'], project_path: '/r/cf', project_id: 1 },
+    });
     const t = get(toasts).find((x) => x.message.startsWith('Project removed.'));
     expect(t?.message).toBe('Project removed. mefistos: purged /mnt/r/cf; no Claude state for /r/cf');
     expect(t?.kind).toBe('success');
