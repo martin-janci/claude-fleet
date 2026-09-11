@@ -14,10 +14,13 @@
   import { bootstrapAccounts, applyAccountEvents } from './lib/accounts';
   import { subscribeToRowEvents } from './lib/events';
   import Toasts from './lib/Toasts.svelte';
+  import QuickSwitcher from './lib/QuickSwitcher.svelte';
+  import NewSessionDialog from './lib/NewSessionDialog.svelte';
+  import { newSessionRequest, clearNewSessionRequest } from './lib/new_session_request';
   import { push, pushError } from './lib/toasts';
   import type { Result } from './lib/result';
   import type { UnlistenFn } from '@tauri-apps/api/event';
-  import { selectedSession, restoreLastSession } from './lib/selection';
+  import { selectedSession, restoreLastSession, selectSession } from './lib/selection';
   import { loadSessionUi, saveSessionUi, DEFAULT_UI } from './lib/session_ui';
   import { readPref, writePref } from './lib/prefs';
   import WelcomeDialog from './lib/WelcomeDialog.svelte';
@@ -240,6 +243,21 @@
 <HintLayer />
 <Toasts />
 <McpConfirmDialog />
+<!-- Cmd/Ctrl+K / Cmd/Ctrl+P. Its "new session" rows publish a request that
+     mounts the dialog here (the Sidebar keeps its own instance for its
+     footer button until it adopts the store post-#46). -->
+<QuickSwitcher />
+{#if $newSessionRequest}
+  <NewSessionDialog
+    project={$newSessionRequest.project}
+    initialName={$newSessionRequest.initialName}
+    onCreate={(s) => {
+      clearNewSessionRequest();
+      selectSession(s);
+    }}
+    onCancel={clearNewSessionRequest}
+  />
+{/if}
 
 {#if showWelcome}
   <!-- "Skip for now" closes the welcome dialog but intentionally leaves the

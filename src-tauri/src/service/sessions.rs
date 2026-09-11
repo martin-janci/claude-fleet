@@ -1253,13 +1253,22 @@ async fn create_worktree_local(
 }
 
 pub async fn new_session(
-    args: NewSessionArgs,
+    mut args: NewSessionArgs,
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
     reg: &Arc<CancellationRegistry>,
 ) -> Result<SessionRow, IpcError> {
     // Reject hostile input before it reaches ssh / tmux / git.
     crate::validate::host_alias(&args.host_alias)?;
+    // An empty name means "pick one for me" (the dialog's dice, an MCP
+    // caller that doesn't care): mint it here so every caller shares the
+    // same convention and the same collision policy.
+    if args.name.trim().is_empty() {
+        let s = store
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        args.name = fill_session_name(&s, &args)?;
+    }
     crate::validate::tmux_name(&args.name)?;
     if let Some(fname) = args.friendly_name.as_deref() {
         crate::validate::friendly_name(fname)?;
@@ -1292,6 +1301,64 @@ pub async fn new_session(
     let _guard = CancelGuard::new(Arc::clone(reg), cancel_id);
 
     new_session_inner(args, store, ssh, token).await
+}
+
+/// Mint a tmux name for a `new_session` call that left `name` empty.
+///
+/// The deterministic `dev-<owner>-<repo>[--<worktree>][-term]` is used when no
+/// session of that name exists on the host (the dialog's own convention).
+/// When it is taken — a second session on the same worktree — a memorable
+/// `<adjective>-<noun>` pair from `names::generate_name` is appended instead,
+/// avoiding every slug already in use on the project (worktree names and
+/// the suffixes of existing tmux names), so the result is unique and reads
+/// like `dev-owner-repo--blue-sirius` rather than `…--main-2`.
+pub(crate) fn fill_session_name(s: &Store, args: &NewSessionArgs) -> Result<String, IpcError> {
+    use std::collections::HashSet;
+    let (owner, repo) = fetch_owner_repo(s, args.project_id)?;
+    let base = format!("dev-{owner}-{repo}");
+    let term = if args.kind.as_deref() == Some("shell") {
+        "-term"
+    } else {
+        ""
+    };
+    let wt: Option<String> = if let Some(n) = args
+        .new_worktree
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
+        Some(n.to_string())
+    } else if let Some(wid) = args.worktree_id {
+        let (name, _) = fetch_worktree(s, wid)?;
+        (name != "main").then_some(name)
+    } else {
+        None
+    };
+    let deterministic = match &wt {
+        Some(w) => format!("{base}--{w}{term}"),
+        None => format!("{base}{term}"),
+    };
+    let on_host = s.list_sessions_for_host(&args.host_alias)?;
+    if !on_host.iter().any(|r| r.tmux_name == deterministic) {
+        return Ok(deterministic);
+    }
+    let mut taken: HashSet<String> = s
+        .list_worktrees_for_project(args.project_id)?
+        .into_iter()
+        .map(|w| w.name)
+        .collect();
+    for r in s.list_all_sessions()? {
+        if r.project_id == Some(args.project_id) {
+            if let Some(suffix) = super::names::tmux_name_suffix(&r.tmux_name, &owner, &repo) {
+                taken.insert(suffix);
+            }
+        }
+    }
+    let pair = super::names::generate_name_default(&taken);
+    Ok(match &wt {
+        Some(w) => format!("{base}--{w}--{pair}{term}"),
+        None => format!("{base}--{pair}{term}"),
+    })
 }
 
 async fn new_session_inner(
@@ -4746,5 +4813,130 @@ mod ghost_tests {
         let err = set_session_friendly_name(set_friendly_args("-evil", "dev-x", "x"), &store)
             .expect_err("bad alias");
         assert_eq!(err.code, "E_INVALID");
+    }
+}
+
+#[cfg(test)]
+mod fill_session_name_tests {
+    use super::*;
+
+    fn args(
+        worktree_id: Option<i64>,
+        new_worktree: Option<&str>,
+        kind: Option<&str>,
+    ) -> NewSessionArgs {
+        NewSessionArgs {
+            host_alias: "local".into(),
+            project_id: 1,
+            worktree_id,
+            name: String::new(),
+            call_id: None,
+            new_worktree: new_worktree.map(Into::into),
+            base_branch: None,
+            kind: kind.map(Into::into),
+            start_command: None,
+            friendly_name: None,
+        }
+    }
+
+    fn seeded() -> (Store, i64, i64) {
+        let s = Store::open_in_memory().expect("store");
+        s.upsert_host("local").unwrap();
+        s.upsert_host("mefistos").unwrap();
+        let pid = s.upsert_project("o", "r", "/tmp/o/r").unwrap();
+        assert_eq!(pid, 1);
+        let main_id = s
+            .upsert_worktree(pid, "main", "/tmp/o/r", Some("main"))
+            .unwrap();
+        let feat_id = s
+            .upsert_worktree(pid, "feat-x", "/tmp/o/r/.worktrees/feat-x", Some("feat-x"))
+            .unwrap();
+        (s, main_id, feat_id)
+    }
+
+    #[test]
+    fn deterministic_name_when_free() {
+        let (s, main_id, feat_id) = seeded();
+        assert_eq!(
+            fill_session_name(&s, &args(Some(main_id), None, None)).unwrap(),
+            "dev-o-r"
+        );
+        assert_eq!(
+            fill_session_name(&s, &args(Some(feat_id), None, None)).unwrap(),
+            "dev-o-r--feat-x"
+        );
+        assert_eq!(
+            fill_session_name(&s, &args(None, Some("blue-sirius"), None)).unwrap(),
+            "dev-o-r--blue-sirius"
+        );
+        assert_eq!(
+            fill_session_name(&s, &args(Some(main_id), None, Some("shell"))).unwrap(),
+            "dev-o-r-term"
+        );
+    }
+
+    #[test]
+    fn appends_generated_pair_when_deterministic_name_is_taken() {
+        let (s, main_id, _) = seeded();
+        s.upsert_session(
+            "dev-o-r",
+            "local",
+            Some(1),
+            Some(main_id),
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap();
+        let name = fill_session_name(&s, &args(Some(main_id), None, None)).unwrap();
+        let suffix = name.strip_prefix("dev-o-r--").expect("pair appended");
+        assert!(
+            crate::service::names::adjectives()
+                .iter()
+                .any(|a| suffix.starts_with(&format!("{a}-"))),
+            "{name}"
+        );
+        // The same name on another host does not count as taken.
+        s.upsert_session(
+            "dev-o-r--feat-x",
+            "mefistos",
+            Some(1),
+            None,
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            fill_session_name(&s, &args(None, Some("feat-x"), None)).unwrap(),
+            "dev-o-r--feat-x"
+        );
+    }
+
+    #[test]
+    fn generated_pair_avoids_slugs_already_used_on_the_project() {
+        let (s, main_id, _) = seeded();
+        s.upsert_session(
+            "dev-o-r",
+            "local",
+            Some(1),
+            Some(main_id),
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..50 {
+            let name = fill_session_name(&s, &args(Some(main_id), None, None)).unwrap();
+            let suffix = name.strip_prefix("dev-o-r--").unwrap().to_string();
+            // Worktree names on the project are off-limits.
+            assert_ne!(suffix, "feat-x");
+            seen.insert(suffix);
+        }
+        assert!(seen.len() > 1, "names are random, not fixed");
     }
 }
