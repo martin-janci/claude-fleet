@@ -39,7 +39,7 @@ See "Shipping a PR" below.
 |---|---|---|
 | A new MCP tool | `src-tauri/src/mcp/tools.rs` — params struct + `#[tool]` method calling into `service::*` | Audit non-secret args; pass bodies / prompts but never log them. Return `ok_json(&result)` or `text_content`. After adding: `REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_current` to refresh `docs/control-api-reference.md`. |
 | A new service function | `src-tauri/src/service/<area>.rs` | Take `&Mutex<Store>` + `&Arc<SshClient>`, never `tauri::State`. Same code path runs from both Tauri IPC and MCP. |
-| A new store helper | `src-tauri/src/store.rs` | Hold the `Mutex<Store>` guard *briefly*; never across `.await`. Use `unchecked_transaction` for multi-step writes. |
+| A new store helper | `src-tauri/src/store/` | Hold the `Mutex<Store>` guard *briefly*; never across `.await`. Use `unchecked_transaction` for multi-step writes. |
 | A schema change | `src-tauri/migrations/NNN_<topic>.sql` + a `tx.execute_batch(include_str!(…))` arm in `migrate()` + bump `assert_eq!(…schema_version, NNN)` in the relevant tests (currently `17`). | One `.sql` per change. Wrap in a transaction in the migrate arm so an interrupted run rolls back cleanly. End each file with `INSERT OR IGNORE INTO schema_version (version) VALUES (NNN);`. |
 | A new Tauri IPC command | `src-tauri/src/commands/<area>.rs` thin wrapper → `service::*` | Validate frontend inputs (`crate::validate::*`); never trust paths. Use `IpcError` with an `E_*` code. |
 | Frontend state | `src/lib/<store>.ts` as Svelte 5 runes; patch via `mergeOne`/`removeOne` from row events, plus the optimistic merge from the mutation's return value. | Don't re-fetch on every event; the event bus + optimistic merge is the contract. |
