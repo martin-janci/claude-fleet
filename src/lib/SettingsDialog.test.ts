@@ -23,7 +23,12 @@ const mcpStatusObj = {
   token: 'test-token',
   url: 'http://127.0.0.1:4180/mcp',
   bind_error: null,
+  confirm_destructive: false,
 };
+
+const hostTokens = [
+  { host_alias: 'mefistos', mode: 'full', created_at: 1 },
+];
 
 // Route invoke() by command name. The dialog calls mcp_status on mount, so an
 // ordered mockResolvedValueOnce chain would be consumed by the wrong call —
@@ -42,6 +47,12 @@ beforeEach(() => {
         return sample[1];
       case 'list_hosts':
         return sample;
+      case 'list_host_tokens':
+        return hostTokens;
+      case 'set_host_token_mode':
+        return { host_alias: 'mefistos', mode: 'readonly', created_at: 1 };
+      case 'rotate_host_token':
+        return { host_alias: 'mefistos', mode: 'full', created_at: 2 };
       default:
         return null;
     }
@@ -113,6 +124,50 @@ describe('SettingsDialog', () => {
         (c) => c[0] === 'mcp_configure',
       ),
     ).toBe(true);
+  });
+
+  it('toggling destructive-call confirmation calls mcp_configure with confirm_destructive', async () => {
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick();
+    const toggle = (await screen.findByTestId('mcp-confirm-destructive')) as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+    await fireEvent.click(toggle);
+    await tick();
+    const call = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c) => c[0] === 'mcp_configure',
+    );
+    expect(call).toBeDefined();
+    expect((call![1] as { args: { confirm_destructive: boolean } }).args.confirm_destructive).toBe(true);
+  });
+
+  it('Token column shows the mode for provisioned hosts and "none" otherwise', async () => {
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick(); await tick();
+    const cells = await screen.findAllByTestId('token-cell');
+    const byRow = (alias: string) =>
+      Array.from(document.querySelectorAll('.hosts-table tbody tr'))
+        .find((r) => r.textContent?.includes(alias))!
+        .querySelector('[data-testid="token-cell"]')!;
+    expect(cells.length).toBe(2);
+    expect(byRow('local').textContent).toContain('none');
+    const mefSelect = byRow('mefistos').querySelector('select') as HTMLSelectElement;
+    expect(mefSelect.value).toBe('full');
+    // Changing the mode invokes set_host_token_mode with the new value.
+    await fireEvent.change(mefSelect, { target: { value: 'readonly' } });
+    await tick();
+    const call = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c) => c[0] === 'set_host_token_mode',
+    );
+    expect(call).toBeDefined();
+    expect((call![1] as { hostAlias: string; mode: string }).mode).toBe('readonly');
+    // Rotate invokes rotate_host_token for that host only.
+    const rotate = byRow('mefistos').querySelector('button[aria-label="Rotate token"]') as HTMLButtonElement;
+    await fireEvent.click(rotate);
+    await tick();
+    const rot = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c) => c[0] === 'rotate_host_token',
+    );
+    expect((rot![1] as { hostAlias: string }).hostAlias).toBe('mefistos');
   });
 
   it('Account column shows — when host has no account', async () => {

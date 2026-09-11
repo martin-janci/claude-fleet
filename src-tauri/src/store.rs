@@ -98,6 +98,18 @@ pub struct SessionEvent {
     pub detail: Option<String>,
 }
 
+/// One per-host control-API bearer token (migration 018). `mode` is `full`
+/// or `readonly`; see `mcp::auth::TokenMode`. The token itself is never sent
+/// to the frontend — `HostTokenInfo` in `commands/mcp.rs` projects this row
+/// without it.
+#[derive(Debug, Clone)]
+pub struct HostTokenRow {
+    pub host_alias: String,
+    pub token: String,
+    pub created_at: i64,
+    pub mode: String,
+}
+
 /// One inter-session message (migration 015). The store is the source of
 /// truth; pane delivery, if requested, happens separately and best-effort.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -205,6 +217,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/016_session_friendly_name.sql"),
     ),
     (17, include_str!("../migrations/017_safe_kill.sql")),
+    (18, include_str!("../migrations/018_host_tokens.sql")),
 ];
 
 /// The schema version a fully migrated database reports.
@@ -462,6 +475,103 @@ impl Store {
             .execute(sql.as_str(), rusqlite::params_from_iter(params))
             .map_err(crate::ipc_error::IpcError::from)?;
         Ok(n)
+    }
+
+    // ---- host_tokens (migration 018) ----
+
+    /// Every per-host token row, alias-ordered. The MCP auth layer loads
+    /// this per request and compares in constant time, so a token never
+    /// runs through a SQL string comparison.
+    pub fn list_host_tokens(&self) -> Result<Vec<HostTokenRow>, crate::ipc_error::IpcError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT host_alias, token, created_at, mode FROM host_tokens ORDER BY host_alias",
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(HostTokenRow {
+                    host_alias: row.get(0)?,
+                    token: row.get(1)?,
+                    created_at: row.get(2)?,
+                    mode: row.get(3)?,
+                })
+            })
+            .map_err(crate::ipc_error::IpcError::from)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(crate::ipc_error::IpcError::from)?);
+        }
+        Ok(out)
+    }
+
+    /// The token row for one host, if it has been provisioned.
+    pub fn get_host_token(
+        &self,
+        host_alias: &str,
+    ) -> Result<Option<HostTokenRow>, crate::ipc_error::IpcError> {
+        Ok(self
+            .list_host_tokens()?
+            .into_iter()
+            .find(|r| r.host_alias == host_alias))
+    }
+
+    /// Insert or replace a host's token, keeping its mode when the row
+    /// already exists. `created_at` is stamped now.
+    pub fn upsert_host_token(
+        &self,
+        host_alias: &str,
+        token: &str,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.conn
+            .execute(
+                "INSERT INTO host_tokens (host_alias, token, created_at, mode) \
+                 VALUES (?1, ?2, ?3, 'full') \
+                 ON CONFLICT(host_alias) DO UPDATE SET \
+                   token = excluded.token, created_at = excluded.created_at",
+                rusqlite::params![host_alias, token, at],
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        Ok(())
+    }
+
+    /// Set a host's token mode (`full` | `readonly`). `E_NOTFOUND` when the
+    /// host has no token yet (it must be provisioned first).
+    pub fn set_host_token_mode(
+        &self,
+        host_alias: &str,
+        mode: &str,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        let n = self
+            .conn
+            .execute(
+                "UPDATE host_tokens SET mode = ?2 WHERE host_alias = ?1",
+                rusqlite::params![host_alias, mode],
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        if n == 0 {
+            return Err(crate::ipc_error::IpcError::new(
+                "E_NOTFOUND",
+                format!("host {host_alias} has no control-API token (provision it first)"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Drop a host's token (e.g. when the host is removed). Idempotent.
+    pub fn delete_host_token(&self, host_alias: &str) -> Result<(), crate::ipc_error::IpcError> {
+        self.conn
+            .execute(
+                "DELETE FROM host_tokens WHERE host_alias = ?1",
+                rusqlite::params![host_alias],
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        Ok(())
     }
 
     /// Read a value from the key/value `settings` table. `None` if absent.
@@ -1010,6 +1120,11 @@ impl Store {
         )?;
         self.conn
             .execute("DELETE FROM hosts WHERE alias=?1", rusqlite::params![alias])?;
+        // A removed host's control-API token must stop authenticating.
+        self.conn.execute(
+            "DELETE FROM host_tokens WHERE host_alias=?1",
+            rusqlite::params![alias],
+        )?;
         for id in &orphan_ids {
             self.bus.session_killed(*id);
         }
@@ -2408,6 +2523,7 @@ mod tests {
         "schema_version",
         "session_events",
         "session_messages",
+        "host_tokens",
     ];
 
     #[test]
@@ -2885,6 +3001,41 @@ mod tests {
     fn schema_version_is_latest_after_migration() {
         let s = Store::open_in_memory().expect("open");
         assert_eq!(s.schema_version().expect("version"), LATEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn host_tokens_upsert_keeps_mode_and_rotates_token() {
+        let s = Store::open_in_memory().expect("open");
+        assert!(s.list_host_tokens().unwrap().is_empty());
+        assert!(s.get_host_token("mefistos").unwrap().is_none());
+        // A mode change on an unprovisioned host is a typed error.
+        assert_eq!(
+            s.set_host_token_mode("mefistos", "readonly")
+                .unwrap_err()
+                .code,
+            "E_NOTFOUND"
+        );
+
+        s.upsert_host_token("mefistos", "tok-1").unwrap();
+        let row = s.get_host_token("mefistos").unwrap().unwrap();
+        assert_eq!(row.token, "tok-1");
+        assert_eq!(row.mode, "full", "new rows default to full");
+
+        s.set_host_token_mode("mefistos", "readonly").unwrap();
+        // Rotating the token must not reset the operator's mode choice.
+        s.upsert_host_token("mefistos", "tok-2").unwrap();
+        let row = s.get_host_token("mefistos").unwrap().unwrap();
+        assert_eq!(row.token, "tok-2");
+        assert_eq!(row.mode, "readonly");
+
+        s.upsert_host_token("local", "tok-3").unwrap();
+        let all = s.list_host_tokens().unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].host_alias, "local", "alias-ordered");
+
+        s.delete_host_token("mefistos").unwrap();
+        s.delete_host_token("mefistos").unwrap(); // idempotent
+        assert_eq!(s.list_host_tokens().unwrap().len(), 1);
     }
 
     #[test]
@@ -3745,7 +3896,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 17, "schema_version should be 17 after migration");
+        assert_eq!(v, 18, "schema_version should be 18 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store

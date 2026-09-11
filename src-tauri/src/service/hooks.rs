@@ -66,7 +66,49 @@ fn apply_stop_hook(
     Ok(())
 }
 
+/// Validate a `worktree_path` from a hook body before it becomes a row:
+/// absolute, no `..` component, no control characters, and its basename a
+/// safe path component. The hook body is network input signed only by a
+/// host token, so it gets the same scrutiny as a frontend value.
+pub fn validate_worktree_path(path: &str) -> Result<(), IpcError> {
+    if path.is_empty() || path.len() > 4096 {
+        return Err(IpcError::new(
+            "E_VALIDATE",
+            "worktree_path must be a non-empty path under 4096 bytes",
+        ));
+    }
+    if !path.starts_with('/') {
+        return Err(IpcError::new(
+            "E_VALIDATE",
+            "worktree_path must be absolute",
+        ));
+    }
+    if path.chars().any(|c| c.is_control()) {
+        return Err(IpcError::new(
+            "E_VALIDATE",
+            "worktree_path must not contain control characters",
+        ));
+    }
+    if path.split('/').any(|c| c == "..") {
+        return Err(IpcError::new(
+            "E_VALIDATE",
+            "worktree_path must not contain a '..' component",
+        ));
+    }
+    let name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| IpcError::new("E_VALIDATE", "worktree_path has no final component"))?;
+    crate::validate::path_component("worktree name", name)
+        .map_err(|e| IpcError::new("E_VALIDATE", e.message))?;
+    Ok(())
+}
+
 /// Auto-register a worktree created by Claude Code's WorktreeCreate tool.
+///
+/// The path must validate ([`validate_worktree_path`]) AND sit under a known
+/// project's `base_path`; anything else is `E_VALIDATE` (the handler answers
+/// 400) rather than a silent upsert of an arbitrary row.
 fn apply_worktree_hook(store: &Arc<Mutex<Store>>, payload: &HookPayload) -> Result<(), IpcError> {
     let input = match &payload.tool_input {
         Some(v) => v,
@@ -76,10 +118,14 @@ fn apply_worktree_hook(store: &Arc<Mutex<Store>>, payload: &HookPayload) -> Resu
         Some(p) => p.to_string(),
         None => return Ok(()),
     };
+    validate_worktree_path(&path)?;
     let branch = input
         .get("branch")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
+    if let Some(b) = branch {
+        crate::validate::git_ref(b).map_err(|e| IpcError::new("E_VALIDATE", e.message))?;
+    }
     let name = std::path::Path::new(&path)
         .file_name()
         .and_then(|n| n.to_str())
@@ -91,8 +137,10 @@ fn apply_worktree_hook(store: &Arc<Mutex<Store>>, payload: &HookPayload) -> Resu
     let project_id = match find_project_id_for_path(&projects, &path) {
         Some(id) => id,
         None => {
-            eprintln!("[hook] WorktreeCreate: no project found for path {path}");
-            return Ok(());
+            return Err(IpcError::new(
+                "E_VALIDATE",
+                format!("worktree_path {path} is not under any known project base"),
+            ));
         }
     };
     s.upsert_worktree(project_id, &name, &path, branch)
@@ -195,6 +243,94 @@ mod tests {
             cwd: None,
         };
         assert!(apply_hook(&store, &make_ssh(), &payload).is_ok());
+    }
+
+    fn worktree_payload(path: &str, branch: Option<&str>) -> HookPayload {
+        let mut input = serde_json::json!({ "worktree_path": path });
+        if let Some(b) = branch {
+            input["branch"] = serde_json::Value::String(b.into());
+        }
+        HookPayload {
+            session_id: Some("s1".into()),
+            hook_event_name: Some("PostToolUse".into()),
+            tool_name: Some("WorktreeCreate".into()),
+            tool_input: Some(input),
+            tool_response: None,
+            cwd: None,
+        }
+    }
+
+    #[test]
+    fn validate_worktree_path_accepts_absolute_clean_paths() {
+        assert!(validate_worktree_path("/home/u/proj/.worktrees/feat").is_ok());
+        assert!(validate_worktree_path("/home/u/proj/.worktrees/feat-x.y_z").is_ok());
+    }
+
+    #[test]
+    fn validate_worktree_path_rejects_relative_traversal_and_control() {
+        for bad in [
+            "",
+            "relative/path",
+            "~/proj/.worktrees/feat",
+            "/home/u/proj/../../etc",
+            "/home/u/proj/.worktrees/..",
+            "/home/u/proj/.worktrees/bad\nname",
+            "/home/u/proj/.worktrees/-rf",
+        ] {
+            let err = validate_worktree_path(bad).expect_err(bad);
+            assert_eq!(err.code, "E_VALIDATE", "{bad}");
+        }
+    }
+
+    #[test]
+    fn worktree_hook_rejects_path_outside_known_projects() {
+        let store = make_store();
+        {
+            let s = store.lock().unwrap();
+            s.upsert_project("o", "r", "/home/u/proj").unwrap();
+        }
+        let err = apply_hook(
+            &store,
+            &make_ssh(),
+            &worktree_payload("/home/u/elsewhere/.worktrees/feat", None),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "E_VALIDATE");
+        let err = apply_hook(
+            &store,
+            &make_ssh(),
+            &worktree_payload("../../etc/passwd", None),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "E_VALIDATE");
+        // A branch that looks like a git option is refused too.
+        let err = apply_hook(
+            &store,
+            &make_ssh(),
+            &worktree_payload("/home/u/proj/.worktrees/feat", Some("--upload-pack=x")),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "E_VALIDATE");
+    }
+
+    #[test]
+    fn worktree_hook_upserts_row_under_known_project() {
+        let store = make_store();
+        let pid = {
+            let s = store.lock().unwrap();
+            s.upsert_project("o", "r", "/home/u/proj").unwrap()
+        };
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &worktree_payload("/home/u/proj/.worktrees/feat", Some("feat")),
+        )
+        .unwrap();
+        let s = store.lock().unwrap();
+        let rows = s.list_worktrees_for_project(pid).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, "/home/u/proj/.worktrees/feat");
+        assert_eq!(rows[0].branch.as_deref(), Some("feat"));
     }
 
     #[test]

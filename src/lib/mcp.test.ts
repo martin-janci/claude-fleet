@@ -16,6 +16,7 @@ const sample: McpStatus = {
   token: 'abcd1234',
   url: 'http://127.0.0.1:4180/mcp',
   bind_error: null,
+  confirm_destructive: false,
 };
 
 beforeEach(() => {
@@ -35,7 +36,7 @@ describe('mcp store', () => {
     inv.mockResolvedValueOnce(sample);
     await mcpConfigure({ enabled: true });
     expect(inv).toHaveBeenCalledWith('mcp_configure', {
-      args: { enabled: true, port: null, regenerate_token: false },
+      args: { enabled: true, port: null, regenerate_token: false, confirm_destructive: null },
     });
   });
 
@@ -43,7 +44,15 @@ describe('mcp store', () => {
     inv.mockResolvedValueOnce(sample);
     await mcpConfigure({ enabled: false, port: 5000, regenerateToken: true });
     expect(inv).toHaveBeenCalledWith('mcp_configure', {
-      args: { enabled: false, port: 5000, regenerate_token: true },
+      args: { enabled: false, port: 5000, regenerate_token: true, confirm_destructive: null },
+    });
+  });
+
+  it('mcpConfigure forwards confirmDestructive when given', async () => {
+    inv.mockResolvedValueOnce(sample);
+    await mcpConfigure({ enabled: true, confirmDestructive: true });
+    expect(inv).toHaveBeenCalledWith('mcp_configure', {
+      args: { enabled: true, port: null, regenerate_token: false, confirm_destructive: true },
     });
   });
 
