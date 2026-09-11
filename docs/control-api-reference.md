@@ -278,6 +278,8 @@ Parameters: `tmux_name`
 Frontend commands registered in `src/lib.rs`:
 
 - `commands::health::health_check`
+- `commands::diagnostics::collect_diagnostics`
+- `commands::diagnostics::open_log_folder`
 - `commands::projects::list_projects`
 - `commands::projects::refresh_projects`
 - `commands::sessions::list_sessions`
