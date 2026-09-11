@@ -62,7 +62,7 @@ REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_curren
 - **Backend** (`src-tauri/src/`): thin Tauri command handlers in `commands/`
   wrap the transport-agnostic logic in `service/`; SSH multiplexing in `ssh.rs`
   (per-host `ControlMaster`, async `tokio::process`); tmux command construction
-  in `tmux.rs`; the single global PTY in `pty.rs`; SQLite in `store.rs`
+  in `tmux.rs`; the single global PTY in `pty.rs`; SQLite in `store/`
   (migrations are registered in the `MIGRATIONS` table there — add a new
   `NNN_<topic>.sql` plus an entry); the event bus in `events.rs`; cancellation
   registry in `cancel.rs`.

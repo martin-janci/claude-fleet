@@ -1,5 +1,5 @@
 //! Service layer for SSH host management — transport-agnostic logic over
-//! `store.rs` helpers plus `ssh_config.rs` (discovery) and any `ssh::SshExec`
+//! `store/` helpers plus `ssh_config.rs` (discovery) and any `ssh::SshExec`
 //! (probing). Called by both the Tauri command wrappers and the MCP server.
 
 use crate::cancel::CancellationRegistry;
