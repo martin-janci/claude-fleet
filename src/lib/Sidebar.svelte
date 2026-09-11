@@ -29,10 +29,34 @@
   import { onboardingDismissed } from './onboarding';
   import { hintAnchor } from './hints';
   import { accounts, type AccountRow } from './accounts';
-  import { buildSessionsByProject, buildRelatedCountById } from './sidebar_index';
+  import {
+    buildSessionsByProject,
+    buildRelatedCountById,
+    sessionVisible,
+    sortProjectsBySeverity,
+    type SessionPredicate,
+  } from './sidebar_index';
+  import {
+    attentionReason,
+    claudeStatusColor,
+    claudeStatusLabel,
+    contextColor,
+    contextLevel,
+    ciStatusColor,
+    ciStatusLabel,
+    formatElapsed,
+    promptPreview,
+    sessionStart,
+    stuckKindLabel,
+    worstSeverityByProject,
+    STUCK_COLOR,
+  } from './attention';
+  import { attentionIdleMinutes } from './notify';
   import { pushError } from './toasts';
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import Attention from './Attention.svelte';
+  import BulkPromptDialog from './BulkPromptDialog.svelte';
 
   let showSettings = $state(false);
 
@@ -91,6 +115,79 @@
   let committingRename = false;
   let pendingKill: SessionRow | null = $state(null);
   let pendingRecreate: SessionRow | null = $state(null);
+
+  // ── Triage (FE-3 / FE-4) ──
+  // "N stuck" counter doubles as a stuck-only filter; "needs attention" is
+  // the wider pill (stuck, safe-kill pending/failed, ghost, failed, idle >
+  // N min). Both are session-scoped (not persisted): a filter that hides
+  // healthy sessions should not survive a restart unnoticed.
+  let stuckOnly = $state(false);
+  let attentionOnly = $state(false);
+  // Coarse clock for the idle rule; a 30 s tick is plenty for a minutes-level
+  // threshold and keeps the derived tree from re-running every second.
+  let nowSec = $state(Math.floor(Date.now() / 1000));
+  $effect(() => {
+    const t = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 30_000);
+    return () => clearInterval(t);
+  });
+  const attentionOpts = $derived({ idleSecs: $attentionIdleMinutes * 60, now: nowSec });
+  const rowPredicate = $derived.by((): SessionPredicate => {
+    if (stuckOnly) return (s) => s.stuck_kind !== null;
+    if (attentionOnly) {
+      const opts = attentionOpts;
+      return (s) => attentionReason(s, opts) !== null;
+    }
+    return null;
+  });
+
+  // Multi-select for bulk Kill / Send prompt. Rows are toggled with
+  // shift/cmd/ctrl-click, or with the checkboxes once select mode is on.
+  let selectMode = $state(false);
+  let selectedIds: Set<number> = $state(new Set());
+  let bulkKillOpen = $state(false);
+  let bulkPromptOpen = $state(false);
+  const selectedRows = $derived($sessions.filter((s) => selectedIds.has(s.id)));
+
+  function toggleSelected(sess: SessionRow) {
+    const next = new Set(selectedIds);
+    if (next.has(sess.id)) next.delete(sess.id);
+    else next.add(sess.id);
+    selectedIds = next;
+  }
+  function clearSelected() {
+    selectedIds = new Set();
+  }
+  function toggleSelectMode() {
+    selectMode = !selectMode;
+    if (!selectMode) clearSelected();
+  }
+  // Drop ids whose rows left the store (killed / reaped) so the bulk bar
+  // never counts phantoms.
+  $effect(() => {
+    const live = new Set($sessions.map((s) => s.id));
+    if ([...selectedIds].some((id) => !live.has(id))) {
+      selectedIds = new Set([...selectedIds].filter((id) => live.has(id)));
+    }
+  });
+
+  async function confirmBulkKill() {
+    bulkKillOpen = false;
+    const targets = selectedRows;
+    clearSelected();
+    const results = await Promise.allSettled(
+      targets.map(async (sess) => {
+        const r = await killSession(sess.host_alias, sess.tmux_name);
+        if (!r.ok) {
+          pushError(r.error, `Kill ${sess.tmux_name} failed`);
+          return;
+        }
+        forgetSessionUi(sess.host_alias, sess.tmux_name);
+        const cur = $selectedSession;
+        if (cur && sameSession(cur, sess)) selectSession(null);
+      }),
+    );
+    void results;
+  }
   // Projects intentionally collapsed by the user. Anything not in this set
   // is open by default — most users have one or two projects and want to
   // see their sessions immediately.
@@ -145,15 +242,31 @@
     );
   }
 
+  // Sessions under the host / bg filters only (no triage predicate): the
+  // counters must keep reporting while a triage filter is active, and the
+  // project sort must weigh every visible session, not just the filtered ones.
+  const hostVisibleSessions = $derived(
+    $sessions.filter((s) => sessionVisible(s, $hostFilter, $showBgAgents)),
+  );
+  const stuckCount = $derived(hostVisibleSessions.filter((s) => s.stuck_kind !== null).length);
+  const attentionCount = $derived.by(() => {
+    const opts = attentionOpts;
+    return hostVisibleSessions.filter((s) => attentionReason(s, opts) !== null).length;
+  });
+  const severityByProject = $derived(worstSeverityByProject(hostVisibleSessions));
+
   // Only show projects that either match the filter directly OR have at least
   // one active session. Without sessions the sidebar would be flooded with
   // every cloned repo on disk — most of which the user isn't working on.
   const filtered = $derived(
-    $projects.filter(
-      (p) =>
-        matchesRecency(p, recency) &&
-        matchesSearch(p, searchQuery) &&
-        sessionsForProject(p.project.id).length > 0,
+    sortProjectsBySeverity(
+      $projects.filter(
+        (p) =>
+          matchesRecency(p, recency) &&
+          matchesSearch(p, searchQuery) &&
+          sessionsForProject(p.project.id).length > 0,
+      ),
+      severityByProject,
     ),
   );
 
@@ -186,8 +299,9 @@
   // value is read directly in the template so Svelte tracks it reactively —
   // using a plain function via {@const} doesn't establish the dependency.
   const filteredSessionsByProject = $derived(
-    buildSessionsByProject($sessions, $hostFilter, $showBgAgents),
+    buildSessionsByProject($sessions, $hostFilter, $showBgAgents, rowPredicate),
   );
+
 
   // Map: session.id → count of other sessions sharing the same (project, worktree_key)
   const relatedCountById = $derived(buildRelatedCountById($sessions));
@@ -203,10 +317,7 @@
   // Sessions whose tmux working directory didn't map to any known project.
   const orphanSessions = $derived(
     $sessions.filter(
-      (s) =>
-        s.project_id === null &&
-        ($hostFilter === 'all' || s.host_alias === $hostFilter) &&
-        ($showBgAgents || s.kind !== 'bg'),
+      (s) => s.project_id === null && sessionVisible(s, $hostFilter, $showBgAgents, rowPredicate),
     ),
   );
 
@@ -255,7 +366,13 @@
     collapsed = new Set(collapsed);
   }
 
-  function onSelectSession(sess: SessionRow) {
+  function onSelectSession(sess: SessionRow, e?: MouseEvent) {
+    // Shift / cmd / ctrl-click (or select mode) toggles the row in the
+    // multi-select instead of opening it.
+    if (selectMode || (e && (e.shiftKey || e.metaKey || e.ctrlKey))) {
+      toggleSelected(sess);
+      return;
+    }
     // Stop rename mode if the user clicks away to another row.
     if (renaming !== null && !sameSession(renaming, sess)) {
       cancelRename();
@@ -500,28 +617,13 @@
     return `${diffDays}d ago`;
   }
 
-  function claudeStatusColor(status: string | null): string {
-    switch (status) {
-      case 'working': return '#50c86e';   // green — active
-      case 'blocked': return '#f0b429';   // yellow — needs input
-      case 'completed': return '#6c8ebf'; // blue — done
-      case 'failed': return '#e64a4a';    // red
-      case 'stopped': return '#888';      // grey — stopped by hook or user
-      case 'idle': return '#888';         // grey
-      default: return 'transparent';
-    }
-  }
-
-  function claudeStatusLabel(status: string | null): string {
-    switch (status) {
-      case 'working': return '⚡ working';
-      case 'blocked': return '⏸ blocked';
-      case 'completed': return '✓ done';
-      case 'failed': return '✗ failed';
-      case 'stopped': return '■ stopped';
-      case 'idle': return '· idle';
-      default: return '';
-    }
+  /** Secondary row text: elapsed since start + the last prompt's first line. */
+  function rowMeta(sess: SessionRow): string {
+    const parts: string[] = [];
+    if (sess.started_at !== null) parts.push(formatElapsed(sessionStart(sess), nowSec));
+    const preview = promptPreview(sess.last_prompt, 48);
+    if (preview) parts.push(preview);
+    return parts.join(' · ');
   }
 </script>
 
@@ -529,18 +631,34 @@
   {#snippet sessionRow(sess: SessionRow)}
     {@const sessSelected = $selectedSession?.id === sess.id}
     {@const isRenaming = renaming !== null && renaming.id === sess.id}
+    {@const isChecked = selectedIds.has(sess.id)}
+    {@const ctxLevel = contextLevel(sess.context_pct)}
+    {@const meta = rowMeta(sess)}
     <div
       class="sess-row"
       class:selected={sessSelected}
       class:renaming={isRenaming}
+      class:checked={isChecked}
+      class:stuck={sess.stuck_kind !== null}
       data-testid="sess-row"
+      data-stuck={sess.stuck_kind ?? undefined}
       role="button"
       tabindex="0"
       ondblclick={(e) => sess.status !== 'ghost' && beginRename(sess, e)}
-      onclick={() => !isRenaming && sess.status !== 'ghost' && onSelectSession(sess)}
+      onclick={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onSelectSession(sess, e)}
       onkeydown={(e) => !isRenaming && sess.status !== 'ghost' && onKeySession(e, sess)}
       use:hintAnchor={{ id: 'session-actions', when: !!sess.claude_session_id && sess.status !== 'ghost' }}
     >
+      {#if selectMode}
+        <input
+          type="checkbox"
+          class="select-box"
+          checked={isChecked}
+          data-testid="select-box"
+          aria-label="Select {sess.tmux_name}"
+          onclick={(e) => { e.stopPropagation(); toggleSelected(sess); }}
+        />
+      {/if}
       {#if isRenaming}
         <input
           bind:this={renameInput}
@@ -600,15 +718,47 @@
             <span class="bg-badge" role="img" title="background agent" aria-label="background agent">🤖</span>
           {/if}
           <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
-          <span class="sess-name" title={sess.tmux_name}>{
-            $showFriendlyNames && sess.friendly_name ? sess.friendly_name : sess.tmux_name
-          }</span>
-          {#if sess.claude_status}
+          <span class="sess-main">
+            <span class="sess-name" title={$showFriendlyNames && sess.friendly_name ? sess.tmux_name : undefined}>{
+              $showFriendlyNames && sess.friendly_name ? sess.friendly_name : sess.tmux_name
+            }</span>
+            {#if $showFriendlyNames && sess.friendly_name}
+              <span class="sess-secondary" data-testid="sess-tmux-name">{sess.tmux_name}</span>
+            {/if}
+            {#if meta}
+              <span class="sess-meta" data-testid="sess-meta" title={sess.last_prompt ?? undefined}>{meta}</span>
+            {/if}
+          </span>
+          {#if sess.stuck_kind}
+            <!-- Stuck outranks claude_status: one red chip, no green "working"
+                 next to it to soften the signal. -->
+            <span
+              class="claude-chip stuck-chip"
+              data-testid="stuck-chip"
+              style="background: {STUCK_COLOR}22; color: {STUCK_COLOR}; border-color: {STUCK_COLOR}66;"
+              title="Stuck: {stuckKindLabel(sess.stuck_kind)}{sess.current_activity ? ' — ' + sess.current_activity : ''}"
+            >⚠ stuck: {stuckKindLabel(sess.stuck_kind)}</span>
+          {:else if sess.claude_status}
             <span
               class="claude-chip"
+              data-testid="claude-chip"
               style="background: {claudeStatusColor(sess.claude_status)}22; color: {claudeStatusColor(sess.claude_status)}; border-color: {claudeStatusColor(sess.claude_status)}44;"
               title="Claude: {sess.claude_status}{sess.current_activity ? ' — ' + sess.current_activity : ''}"
             >{claudeStatusLabel(sess.claude_status)}</span>
+          {/if}
+          {#if ctxLevel !== null && sess.context_pct !== null}
+            <span
+              class="ctx-badge ctx-{ctxLevel}"
+              data-testid="context-badge"
+              data-level={ctxLevel}
+              style="color: {contextColor(ctxLevel)}; border-color: {contextColor(ctxLevel)}55;"
+              title="Context window {Math.round(sess.context_pct)}% used"
+              role="meter"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow={Math.round(sess.context_pct)}
+              aria-label="context usage"
+            ><span class="ctx-bar" style="width: {Math.min(100, Math.max(0, sess.context_pct))}%; background: {contextColor(ctxLevel)};"></span><span class="ctx-pct">{Math.round(sess.context_pct)}%</span></span>
           {/if}
           {#if sess.effort_level}
             <span class="effort-badge" title="Effort: {sess.effort_level}">{sess.effort_level}</span>
@@ -622,6 +772,14 @@
               target="_blank"
               rel="noreferrer"
             >PR↗</a>
+            {#if sess.ci_status}
+              <span
+                class="ci-badge"
+                data-testid="ci-badge"
+                style="color: {ciStatusColor(sess.ci_status)};"
+                title="CI checks: {sess.ci_status}"
+              >{ciStatusLabel(sess.ci_status)}</span>
+            {/if}
           {/if}
           <div class="row-actions">
             {#if sess.claude_session_id && sess.status !== 'ghost'}
@@ -728,6 +886,50 @@
         </button>
       {/each}
     </nav>
+
+    <nav class="triage" aria-label="triage filter">
+      <button
+        class="pill stuck-pill"
+        class:active={stuckOnly}
+        class:hot={stuckCount > 0}
+        data-testid="stuck-filter"
+        aria-pressed={stuckOnly}
+        title={stuckOnly ? 'Show all sessions' : 'Show only stuck sessions'}
+        onclick={() => { stuckOnly = !stuckOnly; if (stuckOnly) attentionOnly = false; }}
+      >
+        ⚠ {stuckCount} stuck
+      </button>
+      <button
+        class="pill"
+        class:active={attentionOnly}
+        data-testid="attention-filter"
+        aria-pressed={attentionOnly}
+        title="Stuck, safe-remove pending/failed, lost, failed, or idle > {$attentionIdleMinutes} min"
+        onclick={() => { attentionOnly = !attentionOnly; if (attentionOnly) stuckOnly = false; }}
+      >
+        needs attention ({attentionCount})
+      </button>
+      <button
+        class="pill"
+        class:active={selectMode}
+        data-testid="select-mode"
+        aria-pressed={selectMode}
+        title="Select several sessions (or shift/cmd-click rows) for bulk actions"
+        onclick={toggleSelectMode}
+      >
+        ☑ select
+      </button>
+    </nav>
+    <Attention />
+
+    {#if selectedIds.size > 0}
+      <div class="bulk-bar" data-testid="bulk-bar" role="toolbar" aria-label="bulk actions">
+        <span class="bulk-count">{selectedIds.size} selected</span>
+        <button class="pill" data-testid="bulk-send" onclick={() => (bulkPromptOpen = true)}>→ Send prompt</button>
+        <button class="pill danger" data-testid="bulk-kill" onclick={() => (bulkKillOpen = true)}>× Kill</button>
+        <button class="pill" data-testid="bulk-clear" onclick={clearSelected}>clear</button>
+      </div>
+    {/if}
 
     <nav class="bg-toggle" aria-label="background agents filter">
       <button
@@ -894,6 +1096,25 @@
   </ConfirmDialog>
 {/if}
 
+{#if bulkKillOpen}
+  <ConfirmDialog
+    title="Kill {selectedRows.length} session{selectedRows.length === 1 ? '' : 's'}?"
+    confirmLabel="Kill all"
+    danger
+    onconfirm={confirmBulkKill}
+    oncancel={() => (bulkKillOpen = false)}
+    confirmTestId="confirm-bulk-kill"
+  >
+    This will kill
+    {#each selectedRows as r, i (r.id)}{i > 0 ? ', ' : ''}<code>{r.tmux_name}</code> on <code>{r.host_alias}</code>{/each}
+    and lose any running claude state inside them. Continue?
+  </ConfirmDialog>
+{/if}
+
+{#if bulkPromptOpen}
+  <BulkPromptDialog targets={selectedRows} onClose={() => (bulkPromptOpen = false)} />
+{/if}
+
 {#if pendingRecreate}
   <ConfirmDialog
     title="Recreate session?"
@@ -1038,6 +1259,25 @@
 
   .recency { display: flex; gap: 0.25rem; }
   .bg-toggle { display: flex; gap: 0.25rem; }
+  .triage { display: flex; gap: 0.25rem; flex-wrap: wrap; align-items: center; }
+  .stuck-pill.hot { color: #e64a4a; border-color: rgba(230, 74, 74, 0.5); }
+  .stuck-pill.active { background: rgba(230, 74, 74, 0.12); }
+  .pill.danger { color: #e64a4a; }
+  .pill.danger:hover { border-color: #e64a4a; }
+  .bulk-bar {
+    display: flex;
+    gap: 0.3rem;
+    align-items: center;
+    padding: 0.25rem 0.4rem;
+    border: 1px solid var(--accent);
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    font-size: 0.75rem;
+  }
+  .bulk-count { flex: 1; color: var(--fg); }
+  .select-box { margin: 0; flex-shrink: 0; }
+  .sess-row.checked { outline: 1px solid var(--accent); }
+  .sess-row.stuck { background: rgba(230, 74, 74, 0.06); }
   .pill {
     font-size: 0.7rem;
     padding: 0.15rem 0.55rem;
@@ -1187,6 +1427,34 @@
     flex-shrink: 0;
     white-space: nowrap;
   }
+  .stuck-chip { font-weight: 600; }
+  .ctx-badge {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2.6rem;
+    height: 0.95rem;
+    font-size: 0.6rem;
+    border: 1px solid;
+    border-radius: 3px;
+    overflow: hidden;
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+  }
+  .ctx-bar {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    opacity: 0.25;
+  }
+  .ctx-pct { position: relative; }
+  .ci-badge {
+    font-size: 0.6rem;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
   .effort-badge {
     font-size: 0.6rem;
     padding: 0.05rem 0.25rem;
@@ -1206,15 +1474,30 @@
   }
   .pr-link:hover { text-decoration: underline; }
 
+  .sess-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.05rem;
+  }
   .sess-name {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.8rem;
-    flex: 1;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .sess-secondary,
+  .sess-meta {
+    font-size: 0.65rem;
+    color: var(--fg-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .sess-secondary { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
   .rename-input {
     flex: 1;

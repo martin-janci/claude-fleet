@@ -14,7 +14,7 @@ const source: SessionRow = {
   status: 'running', notes: null, account_uuid: null, kind: 'work', reviews_session_id: null,
   worktree_key: 'main', lost_at: null,
   claude_session_id: null, claude_status: null, effort_level: null, pr_url: null, current_activity: null,
-  friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null,
+  friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null,
 };
 
 beforeEach(() => { (mockedInvoke as ReturnType<typeof vi.fn>).mockReset(); });

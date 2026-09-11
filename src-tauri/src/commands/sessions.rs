@@ -161,9 +161,10 @@ pub fn dismiss_ghost_session(
 #[tauri::command]
 pub async fn new_bg_session(
     args: NewBgSessionArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<bg_sessions::NewBgSessionResult, IpcError> {
-    bg_sessions::new_bg_session(args, &ssh).await
+    bg_sessions::new_bg_session_tracked(args, &store, &ssh).await
 }
 
 /// Fetch recent log output from a background Claude session without opening a PTY.
@@ -183,4 +184,34 @@ pub async fn purge_project(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
     bg_sessions::purge_project(args, &store, &ssh).await
+}
+
+// ── Operator settings (Wave 2 Track D) ──────────────────────────────────────
+//
+// Typed key/value settings behind the Settings dialog's automation toggles
+// (playbooks, GC, reconcile cadence). The registry in `service::settings`
+// owns the key list, defaults and validation; these wrappers only adapt
+// `tauri::State`.
+
+/// Every registered operator setting with its effective value.
+#[tauri::command]
+pub fn get_fleet_settings(
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
+    let s = store.lock().map_err(|_| IpcError::lock())?;
+    Ok(crate::service::settings::read_all(&s))
+}
+
+/// Validate and persist one operator setting. `E_INVALID` for an unknown key
+/// or a value of the wrong shape. Returns the full effective map so the
+/// dialog can re-render from one source of truth.
+#[tauri::command]
+pub fn set_fleet_setting(
+    key: String,
+    value: String,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
+    let s = store.lock().map_err(|_| IpcError::lock())?;
+    crate::service::settings::set(&s, &key, &value)?;
+    Ok(crate::service::settings::read_all(&s))
 }

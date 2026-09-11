@@ -151,6 +151,13 @@ mod tests {
             safe_kill_nonce: None,
             safe_kill_detail: None,
             safe_kill_requested_at: None,
+            idle_since: None,
+            stuck_since: None,
+            last_playbook_at: None,
+            last_prompt: None,
+            started_at: None,
+            last_turn_at: None,
+            ci_status: None,
         }
     }
 

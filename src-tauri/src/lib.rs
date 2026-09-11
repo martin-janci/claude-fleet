@@ -181,6 +181,16 @@ fn spawn_reconcile_tick(store: std::sync::Arc<Mutex<Store>>, ssh: std::sync::Arc
                 }
                 Err(e) => eprintln!("[reconcile-tick] reconcile failed: {e}"),
             }
+            // Wave 2 Track D: lifecycle automation rides the same tick, after
+            // the pass so it sees fresh `stuck_kind` / `idle_since` stamps.
+            // Both are opt-in through settings and cheap when off. Their
+            // work is best-effort: a failure is logged inside and never
+            // stops the loop.
+            let n = service::playbooks::run(&store, &ssh).await;
+            if n > 0 {
+                eprintln!("[reconcile-tick] applied {n} stuck playbook(s)");
+            }
+            let _ = service::gc::maybe_sweep(&store, &ssh).await;
         }
     });
 }
@@ -558,6 +568,8 @@ pub fn run() {
             commands::sessions::new_bg_session,
             commands::sessions::peek_session,
             commands::sessions::purge_project,
+            commands::sessions::get_fleet_settings,
+            commands::sessions::set_fleet_setting,
             commands::files::repo_changes,
             commands::files::repo_tree,
             commands::files::repo_file,

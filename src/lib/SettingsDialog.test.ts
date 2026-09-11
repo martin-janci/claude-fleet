@@ -182,3 +182,59 @@ describe('SettingsDialog', () => {
     expect(noRow.textContent?.trim()).toBe('—');
   });
 });
+
+describe('SettingsDialog automation + notifications (W2 Track D)', () => {
+  it('renders the playbook and GC controls off by default', async () => {
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick(); await tick();
+    expect(screen.getByTestId('automation-section')).toBeInTheDocument();
+    expect(screen.getByTestId('playbook-press-enter')).not.toBeChecked();
+    expect(screen.getByTestId('playbook-oom-recreate')).not.toBeChecked();
+    expect(screen.getByTestId('gc-enabled')).not.toBeChecked();
+    expect((screen.getByTestId('gc-bg-hours') as HTMLInputElement).value).toBe('24');
+    expect((screen.getByTestId('gc-shell-hours') as HTMLInputElement).value).toBe('168');
+    expect((screen.getByTestId('gc-work-hours') as HTMLInputElement).value).toBe('0');
+    expect(mockedInvoke).toHaveBeenCalledWith('get_fleet_settings', undefined);
+  });
+
+  it('toggling a playbook writes the setting through set_fleet_setting', async () => {
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    inv.mockImplementation(async (cmd: string, args?: { key?: string; value?: string }) => {
+      if (cmd === 'set_fleet_setting') return { [args!.key!]: args!.value! };
+      if (cmd === 'mcp_status') return mcpStatusObj;
+      return null;
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('playbook-press-enter'));
+    await tick();
+    expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'playbooks.press_enter', value: 'true' });
+    expect(screen.getByTestId('playbook-press-enter')).toBeChecked();
+  });
+
+  it('GC TTL inputs convert hours to seconds on the wire', async () => {
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    inv.mockImplementation(async (cmd: string, args?: { key?: string; value?: string }) => {
+      if (cmd === 'set_fleet_setting') return { [args!.key!]: args!.value! };
+      if (cmd === 'mcp_status') return mcpStatusObj;
+      return null;
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick(); await tick();
+    const input = screen.getByTestId('gc-bg-hours') as HTMLInputElement;
+    input.value = '1.5';
+    await fireEvent.change(input);
+    expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'gc.bg_idle_secs', value: '5400' });
+  });
+
+  it('renders the notifications section with the toast toggle on and OS off', async () => {
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick();
+    expect(screen.getByTestId('notifications-section')).toBeInTheDocument();
+    expect(screen.getByTestId('notify-toast')).toBeChecked();
+    expect(screen.getByTestId('notify-os')).not.toBeChecked();
+    // jsdom has no Notification API ⇒ the OS toggle is disabled + labelled.
+    expect(screen.getByTestId('notify-permission')).toHaveTextContent('unsupported');
+    expect(screen.getByTestId('notify-os')).toBeDisabled();
+  });
+});

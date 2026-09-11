@@ -32,7 +32,7 @@ const sampleSession = {
   effort_level: null,
   pr_url: null,
   current_activity: null,
-  friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null,
+  friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null,
 };
 
 beforeEach(() => {
@@ -143,5 +143,65 @@ describe('SessionDetails', () => {
     const panel = await screen.findByTestId('reviews-panel');
     expect(panel).toBeTruthy();
     expect(panel.textContent).toContain('review-foo');
+  });
+});
+
+describe('SessionDetails outcome + triage fields (W2 Track D)', () => {
+  it('shows the stuck chip with its kind and how long it has been stuck', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    render(SessionDetails, {
+      props: { session: { ...sampleSession, claude_status: 'working', stuck_kind: 'trust_prompt', stuck_since: now - 120 } },
+    });
+    await tick();
+    const chip = screen.getByTestId('details-stuck');
+    expect(chip).toHaveTextContent('stuck: trust prompt');
+    expect(chip).toHaveTextContent('2m');
+    // Stuck outranks claude_status.
+    expect(screen.queryByTestId('details-claude-status')).toBeNull();
+  });
+
+  it('shows the claude status chip and the context percentage when not stuck', async () => {
+    render(SessionDetails, {
+      props: { session: { ...sampleSession, claude_status: 'blocked', context_pct: 91 } },
+    });
+    await tick();
+    expect(screen.getByTestId('details-claude-status')).toHaveTextContent('blocked');
+    const ctx = screen.getByTestId('details-context');
+    expect(ctx).toHaveTextContent('91%');
+    expect(ctx).toHaveAttribute('data-level', 'crit');
+  });
+
+  it('shows elapsed since started_at, the last prompt, the PR link and CI badge', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    render(SessionDetails, {
+      props: {
+        session: {
+          ...sampleSession,
+          started_at: now - 2 * 86400 - 3600,
+          last_turn_at: now - 30,
+          last_prompt: 'Ship the GC sweeper',
+          pr_url: 'https://github.com/martin-janci/claude-fleet/pull/42',
+          ci_status: 'passing',
+        },
+      },
+    });
+    await tick();
+    expect(screen.getByTestId('details-elapsed')).toHaveTextContent('2d 1h');
+    expect(screen.getByTestId('details-last-turn')).toHaveTextContent('just now');
+    expect(screen.getByTestId('details-last-prompt')).toHaveTextContent('Ship the GC sweeper');
+    const pr = screen.getByTestId('details-pr');
+    expect(pr.querySelector('a')).toHaveAttribute('href', 'https://github.com/martin-janci/claude-fleet/pull/42');
+    expect(pr).toHaveTextContent('martin-janci/claude-fleet/pull/42');
+    expect(screen.getByTestId('details-ci')).toHaveTextContent('CI');
+  });
+
+  it('falls back to created_at for elapsed and hides the optional rows', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    render(SessionDetails, { props: { session: { ...sampleSession, created_at: now - 90 } } });
+    await tick();
+    expect(screen.getByTestId('details-elapsed')).toHaveTextContent('1m');
+    expect(screen.queryByTestId('details-last-prompt')).toBeNull();
+    expect(screen.queryByTestId('details-pr')).toBeNull();
+    expect(screen.queryByTestId('details-stuck')).toBeNull();
   });
 });

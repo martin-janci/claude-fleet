@@ -21,6 +21,25 @@
   } from './mcp';
   import AddHostPicker from './AddHostPicker.svelte';
   import Modal from './Modal.svelte';
+  import {
+    fleetSettings,
+    loadFleetSettings,
+    setFleetSetting,
+    settingBool,
+    settingSecs,
+    secsToHours,
+    hoursToSecs,
+    SETTING_KEYS,
+    type SettingKey,
+  } from './fleet_settings';
+  import {
+    attentionIdleMinutes,
+    notificationPermission,
+    notifyStuckOs,
+    notifyStuckToast,
+    requestNotificationPermission,
+    type NotificationPermissionState,
+  } from './notify';
 
   let { onClose }: { onClose: () => void } = $props();
 
@@ -97,7 +116,48 @@
       mcpError = r.error.message;
     }
     await loadHostTokens();
+    const fs = await loadFleetSettings();
+    if (!fs.ok) automationError = fs.error.message;
   });
+
+  // --- Notifications (stuck transitions) ---
+  let permission = $state<NotificationPermissionState>(notificationPermission());
+  async function enableOsNotifications() {
+    permission = await requestNotificationPermission();
+    if (permission === 'granted') notifyStuckOs.set(true);
+  }
+
+  // --- Automation: playbooks + GC (backend settings table) ---
+  let automationError: string | null = $state(null);
+  let automationBusy = $state(false);
+  async function applySetting(key: SettingKey, value: string) {
+    automationBusy = true;
+    automationError = null;
+    const r = await setFleetSetting(key, value);
+    automationBusy = false;
+    if (!r.ok) automationError = r.error.message;
+  }
+  function toggleSetting(key: SettingKey) {
+    void applySetting(key, settingBool($fleetSettings, key) ? 'false' : 'true');
+  }
+  // Hours in the inputs, seconds on the wire. `null` while the field is
+  // cleared; nothing is written until the value parses.
+  function onHoursChange(key: SettingKey, e: Event) {
+    const raw = (e.currentTarget as HTMLInputElement).value;
+    const hours = Number.parseFloat(raw);
+    if (!Number.isFinite(hours) || hours < 0) return;
+    void applySetting(key, String(hoursToSecs(hours)));
+  }
+  function onSecsChange(key: SettingKey, e: Event) {
+    const raw = (e.currentTarget as HTMLInputElement).value;
+    const secs = Number.parseInt(raw, 10);
+    if (!Number.isFinite(secs) || secs < 0) return;
+    void applySetting(key, String(secs));
+  }
+  function onIdleMinutesChange(e: Event) {
+    const v = Number.parseInt((e.currentTarget as HTMLInputElement).value, 10);
+    if (Number.isFinite(v) && v >= 0) attentionIdleMinutes.set(v);
+  }
 
   async function applyMcp(opts: {
     enabled: boolean;
@@ -330,6 +390,140 @@
           Copy on select
         </label>
       </div>
+    </section>
+
+    <section class="block" data-testid="notifications-section">
+      <div class="section-header">
+        <h4>Notifications</h4>
+      </div>
+      <p class="mcp-blurb">
+        When a session becomes stuck (auth menu, trust prompt, reconnect,
+        out of memory, press Enter) fleet announces it for screen readers and,
+        optionally, shows a toast and an OS notification.
+      </p>
+      <label class="toggle">
+        <input type="checkbox" bind:checked={$notifyStuckToast} data-testid="notify-toast" />
+        In-app toast on stuck transitions
+      </label>
+      <div class="mcp-row">
+        <label class="toggle">
+          <input
+            type="checkbox"
+            checked={$notifyStuckOs}
+            disabled={permission === 'unsupported'}
+            data-testid="notify-os"
+            onchange={() => {
+              if ($notifyStuckOs) notifyStuckOs.set(false);
+              else void enableOsNotifications();
+            }} />
+          OS notification on stuck transitions
+        </label>
+        <span class="status status-{permission === 'granted' ? 'on' : permission === 'denied' ? 'off' : 'neutral'}" data-testid="notify-permission">
+          {permission}
+        </span>
+      </div>
+      {#if permission === 'unsupported'}
+        <p class="hook-desc">This webview does not expose the Notification API; toasts and the live region still work.</p>
+      {:else if permission === 'denied'}
+        <p class="hook-desc">Notifications were denied at the OS level; allow them for claude-fleet in your system settings.</p>
+      {/if}
+      <div class="mcp-field">
+        <span class="lbl">Idle</span>
+        <input
+          class="port"
+          type="number"
+          min="0"
+          value={$attentionIdleMinutes}
+          onchange={onIdleMinutesChange}
+          data-testid="attention-idle-minutes" />
+        <span class="hook-desc">minutes before an idle work session counts as "needs attention" (0 = never)</span>
+      </div>
+    </section>
+
+    <section class="block" data-testid="automation-section">
+      <div class="section-header">
+        <h4>Automation</h4>
+      </div>
+      <p class="mcp-blurb">
+        Stuck-session playbooks and the idle-session GC run from the background
+        reconcile tick. Everything here is off by default; changes apply on the
+        next tick.
+      </p>
+      <label class="toggle">
+        <input
+          type="checkbox"
+          checked={settingBool($fleetSettings, SETTING_KEYS.playbookPressEnter)}
+          disabled={automationBusy}
+          data-testid="playbook-press-enter"
+          onchange={() => toggleSetting(SETTING_KEYS.playbookPressEnter)} />
+        Press Enter for sessions stuck on a "Press Enter" prompt
+      </label>
+      <label class="toggle">
+        <input
+          type="checkbox"
+          checked={settingBool($fleetSettings, SETTING_KEYS.playbookOomRecreate)}
+          disabled={automationBusy}
+          data-testid="playbook-oom-recreate"
+          onchange={() => toggleSetting(SETTING_KEYS.playbookOomRecreate)} />
+        Recreate sessions that ran out of memory (at most once per hour)
+      </label>
+      <p class="hook-desc">Auth menus, trust prompts and reconnects are always notify-only.</p>
+
+      <label class="toggle gc-toggle">
+        <input
+          type="checkbox"
+          checked={settingBool($fleetSettings, SETTING_KEYS.gcEnabled)}
+          disabled={automationBusy}
+          data-testid="gc-enabled"
+          onchange={() => toggleSetting(SETTING_KEYS.gcEnabled)} />
+        Garbage-collect idle sessions
+      </label>
+      <div class="mcp-field">
+        <span class="lbl">bg</span>
+        <input class="port" type="number" min="0" step="0.5"
+          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.gcBgIdleSecs))}
+          disabled={automationBusy}
+          data-testid="gc-bg-hours"
+          onchange={(e) => onHoursChange(SETTING_KEYS.gcBgIdleSecs, e)} />
+        <span class="hook-desc">hours idle before a background agent is stopped (0 = never)</span>
+      </div>
+      <div class="mcp-field">
+        <span class="lbl">shell</span>
+        <input class="port" type="number" min="0" step="0.5"
+          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.gcShellIdleSecs))}
+          disabled={automationBusy}
+          data-testid="gc-shell-hours"
+          onchange={(e) => onHoursChange(SETTING_KEYS.gcShellIdleSecs, e)} />
+        <span class="hook-desc">hours inactive before a shell session is killed (0 = never)</span>
+      </div>
+      <div class="mcp-field">
+        <span class="lbl">work</span>
+        <input class="port" type="number" min="0" step="0.5"
+          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.gcWorkIdleSecs))}
+          disabled={automationBusy}
+          data-testid="gc-work-hours"
+          onchange={(e) => onHoursChange(SETTING_KEYS.gcWorkIdleSecs, e)} />
+        <span class="hook-desc">hours idle before a work session is removed — dirty worktrees go through safe-remove (0 = never)</span>
+      </div>
+      <div class="mcp-field">
+        <span class="lbl">sweep</span>
+        <input class="port" type="number" min="0"
+          value={settingSecs($fleetSettings, SETTING_KEYS.gcSweepIntervalSecs)}
+          disabled={automationBusy}
+          data-testid="gc-sweep-secs"
+          onchange={(e) => onSecsChange(SETTING_KEYS.gcSweepIntervalSecs, e)} />
+        <span class="hook-desc">seconds between GC sweeps</span>
+      </div>
+      <div class="mcp-field">
+        <span class="lbl">tick</span>
+        <input class="port" type="number" min="0"
+          value={settingSecs($fleetSettings, SETTING_KEYS.reconcileIntervalSecs)}
+          disabled={automationBusy}
+          data-testid="reconcile-secs"
+          onchange={(e) => onSecsChange(SETTING_KEYS.reconcileIntervalSecs, e)} />
+        <span class="hook-desc">seconds between reconcile passes (0 disables; restart to apply)</span>
+      </div>
+      {#if automationError}<p class="err">{automationError}</p>{/if}
     </section>
 
     <section class="block" data-testid="mcp-section">
@@ -787,4 +981,5 @@
     margin-top: 0.4rem;
     font-style: italic;
   }
+  .gc-toggle { margin-top: 0.6rem; }
 </style>

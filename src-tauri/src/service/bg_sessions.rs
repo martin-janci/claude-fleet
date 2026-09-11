@@ -47,6 +47,12 @@ pub struct NewBgSessionResult {
     /// it by id (and thus can't `peek` it). Surfaced so the caller can warn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// The fleet row (MCP-7): `new_bg_session_tracked` runs a single-host
+    /// reconcile right after launch so the `bg:<id>` sentinel exists before
+    /// the caller's next tool call. `None` when the agent could not be matched
+    /// yet (it appears on the next tick) or when the untracked path was used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<crate::store::SessionRow>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,6 +118,103 @@ fn bg_session_result(claude_session_id: Option<String>) -> NewBgSessionResult {
     NewBgSessionResult {
         claude_session_id,
         warning,
+        session: None,
+    }
+}
+
+/// `new_bg_session` + immediate registration (MCP-7): after `claude --bg`
+/// returns its id, reconcile the host once (as `spawn_review` does) so the
+/// synthetic `bg:<id>` row exists, then stamp the row with the launch prompt
+/// (`last_prompt`, `started_at`, and a prompt-derived friendly name — PROD-4).
+/// Every post-launch step is best-effort: the agent is already running, so a
+/// reconcile hiccup degrades to `session: None` rather than an error.
+pub async fn new_bg_session_tracked(
+    args: NewBgSessionArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<NewBgSessionResult, IpcError> {
+    let host_alias = args.host_alias.clone();
+    let prompt = args.prompt.clone();
+    let mut res = new_bg_session(args, ssh).await?;
+    let Some(ref claude_id) = res.claude_session_id else {
+        return Ok(res);
+    };
+    if let Err(e) = crate::service::sessions::reconcile_one_host(store, ssh, &host_alias).await {
+        eprintln!("[bg] post-launch reconcile of {host_alias} failed: {e}");
+        return Ok(res);
+    }
+    res.session = stamp_bg_row(store, claude_id, &prompt);
+    Ok(res)
+}
+
+/// Find the bg row for `claude_id` and record the launch prompt on it.
+/// Returns the refreshed row, or `None` when reconcile has not surfaced the
+/// agent yet.
+fn stamp_bg_row(store: &Mutex<Store>, claude_id: &str, prompt: &str) -> Option<crate::store::SessionRow> {
+    let s = store.lock().ok()?;
+    let row = s.get_session_by_claude_id(claude_id).ok().flatten()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let _ = s.set_started_at(row.id, now);
+    let _ = s.set_last_prompt(row.id, prompt);
+    if row.friendly_name.is_none() {
+        if let Some(name) = crate::service::sessions::friendly_name_from_prompt(prompt) {
+            let _ = s.set_friendly_name(&row.host_alias, &row.tmux_name, Some(&name));
+        }
+    }
+    let _ = s.insert_session_event(row.id, "prompt_sent", Some(&prompt.chars().take(120).collect::<String>()));
+    s.get_session_by_id(row.id).ok().flatten()
+}
+
+/// Resolve a `peek_session` target (MCP-7) from any of: a fleet `session_id`,
+/// or a `claude_session_id` plus its `host_alias` (the id a `new_bg_session`
+/// caller already holds, before reconcile has surfaced the row). Returns the
+/// `(host_alias, claude_session_id)` pair to peek.
+///
+/// A fleet row without a Claude id yields `E_INVALID_STATE` so the caller can
+/// tell "not tracked yet" apart from "no such session" (`E_NOTFOUND`).
+pub fn resolve_peek_target(
+    s: &Store,
+    session_id: Option<i64>,
+    host_alias: Option<&str>,
+    claude_session_id: Option<&str>,
+) -> Result<(String, String), IpcError> {
+    if let Some(id) = session_id {
+        let row = s
+            .get_session_by_id(id)?
+            .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("session {id} not found")))?;
+        return match row.claude_session_id {
+            Some(cid) => Ok((row.host_alias, cid)),
+            None => Err(IpcError::new(
+                "E_INVALID_STATE",
+                "this session has no Claude session id yet — nothing to peek",
+            )),
+        };
+    }
+    match (host_alias, claude_session_id) {
+        (Some(host), Some(cid)) => {
+            validate::host_alias(host)?;
+            validate::claude_session_id(cid)?;
+            Ok((host.to_string(), cid.to_string()))
+        }
+        // A bare Claude id: use the fleet row's host when the agent is
+        // already tracked; otherwise the host is genuinely unknown.
+        (None, Some(cid)) => {
+            validate::claude_session_id(cid)?;
+            match s.get_session_by_claude_id(cid)? {
+                Some(row) => Ok((row.host_alias, cid.to_string())),
+                None => Err(IpcError::new(
+                    "E_INVALID",
+                    "pass host_alias with claude_session_id (the agent is not tracked yet)",
+                )),
+            }
+        }
+        _ => Err(IpcError::new(
+            "E_INVALID",
+            "pass session_id, or claude_session_id (+ host_alias)",
+        )),
     }
 }
 
@@ -161,6 +264,73 @@ mod tests {
             prompt: "Do the thing".into(),
         };
         assert!(args.validate().is_err());
+    }
+
+    #[test]
+    fn stamp_bg_row_names_and_stamps_the_reconciled_row() {
+        let store = make_store();
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 5)
+                .unwrap();
+        }
+        let row = stamp_bg_row(&store, "u1", "Review the auth PR, carefully!").expect("row");
+        assert_eq!(row.friendly_name.as_deref(), Some("review the auth pr carefully"));
+        assert_eq!(row.last_prompt.as_deref(), Some("Review the auth PR, carefully!"));
+        assert!(row.started_at.is_some());
+        // Unknown id ⇒ None, no panic.
+        assert!(stamp_bg_row(&store, "nope", "x").is_none());
+    }
+
+    #[test]
+    fn resolve_peek_target_accepts_fleet_id_or_claude_id() {
+        let store = make_store();
+        let (tracked_id, untracked_id) = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let bg = s
+                .upsert_bg_session("local", &format!("bg:{UUID}"), None, UUID, Some("working"), 5)
+                .unwrap();
+            let plain = s
+                .upsert_session("dev-plain", "local", None, None, 1, 1, "running", None)
+                .unwrap();
+            (bg, plain)
+        };
+        let s = store.lock().unwrap();
+        assert_eq!(
+            resolve_peek_target(&s, Some(tracked_id), None, None).unwrap(),
+            ("local".to_string(), UUID.to_string())
+        );
+        assert_eq!(
+            resolve_peek_target(&s, Some(untracked_id), None, None).unwrap_err().code,
+            "E_INVALID_STATE"
+        );
+        assert_eq!(
+            resolve_peek_target(&s, Some(999), None, None).unwrap_err().code,
+            "E_NOTFOUND"
+        );
+        // Claude id alone resolves through the tracked row …
+        assert_eq!(
+            resolve_peek_target(&s, None, None, Some(UUID)).unwrap().0,
+            "local"
+        );
+        // … an untracked id needs its host …
+        let other = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
+        assert_eq!(
+            resolve_peek_target(&s, None, None, Some(other)).unwrap_err().code,
+            "E_INVALID"
+        );
+        assert_eq!(
+            resolve_peek_target(&s, None, Some("mefistos"), Some(other)).unwrap(),
+            ("mefistos".to_string(), other.to_string())
+        );
+        // … and garbage is rejected before any lookup.
+        assert_eq!(
+            resolve_peek_target(&s, None, Some("local"), Some("--foo")).unwrap_err().code,
+            "E_INVALID"
+        );
+        assert_eq!(resolve_peek_target(&s, None, None, None).unwrap_err().code, "E_INVALID");
     }
 
     #[test]
