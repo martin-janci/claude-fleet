@@ -1429,7 +1429,10 @@ impl Store {
     }
 
     /// A project's worktree rows' fingerprint keys, read and resolved the same
-    /// way (lock released before resolving).
+    /// way (lock released before resolving). Covers the LOCAL rows
+    /// (`list_worktrees_for_project`): only they have a canonical form to
+    /// resolve. A remote row's only key is its stored path, which
+    /// `delete_fingerprints` always tries.
     pub fn fingerprint_keys_of_project(
         store: &std::sync::Mutex<Store>,
         project_id: i64,
@@ -4505,7 +4508,11 @@ mod tests {
             "a remote path is never resolved on this machine"
         );
         assert!(store.try_lock().is_ok(), "the lock is released");
-        assert_eq!(Store::fingerprint_keys_of_project(&store, pid).len(), 2);
+        // Local rows only: a remote row's key is its stored path, which the
+        // delete always tries without precomputation.
+        let by_project = Store::fingerprint_keys_of_project(&store, pid);
+        assert_eq!(by_project.len(), 1, "{by_project:?}");
+        assert!(by_project.contains_key(&local));
         assert!(Store::fingerprint_keys_of_worktree(&store, 999_999).is_empty());
     }
 
