@@ -119,7 +119,10 @@ and keeps the newest 72 files, which is three days:
 
 Files are named `claude-fleet.YYYY-MM-DD-HH.log`, where the hour is in UTC.
 Older builds wrote one `claude-fleet.YYYY-MM-DD.log` per day. Those files are
-still read, and they are deleted first when the folder is pruned.
+still read, and they are deleted first when the folder is pruned. On a
+filesystem that does not record file creation times, the pruner cannot date
+them, so these legacy files (at most five) are never deleted, which is
+harmless.
 **Settings → Diagnostics → Open log folder** opens the folder. The path is
 also shown there, with a copy button.
 

@@ -63,8 +63,10 @@ fn is_log_file_name(name: &str) -> bool {
 }
 
 /// Sort key for a log file name: its date stamp, with a legacy daily stamp
-/// (`YYYY-MM-DD`) read as hour `00` so it orders before that day's hourly
-/// files (`YYYY-MM-DD-HH`). Hourly stamps then sort chronologically as
+/// (`YYYY-MM-DD`) keyed as `YYYY-MM-DD-` so it orders strictly before every
+/// hourly file of that day (`YYYY-MM-DD-HH`), hour `00` included: a prefix
+/// sorts before its extensions, so the new hour-00 file never ties with it
+/// and stays the current file. Hourly stamps then sort chronologically as
 /// strings, so no mtime lookups are needed.
 fn log_sort_key(name: &str) -> String {
     let stamp = name
@@ -72,7 +74,7 @@ fn log_sort_key(name: &str) -> String {
         .and_then(|s| s.strip_suffix(&format!(".{LOG_FILE_SUFFIX}")))
         .unwrap_or(name);
     if stamp.len() == "YYYY-MM-DD".len() {
-        format!("{stamp}-00")
+        format!("{stamp}-")
     } else {
         stamp.to_string()
     }
@@ -559,6 +561,31 @@ mod tests {
                 "claude-fleet.2026-09-12-00.log",
             ]
         );
+    }
+
+    #[test]
+    fn legacy_daily_file_sorts_strictly_before_that_days_hour_00() {
+        let legacy = log_sort_key("claude-fleet.2026-09-11.log");
+        let hour00 = log_sort_key("claude-fleet.2026-09-11-00.log");
+        let prev_day = log_sort_key("claude-fleet.2026-09-10-23.log");
+        assert!(legacy < hour00, "{legacy:?} must sort before {hour00:?}");
+        assert!(
+            prev_day < legacy,
+            "{prev_day:?} must sort before {legacy:?}"
+        );
+
+        // Upgrade day at 00 UTC: the new hour-00 file is the current one, so
+        // the diagnostics tail reads it last whatever the directory order.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        std::fs::write(d.join("claude-fleet.2026-09-11-00.log"), "new\n").unwrap();
+        std::fs::write(d.join("claude-fleet.2026-09-11.log"), "old\n").unwrap();
+        assert_eq!(
+            current_log_file(d).unwrap().file_name().unwrap(),
+            "claude-fleet.2026-09-11-00.log"
+        );
+        assert_eq!(tail_lines(d, 1), ["new"]);
+        assert_eq!(tail_lines(d, 2), ["old", "new"]);
     }
 
     #[test]
