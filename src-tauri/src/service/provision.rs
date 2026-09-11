@@ -3,7 +3,7 @@
 use crate::ipc_error::IpcError;
 use crate::service::tunnel::TunnelSupervisor;
 use crate::shell::quote;
-use crate::ssh::SshClient;
+use crate::ssh::SshExec;
 use crate::store::Store;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -48,7 +48,7 @@ label this session; it defines when to fire and how to look up your `host_alias`
 /// firing). On a remote host `127.0.0.1:<mcp_port>` IS the tunnel's loopback
 /// end (see `tunnel_argv`), so the same URL works on every host.
 pub async fn provision_one(
-    ssh: &Arc<SshClient>,
+    ssh: &dyn SshExec,
     host: &str,
     url: &str,
     token: &str,
@@ -100,7 +100,7 @@ const SETTINGS_JSON: &str = "~/.claude/settings.json";
 /// alone. The block carries the host's bearer token, so the file is written
 /// 0600.
 pub async fn provision_hook(
-    ssh: &Arc<SshClient>,
+    ssh: &dyn SshExec,
     host: &str,
     mcp_port: u16,
     token: &str,
@@ -159,7 +159,7 @@ pub fn commit_host_token(
 /// provisioned. Shared by [`provision_hosts`] and the per-host Rotate action.
 pub async fn provision_host_with_token(
     store: &Mutex<Store>,
-    ssh: &Arc<SshClient>,
+    ssh: &dyn SshExec,
     tunnels: &Arc<TunnelSupervisor>,
     host: &str,
     mcp_port: u16,
@@ -180,7 +180,7 @@ pub async fn provision_host_with_token(
 
 /// Ensure `~/.tmux.conf` has `set -g set-clipboard on` for OSC 52 passthrough.
 /// Appends the setting if not already present; creates the file if missing.
-pub async fn provision_tmux_clipboard(ssh: &Arc<SshClient>, host: &str) -> Result<(), IpcError> {
+pub async fn provision_tmux_clipboard(ssh: &dyn SshExec, host: &str) -> Result<(), IpcError> {
     let existing = read_host_file(ssh, host, TMUX_CONF).await?;
     if has_tmux_clipboard_setting(&existing) {
         return Ok(());
@@ -200,7 +200,7 @@ pub async fn provision_tmux_clipboard(ssh: &Arc<SshClient>, host: &str) -> Resul
 /// block (sentinel-delimited). Idempotent: writes only when the block is
 /// missing or its body drifted. Everything outside the sentinels is the
 /// user's own content and is preserved verbatim.
-pub async fn provision_claude_md(ssh: &Arc<SshClient>, host: &str) -> Result<(), IpcError> {
+pub async fn provision_claude_md(ssh: &dyn SshExec, host: &str) -> Result<(), IpcError> {
     let existing = read_host_file(ssh, host, CLAUDE_MD_PATH).await?;
     let Some(merged) = merge_claude_md(&existing, CLAUDE_MD_BEGIN, CLAUDE_MD_END, CLAUDE_MD_BODY)
     else {
@@ -272,7 +272,7 @@ pub struct HostProvisionResult {
 /// failures never abort the others.
 pub async fn provision_hosts(
     store: &Mutex<Store>,
-    ssh: &Arc<SshClient>,
+    ssh: &dyn SshExec,
     tunnels: &Arc<TunnelSupervisor>,
     mcp_port: u16,
     rotate: bool,
@@ -337,11 +337,7 @@ pub fn reestablish_tunnels(
 
 /// Read a file from a host. `local` → `std::fs`; remote → `cat` over SSH.
 /// Missing file → `Ok(String::new())` (caller treats as empty config).
-pub async fn read_host_file(
-    ssh: &Arc<SshClient>,
-    host: &str,
-    path: &str,
-) -> Result<String, IpcError> {
+pub async fn read_host_file(ssh: &dyn SshExec, host: &str, path: &str) -> Result<String, IpcError> {
     if host == "local" {
         let expanded = expand_home_local(path)?;
         return Ok(std::fs::read_to_string(&expanded).unwrap_or_default());
@@ -360,7 +356,7 @@ pub async fn read_host_file(
 /// shell that `mkdir -p`s the parent and `printf '%s'`s the (shell-quoted)
 /// content to `path`. `dir` is the parent dir; `path` the file.
 pub async fn write_host_file(
-    ssh: &Arc<SshClient>,
+    ssh: &dyn SshExec,
     host: &str,
     dir: &str,
     path: &str,
@@ -384,12 +380,12 @@ pub async fn write_host_file(
 ///
 /// - remote: the file is first created empty under `umask 077` + `chmod 600`
 ///   (a script with only paths in it), then the content is streamed over
-///   stdin through `SshClient::upload_file` (`cat > path`, which keeps the
+///   stdin through `SshExec::upload_file` (`cat > path`, which keeps the
 ///   0600 mode when truncating);
 /// - local: the file is opened with mode 0600 from creation
 ///   ([`write_private_file`]).
 pub async fn write_host_file_secret(
-    ssh: &Arc<SshClient>,
+    ssh: &dyn SshExec,
     host: &str,
     dir: &str,
     path: &str,
@@ -488,7 +484,7 @@ pub fn set_private_mode(path: &std::path::Path) {
 }
 
 async fn run_remote_write(
-    ssh: &Arc<SshClient>,
+    ssh: &dyn SshExec,
     host: &str,
     path: &str,
     script: &str,
@@ -514,6 +510,12 @@ async fn run_remote_write(
 /// directory. `$HOME` is double-quoted (literal through the outer `quote`, then
 /// expanded by the remote `bash`); the rest of the path is `quote`-quoted inert.
 fn remote_path(path: &str) -> String {
+    if path == "~" {
+        // A bare `~` (the parent dir of `~/.tmux.conf`) must expand too —
+        // `quote` would turn it into a literal `'~'` and `mkdir -p` would
+        // create a directory named `~` in the remote cwd.
+        return "\"$HOME\"".to_string();
+    }
     match path.strip_prefix("~/") {
         Some(rest) => format!("\"$HOME\"/{}", quote(rest)),
         None => quote(path),
@@ -653,6 +655,9 @@ mod tests {
         let t = remote_path("~/.claude/skills/claude-fleet-control");
         assert_eq!(t, "\"$HOME\"/'.claude/skills/claude-fleet-control'");
         assert!(!t.starts_with("'~"));
+        // A bare `~` (parent dir of `~/.tmux.conf`) expands too — it used to
+        // become `'~'`, and `mkdir -p '~'` created a literal `~` directory.
+        assert_eq!(remote_path("~"), "\"$HOME\"");
         // Absolute paths are quoted whole.
         assert_eq!(remote_path("/etc/hosts"), "'/etc/hosts'");
     }
@@ -872,5 +877,495 @@ mod tests {
             lines <= 6,
             "managed block must stay short, has {lines} lines"
         );
+    }
+
+    // ── end-to-end through the real provision functions over `FakeSsh` ──────
+
+    use crate::ssh_fake::{Call, FakeSsh, Match, Reply};
+
+    const URL: &str = "http://127.0.0.1:4180/mcp";
+    const TOKEN: &str = "tok-s3cret-0123456789abcdef";
+    const PORT: u16 = 4180;
+    const HOME: &str = "/home/fake";
+
+    /// A host with nothing on it yet: every read comes back empty (the
+    /// default reply), `$HOME` resolves.
+    fn fresh_host() -> FakeSsh {
+        let fake = FakeSsh::new();
+        fake.with_home(HOME);
+        fake
+    }
+
+    /// The exact script / command each step of `provision_one` should issue
+    /// on a fresh host. `Script(s)` is a `bash -lc '<s>'` call, `Cmd(c)` a
+    /// bare argv (`printenv HOME`), `Upload(path, content)` a `cat > path`
+    /// with `content` on stdin.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Step {
+        Script(String),
+        Cmd(String),
+        Upload(String, String),
+    }
+
+    fn step_of(call: &Call) -> Step {
+        if let Some(s) = call.script() {
+            return Step::Script(s);
+        }
+        match (call.args.as_slice(), call.stdin_str()) {
+            ([cmd], Some(stdin)) if cmd.starts_with("cat > ") => {
+                Step::Upload(cmd["cat > ".len()..].to_string(), stdin)
+            }
+            _ => Step::Cmd(call.command()),
+        }
+    }
+
+    fn expected_claude_md() -> String {
+        merge_claude_md("", CLAUDE_MD_BEGIN, CLAUDE_MD_END, CLAUDE_MD_BODY).unwrap()
+    }
+
+    fn expected_tmux_conf() -> String {
+        "\n# Enable OSC 52 clipboard (added by claude-fleet)\nset -g set-clipboard on\n".to_string()
+    }
+
+    fn expected_settings() -> String {
+        crate::commands::mcp::merge_hook_into_settings_json("", PORT, TOKEN).unwrap()
+    }
+
+    fn fresh_host_sequence() -> Vec<Step> {
+        use Step::*;
+        vec![
+            // 1. skills
+            Script(remote_write_script(SKILL_DIR, SKILL_PATH, FLEET_SKILL)),
+            Script(remote_write_script(
+                FRIENDLY_NAME_SKILL_DIR,
+                FRIENDLY_NAME_SKILL_PATH,
+                FRIENDLY_NAME_SKILL,
+            )),
+            // 1b. managed CLAUDE.md block
+            Script(remote_read_script(CLAUDE_MD_PATH)),
+            Script(remote_write_script(
+                CLAUDE_DIR,
+                CLAUDE_MD_PATH,
+                &expected_claude_md(),
+            )),
+            // 2. MCP entry — no backup for an absent file; the token travels
+            //    over stdin into a 0600 file, never through argv.
+            Script(remote_read_script(CLAUDE_JSON)),
+            Script(remote_touch_private_script(CLAUDE_DIR, CLAUDE_JSON)),
+            Cmd("printenv HOME".into()),
+            Upload(
+                quote(&format!("{HOME}/.claude.json")),
+                merge_mcp_entry("", URL, TOKEN).unwrap(),
+            ),
+            // 3. tmux clipboard
+            Script(remote_read_script(TMUX_CONF)),
+            Script(remote_write_script("~", TMUX_CONF, &expected_tmux_conf())),
+            // 4. Stop / WorktreeCreate hooks ($HOME is cached now).
+            Script(remote_read_script(SETTINGS_JSON)),
+            Script(remote_touch_private_script(CLAUDE_DIR, SETTINGS_JSON)),
+            Upload(
+                quote(&format!("{HOME}/.claude/settings.json")),
+                expected_settings(),
+            ),
+        ]
+    }
+
+    /// Every argument the remote shell sees must be inert: `bash -lc` gets
+    /// ONE single-quoted word, every path inside expands under `"$HOME"`
+    /// or is single-quoted, and the token appears in no argv at all.
+    fn assert_quoting_invariants(calls: &[Call]) {
+        for c in calls {
+            match c.args.as_slice() {
+                [b, l, script] if b == "bash" && l == "-lc" => {
+                    assert!(
+                        script.starts_with('\'') && script.ends_with('\''),
+                        "bash -lc script must be one quoted word: {script}"
+                    );
+                    let body = c.script().unwrap();
+                    // A quoted tilde (`'~'`, `'~/x'`) would be a literal path
+                    // named `~` on the remote; the skill body may mention
+                    // `~` inside its printf payload, so only the quoted
+                    // path shape is illegal.
+                    assert!(
+                        !body.contains("'~"),
+                        "no quoted tilde path may reach the remote: {body}"
+                    );
+                    for path in [
+                        ".claude/skills",
+                        ".claude/CLAUDE.md",
+                        ".claude.json",
+                        ".tmux.conf",
+                        ".claude/settings.json",
+                    ] {
+                        if body.contains(path) {
+                            assert!(
+                                body.contains(&format!("\"$HOME\"/'{path}")),
+                                "{path} must be \"$HOME\"/'…'-quoted in: {body}"
+                            );
+                        }
+                    }
+                }
+                [cmd] if cmd.starts_with("cat > ") => {
+                    let target = &cmd["cat > ".len()..];
+                    assert!(
+                        target.starts_with('\'') && target.ends_with('\''),
+                        "upload target must be quoted: {cmd}"
+                    );
+                    assert!(target.starts_with(&format!("'{HOME}/")));
+                }
+                [a, b] if a == "printenv" && b == "HOME" => {}
+                other => panic!("unexpected argv shape: {other:?}"),
+            }
+            assert!(
+                !c.command().contains(TOKEN),
+                "token must never be in argv (SEC-2): {}",
+                c.command()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn provision_one_fresh_host_issues_the_exact_sequence() {
+        let fake = fresh_host();
+        provision_one(&fake, "h1", URL, TOKEN, PORT).await.unwrap();
+        let calls = fake.calls();
+        assert!(calls.iter().all(|c| c.host == "h1"));
+        let steps: Vec<Step> = calls.iter().map(step_of).collect();
+        let expected = fresh_host_sequence();
+        for (i, (got, want)) in steps.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(got, want, "step {i} differs");
+        }
+        assert_eq!(steps.len(), expected.len(), "step count");
+        assert_quoting_invariants(&calls);
+        // The secret reached the host exactly twice, both times over stdin.
+        let uploads = calls.iter().filter(|c| c.stdin.is_some()).count();
+        assert_eq!(uploads, 2);
+        assert!(calls
+            .iter()
+            .filter_map(Call::stdin_str)
+            .all(|s| s.contains(TOKEN)));
+    }
+
+    /// A host already provisioned by `provision_one`: its files read back
+    /// exactly what the first run wrote.
+    fn provisioned_host() -> FakeSsh {
+        let fake = fresh_host();
+        fake.on(
+            Match::script(&remote_read_script(CLAUDE_MD_PATH)),
+            Reply::ok(&expected_claude_md()),
+        )
+        .on(
+            Match::script(&remote_read_script(CLAUDE_JSON)),
+            Reply::ok(&merge_mcp_entry("", URL, TOKEN).unwrap()),
+        )
+        .on(
+            Match::script(&remote_read_script(TMUX_CONF)),
+            Reply::ok(&expected_tmux_conf()),
+        )
+        .on(
+            Match::script(&remote_read_script(SETTINGS_JSON)),
+            Reply::ok(&expected_settings()),
+        );
+        fake
+    }
+
+    #[tokio::test]
+    async fn provision_one_second_run_is_idempotent_and_non_destructive() {
+        let fake = provisioned_host();
+        provision_one(&fake, "h1", URL, TOKEN, PORT).await.unwrap();
+        let calls = fake.calls();
+        assert_quoting_invariants(&calls);
+        let steps: Vec<Step> = calls.iter().map(step_of).collect();
+
+        // Content-gated files are read but NOT rewritten.
+        let claude_md_write =
+            remote_write_script(CLAUDE_DIR, CLAUDE_MD_PATH, &expected_claude_md());
+        let tmux_write = remote_write_script("~", TMUX_CONF, &expected_tmux_conf());
+        assert!(!steps.contains(&Step::Script(claude_md_write)));
+        assert!(!steps.contains(&Step::Script(tmux_write)));
+        assert!(steps.contains(&Step::Script(remote_read_script(CLAUDE_MD_PATH))));
+        assert!(steps.contains(&Step::Script(remote_read_script(TMUX_CONF))));
+
+        // Token-bearing files: backed up BEFORE being rewritten, and
+        // rewritten with byte-identical content.
+        let json = quote(&format!("{HOME}/.claude.json"));
+        let json_bak = quote(&format!("{HOME}/.claude.json.fleet-bak"));
+        let settings = quote(&format!("{HOME}/.claude/settings.json"));
+        let settings_bak = quote(&format!("{HOME}/.claude/settings.json.fleet-bak"));
+        let pos = |target: &str| {
+            steps
+                .iter()
+                .position(|s| matches!(s, Step::Upload(t, _) if t == target))
+                .unwrap_or_else(|| panic!("no upload to {target}"))
+        };
+        assert!(pos(&json_bak) < pos(&json), "backup precedes the rewrite");
+        assert!(pos(&settings_bak) < pos(&settings));
+        let content = |target: &str| match &steps[pos(target)] {
+            Step::Upload(_, c) => c.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(content(&json), merge_mcp_entry("", URL, TOKEN).unwrap());
+        assert_eq!(content(&json_bak), merge_mcp_entry("", URL, TOKEN).unwrap());
+        assert_eq!(content(&settings), expected_settings());
+        assert_eq!(content(&settings_bak), expected_settings());
+        // The backups are 0600 too (touch-private before each upload).
+        assert!(steps.contains(&Step::Script(remote_touch_private_script(
+            CLAUDE_DIR,
+            &format!("{CLAUDE_JSON}.fleet-bak")
+        ))));
+        assert!(steps.contains(&Step::Script(remote_touch_private_script(
+            CLAUDE_DIR,
+            &format!("{SETTINGS_JSON}.fleet-bak")
+        ))));
+
+        // Nothing destructive, ever: no rm / mv / rmdir in the command
+        // skeleton (quoted payloads — the skill markdown — are data, so they
+        // are stripped before the scan).
+        // POSIX-ish: a `'…'` segment is inert, a `\` outside quotes escapes
+        // the next char (that is how `quote` renders an embedded `'`).
+        let skeleton = |body: &str| -> String {
+            let mut out = String::new();
+            let mut chars = body.chars();
+            while let Some(ch) = chars.next() {
+                match ch {
+                    '\'' => {
+                        for c in chars.by_ref() {
+                            if c == '\'' {
+                                break;
+                            }
+                        }
+                        out.push_str("'…'");
+                    }
+                    '\\' => {
+                        chars.next();
+                    }
+                    c => out.push(c),
+                }
+            }
+            out
+        };
+        for c in &calls {
+            let body = skeleton(&c.script().unwrap_or_else(|| c.command()));
+            for bad in ["rm ", "mv ", "rmdir", "unlink", "truncate"] {
+                assert!(!body.contains(bad), "destructive command in {body}");
+            }
+        }
+        // Skills are re-shipped (same bytes) — the only unconditional writes.
+        let skill_writes = steps
+            .iter()
+            .filter(|s| matches!(s, Step::Script(b) if b.contains(".claude/skills")))
+            .count();
+        assert_eq!(skill_writes, 2);
+    }
+
+    #[tokio::test]
+    async fn malformed_remote_settings_json_is_e_provision_with_no_write() {
+        // Regression for the #45 blocker: a settings.json we cannot parse is
+        // never "repaired" — the merge fails BEFORE the backup/touch/upload.
+        let fake = provisioned_host();
+        fake.on(
+            Match::script(&remote_read_script(SETTINGS_JSON)),
+            Reply::ok("{ \"hooks\": [ oops"),
+        );
+        let err = provision_one(&fake, "h1", URL, TOKEN, PORT)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "E_PROVISION");
+        assert!(err.message.contains("settings.json"), "{}", err.message);
+        let calls = fake.calls();
+        let read_idx = calls
+            .iter()
+            .position(|c| c.script().as_deref() == Some(remote_read_script(SETTINGS_JSON).as_str()))
+            .expect("settings.json was read");
+        assert_eq!(
+            read_idx,
+            calls.len() - 1,
+            "the failed read is the LAST call — no touch, no backup, no upload: {:?}",
+            calls[read_idx + 1..]
+                .iter()
+                .map(Call::command)
+                .collect::<Vec<_>>()
+        );
+        assert!(!calls
+            .iter()
+            .any(|c| c.command().contains("settings.json") && c.stdin.is_some()));
+    }
+
+    #[tokio::test]
+    async fn malformed_remote_claude_json_is_e_provision_before_any_secret_write() {
+        let fake = fresh_host();
+        fake.on(
+            Match::script(&remote_read_script(CLAUDE_JSON)),
+            Reply::ok("{not json"),
+        );
+        let err = provision_one(&fake, "h1", URL, TOKEN, PORT)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "E_PROVISION");
+        assert!(err.message.contains("~/.claude.json"), "{}", err.message);
+        let calls = fake.calls();
+        assert!(
+            calls.iter().all(|c| c.stdin.is_none()),
+            "no upload may happen after a parse failure"
+        );
+        assert!(
+            !calls.iter().any(|c| c.command().contains("settings.json")),
+            "provisioning stops at the first failure"
+        );
+        // Skills + CLAUDE.md (steps before the failure) were still written.
+        assert!(calls
+            .iter()
+            .any(|c| c.script().is_some_and(|s| s.contains(".claude/skills"))));
+    }
+
+    #[tokio::test]
+    async fn a_failed_remote_write_is_e_provision_with_stderr() {
+        let fake = fresh_host();
+        fake.on(
+            Match::script_contains("mkdir -p \"$HOME\"/'.claude/skills/claude-fleet-control'"),
+            Reply::fail(1, "mkdir: cannot create directory: Read-only file system"),
+        );
+        let err = provision_one(&fake, "h1", URL, TOKEN, PORT)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "E_PROVISION");
+        assert!(
+            err.message.contains("Read-only file system"),
+            "{}",
+            err.message
+        );
+        assert_eq!(fake.calls().len(), 1, "stops at the first failed step");
+    }
+
+    /// Tunnel supervisor whose "ssh" never exits and records nothing — keeps
+    /// `provision_host_with_token` from spawning a real `ssh -R`.
+    fn quiet_tunnels() -> Arc<TunnelSupervisor> {
+        Arc::new(TunnelSupervisor::with_spawner(
+            Arc::new(|_argv| Box::pin(std::future::pending())),
+            Duration::from_secs(3600),
+        ))
+    }
+
+    #[tokio::test]
+    async fn provision_hosts_skips_unreachable_and_hidden_and_isolates_failures() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            for (alias, reachable) in [
+                ("up", true),
+                ("broken", true),
+                ("down", false),
+                ("hid", true),
+            ] {
+                s.insert_host(alias, Some(alias)).unwrap();
+                s.update_host_probe(alias, reachable, None, None, 1)
+                    .unwrap();
+            }
+            s.set_host_hidden("hid", true).unwrap();
+        }
+        let fake = fresh_host();
+        fake.on_host(
+            "broken",
+            Match::script(&remote_read_script(SETTINGS_JSON)),
+            Reply::ok("not json"),
+        );
+        let tunnels = quiet_tunnels();
+        let results = provision_hosts(&store, &fake, &tunnels, PORT, false)
+            .await
+            .unwrap();
+        let status = |h: &str| {
+            results
+                .iter()
+                .find(|r| r.host == h)
+                .map(|r| r.status.as_str())
+                .unwrap_or("absent")
+        };
+        assert_eq!(status("up"), "provisioned");
+        assert_eq!(status("broken"), "failed");
+        assert_eq!(status("down"), "skipped");
+        assert_eq!(status("hid"), "absent");
+        assert!(fake.calls_for("down").is_empty());
+        assert!(fake.calls_for("hid").is_empty());
+
+        // Token committed + tunnel ensured + marked provisioned ONLY for the
+        // host whose files were actually written.
+        let s = store.lock().unwrap();
+        let up_token = s.get_host_token("up").unwrap().expect("token for up");
+        assert!(s.get_host_token("broken").unwrap().is_none());
+        assert!(s.get_host_token("down").unwrap().is_none());
+        let hosts = s.list_hosts().unwrap();
+        let provisioned = |a: &str| hosts.iter().find(|h| h.alias == a).unwrap().provisioned;
+        assert!(provisioned("up"));
+        assert!(!provisioned("broken"));
+        assert!(!provisioned("down"));
+        let snap = tunnels.snapshot();
+        assert_eq!(snap.get("up"), Some(&true));
+        assert!(!snap.contains_key("broken"));
+        assert!(!snap.contains_key("down"));
+        // The token that reached `up` is the one persisted for it.
+        let uploaded = fake
+            .calls_for("up")
+            .into_iter()
+            .filter_map(|c| c.stdin_str())
+            .collect::<Vec<_>>();
+        assert!(uploaded.iter().all(|u| u.contains(&up_token.token)));
+        tunnels.stop_all();
+    }
+
+    #[tokio::test]
+    async fn rotate_mints_a_new_token_only_after_the_host_received_it() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        store.lock().unwrap().insert_host("h", Some("h")).unwrap();
+        let tunnels = quiet_tunnels();
+        let fake = fresh_host();
+        provision_host_with_token(&store, &fake, &tunnels, "h", PORT, false)
+            .await
+            .unwrap();
+        let first = store
+            .lock()
+            .unwrap()
+            .get_host_token("h")
+            .unwrap()
+            .unwrap()
+            .token;
+
+        // Rotation against a host that now fails: the OLD token stays.
+        let failing = provisioned_host();
+        failing.on(
+            Match::script(&remote_read_script(SETTINGS_JSON)),
+            Reply::ok("{broken"),
+        );
+        let err = provision_host_with_token(&store, &failing, &tunnels, "h", PORT, true)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "E_PROVISION");
+        let after_fail = store
+            .lock()
+            .unwrap()
+            .get_host_token("h")
+            .unwrap()
+            .unwrap()
+            .token;
+        assert_eq!(after_fail, first, "a failed rotate never strands the host");
+
+        // Rotation that succeeds persists the new token the host received.
+        let ok = provisioned_host();
+        provision_host_with_token(&store, &ok, &tunnels, "h", PORT, true)
+            .await
+            .unwrap();
+        let rotated = store
+            .lock()
+            .unwrap()
+            .get_host_token("h")
+            .unwrap()
+            .unwrap()
+            .token;
+        assert_ne!(rotated, first);
+        assert!(ok
+            .calls()
+            .iter()
+            .filter_map(Call::stdin_str)
+            .any(|u| u.contains(&rotated)));
+        tunnels.stop_all();
     }
 }

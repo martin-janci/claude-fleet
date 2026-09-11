@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde::Serialize;
 use std::path::PathBuf;
 
-use crate::ssh::SshClient;
+use crate::ssh::{SshClient, SshExec};
 use std::sync::Arc;
 
 /// Backend-agnostic tmux operations. Implementations differ only in how
@@ -97,12 +97,16 @@ impl TmuxExec for LocalTmux {
     }
 }
 
-pub struct RemoteTmux {
-    pub client: Arc<SshClient>,
+/// tmux over an `SshExec`. Generic (defaulting to the production client) so
+/// the exact scripts it builds can be exercised against a scripted fake or
+/// the local `bash -c` executor without a real host; every construction site
+/// still just writes `RemoteTmux { client: Arc::clone(ssh), host }`.
+pub struct RemoteTmux<C: SshExec = Arc<SshClient>> {
+    pub client: C,
     pub host: String,
 }
 
-impl RemoteTmux {
+impl<C: SshExec> RemoteTmux<C> {
     /// We always wrap remote tmux invocations in `bash -lc '…'` so the
     /// remote user's login env (PATH, LANG, etc.) is sourced. sshd may have
     /// `AcceptEnv` disabled which would silently drop SendEnv vars; the
@@ -134,7 +138,7 @@ impl RemoteTmux {
 }
 
 #[async_trait]
-impl TmuxExec for RemoteTmux {
+impl<C: SshExec> TmuxExec for RemoteTmux<C> {
     async fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError> {
         let script = "tmux list-sessions -F '#{session_name}|#{session_created}|#{session_activity}|#{session_attached}|#{pane_current_path}' 2>&1";
         let output = self.remote_bash(script).await?;

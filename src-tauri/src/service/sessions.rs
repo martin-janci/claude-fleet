@@ -188,7 +188,7 @@ impl ReconcileDeps {
     }
 
     #[cfg(test)]
-    fn fake(
+    pub(crate) fn fake(
         exec: impl Fn(&str) -> Box<dyn TmuxExec> + Send + Sync + 'static,
         probe_timeout: std::time::Duration,
     ) -> Arc<Self> {
@@ -707,7 +707,7 @@ async fn probe_with_timeout(
 /// host's result under its own short store-lock window. Callers are expected
 /// to hold a `ReconcilePass` from the shared gate (see `run_full_reconcile`);
 /// this function does not take the gate itself so tests can drive it directly.
-async fn reconcile_sessions_with(
+pub(crate) async fn reconcile_sessions_with(
     store: &Mutex<Store>,
     deps: &Arc<ReconcileDeps>,
 ) -> Result<(), IpcError> {

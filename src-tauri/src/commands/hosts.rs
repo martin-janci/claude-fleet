@@ -33,7 +33,7 @@ pub async fn add_host(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<HostRow, IpcError> {
-    hosts::add_host(args, &store, &ssh).await
+    hosts::add_host(args, &store, &*ssh).await
 }
 
 #[tauri::command]
@@ -42,7 +42,7 @@ pub async fn probe_ssh_alias(
     ssh: State<'_, Arc<SshClient>>,
     reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<ProbePreview, IpcError> {
-    hosts::probe_ssh_alias(args, &ssh, &reg).await
+    hosts::probe_ssh_alias(args, &*ssh, &reg).await
 }
 
 #[tauri::command]
@@ -52,7 +52,7 @@ pub async fn probe_host(
     ssh: State<'_, Arc<SshClient>>,
     reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<HostRow, IpcError> {
-    hosts::probe_host(args, &store, &ssh, &reg).await
+    hosts::probe_host(args, &store, &*ssh, &reg).await
 }
 
 #[tauri::command]

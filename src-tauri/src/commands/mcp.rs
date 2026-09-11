@@ -210,7 +210,7 @@ pub async fn provision_hosts(
     let port = configured_port(&store)?;
     crate::service::provision::provision_hosts(
         &store,
-        &ssh,
+        &*ssh,
         &tunnels,
         port,
         rotate.unwrap_or(false),
@@ -294,7 +294,7 @@ pub async fn rotate_host_token(
     let port = configured_port(&store)?;
     crate::service::provision::provision_host_with_token(
         &store,
-        &ssh,
+        &*ssh,
         &tunnels,
         &host_alias,
         port,
