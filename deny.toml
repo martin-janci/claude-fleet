@@ -53,13 +53,6 @@ allow = [
 ]
 confidence-threshold = 0.8
 
-# The app crate itself has no `license` field in src-tauri/Cargo.toml; the
-# repository is MIT (package.json). Remove this once the field exists.
-[[licenses.clarify]]
-crate = "claude-fleet"
-expression = "MIT"
-license-files = []
-
 [bans]
 multiple-versions = "warn"
 wildcards = "allow"

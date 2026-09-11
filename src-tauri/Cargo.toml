@@ -4,6 +4,7 @@ version = "0.2.10"
 description = "Desktop app for managing Claude Code sessions across hosts"
 authors = ["martin-janci"]
 edition = "2021"
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

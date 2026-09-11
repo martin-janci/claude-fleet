@@ -17,7 +17,13 @@ pnpm check                      # Svelte/TS type-check
 cd src-tauri && cargo test      # backend
 cd src-tauri && cargo clippy --all-targets -- -D warnings
 cd src-tauri && cargo fmt --check
+cargo deny --manifest-path src-tauri/Cargo.toml check   # licenses + advisories (cargo install cargo-deny --locked)
+scripts/ci-local.sh             # all of the above in CI order; --rust-only / --frontend-only
 ```
+
+`devtools` is an off-by-default cargo feature: `cargo tauri build --features
+devtools` enables the Web Inspector in a release bundle; dev builds have it
+automatically.
 
 **Caveat:** `cargo` builds need the Tauri system libraries (dbus, gtk/atk,
 pkg-config). On a headless box without them, `cargo build`/`cargo test` fail in
@@ -57,8 +63,15 @@ REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_curren
   wrap the transport-agnostic logic in `service/`; SSH multiplexing in `ssh.rs`
   (per-host `ControlMaster`, async `tokio::process`); tmux command construction
   in `tmux.rs`; the single global PTY in `pty.rs`; SQLite in `store.rs`
-  (migrations `001`–`017`); the event bus in `events.rs`; cancellation registry
-  in `cancel.rs`.
+  (migrations are registered in the `MIGRATIONS` table there — add a new
+  `NNN_<topic>.sql` plus an entry); the event bus in `events.rs`; cancellation
+  registry in `cancel.rs`.
+- **Session listing** is cache-first: `service::sessions::list_sessions` serves
+  stored rows and only runs a reconcile pass when the last one is stale;
+  `refresh_sessions` is the forced path for an explicit user refresh.
+- **Status vocabulary** (`claude_status`, `stuck_kind`) lives in the enums in
+  `service/pane_intel.rs`; the MCP tool descriptions and the generated
+  reference derive from them, so add values there, not in prose.
 - **Control API** (`mcp/`): an embedded MCP server (off by default, localhost +
   bearer token) lets an AI assistant drive the fleet. Its tools call the same
   `service/` layer as the Tauri commands. See `docs/control-api.md`.
