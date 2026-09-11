@@ -496,13 +496,28 @@ export async function peekSession(
   });
 }
 
-/** Delete all Claude Code state for a project and remove it from the DB. */
+/** Outcome of `purge_project` on one host (mirrors Rust `claude_cli::PurgeReport`). */
+export interface PurgeReport {
+  host_alias: string;
+  /** The path fleet recorded from the projects scan. */
+  logical_path: string;
+  /** `pwd -P` on the target host; null when the directory no longer exists. */
+  physical_path: string | null;
+  /** Path forms whose Claude state was deleted. */
+  purged: string[];
+  /** Path forms Claude held no state for (not an error). */
+  not_found: string[];
+}
+
+/** Delete Claude Code state for a project on every host in `hostAliases`
+ *  (under both its physical and logical path forms). The backend removes the
+ *  project from the DB only if every host succeeds; one report per host. */
 export async function purgeProject(
-  hostAlias: string,
+  hostAliases: string[],
   projectPath: string,
   projectId: number,
-): Promise<Result<void>> {
-  return invokeCmd<void>('purge_project', {
-    args: { host_alias: hostAlias, project_path: projectPath, project_id: projectId },
+): Promise<Result<PurgeReport[]>> {
+  return invokeCmd<PurgeReport[]>('purge_project', {
+    args: { host_aliases: hostAliases, project_path: projectPath, project_id: projectId },
   });
 }
