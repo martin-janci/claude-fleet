@@ -23,6 +23,15 @@ ALTER TABLE sessions ADD COLUMN turn_seq INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE sessions ADD COLUMN last_stop_at INTEGER;
 ALTER TABLE sessions ADD COLUMN parent_session_id INTEGER;
 ALTER TABLE sessions ADD COLUMN tags TEXT;
+-- transcript_path   the JSONL path Claude Code reports in every hook body
+--                   (Stop / UserPromptSubmit); preferred over any path fleet
+--                   derives from the cwd, which misses symlinked checkouts
+--                   and Claude's truncation of long encoded directory names.
+-- last_hook_at      unix secs of the last Stop OR UserPromptSubmit hook. A
+--                   reconcile pass that STARTED at or before it keeps the
+--                   hook-stamped claude_status instead of the pane guess.
+ALTER TABLE sessions ADD COLUMN transcript_path TEXT;
+ALTER TABLE sessions ADD COLUMN last_hook_at INTEGER;
 
 ALTER TABLE session_messages ADD COLUMN reply_to INTEGER;
 
@@ -37,7 +46,11 @@ CREATE TABLE tasks (
   created_at INTEGER NOT NULL,
   started_at INTEGER,
   finished_at INTEGER,
-  nonce TEXT NOT NULL
+  nonce TEXT NOT NULL,
+  -- The worker's claude_session_id when the task was dispatched; a later
+  -- different id means the worker was recreated onto a fresh conversation
+  -- that never saw the prompt, and the task is failed.
+  worker_claude_session_id TEXT
 );
 CREATE INDEX idx_tasks_state ON tasks(state);
 CREATE INDEX idx_tasks_worker ON tasks(worker_session_id, state);

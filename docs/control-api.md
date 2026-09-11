@@ -163,7 +163,7 @@ reconcile pass's pane observation is never overwritten by the pane heuristic.
 `wait_for_session { session_id, until: "idle" | "turn_gt", turn?, timeout_s? }`
 is a bounded long-poll (500 ms polls, default 120 s, max 600 s) returning
 `{ status: satisfied | timeout, claude_status, turn_seq, last_stop_at,
-stuck_kind }`. Sessions on hosts provisioned before this hook set exist keep
+stuck_kind }`. Each caller may hold at most 8 concurrent bounded waits (`wait_for_session`, `wait_for_task`, `run_prompt`); a ninth returns `E_RATE_LIMITED`. Sessions on hosts provisioned before this hook set exist keep
 working through reconcile alone; re-provision to get the `UserPromptSubmit`
 hook (see *Provisioning hosts*).
 
@@ -172,11 +172,11 @@ reads the session's Claude Code JSONL transcript
 (`~/.claude/projects/<cwd with every non-alphanumeric char replaced by
 "-">/<claude_session_id>.jsonl`) on its host and returns the last assistant
 turn (or every turn after `since_turn`) as plain text: text blocks verbatim,
-one `[tool_use] Name(...)` line per tool call, no thinking. `E_INVALID_STATE`
+one `[tool_use] Name(...)` line per tool call, no thinking. The file is found through the `transcript_path` Claude Code reports in every hook when fleet has one, else under the session's physical cwd (symlinks resolved on the host with `pwd -P`), else by the session id under `~/.claude/projects/*/` (which also covers Claude truncating encoded directory names longer than 200 characters). `E_INVALID_STATE`
 when the row has no `claude_session_id` yet, `E_NO_TRANSCRIPT` when the file
 does not exist. `run_prompt { session_id, prompt, timeout_s?, max_chars?,
 raw? }` composes the three: deliver, wait for `turn_seq` to grow, return
-`{ turn_seq, status, transcript }`.
+`{ turn_seq, status, transcript }`. It refuses (`E_INVALID_STATE`) a session that is not between turns (`claude_status` idle, completed or stopped): mid-turn, the previous turn's `Stop` would satisfy the wait and return the old reply.
 
 **Tasks.** `dispatch_task { worker_session_id | new_worker { host_alias,
 project_id, name? }, prompt, requester_session_id?, raw? }` creates a task
@@ -190,7 +190,7 @@ capture as fallback), looks for the marker on its own line — which the prompt
 echo, where it is followed by more text, never satisfies — and flips the task
 to `done` with the paragraph as `result`; the result is also delivered to the
 requester's inbox as `kind: task_result`. A `Stop` without the marker leaves
-the task `running`. `wait_for_task { task_id, timeout_s? }` long-polls for a
+the task `running`. Open tasks are failed when their worker session is killed or lost, when it is recreated onto a new Claude conversation, or after `tasks.max_age_secs` (default 86400, `0` = off); the check runs on the reconcile tick and on every `list_tasks` / `wait_for_task` call. The fleet instruction is appended after an `[claude-fleet: end of untrusted input]` line, outside the marked prompt, and the result is prefixed with the untrusted-content marker wherever it is returned (inbox, `wait_for_task`, `list_tasks`). `wait_for_task { task_id, timeout_s? }` long-polls for a
 terminal state; `list_tasks { requester_session_id?, state?, limit? }` lists;
 `cancel_task { task_id }` marks a task cancelled (`E_TASK_TERMINAL` if it
 already finished; the worker keeps running) and is confirm-gated like
@@ -220,7 +220,7 @@ session's labels (up to 16 of 1–32 chars from `[A-Za-z0-9_.:-]`) and
    }
    ```
 4. **`~/.tmux.conf` clipboard passthrough** — ensures `set -g set-clipboard on` is present (appended if missing, file created if absent) so OSC 52 clipboard writes from inside tmux reach the host clipboard.
-5. **Hooks in `~/.claude/settings.json`** — merges fleet's `Stop`, `UserPromptSubmit` and `PostToolUse(WorktreeCreate)` hooks as Claude Code `type: "http"` hooks, leaving the user's own hooks alone. Each entry POSTs the hook payload to `http://127.0.0.1:<port>/hook` with `"headers": { "Authorization": "Bearer <host-token>" }` and a 5 s timeout — the token never appears in a process argv. On a remote host the URL's `127.0.0.1:<port>` is the reverse tunnel's loopback end (step 6). Any older fleet entry for the same port (including the pre-0.3 `curl … /hook?token=` command form) is replaced, so re-running upgrades in place; the file is written `0600`. Required for `safe_kill_session` to finalize, for real-time `idle` / `working` status, `turn_seq` and task completion on every host that runs Claude Code. **Settings → Install Hook (local)** performs only this step for the `local` host, using the `local` host token. **Hosts provisioned before the `UserPromptSubmit` hook existed must be re-provisioned** (no rotate needed) to get the busy signal; until then their status only flips to `working` on the next reconcile pass.
+5. **Hooks in `~/.claude/settings.json`** — merges fleet's `Stop`, `UserPromptSubmit` and `PostToolUse(EnterWorktree)` hooks as Claude Code `type: "http"` hooks, leaving the user's own hooks alone. Each entry POSTs the hook payload to `http://127.0.0.1:<port>/hook` with `"headers": { "Authorization": "Bearer <host-token>" }` and a 5 s timeout — the token never appears in a process argv. On a remote host the URL's `127.0.0.1:<port>` is the reverse tunnel's loopback end (step 6). Any older fleet entry for the same port (including the pre-0.3 `curl … /hook?token=` command form) is replaced, so re-running upgrades in place; the file is written `0600`. Required for `safe_kill_session` to finalize, for real-time `idle` / `working` status, `turn_seq` and task completion on every host that runs Claude Code. **Settings → Install Hook (local)** performs only this step for the `local` host, using the `local` host token. **Hosts provisioned before the `UserPromptSubmit` hook existed must be re-provisioned** (no rotate needed) to get the busy signal; until then their status only flips to `working` on the next reconcile pass.
 6. **Reverse SSH tunnel** (remote hosts only) — starts an `ssh -R` tunnel so the remote host's `127.0.0.1:<port>` is forwarded to the central machine's MCP server. The server stays bound to `127.0.0.1` on the central machine; remote hosts reach it only through this authenticated tunnel.
 
 **After provisioning, each host must restart Claude** to load the MCP server (skill files and CLAUDE.md are picked up live, but the MCP server entry requires a restart).
@@ -263,7 +263,7 @@ Per-host failures do not abort provisioning of other hosts.
 - **DNS-rebinding defense.** Requests carrying a non-loopback `Origin` or
   `Host` header are rejected with `403` before the token is even checked — a
   remote page cannot reach the server by rebinding its domain to `127.0.0.1`.
-  `/hook` sits behind the same layer as `/mcp`, and a `WorktreeCreate` hook
+  `/hook` sits behind the same layer as `/mcp`, and an `EnterWorktree` hook
   body must name an absolute, `..`-free path under a known project
   (`E_VALIDATE` / HTTP 400 otherwise).
 - **Off by default.** No listener exists until you enable it in Settings.

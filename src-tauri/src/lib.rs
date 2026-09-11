@@ -201,6 +201,21 @@ fn spawn_reconcile_tick(store: std::sync::Arc<Mutex<Store>>, ssh: std::sync::Arc
                 tracing::info!("reconcile tick: applied {n} stuck playbook(s)");
             }
             let _ = service::gc::maybe_sweep(&store, &ssh).await;
+            // Wave 3 Track E: fail open tasks whose worker died or that
+            // outlived `tasks.max_age_secs` (also swept by list/wait calls).
+            if let Ok(s) = store.lock() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                match service::tasks::sweep_open_tasks(&s, now) {
+                    Ok(failed) if !failed.is_empty() => {
+                        tracing::info!("reconcile tick: failed {} stale task(s)", failed.len())
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("reconcile tick: task sweep failed: {e}"),
+                }
+            }
         }
     });
 }

@@ -38,6 +38,9 @@ const TOOL_SUMMARY_CHARS: usize = 160;
 
 /// Encode a working directory the way Claude Code names its per-project
 /// transcript directory: every char outside `[A-Za-z0-9]` becomes `-`.
+/// The read script does this on the host (after `pwd -P`) with an
+/// equivalent `sed`; this is the tested reference for that rule.
+#[cfg(test)]
 pub fn encode_project_dir(cwd: &str) -> String {
     cwd.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -49,37 +52,63 @@ pub fn read_bytes_for(max_chars: usize) -> usize {
     (max_chars.saturating_mul(64)).clamp(MIN_READ_BYTES, MAX_READ_BYTES)
 }
 
-/// Sentinels the read script prints (on stderr) so the caller can map a
-/// missing transcript / unknown cwd to a code instead of parsing prose.
-const NO_CWD: &str = "__CF_NO_CWD__";
+/// Sentinel the read script prints (on stderr) so the caller can map a
+/// missing transcript to a code instead of parsing prose.
 const NO_TRANSCRIPT: &str = "__CF_NO_TRANSCRIPT__";
 
 /// The bash script that prints the last `max_bytes` of the transcript.
 ///
-/// The cwd comes from the tmux pane when `tmux_name` is given (the session
-/// may have `cd`-ed since it was created) and is encoded on the host with a
-/// `sed` that mirrors [`encode_project_dir`]; otherwise the `cwd` fallback,
-/// encoded here, is used. Every interpolated value is shell-quoted; the
-/// session id is validated by the caller (`validate::claude_session_id`).
+/// Resolution order, all on the host:
+/// 1. `stored_path` — the `transcript_path` Claude Code reported in a hook
+///    (exact; immune to symlinks and name truncation);
+/// 2. the cwd (the pane's `#{pane_current_path}`, else `fallback_dir`),
+///    resolved to its PHYSICAL path with `cd -- "$p" && pwd -P` (a checkout
+///    reached through a symlink, e.g. `~/projects → /mnt/sda4/projects`, is
+///    recorded by Claude under its physical path), then encoded with the
+///    same rule as [`encode_project_dir`];
+/// 3. `~/.claude/projects/*/<id>.jsonl` — session ids are UUIDs, unique
+///    across projects, so this finds the file when the cwd is unknown (dead
+///    pane) or when Claude truncated an encoded directory name longer than
+///    200 chars and added a hash suffix we cannot reproduce.
+///
+/// Every interpolated value is shell-quoted; the session id is validated by
+/// the caller (`validate::claude_session_id`).
 pub fn read_script(
     tmux_name: Option<&str>,
-    cwd: Option<&str>,
+    stored_path: Option<&str>,
+    fallback_dir: Option<&str>,
     claude_session_id: &str,
     max_bytes: usize,
 ) -> String {
     let tmux_q = quote(tmux_name.unwrap_or(""));
-    let fallback_enc_q = quote(&cwd.map(encode_project_dir).unwrap_or_default());
+    let stored_q = quote(stored_path.unwrap_or(""));
+    let fallback_q = quote(fallback_dir.unwrap_or(""));
     let id_q = quote(claude_session_id);
     format!(
         r#"set +e
-cwd=''
-if [ -n {tmux_q} ]; then
-  cwd=$(tmux display-message -p -t {tmux_q} '#{{pane_current_path}}' 2>/dev/null)
+id={id_q}
+f=''
+sp={stored_q}
+if [ -n "$sp" ] && [ -f "$sp" ]; then f="$sp"; fi
+if [ -z "$f" ]; then
+  cwd=''
+  if [ -n {tmux_q} ]; then
+    cwd=$(tmux display-message -p -t {tmux_q} '#{{pane_current_path}}' 2>/dev/null)
+  fi
+  if [ -z "$cwd" ]; then cwd={fallback_q}; fi
+  if [ -n "$cwd" ]; then
+    phys=$(cd -- "$cwd" 2>/dev/null && pwd -P)
+    if [ -n "$phys" ]; then cwd="$phys"; fi
+    enc=$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')
+    if [ -f "$HOME/.claude/projects/$enc/$id.jsonl" ]; then f="$HOME/.claude/projects/$enc/$id.jsonl"; fi
+  fi
 fi
-if [ -n "$cwd" ]; then enc=$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g'); else enc={fallback_enc_q}; fi
-if [ -z "$enc" ]; then echo {NO_CWD} >&2; exit 3; fi
-f="$HOME/.claude/projects/$enc/"{id_q}.jsonl
-if [ ! -f "$f" ]; then printf '{NO_TRANSCRIPT} %s\n' "$f" >&2; exit 4; fi
+if [ -z "$f" ]; then
+  for c in "$HOME"/.claude/projects/*/"$id".jsonl; do
+    if [ -f "$c" ]; then f="$c"; break; fi
+  done
+fi
+if [ -z "$f" ]; then printf '{NO_TRANSCRIPT} %s\n' "$id" >&2; exit 4; fi
 tail -c {max_bytes} "$f"
 "#
     )
@@ -210,8 +239,10 @@ pub fn render_tail(turns: &[String], count: usize, max_chars: usize) -> String {
 pub struct TranscriptArgs {
     pub host_alias: String,
     /// tmux session whose pane cwd locates the transcript (interactive
-    /// sessions). `None` for background sessions — then `cwd` is required.
+    /// sessions). `None` for background sessions.
     pub tmux_name: Option<String>,
+    /// The hook-reported transcript path, tried first when present.
+    pub transcript_path: Option<String>,
     /// Fallback cwd when the pane lookup fails / there is no pane.
     pub cwd: Option<String>,
     pub claude_session_id: String,
@@ -233,15 +264,10 @@ pub async fn fetch_transcript(
     if let Some(name) = args.tmux_name.as_deref() {
         crate::validate::tmux_name_addressable(name)?;
     }
-    if args.tmux_name.is_none() && args.cwd.as_deref().is_none_or(|c| c.trim().is_empty()) {
-        return Err(IpcError::new(
-            "E_INVALID_STATE",
-            "no working directory known for this session — cannot locate its transcript",
-        ));
-    }
     let max_chars = args.max_chars.clamp(1, MAX_MAX_CHARS);
     let script = read_script(
         args.tmux_name.as_deref(),
+        args.transcript_path.as_deref(),
         args.cwd.as_deref(),
         &args.claude_session_id,
         read_bytes_for(max_chars),
@@ -249,12 +275,6 @@ pub async fn fetch_transcript(
     let out = run_shell(ssh, &args.host_alias, &script).await?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        if stderr.contains(NO_CWD) {
-            return Err(IpcError::new(
-                "E_INVALID_STATE",
-                "could not resolve the session's working directory (pane gone?)",
-            ));
-        }
         if stderr.contains(NO_TRANSCRIPT) {
             return Err(IpcError::new(
                 "E_NO_TRANSCRIPT",
@@ -329,18 +349,142 @@ mod tests {
 
     #[test]
     fn read_script_quotes_every_interpolated_value() {
-        let s = read_script(Some("dev-x'; rm -rf /"), Some("/home/u/it's"), "abc", 1024);
+        let s = read_script(
+            Some("dev-x'; rm -rf /"),
+            Some("/h/.claude/projects/it's/abc.jsonl"),
+            Some("/home/u/it's"),
+            "abc",
+            1024,
+        );
         assert!(s.contains("tmux display-message -p -t 'dev-x'\\''; rm -rf /'"));
-        assert!(s.contains("enc='-home-u-it-s'"), "{s}");
-        assert!(s.contains("/\"'abc'.jsonl"));
+        assert!(
+            s.contains("sp='/h/.claude/projects/it'\\''s/abc.jsonl'"),
+            "{s}"
+        );
+        assert!(s.contains("cwd='/home/u/it'\\''s'"), "{s}");
+        assert!(s.contains("id='abc'"));
         assert!(s.contains("tail -c 1024"));
+        assert!(s.contains("pwd -P"), "fallback dir is resolved physically");
         assert!(
             s.contains("sed 's/[^A-Za-z0-9]/-/g'"),
             "remote encoding mirrors encode_project_dir"
         );
         // No tmux lookup when the pane name is absent: the `-n ''` test fails.
-        let bg = read_script(None, Some("/x"), "abc", 1);
+        let bg = read_script(None, None, Some("/x"), "abc", 1);
         assert!(bg.contains("if [ -n '' ]; then"));
+    }
+
+    /// Run [`read_script`] with a private `$HOME` (the script only touches
+    /// `$HOME/.claude/projects`), exactly as the host would.
+    fn run_script(home: &std::path::Path, script: &str) -> std::process::Output {
+        std::process::Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .env("HOME", home)
+            .output()
+            .unwrap()
+    }
+
+    const SID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    fn write_transcript(dir: &std::path::Path, text: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(format!("{SID}.jsonl")), text).unwrap();
+    }
+
+    #[test]
+    fn symlinked_fallback_dir_resolves_to_the_physical_transcript_dir() {
+        // Claude records a session started under `link/proj` (link → real)
+        // by its PHYSICAL cwd. A decoy under the logical encoding proves the
+        // script resolved the symlink instead of encoding the path verbatim.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let real = root.join("real");
+        std::fs::create_dir_all(real.join("proj")).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let home = root.join("home");
+        let projects = home.join(".claude/projects");
+        let phys = real.join("proj");
+        let logical = link.join("proj");
+        write_transcript(
+            &projects.join(encode_project_dir(&phys.to_string_lossy())),
+            "PHYSICAL",
+        );
+        write_transcript(
+            &projects.join(encode_project_dir(&logical.to_string_lossy())),
+            "LOGICAL-DECOY",
+        );
+        let script = read_script(None, None, Some(&logical.to_string_lossy()), SID, 1000);
+        let out = run_script(&home, &script);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "PHYSICAL");
+    }
+
+    #[test]
+    fn stored_transcript_path_is_preferred_over_any_derived_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let home = root.join("home");
+        let cwd = root.join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        write_transcript(
+            &home
+                .join(".claude/projects")
+                .join(encode_project_dir(&cwd.to_string_lossy())),
+            "DERIVED",
+        );
+        let stored_dir = root.join("elsewhere/.claude/projects/xyz");
+        write_transcript(&stored_dir, "STORED");
+        let stored = stored_dir.join(format!("{SID}.jsonl"));
+        let script = read_script(
+            None,
+            Some(&stored.to_string_lossy()),
+            Some(&cwd.to_string_lossy()),
+            SID,
+            1000,
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&run_script(&home, &script).stdout),
+            "STORED"
+        );
+        // A stale stored path (file gone) falls back to the derived one.
+        std::fs::remove_file(&stored).unwrap();
+        let script = read_script(
+            None,
+            Some(&stored.to_string_lossy()),
+            Some(&cwd.to_string_lossy()),
+            SID,
+            1000,
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&run_script(&home, &script).stdout),
+            "DERIVED"
+        );
+    }
+
+    #[test]
+    fn unknown_cwd_or_truncated_dir_name_is_found_by_session_id() {
+        // Claude truncates encoded names over 200 chars with a hash suffix;
+        // neither that nor a dead pane stops the id-based lookup.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        write_transcript(
+            &home
+                .join(".claude/projects")
+                .join(format!("{}-3f9a1c", "-x".repeat(100))),
+            "BY-ID",
+        );
+        let out = run_script(&home, &read_script(None, None, None, SID, 1000));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "BY-ID");
+        let empty = tmp.path().join("empty-home");
+        let out = run_script(&empty, &read_script(None, None, None, SID, 1000));
+        assert_eq!(out.status.code(), Some(4));
+        assert!(String::from_utf8_lossy(&out.stderr).contains(NO_TRANSCRIPT));
     }
 
     fn line(v: serde_json::Value) -> String {
@@ -429,26 +573,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_requires_a_cwd_source_and_a_valid_id() {
+    async fn fetch_rejects_an_invalid_session_id() {
         let ssh = Arc::new(SshClient::new());
         let err = fetch_transcript(
             TranscriptArgs {
                 host_alias: "local".into(),
                 tmux_name: None,
-                cwd: None,
-                claude_session_id: "550e8400-e29b-41d4-a716-446655440000".into(),
-                turns: 1,
-                max_chars: 100,
-            },
-            &ssh,
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.code, "E_INVALID_STATE");
-        let err = fetch_transcript(
-            TranscriptArgs {
-                host_alias: "local".into(),
-                tmux_name: None,
+                transcript_path: None,
                 cwd: Some("/tmp".into()),
                 claude_session_id: "../../etc".into(),
                 turns: 1,
@@ -470,8 +601,9 @@ mod tests {
             TranscriptArgs {
                 host_alias: "local".into(),
                 tmux_name: None,
+                transcript_path: None,
                 cwd: Some(dir.path().to_string_lossy().into_owned()),
-                claude_session_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+                claude_session_id: "00000000-0000-0000-0000-00000000dead".into(),
                 turns: 1,
                 max_chars: 100,
             },

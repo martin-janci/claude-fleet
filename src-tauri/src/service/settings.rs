@@ -73,6 +73,10 @@ pub const PROJECTS_LOCAL_ENV_BASE: &str = "projects.local_env_base";
 
 const LAYOUTS: &[&str] = &["github", "flat"];
 
+/// Open tasks older than this (from start, else creation) are failed by the
+/// liveness sweep. `0` disables the TTL.
+pub const TASKS_MAX_AGE_SECS: &str = "tasks.max_age_secs";
+
 /// Every editable setting. Order is the display order.
 pub const SPECS: &[Spec] = &[
     Spec {
@@ -124,6 +128,11 @@ pub const SPECS: &[Spec] = &[
         key: PROJECTS_LAYOUT,
         default: "github",
         kind: Kind::Choice(LAYOUTS),
+    },
+    Spec {
+        key: TASKS_MAX_AGE_SECS,
+        default: "86400",
+        kind: Kind::Secs,
     },
 ];
 

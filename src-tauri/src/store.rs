@@ -268,6 +268,9 @@ pub struct TaskRow {
     /// the frontend (the marker must not be forgeable from the UI).
     #[serde(skip_serializing)]
     pub nonce: String,
+    /// Worker's `claude_session_id` at dispatch (liveness check; internal).
+    #[serde(skip_serializing)]
+    pub worker_claude_session_id: Option<String>,
 }
 
 /// The task state machine: `queued → running → done | failed | cancelled`.
@@ -276,7 +279,16 @@ pub const TASK_STATES: [&str; 5] = ["queued", "running", "done", "failed", "canc
 pub const TASK_TERMINAL_STATES: [&str; 3] = ["done", "failed", "cancelled"];
 
 const TASK_COLUMNS: &str = "id, requester_session_id, worker_session_id, prompt, state, result, \
-     error, created_at, started_at, finished_at, nonce";
+     error, created_at, started_at, finished_at, nonce, worker_claude_session_id";
+
+/// [`TASK_COLUMNS`] qualified with the `t.` alias for joined queries.
+fn task_columns_t() -> String {
+    TASK_COLUMNS
+        .split(',')
+        .map(|c| format!("t.{}", c.trim()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
     Ok(TaskRow {
@@ -291,6 +303,7 @@ fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
         started_at: row.get(8)?,
         finished_at: row.get(9)?,
         nonce: row.get(10)?,
+        worker_claude_session_id: row.get(11)?,
     })
 }
 
@@ -2090,8 +2103,12 @@ impl Store {
         // the pane the pass captured, so its `idle` must win over the pane
         // heuristic (MCP-1: reconcile used to clobber the hook every tick).
         // `?20 <= 0` disables the guard (store-level tests pass 0).
-        const NEW_STATUS: &str = "CASE WHEN ?20 > 0 AND last_stop_at IS NOT NULL \
-                                            AND last_stop_at >= ?20 \
+        // `last_hook_at` is stamped by BOTH hooks (Stop → idle,
+        // UserPromptSubmit → working). The guard only covers passes that were
+        // already in flight when the hook landed; a pass that starts later
+        // observes the pane afresh and wins, as it should.
+        const NEW_STATUS: &str = "CASE WHEN ?20 > 0 AND last_hook_at IS NOT NULL \
+                                            AND last_hook_at >= ?20 \
                                        THEN claude_status \
                                        ELSE COALESCE(excluded.claude_status, claude_status) END";
         let sql = format!(
@@ -2515,7 +2532,8 @@ impl Store {
             .conn
             .execute(
                 "UPDATE sessions SET claude_status = 'idle', turn_seq = turn_seq + 1, \
-                 last_stop_at = ?2, last_turn_at = ?2, idle_since = COALESCE(idle_since, ?2) \
+                 last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
+                 idle_since = COALESCE(idle_since, ?2) \
                  WHERE claude_session_id = ?1",
                 rusqlite::params![claude_session_id, now],
             )
@@ -2540,9 +2558,9 @@ impl Store {
         let changed = self
             .conn
             .execute(
-                "UPDATE sessions SET claude_status = 'working', idle_since = NULL \
-                 WHERE claude_session_id = ?1",
-                rusqlite::params![claude_session_id],
+                "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
+                 last_hook_at = ?2 WHERE claude_session_id = ?1",
+                rusqlite::params![claude_session_id, now_unix()],
             )
             .map_err(crate::ipc_error::IpcError::from)?;
         if changed == 0 {
@@ -2635,24 +2653,32 @@ impl Store {
 
     /// Tasks newest-first, optionally narrowed by requester and/or state,
     /// capped at `limit`.
+    ///
+    /// `host` scopes the result for a per-host caller IN SQL: only tasks
+    /// whose requester or worker session lives on that host.
     pub fn list_tasks(
         &self,
         requester_session_id: Option<i64>,
         state: Option<&str>,
+        host: Option<&str>,
         limit: i64,
     ) -> Result<Vec<TaskRow>, crate::ipc_error::IpcError> {
         let mut stmt = self
             .conn
             .prepare(&format!(
-                "SELECT {TASK_COLUMNS} FROM tasks \
-                 WHERE (?1 IS NULL OR requester_session_id = ?1) \
-                   AND (?2 IS NULL OR state = ?2) \
-                 ORDER BY created_at DESC, id DESC LIMIT ?3"
+                "SELECT {cols} FROM tasks t \
+                 LEFT JOIN sessions r ON r.id = t.requester_session_id \
+                 LEFT JOIN sessions w ON w.id = t.worker_session_id \
+                 WHERE (?1 IS NULL OR t.requester_session_id = ?1) \
+                   AND (?2 IS NULL OR t.state = ?2) \
+                   AND (?3 IS NULL OR r.host_alias = ?3 OR w.host_alias = ?3) \
+                 ORDER BY t.created_at DESC, t.id DESC LIMIT ?4",
+                cols = task_columns_t()
             ))
             .map_err(crate::ipc_error::IpcError::from)?;
         let rows = stmt
             .query_map(
-                rusqlite::params![requester_session_id, state, limit],
+                rusqlite::params![requester_session_id, state, host, limit],
                 map_task_row,
             )
             .map_err(crate::ipc_error::IpcError::from)?;
@@ -2661,6 +2687,68 @@ impl Store {
             out.push(r.map_err(crate::ipc_error::IpcError::from)?);
         }
         Ok(out)
+    }
+
+    /// Every `queued` / `running` task (oldest first), for the liveness sweep.
+    pub fn open_tasks(&self) -> Result<Vec<TaskRow>, crate::ipc_error::IpcError> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {TASK_COLUMNS} FROM tasks WHERE state IN ('queued','running') \
+                 ORDER BY created_at ASC, id ASC"
+            ))
+            .map_err(crate::ipc_error::IpcError::from)?;
+        let rows = stmt
+            .query_map([], map_task_row)
+            .map_err(crate::ipc_error::IpcError::from)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(crate::ipc_error::IpcError::from)?);
+        }
+        Ok(out)
+    }
+
+    /// Remember the worker's Claude conversation id for a task.
+    pub fn set_task_worker_claude_id(
+        &self,
+        id: i64,
+        claude_session_id: &str,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        self.conn
+            .execute(
+                "UPDATE tasks SET worker_claude_session_id = ?1 WHERE id = ?2",
+                rusqlite::params![claude_session_id, id],
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        Ok(())
+    }
+
+    /// Store the transcript path a hook reported for this Claude session.
+    /// The caller validates it (`service::hooks::valid_transcript_path`).
+    pub fn set_transcript_path_by_claude_id(
+        &self,
+        claude_session_id: &str,
+        path: &str,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        self.conn
+            .execute(
+                "UPDATE sessions SET transcript_path = ?1 WHERE claude_session_id = ?2",
+                rusqlite::params![path, claude_session_id],
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        Ok(())
+    }
+
+    /// The hook-reported transcript path of a session, if any.
+    pub fn session_transcript_path(&self, id: i64) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT transcript_path FROM sessions WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
     }
 
     /// The `queued` / `running` tasks a worker session is executing (oldest
@@ -5117,13 +5205,16 @@ mod tests {
         let t2 = s.set_task_worker(t2.id, 2).unwrap().unwrap();
         assert_eq!(t2.worker_session_id, Some(2));
         // Listing: newest first, filters.
-        let all = s.list_tasks(None, None, 50).unwrap();
+        let all = s.list_tasks(None, None, None, 50).unwrap();
         assert_eq!(
             all.iter().map(|t| t.id).collect::<Vec<_>>(),
             vec![t2.id, t.id]
         );
-        assert_eq!(s.list_tasks(Some(1), None, 50).unwrap().len(), 1);
-        assert_eq!(s.list_tasks(None, Some("queued"), 1).unwrap().len(), 1);
+        assert_eq!(s.list_tasks(Some(1), None, None, 50).unwrap().len(), 1);
+        assert_eq!(
+            s.list_tasks(None, Some("queued"), None, 1).unwrap().len(),
+            1
+        );
         assert_eq!(s.open_tasks_for_worker(2).unwrap().len(), 2);
         // running stamps started_at once.
         let r = s.mark_task_running(t.id).unwrap().unwrap();
@@ -5152,6 +5243,122 @@ mod tests {
         let json = serde_json::to_value(&t).unwrap();
         assert!(json.get("nonce").is_none());
         assert_eq!(json["state"], "queued");
+    }
+
+    #[test]
+    fn reconcile_preserves_a_submit_stamped_working_status() {
+        // S3: UserPromptSubmit stamped `working` at T1; a pass that started at
+        // T0 <= T1 derived `idle` from a pane captured before the submit.
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("a", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_claude_session_id(id, "uuid-a").unwrap();
+        s.record_prompt_submit_hook("uuid-a").unwrap();
+        let hook_at: i64 = s
+            .conn
+            .query_row("SELECT last_hook_at FROM sessions WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let pass = |s: &mut Store, started: i64| {
+            s.apply_host_reconcile(HostReconcile {
+                alias: "local",
+                reachable: true,
+                claude_version: None,
+                tmux_version: None,
+                last_pinged_at: 1,
+                probe_started_at: started,
+                sessions: &[ReconcileSession {
+                    tmux_name: "a",
+                    project_id: None,
+                    created_at: 1,
+                    last_activity_at: 1,
+                    account_uuid: None,
+                    worktree_key: None,
+                    claude_session_id: None,
+                    claude_status: Some("idle".into()),
+                    effort_level: None,
+                    pr_url: None,
+                    current_activity: None,
+                    context_pct: None,
+                    stuck_kind: None,
+                    intel_observed: true,
+                    ci_status: None,
+                    pr_observed: false,
+                }],
+                keep: &["a".to_string()],
+            })
+            .unwrap();
+            s.get_session("a", "local").unwrap().unwrap()
+        };
+        let row = pass(&mut s, hook_at - 3);
+        assert_eq!(row.claude_status.as_deref(), Some("working"));
+        assert_eq!(row.idle_since, None);
+        // A pass that started after the submit is authoritative.
+        let row = pass(&mut s, hook_at + 3);
+        assert_eq!(row.claude_status.as_deref(), Some("idle"));
+    }
+
+    #[test]
+    fn list_tasks_scopes_by_host_in_sql() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("a").unwrap();
+        s.upsert_host("b").unwrap();
+        let ra = s
+            .upsert_session("r", "a", None, None, 1, 1, "running", None)
+            .unwrap();
+        let wb = s
+            .upsert_session("w", "b", None, None, 1, 1, "running", None)
+            .unwrap();
+        let rb = s
+            .upsert_session("r2", "b", None, None, 1, 1, "running", None)
+            .unwrap();
+        let t1 = s.insert_task(Some(ra), Some(wb), "x", "n1").unwrap();
+        let t2 = s.insert_task(Some(rb), Some(wb), "y", "n2").unwrap();
+        let _orphan = s.insert_task(None, None, "z", "n3").unwrap();
+        let ids = |h: Option<&str>| -> Vec<i64> {
+            let mut v: Vec<i64> = s
+                .list_tasks(None, None, h, 50)
+                .unwrap()
+                .iter()
+                .map(|t| t.id)
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(ids(Some("a")), vec![t1.id]);
+        assert_eq!(ids(Some("b")), vec![t1.id, t2.id]);
+        assert_eq!(ids(None).len(), 3);
+        assert!(ids(Some("c")).is_empty());
+    }
+
+    #[test]
+    fn transcript_path_and_task_worker_claude_id_round_trip() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("a", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        assert_eq!(s.session_transcript_path(id).unwrap(), None);
+        s.set_claude_session_id(id, "uuid-a").unwrap();
+        s.set_transcript_path_by_claude_id("uuid-a", "/h/.claude/projects/x/uuid-a.jsonl")
+            .unwrap();
+        assert_eq!(
+            s.session_transcript_path(id).unwrap().as_deref(),
+            Some("/h/.claude/projects/x/uuid-a.jsonl")
+        );
+        let t = s.insert_task(None, Some(id), "p", "n").unwrap();
+        assert_eq!(t.worker_claude_session_id, None);
+        s.set_task_worker_claude_id(t.id, "uuid-a").unwrap();
+        let t = s.get_task(t.id).unwrap().unwrap();
+        assert_eq!(t.worker_claude_session_id.as_deref(), Some("uuid-a"));
+        assert_eq!(s.open_tasks().unwrap().len(), 1);
+        assert!(serde_json::to_value(&t)
+            .unwrap()
+            .get("worker_claude_session_id")
+            .is_none());
     }
 
     #[test]
