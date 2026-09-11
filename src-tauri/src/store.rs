@@ -62,7 +62,7 @@ pub struct SessionRow {
     pub safe_kill_nonce: Option<String>,
     pub safe_kill_detail: Option<String>,
     pub safe_kill_requested_at: Option<i64>,
-    // ── Lifecycle + outcome fields (migration 018) ──
+    // ── Lifecycle + outcome fields (migration 019) ──
     /// When `claude_status` last entered idle/completed/stopped; NULL while
     /// working/blocked/unknown. Drives the GC sweeper.
     pub idle_since: Option<i64>,
@@ -131,7 +131,7 @@ fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
 }
 
 /// `claude_status` values that mean "no turn in progress" — the states
-/// `idle_since` is stamped on (see migration 018).
+/// `idle_since` is stamped on (see migration 019).
 pub const IDLE_STATUSES: [&str; 3] = ["idle", "completed", "stopped"];
 
 /// SQL fragment: the new `idle_since` given the OLD row's `idle_since` and the
@@ -1742,7 +1742,7 @@ impl Store {
     }
 
     /// Remember the most recent prompt sent to a session (first 200 chars,
-    /// migration 018). Emits `session_updated`.
+    /// migration 019). Emits `session_updated`.
     pub fn set_last_prompt(
         &self,
         id: i64,
@@ -1760,7 +1760,7 @@ impl Store {
         Ok(row)
     }
 
-    /// Stamp when fleet created this session (migration 018). Only sets the
+    /// Stamp when fleet created this session (migration 019). Only sets the
     /// value once — a re-create keeps the original start.
     pub fn set_started_at(&self, id: i64, at: i64) -> Result<(), rusqlite::Error> {
         self.conn.execute(
@@ -3891,7 +3891,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 18, "schema_version should be 18 after migration");
+        assert_eq!(v, 19, "schema_version should be 19 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store
@@ -4528,10 +4528,10 @@ mod tests {
         );
     }
 
-    // ── migration 018: lifecycle + outcome fields ──
+    // ── migration 019: lifecycle + outcome fields ──
 
     #[test]
-    fn migration_018_adds_lifecycle_columns_defaulting_to_null() {
+    fn migration_019_adds_lifecycle_columns_defaulting_to_null() {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("local").unwrap();
         let id = s

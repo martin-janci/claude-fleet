@@ -2,7 +2,7 @@
 //! longer than their kind's TTL. Runs from the background tick every
 //! `gc.sweep_interval_secs`; opt-in via `gc.enabled` (default off).
 //!
-//! Idle reference per kind (see migration 018 `idle_since`):
+//! Idle reference per kind (see migration 019 `idle_since`):
 //! - `bg`: `idle_since` (claude_status ∈ idle/completed/stopped), falling
 //!   back to tmux/agent `last_activity_at` when the agent never reported a
 //!   status

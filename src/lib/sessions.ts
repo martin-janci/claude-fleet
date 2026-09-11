@@ -18,7 +18,7 @@ export type ClaudeStatus = (typeof CLAUDE_STATUSES)[number];
 export const STUCK_KINDS = ['auth_menu', 'reconnect', 'trust_prompt', 'oom', 'press_enter'] as const;
 export type StuckKind = (typeof STUCK_KINDS)[number];
 
-/** Reduced PR check status populated by reconcile (migration 018). */
+/** Reduced PR check status populated by reconcile (migration 019). */
 export type CiStatus = 'passing' | 'failing' | 'pending';
 
 export interface SessionRow {
@@ -56,7 +56,7 @@ export interface SessionRow {
   safe_kill_nonce: string | null;
   safe_kill_detail: string | null;
   safe_kill_requested_at: number | null;
-  // Lifecycle + outcome fields (migration 018), unix seconds unless noted.
+  // Lifecycle + outcome fields (migration 019), unix seconds unless noted.
   /** When claude_status last entered idle/completed/stopped; null while working. */
   idle_since: number | null;
   /** When the current stuck_kind episode began; null when not stuck. */
