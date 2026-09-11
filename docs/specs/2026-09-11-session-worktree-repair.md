@@ -34,7 +34,7 @@ for it.
 | Read-only probe | yes | yes |
 | `git worktree add` from an existing local or `origin/` branch, target absent on disk and not registered | yes | yes |
 | `tmux new-session` when `tmux has-session` confirms the session is gone | attach only (other callers own tmux) | yes |
-| `git worktree remove --force -- <path>` for this worktree's own stale entry (never a blanket prune) | only when the [vanished-directory guard](#vanished-directory-guard-automatic) holds, immediately followed by the add from the existing branch; otherwise warning | yes |
+| `git worktree remove --force -- <path>` for this worktree's own stale entry (never a blanket prune) | only from the opt-in reconcile tick (`repair.auto_on_tick`) and only when the [vanished-directory guard](#vanished-directory-guard-automatic) holds, immediately followed by the add from the existing branch; every click-driven entry point (new session, spawn review, restart, recreate, attach) defers it — warning / `E_REPAIR_REQUIRED` | yes |
 | `git worktree add` into an empty leftover dir | no — warning | yes |
 | Adopt the branch's checkout elsewhere, re-path the row | no — warning | yes, guarded |
 | Recreate a branch that exists nowhere locally (`ls-remote`, fetch, or fork from base) | no — warning | yes |
@@ -57,10 +57,13 @@ warning, never a step.
 ### Vanished-directory guard (automatic)
 
 The common real case is `rm -rf` of a worktree directory: git still lists the
-entry, so a plain add would fail. An automatic run may remove that one entry
-(`git worktree remove --force -- <path>`, never `prune`) and re-add it from the
-existing local or `origin/` branch only when every condition holds
-(`repair::VanishedGuard`, evaluated in `plan_with`):
+entry, so a plain add would fail. The opt-in reconcile tick, and only the
+tick, may remove that one entry (`git worktree remove --force -- <path>`,
+never `prune`) and re-add it from the existing local or `origin/` branch. It
+passes `AutoContext::allow_auto_unregister` through
+`repair::ensure_session_workspace_for_tick`; every click-driven entry point
+leaves it false and keeps #49's rule (explicit only). Even for the tick, every
+condition must hold (`repair::VanishedGuard`, evaluated in `plan_with`):
 
 1. `dir_absent` — the probe reported a non-empty canonical path (`pwd -P` of
    the nearest existing parent plus the remainder) and `test -e` / `test -L`
@@ -100,7 +103,9 @@ before it mounts). A person decides through the explicit Repair workspace.
 Known residuals, not distinguishable by device id: a bind mount of the same
 filesystem shares the root's device id; and a plain (non-autofs) mountpoint
 that is currently unmounted is an ordinary empty directory on the root's
-filesystem, so an add there would land under the mountpoint.
+filesystem, so an add there would land under the mountpoint. With
+`repair.auto_on_tick` on, that hole stays open for the tick until the
+parent-fingerprint check lands; click-driven entry points never remove.
 
 **Re-check at apply time.** The probe runs one round trip before the apply,
 and a late-mounting path (autofs, NFS) can reappear in between; `git worktree
@@ -192,10 +197,10 @@ workspace group (reviews, twins).
 
 | # | Case | Before | Automatic now | Explicit now |
 |---|---|---|---|---|
-| a | row + tmux alive, worktree dir deleted | new panes fail; rebuilt at the stale path | vanished-directory guard holds: remove our entry → add → verify (live pane left, `tmux_cwd_stale`); otherwise warning, `E_REPAIR_REQUIRED` for lifecycles | remove our entry → add → verify → respawn (pane cwd confirmed missing) |
+| a | row + tmux alive, worktree dir deleted | new panes fail; rebuilt at the stale path | reconcile tick only, guard holds: remove our entry → add → verify (live pane left, `tmux_cwd_stale`); click-driven entry points: warning, `E_REPAIR_REQUIRED` for lifecycles | remove our entry → add → verify → respawn (pane cwd confirmed missing) |
 | b | tmux gone, dir deleted, entry gone | tmux in a missing cwd | add from the existing branch; attach creates tmux | same, plus create tmux |
 | c | dir present, git no longer lists it / stale `.git` link | undetected | warning | `git worktree repair --`; verify decides; a checkout whose admin dir was pruned is reported, never deleted |
-| d | registered but directory missing (`prunable`, or older git without the flag) | `worktree add` failed | guard holds: remove our entry only → add; otherwise warning (an empty leftover dir is not "absent") | remove our entry only → add |
+| d | registered but directory missing (`prunable`, or older git without the flag) | `worktree add` failed | reconcile tick only, guard holds: remove our entry only → add; otherwise warning (an empty leftover dir is not "absent") | remove our entry only → add |
 | e | branch only on the remote (`origin/<b>` present) | failed | add with `--track` | same |
 | f | branch deleted everywhere | failed | warning | `ls-remote` confirms absent (or no origin) → fork from base, recorded; unreachable origin / failed fetch → `E_REPAIR_FAILED` |
 | g | branch checked out elsewhere | git refused | main checkout: `E_BRANCH_CHECKED_OUT`; linked worktree: warning | main checkout: `E_BRANCH_CHECKED_OUT`; linked: adopt after the guard + verify |
@@ -229,7 +234,8 @@ workspace group (reviews, twins).
 - Frontend: `repairSession(id, { explicit })` + `RepairReport` in
   `sessions.ts`; the Repair workspace button (explicit, shows the branch
   source); the automatic pre-attach check in `TerminalView.svelte`.
-- `repair::{plan_with, AutoContext, VanishedGuard}`; `RepairReport.vanished_guard`.
+- `repair::{plan_with, AutoContext, VanishedGuard, ensure_workspace_with,
+  ensure_session_workspace_for_tick}`; `RepairReport.vanished_guard`.
 - Reconcile tick: `service::repair_tick` (settings `repair.auto_on_tick`,
   `repair.tick_interval_secs`; migration `021_repair_backoff` for the
   per-session backoff stamp). The repair itself needs no migration.
@@ -257,8 +263,9 @@ workspace group (reviews, twins).
 - `ensure_workspace` with a scripted executor: exact scripts in order,
   tmux calls, row writes, events; automatic runs never apply explicit steps;
   failures keep the row; probe vs apply transport failures map differently.
-- Vanished-directory guard: `plan_with` removes-then-adds under every
-  automatic entry point when all conditions hold; each condition alone
+- Vanished-directory guard: `plan_with` removes-then-adds only with the
+  tick's `allow_auto_unregister` when all conditions hold, and every
+  click-driven entry point defers it even then; each condition alone
   (parent missing, absence unconfirmed, outside the root, `..`, another
   session mapped, mapping unknown) leaves no steps and `E_REPAIR_REQUIRED`;
   root missing and locked are refused earlier; the event detail carries the
