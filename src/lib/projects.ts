@@ -12,6 +12,10 @@ export interface ProjectRow {
 export interface WorktreeRow {
   id: number;
   project_id: number;
+  /** Host whose checkout this is: 'local' for the project scan's rows, a
+   * remote alias for rows its EnterWorktree hook reported. The project tree
+   * lists local rows only. */
+  host_alias: string;
   name: string;
   path: string;
   branch: string | null;

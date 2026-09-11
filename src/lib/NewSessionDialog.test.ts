@@ -23,7 +23,7 @@ beforeEach(() => {
 
 const project = {
   project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: null },
-  worktrees: [{ id: 11, project_id: 1, name: 'main', path: '/r/cf', branch: 'main' }],
+  worktrees: [{ id: 11, project_id: 1, host_alias: 'local', name: 'main', path: '/r/cf', branch: 'main' }],
 };
 
 describe('NewSessionDialog remote path preview (W5 G3)', () => {
@@ -419,7 +419,7 @@ describe('NewSessionDialog — generated names', () => {
       ...project,
       worktrees: [
         ...project.worktrees,
-        { id: 12, project_id: 1, name: 'blue-sirius', path: '/r/cf/.worktrees/blue-sirius', branch: 'blue-sirius' },
+        { id: 12, project_id: 1, host_alias: 'local', name: 'blue-sirius', path: '/r/cf/.worktrees/blue-sirius', branch: 'blue-sirius' },
       ],
     };
     sessions.set([okRow({ id: 7, tmux_name: 'dev-martin-janci-claude-fleet--amber-vega', friendly_name: 'Amber vega' })]);
@@ -492,7 +492,7 @@ describe('NewSessionDialog — generated names', () => {
     ...project,
     worktrees: [
       ...project.worktrees,
-      { id: 12, project_id: 1, name: 'feat-x', path: '/r/cf/.worktrees/feat-x', branch: 'feat-x' },
+      { id: 12, project_id: 1, host_alias: 'local', name: 'feat-x', path: '/r/cf/.worktrees/feat-x', branch: 'feat-x' },
     ],
   };
   const pickWorktree = async (name: string) => {
@@ -582,7 +582,7 @@ describe('NewSessionDialog — generated names', () => {
   it('dots in a worktree name never reach the tmux name', async () => {
     const dotted = {
       ...project,
-      worktrees: [{ id: 13, project_id: 1, name: 'v1.2', path: '/r/cf/.worktrees/v1.2', branch: 'v1.2' }],
+      worktrees: [{ id: 13, project_id: 1, host_alias: 'local', name: 'v1.2', path: '/r/cf/.worktrees/v1.2', branch: 'v1.2' }],
     };
     render(NewSessionDialog, { props: { project: dotted, onCreate: () => {}, onCancel: () => {} } });
     await tick();
@@ -644,7 +644,7 @@ describe('NewSessionDialog — generated names', () => {
     const many = {
       ...project,
       worktrees: Array.from({ length: 30 }, (_, i) => ({
-        id: 100 + i, project_id: 1, name: `wt-${i}`, path: `/r/cf/.worktrees/wt-${i}`, branch: `wt-${i}`,
+        id: 100 + i, project_id: 1, host_alias: 'local', name: `wt-${i}`, path: `/r/cf/.worktrees/wt-${i}`, branch: `wt-${i}`,
       })),
     };
     render(NewSessionDialog, { props: { project: many, onCreate: () => {}, onCancel: () => {} } });

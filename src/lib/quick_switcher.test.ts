@@ -55,8 +55,8 @@ const projects: ProjectTreeRow[] = [
   {
     project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: 10 },
     worktrees: [
-      { id: 11, project_id: 1, name: 'main', path: '/r/cf', branch: 'main' },
-      { id: 12, project_id: 1, name: 'blue-sirius', path: '/r/cf/.worktrees/blue-sirius', branch: 'blue-sirius' },
+      { id: 11, project_id: 1, host_alias: 'local', name: 'main', path: '/r/cf', branch: 'main' },
+      { id: 12, project_id: 1, host_alias: 'local', name: 'blue-sirius', path: '/r/cf/.worktrees/blue-sirius', branch: 'blue-sirius' },
     ],
   },
   {
