@@ -19,6 +19,15 @@
  * (U+1160–U+11FF) are zero width because they combine with the preceding
  * leading consonant, and U+00AD SOFT HYPHEN stays width 1.
  *
+ * Deliberately per-code-point, like xterm and tmux — no grapheme clustering:
+ *   - U+FE0F VS16 is width 0 and does NOT promote its base to width 2, so
+ *     `❤️` (U+2764 U+FE0F) stays one cell even though it draws as an emoji.
+ *   - Skin-tone modifiers (U+1F3FB–U+1F3FF) and the parts of a ZWJ sequence
+ *     are each wide on their own, so `👋🏽` and `👨‍👩‍👧` occupy one pair per
+ *     component rather than one pair for the cluster.
+ * That matches what the remote tmux assumed when it laid the line out, which
+ * is what keeps our columns aligned with its.
+ *
  * Ranges are stored as flat `[lo, hi, lo, hi, …]` arrays (inclusive) and
  * looked up with a binary search. Both tables are sorted and non-overlapping;
  * `wcwidth.test.ts` checks that invariant so an edit can't silently break the

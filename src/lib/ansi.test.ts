@@ -961,6 +961,91 @@ describe('ansi.Screen — control strings are swallowed (FE-5)', () => {
     s.write('a\x1b#8b');
     expect(rowText(s, 0)).toBe('ab  ');
   });
+
+  it('a 1 MB unterminated DCS keeps the parser buffer bounded and later text still renders', () => {
+    const s = new Screen(2, 8);
+    s.write('a\x1bP' + 'x'.repeat(1 << 20));
+    expect(s.bufferedLength).toBe(0);
+    for (let i = 0; i < 20; i++) {
+      s.write('y'.repeat(100 * 1024));
+      expect(s.bufferedLength).toBeLessThanOrEqual(1);
+    }
+    s.write('\x1b\\b');
+    expect(rowText(s, 0)).toBe('ab      ');
+  });
+
+  it('an unterminated OSC keeps at most OSC_MAX (64 KiB) of body', () => {
+    const s = new Screen(1, 4);
+    s.write('\x1b]52;c;' + 'A'.repeat(1 << 20));
+    expect(s.bufferedLength).toBeLessThanOrEqual(64 * 1024);
+    s.write('B'.repeat(1 << 20));
+    expect(s.bufferedLength).toBeLessThanOrEqual(64 * 1024);
+    s.write('\x07x');
+    expect(s.bufferedLength).toBe(0);
+    expect(rowText(s, 0)).toBe('x   ');
+  });
+
+  it('a stray DCS opener is ended by the next escape sequence (any ESC ends a string)', () => {
+    const s = new Screen(3, 4);
+    s.write('\x1bPgarbage');
+    s.write('with no ST');
+    s.write('\x1b[2;2Hx');
+    expect(s.cells[1][1].ch).toBe('x');
+  });
+
+  it('CAN / SUB abort a control string', () => {
+    const s = new Screen(1, 6);
+    s.write('\x1bPabc\x18d\x1b]0;t\x1ae');
+    expect(rowText(s, 0)).toBe('de    ');
+  });
+
+  it('a CSI with no final byte is abandoned after CSI_MAX chars instead of buffering forever', () => {
+    const s = new Screen(1, 4);
+    s.write('\x1b[' + '1'.repeat(4000));
+    expect(s.bufferedLength).toBeLessThan(1100);
+    // The abandoned sequence's leftovers render as text; the parser is back
+    // in the ground state, so what follows prints normally.
+    s.write('\rzz');
+    expect(rowText(s, 0).startsWith('zz')).toBe(true);
+  });
+
+  it('a CSI split across chunks is still recognised below the cap', () => {
+    const s = new Screen(3, 3);
+    s.write('\x1b[');
+    s.write('2;');
+    expect(s.bufferedLength).toBe(4);
+    s.write('2Hx');
+    expect(s.bufferedLength).toBe(0);
+    expect(s.cells[1][1].ch).toBe('x');
+  });
+
+  it('ESC ESC [ A restarts the sequence at the second ESC', () => {
+    const s = new Screen(5, 5);
+    s.write('\x1b[5;5H\x1b\x1b[A');
+    expect(s.cursorRow).toBe(3);
+    expect(rowText(s, 3)).toBe('     ');
+  });
+
+  it('CAN inside a CSI aborts it; the following text prints', () => {
+    const s = new Screen(3, 4);
+    s.write('\x1b[3\x18x');
+    expect(s.cells[0][0].ch).toBe('x');
+    expect(s.cursorRow).toBe(0);
+  });
+
+  it('ESC inside a CSI abandons it and starts a new sequence', () => {
+    const s = new Screen(3, 3);
+    s.write('\x1b[9\x1b[2;2Hx');
+    expect(s.cells[1][1].ch).toBe('x');
+  });
+
+  it('CSI ? s / CSI ? u (XTSAVE / XTRESTORE, kitty query) do not touch the ANSI saved cursor', () => {
+    const s = new Screen(4, 4);
+    s.write('\x1b[3;3H\x1b[s\x1b[H\x1b[?1049u\x1b[?u');
+    expect([s.cursorRow, s.cursorCol]).toEqual([0, 0]);
+    s.write('\x1b[2;2H\x1b[?25s\x1b[u');
+    expect([s.cursorRow, s.cursorCol]).toEqual([2, 2]);
+  });
 });
 
 describe('ansi.Screen — queries and replies (FE-5)', () => {
@@ -999,8 +1084,27 @@ describe('ansi.Screen — queries and replies (FE-5)', () => {
   it('secondary DA (CSI > c) gets its own reply; nothing is printed', () => {
     const s = new Screen(1, 3);
     s.write('\x1b[>c');
-    expect(s.takeReplies()).toBe('\x1b[>0;0;0c');
+    expect(s.takeReplies()).toBe('\x1b[>1;10;0c');
     expect(rowText(s, 0)).toBe('   ');
+  });
+
+  it('a DA reply echoed back as output does not trigger another reply (no feedback loop)', () => {
+    const s = new Screen(1, 3);
+    s.write('\x1b[>c');
+    const reply = s.takeReplies();
+    s.write(reply);
+    expect(s.takeReplies()).toBe('');
+    s.write('\x1b[c');
+    const primary = s.takeReplies();
+    s.write(primary);
+    expect(s.takeReplies()).toBe('');
+    expect(rowText(s, 0)).toBe('   ');
+  });
+
+  it('DA with extra parameters is not a query', () => {
+    const s = new Screen(1, 1);
+    s.write('\x1b[0;0c\x1b[>0;1c\x1b[5c');
+    expect(s.takeReplies()).toBe('');
   });
 
   it('multiple queries in one chunk are answered in order', () => {

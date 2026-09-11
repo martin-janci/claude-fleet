@@ -279,11 +279,17 @@ describe('TerminalView keyboard (FE-6)', () => {
       }
       return null;
     });
-    render(TerminalView);
-    selectSession(onAlpha);
-    await settle();
-    // First drain tick fires after DRAIN_MIN_MS (30 ms).
-    await new Promise((r) => setTimeout(r, 120));
-    expect(written()).toContain('\x1b[2;4R');
+    vi.useFakeTimers();
+    try {
+      render(TerminalView);
+      selectSession(onAlpha);
+      await settle();
+      // First drain tick fires after DRAIN_MIN_MS (30 ms); the async variant
+      // lets the mocked pty_drain promise resolve inside the tick.
+      await vi.advanceTimersByTimeAsync(40);
+      expect(written()).toContain('\x1b[2;4R');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

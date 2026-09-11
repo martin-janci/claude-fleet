@@ -23,7 +23,7 @@ const anyCodePoint = fc.integer({ min: 0, max: 0x10ffff }).map((cp) => String.fr
 /** A handful of code points the parser treats specially. */
 const interesting = fc.constantFrom(
   '\x1b', '[', ']', 'P', '_', '^', 'X', '\\', ';', '?', '>', '!', ' ', 'q', 'm', 'H', 'J', 'K',
-  '\x07', '\x9c', '\r', '\n', '\t', '\x08', '\x0e', '\x0f', '\x7f',
+  '\x07', '\x9c', '\x18', '\x1a', '\r', '\n', '\t', '\x08', '\x0e', '\x0f', '\x7f',
   '0', '1', '2', '5', '9', '~', 'a', 'Z', 'b', 'I', 'n', 'c',
   '😀', '中', 'é', '́', '‍', '️', '\ud83d', '\ude00', '\ud800',
 );
@@ -118,6 +118,20 @@ describe('ansi.Screen properties', () => {
         s.takeReplies();
         s.resize(cols, rows); // and a resize on top
         s.write(chunks.join(''));
+      }),
+      { numRuns: NUM_RUNS },
+    );
+  });
+
+  it('(1b) the carried-over parser state stays bounded however the input is cut', () => {
+    fc.assert(
+      fc.property(dims, fc.array(stream, { maxLength: 6 }), ({ rows, cols }, chunks) => {
+        const s = new Screen(rows, cols);
+        for (const chunk of chunks) {
+          s.write(chunk);
+          // CSI_MAX (1024) + the opener, or OSC_MAX for a kept OSC body.
+          expect(s.bufferedLength).toBeLessThanOrEqual(64 * 1024);
+        }
       }),
       { numRuns: NUM_RUNS },
     );

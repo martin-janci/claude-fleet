@@ -186,8 +186,17 @@ export class Screen {
   curBg = COLOR_DEFAULT;
   curAttrs = 0;
   /** Partial escape-sequence buffer carried between chunks. Avoids splitting
-   *  a CSI (or a surrogate pair) across two writes. */
+   *  a CSI (or a surrogate pair) across two writes. Bounded: a CSI is
+   *  abandoned after CSI_MAX body chars, and control-string bodies are not
+   *  buffered here at all (see `stringKind`). */
   private pending = '';
+  /** Control string (OSC / DCS / APC / PM / SOS) opened in an earlier chunk
+   *  and not yet terminated. Bodies are consumed as they arrive rather than
+   *  accumulated in `pending`, so an opener with no ST — `cat` of a binary
+   *  hitting ESC P — costs nothing per later chunk. Only an OSC body is kept
+   *  (capped at OSC_MAX) because OSC 52 needs it. */
+  private stringKind: 'osc' | 'other' | null = null;
+  private stringBuf = '';
   /** Last printed glyph + its width, for REP (`CSI Ps b`). */
   private lastGlyph: { ch: string; width: 1 | 2 } | null = null;
   /** Saved cursor (ESC 7 / DECSC). */
@@ -323,6 +332,12 @@ export class Screen {
     this.pending = '';
     let i = 0;
     while (i < s.length) {
+      if (this.stringKind !== null) {
+        // Inside a control string opened by an earlier chunk: eat the body
+        // up to its terminator without buffering.
+        i = this.continueString(s, i);
+        continue;
+      }
       const code = s.charCodeAt(i);
       if (code === 0x1b /* ESC */) {
         const consumed = this.parseEscape(s, i);
@@ -549,11 +564,54 @@ export class Screen {
     this.markRows(this.scrollTop, this.scrollBottom);
   }
 
+  /** Bytes of parser state carried between writes (`pending` + a buffered
+   *  OSC body). Exposed for tests and diagnostics: it must stay bounded no
+   *  matter what the host sends. */
+  get bufferedLength(): number {
+    return this.pending.length + this.stringBuf.length;
+  }
+
+  /** Open a control string at `start` (ESC + intro). Its body is consumed
+   *  from this chunk onward via `continueString`; returns chars consumed. */
+  private openString(kind: 'osc' | 'other', s: string, start: number): number {
+    this.stringKind = kind;
+    this.stringBuf = '';
+    return this.continueString(s, start + 2) - start;
+  }
+
+  /** Consume control-string body from `from`. Returns the index to resume
+   *  at: just past the terminator, or `s.length` when the string is still
+   *  open (state kept for the next chunk). Per the VT500 state machine any
+   *  ESC ends the string (`ESC \` is the ST proper; another ESC starts a new
+   *  sequence), as do CAN/SUB, C1 ST and — for OSC — BEL. */
+  private continueString(s: string, from: number): number {
+    const kind = this.stringKind!;
+    const end = findStringEnd(s, from, kind === 'osc');
+    const stop = end < 0 ? s.length : end;
+    if (kind === 'osc') this.appendOsc(s, from, stop);
+    if (end < 0) return s.length; // still open
+    if (kind === 'osc') this.applyOsc(this.stringBuf);
+    this.stringKind = null;
+    this.stringBuf = '';
+    return stringTermEnd(s, end);
+  }
+
+  /** Append `s[from, to)` to the OSC body, capped at OSC_MAX so a runaway
+   *  OSC can't grow memory. */
+  private appendOsc(s: string, from: number, to: number): void {
+    const room = OSC_MAX - this.stringBuf.length;
+    if (room <= 0) return;
+    this.stringBuf += s.slice(from, Math.min(to, from + room));
+  }
+
   /** Parse a single escape sequence starting at `start`. Returns number of
    *  chars consumed including the leading ESC, or -1 if incomplete. */
   private parseEscape(s: string, start: number): number {
     if (start + 1 >= s.length) return -1;
     const intro = s.charAt(start + 1);
+    // ESC ESC — the first ESC was a false start; the sequence restarts at
+    // the second one.
+    if (intro === '\x1b') return 1;
     // ESC c — full reset (rare; tmux uses it sometimes during resize).
     if (intro === 'c') {
       this.fullReset();
@@ -590,6 +648,13 @@ export class Screen {
       while (end < s.length) {
         const ch = s.charCodeAt(end);
         if (ch >= 0x40 && ch <= 0x7e) break;
+        // ESC inside a CSI restarts: abandon this one, re-parse from there.
+        if (ch === 0x1b) return end - start;
+        // CAN / SUB abort the sequence (and are themselves consumed).
+        if (ch === 0x18 || ch === 0x1a) return end - start + 1;
+        // Runaway (no final byte within CSI_MAX): discard what we scanned
+        // and resume as text, so `pending` can never grow without bound.
+        if (end - start - 2 >= CSI_MAX) return end - start;
         end++;
       }
       if (end >= s.length) return -1; // incomplete CSI
@@ -599,21 +664,14 @@ export class Screen {
       return end - start + 1;
     }
     if (intro === ']') {
-      // OSC: ESC ] ... BEL  or  ESC ] ... ST
-      const end = findStringEnd(s, start + 2, true);
-      if (end < 0) return -1; // incomplete OSC
-      // Extract and handle the OSC payload (between ESC ] and terminator)
-      const payload = s.slice(start + 2, end);
-      this.applyOsc(payload);
-      return stringTermEnd(s, end) - start;
+      // OSC: ESC ] ... BEL  or  ESC ] ... ST. Body kept (capped) for OSC 52.
+      return this.openString('osc', s, start);
     }
     if (intro === 'P' || intro === '_' || intro === '^' || intro === 'X') {
       // DCS (ESC P), APC (ESC _), PM (ESC ^), SOS (ESC X): a string body up
       // to ST. We implement none of them (sixel, tmux passthrough, kitty
       // keyboard/graphics, …) — swallow the body so it can't print as text.
-      const end = findStringEnd(s, start + 2, false);
-      if (end < 0) return -1; // incomplete — wait for the terminator
-      return stringTermEnd(s, end) - start;
+      return this.openString('other', s, start);
     }
     if (intro === '(' || intro === ')') {
       // SCS — designate a charset into G0 (intro='(') or G1 (intro=')'):
@@ -778,11 +836,13 @@ export class Screen {
         }
         return;
       }
-      case 's': // save cursor (ANSI.SYS variant)
+      case 's': // save cursor (ANSI.SYS variant); `? s` is XTSAVE (DEC modes)
+        if (isPrivate) return;
         this.savedRow = this.cursorRow;
         this.savedCol = this.cursorCol;
         return;
-      case 'u': // restore cursor
+      case 'u': // restore cursor; `? u` is XTRESTORE / the kitty keyboard query
+        if (isPrivate) return;
         this.restoreCursor();
         return;
       case 'm': // SGR - select graphic rendition
@@ -805,16 +865,24 @@ export class Screen {
         if (!isPrivate && body.includes(' ')) this.cursorStyle = clamp(p0, 0, 6);
         return;
       case 'n': // DSR - device status report
+        // Positions are screen-absolute: DECOM (origin mode, ?6) is not
+        // implemented, so there is no margin-relative form to report.
         if (marker === '' && p0 === 5) this.pendingReplies.push('\x1b[0n');
         else if (marker === '' && p0 === 6) this.pendingReplies.push(`\x1b[${this.reportRow()};${this.reportCol()}R`);
         else if (marker === '?' && p0 === 6) this.pendingReplies.push(`\x1b[?${this.reportRow()};${this.reportCol()}R`);
         return;
       case 'c': // DA - device attributes
-        if (p0 !== 0) return;
+        // Only a bare query (no params, or a single 0) is a request. Anything
+        // else — in particular our own replies echoed back as output by a
+        // raw-echo program or a nested terminal, which carry `?1;2` /
+        // `>1;10;0` — is ignored, so a reply can never feed a loop.
+        if (params.length > 1 || p0 !== 0) return;
         // Primary: "VT100 with Advanced Video Option" — the minimal answer
-        // every curses app accepts. Secondary: VT100 family, firmware 0.
+        // every curses app accepts. Secondary: VT220 class, firmware 1.0,
+        // as real terminals answer (a non-zero first param is what keeps the
+        // echoed reply from parsing as a fresh query).
         if (marker === '') this.pendingReplies.push('\x1b[?1;2c');
-        else if (marker === '>') this.pendingReplies.push('\x1b[>0;0;0c');
+        else if (marker === '>') this.pendingReplies.push('\x1b[>1;10;0c');
         return;
       default:
         // Unknown CSI — silently drop.
@@ -1193,28 +1261,36 @@ export class Screen {
   }
 }
 
+/** Longest OSC body we keep (OSC 52 clipboard payloads are base64 text;
+ *  anything bigger is not something we would put on the clipboard). */
+const OSC_MAX = 64 * 1024;
+/** Longest CSI parameter/intermediate run before the sequence is treated as
+ *  garbage. Real sequences are a few dozen chars. */
+const CSI_MAX = 1024;
+
 /** Scan a control-string body (OSC / DCS / APC / PM / SOS) starting at
- *  `from` for its terminator: ST as `ESC \` or C1 0x9c, plus BEL when
- *  `allowBel` (xterm's OSC convention). Returns the index of the terminator's
- *  first char, or -1 when the string is still open at the end of `s`. */
+ *  `from` for whatever ends it: any ESC (an `ESC \` ST, or the start of the
+ *  next sequence), C1 ST 0x9c, CAN, SUB, plus BEL when `allowBel` (xterm's
+ *  OSC convention). Returns the index of that char, or -1 when the string
+ *  is still open at the end of `s`. */
 function findStringEnd(s: string, from: number, allowBel: boolean): number {
   let end = from;
   while (end < s.length) {
     const ch = s.charCodeAt(end);
-    if (ch === 0x9c) return end;
+    if (ch === 0x1b || ch === 0x9c || ch === 0x18 || ch === 0x1a) return end;
     if (allowBel && ch === 0x07) return end;
-    if (ch === 0x1b) {
-      if (end + 1 >= s.length) return -1; // ESC at chunk end — maybe half an ST
-      if (s.charCodeAt(end + 1) === 0x5c) return end;
-    }
     end++;
   }
   return -1;
 }
 
-/** Index just past the terminator found by `findStringEnd` at `end`. */
+/** Index to resume parsing at after the terminator `findStringEnd` found at
+ *  `end`: past `ESC \`, past a one-char terminator, or *at* an ESC that
+ *  starts something else (it is re-parsed as a new sequence). An ESC at the
+ *  very end of the chunk is left in place too — the next chunk decides. */
 function stringTermEnd(s: string, end: number): number {
-  return s.charCodeAt(end) === 0x1b ? end + 2 : end + 1;
+  if (s.charCodeAt(end) !== 0x1b) return end + 1;
+  return end + 1 < s.length && s.charCodeAt(end + 1) === 0x5c ? end + 2 : end;
 }
 
 function makeRow(cols: number): Cell[] {
