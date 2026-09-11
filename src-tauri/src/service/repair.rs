@@ -1634,12 +1634,16 @@ pub async fn ensure_workspace_with(
 ) -> Result<RepairReport, IpcError> {
     let probe = run_probe(exec, spec).await?;
     record_healthy_fingerprint(store, spec, &probe);
-    let ctx = {
+    // Read the rows under the store lock; canonicalize local paths only after
+    // it is released (the filesystem can hang on a dead NFS mount, and a hung
+    // call must never hold the store mutex).
+    let snap = {
         let s = store.lock().map_err(|_| IpcError::lock())?;
-        AutoContext {
-            allow_auto_unregister,
-            ..auto_context(&s, spec, &probe)
-        }
+        auto_snapshot(&s, spec, &probe)
+    };
+    let ctx = AutoContext {
+        allow_auto_unregister,
+        ..auto_context_from(spec, snap, local_canon)
     };
     let fix = plan_with(spec, &probe, policy, ctx).map_err(|e| fail(store, spec, e))?;
     let explicit = policy == Policy::Explicit;
@@ -1960,29 +1964,53 @@ fn record_healthy_fingerprint(store: &Mutex<Store>, spec: &WorkspaceSpec, p: &Pr
     }
 }
 
-/// What the store says about this workspace, for the [`VanishedGuard`]:
-/// other sessions mapped to it, and the parent fingerprint recorded while it
-/// was healthy. No worktree / project id, or a store error, reads as
-/// "unknown", which blocks the automatic removal.
-fn auto_context(s: &Store, spec: &WorkspaceSpec, probe: &Probe) -> AutoContext {
-    let (Some(w), Some(pid)) = (&spec.worktree, spec.project_id) else {
-        return AutoContext::default();
-    };
+/// The rows [`auto_context_from`] needs, read under the store lock.
+struct AutoSnapshot {
+    rows: Vec<crate::store::WorktreeRow>,
+    sessions: Vec<SessionRow>,
+    recorded_parent_fp: Option<(u64, u64)>,
+}
+
+/// Store half of the [`AutoContext`]: plain row reads, no filesystem access,
+/// so it is safe with the store lock held. `None` for a spec without a
+/// worktree / project id, or on a store error ("unknown", which blocks).
+fn auto_snapshot(s: &Store, spec: &WorkspaceSpec, probe: &Probe) -> Option<AutoSnapshot> {
+    let pid = spec.project_id?;
+    spec.worktree.as_ref()?;
     let recorded_parent_fp = probe
         .wt_canon
         .as_deref()
         .and_then(clean_canon)
         .and_then(|c| s.parent_fingerprint(&spec.host_alias, c).ok().flatten())
         .and_then(|v| parse_fp(&v));
-    let (Ok(rows), Ok(sessions)) = (
-        s.list_worktrees_for_project(pid),
-        s.list_sessions_for_host(&spec.host_alias),
-    ) else {
+    Some(AutoSnapshot {
+        rows: s.list_worktrees_for_project(pid).ok()?,
+        sessions: s.list_sessions_for_host(&spec.host_alias).ok()?,
+        recorded_parent_fp,
+    })
+}
+
+/// What the store says about this workspace, for the [`VanishedGuard`]:
+/// other sessions mapped to it, and the parent fingerprint recorded while it
+/// was healthy. `canon` canonicalizes a LOCAL path (it touches the
+/// filesystem, so callers run this WITHOUT the store lock). No snapshot
+/// reads as "unknown", which blocks the automatic removal.
+fn auto_context_from(
+    spec: &WorkspaceSpec,
+    snap: Option<AutoSnapshot>,
+    canon: impl Fn(&str) -> String,
+) -> AutoContext {
+    let (Some(w), Some(pid), Some(snap)) = (&spec.worktree, spec.project_id, snap) else {
         return AutoContext::default();
     };
+    let AutoSnapshot {
+        rows,
+        sessions,
+        recorded_parent_fp,
+    } = snap;
     let local = spec.host_alias == "local";
     let target = if local {
-        local_canon(&w.path)
+        canon(&w.path)
     } else {
         w.path.clone()
     };
@@ -1994,7 +2022,7 @@ fn auto_context(s: &Store, spec: &WorkspaceSpec, probe: &Probe) -> AutoContext {
                 || o.worktree_id
                     .and_then(|wid| rows.iter().find(|r| r.id == wid))
                     .is_some_and(|r| {
-                        r.name == w.name || (local && norm(&local_canon(&r.path)) == norm(&target))
+                        r.name == w.name || (local && norm(&canon(&r.path)) == norm(&target))
                     }))
     });
     AutoContext {
@@ -5557,6 +5585,56 @@ mod tests {
             assert_eq!(d["vanished_guard"][k], true, "{k}: {d}");
         }
         assert_eq!(d["vanished_guard"]["fingerprint_check"], "match", "{d}");
+    }
+
+    #[tokio::test]
+    async fn auto_context_is_read_under_the_lock_and_canonicalized_after_it() {
+        // Another session maps to our workspace only through a worktree row
+        // whose path canonicalizes to ours (a symlinked path).
+        let (store, sid, pid) = seeded_store(VANISHED_WT);
+        {
+            let s = store.lock().unwrap();
+            let alias = s
+                .upsert_worktree(pid, "alias", "/link/feat", Some("alias"))
+                .unwrap();
+            s.upsert_session(
+                "rev-x",
+                "local",
+                Some(pid),
+                Some(alias),
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+        }
+        let spec = spec_with_ids(sid, pid);
+        let snap = || {
+            let s = store.lock().unwrap();
+            auto_snapshot(&s, &spec, &Probe::default())
+        };
+        // The canonicalizer runs with the store lock released.
+        let canon = |p: &str| {
+            assert!(
+                store.try_lock().is_ok(),
+                "canonicalized under the store lock"
+            );
+            if p == "/link/feat" {
+                VANISHED_WT.to_string()
+            } else {
+                p.to_string()
+            }
+        };
+        let ctx = auto_context_from(&spec, snap(), canon);
+        assert_eq!(ctx.other_sessions_mapped, Some(true));
+        let ctx = auto_context_from(&spec, snap(), |p: &str| p.to_string());
+        assert_eq!(ctx.other_sessions_mapped, Some(false), "not the same path");
+        // No snapshot (a store error): unknown, which blocks.
+        assert_eq!(
+            auto_context_from(&spec, None, |p: &str| p.to_string()),
+            AutoContext::default()
+        );
     }
 
     #[tokio::test]

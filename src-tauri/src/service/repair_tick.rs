@@ -159,9 +159,12 @@ pub struct DirCheck {
 
 /// The batched, read-only directory check. Pure so the quoting is testable.
 /// For a present target that is a healthy linked worktree (a `.git` file
-/// whose git dir resolves under `<common>/worktrees/`) it also prints the
-/// canonical path and its parent's `dev:inode` — the same fingerprint a
-/// healthy repair probe records. Nothing in it writes.
+/// whose git dir resolves under `<common>/worktrees/`, and registered at
+/// exactly its canonical path in `git worktree list --porcelain`, as the
+/// repair probe requires) it also prints the canonical path and its
+/// parent's `dev:inode` — the same fingerprint a healthy repair probe
+/// records. A present, valid registration is never `prunable`. Nothing in
+/// it writes.
 pub fn dir_check_script(targets: &[Vec<String>]) -> String {
     let mut s = String::from(
         "if stat -L -c %d / >/dev/null 2>&1; then fpof() { stat -L -c '%d:%i' -- \"$1\" 2>/dev/null; }; \
@@ -176,7 +179,7 @@ pub fn dir_check_script(targets: &[Vec<String>]) -> String {
              \x20 gd=\"$(git -C \"$d\" rev-parse --absolute-git-dir 2>/dev/null)\"\n\
              \x20 case \"$gd\" in */worktrees/*)\n\
              \x20   c=\"$(cd -P -- \"$d\" 2>/dev/null && pwd -P)\"; f=\"$(fpof \"$(dirname -- \"$c\")\")\"\n\
-             \x20   if [ -n \"$c\" ] && [ -n \"$f\" ]; then printf '%s\\n' \"{FP_PREFIX}{i} $f $c\"; fi;;\n\
+             \x20   if [ -n \"$c\" ] && [ -n \"$f\" ] && git -C \"$d\" worktree list --porcelain 2>/dev/null | grep -Fxq -- \"worktree $c\"; then printf '%s\\n' \"{FP_PREFIX}{i} $f $c\"; fi;;\n\
              \x20 esac\n\
              fi\n"
         ));
@@ -1239,6 +1242,13 @@ mod tests {
             "{s}"
         );
         assert!(s.contains("printf '%s\\n' \"@@fleet_fp=1 $f $c\""), "{s}");
+        // Registered at exactly that canonical path, as the repair probe requires.
+        assert!(
+            s.contains(
+                "git -C \"$d\" worktree list --porcelain 2>/dev/null | grep -Fxq -- \"worktree $c\""
+            ),
+            "{s}"
+        );
         let c = parse_dir_check(
             "@@fleet_missing=1\n@@fleet_missing=9\n@@fleet_fp=0 42:7 /h/a b\n\
              @@fleet_fp=5 1:1 /x\n@@fleet_fp=0 bad /y\n@@fleet_fp=0 1:2 rel\n\
@@ -1329,10 +1339,18 @@ mod tests {
         git(&["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feat"]);
         let plain = base.path().join("plain");
         std::fs::create_dir_all(&plain).unwrap();
+        // A stray directory whose `.git` file points at feat's admin dir: its
+        // git dir resolves under `worktrees/`, but git does not register it
+        // at this path, so it must not be fingerprinted.
+        let stray = base.path().join("stray");
+        std::fs::create_dir_all(&stray).unwrap();
+        let admin = std::fs::canonicalize(root.join(".git/worktrees/feat")).unwrap();
+        std::fs::write(stray.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
         let targets = vec![
             vec![wt.to_string_lossy().into_owned()],
             vec![plain.to_string_lossy().into_owned()],
             vec![root.join("gone").to_string_lossy().into_owned()],
+            vec![stray.to_string_lossy().into_owned()],
         ];
         let got = check_missing(&crate::ssh_fake::FakeSsh::new(), "local", &targets)
             .await

@@ -1359,31 +1359,50 @@ impl Store {
     /// the path as given and its canonical form (the nearest existing
     /// ancestor resolved, the missing remainder appended), as the repair
     /// probe records it.
+    ///
+    /// Callers hold the store mutex (the delete functions own their
+    /// transaction), and canonicalizing touches the filesystem, which can
+    /// hang on a dead NFS mount. So it runs on a helper thread with a bounded
+    /// wait: past `FP_CANON_TIMEOUT` only the path as given is used and the
+    /// lock is released on time instead of freezing the app.
     fn fingerprint_keys(path: &str) -> Vec<String> {
-        let trimmed = path.trim_end_matches('/');
-        let mut keys = vec![trimmed.to_string()];
-        let mut cur = std::path::Path::new(trimmed);
+        let trimmed = path.trim_end_matches('/').to_string();
+        let mut keys = vec![trimmed.clone()];
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(Self::canonical_nearest(&trimmed));
+        });
+        if let Ok(Some(c)) = rx.recv_timeout(Self::FP_CANON_TIMEOUT) {
+            if !keys.contains(&c) {
+                keys.push(c);
+            }
+        }
+        keys
+    }
+
+    /// Upper bound on the filesystem wait in [`Store::fingerprint_keys`].
+    const FP_CANON_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+    /// Canonical form of a local path: the nearest existing ancestor
+    /// resolved, the missing remainder appended. Touches the filesystem.
+    fn canonical_nearest(path: &str) -> Option<String> {
+        let mut cur = std::path::Path::new(path);
         let mut rest: Vec<std::ffi::OsString> = Vec::new();
         loop {
             if let Ok(mut full) = std::fs::canonicalize(cur) {
                 for part in rest.iter().rev() {
                     full.push(part);
                 }
-                let s = full.to_string_lossy().into_owned();
-                if !keys.contains(&s) {
-                    keys.push(s);
-                }
-                break;
+                return Some(full.to_string_lossy().into_owned());
             }
             match (cur.file_name(), cur.parent()) {
                 (Some(name), Some(parent)) => {
                     rest.push(name.to_os_string());
                     cur = parent;
                 }
-                _ => break,
+                _ => return None,
             }
         }
-        keys
     }
 
     /// Delete the recorded parent fingerprints (repair) of one worktree row,
@@ -4397,6 +4416,76 @@ mod tests {
             store.list_inbox(peer, false, 10).unwrap().len(),
             1,
             "a message the gone session SENT stays in the recipient's inbox"
+        );
+    }
+
+    #[test]
+    fn bg_reconcile_hard_delete_reaps_timeline_and_inbox_but_keeps_sent_messages() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let bg = store
+            .upsert_bg_session("alpha", "bg:gone", None, "uuid-gone", Some("idle"), 1)
+            .unwrap();
+        let peer = store
+            .upsert_session("peer", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store
+            .insert_session_event(bg, "status_change", Some("idle"))
+            .unwrap();
+        store
+            .insert_message(peer, bg, "to the gone bg", "message", None)
+            .unwrap();
+        store
+            .insert_message(bg, peer, "from the gone bg", "message", None)
+            .unwrap();
+        // Two passes without the agent: ghost, then hard-delete.
+        store.ghost_and_clean_bg_sessions("alpha", &[], 10).unwrap();
+        assert!(
+            store.get_session_by_id(bg).unwrap().is_some(),
+            "ghosted first"
+        );
+        store.ghost_and_clean_bg_sessions("alpha", &[], 20).unwrap();
+        assert!(store.get_session_by_id(bg).unwrap().is_none());
+        assert!(
+            store.list_session_events(bg, 10).unwrap().is_empty(),
+            "the timeline goes with the row"
+        );
+        assert!(
+            store.list_inbox(bg, false, 10).unwrap().is_empty(),
+            "an inbox nobody can read goes with the row"
+        );
+        assert_eq!(
+            store.list_inbox(peer, false, 10).unwrap().len(),
+            1,
+            "a message the gone bg session SENT stays in the recipient's inbox"
+        );
+        assert!(
+            store.get_session_by_id(peer).unwrap().is_some(),
+            "the bg pruner never touches tmux sessions"
+        );
+    }
+
+    /// The canonical key is resolved (off-thread, bounded) through a symlinked
+    /// parent; the path as given is always a key.
+    #[cfg(unix)]
+    #[test]
+    fn fingerprint_keys_include_the_canonical_form() {
+        let base = tempfile::TempDir::new().unwrap();
+        let real = base.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let given = format!("{}/w", link.to_str().unwrap());
+        let keys = Store::fingerprint_keys(&given);
+        let canon_real = std::fs::canonicalize(&real).unwrap();
+        assert_eq!(keys[0], given);
+        assert!(
+            keys.contains(&format!("{}/w", canon_real.to_str().unwrap())),
+            "{keys:?}"
+        );
+        assert_eq!(
+            Store::canonical_nearest("/fleet-no-such-dir/x").as_deref(),
+            Some("/fleet-no-such-dir/x")
         );
     }
 
