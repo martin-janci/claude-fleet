@@ -16,7 +16,10 @@
 //! read-only `test -d` script per reachable host (every path `quote`d) over
 //! the candidates' expected directories, resolved by the same spec builder
 //! the repair itself uses (`repair::spec_for_session`, no ssh round trip:
-//! local paths come from the store, the remote `$HOME` is cached).
+//! local paths come from the store, the remote `$HOME` is cached). For a
+//! target present as a healthy linked worktree the same script prints its
+//! canonical parent's `dev:inode`, recorded as the parent fingerprint a later
+//! automatic repair must match, so a worktree nobody opens is covered too.
 //!
 //! **Bounds.** Hosts are handled one at a time, at most
 //! [`MAX_REPAIRS_PER_TICK`] repairs per tick, and the whole run is detached
@@ -108,12 +111,9 @@ pub trait RepairTickExec: Send + Sync {
     /// Expected worktree location of a session (no ssh round trip).
     async fn target(&self, session_id: i64) -> Result<Option<Target>, IpcError>;
     /// ONE read-only check on `host`: the indices of `targets` none of whose
-    /// directories exist.
-    async fn missing(
-        &self,
-        host: &str,
-        targets: &[Vec<String>],
-    ) -> Result<HashSet<usize>, IpcError>;
+    /// directories exist, plus the parent fingerprints of the targets that
+    /// are present as healthy linked worktrees.
+    async fn missing(&self, host: &str, targets: &[Vec<String>]) -> Result<DirCheck, IpcError>;
     /// The automatic repair of one session.
     async fn repair(&self, session_id: i64) -> Result<RepairReport, IpcError>;
 }
@@ -132,11 +132,7 @@ impl RepairTickExec for RealRepairTickExec {
         Ok(target_from_spec(&spec))
     }
 
-    async fn missing(
-        &self,
-        host: &str,
-        targets: &[Vec<String>],
-    ) -> Result<HashSet<usize>, IpcError> {
+    async fn missing(&self, host: &str, targets: &[Vec<String>]) -> Result<DirCheck, IpcError> {
         check_missing(&*self.ssh, host, targets).await
     }
 
@@ -147,17 +143,42 @@ impl RepairTickExec for RealRepairTickExec {
     }
 }
 
+/// Printed per present, healthy linked worktree:
+/// `<prefix><index> <dev:inode of its canonical parent> <canonical path>`.
+const FP_PREFIX: &str = "@@fleet_fp=";
+
+/// Result of the batched directory check on one host.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DirCheck {
+    /// Indices of targets none of whose directories exist.
+    pub missing: HashSet<usize>,
+    /// `(index, canonical path, parent (dev, inode))` of targets present as a
+    /// healthy linked worktree: recorded as its parent fingerprint.
+    pub fingerprints: Vec<(usize, String, (u64, u64))>,
+}
+
 /// The batched, read-only directory check. Pure so the quoting is testable.
+/// For a present target that is a healthy linked worktree (a `.git` file
+/// whose git dir resolves under `<common>/worktrees/`) it also prints the
+/// canonical path and its parent's `dev:inode` — the same fingerprint a
+/// healthy repair probe records. Nothing in it writes.
 pub fn dir_check_script(targets: &[Vec<String>]) -> String {
-    let mut s = String::new();
+    let mut s = String::from(
+        "if stat -L -c %d / >/dev/null 2>&1; then fpof() { stat -L -c '%d:%i' -- \"$1\" 2>/dev/null; }; \
+         else fpof() { stat -L -f '%d:%i' -- \"$1\" 2>/dev/null; }; fi\n",
+    );
     for (i, dirs) in targets.iter().enumerate() {
-        let test = dirs
-            .iter()
-            .map(|d| format!("[ -d {} ]", quote(d)))
-            .collect::<Vec<_>>()
-            .join(" || ");
+        let cands = dirs.iter().map(|d| quote(d)).collect::<Vec<_>>().join(" ");
         s.push_str(&format!(
-            "if {test}; then :; else printf '%s\\n' '{MISSING_PREFIX}{i}'; fi\n"
+            "d=; for cand in {cands}; do if [ -d \"$cand\" ]; then d=\"$cand\"; break; fi; done\n\
+             if [ -z \"$d\" ]; then printf '%s\\n' '{MISSING_PREFIX}{i}'\n\
+             elif [ -f \"$d/.git\" ]; then\n\
+             \x20 gd=\"$(git -C \"$d\" rev-parse --absolute-git-dir 2>/dev/null)\"\n\
+             \x20 case \"$gd\" in */worktrees/*)\n\
+             \x20   c=\"$(cd -P -- \"$d\" 2>/dev/null && pwd -P)\"; f=\"$(fpof \"$(dirname -- \"$c\")\")\"\n\
+             \x20   if [ -n \"$c\" ] && [ -n \"$f\" ]; then printf '%s\\n' \"{FP_PREFIX}{i} $f $c\"; fi;;\n\
+             \x20 esac\n\
+             fi\n"
         ));
     }
     s.push_str(&format!("printf '%s\\n' '{DONE_MARKER}'\n"));
@@ -166,19 +187,34 @@ pub fn dir_check_script(targets: &[Vec<String>]) -> String {
 
 /// Parse [`dir_check_script`] output. Output without the done marker (a
 /// failed or truncated run) is an error: the tick then does nothing there.
-pub fn parse_dir_check(stdout: &str, n: usize) -> Result<HashSet<usize>, IpcError> {
+pub fn parse_dir_check(stdout: &str, n: usize) -> Result<DirCheck, IpcError> {
     if !stdout.lines().any(|l| l.trim() == DONE_MARKER) {
         return Err(IpcError::new(
             codes::E_SHELL,
             "directory check produced no completion marker",
         ));
     }
-    Ok(stdout
-        .lines()
-        .filter_map(|l| l.trim().strip_prefix(MISSING_PREFIX))
-        .filter_map(|i| i.parse::<usize>().ok())
-        .filter(|i| *i < n)
-        .collect())
+    let mut out = DirCheck::default();
+    for l in stdout.lines() {
+        let l = l.trim();
+        if let Some(i) = l.strip_prefix(MISSING_PREFIX) {
+            if let Ok(i) = i.parse::<usize>() {
+                if i < n {
+                    out.missing.insert(i);
+                }
+            }
+        } else if let Some(rest) = l.strip_prefix(FP_PREFIX) {
+            let mut it = rest.splitn(3, ' ');
+            if let (Some(i), Some(fp), Some(canon)) = (it.next(), it.next(), it.next()) {
+                if let (Ok(i), Some(fp)) = (i.parse::<usize>(), repair::parse_fp(fp)) {
+                    if i < n && canon.starts_with('/') {
+                        out.fingerprints.push((i, canon.to_string(), fp));
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Run the directory check on `host`: local `bash -lc`, else one ssh call.
@@ -186,10 +222,10 @@ pub async fn check_missing(
     ssh: &dyn SshExec,
     host: &str,
     targets: &[Vec<String>],
-) -> Result<HashSet<usize>, IpcError> {
+) -> Result<DirCheck, IpcError> {
     crate::validate::host_alias(host)?;
     if targets.is_empty() {
-        return Ok(HashSet::new());
+        return Ok(DirCheck::default());
     }
     let script = dir_check_script(targets);
     let out = if host == "local" {
@@ -352,6 +388,8 @@ fn record(store: &Mutex<Store>, session_id: i64, kind: &str, detail: &str) {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RepairTickReport {
     pub hosts_checked: usize,
+    /// Parent fingerprints recorded for present, healthy linked worktrees.
+    pub fingerprints_recorded: usize,
     pub missing: usize,
     pub attempted: usize,
     pub repaired: usize,
@@ -412,7 +450,7 @@ pub async fn run_with(
             continue;
         }
         let dirs: Vec<Vec<String>> = targets.iter().map(|(_, t)| t.dirs.clone()).collect();
-        let missing = match exec.missing(&host, &dirs).await {
+        let check = match exec.missing(&host, &dirs).await {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!("[repair-tick] directory check on {host} failed: {e}");
@@ -420,6 +458,23 @@ pub async fn run_with(
             }
         };
         report.hosts_checked += 1;
+        // Read-only: a present, healthy linked worktree's parent `dev:inode`
+        // is the evidence a later automatic repair must match, so a worktree
+        // nobody opens is covered too (as a healthy repair probe records it).
+        for (i, canon, fp) in &check.fingerprints {
+            if check.missing.contains(i) {
+                continue;
+            }
+            if let Ok(s) = store.lock() {
+                match s.record_parent_fingerprint(&host, canon, &repair::fp_string(*fp), now) {
+                    Ok(()) => report.fingerprints_recorded += 1,
+                    Err(e) => tracing::warn!(
+                        "[repair-tick] recording the parent fingerprint of {canon} failed: {e}"
+                    ),
+                }
+            }
+        }
+        let missing = check.missing;
         for (i, (row, t)) in targets.iter().enumerate() {
             let stamped = backoffs.get(&row.id);
             if !missing.contains(&i) {
@@ -607,6 +662,9 @@ mod tests {
     /// Scripted executor. Directories are `/wt/<session id>`; `missing`
     /// holds the ids whose directory is gone. Repairs default to a
     /// successful create that records its event like the real one does.
+    /// Session id → (canonical path, parent fingerprint).
+    type FpMap = HashMap<i64, (String, (u64, u64))>;
+
     struct Fake {
         store: Arc<Mutex<Store>>,
         missing: Mutex<HashSet<i64>>,
@@ -615,6 +673,9 @@ mod tests {
         /// `ensure_workspace`'s refusals do).
         records_failures: bool,
         calls: Mutex<Vec<String>>,
+        /// Session id → (canonical path, parent fingerprint) reported for a
+        /// present target.
+        fps: Mutex<FpMap>,
     }
 
     impl Fake {
@@ -625,6 +686,7 @@ mod tests {
                 results: Mutex::new(HashMap::new()),
                 records_failures: false,
                 calls: Mutex::new(Vec::new()),
+                fps: Mutex::new(HashMap::new()),
             }
         }
         fn calls(&self) -> Vec<String> {
@@ -647,26 +709,27 @@ mod tests {
                 branch: format!("b{id}"),
             }))
         }
-        async fn missing(
-            &self,
-            host: &str,
-            targets: &[Vec<String>],
-        ) -> Result<HashSet<usize>, IpcError> {
+        async fn missing(&self, host: &str, targets: &[Vec<String>]) -> Result<DirCheck, IpcError> {
             self.calls
                 .lock()
                 .unwrap()
                 .push(format!("missing:{host}:{}", targets.len()));
             let gone = self.missing.lock().unwrap().clone();
-            Ok(targets
-                .iter()
-                .enumerate()
-                .filter(|(_, d)| {
-                    d[0].strip_prefix("/wt/")
-                        .and_then(|i| i.parse::<i64>().ok())
-                        .is_some_and(|id| gone.contains(&id))
-                })
-                .map(|(i, _)| i)
-                .collect())
+            let fps = self.fps.lock().unwrap().clone();
+            let id_of = |d: &Vec<String>| {
+                d[0].strip_prefix("/wt/")
+                    .and_then(|i| i.parse::<i64>().ok())
+            };
+            let mut out = DirCheck::default();
+            for (i, d) in targets.iter().enumerate() {
+                let Some(id) = id_of(d) else { continue };
+                if gone.contains(&id) {
+                    out.missing.insert(i);
+                } else if let Some((canon, fp)) = fps.get(&id) {
+                    out.fingerprints.push((i, canon.clone(), *fp));
+                }
+            }
+            Ok(out)
         }
         async fn repair(&self, id: i64) -> Result<RepairReport, IpcError> {
             self.calls.lock().unwrap().push(format!("repair:{id}"));
@@ -1159,16 +1222,32 @@ mod tests {
             vec!["/h/b b'x".to_string(), "/h/.worktrees/b".to_string()],
         ];
         let s = dir_check_script(&targets);
-        assert!(s.contains(&format!("[ -d {} ]", quote("/h/b b'x"))), "{s}");
-        assert!(s.contains(" || "), "{s}");
-        assert_eq!(
-            parse_dir_check(
-                "@@fleet_missing=1\n@@fleet_missing=9\n@@fleet_dircheck_done\n",
-                2
-            )
-            .unwrap(),
-            HashSet::from([1])
+        assert!(
+            s.contains(&format!(
+                "for cand in {} {}; do",
+                quote("/h/b b'x"),
+                quote("/h/.worktrees/b")
+            )),
+            "{s}"
         );
+        assert!(
+            s.contains("gd=\"$(git -C \"$d\" rev-parse --absolute-git-dir 2>/dev/null)\""),
+            "{s}"
+        );
+        assert!(
+            s.contains("fpof() { stat -L -c '%d:%i' -- \"$1\" 2>/dev/null; }"),
+            "{s}"
+        );
+        assert!(s.contains("printf '%s\\n' \"@@fleet_fp=1 $f $c\""), "{s}");
+        let c = parse_dir_check(
+            "@@fleet_missing=1\n@@fleet_missing=9\n@@fleet_fp=0 42:7 /h/a b\n\
+             @@fleet_fp=5 1:1 /x\n@@fleet_fp=0 bad /y\n@@fleet_fp=0 1:2 rel\n\
+             @@fleet_dircheck_done\n",
+            2,
+        )
+        .unwrap();
+        assert_eq!(c.missing, HashSet::from([1]));
+        assert_eq!(c.fingerprints, vec![(0, "/h/a b".to_string(), (42, 7))]);
         assert!(parse_dir_check("@@fleet_missing=0\n", 2).is_err());
     }
 
@@ -1183,7 +1262,7 @@ mod tests {
         );
         let targets = vec![vec!["/h/a".to_string()], vec!["/h/b".to_string()]];
         let got = check_missing(&fake, "mefistos", &targets).await.unwrap();
-        assert_eq!(got, HashSet::from([1]));
+        assert_eq!(got.missing, HashSet::from([1]));
         let calls = fake.calls_for("mefistos");
         assert_eq!(calls.len(), 1, "one call per host: {:?}", fake.commands());
         assert_eq!(calls[0].args[0], "bash");
@@ -1212,8 +1291,88 @@ mod tests {
         let fake = crate::ssh_fake::FakeSsh::new();
         let got = check_missing(&fake, "local", &targets).await.unwrap();
         let _ = std::fs::remove_dir_all(&base);
-        assert_eq!(got, HashSet::from([1]));
+        assert_eq!(got.missing, HashSet::from([1]));
         assert!(fake.calls().is_empty(), "local never goes over ssh");
+        assert!(
+            got.fingerprints.is_empty(),
+            "a plain directory is not a linked worktree"
+        );
+    }
+
+    /// Against real git: a present linked worktree reports its canonical path
+    /// and its canonical parent's real `dev:inode`; a plain directory and a
+    /// missing one do not.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn check_missing_reports_a_real_linked_worktrees_parent_fingerprint() {
+        use std::os::unix::fs::MetadataExt;
+        use std::process::Command;
+        let base = tempfile::TempDir::new().unwrap();
+        let root = base.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            let st = Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(root.join("f"), "x").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        let wt = root.join(".claude/worktrees/feat");
+        git(&["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feat"]);
+        let plain = base.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let targets = vec![
+            vec![wt.to_string_lossy().into_owned()],
+            vec![plain.to_string_lossy().into_owned()],
+            vec![root.join("gone").to_string_lossy().into_owned()],
+        ];
+        let got = check_missing(&crate::ssh_fake::FakeSsh::new(), "local", &targets)
+            .await
+            .unwrap();
+        assert_eq!(got.missing, HashSet::from([2]));
+        let canon = std::fs::canonicalize(&wt).unwrap();
+        let parent = std::fs::metadata(canon.parent().unwrap()).unwrap();
+        assert_eq!(
+            got.fingerprints,
+            vec![(
+                0,
+                canon.to_string_lossy().into_owned(),
+                (parent.dev(), parent.ino())
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_records_parent_fingerprints_of_present_worktrees_read_only() {
+        let (store, ids) = seed(&[("local", "a"), ("local", "b")]);
+        let fake = Fake::new(&store, &[]);
+        fake.fps
+            .lock()
+            .unwrap()
+            .insert(ids[0], ("/repo/.worktrees/a".to_string(), (42, 7)));
+        let rep = run_with(&store, &fake, &ON, 100).await;
+        assert_eq!(rep.fingerprints_recorded, 1);
+        assert_eq!(rep.attempted, 0);
+        assert!(fake.repairs().is_empty(), "read-only: nothing is repaired");
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.parent_fingerprint("local", "/repo/.worktrees/a")
+                .unwrap()
+                .as_deref(),
+            Some("42:7")
+        );
+        assert_eq!(
+            s.parent_fingerprint("local", "/repo/.worktrees/b").unwrap(),
+            None
+        );
     }
 
     #[test]

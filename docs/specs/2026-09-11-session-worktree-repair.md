@@ -89,14 +89,19 @@ never removes (`AutoContext::allow_auto_unregister` is false there).
    shares this one's parent still exists on disk (the probe prints
    `present 1|0` after each porcelain entry). An unmounted volume makes all
    of its worktrees vanish at once; an `rm -rf` leaves the others in place.
-   The refusal names the missing siblings: a stale registration of a
-   worktree deleted long ago also trips it (prune it, or use Repair).
+   When the parent fingerprint (9) matches, a missing sibling is only a
+   warning naming it (a stale registration of a worktree deleted long ago);
+   it blocks only alongside a failed fingerprint, and the refusal names it.
 9. `fingerprint_matches` — the canonical parent's current `dev:inode`
    (`stat -L -c '%d:%i'`, falling back to `stat -L -f '%d:%i'`) equals the
    one recorded while this worktree was healthy. Every probe that finds the
    registered worktree healthy (create, attach, restart, recreate, explicit
-   repair, and the verify after a repair) records it, keyed by host and
+   repair, the verify after a repair, and the reconcile tick's read-only
+   directory check for a present linked worktree) records it, keyed by host and
    canonical worktree path (migration `023_worktree_parent_fingerprints`).
+   Rows go with their host (`delete_host`), their worktree row
+   (`delete_worktree`, `delete_worktrees_not_in`) and their project
+   (`delete_project`).
    `fingerprint_check` says which: `match`, `mismatch` (remounted or
    replaced parent), `missing` (never seen healthy), `stat_failed`. Only
    `match` passes.

@@ -1032,10 +1032,48 @@ impl Store {
             "UPDATE sessions SET worktree_id=NULL WHERE worktree_id=?1",
             rusqlite::params![id],
         )?;
+        // Its recorded parent fingerprint (repair) goes with the row.
+        for key in Self::fingerprint_keys(&row.path) {
+            tx.execute(
+                "DELETE FROM worktree_parent_fingerprints WHERE host_alias='local' AND wt_path=?1",
+                rusqlite::params![key],
+            )?;
+        }
         tx.execute("DELETE FROM worktrees WHERE id=?1", rusqlite::params![id])?;
         tx.commit()?;
         self.bus.worktree_removed(id);
         Ok(Some(row))
+    }
+
+    /// The keys a local worktree's parent fingerprint may be stored under:
+    /// the path as given and its canonical form (the nearest existing
+    /// ancestor resolved, the missing remainder appended), as the repair
+    /// probe records it.
+    fn fingerprint_keys(path: &str) -> Vec<String> {
+        let trimmed = path.trim_end_matches('/');
+        let mut keys = vec![trimmed.to_string()];
+        let mut cur = std::path::Path::new(trimmed);
+        let mut rest: Vec<std::ffi::OsString> = Vec::new();
+        loop {
+            if let Ok(mut full) = std::fs::canonicalize(cur) {
+                for part in rest.iter().rev() {
+                    full.push(part);
+                }
+                let s = full.to_string_lossy().into_owned();
+                if !keys.contains(&s) {
+                    keys.push(s);
+                }
+                break;
+            }
+            match (cur.file_name(), cur.parent()) {
+                (Some(name), Some(parent)) => {
+                    rest.push(name.to_os_string());
+                    cur = parent;
+                }
+                _ => break,
+            }
+        }
+        keys
     }
 
     /// Return the names + hosts of alive (non-ghost, non-dead) sessions
@@ -1096,6 +1134,17 @@ impl Store {
                 "UPDATE sessions SET worktree_id=NULL WHERE worktree_id=?1",
                 rusqlite::params![d.id],
             )?;
+            // Its recorded parent fingerprint (repair) goes with the row.
+            let mut keys = Self::fingerprint_keys(&d.path);
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+            for k in keys {
+                tx.execute(
+                    "DELETE FROM worktree_parent_fingerprints WHERE host_alias='local' AND wt_path=?1",
+                    rusqlite::params![k],
+                )?;
+            }
             tx.execute("DELETE FROM worktrees WHERE id=?1", rusqlite::params![d.id])?;
         }
         tx.commit()?;
@@ -1127,6 +1176,32 @@ impl Store {
             .conn
             .unchecked_transaction()
             .map_err(crate::ipc_error::IpcError::from)?;
+        // What dies with the sessions (as `delete_session` does): their
+        // timeline and the messages addressed to them. And the recorded
+        // parent fingerprints (repair) of the project's worktree rows.
+        tx.execute(
+            "DELETE FROM session_events
+              WHERE session_id IN (SELECT id FROM sessions WHERE project_id = ?1)",
+            rusqlite::params![project_id],
+        )?;
+        tx.execute(
+            "DELETE FROM session_messages
+              WHERE to_session_id IN (SELECT id FROM sessions WHERE project_id = ?1)",
+            rusqlite::params![project_id],
+        )?;
+        let wt_paths: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT path FROM worktrees WHERE project_id = ?1")?;
+            let paths = stmt
+                .query_map(rusqlite::params![project_id], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            paths
+        };
+        for key in wt_paths.iter().flat_map(|p| Self::fingerprint_keys(p)) {
+            tx.execute(
+                "DELETE FROM worktree_parent_fingerprints WHERE host_alias='local' AND wt_path=?1",
+                rusqlite::params![key],
+            )?;
+        }
         tx.execute(
             "DELETE FROM sessions WHERE project_id = ?1",
             rusqlite::params![project_id],
@@ -1427,22 +1502,42 @@ impl Store {
         // Collect orphaned session ids first so we can emit a `session_killed`
         // event per row — otherwise frontend stores subscribed to session events
         // would carry stale rows that point to a host that no longer exists.
-        let orphan_ids: Vec<i64> = self
-            .conn
-            .prepare_cached("SELECT id FROM sessions WHERE host_alias=?1")?
-            .query_map(rusqlite::params![alias], |row| row.get::<_, i64>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let orphan_ids: Vec<i64> = {
+            let mut stmt = tx.prepare_cached("SELECT id FROM sessions WHERE host_alias=?1")?;
+            let ids = stmt
+                .query_map(rusqlite::params![alias], |row| row.get::<_, i64>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            ids
+        };
+        // What dies with the sessions (as `delete_session` does): their
+        // timeline and the messages addressed to them.
+        tx.execute(
+            "DELETE FROM session_events
+              WHERE session_id IN (SELECT id FROM sessions WHERE host_alias=?1)",
+            rusqlite::params![alias],
+        )?;
+        tx.execute(
+            "DELETE FROM session_messages
+              WHERE to_session_id IN (SELECT id FROM sessions WHERE host_alias=?1)",
+            rusqlite::params![alias],
+        )?;
+        tx.execute(
             "DELETE FROM sessions WHERE host_alias=?1",
             rusqlite::params![alias],
         )?;
-        self.conn
-            .execute("DELETE FROM hosts WHERE alias=?1", rusqlite::params![alias])?;
+        tx.execute("DELETE FROM hosts WHERE alias=?1", rusqlite::params![alias])?;
         // A removed host's control-API token must stop authenticating.
-        self.conn.execute(
+        tx.execute(
             "DELETE FROM host_tokens WHERE host_alias=?1",
             rusqlite::params![alias],
         )?;
+        // Its recorded parent fingerprints (repair) go with it.
+        tx.execute(
+            "DELETE FROM worktree_parent_fingerprints WHERE host_alias=?1",
+            rusqlite::params![alias],
+        )?;
+        tx.commit()?;
         for id in &orphan_ids {
             self.bus.session_killed(*id);
         }
@@ -1674,6 +1769,12 @@ impl Store {
                 .collect();
             tx.execute(
                 &format!("DELETE FROM session_events WHERE session_id IN ({phs})"),
+                params.as_slice(),
+            )?;
+            // And the messages addressed to them (an inbox nobody can read),
+            // as `delete_session` does.
+            tx.execute(
+                &format!("DELETE FROM session_messages WHERE to_session_id IN ({phs})"),
                 params.as_slice(),
             )?;
             tx.execute(
@@ -2433,6 +2534,12 @@ impl Store {
             // they linger as orphans forever.
             tx.execute(
                 &format!("DELETE FROM session_events WHERE session_id IN ({phs})"),
+                params.as_slice(),
+            )?;
+            // And the messages addressed to them (an inbox nobody can read),
+            // as `delete_session` does.
+            tx.execute(
+                &format!("DELETE FROM session_messages WHERE to_session_id IN ({phs})"),
                 params.as_slice(),
             )?;
             tx.execute(
@@ -3548,6 +3655,50 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_hard_delete_reaps_the_inbox_but_keeps_sent_messages() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        store.upsert_host("beta").unwrap();
+        let id = store
+            .upsert_session("work-a", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        let peer = store
+            .upsert_session("peer", "beta", None, None, 1, 1, "running", None)
+            .unwrap();
+        store
+            .insert_message(peer, id, "to the gone", "message", None)
+            .unwrap();
+        store
+            .insert_message(id, peer, "from the gone", "message", None)
+            .unwrap();
+        // Two empty reconciles: ghost, then hard-delete.
+        for ts in [10, 20] {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    alias: "alpha",
+                    reachable: true,
+                    claude_version: None,
+                    tmux_version: None,
+                    last_pinged_at: ts,
+                    probe_started_at: 0,
+                    sessions: &[],
+                    keep: &[],
+                })
+                .unwrap();
+        }
+        assert!(store.get_session_by_id(id).unwrap().is_none());
+        assert!(
+            store.list_inbox(id, false, 10).unwrap().is_empty(),
+            "an inbox nobody can read goes with the row"
+        );
+        assert_eq!(
+            store.list_inbox(peer, false, 10).unwrap().len(),
+            1,
+            "a message the gone session SENT stays in the recipient's inbox"
+        );
+    }
+
+    #[test]
     fn session_messages_inbox_roundtrip_and_mark_read() {
         let s = Store::open_in_memory().expect("open");
         // Two messages to session 5, one decoy to session 9.
@@ -3974,6 +4125,144 @@ mod tests {
             0
         );
         assert_eq!(s.list_sessions_for_host("h").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn delete_host_reaps_timeline_inbox_and_fingerprints_in_one_go() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        s.upsert_host("local").unwrap();
+        let gone = s
+            .upsert_session("dev-a", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        let peer = s
+            .upsert_session("peer", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.insert_session_event(gone, "status_change", Some("idle"))
+            .unwrap();
+        s.insert_session_event(peer, "status_change", Some("idle"))
+            .unwrap();
+        s.insert_message(peer, gone, "to the gone", "message", None)
+            .unwrap();
+        s.insert_message(gone, peer, "from the gone", "message", None)
+            .unwrap();
+        s.record_parent_fingerprint("h", "/h/r/w", "1:2", 1)
+            .unwrap();
+        s.record_parent_fingerprint("local", "/l/r/w", "3:4", 1)
+            .unwrap();
+
+        s.delete_host("h").unwrap();
+
+        assert!(s.list_session_events(gone, 10).unwrap().is_empty());
+        assert!(s.list_inbox(gone, false, 10).unwrap().is_empty());
+        assert_eq!(s.list_session_events(peer, 10).unwrap().len(), 1);
+        assert_eq!(
+            s.list_inbox(peer, false, 10).unwrap().len(),
+            1,
+            "a message the gone session SENT stays in the recipient's inbox"
+        );
+        assert_eq!(s.parent_fingerprint("h", "/h/r/w").unwrap(), None);
+        assert_eq!(
+            s.parent_fingerprint("local", "/l/r/w").unwrap().as_deref(),
+            Some("3:4")
+        );
+    }
+
+    #[test]
+    fn delete_project_reaps_timeline_inbox_and_worktree_fingerprints() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let pid = s.upsert_project("o", "r", "/fleet-test/r").unwrap();
+        let other_pid = s.upsert_project("o", "k", "/fleet-test/k").unwrap();
+        s.upsert_worktree(pid, "feat", "/fleet-test/r/.worktrees/feat", Some("feat"))
+            .unwrap();
+        s.upsert_worktree(
+            other_pid,
+            "keep",
+            "/fleet-test/k/.worktrees/keep",
+            Some("keep"),
+        )
+        .unwrap();
+        let sid = s
+            .upsert_session("dev-r", "local", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
+        let peer = s
+            .upsert_session(
+                "peer",
+                "local",
+                Some(other_pid),
+                None,
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+        s.insert_session_event(sid, "status_change", Some("idle"))
+            .unwrap();
+        s.insert_message(peer, sid, "to the project", "message", None)
+            .unwrap();
+        s.record_parent_fingerprint("local", "/fleet-test/r/.worktrees/feat", "1:2", 1)
+            .unwrap();
+        s.record_parent_fingerprint("local", "/fleet-test/k/.worktrees/keep", "3:4", 1)
+            .unwrap();
+
+        s.delete_project(pid).unwrap();
+
+        assert!(s.list_session_events(sid, 10).unwrap().is_empty());
+        assert!(s.list_inbox(sid, false, 10).unwrap().is_empty());
+        assert_eq!(
+            s.parent_fingerprint("local", "/fleet-test/r/.worktrees/feat")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            s.parent_fingerprint("local", "/fleet-test/k/.worktrees/keep")
+                .unwrap()
+                .as_deref(),
+            Some("3:4")
+        );
+    }
+
+    #[test]
+    fn deleting_worktree_rows_drops_their_fingerprints() {
+        let s = Store::open_in_memory().unwrap();
+        let base = tempfile::TempDir::new().unwrap();
+        let root = base.path().join("r");
+        let root_s = root.to_str().unwrap().to_string();
+        let pid = s.upsert_project("o", "r", &root_s).unwrap();
+        let w1 = s
+            .upsert_worktree(pid, "w1", &format!("{root_s}/.worktrees/w1"), Some("w1"))
+            .unwrap();
+        s.upsert_worktree(pid, "w2", &format!("{root_s}/.worktrees/w2"), Some("w2"))
+            .unwrap();
+        // w1 recorded under its canonical form (the probe's), w2 as given.
+        let w1_canon = Store::fingerprint_keys(&format!("{root_s}/.worktrees/w1"))
+            .pop()
+            .unwrap();
+        s.record_parent_fingerprint("local", &w1_canon, "1:1", 1)
+            .unwrap();
+        s.record_parent_fingerprint("local", &format!("{root_s}/.worktrees/w2"), "2:2", 1)
+            .unwrap();
+        s.record_parent_fingerprint("local", "/elsewhere/w", "9:9", 1)
+            .unwrap();
+
+        s.delete_worktree(w1).unwrap();
+        assert_eq!(s.parent_fingerprint("local", &w1_canon).unwrap(), None);
+
+        s.delete_worktrees_not_in(pid, &[], |p| p.to_string())
+            .unwrap();
+        assert_eq!(
+            s.parent_fingerprint("local", &format!("{root_s}/.worktrees/w2"))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            s.parent_fingerprint("local", "/elsewhere/w")
+                .unwrap()
+                .as_deref(),
+            Some("9:9")
+        );
     }
 
     #[test]
