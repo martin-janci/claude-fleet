@@ -27,7 +27,10 @@ use serde_json::Value;
 pub struct ClaudeAgentRow {
     /// The Claude-internal session ID (used to call `claude logs <id>`).
     pub session_id: Option<String>,
-    /// Display name, matches tmux session name when created with `--name`.
+    /// Display name. Equals the tmux session name only for background
+    /// sessions fleet launches with `claude --bg --name`; interactive rows
+    /// carry Claude's default `<dir>-XX` name (e.g. `jhkljh-f2`), which never
+    /// matches, so those bind by cwd.
     pub name: Option<String>,
     /// Fleet `claude_status` value derived from the row's `state`,
     /// `waitingFor` and `status` (see [`normalize_status`]); `None` when the
@@ -38,8 +41,9 @@ pub struct ClaudeAgentRow {
 }
 
 /// A row exactly as the CLI prints it. The status-ish fields are loose
-/// `Value`s: one row with an unexpected type must not fail the whole array,
-/// because a parse failure drops every agent on the host.
+/// `Value`s, so a future CLI that sends an object where a string is expected
+/// still yields a usable row instead of being skipped by
+/// [`parse_claude_agents_json`].
 #[derive(Deserialize)]
 struct RawAgentRow {
     #[serde(rename = "sessionId", default)]
@@ -137,10 +141,13 @@ fn map_value(v: &str) -> Option<ClaudeStatus> {
 /// Fold a row's `state`, `waitingFor` and `status` into one fleet status.
 ///
 /// Precedence, most specific first:
-/// 1. `state`, the lifecycle: a background row with `state: blocked` and
-///    `status: idle` is blocked, and a `done` one is completed;
-/// 2. a non-empty `waitingFor` means blocked, whatever `status` says;
-/// 3. `status`, in the old vocabulary or as `busy | waiting | idle`.
+/// 1. a terminal `state` (`done`, `failed`, `stopped`): the agent is over,
+///    so a leftover `waitingFor` means nothing;
+/// 2. a non-empty `waitingFor` means blocked, over a non-terminal `state`
+///    (`working`, `idle`) and over any `status`;
+/// 3. any other `state`: a background row with `state: blocked` and
+///    `status: idle` is blocked;
+/// 4. `status`, in the old vocabulary or as `busy | waiting | idle`.
 ///
 /// An unrecognised value falls through to the next source. `None` comes back
 /// when nothing is recognised, so the pane-derived fallback decides.
@@ -149,19 +156,37 @@ fn normalize_status(
     status: Option<&str>,
     waiting_for: Option<&str>,
 ) -> Option<ClaudeStatus> {
-    if let Some(st) = state.and_then(map_value) {
-        return Some(st);
+    let state = state.and_then(map_value);
+    if let Some(
+        terminal @ (ClaudeStatus::Completed | ClaudeStatus::Failed | ClaudeStatus::Stopped),
+    ) = state
+    {
+        return Some(terminal);
     }
     if waiting_for.is_some() {
         return Some(ClaudeStatus::Blocked);
     }
-    status.and_then(map_value)
+    state.or_else(|| status.and_then(map_value))
 }
 
-/// Parse the stdout of `claude agents --json`. Returns empty vec on any parse
-/// failure (the fleet treats missing data as degraded-gracefully, not an error).
+/// Parse the stdout of `claude agents --json`. Output that is not a JSON array
+/// yields an empty vec (the fleet treats missing data as degraded-gracefully,
+/// not an error). Inside the array each row parses on its own: a row with a
+/// mistyped field (`"name": 5`) is skipped and logged, never the whole host.
 pub fn parse_claude_agents_json(json: &str) -> Vec<ClaudeAgentRow> {
-    serde_json::from_str(json).unwrap_or_default()
+    let Ok(values) = serde_json::from_str::<Vec<Value>>(json) else {
+        return Vec::new();
+    };
+    values
+        .into_iter()
+        .filter_map(|v| match serde_json::from_value::<ClaudeAgentRow>(v) {
+            Ok(row) => Some(row),
+            Err(e) => {
+                tracing::debug!(error = %e, "claude agents: skipping a row that does not parse");
+                None
+            }
+        })
+        .collect()
 }
 
 /// Find the first `ClaudeAgentRow` whose `name` matches `tmux_name`.
@@ -388,9 +413,10 @@ mod tests {
             .collect()
     }
 
-    /// Real shape, Claude Code 2.1.267: interactive rows report
-    /// `status: busy|idle` and no `state`. `busy` used to be dropped by
-    /// `known_agent_status`, so every working session fell back to the pane.
+    /// Synthetic rows (made-up ids and timestamps) in the 2.1.267 shape:
+    /// interactive rows report `status: busy|idle` and no `state`. `busy`
+    /// used to be dropped by `known_agent_status`, so every working session
+    /// fell back to the pane.
     #[test]
     fn new_cli_interactive_rows_map_busy_to_working() {
         let json = r#"[
@@ -408,9 +434,10 @@ mod tests {
         assert_eq!(rows[1].status.as_deref(), Some("idle"));
     }
 
-    /// Real shape, Claude Code 2.1.267: background rows carry `id` and
-    /// `state`, some with `status: "idle"` too. `state` wins, so a blocked
-    /// background agent is no longer invisible.
+    /// Synthetic rows (made-up ids and timestamps) in the 2.1.267 shape:
+    /// background rows carry `id` and `state`, some with `status: "idle"`
+    /// too. `state` wins, so a blocked background agent is no longer
+    /// invisible.
     #[test]
     fn new_cli_background_rows_prefer_state_over_status() {
         let json = r#"[
@@ -557,15 +584,69 @@ mod tests {
             Some(Completed)
         );
         assert_eq!(
-            normalize_status(Some("working"), Some("idle"), Some("permission prompt")),
-            Some(Working),
-            "state is the lifecycle and wins over a waiting reason"
-        );
-        assert_eq!(
             normalize_status(None, Some("idle"), Some("x")),
             Some(Blocked)
         );
         assert_eq!(normalize_status(None, Some("busy"), None), Some(Working));
+        assert_eq!(
+            normalize_status(Some("blocked"), Some("idle"), None),
+            Some(Blocked)
+        );
         assert_eq!(normalize_status(None, None, None), None);
+    }
+
+    /// A non-empty `waitingFor` wins over a NON-TERMINAL state (`working`,
+    /// `idle`, `blocked`): the agent is alive and waiting on the user. A
+    /// TERMINAL state (`done`, `failed`, `stopped`) still wins over it,
+    /// because the agent is already over and the reason is leftover.
+    #[test]
+    fn waiting_for_beats_a_non_terminal_state_only() {
+        use ClaudeStatus::*;
+        assert_eq!(
+            normalize_status(Some("working"), Some("busy"), Some("permission prompt")),
+            Some(Blocked),
+            "a working agent that asks for permission is blocked"
+        );
+        assert_eq!(
+            normalize_status(Some("idle"), None, Some("input needed")),
+            Some(Blocked)
+        );
+        for (terminal, want) in [
+            ("done", Completed),
+            ("failed", Failed),
+            ("stopped", Stopped),
+        ] {
+            assert_eq!(
+                normalize_status(Some(terminal), Some("idle"), Some("permission prompt")),
+                Some(want),
+                "{terminal} is terminal and outlives a waiting reason"
+            );
+        }
+        let json = r#"[
+          {"kind":"background","state":"working","waitingFor":"permission prompt"},
+          {"kind":"background","state":"done","waitingFor":"permission prompt"}
+        ]"#;
+        assert_eq!(
+            statuses(json),
+            vec![Some("blocked".into()), Some("completed".into())]
+        );
+    }
+
+    /// A row that does not parse is skipped on its own: one mistyped `name`
+    /// or `cwd` must not drop every other agent on the host.
+    #[test]
+    fn a_row_that_does_not_parse_is_skipped_not_the_whole_host() {
+        let json = r#"[
+          {"sessionId":"a","name":5,"status":"busy"},
+          {"sessionId":"b","cwd":["/x"],"status":"idle"},
+          {"sessionId":"c","name":"keeper","cwd":"/p","status":"busy"}
+        ]"#;
+        let rows = parse_claude_agents_json(json);
+        assert_eq!(rows.len(), 1, "only the two broken rows are skipped");
+        assert_eq!(rows[0].name.as_deref(), Some("keeper"));
+        assert_eq!(rows[0].status.as_deref(), Some("working"));
+        // Output that is not a JSON array at all still yields nothing.
+        assert!(parse_claude_agents_json("not json").is_empty());
+        assert!(parse_claude_agents_json("{}").is_empty());
     }
 }

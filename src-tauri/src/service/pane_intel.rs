@@ -444,18 +444,17 @@ fn is_decoration(c: char) -> bool {
         )
 }
 
-/// Footer cues that only the live REPL shows below its input box: the
-/// spinner's interrupt hint, the shortcut hint, the status line and the
-/// permission-mode line. A dialog replaces the input box and its footer, so
-/// one of these BELOW dialog-looking text means that text is scrollback
-/// (Claude's prose, a diff), not a dialog on screen.
-const LIVE_REPL_CUES: &[&str] = &[
-    "esc to interrupt",
-    "? for shortcuts",
-    "% used",
-    "bypass permissions",
-    "shift+tab to cycle",
-];
+/// Cues that belong to the live input box or the spinner, so seeing one
+/// BELOW dialog-looking text means that text is scrollback (Claude's prose,
+/// a diff), not a dialog on screen. The input prompt line (`❯ …`) counts too,
+/// see [`detect_dialog`].
+///
+/// Deliberately NOT here: the status line (`% used`) and the mode line
+/// (`bypass permissions`, `shift+tab to cycle`). A live capture of a
+/// permission dialog (Claude Code 2.1.267) shows the dialog replacing the
+/// input box, but a custom status line can still be painted underneath, and
+/// a dialog with a status line under it is still a dialog.
+const LIVE_REPL_CUES: &[&str] = &["esc to interrupt", "? for shortcuts"];
 
 /// A permission or question dialog seen on screen.
 struct Dialog {
@@ -816,6 +815,11 @@ mod tests {
         assert_eq!(intel.activity.as_deref(), Some(activity), "{name}");
     }
 
+    /// LIVE CAPTURE (`tmux capture-pane -p -S -8`, Claude Code 2.1.267, a
+    /// throwaway session in a scratch dir, paths anonymised): plain `claude`
+    /// in manual mode asked to run `ls`. Note the real dialog has no "No, and
+    /// tell Claude…" choice — it is caught by "Do you want to proceed?" plus
+    /// numbered choices — and its footer is the idle-looking "Esc to cancel".
     #[test]
     fn bash_permission_dialog_is_blocked_on_permission() {
         assert_dialog(
@@ -824,6 +828,20 @@ mod tests {
             WaitingFor::Permission,
             "waiting for permission: Do you want to proceed?",
         );
+    }
+
+    /// The same live dialog with a status line and mode line painted under
+    /// it. Those are not scrollback cues, so it stays blocked.
+    #[test]
+    fn permission_dialog_with_a_status_line_below_is_still_blocked() {
+        let intel = fixture_intel(
+            "permission_statusline_below",
+            include_str!("testdata/pane_intel/permission_statusline_below.txt"),
+        );
+        assert_eq!(intel.derived_status, Some(ClaudeStatus::Blocked));
+        assert_eq!(intel.waiting_for, Some(WaitingFor::Permission));
+        // The status line is still read for the context percentage.
+        assert_eq!(intel.context_pct, Some(34.0));
     }
 
     #[test]

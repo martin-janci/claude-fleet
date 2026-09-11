@@ -1,16 +1,7 @@
- ▐▛███▛█   Claude Code v2.1.267
-▝▜██████▀  Opus 5 (1M context) with xhigh effort · Claude Max
-  ▝▝ ▝▝    /tmp/scratch
-
-  Fable 5.1 writes better code and reports progress on long tasks. Switch anytime with /model.
-
-❯ Run the shell command ls in this folder using the Bash tool. Nothing else.
-
 ● Bash(ls)
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  Bash command
- Tip: auto mode handles these prompts for you — choose "switch to auto mode" below
 
    ls
    List files in current directory
@@ -24,3 +15,5 @@
    4. No
 
  Esc to cancel · Tab to amend
+  [███████░░░░░░░░░░░░░] 34% used  |  Opus 5 (1M context)  |  /tmp/scratch
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
