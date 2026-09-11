@@ -176,8 +176,11 @@ pub async fn delete_worktree(
         ));
     }
 
+    // Resolve the fingerprint keys before taking the lock: canonicalizing a
+    // local path touches the filesystem (it can hang on a dead NFS mount).
+    let fp_keys = Store::fingerprint_keys_of_worktree(store, args.worktree_id);
     let s = store.lock().map_err(|_| IpcError::lock())?;
-    s.delete_worktree(args.worktree_id)
+    s.delete_worktree(args.worktree_id, &fp_keys)
         .map_err(IpcError::from)?;
     Ok(())
 }

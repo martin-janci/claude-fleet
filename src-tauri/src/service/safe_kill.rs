@@ -401,8 +401,10 @@ pub async fn discard_kill_session(
     }
 
     if let Some(wid) = worktree_id {
+        // Fingerprint keys are resolved before the lock (filesystem access).
+        let fp_keys = Store::fingerprint_keys_of_worktree(store, wid);
         if let Ok(s) = store.lock() {
-            if let Err(e) = s.delete_worktree(wid) {
+            if let Err(e) = s.delete_worktree(wid, &fp_keys) {
                 tracing::warn!(
                     worktree_id = wid,
                     error = %e,
@@ -652,8 +654,10 @@ async fn finalize_safe_kill(
     // beyond this point — the git worktree is already gone on disk; we want
     // the DB and tmux to converge to the same reality.
     if let Some(wid) = worktree_id {
+        // Fingerprint keys are resolved before the lock (filesystem access).
+        let fp_keys = Store::fingerprint_keys_of_worktree(store, wid);
         if let Ok(s) = store.lock() {
-            if let Err(e) = s.delete_worktree(wid) {
+            if let Err(e) = s.delete_worktree(wid, &fp_keys) {
                 tracing::warn!(
                     worktree_id = wid,
                     error = %e,

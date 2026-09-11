@@ -32,6 +32,11 @@ pub struct WorktreeRow {
     pub branch: Option<String>,
 }
 
+/// Parent-fingerprint keys per worktree row id ([`Store::fingerprint_keys`]).
+/// Callers compute them BEFORE they take the store lock, since resolving a
+/// local path touches the filesystem, and pass them to the delete functions.
+pub type FingerprintKeys = std::collections::HashMap<i64, Vec<String>>;
+
 /// Columns every `WorktreeRow` query selects, in [`worktree_from_row`] order.
 const WORKTREE_COLUMNS: &str = "id, project_id, host_alias, name, path, branch";
 
@@ -1324,7 +1329,9 @@ impl Store {
         let mut touched: Vec<i64> = Vec::new();
         for id in &ids {
             touched.extend(session_ids_on_worktree(&self.conn, *id)?);
-            self.delete_worktree(*id)?;
+            // Called under the store lock with the host's own spelling of the
+            // path: no local resolution here, the stored path only.
+            self.delete_worktree(*id, &[])?;
         }
         self.emit_sessions_updated(&touched);
         Ok(ids.len())
@@ -1337,8 +1344,13 @@ impl Store {
     /// expected to have checked for live occupants first (see
     /// `service::worktrees::delete_worktree`). Dead/ghost session rows that
     /// still point here have their `worktree_id` cleared so the FK stays
-    /// consistent.
-    pub fn delete_worktree(&self, id: i64) -> Result<Option<WorktreeRow>, rusqlite::Error> {
+    /// consistent. `fp_keys`: the row's parent-fingerprint keys, precomputed
+    /// by the caller off-lock ([`Self::fingerprint_keys_of_worktree`]).
+    pub fn delete_worktree(
+        &self,
+        id: i64,
+        fp_keys: &[String],
+    ) -> Result<Option<WorktreeRow>, rusqlite::Error> {
         let Some(row) = self.get_worktree(id)? else {
             return Ok(None);
         };
@@ -1348,20 +1360,28 @@ impl Store {
             rusqlite::params![id],
         )?;
         // Its recorded parent fingerprint (repair) goes with the row.
-        Self::delete_fingerprints(&tx, &row.host_alias, &row.path)?;
+        Self::delete_fingerprints(&tx, &row.host_alias, &row.path, fp_keys)?;
         tx.execute("DELETE FROM worktrees WHERE id=?1", rusqlite::params![id])?;
         tx.commit()?;
         self.bus.worktree_removed(id);
         Ok(Some(row))
     }
 
-    /// The keys a local worktree's parent fingerprint may be stored under:
-    /// the path as given and its canonical form (the nearest existing
-    /// ancestor resolved, the missing remainder appended), as the repair
-    /// probe records it.
-    fn fingerprint_keys(path: &str) -> Vec<String> {
+    /// The keys a worktree row's parent fingerprint may be stored under. A
+    /// LOCAL row: the path as given and its canonical form (the nearest
+    /// existing ancestor resolved, the missing remainder appended), as the
+    /// repair probe records it. A remote row's path is on another machine, so
+    /// it is never resolved here: the stored path only.
+    ///
+    /// Resolving a local path touches the filesystem, which can hang on a
+    /// dead NFS mount. So callers run this BEFORE taking the store lock and
+    /// pass the result to the delete functions; the store never calls it.
+    pub fn fingerprint_keys(host_alias: &str, path: &str) -> Vec<String> {
         let trimmed = path.trim_end_matches('/');
         let mut keys = vec![trimmed.to_string()];
+        if host_alias != crate::service::projects::LOCAL_HOST {
+            return keys;
+        }
         let mut cur = std::path::Path::new(trimmed);
         let mut rest: Vec<std::ffi::OsString> = Vec::new();
         loop {
@@ -1386,20 +1406,62 @@ impl Store {
         keys
     }
 
+    /// [`Self::fingerprint_keys`] for many rows, by row id. Touches the
+    /// filesystem for local rows: call it without the store lock.
+    pub fn fingerprint_keys_for<'a>(
+        rows: impl IntoIterator<Item = &'a WorktreeRow>,
+    ) -> FingerprintKeys {
+        rows.into_iter()
+            .map(|w| (w.id, Self::fingerprint_keys(&w.host_alias, &w.path)))
+            .collect()
+    }
+
+    /// One worktree row's fingerprint keys for a caller holding only the
+    /// mutex: the row is read under a brief lock, which is released BEFORE
+    /// the path is resolved. Empty when the row is gone.
+    pub fn fingerprint_keys_of_worktree(store: &std::sync::Mutex<Store>, id: i64) -> Vec<String> {
+        let row = match store.lock() {
+            Ok(s) => s.get_worktree(id).ok().flatten(),
+            Err(_) => None,
+        };
+        row.map(|w| Self::fingerprint_keys(&w.host_alias, &w.path))
+            .unwrap_or_default()
+    }
+
+    /// A project's worktree rows' fingerprint keys, read and resolved the same
+    /// way (lock released before resolving).
+    pub fn fingerprint_keys_of_project(
+        store: &std::sync::Mutex<Store>,
+        project_id: i64,
+    ) -> FingerprintKeys {
+        let rows = match store.lock() {
+            Ok(s) => s.list_worktrees_for_project(project_id).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        Self::fingerprint_keys_for(&rows)
+    }
+
     /// Delete the recorded parent fingerprints (repair) of one worktree row,
     /// under the ROW's host: rows are host-scoped (migration 024), and a
-    /// fingerprint is keyed by (host, path). A local row's fingerprint may be
-    /// stored under the path or its canonical form ([`Self::fingerprint_keys`]).
-    /// A remote row's path is on another machine, so it is never resolved on
-    /// this one: only its stored path is tried, and a local fingerprint with
-    /// the same path is left alone.
-    fn delete_fingerprints(conn: &Connection, host_alias: &str, path: &str) -> Result<()> {
-        let keys = if host_alias == crate::service::projects::LOCAL_HOST {
-            Self::fingerprint_keys(path)
-        } else {
-            vec![path.trim_end_matches('/').to_string()]
-        };
-        for key in keys {
+    /// fingerprint is keyed by (host, path). Tries the stored path plus the
+    /// `keys` the caller precomputed off-lock (a local row's canonical form,
+    /// [`Self::fingerprint_keys`]). Never touches the filesystem, so it is
+    /// safe under the store lock; a local fingerprint with the same path as a
+    /// remote row is left alone.
+    fn delete_fingerprints(
+        conn: &Connection,
+        host_alias: &str,
+        path: &str,
+        keys: &[String],
+    ) -> Result<()> {
+        let stored = path.trim_end_matches('/');
+        let mut all: Vec<&str> = vec![stored];
+        for k in keys {
+            if !all.contains(&k.as_str()) {
+                all.push(k);
+            }
+        }
+        for key in all {
             conn.execute(
                 "DELETE FROM worktree_parent_fingerprints WHERE host_alias=?1 AND wt_path=?2",
                 rusqlite::params![host_alias, key],
@@ -1439,12 +1501,15 @@ impl Store {
     /// doomed row's references move to the surviving row of the same project
     /// with the same canonical path (`canon` maps a stored path to its
     /// canonical form); any left over are cleared, as `delete_worktree` does.
-    /// Emits `worktree:removed` per deleted row. Returns how many went.
+    /// `fp_keys`: parent-fingerprint keys by row id, precomputed off-lock (a
+    /// row missing from it drops its stored path only). Emits
+    /// `worktree:removed` per deleted row. Returns how many went.
     pub fn delete_worktrees_not_in(
         &self,
         project_id: i64,
         keep_names: &[String],
         canon: impl Fn(&str) -> String,
+        fp_keys: &FingerprintKeys,
     ) -> Result<usize, rusqlite::Error> {
         let (keep, doomed): (Vec<WorktreeRow>, Vec<WorktreeRow>) = self
             .list_worktrees_for_project(project_id)?
@@ -1470,7 +1535,12 @@ impl Store {
             )?;
             // Its recorded parent fingerprint (repair) goes with the row, under
             // the row's host, plus the refresh's canonical spelling of it.
-            Self::delete_fingerprints(&tx, &d.host_alias, &d.path)?;
+            Self::delete_fingerprints(
+                &tx,
+                &d.host_alias,
+                &d.path,
+                fp_keys.get(&d.id).map(Vec::as_slice).unwrap_or(&[]),
+            )?;
             tx.execute(
                 "DELETE FROM worktree_parent_fingerprints WHERE host_alias=?1 AND wt_path=?2",
                 rusqlite::params![d.host_alias, key],
@@ -1519,8 +1589,14 @@ impl Store {
     /// the old duplicate scan left such references. Their `worktree_id` is
     /// cleared first, or deleting the rows would fail on the foreign key
     /// after the transcripts were already purged, and they get a
-    /// `session:updated` after the commit.
-    pub fn delete_project(&self, project_id: i64) -> Result<(), crate::ipc_error::IpcError> {
+    /// `session:updated` after the commit. `fp_keys`: the worktree rows'
+    /// parent-fingerprint keys, precomputed off-lock
+    /// ([`Self::fingerprint_keys_of_project`]).
+    pub fn delete_project(
+        &self,
+        project_id: i64,
+        fp_keys: &FingerprintKeys,
+    ) -> Result<(), crate::ipc_error::IpcError> {
         let tx = self
             .conn
             .unchecked_transaction()
@@ -1539,18 +1615,19 @@ impl Store {
               WHERE to_session_id IN (SELECT id FROM sessions WHERE project_id = ?1)",
             rusqlite::params![project_id],
         )?;
-        let wt_rows: Vec<(String, String)> = {
+        let wt_rows: Vec<(i64, String, String)> = {
             let mut stmt =
-                tx.prepare("SELECT host_alias, path FROM worktrees WHERE project_id = ?1")?;
+                tx.prepare("SELECT id, host_alias, path FROM worktrees WHERE project_id = ?1")?;
             let rows = stmt
                 .query_map(rusqlite::params![project_id], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         };
-        for (host, path) in &wt_rows {
-            Self::delete_fingerprints(&tx, host, path)?;
+        for (id, host, path) in &wt_rows {
+            let keys = fp_keys.get(id).map(Vec::as_slice).unwrap_or(&[]);
+            Self::delete_fingerprints(&tx, host, path, keys)?;
         }
         const CROSS: &str = "project_id IS NOT ?1
                AND worktree_id IN (SELECT id FROM worktrees WHERE project_id = ?1)";
@@ -1594,6 +1671,7 @@ impl Store {
     pub fn delete_project_if_unused(
         &self,
         project_id: i64,
+        fp_keys: &FingerprintKeys,
     ) -> Result<bool, crate::ipc_error::IpcError> {
         let in_use: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sessions
@@ -1605,7 +1683,7 @@ impl Store {
         if in_use {
             return Ok(false);
         }
-        self.delete_project(project_id)?;
+        self.delete_project(project_id, fp_keys)?;
         Ok(true)
     }
 
@@ -4400,6 +4478,37 @@ mod tests {
         );
     }
 
+    /// Callers holding only the mutex get the keys with the lock released
+    /// before any path is resolved; a remote path is never resolved here.
+    #[test]
+    fn fingerprint_keys_are_resolved_outside_the_store_lock() {
+        let store = std::sync::Mutex::new(Store::open_in_memory().unwrap());
+        let (local, remote, pid) = {
+            let s = store.lock().unwrap();
+            s.upsert_host("vps").unwrap();
+            let pid = s.upsert_project("o", "r", "/fleet-no-such/r").unwrap();
+            let local = s
+                .upsert_worktree(pid, "l", "/fleet-no-such/r/l", None)
+                .unwrap();
+            let remote = s
+                .upsert_worktree_on("vps", pid, "v", "/srv/r/v", None)
+                .unwrap();
+            (local, remote, pid)
+        };
+        assert_eq!(
+            Store::fingerprint_keys_of_worktree(&store, local),
+            vec!["/fleet-no-such/r/l".to_string()]
+        );
+        assert_eq!(
+            Store::fingerprint_keys_of_worktree(&store, remote),
+            vec!["/srv/r/v".to_string()],
+            "a remote path is never resolved on this machine"
+        );
+        assert!(store.try_lock().is_ok(), "the lock is released");
+        assert_eq!(Store::fingerprint_keys_of_project(&store, pid).len(), 2);
+        assert!(Store::fingerprint_keys_of_worktree(&store, 999_999).is_empty());
+    }
+
     #[test]
     fn bg_reconcile_hard_delete_reaps_timeline_and_inbox_but_keeps_sent_messages() {
         let store = Store::open_in_memory().unwrap();
@@ -4546,6 +4655,7 @@ mod tests {
                 pid,
                 &["main".to_string(), "feature-x".to_string()],
                 |p: &str| p.to_string(),
+                &FingerprintKeys::new(),
             )
             .unwrap();
         assert_eq!(removed, 1);
@@ -4590,7 +4700,7 @@ mod tests {
         // `/tmp/link/r` is another spelling of `/tmp/r`.
         let canon = |p: &str| p.replace("/tmp/link/", "/tmp/");
         let removed = s
-            .delete_worktrees_not_in(pid, &["main".to_string()], canon)
+            .delete_worktrees_not_in(pid, &["main".to_string()], canon, &FingerprintKeys::new())
             .expect("referenced rows must not fail the foreign key");
         assert_eq!(removed, 2);
         assert_eq!(
@@ -4617,13 +4727,16 @@ mod tests {
         s.upsert_session("dev", "local", Some(real), Some(w), 1, 1, "running", None)
             .unwrap();
         assert!(
-            !s.delete_project_if_unused(dup).unwrap(),
+            !s.delete_project_if_unused(dup, &FingerprintKeys::new())
+                .unwrap(),
             "still referenced"
         );
         assert!(s.get_worktree_row(w).unwrap().is_some());
         let free = s.upsert_project("o", "free", "/tmp/free").unwrap();
         s.upsert_worktree(free, "main", "/tmp/free", None).unwrap();
-        assert!(s.delete_project_if_unused(free).unwrap());
+        assert!(s
+            .delete_project_if_unused(free, &FingerprintKeys::new())
+            .unwrap());
     }
 
     #[test]
@@ -4955,7 +5068,7 @@ mod tests {
         s.record_parent_fingerprint("local", "/fleet-test/k/.worktrees/keep", "3:4", 1)
             .unwrap();
 
-        s.delete_project(pid).unwrap();
+        s.delete_project(pid, &FingerprintKeys::new()).unwrap();
 
         assert!(s.list_session_events(sid, 10).unwrap().is_empty());
         assert!(s.list_inbox(sid, false, 10).unwrap().is_empty());
@@ -4972,34 +5085,64 @@ mod tests {
         );
     }
 
+    /// The canonical key is resolved by the CALLER, off-lock
+    /// (`Store::fingerprint_keys`), and handed to the delete functions; the
+    /// store itself never touches the filesystem, so a delete without keys
+    /// removes only the stored path.
+    #[cfg(unix)]
     #[test]
     fn deleting_worktree_rows_drops_their_fingerprints() {
         let s = Store::open_in_memory().unwrap();
         let base = tempfile::TempDir::new().unwrap();
-        let root = base.path().join("r");
-        let root_s = root.to_str().unwrap().to_string();
+        let real = base.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        // Rows keep the symlinked spelling; the probe records the canonical one.
+        let root_s = format!("{}/r", link.to_str().unwrap());
         let pid = s.upsert_project("o", "r", &root_s).unwrap();
-        let w1 = s
-            .upsert_worktree(pid, "w1", &format!("{root_s}/.worktrees/w1"), Some("w1"))
-            .unwrap();
+        let w1_path = format!("{root_s}/.worktrees/w1");
+        let w3_path = format!("{root_s}/.worktrees/w3");
+        let w1 = s.upsert_worktree(pid, "w1", &w1_path, Some("w1")).unwrap();
+        let w3 = s.upsert_worktree(pid, "w3", &w3_path, Some("w3")).unwrap();
         s.upsert_worktree(pid, "w2", &format!("{root_s}/.worktrees/w2"), Some("w2"))
             .unwrap();
-        // w1 recorded under its canonical form (the probe's), w2 as given.
-        let w1_canon = Store::fingerprint_keys(&format!("{root_s}/.worktrees/w1"))
-            .pop()
-            .unwrap();
+        let w1_keys = Store::fingerprint_keys("local", &w1_path);
+        let w3_keys = Store::fingerprint_keys("local", &w3_path);
+        assert_eq!(
+            w1_keys.len(),
+            2,
+            "the canonical spelling differs: {w1_keys:?}"
+        );
+        let (w1_canon, w3_canon) = (w1_keys[1].clone(), w3_keys[1].clone());
         s.record_parent_fingerprint("local", &w1_canon, "1:1", 1)
+            .unwrap();
+        s.record_parent_fingerprint("local", &w3_canon, "3:3", 1)
             .unwrap();
         s.record_parent_fingerprint("local", &format!("{root_s}/.worktrees/w2"), "2:2", 1)
             .unwrap();
         s.record_parent_fingerprint("local", "/elsewhere/w", "9:9", 1)
             .unwrap();
 
-        s.delete_worktree(w1).unwrap();
+        // The precomputed keys reach the delete: the canonical key goes.
+        s.delete_worktree(w1, &w1_keys).unwrap();
         assert_eq!(s.parent_fingerprint("local", &w1_canon).unwrap(), None);
+        // Without keys the store resolves nothing itself.
+        s.delete_worktree(w3, &[]).unwrap();
+        assert_eq!(
+            s.parent_fingerprint("local", &w3_canon).unwrap().as_deref(),
+            Some("3:3"),
+            "the store never canonicalizes under its lock"
+        );
 
-        s.delete_worktrees_not_in(pid, &[], |p| p.to_string())
-            .unwrap();
+        let rows = s.list_worktrees_for_project(pid).unwrap();
+        s.delete_worktrees_not_in(
+            pid,
+            &[],
+            |p| p.to_string(),
+            &Store::fingerprint_keys_for(&rows),
+        )
+        .unwrap();
         assert_eq!(
             s.parent_fingerprint("local", &format!("{root_s}/.worktrees/w2"))
                 .unwrap(),
@@ -5991,7 +6134,8 @@ mod tests {
         s.record_parent_fingerprint("vps", path, "9:9", 1).unwrap();
         s.record_parent_fingerprint("local", path, "1:1", 1)
             .unwrap();
-        s.delete_worktree(remote).unwrap();
+        s.delete_worktree(remote, &Store::fingerprint_keys("vps", path))
+            .unwrap();
         assert_eq!(s.parent_fingerprint("vps", path).unwrap(), None);
         assert_eq!(
             s.parent_fingerprint("local", path).unwrap().as_deref(),
@@ -6005,7 +6149,7 @@ mod tests {
         s.record_parent_fingerprint("vps", other, "9:8", 1).unwrap();
         s.record_parent_fingerprint("local", other, "1:2", 1)
             .unwrap();
-        s.delete_project(pid).unwrap();
+        s.delete_project(pid, &FingerprintKeys::new()).unwrap();
         assert_eq!(s.parent_fingerprint("vps", other).unwrap(), None);
         assert_eq!(
             s.parent_fingerprint("local", other).unwrap().as_deref(),
@@ -6343,8 +6487,13 @@ mod tests {
             .upsert_worktree(pid, "main", "/tmp/r", Some("main"))
             .unwrap();
         bus.take();
-        s.delete_worktrees_not_in(pid, &["main".to_string()], |p: &str| p.to_string())
-            .unwrap();
+        s.delete_worktrees_not_in(
+            pid,
+            &["main".to_string()],
+            |p: &str| p.to_string(),
+            &FingerprintKeys::new(),
+        )
+        .unwrap();
         let evts = bus.take();
         assert!(
             evts.contains(&format!("session:updated:{sid}")),
