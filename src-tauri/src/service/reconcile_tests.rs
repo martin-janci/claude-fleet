@@ -138,6 +138,26 @@ impl Fleet {
         );
     }
 
+    /// Wait until the fake has recorded a call on `host` whose command
+    /// contains `needle`. The fake records a call before its reply starts
+    /// (e.g. before a `Reply::Hang` sleeps), so this gates a concurrent
+    /// writer on "the probe is in flight" instead of a guessed timer.
+    async fn called(&self, host: &str, needle: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !self
+            .fake
+            .calls_for(host)
+            .iter()
+            .any(|c| c.command().contains(needle))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no {needle:?} call on {host}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
     fn try_row(&self, name: &str, host: &str) -> Option<SessionRow> {
         self.store.lock().unwrap().get_session(name, host).unwrap()
     }
@@ -358,6 +378,11 @@ async fn failed_pane_capture_preserves_status_and_stuck_flag() {
         "an unobserved pane keeps the stuck flag and its episode start"
     );
     assert_eq!(after.claude_status.as_deref(), Some("blocked"));
+    assert_eq!(
+        f.timeline(before.id).len(),
+        2,
+        "an unobserved pane changes no stored value, so no status_change"
+    );
 }
 
 #[tokio::test]
@@ -390,36 +415,51 @@ async fn pane_without_a_status_signal_does_not_log_phantom_status_changes() {
 }
 
 #[tokio::test]
-async fn hook_stamped_status_newer_than_the_pass_logs_no_status_change() {
-    // The #50 guard: a hook that landed at or after the probe started keeps
-    // its claude_status over the pane guess. The row does not change, so no
-    // status_change may be recorded for the pane's (discarded) value.
+async fn no_phantom_status_change_when_the_last_hook_at_guard_wins() {
+    // The #50 guard: a hook that lands while a probe is in flight keeps its
+    // claude_status over the probe's pane guess. The detector used to compare
+    // the (post-hook) stored row with the discarded pane value and log a
+    // status_change although the row did not change.
     let f = Fleet::new(&["alpha"]);
     f.list("alpha", "work|1|2|0|/tmp/w\n");
-    f.agents("alpha", "[]\n");
+    f.agents(
+        "alpha",
+        r#"[{"sessionId":"c1","name":"work","cwd":"/tmp/w"}]"#,
+    );
     f.pane("alpha", "work", IDLE);
     f.pass().await;
-    let id = f.row("work", "alpha").id;
-    // A hook stamped after any probe this test can start.
-    f.store
-        .lock()
-        .unwrap()
-        .conn_ref()
-        .execute(
-            "UPDATE sessions SET last_hook_at=?1 WHERE id=?2",
-            [now_unix() + 3600, id],
-        )
-        .unwrap();
+    let r1 = f.row("work", "alpha");
+    assert_eq!(r1.claude_session_id.as_deref(), Some("c1"));
+    assert_eq!(r1.claude_status.as_deref(), Some("idle"));
 
-    f.pane("alpha", "work", WORKING);
-    f.pass().await;
+    // Pass 2: the probe stalls on `claude agents` (after `started_at` is
+    // taken) and a UserPromptSubmit hook lands meanwhile. The pane still
+    // says idle.
+    f.fake.on_host(
+        "alpha",
+        Match::script_contains("claude agents --json"),
+        Reply::Hang {
+            for_: Duration::from_millis(300),
+        },
+    );
+    f.fake.clear_calls();
+    let hook = async {
+        f.called("alpha", "claude agents --json").await;
+        f.store
+            .lock()
+            .unwrap()
+            .record_prompt_submit_hook("c1")
+            .unwrap()
+            .expect("the hook matches the row");
+    };
+    tokio::join!(f.pass(), hook);
     assert_eq!(
         f.row("work", "alpha").claude_status.as_deref(),
-        Some("idle"),
+        Some("working"),
         "the hook-stamped status wins over the pane"
     );
     assert_eq!(
-        f.timeline(id),
+        f.timeline(r1.id),
         Vec::<(String, Option<String>)>::new(),
         "the guard kept the stored status, so nothing transitioned"
     );
@@ -542,8 +582,10 @@ async fn stale_probe_does_not_ghost_a_row_stamped_after_it_started() {
             for_: Duration::from_millis(600),
         },
     );
+    f.fake.clear_calls();
     let concurrent_create = async {
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // The probe has taken `started_at` and is blocked in list-sessions.
+        f.called("alpha", "tmux list-sessions").await;
         let s = f.store.lock().unwrap();
         s.upsert_session("fresh", "alpha", None, None, 1, 1, "running", None)
             .unwrap();
@@ -728,36 +770,31 @@ async fn multi_host_pass_isolates_timeout_and_garbage_hosts_and_frees_the_gate()
     f.session_row_events();
 
     // The pass runs through the real gate entry point (`run_full_reconcile`).
-    // gamma hangs for the 150 ms ssh wall clock, so 50 ms in the pass is
-    // still running and holds the single slot.
+    // A second call made while the first is in flight (gamma's probe is
+    // hanging on the ssh wall clock) must not queue a second pass.
     let gate = ReconcileGate::new();
-    let mid_pass_probe = async {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        gate.try_begin().is_none()
+    assert!(!gate.is_fresh(Duration::from_secs(60)));
+    let concurrent = async {
+        f.called("gamma", "list-sessions").await;
+        run_full_reconcile_for_test(&f.store, &f.deps, &gate).await
     };
     let start = std::time::Instant::now();
-    let (ran, busy_mid_pass) = tokio::join!(
+    let (first, second) = tokio::join!(
         run_full_reconcile_for_test(&f.store, &f.deps, &gate),
-        mid_pass_probe
+        concurrent
     );
     let elapsed = start.elapsed();
+    assert!(first.expect("the pass completes"), "a free gate runs");
     assert!(
-        ran.expect("the pass completes"),
-        "a free gate runs the pass"
+        !second.expect("a skipped call is not an error"),
+        "a concurrent call is skipped while a pass runs"
     );
-    assert!(busy_mid_pass, "single slot while a pass runs");
-    assert_eq!(gate.passes(), 1, "the completed pass is counted");
+    assert_eq!(gate.passes(), 1, "only the completed pass is counted");
     assert!(gate.is_fresh(Duration::from_secs(60)));
-    {
-        let _held = gate
-            .try_begin()
-            .expect("gate released after erroring probes");
-        let skipped = run_full_reconcile_for_test(&f.store, &f.deps, &gate)
-            .await
-            .unwrap();
-        assert!(!skipped, "a held gate skips the pass instead of queueing");
-    }
-    assert_eq!(gate.passes(), 1);
+    assert!(
+        gate.try_begin().is_some(),
+        "gate released after a pass with erroring probes"
+    );
     assert!(
         elapsed < Duration::from_secs(3),
         "bounded by the ssh wall clock, not the 5 s probe cap: {elapsed:?}"
@@ -804,6 +841,28 @@ async fn multi_host_pass_isolates_timeout_and_garbage_hosts_and_frees_the_gate()
             "{host}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_failed_full_pass_is_not_marked_fresh_and_frees_the_gate() {
+    let f = Fleet::new(&[]);
+    // Poison the store mutex so the pass fails at its first lock.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = f.store.lock().unwrap();
+        panic!("poison the store mutex");
+    }));
+    assert!(f.store.is_poisoned());
+    let gate = ReconcileGate::new();
+    let err = run_full_reconcile_for_test(&f.store, &f.deps, &gate)
+        .await
+        .expect_err("a poisoned store fails the pass");
+    assert_eq!(err.code, crate::ipc_error::IpcError::lock().code);
+    assert!(
+        !gate.is_fresh(Duration::from_secs(60)),
+        "a failed pass must not make the fleet look fresh"
+    );
+    assert_eq!(gate.passes(), 0);
+    assert!(gate.try_begin().is_some(), "a failed pass frees the gate");
 }
 
 #[tokio::test]
