@@ -1473,7 +1473,6 @@ impl FleetTools {
             p.session_id,
             p.host_alias.as_deref(),
             p.tmux_name.as_deref(),
-        ,
             "the session to retire",
         )?;
         let args = safe_kill::SafeKillSessionArgs {
@@ -1547,9 +1546,11 @@ impl FleetTools {
                 p.session_id, p.host_alias, p.old_name, p.new_name
             ),
         );
-        let (host_alias, old_name) =
-            self.resolve_target(
-            &caller,p.session_id, p.host_alias.as_deref(), p.old_name.as_deref(),
+        let (host_alias, old_name) = self.resolve_target(
+            &caller,
+            p.session_id,
+            p.host_alias.as_deref(),
+            p.old_name.as_deref(),
             "the session to rename",
         )?;
         let args = sessions::RenameSessionArgs {
@@ -1585,7 +1586,6 @@ impl FleetTools {
             p.session_id,
             p.host_alias.as_deref(),
             p.tmux_name.as_deref(),
-        ,
             "the session to label",
         )?;
         let args = sessions::SetFriendlyNameArgs {
@@ -1612,9 +1612,11 @@ impl FleetTools {
                 p.session_id, p.host_alias, p.name
             ),
         );
-        let (host_alias, name) =
-            self.resolve_target(
-            &caller,p.session_id, p.host_alias.as_deref(), p.name.as_deref(),
+        let (host_alias, name) = self.resolve_target(
+            &caller,
+            p.session_id,
+            p.host_alias.as_deref(),
+            p.name.as_deref(),
             "the session to restart",
         )?;
         let args = sessions::RestartSessionArgs {
@@ -2522,8 +2524,15 @@ mod tests {
         assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
         assert!(err.message.contains("turanga"));
         // A lying host_alias alongside the id changes nothing.
-        let err = resolve_and_gate(&store, &c, Some(other), Some("mefistos"), Some("dev-b"), "x")
-            .unwrap_err();
+        let err = resolve_and_gate(
+            &store,
+            &c,
+            Some(other),
+            Some("mefistos"),
+            Some("dev-b"),
+            "x",
+        )
+        .unwrap_err();
         assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
         // Unknown id surfaces as E_NOTFOUND before any host check; master passes.
         let err = resolve_and_gate(&store, &c, Some(9999), None, None, "x").unwrap_err();

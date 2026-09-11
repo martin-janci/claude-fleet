@@ -115,8 +115,9 @@
     } else if (!r.ok) {
       mcpError = r.error.message;
     }
-    await loadHostTokens();
-    const fs = await loadFleetSettings();
+    // Independent fetches, in parallel: a failed token fetch must not hide
+    // the automation section's state and vice versa.
+    const [fs] = await Promise.all([loadFleetSettings(), loadHostTokens()]);
     if (!fs.ok) automationError = fs.error.message;
   });
 

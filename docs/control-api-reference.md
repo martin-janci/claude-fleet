@@ -65,9 +65,9 @@ Parameters: `limit`, `mark_read`, `session_id`, `summary`, `unread_only`
 
 ### `kill_session`
 
-Kill a session on a host: a tmux session by name, or a background agent row (name `bg:<uuid>`) via `claude stop` — the latter is idempotent, so it also clears a stale row whose process already died. Returns the killed session's id. May return E_CONFIRM_REQUIRED when desktop confirmation is on.
+Kill a session on a host: a tmux session by name, or a background agent row (name `bg:<uuid>`) via `claude stop` — the latter is idempotent, so it also clears a stale row whose process already died. Returns the killed session's id. Address the session with session_id OR host_alias + name. May return E_CONFIRM_REQUIRED when desktop confirmation is on.
 
-Parameters: `confirm_nonce`, `force`, `host_alias`, `name`
+Parameters: `confirm_nonce`, `force`, `host_alias`, `name`, `session_id`
 
 ### `list_accounts`
 
@@ -85,9 +85,9 @@ Parameters: `summary`
 
 ### `list_sessions`
 
-List tmux sessions across reachable hosts. Slim summary rows by default; pass summary=false for the full SessionRow. Optional filters: host_alias, project_id, status, claude_status, include_lost (default false drops ghosts); `limit` caps the row count after filtering (default: all). claude_status is one of working | blocked | completed | failed | stopped | idle; stuck_kind is one of auth_menu | reconnect | trust_prompt | oom | press_enter.
+List tmux sessions across reachable hosts. Slim summary rows by default; pass summary=false for the full SessionRow. Optional filters: host_alias, project_id, status, claude_status, include_lost (default false drops ghosts); `limit` caps the row count after filtering (default: all); `force` runs a reconcile pass first instead of serving the recent cache. claude_status is one of working | blocked | completed | failed | stopped | idle; stuck_kind is one of auth_menu | reconnect | trust_prompt | oom | press_enter; ci_status (full rows) is one of passing | failing | pending (null when the session has no PR or its PR has no checks).
 
-Parameters: `claude_status`, `host_alias`, `include_lost`, `limit`, `project_id`, `status`, `summary`
+Parameters: `claude_status`, `force`, `host_alias`, `include_lost`, `limit`, `project_id`, `status`, `summary`
 
 ### `list_worktrees`
 
@@ -97,7 +97,7 @@ Parameters: `project_id`
 
 ### `new_bg_session`
 
-Launch a supervised headless (background) Claude session on a host with an initial prompt. Returns the new Claude session id as JSON; track progress with peek_session.
+Launch a supervised headless (background) Claude session on a host with an initial prompt. Returns JSON with the new claude_session_id AND the fleet row (`session`, registered by an immediate reconcile; the key is absent if the agent was not matched yet — it appears on the next tick) so the next call can be peek_session { session_id }. The prompt becomes the row's default friendly name and last_prompt.
 
 Parameters: `host_alias`, `name`, `prompt`
 
@@ -115,9 +115,9 @@ Parameters: `base_branch`, `host_alias`, `name`, `new_worktree`, `project_id`, `
 
 ### `peek_session`
 
-Peek at a session's background Claude logs. Returns an informational message for interactive sessions with no background job.
+Peek at a session's background Claude logs. Address it with session_id (from list_sessions) OR claude_session_id (the id new_bg_session returned; add host_alias while the fleet row does not exist yet). Returns an informational message for interactive sessions with no background job.
 
-Parameters: `session_id`
+Parameters: `claude_session_id`, `host_alias`, `session_id`
 
 ### `peer_status`
 
@@ -149,9 +149,9 @@ Rescan the local projects directory for new or removed repositories and worktree
 
 ### `register_self`
 
-Mark the calling session as the fleet controller; kill/recreate/restart refuse to target it without force. A per-host token may only register a session on its own host (E_FORBIDDEN).
+Mark the calling session as the fleet controller; kill/recreate/restart refuse to target it without force. Address yourself with session_id (from whoami) OR host_alias + tmux_name. A per-host token may only register a session on its own host (E_FORBIDDEN).
 
-Parameters: `host_alias`, `tmux_name`
+Parameters: `host_alias`, `session_id`, `tmux_name`
 
 ### `related_sessions`
 
@@ -167,9 +167,9 @@ Parameters: `alias`
 
 ### `rename_session`
 
-Rename a tmux session on a host. Returns the updated session row as JSON.
+Rename a tmux session on a host. Returns the updated session row as JSON. Address the session with session_id OR host_alias + old_name.
 
-Parameters: `host_alias`, `new_name`, `old_name`
+Parameters: `host_alias`, `new_name`, `old_name`, `session_id`
 
 ### `repo_branches`
 
@@ -221,15 +221,15 @@ Parameters: `session_id`
 
 ### `restart_session`
 
-Restart a tmux session (kill and recreate it in the same place). Returns the updated session row as JSON.
+Restart a tmux session (kill and recreate it in the same place). Returns the updated session row as JSON. Address the session with session_id OR host_alias + name.
 
-Parameters: `force`, `host_alias`, `name`
+Parameters: `force`, `host_alias`, `name`, `session_id`
 
 ### `safe_kill_session`
 
-Ask a running Claude session to safely persist its work (commit + push), then arm deletion of its worktree + tmux session. Returns the row with safe_kill_state=requested; the actual delete fires only after the SAFE_REMOVE_READY marker AND a clean-tree check. Transitions ('ready', 'failed') arrive via row events.
+Ask a running Claude session to safely persist its work (commit + push), then arm deletion of its worktree + tmux session. Returns the row with safe_kill_state=requested; the actual delete fires only after the SAFE_REMOVE_READY marker AND a clean-tree check. Transitions ('ready', 'failed') arrive via row events. Address the session with session_id OR host_alias + tmux_name.
 
-Parameters: `host_alias`, `tmux_name`
+Parameters: `host_alias`, `session_id`, `tmux_name`
 
 ### `send_message`
 
@@ -239,9 +239,9 @@ Parameters: `body`, `deliver`, `from_session_id`, `kind`, `raw`, `submit`, `to_s
 
 ### `send_prompt`
 
-Send and SUBMIT a prompt to a running Claude session's REPL (literal text, then one Enter). This is how you steer a session. Set submit=false to stage text in the REPL without submitting it. The text is prefixed with an untrusted-content marker line unless raw=true (master token only).
+Send and SUBMIT a prompt to a running Claude session's REPL (literal text, then one Enter). This is how you steer a session. Set submit=false to stage text in the REPL without submitting it. Address the session with session_id OR host_alias + tmux_name. The first prompt to a still-unnamed session also becomes its friendly name. The text is prefixed with an untrusted-content marker line unless raw=true (master token only).
 
-Parameters: `host_alias`, `prompt`, `raw`, `submit`, `tmux_name`
+Parameters: `host_alias`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
 
 ### `session_history`
 
@@ -257,15 +257,21 @@ Parameters: `confirm_nonce`, `content`, `host_alias`
 
 ### `set_friendly_name`
 
-Set the session's friendly display name (shown when the user toggles friendly names on). Called once per task by the in-session agent — short (3–6 words). Empty string clears. Returns the updated row.
+Set the session's friendly display name (shown when the user toggles friendly names on). Called once per task by the in-session agent — short (3–6 words). Empty string clears. Returns the updated row. Address the session with session_id OR host_alias + tmux_name.
 
-Parameters: `friendly_name`, `host_alias`, `tmux_name`
+Parameters: `friendly_name`, `host_alias`, `session_id`, `tmux_name`
 
 ### `spawn_review`
 
 Spawn a review session: a new Claude session in the source session's worktree, seeded with a review prompt. Returns the new review session row as JSON.
 
 Parameters: `prompt`, `source_session_id`
+
+### `whoami`
+
+Find your own fleet row from your tmux session name (`tmux display-message -p '#S'`). Returns the single matching session as JSON (id, host_alias, is_controller, …). E_NOTFOUND when fleet has not reconciled the session yet; E_AMBIGUOUS when the same name exists on several hosts — the error's details list {session_id, host_alias} candidates, pick yours and use session_id from then on.
+
+Parameters: `tmux_name`
 
 ## Tauri IPC commands
 
@@ -293,6 +299,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::new_bg_session`
 - `commands::sessions::peek_session`
 - `commands::sessions::purge_project`
+- `commands::sessions::get_fleet_settings`
+- `commands::sessions::set_fleet_setting`
 - `commands::files::repo_changes`
 - `commands::files::repo_tree`
 - `commands::files::repo_file`
