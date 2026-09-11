@@ -1125,7 +1125,9 @@ pub fn plan_with(
 /// Render the git steps of a plan into one `bash` script. Prints
 /// `outcome=<...>` lines for the parts whose result is only known at run
 /// time (which branch source the add used). `--` separates options from
-/// paths / refs wherever git accepts it.
+/// paths / refs wherever git accepts it. Test-only: production renders
+/// through [`render_git_script_expecting`] (with or without an expected pair).
+#[cfg(test)]
 pub fn render_git_script(root: &str, steps: &[Step]) -> String {
     render_git_script_expecting(root, steps, None)
 }
@@ -6050,14 +6052,15 @@ mod tests {
             .await
             .unwrap();
         assert!(rep.healthy);
-        let s = store.lock().unwrap();
-        assert_eq!(
-            s.parent_fingerprint("local", VANISHED_WT)
-                .unwrap()
-                .as_deref(),
-            Some("42:7")
-        );
-        drop(s);
+        {
+            let s = store.lock().unwrap();
+            assert_eq!(
+                s.parent_fingerprint("local", VANISHED_WT)
+                    .unwrap()
+                    .as_deref(),
+                Some("42:7")
+            );
+        }
         // A vanished worktree never overwrites what was recorded.
         let (store2, _, _) = seeded_store(VANISHED_WT);
         let exec = FakeExec::new(vec![ok(&vanished_out(true))]);
