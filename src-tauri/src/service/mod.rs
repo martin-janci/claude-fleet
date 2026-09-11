@@ -27,5 +27,7 @@ pub mod repair;
 pub mod safe_kill;
 pub mod sessions;
 pub mod settings;
+pub mod tasks;
+pub mod transcript;
 pub mod tunnel;
 pub mod worktrees;

@@ -51,7 +51,7 @@ function row(over: Partial<SessionRow> = {}): SessionRow {
     safe_kill_state: null,
     safe_kill_nonce: null,
     safe_kill_detail: null,
-    safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null,
+    safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [],
     ...over,
   };
 }
@@ -95,6 +95,23 @@ describe('subscribeToRowEvents', () => {
     fire('session:killed', { id: 99 });
     await flush();
     expect(killed).toEqual([99]);
+  });
+
+  it('delivers task:updated to onTaskEvents as one batch', async () => {
+    const seen: Array<[number, string]> = [];
+    await subscribeToRowEvents({
+      onTaskEvents: (events) => {
+        for (const ev of events) seen.push([ev.row.id, ev.row.state]);
+      },
+    });
+    const task = {
+      id: 5, requester_session_id: 1, worker_session_id: 2, prompt: 'x', state: 'running',
+      result: null, error: null, created_at: 1, started_at: 1, finished_at: null,
+    };
+    fire('task:updated', task);
+    fire('task:updated', { ...task, state: 'done', result: 'ok', finished_at: 2 });
+    await flush();
+    expect(seen).toEqual([[5, 'running'], [5, 'done']]);
   });
 
   it('returns unsubscribe that detaches all listeners', async () => {

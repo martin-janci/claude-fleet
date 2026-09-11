@@ -70,6 +70,15 @@ export interface SessionRow {
   /** Last Stop hook (turn completed). */
   last_turn_at: number | null;
   ci_status: CiStatus | null;
+  // Orchestration fields (migration 020).
+  /** Completed turns, bumped by every Stop hook. */
+  turn_seq: number;
+  /** Unix secs of the last Stop hook. */
+  last_stop_at: number | null;
+  /** Requester session that dispatched the task this session works on. */
+  parent_session_id: number | null;
+  /** Labels set via `set_session_tags`; empty when none. */
+  tags: string[];
 }
 
 export const sessions = writable<SessionRow[]>([]);

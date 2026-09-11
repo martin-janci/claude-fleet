@@ -381,15 +381,27 @@ pub fn build_hook_config(port: u16, token: &str) -> String {
     let v = serde_json::json!({
         "hooks": {
             "Stop": build_hook_block(port, token, ""),
-            "PostToolUse": build_hook_block(port, token, "WorktreeCreate")
+            "UserPromptSubmit": build_hook_block(port, token, ""),
+            "PostToolUse": build_hook_block(port, token, "EnterWorktree")
         }
     });
     serde_json::to_string_pretty(&v).unwrap()
 }
 
+/// The hook events fleet installs, with their matcher. `Stop` is the
+/// completion signal (turn over → idle, `turn_seq` bump), `UserPromptSubmit`
+/// the busy signal (turn starting → working), `PostToolUse(EnterWorktree)`
+/// the worktree auto-registration.
+pub(crate) const FLEET_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("Stop", ""),
+    ("UserPromptSubmit", ""),
+    ("PostToolUse", "EnterWorktree"),
+];
+
 /// Pure merge: given `existing` (current `~/.claude/settings.json` content,
 /// possibly empty), return new pretty-JSON with fleet's Stop +
-/// PostToolUse(WorktreeCreate) http hooks installed/refreshed.
+/// UserPromptSubmit + PostToolUse(EnterWorktree) http hooks
+/// installed/refreshed.
 ///
 /// Any prior fleet hook entries pointing at the same port URL — the current
 /// `type: "http"` form OR the pre-Track-B `curl … /hook?token=` command form
@@ -462,19 +474,14 @@ pub(crate) fn merge_hook_into_settings_json(
         .as_object_mut()
         .ok_or_else(|| IpcError::new("E_PARSE", "hooks is not an object"))?;
 
-    let mut stop_arr = strip_fleet(hooks.get("Stop").unwrap_or(&serde_json::json!([])));
-    stop_arr.as_array_mut().unwrap().push(serde_json::json!({
-        "matcher": "",
-        "hooks": [hook_entry(port, token)]
-    }));
-    hooks.insert("Stop".into(), stop_arr);
-
-    let mut ptu_arr = strip_fleet(hooks.get("PostToolUse").unwrap_or(&serde_json::json!([])));
-    ptu_arr.as_array_mut().unwrap().push(serde_json::json!({
-        "matcher": "WorktreeCreate",
-        "hooks": [hook_entry(port, token)]
-    }));
-    hooks.insert("PostToolUse".into(), ptu_arr);
+    for (event, matcher) in FLEET_HOOK_EVENTS {
+        let mut arr = strip_fleet(hooks.get(*event).unwrap_or(&serde_json::json!([])));
+        arr.as_array_mut().unwrap().push(serde_json::json!({
+            "matcher": matcher,
+            "hooks": [hook_entry(port, token)]
+        }));
+        hooks.insert((*event).to_string(), arr);
+    }
 
     serde_json::to_string_pretty(&settings).map_err(|e| IpcError::new("E_SERIALIZE", e.to_string()))
 }
@@ -595,12 +602,18 @@ mod tests {
         let cfg = build_hook_config(4180, "abc");
         let v: serde_json::Value = serde_json::from_str(&cfg).unwrap();
         assert!(v["hooks"]["Stop"].is_array());
+        assert!(v["hooks"]["UserPromptSubmit"].is_array());
         assert!(v["hooks"]["PostToolUse"].is_array());
+        assert_eq!(v["hooks"]["UserPromptSubmit"][0]["matcher"], "");
+        assert_eq!(
+            v["hooks"]["UserPromptSubmit"][0]["hooks"][0]["url"],
+            "http://127.0.0.1:4180/hook"
+        );
         let h = &v["hooks"]["Stop"][0]["hooks"][0];
         assert_eq!(h["type"], "http");
         assert!(h["url"].as_str().unwrap().contains("4180"));
         assert_eq!(h["headers"]["Authorization"], "Bearer abc");
-        assert_eq!(v["hooks"]["PostToolUse"][0]["matcher"], "WorktreeCreate");
+        assert_eq!(v["hooks"]["PostToolUse"][0]["matcher"], "EnterWorktree");
     }
 
     #[test]
@@ -614,10 +627,57 @@ mod tests {
         assert_eq!(h["url"], "http://127.0.0.1:4180/hook");
         assert_eq!(h["headers"]["Authorization"], "Bearer tok");
         let ptu = v["hooks"]["PostToolUse"].as_array().unwrap();
-        assert_eq!(ptu[0]["matcher"], "WorktreeCreate");
+        assert_eq!(ptu[0]["matcher"], "EnterWorktree");
+        // The busy signal (Wave 3 Track E) rides the same bearer entry.
+        let ups = v["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(ups.len(), 1);
+        assert_eq!(ups[0]["matcher"], "");
+        assert_eq!(ups[0]["hooks"][0]["headers"]["Authorization"], "Bearer tok");
         assert!(
             !out.contains("token=tok"),
             "token must not appear in a URL: {out}"
+        );
+    }
+
+    #[test]
+    fn merge_hook_adds_user_prompt_submit_to_a_pre_track_e_install() {
+        // A host provisioned before Track E has only Stop + PostToolUse; a
+        // re-provision must add UserPromptSubmit once and keep it idempotent.
+        let pre = merge_hook_into_settings_json("", 4180, "tok").unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&pre).unwrap();
+        v["hooks"]
+            .as_object_mut()
+            .unwrap()
+            .remove("UserPromptSubmit");
+        let stripped = serde_json::to_string_pretty(&v).unwrap();
+        let out = merge_hook_into_settings_json(&stripped, 4180, "tok").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["hooks"]["UserPromptSubmit"].as_array().unwrap().len(), 1);
+        let again = merge_hook_into_settings_json(&out, 4180, "tok").unwrap();
+        assert_eq!(out, again);
+    }
+
+    #[test]
+    fn merge_hook_replaces_a_stale_worktree_create_entry() {
+        // Earlier provisions registered PostToolUse(matcher "WorktreeCreate"),
+        // which matches no tool. A re-provision must swap it for
+        // "EnterWorktree", not add a second fleet entry beside it.
+        let stale = serde_json::json!({
+            "hooks": { "PostToolUse": [{
+                "matcher": "WorktreeCreate",
+                "hooks": [hook_entry(4180, "old")]
+            }] }
+        })
+        .to_string();
+        let out = merge_hook_into_settings_json(&stale, 4180, "tok").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let ptu = v["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(ptu.len(), 1, "{ptu:?}");
+        assert_eq!(ptu[0]["matcher"], "EnterWorktree");
+        assert!(!out.contains("WorktreeCreate"));
+        assert_eq!(
+            out,
+            merge_hook_into_settings_json(&out, 4180, "tok").unwrap()
         );
     }
 
@@ -641,10 +701,10 @@ mod tests {
             ptu.iter().any(|b| b["matcher"] == "Write|Edit"),
             "user's Write|Edit hook must survive: {ptu:?}"
         );
-        // Fleet's WorktreeCreate hook landed.
+        // Fleet's EnterWorktree hook landed.
         assert!(
-            ptu.iter().any(|b| b["matcher"] == "WorktreeCreate"),
-            "fleet WorktreeCreate hook must be present: {ptu:?}"
+            ptu.iter().any(|b| b["matcher"] == "EnterWorktree"),
+            "fleet EnterWorktree hook must be present: {ptu:?}"
         );
         // Unrelated top-level keys preserved.
         assert_eq!(v["otherTopLevel"]["keep"], true);
@@ -656,7 +716,7 @@ mod tests {
         let ptu2 = v2["hooks"]["PostToolUse"].as_array().unwrap();
         let fleet_count = ptu2
             .iter()
-            .filter(|b| b["matcher"] == "WorktreeCreate")
+            .filter(|b| b["matcher"] == "EnterWorktree")
             .count();
         assert_eq!(
             fleet_count, 1,
@@ -669,7 +729,7 @@ mod tests {
         // Token updated on the surviving entry.
         let fleet_hdr = ptu2
             .iter()
-            .find(|b| b["matcher"] == "WorktreeCreate")
+            .find(|b| b["matcher"] == "EnterWorktree")
             .unwrap()["hooks"][0]["headers"]["Authorization"]
             .as_str()
             .unwrap();

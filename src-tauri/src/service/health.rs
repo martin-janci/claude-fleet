@@ -158,6 +158,10 @@ mod tests {
             started_at: None,
             last_turn_at: None,
             ci_status: None,
+            turn_seq: 0,
+            last_stop_at: None,
+            parent_session_id: None,
+            tags: Vec::new(),
         }
     }
 
@@ -237,7 +241,7 @@ mod tests {
         let h = health_from_store(&s);
         assert_eq!(h.version, env!("CARGO_PKG_VERSION"));
         assert!(h.db_ready);
-        assert_eq!(h.schema_version, 19);
+        assert_eq!(h.schema_version, 20);
         // Empty store → empty roll-up.
         assert_eq!(h.sessions_total, 0);
         assert_eq!(h.hosts_total, 0);

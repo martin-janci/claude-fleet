@@ -6,7 +6,7 @@ use crate::ipc_error::IpcError;
 use crate::mcp::hooks::HookPayload;
 use crate::mcp::Caller;
 use crate::ssh::SshClient;
-use crate::store::{ProjectRow, Store};
+use crate::store::{ProjectRow, SessionRow, Store};
 use std::sync::{Arc, Mutex};
 
 /// Dispatch a hook event to the appropriate handler. `caller` is the
@@ -21,15 +21,82 @@ pub fn apply_hook(
 ) -> Result<(), IpcError> {
     match payload.hook_event_name.as_deref() {
         Some("Stop") => apply_stop_hook(store, ssh, payload, caller),
-        Some("PostToolUse") if payload.tool_name.as_deref() == Some("WorktreeCreate") => {
+        Some("UserPromptSubmit") => apply_prompt_submit_hook(store, payload, caller),
+        // `EnterWorktree` is the real tool (the installed matcher).
+        // `WorktreeCreate` is a hook EVENT that replaces git worktree
+        // creation, not a tool — no PostToolUse ever carries it; it is still
+        // accepted here only so a hand-posted legacy body keeps validating.
+        Some("PostToolUse")
+            if matches!(
+                payload.tool_name.as_deref(),
+                Some("EnterWorktree") | Some("WorktreeCreate")
+            ) =>
+        {
             apply_worktree_hook(store, payload)
         }
         _ => Ok(()),
     }
 }
 
-/// Mark the matching session's `claude_status` as "idle".
-/// Matches by `claude_session_id`. No-ops if no session has this ID.
+/// Accept a hook-reported `transcript_path` only when it is an absolute,
+/// `..`-free, control-free path under a `.claude/projects/` directory whose
+/// file name is exactly `<claude_session_id>.jsonl`. It becomes a file fleet
+/// later `tail`s on the host, so it gets the same scrutiny as a worktree
+/// path. Anything else is ignored (never an error — the hook still counts).
+pub fn valid_transcript_path(path: &str, claude_session_id: &str) -> bool {
+    path.starts_with('/')
+        && path.len() <= 4096
+        && !path.chars().any(|c| c.is_control())
+        && !path.split('/').any(|c| c == "..")
+        && path.contains("/.claude/projects/")
+        && std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            == Some(format!("{claude_session_id}.jsonl").as_str())
+}
+
+/// Store the hook's transcript path on the row when it validates.
+fn remember_transcript_path(s: &Store, payload: &HookPayload, claude_session_id: &str) {
+    if let Some(p) = payload
+        .transcript_path
+        .as_deref()
+        .filter(|p| valid_transcript_path(p, claude_session_id))
+    {
+        let _ = s.set_transcript_path_by_claude_id(claude_session_id, p);
+    }
+}
+
+/// Look up the session a hook is about and apply the caller's host binding:
+/// a host token may only flip sessions on ITS host — host A's token must
+/// not be able to mark host B's session idle (and so trigger B's safe-kill
+/// finalisation or complete B's tasks). Unknown session → `None` (the hook
+/// arrived before reconcile enriched the row; a no-op, as before).
+fn host_checked_row(
+    s: &Store,
+    claude_session_id: &str,
+    caller: &Caller,
+) -> Result<Option<SessionRow>, IpcError> {
+    let row = s.get_session_by_claude_id(claude_session_id)?;
+    if let (Some(row), Some(h)) = (&row, &caller.host_alias) {
+        if &row.host_alias != h {
+            return Err(IpcError::new(
+                "E_FORBIDDEN",
+                format!(
+                    "session {} is on host {}; this token is bound to {h}",
+                    row.tmux_name, row.host_alias
+                ),
+            ));
+        }
+    }
+    Ok(row)
+}
+
+/// The Stop hook: a turn just completed. Marks the session `idle`, bumps
+/// `turn_seq` and stamps `last_stop_at` (the completion signal `send_prompt`
+/// / `wait_for_session` / `run_prompt` build on), then kicks off the
+/// background checks that read the pane / transcript: the safe-kill marker
+/// scan and the task-completion marker scan. Both are spawned so the HTTP
+/// response returns fast.
 ///
 /// Claude Code's `Stop` hook fires when the agent finishes a turn and is ready
 /// for input again — NOT when the session terminates. So the right status is
@@ -46,31 +113,21 @@ fn apply_stop_hook(
         Some(id) => id.clone(),
         None => return Ok(()),
     };
-    // Snapshot whether a safe-kill is in flight BEFORE we update status —
-    // if it is, we spawn the marker check off the hook handler so the HTTP
-    // response returns fast (the work involves pane capture + SSH).
-    let safe_kill_in_flight = {
+    // Snapshot whether a safe-kill / open task is in flight BEFORE we update
+    // status; the follow-ups (pane capture + SSH) run off the hook handler.
+    let (safe_kill_in_flight, task_worker) = {
         let s = store.lock().map_err(|_| IpcError::lock())?;
-        let row = s.get_session_by_claude_id(&session_id).ok().flatten();
-        // A host token may only flip sessions on ITS host: host A's token
-        // must not be able to mark host B's session idle (and so trigger
-        // B's safe-kill finalisation). Unknown session → no-op as before.
-        if let (Some(row), Some(h)) = (&row, &caller.host_alias) {
-            if &row.host_alias != h {
-                return Err(IpcError::new(
-                    "E_FORBIDDEN",
-                    format!(
-                        "session {} is on host {}; this token is bound to {h}",
-                        row.tmux_name, row.host_alias
-                    ),
-                ));
-            }
-        }
-        let in_flight = row
-            .map(|r| r.safe_kill_state.as_deref() == Some("requested"))
+        let Some(before) = host_checked_row(&s, &session_id, caller)? else {
+            return Ok(());
+        };
+        let in_flight = before.safe_kill_state.as_deref() == Some("requested");
+        remember_transcript_path(&s, payload, &session_id);
+        let after = s.record_stop_hook(&session_id)?;
+        let has_open_tasks = s
+            .open_tasks_for_worker(before.id)
+            .map(|v| !v.is_empty())
             .unwrap_or(false);
-        s.set_claude_status_by_session_id(&session_id, "idle")?;
-        in_flight
+        (in_flight, after.filter(|_| has_open_tasks))
     };
     if safe_kill_in_flight {
         let store = Arc::clone(store);
@@ -80,6 +137,37 @@ fn apply_stop_hook(
             crate::service::safe_kill::handle_stop_marker_check(store, ssh, sid).await;
         });
     }
+    if let Some(worker) = task_worker {
+        let store = Arc::clone(store);
+        let ssh = Arc::clone(ssh);
+        let cwd = payload.cwd.clone();
+        tauri::async_runtime::spawn(async move {
+            crate::service::tasks::handle_stop_for_worker(store, ssh, worker, cwd).await;
+        });
+    }
+    Ok(())
+}
+
+/// The UserPromptSubmit hook: a turn is starting. Marks the session
+/// `working` so an idle-looking pane between the submit and the first
+/// spinner frame is not mistaken for "still idle" — and so `wait_for_session
+/// { until: "idle" }` after a `send_prompt` does not return before the turn
+/// even begins.
+fn apply_prompt_submit_hook(
+    store: &Arc<Mutex<Store>>,
+    payload: &HookPayload,
+    caller: &Caller,
+) -> Result<(), IpcError> {
+    let session_id = match &payload.session_id {
+        Some(id) => id.clone(),
+        None => return Ok(()),
+    };
+    let s = store.lock().map_err(|_| IpcError::lock())?;
+    if host_checked_row(&s, &session_id, caller)?.is_none() {
+        return Ok(());
+    }
+    remember_transcript_path(&s, payload, &session_id);
+    s.record_prompt_submit_hook(&session_id)?;
     Ok(())
 }
 
@@ -121,25 +209,43 @@ pub fn validate_worktree_path(path: &str) -> Result<(), IpcError> {
     Ok(())
 }
 
-/// Auto-register a worktree created by Claude Code's WorktreeCreate tool.
+/// The worktree path + branch an `EnterWorktree` call reported. Claude
+/// Code's docs do not pin the tool's result shape (and no local transcript
+/// had a sample), so the path is read from the keys it is known or likely to
+/// use — `tool_response` first, then `tool_input` — and nothing is guessed
+/// beyond that: no path → no-op.
+pub fn worktree_fields(payload: &HookPayload) -> (Option<String>, Option<String>) {
+    const PATH_KEYS: [&str; 3] = ["worktreePath", "worktree_path", "path"];
+    const BRANCH_KEYS: [&str; 3] = ["branch", "branchName", "worktreeBranch"];
+    let pick = |keys: &[&str]| -> Option<String> {
+        [payload.tool_response.as_ref(), payload.tool_input.as_ref()]
+            .into_iter()
+            .flatten()
+            .find_map(|v| {
+                keys.iter()
+                    .find_map(|k| v.get(*k).and_then(|x| x.as_str()))
+                    .map(str::to_string)
+            })
+    };
+    (pick(&PATH_KEYS), pick(&BRANCH_KEYS))
+}
+
+/// Auto-register a worktree Claude Code entered via its `EnterWorktree` tool.
+///
+/// Remote hosts: the path is the HOST's path, and #45's validation requires
+/// it under a known project `base_path` (the central machine's layout), so
+/// remote worktree hooks are refused until the path-identity work lands.
 ///
 /// The path must validate ([`validate_worktree_path`]) AND sit under a known
 /// project's `base_path`; anything else is `E_VALIDATE` (the handler answers
 /// 400) rather than a silent upsert of an arbitrary row.
 fn apply_worktree_hook(store: &Arc<Mutex<Store>>, payload: &HookPayload) -> Result<(), IpcError> {
-    let input = match &payload.tool_input {
-        Some(v) => v,
-        None => return Ok(()),
-    };
-    let path = match input.get("worktree_path").and_then(|v| v.as_str()) {
-        Some(p) => p.to_string(),
-        None => return Ok(()),
+    let (path, branch) = worktree_fields(payload);
+    let Some(path) = path else {
+        return Ok(());
     };
     validate_worktree_path(&path)?;
-    let branch = input
-        .get("branch")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
+    let branch = branch.as_deref().filter(|s| !s.is_empty());
     if let Some(b) = branch {
         crate::validate::git_ref(b).map_err(|e| IpcError::new("E_VALIDATE", e.message))?;
     }
@@ -209,6 +315,7 @@ mod tests {
             tool_input: None,
             tool_response: None,
             cwd: None,
+            transcript_path: None,
         }
     }
 
@@ -302,8 +409,96 @@ mod tests {
     #[test]
     fn unknown_event_is_noop() {
         let store = make_store();
-        let payload = make_payload("UserPromptSubmit", "s1");
+        let payload = make_payload("SessionStart", "s1");
         assert!(apply_hook(&store, &make_ssh(), &payload, &Caller::master()).is_ok());
+    }
+
+    #[test]
+    fn stop_hook_bumps_turn_seq_and_stamps_last_stop_at() {
+        let store = make_store();
+        let id = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let id = s
+                .upsert_session("sess", "local", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.set_claude_session_id(id, "uuid-1").unwrap();
+            id
+        };
+        for expected in 1..=3 {
+            apply_hook(
+                &store,
+                &make_ssh(),
+                &make_payload("Stop", "uuid-1"),
+                &Caller::master(),
+            )
+            .unwrap();
+            let s = store.lock().unwrap();
+            let row = s.get_session_by_id(id).unwrap().unwrap();
+            assert_eq!(row.turn_seq, expected);
+            assert!(row.last_stop_at.is_some());
+            assert_eq!(row.last_stop_at, row.last_turn_at);
+            assert_eq!(row.claude_status.as_deref(), Some("idle"));
+        }
+    }
+
+    #[test]
+    fn user_prompt_submit_marks_the_session_working_and_is_host_checked() {
+        let store = make_store();
+        let id = {
+            let s = store.lock().unwrap();
+            s.upsert_host("hostb").unwrap();
+            let id = s
+                .upsert_session("sess", "hostb", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.set_claude_session_id(id, "uuid-b").unwrap();
+            s.set_claude_status_by_session_id("uuid-b", "idle").unwrap();
+            id
+        };
+        let host_a = Caller {
+            host_alias: Some("hosta".into()),
+            mode: crate::mcp::TokenMode::Full,
+        };
+        let err = apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("UserPromptSubmit", "uuid-b"),
+            &host_a,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "E_FORBIDDEN");
+        {
+            let s = store.lock().unwrap();
+            let row = s.get_session_by_id(id).unwrap().unwrap();
+            assert_eq!(row.claude_status.as_deref(), Some("idle"), "untouched");
+            assert!(row.idle_since.is_some());
+        }
+        let host_b = Caller {
+            host_alias: Some("hostb".into()),
+            mode: crate::mcp::TokenMode::Readonly,
+        };
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("UserPromptSubmit", "uuid-b"),
+            &host_b,
+        )
+        .unwrap();
+        let s = store.lock().unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.claude_status.as_deref(), Some("working"));
+        assert_eq!(row.idle_since, None);
+        // A submit does not count as a turn.
+        assert_eq!(row.turn_seq, 0);
+        drop(s);
+        // Unknown session: no-op for any caller.
+        assert!(apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("UserPromptSubmit", "nope"),
+            &host_a
+        )
+        .is_ok());
     }
 
     #[test]
@@ -312,26 +507,28 @@ mod tests {
         let payload = HookPayload {
             session_id: Some("s1".into()),
             hook_event_name: Some("PostToolUse".into()),
-            tool_name: Some("WorktreeCreate".into()),
+            tool_name: Some("EnterWorktree".into()),
             tool_input: None,
             tool_response: None,
             cwd: None,
+            transcript_path: None,
         };
         assert!(apply_hook(&store, &make_ssh(), &payload, &Caller::master()).is_ok());
     }
 
     fn worktree_payload(path: &str, branch: Option<&str>) -> HookPayload {
-        let mut input = serde_json::json!({ "worktree_path": path });
+        let mut response = serde_json::json!({ "worktreePath": path });
         if let Some(b) = branch {
-            input["branch"] = serde_json::Value::String(b.into());
+            response["branch"] = serde_json::Value::String(b.into());
         }
         HookPayload {
             session_id: Some("s1".into()),
             hook_event_name: Some("PostToolUse".into()),
-            tool_name: Some("WorktreeCreate".into()),
-            tool_input: Some(input),
-            tool_response: None,
+            tool_name: Some("EnterWorktree".into()),
+            tool_input: Some(serde_json::json!({ "name": "feat" })),
+            tool_response: Some(response),
             cwd: None,
+            transcript_path: None,
         }
     }
 
@@ -410,6 +607,86 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].path, "/home/u/proj/.worktrees/feat");
         assert_eq!(rows[0].branch.as_deref(), Some("feat"));
+    }
+
+    #[test]
+    fn worktree_fields_read_response_then_input_and_legacy_name_still_routes() {
+        let mut p = worktree_payload("/home/u/proj/.worktrees/feat", Some("feat"));
+        assert_eq!(
+            worktree_fields(&p),
+            (
+                Some("/home/u/proj/.worktrees/feat".into()),
+                Some("feat".into())
+            )
+        );
+        // snake_case keys in tool_input are the fallback.
+        p.tool_response = None;
+        p.tool_input = Some(serde_json::json!({
+            "worktree_path": "/home/u/proj/.worktrees/x", "branch": "x"
+        }));
+        assert_eq!(
+            worktree_fields(&p),
+            (Some("/home/u/proj/.worktrees/x".into()), Some("x".into()))
+        );
+        // Nothing path-like → no-op, not an error.
+        p.tool_input = Some(serde_json::json!({ "name": "feat" }));
+        let store = make_store();
+        assert!(apply_hook(&store, &make_ssh(), &p, &Caller::master()).is_ok());
+        // A hand-posted legacy `WorktreeCreate` body is still validated.
+        let mut legacy = worktree_payload("../../etc", None);
+        legacy.tool_name = Some("WorktreeCreate".into());
+        let err = apply_hook(&store, &make_ssh(), &legacy, &Caller::master()).unwrap_err();
+        assert_eq!(err.code, "E_VALIDATE");
+    }
+
+    #[test]
+    fn valid_transcript_path_requires_the_session_file_under_claude_projects() {
+        let sid = "uuid-1";
+        assert!(valid_transcript_path(
+            "/home/u/.claude/projects/-home-u-p/uuid-1.jsonl",
+            sid
+        ));
+        for bad in [
+            "relative/.claude/projects/x/uuid-1.jsonl",
+            "/home/u/.claude/projects/x/other.jsonl",
+            "/home/u/.claude/projects/../../etc/uuid-1.jsonl",
+            "/etc/uuid-1.jsonl",
+            "/home/u/.claude/projects/x/uuid-1.jsonl\n",
+        ] {
+            assert!(!valid_transcript_path(bad, sid), "{bad}");
+        }
+    }
+
+    #[test]
+    fn hooks_store_a_valid_transcript_path_and_ignore_a_bad_one() {
+        let store = make_store();
+        let id = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let id = s
+                .upsert_session("sess", "local", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.set_claude_session_id(id, "uuid-1").unwrap();
+            id
+        };
+        let mut p = make_payload("UserPromptSubmit", "uuid-1");
+        p.transcript_path = Some("/etc/passwd".into());
+        apply_hook(&store, &make_ssh(), &p, &Caller::master()).unwrap();
+        assert_eq!(
+            store.lock().unwrap().session_transcript_path(id).unwrap(),
+            None
+        );
+        let good = "/home/u/.claude/projects/-home-u-p/uuid-1.jsonl";
+        let mut p = make_payload("Stop", "uuid-1");
+        p.transcript_path = Some(good.into());
+        apply_hook(&store, &make_ssh(), &p, &Caller::master()).unwrap();
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.session_transcript_path(id).unwrap().as_deref(),
+            Some(good)
+        );
+        // The hook still counted as a turn.
+        assert_eq!(s.get_session_by_id(id).unwrap().unwrap().turn_seq, 1);
     }
 
     #[test]

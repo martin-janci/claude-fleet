@@ -41,6 +41,10 @@ pub struct HookPayload {
     pub tool_input: Option<serde_json::Value>,
     pub tool_response: Option<serde_json::Value>,
     pub cwd: Option<String>,
+    /// Absolute path of the session's JSONL transcript. Claude Code sends it
+    /// in every hook body; fleet stores it (after validation) and prefers it
+    /// over any path derived from the cwd.
+    pub transcript_path: Option<String>,
 }
 
 /// Axum handler for `POST /hook`. Auth has already happened in the
@@ -103,6 +107,28 @@ mod tests {
         assert_eq!(
             inp.get("worktree_path").and_then(|v| v.as_str()),
             Some("/home/user/proj/.worktrees/feat")
+        );
+    }
+
+    #[test]
+    fn transcript_path_and_enter_worktree_response_deserialize() {
+        let json = r#"{
+            "session_id":"s1",
+            "hook_event_name":"PostToolUse",
+            "tool_name":"EnterWorktree",
+            "tool_input":{"name":"feat"},
+            "tool_response":{"worktreePath":"/home/u/proj/.claude/worktrees/feat","branch":"feat"},
+            "transcript_path":"/home/u/.claude/projects/-home-u-proj/s1.jsonl"
+        }"#;
+        let p: HookPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(p.tool_name.as_deref(), Some("EnterWorktree"));
+        assert_eq!(
+            p.transcript_path.as_deref(),
+            Some("/home/u/.claude/projects/-home-u-proj/s1.jsonl")
+        );
+        assert_eq!(
+            p.tool_response.unwrap()["worktreePath"],
+            "/home/u/proj/.claude/worktrees/feat"
         );
     }
 

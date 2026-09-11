@@ -344,6 +344,10 @@ mod tests {
             started_at: None,
             last_turn_at: None,
             ci_status: None,
+            turn_seq: 0,
+            last_stop_at: None,
+            parent_session_id: None,
+            tags: Vec::new(),
         }
     }
 
