@@ -281,6 +281,37 @@ describe('SettingsDialog automation + notifications (W2 Track D)', () => {
     );
   });
 
+  it('never sends a limit it cannot represent, and says why', async () => {
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    inv.mockImplementation(async (cmd: string, args?: { key?: string; value?: string }) => {
+      if (cmd === 'set_fleet_setting') return { [args!.key!]: args!.value! };
+      if (cmd === 'mcp_status') return mcpStatusObj;
+      return null;
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick(); await tick();
+    const tasks = screen.getByLabelText('tasks') as HTMLInputElement;
+    const mb = screen.getByLabelText('move') as HTMLInputElement;
+    expect(tasks).toBe(screen.getByTestId('tasks-max-age-hours'));
+    expect(mb).toBe(screen.getByTestId('move-max-transcript-mb'));
+    const cases: [HTMLInputElement, string, RegExp][] = [
+      // -1 h must not be clamped to 0 s ("never").
+      [tasks, '-1', /Task timeout: hours must be 0 or more/],
+      // A positive value that rounds to 0 s would also mean "never".
+      [tasks, '0.00001', /Task timeout: too small/],
+      [tasks, '', /Task timeout: enter a number of hours/],
+      [mb, '', /Move transcript cap: enter a whole number/],
+      [mb, '1.5', /Move transcript cap: "1.5" is not a whole number/],
+    ];
+    for (const [input, value, message] of cases) {
+      input.value = value;
+      await fireEvent.change(input);
+      await tick();
+      expect(screen.getByRole('alert').textContent).toMatch(message);
+    }
+    expect(inv).not.toHaveBeenCalledWith('set_fleet_setting', expect.anything());
+  });
+
   it('renders the notifications section with the toast toggle on and OS off', async () => {
     render(SettingsDialog, { props: { onClose: () => {} } });
     await tick();

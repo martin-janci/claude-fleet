@@ -20,6 +20,9 @@ import {
   setFleetSetting,
   settingBool,
   settingSecs,
+  settingInt,
+  parseHoursInput,
+  parseIntInput,
   SETTING_DEFAULTS,
   SETTING_KEYS,
 } from './fleet_settings';
@@ -74,6 +77,38 @@ describe('fleet settings', () => {
       value: 'true',
     });
     expect(settingBool(get(fleetSettings), SETTING_KEYS.playbookPressEnter)).toBe(true);
+  });
+
+  it('settingInt reads a count and falls back to the default on garbage', () => {
+    expect(settingInt({}, SETTING_KEYS.moveMaxTranscriptMb)).toBe(200);
+    expect(settingInt({ 'move.max_transcript_mb': '64' }, SETTING_KEYS.moveMaxTranscriptMb)).toBe(64);
+    expect(settingInt({ 'move.max_transcript_mb': 'x' }, SETTING_KEYS.moveMaxTranscriptMb)).toBe(200);
+  });
+
+  it('parseHoursInput refuses what would silently mean "never"', () => {
+    expect(parseHoursInput('2')).toEqual({ secs: 7200 });
+    expect(parseHoursInput(' 0 ')).toEqual({ secs: 0 });
+    expect(parseHoursInput('0.5')).toEqual({ secs: 1800 });
+    // Above the backend cap is passed through: the backend reports the range.
+    expect(parseHoursInput('100000')).toEqual({ secs: 360000000 });
+    for (const [raw, message] of [
+      ['', /enter a number/],
+      ['abc', /not a number/],
+      ['-1', /0 or more/],
+      ['0.00001', /rounds to 0 seconds/],
+    ] as const) {
+      const r = parseHoursInput(raw);
+      expect('error' in r && r.error).toMatch(message);
+    }
+  });
+
+  it('parseIntInput refuses empty and non-integer input, passes integers through', () => {
+    expect(parseIntInput('64')).toEqual({ value: '64' });
+    expect(parseIntInput(' 007 ')).toEqual({ value: '7' });
+    expect(parseIntInput('5000')).toEqual({ value: '5000' });
+    expect(parseIntInput('-1')).toEqual({ value: '-1' });
+    expect(parseIntInput('')).toEqual({ error: 'enter a whole number' });
+    expect(parseIntInput('1.5')).toEqual({ error: '"1.5" is not a whole number' });
   });
 
   it('hours <-> seconds round-trip', () => {

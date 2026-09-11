@@ -92,6 +92,13 @@ export function settingSecs(map: FleetSettings, key: SettingKey): number {
   return Number.isFinite(n) && n >= 0 ? n : Number.parseInt(SETTING_DEFAULTS[key], 10);
 }
 
+/** A non-negative integer setting that is a count or size, not seconds
+ *  (`Kind::Int`); the default on garbage. */
+export function settingInt(map: FleetSettings, key: SettingKey): number {
+  const n = Number.parseInt(map[key] ?? SETTING_DEFAULTS[key], 10);
+  return Number.isFinite(n) && n >= 0 ? n : Number.parseInt(SETTING_DEFAULTS[key], 10);
+}
+
 /** Parse a JSON `alias → path` map setting; `{}` on anything malformed. */
 export function settingPathMap(map: FleetSettings, key: string): Record<string, string> {
   try {
@@ -155,4 +162,32 @@ export function secsToHours(secs: number): number {
 
 export function hoursToSecs(hours: number): number {
   return Math.max(0, Math.round(hours * 3600));
+}
+
+/** An hours input for a seconds setting where `0` means "never". Refuses
+ *  what must not be sent silently: an empty or non-numeric value, a negative
+ *  one (clamping it would store "never"), and a positive one so small it
+ *  rounds to 0 s (also "never"). Values above the cap are passed through so
+ *  the backend's range error is what the user sees. */
+export function parseHoursInput(raw: string): { secs: number } | { error: string } {
+  const t = raw.trim();
+  if (t === '') return { error: 'enter a number of hours (0 = never)' };
+  const hours = Number(t);
+  if (!Number.isFinite(hours)) return { error: `"${t}" is not a number of hours` };
+  if (hours < 0) return { error: 'hours must be 0 or more (0 = never)' };
+  const secs = Math.round(hours * 3600);
+  if (hours > 0 && secs === 0) {
+    return { error: 'too small: that rounds to 0 seconds, which means never (enter 0 for never)' };
+  }
+  return { secs };
+}
+
+/** A whole-number input (`Kind::Int`). Refuses an empty or non-integer value
+ *  instead of ignoring it; an out-of-range integer is passed through so the
+ *  backend's range error is shown. */
+export function parseIntInput(raw: string): { value: string } | { error: string } {
+  const t = raw.trim();
+  if (t === '') return { error: 'enter a whole number' };
+  if (!/^-?\d+$/.test(t)) return { error: `"${t}" is not a whole number` };
+  return { value: String(Number.parseInt(t, 10)) };
 }
