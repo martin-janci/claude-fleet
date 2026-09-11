@@ -3,18 +3,18 @@
   import { invoke } from '@tauri-apps/api/core';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { selectedSession } from './selection';
-  import { Screen, rowToRuns, colorToCss, encodeMouse, type Run } from './ansi';
-  import { sanitizePaste, framePaste } from './clipboard';
+  import { Screen, rowToRuns, colorToCss, type Run } from './ansi';
   import { pointInRect } from './geometry';
   import { selectionRects, type CellPos } from './terminal_selection';
-  import { nativeWriteText, nativeReadText } from './clipboard_native';
+  import { nativeWriteText } from './clipboard_native';
   import { hintAnchor } from './hints';
   import { toIpcError } from './result';
   import { push, pushError } from './toasts';
   import { repairSession } from './sessions';
   import { keyToBytes, detectMac } from './terminal_keys';
-  import { copyOnSelect } from './prefs';
-  import { get } from 'svelte/store';
+  import { createDrainLoop } from './terminal_drain';
+  import { createTerminalClipboard, pathsToPasteText } from './terminal_clipboard';
+  import { createMouseController } from './terminal_mouse';
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -40,14 +40,6 @@
   /** Bumped after every screen.write() so the reactive view recomputes. */
   let renderVersion = $state(0);
   let resizeObserver: ResizeObserver | null = null;
-  // Drain loop: a self-rescheduling setTimeout (not setInterval) so a slow
-  // pty_drain round-trip can't pile up concurrent calls. The delay backs off
-  // adaptively — an idle terminal polls slowly, any output snaps it back to
-  // full rate — so an attached-but-quiet session costs almost nothing.
-  const DRAIN_MIN_MS = 30;
-  const DRAIN_MAX_MS = 250;
-  let drainTimer: ReturnType<typeof setTimeout> | null = null;
-  let drainDelay = DRAIN_MIN_MS;
   // The attached PTY's identity. BOTH parts are compared by the open/attach
   // guard: a tmux_name alone is ambiguous across hosts (default names are
   // project-derived, so host A and host B often run a same-named session),
@@ -76,8 +68,6 @@
    *  old window.getSelection() path). */
   let selAnchor: CellPos | null = $state(null);
   let selFocus: CellPos | null = $state(null);
-  /** True while a drag-select is in progress (between mousedown and mouseup). */
-  let selecting = false;
   let openError: string | null = $state(null);
   /** Context-menu position (client px) or null when hidden. */
   let ctxMenu: { x: number; y: number } | null = $state(null);
@@ -104,71 +94,39 @@
   const MAX_AUTO_RECONNECT = 3;
   const AUTO_RECONNECT_BASE_MS = 600;
 
-  // ─── Mouse forwarding state ───────────────────────────────────────────
-  /** Which button (0/1/2, encoded as cb) is currently pressed. Null = none. */
-  let pressedButton: number | null = null;
-  /** When mouse reporting is on, a left press is deferred until we know whether
-   *  it becomes a drag (→ local selection) or a click (→ forward to the app). */
-  let pendingPress: { cell: CellPos; startX: number; startY: number } | null = null;
-  /** The last cell (1-based col, row) for which we sent a motion report,
-   *  used to throttle: we only send a new report when the cell changes. */
-  let lastMotionCell: { col: number; row: number } | null = null;
-  /** Cleanup functions for the window-level mousemove/mouseup listeners added
-   *  on mousedown. Removed on mouseup or component destroy. */
-  let removeWindowListeners: (() => void) | null = null;
-  /** Accumulated (pixel-normalized) wheel delta not yet turned into reports.
-   *  We forward one wheel report per WHEEL_TICK_PX of scroll instead of one
-   *  per event, so trackpads (many tiny deltas) don't flood tmux and line-mode
-   *  wheels still register — smooth, proportional scrolling either way. */
-  let wheelAccum = 0;
-  const WHEEL_TICK_PX = 40;
-  /** Pointer travel (px) before a deferred left-press promotes to a selection. */
-  const DRAG_PX = 4;
+  const drain = createDrainLoop({
+    drainOnce,
+    attached: () => !!screen && ptyOpen,
+  });
+  const { bumpDrain } = drain;
 
-  /** Map a MouseEvent's client coordinates to a 1-based terminal cell,
-   *  clamped to the visible grid. Accounts for the 4px left/top padding. */
-  function eventToCell(e: MouseEvent): { col: number; row: number } {
-    const rect = container!.getBoundingClientRect();
-    const col = Math.max(1, Math.min(lastCols,
-      Math.floor((e.clientX - rect.left - 4) / cellWidth) + 1));
-    const row = Math.max(1, Math.min(lastRows,
-      Math.floor((e.clientY - rect.top - 4) / cellHeight) + 1));
-    return { col, row };
-  }
+  const { sendPaste, copySelection, pasteFromClipboard } = createTerminalClipboard({
+    ptyOpen: () => ptyOpen,
+    screen: () => screen,
+    selAnchor: () => selAnchor,
+    selFocus: () => selFocus,
+    setOpenError: (message) => (openError = message),
+    writePty,
+    bumpDrain,
+  });
 
-  /** Write a mouse escape sequence to the PTY. */
-  function sendMouse(data: string) {
-    writePty(data);
-  }
-
-  /** Send text to the PTY as a paste: strip any embedded paste-end marker,
-   *  then frame in bracketed-paste markers if the app requested mode 2004.
-   *  Shared by Cmd+V and the drag-drop path. */
-  function sendPaste(text: string) {
-    if (!ptyOpen) return;
-    const clean = sanitizePaste(text);
-    if (clean === '') return;
-    const framed = framePaste(clean, screen?.bracketedPaste ?? false);
-    writePty(framed);
-    bumpDrain();
-  }
-
-  /** Copy the current selection to the native clipboard. No-op if empty. */
-  async function copySelection() {
-    if (!screen || !selAnchor || !selFocus) return;
-    const text = screen.selectionText(selAnchor, selFocus);
-    if (text === '') return;
-    const r = await nativeWriteText(text);
-    if (!r.ok) openError = `Copy failed: ${r.error.message}`;
-  }
-
-  /** Paste the native clipboard into the PTY (bracketed-paste framing happens
-   *  in sendPaste). Shared by Cmd+V and the context-menu Paste item. */
-  async function pasteFromClipboard() {
-    const r = await nativeReadText();
-    if (r.ok) sendPaste(r.value);
-    else openError = `Paste failed: ${r.error.message}`;
-  }
+  const mouse = createMouseController({
+    ptyOpen: () => ptyOpen,
+    screen: () => screen,
+    container: () => container,
+    lastCols: () => lastCols,
+    lastRows: () => lastRows,
+    cellWidth: () => cellWidth,
+    cellHeight: () => cellHeight,
+    selAnchor: () => selAnchor,
+    selFocus: () => selFocus,
+    setSelAnchor: (cell) => (selAnchor = cell),
+    setSelFocus: (cell) => (selFocus = cell),
+    clearSelection,
+    copySelection,
+    writePty,
+  });
+  const { onWheel, onMousedown } = mouse;
 
   function onContextMenu(e: MouseEvent) {
     if (!ptyOpen) return;
@@ -199,12 +157,6 @@
     selFocus = { row: lastRows - 1, col: lastCols - 1 };
   }
 
-  /** Convert a 1-based eventToCell result to a 0-based grid cell. */
-  function cellFromEvent(e: MouseEvent): CellPos {
-    const { col, row } = eventToCell(e);
-    return { row: row - 1, col: col - 1 };
-  }
-
   function clearSelection() {
     selAnchor = null;
     selFocus = null;
@@ -217,18 +169,6 @@
   function pointOverGrid(px: number, py: number): boolean {
     if (!container) return false;
     return pointInRect(px, py, container.getBoundingClientRect());
-  }
-
-  /** Build the prompt text for a set of uploaded remote paths: space-joined,
-   *  POSIX single-quoted (embedded quotes escaped as '\'') when a path
-   *  contains whitespace or a quote, trailing space so the user can keep
-   *  typing. */
-  function pathsToPasteText(paths: string[]): string {
-    return (
-      paths
-        .map((p) => (/[\s']/.test(p) ? `'${p.replace(/'/g, "'\\''")}'` : p))
-        .join(' ') + ' '
-    );
   }
 
   async function handleDrop(paths: string[]) {
@@ -245,182 +185,6 @@
       uploading = false;
     }
   }
-
-  function onWheel(e: WheelEvent) {
-    if (e.altKey) return;
-    if (!ptyOpen || !screen || !screen.mouseEnabled) return;
-    e.preventDefault();
-    // Normalize the delta to pixels across deltaMode (0=px, 1=lines, 2=pages)
-    // so wheels and trackpads accumulate on the same scale.
-    const line = cellHeight || 16;
-    let dy = e.deltaY;
-    if (e.deltaMode === 1) dy *= line;
-    else if (e.deltaMode === 2) dy *= line * (lastRows || 24);
-    // Reset on direction change so a flip registers immediately.
-    if ((dy < 0 && wheelAccum > 0) || (dy > 0 && wheelAccum < 0)) wheelAccum = 0;
-    wheelAccum += dy;
-    const { col, row } = eventToCell(e);
-    const sgr = screen.mouseSgr;
-    // Emit one wheel report per WHEEL_TICK_PX of accumulated scroll. Batch all
-    // reports for this event into a single PTY write; guard caps a pathological
-    // delta at 64 reports.
-    let reports = '';
-    let guard = 0;
-    while (Math.abs(wheelAccum) >= WHEEL_TICK_PX && guard++ < 64) {
-      const up = wheelAccum < 0;
-      reports += encodeMouse(up ? 64 : 65, col, row, false, sgr);
-      wheelAccum += up ? WHEEL_TICK_PX : -WHEEL_TICK_PX;
-    }
-    if (reports) sendMouse(reports);
-  }
-
-  function onMousedown(e: MouseEvent) {
-    if (!ptyOpen || !screen) return;
-    // Right-click is reserved for our context menu (handled by onContextMenu).
-    if (e.button === 2) return;
-    // Left-button only for selection; other buttons fall through to app forwarding.
-    if (e.button === 0 && !screen.mouseEnabled && !e.altKey) {
-      // Plain shell: begin a local drag-selection.
-      e.preventDefault();
-      // Tear down any prior in-progress drag before starting a new one, so a
-      // missed mouseup can't leave a stale handler that wipes this selection.
-      removeWindowListeners?.();
-      (e.currentTarget as HTMLElement | null)?.focus();
-      const cell = cellFromEvent(e);
-      selAnchor = cell;
-      selFocus = cell;
-      selecting = true;
-      const handleMove = (ev: MouseEvent) => {
-        if (!selecting) return;
-        selFocus = cellFromEvent(ev);
-      };
-      const handleUp = () => {
-        if (!selecting) return;
-        selecting = false;
-        removeWindowListeners?.();
-        // Only copy a real drag-selection; a plain click clears any selection.
-        if (
-          selAnchor && selFocus &&
-          (selAnchor.row !== selFocus.row || selAnchor.col !== selFocus.col)
-        ) {
-          if (get(copyOnSelect)) void copySelection();
-        } else {
-          clearSelection();
-        }
-      };
-      window.addEventListener('mousemove', handleMove);
-      window.addEventListener('mouseup', handleUp);
-      removeWindowListeners = () => {
-        window.removeEventListener('mousemove', handleMove);
-        window.removeEventListener('mouseup', handleUp);
-        removeWindowListeners = null;
-      };
-      return;
-    }
-    // Mouse reporting ON, left button, no Option → defer: a drag becomes a local
-    // selection, a click (no movement) forwards to the app.
-    if (e.button === 0 && screen.mouseEnabled && !e.altKey) {
-      e.preventDefault();
-      removeWindowListeners?.(); // drop any stale in-progress drag first
-      (e.currentTarget as HTMLElement | null)?.focus();
-      const cell = cellFromEvent(e);
-      pendingPress = { cell, startX: e.clientX, startY: e.clientY };
-      clearSelection();
-      const handleMove = (ev: MouseEvent) => {
-        if (!pendingPress) return;
-        const moved =
-          Math.abs(ev.clientX - pendingPress.startX) > DRAG_PX ||
-          Math.abs(ev.clientY - pendingPress.startY) > DRAG_PX;
-        if (moved && !selecting) {
-          // Promote to a local selection.
-          selecting = true;
-          selAnchor = pendingPress.cell;
-        }
-        if (selecting) selFocus = cellFromEvent(ev);
-      };
-      const handleUp = (ev: MouseEvent) => {
-        removeWindowListeners?.();
-        if (selecting) {
-          selecting = false;
-          if (get(copyOnSelect)) void copySelection();
-        } else if (pendingPress) {
-          // No drag → forward a real click (press + release) to the app.
-          const c = cellFromEvent(ev);
-          const sgr = screen!.mouseSgr;
-          // Press + release in one write so the app sees an atomic click.
-          sendMouse(
-            encodeMouse(0, c.col + 1, c.row + 1, false, sgr) +
-              encodeMouse(0, c.col + 1, c.row + 1, true, sgr),
-          );
-        }
-        pendingPress = null;
-      };
-      window.addEventListener('mousemove', handleMove);
-      window.addEventListener('mouseup', handleUp);
-      removeWindowListeners = () => {
-        window.removeEventListener('mousemove', handleMove);
-        window.removeEventListener('mouseup', handleUp);
-        removeWindowListeners = null;
-      };
-      return;
-    }
-    // Not a left-button local-select gesture. Option-held drags and middle/right
-    // buttons fall through to app forwarding below.
-    if (!screen.mouseEnabled) return; // no reporting + not a left-select → ignore
-    // Only forward left (0), middle (1), right (2).
-    if (e.button > 2) return;
-    e.preventDefault();
-    // preventDefault() suppresses the browser's default focus-on-click; focus
-    // the terminal explicitly so keystrokes keep flowing after a mouse-mode click.
-    (e.currentTarget as HTMLElement | null)?.focus();
-    const { col, row } = eventToCell(e);
-    const cb = e.button; // 0=left 1=middle 2=right
-    pressedButton = cb;
-    lastMotionCell = { col, row };
-    const sgr = screen.mouseSgr;
-    sendMouse(encodeMouse(cb, col, row, false, sgr));
-
-    // Attach window-level listeners so we keep tracking if the pointer
-    // leaves the terminal element before the button is released.
-    const handleMove = (ev: MouseEvent) => onWindowMousemove(ev);
-    const handleUp   = (ev: MouseEvent) => onWindowMouseup(ev);
-    window.addEventListener('mousemove', handleMove);
-    window.addEventListener('mouseup', handleUp);
-    removeWindowListeners = () => {
-      window.removeEventListener('mousemove', handleMove);
-      window.removeEventListener('mouseup', handleUp);
-      removeWindowListeners = null;
-    };
-  }
-
-  function onWindowMousemove(e: MouseEvent) {
-    if (!ptyOpen || !screen || pressedButton === null && !screen.mouseAnyMotion) return;
-    const { col, row } = eventToCell(e);
-    // Throttle: only send a report if the cell actually changed.
-    if (lastMotionCell && lastMotionCell.col === col && lastMotionCell.row === row) return;
-    lastMotionCell = { col, row };
-    const sgr = screen.mouseSgr;
-    if (pressedButton !== null && screen.mouseButtonMotion) {
-      // Button held — report as motion with the pressed button.
-      sendMouse(encodeMouse(pressedButton + 32, col, row, false, sgr));
-    } else if (pressedButton === null && screen.mouseAnyMotion) {
-      // No button held — any-motion mode (cb = 3 + 32 = 35).
-      sendMouse(encodeMouse(35, col, row, false, sgr));
-    }
-  }
-
-  function onWindowMouseup(e: MouseEvent) {
-    if (pressedButton === null) return;
-    if (ptyOpen && screen && screen.mouseEnabled && container) {
-      const { col, row } = eventToCell(e);
-      const sgr = screen.mouseSgr;
-      sendMouse(encodeMouse(pressedButton, col, row, true, sgr));
-    }
-    pressedButton = null;
-    lastMotionCell = null;
-    removeWindowListeners?.();
-  }
-
 
   $effect(() => {
     const sess = $selectedSession;
@@ -500,8 +264,7 @@
     screen = new Screen(dim.rows, dim.cols);
     clearSelection();
     // Reset any in-progress drag state so a session switch can't leave it stale.
-    selecting = false;
-    pendingPress = null;
+    mouse.reset();
     screen.onClipboard = (text) => {
       void nativeWriteText(text).then((r) => {
         if (!r.ok) openError = `Clipboard write failed: ${r.error.message}`;
@@ -568,8 +331,7 @@
 
     // Start the adaptive drain loop. 30 ms (~33 Hz) is the floor when output
     // is flowing; it backs off to DRAIN_MAX_MS when the terminal is idle.
-    drainDelay = DRAIN_MIN_MS;
-    scheduleDrain();
+    drain.start();
 
     // Hint tmux to redraw at our exact size by re-sending the dimensions
     // once after attach. Defends against race where pty_open runs before
@@ -620,32 +382,6 @@
       cols: Math.max(10, Math.floor(w / cw)),
       rows: Math.max(2, Math.floor(h / ch)),
     };
-  }
-
-  function scheduleDrain() {
-    drainTimer = setTimeout(runDrain, drainDelay);
-  }
-
-  /** One drain tick, then reschedule itself. The delay halves to the floor on
-   *  any output and doubles toward DRAIN_MAX_MS when idle. */
-  async function runDrain() {
-    drainTimer = null;
-    const got = await drainOnce();
-    drainDelay = got ? DRAIN_MIN_MS : Math.min(DRAIN_MAX_MS, drainDelay * 2);
-    // Reschedule only if still attached and no newer loop has taken over
-    // (a concurrent openTerm would have set its own drainTimer).
-    if (screen && ptyOpen && drainTimer === null) scheduleDrain();
-  }
-
-  /** Force the loop back to full rate now — called on keypress so typing
-   *  feels responsive even if the terminal had backed off while idle. */
-  function bumpDrain() {
-    drainDelay = DRAIN_MIN_MS;
-    if (drainTimer !== null) {
-      clearTimeout(drainTimer);
-      drainTimer = null;
-      scheduleDrain();
-    }
   }
 
   /** Drain the PTY buffer once. Returns true if any bytes were consumed. */
@@ -735,17 +471,13 @@
     // unconditionally writes state ($state assignments), and Svelte 5's
     // reactivity scheduler treats the cascade as an effect-update loop.
     const hadAnything =
-      screen !== null || ptyOpen || drainTimer !== null || resizeObserver !== null || resizeTimer !== null;
+      screen !== null || ptyOpen || drain.pending() || resizeObserver !== null || resizeTimer !== null;
     if (!hadAnything) return;
 
     // Drop the context menu so a session switch can't leave the backdrop stuck.
     ctxMenu = null;
 
-    if (drainTimer) {
-      clearTimeout(drainTimer);
-      drainTimer = null;
-    }
-    drainDelay = DRAIN_MIN_MS;
+    drain.stop();
     resizeObserver?.disconnect();
     resizeObserver = null;
     if (resizeTimer !== null) {
@@ -836,7 +568,7 @@
 
   onDestroy(() => {
     void closeTerm();
-    removeWindowListeners?.();
+    mouse.dispose();
   });
 
   // Per-row render cache, keyed by the Screen instance so it resets on a
