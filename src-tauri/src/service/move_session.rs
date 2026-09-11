@@ -697,19 +697,26 @@ fn stderr_of(out: &std::process::Output) -> String {
 }
 
 /// A private temp file removed on drop (the transcript is conversation
-/// content: mode 0600, never left behind).
+/// content: mode 0600, never left behind). Its name is unique per process
+/// and per call: the pid, a process-wide counter and the clock. The counter
+/// alone keeps concurrent calls apart. The clock is only microsecond-granular
+/// on macOS, so two calls in the same tick used to collide on `create_new`
+/// with `File exists (os error 17)`.
 struct TempFile(std::path::PathBuf);
 
 impl TempFile {
     fn write(bytes: &[u8]) -> Result<Self, IpcError> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let path = std::env::temp_dir().join(format!(
-            "claude-fleet-move-{}-{nanos}.jsonl",
+            "claude-fleet-move-{}-{seq}-{nanos}.jsonl",
             std::process::id()
         ));
         let mut f = std::fs::OpenOptions::new()
@@ -727,6 +734,46 @@ impl TempFile {
 impl Drop for TempFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod temp_file_tests {
+    use super::TempFile;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Writes started at once never collide on the name (the macOS clock is
+    /// only microsecond-granular): each gets its own path, holds its own
+    /// bytes, is private (0600), and is removed on drop.
+    #[test]
+    fn concurrent_writes_get_unique_private_files_removed_on_drop() {
+        const N: usize = 32;
+        let files: Vec<TempFile> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..N)
+                .map(|i| {
+                    scope.spawn(move || {
+                        TempFile::write(format!("transcript {i}").as_bytes())
+                            .expect("a concurrent write must not collide")
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let paths: std::collections::HashSet<_> = files.iter().map(|f| f.0.clone()).collect();
+        assert_eq!(paths.len(), N, "every write got its own path");
+        // Joined in spawn order, so `files[i]` is the file thread `i` wrote:
+        // asserting the exact body catches content crossing between them.
+        for (i, f) in files.iter().enumerate() {
+            let mode = std::fs::metadata(&f.0).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{}", f.0.display());
+            let body = std::fs::read_to_string(&f.0).unwrap();
+            assert_eq!(body, format!("transcript {i}"), "{}", f.0.display());
+        }
+        drop(files);
+        assert!(
+            paths.iter().all(|p| !p.exists()),
+            "every temp file is removed on drop"
+        );
     }
 }
 

@@ -71,8 +71,9 @@ that host's own token, not the master token. The token is bound to its host:
 `register_self`, `send_message` (`from_session_id`) and `inbox` refuse sessions
 on other hosts with `E_FORBIDDEN`. The fleet-admin tools (`provision_hosts`,
 `add_host`, `remove_host`, `hide_host`) are master-token only. A `readonly`
-token also refuses anything that sends, kills or writes. Treat `E_FORBIDDEN`
-as a permission answer and do not retry it.
+token also refuses anything that sends, kills or writes, `set_friendly_name`
+included: on a `readonly` host you cannot set your session's label. Treat
+`E_FORBIDDEN` as a permission answer and do not retry it.
 
 **Addressing a session.** Every name-addressed tool — `send_prompt`,
 `kill_session`, `safe_kill_session`, `restart_session`, `rename_session`,

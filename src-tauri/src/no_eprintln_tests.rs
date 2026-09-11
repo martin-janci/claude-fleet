@@ -8,8 +8,10 @@
 //!   `ssh_fake.rs`, this file);
 //! - an inline `#[cfg(test)] mod name { … }`, up to its closing brace, found
 //!   as the first later line that is exactly the `mod` line's indentation
-//!   followed by `}`. rustfmt puts it there and CI enforces `cargo fmt
-//!   --check`. Production code after the module is scanned again;
+//!   followed by `}`, optionally followed by whitespace and a `//` comment
+//!   (rustfmt keeps `} // end tests` as written). rustfmt puts the brace
+//!   there and CI enforces `cargo fmt --check`. Production code after the
+//!   module is scanned again;
 //! - comment lines.
 //!
 //! Why not count braces: braces inside string literals, raw strings above all
@@ -55,20 +57,38 @@ fn calls_print(line: &str) -> bool {
 }
 
 /// Index of the line that closes the inline module opened on `mod_idx`: the
-/// first later line that is exactly that line's indentation plus `}`. `None`
-/// when the file ends first.
+/// first later line that [`is_close_at`] that line's indentation. `None` when
+/// the file ends first.
 fn module_end(lines: &[&str], mod_idx: usize) -> Option<usize> {
     let indent: String = lines[mod_idx]
         .chars()
         .take_while(|c| c.is_whitespace())
         .collect();
-    let close = format!("{indent}}}");
     lines
         .iter()
         .enumerate()
         .skip(mod_idx + 1)
-        .find(|(_, l)| l.trim_end() == close)
+        .find(|(_, l)| is_close_at(l, &indent))
         .map(|(k, _)| k)
+}
+
+/// True when `line` closes a block opened at `indent`: exactly `indent`, then
+/// `}`, then optional whitespace and an optional comment, line (`//`) or
+/// block (`/*`). rustfmt keeps a trailing comment on the closing brace
+/// (`} // end tests`, `} /* end */`). Matching only a bare `}` skipped past
+/// it to the next bare `}` at that indentation, which hid the production code
+/// in between: a false pass. Anything else after the brace (`}}`, `} else`),
+/// or a `}` at a deeper indentation, is not the close, so an odd file is
+/// reported as unterminated rather than guessed.
+fn is_close_at(line: &str, indent: &str) -> bool {
+    let Some(after) = line
+        .strip_prefix(indent)
+        .and_then(|rest| rest.strip_prefix('}'))
+    else {
+        return false;
+    };
+    let after = after.trim_start();
+    after.is_empty() || after.starts_with("//") || after.starts_with("/*")
 }
 
 /// What one file's scan found.
@@ -257,6 +277,52 @@ fn an_inline_test_module_above_production_code_does_not_hide_it() {
         vec![7, 14],
         "only the two production calls"
     );
+}
+
+#[test]
+fn a_trailing_comment_on_the_closing_brace_still_ends_the_module() {
+    // rustfmt keeps `} // end tests` as written. Matching only a bare `}`
+    // jumped past it to the next bare `}` at that indentation (here the end
+    // of `prod2`), hiding both production calls: a false pass.
+    let n = needles()[0];
+    let text = format!(
+        "#[cfg(test)]\n\
+         mod tests {{\n\
+         \x20   fn t() {{ {n}(\"test\"); }}\n\
+         }} // end tests\n\
+         fn prod() {{ {n}(\"prod\"); }}\n\
+         #[cfg(test)]\n\
+         mod more {{\n\
+         \x20   fn t() {{}}\n\
+         }}//no space\n\
+         fn prod2() {{\n\
+         \x20   {n}(\"prod 2\");\n\
+         }}\n\
+         #[cfg(test)]\n\
+         mod block {{\n\
+         \x20   fn t() {{}}\n\
+         }} /* end block */\n\
+         fn prod3() {{ {n}(\"prod 3\"); }}\n"
+    );
+    let r = scan(&text);
+    assert_eq!(
+        r.hits,
+        vec![5, 11, 17],
+        "every production call after a commented brace"
+    );
+    assert!(r.unterminated.is_empty());
+    assert!(is_close_at("} // end tests", ""));
+    assert!(is_close_at("} /* end */", ""), "a block comment closes too");
+    assert!(is_close_at("    }   ", "    "));
+    assert!(is_close_at("}//x", ""));
+    assert!(is_close_at("}/*x*/", ""));
+    assert!(
+        !is_close_at("}}", ""),
+        "two braces are not the module's close"
+    );
+    assert!(!is_close_at("} else {", ""));
+    assert!(!is_close_at("    }", ""), "a deeper brace is not the close");
+    assert!(!is_close_at("}", "    "));
 }
 
 #[test]

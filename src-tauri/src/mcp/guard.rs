@@ -29,9 +29,10 @@ pub const CONFIRM_TTL: Duration = Duration::from_secs(10 * 60);
 
 /// Tools a `readonly` host token may call: everything that only observes the
 /// fleet. `probe_host` / `refresh_projects` re-read external state without
-/// touching sessions; `set_friendly_name` is a display-only label.
-/// Every other tool — sends, kills, deletes, clipboard writes, provisioning,
-/// session creation, host registration — is refused with `E_FORBIDDEN`.
+/// touching sessions. Every other tool — sends, kills, deletes, clipboard
+/// writes, provisioning, session creation, host registration, and any write
+/// to a session row such as `set_friendly_name` — is refused with
+/// `E_FORBIDDEN`.
 pub const READONLY_TOOLS: &[&str] = &[
     "fleet_health",
     "list_hosts",
@@ -43,7 +44,6 @@ pub const READONLY_TOOLS: &[&str] = &[
     "list_sessions",
     "related_sessions",
     "list_worktrees",
-    "set_friendly_name",
     "capture_session",
     "session_history",
     "inbox",
@@ -479,6 +479,9 @@ mod tests {
             "add_host",
             "remove_host",
             "rotate_host_token",
+            // Writes the session row's label: a mutation, so a readonly
+            // token may not call it.
+            "set_friendly_name",
             "no_such_tool",
         ] {
             assert!(!is_readonly_tool(t), "{t} must be mutating");

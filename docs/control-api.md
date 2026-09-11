@@ -48,10 +48,11 @@ Each host's token has a **mode**, shown in the **Token** column of
   etc. remain allowed by design.
 - `readonly` — only tools that observe the fleet (`list_*`, `capture_session`,
   `session_history`, `inbox`, `peer_status`, `peek_session`, `repo_*`,
-  `get_clipboard`, `set_friendly_name`, `wait_for_session`,
-  `session_transcript`, `wait_for_task`, `list_tasks`, …). Anything that
-  sends, kills, deletes, provisions, dispatches, or writes the clipboard
-  returns `E_FORBIDDEN`.
+  `get_clipboard`, `wait_for_session`, `session_transcript`,
+  `wait_for_task`, `list_tasks`, …). Anything that sends, kills, deletes,
+  provisions, dispatches, writes the clipboard, or writes a session row
+  (including `set_friendly_name`, so an agent on a `readonly` host cannot
+  set its sidebar label) returns `E_FORBIDDEN`.
 
 The fleet-admin tools — `provision_hosts`, `add_host`, `remove_host`,
 `hide_host` — are **master-token only** in either mode: a token lifted from
