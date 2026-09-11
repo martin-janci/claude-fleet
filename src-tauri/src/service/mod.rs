@@ -35,4 +35,5 @@ pub mod tasks;
 pub mod transcript;
 pub mod tunnel;
 pub mod usage;
+pub mod worktree_prune;
 pub mod worktrees;
