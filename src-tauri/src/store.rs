@@ -418,6 +418,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (18, include_str!("../migrations/018_host_tokens.sql")),
     (19, include_str!("../migrations/019_lifecycle_fields.sql")),
     (20, include_str!("../migrations/020_tasks_and_turns.sql")),
+    (21, include_str!("../migrations/021_repair_backoff.sql")),
 ];
 
 /// The schema version a fully migrated database reports.
@@ -4407,7 +4408,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 20, "schema_version should be 20 after migration");
+        assert_eq!(v, 21, "schema_version should be 21 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store

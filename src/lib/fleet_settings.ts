@@ -17,6 +17,8 @@ export const SETTING_KEYS = {
   gcSweepIntervalSecs: 'gc.sweep_interval_secs',
   projectsBasePath: 'projects.base_path',
   projectsLayout: 'projects.layout',
+  repairAutoOnTick: 'repair.auto_on_tick',
+  repairTickIntervalSecs: 'repair.tick_interval_secs',
 } as const;
 
 /** Derived, read-only entry in the `get_fleet_settings` map: JSON object of
@@ -47,6 +49,8 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'gc.sweep_interval_secs': '300',
   'projects.base_path': '{}',
   'projects.layout': 'github',
+  'repair.auto_on_tick': 'false',
+  'repair.tick_interval_secs': '600',
 };
 
 export type FleetSettings = Record<string, string>;

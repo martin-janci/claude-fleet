@@ -34,7 +34,7 @@ for it.
 | Read-only probe | yes | yes |
 | `git worktree add` from an existing local or `origin/` branch, target absent on disk and not registered | yes | yes |
 | `tmux new-session` when `tmux has-session` confirms the session is gone | attach only (other callers own tmux) | yes |
-| `git worktree remove --force -- <path>` for this worktree's own stale entry (never a blanket prune) | no — warning | yes |
+| `git worktree remove --force -- <path>` for this worktree's own stale entry (never a blanket prune) | only when the [vanished-directory guard](#vanished-directory-guard-automatic) holds, immediately followed by the add from the existing branch; otherwise warning | yes |
 | `git worktree add` into an empty leftover dir | no — warning | yes |
 | Adopt the branch's checkout elsewhere, re-path the row | no — warning | yes, guarded |
 | Recreate a branch that exists nowhere locally (`ls-remote`, fetch, or fork from base) | no — warning | yes |
@@ -54,6 +54,66 @@ answering), an unreadable pane cwd, no registration at the expected path while
 the branch is checked out elsewhere, a failed `ls-remote` or fetch — each is a
 warning, never a step.
 
+### Vanished-directory guard (automatic)
+
+The common real case is `rm -rf` of a worktree directory: git still lists the
+entry, so a plain add would fail. An automatic run may remove that one entry
+(`git worktree remove --force -- <path>`, never `prune`) and re-add it from the
+existing local or `origin/` branch only when every condition holds
+(`repair::VanishedGuard`, evaluated in `plan_with`):
+
+1. `dir_absent` — the probe reported a non-empty canonical path (`pwd -P` of
+   the nearest existing parent plus the remainder) and `test -e` / `test -L`
+   false for it. A missing key or an empty / failed probe never counts.
+2. `parent_exists` — the directory that should contain the worktree exists.
+3. `repo_ok` — the project root exists and `git rev-parse --git-dir` works
+   there (a missing root is refused earlier with `E_REPO_MISSING`).
+4. `under_root` — the canonical path lies strictly under the canonical
+   project root (which covers `.worktrees/` and `.claude/worktrees/`), with no
+   `.` / `..` component.
+5. `not_locked` — the entry is not locked (a locked entry whose directory is
+   gone is refused earlier with `E_WORKSPACE_LOCKED`, in every policy).
+6. `no_other_session` — no other live or ghost session on the host maps to
+   the worktree (same project and `worktree_key`, or a `worktree_id` whose
+   row has that name or canonical path). Unknown (no project id, a store
+   error) counts as mapped.
+7. `same_filesystem` — the parent directory's device id equals the project
+   root's (`stat -L -c %d` on Linux / BusyBox, `stat -L -f %d` on macOS; the
+   probe picks the flavour by trying `-c` first). Either stat failing fails
+   the guard.
+
+If any condition fails the run stays explicit-only (`E_REPAIR_REQUIRED` for
+new session / restart / recreate / spawn review, a notice on attach) and the
+warning names the failed conditions. The guard is recorded in the
+`workspace_repaired` event detail (`vanished_guard`) and the `RepairReport`.
+
+**Unmounted volumes.** A worktree on a volume that is not mounted looks
+exactly like a deleted one: the path is gone. Removing its registration would
+detach a checkout that still exists on the unmounted disk. The
+`parent_exists` condition blocks that case: when the volume or its mountpoint
+is missing, the parent directory is missing too, so nothing is removed. The
+same holds when a whole `.worktrees/` directory is gone. `same_filesystem`
+blocks a parent that is another volume: a mounted `.worktrees/` volume whose
+worktree vanished, or an autofs mountpoint (autofs has its own device id even
+before it mounts). A person decides through the explicit Repair workspace.
+
+Known residuals, not distinguishable by device id: a bind mount of the same
+filesystem shares the root's device id; and a plain (non-autofs) mountpoint
+that is currently unmounted is an ordinary empty directory on the root's
+filesystem, so an add there would land under the mountpoint.
+
+**Re-check at apply time.** The probe runs one round trip before the apply,
+and a late-mounting path (autofs, NFS) can reappear in between; `git worktree
+remove --force` would then delete whatever is there. So the apply script
+re-checks in the same shell, immediately before the remove: if the path is a
+symlink, exists as anything but an empty directory, or its parent is gone, it
+prints `reappeared or parent missing; not removing` and exits before any git
+step. That maps to `E_REPAIR_REQUIRED` ("reappeared"), which the reconcile
+tick backs off like any refusal. (An empty directory is allowed so the
+explicit repair of an empty leftover keeps working.) An interrupted apply
+(`E_REPAIR_FAILED`, "may be partially applied") is retried at the next tick
+interval instead; the interval has a 60 s floor.
+
 ## Design
 
 Probe → plan → apply → verify → record, in `service::repair`:
@@ -61,7 +121,8 @@ Probe → plan → apply → verify → record, in `service::repair`:
 1. **Probe** — one read-only `bash -lc` script per host, every value through
    `shell::quote`, always exits 0. It prints `key=value` lines
    (`wt_path`, `root_exists`, `root_git`, `root_gitdir_ok`, `root_canon`,
-   `wt_canon`, `layout_dot_worktrees`, `wt_exists`, `wt_git`, `wt_empty`,
+   `wt_canon`, `layout_dot_worktrees`, `wt_exists`, `wt_entry_exists`,
+   `wt_parent_exists`, `root_dev`, `wt_parent_dev`, `wt_git`, `wt_empty`,
    `wt_gitdir_ok`, `index_lock`, `branch_local`, `branch_remote`,
    `default_branch`, `tmux_alive`, `tmux_dead`, `tmux_cwd`,
    `tmux_cwd_exists`) and then `git worktree list --porcelain`, with a
@@ -99,7 +160,8 @@ Probe → plan → apply → verify → record, in `service::repair`:
    Adoption is verified too. Only then is tmux touched.
 5. **Record** — rows within the policy (see the table); one
    `workspace_repaired` event (detail: `cwd`, `actions`, `branch_source`,
-   `tmux`, `warnings`) or `workspace_repair_failed` (`E_CODE: message`).
+   `tmux`, `warnings`, and `vanished_guard` when our registered directory was
+   missing) or `workspace_repair_failed` (`E_CODE: message`).
 
 ### Adoption guard (explicit)
 
@@ -122,7 +184,7 @@ workspace group (reviews, twins).
 | terminal attach (`TerminalView.openTerm`) | `repair_session({ explicit: false })` before `pty_open`; notice when an explicit repair is needed | `Entry::Attach` → Auto, creates a confirmed-dead session |
 | Repair workspace button | `repair_session({ explicit: true })` | `Entry::Explicit` |
 | MCP `repair_session` | resolve + host-bind the target, `confirm_gate`, `repair::repair_session(id, true)` | `Entry::Explicit` |
-| reconcile tick | not wired here; `ensure_session_workspace` is the function to call | — |
+| reconcile tick (opt-in `repair.auto_on_tick`) | `service::repair_tick`: one batched `test -d` per host, then `ensure_session_workspace(id, Entry::Restart)` for vanished dirs, ≤ 5 per run; refusals are backed off per workspace signature | Auto, tmux untouched |
 
 ## Edge-case inventory
 
@@ -130,10 +192,10 @@ workspace group (reviews, twins).
 
 | # | Case | Before | Automatic now | Explicit now |
 |---|---|---|---|---|
-| a | row + tmux alive, worktree dir deleted | new panes fail; rebuilt at the stale path | registration still listed → warning, `E_REPAIR_REQUIRED` for lifecycles | remove our entry → add → verify → respawn (pane cwd confirmed missing) |
+| a | row + tmux alive, worktree dir deleted | new panes fail; rebuilt at the stale path | vanished-directory guard holds: remove our entry → add → verify (live pane left, `tmux_cwd_stale`); otherwise warning, `E_REPAIR_REQUIRED` for lifecycles | remove our entry → add → verify → respawn (pane cwd confirmed missing) |
 | b | tmux gone, dir deleted, entry gone | tmux in a missing cwd | add from the existing branch; attach creates tmux | same, plus create tmux |
 | c | dir present, git no longer lists it / stale `.git` link | undetected | warning | `git worktree repair --`; verify decides; a checkout whose admin dir was pruned is reported, never deleted |
-| d | registered but directory missing (`prunable`, or older git without the flag) | `worktree add` failed | warning | remove our entry only → add |
+| d | registered but directory missing (`prunable`, or older git without the flag) | `worktree add` failed | guard holds: remove our entry only → add; otherwise warning (an empty leftover dir is not "absent") | remove our entry only → add |
 | e | branch only on the remote (`origin/<b>` present) | failed | add with `--track` | same |
 | f | branch deleted everywhere | failed | warning | `ls-remote` confirms absent (or no origin) → fork from base, recorded; unreachable origin / failed fetch → `E_REPAIR_FAILED` |
 | g | branch checked out elsewhere | git refused | main checkout: `E_BRANCH_CHECKED_OUT`; linked worktree: warning | main checkout: `E_BRANCH_CHECKED_OUT`; linked: adopt after the guard + verify |
@@ -167,7 +229,10 @@ workspace group (reviews, twins).
 - Frontend: `repairSession(id, { explicit })` + `RepairReport` in
   `sessions.ts`; the Repair workspace button (explicit, shows the branch
   source); the automatic pre-attach check in `TerminalView.svelte`.
-- No migration.
+- `repair::{plan_with, AutoContext, VanishedGuard}`; `RepairReport.vanished_guard`.
+- Reconcile tick: `service::repair_tick` (settings `repair.auto_on_tick`,
+  `repair.tick_interval_secs`; migration `021_repair_backoff` for the
+  per-session backoff stamp). The repair itself needs no migration.
 
 ## Path source of truth
 
@@ -192,8 +257,15 @@ workspace group (reviews, twins).
 - `ensure_workspace` with a scripted executor: exact scripts in order,
   tmux calls, row writes, events; automatic runs never apply explicit steps;
   failures keep the row; probe vs apply transport failures map differently.
+- Vanished-directory guard: `plan_with` removes-then-adds under every
+  automatic entry point when all conditions hold; each condition alone
+  (parent missing, absence unconfirmed, outside the root, `..`, another
+  session mapped, mapping unknown) leaves no steps and `E_REPAIR_REQUIRED`;
+  root missing and locked are refused earlier; the event detail carries the
+  guard.
 - Real `git` in tempdirs: deleted worktree (explicit repair, second run a
-  no-op), symlinked root (healthy no-op, deleted dir, branch in the main
+  no-op; automatic repair recreates it on the same branch, second run a
+  no-op; a missing parent blocks the automatic removal), symlinked root (healthy no-op, deleted dir, branch in the main
   checkout refused with the row untouched), `.worktrees` layout, another
   worktree's stale registration survives, unreachable origin aborts, branch
   recreated from base when there is no origin.
@@ -203,7 +275,6 @@ workspace group (reviews, twins).
 
 ## Follow-ups
 
-- Wire `ensure_session_workspace` into the reconcile tick (Track D).
 - Only the active pane of the session's current window is respawned.
 - `git worktree repair` cannot resurrect a checkout whose admin dir was pruned
   while the directory survived; a guided "move aside, re-add, restore the

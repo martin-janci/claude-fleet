@@ -20,6 +20,9 @@ pub enum Kind {
     /// Integer seconds in `0..=MAX_SECS` (`0` usually means "disabled" /
     /// "never").
     Secs,
+    /// Integer seconds in `min..=MAX_SECS`: a cadence with no "disabled"
+    /// value (an opt-in toggle elsewhere turns the feature off).
+    SecsMin(u64),
     /// One of a fixed set of strings.
     Choice(&'static [&'static str]),
     /// JSON object `{ "<host alias>": "<projects root>" }`. Every alias must
@@ -51,6 +54,8 @@ pub const GC_BG_IDLE_SECS: &str = "gc.bg_idle_secs";
 pub const GC_SHELL_IDLE_SECS: &str = "gc.shell_idle_secs";
 pub const GC_WORK_IDLE_SECS: &str = "gc.work_idle_secs";
 pub const GC_SWEEP_INTERVAL_SECS: &str = "gc.sweep_interval_secs";
+pub const REPAIR_AUTO_ON_TICK: &str = "repair.auto_on_tick";
+pub const REPAIR_TICK_INTERVAL_SECS: &str = "repair.tick_interval_secs";
 /// Per-host projects root, one JSON map (host alias → path). A host with no
 /// entry falls back to `$CLAUDE_FLEET_PROJECTS_BASE` (local only), then to the
 /// layout default. See `service::projects::project_base_for`.
@@ -134,7 +139,20 @@ pub const SPECS: &[Spec] = &[
         default: "86400",
         kind: Kind::Secs,
     },
+    Spec {
+        key: REPAIR_AUTO_ON_TICK,
+        default: "false",
+        kind: Kind::Bool,
+    },
+    Spec {
+        key: REPAIR_TICK_INTERVAL_SECS,
+        default: "600",
+        kind: Kind::SecsMin(REPAIR_TICK_MIN_SECS),
+    },
 ];
+
+/// Floor for `repair.tick_interval_secs`: `0` would repair on every pass.
+pub const REPAIR_TICK_MIN_SECS: u64 = 60;
 
 pub fn spec(key: &str) -> Option<&'static Spec> {
     SPECS.iter().find(|s| s.key == key)
@@ -198,6 +216,16 @@ pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
         Kind::Secs => Err(IpcError::new(
             "E_INVALID",
             format!("{key} must be an integer number of seconds between 0 and {MAX_SECS}"),
+        )),
+        Kind::SecsMin(min)
+            if v.parse::<u64>()
+                .is_ok_and(|n| (min..=MAX_SECS).contains(&n)) =>
+        {
+            Ok(())
+        }
+        Kind::SecsMin(min) => Err(IpcError::new(
+            "E_INVALID",
+            format!("{key} must be an integer number of seconds between {min} and {MAX_SECS}"),
         )),
         Kind::Choice(options) if options.contains(&v) => Ok(()),
         Kind::Choice(options) => Err(IpcError::new(
@@ -431,5 +459,30 @@ mod tests {
         // a rejected write leaves the stored value alone
         assert!(set(&s, PROJECTS_BASE_PATH, r#"{"vps":"../x"}"#).is_err());
         assert_eq!(base_path_map(&s)["vps"], "~/code");
+    }
+
+    #[test]
+    fn repair_on_tick_defaults_off_with_a_ten_minute_cadence() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(!get_bool(&s, REPAIR_AUTO_ON_TICK));
+        assert_eq!(get_secs(&s, REPAIR_TICK_INTERVAL_SECS), 600);
+        set(&s, REPAIR_AUTO_ON_TICK, "true").unwrap();
+        set(&s, REPAIR_TICK_INTERVAL_SECS, "60").unwrap();
+        assert!(get_bool(&s, REPAIR_AUTO_ON_TICK));
+        assert_eq!(get_secs(&s, REPAIR_TICK_INTERVAL_SECS), 60);
+        assert_eq!(
+            validate(REPAIR_AUTO_ON_TICK, "on").unwrap_err().code,
+            "E_INVALID"
+        );
+        // No "repair on every pass": the cadence has a 60 s floor.
+        for bad in ["0", "59", "-1", "abc"] {
+            assert_eq!(
+                validate(REPAIR_TICK_INTERVAL_SECS, bad).unwrap_err().code,
+                "E_INVALID",
+                "{bad}"
+            );
+        }
+        assert!(validate(REPAIR_TICK_INTERVAL_SECS, &MAX_SECS.to_string()).is_ok());
+        assert_eq!(resolve(REPAIR_TICK_INTERVAL_SECS, Some("0")), "600");
     }
 }

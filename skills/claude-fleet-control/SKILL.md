@@ -186,6 +186,29 @@ Each rung is more destructive than the last.
 `recreate_session` kills the running process but keeps the conversation via
 session-id resume; prefer `send_prompt` / `restart_session` for in-place fixes.
 
+**Workspace gone or broken** (the worktree directory vanished, the pane runs
+in a deleted dir, git lists a stale entry): `repair_session { session_id }`
+(or `host_alias` + `name`) is the explicit repair, the same as the Repair
+workspace button. Create, restart, recreate and attach already re-add a
+missing worktree from its existing branch, first dropping its own stale git
+entry when the directory is confirmed gone under the project root, its parent
+exists and no other session maps to it; so does the reconcile tick when
+`repair.auto_on_tick` is on (at most 5 per run). `repair_session` may also
+unregister that entry when those checks fail, adopt its branch's checkout
+elsewhere, recreate the branch from base once origin confirms it is gone, run
+`git worktree repair` and respawn the pane. It is gated by
+`mcp.confirm_destructive`: on `E_CONFIRM_REQUIRED`, retry with the returned
+`confirm_nonce` once approved. It returns a RepairReport (`cwd`, `healthy`,
+`actions`, `warnings`, `branch_source`, `tmux`). Refusals need a human, so do
+not loop on them: `E_REPO_MISSING` (the main checkout is gone; it is never
+faked with mkdir), `E_BRANCH_CHECKED_OUT` (the branch is checked out in the
+main checkout, or adoption was refused because another fleet workspace uses
+that checkout), `E_WORKSPACE_LOCKED` (`git worktree unlock` first),
+`E_REPAIR_FAILED` (a step or the verify failed; read the message). A
+restart/recreate answering `E_REPAIR_REQUIRED` means only the explicit repair
+can fix the workspace: call `repair_session`, then retry. Each attempt shows in
+`session_history` as `workspace_repaired` or `workspace_repair_failed`.
+
 ## Reviewing a session's work
 
 Read the worktree without touching it: `repo_changes` (git status),
