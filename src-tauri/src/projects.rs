@@ -1,7 +1,7 @@
 use crate::ipc_error::IpcError;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use tokio::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DiscoveredProject {
@@ -60,12 +60,17 @@ pub fn scan_projects(base: &Path) -> Result<Vec<DiscoveredProject>, IpcError> {
 
 /// Runs `git worktree list --porcelain` in `repo_path` and parses the result.
 /// The main checkout is normalized to `name = "main"`; extras use the dir name.
-pub fn list_worktrees(repo_path: &Path) -> Result<Vec<DiscoveredWorktree>, IpcError> {
+///
+/// Async via `tokio::process` so the per-project fan-out in
+/// `service::projects::refresh_projects` awaits N git children instead of
+/// blocking N tokio worker threads (BE-4).
+pub async fn list_worktrees(repo_path: &Path) -> Result<Vec<DiscoveredWorktree>, IpcError> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo_path)
         .args(["worktree", "list", "--porcelain"])
         .output()
+        .await
         .map_err(|e| IpcError::new("E_GIT", format!("git worktree list failed: {e}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();

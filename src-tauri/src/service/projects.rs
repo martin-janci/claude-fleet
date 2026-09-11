@@ -20,9 +20,7 @@ pub(crate) fn projects_base() -> PathBuf {
 }
 
 pub fn list_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow>, IpcError> {
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = store.lock().map_err(|_| IpcError::lock())?;
     s.list_projects_joined()
 }
 
@@ -31,22 +29,25 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
 
     // 1. Snapshot the current project list under a brief lock.
     let snapshot = {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = store.lock().map_err(|_| IpcError::lock())?;
         s.list_projects_joined()?
     };
 
     // 2. Scan the filesystem for new/removed projects (IO-only, no lock needed).
-    let discovered = scan_projects(&base)?;
+    //    `read_dir` over the whole projects tree is blocking std::fs, so it
+    //    runs on the blocking pool rather than stalling a tokio worker.
+    let discovered = tokio::task::spawn_blocking(move || scan_projects(&base))
+        .await
+        .map_err(|e| IpcError::new("E_IO", format!("project scan task failed: {e}")))??;
 
     // 3. Fan-out: run `git worktree list` for each discovered project, off-lock
-    //    and in parallel using tokio tasks.
+    //    and in parallel using tokio tasks. `list_worktrees` is async
+    //    (tokio::process) so N repos never pin N worker threads (BE-4).
     let mut set = tokio::task::JoinSet::new();
     for dp in discovered.iter().cloned() {
         let _ = &snapshot; // borrow-check: snapshot not moved into tasks
         set.spawn(async move {
-            let result = list_worktrees(&dp.base_path);
+            let result = list_worktrees(&dp.base_path).await;
             (dp, result)
         });
     }
@@ -66,9 +67,7 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
 
     // 4. Apply all writes under a single brief lock.
     {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = store.lock().map_err(|_| IpcError::lock())?;
         for (dp, worktrees) in &upserts {
             let project_id =
                 s.upsert_project(&dp.owner, &dp.repo, &dp.base_path.to_string_lossy())?;
@@ -87,8 +86,6 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
     }
 
     // 5. Return the fresh list under one final brief lock.
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = store.lock().map_err(|_| IpcError::lock())?;
     s.list_projects_joined()
 }

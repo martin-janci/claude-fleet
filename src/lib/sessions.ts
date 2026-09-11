@@ -51,8 +51,11 @@ export const showFriendlyNames = writable<boolean>(
 );
 showFriendlyNames.subscribe((v) => writePref('show-friendly-names', v));
 
-export async function loadSessions(): Promise<Result<SessionRow[]>> {
-  const r = await invokeCmd<SessionRow[]>('list_sessions');
+// `force: true` (the sidebar Refresh button) makes the backend run a fleet
+// reconcile pass now; the default returns stored rows while the last pass is
+// within the configured interval, so window-focus reloads stay cheap.
+export async function loadSessions(opts: { force?: boolean } = {}): Promise<Result<SessionRow[]>> {
+  const r = await invokeCmd<SessionRow[]>('list_sessions', { force: opts.force ?? false });
   if (r.ok) sessions.set(r.value);
   return r;
 }

@@ -32,6 +32,11 @@ pub mod codes {
     pub const E_SERIALIZE: &str = "E_SERIALIZE";
     /// Parsing external text (settings JSON, command output…) failed.
     pub const E_PARSE: &str = "E_PARSE";
+    /// An `ssh` command exceeded its wall-clock bound after connecting; the
+    /// child was killed and the host's ControlMaster may have been reset
+    /// (`ssh.rs` `run_child`). Distinct from `E_TIMEOUT` so the UI can tell
+    /// a wedged transport from a slow local/remote command.
+    pub const E_SSH_TIMEOUT: &str = "E_SSH_TIMEOUT";
     /// The `ssh` transport itself failed (ControlMaster, exit status…).
     pub const E_SSH: &str = "E_SSH";
     /// The host is known but currently unreachable.
