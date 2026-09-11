@@ -47,6 +47,52 @@ fn worktree_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRow> {
     })
 }
 
+/// One `PRAGMA foreign_key_check` row: a child row whose foreign key names a
+/// missing parent. `(table, rowid, parent, fkid)` identifies it stably across
+/// a migration: rowids survive the 024 rebuild (the id column is the rowid)
+/// and the rebuilt table declares its foreign keys in the same order.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct FkViolation {
+    pub table: String,
+    pub rowid: Option<i64>,
+    pub parent: String,
+    pub fkid: i64,
+}
+
+/// Every dangling foreign key in the database.
+fn fk_violations(conn: &Connection) -> rusqlite::Result<Vec<FkViolation>> {
+    let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
+    let rows = stmt.query_map([], |r| {
+        Ok(FkViolation {
+            table: r.get(0)?,
+            rowid: r.get(1)?,
+            parent: r.get(2)?,
+            fkid: r.get(3)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Whether a migration's schema change is already present, for migrations
+/// that cannot be written idempotently in SQL. Tests roll the recorded
+/// version back and migrate again, which re-runs every later migration. 024
+/// rebuilds `worktrees` and would reset every row's host to 'local' (and
+/// collide remote rows with same-named local ones), so on a table that
+/// already has `host_alias` it only records its version.
+fn migration_already_in_schema(conn: &Connection, version: i64) -> rusqlite::Result<bool> {
+    match version {
+        24 => {
+            let n: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('worktrees') WHERE name = 'host_alias'",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok(n > 0)
+        }
+        _ => Ok(false),
+    }
+}
+
 /// Ids of the sessions whose `worktree_id` is `worktree_id`: the rows a
 /// re-point or clear is about to change, for the `session:updated` events
 /// emitted after the commit.
@@ -522,8 +568,12 @@ impl Store {
         // `sessions.worktree_id` references, which SQLite only allows that
         // way. The pragma is a no-op inside a transaction, so it is set here,
         // outside them; `apply_migrations` then refuses to commit any
-        // migration that leaves a dangling reference, and foreign keys go
-        // back on even when a migration fails.
+        // migration that ADDS a dangling reference, and foreign keys go back
+        // on even when a migration fails. Dangling references that were
+        // already there (a hand edit in the sqlite3 CLI, where foreign keys
+        // default to off, can leave one) are logged and never fatal: failing
+        // on them would stop the app from starting with no way out short of
+        // manual SQL.
         let pending: Vec<(i64, &str)> = MIGRATIONS
             .iter()
             .copied()
@@ -533,35 +583,60 @@ impl Store {
             self.conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
             let applied = self.apply_migrations(&pending);
             let restored = self.conn.execute_batch("PRAGMA foreign_keys = ON;");
-            applied?;
+            for violation in applied? {
+                tracing::warn!(
+                    "migration left a pre-existing dangling foreign key in place: {violation:?}"
+                );
+            }
             restored?;
         }
         self.reap_orphan_session_events()?;
         Ok(())
     }
 
-    /// Run `pending` migrations in order, each in its own transaction. Before
-    /// each commit `PRAGMA foreign_key_check` must come back empty (SQLite's
-    /// table-rebuild procedure), so a migration that leaves a reference to a
-    /// missing row rolls back instead of committing with foreign keys off.
-    fn apply_migrations(&self, pending: &[(i64, &str)]) -> Result<()> {
+    /// Run `pending` migrations in order, each in its own transaction, and
+    /// return the dangling references that were ALREADY in the database.
+    /// `PRAGMA foreign_key_check` covers the whole database, so it is taken
+    /// before and after each migration: only rows the migration added roll it
+    /// back (SQLite's table-rebuild procedure); rows present before it are
+    /// left alone and returned for the caller to log.
+    fn apply_migrations(&self, pending: &[(i64, &str)]) -> Result<Vec<FkViolation>> {
+        let mut preexisting: Vec<FkViolation> = Vec::new();
         for (version, sql) in pending {
             let tx = self.conn.unchecked_transaction()?;
+            if migration_already_in_schema(&tx, *version)? {
+                // Re-run on a schema that already has this change (a test
+                // rolled the recorded version back): only record it.
+                tx.execute(
+                    "INSERT OR IGNORE INTO schema_version (version) VALUES (?1)",
+                    rusqlite::params![version],
+                )?;
+                tx.commit()?;
+                continue;
+            }
+            let before: std::collections::HashSet<FkViolation> =
+                fk_violations(&tx)?.into_iter().collect();
             tx.execute_batch(sql)?;
-            let dangling: Option<String> = tx
-                .query_row("PRAGMA foreign_key_check", [], |r| r.get(0))
-                .optional()?;
-            if let Some(table) = dangling {
+            let mut added: Vec<FkViolation> = Vec::new();
+            for violation in fk_violations(&tx)? {
+                if !before.contains(&violation) {
+                    added.push(violation);
+                } else if !preexisting.contains(&violation) {
+                    preexisting.push(violation);
+                }
+            }
+            if let Some(v) = added.first() {
                 return Err(rusqlite::Error::SqliteFailure(
                     rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
                     Some(format!(
-                        "migration {version} left a dangling foreign key in table {table}"
+                        "migration {version} left a dangling foreign key: {} row {:?} -> {} (fk {})",
+                        v.table, v.rowid, v.parent, v.fkid
                     )),
                 ));
             }
             tx.commit()?;
         }
-        Ok(())
+        Ok(preexisting)
     }
 
     #[cfg(test)]
@@ -1112,7 +1187,8 @@ impl Store {
 
     /// Delete `host_alias`'s worktree rows at `path` (an `ExitWorktree`
     /// removal on that host). Sessions still pointing at them are cleared, as
-    /// [`Self::delete_worktree`] does. Returns how many went.
+    /// [`Self::delete_worktree`] does, and get a `session:updated` so the
+    /// sidebar drops the worktree at once. Returns how many went.
     pub fn delete_worktrees_at(
         &self,
         host_alias: &str,
@@ -1125,9 +1201,12 @@ impl Store {
             let rows = stmt.query_map(rusqlite::params![host_alias, path], |r| r.get(0))?;
             rows.collect::<Result<_, _>>()?
         };
+        let mut touched: Vec<i64> = Vec::new();
         for id in &ids {
+            touched.extend(session_ids_on_worktree(&self.conn, *id)?);
             self.delete_worktree(*id)?;
         }
+        self.emit_sessions_updated(&touched);
         Ok(ids.len())
     }
 
@@ -1344,7 +1423,9 @@ impl Store {
             let mut stmt =
                 tx.prepare("SELECT host_alias, path FROM worktrees WHERE project_id = ?1")?;
             let rows = stmt
-                .query_map(rusqlite::params![project_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .query_map(rusqlite::params![project_id], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         };
@@ -1700,9 +1781,11 @@ impl Store {
         )?;
         // And its worktree rows (host-scoped, migration 024). A session on
         // another host that still points at one is cleared first, and told.
-        const HOST_WORKTREES: &str = "worktree_id IN (SELECT id FROM worktrees WHERE host_alias=?1)";
+        const HOST_WORKTREES: &str =
+            "worktree_id IN (SELECT id FROM worktrees WHERE host_alias=?1)";
         let cleared: Vec<i64> = {
-            let mut stmt = tx.prepare(&format!("SELECT id FROM sessions WHERE {HOST_WORKTREES}"))?;
+            let mut stmt =
+                tx.prepare(&format!("SELECT id FROM sessions WHERE {HOST_WORKTREES}"))?;
             let ids = stmt
                 .query_map(rusqlite::params![alias], |row| row.get::<_, i64>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -5258,7 +5341,8 @@ mod tests {
             .upsert_worktree_on("vps", pid, "feat", path, None)
             .unwrap();
         s.record_parent_fingerprint("vps", path, "9:9", 1).unwrap();
-        s.record_parent_fingerprint("local", path, "1:1", 1).unwrap();
+        s.record_parent_fingerprint("local", path, "1:1", 1)
+            .unwrap();
         s.delete_worktree(remote).unwrap();
         assert_eq!(s.parent_fingerprint("vps", path).unwrap(), None);
         assert_eq!(
@@ -5271,7 +5355,8 @@ mod tests {
         s.upsert_worktree_on("vps", pid, "other", other, None)
             .unwrap();
         s.record_parent_fingerprint("vps", other, "9:8", 1).unwrap();
-        s.record_parent_fingerprint("local", other, "1:2", 1).unwrap();
+        s.record_parent_fingerprint("local", other, "1:2", 1)
+            .unwrap();
         s.delete_project(pid).unwrap();
         assert_eq!(s.parent_fingerprint("vps", other).unwrap(), None);
         assert_eq!(
@@ -5297,7 +5382,16 @@ mod tests {
             .upsert_worktree_on("vps", pid, "feat", "/srv/r/.worktrees/feat", None)
             .unwrap();
         let elsewhere = s
-            .upsert_session("dev", "local", Some(pid), Some(remote), 1, 1, "running", None)
+            .upsert_session(
+                "dev",
+                "local",
+                Some(pid),
+                Some(remote),
+                1,
+                1,
+                "running",
+                None,
+            )
             .unwrap();
         bus.take();
         s.delete_host("vps").unwrap();
@@ -5308,8 +5402,7 @@ mod tests {
             None
         );
         assert!(
-            bus.take()
-                .contains(&format!("session:updated:{elsewhere}")),
+            bus.take().contains(&format!("session:updated:{elsewhere}")),
             "the cleared session is announced"
         );
     }
@@ -5444,6 +5537,110 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 0, "the migration rolled back");
+    }
+
+    /// Seed one dangling reference, as a hand edit in the sqlite3 CLI (foreign
+    /// keys default to off there) can leave.
+    fn seed_dangling_session(s: &Store) {
+        s.conn
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 INSERT INTO hosts (alias) VALUES ('local');
+                 INSERT INTO sessions
+                   (tmux_name, host_alias, project_id, worktree_id,
+                    created_at, last_activity_at, status)
+                   VALUES ('stale', 'local', NULL, 4242, 1, 1, 'running');
+                 PRAGMA foreign_keys = ON;",
+            )
+            .unwrap();
+    }
+
+    /// `PRAGMA foreign_key_check` covers the whole database: a dangling
+    /// reference that was ALREADY there must not block 024 (or brick
+    /// startup). It is reported, keyed stably, and left in place; only rows a
+    /// migration adds roll it back.
+    #[test]
+    fn migration_024_applies_over_a_preexisting_dangling_reference() {
+        let old = store_at_version(23);
+        seed_dangling_session(&old);
+        let pending: Vec<(i64, &str)> = MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|(v, _)| *v > 23)
+            .collect();
+        old.conn
+            .execute_batch("PRAGMA foreign_keys = OFF;")
+            .unwrap();
+        let reported = old
+            .apply_migrations(&pending)
+            .expect("a pre-existing dangling row is not fatal");
+        old.conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        assert_eq!(reported.len(), 1, "{reported:?}");
+        assert_eq!(
+            (reported[0].table.as_str(), reported[0].parent.as_str()),
+            ("sessions", "worktrees")
+        );
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(
+            old.has_table("worktrees").unwrap()
+                && old.list_worktrees_on_host("local").unwrap().is_empty(),
+            "the rebuilt table is in place"
+        );
+        // The app start path too: `migrate()` logs it and succeeds.
+        let again = store_at_version(23);
+        seed_dangling_session(&again);
+        again.migrate().expect("the app still starts");
+        assert_eq!(again.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// Tests roll the recorded version back and migrate again (#61's upgrade
+    /// test does), which re-runs 024. On a table that already has
+    /// `host_alias` it must not rebuild again: remote rows keep their host,
+    /// even one named like a local row.
+    #[test]
+    fn migration_024_rerun_keeps_remote_rows() {
+        let s = Store::open_in_memory().unwrap();
+        let pid = s.upsert_project("o", "r", "/p/r").unwrap();
+        s.upsert_worktree(pid, "main", "/p/r", None).unwrap();
+        let remote = s
+            .upsert_worktree_on("vps", pid, "main", "/home/u/r", None)
+            .unwrap();
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 24;")
+            .unwrap();
+        s.migrate().expect("re-running 024 is safe");
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert_eq!(
+            s.get_worktree_row(remote).unwrap().unwrap().host_alias,
+            "vps"
+        );
+        assert_eq!(s.list_worktrees_for_project(pid).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn delete_worktrees_at_emits_session_updated_for_cleared_sessions() {
+        let bus = Arc::new(crate::events::RecordingEventBus::new());
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+        s.upsert_host("vps").unwrap();
+        let pid = s.upsert_project("o", "r", "/p/r").unwrap();
+        let wt = s
+            .upsert_worktree_on("vps", pid, "feat", "/home/u/r/.worktrees/feat", None)
+            .unwrap();
+        let sid = s
+            .upsert_session("dev", "vps", Some(pid), Some(wt), 1, 1, "running", None)
+            .unwrap();
+        bus.take();
+        assert_eq!(
+            s.delete_worktrees_at("vps", "/home/u/r/.worktrees/feat")
+                .unwrap(),
+            1
+        );
+        let evts = bus.take();
+        assert!(
+            evts.contains(&format!("session:updated:{sid}")),
+            "the sidebar learns the worktree is gone: {evts:?}"
+        );
+        assert_eq!(s.get_session_by_id(sid).unwrap().unwrap().worktree_id, None);
     }
 
     #[test]

@@ -1002,9 +1002,11 @@ impl HostPaths {
         }
     }
 
-    /// The project of the longest known worktree checkout on this host that
-    /// contains the cwd in any of its `spellings`, by whole components.
-    fn project_by_worktree(&self, spellings: &[&str]) -> Option<i64> {
+    /// The longest known worktree checkout on this host that contains the cwd
+    /// in any of its `spellings`, by whole components, as `(project_id,
+    /// matched path length)`; the length lets the caller weigh it against a
+    /// project-root match.
+    fn project_by_worktree(&self, spellings: &[&str]) -> Option<(i64, usize)> {
         self.worktrees
             .iter()
             .filter(|(wt, _)| {
@@ -1014,7 +1016,7 @@ impl HostPaths {
                         .any(|p| crate::service::projects::strip_root(p, wt).is_some())
             })
             .max_by_key(|(wt, _)| wt.len())
-            .map(|(_, pid)| *pid)
+            .map(|(wt, pid)| (*pid, wt.len()))
     }
 
     /// Path components below the root, when `path` lies under it. Compares
@@ -1125,25 +1127,24 @@ pub(crate) fn find_project_id_for_path(
             crate::service::projects::strip_root(&path_str, base).is_some()
                 || crate::service::projects::strip_root(&canon_str, base).is_some()
         };
-        // No project base contains it: a linked worktree outside the layout
-        // (a sibling folder of the repo) still belongs to the repo whose
-        // `git worktree list` named it.
-        return projects
+        // The most specific match wins: a project whose base contains the
+        // cwd, or a checkout from `git worktree list` (a linked worktree
+        // outside the layout, such as a sibling folder of the repo, belongs
+        // to the repo that lists it). See `most_specific`.
+        let by_root = projects
             .iter()
             .filter(|p| within(&p.base_path))
             .max_by_key(|p| p.base_path.len())
-            .map(|p| p.id)
-            .or_else(|| paths.project_by_worktree(&[&path_str, &canon_str]));
+            .map(|p| (p.id, p.base_path.len()));
+        return most_specific(by_root, paths.project_by_worktree(&[&path_str, &canon_str]));
     }
-    // Remote paths: locate (owner, repo) under the host's configured root and
-    // layout, then the worktree checkouts this host's hooks reported (a
-    // sibling-folder worktree lies outside the layout), then the
-    // conventional `.../projects/github.com/<owner>/<repo>/...` regex. `None`
-    // (orphan) if nothing matches.
-    if let Some(pid) = remote_project_by_layout(projects, &path_str, paths) {
-        return Some(pid);
-    }
-    if let Some(pid) = paths.project_by_worktree(&[&path_str]) {
+    // Remote paths: the project located under the host's configured root and
+    // layout (owner/repo), weighed against the worktree checkouts this host's
+    // hooks reported (`most_specific`), then the conventional
+    // `.../projects/github.com/<owner>/<repo>/...` regex. `None` (orphan) if
+    // nothing matches.
+    let by_layout = remote_project_by_layout(projects, &path_str, paths);
+    if let Some(pid) = most_specific(by_layout, paths.project_by_worktree(&[&path_str])) {
         return Some(pid);
     }
     let (owner, repo) = extract_owner_repo(&path_str)?;
@@ -1153,15 +1154,31 @@ pub(crate) fn find_project_id_for_path(
         .map(|p| p.id)
 }
 
+/// The more specific of a project-root match and a worktree-row match, each
+/// `(project_id, matched path length)`: the longer match wins, and a tie goes
+/// to the worktree row. A tie means a project whose base IS that checkout,
+/// typically a leftover duplicate of a linked worktree (a sibling folder once
+/// scanned as its own repo and kept alive by a session). The worktree row
+/// names the repo whose `git worktree list` holds that checkout, which must
+/// win.
+fn most_specific(root: Option<(i64, usize)>, worktree: Option<(i64, usize)>) -> Option<i64> {
+    match (root, worktree) {
+        (Some((r, root_len)), Some((w, wt_len))) => Some(if wt_len >= root_len { w } else { r }),
+        (root, worktree) => root.or(worktree).map(|(id, _)| id),
+    }
+}
+
 /// The project of a remote cwd located under the host's configured root and
-/// layout, matched by owner/repo (github layout) or a unique repo name (flat).
+/// layout, matched by owner/repo (github layout) or a unique repo name
+/// (flat), as `(project_id, length of the repo directory prefix of the cwd)`.
 fn remote_project_by_layout(
     projects: &[ProjectRow],
     path_str: &str,
     paths: &HostPaths,
-) -> Option<i64> {
-    let (owner, repo, _) = paths.locate(path_str)?;
-    match owner {
+) -> Option<(i64, usize)> {
+    let (owner, repo, remainder) = paths.locate(path_str)?;
+    let repo_len = path_str.len().saturating_sub(remainder.len());
+    let pid = match owner {
         Some(o) => projects
             .iter()
             .find(|p| p.owner == o && p.repo == repo)
@@ -1174,7 +1191,8 @@ fn remote_project_by_layout(
                 _ => None,
             }
         }
-    }
+    }?;
+    Some((pid, repo_len))
 }
 
 /// List every session in the fleet.
@@ -4495,6 +4513,53 @@ mod tests {
             Some(app)
         );
         assert_eq!(find_vps("/b/o/app-wt/src"), None, "local rows stay local");
+    }
+
+    /// A leftover duplicate project whose base IS a linked worktree (such as
+    /// `stw-fix2`, once scanned as its own repo and kept alive by a session)
+    /// must not win over the real repo that lists that checkout. The matches
+    /// tie on length and the worktree row wins, locally and remotely. A
+    /// project root deeper than the worktree row still wins.
+    #[test]
+    fn find_project_prefers_the_worktree_row_over_a_duplicate_project() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("vps").unwrap();
+        let app = s.upsert_project("o", "app", "/b/o/app").unwrap();
+        s.upsert_project("o", "stw-fix2", "/b/o/stw-fix2").unwrap();
+        s.upsert_worktree(app, "stw-fix2", "/b/o/stw-fix2", None)
+            .unwrap();
+        s.upsert_worktree_on(
+            "vps",
+            app,
+            "stw-fix2",
+            "/home/u/projects/github.com/o/stw-fix2",
+            None,
+        )
+        .unwrap();
+        let nested = s
+            .upsert_project("o", "nested", "/b/o/stw-fix2/vendor/nested")
+            .unwrap();
+        let projects = s.list_projects().unwrap();
+        let local = HostPaths::for_host(&s, "local");
+        let vps = HostPaths::for_host(&s, "vps");
+        let find = |host: &str, paths: &HostPaths, p: &str| {
+            find_project_id_for_path(&projects, host, std::path::Path::new(p), paths)
+        };
+        assert_eq!(
+            find("local", &local, "/b/o/stw-fix2/src"),
+            Some(app),
+            "the duplicate project loses the tie locally"
+        );
+        assert_eq!(
+            find("vps", &vps, "/home/u/projects/github.com/o/stw-fix2/src"),
+            Some(app),
+            "the duplicate project located by the layout loses the tie remotely"
+        );
+        assert_eq!(
+            find("local", &local, "/b/o/stw-fix2/vendor/nested/x"),
+            Some(nested),
+            "a deeper project root beats a shorter worktree row"
+        );
     }
 
     #[test]
