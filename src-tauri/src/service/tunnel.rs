@@ -34,7 +34,16 @@ fn ssh_spawner() -> TunnelSpawner {
                 .kill_on_drop(true)
                 .status()
                 .await;
-            status.ok().and_then(|s| s.code())
+            match status {
+                // `code()` is None when ssh was killed by a signal.
+                Ok(s) => s.code(),
+                // Log it here: once mapped to None, "ssh is missing" would
+                // look the same as "killed by a signal" in the restart line.
+                Err(e) => {
+                    eprintln!("[tunnel] failed to spawn ssh: {e}");
+                    None
+                }
+            }
         })
     })
 }

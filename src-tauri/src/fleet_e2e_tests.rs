@@ -10,7 +10,6 @@
 //!   ```
 
 use crate::service::sessions::{reconcile_sessions_with, ReconcileDeps};
-use crate::ssh::SshExec;
 use crate::ssh_fake::{FakeSsh, Match, Reply};
 use crate::store::Store;
 use crate::tmux::{RemoteTmux, TmuxExec};
@@ -166,7 +165,11 @@ async fn reconcile_recovers_a_host_once_it_answers_again() {
     fake.on_host(
         "local",
         Match::script(LIST_SCRIPT),
-        Reply::fail(1, "no server running on /tmp/tmux-1000/default"),
+        Reply::Exit {
+            code: 1,
+            stdout: b"no server running on /tmp/tmux-1000/default\n".to_vec(),
+            stderr: Vec::new(),
+        },
     );
     fake.unreachable("beta");
     let deps = deps_over(fake.clone(), Duration::from_secs(5));
@@ -232,6 +235,10 @@ async fn tmux_roundtrip() {
         "tmux must be on PATH for this test"
     );
     let dir = tempfile::tempdir().unwrap();
+    // Declared after `dir`, so it drops first: the private server (and its
+    // `sleep 300` pane) is killed on every exit path, a failed assert
+    // included, before the socket directory is removed.
+    let _server = PrivateTmuxServer(dir.path().to_path_buf());
     let exec = LocalExec::new()
         .with_env("TMUX_TMPDIR", &dir.path().to_string_lossy())
         .without_env("TMUX")
@@ -294,6 +301,12 @@ async fn tmux_roundtrip() {
         .unwrap()
         .iter()
         .all(|s| s.name != name));
+    // The BE-3 ghost guard only ghosts a row whose `last_reconciled_at` is
+    // strictly older than the probe's start, and both are whole unix
+    // seconds. If this pass started in the same second the first pass
+    // stamped the row, the guard (correctly) treats it as fresh and keeps
+    // it `running`. Wait for the next second so the test doesn't flake.
+    wait_for_next_unix_second().await;
     reconcile_sessions_with(&store, &deps).await.unwrap();
     {
         let s = store.lock().unwrap();
@@ -302,9 +315,39 @@ async fn tmux_roundtrip() {
         assert_eq!(row.status, "ghost");
     }
 
-    // Shut the private server down (it usually exits with its last
-    // session; ignore the "no server" exit).
-    let _ = exec
-        .run("local", &["tmux", "kill-server"], Duration::from_secs(5))
-        .await;
+    // `_server` shuts the private server down on drop.
+}
+
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Sleep until the wall clock has moved into a later unix second than when
+/// this was called (at most ~1 s).
+async fn wait_for_next_unix_second() {
+    let start = unix_secs();
+    while unix_secs() <= start {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Kills the `tmux_roundtrip` private server (socket under `TMUX_TMPDIR`)
+/// when dropped. Synchronous, because `Drop` cannot await; errors (e.g. "no
+/// server running" once the last session is gone) are ignored.
+struct PrivateTmuxServer(std::path::PathBuf);
+
+impl Drop for PrivateTmuxServer {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("tmux")
+            .arg("kill-server")
+            .env("TMUX_TMPDIR", &self.0)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
 }

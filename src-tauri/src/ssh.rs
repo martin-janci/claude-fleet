@@ -33,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 const DEFAULT_WALL_CLOCK_FLOOR: Duration = Duration::from_secs(30);
 /// Wall-clock bound for `upload_file`: a large file over a slow link needs
 /// far more than a probe, but it still must not hang forever.
-const UPLOAD_WALL_CLOCK: Duration = Duration::from_secs(300);
+pub(crate) const UPLOAD_WALL_CLOCK: Duration = Duration::from_secs(300);
 /// Bound on each of the two best-effort control requests issued after a
 /// wall-clock timeout (`ssh -O check`, then `ssh -O exit` if needed). A
 /// timed-out call can therefore take up to `wall_clock + 2 × this` before it
@@ -531,8 +531,8 @@ impl Default for SshClient {
 
 /// The transport the service layer talks to a host through. `SshClient` is
 /// the production implementation (ControlMaster-multiplexed `ssh`);
-/// `LocalExec` runs the same argv through a local `bash -c`; tests script a
-/// `FakeSsh` (`ssh_fake.rs`) that records every call and answers from canned
+/// tests use `LocalExec` (the same argv through a local `bash -c`) and a
+/// scripted `FakeSsh`, which records every call and answers from canned
 /// replies. Services take `&dyn SshExec` so all three are interchangeable.
 ///
 /// Semantics every implementation must keep, because the callers rely on
@@ -682,11 +682,13 @@ pub(crate) fn wall_clock_error(host: &str, wall_clock: Duration, reset: bool) ->
 /// modes are a missing `bash`, a non-zero exit, and the wall clock.
 ///
 /// Used by the opt-in `tmux_roundtrip` integration test to drive the real
-/// `RemoteTmux` command builder against a private local tmux server; it is
-/// also the natural executor for the `local` host alias should `exec_for`
-/// ever stop special-casing it.
+/// `RemoteTmux` command builder against a private local tmux server.
+///
+/// Test-only on purpose: production `local` commands go through `LocalTmux`,
+/// which execs tmux with a plain argv and never involves a shell. Routing
+/// them through `bash -c` would widen the shell-injection surface.
+#[cfg(test)]
 #[derive(Clone, Default)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub struct LocalExec {
     /// Extra environment for every spawned `bash` (e.g. `TMUX_TMPDIR` to
     /// point tmux at a private server).
@@ -696,7 +698,7 @@ pub struct LocalExec {
     env_remove: Vec<String>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 impl LocalExec {
     pub fn new() -> Self {
         Self::default()
@@ -792,6 +794,7 @@ impl LocalExec {
     }
 }
 
+#[cfg(test)]
 #[async_trait::async_trait]
 impl SshExec for LocalExec {
     async fn run(&self, host: &str, args: &[&str], timeout: Duration) -> Result<Output, IpcError> {

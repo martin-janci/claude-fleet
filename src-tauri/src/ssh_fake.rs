@@ -10,13 +10,14 @@
 //! The fake keeps the contract documented on `SshExec`: an unreachable host
 //! is ssh exiting 255 with a connect error on stderr (`Ok(Output)`), not an
 //! `Err`; a hang is bounded by the same wall clock the real client applies
-//! (`SshClient::default_wall_clock`, overridable with `set_wall_clock` so a
+//! (`SshClient::default_wall_clock`, `UPLOAD_WALL_CLOCK` for uploads;
+//! both overridable with `set_wall_clock` so a
 //! test does not wait 30 s) and surfaces as `E_SSH_TIMEOUT`; cancellation
 //! wins over both and surfaces as `E_CANCELLED`. `remote_home` runs
 //! `printenv HOME` through the log like the real client and caches per host.
 
 use crate::ipc_error::IpcError;
-use crate::ssh::{home_from_output, wall_clock_error, SshClient, SshExec};
+use crate::ssh::{home_from_output, wall_clock_error, SshClient, SshExec, UPLOAD_WALL_CLOCK};
 use std::collections::HashMap;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
@@ -294,10 +295,10 @@ impl FakeSsh {
         reply
     }
 
-    fn wall_clock_for(&self, timeout: Duration) -> Duration {
-        self.lock()
-            .wall_clock
-            .unwrap_or_else(|| SshClient::default_wall_clock(timeout))
+    /// The test override from `set_wall_clock`, else `base` — the bound the
+    /// real client would apply to this kind of call.
+    fn wall_clock_or(&self, base: Duration) -> Duration {
+        self.lock().wall_clock.unwrap_or(base)
     }
 
     async fn execute(
@@ -305,7 +306,7 @@ impl FakeSsh {
         host: &str,
         args: &[&str],
         stdin: Option<Vec<u8>>,
-        timeout: Duration,
+        wall_clock: Duration,
         token: Option<CancellationToken>,
         spawn_code: &str,
     ) -> Result<Output, IpcError> {
@@ -331,7 +332,6 @@ impl FakeSsh {
                 format!("ssh spawn {host}: {message}"),
             )),
             Reply::Hang { for_ } => {
-                let wall_clock = self.wall_clock_for(timeout);
                 let cancelled = async {
                     match token {
                         Some(t) => t.cancelled().await,
@@ -356,7 +356,15 @@ impl FakeSsh {
 #[async_trait::async_trait]
 impl SshExec for FakeSsh {
     async fn run(&self, host: &str, args: &[&str], timeout: Duration) -> Result<Output, IpcError> {
-        self.execute(host, args, None, timeout, None, "E_SSH").await
+        self.execute(
+            host,
+            args,
+            None,
+            self.wall_clock_or(SshClient::default_wall_clock(timeout)),
+            None,
+            "E_SSH",
+        )
+        .await
     }
 
     async fn run_cancellable(
@@ -366,8 +374,15 @@ impl SshExec for FakeSsh {
         timeout: Duration,
         token: CancellationToken,
     ) -> Result<Output, IpcError> {
-        self.execute(host, args, None, timeout, Some(token), "E_SSH")
-            .await
+        self.execute(
+            host,
+            args,
+            None,
+            self.wall_clock_or(SshClient::default_wall_clock(timeout)),
+            Some(token),
+            "E_SSH",
+        )
+        .await
     }
 
     async fn upload_file(
@@ -375,7 +390,7 @@ impl SshExec for FakeSsh {
         host: &str,
         local_path: &Path,
         remote_path: &str,
-        timeout: Duration,
+        _timeout: Duration,
     ) -> Result<(), IpcError> {
         let bytes = std::fs::read(local_path).map_err(|e| {
             IpcError::new("E_UPLOAD", format!("open {}: {e}", local_path.display()))
@@ -386,7 +401,8 @@ impl SshExec for FakeSsh {
                 host,
                 &[remote_cmd.as_str()],
                 Some(bytes),
-                timeout,
+                // Same bound as `SshClient::upload_file`, not the probe one.
+                self.wall_clock_or(UPLOAD_WALL_CLOCK),
                 None,
                 "E_UPLOAD",
             )
