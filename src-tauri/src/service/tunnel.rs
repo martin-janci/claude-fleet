@@ -40,7 +40,7 @@ fn ssh_spawner() -> TunnelSpawner {
                 // Log it here: once mapped to None, "ssh is missing" would
                 // look the same as "killed by a signal" in the restart line.
                 Err(e) => {
-                    eprintln!("[tunnel] failed to spawn ssh: {e}");
+                    tracing::error!(error = %e, "[tunnel] failed to spawn ssh");
                     None
                 }
             }
@@ -124,7 +124,12 @@ impl TunnelSupervisor {
             loop {
                 let argv = tunnel_argv(&host_s, remote_port, mcp_port);
                 let status = spawner(argv).await;
-                eprintln!("[tunnel] {host_s} ssh exited: {status:?}; restarting in {backoff:?}");
+                tracing::warn!(
+                    host = %host_s,
+                    exit_code = ?status,
+                    restart_in = ?backoff,
+                    "[tunnel] ssh exited; restarting"
+                );
                 tokio::time::sleep(backoff).await;
                 backoff = next_backoff(backoff);
             }

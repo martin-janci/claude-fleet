@@ -259,17 +259,22 @@ pub async fn run_with(
             ),
         };
         if let Err(e) = &result {
-            eprintln!(
-                "[playbook] {} on {}/{} failed: {e}",
-                p.action.as_str(),
-                p.host_alias,
-                p.tmux_name
+            tracing::warn!(
+                action = p.action.as_str(),
+                host = %p.host_alias,
+                session = %p.tmux_name,
+                error = %e,
+                "[playbook] action failed"
             );
         }
         if let Ok(s) = store.lock() {
             match s.mark_playbook_applied(p.session_id, now, &detail) {
                 Ok(_) => applied += 1,
-                Err(e) => eprintln!("[playbook] stamping session {} failed: {e}", p.session_id),
+                Err(e) => tracing::warn!(
+                    session_id = p.session_id,
+                    error = %e,
+                    "[playbook] stamping the session failed"
+                ),
             }
         }
     }

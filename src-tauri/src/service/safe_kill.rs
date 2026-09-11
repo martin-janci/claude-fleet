@@ -403,7 +403,11 @@ pub async fn discard_kill_session(
     if let Some(wid) = worktree_id {
         if let Ok(s) = store.lock() {
             if let Err(e) = s.delete_worktree(wid) {
-                eprintln!("[safe_kill] discard: delete_worktree({wid}) failed: {e}");
+                tracing::warn!(
+                    worktree_id = wid,
+                    error = %e,
+                    "[safe_kill] discard: dropping the worktree row failed"
+                );
             }
             let _ = s.insert_session_event(
                 session_id,
@@ -492,9 +496,10 @@ pub async fn handle_stop_marker_check(
     claude_session_id: String,
 ) {
     if let Err(e) = handle_stop_marker_check_inner(&store, &ssh, &claude_session_id).await {
-        eprintln!(
-            "[safe_kill] marker check for claude_session_id={claude_session_id} failed: {}",
-            e.message
+        tracing::warn!(
+            claude_session_id = %claude_session_id,
+            error = %e.message,
+            "[safe_kill] marker check failed"
         );
     }
 }
@@ -535,9 +540,11 @@ async fn handle_stop_marker_check_inner(
     {
         Ok(p) => p,
         Err(e) => {
-            eprintln!(
-                "[safe_kill] capture_pane failed for {host_alias}/{tmux_name}: {}",
-                e.message
+            tracing::warn!(
+                host = %host_alias,
+                session = %tmux_name,
+                error = %e.message,
+                "[safe_kill] capture_pane failed; retrying on the next Stop"
             );
             return Ok(());
         }
@@ -647,7 +654,11 @@ async fn finalize_safe_kill(
     if let Some(wid) = worktree_id {
         if let Ok(s) = store.lock() {
             if let Err(e) = s.delete_worktree(wid) {
-                eprintln!("[safe_kill] delete_worktree({wid}) failed: {e}");
+                tracing::warn!(
+                    worktree_id = wid,
+                    error = %e,
+                    "[safe_kill] dropping the worktree row failed"
+                );
             }
         }
     }
@@ -669,9 +680,11 @@ async fn finalize_safe_kill(
     )
     .await
     {
-        eprintln!(
-            "[safe_kill] tmux kill after READY failed for {host_alias}/{tmux_name}: {}",
-            e.message
+        tracing::error!(
+            host = %host_alias,
+            session = %tmux_name,
+            error = %e.message,
+            "[safe_kill] tmux kill after READY failed; the worktree is gone but the session still runs"
         );
     }
     Ok(())
