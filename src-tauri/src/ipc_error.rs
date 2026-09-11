@@ -132,6 +132,9 @@ pub mod codes {
     /// `move_session`: a step failed after the target session was started;
     /// both sessions were left running (`details.target_session_id`).
     pub const E_MOVE_PARTIAL: &str = "E_MOVE_PARTIAL";
+    /// No Claude transcript was found for the session (it has not written a
+    /// turn yet, or runs on another cwd), or it is empty.
+    pub const E_NO_TRANSCRIPT: &str = "E_NO_TRANSCRIPT";
     /// The call needs a desktop confirmation first (`mcp.confirm_destructive`);
     /// retry with the `confirm_nonce` from `details` once approved.
     pub const E_CONFIRM_REQUIRED: &str = "E_CONFIRM_REQUIRED";

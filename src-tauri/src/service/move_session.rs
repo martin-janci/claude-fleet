@@ -4,8 +4,10 @@
 //! see `docs/adr/0001-descope-freeze-ship-move.md`. A move carries the
 //! conversation, not the process:
 //!
-//! 1. **Preflight** — the source is a `work` row with a `claude_session_id`
-//!    and a worktree branch; both hosts are reachable, the target is
+//! 1. **Preflight** — no other move of the session is in flight; the source
+//!    is a `work` row with a `claude_session_id`, a worktree branch and an
+//!    idle Claude (freshly reconciled; a turn in progress or an unknown
+//!    status is refused); both hosts are reachable, the target is
 //!    provisioned; the source worktree is clean (`E_MOVE_DIRTY`) and its
 //!    branch is on origin with nothing unpushed (`E_MOVE_UNPUSHED`). Nothing
 //!    is ever pushed or stashed on the user's behalf.
@@ -20,8 +22,9 @@
 //!    (the recreate pane command). The move then waits, bounded, for the row
 //!    to be `running` and the transcript to be in place.
 //! 4. **Source** — only once the target is confirmed: a `session_moved` event
-//!    on both rows (the new row's `parent_session_id` is the source), then the
-//!    normal kill path unless `keep_source`.
+//!    on both rows (the new row's `parent_session_id` is the source), then —
+//!    unless `keep_source`, and only if the source transcript still has the
+//!    size and mtime the copy was taken at — the normal kill path.
 //!
 //! Failure handling: every step before the target tmux session starts leaves
 //! the source untouched and returns the step's own error. Any failure after
@@ -456,7 +459,7 @@ hint={hint}
 br={br}
 wt=''
 if [ -n "$name" ]; then
-  c=$(tmux display-message -p -t "$name" '#{{pane_current_path}}' 2>/dev/null)
+  c=$(tmux display-message -p -t "=$name:" '#{{pane_current_path}}' 2>/dev/null)
   if [ -n "$c" ] && git -C "$c" rev-parse --git-dir >/dev/null 2>&1; then wt="$c"; fi
 fi
 if [ -z "$wt" ] && [ -n "$hint" ] && git -C "$hint" rev-parse --git-dir >/dev/null 2>&1; then wt="$hint"; fi
@@ -481,7 +484,8 @@ printf '%s\036%s\036%s\036%s\036%s\036%s' "$wt" "$porcelain" "$head" "$cur" "$rs
     )
 }
 
-/// Locate the source transcript: prints `<bytes>\t<path>`.
+/// Locate the source transcript: prints `<bytes>\t<mtime secs>\t<path>`
+/// (mtime via GNU `stat -c %Y`, else BSD `stat -f %m`; empty if neither).
 pub fn locate_script(stored_path: Option<&str>, claude_id: &str) -> String {
     format!(
         r#"# cf-move:locate
@@ -497,11 +501,98 @@ if [ -z "$f" ]; then
 fi
 if [ -z "$f" ]; then printf '{NO_TRANSCRIPT} %s\n' "$id" >&2; exit 4; fi
 n=$(wc -c < "$f" | tr -d ' ')
-printf '%s\t%s\n' "$n" "$f"
+m=$(stat -c %Y -- "$f" 2>/dev/null || stat -f %m -- "$f" 2>/dev/null)
+printf '%s\t%s\t%s\n' "$n" "$m" "$f"
 "#,
         id = quote(claude_id),
         sp = quote(stored_path.unwrap_or("")),
     )
+}
+
+/// Where the source transcript is and the state the copy was taken at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Located {
+    pub size: u64,
+    /// Unix mtime; -1 when the host's `stat` gave nothing.
+    pub mtime: i64,
+    pub path: String,
+}
+
+/// Parse [`locate_script`] output.
+pub fn parse_locate(stdout: &str) -> Result<Located, IpcError> {
+    let line = stdout.trim();
+    let mut parts = line.splitn(3, '\t');
+    let size = parts.next().and_then(|n| n.trim().parse::<u64>().ok());
+    let mtime = parts.next().map(|m| m.trim().parse::<i64>().unwrap_or(-1));
+    let path = parts.next().filter(|p| p.starts_with('/'));
+    match (size, mtime, path) {
+        (Some(size), Some(mtime), Some(path)) => Ok(Located {
+            size,
+            mtime,
+            path: path.to_string(),
+        }),
+        _ => Err(IpcError::new(
+            codes::E_PARSE,
+            format!("unexpected transcript locate output: {line:?}"),
+        )),
+    }
+}
+
+/// Refuse a source whose Claude may be mid-turn: the copy would miss the
+/// rest of the turn and the two sessions would fork. Only a known idle
+/// status (the `wait_for_session` idle set, plus `failed`) is accepted.
+pub fn require_source_idle(status: Option<&str>) -> Result<(), IpcError> {
+    match status {
+        Some(s) if crate::store::IDLE_STATUSES.contains(&s) || s == "failed" => Ok(()),
+        other => Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            format!(
+                "the source Claude is not idle (claude_status {}); moving now would lose the turn in progress — wait until it finishes, then retry",
+                other
+                    .map(|s| format!("{s:?}"))
+                    .unwrap_or_else(|| "unknown".into())
+            ),
+        )),
+    }
+}
+
+// ── in-flight guard ─────────────────────────────────────────────────────────
+
+type InFlight = Mutex<std::collections::HashSet<(usize, i64)>>;
+
+/// Sessions with a move in progress, keyed by (store address, session id):
+/// one store per app, and the address keeps parallel tests on separate
+/// in-memory stores from colliding.
+fn moves_in_flight() -> &'static InFlight {
+    static IN_FLIGHT: std::sync::OnceLock<InFlight> = std::sync::OnceLock::new();
+    IN_FLIGHT.get_or_init(Default::default)
+}
+
+/// RAII claim on one session's move; released on drop (every exit path).
+pub struct MoveClaim((usize, i64));
+
+impl MoveClaim {
+    /// `E_INVALID_STATE` when a move of `session_id` is already running
+    /// (the UI and an MCP caller racing would otherwise both start one).
+    pub fn acquire(store: &Mutex<Store>, session_id: i64) -> Result<Self, IpcError> {
+        let key = (store as *const Mutex<Store> as usize, session_id);
+        let mut set = moves_in_flight().lock().map_err(|_| IpcError::lock())?;
+        if !set.insert(key) {
+            return Err(IpcError::new(
+                codes::E_INVALID_STATE,
+                format!("a move of session {session_id} is already in progress"),
+            ));
+        }
+        Ok(MoveClaim(key))
+    }
+}
+
+impl Drop for MoveClaim {
+    fn drop(&mut self) {
+        if let Ok(mut set) = moves_in_flight().lock() {
+            set.remove(&self.0);
+        }
+    }
 }
 
 /// Read at most `limit` bytes of the transcript.
@@ -666,6 +757,9 @@ struct Snapshot {
     target_projects_root: String,
     layout: crate::projects::Layout,
     target_taken: Vec<String>,
+    /// `(project root, worktree dir)` by the local projects root and layout:
+    /// the fallback when a `local` target has no project / worktree row path.
+    local_layout_paths: (String, String),
 }
 
 fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
@@ -749,6 +843,15 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
         )?;
     }
     let (owner, repo) = crate::service::sessions::fetch_owner_repo(s, project_id)?;
+    crate::validate::path_component("owner", &owner)?;
+    crate::validate::path_component("repo", &repo)?;
+    let local_layout_paths = crate::service::sessions::remote_project_path(
+        &crate::service::projects::local_projects_root(s).to_string_lossy(),
+        crate::service::projects::layout(s),
+        &owner,
+        &repo,
+        Some(&wt.name),
+    );
     let stored_transcript = s
         .session_transcript_path(row.id)?
         .filter(|p| p.ends_with(&format!("/{claude_id}.jsonl")));
@@ -773,6 +876,7 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
         target_projects_root: crate::service::projects::project_base_for(s, target),
         layout: crate::service::projects::layout(s),
         target_taken,
+        local_layout_paths,
         row,
     })
 }
@@ -828,6 +932,7 @@ pub async fn move_session_with(
     opts: MoveOptions,
 ) -> Result<MoveReport, IpcError> {
     crate::validate::host_alias(&args.target_host_alias)?;
+    let _claim = MoveClaim::acquire(store, args.session_id)?;
     let snap = {
         let s = store.lock().map_err(|_| IpcError::lock())?;
         snapshot(&s, &args)?
@@ -836,6 +941,17 @@ pub async fn move_session_with(
     let target = args.target_host_alias.clone();
     let id = snap.claude_id.clone();
     let mut warnings: Vec<String> = Vec::new();
+
+    // 0. The source Claude must be idle NOW: reconcile its host so the status
+    //    is fresh, then refuse a turn in progress or an unknown status.
+    hooks.refresh_host(store, &src).await?;
+    let status = {
+        let s = store.lock().map_err(|_| IpcError::lock())?;
+        s.get_session_by_id(snap.row.id)?
+            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?
+            .claude_status
+    };
+    require_source_idle(status.as_deref())?;
 
     // 1. Source git state: clean, on its branch, fully pushed.
     let hint = hooks.source_cwd_hint(store, &snap.row).await;
@@ -871,7 +987,7 @@ pub async fn move_session_with(
     if !out.status.success() {
         let err = stderr_of(&out);
         let code = if err.contains(NO_TRANSCRIPT) {
-            "E_NO_TRANSCRIPT"
+            codes::E_NO_TRANSCRIPT
         } else {
             codes::E_SHELL
         };
@@ -880,23 +996,16 @@ pub async fn move_session_with(
             format!("no transcript to move for claude session {id} on {src}: {err}"),
         ));
     }
-    let located = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let (size, src_path) = located
-        .split_once('\t')
-        .and_then(|(n, p)| n.trim().parse::<u64>().ok().map(|n| (n, p.to_string())))
-        .ok_or_else(|| {
-            IpcError::new(
-                codes::E_PARSE,
-                format!("unexpected transcript locate output: {located:?}"),
-            )
-        })?;
-    if size > snap.cap {
-        return Err(too_large(size, snap.cap));
+    let located = parse_locate(&String::from_utf8_lossy(&out.stdout))?;
+    if located.size > snap.cap {
+        return Err(too_large(located.size, snap.cap));
     }
+    // Exactly the located bytes: the end-of-move check compares against
+    // this size / mtime, so the copy and the check describe the same file.
     let out = sh(
         ssh,
         &src,
-        &read_script(&src_path, snap.cap + 1),
+        &read_script(&located.path, located.size),
         COPY_TIMEOUT,
     )
     .await?;
@@ -916,7 +1025,7 @@ pub async fn move_session_with(
     trim_to_last_newline(&mut bytes);
     if bytes.is_empty() {
         return Err(IpcError::new(
-            "E_NO_TRANSCRIPT",
+            codes::E_NO_TRANSCRIPT,
             format!("the transcript for claude session {id} on {src} is empty"),
         ));
     }
@@ -925,17 +1034,12 @@ pub async fn move_session_with(
     // 3. Target workspace: refresh origin/<branch>, create/repair the
     //    worktree, fast-forward to the source HEAD, resolve the transcript path.
     let (project_root, cwd_hint) = if target == LOCAL {
-        let root = snap.project_base.clone().ok_or_else(|| {
-            IpcError::new(
-                codes::E_NOTFOUND,
-                format!("project {} not found", snap.project_id),
-            )
-        })?;
-        let hint = snap
-            .worktree_path
-            .clone()
-            .unwrap_or_else(|| format!("{root}/.claude/worktrees/{}", snap.worktree_name));
-        (root, hint)
+        // The rows' own paths when present, else the layout-derived ones.
+        let (layout_root, layout_cwd) = snap.local_layout_paths.clone();
+        (
+            snap.project_base.clone().unwrap_or(layout_root),
+            snap.worktree_path.clone().unwrap_or(layout_cwd),
+        )
     } else {
         let home = ssh
             .remote_home(&target)
@@ -1040,7 +1144,7 @@ pub async fn move_session_with(
         .map_err(|e| {
             before_target(
                 &format!(
-                    "starting {tmux_name} on {target} (the worktree and transcript copy on the target were left in place)"
+                    "starting {tmux_name} on {target} (fleet only checked its own rows for that name, so a live tmux session called {tmux_name} may already exist on {target} outside fleet; the worktree and transcript copy on the target were left in place)"
                 ),
                 e,
             )
@@ -1149,6 +1253,53 @@ pub async fn move_session_with(
     }
     let mut source_killed = false;
     if !args.keep_source {
+        // The source kept running through the copy: if its transcript moved
+        // on since, it took a turn the target does not have. Killing it would
+        // lose that turn, so stop here with both sessions alive.
+        let recheck = async {
+            let out = sh(
+                ssh,
+                &src,
+                &locate_script(snap.stored_transcript.as_deref(), &id),
+                GIT_TIMEOUT,
+            )
+            .await?;
+            if !out.status.success() {
+                return Err(IpcError::new(
+                    codes::E_SHELL,
+                    format!(
+                        "re-locating the source transcript failed: {}",
+                        stderr_of(&out)
+                    ),
+                ));
+            }
+            parse_locate(&String::from_utf8_lossy(&out.stdout))
+        }
+        .await
+        .map_err(|e| {
+            partial(
+                "re-checking the source transcript",
+                &target,
+                &tmux_name,
+                Some(target_row.id),
+                &e,
+            )
+        })?;
+        if recheck.size != located.size || recheck.mtime != located.mtime {
+            return Err(partial(
+                "source transcript changed after copy",
+                &target,
+                &tmux_name,
+                Some(target_row.id),
+                &IpcError::new(
+                    codes::E_INVALID_STATE,
+                    format!(
+                        "the source transcript went from {} to {} bytes (mtime {} -> {}) after it was copied, so the source took a turn the target does not have; kill the target session {tmux_name} on {target} and retry move_session once the source is idle",
+                        located.size, recheck.size, located.mtime, recheck.mtime
+                    ),
+                ),
+            ));
+        }
         hooks
             .kill_source(store, &src, &snap.row.tmux_name)
             .await
@@ -1207,6 +1358,11 @@ mod tests {
         worktree_id: i64,
         /// Status the target row gets on reconcile.
         target_status: &'static str,
+        /// `kill_source` fails.
+        kill_fails: bool,
+        /// Starting the target makes the source transcript grow (a turn
+        /// taken on the source after the copy).
+        grow_source_on_start: bool,
         started: Mutex<Vec<(String, String)>>,
         log: Mutex<Vec<String>>,
     }
@@ -1218,6 +1374,8 @@ mod tests {
                 project_id,
                 worktree_id,
                 target_status: "running",
+                kill_fails: false,
+                grow_source_on_start: false,
                 started: Mutex::new(Vec::new()),
                 log: Mutex::new(Vec::new()),
             }
@@ -1256,6 +1414,13 @@ mod tests {
             }
             .new_session(name, std::path::Path::new(cwd), pane_cmd)
             .await?;
+            if self.grow_source_on_start {
+                self.fake.on_host(
+                    "alpha",
+                    Match::script_contains("# cf-move:locate"),
+                    Reply::ok(&locate_out(TRANSCRIPT.len() + 40, MTIME + 3)),
+                );
+            }
             self.started
                 .lock()
                 .unwrap()
@@ -1285,6 +1450,9 @@ mod tests {
             host: &str,
             name: &str,
         ) -> Result<(), IpcError> {
+            if self.kill_fails {
+                return Err(IpcError::new("E_TMUX", "can't find session"));
+            }
             self.log.lock().unwrap().push(format!("kill {host} {name}"));
             Ok(())
         }
@@ -1296,6 +1464,12 @@ mod tests {
         source_id: i64,
         project_id: i64,
         worktree_id: i64,
+    }
+
+    const MTIME: usize = 1_789_000_000;
+
+    fn locate_out(size: usize, mtime: usize) -> String {
+        format!("{size}\t{mtime}\t{SRC_PATH}\n")
     }
 
     fn inspection(porcelain: &str, rsha: &str, ahead: &str) -> String {
@@ -1334,6 +1508,7 @@ mod tests {
             )
             .unwrap();
         s.set_claude_session_id(id, SID).unwrap();
+        s.set_claude_status_by_session_id(SID, "idle").unwrap();
         s.set_friendly_name("alpha", "dev-o-r--feat", Some("Feat work"))
             .unwrap();
         // beta's projects root → the layout hint is exactly TGT_CWD.
@@ -1349,7 +1524,7 @@ mod tests {
         .on_host(
             "alpha",
             Match::script_contains("# cf-move:locate"),
-            Reply::ok(&format!("{}\t{SRC_PATH}\n", TRANSCRIPT.len())),
+            Reply::ok(&locate_out(TRANSCRIPT.len(), MTIME)),
         )
         .on_host(
             "alpha",
@@ -1583,7 +1758,7 @@ mod tests {
         f.fake.on_host(
             "alpha",
             Match::script_contains("# cf-move:locate"),
-            Reply::ok(&format!("{}\t{SRC_PATH}\n", 2 * 1024 * 1024)),
+            Reply::ok(&locate_out(2 * 1024 * 1024, MTIME)),
         );
         let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
         let err = run(&f, &hooks, false).await.unwrap_err();
@@ -1633,6 +1808,127 @@ mod tests {
         assert_eq!(d["target_host"], "beta");
         assert!(err.message.contains("source is untouched"));
         assert_source_untouched(&f, &hooks);
+    }
+
+    #[tokio::test]
+    async fn kill_failure_is_partial_with_the_target_id() {
+        let f = fixture();
+        let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        hooks.kill_fails = true;
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_PARTIAL, "{}", err.message);
+        let d = err.details.expect("details");
+        let tid = d["target_session_id"].as_i64().expect("target id set");
+        assert_eq!(d["cause_code"], "E_TMUX");
+        assert!(d["step"]
+            .as_str()
+            .unwrap()
+            .starts_with("killing the source"));
+        // The target is registered and running; the source row is intact.
+        let s = f.store.lock().unwrap();
+        let t = s.get_session_by_id(tid).unwrap().unwrap();
+        assert_eq!(t.host_alias, "beta");
+        assert_eq!(t.status, "running");
+        assert!(s.get_session_by_id(f.source_id).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn source_that_wrote_after_the_copy_is_not_killed() {
+        let f = fixture();
+        let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        hooks.grow_source_on_start = true;
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_PARTIAL, "{}", err.message);
+        let d = err.details.expect("details");
+        assert_eq!(d["step"], "source transcript changed after copy");
+        assert!(d["target_session_id"].is_i64());
+        assert!(
+            err.message.contains("retry move_session"),
+            "{}",
+            err.message
+        );
+        assert!(
+            !hooks.log().iter().any(|l| l.starts_with("kill")),
+            "the source must stay alive: {:?}",
+            hooks.log()
+        );
+        // keep_source never re-checks: the user keeps both on purpose.
+        let f = fixture();
+        let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        hooks.grow_source_on_start = true;
+        assert!(run(&f, &hooks, true).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn busy_or_unknown_source_status_is_refused_before_anything_runs() {
+        for status in ["working", "blocked"] {
+            let f = fixture();
+            f.store
+                .lock()
+                .unwrap()
+                .set_claude_status_by_session_id(SID, status)
+                .unwrap();
+            let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+            let err = run(&f, &hooks, false).await.unwrap_err();
+            assert_eq!(
+                err.code,
+                codes::E_INVALID_STATE,
+                "{status}: {}",
+                err.message
+            );
+            assert!(err.message.contains("not idle"), "{}", err.message);
+            assert!(f.fake.calls().is_empty(), "{status}: no ssh at all");
+        }
+        assert!(require_source_idle(None)
+            .unwrap_err()
+            .message
+            .contains("unknown"));
+        for ok in ["idle", "completed", "stopped", "failed"] {
+            assert!(require_source_idle(Some(ok)).is_ok(), "{ok}");
+        }
+    }
+
+    #[tokio::test]
+    async fn diverged_target_worktree_is_refused_before_the_copy() {
+        let f = fixture();
+        f.fake.on_host(
+            "beta",
+            Match::script_contains("# cf-move:prep"),
+            Reply::fail(
+                6,
+                &format!("{DIVERGED} 2222222222222222222222222222222222222222"),
+            ),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_GIT, "{}", err.message);
+        assert!(err.message.contains("diverged"), "{}", err.message);
+        assert!(err.message.contains("source session was not touched"));
+        let beta = f.fake.calls_for("beta");
+        assert!(beta.iter().all(|c| c.stdin.is_none()), "no upload");
+        assert!(beta
+            .iter()
+            .all(|c| !c.script().unwrap_or_default().contains("tmux new-session")));
+        assert_source_untouched(&f, &hooks);
+    }
+
+    #[tokio::test]
+    async fn a_second_concurrent_move_of_the_same_session_is_refused() {
+        let f = fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let claim = MoveClaim::acquire(&f.store, f.source_id).unwrap();
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID_STATE);
+        assert!(
+            err.message.contains("already in progress"),
+            "{}",
+            err.message
+        );
+        assert!(f.fake.calls().is_empty());
+        drop(claim);
+        // Released on drop, including after a finished move.
+        run(&f, &hooks, true).await.expect("move after release");
+        assert!(MoveClaim::acquire(&f.store, f.source_id).is_ok());
     }
 
     #[tokio::test]
@@ -1777,6 +2073,8 @@ mod tests {
     fn scripts_quote_every_interpolated_value() {
         let evil = "x'; rm -rf / #";
         let i = inspect_script(evil, Some(evil), evil);
+        // Exact-match target: never a prefix-matched sibling like `<name>-bar`.
+        assert!(i.contains(r#"-t "=$name:""#), "{i}");
         assert!(i.contains("name='x'\\''; rm -rf / #'"), "{i}");
         assert!(i.contains("hint='x'\\''; rm -rf / #'"));
         assert!(i.contains("br='x'\\''; rm -rf / #'"));
@@ -1811,12 +2109,19 @@ mod tests {
         };
         let out = run(locate_script(None, SID));
         let text = String::from_utf8_lossy(&out.stdout);
-        assert!(text.starts_with("4\t"), "{text}");
-        assert!(text.trim_end().ends_with(&format!("-some-dir/{SID}.jsonl")));
+        let loc = parse_locate(&text).expect("parses");
+        assert_eq!(loc.size, 4, "{text}");
+        assert!(loc.mtime > 0, "stat gave an mtime: {text}");
+        assert!(loc.path.ends_with(&format!("-some-dir/{SID}.jsonl")));
         let stored = tmp.path().join("stored.jsonl");
         std::fs::write(&stored, "stored!\n").unwrap();
         let out = run(locate_script(Some(&stored.to_string_lossy()), SID));
-        assert!(String::from_utf8_lossy(&out.stdout).starts_with("8\t"));
+        assert_eq!(
+            parse_locate(&String::from_utf8_lossy(&out.stdout))
+                .unwrap()
+                .size,
+            8
+        );
         let empty = tmp.path().join("none");
         let out = std::process::Command::new("bash")
             .arg("-c")
