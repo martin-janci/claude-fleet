@@ -3,6 +3,7 @@
   import { projects, refreshProjects } from './projects';
   import { sessions } from './sessions';
   import { mcpStatus, mcpConfigure, mcpClientConfig, provisionHosts, type McpStatus } from './mcp';
+  import { copyText } from './clipboard';
   import {
     deriveSteps,
     allRequiredComplete,
@@ -101,14 +102,6 @@
 
   function maskToken(t: string): string {
     return t.length > 4 ? '••••••••••••' + t.slice(-4) : '••••';
-  }
-
-  async function copyText(text: string) {
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      /* clipboard unavailable — no-op */
-    }
   }
 
   function dismiss() {

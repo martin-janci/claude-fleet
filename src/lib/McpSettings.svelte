@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Result } from './result';
+  import { copyText } from './clipboard';
   import {
     mcpConfigure,
     mcpClientConfig,
@@ -65,14 +66,6 @@
 
   function maskToken(t: string): string {
     return t.length > 4 ? '••••••••••••' + t.slice(-4) : '••••';
-  }
-
-  async function copyText(text: string) {
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      /* clipboard unavailable — no-op */
-    }
   }
 
   // --- Install fleet hook ---
@@ -290,65 +283,8 @@
 </section>
 
 <style>
-  .section-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 0.4rem;
-  }
-  .section-header h4 {
-    margin: 0;
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--fg-muted);
-  }
-  .alias { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-
-  .status {
-    font-size: 0.7rem;
-    padding: 0.1rem 0.45rem;
-    border-radius: 999px;
-  }
-  .status-on { background: rgba(60,180,90,0.18); color: rgb(80,200,110); }
-  .status-off { background: rgba(180,100,100,0.18); color: rgb(220,130,130); }
-  .hook-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
-
   .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
 
-  .mcp-blurb {
-    font-size: 0.78rem;
-    color: var(--fg-muted);
-    margin: 0 0 0.6rem;
-    line-height: 1.4;
-  }
-  .mcp-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 0.5rem;
-  }
-  .toggle {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    font-size: 0.85rem;
-    cursor: pointer;
-  }
-  .mcp-field {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    margin-bottom: 0.4rem;
-    font-size: 0.82rem;
-  }
-  .mcp-field .lbl {
-    width: 3.2rem;
-    color: var(--fg-muted);
-    font-size: 0.72rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
   .mcp-field .mono {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     background: var(--bg-alt, rgba(127, 127, 127, 0.12));
@@ -362,28 +298,6 @@
     flex: 1;
     min-width: 0;
   }
-  .mcp-field .port {
-    width: 6rem;
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--fg);
-    border-radius: 4px;
-    padding: 0.2rem 0.4rem;
-  }
-  .mcp-field .port.invalid {
-    border-color: #e64a4a;
-  }
-  .mcp-field button {
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--fg);
-    cursor: pointer;
-    padding: 0.18rem 0.5rem;
-    font-size: 0.78rem;
-    border-radius: 4px;
-  }
-  .mcp-field button:hover:not(:disabled) { border-color: var(--accent); }
-  .mcp-field button:disabled { opacity: 0.5; cursor: default; }
   .mcp-field button.danger:hover:not(:disabled) {
     color: #e64a4a;
     border-color: #e64a4a;
@@ -409,29 +323,11 @@
   }
   .mcp-config button:hover { border-color: var(--accent); }
 
-  .hook-section {
-    margin-top: 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
   .hook-desc {
     margin: 0;
     font-size: 12px;
     color: var(--text-secondary, #888);
   }
-  .hook-btn {
-    align-self: flex-start;
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--fg);
-    cursor: pointer;
-    padding: 0.18rem 0.5rem;
-    font-size: 0.78rem;
-    border-radius: 4px;
-  }
-  .hook-btn:hover:not(:disabled) { border-color: var(--accent); }
-  .hook-btn:disabled { opacity: 0.5; cursor: default; }
   .hook-ok {
     margin: 0;
     font-size: 12px;
@@ -466,10 +362,6 @@
   .provision-detail {
     color: var(--fg-muted);
     font-size: 0.78rem;
-  }
-  .status-neutral {
-    background: rgba(127, 127, 127, 0.15);
-    color: var(--fg-muted);
   }
   .provision-note {
     margin-top: 0.4rem;

@@ -1,0 +1,111 @@
+/* Rules shared by SettingsDialog, HostsTable and McpSettings, which all render
+   inside the settings dialog. Namespaced under the dialog root so they never
+   reach other components' same-named classes (Sidebar and others define their
+   own .err / .status). Single-class selectors keep the specificity of the
+   scoped rules they replace; compound ones lose only the scoping hash, and
+   only where a component rule already outranked them, so computed styles are
+   unchanged.
+
+   .err and .hook-desc deliberately stay scoped in each component: they tie
+   with component rules at equal specificity (.project-preview, .provision-note
+   and the class:err preview line), and those ties are decided by source order
+   inside each component's own stylesheet. */
+.settings-dialog .section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.4rem;
+}
+.settings-dialog .section-header h4 {
+  margin: 0;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-muted);
+}
+.settings-dialog .alias { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.settings-dialog .status {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+}
+.settings-dialog .status-on { background: rgba(60,180,90,0.18); color: rgb(80,200,110); }
+.settings-dialog .status-off { background: rgba(180,100,100,0.18); color: rgb(220,130,130); }
+.settings-dialog .hook-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+.settings-dialog .mcp-blurb {
+  font-size: 0.78rem;
+  color: var(--fg-muted);
+  margin: 0 0 0.6rem;
+  line-height: 1.4;
+}
+.settings-dialog .mcp-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+.settings-dialog .toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.settings-dialog .mcp-field {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.4rem;
+  font-size: 0.82rem;
+}
+.settings-dialog .mcp-field .lbl {
+  width: 3.2rem;
+  color: var(--fg-muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.settings-dialog .mcp-field .port {
+  width: 6rem;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: 4px;
+  padding: 0.2rem 0.4rem;
+}
+.settings-dialog .mcp-field .port.invalid {
+  border-color: #e64a4a;
+}
+.settings-dialog .mcp-field button {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg);
+  cursor: pointer;
+  padding: 0.18rem 0.5rem;
+  font-size: 0.78rem;
+  border-radius: 4px;
+}
+.settings-dialog .mcp-field button:hover:not(:disabled) { border-color: var(--accent); }
+.settings-dialog .mcp-field button:disabled { opacity: 0.5; cursor: default; }
+.settings-dialog .hook-section {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.settings-dialog .hook-btn {
+  align-self: flex-start;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg);
+  cursor: pointer;
+  padding: 0.18rem 0.5rem;
+  font-size: 0.78rem;
+  border-radius: 4px;
+}
+.settings-dialog .hook-btn:hover:not(:disabled) { border-color: var(--accent); }
+.settings-dialog .hook-btn:disabled { opacity: 0.5; cursor: default; }
+.settings-dialog .status-neutral {
+  background: rgba(127, 127, 127, 0.15);
+  color: var(--fg-muted);
+}

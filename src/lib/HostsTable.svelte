@@ -170,19 +170,6 @@
 </section>
 
 <style>
-  .section-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 0.4rem;
-  }
-  .section-header h4 {
-    margin: 0;
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--fg-muted);
-  }
   .add {
     font-size: 0.8rem;
     padding: 0.25rem 0.6rem;
@@ -210,7 +197,6 @@
   }
   .hosts-table td { padding: 0.4rem; border-bottom: 1px solid var(--border); }
   .hosts-table tr.hidden-row td { opacity: 0.55; }
-  .alias { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .muted { color: var(--fg-muted); }
 
   .hosts-table td.account {
@@ -221,14 +207,6 @@
     white-space: nowrap;
     color: var(--fg);
   }
-
-  .status {
-    font-size: 0.7rem;
-    padding: 0.1rem 0.45rem;
-    border-radius: 999px;
-  }
-  .status-on { background: rgba(60,180,90,0.18); color: rgb(80,200,110); }
-  .status-off { background: rgba(180,100,100,0.18); color: rgb(220,130,130); }
 
   .token-cell { display: flex; gap: 0.3rem; align-items: center; white-space: nowrap; }
   .token-cell select.mode {
