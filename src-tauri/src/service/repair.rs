@@ -1549,36 +1549,59 @@ fn local_canon(p: &str) -> String {
     }
 }
 
+/// The rows the adoption guard reads, taken under the store lock.
+struct AdoptionSnapshot {
+    rows: Vec<crate::store::WorktreeRow>,
+    sessions: Vec<SessionRow>,
+}
+
+/// Store half of the adoption guard: plain row reads, no filesystem access,
+/// so it is safe with the store lock held. `None` without a project id.
+fn adoption_snapshot(
+    s: &Store,
+    spec: &WorkspaceSpec,
+) -> Result<Option<AdoptionSnapshot>, IpcError> {
+    let Some(pid) = spec.project_id else {
+        return Ok(None);
+    };
+    Ok(Some(AdoptionSnapshot {
+        rows: s.list_worktrees_for_project(pid)?,
+        sessions: s.list_sessions_for_host(&spec.host_alias)?,
+    }))
+}
+
 /// Explicit adoption guard: `Some(reason)` when the checkout at `adopt_key`
 /// (host-canonical) belongs to another workspace fleet knows about — another
 /// worktree row on the same branch, or any other running / not-yet-dismissed
 /// ghost session mapped to that checkout (by portable key, or by canonical
 /// local path). Two rows sharing one path would let a safe-kill of either
-/// delete the other's tree.
+/// delete the other's tree. `canon` canonicalizes a LOCAL path (it touches
+/// the filesystem), so callers run this WITHOUT the store lock, on a snapshot
+/// from [`adoption_snapshot`].
 fn adoption_conflict(
-    s: &Store,
     spec: &WorkspaceSpec,
     w: &WorktreeSpec,
     adopt_key: &str,
-) -> Result<Option<String>, IpcError> {
-    let Some(pid) = spec.project_id else {
-        return Ok(None);
+    snap: Option<AdoptionSnapshot>,
+    canon: impl Fn(&str) -> String,
+) -> Option<String> {
+    let (Some(pid), Some(AdoptionSnapshot { rows, sessions })) = (spec.project_id, snap) else {
+        return None;
     };
-    let rows = s.list_worktrees_for_project(pid)?;
     if let Some(other) = rows
         .iter()
         .find(|r| r.name != w.name && r.branch.as_deref() == Some(w.branch.as_str()))
     {
-        return Ok(Some(format!("fleet tracks it as worktree {}", other.name)));
+        return Some(format!("fleet tracks it as worktree {}", other.name));
     }
     let local = spec.host_alias == "local";
     let adopt_name = basename(adopt_key);
     let target = if local {
-        local_canon(adopt_key)
+        canon(adopt_key)
     } else {
         adopt_key.to_string()
     };
-    for o in s.list_sessions_for_host(&spec.host_alias)? {
+    for o in &sessions {
         if Some(o.id) == spec.session_id || o.kind == "bg" || o.project_id != Some(pid) {
             continue;
         }
@@ -1587,15 +1610,12 @@ fn adoption_conflict(
         let by_row = local
             && o.worktree_id
                 .and_then(|wid| rows.iter().find(|r| r.id == wid))
-                .is_some_and(|r| r.name != w.name && norm(&local_canon(&r.path)) == norm(&target));
+                .is_some_and(|r| r.name != w.name && norm(&canon(&r.path)) == norm(&target));
         if by_key || by_row {
-            return Ok(Some(format!(
-                "session {} ({}) uses it",
-                o.tmux_name, o.status
-            )));
+            return Some(format!("session {} ({}) uses it", o.tmux_name, o.status));
         }
     }
-    Ok(None)
+    None
 }
 
 /// Make the workspace described by `spec` healthy within `policy`.
@@ -1690,10 +1710,13 @@ pub async fn ensure_workspace_with(
             .find(|r| &r.path == path)
             .map(|r| r.key().to_string())
             .unwrap_or_else(|| path.clone());
-        let conflict = {
+        // Read the rows under the store lock; canonicalize only after it is
+        // released (a dead NFS path must never hold the store mutex).
+        let snap = {
             let s = store.lock().map_err(|_| IpcError::lock())?;
-            adoption_conflict(&s, spec, w, &adopt_key)?
+            adoption_snapshot(&s, spec)?
         };
+        let conflict = adoption_conflict(spec, w, &adopt_key, snap, local_canon);
         if let Some(reason) = conflict {
             return Err(fail(
                 store,
@@ -4480,6 +4503,62 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.code, codes::E_HOST_OFFLINE);
+    }
+
+    /// The adoption guard reads rows under the store lock and resolves local
+    /// paths only after releasing it (a dead NFS path must not freeze the app).
+    #[test]
+    fn adoption_guard_canonicalizes_outside_the_store_lock() {
+        let (store, sid, pid) = seeded_store("/repo/.claude/worktrees/feat");
+        {
+            let s = store.lock().unwrap();
+            // Another session maps to the adopt path only through a row whose
+            // (symlinked) path canonicalizes to it.
+            let other = s
+                .upsert_worktree(pid, "other", "/link/other", Some("other"))
+                .unwrap();
+            s.upsert_session(
+                "rev-x",
+                "local",
+                Some(pid),
+                Some(other),
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+        }
+        let spec = spec_with_ids(sid, pid);
+        let w = spec.worktree.as_ref().unwrap();
+        let adopt = "/repo/.worktrees/other";
+        let snap = || {
+            let s = store.lock().unwrap();
+            adoption_snapshot(&s, &spec).unwrap()
+        };
+        let canon = |p: &str| {
+            assert!(
+                store.try_lock().is_ok(),
+                "canonicalized under the store lock"
+            );
+            if p == "/link/other" {
+                adopt.to_string()
+            } else {
+                p.to_string()
+            }
+        };
+        let reason = adoption_conflict(&spec, w, adopt, snap(), canon)
+            .expect("the other session uses that checkout");
+        assert!(reason.contains("session rev-x"), "{reason}");
+        assert_eq!(
+            adoption_conflict(&spec, w, adopt, snap(), |p: &str| p.to_string()),
+            None,
+            "not the same path without the symlink"
+        );
+        assert_eq!(
+            adoption_conflict(&spec, w, adopt, None, |p: &str| p.to_string()),
+            None
+        );
     }
 
     #[tokio::test]
