@@ -292,8 +292,10 @@ where
     for host in &args.host_aliases {
         reports.push(purge(host.clone(), args.project_path.clone()).await?);
     }
+    // Fingerprint keys are resolved before the lock (filesystem access).
+    let fp_keys = Store::fingerprint_keys_of_project(store, args.project_id);
     let s = store.lock().map_err(|_| IpcError::lock())?;
-    s.delete_project(args.project_id)?;
+    s.delete_project(args.project_id, &fp_keys)?;
     Ok(reports)
 }
 

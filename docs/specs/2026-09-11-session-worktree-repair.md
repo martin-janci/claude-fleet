@@ -97,7 +97,8 @@ never removes (`AutoContext::allow_auto_unregister` is false there).
    one recorded while this worktree was healthy. Every probe that finds the
    registered worktree healthy (create, attach, restart, recreate, explicit
    repair, the verify after a repair, and the reconcile tick's read-only
-   directory check for a present linked worktree) records it, keyed by host and
+   directory check for a present linked worktree registered at that exact
+   canonical path) records it, keyed by host and
    canonical worktree path (migration `023_worktree_parent_fingerprints`).
    Rows go with their host (`delete_host`), their worktree row
    (`delete_worktree`, `delete_worktrees_not_in`) and their project

@@ -195,7 +195,13 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
                 .chain(p.worktrees.iter().map(|w| w.path.clone()))
         })
         .collect();
-    let (discovered, root_canon, canon_of) = tokio::task::spawn_blocking(move || {
+    // Every known worktree row, for its parent-fingerprint keys: resolved in
+    // the blocking task below (off-lock), used by the deletes in step 4.
+    let snap_rows: Vec<WorktreeRow> = snapshot
+        .iter()
+        .flat_map(|p| p.worktrees.iter().cloned())
+        .collect();
+    let (discovered, root_canon, canon_of, fp_keys) = tokio::task::spawn_blocking(move || {
         let root_canon = canonical(&base).to_string_lossy().into_owned();
         let discovered = scan_projects(&base, layout)?;
         let mut canon_of: HashMap<String, String> = HashMap::new();
@@ -203,7 +209,8 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
             let c = canonical_str(&p);
             canon_of.insert(p, c);
         }
-        Ok::<_, IpcError>((discovered, root_canon, canon_of))
+        let fp_keys = Store::fingerprint_keys_for(&snap_rows);
+        Ok::<_, IpcError>((discovered, root_canon, canon_of, fp_keys))
     })
     .await
     .map_err(|e| IpcError::new("E_IO", format!("project scan task failed: {e}")))??;
@@ -256,7 +263,7 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
             // Renamed rows (e.g. the old basename-named main row, now `main`)
             // hand their session references to the surviving row with the
             // same canonical path before they go.
-            s.delete_worktrees_not_in(project_id, &keep_names, canon)?;
+            s.delete_worktrees_not_in(project_id, &keep_names, canon, &fp_keys)?;
         }
 
         // Duplicates, the self-heal for rows an earlier scan left behind:
@@ -285,7 +292,7 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
             }
             if left == 0
                 && owned_elsewhere(&p.project.base_path)
-                && s.delete_project_if_unused(id)?
+                && s.delete_project_if_unused(id, &fp_keys)?
             {
                 removed.insert(id);
                 eprintln!(
@@ -308,7 +315,7 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
             }
             let inside = strip_root(&row.base_path, &root_raw).is_some()
                 || strip_root(&canon(&row.base_path), &root_canon).is_some();
-            if !inside && s.delete_project_if_unused(row.id)? {
+            if !inside && s.delete_project_if_unused(row.id, &fp_keys)? {
                 eprintln!(
                     "[projects] removed stale project {}/{} at {} (outside {root_raw})",
                     row.owner, row.repo, row.base_path
