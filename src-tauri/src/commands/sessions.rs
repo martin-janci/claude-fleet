@@ -18,12 +18,20 @@ use crate::store::{SessionRow, Store};
 use std::sync::{Arc, Mutex};
 use tauri::State;
 
+/// `force: true` (the sidebar Refresh button) always runs a fleet reconcile
+/// pass; the default serves stored rows while the last pass is within the
+/// configured interval.
 #[tauri::command]
 pub async fn list_sessions(
+    force: Option<bool>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<Vec<SessionRow>, IpcError> {
-    sessions::list_sessions(&store, &ssh).await
+    if force.unwrap_or(false) {
+        sessions::refresh_sessions(&store, &ssh).await
+    } else {
+        sessions::list_sessions(&store, &ssh).await
+    }
 }
 
 #[tauri::command]

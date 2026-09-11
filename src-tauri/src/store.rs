@@ -1765,7 +1765,10 @@ impl Store {
         // frontend can see actually changed. Reconcile upserts every live
         // session every pass; without this diff each pass emitted one
         // `session:updated` per session — sixty store flushes per tick for a
-        // fleet that had not changed at all (BE-11 / FE-10).
+        // fleet that had not changed at all (BE-11 / FE-10). Note that
+        // `update_host_probe_in_tx` still emits one `host:probed` per host
+        // per pass: `last_pinged_at` moves every time, so it cannot be diffed
+        // away — one event per host, not per session.
         let prior: Option<SessionRow> = fetch_session(tx, tmux_name, host_alias)?;
 
         tx.execute(
@@ -3362,6 +3365,55 @@ mod tests {
             stuck_kind: None,
             intel_observed: true,
         }
+    }
+
+    #[test]
+    fn upsert_session_in_tx_identical_row_pushes_no_change() {
+        // Direct, transaction-level check of the BE-11 diff: the same upsert
+        // twice yields one `SessionCreated` and then nothing at all; a single
+        // changed field yields exactly one `SessionUpdated`.
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let upsert = |store: &mut Store, activity: i64| -> Vec<RowChange> {
+            store
+                .with_transaction(|tx| {
+                    let mut out = Vec::new();
+                    Store::upsert_session_in_tx(
+                        tx,
+                        "s1",
+                        "alpha",
+                        None,
+                        None,
+                        1,
+                        activity,
+                        None,
+                        Some("main"),
+                        None,
+                        Some("idle"),
+                        None,
+                        None,
+                        None,
+                        Some(12.5),
+                        None,
+                        true,
+                        &mut out,
+                    )?;
+                    Ok(out)
+                })
+                .unwrap()
+        };
+        let first = upsert(&mut store, 10);
+        assert_eq!(first.len(), 1);
+        assert!(matches!(first[0], RowChange::SessionCreated(_)));
+        let second = upsert(&mut store, 10);
+        assert!(
+            second.is_empty(),
+            "identical row must push no change, got {} entries",
+            second.len()
+        );
+        let third = upsert(&mut store, 11);
+        assert_eq!(third.len(), 1);
+        assert!(matches!(third[0], RowChange::SessionUpdated(_)));
     }
 
     #[test]

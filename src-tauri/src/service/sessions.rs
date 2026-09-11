@@ -767,6 +767,24 @@ pub async fn list_sessions(
     .await
 }
 
+/// `list_sessions` for an explicit user refresh: ignores the freshness window
+/// (a pass already in flight is still not duplicated — the stored rows it is
+/// about to write are returned instead).
+pub async fn refresh_sessions(
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<Vec<SessionRow>, IpcError> {
+    let window = list_freshness_window(store);
+    list_sessions_with(
+        store,
+        &ReconcileDeps::real(ssh),
+        reconcile_gate(),
+        window,
+        true,
+    )
+    .await
+}
+
 /// Headless, forced reconcile entry point: the background tick (Task H) and
 /// any "refresh now" caller.
 ///

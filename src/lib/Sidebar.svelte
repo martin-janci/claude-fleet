@@ -103,7 +103,8 @@
     loading = true;
     loadError = null;
     const pr = await refreshProjects();
-    const sr = await loadSessions();
+    // Explicit user refresh: bypass the backend's freshness window.
+    const sr = await loadSessions({ force: true });
     loading = false;
     if (!pr.ok) {
       loadError = pr.error.message;

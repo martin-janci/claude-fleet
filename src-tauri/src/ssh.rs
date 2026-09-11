@@ -34,7 +34,10 @@ const DEFAULT_WALL_CLOCK_FLOOR: Duration = Duration::from_secs(30);
 /// Wall-clock bound for `upload_file`: a large file over a slow link needs
 /// far more than a probe, but it still must not hang forever.
 const UPLOAD_WALL_CLOCK: Duration = Duration::from_secs(300);
-/// Bound on the best-effort `ssh -O exit` issued after a wall-clock timeout.
+/// Bound on each of the two best-effort control requests issued after a
+/// wall-clock timeout (`ssh -O check`, then `ssh -O exit` if needed). A
+/// timed-out call can therefore take up to `wall_clock + 2 × this` before it
+/// returns.
 const MASTER_RESET_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct SshClientInner {
@@ -45,6 +48,37 @@ struct SshClientInner {
     /// the lifetime of the app, so the `printenv HOME` round-trip is paid
     /// once and reused (it was previously one SSH round-trip per new_session).
     homes: DashMap<String, String>,
+    /// Per-host count of `run_child` calls currently live. A wall-clock
+    /// timeout must not reset the shared ControlMaster while other commands
+    /// (an upload, another probe) are still multiplexed through it.
+    in_flight: DashMap<String, usize>,
+    /// How many times a master was actually reset after a timeout. Tests use
+    /// it to prove the reset is skipped when it would collateral-damage.
+    master_resets: std::sync::atomic::AtomicUsize,
+}
+
+/// RAII decrement for `SshClientInner::in_flight`.
+struct InFlight<'a> {
+    inner: &'a SshClientInner,
+    host: String,
+}
+
+impl<'a> InFlight<'a> {
+    fn enter(inner: &'a SshClientInner, host: &str) -> Self {
+        *inner.in_flight.entry(host.to_string()).or_insert(0) += 1;
+        Self {
+            inner,
+            host: host.to_string(),
+        }
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        if let Some(mut n) = self.inner.in_flight.get_mut(&self.host) {
+            *n = n.saturating_sub(1);
+        }
+    }
 }
 
 /// Cheaply cloneable SSH client. Clones share the same underlying state via
@@ -60,6 +94,8 @@ impl SshClient {
             inner: Arc::new(SshClientInner {
                 seen: DashMap::new(),
                 homes: DashMap::new(),
+                in_flight: DashMap::new(),
+                master_resets: std::sync::atomic::AtomicUsize::new(0),
             }),
         }
     }
@@ -265,11 +301,18 @@ impl SshClient {
         Ok(())
     }
 
-    /// Spawn `cmd` and wait for it under three exits, in priority order:
+    /// Spawn `cmd` and wait for it under three exits, in priority order
+    /// (`biased` select, so a cancel that races the deadline always wins):
     ///
     /// 1. `token` fired → kill + reap the child, `Err(E_CANCELLED)`.
-    /// 2. `wall_clock` elapsed → kill + reap the child, tell the host's
-    ///    ControlMaster to exit (`reset_master`), `Err(E_SSH_TIMEOUT)`.
+    /// 2. `wall_clock` elapsed → kill + reap the child, then — ONLY if no
+    ///    other command is in flight on this host AND the master fails an
+    ///    `ssh -O check` — tell the ControlMaster to exit (`reset_master`).
+    ///    `Err(E_SSH_TIMEOUT)`. The master is shared with the user's attached
+    ///    PTY (`pty.rs`) and any concurrent upload/probe, so a merely slow
+    ///    command must never tear it down; only a wedged one may. Because
+    ///    of the check + exit requests, a timed-out call can take up to
+    ///    `wall_clock + 2 × MASTER_RESET_TIMEOUT` before returning.
     /// 3. child exited → `Ok(Output)`.
     ///
     /// `spawn_code` is the error code used for a spawn/wait failure so
@@ -287,6 +330,7 @@ impl SshClient {
         token: Option<CancellationToken>,
         spawn_code: &str,
     ) -> Result<Output, IpcError> {
+        let in_flight = InFlight::enter(&self.inner, host);
         let mut child = cmd
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -334,6 +378,8 @@ impl SshClient {
         };
 
         tokio::select! {
+            // Priority order as documented: cancel beats deadline beats exit.
+            biased;
             _ = cancelled => {
                 kill_and_reap(child).await;
                 stdout_task.abort();
@@ -344,15 +390,15 @@ impl SshClient {
                 kill_and_reap(child).await;
                 stdout_task.abort();
                 stderr_task.abort();
-                // The master itself is most likely what wedged (a command
-                // that multiplexed onto it never came back). Drop it so the
-                // next call reconnects instead of hanging the same way.
-                self.reset_master(host).await;
+                // This call no longer counts as live on the host.
+                drop(in_flight);
+                let reset = self.maybe_reset_master(host).await;
                 Err(IpcError::new(
                     "E_SSH_TIMEOUT",
                     format!(
-                        "ssh {host}: command exceeded {}s wall clock; connection reset",
-                        wall_clock.as_secs()
+                        "ssh {host}: command exceeded {}s wall clock{}",
+                        wall_clock.as_secs(),
+                        if reset { "; connection reset" } else { "" }
                     ),
                 ))
             }
@@ -362,6 +408,80 @@ impl SshClient {
                 let stdout = stdout_task.await.unwrap_or_default();
                 let stderr = stderr_task.await.unwrap_or_default();
                 Ok(Output { status, stdout, stderr })
+            }
+        }
+    }
+
+    /// Number of `run_child` calls currently live on `host` (excluding any
+    /// the caller has already dropped its guard for).
+    fn others_in_flight(&self, host: &str) -> usize {
+        self.inner.in_flight.get(host).map(|n| *n).unwrap_or(0)
+    }
+
+    /// How many times `maybe_reset_master` actually reset a master.
+    #[cfg(test)]
+    pub(crate) fn master_reset_count(&self) -> usize {
+        self.inner
+            .master_resets
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// After a wall-clock timeout on `host`: decide whether the shared
+    /// ControlMaster is wedged and, only then, reset it. Returns whether a
+    /// reset happened.
+    ///
+    /// Skipped while other commands are live on the host (they would lose
+    /// their channels) and when the master still answers `ssh -O check`
+    /// within `MASTER_RESET_TIMEOUT` (the timed-out command was slow, not
+    /// the transport). The `-O check` also covers channels this client does
+    /// not count — the user's attached PTY in `pty.rs` multiplexes over the
+    /// same ControlPath.
+    async fn maybe_reset_master(&self, host: &str) -> bool {
+        if self.others_in_flight(host) > 0 {
+            eprintln!(
+                "[ssh] {host}: command timed out but other commands are in flight; keeping the master"
+            );
+            return false;
+        }
+        if self.master_alive(host).await {
+            eprintln!("[ssh] {host}: command timed out but the master still answers; keeping it");
+            return false;
+        }
+        self.inner
+            .master_resets
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.reset_master(host).await;
+        true
+    }
+
+    /// `ssh -O check` against the host's ControlPath under
+    /// `MASTER_RESET_TIMEOUT`. `true` only when the master answered
+    /// successfully in time; a missing socket, a failed spawn, a non-zero
+    /// exit or a hang all count as "not alive".
+    async fn master_alive(&self, host: &str) -> bool {
+        let path = self.control_path(host);
+        let mut cmd = tokio::process::Command::new("ssh");
+        cmd.args([
+            "-o",
+            &format!("ControlPath={}", path.display()),
+            "-O",
+            "check",
+            "--",
+            host,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+        let Ok(mut child) = cmd.spawn() else {
+            return false;
+        };
+        match tokio::time::timeout(MASTER_RESET_TIMEOUT, child.wait()).await {
+            Ok(Ok(status)) => status.success(),
+            Ok(Err(_)) => false,
+            Err(_elapsed) => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                false
             }
         }
     }
@@ -534,6 +654,77 @@ mod tests {
             elapsed < Duration::from_secs(10),
             "timeout arm must fire near the bound (incl. best-effort master reset), took {elapsed:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn timeout_with_other_command_in_flight_does_not_reset_master() {
+        // The ControlMaster is shared with the attached PTY and every other
+        // command on the host. A timeout must not tear it down while another
+        // command is still multiplexed through it.
+        if !have_sh() {
+            eprintln!("skipping: no sh on this box");
+            return;
+        }
+        let c = SshClient::new();
+        let host = "fleet-test-nonexistent-host";
+        // A long-lived "upload" on the same host.
+        let c_long = c.clone();
+        let long = tokio::spawn(async move {
+            let mut cmd = tokio::process::Command::new("sh");
+            cmd.args(["-c", "sleep 2"]);
+            c_long
+                .run_child(host, cmd, Duration::from_secs(30), None, "E_SSH")
+                .await
+        });
+        // Let it spawn and register as in flight.
+        for _ in 0..100 {
+            if c.others_in_flight(host) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(c.others_in_flight(host), 1, "long command registered");
+
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "sleep 30"]);
+        let err = c
+            .run_child(host, cmd, Duration::from_millis(100), None, "E_SSH")
+            .await
+            .expect_err("times out");
+        assert_eq!(err.code, "E_SSH_TIMEOUT");
+        assert_eq!(
+            c.master_reset_count(),
+            0,
+            "reset skipped while another command is live on the host"
+        );
+        assert!(
+            !err.message.contains("connection reset"),
+            "message must not claim a reset: {}",
+            err.message
+        );
+        long.await.unwrap().expect("long command finishes normally");
+        assert_eq!(c.others_in_flight(host), 0, "guard released");
+    }
+
+    #[tokio::test]
+    async fn timeout_alone_resets_master_when_check_fails() {
+        // No other command in flight and no master answering `-O check`
+        // (there is no socket for this fake host) ⇒ the reset path runs.
+        if !have_sh() {
+            eprintln!("skipping: no sh on this box");
+            return;
+        }
+        let c = SshClient::new();
+        let host = "fleet-test-nonexistent-host-2";
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "sleep 30"]);
+        let err = c
+            .run_child(host, cmd, Duration::from_millis(100), None, "E_SSH")
+            .await
+            .expect_err("times out");
+        assert_eq!(err.code, "E_SSH_TIMEOUT");
+        assert_eq!(c.master_reset_count(), 1, "wedged/missing master is reset");
+        assert_eq!(c.others_in_flight(host), 0);
     }
 
     #[tokio::test]
