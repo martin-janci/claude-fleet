@@ -38,11 +38,17 @@ export function timeAgo(unixSecs: number): string {
   return `${diffDays}d ago`;
 }
 
+/** Elapsed since the session started ("3h 5m"), or '' before it started. */
+export function rowElapsed(sess: SessionRow, nowSec: number): string {
+  return sess.started_at !== null ? formatElapsed(sessionStart(sess), nowSec) : '';
+}
+
+/** First line of the last prompt, truncated for the row; '' when none. */
+export function rowPrompt(sess: SessionRow): string {
+  return promptPreview(sess.last_prompt, 48);
+}
+
 /** Secondary row text: elapsed since start + the last prompt's first line. */
 export function rowMeta(sess: SessionRow, nowSec: number): string {
-  const parts: string[] = [];
-  if (sess.started_at !== null) parts.push(formatElapsed(sessionStart(sess), nowSec));
-  const preview = promptPreview(sess.last_prompt, 48);
-  if (preview) parts.push(preview);
-  return parts.join(' · ');
+  return [rowElapsed(sess, nowSec), rowPrompt(sess)].filter(Boolean).join(' · ');
 }
