@@ -804,4 +804,45 @@ describe('NewSessionDialog host-scoped worktrees', () => {
     await pickHost('local');
     expect(document.querySelector('[data-testid="wt-picker"] [role="option"].active')?.getAttribute('data-key')).toBe('11');
   });
+
+  it('switching host mid-scan never leaves a foreign worktree row selected/submittable', async () => {
+    // The scan never resolves within this test — regression test for the
+    // stale-foreign-worktree-id bug: during the (possibly long) SSH scan,
+    // the picker must already show "+ new worktree" as active, not the
+    // previous host's row.
+    mockHostWorktrees(() => new Promise(() => {}));
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickHost('mefistos');
+    expect(document.querySelector('[data-testid="wt-picker"] [role="option"].active')?.getAttribute('data-key')).toBe('new');
+  });
+
+  it('a scan error also leaves + new worktree selected, not a foreign row', async () => {
+    mockHostWorktrees(new Error('ssh: connect to host mefistos: timed out'));
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickHost('mefistos');
+    await vi.waitFor(() => expect(screen.getByTestId('wt-status')).toHaveTextContent('timed out'));
+    expect(document.querySelector('[data-testid="wt-picker"] [role="option"].active')?.getAttribute('data-key')).toBe('new');
+  });
+
+  it('a legacy flat local memory value still selects that worktree on open', async () => {
+    localStorage.setItem('cf:pref:newsession.project.1', JSON.stringify({ host: 'local', worktree: 11, kind: 'work' }));
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    expect(document.querySelector('[data-testid="wt-picker"] [role="option"].active')?.getAttribute('data-key')).toBe('11');
+  });
+
+  it('a remembered worktree id that no longer exists on that host falls back to its main', async () => {
+    localStorage.setItem(
+      'cf:pref:newsession.project.1',
+      JSON.stringify({ host: 'mefistos', kind: 'work', worktrees: { mefistos: 999 } }),
+    );
+    mockHostWorktrees({ cloned: true, worktrees: [remoteMain, remoteFeat] });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="wt-picker"] [role="option"].active')?.getAttribute('data-key')).toBe('501'),
+    );
+  });
 });

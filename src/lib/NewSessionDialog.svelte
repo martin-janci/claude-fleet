@@ -58,7 +58,7 @@
     v !== null &&
     typeof (v as ProjectMemory).host === 'string' &&
     ((v as ProjectMemory).worktree === undefined || isChoice((v as ProjectMemory).worktree)) &&
-    ((v as ProjectMemory).worktrees === undefined ||
+    ((v as ProjectMemory).worktrees == null ||
       (typeof (v as ProjectMemory).worktrees === 'object' &&
         Object.values((v as ProjectMemory).worktrees!).every(isChoice))) &&
     ((v as ProjectMemory).kind === 'work' || (v as ProjectMemory).kind === 'shell');
@@ -152,34 +152,69 @@
   let scanSeq = 0;
   $effect(() => {
     const host = chosenHost;
-    const localRows = project.worktrees;
     if (host === 'local') {
+      // Only the local branch needs the live project tree; reading it here
+      // instead of above the branch keeps this effect from tracking (and
+      // being re-run by) the project's LOCAL worktrees while a REMOTE host
+      // is what's actually selected. The backend only ever emits
+      // `worktree:updated` / `worktree:removed` for local rows
+      // (src-tauri/src/store/projects.rs:185), which is also what keeps a
+      // remote scan's own upserts from feeding back into this effect.
       scanSeq++;
-      hostWorktrees = { status: 'ready', rows: localRows, cloned: true };
-      return;
+      hostWorktrees = { status: 'ready', rows: project.worktrees, cloned: true };
+      return () => {
+        scanSeq++;
+      };
     }
     const seq = ++scanSeq;
     hostWorktrees = { status: 'loading', rows: [], cloned: true };
+    // Never leave the previous host's row selected (and submittable) while
+    // this scan is in flight, or if it errors, or never lands: start remote
+    // hosts in new-worktree mode; the repair effect below corrects it once
+    // real rows arrive. `untrack` because `onPickNew` reads
+    // `nameDirty`/`takenSlugs` ($sessions) reactively, and this effect (which
+    // fires an SSH call) must not re-run just because a session changed.
+    untrack(() => onPickNew());
     void listHostWorktrees(host, projectId).then((r) => {
       if (seq !== scanSeq) return;
-      // Belt and braces (on top of the seq guard): never accept a reply that
-      // isn't for the host still chosen right now.
-      if (chosenHost !== host) return;
       if (!r.ok) {
         hostWorktrees = { status: 'error', rows: [], cloned: true, error: r.error.message };
         return;
       }
-      if (!r.value || r.value.host_alias !== chosenHost) return;
+      if (!r.value || r.value.host_alias !== host) {
+        // Shouldn't happen — the backend echoes the request's host_alias —
+        // but never silently adopt a reply that isn't for the host this
+        // scan was for; show an error instead of getting stuck on
+        // "Scanning…" forever.
+        hostWorktrees = {
+          status: 'error',
+          rows: [],
+          cloned: true,
+          error: `list_host_worktrees replied unexpectedly for ${host}`,
+        };
+        return;
+      }
       hostWorktrees = {
         status: 'ready',
         rows: r.value.worktrees ?? [],
         cloned: r.value.cloned ?? true,
       };
     });
+    // A dialog closed (or switched to another host) mid-scan must not let a
+    // late reply land: bump the sequence so its `seq !== scanSeq` check fails.
+    return () => {
+      scanSeq++;
+    };
   });
 
   function initialWorktree(): number | null {
-    const remembered = rememberedFor(untrack(() => chosenHost));
+    // A remembered (or default) REMOTE host's rows aren't known synchronously
+    // — only `project.worktrees` (local) is available before the first scan
+    // resolves. Start it in new-worktree mode rather than risk carrying over
+    // a local row id that would be foreign (and rejected) on that host; the
+    // scan-then-repair effects below correct this the moment real rows land.
+    if (chosenHost !== 'local') return null;
+    const remembered = rememberedFor(chosenHost);
     if (remembered === 'new') return null;
     if (typeof remembered === 'number' && project.worktrees.some((w) => w.id === remembered)) {
       return remembered;
@@ -190,10 +225,13 @@
   let inNewMode = $derived(chosenWorktreeId === null);
   let chosenWorktree = $derived(hostWorktrees.rows.find((w) => w.id === chosenWorktreeId) ?? null);
 
-  // When the host's rows arrive (or change), keep the selection valid: the
+  // When the host's rows arrive (or change) — including landing on an
+  // error, whose rows are always `[]` — keep the selection valid: the
   // remembered row for that host, else its `main`, else "+ new worktree".
+  // Only skip this while a scan is actually in flight (`loading`); the
+  // scan effect above already forces new-worktree mode for that window.
   $effect(() => {
-    if (hostWorktrees.status !== 'ready') return;
+    if (hostWorktrees.status === 'loading') return;
     const rows = hostWorktrees.rows;
     const current = untrack(() => chosenWorktreeId);
     if (current !== null && rows.some((w) => w.id === current)) return;
@@ -203,8 +241,14 @@
       rows.find((w) => w.name === 'main') ||
       (remembered === 'new' ? null : rows[0]) ||
       null;
-    if (pick) onPickWorktree(pick.id);
-    else if (current !== null || !untrack(() => newWorktreeName)) onPickNew();
+    // `untrack`: `onPickWorktree`/`onPickNew` read `nameDirty`/`takenSlugs`
+    // ($sessions) reactively, and this effect must not re-run (regenerating
+    // the branch name under the user's cursor) just because a session event
+    // fired.
+    untrack(() => {
+      if (pick) onPickWorktree(pick.id);
+      else if (current !== null || !newWorktreeName) onPickNew();
+    });
   });
 
   let newWorktreeName = $state<string>('');
@@ -300,9 +344,10 @@
     }
     const wt = chosenWorktree;
     if (!wt || wt.name === 'main') return root;
-    // Remote rows always carry a real path now; the derived form is only a
-    // fallback for the (unexpected) empty-string case.
-    return chosenHost === 'local' ? wt.path : wt.path || `${root}/.claude/worktrees/${wt.name}`;
+    // The row's own path is authoritative for local AND remote — deriving
+    // one from `root` would hardcode the wrong layout for a repo that uses
+    // `.worktrees/` instead of `.claude/worktrees/`.
+    return wt.path;
   });
 
   const worktreeItems: PickerItem[] = $derived([
@@ -399,12 +444,21 @@
     nameOverride = value;
   }
 
-  function remember() {
+  /** Persist the host/worktree that were actually SUBMITTED (the caller
+   *  snapshots these before the async create, since the host chips stay
+   *  clickable while `busy`). Folds a legacy flat `worktree` value into the
+   *  per-host map under `local` so it survives past the first create under
+   *  the new shape instead of evaporating. */
+  function remember(host: string, worktreeId: number | null) {
     const prev = readPref<ProjectMemory | null>(memoryKey, null, (v): v is ProjectMemory | null => v === null || isMemory(v));
     writePref<ProjectMemory>(memoryKey, {
-      host: chosenHost,
+      host,
       kind: chosenKind,
-      worktrees: { ...(prev?.worktrees ?? {}), [chosenHost]: chosenWorktreeId === null ? 'new' : chosenWorktreeId },
+      worktrees: {
+        ...(prev?.worktree !== undefined ? { local: prev.worktree } : {}),
+        ...(prev?.worktrees ?? {}),
+        [host]: worktreeId === null ? 'new' : worktreeId,
+      },
     });
   }
 
@@ -420,14 +474,21 @@
       error = 'Worktree name required';
       return;
     }
+    // Snapshot what is actually being submitted: the host chips (and, in
+    // principle, the worktree picker) stay interactive while `busy`, so
+    // `chosenHost`/`chosenWorktreeId` could change under us before the
+    // request resolves. Remember what was submitted, not whatever is
+    // current when the response lands.
+    const submittedHost = chosenHost;
+    const submittedWorktreeId = inNewMode ? null : chosenWorktreeId;
     busy = true;
     error = null;
     createController = new AbortController();
     const r = await newSessionAbortable(
       {
-        host_alias: chosenHost,
+        host_alias: submittedHost,
         project_id: project.project.id,
-        worktree_id: inNewMode ? null : chosenWorktreeId,
+        worktree_id: submittedWorktreeId,
         // An empty tmux name is legal: the backend mints one with the same
         // generator (see `fill_session_name`).
         name: name.trim(),
@@ -448,7 +509,7 @@
       }
       return;
     }
-    remember();
+    remember(submittedHost, submittedWorktreeId);
     onCreate(r.value);
   }
 
