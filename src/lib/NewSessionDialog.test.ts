@@ -845,4 +845,58 @@ describe('NewSessionDialog host-scoped worktrees', () => {
       expect(document.querySelector('[data-testid="wt-picker"] [role="option"].active')?.getAttribute('data-key')).toBe('501'),
     );
   });
+
+  it('switching host while already in new-worktree mode preserves the typed branch name', async () => {
+    // The scan never resolves — this isolates the scan-start reset (the
+    // thing under test) from the separate "rows arrived" repair effect.
+    mockHostWorktrees(() => new Promise(() => {}));
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('new-worktree-chip'));
+    await tick();
+    await fireEvent.input(screen.getByTestId('new-worktree-name'), { target: { value: 'my-typed-branch' } });
+    await tick();
+    await pickHost('mefistos');
+    expect((screen.getByTestId('new-worktree-name') as HTMLInputElement).value).toBe('my-typed-branch');
+    expect(document.querySelector('[data-testid="wt-picker"] [role="option"].active')?.getAttribute('data-key')).toBe('new');
+  });
+
+  it('remember() folds a legacy flat local value into the per-host map', async () => {
+    localStorage.setItem('cf:pref:newsession.project.1', JSON.stringify({ host: 'local', worktree: 11, kind: 'work' }));
+    mockHostWorktrees({ cloned: true, worktrees: [remoteMain] });
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({ ok: true, value: { id: 1 } as any });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickHost('mefistos');
+    await vi.waitFor(() => expect(worktreeLabels()).toContain('main'));
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+    const mem = JSON.parse(localStorage.getItem('cf:pref:newsession.project.1')!);
+    expect(mem.worktrees).toEqual({ local: 11, mefistos: 501 });
+    spy.mockRestore();
+  });
+
+  it('remembers what was submitted, not a later selection made while busy', async () => {
+    mockHostWorktrees({ cloned: true, worktrees: [remoteMain, remoteFeat] });
+    let resolveCreate!: (v: unknown) => void;
+    const spy = vi
+      .spyOn(sessionsModule, 'newSessionAbortable')
+      .mockImplementation(() => new Promise((r) => (resolveCreate = r as (v: unknown) => void)) as any);
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    // Submit while on local + main (worktree id 11); the request hangs.
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+    // The host chips stay clickable while `busy` — switch to mefistos and
+    // let its scan settle onto a real (different) selection before the
+    // original request finally resolves.
+    await pickHost('mefistos');
+    await vi.waitFor(() => expect(worktreeLabels()).toContain('main'));
+    resolveCreate({ ok: true, value: { id: 1 } as any });
+    await tick();
+    const mem = JSON.parse(localStorage.getItem('cf:pref:newsession.project.1')!);
+    expect(mem.host).toBe('local');
+    expect(mem.worktrees).toEqual({ local: 11 });
+    spy.mockRestore();
+  });
 });

@@ -169,12 +169,17 @@
     const seq = ++scanSeq;
     hostWorktrees = { status: 'loading', rows: [], cloned: true };
     // Never leave the previous host's row selected (and submittable) while
-    // this scan is in flight, or if it errors, or never lands: start remote
-    // hosts in new-worktree mode; the repair effect below corrects it once
-    // real rows arrive. `untrack` because `onPickNew` reads
-    // `nameDirty`/`takenSlugs` ($sessions) reactively, and this effect (which
-    // fires an SSH call) must not re-run just because a session changed.
-    untrack(() => onPickNew());
+    // this scan is in flight, or if it errors, or never lands: force
+    // new-worktree mode; the repair effect below corrects it once real rows
+    // arrive. Only when a row is actually selected — if the user was
+    // already mid-new-worktree (typed a branch name, a base branch) that
+    // in-progress input must survive the host switch, not get discarded.
+    // `untrack` because `onPickNew` reads `nameDirty`/`takenSlugs`
+    // ($sessions) reactively, and this effect (which fires an SSH call)
+    // must not re-run just because a session changed.
+    untrack(() => {
+      if (chosenWorktreeId !== null) onPickNew();
+    });
     void listHostWorktrees(host, projectId).then((r) => {
       if (seq !== scanSeq) return;
       if (!r.ok) {
