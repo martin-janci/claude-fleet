@@ -136,14 +136,26 @@ Live (non-ghost) rows become a column of two lines:
   badge leaves line 1. **The friendly name is primary**: line 1 shows
   `friendly_name` whenever the session has one (and the friendly-names
   pref is on, as today), else the tmux name.
-- Line 2 (`sess-details`, 0.65rem, muted, single line, ellipsis): host ·
-  tmux name (always, when line 1 shows a friendly name; otherwise the
-  worktree key when it differs from the tmux name) · elapsed · context
-  meter · cost · effort · PR↗ + CI · last-prompt preview last, so it
-  absorbs the truncation.
-  Items are joined by ` · ` separators rendered as spans; absent items and
-  their separators are omitted. `rowMeta` splits into `rowElapsed` and
-  `rowPrompt` so the preview can be placed last.
+- Line 2 (`sess-details`, 0.65rem, muted): host · tmux name (always, when
+  line 1 shows a friendly name; otherwise the worktree key ONLY when the
+  tmux name does not already end in `--<worktree key>` — repeating the tail
+  of the name already on line 1 is noise and costs a quarter of the line's
+  width) · elapsed · context meter · cost · effort · PR↗ + CI · last-prompt
+  preview last.
+  Items are joined by ` · ` separators rendered as real `<span>` elements,
+  never a CSS `::before` on the item itself: the badges are bordered or
+  filled boxes and a generated separator lands *inside* them, shifting the
+  context meter's label and adding a stray dot inside the effort chip and
+  the PR link's hit area. Absent items and their separators are omitted.
+  The line wraps rather than clipping: at the default 280px sidebar the
+  full set of badges does not fit on one row, and silently hiding the
+  prompt preview and CI would defeat the point of the line. Height is the
+  user's choice because the whole line collapses.
+  `rowMeta` splits into `rowElapsed` and `rowPrompt` so the preview can be
+  placed last; `rowMeta` itself is then unused and goes.
+- `row-actions` must not consume layout width on line 1: they are absolutely
+  positioned at the row's right edge and revealed on hover/selection, so the
+  name keeps its full width and never collapses when the pointer enters.
 - Ghost rows, select-mode checkbox and the rename input are unchanged
   (the rename input replaces line 1 and hides line 2).
 - `data-testid="sess-row"` stays on the outer element; line 2 gets
