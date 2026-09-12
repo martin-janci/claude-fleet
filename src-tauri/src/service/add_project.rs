@@ -6,6 +6,7 @@
 //! (Task 4) sources of `docs/superpowers/plans/2026-09-12-add-project.md`,
 //! plus the read-only `list_github_repos` (also Task 4).
 
+use crate::cancel::{CancelGuard, CancellationRegistry};
 use crate::ipc_error::{codes, IpcError};
 use crate::projects::Layout;
 use crate::repo_url::{clone_url_for, parse_repo_url};
@@ -17,6 +18,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 /// ssh `ConnectTimeout` for a clone: a typo'd or unreachable host must fail
 /// fast, independent of how long the clone itself is allowed to run. Kept
@@ -27,8 +29,8 @@ use std::time::{Duration, Instant};
 const CLONE_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Wall clock for a clone: big repos over a slow link. The frontend can
-/// cancel sooner once `add_project_with` itself races a `CancellationToken`
-/// derived from `call_id` (Task 5 — see the field's doc comment).
+/// cancel sooner: `add_project_with` races the `CancellationToken` derived
+/// from `call_id` directly (see `AddProjectArgs::call_id`'s doc comment).
 const CLONE_WALL_CLOCK: Duration = Duration::from_secs(600);
 
 /// Written to stderr by [`clone_script`]'s "already a checkout" guard and
@@ -59,59 +61,57 @@ pub enum AddProjectSource {
 pub struct AddProjectArgs {
     pub host_alias: String,
     pub source: AddProjectSource,
-    /// Set by `invokeCmdAbortable` so the dialog's Cancel can abort a clone.
-    /// Registering `call_id` in the cancellation registry at the command
-    /// layer is not enough by itself: cancelling actually happens inside
-    /// THIS module, so Task 5 must have `add_project_with` accept the
-    /// resulting `CancellationToken` and race it directly — via
-    /// `SshExec::run_cancellable` for the remote branch and a
-    /// `tokio::select!` added to `run_local_script` for the local one.
-    /// Unused here.
+    /// Injected by the frontend's `invokeCmdAbortable` (see `cancel.rs`) so
+    /// the Add-project dialog's Cancel button can abort a clone / new-project
+    /// run in flight, exactly like `NewSessionArgs::call_id`
+    /// (`service::sessions::lifecycle`). `add_project` binds this id to a
+    /// fresh `CancellationToken` in the process-wide `CancellationRegistry`
+    /// and threads the token into `add_project_with`, which races it
+    /// directly against the long-running script — via
+    /// `SshExec::run_bounded_cancellable` on the remote branch and a
+    /// `tokio::select!` in `run_local_script` on the local one — rather than
+    /// stopping at the command layer, where cancelling would do nothing.
     #[serde(default)]
-    #[allow(dead_code)] // Task 5 wires this in.
-    pub call_id: Option<String>,
+    pub call_id: Option<u64>,
 }
 
-/// Production entry point.
-#[allow(dead_code)] // Task 5 (the `add_project` Tauri command) wires this in.
+/// Production entry point. Mints or binds a `CancellationToken` for
+/// `args.call_id` in `reg` (see `AddProjectArgs::call_id`) and releases the
+/// registry slot on every exit path via `CancelGuard`, exactly like
+/// `service::sessions::lifecycle::new_session`.
 pub async fn add_project(
     args: AddProjectArgs,
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
+    reg: &Arc<CancellationRegistry>,
 ) -> Result<ProjectTreeRow, IpcError> {
-    add_project_with(args, store, &**ssh).await
+    let (cancel_id, token) = match args.call_id {
+        Some(id) => {
+            let token = CancellationToken::new();
+            reg.bind(id, token.clone());
+            (id, token)
+        }
+        None => reg.register_anonymous(),
+    };
+    let _guard = CancelGuard::new(Arc::clone(reg), cancel_id);
+    add_project_with(args, store, &**ssh, token).await
 }
 
 pub async fn add_project_with(
     args: AddProjectArgs,
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
+    token: CancellationToken,
 ) -> Result<ProjectTreeRow, IpcError> {
-    // This becomes a Tauri-reachable entry point in Task 5, so the alias
-    // must be rejected before it ever reaches an ssh argv — same guard
-    // every other caller-supplied-alias service applies first (e.g.
+    // This is a Tauri-reachable entry point, so the alias must be rejected
+    // before it ever reaches an ssh argv — same guard every other
+    // caller-supplied-alias service applies first (e.g.
     // `service::transcript::fetch_transcript`, `service::hosts::add_host`).
     crate::validate::host_alias(&args.host_alias)?;
     match &args.source {
-        AddProjectSource::Clone { url } => clone_source(&args, url, store, ssh).await,
+        AddProjectSource::Clone { url } => clone_source(&args, url, store, ssh, &token).await,
         AddProjectSource::Folder { path } => folder_source(&args, path, store).await,
-        AddProjectSource::New {
-            owner,
-            repo,
-            create_remote,
-            confirm,
-        } => {
-            new_source(
-                &args,
-                owner,
-                repo,
-                *create_remote,
-                confirm.as_deref(),
-                store,
-                ssh,
-            )
-            .await
-        }
+        AddProjectSource::New { .. } => new_source(&args, store, ssh, &token).await,
     }
 }
 
@@ -120,6 +120,7 @@ async fn clone_source(
     url: &str,
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
+    token: &CancellationToken,
 ) -> Result<ProjectTreeRow, IpcError> {
     let (owner, repo) = parse_repo_url(url).ok_or_else(|| {
         IpcError::new(
@@ -140,8 +141,12 @@ async fn clone_source(
     let clone_url = clone_url_for(&owner, &repo);
 
     let (out, dest) = if args.host_alias == crate::service::projects::LOCAL_HOST {
-        let out =
-            run_local_script(&clone_script(&local_base, &clone_url), CLONE_WALL_CLOCK).await?;
+        let out = run_local_script(
+            &clone_script(&local_base, &clone_url),
+            CLONE_WALL_CLOCK,
+            token,
+        )
+        .await?;
         (out, local_base.clone())
     } else {
         let home = ssh.remote_home(&args.host_alias).await?;
@@ -149,11 +154,12 @@ async fn clone_source(
         let dest = layout.project_dir(&root, &owner, &repo);
         let script = clone_script(&dest, &clone_url);
         let out = ssh
-            .run_bounded(
+            .run_bounded_cancellable(
                 &args.host_alias,
                 &["bash", "-lc", &quote(&script)],
                 CLONE_CONNECT_TIMEOUT,
                 CLONE_WALL_CLOCK,
+                token.clone(),
             )
             .await?;
         (out, dest)
@@ -331,13 +337,23 @@ fn confirm_tokens() -> &'static ConfirmTokens {
 /// leave such a project stuck.
 async fn new_source(
     args: &AddProjectArgs,
-    owner: &str,
-    repo: &str,
-    create_remote: bool,
-    confirm: Option<&str>,
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
+    token: &CancellationToken,
 ) -> Result<ProjectTreeRow, IpcError> {
+    let AddProjectSource::New {
+        owner,
+        repo,
+        create_remote,
+        confirm,
+    } = &args.source
+    else {
+        unreachable!("new_source is only called for AddProjectSource::New")
+    };
+    let owner = owner.as_str();
+    let repo = repo.as_str();
+    let create_remote = *create_remote;
+    let confirm = confirm.as_deref();
     if !crate::repo_url::is_component(owner, 39) || !crate::repo_url::is_component(repo, 100) {
         return Err(IpcError::new(
             codes::E_INVALID,
@@ -401,7 +417,7 @@ async fn new_source(
         layout.project_dir(&root, owner, repo)
     };
     let script = new_project_script(&dest, owner, repo, create_remote);
-    let mut out = run_new_step(host, ssh, &script, CLONE_WALL_CLOCK)
+    let mut out = run_new_step(host, ssh, &script, CLONE_WALL_CLOCK, token)
         .await
         .map_err(|e| note_unknown_github_state_on_timeout(e, create_remote, owner, repo))?;
 
@@ -426,6 +442,7 @@ async fn new_source(
             ssh,
             &remote_branch_check_script(&dest),
             REMOTE_BRANCH_CHECK_WALL_CLOCK,
+            token,
         )
         .await
         .map_err(|e| remote_check_failed(owner, repo, &e.message))?;
@@ -446,9 +463,15 @@ async fn new_source(
                 return Err(remote_check_failed(owner, repo, &detail));
             }
         }
-        out = run_new_step(host, ssh, &push_only_script(&dest, &url), CLONE_WALL_CLOCK)
-            .await
-            .map_err(|e| note_unknown_github_state_on_timeout(e, create_remote, owner, repo))?;
+        out = run_new_step(
+            host,
+            ssh,
+            &push_only_script(&dest, &url),
+            CLONE_WALL_CLOCK,
+            token,
+        )
+        .await
+        .map_err(|e| note_unknown_github_state_on_timeout(e, create_remote, owner, repo))?;
     }
 
     if !out.status.success() {
@@ -459,7 +482,8 @@ async fn new_source(
         // flow never created. Whether the repository is actually usable is
         // decided by probing it for a real HEAD.
         let reached_own_steps = last_stage(&String::from_utf8_lossy(&out.stderr)).is_some();
-        if create_remote && reached_own_steps && local_repo_is_usable(host, ssh, &dest).await {
+        if create_remote && reached_own_steps && local_repo_is_usable(host, ssh, &dest, token).await
+        {
             // The local checkout is real and has a commit even though the
             // GitHub half of `new` didn't finish — register it anyway so the
             // user is not left with an orphan, unlisted directory; a retry
@@ -518,15 +542,17 @@ async fn run_new_step(
     ssh: &dyn SshExec,
     script: &str,
     wall_clock: Duration,
+    token: &CancellationToken,
 ) -> Result<std::process::Output, IpcError> {
     if host == crate::service::projects::LOCAL_HOST {
-        run_local_script(script, wall_clock).await
+        run_local_script(script, wall_clock, token).await
     } else {
-        ssh.run_bounded(
+        ssh.run_bounded_cancellable(
             host,
             &["bash", "-lc", &quote(script)],
             CLONE_CONNECT_TIMEOUT,
             wall_clock,
+            token.clone(),
         )
         .await
     }
@@ -537,13 +563,18 @@ async fn run_new_step(
 /// than inferred from which stage markers a failed run printed: a marker
 /// only says a step STARTED, not that the commit exists. Any probe failure
 /// (including not reaching the host) reads as "not usable".
-async fn local_repo_is_usable(host: &str, ssh: &dyn SshExec, dest: &str) -> bool {
+async fn local_repo_is_usable(
+    host: &str,
+    ssh: &dyn SshExec,
+    dest: &str,
+    token: &CancellationToken,
+) -> bool {
     let probe = format!(
         "git -C {} rev-parse --verify -q HEAD >/dev/null",
         quote(dest)
     );
     matches!(
-        run_new_step(host, ssh, &probe, HEAD_PROBE_WALL_CLOCK).await,
+        run_new_step(host, ssh, &probe, HEAD_PROBE_WALL_CLOCK, token).await,
         Ok(out) if out.status.success()
     )
 }
@@ -1080,7 +1111,6 @@ struct GhRepoWire {
 }
 
 /// Production entry point for the Add-project dialog's browse mode.
-#[allow(dead_code)] // Task 5 (the `list_github_repos` Tauri command) wires this in.
 pub async fn list_github_repos(
     host_alias: &str,
     store: &Mutex<Store>,
@@ -1102,7 +1132,9 @@ pub async fn list_github_repos_with(
     const CMD: &str =
         "gh repo list --limit 200 --json nameWithOwner,description,isPrivate,updatedAt";
     let out = if host_alias == crate::service::projects::LOCAL_HOST {
-        run_local_script(CMD, GH_WALL_CLOCK).await?
+        // A short read-only probe: no cancellation is wired for browse mode,
+        // so a token that is never fired is the same as having none.
+        run_local_script(CMD, GH_WALL_CLOCK, &CancellationToken::new()).await?
     } else {
         ssh.run_bounded(
             host_alias,
@@ -1461,25 +1493,75 @@ fn roots(store: &Mutex<Store>, host: &str) -> Result<(String, String, Layout), I
     ))
 }
 
-/// Run `script` locally via `bash -lc`, bounded by `wall_clock`. Returns the
-/// raw `Output` for ANY exit status, same contract as `SshExec::run` —
-/// mapping a failure to an `IpcError` is the caller's job (`git_error`).
-/// `Err` is reserved for a spawn failure or the wall clock elapsing.
+/// Run `script` locally via `bash -lc`, bounded by `wall_clock` and raced
+/// against `token`. Returns the raw `Output` for ANY exit status, same
+/// contract as `SshExec::run` — mapping a failure to an `IpcError` is the
+/// caller's job (`git_error`). `Err` is reserved for a spawn failure, the
+/// wall clock elapsing (`E_TIMEOUT`), or `token` firing first
+/// (`codes::E_CANCELLED`) — same priority order as `SshClient::run_child`:
+/// cancel beats deadline beats exit. Either early exit kills and reaps the
+/// child (`kill_on_drop(true)` alone only sends the signal on drop, it never
+/// awaits the reap, so an explicit `start_kill` + `wait` is needed to avoid
+/// leaving a zombie).
 async fn run_local_script(
     script: &str,
     wall_clock: Duration,
+    token: &CancellationToken,
 ) -> Result<std::process::Output, IpcError> {
-    let child = tokio::process::Command::new("bash")
+    let mut child = tokio::process::Command::new("bash")
         .arg("-lc")
         .arg(script)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
-        .output();
-    match tokio::time::timeout(wall_clock, child).await {
-        Ok(res) => res.map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}"))),
-        Err(_) => Err(IpcError::new(
-            codes::E_TIMEOUT,
-            format!("local script exceeded {}s", wall_clock.as_secs()),
-        )),
+        .spawn()
+        .map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}")))?;
+
+    // Stdout/stderr are drained off to the side so a chatty child can never
+    // block on a full pipe while the select! below waits on it.
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut s) = stdout {
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut s, &mut buf).await;
+        }
+        buf
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut s) = stderr {
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut s, &mut buf).await;
+        }
+        buf
+    });
+
+    tokio::select! {
+        biased;
+        _ = token.cancelled() => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            stdout_task.abort();
+            stderr_task.abort();
+            Err(IpcError::new(codes::E_CANCELLED, "local script cancelled"))
+        }
+        _ = tokio::time::sleep(wall_clock) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            stdout_task.abort();
+            stderr_task.abort();
+            Err(IpcError::new(
+                codes::E_TIMEOUT,
+                format!("local script exceeded {}s", wall_clock.as_secs()),
+            ))
+        }
+        status = child.wait() => {
+            let status = status
+                .map_err(|e| IpcError::new(codes::E_SHELL, format!("bash wait: {e}")))?;
+            let stdout = stdout_task.await.unwrap_or_default();
+            let stderr = stderr_task.await.unwrap_or_default();
+            Ok(std::process::Output { status, stdout, stderr })
+        }
     }
 }
 
@@ -1619,6 +1701,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -1661,6 +1744,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -1689,6 +1773,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -1719,6 +1804,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -1742,6 +1828,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -1773,13 +1860,13 @@ mod tests {
         let dest_str = dest.to_str().unwrap();
         let script = clone_script(dest_str, &clone_url);
 
-        let out = run_local_script(&script, Duration::from_secs(10))
+        let out = run_local_script(&script, Duration::from_secs(10), &CancellationToken::new())
             .await
             .unwrap();
         assert!(out.status.success(), "{out:?}");
         assert!(dest.join(".git").is_dir());
 
-        let out2 = run_local_script(&script, Duration::from_secs(10))
+        let out2 = run_local_script(&script, Duration::from_secs(10), &CancellationToken::new())
             .await
             .unwrap();
         assert!(!out2.status.success());
@@ -1808,7 +1895,7 @@ mod tests {
     async fn an_invalid_host_alias_is_refused_before_any_ssh() {
         // Same guard, same shape as `a_bad_url_is_refused_before_any_ssh`,
         // but for the alias itself: `add_project_with` is a Tauri-reachable
-        // entry point (Task 5), so a hostile alias (e.g. one starting with
+        // entry point, so a hostile alias (e.g. one starting with
         // `-`, which `ssh` would parse as an option) must never reach an ssh
         // argv, regardless of which source is requested.
         let store = store_with_no_projects();
@@ -1821,6 +1908,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -1892,6 +1980,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -1930,6 +2019,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -1972,6 +2062,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -1994,6 +2085,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -2030,6 +2122,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -2084,6 +2177,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -2152,6 +2246,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -2189,6 +2284,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -2220,6 +2316,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -2249,6 +2346,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -2270,6 +2368,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -2299,6 +2398,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -2325,6 +2425,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -2349,6 +2450,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -2407,6 +2509,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -2437,6 +2540,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -2481,6 +2585,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -2511,7 +2616,7 @@ mod tests {
         };
         // Step 1: no token yet -> mint one (the real two-call flow the
         // frontend dialog will drive).
-        let mint_err = add_project_with(new_args(), &store, &fake)
+        let mint_err = add_project_with(new_args(), &store, &fake, CancellationToken::new())
             .await
             .unwrap_err();
         let token = confirm_token_from(&mint_err);
@@ -2521,7 +2626,9 @@ mod tests {
         if let AddProjectSource::New { confirm, .. } = &mut args.source {
             *confirm = Some(token);
         }
-        add_project_with(args, &store, &fake).await.unwrap();
+        add_project_with(args, &store, &fake, CancellationToken::new())
+            .await
+            .unwrap();
 
         let script = fake.calls_for("vps").last().unwrap().script().unwrap();
         assert!(
@@ -2560,6 +2667,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -2583,9 +2691,14 @@ mod tests {
             },
             call_id: None,
         };
-        add_project_with(new_args(Some(token.clone())), &store, &fake)
-            .await
-            .unwrap();
+        add_project_with(
+            new_args(Some(token.clone())),
+            &store,
+            &fake,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         // Drive the token check directly: through `add_project_with` a
         // replay would be let through `existing_project_or_resume` (same
         // row, same path) and then simply mint a new token, which says
@@ -2645,6 +2758,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -2681,6 +2795,7 @@ mod tests {
                 },
                 &store,
                 &fake,
+                CancellationToken::new(),
             )
             .await
             .unwrap_err();
@@ -2715,6 +2830,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -2754,6 +2870,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -3196,6 +3313,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -3917,9 +4035,14 @@ mod tests {
 
         // Attempt 1 fails at the gh stage; the repo has a HEAD (the probe
         // answers ok), so the row is registered.
-        let err = add_project_with(new_remote_args(Some(mint_vps_widget())), &store, &fake)
-            .await
-            .unwrap_err();
+        let err = add_project_with(
+            new_remote_args(Some(mint_vps_widget())),
+            &store,
+            &fake,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, codes::E_GH);
         assert!(err.message.contains("retry"), "{}", err.message);
         assert_eq!(store.lock().unwrap().list_projects().unwrap().len(), 1);
@@ -3930,9 +4053,14 @@ mod tests {
             Match::script_contains("git init"),
             reply_with_stderr(0, &format!("{STAGE_GH_CREATE}\n{STAGE_GH_PUSH}\n")),
         );
-        let row = add_project_with(new_remote_args(Some(mint_vps_widget())), &store, &fake)
-            .await
-            .unwrap();
+        let row = add_project_with(
+            new_remote_args(Some(mint_vps_widget())),
+            &store,
+            &fake,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             (row.project.owner.as_str(), row.project.repo.as_str()),
             ("acme", "widget")
@@ -3968,9 +4096,14 @@ mod tests {
                 &format!("{STAGE_GH_CREATE}\n{STAGE_GH_PUSH}\nsrc refspec main does not match any"),
             ),
         );
-        let err = add_project_with(new_remote_args(Some(mint_vps_widget())), &store, &fake)
-            .await
-            .unwrap_err();
+        let err = add_project_with(
+            new_remote_args(Some(mint_vps_widget())),
+            &store,
+            &fake,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, codes::E_GH);
         assert!(
             store.lock().unwrap().list_projects().unwrap().is_empty(),
@@ -4043,9 +4176,14 @@ mod tests {
             "https://github.com/acme/widget.git",
             Reply::fail(2, ""), // ls-remote: the remote answered, no main
         );
-        let row = add_project_with(new_remote_args(Some(mint_vps_widget())), &store, &fake)
-            .await
-            .unwrap();
+        let row = add_project_with(
+            new_remote_args(Some(mint_vps_widget())),
+            &store,
+            &fake,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             (row.project.owner.as_str(), row.project.repo.as_str()),
             ("Acme", "Widget")
@@ -4073,9 +4211,14 @@ mod tests {
             "git@github.com:acme/widget.git",
             Reply::ok("0123456789abcdef0123456789abcdef01234567\trefs/heads/main\n"),
         );
-        let row = add_project_with(new_remote_args(Some(mint_vps_widget())), &store, &fake)
-            .await
-            .unwrap();
+        let row = add_project_with(
+            new_remote_args(Some(mint_vps_widget())),
+            &store,
+            &fake,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             (row.project.owner.as_str(), row.project.repo.as_str()),
             ("Acme", "Widget"),
@@ -4095,9 +4238,14 @@ mod tests {
             "https://github.com/acme/widget.git",
             Reply::ok("0123456789abcdef0123456789abcdef01234567\trefs/heads/main\n"),
         );
-        let row = add_project_with(new_remote_args(Some(mint_vps_widget())), &store, &fake)
-            .await
-            .unwrap();
+        let row = add_project_with(
+            new_remote_args(Some(mint_vps_widget())),
+            &store,
+            &fake,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(row.project.repo, "widget");
         assert_eq!(store.lock().unwrap().list_projects().unwrap().len(), 1);
         assert_no_push(&fake);
@@ -4114,9 +4262,14 @@ mod tests {
                 "fatal: unable to access 'https://github.com/acme/widget.git/'",
             ),
         );
-        let err = add_project_with(new_remote_args(Some(mint_vps_widget())), &store, &fake)
-            .await
-            .unwrap_err();
+        let err = add_project_with(
+            new_remote_args(Some(mint_vps_widget())),
+            &store,
+            &fake,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, codes::E_GH);
         assert!(err.message.contains("couldn't check"), "{}", err.message);
         assert!(
@@ -4135,9 +4288,14 @@ mod tests {
         // tag guard passed; the tag guard itself is covered hermetically.
         let store = store_with_no_projects();
         let fake = fake_with_origin_set("https://github.com/acme/widget.git", Reply::fail(2, ""));
-        let row = add_project_with(new_remote_args(Some(mint_vps_widget())), &store, &fake)
-            .await
-            .unwrap();
+        let row = add_project_with(
+            new_remote_args(Some(mint_vps_widget())),
+            &store,
+            &fake,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(row.project.repo, "widget");
         assert_eq!(scripts_containing(&fake, "ls-remote --exit-code").len(), 1);
         assert_eq!(
@@ -4156,9 +4314,14 @@ mod tests {
         register_widget_as(&store, "acme", "widget");
         let fake =
             fake_with_origin_set("git@github.com:someone-else/widget.git", Reply::fail(2, ""));
-        let err = add_project_with(new_remote_args(Some(mint_vps_widget())), &store, &fake)
-            .await
-            .unwrap_err();
+        let err = add_project_with(
+            new_remote_args(Some(mint_vps_widget())),
+            &store,
+            &fake,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, codes::E_EXISTS);
         assert!(err.message.contains("refusing to push"), "{}", err.message);
         assert!(!err.message.contains("__"), "{}", err.message);
@@ -4245,9 +4408,14 @@ mod tests {
             .unwrap();
         let fake = FakeSsh::new();
         let token = mint_vps_widget();
-        let err = add_project_with(new_remote_args(Some(token.clone())), &store, &fake)
-            .await
-            .unwrap_err();
+        let err = add_project_with(
+            new_remote_args(Some(token.clone())),
+            &store,
+            &fake,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, codes::E_EXISTS);
         assert!(fake.calls().is_empty());
         assert!(
@@ -4270,7 +4438,9 @@ mod tests {
         if let AddProjectSource::New { create_remote, .. } = &mut args.source {
             *create_remote = false;
         }
-        let err = add_project_with(args, &store, &fake).await.unwrap_err();
+        let err = add_project_with(args, &store, &fake, CancellationToken::new())
+            .await
+            .unwrap_err();
         assert_eq!(err.code, codes::E_EXISTS);
         assert!(fake.calls().is_empty());
     }
@@ -4295,6 +4465,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -4380,5 +4551,83 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, codes::E_INVALID);
         assert!(fake.calls().is_empty());
+    }
+
+    // ── cancellation end-to-end: `call_id` → `CancellationToken` → the
+    // actual work, not just the command-layer registry (the "cancellation
+    // trap" the add-project plan calls out) ──────────────────────────────
+
+    #[tokio::test]
+    async fn a_hanging_remote_clone_cancelled_via_the_token_returns_e_cancelled_and_registers_nothing(
+    ) {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        // `hanging` (an `Any` rule) must be added BEFORE `with_home`, same
+        // reasoning as the `new`-source tests above: later rules win, so
+        // `with_home`'s narrower `printenv HOME` match has to be added last
+        // or the broad `Any` hang would also swallow the home lookup.
+        fake.hanging("vps")
+            .with_home("/home/u")
+            .set_wall_clock(Duration::from_millis(200));
+        let token = CancellationToken::new();
+        let call = add_project_with(
+            AddProjectArgs {
+                host_alias: "vps".into(),
+                source: AddProjectSource::Clone { url: "o/r".into() },
+                call_id: None,
+            },
+            &store,
+            &fake,
+            token.clone(),
+        );
+        let cancel_soon = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            token.cancel();
+        };
+        let (result, ()) = tokio::join!(call, cancel_soon);
+        let err = result.unwrap_err();
+        assert_eq!(err.code, codes::E_CANCELLED);
+        assert!(
+            store.lock().unwrap().list_projects().unwrap().is_empty(),
+            "a cancelled clone must never register a project row"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_local_script_cancelled_mid_run_returns_e_cancelled_and_kills_the_child() {
+        // A real local process (never the network — this drives
+        // `run_local_script` directly with an innocuous `sleep`), proving
+        // the child is actually killed rather than left running: the script
+        // would otherwise `touch` a marker file after its sleep, so the
+        // marker's absence once the sleep would have elapsed proves the
+        // child never got there.
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran");
+        let script = format!(
+            "sleep 1 && touch {}",
+            crate::shell::quote(marker.to_str().unwrap())
+        );
+        let token = CancellationToken::new();
+        let call = run_local_script(&script, Duration::from_secs(30), &token);
+        let cancel_soon = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            token.cancel();
+        };
+        let start = std::time::Instant::now();
+        let (result, ()) = tokio::join!(call, cancel_soon);
+        let err = result.unwrap_err();
+        assert_eq!(err.code, codes::E_CANCELLED);
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "cancellation must not wait for the wall clock or the sleep to finish"
+        );
+        // Wait past when the uncancelled sleep would have finished, so the
+        // marker's absence is real proof the child was killed, not just that
+        // we checked too early.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert!(
+            !marker.exists(),
+            "the child must be killed, not left running to finish the script"
+        );
     }
 }

@@ -214,6 +214,32 @@ impl SshClient {
         self.run_child(host, cmd, wall_clock, None, "E_SSH").await
     }
 
+    /// `run_bounded` raced against a `CancellationToken`, for a long-running
+    /// script that must keep an independent connect timeout / wall-clock
+    /// pair (see `run_bounded`'s doc comment) while still being abortable —
+    /// `run_cancellable` cannot be reused here because it derives its wall
+    /// clock as `3 × connect_timeout`, which would silently reintroduce the
+    /// coupled-timeout bug `run_bounded` exists to avoid. Same kill/reap
+    /// semantics as `run_cancellable`: `E_CANCELLED` when `token` fires
+    /// first, `E_SSH_TIMEOUT` when `wall_clock` elapses first.
+    pub async fn run_bounded_cancellable(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+        token: CancellationToken,
+    ) -> Result<Output, IpcError> {
+        self.inner.seen.insert(host.to_string(), ());
+        let mut cmd = tokio::process::Command::new("ssh");
+        for opt in self.mux_opts(host, connect_timeout) {
+            cmd.arg(opt);
+        }
+        cmd.arg("--").arg(host).args(args);
+        self.run_child(host, cmd, wall_clock, Some(token), "E_SSH")
+            .await
+    }
+
     /// Same as `run` but races the SSH child against a `CancellationToken`.
     /// When the token fires before the command finishes, the child is sent
     /// SIGKILL via `start_kill` and explicitly `wait`ed so the OS reaps the
@@ -590,6 +616,16 @@ pub trait SshExec: Send + Sync {
         token: CancellationToken,
     ) -> Result<Output, IpcError>;
 
+    /// See the inherent `SshClient::run_bounded_cancellable`.
+    async fn run_bounded_cancellable(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+        token: CancellationToken,
+    ) -> Result<Output, IpcError>;
+
     async fn upload_file(
         &self,
         host: &str,
@@ -627,6 +663,18 @@ impl SshExec for SshClient {
         token: CancellationToken,
     ) -> Result<Output, IpcError> {
         SshClient::run_cancellable(self, host, args, timeout, token).await
+    }
+
+    async fn run_bounded_cancellable(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+        token: CancellationToken,
+    ) -> Result<Output, IpcError> {
+        SshClient::run_bounded_cancellable(self, host, args, connect_timeout, wall_clock, token)
+            .await
     }
 
     async fn upload_file(
@@ -673,6 +721,19 @@ impl<T: SshExec + ?Sized> SshExec for Arc<T> {
         token: CancellationToken,
     ) -> Result<Output, IpcError> {
         (**self).run_cancellable(host, args, timeout, token).await
+    }
+
+    async fn run_bounded_cancellable(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+        token: CancellationToken,
+    ) -> Result<Output, IpcError> {
+        (**self)
+            .run_bounded_cancellable(host, args, connect_timeout, wall_clock, token)
+            .await
     }
 
     async fn upload_file(
@@ -889,6 +950,19 @@ impl SshExec for LocalExec {
             "E_SSH",
         )
         .await
+    }
+
+    async fn run_bounded_cancellable(
+        &self,
+        host: &str,
+        args: &[&str],
+        _connect_timeout: Duration,
+        wall_clock: Duration,
+        token: CancellationToken,
+    ) -> Result<Output, IpcError> {
+        let cmd = self.command(args);
+        self.bounded(host, cmd, wall_clock, Some(token), "E_SSH")
+            .await
     }
 
     async fn upload_file(

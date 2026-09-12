@@ -348,6 +348,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::diagnostics::open_log_folder`
 - `commands::projects::list_projects`
 - `commands::projects::refresh_projects`
+- `commands::projects::add_project`
+- `commands::projects::list_github_repos`
 - `commands::sessions::list_sessions`
 - `commands::sessions::related_sessions`
 - `commands::sessions::new_session`

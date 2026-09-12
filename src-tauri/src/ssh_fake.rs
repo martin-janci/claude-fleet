@@ -407,6 +407,28 @@ impl SshExec for FakeSsh {
         .await
     }
 
+    async fn run_bounded_cancellable(
+        &self,
+        host: &str,
+        args: &[&str],
+        _connect_timeout: Duration,
+        wall_clock: Duration,
+        token: CancellationToken,
+    ) -> Result<Output, IpcError> {
+        // Same convention as `run_bounded`: the fake has nothing to time a
+        // connect against, so only `wall_clock` (and `set_wall_clock`'s
+        // override) and `token` matter here.
+        self.execute(
+            host,
+            args,
+            None,
+            self.wall_clock_or(wall_clock),
+            Some(token),
+            "E_SSH",
+        )
+        .await
+    }
+
     async fn upload_file(
         &self,
         host: &str,
