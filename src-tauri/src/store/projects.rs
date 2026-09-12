@@ -637,6 +637,41 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// After a scan of `host_alias`'s checkout of `project_id`: drop that
+    /// host's rows the scan did not report, except rows a session still
+    /// points at (any status — the FK must stay valid). Local rows are never
+    /// touched. Emits `worktree:removed` per dropped row like
+    /// [`Self::delete_worktree_if_unused`]. Returns how many went.
+    pub fn delete_host_worktrees_not_in(
+        &self,
+        host_alias: &str,
+        project_id: i64,
+        keep_names: &[String],
+    ) -> Result<usize, rusqlite::Error> {
+        if host_alias == crate::service::projects::LOCAL_HOST {
+            return Ok(0);
+        }
+        let ids: Vec<i64> = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT id, name FROM worktrees WHERE host_alias=?1 AND project_id=?2",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![host_alias, project_id], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })?;
+            rows.filter_map(Result::ok)
+                .filter(|(_, name)| !keep_names.iter().any(|k| k == name))
+                .map(|(id, _)| id)
+                .collect()
+        };
+        let mut n = 0;
+        for id in ids {
+            if self.delete_worktree_if_unused(id)? {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
     /// Remember the parent directory's `dev:inode` of a worktree a probe found
     /// healthy (migration 023). Keyed by host and canonical worktree path.
     pub fn record_parent_fingerprint(
@@ -1126,6 +1161,53 @@ mod tests {
         assert_eq!(
             s.get_session_by_id(sid).unwrap().unwrap().worktree_id,
             Some(main)
+        );
+    }
+
+    #[test]
+    fn delete_host_worktrees_not_in_prunes_only_that_hosts_unlisted_rows() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("vps").unwrap();
+        let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+        let local = s
+            .upsert_worktree(pid, "feat", "/p/o/r/.claude/worktrees/feat", Some("feat"))
+            .unwrap();
+        let keep = s
+            .upsert_worktree_on("vps", pid, "main", "/home/u/r", Some("main"))
+            .unwrap();
+        let gone = s
+            .upsert_worktree_on("vps", pid, "old", "/home/u/r/.claude/worktrees/old", None)
+            .unwrap();
+        let busy = s
+            .upsert_worktree_on("vps", pid, "busy", "/home/u/r/.claude/worktrees/busy", None)
+            .unwrap();
+        // An alive session pins `busy` even though the scan did not list it.
+        s.upsert_session(
+            "dev-r--busy",
+            "vps",
+            Some(pid),
+            Some(busy),
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap();
+
+        let removed = s
+            .delete_host_worktrees_not_in("vps", pid, &["main".to_string()])
+            .unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(s.get_worktree_row(gone).unwrap().is_none());
+        assert!(s.get_worktree_row(keep).unwrap().is_some());
+        assert!(
+            s.get_worktree_row(busy).unwrap().is_some(),
+            "row with an alive session is kept"
+        );
+        assert!(
+            s.get_worktree_row(local).unwrap().is_some(),
+            "local rows are never touched"
         );
     }
 }
