@@ -14,6 +14,7 @@ mod mcp;
 mod no_eprintln_tests;
 mod projects;
 mod pty;
+mod repo_url;
 mod service;
 mod shell;
 mod ssh;
