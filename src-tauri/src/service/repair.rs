@@ -62,6 +62,10 @@ pub const UNREGISTER_REFUSED: &str = "reappeared or parent missing; not removing
 /// stderr marker of the apply script's fingerprint re-check right before the
 /// re-add: the parent changed after the stale entry was removed.
 pub const ADD_REFUSED: &str = "parent changed since the check; not re-adding";
+/// stderr marker of a [`BranchSource::Mirror`] add: the branch exists neither
+/// on the host nor on origin (it was never pushed), so there is nothing to
+/// mirror. The caller turns it into a "push it first" error.
+pub const MIRROR_REFUSED: &str = "is not on origin; nothing to mirror";
 
 /// `"dev:inode"` → `(dev, inode)`; `None` for anything else.
 pub fn parse_fp(s: &str) -> Option<(u64, u64)> {
@@ -500,6 +504,15 @@ pub enum BranchSource {
     /// branch from `base` (local, then `origin/<base>`), then `default`, then
     /// `HEAD`. Any other ls-remote / fetch error aborts the repair.
     FetchOrBase { base: String, default: String },
+    /// Mirror an EXISTING worktree onto another host, where nothing was
+    /// probed: decided at run time. `refs/heads/<branch>` if the host has it;
+    /// else ask origin (`git ls-remote --exit-code`), fetch the branch and
+    /// track it. When origin does not have it either, refuse with
+    /// [`MIRROR_REFUSED`] on stderr — never fork a new branch of that name
+    /// from the base, which would silently impersonate the user's work that
+    /// only exists on the originating machine. Any other ls-remote / fetch
+    /// error aborts.
+    Mirror,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -543,6 +556,9 @@ impl Step {
                 }
                 BranchSource::FetchOrBase { base, .. } => format!(
                     "git worktree add -- {path} (origin/{branch} if origin has it, else a new branch {branch} from {base})"
+                ),
+                BranchSource::Mirror => format!(
+                    "git worktree add -- {path} {branch} (local, else fetched from origin/{branch}; refused when origin lacks it)"
                 ),
             },
             Step::AdoptPath { path } => format!("adopt existing checkout at {path}"),
@@ -1246,6 +1262,40 @@ pub fn render_git_script_expecting(
                              \x20 echo \"repair: cannot confirm whether origin still has $b (git ls-remote exit $lr); not recreating it\" >&2; exit 1\n\
                              \x20 ;;\n\
                              esac\n"
+                        ));
+                    }
+                    BranchSource::Mirror => {
+                        // Local first (an earlier mirror, or the user's own
+                        // checkout of the branch); else a fresh fetch so a
+                        // stale `origin/<b>` from an old clone is refreshed
+                        // before it is checked out. Nowhere: refuse.
+                        s.push_str(&format!(
+                            "b={bq}\n\
+                             if git -C {rq} show-ref --verify --quiet \"refs/heads/$b\"; then\n\
+                             \x20 git -C {rq} worktree add -- {pq} \"$b\" 1>&2\n\
+                             \x20 echo outcome=branch_local\n\
+                             else\n\
+                             \x20 if git -C {rq} remote get-url origin >/dev/null 2>&1; then\n\
+                             \x20   lr=0; git -C {rq} ls-remote --exit-code --heads -- origin \"refs/heads/$b\" >/dev/null 2>&1 || lr=$?\n\
+                             \x20 else\n\
+                             \x20   lr=2\n\
+                             \x20 fi\n\
+                             \x20 case \"$lr\" in\n\
+                             \x20 0)\n\
+                             \x20   if ! git -C {rq} fetch -- origin \"+refs/heads/$b:refs/remotes/origin/$b\" 1>&2; then\n\
+                             \x20     echo \"repair: fetching origin/$b failed; not mirroring the branch\" >&2; exit 1\n\
+                             \x20   fi\n\
+                             \x20   git -C {rq} worktree add --track -b \"$b\" -- {pq} \"origin/$b\" 1>&2\n\
+                             \x20   echo outcome=branch_remote\n\
+                             \x20   ;;\n\
+                             \x20 2)\n\
+                             \x20   echo \"repair: branch $b {MIRROR_REFUSED}\" >&2; exit 1\n\
+                             \x20   ;;\n\
+                             \x20 *)\n\
+                             \x20   echo \"repair: cannot confirm whether origin has $b (git ls-remote exit $lr); not mirroring it\" >&2; exit 1\n\
+                             \x20   ;;\n\
+                             \x20 esac\n\
+                             fi\n"
                         ));
                     }
                 }
@@ -3067,6 +3117,58 @@ mod tests {
             "{script}"
         );
         assert!(script.contains("echo outcome=branch_local"));
+    }
+
+    #[test]
+    fn git_script_mirror_variant_fetches_or_refuses_never_forks() {
+        let step = Step::AddWorktree {
+            path: "/re po/w".into(),
+            branch: "feature/x".into(),
+            from: BranchSource::Mirror,
+        };
+        let s = render_git_script("/re po", std::slice::from_ref(&step));
+        assert!(s.contains("b='feature/x'\n"), "{s}");
+        // Local branch first.
+        assert!(
+            s.contains("if git -C '/re po' show-ref --verify --quiet \"refs/heads/$b\"; then"),
+            "{s}"
+        );
+        assert!(
+            s.contains("git -C '/re po' worktree add -- '/re po/w' \"$b\" 1>&2\n  echo outcome=branch_local"),
+            "{s}"
+        );
+        // Else origin: ls-remote, fetch, track.
+        assert!(
+            s.contains("ls-remote --exit-code --heads -- origin \"refs/heads/$b\""),
+            "{s}"
+        );
+        assert!(
+            s.contains("fetch -- origin \"+refs/heads/$b:refs/remotes/origin/$b\""),
+            "{s}"
+        );
+        assert!(
+            s.contains("worktree add --track -b \"$b\" -- '/re po/w' \"origin/$b\" 1>&2\n    echo outcome=branch_remote"),
+            "{s}"
+        );
+        // Nowhere: refused with the marker; no fork from a base.
+        assert!(
+            s.contains(&format!(
+                "echo \"repair: branch $b {MIRROR_REFUSED}\" >&2; exit 1"
+            )),
+            "{s}"
+        );
+        assert!(!s.contains("basebr="), "{s}");
+        assert!(!s.contains("branch_from_base"), "{s}");
+        assert!(
+            s.contains("not mirroring it"),
+            "unknown ls-remote exit aborts: {s}"
+        );
+        let d = step.describe();
+        assert!(
+            d.contains("feature/x") && d.contains("origin/feature/x"),
+            "{d}"
+        );
+        assert!(d.contains("refused"), "{d}");
     }
 
     #[test]

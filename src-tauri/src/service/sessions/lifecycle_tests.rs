@@ -22,6 +22,10 @@ fn a_remote_row_for_local_is_refused_too() {
     assert!(reject_foreign_worktree("local", "mefistos", "w").is_err());
 }
 
+/// Pin: the worktree is created at the row's OWN scanned path — here under
+/// `.worktrees/`, never the `.claude/worktrees/<name>` guess. This is one of
+/// the two behaviours this branch added that the merge with origin/main's
+/// Mirror-based builder must not regress.
 #[test]
 fn ensure_script_targets_the_row_own_path_not_the_claude_worktrees_guess() {
     let wt = RemoteWorktree {
@@ -29,7 +33,7 @@ fn ensure_script_targets_the_row_own_path_not_the_claude_worktrees_guess() {
         branch: Some("feature/feat"),
         path: "/home/u/projects/github.com/o/r/.worktrees/feat",
     };
-    let script = ensure_script(
+    let script = ensure_remote_project_script(
         "/home/u/projects/github.com/o/r",
         "git@github.com:o/r.git",
         Some(&wt),
@@ -42,7 +46,12 @@ fn ensure_script_targets_the_row_own_path_not_the_claude_worktrees_guess() {
         !script.contains(".claude/worktrees/feat"),
         "script must not fall back to the .claude/worktrees/<name> guess: {script}"
     );
-    assert!(script.contains("git worktree add"));
+    // The guard checks existence of the scanned path, and the Mirror step
+    // (not a naive one-liner) does the add.
+    assert!(
+        script.contains("if [ ! -d '/home/u/projects/github.com/o/r/.worktrees/feat' ]; then\n")
+    );
+    assert!(script.contains("worktree add"));
     assert!(script.contains("feature/feat"));
 }
 
@@ -53,7 +62,7 @@ fn ensure_script_skips_worktree_add_for_main() {
         branch: None,
         path: "/home/u/projects/github.com/o/r",
     };
-    let script = ensure_script(
+    let script = ensure_remote_project_script(
         "/home/u/projects/github.com/o/r",
         "git@github.com:o/r.git",
         Some(&wt),
@@ -64,7 +73,7 @@ fn ensure_script_skips_worktree_add_for_main() {
 
 #[test]
 fn ensure_script_with_no_worktree_only_clones() {
-    let script = ensure_script(
+    let script = ensure_remote_project_script(
         "/home/u/projects/github.com/o/r",
         "git@github.com:o/r.git",
         None,
@@ -77,7 +86,10 @@ fn ensure_script_with_no_worktree_only_clones() {
 /// project root containing a space would word-split the command
 /// substitution, and a worktree path containing shell metacharacters
 /// (space, `'`, `$`) must come through exactly as `crate::shell::quote`
-/// renders it — this is the test that would have caught both.
+/// renders it — this is the test that would have caught both. Pin: every
+/// value interpolated anywhere in the merged script — the clone guard AND
+/// the Mirror add step's path/branch — is quoted, and the `dirname`
+/// substitution is double-quoted.
 #[test]
 fn ensure_script_quotes_paths_with_shell_metacharacters() {
     let project_root = "/home/u/my projects/o/r";
@@ -87,12 +99,12 @@ fn ensure_script_quotes_paths_with_shell_metacharacters() {
         branch: Some("feature/x"),
         path: wt_path,
     };
-    let script = ensure_script(project_root, "git@github.com:o/r.git", Some(&wt));
+    let script = ensure_remote_project_script(project_root, "git@github.com:o/r.git", Some(&wt));
 
-    // The `dirname` command substitution must be double-quoted so a root
+    // The `dirname --` command substitution must be double-quoted so a root
     // with a space in it does not word-split.
     assert!(
-        script.contains(&format!("\"$(dirname {})\"", quote(project_root))),
+        script.contains(&format!("\"$(dirname -- {})\"", quote(project_root))),
         "dirname substitution must be double-quoted: {script}"
     );
     // Every interpolated value must appear exactly as `quote` renders it.
@@ -106,26 +118,59 @@ fn ensure_script_quotes_paths_with_shell_metacharacters() {
     );
     assert!(
         script.contains(&quote("feature/x")),
-        "branch must be shell-quoted: {script}"
+        "branch must be shell-quoted (as the $b assignment): {script}"
     );
 }
 
+/// Pin: the Mirror step's `worktree add` (the local-branch fast path) is
+/// rendered against the row's own scanned path, quoted — not a name-derived
+/// guess, and not a naive unconditional `git worktree add`.
 #[test]
-fn ensure_script_clone_url_and_worktree_add_target_the_scanned_path() {
-    // Sanity check on the non-main worktree-add step's shape: `cd <root> &&
-    // git worktree add <abs path> <branch>`, guarded by an existence check on
-    // the abs path (not a name-derived guess).
+fn ensure_script_worktree_add_targets_the_scanned_path() {
     let wt = RemoteWorktree {
         name: "feat",
-        branch: None, // falls back to `name` as the branch
+        branch: None, // falls back to `name` as the mirrored branch
         path: "/r/.worktrees/feat",
     };
-    let script = ensure_script("/r", "git@github.com:o/r.git", Some(&wt));
-    assert!(script.contains(&format!(
-        "if [ ! -d {} ]; then cd {} && git worktree add {} {}; fi",
-        quote("/r/.worktrees/feat"),
-        quote("/r"),
-        quote("/r/.worktrees/feat"),
-        quote("feat"),
-    )));
+    let script = ensure_remote_project_script("/r", "git@github.com:o/r.git", Some(&wt));
+    assert!(
+        script.contains(&format!(
+            "if [ ! -d {} ]; then\n",
+            quote("/r/.worktrees/feat")
+        )),
+        "{script}"
+    );
+    assert!(script.contains("b='feat'\n"), "{script}");
+    assert!(
+        script.contains(&format!(
+            "git -C {} worktree add -- {} \"$b\"",
+            quote("/r"),
+            quote("/r/.worktrees/feat"),
+        )),
+        "local-branch fast path targets the scanned path: {script}"
+    );
+}
+
+/// Composition test: the two merged behaviours work together. A
+/// `RemoteWorktree` whose `path` was scanned under `.worktrees/` (this
+/// branch's contribution) produces a Mirror step (origin/main's
+/// contribution) whose `worktree add --track` step also targets that exact
+/// scanned path, quoted — proving the scanned path survives all the way
+/// through the Mirror rendering, not just the outer existence guard.
+#[test]
+fn scanned_worktrees_path_survives_the_mirror_rendering() {
+    let wt = RemoteWorktree {
+        name: "feat",
+        branch: Some("feature/feat"),
+        path: "/repo/.worktrees/feat",
+    };
+    let script = ensure_remote_project_script("/repo", "git@github.com:o/r.git", Some(&wt));
+    assert!(
+        script.contains(&format!(
+            "worktree add --track -b \"$b\" -- {} \"origin/$b\"",
+            quote("/repo/.worktrees/feat"),
+        )),
+        "the origin-tracking branch of the Mirror add must target the \
+         row's own .worktrees/ path, not a .claude/worktrees/ guess: {script}"
+    );
 }
