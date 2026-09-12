@@ -84,36 +84,79 @@ pub struct HostWorktrees {
     pub worktrees: Vec<WorktreeRow>,
 }
 
-/// Printed by the scan script instead of porcelain when `<root>/.git` is
-/// missing on the host.
+/// Printed by the scan script instead of `root <path>` + porcelain when the
+/// project root is not a git checkout on the host yet.
 const NOT_CLONED_MARKER: &str = "__NOT_CLONED__";
 
 /// Wall clock for the remote `git worktree list` (a cold ControlMaster plus
 /// a login shell; git itself is instant).
 const SCAN_WALL_CLOCK: Duration = Duration::from_secs(15);
 
-/// Map `git worktree list --porcelain` of the checkout at `root` to
-/// `(name, path, branch)` triples: the root entry is `main`, every other
-/// entry is named by its last path component. Bare and prunable entries
-/// are skipped (nothing can run in them).
+/// Split the scan script's stdout into the canonical root reported by its
+/// leading `root <path>` line (the host's `pwd -P` of the project root — git
+/// itself reports worktree entries by realpath, so this is what entry paths
+/// must be compared against under a symlinked root) and the remaining
+/// `git worktree list --porcelain` text. `None` when that line is missing or
+/// empty (a malformed or unexpected scan).
+fn split_scan_output(stdout: &str) -> Option<(String, &str)> {
+    let (first, rest) = stdout.split_once('\n').unwrap_or((stdout, ""));
+    let root = first.strip_prefix("root ")?.trim();
+    if root.is_empty() {
+        return None;
+    }
+    Some((root.to_string(), rest))
+}
+
+/// Map `git worktree list --porcelain` of the checkout at `root` (the
+/// CANONICAL root, i.e. what the host's `pwd -P` reports — see
+/// [`split_scan_output`]) to `(name, path, branch)` triples. Bare and
+/// prunable entries are dropped first (nothing can run in them). The main
+/// worktree is the entry whose path equals `root`; if none matches exactly
+/// (a normalization difference), the FIRST remaining entry is treated as
+/// main, since `git worktree list` always lists it first. Every other entry
+/// is named by its last path component. Two entries that would collide on
+/// name (two worktrees named e.g. `feat` under different parent dirs) keep
+/// only the first; the rest are dropped with a `tracing::warn!` — the
+/// returned list never has two entries with the same name.
 pub fn rows_from_porcelain(root: &str, porcelain: &str) -> Vec<(String, String, Option<String>)> {
     let root = root.trim_end_matches('/');
-    crate::service::repair::parse_porcelain(porcelain)
+    let entries: Vec<_> = crate::service::repair::parse_porcelain(porcelain)
         .into_iter()
         .filter(|w| !w.bare && !w.prunable)
-        .filter_map(|w| {
-            let path = w.path.trim_end_matches('/').to_string();
-            let name = if path == root {
-                "main".to_string()
-            } else {
-                path.rsplit('/')
-                    .next()
-                    .filter(|s| !s.is_empty())?
-                    .to_string()
+        .collect();
+    let main_path: Option<String> = entries
+        .iter()
+        .map(|w| w.path.trim_end_matches('/').to_string())
+        .find(|p| p == root)
+        .or_else(|| {
+            entries
+                .first()
+                .map(|w| w.path.trim_end_matches('/').to_string())
+        });
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(entries.len());
+    for w in entries {
+        let path = w.path.trim_end_matches('/').to_string();
+        let name = if Some(&path) == main_path.as_ref() {
+            "main".to_string()
+        } else {
+            let Some(basename) = path.rsplit('/').next().filter(|s| !s.is_empty()) else {
+                continue;
             };
-            Some((name, path, w.branch))
-        })
-        .collect()
+            basename.to_string()
+        };
+        if !seen.insert(name.clone()) {
+            tracing::warn!(
+                name = %name,
+                path = %path,
+                "[worktrees] duplicate worktree name from `git worktree list --porcelain`; keeping the first occurrence"
+            );
+            continue;
+        }
+        out.push((name, path, w.branch));
+    }
+    out
 }
 
 /// Production entry point: the shared SSH client. Not yet wired to a Tauri
@@ -164,9 +207,16 @@ pub async fn list_host_worktrees_with(
     let (root, _) =
         crate::service::repair::resolve_remote_paths(ssh, host, &base, layout, &owner, &repo, None)
             .await?;
+    // `root` is the LOGICAL path this side resolved (may traverse a
+    // symlink); git reports worktree entries by realpath, so the script
+    // reports the canonical root itself (`pwd -P`) as its first line, and
+    // entries are compared against that, not against `root`. A `.git` FILE
+    // (a linked worktree scanned as its own project, or a submodule) is a
+    // valid checkout, so the probe is `git … rev-parse --git-dir`, not a
+    // `[ -d …/.git ]` test.
+    let q_root = quote(&root);
     let script = format!(
-        "if [ -d {root}/.git ]; then git -C {root} worktree list --porcelain; else echo {marker}; fi",
-        root = quote(&root),
+        "if git -C {q_root} rev-parse --git-dir >/dev/null 2>&1; then echo \"root $(cd {q_root} && pwd -P)\"; git -C {q_root} worktree list --porcelain; else echo {marker}; fi",
         marker = NOT_CLONED_MARKER,
     );
     let quoted = quote(&script);
@@ -175,13 +225,25 @@ pub async fn list_host_worktrees_with(
         .await?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(IpcError::new(
-            "E_GIT_SETUP",
-            format!("couldn't list worktrees of {owner}/{repo} on {host}: {stderr}"),
-        ));
+        let stderr = if stderr.is_empty() {
+            "(no stderr)".to_string()
+        } else {
+            stderr
+        };
+        // `SshExec` contract: an unreachable host is ssh exiting 255 with the
+        // connect error on stderr, not an `Err` — surface it as a transport
+        // failure distinct from the checkout itself being broken.
+        return Err(if out.status.code() == Some(255) {
+            IpcError::new("E_SSH", format!("ssh to {host} failed: {stderr}"))
+        } else {
+            IpcError::new(
+                "E_GIT_SETUP",
+                format!("couldn't list worktrees of {owner}/{repo} on {host}: {stderr}"),
+            )
+        });
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    if stdout.trim() == NOT_CLONED_MARKER {
+    if stdout.lines().any(|l| l.trim() == NOT_CLONED_MARKER) {
         return Ok(HostWorktrees {
             host_alias: host.to_string(),
             project_id: pid,
@@ -189,7 +251,25 @@ pub async fn list_host_worktrees_with(
             worktrees: Vec::new(),
         });
     }
-    let found = rows_from_porcelain(&root, &stdout);
+    let Some((canonical_root, porcelain)) = split_scan_output(&stdout) else {
+        return Err(IpcError::new(
+            "E_GIT_SETUP",
+            format!(
+                "couldn't parse the worktree scan of {owner}/{repo} on {host}: missing root line"
+            ),
+        ));
+    };
+    let found = rows_from_porcelain(&canonical_root, porcelain);
+    if found.is_empty() {
+        return Err(IpcError::new(
+            "E_GIT_SETUP",
+            format!("worktree scan of {owner}/{repo} on {host} produced no worktrees"),
+        ));
+    }
+    // A mid-loop error below (an upsert failing) leaves whatever rows it
+    // already wrote in place and never reaches the prune call; the next scan
+    // is idempotent (`delete_host_worktrees_not_in`'s contract) and retries
+    // whatever this one left behind.
     let worktrees = {
         let s = store.lock().map_err(|_| IpcError::lock())?;
         let mut rows = Vec::with_capacity(found.len());
@@ -437,6 +517,40 @@ mod tests {
         );
     }
 
+    /// A root with a trailing slash still matches the (slash-free) entry
+    /// path git reports, so the root worktree is still named `main`.
+    #[test]
+    fn rows_from_porcelain_root_with_trailing_slash_still_maps_to_main() {
+        let porcelain = "worktree /r\nHEAD 1\nbranch refs/heads/main\n\n";
+        assert_eq!(rows_from_porcelain("/r/", porcelain)[0].0, "main");
+    }
+
+    /// `main` is detected by comparing against the CANONICAL root (what the
+    /// host's scan reports via `pwd -P`), not the logical `~/projects/...`
+    /// path a caller may have resolved — the scenario a symlinked projects
+    /// root produces.
+    #[test]
+    fn rows_from_porcelain_detects_main_via_the_canonical_root() {
+        let porcelain = "worktree /mnt/sda4/projects/github.com/o/r\nHEAD 1\nbranch refs/heads/main\n\nworktree /mnt/sda4/projects/github.com/o/r/.claude/worktrees/feat\nHEAD 2\nbranch refs/heads/feat\n\n";
+        let rows = rows_from_porcelain("/mnt/sda4/projects/github.com/o/r", porcelain);
+        let names: Vec<&str> = rows.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["main", "feat"]);
+    }
+
+    /// Two worktrees that share a basename (`.worktrees/feat` and
+    /// `.claude/worktrees/feat`, the two layouts the ecosystem uses) collide
+    /// on name; the first occurrence (git's own listing order) wins and the
+    /// second is dropped, never silently overwriting the first in the map.
+    #[test]
+    fn rows_from_porcelain_dedupes_by_name_keeping_the_first() {
+        let porcelain = "worktree /r\nHEAD 1\nbranch refs/heads/main\n\nworktree /r/.worktrees/feat\nHEAD 2\nbranch refs/heads/a\n\nworktree /r/.claude/worktrees/feat\nHEAD 3\nbranch refs/heads/b\n\n";
+        let rows = rows_from_porcelain("/r", porcelain);
+        let names: Vec<&str> = rows.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["main", "feat"], "the later `feat` is dropped");
+        assert_eq!(rows[1].1, "/r/.worktrees/feat", "first occurrence wins");
+        assert_eq!(rows[1].2.as_deref(), Some("a"));
+    }
+
     #[tokio::test]
     async fn list_host_worktrees_scans_the_host_and_caches_rows() {
         let store = Mutex::new(Store::open_in_memory().unwrap());
@@ -464,7 +578,9 @@ mod tests {
         let fake = FakeSsh::new();
         fake.with_home("/home/u").on(
             Match::script_contains("worktree list --porcelain"),
-            Reply::ok(PORCELAIN),
+            Reply::ok(&format!(
+                "root /home/u/projects/github.com/o/r\n{PORCELAIN}"
+            )),
         );
 
         let out = list_host_worktrees_with(
@@ -489,6 +605,10 @@ mod tests {
         assert_eq!(out.worktrees[2].branch.as_deref(), Some("feature/feat"));
         let script = fake.calls_for("vps").last().unwrap().script().unwrap();
         assert!(
+            script.contains("git -C '/home/u/projects/github.com/o/r' rev-parse --git-dir"),
+            "{script}"
+        );
+        assert!(
             script.contains("git -C '/home/u/projects/github.com/o/r' worktree list --porcelain"),
             "{script}"
         );
@@ -498,6 +618,61 @@ mod tests {
         assert_eq!(cached.len(), 3);
         assert!(cached.iter().all(|w| w.name != "old"));
         assert_eq!(s.list_worktrees_for_project(pid).unwrap().len(), 1);
+    }
+
+    /// A root containing a single quote and a space (an arbitrary
+    /// `projects.base_path` setting, not sanitized like owner/repo) still
+    /// crosses the ssh argv as one inert word: every occurrence in the
+    /// script goes through `shell::quote`, matching its documented escaping.
+    #[tokio::test]
+    async fn list_host_worktrees_quotes_a_root_containing_a_quote_and_a_space() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let pid = {
+            let s = store.lock().unwrap();
+            let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+            crate::service::settings::set(
+                &s,
+                crate::service::settings::PROJECTS_BASE_PATH,
+                r#"{"vps":"/mnt/it's fine"}"#,
+            )
+            .unwrap();
+            pid
+        };
+        let root = "/mnt/it's fine/o/r";
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u").on(
+            Match::script_contains("worktree list --porcelain"),
+            Reply::ok(&format!(
+                "root {root}\nworktree {root}\nHEAD 1\nbranch refs/heads/main\n\n"
+            )),
+        );
+
+        let out = list_host_worktrees_with(
+            ListHostWorktreesArgs {
+                host_alias: "vps".into(),
+                project_id: pid,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert!(out.cloned);
+
+        let script = fake.calls_for("vps").last().unwrap().script().unwrap();
+        let q_root = crate::shell::quote(root);
+        assert!(
+            script.contains(&format!("git -C {q_root} rev-parse --git-dir")),
+            "{script}"
+        );
+        assert!(
+            script.contains(&format!("cd {q_root} && pwd -P")),
+            "{script}"
+        );
+        assert!(
+            script.contains(&format!("git -C {q_root} worktree list --porcelain")),
+            "{script}"
+        );
     }
 
     #[tokio::test]
