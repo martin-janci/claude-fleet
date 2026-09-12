@@ -91,17 +91,18 @@ plus the `HostWorktrees` type.
 
 `NewSessionDialog.svelte`:
 
-- New state `hostWorktrees: { status: 'idle' | 'loading' | 'ready' | 'error'; rows: WorktreeRow[]; cloned: boolean; error?: string }`.
+- New state `hostWorktrees: { status: 'loading' | 'ready' | 'error'; rows: WorktreeRow[]; cloned: boolean; error?: string }`.
   Local: `rows = project.worktrees`, `status = 'ready'` synchronously (no IPC).
   Remote: an `$effect` keyed on `chosenHost` calls `listHostWorktrees`,
   guarded by a request counter so a slow earlier scan cannot overwrite a
   later host's result.
 - The picker's items come from `hostWorktrees.rows` instead of
-  `project.worktrees`. While loading, the list shows one non-selectable row
-  "Scanning <host>…" under the still-selectable "+ new worktree". On
-  `cloned: false` it shows "Not cloned on <host> yet — cloned on first
-  session" and offers only "+ new worktree" (the backend clones and adds).
-  On error it shows the message inline and "+ new worktree" stays usable.
+  `project.worktrees`. A `wt-status` line ABOVE the picker (not a row inside
+  it) carries the state: "Scanning <host>…" while the scan runs, "Not cloned
+  on <host> yet — it is cloned on the first session" for `cloned: false`, and
+  the error message on a failure. In all three the picker offers only
+  "+ new worktree", and the selection falls back to new-mode, so a row from
+  the previous host can never be submitted with the new host.
 - Selection rules on host switch: if the remembered/selected worktree id is
   not in the new host's rows, fall back to that host's `main` row when
   present, else to "+ new worktree". The per-project memory becomes
