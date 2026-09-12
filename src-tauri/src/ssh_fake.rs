@@ -1,7 +1,8 @@
 //! `FakeSsh`: a scripted, recording `SshExec` for tests (OPS-8 / W4 F6).
 //!
-//! Every `run` / `run_cancellable` / `upload_file` call is appended to a call
-//! log — `(host, argv, stdin)` in order — and answered from the matching
+//! Every `run` / `run_cancellable` / `run_bounded` / `upload_file` call is
+//! appended to a call log — `(host, argv, stdin)` in order — and answered
+//! from the matching
 //! `Reply`. Rules are `(host filter, matcher, reply)`; the most recently
 //! added matching rule wins, so a test can install a broad default first and
 //! narrow it later. A command no rule matches gets the `default` reply

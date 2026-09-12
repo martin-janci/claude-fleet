@@ -2,9 +2,8 @@
 //! existing checkout, or create a new one. The New-session flow's entry
 //! point for "this repo is not on disk yet".
 //!
-//! This module implements the `clone` source (Task 2 of
-//! `docs/superpowers/plans/2026-09-12-add-project.md`); `folder` and `new`
-//! are Tasks 3 and 4.
+//! This module implements the `clone` (Task 2) and `folder` (Task 3) sources
+//! of `docs/superpowers/plans/2026-09-12-add-project.md`; `new` is Task 4.
 
 use crate::ipc_error::{codes, IpcError};
 use crate::projects::Layout;
@@ -41,7 +40,6 @@ pub enum AddProjectSource {
     Clone {
         url: String,
     },
-    #[allow(dead_code)] // Task 3 wires this in.
     Folder {
         path: String,
     },
@@ -95,8 +93,9 @@ pub async fn add_project_with(
     crate::validate::host_alias(&args.host_alias)?;
     match &args.source {
         AddProjectSource::Clone { url } => clone_source(&args, url, store, ssh).await,
-        // Tasks 3 and 4.
-        AddProjectSource::Folder { .. } | AddProjectSource::New { .. } => Err(IpcError::new(
+        AddProjectSource::Folder { path } => folder_source(&args, path, store).await,
+        // Task 4.
+        AddProjectSource::New { .. } => Err(IpcError::new(
             codes::E_INVALID,
             "source not implemented yet",
         )),
@@ -167,6 +166,64 @@ pub(crate) fn clone_script(dest: &str, clone_url: &str) -> String {
         url = quote(clone_url),
         marker = quote(ALREADY_CLONED_MARKER),
     )
+}
+
+/// Adopt an existing checkout at `path` as a fleet project: register it
+/// WHERE IT IS (`base_path` is its canonical top level) — nothing is moved,
+/// copied, or written under `path`. Local-only: a checkout that lives on a
+/// remote host must be cloned there instead, since fleet has no way to
+/// register a path it cannot resolve without SSH-ing in for every read.
+async fn folder_source(
+    args: &AddProjectArgs,
+    path: &str,
+    store: &Mutex<Store>,
+) -> Result<ProjectTreeRow, IpcError> {
+    if args.host_alias != crate::service::projects::LOCAL_HOST {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "adopting a folder works on the local host only; clone it on the remote host instead",
+        ));
+    }
+    crate::validate::remote_abs_path("folder", path)?;
+    // `std::fs` and `git` are blocking; keep them off the async worker.
+    let p = path.to_string();
+    let (base_path, owner, repo) = tokio::task::spawn_blocking(move || adopt(&p))
+        .await
+        .map_err(|e| IpcError::new(codes::E_IO, format!("folder probe failed: {e}")))??;
+    refuse_existing_project(store, &owner, &repo)?;
+    register(store, &owner, &repo, &base_path)
+}
+
+/// The checkout at `path`: its canonical top level, and the `(owner, repo)`
+/// its `origin` names — falling back to `("local", <basename of the top
+/// level>)` when there is no origin, or `origin` is not a GitHub URL.
+fn adopt(path: &str) -> Result<(String, String, String), IpcError> {
+    let top = git_out(path, &["rev-parse", "--show-toplevel"])
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, format!("{path} is not a git checkout")))?;
+    let origin = git_out(&top, &["remote", "get-url", "origin"]).unwrap_or_default();
+    let (owner, repo) = parse_repo_url(&origin).unwrap_or_else(|| {
+        let name = std::path::Path::new(&top)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "repo".to_string());
+        ("local".to_string(), name)
+    });
+    Ok((top, owner, repo))
+}
+
+/// `git -C <dir> <args>` trimmed stdout, or `None` when git fails to run or
+/// exits non-zero.
+fn git_out(dir: &str, args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// `(owner, repo)` already names a fleet project. GitHub and the default
@@ -258,6 +315,16 @@ fn git_error(
         stdout
     } else {
         "(no stderr)".to_string()
+    };
+    // The marker is an internal implementation detail of `clone_script`'s
+    // own "already a checkout" guard (handled above for its real exit-3
+    // case) — it must never reach a user-facing `E_GIT_SETUP` message, even
+    // if some other command happened to echo it.
+    let detail = detail.replace(ALREADY_CLONED_MARKER, "").trim().to_string();
+    let detail = if detail.is_empty() {
+        "(no stderr)".to_string()
+    } else {
+        detail
     };
     IpcError::new(
         codes::E_GIT_SETUP,
@@ -497,5 +564,207 @@ mod tests {
             "{script}"
         );
         assert!(script.contains("mkdir -p \"$(dirname --"), "{script}");
+    }
+
+    #[tokio::test]
+    async fn an_invalid_host_alias_is_refused_before_any_ssh() {
+        // Same guard, same shape as `a_bad_url_is_refused_before_any_ssh`,
+        // but for the alias itself: `add_project_with` is a Tauri-reachable
+        // entry point (Task 5), so a hostile alias (e.g. one starting with
+        // `-`, which `ssh` would parse as an option) must never reach an ssh
+        // argv, regardless of which source is requested.
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        let err = add_project_with(
+            AddProjectArgs {
+                host_alias: "-oProxyCommand=evil".into(),
+                source: AddProjectSource::Clone { url: "o/r".into() },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        assert!(
+            fake.calls().is_empty(),
+            "nothing should run for an invalid host alias"
+        );
+    }
+
+    #[test]
+    fn git_setup_exit_code_3_without_the_marker_is_not_mistaken_for_e_exists() {
+        // Exit code 3 alone is not enough — only code 3 TOGETHER WITH
+        // `ALREADY_CLONED_MARKER` on stderr is `clone_script`'s own guard.
+        // Some other command that happens to exit 3 for an unrelated reason
+        // must still surface as E_GIT_SETUP, which is exactly the case the
+        // marker hardening exists to cover.
+        let out = std::process::Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(3 << 8),
+            stdout: Vec::new(),
+            stderr: b"some other failure".to_vec(),
+        };
+        let err = git_error("vps", "o", "r", "/p/o/r", &out);
+        assert_eq!(err.code, codes::E_GIT_SETUP);
+        assert!(
+            err.message.contains("some other failure"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn folder_is_refused_for_a_remote_host() {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        let err = add_project_with(
+            AddProjectArgs {
+                host_alias: "vps".into(),
+                source: AddProjectSource::Folder {
+                    path: "/srv/r".into(),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        assert!(err.message.contains("local"));
+        assert!(fake.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn folder_adopts_a_real_checkout_and_reads_its_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("my-repo");
+        std::fs::create_dir_all(&path).unwrap();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["remote", "add", "origin", "git@github.com:acme/widget.git"],
+        ] {
+            let ok = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&path)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?} failed");
+        }
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        let row = add_project_with(
+            AddProjectArgs {
+                host_alias: "local".into(),
+                source: AddProjectSource::Folder {
+                    path: path.to_string_lossy().into(),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (row.project.owner.as_str(), row.project.repo.as_str()),
+            ("acme", "widget")
+        );
+        // Registered where it is — nothing moved.
+        assert_eq!(
+            row.project.base_path,
+            path.canonicalize().unwrap().to_string_lossy()
+        );
+    }
+
+    #[tokio::test]
+    async fn folder_without_an_origin_falls_back_to_the_directory_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("loose-repo");
+        std::fs::create_dir_all(&path).unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&path)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        let row = add_project_with(
+            AddProjectArgs {
+                host_alias: "local".into(),
+                source: AddProjectSource::Folder {
+                    path: path.to_string_lossy().into(),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert_eq!(row.project.repo, "loose-repo");
+        assert_eq!(row.project.owner, "local");
+    }
+
+    #[tokio::test]
+    async fn folder_that_is_not_a_checkout_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        let err = add_project_with(
+            AddProjectArgs {
+                host_alias: "local".into(),
+                source: AddProjectSource::Folder {
+                    path: dir.path().to_string_lossy().into(),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        assert!(err.message.contains("git"));
+    }
+
+    #[tokio::test]
+    async fn folder_that_already_exists_as_a_project_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dup-repo");
+        std::fs::create_dir_all(&path).unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&path)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let store = store_with_no_projects();
+        store
+            .lock()
+            .unwrap()
+            .upsert_project("local", "dup-repo", "/somewhere/else")
+            .unwrap();
+        let fake = FakeSsh::new();
+        let err = add_project_with(
+            AddProjectArgs {
+                host_alias: "local".into(),
+                source: AddProjectSource::Folder {
+                    path: path.to_string_lossy().into(),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_EXISTS);
     }
 }
