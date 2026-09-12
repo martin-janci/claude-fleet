@@ -436,7 +436,7 @@ pub(crate) fn clone_script(dest: &str, clone_url: &str) -> String {
 
 Write the remaining helpers to match the codebase:
 
-- `refuse_existing_project(store, owner, repo)` — `E_EXISTS` with the message `"<owner>/<repo> is already a fleet project"` when `Store::list_projects` already holds the pair. Takes and drops the lock, no `.await` inside.
+- `refuse_existing_project(store, owner, repo)` — `codes::E_EXISTS` (add it to the codes module in this task) with the message `"<owner>/<repo> is already a fleet project"` when `Store::list_projects` already holds the pair. Takes and drops the lock, no `.await` inside.
 - `roots(store, host)` — under one lock, returns `(project_base_for(s, host), local_projects_root(s) as String, layout(s))`.
 - `run_local_script(script, wall_clock)` — `tokio::process::Command::new("bash").arg("-lc").arg(script)` with the same wall-clock/kill handling `SshClient::run_child` uses; map a non-zero exit to `E_GIT_SETUP` with stderr, exit code 3 to `E_EXISTS`.
 - `git_error(host, out)` — exit code 3 → `E_EXISTS` ("already cloned at that path; it should appear after a refresh"); otherwise `E_GIT_SETUP` with stderr, falling back to stdout, and `(no stderr)` when both are empty.
@@ -702,7 +702,7 @@ git commit -m "feat(projects): adopt an existing checkout as a project"
         )
         .await
         .unwrap_err();
-        assert_eq!(err.code, codes::E_CONFIRM);
+        assert_eq!(err.code, codes::E_CONFIRM_REQUIRED);
         assert!(fake.calls_for("vps").iter().all(|c| !c.command().contains("gh repo create")));
     }
 
@@ -754,13 +754,17 @@ git commit -m "feat(projects): adopt an existing checkout as a project"
     }
 ```
 
-Confirm `codes::E_CONFIRM` exists (grep the codes module); if the confirm-gated MCP path uses a different constant, use that one and say so.
+Error codes this task introduces: `E_EXISTS` and `E_GH` do NOT exist yet —
+add both to the `codes` module in `src-tauri/src/ipc_error.rs` alongside the
+existing constants, with the one-line doc comments the neighbours have, and
+use `codes::E_EXISTS` / `codes::E_GH` rather than string literals. The
+confirmation code already exists as `codes::E_CONFIRM_REQUIRED`.
 
 - [ ] **Step 2: Run to verify they fail.**
 
 - [ ] **Step 3: Implement**
 
-The `New` arm: validate `owner` and `repo` with `crate::validate::path_component`; refuse an existing project; when `create_remote` is set, require `confirm == Some("<owner>/<repo>")` and otherwise return `E_CONFIRM` with a message naming the repository; build the script
+The `New` arm: validate `owner` and `repo` with `crate::validate::path_component`; refuse an existing project; when `create_remote` is set, require `confirm == Some("<owner>/<repo>")` and otherwise return `codes::E_CONFIRM_REQUIRED` with a message naming the repository; build the script
 
 ```rust
 fn new_project_script(dest: &str, owner: &str, repo: &str, create_remote: bool) -> String {
@@ -797,7 +801,7 @@ pub struct GithubRepo {
 }
 ```
 
-runs `gh repo list --limit 200 --json nameWithOwner,description,isPrivate,updatedAt` (locally or over SSH), maps a non-zero exit to `E_GH` carrying stderr verbatim, and parses the JSON with serde (`#[serde(rename_all = "camelCase")]` on a private wire struct). A parse failure is `E_GH` too, with the first 200 bytes of output.
+runs `gh repo list --limit 200 --json nameWithOwner,description,isPrivate,updatedAt` (locally or over SSH), maps a non-zero exit to `codes::E_GH` carrying stderr verbatim, and parses the JSON with serde (`#[serde(rename_all = "camelCase")]` on a private wire struct). A parse failure is `codes::E_GH` too, with the first 200 bytes of output.
 
 - [ ] **Step 4: Run the tests + fmt + clippy.**
 
