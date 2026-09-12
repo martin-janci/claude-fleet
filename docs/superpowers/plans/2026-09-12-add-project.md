@@ -962,6 +962,35 @@ git commit -m "feat(projects): addProject and listGithubRepos wrappers"
 
 ### Task 8: `AddProjectDialog.svelte`
 
+**Backend contracts that landed after this plan was written — these override the sketches below.**
+
+- **Two-step GitHub confirmation.** A `new` source with `create_remote: true`
+  and no valid token returns `E_CONFIRM_REQUIRED` whose `details` is
+  `{"confirm": "<64-hex token>"}`. The token is single-use, bound to
+  host+owner+repo, and lives 5 minutes. Flow: the first Create call (no
+  `confirm`) returns that error; the dialog shows `ConfirmDialog` naming
+  `<owner>/<repo>` and saying it creates a PRIVATE repository on GitHub and
+  pushes the initial commit; only its confirm handler resends the same
+  request with `confirm: details.confirm`. Never pre-fill `confirm` from
+  anything else, and never auto-retry on `E_CONFIRM_REQUIRED`.
+- **Cancel is honest, not a promise.** Cancelling returns control to the UI.
+  Locally it stops the whole process group. On a REMOTE host it cannot stop a
+  clone or a GitHub creation already running there, and for a `create_remote`
+  run the backend's `E_CANCELLED` message says the GitHub repository may
+  already exist. So: show that message instead of closing silently on
+  `E_CANCELLED` for a `create_remote` run, and label the in-flight button
+  "Stop waiting" (not "Cancel") whenever the chosen host is remote, with a
+  tooltip saying the host may finish the operation anyway.
+- **Retry after a partial GitHub failure** is supported by the backend: a
+  second Create for the same owner/repo on the same host resumes a
+  repository `new` created (it is tagged), so the dialog should keep the form
+  filled after an `E_GH` error rather than resetting it.
+- `list_github_repos` returns `E_GH` with gh's own stderr (e.g. "run gh auth
+  login") — show it verbatim.
+- `add_project` / `list_github_repos` both exist as commands now (Task 5);
+  cancellation uses `invokeCmdAbortable`, which since commit ab76cf4 sends
+  `cancel_command` with the `callId` key the backend expects.
+
 **Files:** Create `src/lib/AddProjectDialog.svelte` + `src/lib/AddProjectDialog.test.ts`
 
 Build the dialog described in the spec's "`AddProjectDialog.svelte`" section. Follow `NewSessionDialog.svelte` for every shared pattern: the `Modal` wrapper, the host chips and their disabled rule, the `last-host` pref, the path preview from `fleet_settings`, `busy` + `AbortController` around the create call, inline `.err` text, and Enter-to-submit.
