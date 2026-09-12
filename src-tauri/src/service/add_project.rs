@@ -148,7 +148,7 @@ async fn clone_source(
     if !out.status.success() {
         return Err(git_error(&args.host_alias, &owner, &repo, &dest, &out));
     }
-    register(store, &owner, &repo, &local_base)
+    register(store, &owner, &repo, &local_base, false)
 }
 
 /// Clone `url` into `dest` unless `dest` is already a checkout. Every value
@@ -168,6 +168,13 @@ pub(crate) fn clone_script(dest: &str, clone_url: &str) -> String {
     )
 }
 
+/// Wall clock for each local `git` read `adopt` runs. The user reaches this
+/// path through a native folder picker, so `path` could plausibly sit on a
+/// hung network mount — a few seconds is generous for a `rev-parse` or
+/// `worktree list` against a real checkout, and keeps a stuck probe from
+/// pinning a blocking-pool thread forever.
+const ADOPT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Adopt an existing checkout at `path` as a fleet project: register it
 /// WHERE IT IS (`base_path` is its canonical top level) — nothing is moved,
 /// copied, or written under `path`. Local-only: a checkout that lives on a
@@ -185,45 +192,170 @@ async fn folder_source(
         ));
     }
     crate::validate::remote_abs_path("folder", path)?;
-    // `std::fs` and `git` are blocking; keep them off the async worker.
+    // `std::fs` and `git` are blocking; keep them off the async worker. A
+    // `Handle` travels into the blocking closure so `git_out` can bound each
+    // probe with `tokio::time::timeout` (see `ADOPT_PROBE_TIMEOUT`) without
+    // itself being async — `spawn_blocking`'s closure is a plain `FnOnce`.
     let p = path.to_string();
-    let (base_path, owner, repo) = tokio::task::spawn_blocking(move || adopt(&p))
+    let handle = tokio::runtime::Handle::current();
+    let (base_path, owner, repo) = tokio::task::spawn_blocking(move || adopt(&handle, &p))
         .await
         .map_err(|e| IpcError::new(codes::E_IO, format!("folder probe failed: {e}")))??;
     refuse_existing_project(store, &owner, &repo)?;
-    register(store, &owner, &repo, &base_path)
+    refuse_existing_base_path(store, &base_path)?;
+    register(store, &owner, &repo, &base_path, true)
 }
 
-/// The checkout at `path`: its canonical top level, and the `(owner, repo)`
-/// its `origin` names — falling back to `("local", <basename of the top
-/// level>)` when there is no origin, or `origin` is not a GitHub URL.
-fn adopt(path: &str) -> Result<(String, String, String), IpcError> {
-    let top = git_out(path, &["rev-parse", "--show-toplevel"])
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| IpcError::new(codes::E_INVALID, format!("{path} is not a git checkout")))?;
-    let origin = git_out(&top, &["remote", "get-url", "origin"]).unwrap_or_default();
+/// The checkout at `path`: its canonical top level (resolved through a
+/// linked worktree to its MAIN checkout, if that's what `path` names — see
+/// [`resolve_main_checkout`]), and the `(owner, repo)` its `origin` names —
+/// falling back to `("local", <sanitized basename of the top level>)` when
+/// there is no origin, or `origin` is not a GitHub URL.
+fn adopt(
+    handle: &tokio::runtime::Handle,
+    path: &str,
+) -> Result<(String, String, String), IpcError> {
+    let top = match git_out(handle, path, &["rev-parse", "--show-toplevel"]) {
+        Ok(s) if !s.is_empty() => s,
+        Ok(_) => {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("{path} is not a git checkout"),
+            ))
+        }
+        // Surface git's own stderr: a nonexistent path, a permission error,
+        // and git's `safe.directory` "dubious ownership" refusal all fail
+        // here, and each says something different — collapsing them into one
+        // generic "is not a git checkout" made them undiagnosable.
+        Err(detail) => {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("{path} is not a git checkout: {detail}"),
+            ))
+        }
+    };
+    let top = resolve_main_checkout(handle, &top)?;
+    let origin = git_out(handle, &top, &["remote", "get-url", "origin"]).unwrap_or_default();
     let (owner, repo) = parse_repo_url(&origin).unwrap_or_else(|| {
         let name = std::path::Path::new(&top)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "repo".to_string());
-        ("local".to_string(), name)
+        ("local".to_string(), sanitize_basename(&name))
     });
     Ok((top, owner, repo))
 }
 
-/// `git -C <dir> <args>` trimmed stdout, or `None` when git fails to run or
-/// exits non-zero.
-fn git_out(dir: &str, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+/// When `top` is a linked worktree, resolve and return its MAIN checkout's
+/// path instead; otherwise return `top` unchanged.
+///
+/// A linked worktree's `git rev-parse --git-dir` points into the main
+/// checkout's `.git/worktrees/<name>`, while `--git-common-dir` stays the
+/// main checkout's own `.git` — the two differ only there, so comparing them
+/// (raw, no canonicalization needed to tell "different" from "same") detects
+/// the shape. `refresh_projects` already has a dedicated self-heal for a
+/// project row registered at a linked-worktree path ("a linked worktree
+/// scanned as a repo" in `service::projects`) — it treats that as a defect
+/// state to correct, so `adopt` must not manufacture it in the first place:
+/// adopting `/somewhere/wt-feature` must register the main checkout, not the
+/// worktree.
+fn resolve_main_checkout(handle: &tokio::runtime::Handle, top: &str) -> Result<String, IpcError> {
+    let git_dir = git_out(handle, top, &["rev-parse", "--git-dir"]).unwrap_or_default();
+    let common_dir = git_out(handle, top, &["rev-parse", "--git-common-dir"]).unwrap_or_default();
+    if git_dir.is_empty() || common_dir.is_empty() || git_dir == common_dir {
+        return Ok(top.to_string());
+    }
+    let list = git_out(handle, top, &["worktree", "list", "--porcelain"]).map_err(|detail| {
+        IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{top} is a linked worktree, but its main checkout could not be resolved: {detail}"
+            ),
+        )
+    })?;
+    // Git's own ordering guarantee: the first `worktree ` entry is the main
+    // worktree (see the identical assumption in `crate::projects::list_worktrees`).
+    let main = list
+        .lines()
+        .find_map(|l| l.strip_prefix("worktree "))
+        .ok_or_else(|| {
+            IpcError::new(
+                codes::E_INTERNAL,
+                format!("{top}: `git worktree list` reported no worktrees"),
+            )
+        })?;
+    Ok(crate::projects::path_identity::canonical_str(main))
+}
+
+/// Sanitize a raw directory basename for the `("local", <basename>)`
+/// fallback: `repo_url::parse_repo_url`'s documented invariant is that a
+/// parsed pair is always safe to interpolate into a path, but a filesystem
+/// basename never passed through that check, so `/Users/m/my repo` or
+/// `/Users/m/-rf` would otherwise store a pair violating it — later
+/// interpolated into remote paths by `worktree_prune`, `move_session` and
+/// `repair`. Chosen over refusing outright: adopting a folder should not fail
+/// just because its directory name is unconventional when there is a safe,
+/// obvious rendering of it. Runs of characters `repo_url::is_component`
+/// would reject (including a leading `-`, which a command-line parser would
+/// read as an option) collapse to a single `-`, then are trimmed from the
+/// ends; a name that sanitizes to nothing — or still fails the check, e.g.
+/// the reserved `.git` marker — falls back to `"repo"`.
+fn sanitize_basename(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut last_dash = false;
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '_' | '.') {
+            out.push(c);
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    let candidate = out.trim_matches('-');
+    if candidate.is_empty() || !crate::repo_url::is_component(candidate, 100) {
+        "repo".to_string()
+    } else {
+        candidate.to_string()
+    }
+}
+
+/// `git -C <dir> <args>` trimmed stdout on success, bounded by
+/// [`ADOPT_PROBE_TIMEOUT`]. `Err` carries a diagnostic — git's stderr when
+/// non-empty, else a description of what went wrong (a spawn failure, a
+/// timeout) — instead of the caller collapsing every failure mode into one
+/// generic message. Runs `git` via `tokio::process` and awaits it through
+/// `handle.block_on`: this function itself runs on a `spawn_blocking` thread
+/// (never a runtime worker), so blocking there to await a bounded future is
+/// the documented safe bridge, and it is what lets a hung git process be
+/// killed on timeout (`kill_on_drop`) instead of leaking a thread forever.
+fn git_out(handle: &tokio::runtime::Handle, dir: &str, args: &[&str]) -> Result<String, String> {
+    handle.block_on(async {
+        let run = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .kill_on_drop(true)
+            .output();
+        match tokio::time::timeout(ADOPT_PROBE_TIMEOUT, run).await {
+            Ok(Ok(out)) if out.status.success() => {
+                Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            }
+            Ok(Ok(out)) => {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                Err(if stderr.is_empty() {
+                    format!("git exited with {}", out.status)
+                } else {
+                    stderr
+                })
+            }
+            Ok(Err(e)) => Err(format!("couldn't run git: {e}")),
+            Err(_) => Err(format!(
+                "timed out after {}s (is the folder on an unresponsive network mount?)",
+                ADOPT_PROBE_TIMEOUT.as_secs()
+            )),
+        }
+    })
 }
 
 /// `(owner, repo)` already names a fleet project. GitHub and the default
@@ -242,6 +374,28 @@ fn refuse_existing_project(store: &Mutex<Store>, owner: &str, repo: &str) -> Res
         return Err(IpcError::new(
             codes::E_EXISTS,
             format!("{owner}/{repo} is already a fleet project"),
+        ));
+    }
+    Ok(())
+}
+
+/// `base_path` already names another project's row. Nothing about adopting a
+/// folder stops two different `(owner, repo)` pairs from resolving to the
+/// same directory — e.g. adopt with no `origin` (falls back to
+/// `local/<basename>`), add an `origin` afterwards, then adopt the same
+/// folder again — so the path itself needs its own de-duplication alongside
+/// [`refuse_existing_project`]'s name check. Takes and drops the lock; no
+/// `.await` while held.
+fn refuse_existing_base_path(store: &Mutex<Store>, base_path: &str) -> Result<(), IpcError> {
+    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let exists = s
+        .list_projects()?
+        .into_iter()
+        .any(|p| p.base_path == base_path);
+    if exists {
+        return Err(IpcError::new(
+            codes::E_EXISTS,
+            format!("{base_path} is already registered as a fleet project"),
         ));
     }
     Ok(())
@@ -308,6 +462,15 @@ fn git_error(
             format!("already cloned at {dest}; it should appear after a refresh"),
         );
     }
+    // The marker is an internal implementation detail of `clone_script`'s own
+    // "already a checkout" guard (handled above for its real exit-3 case) —
+    // it must never reach a user-facing `E_GIT_SETUP` message, even if some
+    // other command happened to echo it. Stripped BEFORE the stderr → stdout
+    // → "(no stderr)" fallback ladder below, so a stderr containing only the
+    // marker still falls through to stdout instead of the ladder picking
+    // "stderr is non-empty", stripping it down to nothing, and reporting a
+    // hardcoded "(no stderr)" even though stdout had real diagnostic text.
+    let stderr = stderr.replace(ALREADY_CLONED_MARKER, "").trim().to_string();
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let detail = if !stderr.is_empty() {
         stderr
@@ -315,16 +478,6 @@ fn git_error(
         stdout
     } else {
         "(no stderr)".to_string()
-    };
-    // The marker is an internal implementation detail of `clone_script`'s
-    // own "already a checkout" guard (handled above for its real exit-3
-    // case) — it must never reach a user-facing `E_GIT_SETUP` message, even
-    // if some other command happened to echo it.
-    let detail = detail.replace(ALREADY_CLONED_MARKER, "").trim().to_string();
-    let detail = if detail.is_empty() {
-        "(no stderr)".to_string()
-    } else {
-        detail
     };
     IpcError::new(
         codes::E_GIT_SETUP,
@@ -334,16 +487,25 @@ fn git_error(
 
 /// Register `owner`/`repo` at `base_path` (always the LOCAL path the project
 /// would occupy) and read the row back as a `ProjectTreeRow` — the same
-/// shape `service::projects::list_projects` builds. `upsert_project` already
-/// emits `project:updated`; worktrees are empty until the next scan/refresh.
+/// shape `service::projects::list_projects` builds. `adopted` marks a row
+/// from the `folder` source (`ProjectRow::adopted`, migration 027) so
+/// `refresh_projects`'s stale-rows sweep never deletes it for living outside
+/// the scanned root, which is the adopt feature's entire point.
+/// `upsert_project`/`upsert_adopted_project` already emit `project:updated`;
+/// worktrees are empty until the next scan/refresh.
 fn register(
     store: &Mutex<Store>,
     owner: &str,
     repo: &str,
     base_path: &str,
+    adopted: bool,
 ) -> Result<ProjectTreeRow, IpcError> {
     let s = store.lock().map_err(|_| IpcError::lock())?;
-    s.upsert_project(owner, repo, base_path)?;
+    if adopted {
+        s.upsert_adopted_project(owner, repo, base_path)?;
+    } else {
+        s.upsert_project(owner, repo, base_path)?;
+    }
     s.list_projects_joined()?
         .into_iter()
         .find(|r| r.project.owner == owner && r.project.repo == repo)
@@ -614,6 +776,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn git_error_falls_back_to_stdout_when_stderr_is_only_the_marker() {
+        // A stderr containing NOTHING but the marker (exit code not 3, so it
+        // isn't `clone_script`'s own "already a checkout" guard) must still
+        // fall through to stdout, not collapse to a hardcoded "(no stderr)"
+        // that throws away real diagnostic text — and the marker itself must
+        // never reach the user-facing message.
+        let out = std::process::Output {
+            status: std::os::unix::process::ExitStatusExt::from_raw(1 << 8),
+            stdout: b"real diagnostic from stdout".to_vec(),
+            stderr: ALREADY_CLONED_MARKER.as_bytes().to_vec(),
+        };
+        let err = git_error("vps", "o", "r", "/p/o/r", &out);
+        assert_eq!(err.code, codes::E_GIT_SETUP);
+        assert!(
+            err.message.contains("real diagnostic from stdout"),
+            "{}",
+            err.message
+        );
+        assert!(
+            !err.message.contains(ALREADY_CLONED_MARKER),
+            "the marker must never reach a user-facing message: {}",
+            err.message
+        );
+    }
+
     #[tokio::test]
     async fn folder_is_refused_for_a_remote_host() {
         let store = store_with_no_projects();
@@ -677,6 +865,10 @@ mod tests {
         assert_eq!(
             row.project.base_path,
             path.canonicalize().unwrap().to_string_lossy()
+        );
+        assert!(
+            row.project.adopted,
+            "a folder-sourced row must be flagged adopted"
         );
     }
 
@@ -766,5 +958,316 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.code, codes::E_EXISTS);
+    }
+
+    fn git_ok(dir: &std::path::Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+
+    #[tokio::test]
+    async fn folder_adopting_a_linked_worktree_registers_the_main_checkout() {
+        use crate::projects::test_git::{init_repo, run};
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("widget");
+        if !init_repo(&main) {
+            return; // no git on this box
+        }
+        assert!(run(
+            &main,
+            &["remote", "add", "origin", "git@github.com:acme/widget.git"]
+        ));
+        let wt = dir.path().join("wt-feature");
+        assert!(run(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                wt.to_str().unwrap(),
+                "-b",
+                "feature"
+            ]
+        ));
+
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        // Adopt the LINKED WORKTREE's path, not the main checkout's.
+        let row = add_project_with(
+            AddProjectArgs {
+                host_alias: "local".into(),
+                source: AddProjectSource::Folder {
+                    path: wt.to_string_lossy().into(),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (row.project.owner.as_str(), row.project.repo.as_str()),
+            ("acme", "widget")
+        );
+        assert_eq!(
+            row.project.base_path,
+            crate::projects::path_identity::canonical(&main).to_string_lossy(),
+            "the MAIN checkout is registered, not the linked worktree"
+        );
+    }
+
+    #[tokio::test]
+    async fn folder_from_a_subdirectory_registers_the_top_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("repo");
+        let sub = path.join("src").join("nested");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert!(git_ok(&path, &["init", "-q", "-b", "main"]));
+        assert!(git_ok(
+            &path,
+            &["remote", "add", "origin", "git@github.com:acme/repo.git"]
+        ));
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        let row = add_project_with(
+            AddProjectArgs {
+                host_alias: "local".into(),
+                source: AddProjectSource::Folder {
+                    path: sub.to_string_lossy().into(),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            row.project.base_path,
+            path.canonicalize().unwrap().to_string_lossy()
+        );
+    }
+
+    #[tokio::test]
+    async fn folder_with_a_non_github_origin_falls_back_to_the_directory_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gl-repo");
+        std::fs::create_dir_all(&path).unwrap();
+        assert!(git_ok(&path, &["init", "-q", "-b", "main"]));
+        assert!(git_ok(
+            &path,
+            &["remote", "add", "origin", "git@gitlab.com:acme/repo.git"]
+        ));
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        let row = add_project_with(
+            AddProjectArgs {
+                host_alias: "local".into(),
+                source: AddProjectSource::Folder {
+                    path: path.to_string_lossy().into(),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert_eq!(row.project.owner, "local");
+        assert_eq!(row.project.repo, "gl-repo");
+    }
+
+    #[tokio::test]
+    async fn folder_sanitizes_a_basename_with_spaces_instead_of_storing_it_raw() {
+        // `parse_repo_url`'s invariant is that a parsed pair is always safe
+        // to interpolate into a path — a raw filesystem basename never went
+        // through that check, so a name like "my repo" must be sanitized,
+        // not stored verbatim.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("my repo");
+        std::fs::create_dir_all(&path).unwrap();
+        assert!(git_ok(&path, &["init", "-q", "-b", "main"]));
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        let row = add_project_with(
+            AddProjectArgs {
+                host_alias: "local".into(),
+                source: AddProjectSource::Folder {
+                    path: path.to_string_lossy().into(),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert_eq!(row.project.owner, "local");
+        assert_eq!(row.project.repo, "my-repo");
+    }
+
+    #[tokio::test]
+    async fn folder_with_a_relative_path_is_refused_before_the_probe() {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        let err = add_project_with(
+            AddProjectArgs {
+                host_alias: "local".into(),
+                source: AddProjectSource::Folder {
+                    path: "relative/repo".into(),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+    }
+
+    #[tokio::test]
+    async fn folder_pointing_at_a_bare_repo_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bare.git");
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q", "--bare"])
+            .arg(&path)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        let err = add_project_with(
+            AddProjectArgs {
+                host_alias: "local".into(),
+                source: AddProjectSource::Folder {
+                    path: path.to_string_lossy().into(),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+    }
+
+    #[tokio::test]
+    async fn folder_refuses_a_path_already_registered_by_another_project() {
+        // Today two rows could share one path: adopt with no origin (falls
+        // back to local/<basename>), add an origin afterwards, adopt again.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared-repo");
+        std::fs::create_dir_all(&path).unwrap();
+        assert!(git_ok(&path, &["init", "-q", "-b", "main"]));
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        add_project_with(
+            AddProjectArgs {
+                host_alias: "local".into(),
+                source: AddProjectSource::Folder {
+                    path: path.to_string_lossy().into(),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert!(git_ok(
+            &path,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:acme/shared-repo.git"
+            ]
+        ));
+        // Same path, now with an origin — a different (owner, repo) pair, so
+        // `refuse_existing_project`'s name check would not catch this alone.
+        let err = add_project_with(
+            AddProjectArgs {
+                host_alias: "local".into(),
+                source: AddProjectSource::Folder {
+                    path: path.to_string_lossy().into(),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_EXISTS);
+    }
+
+    #[tokio::test]
+    async fn folder_adoption_writes_nothing_to_the_checkout() {
+        fn snapshot(
+            dir: &std::path::Path,
+        ) -> Vec<(std::path::PathBuf, u64, std::time::SystemTime)> {
+            fn walk(
+                dir: &std::path::Path,
+                out: &mut Vec<(std::path::PathBuf, u64, std::time::SystemTime)>,
+            ) {
+                for entry in std::fs::read_dir(dir).unwrap() {
+                    let entry = entry.unwrap();
+                    let meta = entry.metadata().unwrap();
+                    if meta.is_dir() {
+                        walk(&entry.path(), out);
+                    } else {
+                        out.push((entry.path(), meta.len(), meta.modified().unwrap()));
+                    }
+                }
+            }
+            let mut out = Vec::new();
+            walk(dir, &mut out);
+            out.sort();
+            out
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("untouched");
+        std::fs::create_dir_all(&path).unwrap();
+        assert!(git_ok(&path, &["init", "-q", "-b", "main"]));
+        assert!(git_ok(
+            &path,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:acme/untouched.git"
+            ]
+        ));
+        let before = snapshot(&path);
+
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        add_project_with(
+            AddProjectArgs {
+                host_alias: "local".into(),
+                source: AddProjectSource::Folder {
+                    path: path.to_string_lossy().into(),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap();
+
+        let after = snapshot(&path);
+        assert_eq!(before, after, "adopting a folder must never write into it");
     }
 }

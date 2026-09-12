@@ -10,13 +10,13 @@ import { get } from 'svelte/store';
 
 const fake = [
   {
-    project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: null },
+    project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: null, adopted: false },
     worktrees: [
       { id: 11, project_id: 1, name: 'main', path: '/r/cf', branch: 'main' },
     ],
   },
   {
-    project: { id: 2, owner: 'papayapos', repo: 'pos-frontend', base_path: '/r/pf', last_session_at: 1716120000 },
+    project: { id: 2, owner: 'papayapos', repo: 'pos-frontend', base_path: '/r/pf', last_session_at: 1716120000, adopted: false },
     worktrees: [
       { id: 21, project_id: 2, name: 'main', path: '/r/pf', branch: 'main' },
       { id: 22, project_id: 2, name: 'feature-x', path: '/r/pf/.worktrees/feature-x', branch: 'feature-x' },

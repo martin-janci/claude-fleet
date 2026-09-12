@@ -53,14 +53,14 @@ function sess(over: Partial<SessionRow> & { id: number }): SessionRow {
 
 const projects: ProjectTreeRow[] = [
   {
-    project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: 10 },
+    project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: 10, adopted: false },
     worktrees: [
       { id: 11, project_id: 1, host_alias: 'local', name: 'main', path: '/r/cf', branch: 'main' },
       { id: 12, project_id: 1, host_alias: 'local', name: 'blue-sirius', path: '/r/cf/.worktrees/blue-sirius', branch: 'blue-sirius' },
     ],
   },
   {
-    project: { id: 2, owner: 'acme', repo: 'widgets', base_path: '/r/w', last_session_at: 20 },
+    project: { id: 2, owner: 'acme', repo: 'widgets', base_path: '/r/w', last_session_at: 20, adopted: false },
     worktrees: [],
   },
 ];

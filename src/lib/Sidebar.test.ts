@@ -6,15 +6,15 @@ import { tick } from 'svelte';
 // the new "hide projects without sessions" behavior.
 const fakeProjects = [
   {
-    project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: Math.floor(Date.now() / 1000) - 60 },
+    project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: Math.floor(Date.now() / 1000) - 60, adopted: false },
     worktrees: [{ id: 11, project_id: 1, host_alias: 'local', name: 'main', path: '/r/cf', branch: 'main' }],
   },
   {
-    project: { id: 2, owner: 'papayapos', repo: 'pos-frontend', base_path: '/r/pf', last_session_at: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 14 },
+    project: { id: 2, owner: 'papayapos', repo: 'pos-frontend', base_path: '/r/pf', last_session_at: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 14, adopted: false },
     worktrees: [{ id: 21, project_id: 2, host_alias: 'local', name: 'main', path: '/r/pf', branch: 'main' }],
   },
   {
-    project: { id: 3, owner: 'martin-janci', repo: 'phone-manager', base_path: '/r/pm', last_session_at: null },
+    project: { id: 3, owner: 'martin-janci', repo: 'phone-manager', base_path: '/r/pm', last_session_at: null, adopted: false },
     worktrees: [{ id: 31, project_id: 3, host_alias: 'local', name: 'main', path: '/r/pm', branch: 'main' }],
   },
 ];
@@ -154,7 +154,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     // Even if a project has multiple worktrees, the sidebar must not show them.
     const multi = [
       {
-        project: { id: 1, owner: 'o', repo: 'r', base_path: '/x', last_session_at: 0 },
+        project: { id: 1, owner: 'o', repo: 'r', base_path: '/x', last_session_at: 0, adopted: false },
         worktrees: [
           { id: 11, project_id: 1, host_alias: 'local', name: 'main', path: '/x', branch: 'main' },
           { id: 12, project_id: 1, host_alias: 'local', name: 'feature-x', path: '/x/.worktrees/feature-x', branch: 'feature-x' },
@@ -513,7 +513,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     const colliding = [
       ...fakeProjects,
       {
-        project: { id: 4, owner: 'otherperson', repo: 'claude-fleet', base_path: '/x/cf', last_session_at: null },
+        project: { id: 4, owner: 'otherperson', repo: 'claude-fleet', base_path: '/x/cf', last_session_at: null, adopted: false },
         worktrees: [{ id: 41, project_id: 4, host_alias: 'local', name: 'main', path: '/x/cf', branch: 'main' }],
       },
     ];
@@ -817,7 +817,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     const projs: typeof fakeProjects = [];
     for (let p = 1; p <= 25; p++) {
       projs.push({
-        project: { id: p, owner: 'o', repo: `r${p}`, base_path: `/r/${p}`, last_session_at: Date.now() / 1000 },
+        project: { id: p, owner: 'o', repo: `r${p}`, base_path: `/r/${p}`, last_session_at: Date.now() / 1000, adopted: false },
         worktrees: [{ id: p * 10, project_id: p, host_alias: 'local', name: 'main', path: `/r/${p}`, branch: 'main' }],
       });
       for (let i = 0; i < 20; i++) {

@@ -500,6 +500,7 @@ mod tests {
                 repo: "r".into(),
                 base_path: "/Users/me/p/o/r".into(),
                 last_session_at: None,
+                adopted: false,
             },
             ProjectRow {
                 id: 2,
@@ -507,6 +508,7 @@ mod tests {
                 repo: "s".into(),
                 base_path: "/Users/me/p/o/s".into(),
                 last_session_at: None,
+                adopted: false,
             },
         ];
         let mut other = wt(3, "/x/s-wt");

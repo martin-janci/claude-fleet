@@ -310,9 +310,17 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
         // sessions through prefix linking. Rows with sessions are kept. The
         // root is checked in both spellings, so canonicalizing a symlinked
         // root does not make every old logical row look "outside".
+        //
+        // An ADOPTED row (`service::add_project`'s `folder` source) is
+        // exempt: the whole point of adopting a folder is registering a
+        // checkout that lives OUTSIDE the projects root, so "not rediscovered
+        // by the scan" and "outside the root" are its normal shape, not
+        // evidence of staleness. Without this, the very next refresh (the
+        // Settings save path, the onboarding card, or the `refresh_projects`
+        // MCP tool) would delete it before a session ever got to reference it.
         for p in &snapshot {
             let row = &p.project;
-            if fresh_ids.contains(&row.id) || removed.contains(&row.id) {
+            if fresh_ids.contains(&row.id) || removed.contains(&row.id) || row.adopted {
                 continue;
             }
             let inside = strip_root(&row.base_path, &root_raw).is_some()
@@ -482,6 +490,38 @@ mod tests {
             "a project with sessions is never dropped"
         );
         assert!(ids.contains(&inside), "rows under the root are left alone");
+    }
+
+    /// The Task 3 CRITICAL fix: an adopted row (`service::add_project`'s
+    /// `folder` source) is outside-root and unrediscovered by construction —
+    /// that must never be read as staleness. A plain (non-adopted) row in the
+    /// same shape is still dropped, so the fix does not weaken the existing
+    /// sweep.
+    #[tokio::test]
+    async fn refresh_projects_keeps_an_adopted_row_outside_the_root_but_drops_a_plain_one() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let (adopted, plain) = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let map = serde_json::json!({ "local": tmp.path().to_string_lossy() }).to_string();
+            settings::set(&s, settings::PROJECTS_BASE_PATH, &map).unwrap();
+            let adopted = s
+                .upsert_adopted_project("acme", "widget", "/elsewhere/acme/widget")
+                .unwrap();
+            let plain = s.upsert_project("o", "old", "/elsewhere/o/old").unwrap();
+            (adopted, plain)
+        };
+        let rows = refresh_projects(&store).await.unwrap();
+        let ids: Vec<i64> = rows.iter().map(|r| r.project.id).collect();
+        assert!(
+            ids.contains(&adopted),
+            "an adopted row outside the root survives a refresh"
+        );
+        assert!(
+            !ids.contains(&plain),
+            "a non-adopted stale row outside the root is still dropped"
+        );
     }
 
     #[tokio::test]

@@ -10,6 +10,12 @@ pub struct ProjectRow {
     pub repo: String,
     pub base_path: String,
     pub last_session_at: Option<i64>,
+    /// Set by `service::add_project`'s `folder` source (migration 027): this
+    /// row was registered from a checkout already on disk, possibly outside
+    /// the local projects root. `refresh_projects`'s stale-rows sweep must
+    /// never delete such a row for being outside the root — that is its
+    /// normal shape, not evidence of staleness (see `service::projects`).
+    pub adopted: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -589,7 +595,7 @@ pub(super) fn fetch_project(
     id: i64,
 ) -> Result<Option<ProjectRow>, rusqlite::Error> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, owner, repo, base_path, last_session_at FROM projects WHERE id=?1",
+        "SELECT id, owner, repo, base_path, last_session_at, adopted FROM projects WHERE id=?1",
     )?;
     let mut rows = stmt.query_map(rusqlite::params![id], |row| {
         Ok(ProjectRow {
@@ -598,6 +604,7 @@ pub(super) fn fetch_project(
             repo: row.get(2)?,
             base_path: row.get(3)?,
             last_session_at: row.get(4)?,
+            adopted: row.get::<_, i64>(5)? != 0,
         })
     })?;
     match rows.next() {

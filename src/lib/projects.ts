@@ -7,6 +7,9 @@ export interface ProjectRow {
   repo: string;
   base_path: string;
   last_session_at: number | null;
+  /** Registered by adopting an existing checkout already on disk (possibly
+   * outside the projects root) rather than by the scan or a clone. */
+  adopted: boolean;
 }
 
 export interface WorktreeRow {

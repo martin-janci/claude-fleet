@@ -49,14 +49,21 @@ pub fn parse_repo_url(input: &str) -> Option<(String, String)> {
 /// codebase uses `<path>/.git` as its "is this a project" marker — see the
 /// clone script in `service/sessions/lifecycle.rs` — so a project root
 /// named `.git` would make the directory holding it resolve as a git repo
-/// itself), and anything longer than `max_len`. The character-class check
-/// below is a conservative *subset* of the characters GitHub allows in an
-/// owner or repo name — it exists to guarantee the result is safe to use as
-/// a path component, not to guarantee the name is valid or exists on
-/// GitHub.
-fn is_component(s: &str, max_len: usize) -> bool {
+/// itself), a leading `-` (which a command-line parser would read as an
+/// option instead of a name — the same rule `validate::host_alias` and
+/// `validate::path_component` apply), and anything longer than `max_len`.
+/// The character-class check below is a conservative *subset* of the
+/// characters GitHub allows in an owner or repo name — it exists to
+/// guarantee the result is safe to use as a path component, not to
+/// guarantee the name is valid or exists on GitHub.
+///
+/// `pub(crate)`: also reused by `service::add_project`'s `("local",
+/// <basename>)` fallback, which reads a raw filesystem basename that never
+/// passed through GitHub's own naming rules.
+pub(crate) fn is_component(s: &str, max_len: usize) -> bool {
     !s.is_empty()
         && s.len() <= max_len
+        && !s.starts_with('-')
         && !s.chars().all(|c| c == '.')
         && !s.eq_ignore_ascii_case(".git")
         && s.chars()
@@ -116,6 +123,10 @@ mod tests {
             // All-dots components, beyond plain `.`/`..`.
             ".../repo",
             "owner/...",
+            // A leading `-` would be read as a command-line option by a
+            // program the pair is later passed to, not a name.
+            "-owner/repo",
+            "owner/-repo",
             // GitHub's length caps: 39 for owner, 100 for repo.
             &format!("{}/repo", "a".repeat(40)),
             &format!("owner/{}", "a".repeat(101)),
@@ -175,5 +186,16 @@ mod tests {
                 "{owner}/{repo}"
             );
         }
+    }
+
+    #[test]
+    fn is_component_rejects_a_leading_dash() {
+        // `service::add_project`'s adopt fallback reuses this directly on a
+        // raw filesystem basename (e.g. `-rf`), which a command-line parser
+        // would otherwise read as an option rather than a name.
+        assert!(!is_component("-rf", 100));
+        assert!(!is_component("-", 100));
+        assert!(is_component("rf-", 100), "a trailing dash is fine");
+        assert!(is_component("r-f", 100), "an internal dash is fine");
     }
 }

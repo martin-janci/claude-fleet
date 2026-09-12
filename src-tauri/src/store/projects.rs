@@ -26,16 +26,43 @@ impl Store {
 
     // ---- Public mutation methods ----
 
+    /// Upsert a project row scanned by `refresh_projects` or cloned by
+    /// `service::add_project`: `adopted` is always cleared, since a scan or
+    /// clone re-establishes the row's normal, rediscoverable shape even if it
+    /// was previously adopted (e.g. the projects root grew to cover it).
     pub fn upsert_project(
         &self,
         owner: &str,
         repo: &str,
         base_path: &str,
     ) -> Result<i64, rusqlite::Error> {
+        self.upsert_project_impl(owner, repo, base_path, false)
+    }
+
+    /// Upsert a project row registered by `service::add_project`'s `folder`
+    /// source: `adopted` is set, so `refresh_projects`'s stale-rows sweep
+    /// never deletes it merely for living outside the scanned root (its
+    /// whole point) — see [`ProjectRow::adopted`].
+    pub fn upsert_adopted_project(
+        &self,
+        owner: &str,
+        repo: &str,
+        base_path: &str,
+    ) -> Result<i64, rusqlite::Error> {
+        self.upsert_project_impl(owner, repo, base_path, true)
+    }
+
+    fn upsert_project_impl(
+        &self,
+        owner: &str,
+        repo: &str,
+        base_path: &str,
+        adopted: bool,
+    ) -> Result<i64, rusqlite::Error> {
         self.conn.execute(
-            "INSERT INTO projects (owner, repo, base_path) VALUES (?1, ?2, ?3)
-             ON CONFLICT(owner, repo) DO UPDATE SET base_path=excluded.base_path",
-            rusqlite::params![owner, repo, base_path],
+            "INSERT INTO projects (owner, repo, base_path, adopted) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(owner, repo) DO UPDATE SET base_path=excluded.base_path, adopted=excluded.adopted",
+            rusqlite::params![owner, repo, base_path, adopted as i64],
         )?;
         let id: i64 = self.conn.query_row(
             "SELECT id FROM projects WHERE owner=?1 AND repo=?2",
@@ -50,7 +77,7 @@ impl Store {
 
     pub fn list_projects(&self) -> Result<Vec<ProjectRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, owner, repo, base_path, last_session_at FROM projects ORDER BY owner, repo",
+            "SELECT id, owner, repo, base_path, last_session_at, adopted FROM projects ORDER BY owner, repo",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(ProjectRow {
@@ -59,6 +86,7 @@ impl Store {
                 repo: row.get(2)?,
                 base_path: row.get(3)?,
                 last_session_at: row.get(4)?,
+                adopted: row.get::<_, i64>(5)? != 0,
             })
         })?;
         rows.collect()
@@ -76,7 +104,7 @@ impl Store {
         &self,
     ) -> Result<Vec<crate::service::projects::ProjectTreeRow>, crate::ipc_error::IpcError> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT p.id, p.owner, p.repo, p.base_path, p.last_session_at,
+            "SELECT p.id, p.owner, p.repo, p.base_path, p.last_session_at, p.adopted,
                     w.id, w.project_id, w.name, w.path, w.branch
              FROM projects p
              LEFT JOIN worktrees w ON w.project_id = p.id AND w.host_alias = 'local'
@@ -93,17 +121,18 @@ impl Store {
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, Option<i64>>(4)?,
-                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, i64>(5)? != 0,
                 row.get::<_, Option<i64>>(6)?,
-                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<i64>>(7)?,
                 row.get::<_, Option<String>>(8)?,
                 row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
             ))
         })?;
         let mut out: Vec<crate::service::projects::ProjectTreeRow> = Vec::new();
         let mut last_pid: Option<i64> = None;
         for r in rows {
-            let (pid, owner, repo, base, last, wid, _wpid, wname, wpath, wbranch) = r?;
+            let (pid, owner, repo, base, last, adopted, wid, _wpid, wname, wpath, wbranch) = r?;
             if last_pid != Some(pid) {
                 out.push(crate::service::projects::ProjectTreeRow {
                     project: ProjectRow {
@@ -112,6 +141,7 @@ impl Store {
                         repo,
                         base_path: base,
                         last_session_at: last,
+                        adopted,
                     },
                     worktrees: Vec::new(),
                 });

@@ -69,6 +69,18 @@ fn worktrees_has_updated_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 027: `projects` already has its
+/// `adopted` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
+/// See [`Migration`].
+fn projects_has_adopted(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'adopted'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// Ordered schema migrations, `(version, sql)`. Versions are contiguous from
 /// 1 and every script must end by recording its own version with
 /// `INSERT OR IGNORE INTO schema_version (version) VALUES (N)` — the tests
@@ -150,6 +162,12 @@ const MIGRATIONS: &[Migration] = &[
         version: 26,
         sql: include_str!("../../migrations/026_worktree_updated_at.sql"),
         already_applied: Some(worktrees_has_updated_at),
+    },
+    // `ALTER TABLE ... ADD COLUMN` fails if the column is already there.
+    Migration {
+        version: 27,
+        sql: include_str!("../../migrations/027_project_adopted.sql"),
+        already_applied: Some(projects_has_adopted),
     },
 ];
 
@@ -974,6 +992,43 @@ mod tests {
         assert_eq!(s.worktree_updated_at_ms(999_999).unwrap(), None);
     }
 
+    /// 027 on a database with project rows (stopped at 026): the column is
+    /// added, defaults to 0 (not adopted) for existing rows, and a re-run
+    /// (tests roll the recorded version back and migrate again) is a no-op
+    /// that keeps a row's `adopted` flag.
+    #[test]
+    fn migration_027_adds_adopted_column_defaulting_to_unset_and_reruns_safely() {
+        let old = store_at_version(26);
+        old.conn
+            .execute_batch(
+                "INSERT INTO projects (id, owner, repo, base_path) VALUES (1, 'o', 'r', '/p/r');",
+            )
+            .unwrap();
+        old.migrate().expect("027 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(
+            !old.list_projects().unwrap()[0].adopted,
+            "a pre-027 row is not adopted"
+        );
+        let pid = old
+            .upsert_adopted_project("a", "b", "/out/of/root")
+            .unwrap();
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 27;")
+            .unwrap();
+        old.migrate().expect("re-running 027 is safe");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(
+            old.list_projects()
+                .unwrap()
+                .into_iter()
+                .find(|p| p.id == pid)
+                .unwrap()
+                .adopted,
+            "the adopted flag survives a re-run"
+        );
+    }
+
     #[test]
     fn migration_008_adds_lost_at_column() {
         let store = Store::open_in_memory().expect("store");
@@ -981,7 +1036,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 26, "schema_version should be 26 after migration");
+        assert_eq!(v, 27, "schema_version should be 27 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store
