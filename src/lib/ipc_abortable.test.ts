@@ -44,6 +44,33 @@ describe('invokeCmdAbortable', () => {
     await p;
   });
 
+  it('sends cancel_command the exact camelCase payload { callId } matching the injected call_id', async () => {
+    // `cancel_command(call_id: u64)` is a bare top-level Tauri parameter, which
+    // tauri-macros deserializes from the camelCase key `callId`. A snake_case
+    // `call_id` key is rejected, so pin the exact payload, not just the name.
+    let resolveInvoke: (v: unknown) => void = () => {};
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation((cmd: string) => {
+      if (cmd === 'cancel_command') return Promise.resolve(null);
+      return new Promise((res) => {
+        resolveInvoke = res;
+      });
+    });
+    const ac = new AbortController();
+    const p = invokeCmdAbortable('long_op', { args: { y: 2 } }, ac.signal);
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 0));
+    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls;
+    const op = calls.find((c) => c[0] === 'long_op');
+    const cancels = calls.filter((c) => c[0] === 'cancel_command');
+    expect(op).toBeDefined();
+    expect(cancels).toHaveLength(1);
+    const injected = (op![1] as { args: { call_id: number } }).args.call_id;
+    expect(injected).toEqual(expect.any(Number));
+    expect(cancels[0][1]).toStrictEqual({ callId: injected });
+    resolveInvoke(null);
+    await p;
+  });
+
   it('returns E_CANCELLED synchronously if signal already aborted', async () => {
     const ac = new AbortController();
     ac.abort();
