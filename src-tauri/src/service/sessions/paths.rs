@@ -306,16 +306,27 @@ pub(crate) fn fetch_owner_repo(s: &Store, project_id: i64) -> Result<(String, St
     .map_err(IpcError::from)
 }
 
-/// Look up `(name, branch)` for a worktree id. `branch` may be NULL in the DB.
+/// `(name, branch, host_alias, path)` of a worktree row. `branch` may be NULL
+/// in the DB. `host_alias` is the host the row's checkout actually lives on
+/// (`local` for the project scan's rows, a remote alias for a host-scanned
+/// row — see `service::worktrees::list_host_worktrees`); `path` is that
+/// checkout's real path AS RECORDED ON THAT HOST, which may not follow the
+/// `<project_root>/.claude/worktrees/<name>` convention (e.g. `.worktrees/`,
+/// or anywhere else git has it registered).
 pub(super) fn fetch_worktree(
     s: &Store,
     worktree_id: i64,
-) -> Result<(String, Option<String>), IpcError> {
+) -> Result<(String, Option<String>, String, String), IpcError> {
     let mut stmt = s
         .conn_ref()
-        .prepare("SELECT name, branch FROM worktrees WHERE id=?1")?;
+        .prepare("SELECT name, branch, host_alias, path FROM worktrees WHERE id=?1")?;
     stmt.query_row(rusqlite::params![worktree_id], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+        ))
     })
     .map_err(IpcError::from)
 }

@@ -316,6 +316,44 @@ pub fn not_option_like(label: &str, value: &str) -> Result<(), IpcError> {
     Ok(())
 }
 
+/// Validate an absolute path on a remote host — specifically a worktree
+/// row's stored `path`, as recorded by the per-host scan
+/// (`service::worktrees::list_host_worktrees`) and interpolated into a
+/// remote `git worktree add <path> …` target. Shell-quoting (`quote`) stops
+/// command injection but not `..` traversal escaping the intended tree, so
+/// that is rejected here, along with a relative path (the scan always
+/// records an absolute one; a relative value can only be a tampered DB row)
+/// and control characters. No existing validator fits: `path_component`
+/// checks a single directory-name component, and `repo_rel_path` requires a
+/// *relative* path — the opposite of what's needed here.
+pub fn remote_abs_path(label: &str, value: &str) -> Result<(), IpcError> {
+    if value.is_empty() {
+        return Err(IpcError::new(
+            "E_INVALID",
+            format!("{label} must not be empty"),
+        ));
+    }
+    if !value.starts_with('/') {
+        return Err(IpcError::new(
+            "E_INVALID",
+            format!("{label} must be an absolute path"),
+        ));
+    }
+    if value.chars().any(|c| c.is_control()) {
+        return Err(IpcError::new(
+            "E_INVALID",
+            format!("{label} must not contain control characters"),
+        ));
+    }
+    if value.split('/').any(|component| component == "..") {
+        return Err(IpcError::new(
+            "E_INVALID",
+            format!("{label} must not contain a '..' component"),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,5 +532,28 @@ mod tests {
         assert!(friendly_name("line one\nline two").is_err()); // \n is control
         assert!(friendly_name("with\ttab").is_err());
         assert!(friendly_name("bell\x07").is_err());
+    }
+
+    #[test]
+    fn remote_abs_path_accepts_normal_absolute_paths() {
+        for ok in [
+            "/home/u/projects/github.com/o/r",
+            "/home/u/projects/github.com/o/r/.worktrees/feat",
+            "/",
+        ] {
+            assert!(
+                remote_abs_path("worktree path", ok).is_ok(),
+                "{ok} should be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_abs_path_rejects_relative_traversal_and_control_chars() {
+        assert!(remote_abs_path("worktree path", "").is_err());
+        assert!(remote_abs_path("worktree path", "relative/path").is_err());
+        assert!(remote_abs_path("worktree path", "/a/../etc").is_err());
+        assert!(remote_abs_path("worktree path", "/a/b/..").is_err());
+        assert!(remote_abs_path("worktree path", "/a\nb").is_err());
     }
 }
