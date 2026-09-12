@@ -246,8 +246,9 @@ fn adopt(
     Ok((top, owner, repo))
 }
 
-/// When `top` is a linked worktree, resolve and return its MAIN checkout's
-/// path instead; otherwise return `top` unchanged.
+/// When `top` is a linked worktree of a NON-bare repo, resolve and return its
+/// MAIN checkout's path instead; otherwise (not a linked worktree, or a
+/// linked worktree of a BARE repo) return `top` unchanged.
 ///
 /// A linked worktree's `git rev-parse --git-dir` points into the main
 /// checkout's `.git/worktrees/<name>`, while `--git-common-dir` stays the
@@ -259,6 +260,13 @@ fn adopt(
 /// state to correct, so `adopt` must not manufacture it in the first place:
 /// adopting `/somewhere/wt-feature` must register the main checkout, not the
 /// worktree.
+///
+/// A BARE repo's worktrees are the exception: `--git-dir`/`--git-common-dir`
+/// differ there too, but the bare repo itself has no working tree — it is
+/// the same "not a checkout" state `adopt` already refuses outright when
+/// pointed at it directly. Preferring it here would silently register that
+/// unusable path instead. There is no better checkout to prefer than the one
+/// the user actually picked, so a bare repo's worktree keeps `top`.
 fn resolve_main_checkout(handle: &tokio::runtime::Handle, top: &str) -> Result<String, IpcError> {
     let git_dir = git_out(handle, top, &["rev-parse", "--git-dir"]).unwrap_or_default();
     let common_dir = git_out(handle, top, &["rev-parse", "--git-common-dir"]).unwrap_or_default();
@@ -273,17 +281,26 @@ fn resolve_main_checkout(handle: &tokio::runtime::Handle, top: &str) -> Result<S
             ),
         )
     })?;
-    // Git's own ordering guarantee: the first `worktree ` entry is the main
-    // worktree (see the identical assumption in `crate::projects::list_worktrees`).
-    let main = list
-        .lines()
-        .find_map(|l| l.strip_prefix("worktree "))
+    // Porcelain entries are separated by a blank line; git's own ordering
+    // guarantee is that the FIRST block is the main worktree (the identical
+    // assumption `crate::projects::list_worktrees` makes). Scoping both the
+    // path and the `bare` check to that first block — rather than scanning
+    // every line — means a `bare` marker belonging to some other entry can
+    // never be mistaken for the first block's own.
+    let first_block = list.split("\n\n").next().unwrap_or("");
+    let mut first_block_lines = first_block.lines();
+    let main = first_block_lines
+        .next()
+        .and_then(|l| l.strip_prefix("worktree "))
         .ok_or_else(|| {
             IpcError::new(
                 codes::E_INTERNAL,
                 format!("{top}: `git worktree list` reported no worktrees"),
             )
         })?;
+    if first_block_lines.any(|l| l == "bare") {
+        return Ok(top.to_string());
+    }
     Ok(crate::projects::path_identity::canonical_str(main))
 }
 
@@ -1019,6 +1036,74 @@ mod tests {
             row.project.base_path,
             crate::projects::path_identity::canonical(&main).to_string_lossy(),
             "the MAIN checkout is registered, not the linked worktree"
+        );
+    }
+
+    #[tokio::test]
+    async fn folder_adopting_a_bare_repos_worktree_registers_the_worktree_not_the_bare_dir() {
+        // A bare repo's worktrees also fail the git-dir/git-common-dir
+        // comparison (same shape as a linked worktree), but the bare repo
+        // itself has no working tree — it is the same "not a checkout" state
+        // `folder_pointing_at_a_bare_repo_is_refused` refuses when adopted
+        // directly. `resolve_main_checkout` must not "resolve" into it.
+        use crate::projects::test_git::run;
+        let dir = tempfile::tempdir().unwrap();
+        let bare = dir.path().join("widget.git");
+        if !std::process::Command::new("git")
+            .args(["init", "-q", "--bare"])
+            .arg(&bare)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return; // no git on this box
+        }
+        assert!(git_ok(
+            &bare,
+            &["remote", "add", "origin", "git@github.com:acme/widget.git"]
+        ));
+
+        // Seed the bare repo with one commit on `main` from a throwaway
+        // clone, so `worktree add` has a branch to check out.
+        let seed = dir.path().join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        assert!(run(&seed, &["init", "-q", "-b", "main"]));
+        assert!(run(&seed, &["commit", "--allow-empty", "-q", "-m", "init"]));
+        assert!(run(
+            &seed,
+            &["remote", "add", "origin", bare.to_str().unwrap()]
+        ));
+        assert!(run(&seed, &["push", "-q", "origin", "main"]));
+
+        let wt = dir.path().join("wt-main");
+        assert!(git_ok(
+            &bare,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "main"]
+        ));
+
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        let row = add_project_with(
+            AddProjectArgs {
+                host_alias: "local".into(),
+                source: AddProjectSource::Folder {
+                    path: wt.to_string_lossy().into(),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (row.project.owner.as_str(), row.project.repo.as_str()),
+            ("acme", "widget")
+        );
+        assert_eq!(
+            row.project.base_path,
+            wt.canonicalize().unwrap().to_string_lossy(),
+            "the worktree the user picked is registered, not the bare repo"
         );
     }
 
