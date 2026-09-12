@@ -118,14 +118,17 @@ plus the `HostWorktrees` type.
 
 Live (non-ghost) rows become a column of two lines:
 
-- Line 1: status dot · kind badges (🔗n, 🔍, ▶, 🤖) · name (friendly
-  name when enabled, else tmux name) taking all remaining width, single
-  line with ellipsis · one status chip (stuck outranks claude_status) ·
-  `row-actions` on hover/selection. The host badge leaves line 1.
+- Line 1: status dot · kind badges (🔗n, 🔍, ▶, 🤖) · name taking all
+  remaining width, single line with ellipsis · one status chip (stuck
+  outranks claude_status) · `row-actions` on hover/selection. The host
+  badge leaves line 1. **The friendly name is primary**: line 1 shows
+  `friendly_name` whenever the session has one (and the friendly-names
+  pref is on, as today), else the tmux name.
 - Line 2 (`sess-details`, 0.65rem, muted, single line, ellipsis): host ·
-  worktree key (or the tmux name when a friendly name is shown and the
-  worktree key is null) · elapsed · context meter · cost · effort · PR↗ +
-  CI · last-prompt preview last, so it absorbs the truncation.
+  tmux name (always, when line 1 shows a friendly name; otherwise the
+  worktree key when it differs from the tmux name) · elapsed · context
+  meter · cost · effort · PR↗ + CI · last-prompt preview last, so it
+  absorbs the truncation.
   Items are joined by ` · ` separators rendered as spans; absent items and
   their separators are omitted. `rowMeta` splits into `rowElapsed` and
   `rowPrompt` so the preview can be placed last.
