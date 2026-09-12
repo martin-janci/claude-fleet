@@ -1089,11 +1089,21 @@ describe('Sidebar triage (W2 Track D)', () => {
     expect(line1.querySelector('[data-testid="claude-chip"]')).toHaveTextContent('working');
     const details = screen.getByTestId('sess-details');
     expect(details.querySelector('[data-testid="host-badge"]')).toHaveTextContent('local');
-    expect(details).toHaveTextContent('fix-login');
+    // The tmux name already ends in "--fix-login" — showing the worktree
+    // key again would just repeat the tail of the name already on line 1.
+    expect(screen.queryByTestId('sess-tmux-name')).toBeNull();
     expect(details).toHaveTextContent('1h');
     expect(details.querySelector('[data-testid="context-badge"]')).not.toBeNull();
     expect(screen.getByTestId('sess-meta')).toHaveTextContent('Implement the triage filter');
     expect(line1.querySelector('[data-testid="host-badge"]')).toBeNull();
+  });
+
+  it('shows the worktree key on line 2 when the tmux name does not end in it', async () => {
+    const s = { ...sessionFor(1, 'dev-a'), worktree_key: 'fix-login' };
+    mockBackend(fakeProjects, [s]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByTestId('sess-tmux-name')).toHaveTextContent('fix-login');
   });
 
   it('the details pill hides the second row line and persists', async () => {
@@ -1108,5 +1118,44 @@ describe('Sidebar triage (W2 Track D)', () => {
     expect(screen.queryByTestId('sess-details')).toBeNull();
     expect(pill).toHaveAttribute('aria-pressed', 'false');
     expect(JSON.parse(localStorage.getItem('cf:pref:rows.details')!)).toBe(false);
+    // Clicking again re-shows it — only the hide direction is exercised above.
+    await fireEvent.click(pill);
+    await tick();
+    expect(screen.getByTestId('sess-details')).toBeInTheDocument();
+    expect(pill).toHaveAttribute('aria-pressed', 'true');
+    expect(JSON.parse(localStorage.getItem('cf:pref:rows.details')!)).toBe(true);
+  });
+
+  it('shows the details line by default with no stored pref', async () => {
+    expect(localStorage.getItem('cf:pref:rows.details')).toBeNull();
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a')]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByTestId('sess-details')).toBeInTheDocument();
+    expect(screen.getByTestId('toggle-row-details')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('a ghost row stays one line with an unbracketed host badge', async () => {
+    const ghost = { ...sessionFor(2, 'dev-ghost'), status: 'ghost', lost_at: 5 };
+    mockBackend(fakeProjects, [ghost]);
+    render(Sidebar);
+    await tick(); await tick();
+    const row = screen.getByTestId('sess-row');
+    expect(row.querySelector('.sess-lines')).toBeNull();
+    expect(row.querySelector('.sess-details')).toBeNull();
+    const badge = screen.getByTestId('host-badge');
+    expect(badge.textContent).toBe('local');
+  });
+
+  it('the rename editor hides the details line', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-foo')]);
+    render(Sidebar);
+    await tick(); await tick();
+    const row = await screen.findByTestId('sess-row');
+    expect(screen.getByTestId('sess-details')).toBeInTheDocument();
+    const btn = row.querySelector('[data-testid="rename-tmux"]') as HTMLButtonElement;
+    await fireEvent.click(btn);
+    await screen.findByTestId('rename-input');
+    expect(screen.queryByTestId('sess-details')).toBeNull();
   });
 });

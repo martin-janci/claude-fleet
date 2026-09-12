@@ -47,8 +47,3 @@ export function rowElapsed(sess: SessionRow, nowSec: number): string {
 export function rowPrompt(sess: SessionRow): string {
   return promptPreview(sess.last_prompt, 48);
 }
-
-/** Secondary row text: elapsed since start + the last prompt's first line. */
-export function rowMeta(sess: SessionRow, nowSec: number): string {
-  return [rowElapsed(sess, nowSec), rowPrompt(sess)].filter(Boolean).join(' · ');
-}

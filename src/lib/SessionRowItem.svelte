@@ -82,14 +82,14 @@
   const sessSelected = $derived($selectedSession?.id === sess.id);
   const ctxLevel = $derived(contextLevel(sess.context_pct));
   const elapsed = $derived(rowElapsed(sess, nowSec));
-  const prompt = $derived(rowPrompt(sess));
+  const promptText = $derived(rowPrompt(sess));
   const primaryIsFriendly = $derived($showFriendlyNames && !!sess.friendly_name);
   const primaryName = $derived(primaryIsFriendly ? sess.friendly_name! : sess.tmux_name);
   // Line 2 names what line 1 does not: the tmux name under a friendly name,
   // else the worktree when it is not already part of the tmux name.
   const secondaryName = $derived.by((): string | null => {
     if (primaryIsFriendly) return sess.tmux_name;
-    if (sess.worktree_key && sess.worktree_key !== sess.tmux_name) return sess.worktree_key;
+    if (sess.worktree_key && !sess.tmux_name.endsWith(`--${sess.worktree_key}`)) return sess.worktree_key;
     return null;
   });
 
@@ -167,7 +167,7 @@
   {:else}
     {#if sess.status === 'ghost'}
       <span class="status-dot status-ghost" title="ghost — session lost" aria-hidden="true"></span>
-      <span class="host-badge" data-testid="host-badge">{sess.host_alias}</span>
+      <span class="host-badge" data-testid="host-badge" aria-label="host {sess.host_alias}">{sess.host_alias}</span>
       <span class="sess-name" title={sess.tmux_name}>{
         $showFriendlyNames && sess.friendly_name ? sess.friendly_name : sess.tmux_name
       }</span>
@@ -215,7 +215,7 @@
           {#if sess.kind === 'bg'}
             <span class="bg-badge" role="img" title="background agent" aria-label="background agent">🤖</span>
           {/if}
-          <span class="sess-name" title={primaryIsFriendly ? sess.tmux_name : undefined}>{primaryName}</span>
+          <span class="sess-name" title={sess.tmux_name}>{primaryName}</span>
           {#if sess.stuck_kind}
             <!-- Stuck outranks claude_status: one red chip, no green "working"
                  next to it to soften the signal. -->
@@ -273,14 +273,17 @@
         </div>
         {#if $showRowDetails}
           <div class="sess-details" data-testid="sess-details">
-            <span class="host-badge" data-testid="host-badge">{sess.host_alias}</span>
+            <span class="host-badge" data-testid="host-badge" aria-label="host {sess.host_alias}">{sess.host_alias}</span>
             {#if secondaryName}
+              <span class="sep" aria-hidden="true">·</span>
               <span class="sess-secondary" data-testid="sess-tmux-name">{secondaryName}</span>
             {/if}
             {#if elapsed}
+              <span class="sep" aria-hidden="true">·</span>
               <span class="sess-elapsed">{elapsed}</span>
             {/if}
             {#if ctxLevel !== null && sess.context_pct !== null}
+              <span class="sep" aria-hidden="true">·</span>
               <span
                 class="ctx-badge ctx-{ctxLevel}"
                 data-testid="context-badge"
@@ -296,6 +299,7 @@
             {/if}
             {#if sessionUsageTokens(sess) > 0}
               {@const priced = (sess.usage_cost_micros ?? 0) > 0}
+              <span class="sep" aria-hidden="true">·</span>
               <span
                 class="cost-badge"
                 data-testid="cost-badge"
@@ -306,9 +310,11 @@
               >{priced ? formatCostMicros(sess.usage_cost_micros) : 'unpriced'}</span>
             {/if}
             {#if sess.effort_level}
+              <span class="sep" aria-hidden="true">·</span>
               <span class="effort-badge" title="Effort: {sess.effort_level}">{sess.effort_level}</span>
             {/if}
             {#if sess.pr_url}
+              <span class="sep" aria-hidden="true">·</span>
               <a
                 class="pr-link"
                 href={sess.pr_url}
@@ -318,6 +324,7 @@
                 rel="noreferrer"
               >PR↗</a>
               {#if sess.ci_status}
+                <span class="sep" aria-hidden="true">·</span>
                 <span
                   class="ci-badge"
                   data-testid="ci-badge"
@@ -326,8 +333,9 @@
                 >{ciStatusLabel(sess.ci_status)}</span>
               {/if}
             {/if}
-            {#if prompt}
-              <span class="sess-meta" data-testid="sess-meta" title={sess.last_prompt ?? undefined}>{prompt}</span>
+            {#if promptText}
+              <span class="sep" aria-hidden="true">·</span>
+              <span class="sess-meta" data-testid="sess-meta" title={sess.last_prompt ?? undefined}>{promptText}</span>
             {/if}
           </div>
         {/if}
@@ -369,7 +377,11 @@
   .icon-btn.small:hover { border-color: var(--border); }
   .icon-btn.danger:hover { color: #e64a4a; border-color: #e64a4a; }
 
-  .select-box { margin: 0; flex-shrink: 0; }
+  /* Line 1's dot/badges/name sit near the row's vertical center; align the
+     checkbox with that line instead of the two-line row's overall center
+     (align-items: center on .sess-row would otherwise split the difference
+     and visually float the box between the two lines). */
+  .select-box { margin: 0; margin-top: 0.2rem; flex-shrink: 0; align-self: flex-start; }
   .sess-row.checked { outline: 1px solid var(--accent); }
   .sess-row.stuck { background: rgba(230, 74, 74, 0.06); }
 
@@ -419,6 +431,43 @@
   }
   .sess-row:hover .row-actions,
   .sess-row.selected .row-actions { display: flex; }
+
+  /* Line 1's actions must never take flex width: reserving space for them
+     permanently narrows the name, and NOT reserving space (the old rule)
+     let them pop in at display:flex and squeeze the name to a sliver the
+     instant the pointer entered. Take them out of flow entirely instead —
+     absolutely positioned over the name's tail — with a solid strip in the
+     row's current background plus a short fade so the truncated text reads
+     cleanly right up to the overlay. */
+  .sess-line1 .row-actions {
+    position: absolute;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    padding-left: 0.15rem;
+    background: var(--bg-pane);
+  }
+  .sess-line1 .row-actions::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: 100%;
+    width: 1rem;
+    background: linear-gradient(to right, transparent, var(--bg-pane));
+  }
+  .sess-row:hover .sess-line1 .row-actions {
+    background: color-mix(in srgb, var(--accent) 10%, var(--bg-pane));
+  }
+  .sess-row:hover .sess-line1 .row-actions::before {
+    background: linear-gradient(to right, transparent, color-mix(in srgb, var(--accent) 10%, var(--bg-pane)));
+  }
+  .sess-row.selected .sess-line1 .row-actions {
+    background: color-mix(in srgb, var(--accent) 22%, var(--bg-pane));
+  }
+  .sess-row.selected .sess-line1 .row-actions::before {
+    background: linear-gradient(to right, transparent, color-mix(in srgb, var(--accent) 22%, var(--bg-pane)));
+  }
 
   .status-dot {
     width: 0.45rem;
@@ -502,23 +551,27 @@
   .pr-link:hover { text-decoration: underline; }
 
   .sess-lines { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.1rem; }
-  .sess-line1 { display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
+  .sess-line1 { position: relative; display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
   .sess-line1 .sess-name { flex: 1; }
   .sess-details {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 0.35rem;
+    row-gap: 0.15rem;
     min-width: 0;
     padding-left: 0.85rem;
     font-size: 0.65rem;
     color: var(--fg-muted);
-    white-space: nowrap;
-    overflow: hidden;
   }
+  /* The line wraps instead of clipping — hiding the prompt preview (or any
+     badge) with no visible trace that it exists would defeat the point of
+     the line. Extra height is the user's choice: they opted into this line
+     via the details toggle and can collapse it. */
   .sess-details > * { flex-shrink: 0; }
+  .sess-details > .sess-secondary { flex-shrink: 1; min-width: 0; }
   .sess-details > .sess-meta { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .sess-details > * + *::before { content: '·'; margin-right: 0.35rem; color: var(--fg-muted); opacity: 0.6; }
-  .sess-details > .host-badge::before { content: none; }
+  .sess-details .sep { color: var(--fg-muted); opacity: 0.6; }
   .sess-name {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.8rem;

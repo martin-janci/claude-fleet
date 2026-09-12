@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { rowElapsed, rowPrompt, rowMeta } from './session_status';
+import { rowElapsed, rowPrompt } from './session_status';
 import type { SessionRow } from './sessions';
 
 const base = { started_at: null, last_prompt: null, last_turn_at: null } as unknown as SessionRow;
@@ -12,8 +12,5 @@ describe('row text helpers', () => {
   it('rowPrompt takes the first line, truncated', () => {
     expect(rowPrompt(base)).toBe('');
     expect(rowPrompt({ ...base, last_prompt: 'Implement the triage filter\nsecond line' })).toBe('Implement the triage filter');
-  });
-  it('rowMeta still joins both with a dot', () => {
-    expect(rowMeta({ ...base, started_at: 1000 - 60, last_prompt: 'hi' }, 1000)).toBe('1m · hi');
   });
 });

@@ -166,16 +166,6 @@
     >
       ☑ select
     </button>
-    <button
-      class="pill"
-      class:active={$showRowDetails}
-      data-testid="toggle-row-details"
-      aria-pressed={$showRowDetails}
-      title={$showRowDetails ? 'Hide the details line under each session' : 'Show host, worktree, elapsed and badges under each session'}
-      onclick={() => showRowDetails.update((v) => !v)}
-    >
-      ≡ details
-    </button>
   </nav>
   <Attention />
 
@@ -210,6 +200,16 @@
       onclick={() => showFriendlyNames.update((v) => !v)}
     >
       🏷 friendly {$showFriendlyNames ? 'on' : 'off'}
+    </button>
+    <button
+      class="pill"
+      class:active={$showRowDetails}
+      data-testid="toggle-row-details"
+      aria-pressed={$showRowDetails}
+      title={$showRowDetails ? 'Hide the details line under each session' : 'Show host, worktree, elapsed and badges under each session'}
+      onclick={() => showRowDetails.update((v) => !v)}
+    >
+      ≡ details {$showRowDetails ? 'on' : 'off'}
     </button>
   </nav>
 
