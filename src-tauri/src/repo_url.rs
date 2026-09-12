@@ -6,7 +6,6 @@
 /// for anything else — including a host other than github.com and any
 /// component that is not a safe path component, so a parsed pair is always
 /// safe to interpolate into a path.
-#[allow(dead_code)] // Task 2 (add_project) wires this in.
 pub fn parse_repo_url(input: &str) -> Option<(String, String)> {
     let s = input.trim();
     if s.is_empty() {
@@ -65,7 +64,6 @@ fn is_component(s: &str, max_len: usize) -> bool {
 }
 
 /// The URL fleet clones with, for a pair from [`parse_repo_url`].
-#[allow(dead_code)] // Task 2 (add_project) wires this in.
 pub fn clone_url_for(owner: &str, repo: &str) -> String {
     format!("git@github.com:{owner}/{repo}.git")
 }

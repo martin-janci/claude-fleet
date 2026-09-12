@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ProjectTreeRow {
     pub project: ProjectRow,
     pub worktrees: Vec<WorktreeRow>,

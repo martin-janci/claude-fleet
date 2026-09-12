@@ -20,6 +20,10 @@ pub mod codes {
     pub const E_VALIDATE: &str = "E_VALIDATE";
     /// The addressed host / session / project / worktree row does not exist.
     pub const E_NOTFOUND: &str = "E_NOTFOUND";
+    /// The thing being created already exists (a project's owner/repo, a
+    /// checkout already at the destination path…) — the inverse of
+    /// `E_NOTFOUND`.
+    pub const E_EXISTS: &str = "E_EXISTS";
     /// The target exists but is in the wrong state for the operation.
     pub const E_INVALID_STATE: &str = "E_INVALID_STATE";
     /// An invariant the code relies on was violated (row vanished mid-op…).
