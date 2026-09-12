@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { sessions, showBgAgents, showFriendlyNames } from './sessions';
+  import { sessions, showBgAgents, showFriendlyNames, showRowDetails } from './sessions';
   import { hosts, hostFilter } from './hosts';
   import { hintAnchor } from './hints';
   import { accounts, type AccountRow } from './accounts';
@@ -165,6 +165,16 @@
       onclick={toggleSelectMode}
     >
       ☑ select
+    </button>
+    <button
+      class="pill"
+      class:active={$showRowDetails}
+      data-testid="toggle-row-details"
+      aria-pressed={$showRowDetails}
+      title={$showRowDetails ? 'Hide the details line under each session' : 'Show host, worktree, elapsed and badges under each session'}
+      onclick={() => showRowDetails.update((v) => !v)}
+    >
+      ≡ details
     </button>
   </nav>
   <Attention />

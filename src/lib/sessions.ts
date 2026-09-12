@@ -156,6 +156,11 @@ export const showFriendlyNames = writable<boolean>(
 );
 showFriendlyNames.subscribe((v) => writePref('show-friendly-names', v));
 
+// Sidebar density toggle — when true, session rows show their second
+// (details) line: host, tmux name / worktree, elapsed, badges, last prompt.
+export const showRowDetails = writable<boolean>(readPref('rows.details', true, isBool));
+showRowDetails.subscribe((v) => writePref('rows.details', v));
+
 // `force: true` (the sidebar Refresh button) makes the backend run a fleet
 // reconcile pass now; the default returns stored rows while the last pass is
 // within the configured interval, so window-focus reloads stay cheap.

@@ -58,7 +58,7 @@ import { buildSessionsByProject, buildRelatedCountById } from './sidebar_index';
 import { get } from 'svelte/store';
 import Sidebar from './Sidebar.svelte';
 import { projects, bootstrapProjects } from './projects';
-import { sessions, bootstrapSessions, showBgAgents, resetTombstonesForTests, type SessionRow } from './sessions';
+import { sessions, bootstrapSessions, showBgAgents, showRowDetails, resetTombstonesForTests, type SessionRow } from './sessions';
 import { selectedSession, selectSession } from './selection';
 import { hosts, bootstrapHosts, hostFilter, resetTombstonesForTests as resetHostTombstones } from './hosts';
 import { accounts, bootstrapAccounts } from './accounts';
@@ -110,6 +110,7 @@ beforeEach(() => {
   accounts.set([]);
   hostFilter.set('all');
   showBgAgents.set(true);
+  showRowDetails.set(true);
   selectSession(null);
   // Suppress the OnboardingCard so tests don't need stubs for its IPC calls
   // (check_local_prereqs, tunnel_status, mcp_status).
@@ -1064,5 +1065,19 @@ describe('Sidebar triage (W2 Track D)', () => {
     expect(meta).toHaveTextContent('Implement the triage filter');
     expect(meta).not.toHaveTextContent('second line');
     expect(screen.getByTestId('ci-badge')).toHaveTextContent('CI');
+  });
+
+  it.skip('the details pill hides the second row line and persists', async () => {
+    mockBackend(fakeProjects, [{ ...sessionFor(1, 'dev-a'), started_at: Math.floor(Date.now() / 1000) - 60 }]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByTestId('sess-details')).toBeInTheDocument();
+    const pill = screen.getByTestId('toggle-row-details');
+    expect(pill).toHaveAttribute('aria-pressed', 'true');
+    await fireEvent.click(pill);
+    await tick();
+    expect(screen.queryByTestId('sess-details')).toBeNull();
+    expect(pill).toHaveAttribute('aria-pressed', 'false');
+    expect(JSON.parse(localStorage.getItem('cf:pref:rows.details')!)).toBe(false);
   });
 });
