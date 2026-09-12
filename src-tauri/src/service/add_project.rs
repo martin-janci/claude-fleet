@@ -2,8 +2,9 @@
 //! existing checkout, or create a new one. The New-session flow's entry
 //! point for "this repo is not on disk yet".
 //!
-//! This module implements the `clone` (Task 2) and `folder` (Task 3) sources
-//! of `docs/superpowers/plans/2026-09-12-add-project.md`; `new` is Task 4.
+//! This module implements the `clone` (Task 2), `folder` (Task 3) and `new`
+//! (Task 4) sources of `docs/superpowers/plans/2026-09-12-add-project.md`,
+//! plus the read-only `list_github_repos` (also Task 4).
 
 use crate::ipc_error::{codes, IpcError};
 use crate::projects::Layout;
@@ -43,7 +44,6 @@ pub enum AddProjectSource {
     Folder {
         path: String,
     },
-    #[allow(dead_code)] // Task 4 wires this in.
     New {
         owner: String,
         repo: String,
@@ -94,11 +94,23 @@ pub async fn add_project_with(
     match &args.source {
         AddProjectSource::Clone { url } => clone_source(&args, url, store, ssh).await,
         AddProjectSource::Folder { path } => folder_source(&args, path, store).await,
-        // Task 4.
-        AddProjectSource::New { .. } => Err(IpcError::new(
-            codes::E_INVALID,
-            "source not implemented yet",
-        )),
+        AddProjectSource::New {
+            owner,
+            repo,
+            create_remote,
+            confirm,
+        } => {
+            new_source(
+                &args,
+                owner,
+                repo,
+                *create_remote,
+                confirm.as_deref(),
+                store,
+                ssh,
+            )
+            .await
+        }
     }
 }
 
@@ -166,6 +178,229 @@ pub(crate) fn clone_script(dest: &str, clone_url: &str) -> String {
         url = quote(clone_url),
         marker = quote(ALREADY_CLONED_MARKER),
     )
+}
+
+/// Create a brand-new project fleet does not know about yet: `owner`/`repo`
+/// validated the same way [`parse_repo_url`] would (`repo_url::is_component`,
+/// NOT `validate::path_component` — the rules a new project name must follow
+/// match what clone accepts, not the generic path-component rule), refuse an
+/// existing project, then run [`new_project_script`] locally or over SSH
+/// exactly like [`clone_source`] does, and `register` the result.
+/// `create_remote` is confirm-gated BEFORE any command runs — see
+/// [`new_project_script`]'s doc comment for what it does.
+async fn new_source(
+    args: &AddProjectArgs,
+    owner: &str,
+    repo: &str,
+    create_remote: bool,
+    confirm: Option<&str>,
+    store: &Mutex<Store>,
+    ssh: &dyn SshExec,
+) -> Result<ProjectTreeRow, IpcError> {
+    if !crate::repo_url::is_component(owner, 39) || !crate::repo_url::is_component(repo, 100) {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("{owner}/{repo} is not a valid GitHub owner/repo name"),
+        ));
+    }
+    // Gate BEFORE any ssh/local command runs, and before the existing-project
+    // check too: a repo the user is about to publish to GitHub should never
+    // even reach that lock without an explicit confirmation naming it.
+    let slug = format!("{owner}/{repo}");
+    if create_remote && confirm != Some(slug.as_str()) {
+        return Err(IpcError::new(
+            codes::E_CONFIRM_REQUIRED,
+            format!(
+                "creating {slug} on GitHub needs confirmation; retry with confirm set to \"{slug}\""
+            ),
+        ));
+    }
+    refuse_existing_project(store, owner, repo)?;
+    // Same TOCTOU note as `clone_source`: the lock above is dropped and
+    // re-taken inside `register`.
+    let (host_root, local_root, layout) = roots(store, &args.host_alias)?;
+    let local_base = layout.project_dir(&local_root, owner, repo);
+
+    let (out, dest) = if args.host_alias == crate::service::projects::LOCAL_HOST {
+        let out = run_local_script(
+            &new_project_script(&local_base, owner, repo, create_remote),
+            CLONE_WALL_CLOCK,
+        )
+        .await?;
+        (out, local_base.clone())
+    } else {
+        let home = ssh.remote_home(&args.host_alias).await?;
+        let root = crate::service::projects::expand_home(&host_root, &home);
+        let dest = layout.project_dir(&root, owner, repo);
+        let script = new_project_script(&dest, owner, repo, create_remote);
+        let out = ssh
+            .run_bounded(
+                &args.host_alias,
+                &["bash", "-lc", &quote(&script)],
+                CLONE_CONNECT_TIMEOUT,
+                CLONE_WALL_CLOCK,
+            )
+            .await?;
+        (out, dest)
+    };
+    if !out.status.success() {
+        // Same marker + exit-3 convention as the clone script, so a
+        // destination that already exists is `E_EXISTS` rather than a
+        // generic setup failure — `git_error`'s wording ("couldn't clone…")
+        // is shared with the clone path rather than duplicated for this one.
+        return Err(git_error(&args.host_alias, owner, repo, &dest, &out));
+    }
+    register(store, owner, repo, &local_base, false)
+}
+
+/// Fallback committer identity for [`new_project_script`]'s initial commit —
+/// used ONLY when `git config` resolves neither `user.name` nor
+/// `user.email` from any scope (local/global/system), i.e. a bare host with
+/// no identity configured at all. A user's own configured identity always
+/// wins; this exists purely so the initial commit does not fail outright
+/// with git's "Please tell me who you are".
+const FALLBACK_GIT_NAME: &str = "claude-fleet";
+const FALLBACK_GIT_EMAIL: &str = "claude-fleet@localhost";
+
+/// Create a brand-new project at `dest`: refuse when it already exists (same
+/// [`ALREADY_CLONED_MARKER`] + exit-3 convention as [`clone_script`], so
+/// [`git_error`] maps it to `E_EXISTS`), `mkdir -p`, `git init -b main`, then
+/// an empty initial commit so a later `git worktree add` has a branch to
+/// fork from.
+///
+/// `git commit` refuses outright ("Please tell me who you are") when NEITHER
+/// `user.name` NOR `user.email` is configured anywhere `git config` would
+/// read from — checked here with the exact same plain `git config` lookup
+/// git itself consults for a commit, so the placeholder identity
+/// ([`FALLBACK_GIT_NAME`]/[`FALLBACK_GIT_EMAIL`]) is substituted, per-command
+/// via `-c`, ONLY when the real commit would otherwise fail; a host with its
+/// own identity configured (locally, globally, or system-wide) always keeps
+/// it. `create_remote` appends `gh repo create` inside the new directory,
+/// run only after `init`/`commit` succeed — never before, and never at all
+/// unless asked.
+fn new_project_script(dest: &str, owner: &str, repo: &str, create_remote: bool) -> String {
+    let d = quote(dest);
+    let mut s = format!(
+        "set -e\n\
+         if [ -e {d} ]; then echo {marker} >&2; exit 3; fi\n\
+         mkdir -p {d}\n\
+         cd {d}\n\
+         git init -b main\n\
+         if git config user.email >/dev/null 2>&1 && git config user.name >/dev/null 2>&1; then\n\
+         \x20 git commit --allow-empty -m 'Initial commit'\n\
+         else\n\
+         \x20 git -c user.name={name} -c user.email={email} commit --allow-empty -m 'Initial commit'\n\
+         fi\n",
+        marker = quote(ALREADY_CLONED_MARKER),
+        name = quote(FALLBACK_GIT_NAME),
+        email = quote(FALLBACK_GIT_EMAIL),
+    );
+    if create_remote {
+        s.push_str(&format!(
+            "gh repo create {slug} --private --source . --remote origin --push\n",
+            slug = quote(&format!("{owner}/{repo}")),
+        ));
+    }
+    s
+}
+
+/// Wall clock for `gh repo list` / `gh repo create`: a plain API call, but
+/// generous enough for a slow link without leaving the Add-project dialog's
+/// browse mode — or a `new` create — spinning forever on a wedged `gh`.
+const GH_WALL_CLOCK: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GithubRepo {
+    pub name_with_owner: String,
+    pub description: Option<String>,
+    pub is_private: bool,
+    pub updated_at: Option<String>,
+}
+
+/// `gh repo list --json`'s camelCase wire shape. Kept private and separate
+/// from [`GithubRepo`] (whose fields are snake_case for the TS side) rather
+/// than annotating one struct with two different renames.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhRepoWire {
+    name_with_owner: String,
+    description: Option<String>,
+    is_private: bool,
+    updated_at: Option<String>,
+}
+
+/// Production entry point for the Add-project dialog's browse mode.
+#[allow(dead_code)] // Task 5 (the `list_github_repos` Tauri command) wires this in.
+pub async fn list_github_repos(
+    host_alias: &str,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<Vec<GithubRepo>, IpcError> {
+    list_github_repos_with(host_alias, store, &**ssh).await
+}
+
+/// The repositories `gh` can see on `host_alias` — read-only, nothing is
+/// registered or written. `store` is threaded through for symmetry with
+/// every other `_with` function in this module (and in case a future host
+/// lookup needs it); today only `host_alias` itself is consulted.
+pub async fn list_github_repos_with(
+    host_alias: &str,
+    _store: &Mutex<Store>,
+    ssh: &dyn SshExec,
+) -> Result<Vec<GithubRepo>, IpcError> {
+    crate::validate::host_alias(host_alias)?;
+    const CMD: &str =
+        "gh repo list --limit 200 --json nameWithOwner,description,isPrivate,updatedAt";
+    let out = if host_alias == crate::service::projects::LOCAL_HOST {
+        run_local_script(CMD, GH_WALL_CLOCK).await?
+    } else {
+        ssh.run_bounded(
+            host_alias,
+            &["bash", "-lc", &quote(CMD)],
+            CLONE_CONNECT_TIMEOUT,
+            GH_WALL_CLOCK,
+        )
+        .await?
+    };
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        // Exit 127 is the shell's own "command not found" — `gh` is simply
+        // missing from this host's PATH, which needs a different remedy
+        // (install it) than every other `gh` failure (auth, network, a bad
+        // flag…), which is reported with gh's own stderr verbatim so "run gh
+        // auth login" reaches the user unchanged.
+        if out.status.code() == Some(127) || stderr.to_lowercase().contains("command not found") {
+            return Err(IpcError::new(
+                codes::E_GH,
+                format!("gh is not installed on {host_alias}; install the GitHub CLI there"),
+            ));
+        }
+        return Err(IpcError::new(
+            codes::E_GH,
+            if stderr.is_empty() {
+                format!("gh repo list failed on {host_alias}")
+            } else {
+                stderr
+            },
+        ));
+    }
+    let repos: Vec<GhRepoWire> = serde_json::from_slice(&out.stdout).map_err(|_| {
+        let cut = out.stdout.len().min(200);
+        let snippet = String::from_utf8_lossy(&out.stdout[..cut]);
+        IpcError::new(
+            codes::E_GH,
+            format!("couldn't parse gh's repo list on {host_alias}: {snippet}"),
+        )
+    })?;
+    Ok(repos
+        .into_iter()
+        .map(|w| GithubRepo {
+            name_with_owner: w.name_with_owner,
+            description: w.description,
+            is_private: w.is_private,
+            updated_at: w.updated_at,
+        })
+        .collect())
 }
 
 /// Wall clock for each local `git` read `adopt` runs. The user reaches this
@@ -1354,5 +1589,429 @@ mod tests {
 
         let after = snapshot(&path);
         assert_eq!(before, after, "adopting a folder must never write into it");
+    }
+
+    #[tokio::test]
+    async fn new_creates_a_repo_with_an_initial_commit() {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        // `Match::Any` must be the OLDER rule: FakeSsh's "most recently added
+        // rule wins" means an `Any` reply added AFTER `with_home` would also
+        // catch the `printenv HOME` call `remote_home` makes and blank it
+        // out, so it goes first here and `with_home` narrows it back after.
+        fake.on(Match::Any, Reply::ok("")).with_home("/home/u");
+        let row = add_project_with(
+            AddProjectArgs {
+                host_alias: "vps".into(),
+                source: AddProjectSource::New {
+                    owner: "acme".into(),
+                    repo: "widget".into(),
+                    create_remote: false,
+                    confirm: None,
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert_eq!(row.project.repo, "widget");
+        let script = fake.calls_for("vps").last().unwrap().script().unwrap();
+        assert!(script.contains("git init -b main"), "{script}");
+        assert!(script.contains("commit --allow-empty"), "{script}");
+        assert!(!script.contains("gh repo create"), "{script}");
+    }
+
+    #[tokio::test]
+    async fn create_remote_without_the_confirmation_is_refused() {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u").on(Match::Any, Reply::ok(""));
+        let err = add_project_with(
+            AddProjectArgs {
+                host_alias: "vps".into(),
+                source: AddProjectSource::New {
+                    owner: "acme".into(),
+                    repo: "widget".into(),
+                    create_remote: true,
+                    confirm: None,
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_CONFIRM_REQUIRED);
+        assert!(fake
+            .calls_for("vps")
+            .iter()
+            .all(|c| !c.command().contains("gh repo create")));
+    }
+
+    #[tokio::test]
+    async fn create_remote_with_the_confirmation_runs_gh_repo_create() {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        // See the comment in `new_creates_a_repo_with_an_initial_commit`:
+        // `Match::Any` must be added before `with_home`, not after.
+        fake.on(Match::Any, Reply::ok("")).with_home("/home/u");
+        add_project_with(
+            AddProjectArgs {
+                host_alias: "vps".into(),
+                source: AddProjectSource::New {
+                    owner: "acme".into(),
+                    repo: "widget".into(),
+                    create_remote: true,
+                    confirm: Some("acme/widget".into()),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap();
+        let script = fake.calls_for("vps").last().unwrap().script().unwrap();
+        assert!(
+            script.contains("gh repo create 'acme/widget' --private"),
+            "{script}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_remote_confirmation_must_match_owner_repo_exactly() {
+        // A confirmation for a DIFFERENT repo (e.g. a stale value left over
+        // from switching the owner/repo fields) must not be accepted.
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u").on(Match::Any, Reply::ok(""));
+        let err = add_project_with(
+            AddProjectArgs {
+                host_alias: "vps".into(),
+                source: AddProjectSource::New {
+                    owner: "acme".into(),
+                    repo: "widget".into(),
+                    create_remote: true,
+                    confirm: Some("acme/other".into()),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_CONFIRM_REQUIRED);
+        assert!(fake
+            .calls_for("vps")
+            .iter()
+            .all(|c| !c.command().contains("gh repo create")));
+    }
+
+    #[tokio::test]
+    async fn new_refuses_an_existing_project_before_any_command() {
+        let store = store_with_no_projects();
+        store
+            .lock()
+            .unwrap()
+            .upsert_project("acme", "widget", "/p/acme/widget")
+            .unwrap();
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u").on(Match::Any, Reply::ok(""));
+        let err = add_project_with(
+            AddProjectArgs {
+                host_alias: "vps".into(),
+                source: AddProjectSource::New {
+                    owner: "acme".into(),
+                    repo: "widget".into(),
+                    create_remote: false,
+                    confirm: None,
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_EXISTS);
+        assert!(
+            fake.calls().is_empty(),
+            "refused before touching ssh, same as clone/folder"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_rejects_an_invalid_owner_or_repo_name() {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        let err = add_project_with(
+            AddProjectArgs {
+                host_alias: "vps".into(),
+                source: AddProjectSource::New {
+                    owner: "-rf".into(),
+                    repo: "widget".into(),
+                    create_remote: false,
+                    confirm: None,
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        assert!(
+            fake.calls().is_empty(),
+            "an invalid name must never reach ssh"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_on_local_runs_a_real_git_init_and_commit() {
+        // Exercise the LOCAL branch (no FakeSsh involved) against a real
+        // temporary directory, proving `new_project_script` actually
+        // produces a checkout with a commit `git worktree add` can fork
+        // from.
+        let projects_root = tempfile::tempdir().unwrap();
+        let store = store_with_no_projects();
+        {
+            let s = store.lock().unwrap();
+            s.set_setting(
+                crate::service::settings::PROJECTS_BASE_PATH,
+                &serde_json::json!({ "local": projects_root.path().to_string_lossy() }).to_string(),
+            )
+            .unwrap();
+        }
+        let fake = FakeSsh::new();
+        let row = add_project_with(
+            AddProjectArgs {
+                host_alias: "local".into(),
+                source: AddProjectSource::New {
+                    owner: "acme".into(),
+                    repo: "newrepo".into(),
+                    create_remote: false,
+                    confirm: None,
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap();
+        assert_eq!(row.project.repo, "newrepo");
+        let head = std::process::Command::new("git")
+            .args(["-C", &row.project.base_path, "log", "-1", "--format=%s"])
+            .output()
+            .unwrap();
+        assert!(head.status.success(), "{head:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "Initial commit"
+        );
+    }
+
+    #[test]
+    fn new_project_script_only_falls_back_to_a_placeholder_identity_when_git_has_none() {
+        // The script always embeds BOTH branches — the choice of which one
+        // actually runs happens at shell-execution time, not at script-build
+        // time — so this asserts the conditional structure itself: a plain
+        // commit when `git config` already resolves an identity, and the
+        // `-c user.name=/-c user.email=` fallback only in the `else`.
+        let script = new_project_script("/root/acme/widget", "acme", "widget", false);
+        assert!(
+            script.contains("git config user.email >/dev/null 2>&1 && git config user.name"),
+            "{script}"
+        );
+        assert!(
+            script.contains("else"),
+            "must have a fallback branch: {script}"
+        );
+        assert!(
+            script.contains(&format!(
+                "-c user.name={} -c user.email={}",
+                crate::shell::quote(FALLBACK_GIT_NAME),
+                crate::shell::quote(FALLBACK_GIT_EMAIL),
+            )),
+            "{script}"
+        );
+        // The plain `if` branch's commit must NOT itself carry the
+        // placeholder identity — only the `else` branch may.
+        let if_branch = script.split("else").next().unwrap();
+        assert!(
+            !if_branch.contains(FALLBACK_GIT_NAME),
+            "the configured-identity branch must not carry the placeholder: {script}"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_project_commits_with_the_hosts_own_identity_when_one_is_configured() {
+        // Runs the REAL script (no FakeSsh) with a git identity configured
+        // only via a fresh $HOME, proving the "already configured" branch
+        // is the one that actually executes and that it keeps the user's
+        // own identity rather than the placeholder.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".gitconfig"),
+            "[user]\n\tname = Real User\n\temail = real@example.com\n",
+        )
+        .unwrap();
+        let dest_parent = tempfile::tempdir().unwrap();
+        let dest = dest_parent.path().join("configured-identity");
+        let script = new_project_script(dest.to_str().unwrap(), "acme", "widget", false);
+
+        let out = tokio::process::Command::new("bash")
+            .arg("-lc")
+            .arg(&script)
+            .env("HOME", home.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_AUTHOR_NAME")
+            .env_remove("GIT_AUTHOR_EMAIL")
+            .env_remove("GIT_COMMITTER_NAME")
+            .env_remove("GIT_COMMITTER_EMAIL")
+            .output()
+            .await
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+
+        let head = std::process::Command::new("git")
+            .args([
+                "-C",
+                dest.to_str().unwrap(),
+                "log",
+                "-1",
+                "--format=%an <%ae>",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "Real User <real@example.com>",
+            "a configured identity must be kept, not replaced by the placeholder"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_project_falls_back_to_a_placeholder_identity_when_none_is_configured() {
+        // Same real-execution proof as above, for the opposite branch: an
+        // empty $HOME with no `.gitconfig` at all must still produce a
+        // commit, via the placeholder identity.
+        let home = tempfile::tempdir().unwrap();
+        let dest_parent = tempfile::tempdir().unwrap();
+        let dest = dest_parent.path().join("no-identity");
+        let script = new_project_script(dest.to_str().unwrap(), "acme", "widget", false);
+
+        let out = tokio::process::Command::new("bash")
+            .arg("-lc")
+            .arg(&script)
+            .env("HOME", home.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_AUTHOR_NAME")
+            .env_remove("GIT_AUTHOR_EMAIL")
+            .env_remove("GIT_COMMITTER_NAME")
+            .env_remove("GIT_COMMITTER_EMAIL")
+            .output()
+            .await
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+
+        let head = std::process::Command::new("git")
+            .args([
+                "-C",
+                dest.to_str().unwrap(),
+                "log",
+                "-1",
+                "--format=%an <%ae>",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            format!("{FALLBACK_GIT_NAME} <{FALLBACK_GIT_EMAIL}>"),
+            "with no identity configured anywhere, the placeholder must be used"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_github_repos_maps_the_json_and_surfaces_a_failure() {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u").on(
+            Match::script_contains("gh repo list"),
+            Reply::ok(
+                r#"[{"nameWithOwner":"acme/widget","description":"w","isPrivate":true,"updatedAt":"2026-09-01T10:00:00Z"}]"#,
+            ),
+        );
+        let repos = list_github_repos_with("vps", &store, &fake).await.unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].name_with_owner, "acme/widget");
+        assert!(repos[0].is_private);
+        assert_eq!(repos[0].description.as_deref(), Some("w"));
+        assert_eq!(repos[0].updated_at.as_deref(), Some("2026-09-01T10:00:00Z"));
+
+        let bad = FakeSsh::new();
+        bad.with_home("/home/u").on(
+            Match::script_contains("gh repo list"),
+            Reply::fail(
+                4,
+                "gh: To get started with GitHub CLI, please run: gh auth login",
+            ),
+        );
+        let err = list_github_repos_with("vps", &store, &bad)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_GH);
+        assert!(err.message.contains("gh auth login"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn list_github_repos_reports_a_missing_gh_with_a_remedy() {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u").on(
+            Match::script_contains("gh repo list"),
+            Reply::fail(127, "bash: line 1: gh: command not found"),
+        );
+        let err = list_github_repos_with("vps", &store, &fake)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_GH);
+        assert!(
+            err.message.to_lowercase().contains("install"),
+            "{}",
+            err.message
+        );
+        assert!(err.message.contains("vps"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn list_github_repos_reports_a_json_parse_failure() {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u").on(
+            Match::script_contains("gh repo list"),
+            Reply::ok("not json at all"),
+        );
+        let err = list_github_repos_with("vps", &store, &fake)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_GH);
+        assert!(err.message.contains("not json at all"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn list_github_repos_validates_the_host_alias_before_any_ssh() {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        let err = list_github_repos_with("-oProxyCommand=evil", &store, &fake)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        assert!(fake.calls().is_empty());
     }
 }

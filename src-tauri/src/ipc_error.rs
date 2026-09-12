@@ -24,6 +24,9 @@ pub mod codes {
     /// checkout already at the destination path…) — the inverse of
     /// `E_NOTFOUND`.
     pub const E_EXISTS: &str = "E_EXISTS";
+    /// The `gh` CLI failed: not installed, unauthenticated, or exited
+    /// non-zero, or its JSON output could not be parsed.
+    pub const E_GH: &str = "E_GH";
     /// The target exists but is in the wrong state for the operation.
     pub const E_INVALID_STATE: &str = "E_INVALID_STATE";
     /// An invariant the code relies on was violated (row vanished mid-op…).
