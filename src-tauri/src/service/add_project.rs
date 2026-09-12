@@ -272,14 +272,39 @@ fn confirm_tokens() -> &'static ConfirmTokens {
 /// existing project, then run [`new_project_script`] locally or over SSH,
 /// and `register` the result.
 ///
-/// `create_remote` is gated on [`ConfirmTokens`] BEFORE any command runs —
-/// see that type's doc comment for the token shape and why a plain string
-/// isn't enough. A failure inside the script itself is mapped by
-/// [`new_project_error`], NOT the clone path's `git_error`: unlike a clone
-/// (where any failure means `dest` is safe to consider untouched), a `new`
-/// with `create_remote` can leave a REAL local repository behind even
-/// though the GitHub half failed — see that function's doc comment for how
-/// this reports and registers that state.
+/// Order of checks, each one before anything that follows it:
+///
+/// 1. the names are valid;
+/// 2. (tests only) the local host with `create_remote` is refused outright —
+///    see the comment at that check;
+/// 3. an existing project is refused ([`existing_project_or_resume`]) —
+///    EXCEPT a `create_remote` retry of the very project a previous attempt
+///    registered at this same path, which is allowed through so the script
+///    can resume the GitHub half;
+/// 4. `create_remote` is gated on [`ConfirmTokens`] — see that type's doc
+///    comment for the token shape and why a plain string isn't enough.
+///
+/// The existing-project check runs BEFORE the token is consumed, so a call
+/// that is refused anyway does not burn the user's confirmation. The token
+/// IS consumed before steps that can still fail transiently — resolving the
+/// remote `$HOME` over SSH and the SSH connect for the script itself — so a
+/// failure there (an unreachable host, a timeout) means the user has to
+/// confirm again on the next attempt: a token is single-use and is never
+/// restored after a later failure.
+///
+/// A failure inside the script itself is mapped by [`new_project_error`],
+/// NOT the clone path's `git_error`: unlike a clone (where any failure means
+/// `dest` is safe to consider untouched), a `new` with `create_remote` can
+/// leave a REAL local repository behind even though the GitHub half failed.
+/// Such a repository is registered anyway when it has a commit
+/// ([`local_repo_is_usable`]), and a retry resumes it (see
+/// [`new_project_script`]).
+///
+/// When the script reports that `dest` already has an `origin` (a previous
+/// attempt created the GitHub repository but the push failed), the push is
+/// retried by [`push_only_script`] — but only after [`origin_is_github_repo`]
+/// has confirmed that `origin` is exactly `owner/repo` on GitHub. Anything
+/// else is refused without pushing.
 async fn new_source(
     args: &AddProjectArgs,
     owner: &str,
@@ -295,10 +320,32 @@ async fn new_source(
             format!("{owner}/{repo} is not a valid GitHub owner/repo name"),
         ));
     }
-    // Gate BEFORE any ssh/local command runs, and before the existing-project
-    // check too: a repo the user is about to publish to GitHub should never
-    // even reach that lock without a token this process itself minted for
-    // exactly this (host, owner, repo).
+    // The real `gh` CLI already ran once from a test during development (it
+    // only failed to publish a repository because that environment had no
+    // auth). On the local host this function runs the script through the
+    // production `bash -lc` with the real `PATH` — where an authenticated
+    // `gh` lives, and on macOS it can read its token from the keychain — so
+    // a test that combined `host_alias: "local"`, `create_remote: true` and
+    // a minted token would publish a real GitHub repository. Structurally
+    // impossible under `cfg(test)`: exercise `create_remote` through
+    // `FakeSsh` on a remote host, or run the script via the tests'
+    // `run_hermetic` helper with a stub `gh`.
+    #[cfg(test)]
+    if create_remote && args.host_alias == crate::service::projects::LOCAL_HOST {
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            "refusing `new` with create_remote on the local host under test: it would run \
+             the real gh CLI",
+        ));
+    }
+    // Same TOCTOU note as `clone_source`: the lock taken inside is dropped
+    // and re-taken inside `register`.
+    let (host_root, local_root, layout) = roots(store, &args.host_alias)?;
+    let local_base = layout.project_dir(&local_root, owner, repo);
+    let resume_as = existing_project_or_resume(store, owner, repo, &local_base, create_remote)?;
+    // Gate BEFORE any ssh/local command runs: a repo the user is about to
+    // publish to GitHub must never reach the host without a token this
+    // process itself minted for exactly this (host, owner, repo).
     if create_remote {
         let now = Instant::now();
         let authorized = confirm
@@ -314,54 +361,118 @@ async fn new_source(
             .with_details(serde_json::json!({ "confirm": token })));
         }
     }
-    refuse_existing_project(store, owner, repo)?;
-    // Same TOCTOU note as `clone_source`: the lock above is dropped and
-    // re-taken inside `register`.
-    let (host_root, local_root, layout) = roots(store, &args.host_alias)?;
-    let local_base = layout.project_dir(&local_root, owner, repo);
+    // A resumed retry re-registers the row under the casing it already has,
+    // so the upsert hits that row instead of adding a case-variant twin (the
+    // `projects(owner, repo)` unique index is case-sensitive).
+    let (reg_owner, reg_repo) = resume_as
+        .as_ref()
+        .map_or((owner, repo), |(o, r)| (o.as_str(), r.as_str()));
 
-    let (out, dest) = if args.host_alias == crate::service::projects::LOCAL_HOST {
-        let out = run_local_script(
-            &new_project_script(&local_base, owner, repo, create_remote),
-            CLONE_WALL_CLOCK,
-        )
+    let host = args.host_alias.as_str();
+    let dest = if host == crate::service::projects::LOCAL_HOST {
+        local_base.clone()
+    } else {
+        let home = ssh.remote_home(host).await?;
+        let root = crate::service::projects::expand_home(&host_root, &home);
+        layout.project_dir(&root, owner, repo)
+    };
+    let script = new_project_script(&dest, owner, repo, create_remote);
+    let mut out = run_new_step(host, ssh, &script, CLONE_WALL_CLOCK)
         .await
         .map_err(|e| note_unknown_github_state_on_timeout(e, create_remote, owner, repo))?;
-        (out, local_base.clone())
-    } else {
-        let home = ssh.remote_home(&args.host_alias).await?;
-        let root = crate::service::projects::expand_home(&host_root, &home);
-        let dest = layout.project_dir(&root, owner, repo);
-        let script = new_project_script(&dest, owner, repo, create_remote);
-        let out = ssh
-            .run_bounded(
-                &args.host_alias,
-                &["bash", "-lc", &quote(&script)],
-                CLONE_CONNECT_TIMEOUT,
-                CLONE_WALL_CLOCK,
-            )
-            .await
-            .map_err(|e| note_unknown_github_state_on_timeout(e, create_remote, owner, repo))?;
-        (out, dest)
-    };
+
+    if create_remote && origin_already_set(&out) {
+        // A previous attempt got as far as `gh repo create` (which set
+        // `origin`) but the push did not finish. Push again — but ONLY to an
+        // `origin` verified to be exactly this repository on GitHub.
+        let origin = origin_url_from(&out);
+        match origin.filter(|u| origin_is_github_repo(u, owner, repo)) {
+            Some(url) => {
+                out = run_new_step(host, ssh, &push_only_script(&dest, &url), CLONE_WALL_CLOCK)
+                    .await
+                    .map_err(|e| {
+                        note_unknown_github_state_on_timeout(e, create_remote, owner, repo)
+                    })?;
+            }
+            None => {
+                return Err(IpcError::new(
+                    codes::E_EXISTS,
+                    format!(
+                        "{dest} on {host} already has an origin remote that is not \
+                         github.com/{owner}/{repo}; refusing to push to it. Inspect it with \
+                         `git -C {dest} remote -v`."
+                    ),
+                ));
+            }
+        }
+    }
+
     if !out.status.success() {
-        let err = new_project_error(&args.host_alias, owner, repo, &dest, &out);
-        if create_remote && local_repo_is_usable(&out) {
-            // The local checkout is real and usable (it has a commit) even
-            // though the GitHub half of `new` didn't finish — register it
-            // anyway so the user is not left with an orphan, unlisted
-            // directory. Best-effort: if THIS also fails, the original
-            // gh-stage error above is still the one returned; a failed
-            // best-effort registration must never mask it.
-            let _ = register(store, owner, repo, &local_base, false);
+        let err = new_project_error(host, owner, repo, &dest, &out);
+        // `last_stage` is only a precondition here, never the evidence: it
+        // excludes the script's own refusals (exit 3/4/5, a changed origin),
+        // which print no stage marker and may be looking at a directory this
+        // flow never created. Whether the repository is actually usable is
+        // decided by probing it for a real HEAD.
+        let reached_own_steps = last_stage(&String::from_utf8_lossy(&out.stderr)).is_some();
+        if create_remote && reached_own_steps && local_repo_is_usable(host, ssh, &dest).await {
+            // The local checkout is real and has a commit even though the
+            // GitHub half of `new` didn't finish — register it anyway so the
+            // user is not left with an orphan, unlisted directory; a retry
+            // is let through `existing_project_or_resume` and resumes it.
+            // Best-effort: if THIS also fails, the original error above is
+            // still the one returned.
+            let _ = register(store, reg_owner, reg_repo, &local_base, false);
         }
         return Err(err);
     }
-    let row = register(store, owner, repo, &local_base, false);
+    let row = register(store, reg_owner, reg_repo, &local_base, false);
     if create_remote {
         return row.map_err(|e| describe_register_failure_after_gh_success(owner, repo, e));
     }
     row
+}
+
+/// Wall clock for [`local_repo_is_usable`]'s HEAD probe: one local git call,
+/// plus the SSH round trip on a remote host.
+const HEAD_PROBE_WALL_CLOCK: Duration = Duration::from_secs(30);
+
+/// Run one `new`-flow script on `host`: locally via [`run_local_script`], or
+/// over SSH via `bash -lc`. Same contract as both: the raw `Output` for any
+/// exit status, `Err` only for a spawn/connect failure or the wall clock.
+async fn run_new_step(
+    host: &str,
+    ssh: &dyn SshExec,
+    script: &str,
+    wall_clock: Duration,
+) -> Result<std::process::Output, IpcError> {
+    if host == crate::service::projects::LOCAL_HOST {
+        run_local_script(script, wall_clock).await
+    } else {
+        ssh.run_bounded(
+            host,
+            &["bash", "-lc", &quote(script)],
+            CLONE_CONNECT_TIMEOUT,
+            wall_clock,
+        )
+        .await
+    }
+}
+
+/// `dest` on `host` is a git repository with a real HEAD commit — the thing
+/// a later `git worktree add` needs to fork from. Probed directly rather
+/// than inferred from which stage markers a failed run printed: a marker
+/// only says a step STARTED, not that the commit exists. Any probe failure
+/// (including not reaching the host) reads as "not usable".
+async fn local_repo_is_usable(host: &str, ssh: &dyn SshExec, dest: &str) -> bool {
+    let probe = format!(
+        "git -C {} rev-parse --verify -q HEAD >/dev/null",
+        quote(dest)
+    );
+    matches!(
+        run_new_step(host, ssh, &probe, HEAD_PROBE_WALL_CLOCK).await,
+        Ok(out) if out.status.success()
+    )
 }
 
 /// `register`'s error after a FULLY successful `create_remote` script (init,
@@ -426,10 +537,12 @@ const FALLBACK_GIT_EMAIL: &str = "claude-fleet@localhost";
 /// to say what was left behind, instead of the clone path's generic
 /// "couldn't clone" message, which would be wrong (and in the `gh` case,
 /// actively misleading about whether GitHub state changed) for this script.
+/// Internal only: [`user_facing_stderr`] keeps them out of every message.
 const STAGE_INIT: &str = "__stage=init__";
 const STAGE_COMMIT: &str = "__stage=commit__";
 const STAGE_GH_CREATE: &str = "__stage=gh_create__";
 const STAGE_GH_PUSH: &str = "__stage=gh_push__";
+const STAGE_MARKERS: [&str; 4] = [STAGE_INIT, STAGE_COMMIT, STAGE_GH_CREATE, STAGE_GH_PUSH];
 
 /// Written to stderr, alongside exit code 4, when `dest` already exists but
 /// is not a git checkout at all — distinct from [`ALREADY_CLONED_MARKER`]
@@ -437,39 +550,59 @@ const STAGE_GH_PUSH: &str = "__stage=gh_push__";
 const NOT_A_GIT_REPO_MARKER: &str = "__add_project_dest_not_a_git_repo__";
 
 /// Written to stderr, alongside exit code 5, when `create_remote` is set and
-/// `git config` resolves neither `user.name` nor `user.email` anywhere —
-/// see [`new_project_script`]'s doc comment for why this refuses outright
+/// `git config` does not resolve both `user.name` and `user.email` — see
+/// [`new_project_script`]'s doc comment for why this refuses outright
 /// instead of substituting the placeholder identity here.
 const NO_GIT_IDENTITY_MARKER: &str = "__add_project_no_git_identity__";
 
+/// Frame `dest`'s effective push URL for `origin` on stderr, alongside exit
+/// code 6, when `create_remote` is set and `dest` already has an `origin`
+/// and a commit — the "created on GitHub but the push failed" state. Read
+/// back by [`origin_url_from`]; `new_source` then verifies it before running
+/// [`push_only_script`].
+const ORIGIN_URL_BEGIN_MARKER: &str = "__add_project_origin_url_begin__";
+const ORIGIN_URL_END_MARKER: &str = "__add_project_origin_url_end__";
+
+/// Written to stderr, alongside exit code 3, by [`push_only_script`] when
+/// `origin` no longer names exactly the URL `new_source` verified.
+const ORIGIN_CHANGED_MARKER: &str = "__add_project_origin_changed__";
+
 /// Create a brand-new project at `dest`, or safely RESUME a previous
-/// attempt that got as far as a local commit but no further:
+/// attempt that stopped part-way:
 ///
-/// - `dest` already exists and is a git repo WITH an `origin` remote → it is
-///   already fully done (or at least far enough that redoing it would be
-///   wrong); refuse via [`ALREADY_CLONED_MARKER`] + exit 3, same convention
-///   as [`clone_script`] (mapped to `E_EXISTS` by [`new_project_error`]).
-/// - `dest` exists and is a git repo WITHOUT an `origin` remote → a prior
-///   attempt got through `init`/`commit` but not (all the way through) the
-///   `gh` stage; skip `mkdir`/`init`/`commit` entirely and go straight to
-///   the `gh` stage below (only meaningful when `create_remote` is set —
-///   otherwise there is nothing left to do and the script exits 0).
+/// - `dest` does not exist → with `create_remote`, first require a git
+///   identity ([`NO_GIT_IDENTITY_MARKER`] + exit 5) BEFORE `mkdir`, so a
+///   refusal leaves nothing behind at all. Then `mkdir -p`, `git init`
+///   (deliberately NOT `git init -b main`: that flag needs git ≥2.28, which
+///   is newer than some still-common distros ship — `git init && git
+///   symbolic-ref HEAD refs/heads/main` names the initial branch `main` on
+///   every git that still has an unborn-HEAD `init`), then an empty initial
+///   commit so a later `git worktree add` has a branch to fork from.
+/// - `dest` is a git repo WITHOUT an `origin` remote → a prior attempt got
+///   through `init` but not through the `gh` stage. Skip `mkdir`/`init`;
+///   make the initial commit only if there is no HEAD yet (a prior commit
+///   failed, e.g. `commit.gpgsign` with no TTY); then run the `gh` stage
+///   (with `create_remote` off there is nothing more to do: exit 0).
+/// - `dest` is a git repo WITH an `origin`, a HEAD, and `create_remote` is
+///   set → `gh repo create` already ran but the push did not finish. Print
+///   the push URL framed by [`ORIGIN_URL_BEGIN_MARKER`]/
+///   [`ORIGIN_URL_END_MARKER`] and exit 6 WITHOUT pushing: the caller
+///   verifies the URL and runs [`push_only_script`].
+/// - `dest` is a git repo WITH an `origin` otherwise → refuse via
+///   [`ALREADY_CLONED_MARKER`] + exit 3, same convention as [`clone_script`]
+///   (mapped to `E_EXISTS` by [`new_project_error`]).
 /// - `dest` exists and is NOT a git repo at all → refuse via
-///   [`NOT_A_GIT_REPO_MARKER`] + exit 4 (distinct from the above: this is a
-///   name collision with something else, not a resumable prior attempt).
-/// - `dest` does not exist → `mkdir -p`, `git init` (deliberately NOT `git
-///   init -b main`: that flag needs git ≥2.28, which is newer than some
-///   still-common distros ship — `git init && git symbolic-ref HEAD
-///   refs/heads/main` names the initial branch `main` on every git that
-///   still has an unborn-HEAD `init`), then an empty initial commit so a
-///   later `git worktree add` has a branch to fork from.
+///   [`NOT_A_GIT_REPO_MARKER`] + exit 4 (a name collision with something
+///   else, not a resumable prior attempt).
 ///
 /// The commit step never lets a placeholder author reach a real GitHub
 /// repository: with `create_remote` set, a missing identity refuses outright
-/// ([`NO_GIT_IDENTITY_MARKER`] + exit 5) instead of substituting
-/// [`FALLBACK_GIT_NAME`]/[`FALLBACK_GIT_EMAIL`] — those are used only when
-/// `create_remote` is off, and then only per missing field (a real
-/// configured email is kept even if the name is missing, and vice versa).
+/// (exit 5) instead of substituting [`FALLBACK_GIT_NAME`]/
+/// [`FALLBACK_GIT_EMAIL`] — those are used only when `create_remote` is off,
+/// and then only per missing field. The identity check that precedes
+/// `mkdir` runs from `/` so no surrounding repository's local config can
+/// satisfy it; a user whose identity comes only from an `includeIf
+/// "gitdir:…"` block is therefore asked for a global one.
 ///
 /// `create_remote` appends two SEPARATE steps — `gh repo create … --remote
 /// origin` (no `--push`) then a plain `git push -u origin main` — rather
@@ -477,16 +610,19 @@ const NO_GIT_IDENTITY_MARKER: &str = "__add_project_no_git_identity__";
 /// stage marker can tell "the GitHub repository was never created" (failed
 /// during [`STAGE_GH_CREATE`]) apart from "it was created but the push
 /// failed, so it may already exist" (failed during [`STAGE_GH_PUSH`]).
+///
+/// `GIT_TERMINAL_PROMPT=0` is exported so a push can never block on a
+/// credential prompt when the app was launched from a terminal.
 fn new_project_script(dest: &str, owner: &str, repo: &str, create_remote: bool) -> String {
     let d = quote(dest);
 
     let commit_block = if create_remote {
         format!(
             "if git config user.email >/dev/null 2>&1 && git config user.name >/dev/null 2>&1; then\n\
-             \x20 git commit --allow-empty -m 'Initial commit'\n\
+             git commit --allow-empty -m 'Initial commit'\n\
              else\n\
-             \x20 echo {marker} >&2\n\
-             \x20 exit 5\n\
+             echo {marker} >&2\n\
+             exit 5\n\
              fi\n",
             marker = quote(NO_GIT_IDENTITY_MARKER),
         )
@@ -501,33 +637,63 @@ fn new_project_script(dest: &str, owner: &str, repo: &str, create_remote: bool) 
         )
     };
 
-    let init_and_commit = format!(
-        "echo {stage_init} >&2\n\
+    let identity_precheck = if create_remote {
+        format!(
+            "if ! {{ git -C / config user.email && git -C / config user.name; }} >/dev/null 2>&1; then\n\
+             echo {marker} >&2\n\
+             exit 5\n\
+             fi\n",
+            marker = quote(NO_GIT_IDENTITY_MARKER),
+        )
+    } else {
+        String::new()
+    };
+
+    let origin_resume = if create_remote {
+        format!(
+            "if git rev-parse --verify -q HEAD >/dev/null; then\n\
+             echo {begin} >&2\n\
+             git remote get-url --push origin >&2\n\
+             echo {end} >&2\n\
+             exit 6\n\
+             fi\n",
+            begin = quote(ORIGIN_URL_BEGIN_MARKER),
+            end = quote(ORIGIN_URL_END_MARKER),
+        )
+    } else {
+        String::new()
+    };
+
+    let stage_init = quote(STAGE_INIT);
+    let stage_commit = quote(STAGE_COMMIT);
+    let mut s = format!(
+        "set -e\n\
+         export GIT_TERMINAL_PROMPT=0\n\
+         if [ -e {d} ]; then\n\
+         if git -C {d} rev-parse --git-dir >/dev/null 2>&1; then\n\
+         cd {d}\n\
+         if git remote get-url origin >/dev/null 2>&1; then\n\
+         {origin_resume}\
+         echo {exists_marker} >&2\n\
+         exit 3\n\
+         fi\n\
+         if ! git rev-parse --verify -q HEAD >/dev/null; then\n\
+         echo {stage_commit} >&2\n\
+         {commit_block}\
+         fi\n\
+         else\n\
+         echo {notgit_marker} >&2\n\
+         exit 4\n\
+         fi\n\
+         else\n\
+         {identity_precheck}\
+         echo {stage_init} >&2\n\
          mkdir -p {d}\n\
          cd {d}\n\
          git init\n\
          git symbolic-ref HEAD refs/heads/main\n\
          echo {stage_commit} >&2\n\
-         {commit_block}",
-        stage_init = quote(STAGE_INIT),
-        stage_commit = quote(STAGE_COMMIT),
-    );
-
-    let mut s = format!(
-        "set -e\n\
-         if [ -e {d} ]; then\n\
-         \x20 if git -C {d} rev-parse --git-dir >/dev/null 2>&1; then\n\
-         \x20\x20 if git -C {d} remote get-url origin >/dev/null 2>&1; then\n\
-         \x20\x20\x20 echo {exists_marker} >&2\n\
-         \x20\x20\x20 exit 3\n\
-         \x20\x20 fi\n\
-         \x20\x20 cd {d}\n\
-         \x20 else\n\
-         \x20\x20 echo {notgit_marker} >&2\n\
-         \x20\x20 exit 4\n\
-         \x20 fi\n\
-         else\n\
-         {init_and_commit}\
+         {commit_block}\
          fi\n",
         exists_marker = quote(ALREADY_CLONED_MARKER),
         notgit_marker = quote(NOT_A_GIT_REPO_MARKER),
@@ -546,13 +712,73 @@ fn new_project_script(dest: &str, owner: &str, repo: &str, create_remote: bool) 
     s
 }
 
+/// Only the push, for a `dest` whose `origin` `new_source` has already
+/// verified to be `origin_url` (see [`origin_is_github_repo`]). Re-checks
+/// that the effective push URL is still exactly that string immediately
+/// before pushing — refusing via [`ORIGIN_CHANGED_MARKER`] + exit 3 if it
+/// changed in between — so nothing is ever pushed to an unverified remote.
+fn push_only_script(dest: &str, origin_url: &str) -> String {
+    format!(
+        "set -e\n\
+         export GIT_TERMINAL_PROMPT=0\n\
+         cd {d}\n\
+         if [ \"$(git remote get-url --push origin)\" != {url} ]; then\n\
+         echo {changed} >&2\n\
+         exit 3\n\
+         fi\n\
+         echo {stage_push} >&2\n\
+         git push -u origin main\n",
+        d = quote(dest),
+        url = quote(origin_url),
+        changed = quote(ORIGIN_CHANGED_MARKER),
+        stage_push = quote(STAGE_GH_PUSH),
+    )
+}
+
+/// The script stopped at its "already has an origin and a commit" branch
+/// (exit 6 with the URL frame) instead of doing anything.
+fn origin_already_set(out: &std::process::Output) -> bool {
+    out.status.code() == Some(6)
+        && String::from_utf8_lossy(&out.stderr).contains(ORIGIN_URL_END_MARKER)
+}
+
+/// The push URL [`new_project_script`] framed on stderr — `None` when the
+/// frame is missing, empty, or holds more than one line (several push URLs
+/// configured: never a single verifiable destination).
+fn origin_url_from(out: &std::process::Output) -> Option<String> {
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let start = stderr.find(ORIGIN_URL_BEGIN_MARKER)? + ORIGIN_URL_BEGIN_MARKER.len();
+    let len = stderr[start..].find(ORIGIN_URL_END_MARKER)?;
+    let url = stderr[start..start + len].trim();
+    (!url.is_empty() && !url.contains('\n')).then(|| url.to_string())
+}
+
+/// `url` names exactly `owner/repo` on GitHub, compared case-insensitively
+/// like [`existing_project_or_resume`]. Parsed with [`parse_repo_url`], but
+/// only for an explicit `github.com` URL: that parser also accepts a bare
+/// `owner/repo`, which as a git remote is a LOCAL relative path, not GitHub.
+fn origin_is_github_repo(url: &str, owner: &str, repo: &str) -> bool {
+    let url = url.trim();
+    let on_github = [
+        "git@github.com:",
+        "ssh://git@github.com/",
+        "https://github.com/",
+        "http://github.com/",
+    ]
+    .iter()
+    .any(|prefix| url.starts_with(prefix));
+    on_github
+        && parse_repo_url(url)
+            .is_some_and(|(o, r)| o.eq_ignore_ascii_case(owner) && r.eq_ignore_ascii_case(repo))
+}
+
 /// The LAST stage marker [`new_project_script`] managed to print before
 /// failing, in stage order (later stages checked last so they win when
 /// present) — `None` when the failure happened before any stage marker at
-/// all (the existence guard itself, or a spawn-level problem).
+/// all (the existence/identity/origin guards, or a spawn-level problem).
 fn last_stage(stderr: &str) -> Option<&'static str> {
     let mut found = None;
-    for marker in [STAGE_INIT, STAGE_COMMIT, STAGE_GH_CREATE, STAGE_GH_PUSH] {
+    for marker in STAGE_MARKERS {
         if stderr.contains(marker) {
             found = Some(marker);
         }
@@ -560,24 +786,45 @@ fn last_stage(stderr: &str) -> Option<&'static str> {
     found
 }
 
-/// `stderr` shows the script reached the `gh` stage at all — meaning the
-/// local repository has a real initial commit (either just made, or
-/// resumed from a prior attempt), whether or not `gh` itself then
-/// succeeded. Used to decide whether a failed [`new_project_script`] run
-/// should still be [`register`]ed.
-fn local_repo_is_usable(out: &std::process::Output) -> bool {
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    stderr.contains(STAGE_GH_CREATE) || stderr.contains(STAGE_GH_PUSH)
+/// The part of a failed run's stderr a user should see: only what came
+/// after the LAST stage marker (earlier output belongs to steps that
+/// succeeded — `git init`'s `hint:` block, for one), with any `hint:` lines
+/// and every internal marker removed. Mirrors how [`git_error`] keeps
+/// [`ALREADY_CLONED_MARKER`] out of its message.
+fn user_facing_stderr(stderr: &str) -> String {
+    let tail_start = STAGE_MARKERS
+        .iter()
+        .filter_map(|m| stderr.rfind(m).map(|i| i + m.len()))
+        .max()
+        .unwrap_or(0);
+    let mut tail = stderr[tail_start..].to_string();
+    for marker in STAGE_MARKERS.iter().chain(&[
+        ALREADY_CLONED_MARKER,
+        NOT_A_GIT_REPO_MARKER,
+        NO_GIT_IDENTITY_MARKER,
+        ORIGIN_URL_BEGIN_MARKER,
+        ORIGIN_URL_END_MARKER,
+        ORIGIN_CHANGED_MARKER,
+    ]) {
+        tail = tail.replace(marker, "");
+    }
+    tail.lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("hint:"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-/// [`new_project_script`]'s failure at `dest` on `host`, mapped to an
-/// `IpcError`. Deliberately NOT [`git_error`]: a clone failure always means
-/// `dest` is safe to consider untouched (nothing to resume, nothing kept),
-/// but a `new` failure can leave a REAL, usable local repository behind —
-/// this reads [`last_stage`] to say exactly what state `dest` is actually
-/// in, rather than reusing `git_error`'s "couldn't clone" wording (wrong
-/// here) or its blanket `E_EXISTS`-on-exit-3 convention (shared only for the
-/// truly-already-done case, which this script signals the same way).
+/// [`new_project_script`]'s (or [`push_only_script`]'s) failure at `dest`
+/// on `host`, mapped to an `IpcError`. Deliberately NOT [`git_error`]: a
+/// clone failure always means `dest` is safe to consider untouched (nothing
+/// to resume, nothing kept), but a `new` failure can leave a REAL, usable
+/// local repository behind — this reads [`last_stage`] to say exactly what
+/// state `dest` is actually in, rather than reusing `git_error`'s "couldn't
+/// clone" wording (wrong here) or its blanket `E_EXISTS`-on-exit-3
+/// convention (shared only for the truly-already-done case, which this
+/// script signals the same way). The raw stderr never reaches the message:
+/// only [`user_facing_stderr`] does.
 fn new_project_error(
     host: &str,
     owner: &str,
@@ -587,10 +834,10 @@ fn new_project_error(
 ) -> IpcError {
     let stderr_raw = String::from_utf8_lossy(&out.stderr).to_string();
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let detail = |raw: &str| -> String {
-        let s = raw.trim();
+    let detail = || -> String {
+        let s = user_facing_stderr(&stderr_raw);
         if !s.is_empty() {
-            s.to_string()
+            s
         } else if !stdout.is_empty() {
             stdout.clone()
         } else {
@@ -598,6 +845,15 @@ fn new_project_error(
         }
     };
 
+    if out.status.code() == Some(3) && stderr_raw.contains(ORIGIN_CHANGED_MARKER) {
+        return IpcError::new(
+            codes::E_EXISTS,
+            format!(
+                "the origin remote of {dest} on {host} changed before the push; nothing was \
+                 pushed. Check `git -C {dest} remote -v`."
+            ),
+        );
+    }
     if out.status.code() == Some(3) && stderr_raw.contains(ALREADY_CLONED_MARKER) {
         return IpcError::new(
             codes::E_EXISTS,
@@ -628,7 +884,7 @@ fn new_project_error(
                 "created {dest} on {host}, and the GitHub repository {owner}/{repo} may already \
                  exist, but pushing to it failed: {}. The local repository is kept; check \
                  GitHub and retry if needed.",
-                detail(&stderr_raw)
+                detail()
             ),
         ),
         Some(STAGE_GH_CREATE) if out.status.code() == Some(127) => IpcError::new(
@@ -643,15 +899,12 @@ fn new_project_error(
             format!(
                 "created {dest} on {host}, but `gh repo create` failed: {}. The local \
                  repository is kept; retry to create it on GitHub.",
-                detail(&stderr_raw)
+                detail()
             ),
         ),
         _ => IpcError::new(
             codes::E_GIT_SETUP,
-            format!(
-                "couldn't set up {owner}/{repo} on {host}: {}",
-                detail(&stderr_raw)
-            ),
+            format!("couldn't set up {owner}/{repo} on {host}: {}", detail()),
         ),
     }
 }
@@ -987,6 +1240,43 @@ fn refuse_existing_project(store: &Mutex<Store>, owner: &str, repo: &str) -> Res
         ));
     }
     Ok(())
+}
+
+/// `new`'s existing-project check: [`refuse_existing_project`]'s rule, with
+/// one exception. When `create_remote` is set and a row for the same
+/// `owner/repo` (case-insensitively) is already registered at exactly
+/// `local_base` — the path this call would register — it is the row a
+/// previous `create_remote` attempt left behind when its GitHub half failed
+/// (see `new_source`), so the call is let through to resume that attempt
+/// and `Some((owner, repo))` returns the row's own casing for the
+/// re-registration (`register` is an upsert). Every other existing-project
+/// case refuses exactly like [`refuse_existing_project`]. Takes and drops
+/// the lock; no `.await` while held.
+fn existing_project_or_resume(
+    store: &Mutex<Store>,
+    owner: &str,
+    repo: &str,
+    local_base: &str,
+    create_remote: bool,
+) -> Result<Option<(String, String)>, IpcError> {
+    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let same_name: Vec<_> = s
+        .list_projects()?
+        .into_iter()
+        .filter(|p| p.owner.eq_ignore_ascii_case(owner) && p.repo.eq_ignore_ascii_case(repo))
+        .collect();
+    if same_name.is_empty() {
+        return Ok(None);
+    }
+    if create_remote {
+        if let Some(p) = same_name.iter().find(|p| p.base_path == local_base) {
+            return Ok(Some((p.owner.clone(), p.repo.clone())));
+        }
+    }
+    Err(IpcError::new(
+        codes::E_EXISTS,
+        format!("{owner}/{repo} is already a fleet project"),
+    ))
 }
 
 /// `base_path` already names another project's row. Nothing about adopting a
@@ -2094,8 +2384,13 @@ mod tests {
             script.contains("gh repo create 'acme/widget' --private"),
             "{script}"
         );
+        // (`git remote get-url --push` elsewhere in the script is a read.)
+        let gh_line = script
+            .lines()
+            .find(|l| l.starts_with("gh repo create"))
+            .unwrap();
         assert!(
-            !script.contains("--push"),
+            !gh_line.contains("--push"),
             "create and push must be SEPARATE steps: {script}"
         );
         assert!(script.contains("git push -u origin main"), "{script}");
@@ -2147,10 +2442,10 @@ mod tests {
         add_project_with(new_args(Some(token.clone())), &store, &fake)
             .await
             .unwrap();
-        // A THIRD-party project row with the same owner/repo now exists, so
-        // drive the token check directly rather than through
-        // `add_project_with` (which would fail on `refuse_existing_project`
-        // first and never even look at the token on this replay).
+        // Drive the token check directly: through `add_project_with` a
+        // replay would be let through `existing_project_or_resume` (same
+        // row, same path) and then simply mint a new token, which says
+        // nothing about whether the OLD one is still accepted.
         let now = Instant::now();
         assert!(
             !confirm_tokens().consume(&token, "vps", "acme", "widget", now),
@@ -2590,13 +2885,9 @@ mod tests {
             err.message
         );
 
-        let log = std::process::Command::new("git")
-            .args(["-C", dest.to_str().unwrap(), "log"])
-            .output()
-            .unwrap();
         assert!(
-            !log.status.success(),
-            "there must be no commit — and so no placeholder-authored commit — at all"
+            !dest.exists(),
+            "the identity check must run before mkdir, leaving nothing behind to resume"
         );
     }
 
@@ -2888,6 +3179,567 @@ mod tests {
             .unwrap();
         assert!(pushed.status.success(), "{pushed:?}");
         assert_eq!(String::from_utf8_lossy(&pushed.stdout).lines().count(), 1);
+    }
+
+    // ── recovery: retries the error messages prescribe must really work ─────
+
+    /// Run git with the TEST process's environment, for setting up and
+    /// inspecting fixtures only — never for the code under test.
+    fn git_at(dir: &Path, args: &[&str]) -> std::process::Output {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap()
+    }
+
+    fn commit_count(dir: &Path) -> usize {
+        let out = git_at(dir, &["log", "--oneline"]);
+        if !out.status.success() {
+            return 0;
+        }
+        String::from_utf8_lossy(&out.stdout).lines().count()
+    }
+
+    fn bare_repo() -> tempfile::TempDir {
+        let bare = tempfile::tempdir().unwrap();
+        assert!(git_at(bare.path(), &["init", "-q", "--bare"])
+            .status
+            .success());
+        bare
+    }
+
+    /// A `gh` stub that records it was called (by touching `called`) and
+    /// wires `bare` up as `origin`, exactly like `gh repo create --remote
+    /// origin` would with a real GitHub repository.
+    fn write_working_gh(dir: &Path, called: &Path, bare: &Path) {
+        write_stub_gh(
+            dir,
+            &format!(
+                "touch {}\ngit remote add origin {}\n",
+                crate::shell::quote(called.to_str().unwrap()),
+                crate::shell::quote(bare.to_str().unwrap())
+            ),
+        );
+    }
+
+    fn identity_gitconfig(home: &Path) -> std::path::PathBuf {
+        let path = home.join("global.gitconfig");
+        std::fs::write(&path, "[user]\n\tname = T\n\temail = t@t\n").unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn a_missing_identity_leaves_nothing_behind_and_the_retry_commits_and_pushes() {
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("acme").join("widget");
+        let script = new_project_script(dest.to_str().unwrap(), "acme", "widget", true);
+
+        // Attempt 1: no identity anywhere. No stub either — the guard `gh`
+        // would exit 99 if the script ever got that far.
+        let empty_bin = tempfile::tempdir().unwrap();
+        let out1 = run_hermetic(&script, empty_bin.path(), home.path(), "/dev/null").await;
+        assert_eq!(out1.status.code(), Some(5), "{out1:?}");
+        assert!(
+            !dest.exists(),
+            "a refused identity must leave no directory to resume from"
+        );
+
+        // The user follows the message: configure an identity, then retry.
+        let gitconfig = identity_gitconfig(home.path());
+        let bare = bare_repo();
+        let gh_bin = tempfile::tempdir().unwrap();
+        let called = gh_bin.path().join("called");
+        write_working_gh(gh_bin.path(), &called, bare.path());
+        let out2 = run_hermetic(
+            &script,
+            gh_bin.path(),
+            home.path(),
+            gitconfig.to_str().unwrap(),
+        )
+        .await;
+        assert!(out2.status.success(), "{out2:?}");
+        assert_eq!(commit_count(&dest), 1, "the retry must make the commit");
+        assert!(called.exists(), "the gh stub must have been called");
+        let pushed = git_at(bare.path(), &["log", "--oneline", "main"]);
+        assert!(
+            pushed.status.success(),
+            "main must reach the remote: {pushed:?}"
+        );
+        assert_eq!(String::from_utf8_lossy(&pushed.stdout).lines().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn resuming_a_repo_whose_commit_failed_commits_before_the_gh_stage() {
+        // `git init` succeeded but the commit did not (e.g. `commit.gpgsign`
+        // with no TTY): a repo with no HEAD and no origin. The retry must
+        // commit before `gh`, or the push has no `main` to send.
+        let home = tempfile::tempdir().unwrap();
+        let gitconfig = identity_gitconfig(home.path());
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("widget");
+        std::fs::create_dir_all(&dest).unwrap();
+        assert!(git_at(&dest, &["init", "-q"]).status.success());
+        assert!(git_at(&dest, &["symbolic-ref", "HEAD", "refs/heads/main"])
+            .status
+            .success());
+        assert_eq!(commit_count(&dest), 0);
+
+        let bare = bare_repo();
+        let gh_bin = tempfile::tempdir().unwrap();
+        let called = gh_bin.path().join("called");
+        write_working_gh(gh_bin.path(), &called, bare.path());
+        let script = new_project_script(dest.to_str().unwrap(), "acme", "widget", true);
+        let out = run_hermetic(
+            &script,
+            gh_bin.path(),
+            home.path(),
+            gitconfig.to_str().unwrap(),
+        )
+        .await;
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(commit_count(&dest), 1);
+        assert!(called.exists());
+        assert!(git_at(bare.path(), &["rev-parse", "--verify", "main"])
+            .status
+            .success());
+
+        // Without create_remote the same resume must not report success on
+        // an empty repo either.
+        let dest2 = root.path().join("local-only");
+        std::fs::create_dir_all(&dest2).unwrap();
+        assert!(git_at(&dest2, &["init", "-q"]).status.success());
+        let empty_bin = tempfile::tempdir().unwrap();
+        let script2 = new_project_script(dest2.to_str().unwrap(), "acme", "local-only", false);
+        let out2 = run_hermetic(&script2, empty_bin.path(), home.path(), "/dev/null").await;
+        assert!(out2.status.success(), "{out2:?}");
+        assert_eq!(commit_count(&dest2), 1);
+    }
+
+    #[tokio::test]
+    async fn a_repo_with_origin_and_a_commit_reports_its_push_url_and_pushes_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let gitconfig = identity_gitconfig(home.path());
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("widget");
+        std::fs::create_dir_all(&dest).unwrap();
+        let bare = bare_repo();
+        assert!(git_at(&dest, &["init", "-q"]).status.success());
+        assert!(git_at(
+            &dest,
+            &[
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "x"
+            ]
+        )
+        .status
+        .success());
+        assert!(git_at(
+            &dest,
+            &["remote", "add", "origin", bare.path().to_str().unwrap()]
+        )
+        .status
+        .success());
+
+        // No stub: reaching `gh` would hit the guard (exit 99).
+        let empty_bin = tempfile::tempdir().unwrap();
+        let script = new_project_script(dest.to_str().unwrap(), "acme", "widget", true);
+        let out = run_hermetic(
+            &script,
+            empty_bin.path(),
+            home.path(),
+            gitconfig.to_str().unwrap(),
+        )
+        .await;
+        assert_eq!(out.status.code(), Some(6), "{out:?}");
+        assert!(origin_already_set(&out));
+        assert_eq!(
+            origin_url_from(&out).as_deref(),
+            Some(bare.path().to_str().unwrap())
+        );
+        assert_eq!(
+            git_at(bare.path(), &["for-each-ref"]).stdout,
+            b"",
+            "nothing may be pushed before the caller verifies the origin"
+        );
+    }
+
+    #[tokio::test]
+    async fn push_only_script_pushes_to_the_verified_origin_and_refuses_a_changed_one() {
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("widget");
+        std::fs::create_dir_all(&dest).unwrap();
+        let bare = bare_repo();
+        assert!(git_at(&dest, &["init", "-q"]).status.success());
+        assert!(git_at(&dest, &["symbolic-ref", "HEAD", "refs/heads/main"])
+            .status
+            .success());
+        assert!(git_at(
+            &dest,
+            &[
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "x"
+            ]
+        )
+        .status
+        .success());
+        let bare_url = bare.path().to_str().unwrap();
+        assert!(git_at(&dest, &["remote", "add", "origin", bare_url])
+            .status
+            .success());
+        let empty_bin = tempfile::tempdir().unwrap();
+
+        // The verified URL is not what `origin` holds: refuse, push nothing.
+        let changed =
+            push_only_script(dest.to_str().unwrap(), "https://github.com/acme/widget.git");
+        let out = run_hermetic(&changed, empty_bin.path(), home.path(), "/dev/null").await;
+        assert_eq!(out.status.code(), Some(3), "{out:?}");
+        assert_eq!(git_at(bare.path(), &["for-each-ref"]).stdout, b"");
+        let err = new_project_error("vps", "acme", "widget", "/p/acme/widget", &out);
+        assert_eq!(err.code, codes::E_EXISTS);
+        assert!(
+            err.message.contains("nothing was pushed"),
+            "{}",
+            err.message
+        );
+
+        // The verified URL matches: exactly the push, and it lands.
+        let ok = push_only_script(dest.to_str().unwrap(), bare_url);
+        let out = run_hermetic(&ok, empty_bin.path(), home.path(), "/dev/null").await;
+        assert!(out.status.success(), "{out:?}");
+        assert!(git_at(bare.path(), &["rev-parse", "--verify", "main"])
+            .status
+            .success());
+    }
+
+    #[test]
+    fn origin_is_github_repo_accepts_only_this_repository_on_github() {
+        for url in [
+            "https://github.com/acme/widget.git",
+            "https://github.com/Acme/Widget",
+            "git@github.com:acme/widget.git",
+            "ssh://git@github.com/acme/widget",
+        ] {
+            assert!(origin_is_github_repo(url, "acme", "widget"), "{url}");
+        }
+        for url in [
+            "https://github.com/acme/other.git",
+            "git@github.com:someone/widget.git",
+            "https://gitlab.com/acme/widget.git",
+            "acme/widget", // a local relative path, not GitHub
+            "/srv/git/acme/widget.git",
+            "https://token@github.com/acme/widget.git",
+            "",
+        ] {
+            assert!(!origin_is_github_repo(url, "acme", "widget"), "{url}");
+        }
+    }
+
+    #[test]
+    fn new_project_scripts_never_let_git_prompt_for_credentials() {
+        // The same script text runs locally and over SSH, so asserting the
+        // text covers both paths.
+        for script in [
+            new_project_script("/p/acme/widget", "acme", "widget", true),
+            new_project_script("/p/acme/widget", "acme", "widget", false),
+            push_only_script("/p/acme/widget", "https://github.com/acme/widget.git"),
+        ] {
+            assert!(
+                script.contains("export GIT_TERMINAL_PROMPT=0\n"),
+                "{script}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_project_error_shows_only_the_stderr_after_the_last_stage_marker() {
+        let out = output_with(
+            1,
+            &format!(
+                "{STAGE_INIT}\nhint: Using 'master' as the name for the initial branch.\n\
+                 hint: to suppress this, set init.defaultBranch\n\
+                 Initialized empty Git repository in /p/acme/widget/.git/\n\
+                 {STAGE_COMMIT}\nearlier noise\n{STAGE_GH_CREATE}\n\
+                 hint: stray hint\nHTTP 422: name already exists on this account\n"
+            ),
+        );
+        let err = new_project_error("vps", "acme", "widget", "/p/acme/widget", &out);
+        assert_eq!(err.code, codes::E_GH);
+        assert!(err.message.contains("HTTP 422"), "{}", err.message);
+        for leaked in [
+            "__",
+            "stage=",
+            "hint:",
+            "earlier noise",
+            "Initialized empty",
+        ] {
+            assert!(!err.message.contains(leaked), "{leaked}: {}", err.message);
+        }
+    }
+
+    /// `(host, local_base)` exactly as `new_source` would compute them for
+    /// `acme/widget` on `vps`.
+    fn local_base_for(store: &Mutex<Store>) -> String {
+        let (_, local_root, layout) = roots(store, "vps").unwrap();
+        layout.project_dir(&local_root, "acme", "widget")
+    }
+
+    fn new_remote_args(confirm: Option<String>) -> AddProjectArgs {
+        AddProjectArgs {
+            host_alias: "vps".into(),
+            source: AddProjectSource::New {
+                owner: "acme".into(),
+                repo: "widget".into(),
+                create_remote: true,
+                confirm,
+            },
+            call_id: None,
+        }
+    }
+
+    fn mint_vps_widget() -> String {
+        confirm_tokens().mint("vps", "acme", "widget", Instant::now())
+    }
+
+    fn reply_with_stderr(code: i32, stderr: &str) -> Reply {
+        Reply::Exit {
+            code,
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_create_remote_retry_after_a_gh_failure_resumes_instead_of_refusing() {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        fake.on(Match::Any, Reply::ok("")).with_home("/home/u");
+        fake.on(
+            Match::script_contains("git init"),
+            reply_with_stderr(
+                1,
+                &format!("{STAGE_INIT}\n{STAGE_COMMIT}\n{STAGE_GH_CREATE}\ngh: HTTP 502"),
+            ),
+        );
+
+        // Attempt 1 fails at the gh stage; the repo has a HEAD (the probe
+        // answers ok), so the row is registered.
+        let err = add_project_with(new_remote_args(Some(mint_vps_widget())), &store, &fake)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_GH);
+        assert!(err.message.contains("retry"), "{}", err.message);
+        assert_eq!(store.lock().unwrap().list_projects().unwrap().len(), 1);
+
+        // Attempt 2, as the message prescribes, with a fresh confirmation:
+        // it must NOT be refused as "already a fleet project".
+        fake.on(
+            Match::script_contains("git init"),
+            reply_with_stderr(0, &format!("{STAGE_GH_CREATE}\n{STAGE_GH_PUSH}\n")),
+        );
+        let row = add_project_with(new_remote_args(Some(mint_vps_widget())), &store, &fake)
+            .await
+            .unwrap();
+        assert_eq!(
+            (row.project.owner.as_str(), row.project.repo.as_str()),
+            ("acme", "widget")
+        );
+        let gh_scripts = fake
+            .calls_for("vps")
+            .iter()
+            .filter_map(|c| c.script())
+            .filter(|s| s.contains("gh repo create"))
+            .count();
+        assert_eq!(gh_scripts, 2, "the retry must actually run the script");
+        assert_eq!(
+            store.lock().unwrap().list_projects().unwrap().len(),
+            1,
+            "the retry re-registers the same row"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_gh_stage_failure_with_no_head_is_not_registered() {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        fake.on(Match::Any, Reply::ok("")).with_home("/home/u");
+        // The HEAD probe finds no commit.
+        fake.on(
+            Match::script_contains("rev-parse --verify -q HEAD"),
+            Reply::fail(1, ""),
+        );
+        fake.on(
+            Match::script_contains("git init"),
+            reply_with_stderr(
+                1,
+                &format!("{STAGE_GH_CREATE}\n{STAGE_GH_PUSH}\nsrc refspec main does not match any"),
+            ),
+        );
+        let err = add_project_with(new_remote_args(Some(mint_vps_widget())), &store, &fake)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_GH);
+        assert!(
+            store.lock().unwrap().list_projects().unwrap().is_empty(),
+            "a repo without a commit must not be registered"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retry_after_a_failed_push_verifies_origin_then_pushes_only() {
+        let store = store_with_no_projects();
+        let local_base = local_base_for(&store);
+        store
+            .lock()
+            .unwrap()
+            .upsert_project("acme", "widget", &local_base)
+            .unwrap();
+        let fake = FakeSsh::new();
+        fake.on(Match::Any, Reply::ok("")).with_home("/home/u");
+        fake.on(
+            Match::script_contains("git init"),
+            reply_with_stderr(
+                6,
+                &format!(
+                    "{ORIGIN_URL_BEGIN_MARKER}\nhttps://github.com/acme/widget.git\n{ORIGIN_URL_END_MARKER}\n"
+                ),
+            ),
+        );
+        fake.on(
+            Match::script_contains(ORIGIN_CHANGED_MARKER),
+            reply_with_stderr(0, &format!("{STAGE_GH_PUSH}\n")),
+        );
+        add_project_with(new_remote_args(Some(mint_vps_widget())), &store, &fake)
+            .await
+            .unwrap();
+        let push_scripts: Vec<String> = fake
+            .calls_for("vps")
+            .iter()
+            .filter_map(|c| c.script())
+            .filter(|s| s.contains(ORIGIN_CHANGED_MARKER))
+            .collect();
+        assert_eq!(push_scripts.len(), 1);
+        assert!(
+            push_scripts[0].contains("'https://github.com/acme/widget.git'"),
+            "{}",
+            push_scripts[0]
+        );
+        assert!(!push_scripts[0].contains("gh repo create"));
+    }
+
+    #[tokio::test]
+    async fn an_origin_pointing_at_a_different_repository_is_refused_without_a_push() {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        fake.on(Match::Any, Reply::ok("")).with_home("/home/u");
+        fake.on(
+            Match::script_contains("git init"),
+            reply_with_stderr(
+                6,
+                &format!(
+                    "{ORIGIN_URL_BEGIN_MARKER}\ngit@github.com:someone-else/widget.git\n{ORIGIN_URL_END_MARKER}\n"
+                ),
+            ),
+        );
+        let err = add_project_with(new_remote_args(Some(mint_vps_widget())), &store, &fake)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_EXISTS);
+        assert!(err.message.contains("refusing to push"), "{}", err.message);
+        assert!(!err.message.contains("__"), "{}", err.message);
+        let pushed = fake.calls_for("vps").iter().any(|c| {
+            c.script().is_some_and(|s| {
+                s.contains(ORIGIN_CHANGED_MARKER) || s == "git push -u origin main"
+            })
+        });
+        assert!(!pushed, "no push script may run for an unverified origin");
+        assert!(store.lock().unwrap().list_projects().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_existing_project_elsewhere_is_refused_without_consuming_the_token() {
+        let store = store_with_no_projects();
+        store
+            .lock()
+            .unwrap()
+            .upsert_project("Acme", "Widget", "/somewhere/else")
+            .unwrap();
+        let fake = FakeSsh::new();
+        let token = mint_vps_widget();
+        let err = add_project_with(new_remote_args(Some(token.clone())), &store, &fake)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_EXISTS);
+        assert!(fake.calls().is_empty());
+        assert!(
+            confirm_tokens().consume(&token, "vps", "acme", "widget", Instant::now()),
+            "a refused call must not burn the user's confirmation"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_registered_project_at_the_same_path_still_refuses_without_create_remote() {
+        let store = store_with_no_projects();
+        let local_base = local_base_for(&store);
+        store
+            .lock()
+            .unwrap()
+            .upsert_project("acme", "widget", &local_base)
+            .unwrap();
+        let fake = FakeSsh::new();
+        let mut args = new_remote_args(None);
+        if let AddProjectSource::New { create_remote, .. } = &mut args.source {
+            *create_remote = false;
+        }
+        let err = add_project_with(args, &store, &fake).await.unwrap_err();
+        assert_eq!(err.code, codes::E_EXISTS);
+        assert!(fake.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_remote_on_the_local_host_is_refused_under_test() {
+        let projects_root = tempfile::tempdir().unwrap();
+        let store = store_with_no_projects();
+        set_local_projects_root(&store, projects_root.path());
+        let fake = FakeSsh::new();
+        let token = confirm_tokens().mint("local", "acme", "widget", Instant::now());
+        let err = add_project_with(
+            AddProjectArgs {
+                host_alias: "local".into(),
+                source: AddProjectSource::New {
+                    owner: "acme".into(),
+                    repo: "widget".into(),
+                    create_remote: true,
+                    confirm: Some(token),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_FORBIDDEN);
+        assert!(err.message.contains("real gh"), "{}", err.message);
+        assert!(!projects_root.path().join("acme").exists());
+        assert!(store.lock().unwrap().list_projects().unwrap().is_empty());
     }
 
     #[tokio::test]
