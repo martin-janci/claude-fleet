@@ -492,6 +492,37 @@ mod tests {
         assert!(ids.contains(&inside), "rows under the root are left alone");
     }
 
+    /// `service::add_project`'s `clone` and `new` sources on a REMOTE host
+    /// register `base_path` as the LOCAL path the project would occupy — under
+    /// the projects root, but with nothing on this machine's disk. The local
+    /// scan can never rediscover it, so the refresh sweep must treat "under the
+    /// root and missing on disk" as normal, not stale. If this fails, remotely
+    /// added projects vanish from the sidebar on the next refresh.
+    #[tokio::test]
+    async fn a_remotely_added_project_survives_refresh_though_absent_locally() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let id = {
+            let s = store.lock().unwrap();
+            let map = serde_json::json!({ "local": tmp.path().to_string_lossy() }).to_string();
+            settings::set(&s, settings::PROJECTS_BASE_PATH, &map).unwrap();
+            // Exactly what add_project registers for a clone on another host:
+            // <local root>/<owner>/<repo>, never created locally.
+            let base = tmp.path().join("acme").join("widget");
+            assert!(
+                !base.exists(),
+                "the local checkout must not exist for this test"
+            );
+            s.upsert_project("acme", "widget", &base.to_string_lossy())
+                .unwrap()
+        };
+        let rows = refresh_projects(&store).await.unwrap();
+        assert!(
+            rows.iter().any(|r| r.project.id == id),
+            "a project added on a remote host must survive a local refresh"
+        );
+    }
+
     /// The Task 3 CRITICAL fix: an adopted row (`service::add_project`'s
     /// `folder` source) is outside-root and unrediscovered by construction —
     /// that must never be read as staleness. A plain (non-adopted) row in the
