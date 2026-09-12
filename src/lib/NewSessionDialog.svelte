@@ -24,12 +24,16 @@
     onCreate,
     onCancel,
     initialName,
+    initialHost,
   }: {
     project: ProjectTreeRow;
     onCreate: (s: SessionRow) => void;
     onCancel: () => void;
     /** Pre-fill the friendly name (the quick switcher's query). */
     initialName?: string;
+    /** Preselect this host (e.g. where Add project just put the project);
+     *  wins over the remembered choices while it is pickable. */
+    initialHost?: string;
   } = $props();
 
   // The project is fixed for the dialog's lifetime (the parent remounts for
@@ -79,7 +83,9 @@
     );
   }
   let chosenHost = $state<string>(
-    untrack(() => [memory?.host, readPref('last-host', '', isString)].find(usableHost) ?? 'local'),
+    untrack(
+      () => [initialHost, memory?.host, readPref('last-host', '', isString)].find(usableHost) ?? 'local',
+    ),
   );
   $effect(() => {
     writePref('last-host', chosenHost);

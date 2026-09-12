@@ -48,12 +48,16 @@ function sessionFor(projectId: number | null, name = `dev-${projectId ?? 'orphan
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
 }));
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  open: vi.fn(),
+}));
 
 // Wrap the memoised index builders in call-through spies so the scale test
 // below can assert they run once per render, not once per row.
 vi.mock('./sidebar_index', { spy: true });
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
+import { open as mockedOpen } from '@tauri-apps/plugin-dialog';
 import { buildSessionsByProject, buildRelatedCountById } from './sidebar_index';
 import { get } from 'svelte/store';
 import Sidebar from './Sidebar.svelte';
@@ -608,6 +612,54 @@ describe('Sidebar (sessions-grouped view)', () => {
     await vi.waitFor(() => expect(screen.queryByTestId('add-project-dialog')).toBeNull());
     expect(screen.getByRole('heading', { name: /New session/ }).textContent).toContain('newowner/fresh-repo');
     expect(get(projects).some((p) => p.project.id === 42)).toBe(true);
+  });
+
+  it('adopting a folder while a remote host is chosen opens NewSessionDialog on local', async () => {
+    const added = {
+      project: { id: 43, owner: 'me', repo: 'thing', base_path: '/Users/me/code/thing', last_session_at: null, adopted: true },
+      worktrees: [],
+    };
+    mockBackend(fakeProjects, []);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (cmd: string, args?: unknown) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: unknown) =>
+      cmd === 'add_project' ? added : base(cmd, args),
+    );
+    (mockedOpen as ReturnType<typeof vi.fn>).mockResolvedValue('/Users/me/code/thing');
+    hosts.set([
+      { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
+      { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
+    ]);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('new-session-footer'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('add-project-row'));
+    await tick();
+    const chipFor = (alias: string) =>
+      Array.from(document.querySelectorAll<HTMLButtonElement>('.host-pick')).find((b) => b.textContent?.trim() === alias)!;
+    await fireEvent.click(chipFor('mefistos'));
+    await fireEvent.click(screen.getByTestId('add-mode-folder'));
+    await fireEvent.click(screen.getByTestId('choose-folder'));
+    await vi.waitFor(() => expect((screen.getByTestId('add-create') as HTMLButtonElement).disabled).toBe(false));
+    await fireEvent.click(screen.getByTestId('add-create'));
+    await vi.waitFor(() => expect(screen.queryByTestId('add-project-dialog')).toBeNull());
+    expect(screen.getByRole('heading', { name: /New session/ }).textContent).toContain('me/thing');
+    expect(document.querySelector('.host-pick.active')?.textContent?.trim()).toBe('local');
+  });
+
+  it('a native <dialog> close on NewSessionDialog still closes it (Modal reopen only when the parent declines)', async () => {
+    mockBackend(fakeProjects, []);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('new-session-footer'));
+    await tick();
+    await fireEvent.click(screen.getByText('claude-fleet'));
+    await tick();
+    const dlg = screen.getByRole('dialog', { name: 'New session' }) as HTMLDialogElement;
+    dlg.removeAttribute('open');
+    dlg.dispatchEvent(new Event('close'));
+    await tick(); await tick();
+    expect(screen.queryByRole('dialog', { name: 'New session' })).toBeNull();
   });
 
   it('exposes a "1d" recency pill (replaces older "today")', async () => {

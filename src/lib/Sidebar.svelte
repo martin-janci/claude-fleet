@@ -329,6 +329,8 @@
   let dialogProject: ProjectTreeRow | null = $state(null);
   let showProjectPicker = $state(false);
   let showAddProject = $state(false);
+  /** Host to preselect in NewSessionDialog: where Add project put the project. */
+  let dialogHost: string | undefined = $state(undefined);
 
   // Onboarding card actions — open the same flows as existing UI.
   const openAddHost = () => { showSettings = true; };
@@ -336,6 +338,7 @@
 
   function openNew(p: ProjectTreeRow, e?: Event) {
     e?.stopPropagation();
+    dialogHost = undefined;
     dialogProject = p;
     showProjectPicker = false;
   }
@@ -347,8 +350,9 @@
 
   // The user added a project in order to start a session in it: go straight
   // to NewSessionDialog on the new row (already merged into `projects`).
-  function onProjectAdded(row: ProjectTreeRow) {
+  function onProjectAdded(row: ProjectTreeRow, host: string) {
     showAddProject = false;
+    dialogHost = host;
     dialogProject = row;
   }
 
@@ -782,7 +786,7 @@
 {/if}
 
 {#if dialogProject}
-  <NewSessionDialog project={dialogProject} onCreate={onCreated} {onCancel} />
+  <NewSessionDialog project={dialogProject} initialHost={dialogHost} onCreate={onCreated} {onCancel} />
 {/if}
 
 {#if pendingKill}

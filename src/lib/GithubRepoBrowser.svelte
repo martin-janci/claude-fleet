@@ -2,11 +2,22 @@
   // The Add-project dialog's "My GitHub" mode: the repositories `gh` can see
   // on one host, filtered client-side. Picking a row hands its
   // `owner/repo` back to the dialog, which switches to clone mode with it.
+  import { untrack } from 'svelte';
   import { listGithubRepos, type GithubRepo } from './projects';
   import PickerList from './PickerList.svelte';
   import type { PickerItem } from './PickerList.svelte';
 
-  let { host, onpick }: { host: string; onpick: (nameWithOwner: string) => void } = $props();
+  let {
+    host,
+    onpick,
+    autofocus = false,
+  }: {
+    host: string;
+    onpick: (nameWithOwner: string) => void;
+    /** Move focus to the filter box once the list lands (the mode was opened
+     *  with a click / Enter, not arrowed past on the way to another mode). */
+    autofocus?: boolean;
+  } = $props();
 
   type ListState =
     | { status: 'loading' }
@@ -15,12 +26,17 @@
   let list = $state<ListState>({ status: 'loading' });
   let filter = $state('');
   let activeKey = $state<string | null>(null);
+  /** Bumped by Retry to re-run the listing for the same host. */
+  let attempt = $state(0);
+  let filterEl: HTMLInputElement | undefined = $state();
+  let wantFocus = untrack(() => autofocus);
 
   // A slow reply for a previous host must not land after a newer request
   // (same guard as NewSessionDialog's `scanSeq`).
   let seq = 0;
   $effect(() => {
     const h = host;
+    void attempt;
     const mine = ++seq;
     list = { status: 'loading' };
     void listGithubRepos(h).then((r) => {
@@ -53,6 +69,21 @@
       }));
   });
 
+  // Once per request for it (not on every later host switch, which would
+  // yank focus off the chip the user just pressed).
+  $effect(() => {
+    if (filterEl && wantFocus) {
+      wantFocus = false;
+      filterEl.focus();
+    }
+  });
+
+  function retry() {
+    // The Retry button disappears with the error; land the user in the list.
+    wantFocus = true;
+    attempt++;
+  }
+
   // Keep the highlight on a visible row as the filter narrows the list.
   $effect(() => {
     if (!items.some((i) => i.key === activeKey)) activeKey = items[0]?.key ?? null;
@@ -76,11 +107,13 @@
 {#if list.status === 'loading'}
   <p class="status" data-testid="gh-loading">Listing repositories on {host}…</p>
 {:else if list.status === 'error'}
-  <p class="err" data-testid="gh-error">{list.message}</p>
+  <p class="err" role="alert" data-testid="gh-error">{list.message}</p>
+  <button type="button" class="retry" data-testid="gh-retry" onclick={retry}>Retry</button>
 {:else}
   <input
     id="gh-filter"
     data-testid="gh-filter"
+    bind:this={filterEl}
     bind:value={filter}
     onkeydown={onFilterKeydown}
     placeholder="Filter repositories"
@@ -101,6 +134,16 @@
 <style>
   .status { font-size: 0.75rem; color: var(--fg-muted); margin: 0; }
   .err { color: #e64a4a; font-size: 0.8rem; margin: 0; white-space: pre-wrap; }
+  .retry {
+    align-self: flex-start;
+    font-size: 0.8rem;
+    padding: 0.2rem 0.7rem;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--fg);
+    border-radius: 4px;
+    cursor: pointer;
+  }
   input {
     font: inherit;
     padding: 0.3rem 0.4rem;

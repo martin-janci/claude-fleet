@@ -125,7 +125,10 @@ describe('AddProjectDialog', () => {
       await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'not a repo' } });
       await tick();
       expect((screen.getByTestId('add-create') as HTMLButtonElement).disabled).toBe(true);
-      expect(screen.getByTestId('add-reason').textContent).toContain('Not a GitHub repository');
+      expect(screen.getByTestId('add-url-err').textContent).toContain('Not a GitHub repository');
+      const field = screen.getByTestId('clone-url');
+      expect(field.getAttribute('aria-invalid')).toBe('true');
+      expect(field.getAttribute('aria-describedby')).toBe('add-url-err');
       await fireEvent.keyDown(screen.getByTestId('clone-url'), { key: 'Enter' });
       await flush();
       expect(calls('add_project')).toHaveLength(0);
@@ -139,7 +142,7 @@ describe('AddProjectDialog', () => {
       await fireEvent.keyDown(screen.getByTestId('clone-url'), { key: 'Enter' });
       await flush();
       expect(calls('add_project')).toHaveLength(1);
-      expect(onCreated).toHaveBeenCalledWith(row);
+      expect(onCreated).toHaveBeenCalledWith(row, 'local');
     });
   });
 
@@ -157,6 +160,25 @@ describe('AddProjectDialog', () => {
         expect(screen.getByTestId('gh-error').textContent).toBe('gh: not logged in — run gh auth login'),
       );
       expect(screen.queryByTestId('gh-list')).toBeNull();
+      expect(screen.getByTestId('gh-error').getAttribute('role')).toBe('alert');
+    });
+
+    it('Retry re-runs a failed listing, and the filter box gets focus', async () => {
+      let n = 0;
+      route({
+        list_github_repos: () => {
+          if (++n === 1) throw { code: 'E_GH', message: 'gh: network down' };
+          return [{ name_with_owner: 'o/alpha', description: null, is_private: false, updated_at: null }];
+        },
+      });
+      mount();
+      await tick();
+      await fireEvent.click(screen.getByTestId('add-mode-github'));
+      await vi.waitFor(() => expect(screen.getByTestId('gh-error')).toBeInTheDocument());
+      await fireEvent.click(screen.getByTestId('gh-retry'));
+      await vi.waitFor(() => expect(screen.getAllByTestId('gh-repo-row')).toHaveLength(1));
+      expect(calls('list_github_repos')).toHaveLength(2);
+      expect(document.activeElement).toBe(screen.getByTestId('gh-filter'));
     });
 
     it('picking a row switches to clone mode prefilled', async () => {
@@ -274,11 +296,16 @@ describe('AddProjectDialog', () => {
       await tick();
       await fillNew('-bad', 'r', false);
       expect((screen.getByTestId('add-create') as HTMLButtonElement).disabled).toBe(true);
-      expect(screen.getByTestId('add-reason').textContent).toMatch(/Owner/);
+      expect(screen.getByTestId('add-owner-err').textContent).toMatch(/Owner/);
+      expect(screen.getByTestId('new-owner').getAttribute('aria-invalid')).toBe('true');
+      expect(screen.getByTestId('new-owner').getAttribute('aria-describedby')).toBe('add-owner-err');
+      expect(screen.getByTestId('new-repo').getAttribute('aria-invalid')).toBeNull();
       await fireEvent.input(screen.getByTestId('new-owner'), { target: { value: 'o' } });
       await fireEvent.input(screen.getByTestId('new-repo'), { target: { value: '..' } });
       await tick();
-      expect(screen.getByTestId('add-reason').textContent).toMatch(/Repository/);
+      expect(screen.queryByTestId('add-owner-err')).toBeNull();
+      expect(screen.getByTestId('add-repo-err').textContent).toMatch(/Repository/);
+      expect(screen.getByTestId('new-repo').getAttribute('aria-describedby')).toBe('add-repo-err');
     });
 
     describe('with "create on GitHub"', () => {
@@ -332,7 +359,7 @@ describe('AddProjectDialog', () => {
         expect(sent).toHaveLength(2);
         expect(sent[1].args.host_alias).toBe('mefistos');
         expect(sent[1].args.source).toEqual({ kind: 'new', owner: 'o', repo: 'r', create_remote: true, confirm: TOKEN });
-        expect(onCreated).toHaveBeenCalledWith(row);
+        expect(onCreated).toHaveBeenCalledWith(row, 'mefistos');
       });
 
       it('declining sends nothing further and keeps the form', async () => {
@@ -366,6 +393,61 @@ describe('AddProjectDialog', () => {
         expect(calls('add_project')).toHaveLength(2);
         expect(screen.queryByTestId('confirm-dialog')).toBeNull();
         expect(screen.getByTestId('add-error').textContent).toMatch(/confirmation expired/);
+      });
+
+      it('editing the form under the confirmation does not change the resent request', async () => {
+        confirmRoute(() => row);
+        mount();
+        await tick();
+        await fillNew('o', 'r', true);
+        await fireEvent.click(screen.getByTestId('add-create'));
+        await flush();
+        expect(screen.getByTestId('confirm-dialog')).toBeInTheDocument();
+        await fireEvent.input(screen.getByTestId('new-owner'), { target: { value: 'x' } });
+        await fireEvent.click(screen.getByTestId('new-create-remote'));
+        await tick();
+        await fireEvent.click(screen.getByTestId('confirm-create-remote'));
+        await flush();
+        const sent = calls('add_project');
+        expect(sent).toHaveLength(2);
+        expect(sent[1].args.source).toEqual({ kind: 'new', owner: 'o', repo: 'r', create_remote: true, confirm: TOKEN });
+      });
+
+      it('a double click on Confirm sends one request', async () => {
+        const inflight = deferred();
+        confirmRoute(() => inflight.promise);
+        mount();
+        await tick();
+        await fillNew('o', 'r', true);
+        await fireEvent.click(screen.getByTestId('add-create'));
+        await flush();
+        const confirm = screen.getByTestId('confirm-create-remote');
+        confirm.click();
+        confirm.click();
+        await flush();
+        expect(calls('add_project')).toHaveLength(2);
+        inflight.resolve(row);
+        await flush();
+      });
+
+      it('in flight on local, the visible note warns about GitHub and describes the button', async () => {
+        const inflight = deferred();
+        confirmRoute(() => inflight.promise);
+        mount();
+        await tick();
+        await fillNew('o', 'r', true);
+        await fireEvent.click(screen.getByTestId('add-create'));
+        await flush();
+        await fireEvent.click(screen.getByTestId('confirm-create-remote'));
+        await flush();
+        const btn = screen.getByTestId('cancel-create');
+        expect(btn.textContent?.trim()).toBe('Cancel');
+        const note = screen.getByTestId('add-inflight-note');
+        expect(note.textContent).toMatch(/GitHub repository may already have been created/);
+        expect(note.textContent).not.toMatch(/local/);
+        expect(btn.getAttribute('aria-describedby')).toBe(note.id);
+        inflight.resolve(row);
+        await flush();
       });
 
       it('E_CANCELLED on the create_remote run shows the backend message instead of closing', async () => {
@@ -411,7 +493,7 @@ describe('AddProjectDialog', () => {
     expect(onCreated).not.toHaveBeenCalled();
   });
 
-  it('in flight on local the button is "Cancel" and fires cancel_command with callId', async () => {
+  it('in flight on local the button is "Cancel", fires cancel_command with callId, then shows Stopping…', async () => {
     const inflight = deferred();
     route({ add_project: () => inflight.promise });
     mount();
@@ -419,10 +501,15 @@ describe('AddProjectDialog', () => {
     await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'o/r' } });
     await fireEvent.click(screen.getByTestId('add-create'));
     await tick();
-    const btn = screen.getByTestId('cancel-create');
+    const btn = screen.getByTestId('cancel-create') as HTMLButtonElement;
     expect(btn.textContent?.trim()).toBe('Cancel');
+    // A local clone has nothing extra to warn about.
+    expect(screen.queryByTestId('add-inflight-note')).toBeNull();
+    expect(btn.hasAttribute('aria-describedby')).toBe(false);
     await fireEvent.click(btn);
     await tick();
+    expect(btn.textContent?.trim()).toBe('Stopping…');
+    expect(btn.disabled).toBe(true);
     const cancel = calls('cancel_command');
     expect(cancel).toHaveLength(1);
     const callId = calls('add_project')[0].args.call_id;
@@ -432,7 +519,7 @@ describe('AddProjectDialog', () => {
     expect(screen.queryByTestId('cancel-create')).toBeNull();
   });
 
-  it('in flight on a remote host the button is "Stop waiting" with a hedging tooltip', async () => {
+  it('in flight on a remote host the button is "Stop waiting" with a visible note naming the host', async () => {
     const inflight = deferred();
     route({ add_project: () => inflight.promise });
     mount();
@@ -443,7 +530,10 @@ describe('AddProjectDialog', () => {
     await tick();
     const btn = screen.getByTestId('cancel-create');
     expect(btn.textContent?.trim()).toBe('Stop waiting');
-    expect(btn.title).toMatch(/may still finish/);
+    const note = screen.getByTestId('add-inflight-note');
+    expect(note.textContent).toBe('mefistos may still finish the clone after you stop waiting.');
+    expect(note.textContent).not.toMatch(/GitHub/);
+    expect(btn.getAttribute('aria-describedby')).toBe(note.id);
     await fireEvent.click(btn);
     await tick();
     expect(calls('cancel_command')).toHaveLength(1);
@@ -460,6 +550,127 @@ describe('AddProjectDialog', () => {
     await fireEvent.click(screen.getByTestId('add-create'));
     await flush();
     expect(onCreated).toHaveBeenCalledOnce();
-    expect(onCreated).toHaveBeenCalledWith(row);
+    expect(onCreated).toHaveBeenCalledWith(row, 'local');
+  });
+
+  it('folder mode reports local as the host even when another chip was chosen', async () => {
+    route({ add_project: () => row });
+    mockedOpen.mockResolvedValue('/Users/me/code/thing');
+    const { onCreated } = mount();
+    await tick();
+    await fireEvent.click(chip('mefistos'));
+    await fireEvent.click(screen.getByTestId('add-mode-folder'));
+    await fireEvent.click(screen.getByTestId('choose-folder'));
+    await flush();
+    await fireEvent.click(screen.getByTestId('add-create'));
+    await flush();
+    expect(onCreated).toHaveBeenCalledWith(row, 'local');
+  });
+
+  it('a double click on Create sends one request', async () => {
+    const inflight = deferred();
+    route({ add_project: () => inflight.promise });
+    mount();
+    await tick();
+    await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'o/r' } });
+    const create = screen.getByTestId('add-create');
+    create.click();
+    create.click();
+    await flush();
+    expect(calls('add_project')).toHaveLength(1);
+    inflight.resolve(row);
+    await flush();
+  });
+
+  it('unmounting mid-create aborts the request', async () => {
+    const inflight = deferred();
+    route({ add_project: () => inflight.promise });
+    const onCreated = vi.fn();
+    const r = render(AddProjectDialog, { props: { onCreated, onCancel: vi.fn() } });
+    await tick();
+    await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'o/r' } });
+    await fireEvent.click(screen.getByTestId('add-create'));
+    await tick();
+    r.unmount();
+    expect(calls('cancel_command')).toHaveLength(1);
+    inflight.resolve(row);
+    await flush();
+    expect(onCreated).not.toHaveBeenCalled();
+  });
+
+  it('while busy the fields, modes and host chips are disabled', async () => {
+    const inflight = deferred();
+    route({ add_project: () => inflight.promise });
+    mount();
+    await tick();
+    await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'o/r' } });
+    await fireEvent.click(screen.getByTestId('add-create'));
+    await tick();
+    expect((screen.getByTestId('clone-url') as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByTestId('add-mode-new') as HTMLButtonElement).disabled).toBe(true);
+    expect(chip('local').disabled).toBe(true);
+    expect(chip('mefistos').disabled).toBe(true);
+    inflight.resolve(row);
+    await flush();
+    expect((screen.getByTestId('clone-url') as HTMLInputElement).disabled).toBe(false);
+  });
+
+  it('a native <dialog> close while busy leaves the dialog open', async () => {
+    const inflight = deferred();
+    route({ add_project: () => inflight.promise });
+    const { onCancel } = mount();
+    await tick();
+    await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'o/r' } });
+    await fireEvent.click(screen.getByTestId('add-create'));
+    await tick();
+    const dlg = screen.getByTestId('add-project-dialog') as HTMLDialogElement;
+    dlg.removeAttribute('open');
+    dlg.dispatchEvent(new Event('close'));
+    await flush();
+    expect(dlg.hasAttribute('open')).toBe(true);
+    expect(onCancel).not.toHaveBeenCalled();
+    inflight.reject({ code: 'E_GH', message: 'boom' });
+    await flush();
+    expect(screen.getByTestId('add-error').textContent).toBe('boom');
+  });
+
+  it('errors are announced: add-error has role=alert', async () => {
+    route({ add_project: () => { throw { code: 'E_GH', message: 'nope' }; } });
+    mount();
+    await tick();
+    await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'o/r' } });
+    await fireEvent.click(screen.getByTestId('add-create'));
+    await flush();
+    expect(screen.getByTestId('add-error').getAttribute('role')).toBe('alert');
+  });
+
+  describe('mode control', () => {
+    it('marks the active mode and host with aria-pressed', async () => {
+      route({});
+      mount();
+      await tick();
+      expect(screen.getByTestId('add-mode-clone').getAttribute('aria-pressed')).toBe('true');
+      expect(screen.getByTestId('add-mode-new').getAttribute('aria-pressed')).toBe('false');
+      expect(chip('local').getAttribute('aria-pressed')).toBe('true');
+      expect(chip('mefistos').getAttribute('aria-pressed')).toBe('false');
+      expect(screen.getByRole('group', { name: 'Host' })).toBeInTheDocument();
+    });
+
+    it('Left/Right arrows move between modes and keep focus on the control', async () => {
+      route({});
+      mount();
+      await tick();
+      const clone = screen.getByTestId('add-mode-clone');
+      clone.focus();
+      await fireEvent.keyDown(clone, { key: 'ArrowRight' });
+      await tick();
+      expect(screen.getByTestId('add-mode-github').getAttribute('aria-pressed')).toBe('true');
+      expect(document.activeElement).toBe(screen.getByTestId('add-mode-github'));
+      await fireEvent.keyDown(document.activeElement!, { key: 'ArrowLeft' });
+      await fireEvent.keyDown(document.activeElement!, { key: 'ArrowLeft' });
+      await tick();
+      expect(screen.getByTestId('add-mode-new').getAttribute('aria-pressed')).toBe('true');
+      expect(document.activeElement).toBe(screen.getByTestId('add-mode-new'));
+    });
   });
 });
