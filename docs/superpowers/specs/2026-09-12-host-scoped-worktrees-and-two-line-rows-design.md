@@ -66,12 +66,23 @@ pub async fn list_host_worktrees(
 ### `new_session` with a remote `worktree_id`
 
 `new_session_inner`'s existing-worktree arm reads the row by id. A remote
-row's `path` is the host path from the scan, so `remote_project_path_for`
-keeps deriving the cwd from the row name as today. `ensure_remote_project`
-sees the worktree directory already present and skips `worktree add`.
-A local row id sent for a remote host (stale frontend, MCP caller) is
-rejected up front with `E_INVALID_ARG`: "worktree <name> is a local
-checkout; pick one that exists on <host> or start a new worktree".
+row's `path` is the real path the scan recorded on that host, and it becomes
+the pane's cwd directly — a worktree under `.worktrees/` or anywhere else
+git has it registered therefore opens correctly, rather than being derived
+as `<project_root>/.claude/worktrees/<name>`. `ensure_remote_project` checks
+and, if missing, creates exactly that path, so a present worktree is a
+no-op. Because the path is authoritative, the repair spec marks it
+`path_is_guess: false` and its guess resolver leaves it alone.
+
+A row belonging to another host (stale frontend, MCP caller) is rejected up
+front on BOTH the local and the remote arm, with code `E_INVALID` (the
+codebase has no `E_INVALID_ARG`): "worktree <name> is a checkout on
+<row_host>; pick one that exists on <target_host> or start a new worktree".
+
+Known gap, tracked separately: if the worktree directory was deleted on the
+host but its registration remains, `git worktree add` still fails with git's
+own "already used by worktree at …" and `ensure_remote_project` returns
+before `repair::ensure_for_new_session` could unregister and recreate it.
 
 ### Frontend
 

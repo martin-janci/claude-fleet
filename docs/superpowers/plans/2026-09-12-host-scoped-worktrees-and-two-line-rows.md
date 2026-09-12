@@ -501,7 +501,7 @@ mod foreign_worktree_tests {
     #[test]
     fn a_local_row_is_refused_for_a_remote_host() {
         let err = reject_foreign_worktree("mefistos", "local", "nifty-swanson").unwrap_err();
-        assert_eq!(err.code, "E_INVALID_ARG");
+        assert_eq!(err.code, codes::E_INVALID); // the codebase has no E_INVALID_ARG
         assert!(err.message.contains("nifty-swanson"));
         assert!(err.message.contains("mefistos"));
     }
