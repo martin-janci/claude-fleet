@@ -35,18 +35,31 @@ pub fn parse_repo_url(input: &str) -> Option<(String, String)> {
     if parts.next().is_some() {
         return None;
     }
-    if !is_component(owner) || !is_component(repo) {
+    // GitHub's own limits: an owner (user/org) name is capped at 39
+    // characters, a repo name at 100.
+    if !is_component(owner, 39) || !is_component(repo, 100) {
         return None;
     }
     Some((owner.to_string(), repo.to_string()))
 }
 
-/// A safe single path component: non-empty, no `/`, not `.`/`..`, and only
-/// characters GitHub allows in an owner or repo name.
-fn is_component(s: &str) -> bool {
+/// A safe single path component. Beyond being non-empty and free of `/`,
+/// this rejects a component made entirely of dots (`.`, `..`, `...`, ...,
+/// which would otherwise let a segment resolve to the current or parent
+/// directory), the literal component `.git` case-insensitively (this
+/// codebase uses `<path>/.git` as its "is this a project" marker — see the
+/// clone script in `service/sessions/lifecycle.rs` — so a project root
+/// named `.git` would make the directory holding it resolve as a git repo
+/// itself), and anything longer than `max_len`. The character-class check
+/// below is a conservative *subset* of the characters GitHub allows in an
+/// owner or repo name — it exists to guarantee the result is safe to use as
+/// a path component, not to guarantee the name is valid or exists on
+/// GitHub.
+fn is_component(s: &str, max_len: usize) -> bool {
     !s.is_empty()
-        && s != "."
-        && s != ".."
+        && s.len() <= max_len
+        && !s.chars().all(|c| c == '.')
+        && !s.eq_ignore_ascii_case(".git")
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
@@ -97,9 +110,49 @@ mod tests {
             "../etc/passwd",
             "martin-janci/../escape",
             "o/r; rm -rf /",
+            // A `.git` component would make the parent directory resolve as
+            // a git repo (`<path>/.git` is this codebase's project marker).
+            "owner/.git.git",
+            ".git/repo",
+            "git@github.com:o/.git.git",
+            // All-dots components, beyond plain `.`/`..`.
+            ".../repo",
+            "owner/...",
+            // GitHub's length caps: 39 for owner, 100 for repo.
+            &format!("{}/repo", "a".repeat(40)),
+            &format!("owner/{}", "a".repeat(101)),
+            // Non-ASCII, control characters, and percent-encoded traversal.
+            "о/repo", // Cyrillic о (U+043E), not ASCII 'o'
+            "owner/re\0po",
+            "owner/re\npo",
+            "%2e%2e/repo",
+            // URL edge cases that must not be mistaken for github.com.
+            "https://github.com/o/r?x=1",
+            "https://user:pw@github.com/o/r",
+            "https://github.com.evil.com/o/r",
+            "git@github.com:/o/r",
+            "https://github.com:443/o/r",
         ] {
             assert_eq!(parse_repo_url(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn accepts_legitimate_dotted_components() {
+        // A leading dot alone is fine — only all-dots and the exact `.git`
+        // component are rejected.
+        assert_eq!(
+            parse_repo_url("owner/.github"),
+            Some(("owner".to_string(), ".github".to_string()))
+        );
+        assert_eq!(
+            parse_repo_url(".hidden/repo"),
+            Some((".hidden".to_string(), "repo".to_string()))
+        );
+        assert_eq!(
+            parse_repo_url("owner/repo.name"),
+            Some(("owner".to_string(), "repo.name".to_string()))
+        );
     }
 
     #[test]
@@ -108,5 +161,21 @@ mod tests {
             clone_url_for("martin-janci", "claude-fleet"),
             "git@github.com:martin-janci/claude-fleet.git"
         );
+    }
+
+    #[test]
+    fn clone_url_round_trips_through_parse() {
+        for (owner, repo) in [
+            ("martin-janci", "claude-fleet"),
+            ("owner", ".github"),
+            ("owner", "repo.name"),
+            ("a", "b"),
+        ] {
+            assert_eq!(
+                parse_repo_url(&clone_url_for(owner, repo)),
+                Some((owner.to_string(), repo.to_string())),
+                "{owner}/{repo}"
+            );
+        }
     }
 }
