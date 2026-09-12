@@ -214,6 +214,27 @@ impl SshClient {
         self.run_child(host, cmd, wall_clock, None, "E_SSH").await
     }
 
+    /// `run_bounded` that also races `token` (`E_CANCELLED`, child killed and
+    /// reaped) — the explicit-wall-clock counterpart of `run_cancellable`,
+    /// for a long command the user can abort (a large `git clone`…).
+    pub async fn run_bounded_cancellable(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+        token: CancellationToken,
+    ) -> Result<Output, IpcError> {
+        self.inner.seen.insert(host.to_string(), ());
+        let mut cmd = tokio::process::Command::new("ssh");
+        for opt in self.mux_opts(host, connect_timeout) {
+            cmd.arg(opt);
+        }
+        cmd.arg("--").arg(host).args(args);
+        self.run_child(host, cmd, wall_clock, Some(token), "E_SSH")
+            .await
+    }
+
     /// Same as `run` but races the SSH child against a `CancellationToken`.
     /// When the token fires before the command finishes, the child is sent
     /// SIGKILL via `start_kill` and explicitly `wait`ed so the OS reaps the
@@ -568,18 +589,20 @@ impl Default for SshClient {
 pub trait SshExec: Send + Sync {
     async fn run(&self, host: &str, args: &[&str], timeout: Duration) -> Result<Output, IpcError>;
 
-    /// Like `run`, but with the wall-clock bound given explicitly instead of
-    /// derived as `3 × connect_timeout`. Use this when a command legitimately
-    /// runs far longer than a reasonable connect budget (a large `git
-    /// clone`…) but a hung or unreachable host must still fail fast on the
-    /// connect step: pass a short `connect_timeout` and the real deadline as
-    /// `wall_clock`.
-    async fn run_bounded(
+    /// Like `run_cancellable`, but with the wall-clock bound given explicitly
+    /// instead of derived as `3 × connect_timeout`. Use this when a command
+    /// legitimately runs far longer than a reasonable connect budget (a large
+    /// `git clone`…) but a hung or unreachable host must still fail fast on
+    /// the connect step: pass a short `connect_timeout` and the real deadline
+    /// as `wall_clock`. When `token` fires the child is killed and reaped and
+    /// `E_CANCELLED` is returned.
+    async fn run_bounded_cancellable(
         &self,
         host: &str,
         args: &[&str],
         connect_timeout: Duration,
         wall_clock: Duration,
+        token: CancellationToken,
     ) -> Result<Output, IpcError>;
 
     async fn run_cancellable(
@@ -609,14 +632,16 @@ impl SshExec for SshClient {
         SshClient::run(self, host, args, timeout).await
     }
 
-    async fn run_bounded(
+    async fn run_bounded_cancellable(
         &self,
         host: &str,
         args: &[&str],
         connect_timeout: Duration,
         wall_clock: Duration,
+        token: CancellationToken,
     ) -> Result<Output, IpcError> {
-        SshClient::run_bounded(self, host, args, connect_timeout, wall_clock).await
+        SshClient::run_bounded_cancellable(self, host, args, connect_timeout, wall_clock, token)
+            .await
     }
 
     async fn run_cancellable(
@@ -653,15 +678,16 @@ impl<T: SshExec + ?Sized> SshExec for Arc<T> {
         (**self).run(host, args, timeout).await
     }
 
-    async fn run_bounded(
+    async fn run_bounded_cancellable(
         &self,
         host: &str,
         args: &[&str],
         connect_timeout: Duration,
         wall_clock: Duration,
+        token: CancellationToken,
     ) -> Result<Output, IpcError> {
         (**self)
-            .run_bounded(host, args, connect_timeout, wall_clock)
+            .run_bounded_cancellable(host, args, connect_timeout, wall_clock, token)
             .await
     }
 
@@ -862,15 +888,17 @@ impl SshExec for LocalExec {
         .await
     }
 
-    async fn run_bounded(
+    async fn run_bounded_cancellable(
         &self,
         host: &str,
         args: &[&str],
         _connect_timeout: Duration,
         wall_clock: Duration,
+        token: CancellationToken,
     ) -> Result<Output, IpcError> {
         let cmd = self.command(args);
-        self.bounded(host, cmd, wall_clock, None, "E_SSH").await
+        self.bounded(host, cmd, wall_clock, Some(token), "E_SSH")
+            .await
     }
 
     async fn run_cancellable(

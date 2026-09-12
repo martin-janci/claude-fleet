@@ -1,10 +1,10 @@
 //! `FakeSsh`: a scripted, recording `SshExec` for tests (OPS-8 / W4 F6).
 //!
-//! Every `run` / `run_cancellable` / `run_bounded` / `upload_file` call is
-//! appended to a call log — `(host, argv, stdin)` in order — and answered
-//! from the matching
-//! `Reply`. Rules are `(host filter, matcher, reply)`; the most recently
-//! added matching rule wins, so a test can install a broad default first and
+//! Every `run` / `run_cancellable` / `run_bounded_cancellable` /
+//! `upload_file` call is appended to a call log — `(host, argv, stdin)` in
+//! order — and answered from the matching `Reply`. Rules are
+//! `(host filter, matcher, reply)`; the most recently added matching rule
+//! wins, so a test can install a broad default first and
 //! narrow it later. A command no rule matches gets the `default` reply
 //! (exit 0, empty output, unless changed with `set_default`).
 //!
@@ -368,12 +368,13 @@ impl SshExec for FakeSsh {
         .await
     }
 
-    async fn run_bounded(
+    async fn run_bounded_cancellable(
         &self,
         host: &str,
         args: &[&str],
         _connect_timeout: Duration,
         wall_clock: Duration,
+        token: CancellationToken,
     ) -> Result<Output, IpcError> {
         // `set_wall_clock` still overrides, exactly like `run`; the caller's
         // `connect_timeout` plays no role for a fake — there is nothing to
@@ -383,7 +384,7 @@ impl SshExec for FakeSsh {
             args,
             None,
             self.wall_clock_or(wall_clock),
-            None,
+            Some(token),
             "E_SSH",
         )
         .await

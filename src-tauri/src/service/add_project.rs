@@ -15,18 +15,18 @@ use crate::store::Store;
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 /// ssh `ConnectTimeout` for a clone: a typo'd or unreachable host must fail
 /// fast, independent of how long the clone itself is allowed to run. Kept
 /// short and passed separately from [`CLONE_WALL_CLOCK`] via
-/// `SshExec::run_bounded` — `SshExec::run`'s single `timeout` argument is
+/// `SshExec::run_bounded_cancellable` — `SshExec::run`'s single `timeout` argument is
 /// BOTH the connect timeout AND (×3) the wall clock, which would otherwise
 /// force a choice between a slow-to-fail connect and a too-short clone.
 const CLONE_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Wall clock for a clone: big repos over a slow link. The frontend can
-/// cancel sooner once `add_project_with` itself races a `CancellationToken`
-/// derived from `call_id` (Task 5 — see the field's doc comment).
+/// Wall clock for a clone: big repos over a slow link. The caller can abort
+/// sooner through the `CancellationToken` `add_project_with` races.
 const CLONE_WALL_CLOCK: Duration = Duration::from_secs(600);
 
 /// Written to stderr by [`clone_script`]'s "already a checkout" guard and
@@ -59,13 +59,12 @@ pub struct AddProjectArgs {
     pub host_alias: String,
     pub source: AddProjectSource,
     /// Set by `invokeCmdAbortable` so the dialog's Cancel can abort a clone.
-    /// Registering `call_id` in the cancellation registry at the command
-    /// layer is not enough by itself: cancelling actually happens inside
-    /// THIS module, so Task 5 must have `add_project_with` accept the
-    /// resulting `CancellationToken` and race it directly — via
-    /// `SshExec::run_cancellable` for the remote branch and a
-    /// `tokio::select!` added to `run_local_script` for the local one.
-    /// Unused here.
+    /// Not read here: the command layer (Task 5) registers it in the
+    /// cancellation registry and passes the resulting `CancellationToken` to
+    /// [`add_project_with`], which races it on both clone paths
+    /// (`SshExec::run_bounded_cancellable` remotely, the token of
+    /// `local_exec::run_bash_script` locally). Registering `call_id` alone
+    /// would ship a Cancel button that does nothing.
     #[serde(default)]
     #[allow(dead_code)] // Task 5 wires this in.
     pub call_id: Option<String>,
@@ -77,14 +76,19 @@ pub async fn add_project(
     args: AddProjectArgs,
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
+    token: CancellationToken,
 ) -> Result<ProjectTreeRow, IpcError> {
-    add_project_with(args, store, &**ssh).await
+    add_project_with(args, store, &**ssh, token).await
 }
 
+/// `token` aborts a clone in flight (`E_CANCELLED`, the clone process killed
+/// and reaped, no project row written); the `folder` source is synchronous
+/// and ignores it.
 pub async fn add_project_with(
     args: AddProjectArgs,
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
+    token: CancellationToken,
 ) -> Result<ProjectTreeRow, IpcError> {
     // This becomes a Tauri-reachable entry point in Task 5, so the alias
     // must be rejected before it ever reaches an ssh argv — same guard
@@ -92,7 +96,7 @@ pub async fn add_project_with(
     // `service::transcript::fetch_transcript`, `service::hosts::add_host`).
     crate::validate::host_alias(&args.host_alias)?;
     match &args.source {
-        AddProjectSource::Clone { url } => clone_source(&args, url, store, ssh).await,
+        AddProjectSource::Clone { url } => clone_source(&args, url, store, ssh, token).await,
         AddProjectSource::Folder { path } => folder_source(&args, path, store).await,
         // Task 4.
         AddProjectSource::New { .. } => Err(IpcError::new(
@@ -107,6 +111,7 @@ async fn clone_source(
     url: &str,
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
+    token: CancellationToken,
 ) -> Result<ProjectTreeRow, IpcError> {
     let (owner, repo) = parse_repo_url(url).ok_or_else(|| {
         IpcError::new(
@@ -127,8 +132,11 @@ async fn clone_source(
     let clone_url = clone_url_for(&owner, &repo);
 
     let (out, dest) = if args.host_alias == crate::service::projects::LOCAL_HOST {
+        // Killed and reaped as a process group on timeout or cancel, so an
+        // abandoned clone can't keep writing into `local_base` under a retry.
+        let script = clone_script(&local_base, &clone_url);
         let out =
-            run_local_script(&clone_script(&local_base, &clone_url), CLONE_WALL_CLOCK).await?;
+            crate::local_exec::run_bash_script(&script, CLONE_WALL_CLOCK, Some(token)).await?;
         (out, local_base.clone())
     } else {
         let home = ssh.remote_home(&args.host_alias).await?;
@@ -136,11 +144,12 @@ async fn clone_source(
         let dest = layout.project_dir(&root, &owner, &repo);
         let script = clone_script(&dest, &clone_url);
         let out = ssh
-            .run_bounded(
+            .run_bounded_cancellable(
                 &args.host_alias,
                 &["bash", "-lc", &quote(&script)],
                 CLONE_CONNECT_TIMEOUT,
                 CLONE_WALL_CLOCK,
+                token,
             )
             .await?;
         (out, dest)
@@ -263,27 +272,6 @@ fn roots(store: &Mutex<Store>, host: &str) -> Result<(String, String, Layout), I
     ))
 }
 
-/// Run `script` locally via `bash -lc`, bounded by `wall_clock`. Returns the
-/// raw `Output` for ANY exit status, same contract as `SshExec::run` —
-/// mapping a failure to an `IpcError` is the caller's job (`git_error`).
-/// `Err` is reserved for a spawn failure or the wall clock elapsing.
-async fn run_local_script(
-    script: &str,
-    wall_clock: Duration,
-) -> Result<std::process::Output, IpcError> {
-    let child = tokio::process::Command::new("bash")
-        .arg("-lc")
-        .arg(script)
-        .output();
-    match tokio::time::timeout(wall_clock, child).await {
-        Ok(res) => res.map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}"))),
-        Err(_) => Err(IpcError::new(
-            codes::E_TIMEOUT,
-            format!("local script exceeded {}s", wall_clock.as_secs()),
-        )),
-    }
-}
-
 /// The clone script's failure at `dest` on `host`, mapped to an `IpcError`.
 /// Exit code 3 together with [`ALREADY_CLONED_MARKER`] on stderr (both, so
 /// an unrelated command that happens to exit 3 is never misread) is the
@@ -381,6 +369,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -423,6 +412,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -451,6 +441,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -481,6 +472,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -504,6 +496,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -513,10 +506,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_cancelled_remote_clone_is_aborted_and_leaves_no_project_row() {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u")
+            .on(Match::script_contains("git clone"), Reply::hang());
+        let token = CancellationToken::new();
+        let canceller = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            canceller.cancel();
+        });
+        let err = tokio::time::timeout(
+            Duration::from_secs(10),
+            add_project_with(
+                AddProjectArgs {
+                    host_alias: "vps".into(),
+                    source: AddProjectSource::Clone { url: "o/r".into() },
+                    call_id: None,
+                },
+                &store,
+                &fake,
+                token,
+            ),
+        )
+        .await
+        .expect("cancel did not abort the clone")
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_CANCELLED);
+        assert!(store.lock().unwrap().list_projects().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn local_clone_runs_git_and_a_second_attempt_reports_e_exists() {
         // `clone_url_for` always targets github.com, so exercising the
         // `local` branch of `clone_source` end-to-end would need network
-        // access. This drives `run_local_script` + `clone_script` directly
+        // access. This drives `run_bash_script` + `clone_script` directly
         // — the pair the local branch calls — against a real local bare
         // repo, proving the local execution path (no `FakeSsh` involved)
         // actually runs git and maps a repeat clone to `E_EXISTS`.
@@ -535,13 +560,13 @@ mod tests {
         let dest_str = dest.to_str().unwrap();
         let script = clone_script(dest_str, &clone_url);
 
-        let out = run_local_script(&script, Duration::from_secs(10))
+        let out = crate::local_exec::run_bash_script(&script, Duration::from_secs(10), None)
             .await
             .unwrap();
         assert!(out.status.success(), "{out:?}");
         assert!(dest.join(".git").is_dir());
 
-        let out2 = run_local_script(&script, Duration::from_secs(10))
+        let out2 = crate::local_exec::run_bash_script(&script, Duration::from_secs(10), None)
             .await
             .unwrap();
         assert!(!out2.status.success());
@@ -583,6 +608,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -628,6 +654,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -666,6 +693,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -704,6 +732,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -726,6 +755,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
@@ -762,6 +792,7 @@ mod tests {
             },
             &store,
             &fake,
+            CancellationToken::new(),
         )
         .await
         .unwrap_err();
