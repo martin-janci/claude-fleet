@@ -93,25 +93,27 @@ const NOT_CLONED_MARKER: &str = "__NOT_CLONED__";
 const SCAN_WALL_CLOCK: Duration = Duration::from_secs(15);
 
 /// Split the scan script's stdout into the canonical root reported by its
-/// `root <path>` line (the host's `pwd -P` of the project root — git itself
-/// reports worktree entries by realpath, so this is what entry paths must be
-/// compared against under a symlinked root) and the remaining
+/// `root <path>` line (git's own canonicalization of the project root via
+/// `rev-parse --show-toplevel` — the same one `worktree list --porcelain`
+/// uses for entry paths, so this is what entry paths must be compared
+/// against under a symlinked root) and the remaining
 /// `git worktree list --porcelain` text. The `root ` line is normally first,
 /// but a login shell can prepend a banner (e.g. a provider MOTD), so this
 /// scans for the first line that starts with `root ` rather than requiring
-/// it to be line 1. `None` when no such line is found or it is empty (a
-/// malformed or unexpected scan).
+/// it to be line 1. A candidate value must start with `/` to be accepted —
+/// otherwise an unrelated MOTD line such as "root login is disabled" would
+/// be mistaken for the marker. `None` when no such line is found or its
+/// value is empty (a malformed or unexpected scan).
 fn split_scan_output(stdout: &str) -> Option<(String, &str)> {
     let mut offset = 0usize;
     for line in stdout.split('\n') {
         if let Some(root) = line.strip_prefix("root ") {
             let root = root.trim();
-            if root.is_empty() {
-                return None;
+            if root.starts_with('/') {
+                let rest_start = offset + line.len() + 1;
+                let rest = stdout.get(rest_start..).unwrap_or("");
+                return Some((root.to_string(), rest));
             }
-            let rest_start = offset + line.len() + 1;
-            let rest = stdout.get(rest_start..).unwrap_or("");
-            return Some((root.to_string(), rest));
         }
         offset += line.len() + 1;
     }
@@ -119,7 +121,7 @@ fn split_scan_output(stdout: &str) -> Option<(String, &str)> {
 }
 
 /// Map `git worktree list --porcelain` of the checkout at `root` (the
-/// CANONICAL root, i.e. what the host's `pwd -P` reports — see
+/// CANONICAL root, i.e. what `git rev-parse --show-toplevel` reports — see
 /// [`split_scan_output`]) to `(name, path, branch)` triples. Bare and
 /// prunable entries are dropped first (nothing can run in them). The main
 /// worktree is the entry whose path equals `root`; if none matches exactly
@@ -217,20 +219,25 @@ pub async fn list_host_worktrees_with(
             .await?;
     // `root` is the LOGICAL path this side resolved (may traverse a
     // symlink); git reports worktree entries by realpath, so the script
-    // reports the canonical root itself (`pwd -P`) as its `root ` line, and
-    // entries are compared against that, not against `root`. The probe is
+    // reports the canonical root itself (`git rev-parse --show-toplevel`,
+    // git's own canonicalization) as its `root ` line, and entries are
+    // compared against that, not against `root`. The probe is
     // `git … rev-parse --show-toplevel` rather than `--git-dir` (or a
     // `[ -d …/.git ]` test): `--git-dir` merely proves `root` is INSIDE some
     // git repo, which is also true when `root` is a git-tracked directory
     // nested under an unrelated parent checkout — that would wrongly cache
     // the parent repo's worktrees as this project's. `--show-toplevel`
     // resolves to the checkout's actual top level (its own, even inside a
-    // linked worktree or a submodule), so requiring it to equal `root`'s own
-    // realpath confirms `root` really IS a checkout root, not merely inside
-    // one.
+    // linked worktree or a submodule), so requiring it to identify the SAME
+    // directory as `root` confirms `root` really IS a checkout root, not
+    // merely inside one. The comparison is `-ef` (same device+inode), not a
+    // string compare of `pwd -P` output: a case-insensitive filesystem (the
+    // macOS default) would otherwise report `$top` and `root`'s realpath as
+    // unequal strings for `REPO` vs on-disk `repo`, wrongly treating a valid
+    // checkout as not-cloned.
     let q_root = quote(&root);
     let script = format!(
-        "top=$(git -C {q_root} rev-parse --show-toplevel 2>/dev/null); if [ -n \"$top\" ] && [ \"$top\" = \"$(cd {q_root} && pwd -P)\" ]; then echo \"root $top\"; git -C {q_root} worktree list --porcelain; else echo {marker}; fi",
+        "top=$(git -C {q_root} rev-parse --show-toplevel 2>/dev/null); if [ -n \"$top\" ] && [ \"$top\" -ef {q_root} ]; then echo \"root $top\"; git -C {q_root} worktree list --porcelain; else echo {marker}; fi",
         marker = NOT_CLONED_MARKER,
     );
     let quoted = quote(&script);
@@ -506,6 +513,53 @@ mod tests {
         assert_eq!(out[0].occupants[0].tmux_name, "sess");
     }
 
+    #[test]
+    fn split_scan_output_finds_root_line_after_a_banner() {
+        let (root, rest) =
+            split_scan_output("Welcome to vps\nroot /home/u/r\nworktree /home/u/r\n\n").unwrap();
+        assert_eq!(root, "/home/u/r");
+        assert_eq!(rest, "worktree /home/u/r\n\n");
+    }
+
+    #[test]
+    fn split_scan_output_no_root_line_is_none() {
+        assert!(
+            split_scan_output("worktree /home/u/r\nHEAD 1\nbranch refs/heads/main\n\n").is_none()
+        );
+    }
+
+    #[test]
+    fn split_scan_output_empty_root_value_is_none() {
+        assert!(split_scan_output("root \nworktree /home/u/r\n\n").is_none());
+    }
+
+    #[test]
+    fn split_scan_output_root_as_last_line_with_no_trailing_newline_has_empty_rest() {
+        let (root, rest) = split_scan_output("root /home/u/r").unwrap();
+        assert_eq!(root, "/home/u/r");
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn split_scan_output_tolerates_a_multibyte_banner_line() {
+        let (root, rest) =
+            split_scan_output("Vítejte\nroot /home/u/r\nworktree /home/u/r\n\n").unwrap();
+        assert_eq!(root, "/home/u/r");
+        assert_eq!(rest, "worktree /home/u/r\n\n");
+    }
+
+    /// A MOTD line that happens to start with `root ` but isn't a path (no
+    /// leading `/`) is skipped in favor of the real `root <path>` line that
+    /// follows it, rather than being mistaken for the marker.
+    #[test]
+    fn split_scan_output_skips_a_root_login_is_disabled_motd_line() {
+        let (root, rest) =
+            split_scan_output("root login is disabled\nroot /home/u/r\nworktree /home/u/r\n\n")
+                .unwrap();
+        assert_eq!(root, "/home/u/r");
+        assert_eq!(rest, "worktree /home/u/r\n\n");
+    }
+
     use crate::ssh_fake::{FakeSsh, Match, Reply};
 
     const PORCELAIN: &str = "worktree /home/u/projects/github.com/o/r\nHEAD 1111\nbranch refs/heads/main\n\nworktree /home/u/projects/github.com/o/r/.claude/worktrees/feat\nHEAD 2222\nbranch refs/heads/feature/feat\n\nworktree /home/u/projects/github.com/o/r/.claude/worktrees/det\nHEAD 3333\ndetached\n\nworktree /home/u/projects/github.com/o/r.git\nbare\n\nworktree /home/u/projects/github.com/o/r/.claude/worktrees/stale\nHEAD 4444\nbranch refs/heads/stale\nprunable gitdir file points to non-existent location\n";
@@ -540,9 +594,9 @@ mod tests {
     }
 
     /// `main` is detected by comparing against the CANONICAL root (what the
-    /// host's scan reports via `pwd -P`), not the logical `~/projects/...`
-    /// path a caller may have resolved — the scenario a symlinked projects
-    /// root produces.
+    /// host's scan reports via `git rev-parse --show-toplevel`), not the
+    /// logical `~/projects/...` path a caller may have resolved — the
+    /// scenario a symlinked projects root produces.
     #[test]
     fn rows_from_porcelain_detects_main_via_the_canonical_root() {
         let porcelain = "worktree /mnt/sda4/projects/github.com/o/r\nHEAD 1\nbranch refs/heads/main\n\nworktree /mnt/sda4/projects/github.com/o/r/.claude/worktrees/feat\nHEAD 2\nbranch refs/heads/feat\n\n";
@@ -636,7 +690,11 @@ mod tests {
 
     /// A login shell can print a banner (a provider MOTD) before the
     /// script's own output; the `root ` line detection scans for it instead
-    /// of requiring line 1, so the scan still parses.
+    /// of requiring line 1, so the scan still parses. The porcelain here
+    /// lists `feat` before the root entry, so a correctly-identified `main`
+    /// row (path == the canonical root) proves the root string extracted
+    /// from behind the banner is right — `rows_from_porcelain`'s
+    /// first-entry fallback would otherwise wrongly name `feat` as main.
     #[tokio::test]
     async fn list_host_worktrees_tolerates_a_login_banner_before_the_root_line() {
         let store = Mutex::new(Store::open_in_memory().unwrap());
@@ -646,11 +704,13 @@ mod tests {
             .upsert_project("o", "r", "/p/o/r")
             .unwrap();
         let fake = FakeSsh::new();
+        let root = "/home/u/projects/github.com/o/r";
+        let porcelain = format!(
+            "worktree {root}/.claude/worktrees/feat\nHEAD 2222\nbranch refs/heads/feature/feat\n\nworktree {root}\nHEAD 1111\nbranch refs/heads/main\n\n"
+        );
         fake.with_home("/home/u").on(
             Match::script_contains("worktree list --porcelain"),
-            Reply::ok(&format!(
-                "Welcome to vps\nroot /home/u/projects/github.com/o/r\n{PORCELAIN}"
-            )),
+            Reply::ok(&format!("Welcome to vps\nroot {root}\n{porcelain}")),
         );
 
         let out = list_host_worktrees_with(
@@ -666,7 +726,13 @@ mod tests {
 
         assert!(out.cloned);
         let names: Vec<&str> = out.worktrees.iter().map(|w| w.name.as_str()).collect();
-        assert_eq!(names, vec!["main", "det", "feat"]);
+        assert_eq!(names, vec!["main", "feat"], "main first, then by name");
+        let main = out
+            .worktrees
+            .iter()
+            .find(|w| w.name == "main")
+            .expect("a main row");
+        assert_eq!(main.path, root, "main's path is the canonical root");
     }
 
     /// A root containing a single quote and a space (an arbitrary
@@ -715,7 +781,7 @@ mod tests {
             "{script}"
         );
         assert!(
-            script.contains(&format!("cd {q_root} && pwd -P")),
+            script.contains(&format!("\"$top\" -ef {q_root}")),
             "{script}"
         );
         assert!(
