@@ -679,10 +679,7 @@ impl Store {
         // idempotent: the next scan retries whatever this one left behind.
         for (id, path) in doomed {
             if self.delete_worktree_if_unused(id)? {
-                self.conn.execute(
-                    "DELETE FROM worktree_parent_fingerprints WHERE host_alias=?1 AND wt_path=?2",
-                    rusqlite::params![host_alias, path],
-                )?;
+                Self::delete_fingerprints(&self.conn, host_alias, &path, &[])?;
                 n += 1;
             }
         }

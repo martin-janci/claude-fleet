@@ -2087,7 +2087,7 @@ pub fn require_no_explicit(report: RepairReport) -> Result<RepairReport, IpcErro
 /// may start with `~/`, which is expanded against the remote `$HOME` here. The
 /// local `worktrees.path` column is a local path and is never used for a
 /// remote host.
-async fn resolve_remote_paths(
+pub(crate) async fn resolve_remote_paths(
     ssh: &dyn SshExec,
     host: &str,
     root: &str,
