@@ -356,6 +356,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::inspect_safe_kill`
 - `commands::sessions::discard_kill_session`
 - `commands::worktrees::list_worktrees`
+- `commands::worktrees::list_host_worktrees`
 - `commands::worktrees::delete_worktree`
 - `commands::sessions::repair_session`
 - `commands::sessions::rename_session`
