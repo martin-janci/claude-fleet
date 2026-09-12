@@ -61,6 +61,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std", "registry", "tracing-log", "smallvec"] }
 tracing-appender = "0.2"
 
+# `run_local_script` (service/add_project.rs) signals a script's whole process
+# group (`kill(-pgid, ..)`). Already in the tree transitively; no new crate.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 # Property tests for shell::quote (see shell.rs). `std` only: no fork/timeout

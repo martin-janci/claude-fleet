@@ -71,6 +71,8 @@ pub struct AddProjectArgs {
     /// `SshExec::run_bounded_cancellable` on the remote branch and a
     /// `tokio::select!` in `run_local_script` on the local one — rather than
     /// stopping at the command layer, where cancelling would do nothing.
+    /// A remote cancel only stops the local ssh client, not the run on the
+    /// host: see [`add_project`]'s doc comment.
     #[serde(default)]
     pub call_id: Option<u64>,
 }
@@ -79,10 +81,25 @@ pub struct AddProjectArgs {
 /// `args.call_id` in `reg` (see `AddProjectArgs::call_id`) and releases the
 /// registry slot on every exit path via `CancelGuard`, exactly like
 /// `service::sessions::lifecycle::new_session`.
+///
+/// # What cancelling does and does not do
+///
+/// Cancelling returns control to the UI promptly, but it CANNOT guarantee
+/// that a remote host stops a clone or a GitHub creation already under way.
+/// On the local host the script's whole process group is stopped (see
+/// [`run_local_script`]). On a remote host only the local ssh client is
+/// killed: that closes the channel, but without a pty sshd sends the remote
+/// shell no SIGHUP, so the remote `bash`, `git clone` and `gh repo create`
+/// keep running to completion on the host. Even locally, `gh repo create`
+/// may have finished just before the kill. That is why a cancelled
+/// `create_remote` run comes back as `E_CANCELLED` carrying the same "the
+/// GitHub repository may already exist; check GitHub before retrying" hedge
+/// as a timeout (see [`note_unknown_github_state`]), never as a silent
+/// no-op. A caller must not tell the user that cancelling undid anything.
 pub async fn add_project(
     args: AddProjectArgs,
     store: &Mutex<Store>,
-    ssh: &Arc<SshClient>,
+    ssh: &dyn SshExec,
     reg: &Arc<CancellationRegistry>,
 ) -> Result<ProjectTreeRow, IpcError> {
     let (cancel_id, token) = match args.call_id {
@@ -94,7 +111,7 @@ pub async fn add_project(
         None => reg.register_anonymous(),
     };
     let _guard = CancelGuard::new(Arc::clone(reg), cancel_id);
-    add_project_with(args, store, &**ssh, token).await
+    add_project_with(args, store, ssh, token).await
 }
 
 pub async fn add_project_with(
@@ -419,7 +436,7 @@ async fn new_source(
     let script = new_project_script(&dest, owner, repo, create_remote);
     let mut out = run_new_step(host, ssh, &script, CLONE_WALL_CLOCK, token)
         .await
-        .map_err(|e| note_unknown_github_state_on_timeout(e, create_remote, owner, repo))?;
+        .map_err(|e| note_unknown_github_state(e, create_remote, owner, repo))?;
 
     if create_remote && origin_already_set(&out) {
         // The script only reaches this state for a repository carrying
@@ -445,7 +462,16 @@ async fn new_source(
             token,
         )
         .await
-        .map_err(|e| remote_check_failed(owner, repo, &e.message))?;
+        .map_err(|e| {
+            // A cancel is the user's own choice, not a failed check: keep
+            // `E_CANCELLED` so the dialog can tell the two apart. The check
+            // is read-only, so a cancel here changes nothing on GitHub.
+            if e.code == codes::E_CANCELLED {
+                e
+            } else {
+                remote_check_failed(owner, repo, &e.message)
+            }
+        })?;
         match check.status.code() {
             Some(2) => {}
             Some(0) => {
@@ -471,7 +497,7 @@ async fn new_source(
             token,
         )
         .await
-        .map_err(|e| note_unknown_github_state_on_timeout(e, create_remote, owner, repo))?;
+        .map_err(|e| note_unknown_github_state(e, create_remote, owner, repo))?;
     }
 
     if !out.status.success() {
@@ -596,25 +622,41 @@ fn describe_register_failure_after_gh_success(owner: &str, repo: &str, e: IpcErr
     )
 }
 
-/// Wraps a genuine timeout (`E_TIMEOUT` / `E_SSH_TIMEOUT`) from running
-/// [`new_project_script`] with `create_remote` set: a timeout means the
-/// process was killed before it finished, and — unlike a normal failure
-/// exit — there is no captured output to read a stage marker from, so
-/// whether `gh` already created (or even pushed to) the GitHub repository
-/// before the deadline hit is genuinely unknown. Every other error passes
-/// through unchanged.
-fn note_unknown_github_state_on_timeout(
+/// Wraps a genuine timeout (`E_TIMEOUT` / `E_SSH_TIMEOUT`) or a cancellation
+/// (`E_CANCELLED`) from running [`new_project_script`] (or the push-only
+/// retry) with `create_remote` set. Either way the run was stopped before it
+/// finished and — unlike a normal failure exit — there is no captured output
+/// to read a stage marker from, so whether `gh` already created (or even
+/// pushed to) the GitHub repository is genuinely unknown. A cancel is no
+/// better than a timeout here: `gh repo create` may have completed just
+/// before the kill, and on a remote host the run is not stopped at all (see
+/// [`add_project`]'s doc comment). The code is kept, so a caller can still
+/// tell a cancel from a timeout; every other error passes through unchanged.
+fn note_unknown_github_state(
     e: IpcError,
     create_remote: bool,
     owner: &str,
     repo: &str,
 ) -> IpcError {
-    if create_remote && (e.code == codes::E_TIMEOUT || e.code == codes::E_SSH_TIMEOUT) {
+    if !create_remote {
+        return e;
+    }
+    if e.code == codes::E_TIMEOUT || e.code == codes::E_SSH_TIMEOUT {
         return IpcError::new(
             &e.code,
             format!(
                 "{} — creating {owner}/{repo} on GitHub may or may not have completed before \
                  the timeout; the GitHub state is unknown. Check GitHub before retrying.",
+                e.message
+            ),
+        );
+    }
+    if e.code == codes::E_CANCELLED {
+        return IpcError::new(
+            &e.code,
+            format!(
+                "{} — the GitHub repository {owner}/{repo} may already exist; check GitHub \
+                 before retrying.",
                 e.message
             ),
         );
@@ -1493,61 +1535,72 @@ fn roots(store: &Mutex<Store>, host: &str) -> Result<(String, String, Layout), I
     ))
 }
 
+/// Grace between SIGTERM and SIGKILL when [`run_local_script`] stops a script
+/// on cancel or timeout. SIGTERM first so the processes get to clean up —
+/// `git clone` removes its half-written destination on SIGTERM, whereas a
+/// SIGKILL leaves a `.git` behind that makes every retry fail with
+/// `E_EXISTS` — then SIGKILL for anything still running once it elapses.
+const LOCAL_KILL_GRACE: Duration = Duration::from_secs(2);
+
+/// How long [`run_local_script`] keeps draining stdout/stderr after the script
+/// itself exited normally. The pipes normally hit EOF at once; a background
+/// grandchild that inherited them would otherwise hold the call open for as
+/// long as it lives, past the wall clock. Output read so far is kept.
+const LOCAL_PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
 /// Run `script` locally via `bash -lc`, bounded by `wall_clock` and raced
 /// against `token`. Returns the raw `Output` for ANY exit status, same
 /// contract as `SshExec::run` — mapping a failure to an `IpcError` is the
 /// caller's job (`git_error`). `Err` is reserved for a spawn failure, the
 /// wall clock elapsing (`E_TIMEOUT`), or `token` firing first
 /// (`codes::E_CANCELLED`) — same priority order as `SshClient::run_child`:
-/// cancel beats deadline beats exit. Either early exit kills and reaps the
-/// child (`kill_on_drop(true)` alone only sends the signal on drop, it never
-/// awaits the reap, so an explicit `start_kill` + `wait` is needed to avoid
-/// leaving a zombie).
+/// cancel beats deadline beats exit.
+///
+/// The script runs in its OWN process group, and both early exits stop the
+/// whole group, not just `bash`: a `new`-flow script forks `gh repo create`
+/// (it is not the last command, so bash does not exec it), and a SIGKILL to
+/// bash alone let that `gh` survive and create the repository after the user
+/// pressed Cancel. See [`stop_local_script`] for the SIGTERM → grace →
+/// SIGKILL → reap sequence. stdin is `/dev/null`, so a `git`/`gh` that wants
+/// to prompt fails instead of hanging on the terminal the app was started
+/// from (e.g. under `cargo tauri dev`).
 async fn run_local_script(
     script: &str,
     wall_clock: Duration,
     token: &CancellationToken,
 ) -> Result<std::process::Output, IpcError> {
-    let mut child = tokio::process::Command::new("bash")
-        .arg("-lc")
+    let mut cmd = tokio::process::Command::new("bash");
+    cmd.arg("-lc")
         .arg(script)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let mut child = cmd
         .spawn()
         .map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}")))?;
+    // Declared AFTER `child`, so on an early drop of this future it drops
+    // FIRST and SIGKILLs the group while the leader is still unreaped.
+    let mut group = ProcessGroup::of(&child);
 
     // Stdout/stderr are drained off to the side so a chatty child can never
-    // block on a full pipe while the select! below waits on it.
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let stdout_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        if let Some(mut s) = stdout {
-            let _ = tokio::io::AsyncReadExt::read_to_end(&mut s, &mut buf).await;
-        }
-        buf
-    });
-    let stderr_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        if let Some(mut s) = stderr {
-            let _ = tokio::io::AsyncReadExt::read_to_end(&mut s, &mut buf).await;
-        }
-        buf
-    });
+    // block on a full pipe while the select! below waits on it. The buffers
+    // are shared, so output read before a bounded drain gives up is kept.
+    let (stdout_buf, mut stdout_task) = drain_pipe(child.stdout.take());
+    let (stderr_buf, mut stderr_task) = drain_pipe(child.stderr.take());
 
     tokio::select! {
         biased;
         _ = token.cancelled() => {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+            stop_local_script(&mut child, &mut group, &stdout_task, &stderr_task).await;
             stdout_task.abort();
             stderr_task.abort();
             Err(IpcError::new(codes::E_CANCELLED, "local script cancelled"))
         }
         _ = tokio::time::sleep(wall_clock) => {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+            stop_local_script(&mut child, &mut group, &stdout_task, &stderr_task).await;
             stdout_task.abort();
             stderr_task.abort();
             Err(IpcError::new(
@@ -1556,12 +1609,154 @@ async fn run_local_script(
             ))
         }
         status = child.wait() => {
+            // Reaped: from here on the pgid number may be recycled, so the
+            // group must never be signalled again.
+            group.disarm();
             let status = status
                 .map_err(|e| IpcError::new(codes::E_SHELL, format!("bash wait: {e}")))?;
-            let stdout = stdout_task.await.unwrap_or_default();
-            let stderr = stderr_task.await.unwrap_or_default();
-            Ok(std::process::Output { status, stdout, stderr })
+            let drained = tokio::time::timeout(LOCAL_PIPE_DRAIN_GRACE, async {
+                let _ = (&mut stdout_task).await;
+                let _ = (&mut stderr_task).await;
+            })
+            .await;
+            if drained.is_err() {
+                stdout_task.abort();
+                stderr_task.abort();
+            }
+            Ok(std::process::Output {
+                status,
+                stdout: take_buf(&stdout_buf),
+                stderr: take_buf(&stderr_buf),
+            })
         }
+    }
+}
+
+/// Read `pipe` to EOF into a shared buffer on a background task.
+fn drain_pipe<R>(pipe: Option<R>) -> (Arc<Mutex<Vec<u8>>>, tokio::task::JoinHandle<()>)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&buf);
+    let task = tokio::spawn(async move {
+        let Some(mut pipe) = pipe else { return };
+        let mut chunk = [0u8; 8192];
+        loop {
+            match tokio::io::AsyncReadExt::read(&mut pipe, &mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => sink
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend_from_slice(&chunk[..n]),
+            }
+        }
+    });
+    (buf, task)
+}
+
+fn take_buf(buf: &Mutex<Vec<u8>>) -> Vec<u8> {
+    std::mem::take(
+        &mut *buf
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
+
+/// Stop a local script's whole process group and reap its leader:
+///
+/// 1. SIGTERM to the group, so every member (bash, a forked `gh`, `git`)
+///    gets the chance to clean up.
+/// 2. Wait up to [`LOCAL_KILL_GRACE`]. It ends early once both output pipes
+///    hit EOF, i.e. the leader and every member still holding them exited.
+///    The leader is NOT reaped during this wait (its exit is only observed
+///    through the pipes), so as a zombie it keeps the pgid reserved.
+/// 3. SIGKILL to the group, for anything that ignored SIGTERM or is still
+///    cleaning up. Safe against pid reuse for the reason above.
+/// 4. Reap the leader, then disarm the group.
+///
+/// Members that left the group themselves (`setsid`, a daemonizing helper)
+/// are out of reach, as with any process-group kill.
+async fn stop_local_script(
+    child: &mut tokio::process::Child,
+    group: &mut ProcessGroup,
+    stdout_task: &tokio::task::JoinHandle<()>,
+    stderr_task: &tokio::task::JoinHandle<()>,
+) {
+    if group.signal_term() {
+        let deadline = tokio::time::Instant::now() + LOCAL_KILL_GRACE;
+        while tokio::time::Instant::now() < deadline
+            && !(stdout_task.is_finished() && stderr_task.is_finished())
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        group.signal_kill();
+    }
+    // The leader itself, for platforms without process groups (and harmless
+    // after the group SIGKILL: an unreaped leader's pid is still its own).
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+    group.disarm();
+}
+
+/// The process group a local script was spawned into with
+/// `process_group(0)` (so its pgid is the child's pid). Signals go to the
+/// whole group via a negative pid. SIGKILLs the group on drop unless
+/// disarmed; it MUST be disarmed as soon as the leader has been reaped,
+/// because only an unreaped leader keeps the pgid number from being reused.
+struct ProcessGroup {
+    #[cfg(unix)]
+    pgid: Option<libc::pid_t>,
+}
+
+#[cfg(unix)]
+impl ProcessGroup {
+    fn of(child: &tokio::process::Child) -> Self {
+        // Never 0 or 1: `kill(0, ..)` would signal the APP's own group and
+        // `kill(-1, ..)` every process the app may signal.
+        let pgid = child
+            .id()
+            .and_then(|pid| libc::pid_t::try_from(pid).ok())
+            .filter(|&pid| pid > 1);
+        Self { pgid }
+    }
+
+    fn signal(&self, sig: libc::c_int) -> bool {
+        let Some(pgid) = self.pgid else { return false };
+        // SAFETY: `kill` takes no pointers; a negative pid addresses the
+        // process group `pgid`, validated `> 1` in `of`.
+        unsafe { libc::kill(-pgid, sig) };
+        true
+    }
+
+    fn signal_term(&self) -> bool {
+        self.signal(libc::SIGTERM)
+    }
+
+    fn signal_kill(&self) {
+        self.signal(libc::SIGKILL);
+    }
+
+    fn disarm(&mut self) {
+        self.pgid = None;
+    }
+}
+
+#[cfg(not(unix))]
+impl ProcessGroup {
+    fn of(_child: &tokio::process::Child) -> Self {
+        Self {}
+    }
+    fn signal_term(&self) -> bool {
+        false
+    }
+    fn signal_kill(&self) {}
+    fn disarm(&mut self) {}
+}
+
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        self.signal_kill();
     }
 }
 
@@ -3243,8 +3438,8 @@ mod tests {
     }
 
     #[test]
-    fn note_unknown_github_state_on_timeout_hedges_only_for_create_remote_timeouts() {
-        let hedged = note_unknown_github_state_on_timeout(
+    fn note_unknown_github_state_hedges_only_for_create_remote_timeouts_and_cancels() {
+        let hedged = note_unknown_github_state(
             IpcError::new(codes::E_TIMEOUT, "local script exceeded 600s"),
             true,
             "acme",
@@ -3257,8 +3452,33 @@ mod tests {
             hedged.message
         );
 
-        // Not a timeout code -> passed through unchanged.
-        let unrelated = note_unknown_github_state_on_timeout(
+        // A cancel leaves the GitHub state just as unknown: same hedge, code kept.
+        for msg in ["local script cancelled", "ssh vps cancelled"] {
+            let cancelled = note_unknown_github_state(
+                IpcError::new(codes::E_CANCELLED, msg),
+                true,
+                "acme",
+                "widget",
+            );
+            assert_eq!(cancelled.code, codes::E_CANCELLED);
+            assert_eq!(
+                cancelled.message,
+                format!(
+                    "{msg} — the GitHub repository acme/widget may already exist; check \
+                     GitHub before retrying."
+                )
+            );
+        }
+        let local_cancel = note_unknown_github_state(
+            IpcError::new(codes::E_CANCELLED, "local script cancelled"),
+            false,
+            "acme",
+            "widget",
+        );
+        assert_eq!(local_cancel.message, "local script cancelled");
+
+        // Not a timeout or cancel code -> passed through unchanged.
+        let unrelated = note_unknown_github_state(
             IpcError::new(codes::E_GH, "some other failure"),
             true,
             "acme",
@@ -3267,7 +3487,7 @@ mod tests {
         assert_eq!(unrelated.message, "some other failure");
 
         // create_remote off -> no GitHub state to hedge about.
-        let local_only = note_unknown_github_state_on_timeout(
+        let local_only = note_unknown_github_state(
             IpcError::new(codes::E_TIMEOUT, "local script exceeded 600s"),
             false,
             "acme",
@@ -4593,41 +4813,309 @@ mod tests {
         );
     }
 
+    /// Whether ANY process with this pid (`pid > 0`) or in this process group
+    /// (`pid < 0`) still exists, zombies included.
+    fn exists(pid: libc::pid_t) -> bool {
+        // SAFETY: signal 0 only checks for existence; no pointers involved.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    fn read_pid(path: &Path) -> libc::pid_t {
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    /// Wait for `path` to exist (the script got far enough), up to 5 s.
+    async fn wait_for_file(path: &Path) {
+        for _ in 0..250 {
+            if path.exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("{} never appeared", path.display());
+    }
+
+    /// Poll until neither the group nor `extra` exists, up to 3 s. A killed
+    /// grandchild is reparented to init/launchd and reaped there, which takes
+    /// a moment.
+    async fn gone(pgid: libc::pid_t, extra: libc::pid_t) -> bool {
+        for _ in 0..150 {
+            if !exists(-pgid) && !exists(extra) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        false
+    }
+
     #[tokio::test]
-    async fn run_local_script_cancelled_mid_run_returns_e_cancelled_and_kills_the_child() {
-        // A real local process (never the network — this drives
-        // `run_local_script` directly with an innocuous `sleep`), proving
-        // the child is actually killed rather than left running: the script
-        // would otherwise `touch` a marker file after its sleep, so the
-        // marker's absence once the sleep would have elapsed proves the
-        // child never got there.
+    async fn run_local_script_cancel_kills_a_forked_grandchild_and_the_whole_group() {
+        // A real local process (never the network, never `gh`). The marker is
+        // written by a FORKED grandchild — a backgrounded subshell, the shape
+        // of `gh repo create` in the `new` script, which bash forks rather
+        // than execs. Killing only `bash` (the old `start_kill`) left exactly
+        // this grandchild alive to write the marker after the cancel.
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("ran");
+        let pgid_file = dir.path().join("pgid");
+        let gc_file = dir.path().join("grandchild");
+        let q = |p: &Path| crate::shell::quote(p.to_str().unwrap());
         let script = format!(
-            "sleep 1 && touch {}",
-            crate::shell::quote(marker.to_str().unwrap())
+            "echo $$ > {pgid}\n( sleep 1; touch {marker} ) &\necho $! > {gc}\nwait\n",
+            pgid = q(&pgid_file),
+            marker = q(&marker),
+            gc = q(&gc_file),
         );
         let token = CancellationToken::new();
         let call = run_local_script(&script, Duration::from_secs(30), &token);
-        let cancel_soon = async {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        let cancel_once_forked = async {
+            wait_for_file(&gc_file).await;
             token.cancel();
         };
         let start = std::time::Instant::now();
-        let (result, ()) = tokio::join!(call, cancel_soon);
+        let (result, ()) = tokio::join!(call, cancel_once_forked);
         let err = result.unwrap_err();
         assert_eq!(err.code, codes::E_CANCELLED);
         assert!(
-            start.elapsed() < Duration::from_secs(1),
-            "cancellation must not wait for the wall clock or the sleep to finish"
+            start.elapsed() < LOCAL_KILL_GRACE + Duration::from_secs(1),
+            "cancellation must not wait for the wall clock or the grandchild's sleep"
         );
-        // Wait past when the uncancelled sleep would have finished, so the
-        // marker's absence is real proof the child was killed, not just that
-        // we checked too early.
-        tokio::time::sleep(Duration::from_millis(1200)).await;
+        let pgid = read_pid(&pgid_file);
+        let grandchild = read_pid(&gc_file);
+        assert!(pgid > 1 && grandchild > 1);
+
+        // Well past when the grandchild's `sleep 1` would have finished.
+        tokio::time::sleep(Duration::from_millis(2500)).await;
         assert!(
             !marker.exists(),
-            "the child must be killed, not left running to finish the script"
+            "the forked grandchild must be killed, not left running to finish the script"
         );
+        assert!(
+            gone(pgid, grandchild).await,
+            "no process from the script's group may still be alive"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_local_script_cancel_sends_sigterm_first_so_processes_can_clean_up() {
+        // `git clone` removes its half-written destination on SIGTERM but not
+        // on SIGKILL. Stand-in: a script whose TERM trap records that it ran.
+        let dir = tempfile::tempdir().unwrap();
+        let cleaned = dir.path().join("cleaned");
+        let ready = dir.path().join("ready");
+        let q = |p: &Path| crate::shell::quote(p.to_str().unwrap());
+        let script = format!(
+            "trap 'touch {cleaned}; exit 1' TERM\nsleep 30 &\ntouch {ready}\nwait\n",
+            cleaned = q(&cleaned),
+            ready = q(&ready),
+        );
+        let token = CancellationToken::new();
+        let call = run_local_script(&script, Duration::from_secs(60), &token);
+        let cancel_when_ready = async {
+            wait_for_file(&ready).await;
+            token.cancel();
+        };
+        let (result, ()) = tokio::join!(call, cancel_when_ready);
+        assert_eq!(result.unwrap_err().code, codes::E_CANCELLED);
+        assert!(
+            cleaned.exists(),
+            "the script must receive SIGTERM (and get to clean up) before any SIGKILL"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_local_script_timeout_escalates_to_sigkill_for_a_group_member_ignoring_sigterm() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("survived");
+        let gc_file = dir.path().join("grandchild");
+        let q = |p: &Path| crate::shell::quote(p.to_str().unwrap());
+        // The subshell (and the `sleep` it runs, which inherits the ignored
+        // disposition) shrugs off SIGTERM and would touch the marker after
+        // 4 s — past the 2 s grace, so only the SIGKILL stops it.
+        let script = format!(
+            "( trap '' TERM; sleep 4; touch {marker} ) &\necho $! > {gc}\nwait\n",
+            marker = q(&marker),
+            gc = q(&gc_file),
+        );
+        let start = std::time::Instant::now();
+        let err = run_local_script(
+            &script,
+            Duration::from_millis(300),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_TIMEOUT);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= LOCAL_KILL_GRACE && elapsed < LOCAL_KILL_GRACE + Duration::from_secs(2),
+            "a member ignoring SIGTERM gets the full grace, then SIGKILL: took {elapsed:?}"
+        );
+        let grandchild = read_pid(&gc_file);
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert!(
+            !marker.exists(),
+            "the SIGTERM-ignoring member must be SIGKILLed"
+        );
+        assert!(
+            gone(grandchild, grandchild).await,
+            "grandchild {grandchild} still alive"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_local_script_does_not_hang_on_a_grandchild_holding_the_pipes_after_exit() {
+        // bash exits at once, but the backgrounded `sleep` inherited stdout
+        // and stderr: reading them to EOF would block for 30 s. The drain is
+        // bounded, and the output read before it gave up is kept.
+        let dir = tempfile::tempdir().unwrap();
+        let gc_file = dir.path().join("grandchild");
+        let script = format!(
+            "sleep 30 &\necho $! > {gc}\necho hello\necho oops >&2\nexit 7\n",
+            gc = crate::shell::quote(gc_file.to_str().unwrap()),
+        );
+        let start = std::time::Instant::now();
+        let out = run_local_script(&script, Duration::from_secs(60), &CancellationToken::new())
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+        let grandchild = read_pid(&gc_file);
+        // Clean up the stray sleep before asserting anything.
+        // SAFETY: plain signal to a pid this test just spawned.
+        unsafe { libc::kill(grandchild, libc::SIGKILL) };
+        assert!(
+            elapsed < LOCAL_PIPE_DRAIN_GRACE + Duration::from_secs(3),
+            "a grandchild holding the pipes must not hold the call open: took {elapsed:?}"
+        );
+        assert_eq!(out.status.code(), Some(7));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "hello\n");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "oops\n");
+    }
+
+    #[tokio::test]
+    async fn run_local_script_gives_the_script_a_null_stdin() {
+        // `.spawn()` would otherwise inherit the app's stdin, and under
+        // `cargo tauri dev` a prompting `git`/`gh` would hang on the terminal.
+        let out = run_local_script(
+            "if read -r line; then echo \"read:$line\"; else echo eof; fi",
+            Duration::from_secs(10),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "eof\n");
+    }
+
+    #[tokio::test]
+    async fn production_add_project_is_cancellable_through_the_registry() {
+        // Drives the production `add_project` (not `add_project_with` with a
+        // token in hand): the frontend's `call_id` must be bound in the
+        // registry so `cancel_command` -> `CancellationRegistry::cancel`
+        // reaches the running clone.
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        fake.hanging("vps")
+            .with_home("/home/u")
+            .set_wall_clock(Duration::from_secs(60));
+        let reg = CancellationRegistry::new();
+        let reg_for_cancel = Arc::clone(&reg);
+        let canceller = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            reg_for_cancel.cancel(42);
+        });
+        let start = std::time::Instant::now();
+        let err = add_project(
+            AddProjectArgs {
+                host_alias: "vps".into(),
+                source: AddProjectSource::Clone { url: "o/r".into() },
+                call_id: Some(42),
+            },
+            &store,
+            &fake,
+            &reg,
+        )
+        .await
+        .unwrap_err();
+        canceller.await.unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "cancel beats the 60s wall clock"
+        );
+        assert_eq!(err.code, codes::E_CANCELLED);
+        assert!(store.lock().unwrap().list_projects().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_remote_create_remote_run_keeps_e_cancelled_and_hedges_github_state() {
+        // Killing the ssh client does not stop `gh repo create` on the host
+        // (see `add_project`'s doc comment), so a remote cancel must not read
+        // as "nothing happened".
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        fake.on(Match::Any, Reply::ok("")).with_home("/home/u");
+        fake.on(Match::script_contains("git init"), Reply::hang());
+        fake.set_wall_clock(Duration::from_secs(60));
+        let reg = CancellationRegistry::new();
+        let reg_for_cancel = Arc::clone(&reg);
+        let canceller = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            reg_for_cancel.cancel(43);
+        });
+        let confirm = confirm_tokens().mint("vps", "acme", "cancelled-widget", Instant::now());
+        let err = add_project(
+            AddProjectArgs {
+                host_alias: "vps".into(),
+                source: AddProjectSource::New {
+                    owner: "acme".into(),
+                    repo: "cancelled-widget".into(),
+                    create_remote: true,
+                    confirm: Some(confirm),
+                },
+                call_id: Some(43),
+            },
+            &store,
+            &fake,
+            &reg,
+        )
+        .await
+        .unwrap_err();
+        canceller.await.unwrap();
+        assert_eq!(err.code, codes::E_CANCELLED);
+        assert!(
+            err.message.contains(
+                "the GitHub repository acme/cancelled-widget may already exist; check GitHub \
+                 before retrying"
+            ),
+            "{}",
+            err.message
+        );
+        assert!(store.lock().unwrap().list_projects().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_remote_branch_check_passes_e_cancelled_through() {
+        let store = store_with_no_projects();
+        register_widget_as(&store, "acme", "widget");
+        let fake = fake_with_origin_set("https://github.com/acme/widget.git", Reply::hang());
+        fake.set_wall_clock(Duration::from_secs(60));
+        let token = CancellationToken::new();
+        let call = add_project_with(
+            new_remote_args(Some(mint_vps_widget())),
+            &store,
+            &fake,
+            token.clone(),
+        );
+        let cancel_soon = async {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            token.cancel();
+        };
+        let (result, ()) = tokio::join!(call, cancel_soon);
+        let err = result.unwrap_err();
+        assert_eq!(err.code, codes::E_CANCELLED, "{}", err.message);
+        assert_no_push(&fake);
     }
 }

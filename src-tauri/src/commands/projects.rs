@@ -33,7 +33,7 @@ pub async fn add_project(
     ssh: State<'_, Arc<SshClient>>,
     reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<ProjectTreeRow, IpcError> {
-    add_project::add_project(args, &store, &ssh, &reg).await
+    add_project::add_project(args, &store, &*ssh, &reg).await
 }
 
 #[derive(Deserialize)]
