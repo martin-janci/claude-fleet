@@ -174,3 +174,170 @@ fn scanned_worktrees_path_survives_the_mirror_rendering() {
          row's own .worktrees/ path, not a .claude/worktrees/ guess: {script}"
     );
 }
+
+// ── the deleted-but-still-registered worktree ─────────────────────────────
+
+#[test]
+fn ensure_remote_project_script_guards_the_add_on_the_paths_own_registration() {
+    let wt = RemoteWorktree {
+        name: "feat",
+        branch: Some("feature/feat"),
+        path: "/repo/.worktrees/feat",
+    };
+    let script = ensure_remote_project_script("/repo", "git@github.com:o/r.git", Some(&wt));
+    assert!(
+        script.contains("worktree list --porcelain"),
+        "the add must be guarded on git's own registration list: {script}"
+    );
+    assert!(
+        script.contains(r#"grep -Fxq -e "worktree $wt" -e "worktree $wtc""#),
+        "the guard must match this path in either spelling: {script}"
+    );
+    assert!(
+        script.contains(&format!("wt={}\n", quote("/repo/.worktrees/feat"))),
+        "the guarded path is the row's own, shell-quoted: {script}"
+    );
+    assert!(
+        !script.contains("worktree prune"),
+        "a repo-wide prune would discard other worktrees' registrations: {script}"
+    );
+}
+
+fn git_ok(args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .output()
+        .expect("git");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `git init` + one commit on `main`, with `origin` pointing at a bare repo
+/// so the Mirror add can consult it.
+fn init_repo_with_origin(base: &std::path::Path) -> std::path::PathBuf {
+    let origin = base.join("origin.git");
+    let root = base.join("repo");
+    let (o, r) = (origin.to_str().unwrap(), root.to_str().unwrap());
+    git_ok(&["init", "--bare", "-b", "main", o]);
+    git_ok(&["init", "-b", "main", r]);
+    git_ok(&["-C", r, "config", "user.email", "t@t"]);
+    git_ok(&["-C", r, "config", "user.name", "T"]);
+    std::fs::write(root.join("f"), "x").unwrap();
+    git_ok(&["-C", r, "add", "."]);
+    git_ok(&["-C", r, "commit", "-q", "-m", "init"]);
+    git_ok(&["-C", r, "remote", "add", "origin", o]);
+    git_ok(&["-C", r, "push", "-q", "-u", "origin", "main"]);
+    root
+}
+
+fn run_script(script: &str) -> (bool, String) {
+    let out = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(script)
+        .output()
+        .expect("bash");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).trim().to_string(),
+    )
+}
+
+/// End to end against real git: the worktree directory was deleted but git
+/// still lists its registration. No add can recover from that ("missing but
+/// already registered worktree") and git never prunes on its own, so the
+/// script must skip the add and exit 0 — otherwise `ensure_remote_project`
+/// fails with E_GIT_SETUP before `repair::ensure_for_new_session` gets its
+/// chance to unregister and re-add.
+#[test]
+fn ensure_remote_project_script_tolerates_a_deleted_but_registered_worktree() {
+    let base = tempfile::TempDir::new().unwrap();
+    let root = init_repo_with_origin(base.path());
+    let (r, wt) = (root.to_str().unwrap(), root.join(".worktrees/feat"));
+    git_ok(&[
+        "-C",
+        r,
+        "worktree",
+        "add",
+        "-q",
+        wt.to_str().unwrap(),
+        "-b",
+        "feat",
+    ]);
+    std::fs::remove_dir_all(&wt).unwrap();
+    assert!(!wt.exists(), "directory deleted, registration left behind");
+
+    let row = RemoteWorktree {
+        name: "feat",
+        branch: Some("feat"),
+        path: wt.to_str().unwrap(),
+    };
+    // The clone URL is unreachable on purpose: `<root>/.git` exists, so a
+    // passing run also proves the clone step stayed a no-op.
+    let script = ensure_remote_project_script(r, "git@github.com:o/does-not-exist.git", Some(&row));
+    let (ok, stderr) = run_script(&script);
+    assert!(
+        ok,
+        "script must not abort on a stale registration: {stderr}"
+    );
+    assert!(
+        !wt.exists(),
+        "the add is skipped, not forced; repair owns the unregister + re-add"
+    );
+    let listed = std::process::Command::new("git")
+        .args(["-C", r, "worktree", "list", "--porcelain"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains(wt.to_str().unwrap()),
+        "the stale registration must be left intact, not pruned"
+    );
+}
+
+/// The guard must not break the case it protects: nothing registered and no
+/// directory, so the Mirror add runs and checks the worktree out.
+#[test]
+fn ensure_remote_project_script_still_adds_an_unregistered_worktree() {
+    let base = tempfile::TempDir::new().unwrap();
+    let root = init_repo_with_origin(base.path());
+    let (r, wt) = (root.to_str().unwrap(), root.join(".worktrees/feat"));
+    git_ok(&["-C", r, "branch", "feat"]);
+
+    let row = RemoteWorktree {
+        name: "feat",
+        branch: Some("feat"),
+        path: wt.to_str().unwrap(),
+    };
+    let script = ensure_remote_project_script(r, "git@github.com:o/does-not-exist.git", Some(&row));
+    let (ok, stderr) = run_script(&script);
+    assert!(ok, "add should succeed: {stderr}");
+    assert!(wt.join(".git").exists(), "worktree checked out at {wt:?}");
+}
+
+/// The tolerance is scoped to the stale-registration case: a branch on
+/// neither the host nor origin is still refused, so the user keeps the
+/// actionable "push it first" error.
+#[test]
+fn ensure_remote_project_script_still_refuses_an_unpushed_branch() {
+    let base = tempfile::TempDir::new().unwrap();
+    let root = init_repo_with_origin(base.path());
+    let (r, wt) = (root.to_str().unwrap(), root.join(".worktrees/nope"));
+
+    let row = RemoteWorktree {
+        name: "nope",
+        branch: Some("no-such-branch"),
+        path: wt.to_str().unwrap(),
+    };
+    let script = ensure_remote_project_script(r, "git@github.com:o/does-not-exist.git", Some(&row));
+    let (ok, stderr) = run_script(&script);
+    assert!(
+        !ok,
+        "an unmirrorable branch must still surface as a failure"
+    );
+    assert!(
+        stderr.contains(crate::service::repair::MIRROR_REFUSED),
+        "{stderr}"
+    );
+}

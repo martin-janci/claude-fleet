@@ -185,8 +185,28 @@ pub(super) fn ensure_remote_project_script(
                 }],
                 None,
             );
+            // The directory is gone, but git may still list a registration
+            // for that exact path — it never prunes on its own. Every add
+            // above (local ref, or fetch + `--track`) fails there with
+            // "missing but already registered worktree", and `set -e` would
+            // abort the whole script, so `ensure_remote_project` returns
+            // E_GIT_SETUP before `repair::ensure_for_new_session` ever runs —
+            // the layer that exists precisely to unregister that one entry
+            // and re-add (`Step::Unregister` + `AddWorktree`). Skip the add
+            // and leave the state for it. Scoped to this path: no repo-wide
+            // `git worktree prune`, which would discard other worktrees'
+            // registrations too. Both spellings are compared because git
+            // stores its own canonicalization and a symlinked ancestor
+            // (/var -> /private/var) makes the two differ — the same
+            // two-form compare the repair probe does.
             script.push_str(&format!(
-                "if [ ! -d {abs} ]; then\n{add}fi\n",
+                "if [ ! -d {abs} ]; then\n\
+                 wt={abs}\n\
+                 wtc=\"$(cd -P -- \"$(dirname -- \"$wt\")\" 2>/dev/null && pwd -P || echo)/$(basename -- \"$wt\")\"\n\
+                 if ! git -C {root} worktree list --porcelain 2>/dev/null | \
+                 grep -Fxq -e \"worktree $wt\" -e \"worktree $wtc\"; then\n\
+                 {add}fi\n\
+                 fi\n",
                 abs = quote(&wt_abs),
             ));
         }
