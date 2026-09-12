@@ -640,7 +640,9 @@ impl Store {
     /// After a scan of `host_alias`'s checkout of `project_id`: drop that
     /// host's rows the scan did not report, except rows a session still
     /// points at (any status — the FK must stay valid). Local rows are never
-    /// touched. Emits `worktree:removed` per dropped row like
+    /// touched. A successful scan always reports the root worktree, so an
+    /// empty `keep_names` means the scan failed and must not wipe the cache.
+    /// Emits `worktree:removed` per dropped row like
     /// [`Self::delete_worktree_if_unused`]. Returns how many went.
     pub fn delete_host_worktrees_not_in(
         &self,
@@ -651,21 +653,36 @@ impl Store {
         if host_alias == crate::service::projects::LOCAL_HOST {
             return Ok(0);
         }
-        let ids: Vec<i64> = {
+        if keep_names.is_empty() {
+            return Ok(0);
+        }
+        let doomed: Vec<(i64, String)> = {
             let mut stmt = self.conn.prepare_cached(
-                "SELECT id, name FROM worktrees WHERE host_alias=?1 AND project_id=?2",
+                "SELECT id, name, path FROM worktrees WHERE host_alias=?1 AND project_id=?2",
             )?;
-            let rows = stmt.query_map(rusqlite::params![host_alias, project_id], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-            })?;
-            rows.filter_map(Result::ok)
-                .filter(|(_, name)| !keep_names.iter().any(|k| k == name))
-                .map(|(id, _)| id)
+            let rows: Result<Vec<(i64, String, String)>, rusqlite::Error> = stmt
+                .query_map(rusqlite::params![host_alias, project_id], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })?
+                .collect();
+            rows?
+                .into_iter()
+                .filter(|(_, name, _)| !keep_names.contains(name))
+                .map(|(id, _, path)| (id, path))
                 .collect()
         };
         let mut n = 0;
-        for id in ids {
+        // Each delete is independent and self-conditional (only a row no
+        // session references goes), and delete_worktree_if_unused emits
+        // worktree:removed inside itself — an outer transaction's rollback
+        // would emit events for rows that then come back. A partial prune is
+        // idempotent: the next scan retries whatever this one left behind.
+        for (id, path) in doomed {
             if self.delete_worktree_if_unused(id)? {
+                self.conn.execute(
+                    "DELETE FROM worktree_parent_fingerprints WHERE host_alias=?1 AND wt_path=?2",
+                    rusqlite::params![host_alias, path],
+                )?;
                 n += 1;
             }
         }
@@ -1166,8 +1183,10 @@ mod tests {
 
     #[test]
     fn delete_host_worktrees_not_in_prunes_only_that_hosts_unlisted_rows() {
-        let s = Store::open_in_memory().unwrap();
+        let bus = Arc::new(crate::events::RecordingEventBus::new());
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
         s.upsert_host("vps").unwrap();
+        s.upsert_host("vps2").unwrap();
         let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
         let local = s
             .upsert_worktree(pid, "feat", "/p/o/r/.claude/worktrees/feat", Some("feat"))
@@ -1180,6 +1199,15 @@ mod tests {
             .unwrap();
         let busy = s
             .upsert_worktree_on("vps", pid, "busy", "/home/u/r/.claude/worktrees/busy", None)
+            .unwrap();
+        let other_host = s
+            .upsert_worktree_on(
+                "vps2",
+                pid,
+                "stale",
+                "/home/u2/r/.claude/worktrees/stale",
+                None,
+            )
             .unwrap();
         // An alive session pins `busy` even though the scan did not list it.
         s.upsert_session(
@@ -1194,6 +1222,19 @@ mod tests {
         )
         .unwrap();
 
+        // Local rows are never touched, even with an empty keep list.
+        assert_eq!(
+            s.delete_host_worktrees_not_in("local", pid, &[]).unwrap(),
+            0
+        );
+        assert!(s.get_worktree_row(local).unwrap().is_some());
+
+        // An empty keep list means the scan failed (a successful scan always
+        // reports the root worktree) — nothing is pruned.
+        assert_eq!(s.delete_host_worktrees_not_in("vps", pid, &[]).unwrap(), 0);
+        assert!(s.get_worktree_row(gone).unwrap().is_some());
+
+        bus.take();
         let removed = s
             .delete_host_worktrees_not_in("vps", pid, &["main".to_string()])
             .unwrap();
@@ -1208,6 +1249,18 @@ mod tests {
         assert!(
             s.get_worktree_row(local).unwrap().is_some(),
             "local rows are never touched"
+        );
+        assert!(
+            s.get_worktree_row(other_host).unwrap().is_some(),
+            "another host's unlisted row is untouched by this host's prune"
+        );
+        let evts = bus.take();
+        assert_eq!(
+            evts.iter()
+                .filter(|e| *e == &format!("worktree:removed:{gone}"))
+                .count(),
+            1,
+            "worktree:removed fires once for the pruned row: {evts:?}"
         );
     }
 }
