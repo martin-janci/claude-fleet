@@ -300,11 +300,23 @@ fn confirm_tokens() -> &'static ConfirmTokens {
 /// ([`local_repo_is_usable`]), and a retry resumes it (see
 /// [`new_project_script`]).
 ///
-/// When the script reports that `dest` already has an `origin` (a previous
-/// attempt created the GitHub repository but the push failed), the push is
-/// retried by [`push_only_script`] — but only after [`origin_is_github_repo`]
-/// has confirmed that `origin` is exactly `owner/repo` on GitHub. Anything
-/// else is refused without pushing.
+/// `new` creates a NEW project. The push-only retry exists solely to finish
+/// a creation fleet itself started and that failed at the push stage — it is
+/// never a general "push my branch" command. So when the script reports
+/// that `dest` already has an `origin` and a commit, the push is retried by
+/// [`push_only_script`] ONLY for a project fleet registered (a row for this
+/// `owner/repo` at exactly this path — see [`existing_project_or_resume`])
+/// whose GitHub branch does not exist yet, and only after
+/// [`origin_is_github_repo`] has confirmed `origin` is exactly `owner/repo`
+/// on GitHub:
+///
+/// - no such row → refused as already existing, nothing pushed;
+/// - `origin` is anything else → refused, nothing pushed;
+/// - the remote already has `main` ([`remote_branch_check_script`] exit 0)
+///   → the creation already completed; refused, nothing pushed;
+/// - the remote could not be checked (any exit other than 0 or 2) → error,
+///   nothing pushed;
+/// - only a remote that definitely lacks `main` (exit 2) gets the push.
 async fn new_source(
     args: &AddProjectArgs,
     owner: &str,
@@ -383,28 +395,56 @@ async fn new_source(
 
     if create_remote && origin_already_set(&out) {
         // A previous attempt got as far as `gh repo create` (which set
-        // `origin`) but the push did not finish. Push again — but ONLY to an
-        // `origin` verified to be exactly this repository on GitHub.
-        let origin = origin_url_from(&out);
-        match origin.filter(|u| origin_is_github_repo(u, owner, repo)) {
-            Some(url) => {
-                out = run_new_step(host, ssh, &push_only_script(&dest, &url), CLONE_WALL_CLOCK)
-                    .await
-                    .map_err(|e| {
-                        note_unknown_github_state_on_timeout(e, create_remote, owner, repo)
-                    })?;
-            }
-            None => {
+        // `origin`) but the push may not have landed. Finish it only under
+        // every rule in this function's doc comment; otherwise push nothing.
+        if resume_as.is_none() {
+            // Not a project fleet registered: a folder that merely has an
+            // origin and a commit. `new` does not adopt or push it.
+            return Err(already_exists_error(owner, repo, &dest));
+        }
+        let Some(url) = origin_url_from(&out).filter(|u| origin_is_github_repo(u, owner, repo))
+        else {
+            return Err(IpcError::new(
+                codes::E_EXISTS,
+                format!(
+                    "{dest} on {host} already has an origin remote that is not \
+                     github.com/{owner}/{repo}; refusing to push to it. Inspect it with \
+                     `git -C {dest} remote -v`."
+                ),
+            ));
+        };
+        let check = run_new_step(
+            host,
+            ssh,
+            &remote_branch_check_script(&dest),
+            REMOTE_BRANCH_CHECK_WALL_CLOCK,
+        )
+        .await
+        .map_err(|e| remote_check_failed(owner, repo, &e.message))?;
+        match check.status.code() {
+            Some(2) => {}
+            Some(0) => {
                 return Err(IpcError::new(
                     codes::E_EXISTS,
                     format!(
-                        "{dest} on {host} already has an origin remote that is not \
-                         github.com/{owner}/{repo}; refusing to push to it. Inspect it with \
-                         `git -C {dest} remote -v`."
+                        "the project is already created on GitHub at {owner}/{repo} (its main \
+                         branch exists there); nothing was pushed"
                     ),
                 ));
             }
+            _ => {
+                let detail = user_facing_stderr(&String::from_utf8_lossy(&check.stderr));
+                let detail = if detail.is_empty() {
+                    format!("exit {:?}", check.status.code())
+                } else {
+                    detail
+                };
+                return Err(remote_check_failed(owner, repo, &detail));
+            }
         }
+        out = run_new_step(host, ssh, &push_only_script(&dest, &url), CLONE_WALL_CLOCK)
+            .await
+            .map_err(|e| note_unknown_github_state_on_timeout(e, create_remote, owner, repo))?;
     }
 
     if !out.status.success() {
@@ -431,6 +471,32 @@ async fn new_source(
         return row.map_err(|e| describe_register_failure_after_gh_success(owner, repo, e));
     }
     row
+}
+
+/// Wall clock for [`remote_branch_check_script`]: one read-only network
+/// round trip to GitHub, plus the SSH round trip on a remote host.
+const REMOTE_BRANCH_CHECK_WALL_CLOCK: Duration = Duration::from_secs(60);
+
+/// The push-only retry could not tell whether `main` already exists on the
+/// GitHub repository, so it pushed nothing.
+fn remote_check_failed(owner: &str, repo: &str, detail: &str) -> IpcError {
+    IpcError::new(
+        codes::E_GH,
+        format!(
+            "couldn't check whether {owner}/{repo} on GitHub already has its main branch: \
+             {detail}. Nothing was pushed; retry once GitHub is reachable."
+        ),
+    )
+}
+
+/// `new`'s refusal for a `dest` that already holds a repository `new` must
+/// not touch — shared by the script's exit-3 guard and `new_source`'s
+/// "has an origin but fleet never registered it" refusal.
+fn already_exists_error(owner: &str, repo: &str, dest: &str) -> IpcError {
+    IpcError::new(
+        codes::E_EXISTS,
+        format!("{owner}/{repo} already exists at {dest}; it should appear after a refresh"),
+    )
 }
 
 /// Wall clock for [`local_repo_is_usable`]'s HEAD probe: one local git call,
@@ -735,6 +801,18 @@ fn push_only_script(dest: &str, origin_url: &str) -> String {
     )
 }
 
+/// Read-only: does `origin` (already verified by [`origin_is_github_repo`])
+/// have `refs/heads/main`? `git ls-remote --exit-code` exits 0 when it does,
+/// 2 when the remote answered but has no such ref, and anything else when
+/// the remote could not be asked — `new_source` pushes only on 2.
+fn remote_branch_check_script(dest: &str) -> String {
+    format!(
+        "export GIT_TERMINAL_PROMPT=0\n\
+         git -C {d} ls-remote --exit-code origin refs/heads/main\n",
+        d = quote(dest),
+    )
+}
+
 /// The script stopped at its "already has an origin and a commit" branch
 /// (exit 6 with the URL frame) instead of doing anything.
 fn origin_already_set(out: &std::process::Output) -> bool {
@@ -855,10 +933,7 @@ fn new_project_error(
         );
     }
     if out.status.code() == Some(3) && stderr_raw.contains(ALREADY_CLONED_MARKER) {
-        return IpcError::new(
-            codes::E_EXISTS,
-            format!("{owner}/{repo} already exists at {dest}; it should appear after a refresh"),
-        );
+        return already_exists_error(owner, repo, dest);
     }
     if out.status.code() == Some(4) && stderr_raw.contains(NOT_A_GIT_REPO_MARKER) {
         return IpcError::new(
@@ -3602,40 +3677,82 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_retry_after_a_failed_push_verifies_origin_then_pushes_only() {
-        let store = store_with_no_projects();
-        let local_base = local_base_for(&store);
-        store
-            .lock()
-            .unwrap()
-            .upsert_project("acme", "widget", &local_base)
-            .unwrap();
+    /// A `FakeSsh` for the "origin already set" retry: the main script
+    /// answers with the exit-6 frame naming `origin`, the read-only remote
+    /// branch check answers `ls_remote`, and a push-only script succeeds.
+    fn fake_with_origin_set(origin: &str, ls_remote: Reply) -> FakeSsh {
         let fake = FakeSsh::new();
         fake.on(Match::Any, Reply::ok("")).with_home("/home/u");
         fake.on(
             Match::script_contains("git init"),
             reply_with_stderr(
                 6,
-                &format!(
-                    "{ORIGIN_URL_BEGIN_MARKER}\nhttps://github.com/acme/widget.git\n{ORIGIN_URL_END_MARKER}\n"
-                ),
+                &format!("{ORIGIN_URL_BEGIN_MARKER}\n{origin}\n{ORIGIN_URL_END_MARKER}\n"),
             ),
         );
+        fake.on(Match::script_contains("ls-remote --exit-code"), ls_remote);
         fake.on(
             Match::script_contains(ORIGIN_CHANGED_MARKER),
             reply_with_stderr(0, &format!("{STAGE_GH_PUSH}\n")),
         );
-        add_project_with(new_remote_args(Some(mint_vps_widget())), &store, &fake)
-            .await
-            .unwrap();
-        let push_scripts: Vec<String> = fake
-            .calls_for("vps")
+        fake
+    }
+
+    fn scripts_containing(fake: &FakeSsh, needle: &str) -> Vec<String> {
+        fake.calls_for("vps")
             .iter()
             .filter_map(|c| c.script())
-            .filter(|s| s.contains(ORIGIN_CHANGED_MARKER))
-            .collect();
-        assert_eq!(push_scripts.len(), 1);
+            .filter(|s| s.contains(needle))
+            .collect()
+    }
+
+    /// No push of any shape was issued: neither the push-only script nor a
+    /// bare `git push`.
+    fn assert_no_push(fake: &FakeSsh) {
+        assert!(
+            scripts_containing(fake, ORIGIN_CHANGED_MARKER).is_empty(),
+            "no push-only script may run"
+        );
+        let pushes = scripts_containing(fake, "git push")
+            .into_iter()
+            .filter(|s| !s.contains("git init"))
+            .count();
+        assert_eq!(pushes, 0, "no push may run");
+    }
+
+    /// Register `acme/widget` at exactly the path `new_source` computes, in
+    /// the casing given — what a previous failed `create_remote` attempt
+    /// leaves behind.
+    fn register_widget_as(store: &Mutex<Store>, owner: &str, repo: &str) {
+        let local_base = local_base_for(store);
+        store
+            .lock()
+            .unwrap()
+            .upsert_project(owner, repo, &local_base)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_registered_project_whose_remote_lacks_main_gets_exactly_one_push() {
+        let store = store_with_no_projects();
+        // Registered in a different casing, so the returned row proves the
+        // retry re-registered THAT row rather than adding a twin.
+        register_widget_as(&store, "Acme", "Widget");
+        let fake = fake_with_origin_set(
+            "https://github.com/acme/widget.git",
+            Reply::fail(2, ""), // ls-remote: the remote answered, no main
+        );
+        let row = add_project_with(new_remote_args(Some(mint_vps_widget())), &store, &fake)
+            .await
+            .unwrap();
+        assert_eq!(
+            (row.project.owner.as_str(), row.project.repo.as_str()),
+            ("Acme", "Widget")
+        );
+        assert_eq!(store.lock().unwrap().list_projects().unwrap().len(), 1);
+        assert_eq!(scripts_containing(&fake, "ls-remote --exit-code").len(), 1);
+        let push_scripts = scripts_containing(&fake, ORIGIN_CHANGED_MARKER);
+        assert_eq!(push_scripts.len(), 1, "the push runs exactly once");
         assert!(
             push_scripts[0].contains("'https://github.com/acme/widget.git'"),
             "{}",
@@ -3645,32 +3762,154 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_origin_pointing_at_a_different_repository_is_refused_without_a_push() {
+    async fn a_registered_project_whose_remote_already_has_main_is_refused_without_a_push() {
         let store = store_with_no_projects();
-        let fake = FakeSsh::new();
-        fake.on(Match::Any, Reply::ok("")).with_home("/home/u");
-        fake.on(
-            Match::script_contains("git init"),
-            reply_with_stderr(
-                6,
-                &format!(
-                    "{ORIGIN_URL_BEGIN_MARKER}\ngit@github.com:someone-else/widget.git\n{ORIGIN_URL_END_MARKER}\n"
-                ),
+        register_widget_as(&store, "acme", "widget");
+        let fake = fake_with_origin_set(
+            "git@github.com:acme/widget.git",
+            Reply::ok("0123456789abcdef0123456789abcdef01234567\trefs/heads/main\n"),
+        );
+        let err = add_project_with(new_remote_args(Some(mint_vps_widget())), &store, &fake)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_EXISTS);
+        assert!(
+            err.message
+                .contains("already created on GitHub at acme/widget"),
+            "{}",
+            err.message
+        );
+        assert_no_push(&fake);
+    }
+
+    #[tokio::test]
+    async fn a_failing_remote_branch_check_is_an_error_and_pushes_nothing() {
+        let store = store_with_no_projects();
+        register_widget_as(&store, "acme", "widget");
+        let fake = fake_with_origin_set(
+            "https://github.com/acme/widget.git",
+            Reply::fail(
+                128,
+                "fatal: unable to access 'https://github.com/acme/widget.git/'",
             ),
         );
+        let err = add_project_with(new_remote_args(Some(mint_vps_widget())), &store, &fake)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_GH);
+        assert!(err.message.contains("couldn't check"), "{}", err.message);
+        assert!(
+            err.message.contains("Nothing was pushed"),
+            "{}",
+            err.message
+        );
+        assert_no_push(&fake);
+    }
+
+    #[tokio::test]
+    async fn an_unregistered_folder_with_a_verified_origin_is_refused_without_a_push() {
+        // `new` creates a NEW project: a folder fleet never registered that
+        // merely has the right origin and a commit is not finished for it.
+        let store = store_with_no_projects();
+        let fake = fake_with_origin_set("https://github.com/acme/widget.git", Reply::fail(2, ""));
+        let err = add_project_with(new_remote_args(Some(mint_vps_widget())), &store, &fake)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_EXISTS);
+        assert!(err.message.contains("already exists"), "{}", err.message);
+        assert!(
+            scripts_containing(&fake, "ls-remote --exit-code").is_empty(),
+            "refused before even asking the remote"
+        );
+        assert_no_push(&fake);
+        assert!(store.lock().unwrap().list_projects().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_origin_pointing_at_a_different_repository_is_refused_without_a_push() {
+        let store = store_with_no_projects();
+        // Registered, so the refusal below is the origin check itself and not
+        // the unregistered-folder rule.
+        register_widget_as(&store, "acme", "widget");
+        let fake =
+            fake_with_origin_set("git@github.com:someone-else/widget.git", Reply::fail(2, ""));
         let err = add_project_with(new_remote_args(Some(mint_vps_widget())), &store, &fake)
             .await
             .unwrap_err();
         assert_eq!(err.code, codes::E_EXISTS);
         assert!(err.message.contains("refusing to push"), "{}", err.message);
         assert!(!err.message.contains("__"), "{}", err.message);
-        let pushed = fake.calls_for("vps").iter().any(|c| {
-            c.script().is_some_and(|s| {
-                s.contains(ORIGIN_CHANGED_MARKER) || s == "git push -u origin main"
-            })
-        });
-        assert!(!pushed, "no push script may run for an unverified origin");
-        assert!(store.lock().unwrap().list_projects().unwrap().is_empty());
+        assert!(
+            scripts_containing(&fake, "ls-remote --exit-code").is_empty(),
+            "an unverified origin is never even queried"
+        );
+        assert_no_push(&fake);
+    }
+
+    #[tokio::test]
+    async fn remote_branch_check_script_exits_2_only_when_main_is_absent() {
+        // Real git against a local bare repo standing in for GitHub; never a
+        // network remote.
+        let home = tempfile::tempdir().unwrap();
+        let empty_bin = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dest = root.path().join("widget");
+        std::fs::create_dir_all(&dest).unwrap();
+        let bare = bare_repo();
+        assert!(git_at(&dest, &["init", "-q"]).status.success());
+        assert!(git_at(&dest, &["symbolic-ref", "HEAD", "refs/heads/main"])
+            .status
+            .success());
+        assert!(git_at(
+            &dest,
+            &[
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "x"
+            ]
+        )
+        .status
+        .success());
+        assert!(git_at(
+            &dest,
+            &["remote", "add", "origin", bare.path().to_str().unwrap()]
+        )
+        .status
+        .success());
+        let check = remote_branch_check_script(dest.to_str().unwrap());
+
+        let absent = run_hermetic(&check, empty_bin.path(), home.path(), "/dev/null").await;
+        assert_eq!(absent.status.code(), Some(2), "{absent:?}");
+
+        assert!(git_at(&dest, &["push", "-q", "origin", "main"])
+            .status
+            .success());
+        let present = run_hermetic(&check, empty_bin.path(), home.path(), "/dev/null").await;
+        assert_eq!(present.status.code(), Some(0), "{present:?}");
+
+        // An unreachable remote is neither 0 nor 2.
+        assert!(git_at(
+            &dest,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                root.path().join("gone").to_str().unwrap()
+            ]
+        )
+        .status
+        .success());
+        let unreachable = run_hermetic(&check, empty_bin.path(), home.path(), "/dev/null").await;
+        assert!(
+            !matches!(unreachable.status.code(), Some(0) | Some(2)),
+            "{unreachable:?}"
+        );
     }
 
     #[tokio::test]
