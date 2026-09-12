@@ -911,7 +911,7 @@ git commit -m "chore(deps): tauri-plugin-dialog for the folder picker"
 
 - [ ] **Step 2: Run to verify it fails.** `npx vitest run src/lib/repo_url.test.ts`
 
-- [ ] **Step 3: Implement** `parseRepoUrl(input: string): { owner: string; repo: string } | null` as a direct port of the Rust function (same prefixes, same `.git`/trailing-slash trimming, same component rule), with a comment naming `src-tauri/src/repo_url.rs` as the twin that must stay in sync.
+- [ ] **Step 3: Implement** `parseRepoUrl(input: string): { owner: string; repo: string } | null` as a direct port of the Rust function — **including every rule Task 1's review and Task 3's fixes added to `is_component`**: reject a component equal to `.git` (case-insensitive), any all-dot component, a component starting with `-`, an owner over 39 characters and a repo over 100. Port the Rust test lists verbatim (`src-tauri/src/repo_url.rs`), including the adversarial rejection cases, so the dialog never accepts input the backend refuses. Read the CURRENT Rust file rather than this plan's Task 1 snippet, which predates those rules. (same prefixes, same `.git`/trailing-slash trimming, same component rule), with a comment naming `src-tauri/src/repo_url.rs` as the twin that must stay in sync.
 
 In `src/lib/projects.ts` add the wire types and wrappers:
 
