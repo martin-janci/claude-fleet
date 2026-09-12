@@ -75,7 +75,7 @@ pub(super) fn ensure_script(
 ) -> String {
     let mut script = String::new();
     script.push_str(&format!(
-        "if [ ! -d {root}/.git ]; then mkdir -p $(dirname {root}) && git clone {url} {root}; fi",
+        "if [ ! -d {root}/.git ]; then mkdir -p \"$(dirname {root})\" && git clone {url} {root}; fi",
         root = quote(project_root),
         url = quote(clone_url),
     ));
@@ -395,11 +395,14 @@ pub(super) async fn new_session_inner(
                 .lock()
                 .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
             if let Some(wid) = args.worktree_id {
-                let mut stmt = s
-                    .conn_ref()
-                    .prepare("SELECT path FROM worktrees WHERE id=?1")?;
-                let row: String = stmt.query_row(rusqlite::params![wid], |r| r.get(0))?;
-                PathBuf::from(row)
+                // A worktree row names a checkout on ONE host — refuse a
+                // remote host's row here just as the remote arm below refuses
+                // a foreign one, so a mismatched `host_alias: "local"` call
+                // can't turn into a pane cwd that doesn't exist on this
+                // machine.
+                let (name, _, row_host, path) = fetch_worktree(&s, wid)?;
+                reject_foreign_worktree(&args.host_alias, &row_host, &name)?;
+                PathBuf::from(path)
             } else {
                 let mut stmt = s
                     .conn_ref()
@@ -472,10 +475,12 @@ pub(super) async fn new_session_inner(
                 (owner, repo, wt)
             };
             let home = ssh.remote_home(&args.host_alias).await?;
-            let wt_name_str = wt_info.as_ref().map(|(name, _, _)| name.as_str());
+            // `remote_project_path_for`'s project root does not depend on the
+            // worktree name (only its discarded second return value, the
+            // `.claude/worktrees/<name>` cwd guess, does) — pass `None`.
             let (project_root, _) = {
                 let s = store.lock().map_err(|_| IpcError::lock())?;
-                remote_project_path_for(&s, &args.host_alias, &home, &owner, &repo, wt_name_str)
+                remote_project_path_for(&s, &args.host_alias, &home, &owner, &repo, None)
             };
             // The pane's cwd: for an existing non-main worktree, the row's
             // own scanned path (it may live under `.worktrees/` or anywhere
@@ -1058,79 +1063,4 @@ pub fn dismiss_ghost_session(
     }
     s.delete_session(sess.id)?;
     Ok(())
-}
-
-#[cfg(test)]
-mod lifecycle_tests {
-    use super::*;
-
-    #[test]
-    fn a_local_row_is_refused_for_a_remote_host() {
-        let err = reject_foreign_worktree("mefistos", "local", "nifty-swanson").unwrap_err();
-        assert_eq!(err.code, "E_INVALID");
-        assert!(err.message.contains("nifty-swanson"));
-        assert!(err.message.contains("mefistos"));
-    }
-
-    #[test]
-    fn a_row_of_the_same_host_or_a_local_target_passes() {
-        assert!(reject_foreign_worktree("mefistos", "mefistos", "w").is_ok());
-        assert!(reject_foreign_worktree("local", "local", "w").is_ok());
-    }
-
-    #[test]
-    fn a_remote_row_for_local_is_refused_too() {
-        assert!(reject_foreign_worktree("local", "mefistos", "w").is_err());
-    }
-
-    #[test]
-    fn ensure_script_targets_the_row_own_path_not_the_claude_worktrees_guess() {
-        let wt = RemoteWorktree {
-            name: "feat",
-            branch: Some("feature/feat"),
-            path: "/home/u/projects/github.com/o/r/.worktrees/feat",
-        };
-        let script = ensure_script(
-            "/home/u/projects/github.com/o/r",
-            "git@github.com:o/r.git",
-            Some(&wt),
-        );
-        assert!(
-            script.contains("/home/u/projects/github.com/o/r/.worktrees/feat"),
-            "script should target the row's own scanned path: {script}"
-        );
-        assert!(
-            !script.contains(".claude/worktrees/feat"),
-            "script must not fall back to the .claude/worktrees/<name> guess: {script}"
-        );
-        assert!(script.contains("git worktree add"));
-        assert!(script.contains("feature/feat"));
-    }
-
-    #[test]
-    fn ensure_script_skips_worktree_add_for_main() {
-        let wt = RemoteWorktree {
-            name: "main",
-            branch: None,
-            path: "/home/u/projects/github.com/o/r",
-        };
-        let script = ensure_script(
-            "/home/u/projects/github.com/o/r",
-            "git@github.com:o/r.git",
-            Some(&wt),
-        );
-        assert!(!script.contains("git worktree add"));
-        assert!(script.contains("git clone"));
-    }
-
-    #[test]
-    fn ensure_script_with_no_worktree_only_clones() {
-        let script = ensure_script(
-            "/home/u/projects/github.com/o/r",
-            "git@github.com:o/r.git",
-            None,
-        );
-        assert!(script.contains("git clone"));
-        assert!(!script.contains("git worktree add"));
-    }
 }

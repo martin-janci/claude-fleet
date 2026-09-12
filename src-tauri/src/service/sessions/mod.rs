@@ -27,6 +27,8 @@ mod fill_session_name_tests;
 #[cfg(test)]
 mod ghost_tests;
 #[cfg(test)]
+mod lifecycle_tests;
+#[cfg(test)]
 mod tests;
 
 pub use self::lifecycle::*;

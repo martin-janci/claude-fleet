@@ -2316,11 +2316,20 @@ fn spec_for_new_session(
         Some(wid) => s.get_worktree_row(wid)?,
         None => None,
     };
+    // The row's own host scan recorded its real path when the row's host
+    // matches the target host — trust it (`path_is_guess: false`) rather
+    // than letting `run_probe`'s guess resolver re-point the cwd to whichever
+    // of `.worktrees/`/`.claude/worktrees/` happens to exist, which would
+    // silently override a checkout registered somewhere else entirely. A
+    // foreign-host row (which `new_session`'s `reject_foreign_worktree`
+    // should already have refused before this runs) or a vanished one falls
+    // back to the guess, as before.
+    let same_host = wt.as_ref().is_some_and(|r| r.host_alias == w.host_alias);
     let worktree = wt.filter(|r| r.name != "main").map(|r| WorktreeSpec {
         branch: r.branch.clone().unwrap_or_else(|| r.name.clone()),
         name: r.name,
         path: w.cwd.to_string(),
-        path_is_guess: !is_local,
+        path_is_guess: !same_host,
         row_is_local: is_local,
     });
     // Same validation as `spec_for_session`: these values reach git.
@@ -3933,6 +3942,92 @@ mod tests {
         let wt = spec.worktree.unwrap();
         assert!(wt.path_is_guess && !wt.row_is_local);
         assert_eq!(wt.path, w_remote.cwd);
+    }
+
+    #[test]
+    fn spec_for_new_session_trusts_the_scanned_path_for_a_same_host_row() {
+        // A row the HOST'S OWN scan recorded (`upsert_worktree_on`, as
+        // `service::worktrees::list_host_worktrees` does) must be trusted —
+        // `path_is_guess: false` — so `run_probe`'s guess resolver never gets
+        // a chance to re-point the cwd to a `.worktrees/`/`.claude/worktrees/`
+        // guess and silently override a checkout registered elsewhere.
+        let s = Store::open_in_memory().unwrap();
+        let pid = s.upsert_project("o", "r", "/repo").unwrap();
+        let wid = s
+            .upsert_worktree_on(
+                "mefistos",
+                pid,
+                "feat",
+                "/home/me/projects/github.com/o/r/.worktrees/feat",
+                Some("feat-branch"),
+            )
+            .unwrap();
+        let w = NewSessionWorkspace {
+            host_alias: "mefistos",
+            project_id: pid,
+            worktree_id: Some(wid),
+            tmux_name: "dev-x",
+            pane_cmd: "cl",
+            cwd: "/home/me/projects/github.com/o/r/.worktrees/feat",
+            base_branch: None,
+        };
+        let spec =
+            spec_for_new_session(&s, &w, Some("/home/me/projects/github.com/o/r".into())).unwrap();
+        let wt = spec.worktree.unwrap();
+        assert!(
+            !wt.path_is_guess,
+            "a row scanned on the target host itself must be trusted, not guessed"
+        );
+    }
+
+    #[test]
+    fn spec_for_new_session_still_guesses_for_a_foreign_host_row_or_a_vanished_one() {
+        let s = Store::open_in_memory().unwrap();
+        let pid = s.upsert_project("o", "r", "/repo").unwrap();
+        // Row recorded on a DIFFERENT host than the session's target — the
+        // situation `new_session`'s `reject_foreign_worktree` should already
+        // refuse before this runs, but the guess fallback still has to be
+        // safe on its own.
+        let wid = s
+            .upsert_worktree_on(
+                "otherhost",
+                pid,
+                "feat",
+                "/home/other/.worktrees/feat",
+                Some("feat-branch"),
+            )
+            .unwrap();
+        let w = NewSessionWorkspace {
+            host_alias: "mefistos",
+            project_id: pid,
+            worktree_id: Some(wid),
+            tmux_name: "dev-x",
+            pane_cmd: "cl",
+            cwd: "/home/me/projects/github.com/o/r/.claude/worktrees/feat",
+            base_branch: None,
+        };
+        let spec =
+            spec_for_new_session(&s, &w, Some("/home/me/projects/github.com/o/r".into())).unwrap();
+        let wt = spec.worktree.unwrap();
+        assert!(
+            wt.path_is_guess,
+            "a row from a different host must still fall back to the guess resolver"
+        );
+
+        // A worktree_id that no longer resolves to any row: no `WorktreeSpec`
+        // is built at all (unchanged by this fix) — nothing to trust or guess.
+        let w_missing = NewSessionWorkspace {
+            worktree_id: Some(wid + 1_000_000),
+            ..w
+        };
+        assert!(spec_for_new_session(
+            &s,
+            &w_missing,
+            Some("/home/me/projects/github.com/o/r".into())
+        )
+        .unwrap()
+        .worktree
+        .is_none());
     }
 
     #[tokio::test]
