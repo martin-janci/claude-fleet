@@ -93,16 +93,11 @@ impl PurgeProjectArgs {
             validate::host_alias(host)?;
         }
         validate::not_option_like("project_path", &self.project_path)?;
-        // A relative path would resolve against the remote $HOME.
-        if !self.project_path.starts_with('/') {
-            return Err(IpcError::new("E_INVALID", "project_path must be absolute"));
-        }
-        if self.project_path.chars().any(|c| c.is_control()) {
-            return Err(IpcError::new(
-                "E_INVALID",
-                "project_path must not contain control characters",
-            ));
-        }
+        // The one canonical rule for a path that reaches a remote shell:
+        // absolute (a relative one would resolve against the remote $HOME),
+        // bounded, control-free and `..`-free. Shell-quoting stops injection
+        // but not traversal, and this path drives a `rm -rf`-shaped purge.
+        validate::remote_abs_path("project_path", &self.project_path)?;
         Ok(())
     }
 }
@@ -537,6 +532,34 @@ mod tests {
             let err = purge_args(hosts, "/x", 1).validate().unwrap_err();
             assert_eq!(err.code, "E_INVALID", "{hosts:?}");
         }
+    }
+
+    /// The inline copy of the rule this validator used to carry had no `..`
+    /// check, so a traversing absolute path passed. It now shares
+    /// `validate::remote_abs_path` with every other remote path.
+    #[test]
+    fn purge_project_args_rejects_traversal_and_oversized_paths() {
+        for bad in [
+            "/home/u/../../etc",
+            "/home/u/p/..",
+            "/..",
+            "/../root/.ssh",
+            "/a/b/../c",
+        ] {
+            let err = purge_args(&["local"], bad, 1).validate().unwrap_err();
+            assert_eq!(err.code, "E_INVALID", "{bad:?}");
+            assert!(err.message.contains(".."), "{bad:?}: {}", err.message);
+        }
+        // A `..` inside a component is an ordinary name, not traversal.
+        assert!(purge_args(&["local"], "/home/u/a..b", 1).validate().is_ok());
+        let long = format!("/{}", "x".repeat(4096));
+        assert_eq!(
+            purge_args(&["local"], &long, 1)
+                .validate()
+                .unwrap_err()
+                .code,
+            "E_INVALID"
+        );
     }
 
     /// A project with one session on each of `hosts`; returns its id.

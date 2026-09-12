@@ -55,10 +55,12 @@ pub fn apply_hook(
 /// later `tail`s on the host, so it gets the same scrutiny as a worktree
 /// path. Anything else is ignored (never an error — the hook still counts).
 pub fn valid_transcript_path(path: &str, claude_session_id: &str) -> bool {
-    path.starts_with('/')
-        && path.len() <= 4096
-        && !path.chars().any(|c| c.is_control())
-        && !path.split('/').any(|c| c == "..")
+    // Absolute / bounded / control-free / `..`-free is the same rule every
+    // other remote path gets; only the `.claude/projects/` placement and the
+    // file name are specific to a transcript. Delegating keeps one copy of
+    // the shared half — the error itself is discarded, since an unusable
+    // transcript path is ignored rather than reported.
+    crate::validate::remote_abs_path("transcript_path", path).is_ok()
         && path.contains("/.claude/projects/")
         && std::path::Path::new(path)
             .file_name()
