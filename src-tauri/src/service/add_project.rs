@@ -2374,17 +2374,47 @@ mod tests {
     /// Run `script` with `bash -c` (never `-lc`, so `/etc/profile` is never
     /// sourced) under a FULLY CLEARED environment, plus exactly the
     /// variables a hermetic git-identity resolution needs: `PATH`
-    /// (`extra_path` first, so a stubbed `gh` can be picked up, then enough
-    /// of the real system to find `bash`/`git`), `HOME`, `GIT_CONFIG_NOSYSTEM=1`,
-    /// a fresh EMPTY `XDG_CONFIG_HOME` (git also reads
-    /// `$XDG_CONFIG_HOME/git/config` as a global fallback — a real one on
-    /// the test host would otherwise leak an identity in), and
+    /// (`extra_path` first, so a test's own stubbed `gh` can be picked up,
+    /// then an always-present guard directory — see below — then just
+    /// enough of the real system to find `bash`/`git`), `HOME`,
+    /// `GIT_CONFIG_NOSYSTEM=1`, a fresh EMPTY `XDG_CONFIG_HOME` (git also
+    /// reads `$XDG_CONFIG_HOME/git/config` as a global fallback — a real one
+    /// on the test host would otherwise leak an identity in), and
     /// `GIT_CONFIG_GLOBAL` pointed at exactly `global_gitconfig` (`/dev/null`
     /// for "no identity at all") so `~/.gitconfig` itself is irrelevant.
     /// `.env_clear()` also drops any inherited `GIT_DIR`/`GIT_WORK_TREE`/
     /// `GIT_INDEX_FILE` — e.g. from a git hook running `cargo test` — which
     /// would otherwise aim `git init` at the OUTER repository instead of
     /// `dest`.
+    ///
+    /// # The `gh` guard
+    ///
+    /// The code under test (`new_project_script` with `create_remote` set)
+    /// can run `gh repo create` against the user's REAL GitHub account — a
+    /// public side effect, not a hermetic no-op. This happened once already
+    /// during development: a login shell (`bash -lc`, not `-c`) re-prepended
+    /// Homebrew's `bin` ahead of an intended `gh` stub, and the real `gh`
+    /// only failed to actually create anything because the stripped
+    /// environment had no auth token — luck, not a guarantee, since on
+    /// macOS `gh` can read its token straight out of the system keychain
+    /// regardless of `HOME`/env.
+    ///
+    /// So every call here gets a SECOND, always-present `PATH` entry, right
+    /// after `extra_path`: a throwaway directory holding a `gh` script that
+    /// does nothing but print `BLOCKED: the real gh must never run from a
+    /// test` to stderr and exit 99. A test that supplies its own `gh` stub
+    /// in `extra_path` still wins (it comes first on `PATH`); a test that
+    /// passes an empty `extra_path` — or a future reordering of the script
+    /// that reaches the `gh` stage before whatever earlier check used to
+    /// make a missing stub safe — hits this guard instead of falling
+    /// through to a real `gh`.
+    ///
+    /// `PATH` deliberately excludes `/usr/local/bin` and `/opt/homebrew/bin`:
+    /// those are exactly where a real, authenticated `gh` lives (Homebrew on
+    /// macOS; common manual installs on Linux land in `/usr/local/bin`).
+    /// `/usr/bin` and `/bin` are enough to find `git`/`bash` on both macOS
+    /// (Apple Git) and standard Linux. Keep it this way — widening `PATH`
+    /// back out reopens the exact hole this guard exists to close.
     async fn run_hermetic(
         script: &str,
         extra_path: &Path,
@@ -2392,6 +2422,11 @@ mod tests {
         global_gitconfig: &str,
     ) -> std::process::Output {
         let xdg = tempfile::tempdir().unwrap();
+        let gh_guard = tempfile::tempdir().unwrap();
+        write_stub_gh(
+            gh_guard.path(),
+            "echo 'BLOCKED: the real gh must never run from a test' >&2\nexit 99\n",
+        );
         tokio::process::Command::new("bash")
             .arg("-c")
             .arg(script)
@@ -2399,8 +2434,9 @@ mod tests {
             .env(
                 "PATH",
                 format!(
-                    "{}:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
-                    extra_path.display()
+                    "{}:{}:/usr/bin:/bin",
+                    extra_path.display(),
+                    gh_guard.path().display()
                 ),
             )
             .env("HOME", home)
@@ -2410,6 +2446,30 @@ mod tests {
             .output()
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn run_hermetic_blocks_a_real_gh_invocation_when_no_stub_is_supplied() {
+        // The regression test for the whole class of bug this hardening
+        // fixes: a script that reaches `gh` with no test-supplied stub on
+        // `extra_path` must hit the always-present guard — exit 99 with the
+        // BLOCKED marker on stderr — and never a real `gh` on the system
+        // `PATH`.
+        let home = tempfile::tempdir().unwrap();
+        let empty_bin = tempfile::tempdir().unwrap();
+        let out = run_hermetic(
+            "gh repo create acme/widget --private",
+            empty_bin.path(),
+            home.path(),
+            "/dev/null",
+        )
+        .await;
+        assert_eq!(out.status.code(), Some(99), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr)
+                .contains("BLOCKED: the real gh must never run from a test"),
+            "{out:?}"
+        );
     }
 
     fn author_of(dest: &Path) -> String {
