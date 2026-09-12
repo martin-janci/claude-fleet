@@ -1,5 +1,5 @@
 import { writable, derived } from 'svelte/store';
-import { invokeCmd, type Result } from './result';
+import { invokeCmd, invokeCmdAbortable, type IpcError, type Result } from './result';
 
 export interface ProjectRow {
   id: number;
@@ -181,4 +181,63 @@ export async function listHostWorktrees(
   return invokeCmd<HostWorktrees>('list_host_worktrees', {
     args: { host_alias: hostAlias, project_id: projectId },
   });
+}
+
+/** Wire shape of `service::add_project::AddProjectArgs::source`
+ *  (`#[serde(tag = "kind", rename_all = "snake_case")]`). */
+export type AddProjectSource =
+  | { kind: 'clone'; url: string }
+  | { kind: 'folder'; path: string }
+  | { kind: 'new'; owner: string; repo: string; create_remote: boolean; confirm?: string };
+
+/** Wire shape of `service::add_project::GithubRepo`. */
+export interface GithubRepo {
+  name_with_owner: string;
+  description: string | null;
+  is_private: boolean;
+  updated_at: string | null;
+}
+
+/**
+ * Add a project fleet does not know about yet: clone a GitHub repo, adopt an
+ * existing checkout, or create a new one. Cancellable via `signal` — see
+ * `invokeCmdAbortable` and `AddProjectArgs::call_id`. Merges the returned
+ * row into the `projects` store on success via `mergeProject`, so the
+ * sidebar shows the new project without a refetch.
+ */
+export async function addProject(
+  hostAlias: string,
+  source: AddProjectSource,
+  signal?: AbortSignal,
+): Promise<Result<ProjectTreeRow>> {
+  const r = await invokeCmdAbortable<ProjectTreeRow>(
+    'add_project',
+    { args: { host_alias: hostAlias, source } },
+    signal,
+  );
+  if (r.ok) mergeProject(r.value);
+  return r;
+}
+
+/** The repositories `gh` can see on `hostAlias`, for the Add-project
+ *  dialog's browse mode. Read-only. */
+export async function listGithubRepos(hostAlias: string): Promise<Result<GithubRepo[]>> {
+  return invokeCmd<GithubRepo[]>('list_github_repos', { args: { host_alias: hostAlias } });
+}
+
+const CONFIRM_TOKEN_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * The `create_remote` confirmation token carried in an `E_CONFIRM_REQUIRED`
+ * error's `details.confirm` field (see `service::add_project::ConfirmTokens`),
+ * for the Add-project dialog's two-step confirmation flow. `null` when the
+ * error is not `E_CONFIRM_REQUIRED`, has no `details`, or the token is not a
+ * well-formed 64-character hex string.
+ */
+export function confirmTokenOf(error: IpcError): string | null {
+  if (error.code !== 'E_CONFIRM_REQUIRED') return null;
+  const details = error.details;
+  if (!details || typeof details !== 'object') return null;
+  const confirm = (details as { confirm?: unknown }).confirm;
+  return typeof confirm === 'string' && CONFIRM_TOKEN_RE.test(confirm) ? confirm : null;
 }
