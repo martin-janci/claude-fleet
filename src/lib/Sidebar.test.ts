@@ -661,7 +661,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(screen.queryAllByTestId('sess-row')).toHaveLength(1);
   });
 
-  it('shows host badge before each session name', async () => {
+  it('shows the host in the details line of each session', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
       if (cmd === 'list_projects') return fakeProjects;
       if (cmd === 'list_sessions') return [sessionFor(1, 'dev-foo')];
@@ -675,7 +675,8 @@ describe('Sidebar (sessions-grouped view)', () => {
     for (let i = 0; i < 8; i++) await tick();
     const badges = screen.queryAllByTestId('host-badge');
     expect(badges).toHaveLength(1);
-    expect(badges[0].textContent).toBe('[local]');
+    expect(badges[0].textContent).toBe('local');
+    expect(badges[0].closest('[data-testid="sess-details"]')).not.toBeNull();
   });
 
   it('host pill tooltip includes account info when present', async () => {
@@ -1046,6 +1047,8 @@ describe('Sidebar triage (W2 Track D)', () => {
     const row = screen.getByTestId('sess-row');
     expect(row.querySelector('.sess-name')).toHaveTextContent('Fix login');
     expect(screen.getByTestId('sess-tmux-name')).toHaveTextContent('dev-martin-janci-claude-fleet--fix-login');
+    expect(row.querySelector('.sess-line1 .sess-name')).toHaveTextContent('Fix login');
+    expect(screen.getByTestId('sess-tmux-name').closest('[data-testid="sess-details"]')).not.toBeNull();
   });
 
   it('shows elapsed time, last prompt and a CI badge as secondary row text', async () => {
@@ -1061,13 +1064,39 @@ describe('Sidebar triage (W2 Track D)', () => {
     render(Sidebar);
     await tick(); await tick();
     const meta = screen.getByTestId('sess-meta');
-    expect(meta).toHaveTextContent('3h 5m');
+    expect(screen.getByTestId('sess-details')).toHaveTextContent('3h 5m');
     expect(meta).toHaveTextContent('Implement the triage filter');
     expect(meta).not.toHaveTextContent('second line');
     expect(screen.getByTestId('ci-badge')).toHaveTextContent('CI');
   });
 
-  it.skip('the details pill hides the second row line and persists', async () => {
+  it('line 1 holds the name and one status chip; line 2 holds host, worktree, elapsed and prompt', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const s = {
+      ...sessionFor(1, 'dev-martin-janci-claude-fleet--fix-login'),
+      worktree_key: 'fix-login',
+      claude_status: 'working' as const,
+      started_at: now - 3600,
+      last_prompt: 'Implement the triage filter',
+      context_pct: 62,
+    };
+    mockBackend(fakeProjects, [s]);
+    render(Sidebar);
+    await tick(); await tick();
+    const row = screen.getByTestId('sess-row');
+    const line1 = row.querySelector('.sess-line1')!;
+    expect(line1.querySelector('.sess-name')).toHaveTextContent('dev-martin-janci-claude-fleet--fix-login');
+    expect(line1.querySelector('[data-testid="claude-chip"]')).toHaveTextContent('working');
+    const details = screen.getByTestId('sess-details');
+    expect(details.querySelector('[data-testid="host-badge"]')).toHaveTextContent('local');
+    expect(details).toHaveTextContent('fix-login');
+    expect(details).toHaveTextContent('1h');
+    expect(details.querySelector('[data-testid="context-badge"]')).not.toBeNull();
+    expect(screen.getByTestId('sess-meta')).toHaveTextContent('Implement the triage filter');
+    expect(line1.querySelector('[data-testid="host-badge"]')).toBeNull();
+  });
+
+  it('the details pill hides the second row line and persists', async () => {
     mockBackend(fakeProjects, [{ ...sessionFor(1, 'dev-a'), started_at: Math.floor(Date.now() / 1000) - 60 }]);
     render(Sidebar);
     await tick(); await tick();

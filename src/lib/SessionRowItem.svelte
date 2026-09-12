@@ -4,6 +4,7 @@
     recreateSession,
     dismissGhostSession,
     showFriendlyNames,
+    showRowDetails,
     formatCostMicros,
     formatTokens,
     sessionUsageTokens,
@@ -24,7 +25,7 @@
     STUCK_COLOR,
   } from './attention';
   import { pushError } from './toasts';
-  import { rowMeta, timeAgo } from './session_status';
+  import { rowElapsed, rowPrompt, timeAgo } from './session_status';
   import PeekPanel from './PeekPanel.svelte';
 
   // Rename, selection and peek state stay in the Sidebar (they must survive a
@@ -80,7 +81,17 @@
 
   const sessSelected = $derived($selectedSession?.id === sess.id);
   const ctxLevel = $derived(contextLevel(sess.context_pct));
-  const meta = $derived(rowMeta(sess, nowSec));
+  const elapsed = $derived(rowElapsed(sess, nowSec));
+  const prompt = $derived(rowPrompt(sess));
+  const primaryIsFriendly = $derived($showFriendlyNames && !!sess.friendly_name);
+  const primaryName = $derived(primaryIsFriendly ? sess.friendly_name! : sess.tmux_name);
+  // Line 2 names what line 1 does not: the tmux name under a friendly name,
+  // else the worktree when it is not already part of the tmux name.
+  const secondaryName = $derived.by((): string | null => {
+    if (primaryIsFriendly) return sess.tmux_name;
+    if (sess.worktree_key && sess.worktree_key !== sess.tmux_name) return sess.worktree_key;
+    return null;
+  });
 
   async function doRestart(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
@@ -156,7 +167,7 @@
   {:else}
     {#if sess.status === 'ghost'}
       <span class="status-dot status-ghost" title="ghost — session lost" aria-hidden="true"></span>
-      <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
+      <span class="host-badge" data-testid="host-badge">{sess.host_alias}</span>
       <span class="sess-name" title={sess.tmux_name}>{
         $showFriendlyNames && sess.friendly_name ? sess.friendly_name : sess.tmux_name
       }</span>
@@ -183,136 +194,143 @@
         >×</button>
       </div>
     {:else}
-      <span class="status-dot status-{sess.status}" title={sess.status} aria-hidden="true"></span>
-      {#if relatedCount > 0}
-        <span
-          class="related-badge"
-          data-testid="related-badge"
-          role="img"
-          title="{relatedCount} related session(s)"
-          aria-label="{relatedCount} related sessions"
-        >🔗{relatedCount}</span>
-      {/if}
-      {#if sess.kind === 'review'}
-        <span class="review-badge" role="img" title="review session" aria-label="review session">🔍</span>
-      {/if}
-      {#if sess.kind === 'shell'}
-        <span class="shell-badge" title="shell session">▶</span>
-      {/if}
-      {#if sess.kind === 'bg'}
-        <span class="bg-badge" role="img" title="background agent" aria-label="background agent">🤖</span>
-      {/if}
-      <span class="host-badge" data-testid="host-badge">[{sess.host_alias}]</span>
-      <span class="sess-main">
-        <span class="sess-name" title={$showFriendlyNames && sess.friendly_name ? sess.tmux_name : undefined}>{
-          $showFriendlyNames && sess.friendly_name ? sess.friendly_name : sess.tmux_name
-        }</span>
-        {#if $showFriendlyNames && sess.friendly_name}
-          <span class="sess-secondary" data-testid="sess-tmux-name">{sess.tmux_name}</span>
+      <div class="sess-lines">
+        <div class="sess-line1">
+          <span class="status-dot status-{sess.status}" title={sess.status} aria-hidden="true"></span>
+          {#if relatedCount > 0}
+            <span
+              class="related-badge"
+              data-testid="related-badge"
+              role="img"
+              title="{relatedCount} related session(s)"
+              aria-label="{relatedCount} related sessions"
+            >🔗{relatedCount}</span>
+          {/if}
+          {#if sess.kind === 'review'}
+            <span class="review-badge" role="img" title="review session" aria-label="review session">🔍</span>
+          {/if}
+          {#if sess.kind === 'shell'}
+            <span class="shell-badge" title="shell session">▶</span>
+          {/if}
+          {#if sess.kind === 'bg'}
+            <span class="bg-badge" role="img" title="background agent" aria-label="background agent">🤖</span>
+          {/if}
+          <span class="sess-name" title={primaryIsFriendly ? sess.tmux_name : undefined}>{primaryName}</span>
+          {#if sess.stuck_kind}
+            <!-- Stuck outranks claude_status: one red chip, no green "working"
+                 next to it to soften the signal. -->
+            <span
+              class="claude-chip stuck-chip"
+              data-testid="stuck-chip"
+              style="background: {STUCK_COLOR}22; color: {STUCK_COLOR}; border-color: {STUCK_COLOR}66;"
+              title="Stuck: {stuckKindLabel(sess.stuck_kind)}{sess.current_activity ? ' — ' + sess.current_activity : ''}"
+            >⚠ stuck: {stuckKindLabel(sess.stuck_kind)}</span>
+          {:else if sess.claude_status}
+            <span
+              class="claude-chip"
+              data-testid="claude-chip"
+              style="background: {claudeStatusColor(sess.claude_status)}22; color: {claudeStatusColor(sess.claude_status)}; border-color: {claudeStatusColor(sess.claude_status)}44;"
+              title="Claude: {sess.claude_status}{sess.current_activity ? ' — ' + sess.current_activity : ''}"
+            >{claudeStatusLabel(sess.claude_status)}</span>
+          {/if}
+          <div class="row-actions">
+            {#if sess.claude_session_id && sess.status !== 'ghost'}
+              <button
+                class="icon-btn small peek-btn"
+                data-testid="peek-session"
+                title="Peek at session logs"
+                onclick={(e) => { e.stopPropagation(); doPeek(sess); }}
+                aria-label="Peek"
+              >📋</button>
+            {/if}
+            <button class="icon-btn small" onclick={(e) => doRestart(sess, e)} title="Restart claude in this session" aria-label="Restart">↻</button>
+            <button
+              class="icon-btn small"
+              data-testid="edit-label"
+              onclick={(e) => beginLabelEdit(sess, e)}
+              title="Edit label (double-click the row)"
+              aria-label="Edit label"
+            >🏷</button>
+            <button
+              class="icon-btn small"
+              data-testid="rename-tmux"
+              onclick={(e) => beginRename(sess, e)}
+              title="Rename tmux session"
+              aria-label="Rename tmux session"
+            >✎</button>
+            <button
+              class="icon-btn small"
+              data-testid="recreate-live"
+              onclick={(e) => askRecreate(sess, e)}
+              disabled={!hostIsReachable(sess.host_alias)}
+              title={hostIsReachable(sess.host_alias)
+                ? 'Recreate: kill the tmux session and start it fresh in the same worktree'
+                : 'Host is offline'}
+              aria-label="Recreate"
+            >♻</button>
+            <button class="icon-btn small danger" onclick={(e) => askKill(sess, e)} title="Kill session" aria-label="Kill">×</button>
+          </div>
+        </div>
+        {#if $showRowDetails}
+          <div class="sess-details" data-testid="sess-details">
+            <span class="host-badge" data-testid="host-badge">{sess.host_alias}</span>
+            {#if secondaryName}
+              <span class="sess-secondary" data-testid="sess-tmux-name">{secondaryName}</span>
+            {/if}
+            {#if elapsed}
+              <span class="sess-elapsed">{elapsed}</span>
+            {/if}
+            {#if ctxLevel !== null && sess.context_pct !== null}
+              <span
+                class="ctx-badge ctx-{ctxLevel}"
+                data-testid="context-badge"
+                data-level={ctxLevel}
+                style="color: {contextColor(ctxLevel)}; border-color: {contextColor(ctxLevel)}55;"
+                title="Context window {Math.round(sess.context_pct)}% used"
+                role="meter"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow={Math.round(sess.context_pct)}
+                aria-label="context usage"
+              ><span class="ctx-bar" style="width: {Math.min(100, Math.max(0, sess.context_pct))}%; background: {contextColor(ctxLevel)};"></span><span class="ctx-pct">{Math.round(sess.context_pct)}%</span></span>
+            {/if}
+            {#if sessionUsageTokens(sess) > 0}
+              {@const priced = (sess.usage_cost_micros ?? 0) > 0}
+              <span
+                class="cost-badge"
+                data-testid="cost-badge"
+                data-priced={priced}
+                title={priced
+                  ? `Estimated cost ${formatCostMicros(sess.usage_cost_micros)} · ${formatTokens(sessionUsageTokens(sess))} tokens${sess.usage_model ? ' · ' + sess.usage_model : ''}`
+                  : `Unpriced: no price for ${sess.usage_model ?? 'an unknown model'} · ${formatTokens(sessionUsageTokens(sess))} tokens`}
+              >{priced ? formatCostMicros(sess.usage_cost_micros) : 'unpriced'}</span>
+            {/if}
+            {#if sess.effort_level}
+              <span class="effort-badge" title="Effort: {sess.effort_level}">{sess.effort_level}</span>
+            {/if}
+            {#if sess.pr_url}
+              <a
+                class="pr-link"
+                href={sess.pr_url}
+                onclick={(e) => e.stopPropagation()}
+                title="Open pull request"
+                target="_blank"
+                rel="noreferrer"
+              >PR↗</a>
+              {#if sess.ci_status}
+                <span
+                  class="ci-badge"
+                  data-testid="ci-badge"
+                  style="color: {ciStatusColor(sess.ci_status)};"
+                  title="CI checks: {sess.ci_status}"
+                >{ciStatusLabel(sess.ci_status)}</span>
+              {/if}
+            {/if}
+            {#if prompt}
+              <span class="sess-meta" data-testid="sess-meta" title={sess.last_prompt ?? undefined}>{prompt}</span>
+            {/if}
+          </div>
         {/if}
-        {#if meta}
-          <span class="sess-meta" data-testid="sess-meta" title={sess.last_prompt ?? undefined}>{meta}</span>
-        {/if}
-      </span>
-      {#if sess.stuck_kind}
-        <!-- Stuck outranks claude_status: one red chip, no green "working"
-             next to it to soften the signal. -->
-        <span
-          class="claude-chip stuck-chip"
-          data-testid="stuck-chip"
-          style="background: {STUCK_COLOR}22; color: {STUCK_COLOR}; border-color: {STUCK_COLOR}66;"
-          title="Stuck: {stuckKindLabel(sess.stuck_kind)}{sess.current_activity ? ' — ' + sess.current_activity : ''}"
-        >⚠ stuck: {stuckKindLabel(sess.stuck_kind)}</span>
-      {:else if sess.claude_status}
-        <span
-          class="claude-chip"
-          data-testid="claude-chip"
-          style="background: {claudeStatusColor(sess.claude_status)}22; color: {claudeStatusColor(sess.claude_status)}; border-color: {claudeStatusColor(sess.claude_status)}44;"
-          title="Claude: {sess.claude_status}{sess.current_activity ? ' — ' + sess.current_activity : ''}"
-        >{claudeStatusLabel(sess.claude_status)}</span>
-      {/if}
-      {#if ctxLevel !== null && sess.context_pct !== null}
-        <span
-          class="ctx-badge ctx-{ctxLevel}"
-          data-testid="context-badge"
-          data-level={ctxLevel}
-          style="color: {contextColor(ctxLevel)}; border-color: {contextColor(ctxLevel)}55;"
-          title="Context window {Math.round(sess.context_pct)}% used"
-          role="meter"
-          aria-valuemin="0"
-          aria-valuemax="100"
-          aria-valuenow={Math.round(sess.context_pct)}
-          aria-label="context usage"
-        ><span class="ctx-bar" style="width: {Math.min(100, Math.max(0, sess.context_pct))}%; background: {contextColor(ctxLevel)};"></span><span class="ctx-pct">{Math.round(sess.context_pct)}%</span></span>
-      {/if}
-      {#if sessionUsageTokens(sess) > 0}
-        {@const priced = (sess.usage_cost_micros ?? 0) > 0}
-        <span
-          class="cost-badge"
-          data-testid="cost-badge"
-          data-priced={priced}
-          title={priced
-            ? `Estimated cost ${formatCostMicros(sess.usage_cost_micros)} · ${formatTokens(sessionUsageTokens(sess))} tokens${sess.usage_model ? ' · ' + sess.usage_model : ''}`
-            : `Unpriced: no price for ${sess.usage_model ?? 'an unknown model'} · ${formatTokens(sessionUsageTokens(sess))} tokens`}
-        >{priced ? formatCostMicros(sess.usage_cost_micros) : 'unpriced'}</span>
-      {/if}
-      {#if sess.effort_level}
-        <span class="effort-badge" title="Effort: {sess.effort_level}">{sess.effort_level}</span>
-      {/if}
-      {#if sess.pr_url}
-        <a
-          class="pr-link"
-          href={sess.pr_url}
-          onclick={(e) => e.stopPropagation()}
-          title="Open pull request"
-          target="_blank"
-          rel="noreferrer"
-        >PR↗</a>
-        {#if sess.ci_status}
-          <span
-            class="ci-badge"
-            data-testid="ci-badge"
-            style="color: {ciStatusColor(sess.ci_status)};"
-            title="CI checks: {sess.ci_status}"
-          >{ciStatusLabel(sess.ci_status)}</span>
-        {/if}
-      {/if}
-      <div class="row-actions">
-        {#if sess.claude_session_id && sess.status !== 'ghost'}
-          <button
-            class="icon-btn small peek-btn"
-            data-testid="peek-session"
-            title="Peek at session logs"
-            onclick={(e) => { e.stopPropagation(); doPeek(sess); }}
-            aria-label="Peek"
-          >📋</button>
-        {/if}
-        <button class="icon-btn small" onclick={(e) => doRestart(sess, e)} title="Restart claude in this session" aria-label="Restart">↻</button>
-        <button
-          class="icon-btn small"
-          data-testid="edit-label"
-          onclick={(e) => beginLabelEdit(sess, e)}
-          title="Edit label (double-click the row)"
-          aria-label="Edit label"
-        >🏷</button>
-        <button
-          class="icon-btn small"
-          data-testid="rename-tmux"
-          onclick={(e) => beginRename(sess, e)}
-          title="Rename tmux session"
-          aria-label="Rename tmux session"
-        >✎</button>
-        <button
-          class="icon-btn small"
-          data-testid="recreate-live"
-          onclick={(e) => askRecreate(sess, e)}
-          disabled={!hostIsReachable(sess.host_alias)}
-          title={hostIsReachable(sess.host_alias)
-            ? 'Recreate: kill the tmux session and start it fresh in the same worktree'
-            : 'Host is offline'}
-          aria-label="Recreate"
-        >♻</button>
-        <button class="icon-btn small danger" onclick={(e) => askKill(sess, e)} title="Kill session" aria-label="Kill">×</button>
       </div>
     {/if}
   {/if}
@@ -483,13 +501,24 @@
   }
   .pr-link:hover { text-decoration: underline; }
 
-  .sess-main {
-    flex: 1;
-    min-width: 0;
+  .sess-lines { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.1rem; }
+  .sess-line1 { display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
+  .sess-line1 .sess-name { flex: 1; }
+  .sess-details {
     display: flex;
-    flex-direction: column;
-    gap: 0.05rem;
+    align-items: center;
+    gap: 0.35rem;
+    min-width: 0;
+    padding-left: 0.85rem;
+    font-size: 0.65rem;
+    color: var(--fg-muted);
+    white-space: nowrap;
+    overflow: hidden;
   }
+  .sess-details > * { flex-shrink: 0; }
+  .sess-details > .sess-meta { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .sess-details > * + *::before { content: '·'; margin-right: 0.35rem; color: var(--fg-muted); opacity: 0.6; }
+  .sess-details > .host-badge::before { content: none; }
   .sess-name {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.8rem;
