@@ -159,3 +159,23 @@ export async function deleteWorktree(
   if (r.ok) removeWorktree(worktreeId);
   return r;
 }
+
+/** `list_host_worktrees` result: one project's worktrees as they exist on
+ *  one host. `cloned: false` means the repo is not checked out there yet. */
+export interface HostWorktrees {
+  host_alias: string;
+  project_id: number;
+  cloned: boolean;
+  worktrees: WorktreeRow[];
+}
+
+/** The worktrees of `projectId` on `hostAlias`. `local` answers from the
+ *  DB; a remote host is scanned over SSH (one short call) and cached. */
+export async function listHostWorktrees(
+  hostAlias: string,
+  projectId: number,
+): Promise<Result<HostWorktrees>> {
+  return invokeCmd<HostWorktrees>('list_host_worktrees', {
+    args: { host_alias: hostAlias, project_id: projectId },
+  });
+}
