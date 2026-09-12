@@ -568,6 +568,20 @@ impl Default for SshClient {
 pub trait SshExec: Send + Sync {
     async fn run(&self, host: &str, args: &[&str], timeout: Duration) -> Result<Output, IpcError>;
 
+    /// Like `run`, but with the wall-clock bound given explicitly instead of
+    /// derived as `3 × connect_timeout`. Use this when a command legitimately
+    /// runs far longer than a reasonable connect budget (a large `git
+    /// clone`…) but a hung or unreachable host must still fail fast on the
+    /// connect step: pass a short `connect_timeout` and the real deadline as
+    /// `wall_clock`.
+    async fn run_bounded(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+    ) -> Result<Output, IpcError>;
+
     async fn run_cancellable(
         &self,
         host: &str,
@@ -593,6 +607,16 @@ pub trait SshExec: Send + Sync {
 impl SshExec for SshClient {
     async fn run(&self, host: &str, args: &[&str], timeout: Duration) -> Result<Output, IpcError> {
         SshClient::run(self, host, args, timeout).await
+    }
+
+    async fn run_bounded(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+    ) -> Result<Output, IpcError> {
+        SshClient::run_bounded(self, host, args, connect_timeout, wall_clock).await
     }
 
     async fn run_cancellable(
@@ -627,6 +651,18 @@ impl SshExec for SshClient {
 impl<T: SshExec + ?Sized> SshExec for Arc<T> {
     async fn run(&self, host: &str, args: &[&str], timeout: Duration) -> Result<Output, IpcError> {
         (**self).run(host, args, timeout).await
+    }
+
+    async fn run_bounded(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+    ) -> Result<Output, IpcError> {
+        (**self)
+            .run_bounded(host, args, connect_timeout, wall_clock)
+            .await
     }
 
     async fn run_cancellable(
@@ -824,6 +860,17 @@ impl SshExec for LocalExec {
             "E_SSH",
         )
         .await
+    }
+
+    async fn run_bounded(
+        &self,
+        host: &str,
+        args: &[&str],
+        _connect_timeout: Duration,
+        wall_clock: Duration,
+    ) -> Result<Output, IpcError> {
+        let cmd = self.command(args);
+        self.bounded(host, cmd, wall_clock, None, "E_SSH").await
     }
 
     async fn run_cancellable(

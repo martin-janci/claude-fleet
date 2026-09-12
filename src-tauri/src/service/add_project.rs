@@ -17,10 +17,23 @@ use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// ssh `ConnectTimeout` for a clone: a typo'd or unreachable host must fail
+/// fast, independent of how long the clone itself is allowed to run. Kept
+/// short and passed separately from [`CLONE_WALL_CLOCK`] via
+/// `SshExec::run_bounded` — `SshExec::run`'s single `timeout` argument is
+/// BOTH the connect timeout AND (×3) the wall clock, which would otherwise
+/// force a choice between a slow-to-fail connect and a too-short clone.
+const CLONE_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Wall clock for a clone: big repos over a slow link. The frontend can
-/// cancel sooner through `call_id` once the command layer wires it into the
-/// cancellation registry (Task 5).
+/// cancel sooner once `add_project_with` itself races a `CancellationToken`
+/// derived from `call_id` (Task 5 — see the field's doc comment).
 const CLONE_WALL_CLOCK: Duration = Duration::from_secs(600);
+
+/// Written to stderr by [`clone_script`]'s "already a checkout" guard and
+/// checked by [`git_error`] alongside exit code 3, so an unrelated command
+/// that happens to exit 3 is never misread as "already cloned".
+const ALREADY_CLONED_MARKER: &str = "__add_project_clone_dest_exists__";
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -48,8 +61,13 @@ pub struct AddProjectArgs {
     pub host_alias: String,
     pub source: AddProjectSource,
     /// Set by `invokeCmdAbortable` so the dialog's Cancel can abort a clone.
-    /// Read by the command layer once Task 5 wires it into the cancellation
-    /// registry (see `commands/mutate.rs` / `cancel.rs`); unused here.
+    /// Registering `call_id` in the cancellation registry at the command
+    /// layer is not enough by itself: cancelling actually happens inside
+    /// THIS module, so Task 5 must have `add_project_with` accept the
+    /// resulting `CancellationToken` and race it directly — via
+    /// `SshExec::run_cancellable` for the remote branch and a
+    /// `tokio::select!` added to `run_local_script` for the local one.
+    /// Unused here.
     #[serde(default)]
     #[allow(dead_code)] // Task 5 wires this in.
     pub call_id: Option<String>,
@@ -70,6 +88,11 @@ pub async fn add_project_with(
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
 ) -> Result<ProjectTreeRow, IpcError> {
+    // This becomes a Tauri-reachable entry point in Task 5, so the alias
+    // must be rejected before it ever reaches an ssh argv — same guard
+    // every other caller-supplied-alias service applies first (e.g.
+    // `service::transcript::fetch_transcript`, `service::hosts::add_host`).
+    crate::validate::host_alias(&args.host_alias)?;
     match &args.source {
         AddProjectSource::Clone { url } => clone_source(&args, url, store, ssh).await,
         // Tasks 3 and 4.
@@ -93,43 +116,56 @@ async fn clone_source(
         )
     })?;
     refuse_existing_project(store, &owner, &repo)?;
+    // TOCTOU, accepted: the lock above is dropped here and re-taken inside
+    // `register`. Two concurrent adds of `Owner/Repo` and `owner/repo` could
+    // both pass that case-insensitive guard and then both succeed in
+    // `register`, because the `projects(owner, repo)` unique index is
+    // SQLite's default BINARY collation (case-sensitive), not `NOCASE`. This
+    // is a single-user desktop app — a transaction to close the window isn't
+    // worth it, but the next reader should know the guard isn't atomic.
     let (host_root, local_root, layout) = roots(store, &args.host_alias)?;
     let local_base = layout.project_dir(&local_root, &owner, &repo);
     let clone_url = clone_url_for(&owner, &repo);
 
-    if args.host_alias == crate::service::projects::LOCAL_HOST {
-        run_local_script(&clone_script(&local_base, &clone_url), CLONE_WALL_CLOCK).await?;
+    let (out, dest) = if args.host_alias == crate::service::projects::LOCAL_HOST {
+        let out =
+            run_local_script(&clone_script(&local_base, &clone_url), CLONE_WALL_CLOCK).await?;
+        (out, local_base.clone())
     } else {
         let home = ssh.remote_home(&args.host_alias).await?;
         let root = crate::service::projects::expand_home(&host_root, &home);
         let dest = layout.project_dir(&root, &owner, &repo);
         let script = clone_script(&dest, &clone_url);
         let out = ssh
-            .run(
+            .run_bounded(
                 &args.host_alias,
                 &["bash", "-lc", &quote(&script)],
+                CLONE_CONNECT_TIMEOUT,
                 CLONE_WALL_CLOCK,
             )
             .await?;
-        if !out.status.success() {
-            return Err(git_error(&out));
-        }
+        (out, dest)
+    };
+    if !out.status.success() {
+        return Err(git_error(&args.host_alias, &owner, &repo, &dest, &out));
     }
     register(store, &owner, &repo, &local_base)
 }
 
 /// Clone `url` into `dest` unless `dest` is already a checkout. Every value
 /// quoted; `set -e` so a failed `mkdir` does not reach `git clone`. Exit
-/// code 3 is the script's own "already a checkout" guard, mapped to
-/// `E_EXISTS` by [`git_error`] — nothing here ever removes `dest`.
+/// code 3 plus [`ALREADY_CLONED_MARKER`] on stderr is the script's own
+/// "already a checkout" guard, mapped to `E_EXISTS` by [`git_error`] —
+/// nothing here ever removes `dest`.
 pub(crate) fn clone_script(dest: &str, clone_url: &str) -> String {
     let d = quote(dest);
     format!(
         "set -e\n\
-         if git -C {d} rev-parse --git-dir >/dev/null 2>&1; then echo \"exists\" >&2; exit 3; fi\n\
+         if git -C {d} rev-parse --git-dir >/dev/null 2>&1; then echo {marker} >&2; exit 3; fi\n\
          mkdir -p \"$(dirname -- {d})\"\n\
          git clone {url} {d}\n",
         url = quote(clone_url),
+        marker = quote(ALREADY_CLONED_MARKER),
     )
 }
 
@@ -170,41 +206,51 @@ fn roots(store: &Mutex<Store>, host: &str) -> Result<(String, String, Layout), I
     ))
 }
 
-/// Run `script` locally via `bash -lc`, bounded by `wall_clock`. A non-zero
-/// exit is mapped by [`git_error`], exactly like the remote path.
-async fn run_local_script(script: &str, wall_clock: Duration) -> Result<(), IpcError> {
+/// Run `script` locally via `bash -lc`, bounded by `wall_clock`. Returns the
+/// raw `Output` for ANY exit status, same contract as `SshExec::run` —
+/// mapping a failure to an `IpcError` is the caller's job (`git_error`).
+/// `Err` is reserved for a spawn failure or the wall clock elapsing.
+async fn run_local_script(
+    script: &str,
+    wall_clock: Duration,
+) -> Result<std::process::Output, IpcError> {
     let child = tokio::process::Command::new("bash")
         .arg("-lc")
         .arg(script)
         .output();
-    let out = match tokio::time::timeout(wall_clock, child).await {
-        Ok(res) => res.map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}")))?,
-        Err(_) => {
-            return Err(IpcError::new(
-                codes::E_TIMEOUT,
-                format!("local script exceeded {}s", wall_clock.as_secs()),
-            ))
-        }
-    };
-    if out.status.success() {
-        return Ok(());
+    match tokio::time::timeout(wall_clock, child).await {
+        Ok(res) => res.map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}"))),
+        Err(_) => Err(IpcError::new(
+            codes::E_TIMEOUT,
+            format!("local script exceeded {}s", wall_clock.as_secs()),
+        )),
     }
-    Err(git_error(&out))
 }
 
-/// The clone script's failure, mapped to an `IpcError`. Exit code 3 (the
-/// script's own "already a checkout" guard) is `E_EXISTS`; anything else is
-/// `E_GIT_SETUP` with stderr, falling back to stdout, and `(no stderr)` when
-/// both are empty. Shared by the local and remote clone paths — the script
-/// text is identical either way, only the transport differs.
-fn git_error(out: &std::process::Output) -> IpcError {
-    if out.status.code() == Some(3) {
+/// The clone script's failure at `dest` on `host`, mapped to an `IpcError`.
+/// Exit code 3 together with [`ALREADY_CLONED_MARKER`] on stderr (both, so
+/// an unrelated command that happens to exit 3 is never misread) is the
+/// script's own "already a checkout" guard, reported as `E_EXISTS` with the
+/// path so the caller knows where to look. Anything else is `E_GIT_SETUP`
+/// naming `owner/repo` and `host`, with stderr (falling back to stdout, and
+/// `(no stderr)` when both are empty) — matching the sibling clone error at
+/// `service::sessions::lifecycle::git_setup_error`. Shared by the local and
+/// remote clone paths — the script text is identical either way, only the
+/// transport differs.
+fn git_error(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    dest: &str,
+    out: &std::process::Output,
+) -> IpcError {
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if out.status.code() == Some(3) && stderr.contains(ALREADY_CLONED_MARKER) {
         return IpcError::new(
             codes::E_EXISTS,
-            "already cloned at that path; it should appear after a refresh",
+            format!("already cloned at {dest}; it should appear after a refresh"),
         );
     }
-    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let detail = if !stderr.is_empty() {
         stderr
@@ -213,7 +259,10 @@ fn git_error(out: &std::process::Output) -> IpcError {
     } else {
         "(no stderr)".to_string()
     };
-    IpcError::new(codes::E_GIT_SETUP, detail)
+    IpcError::new(
+        codes::E_GIT_SETUP,
+        format!("couldn't clone {owner}/{repo} on {host}: {detail}"),
+    )
 }
 
 /// Register `owner`/`repo` at `base_path` (always the LOCAL path the project
@@ -416,17 +465,22 @@ mod tests {
         let dest_parent = tempfile::tempdir().unwrap();
         let dest = dest_parent.path().join("checkout");
         let clone_url = format!("file://{}", src.path().display());
-        let script = clone_script(dest.to_str().unwrap(), &clone_url);
+        let dest_str = dest.to_str().unwrap();
+        let script = clone_script(dest_str, &clone_url);
 
-        run_local_script(&script, Duration::from_secs(10))
+        let out = run_local_script(&script, Duration::from_secs(10))
             .await
             .unwrap();
+        assert!(out.status.success(), "{out:?}");
         assert!(dest.join(".git").is_dir());
 
-        let err = run_local_script(&script, Duration::from_secs(10))
+        let out2 = run_local_script(&script, Duration::from_secs(10))
             .await
-            .unwrap_err();
+            .unwrap();
+        assert!(!out2.status.success());
+        let err = git_error("local", "o", "r", dest_str, &out2);
         assert_eq!(err.code, codes::E_EXISTS);
+        assert!(err.message.contains(dest_str), "{}", err.message);
     }
 
     #[tokio::test]

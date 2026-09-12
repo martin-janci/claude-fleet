@@ -367,6 +367,27 @@ impl SshExec for FakeSsh {
         .await
     }
 
+    async fn run_bounded(
+        &self,
+        host: &str,
+        args: &[&str],
+        _connect_timeout: Duration,
+        wall_clock: Duration,
+    ) -> Result<Output, IpcError> {
+        // `set_wall_clock` still overrides, exactly like `run`; the caller's
+        // `connect_timeout` plays no role for a fake — there is nothing to
+        // time a connect against.
+        self.execute(
+            host,
+            args,
+            None,
+            self.wall_clock_or(wall_clock),
+            None,
+            "E_SSH",
+        )
+        .await
+    }
+
     async fn run_cancellable(
         &self,
         host: &str,
