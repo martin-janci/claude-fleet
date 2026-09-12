@@ -1,4 +1,5 @@
 use super::*;
+use crate::service::repair::MIRROR_REFUSED;
 use crate::store::Store;
 
 #[test]
@@ -2353,4 +2354,313 @@ async fn reconcile_survives_a_failing_pr_probe_shell() {
     let a = s.get_session("dev-a", "local").unwrap().unwrap();
     assert_eq!(a.status, "running");
     assert_eq!(a.pr_url, None);
+}
+
+// ── ensure_remote_project: mirroring an existing worktree ─────────────────
+
+#[test]
+fn ensure_remote_project_script_clones_only_without_a_worktree() {
+    let script = ensure_remote_project_script(
+        "/home/u/projects/github.com/o/r",
+        "git@github.com:o/r.git",
+        None,
+    );
+    assert!(script.starts_with("set -e\n"), "{script}");
+    assert!(
+        script.contains(
+            "if [ ! -d '/home/u/projects/github.com/o/r'/.git ]; then mkdir -p \"$(dirname -- '/home/u/projects/github.com/o/r')\" && git clone 'git@github.com:o/r.git' '/home/u/projects/github.com/o/r'; fi"
+        ),
+        "guarded clone: {script}"
+    );
+    assert!(!script.contains("worktree add"), "{script}");
+}
+
+#[test]
+fn ensure_remote_project_script_main_is_the_clone_itself() {
+    let script = ensure_remote_project_script("/r", "git@github.com:o/r.git", Some(("main", None)));
+    assert!(!script.contains("worktree add"), "{script}");
+    assert_eq!(mirrored_branch(Some(("main", Some("main")))), None);
+    assert_eq!(mirrored_branch(None), None);
+    assert_eq!(mirrored_branch(Some(("wt", None))), Some("wt"));
+    assert_eq!(
+        mirrored_branch(Some(("wt", Some("feature/x")))),
+        Some("feature/x")
+    );
+}
+
+#[test]
+fn ensure_remote_project_script_mirrors_the_worktree_from_origin() {
+    let script = ensure_remote_project_script(
+        "/re po",
+        "git@github.com:o/r.git",
+        Some(("nifty-swanson", Some("feature/elated-shtern"))),
+    );
+    // Guarded on the worktree directory, quoted.
+    assert!(
+        script.contains("if [ ! -d '/re po/.claude/worktrees/nifty-swanson' ]; then\n"),
+        "{script}"
+    );
+    // The repair module's Mirror add, not a naive `git worktree add <path> <branch>`.
+    assert!(script.contains("b='feature/elated-shtern'\n"), "{script}");
+    assert!(
+        script.contains("show-ref --verify --quiet \"refs/heads/$b\""),
+        "local branch first: {script}"
+    );
+    assert!(
+        script.contains("ls-remote --exit-code --heads -- origin \"refs/heads/$b\""),
+        "asks origin: {script}"
+    );
+    assert!(
+        script.contains("fetch -- origin \"+refs/heads/$b:refs/remotes/origin/$b\""),
+        "fetches before checkout: {script}"
+    );
+    assert!(
+        script.contains(
+            "worktree add --track -b \"$b\" -- '/re po/.claude/worktrees/nifty-swanson' \"origin/$b\""
+        ),
+        "tracks origin: {script}"
+    );
+    assert!(
+        script.contains(MIRROR_REFUSED),
+        "refuses when origin lacks it: {script}"
+    );
+    assert!(
+        !script.contains(" -b \"$b\" -- '/re po/.claude/worktrees/nifty-swanson' \"$start\""),
+        "never forks a new branch from the base: {script}"
+    );
+    // The name is the branch when the row has none.
+    let by_name = ensure_remote_project_script("/r", "u", Some(("wt", None)));
+    assert!(by_name.contains("b='wt'\n"), "{by_name}");
+}
+
+#[test]
+fn git_setup_error_explains_a_branch_that_is_not_on_origin() {
+    let e = git_setup_error(
+        "mefistos",
+        "o",
+        "r",
+        Some("feature/x"),
+        "",
+        &format!("repair: branch feature/x {MIRROR_REFUSED}\n"),
+    );
+    assert_eq!(e.code, codes::E_GIT_SETUP);
+    assert_eq!(
+        e.message,
+        "branch feature/x is not on origin; push it from the source machine, or start a new worktree on mefistos"
+    );
+    // Any other failure keeps git's stderr (stdout when stderr is empty).
+    let raw = git_setup_error(
+        "mefistos",
+        "o",
+        "r",
+        Some("feature/x"),
+        "",
+        "fatal: invalid reference: feature/x\n",
+    );
+    assert_eq!(raw.code, codes::E_GIT_SETUP);
+    assert_eq!(
+        raw.message,
+        "couldn't ensure o/r on mefistos: fatal: invalid reference: feature/x"
+    );
+    let out = git_setup_error("h", "o", "r", None, "only stdout\n", "  ");
+    assert_eq!(out.message, "couldn't ensure o/r on h: only stdout");
+    // The marker without a mirrored branch (no worktree) is not rewritten.
+    let no_wt = git_setup_error("h", "o", "r", None, "", MIRROR_REFUSED);
+    assert!(
+        no_wt.message.starts_with("couldn't ensure o/r on h: "),
+        "{}",
+        no_wt.message
+    );
+}
+
+#[tokio::test]
+async fn ensure_remote_project_maps_a_refused_mirror_to_a_push_hint() {
+    use crate::ssh_fake::{FakeSsh, Match, Reply};
+    let fake = FakeSsh::new();
+    fake.on_host(
+        "mefistos",
+        Match::script_contains("worktree add"),
+        Reply::fail(
+            1,
+            &format!("repair: branch feature/elated-shtern {MIRROR_REFUSED}\n"),
+        ),
+    );
+    let err = ensure_remote_project(
+        &fake,
+        "mefistos",
+        "FrantisekSefcik",
+        "sales-twins-app",
+        "/home/u/projects/github.com/FrantisekSefcik/sales-twins-app",
+        Some(("nifty-swanson", Some("feature/elated-shtern"))),
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("refused mirror must fail");
+    assert_eq!(err.code, codes::E_GIT_SETUP);
+    assert_eq!(
+        err.message,
+        "branch feature/elated-shtern is not on origin; push it from the source machine, or start a new worktree on mefistos"
+    );
+    // One `bash -lc '<script>'` call carrying the origin-aware add.
+    let calls = fake.calls_for("mefistos");
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    let script = calls[0].script().expect("bash -lc script");
+    assert!(
+        script.contains("ls-remote --exit-code --heads -- origin"),
+        "{script}"
+    );
+    assert!(
+        script.contains("git clone 'git@github.com:FrantisekSefcik/sales-twins-app.git'"),
+        "{script}"
+    );
+}
+
+#[tokio::test]
+async fn ensure_remote_project_keeps_other_git_failures_verbatim() {
+    use crate::ssh_fake::{FakeSsh, Match, Reply};
+    let fake = FakeSsh::new();
+    fake.on_host(
+        "mefistos",
+        Match::Any,
+        Reply::fail(128, "fatal: could not read from remote repository\n"),
+    );
+    let err = ensure_remote_project(
+        &fake,
+        "mefistos",
+        "o",
+        "r",
+        "/home/u/projects/github.com/o/r",
+        Some(("wt", Some("feature/x"))),
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("git failure");
+    assert_eq!(err.code, codes::E_GIT_SETUP);
+    assert_eq!(
+        err.message,
+        "couldn't ensure o/r on mefistos: fatal: could not read from remote repository"
+    );
+    // And success is silent.
+    let ok = FakeSsh::new();
+    ensure_remote_project(
+        &ok,
+        "mefistos",
+        "o",
+        "r",
+        "/home/u/projects/github.com/o/r",
+        Some(("wt", Some("feature/x"))),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("default reply is exit 0");
+}
+
+/// Runs the real mirror script against local git repos: a bare `origin`, a
+/// `source` clone that pushes one branch and keeps another local-only, and a
+/// `remote` clone standing in for the other host.
+#[tokio::test]
+async fn ensure_remote_project_script_mirrors_pushed_branches_and_refuses_unpushed_ones() {
+    use std::process::Command;
+    fn git(args: &[&str]) {
+        let out = Command::new("git").args(args).output().expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let base = std::env::temp_dir().join(format!(
+        "cf-mirror-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&base).expect("create base");
+    let origin = base.join("origin.git");
+    let source = base.join("source");
+    let remote = base.join("remote");
+    let (origin_s, source_s, remote_s) = (
+        origin.to_str().unwrap(),
+        source.to_str().unwrap(),
+        remote.to_str().unwrap(),
+    );
+    git(&["init", "--bare", "-b", "main", origin_s]);
+    git(&["init", "-b", "main", source_s]);
+    git(&["-C", source_s, "config", "user.email", "t@t"]);
+    git(&["-C", source_s, "config", "user.name", "T"]);
+    std::fs::write(source.join("README.md"), "hello").unwrap();
+    git(&["-C", source_s, "add", "."]);
+    git(&["-C", source_s, "commit", "-m", "init"]);
+    git(&["-C", source_s, "remote", "add", "origin", origin_s]);
+    git(&["-C", source_s, "push", "-u", "origin", "main"]);
+    // The "remote host" clones before either feature branch exists, so its
+    // `origin/*` refs are stale — exactly the case the fetch is for.
+    git(&["clone", origin_s, remote_s]);
+    git(&["-C", source_s, "checkout", "-b", "feature/pushed"]);
+    std::fs::write(source.join("pushed.txt"), "p").unwrap();
+    git(&["-C", source_s, "add", "."]);
+    git(&["-C", source_s, "commit", "-m", "pushed"]);
+    git(&["-C", source_s, "push", "-u", "origin", "feature/pushed"]);
+    git(&["-C", source_s, "checkout", "-b", "feature/local-only"]);
+
+    let run = |wt: &str, branch: &str| {
+        let script = ensure_remote_project_script(remote_s, origin_s, Some((wt, Some(branch))));
+        Command::new("bash")
+            .args(["-lc", &script])
+            .output()
+            .expect("bash")
+    };
+    // Pushed: fetched fresh and checked out tracking origin.
+    let out = run("wt-pushed", "feature/pushed");
+    assert!(
+        out.status.success(),
+        "mirror of a pushed branch: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("outcome=branch_remote"));
+    let wt = remote.join(".claude/worktrees/wt-pushed");
+    assert!(
+        wt.join("pushed.txt").is_file(),
+        "checked out at the pushed commit"
+    );
+    let head = Command::new("git")
+        .args([
+            "-C",
+            wt.to_str().unwrap(),
+            "rev-parse",
+            "--abbrev-ref",
+            "HEAD",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&head.stdout).trim(),
+        "feature/pushed"
+    );
+    // Idempotent: the directory exists, nothing runs.
+    let again = run("wt-pushed", "feature/pushed");
+    assert!(
+        again.status.success(),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&again.stdout).contains("outcome="));
+    // Never pushed: refused with the marker, no directory, no branch.
+    let out = run("wt-local", "feature/local-only");
+    assert!(!out.status.success(), "unpushed branch must be refused");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(MIRROR_REFUSED), "{stderr}");
+    assert!(!remote.join(".claude/worktrees/wt-local").exists());
+    let branches = Command::new("git")
+        .args(["-C", remote_s, "branch", "--list", "feature/local-only"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&branches.stdout).trim(), "");
+    assert_eq!(
+        git_setup_error("h", "o", "r", Some("feature/local-only"), "", &stderr).message,
+        "branch feature/local-only is not on origin; push it from the source machine, or start a new worktree on h"
+    );
+    std::fs::remove_dir_all(&base).ok();
 }

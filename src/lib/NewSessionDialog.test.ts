@@ -663,3 +663,53 @@ describe('NewSessionDialog — generated names', () => {
     delete Element.prototype.scrollIntoView;
   });
 });
+
+describe('NewSessionDialog worktree rows on another host', () => {
+  const withWorktree = {
+    ...project,
+    worktrees: [
+      ...project.worktrees,
+      { id: 12, project_id: 1, host_alias: 'local', name: 'nifty-swanson', path: '/r/cf/.claude/worktrees/nifty-swanson', branch: 'feature/elated-shtern' },
+    ],
+  };
+  function rowText(name: string): string {
+    return screen.getAllByTestId('worktree-row').find((r) => r.textContent?.includes(name))!.textContent ?? '';
+  }
+
+  it('marks a worktree of another host as mirrored from origin, never main', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    render(NewSessionDialog, { props: { project: withWorktree, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    // On the row's own host nothing is mirrored.
+    expect(rowText('nifty-swanson')).not.toContain('mirrored from origin');
+    const mefistos = Array.from(document.querySelectorAll('.host-pick')).find(
+      (p) => p.textContent?.trim() === 'mefistos',
+    ) as HTMLButtonElement;
+    await fireEvent.click(mefistos);
+    await tick();
+    expect(rowText('nifty-swanson')).toContain('mirrored from origin');
+    // `main` is the clone itself: no worktree add, no hint.
+    expect(rowText('main')).not.toContain('mirrored from origin');
+    // Back on local the hint goes away.
+    const local = Array.from(document.querySelectorAll('.host-pick')).find(
+      (p) => p.textContent?.trim() === 'local',
+    ) as HTMLButtonElement;
+    await fireEvent.click(local);
+    await tick();
+    expect(rowText('nifty-swanson')).not.toContain('mirrored from origin');
+  });
+
+  it('keeps the in-use hint next to the mirrored one', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    sessions.set([okRow({ id: 51, worktree_id: 12 })]);
+    render(NewSessionDialog, { props: { project: withWorktree, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    const mefistos = Array.from(document.querySelectorAll('.host-pick')).find(
+      (p) => p.textContent?.trim() === 'mefistos',
+    ) as HTMLButtonElement;
+    await fireEvent.click(mefistos);
+    await tick();
+    expect(rowText('nifty-swanson')).toContain('in use · mirrored from origin');
+    sessions.set([]);
+  });
+});

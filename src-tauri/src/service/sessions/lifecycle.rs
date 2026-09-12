@@ -2,6 +2,8 @@
 //! friendly name, restart, recreate, and dismissing ghosts.
 
 use super::*;
+use crate::service::repair::{render_git_script_expecting, BranchSource, Step, MIRROR_REFUSED};
+use crate::ssh::SshExec;
 
 #[derive(Deserialize)]
 pub struct NewSessionArgs {
@@ -43,9 +45,11 @@ pub struct NewSessionArgs {
 /// on cancel — that's a follow-up task.
 ///
 /// Returns Ok(()) on success. Failure surfaces stderr in the IpcError so the
-/// user can diagnose (missing SSH key, private-repo auth, etc.).
+/// user can diagnose (missing SSH key, private-repo auth, etc.) — except a
+/// worktree whose branch was never pushed, which gets an actionable
+/// `E_GIT_SETUP` ("push it first") instead of git's `invalid reference`.
 pub(super) async fn ensure_remote_project(
-    ssh: &Arc<SshClient>,
+    ssh: &dyn SshExec,
     host: &str,
     owner: &str,
     repo: &str,
@@ -66,30 +70,7 @@ pub(super) async fn ensure_remote_project(
         }
     }
     let clone_url = format!("git@github.com:{owner}/{repo}.git");
-    // Build a single bash script that:
-    //   1. clones the repo if .git is missing
-    //   2. creates the worktree if requested and not yet present
-    // Both steps are guarded so a re-run on an already-set-up host is a no-op.
-    let mut script = String::new();
-    script.push_str(&format!(
-        "if [ ! -d {root}/.git ]; then mkdir -p $(dirname {root}) && git clone {url} {root}; fi",
-        root = quote(project_root),
-        url = quote(&clone_url),
-    ));
-    if let Some((wt_name, branch)) = worktree {
-        if wt_name != "main" {
-            let wt_rel = format!(".claude/worktrees/{wt_name}");
-            let wt_abs = format!("{project_root}/{wt_rel}");
-            let branch = branch.unwrap_or(wt_name);
-            script.push_str(&format!(
-                " && if [ ! -d {abs} ]; then cd {root} && git worktree add {rel} {br}; fi",
-                abs = quote(&wt_abs),
-                root = quote(project_root),
-                rel = quote(&wt_rel),
-                br = quote(branch),
-            ));
-        }
-    }
+    let script = ensure_remote_project_script(project_root, &clone_url, worktree);
     // Wrap in bash -lc so $PATH (git on Homebrew/Linuxbrew) is sourced. Use
     // the same single-quote-the-whole-script trick as RemoteTmux::remote_bash
     // to avoid the ssh argv-joining bug.
@@ -111,19 +92,103 @@ pub(super) async fn ensure_remote_project(
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stdout = String::from_utf8_lossy(&out.stdout);
-        return Err(IpcError::new(
-            "E_GIT_SETUP",
-            format!(
-                "couldn't ensure {owner}/{repo} on {host}: {}",
-                if stderr.trim().is_empty() {
-                    stdout.trim().to_string()
-                } else {
-                    stderr.trim().to_string()
-                }
-            ),
+        return Err(git_setup_error(
+            host,
+            owner,
+            repo,
+            mirrored_branch(worktree),
+            &stdout,
+            &stderr,
         ));
     }
     Ok(())
+}
+
+/// The branch `ensure_remote_project` mirrors for `worktree`: the row's
+/// branch, else the worktree name; `None` for no worktree / the main checkout
+/// (which is the clone itself, never a `worktree add`).
+pub(super) fn mirrored_branch<'a>(worktree: Option<(&'a str, Option<&'a str>)>) -> Option<&'a str> {
+    match worktree {
+        Some((name, branch)) if name != "main" => Some(branch.unwrap_or(name)),
+        _ => None,
+    }
+}
+
+/// The bash script `ensure_remote_project` runs (via `bash -lc`):
+///   1. clones the repo if `<root>/.git` is missing;
+///   2. creates `<root>/.claude/worktrees/<name>` if requested and absent,
+///      with the branch resolved at run time by the repair module's
+///      [`BranchSource::Mirror`] add — the host's own `refs/heads/<branch>`,
+///      else fetched fresh from origin and tracked, else refused with
+///      [`MIRROR_REFUSED`] (the branch only exists on the source machine).
+///
+/// Both steps are guarded so a re-run on an already-set-up host is a no-op.
+/// Pure, so tests pin its shape without a host.
+pub(super) fn ensure_remote_project_script(
+    project_root: &str,
+    clone_url: &str,
+    worktree: Option<(&str, Option<&str>)>,
+) -> String {
+    let root = quote(project_root);
+    let mut script = format!(
+        "set -e\n\
+         if [ ! -d {root}/.git ]; then mkdir -p \"$(dirname -- {root})\" && git clone {url} {root}; fi\n",
+        url = quote(clone_url),
+    );
+    if let Some((wt_name, _)) = worktree {
+        if let Some(branch) = mirrored_branch(worktree) {
+            let wt_abs = format!("{project_root}/.claude/worktrees/{wt_name}");
+            let add = render_git_script_expecting(
+                project_root,
+                &[Step::AddWorktree {
+                    path: wt_abs.clone(),
+                    branch: branch.to_string(),
+                    from: BranchSource::Mirror,
+                }],
+                None,
+            );
+            script.push_str(&format!(
+                "if [ ! -d {abs} ]; then\n{add}fi\n",
+                abs = quote(&wt_abs),
+            ));
+        }
+    }
+    script
+}
+
+/// The `E_GIT_SETUP` for a failed `ensure_remote_project` script. A mirror
+/// the script refused because `branch` is on neither the host nor origin
+/// says what to do (push it, or start a new worktree there) instead of
+/// surfacing git's raw stderr; everything else keeps stderr (stdout when
+/// stderr is empty) so the user can diagnose it.
+pub(super) fn git_setup_error(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    branch: Option<&str>,
+    stdout: &str,
+    stderr: &str,
+) -> IpcError {
+    if let Some(b) = branch.filter(|_| stderr.contains(MIRROR_REFUSED)) {
+        return IpcError::new(
+            codes::E_GIT_SETUP,
+            format!(
+                "branch {b} is not on origin; push it from the source machine, \
+                 or start a new worktree on {host}"
+            ),
+        );
+    }
+    IpcError::new(
+        codes::E_GIT_SETUP,
+        format!(
+            "couldn't ensure {owner}/{repo} on {host}: {}",
+            if stderr.trim().is_empty() {
+                stdout.trim()
+            } else {
+                stderr.trim()
+            }
+        ),
+    )
 }
 
 /// Build a bash script (run via `bash -lc`) that creates a new worktree for a
@@ -380,7 +445,7 @@ pub(super) async fn new_session_inner(
                 remote_project_path_for(&s, &args.host_alias, &home, &owner, &repo, None)
             };
             ensure_remote_project(
-                ssh,
+                &**ssh,
                 &args.host_alias,
                 &owner,
                 &repo,
@@ -431,7 +496,7 @@ pub(super) async fn new_session_inner(
                 .as_ref()
                 .map(|(name, branch)| (name.as_str(), branch.as_deref()));
             ensure_remote_project(
-                ssh,
+                &**ssh,
                 &args.host_alias,
                 &owner,
                 &repo,

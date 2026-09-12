@@ -230,13 +230,21 @@
   });
 
   const worktreeItems: PickerItem[] = $derived([
-    ...project.worktrees.map((wt) => ({
-      key: String(wt.id),
-      label: wt.name,
-      description: wt.branch && wt.branch !== wt.name ? wt.branch : undefined,
-      meta: $sessions.some((s) => s.worktree_id === wt.id && s.status !== 'ghost') ? 'in use' : undefined,
-      testid: 'worktree-row',
-    })),
+    ...project.worktrees.map((wt) => {
+      const inUse = $sessions.some((s) => s.worktree_id === wt.id && s.status !== 'ghost');
+      // Worktree rows are host-scoped (`host_alias`): picking one on another
+      // host recreates it there from origin (`ensure_remote_project` fetches
+      // the branch), so it has to be pushed first. `main` is the clone itself.
+      const mirrored = wt.name !== 'main' && wt.host_alias !== chosenHost;
+      const meta = [inUse ? 'in use' : null, mirrored ? 'mirrored from origin' : null].filter(Boolean).join(' · ');
+      return {
+        key: String(wt.id),
+        label: wt.name,
+        description: wt.branch && wt.branch !== wt.name ? wt.branch : undefined,
+        meta: meta || undefined,
+        testid: 'worktree-row',
+      };
+    }),
     { key: 'new', label: '+ new worktree', description: 'fresh branch from the base branch', testid: 'new-worktree-chip' },
   ]);
 
