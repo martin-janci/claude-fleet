@@ -1904,7 +1904,7 @@ async fn create_worktree_local_creates_and_is_idempotent() {
         .expect("git commit");
 
     // call create_worktree_local
-    let result = create_worktree_local(repo_str, "feat-x", None).await;
+    let result = create_worktree_local(repo_str, "feat-x", None, None).await;
     assert!(result.is_ok(), "first call failed: {:?}", result);
     let wt_path = result.unwrap();
     assert!(
@@ -1917,7 +1917,7 @@ async fn create_worktree_local_creates_and_is_idempotent() {
     );
 
     // second call — idempotent
-    let result2 = create_worktree_local(repo_str, "feat-x", None).await;
+    let result2 = create_worktree_local(repo_str, "feat-x", None, None).await;
     assert!(
         result2.is_ok(),
         "second (idempotent) call failed: {:?}",

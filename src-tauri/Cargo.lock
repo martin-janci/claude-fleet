@@ -588,6 +588,7 @@ dependencies = [
  "dashmap",
  "directories",
  "dirs 5.0.1",
+ "libc",
  "once_cell",
  "portable-pty",
  "proptest",
