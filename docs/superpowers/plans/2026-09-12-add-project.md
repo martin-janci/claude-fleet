@@ -848,6 +848,21 @@ pub async fn list_github_repos(
 
 Register both in `lib.rs` next to `commands::projects::refresh_projects`. Wire `call_id` cancellation for `add_project` the way `new_session` does (find it: `grep -rn "call_id" src-tauri/src/commands src-tauri/src/cancel.rs`).
 
+**Cancellation trap — read before touching the clone call.** Registering the
+`call_id` at the command layer is NOT enough: the `CancellationToken` has to
+reach `add_project_with`, which must race it (`SshExec::run_cancellable` for
+the remote branch, a `tokio::select!` in `run_local_script` for the local
+one). Otherwise the dialog ships a Cancel button that does nothing.
+
+And note the regression it would cause: Task 2 deliberately moved the clone
+onto `SshExec::run_bounded` so the connect timeout (20s) and the wall clock
+(600s) are independent. `run_cancellable` takes ONE timeout and derives its
+bound as `default_wall_clock(timeout)`, i.e. 3x — swapping to it naively puts
+back the 600s-connect-timeout bug Task 2 fixed. Add a `run_bounded_cancellable`
+to the `SshExec` trait (or an optional token on `run_bounded`), implemented
+for `SshClient`, `Arc<T>`, `LocalExec` and `FakeSsh` exactly as Task 2 did for
+`run_bounded`, and use that.
+
 - [ ] **Step 2: Regenerate and verify**
 
 Run: `REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_current` then the same command without `REGEN_DOCS` — must pass.
