@@ -8,6 +8,7 @@ mod events;
 mod fleet_e2e_tests;
 mod humanize;
 mod ipc_error;
+mod local_exec;
 mod logging;
 mod mcp;
 #[cfg(test)]

@@ -43,6 +43,9 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 dashmap = "6"
 async-trait = "0.1"
+# `killpg` for local scripts: a timed-out `bash -lc` is killed as a whole
+# process group (local_exec.rs), not just the shell.
+libc = "0.2"
 
 # Control API: the app embeds an MCP server (streamable-HTTP transport) on
 # localhost so an AI assistant can drive it. See docs/specs/2026-05-21-control-api-mcp-design.md.

@@ -271,17 +271,24 @@ pub(super) fn worktree_add_script(root: &str, name: &str, base: Option<&str>) ->
     )
 }
 
+/// Wall clock for the local `git worktree add` — the same bound the remote
+/// branch of `new_session` gets from `run_cancellable(.., 60s, ..)`.
+const LOCAL_WORKTREE_WALL_CLOCK: std::time::Duration = std::time::Duration::from_secs(180);
+
 pub(super) async fn create_worktree_local(
     root: &str,
     name: &str,
     base: Option<&str>,
+    token: Option<CancellationToken>,
 ) -> Result<String, IpcError> {
+    use crate::local_exec::{run_bash_script, LocalScriptError};
     let script = worktree_add_script(root, name, base);
-    let out = tokio::process::Command::new("bash")
-        .args(["-lc", &script])
-        .output()
+    let out = run_bash_script(&script, LOCAL_WORKTREE_WALL_CLOCK, token)
         .await
-        .map_err(|e| IpcError::new("E_GIT_SETUP", format!("bash: {e}")))?;
+        .map_err(|e| match e {
+            LocalScriptError::Io(e) => IpcError::new("E_GIT_SETUP", format!("bash: {e}")),
+            other => other.into(),
+        })?;
     if !out.status.success() {
         return Err(IpcError::new(
             "E_GIT_SETUP",
@@ -446,7 +453,13 @@ pub(super) async fn new_session_inner(
                 row
             };
             PathBuf::from(
-                create_worktree_local(&base_path, name, args.base_branch.as_deref()).await?,
+                create_worktree_local(
+                    &base_path,
+                    name,
+                    args.base_branch.as_deref(),
+                    Some(token.clone()),
+                )
+                .await?,
             )
         } else {
             let s = store
