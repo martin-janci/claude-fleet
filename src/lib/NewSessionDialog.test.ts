@@ -26,6 +26,31 @@ const project = {
   worktrees: [{ id: 11, project_id: 1, host_alias: 'local', name: 'main', path: '/r/cf', branch: 'main' }],
 };
 
+const remoteMain = { id: 501, project_id: 1, host_alias: 'mefistos', name: 'main', path: '/home/u/projects/github.com/martin-janci/claude-fleet', branch: 'main' };
+const remoteFeat = { id: 502, project_id: 1, host_alias: 'mefistos', name: 'feat', path: '/home/u/projects/github.com/martin-janci/claude-fleet/.claude/worktrees/feat', branch: 'feature/feat' };
+
+/** Answer `list_host_worktrees` for mefistos; other commands keep `extra`. */
+function mockHostWorktrees(
+  reply: { cloned: boolean; worktrees: unknown[] } | Error | (() => Promise<unknown>),
+  extra: (cmd: string, args?: unknown) => unknown = () => null,
+) {
+  (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: unknown) => {
+    if (cmd === 'list_host_worktrees') {
+      if (reply instanceof Error) throw { code: 'E_SSH', message: reply.message };
+      if (typeof reply === 'function') return reply();
+      const a = (args as { args: { host_alias: string; project_id: number } }).args;
+      return { host_alias: a.host_alias, project_id: a.project_id, ...reply };
+    }
+    return extra(cmd, args);
+  });
+}
+
+function worktreeLabels(): string[] {
+  return Array.from(document.querySelectorAll('[data-testid="wt-picker"] [role="option"] .label')).map(
+    (e) => e.textContent?.trim() ?? '',
+  );
+}
+
 describe('NewSessionDialog remote path preview (W5 G3)', () => {
   async function pickMefistos() {
     const btn = Array.from(document.querySelectorAll('.host-pick')).find(
@@ -84,6 +109,7 @@ describe('NewSessionDialog', () => {
 
   it('clicking a host pick + Create sends host_alias to new_session', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_host_worktrees') return { host_alias: 'mefistos', project_id: 1, cloned: true, worktrees: [remoteMain] };
       if (cmd === 'new_session') {
         return { id: 99, tmux_name: 'dev-foo', host_alias: 'mefistos', project_id: 1, worktree_id: null, created_at: 1, last_activity_at: 1, status: 'running', notes: null, account_uuid: null, kind: 'work', reviews_session_id: null, worktree_key: null, lost_at: null, claude_session_id: null, claude_status: null, effort_level: null, pr_url: null, current_activity: null, friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null };
       }
@@ -94,6 +120,7 @@ describe('NewSessionDialog', () => {
     await tick();
     const mefBtn = Array.from(document.querySelectorAll('.host-pick')).find((p) => p.textContent?.trim() === 'mefistos') as HTMLButtonElement;
     await fireEvent.click(mefBtn);
+    await vi.waitFor(() => expect(worktreeLabels()).toContain('main'));
     await fireEvent.click(screen.getByText('Create'));
     await tick();
     const newSessionCall = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.find((c) => c[0] === 'new_session');
@@ -448,6 +475,10 @@ describe('NewSessionDialog — generated names', () => {
   });
 
   it('a second session on the same worktree gets a name-suffixed tmux name instead of a collision', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_host_worktrees') return { host_alias: 'mefistos', project_id: 1, cloned: true, worktrees: [remoteMain] };
+      return null;
+    });
     sessions.set([okRow({ id: 7, tmux_name: 'dev-martin-janci-claude-fleet', worktree_id: 11 })]);
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await tick();
@@ -457,7 +488,7 @@ describe('NewSessionDialog — generated names', () => {
     // …but only on the same host.
     const mefBtn = Array.from(document.querySelectorAll('.host-pick')).find((p) => p.textContent?.trim() === 'mefistos') as HTMLButtonElement;
     await fireEvent.click(mefBtn);
-    await tick();
+    await vi.waitFor(() => expect(worktreeLabels()).toContain('main'));
     expect((screen.getByTestId('new-session-name') as HTMLInputElement).value).toBe('dev-martin-janci-claude-fleet');
   });
 
@@ -624,7 +655,7 @@ describe('NewSessionDialog — generated names', () => {
     await fireEvent.click(screen.getByText('Create'));
     await tick();
     expect(JSON.parse(localStorage.getItem('cf:pref:newsession.project.1')!)).toEqual({
-      host: 'mefistos', worktree: 'new', kind: 'shell',
+      host: 'mefistos', kind: 'shell', worktrees: { mefistos: 'new' },
     });
     unmount();
     // Re-open: the remembered choices are applied.
@@ -661,5 +692,116 @@ describe('NewSessionDialog — generated names', () => {
     expect(screen.getByText('Create').closest('.fields')).toBeNull();
     // @ts-expect-error restore jsdom default (undefined)
     delete Element.prototype.scrollIntoView;
+  });
+});
+
+describe('NewSessionDialog host-scoped worktrees', () => {
+  async function pickHost(alias: string) {
+    const btn = Array.from(document.querySelectorAll('.host-pick')).find(
+      (p) => p.textContent?.trim() === alias,
+    ) as HTMLButtonElement;
+    await fireEvent.click(btn);
+    await tick();
+  }
+
+  it('local never calls list_host_worktrees and lists the project tree rows', async () => {
+    mockHostWorktrees({ cloned: true, worktrees: [] });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    expect(worktreeLabels()).toEqual(['main', '+ new worktree']);
+    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'list_host_worktrees');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('switching to a remote host scans it once and swaps the list', async () => {
+    mockHostWorktrees({ cloned: true, worktrees: [remoteMain, remoteFeat] });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickHost('mefistos');
+    await vi.waitFor(() => expect(worktreeLabels()).toEqual(['main', 'feat', '+ new worktree']));
+    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'list_host_worktrees');
+    expect(calls).toHaveLength(1);
+    expect((calls[0][1] as any).args).toEqual({ host_alias: 'mefistos', project_id: 1 });
+    // The remote main row is selected, not the local one.
+    expect(document.querySelector('[data-testid="wt-picker"] [role="option"].active')?.getAttribute('data-key')).toBe('501');
+  });
+
+  it('shows a scanning status while the scan is in flight', async () => {
+    let resolve!: (v: unknown) => void;
+    mockHostWorktrees(() => new Promise((r) => (resolve = r)));
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickHost('mefistos');
+    expect(screen.getByTestId('wt-status')).toHaveTextContent('Scanning mefistos');
+    expect(worktreeLabels()).toEqual(['+ new worktree']);
+    resolve({ host_alias: 'mefistos', project_id: 1, cloned: true, worktrees: [remoteMain] });
+    await vi.waitFor(() => expect(screen.queryByTestId('wt-status')).toBeNull());
+    expect(worktreeLabels()).toEqual(['main', '+ new worktree']);
+  });
+
+  it('a host without the clone offers only + new worktree and says so', async () => {
+    mockHostWorktrees({ cloned: false, worktrees: [] });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickHost('mefistos');
+    await vi.waitFor(() => expect(screen.getByTestId('wt-status')).toHaveTextContent('Not cloned on mefistos yet'));
+    expect(worktreeLabels()).toEqual(['+ new worktree']);
+    expect(document.querySelector('[data-testid="wt-picker"] [role="option"].active')?.getAttribute('data-key')).toBe('new');
+    expect((screen.getByTestId('new-worktree-name') as HTMLInputElement).value).not.toBe('');
+  });
+
+  it('a failed scan shows the error and keeps + new worktree usable', async () => {
+    mockHostWorktrees(new Error('ssh: connect to host mefistos: timed out'));
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickHost('mefistos');
+    await vi.waitFor(() => expect(screen.getByTestId('wt-status')).toHaveTextContent('timed out'));
+    expect(worktreeLabels()).toEqual(['+ new worktree']);
+    expect(screen.getByText('Create')).not.toBeDisabled();
+  });
+
+  it('a slow earlier scan cannot overwrite a later host', async () => {
+    hosts.update((h) => [...h, { alias: 'vps', ssh_alias: 'vps', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false }]);
+    let resolveMef!: (v: unknown) => void;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd !== 'list_host_worktrees') return null;
+      const host = (args as { args: { host_alias: string } }).args.host_alias;
+      if (host === 'mefistos') return new Promise((r) => (resolveMef = r));
+      return { host_alias: 'vps', project_id: 1, cloned: true, worktrees: [{ ...remoteMain, id: 601, host_alias: 'vps' }] };
+    });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickHost('mefistos');
+    await pickHost('vps');
+    await vi.waitFor(() => expect(worktreeLabels()).toEqual(['main', '+ new worktree']));
+    resolveMef({ host_alias: 'mefistos', project_id: 1, cloned: true, worktrees: [remoteMain, remoteFeat] });
+    await tick(); await tick();
+    expect(worktreeLabels()).toEqual(['main', '+ new worktree']);
+    expect(document.querySelector('[data-testid="wt-picker"] [role="option"].active')?.getAttribute('data-key')).toBe('601');
+  });
+
+  it('remembers the worktree per host', async () => {
+    mockHostWorktrees({ cloned: true, worktrees: [remoteMain, remoteFeat] });
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({ ok: true, value: { id: 1 } as any });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickHost('mefistos');
+    await vi.waitFor(() => expect(worktreeLabels()).toContain('feat'));
+    await fireEvent.click(document.querySelector('[data-testid="wt-picker"] [data-key="502"]')!);
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+    const mem = JSON.parse(localStorage.getItem('cf:pref:newsession.project.1')!);
+    expect(mem.host).toBe('mefistos');
+    expect(mem.worktrees).toEqual({ mefistos: 502 });
+    spy.mockRestore();
+    // Re-open: mefistos remembers feat, local still defaults to its first row.
+    document.body.innerHTML = '';
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="wt-picker"] [role="option"].active')?.getAttribute('data-key')).toBe('502'),
+    );
+    await pickHost('local');
+    expect(document.querySelector('[data-testid="wt-picker"] [role="option"].active')?.getAttribute('data-key')).toBe('11');
   });
 });

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
-  import type { ProjectTreeRow, WorktreeRow } from './projects';
+  import { listHostWorktrees, type ProjectTreeRow, type WorktreeRow } from './projects';
   import { newSessionAbortable, sessions, type SessionRow } from './sessions';
   import { hosts } from './hosts';
   import { readPref, writePref } from './prefs';
@@ -46,17 +46,28 @@
   const isString = (v: unknown): v is string => typeof v === 'string';
   interface ProjectMemory {
     host: string;
-    worktree: number | 'new';
+    /** Legacy (pre host-scoped picker): the local host's choice. */
+    worktree?: number | 'new';
+    /** Per host: worktree row id or 'new'. */
+    worktrees?: Record<string, number | 'new'>;
     kind: 'work' | 'shell';
   }
+  const isChoice = (v: unknown): v is number | 'new' => v === 'new' || typeof v === 'number';
   const isMemory = (v: unknown): v is ProjectMemory =>
     typeof v === 'object' &&
     v !== null &&
     typeof (v as ProjectMemory).host === 'string' &&
-    ((v as ProjectMemory).worktree === 'new' || typeof (v as ProjectMemory).worktree === 'number') &&
+    ((v as ProjectMemory).worktree === undefined || isChoice((v as ProjectMemory).worktree)) &&
+    ((v as ProjectMemory).worktrees === undefined ||
+      (typeof (v as ProjectMemory).worktrees === 'object' &&
+        Object.values((v as ProjectMemory).worktrees!).every(isChoice))) &&
     ((v as ProjectMemory).kind === 'work' || (v as ProjectMemory).kind === 'shell');
   const memoryKey = `newsession.project.${projectId}`;
   const memory = readPref<ProjectMemory | null>(memoryKey, null, (v): v is ProjectMemory | null => v === null || isMemory(v));
+  /** The remembered choice for `host` (legacy flat value counts for local). */
+  function rememberedFor(host: string): number | 'new' | undefined {
+    return memory?.worktrees?.[host] ?? (host === 'local' ? memory?.worktree : undefined);
+  }
 
   // A remembered host is only honoured while it is still pickable (visible,
   // and reachable unless it is `local`) — otherwise fall back to the global
@@ -95,7 +106,7 @@
   // all of them so "blue sirius" is never offered twice.
   const takenSlugs = $derived.by(() => {
     const set = new Set<string>();
-    for (const w of project.worktrees) set.add(w.name.toLowerCase());
+    for (const w of hostWorktrees.rows) set.add(w.name.toLowerCase());
     for (const s of $sessions) {
       if (s.project_id !== project.project.id) continue;
       const suffix = tmuxNameSuffix(s.tmux_name, owner, repo);
@@ -126,16 +137,75 @@
   }
 
   // ── Worktree choice ──────────────────────────────────────────────────
+  // The rows on offer are the CHOSEN HOST's: local answers from the project
+  // tree synchronously; a remote host is scanned over SSH (`hostWorktrees`).
+  type HostWorktreesState = {
+    status: 'loading' | 'ready' | 'error';
+    rows: WorktreeRow[];
+    cloned: boolean;
+    error?: string;
+  };
+  let hostWorktrees = $state<HostWorktreesState>(
+    untrack(() => ({ status: 'ready', rows: project.worktrees, cloned: true })),
+  );
+  // A slow scan of the previous host must not land after a newer one.
+  let scanSeq = 0;
+  $effect(() => {
+    const host = chosenHost;
+    const localRows = project.worktrees;
+    if (host === 'local') {
+      scanSeq++;
+      hostWorktrees = { status: 'ready', rows: localRows, cloned: true };
+      return;
+    }
+    const seq = ++scanSeq;
+    hostWorktrees = { status: 'loading', rows: [], cloned: true };
+    void listHostWorktrees(host, projectId).then((r) => {
+      if (seq !== scanSeq) return;
+      // Belt and braces (on top of the seq guard): never accept a reply that
+      // isn't for the host still chosen right now.
+      if (chosenHost !== host) return;
+      if (!r.ok) {
+        hostWorktrees = { status: 'error', rows: [], cloned: true, error: r.error.message };
+        return;
+      }
+      if (!r.value || r.value.host_alias !== chosenHost) return;
+      hostWorktrees = {
+        status: 'ready',
+        rows: r.value.worktrees ?? [],
+        cloned: r.value.cloned ?? true,
+      };
+    });
+  });
+
   function initialWorktree(): number | null {
-    if (memory?.worktree === 'new') return null;
-    if (typeof memory?.worktree === 'number' && project.worktrees.some((w) => w.id === memory.worktree)) {
-      return memory.worktree;
+    const remembered = rememberedFor(untrack(() => chosenHost));
+    if (remembered === 'new') return null;
+    if (typeof remembered === 'number' && project.worktrees.some((w) => w.id === remembered)) {
+      return remembered;
     }
     return project.worktrees[0]?.id ?? null;
   }
   let chosenWorktreeId = $state<number | null>(untrack(initialWorktree));
   let inNewMode = $derived(chosenWorktreeId === null);
-  let chosenWorktree = $derived(project.worktrees.find((w) => w.id === chosenWorktreeId) ?? null);
+  let chosenWorktree = $derived(hostWorktrees.rows.find((w) => w.id === chosenWorktreeId) ?? null);
+
+  // When the host's rows arrive (or change), keep the selection valid: the
+  // remembered row for that host, else its `main`, else "+ new worktree".
+  $effect(() => {
+    if (hostWorktrees.status !== 'ready') return;
+    const rows = hostWorktrees.rows;
+    const current = untrack(() => chosenWorktreeId);
+    if (current !== null && rows.some((w) => w.id === current)) return;
+    const remembered = rememberedFor(untrack(() => chosenHost));
+    const pick =
+      (typeof remembered === 'number' && rows.find((w) => w.id === remembered)) ||
+      rows.find((w) => w.name === 'main') ||
+      (remembered === 'new' ? null : rows[0]) ||
+      null;
+    if (pick) onPickWorktree(pick.id);
+    else if (current !== null || !untrack(() => newWorktreeName)) onPickNew();
+  });
 
   let newWorktreeName = $state<string>('');
   // Base branch to fork the new worktree from. Empty = the repo's default
@@ -156,7 +226,7 @@
 
   // Initial fill (untracked: reads stores once, on open).
   untrack(() => {
-    const wt = project.worktrees.find((w) => w.id === chosenWorktreeId) ?? null;
+    const wt = hostWorktrees.rows.find((w) => w.id === chosenWorktreeId) ?? null;
     if (initialName?.trim()) {
       friendlyName = initialName.trim();
       nameDirty = true;
@@ -207,7 +277,11 @@
   // the configured layout. New worktrees land in whichever of `.worktrees` /
   // `.claude/worktrees` the repo already uses.
   const worktreeDir = $derived(
-    project.worktrees.some((w) => w.path.includes('/.claude/worktrees/')) ? '.claude/worktrees' : '.worktrees',
+    (hostWorktrees.rows.length ? hostWorktrees.rows : project.worktrees).some((w) =>
+      w.path.includes('/.claude/worktrees/'),
+    )
+      ? '.claude/worktrees'
+      : '.worktrees',
   );
   const projectsLayout = $derived(settingLayout($fleetSettings));
   const remoteRoot = $derived(
@@ -226,11 +300,13 @@
     }
     const wt = chosenWorktree;
     if (!wt || wt.name === 'main') return root;
-    return chosenHost === 'local' ? wt.path : `${root}/.claude/worktrees/${wt.name}`;
+    // Remote rows always carry a real path now; the derived form is only a
+    // fallback for the (unexpected) empty-string case.
+    return chosenHost === 'local' ? wt.path : wt.path || `${root}/.claude/worktrees/${wt.name}`;
   });
 
   const worktreeItems: PickerItem[] = $derived([
-    ...project.worktrees.map((wt) => ({
+    ...(hostWorktrees.status === 'ready' && hostWorktrees.cloned ? hostWorktrees.rows : []).map((wt) => ({
       key: String(wt.id),
       label: wt.name,
       description: wt.branch && wt.branch !== wt.name ? wt.branch : undefined,
@@ -239,6 +315,12 @@
     })),
     { key: 'new', label: '+ new worktree', description: 'fresh branch from the base branch', testid: 'new-worktree-chip' },
   ]);
+  const worktreeStatus = $derived.by((): string | null => {
+    if (hostWorktrees.status === 'loading') return `Scanning ${chosenHost}…`;
+    if (hostWorktrees.status === 'error') return `Couldn't list worktrees on ${chosenHost}: ${hostWorktrees.error}`;
+    if (!hostWorktrees.cloned) return `Not cloned on ${chosenHost} yet — it is cloned on the first session.`;
+    return null;
+  });
 
   let busy = $state(false);
   let error: string | null = $state(null);
@@ -263,7 +345,7 @@
     baseBranch = '';
     slugDirty = false;
     nameOverride = null;
-    const wt = project.worktrees.find((w) => w.id === id) ?? null;
+    const wt = hostWorktrees.rows.find((w) => w.id === id) ?? null;
     if (!nameDirty) friendlyName = defaultFriendly(wt);
   }
 
@@ -318,10 +400,11 @@
   }
 
   function remember() {
+    const prev = readPref<ProjectMemory | null>(memoryKey, null, (v): v is ProjectMemory | null => v === null || isMemory(v));
     writePref<ProjectMemory>(memoryKey, {
       host: chosenHost,
-      worktree: chosenWorktreeId === null ? 'new' : chosenWorktreeId,
       kind: chosenKind,
+      worktrees: { ...(prev?.worktrees ?? {}), [chosenHost]: chosenWorktreeId === null ? 'new' : chosenWorktreeId },
     });
   }
 
@@ -475,6 +558,9 @@
     </div>
 
     <label for="wt-picker">Worktree</label>
+    {#if worktreeStatus}
+      <p class="wt-status" data-testid="wt-status" class:err={hostWorktrees.status === 'error'}>{worktreeStatus}</p>
+    {/if}
     <PickerList
       items={worktreeItems}
       activeKey={inNewMode ? 'new' : String(chosenWorktreeId)}
@@ -622,6 +708,8 @@
   .preview .k { text-transform: uppercase; font-size: 0.65rem; margin-right: 0.3rem; }
   .preview code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
+  .wt-status { font-size: 0.72rem; color: var(--fg-muted); margin: 0 0 0.2rem; }
+  .wt-status.err { color: #e64a4a; }
   .actions {
     display: flex;
     gap: 0.4rem;
