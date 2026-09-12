@@ -560,6 +560,56 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(listbox.textContent).toContain('phone-manager');
   });
 
+  it('the project picker offers Add project, which opens the dialog', async () => {
+    mockBackend(fakeProjects, [sessionFor(1)]);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('new-session-footer'));
+    await tick();
+    const addRow = screen.getByTestId('add-project-row');
+    // Pinned first, above the projects.
+    expect(screen.getByRole('listbox').firstElementChild).toBe(addRow);
+    await fireEvent.click(addRow);
+    await tick();
+    expect(screen.getByTestId('add-project-dialog')).toBeInTheDocument();
+    // The popover closes behind the dialog.
+    expect(screen.queryByTestId('add-project-row')).toBeNull();
+  });
+
+  it('Add project is reachable with no projects at all', async () => {
+    mockBackend([], []);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('new-session-footer'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('add-project-row'));
+    await tick();
+    expect(screen.getByTestId('add-project-dialog')).toBeInTheDocument();
+  });
+
+  it('after a successful add, NewSessionDialog opens on the returned project', async () => {
+    const added = {
+      project: { id: 42, owner: 'newowner', repo: 'fresh-repo', base_path: '/r/fresh', last_session_at: null, adopted: false },
+      worktrees: [],
+    };
+    mockBackend(fakeProjects, []);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (cmd: string, args?: unknown) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: unknown) =>
+      cmd === 'add_project' ? added : base(cmd, args),
+    );
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('new-session-footer'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('add-project-row'));
+    await tick();
+    await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'newowner/fresh-repo' } });
+    await fireEvent.click(screen.getByTestId('add-create'));
+    await vi.waitFor(() => expect(screen.queryByTestId('add-project-dialog')).toBeNull());
+    expect(screen.getByRole('heading', { name: /New session/ }).textContent).toContain('newowner/fresh-repo');
+    expect(get(projects).some((p) => p.project.id === 42)).toBe(true);
+  });
+
   it('exposes a "1d" recency pill (replaces older "today")', async () => {
     mockBackend(fakeProjects, []);
     render(Sidebar);

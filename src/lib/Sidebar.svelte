@@ -21,6 +21,7 @@
   import { readPref, writePref } from './prefs';
   import { theme, cycleTheme } from './theme';
   import NewSessionDialog from './NewSessionDialog.svelte';
+  import AddProjectDialog from './AddProjectDialog.svelte';
   import SettingsDialog from './SettingsDialog.svelte';
   import OnboardingCard from './OnboardingCard.svelte';
   import { hostFilter } from './hosts';
@@ -327,6 +328,7 @@
 
   let dialogProject: ProjectTreeRow | null = $state(null);
   let showProjectPicker = $state(false);
+  let showAddProject = $state(false);
 
   // Onboarding card actions — open the same flows as existing UI.
   const openAddHost = () => { showSettings = true; };
@@ -336,6 +338,18 @@
     e?.stopPropagation();
     dialogProject = p;
     showProjectPicker = false;
+  }
+
+  function openAddProject() {
+    showProjectPicker = false;
+    showAddProject = true;
+  }
+
+  // The user added a project in order to start a session in it: go straight
+  // to NewSessionDialog on the new row (already merged into `projects`).
+  function onProjectAdded(row: ProjectTreeRow) {
+    showAddProject = false;
+    dialogProject = row;
   }
 
   function onCreated(s: SessionRow) {
@@ -739,6 +753,9 @@
     </button>
     {#if showProjectPicker}
       <div class="picker" role="listbox" aria-label="Pick project for new session">
+        <button class="picker-item add-project" onclick={openAddProject} data-testid="add-project-row">
+          ＋ Add project…
+        </button>
         {#each allProjectsSorted as row (row.project.id)}
           <button class="picker-item" onclick={() => openNew(row)}>
             {#if collidingRepos.has(row.project.repo)}<span class="owner"
@@ -747,7 +764,7 @@
           </button>
         {/each}
         {#if allProjectsSorted.length === 0}
-          <p class="empty pad">No projects. Refresh first.</p>
+          <p class="empty pad">No projects yet. Add one, or refresh.</p>
         {/if}
       </div>
     {/if}
@@ -759,6 +776,10 @@
 <svelte:window onkeydown={(e) => {
   if (e.key === 'Escape' && showProjectPicker) showProjectPicker = false;
 }} />
+
+{#if showAddProject}
+  <AddProjectDialog onCreated={onProjectAdded} onCancel={() => (showAddProject = false)} />
+{/if}
 
 {#if dialogProject}
   <NewSessionDialog project={dialogProject} onCreate={onCreated} {onCancel} />
@@ -1026,4 +1047,5 @@
     cursor: pointer;
   }
   .picker-item:hover { background: var(--bg-pane); }
+  .picker-item.add-project { color: var(--accent); border-bottom: 1px solid var(--border); }
 </style>
