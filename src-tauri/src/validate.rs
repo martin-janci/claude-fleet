@@ -316,21 +316,30 @@ pub fn not_option_like(label: &str, value: &str) -> Result<(), IpcError> {
     Ok(())
 }
 
-/// Validate an absolute path on a remote host — specifically a worktree
-/// row's stored `path`, as recorded by the per-host scan
-/// (`service::worktrees::list_host_worktrees`) and interpolated into a
-/// remote `git worktree add <path> …` target. Shell-quoting (`quote`) stops
-/// command injection but not `..` traversal escaping the intended tree, so
-/// that is rejected here, along with a relative path (the scan always
-/// records an absolute one; a relative value can only be a tampered DB row)
-/// and control characters. No existing validator fits: `path_component`
-/// checks a single directory-name component, and `repo_rel_path` requires a
-/// *relative* path — the opposite of what's needed here.
+/// Validate an absolute path on a remote host. This is the canonical rule for
+/// a worktree checkout path — a worktree row's stored `path` as recorded by
+/// the per-host scan (`service::worktrees::list_host_worktrees`) and
+/// interpolated into a remote `git worktree add <path> …` target, or a
+/// `worktree_path` reported by a hook body
+/// (`service::hooks::validate_worktree_path`, which wraps
+/// [`remote_worktree_path`] below to get `E_VALIDATE` instead of `E_INVALID`
+/// for its 400 response). Shell-quoting (`quote`) stops command injection
+/// but not `..` traversal escaping the intended tree, so that is rejected
+/// here, along with a relative path, an oversized value, and control
+/// characters. No existing validator fits: `path_component` checks a single
+/// directory-name component, and `repo_rel_path` requires a *relative*
+/// path — the opposite of what's needed here.
 pub fn remote_abs_path(label: &str, value: &str) -> Result<(), IpcError> {
     if value.is_empty() {
         return Err(IpcError::new(
             "E_INVALID",
             format!("{label} must not be empty"),
+        ));
+    }
+    if value.len() > 4096 {
+        return Err(IpcError::new(
+            "E_INVALID",
+            format!("{label} must be 4096 bytes or fewer"),
         ));
     }
     if !value.starts_with('/') {
@@ -352,6 +361,19 @@ pub fn remote_abs_path(label: &str, value: &str) -> Result<(), IpcError> {
         ));
     }
     Ok(())
+}
+
+/// [`remote_abs_path`] plus a `path_component` check on the path's basename —
+/// the rule `service::hooks::validate_worktree_path` needs for a worktree
+/// checkout path reported over the wire, where the final component also has
+/// to be safe to use as a directory name (no leading `-`, no separator).
+pub fn remote_worktree_path(label: &str, value: &str) -> Result<(), IpcError> {
+    remote_abs_path(label, value)?;
+    let name = std::path::Path::new(value)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| IpcError::new("E_INVALID", format!("{label} has no final component")))?;
+    path_component("worktree name", name)
 }
 
 #[cfg(test)]
@@ -549,11 +571,59 @@ mod tests {
     }
 
     #[test]
-    fn remote_abs_path_rejects_relative_traversal_and_control_chars() {
-        assert!(remote_abs_path("worktree path", "").is_err());
-        assert!(remote_abs_path("worktree path", "relative/path").is_err());
-        assert!(remote_abs_path("worktree path", "/a/../etc").is_err());
-        assert!(remote_abs_path("worktree path", "/a/b/..").is_err());
-        assert!(remote_abs_path("worktree path", "/a\nb").is_err());
+    fn remote_abs_path_rejects_empty() {
+        let err = remote_abs_path("worktree path", "").unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+    }
+
+    #[test]
+    fn remote_abs_path_rejects_too_long() {
+        let value = format!("/{}", "a".repeat(4096));
+        let err = remote_abs_path("worktree path", &value).unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+    }
+
+    #[test]
+    fn remote_abs_path_rejects_relative() {
+        let err = remote_abs_path("worktree path", "relative/path").unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+    }
+
+    #[test]
+    fn remote_abs_path_rejects_dotdot_component() {
+        for bad in ["/a/../etc", "/a/b/.."] {
+            let err = remote_abs_path("worktree path", bad).unwrap_err();
+            assert_eq!(err.code, "E_INVALID", "{bad}");
+        }
+    }
+
+    #[test]
+    fn remote_abs_path_rejects_control_chars() {
+        let err = remote_abs_path("worktree path", "/a\nb").unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+    }
+
+    #[test]
+    fn remote_worktree_path_accepts_absolute_clean_paths() {
+        assert!(remote_worktree_path("worktree_path", "/home/u/proj/.worktrees/feat").is_ok());
+        assert!(
+            remote_worktree_path("worktree_path", "/home/u/proj/.worktrees/feat-x.y_z").is_ok()
+        );
+    }
+
+    #[test]
+    fn remote_worktree_path_rejects_relative_traversal_control_and_bad_basename() {
+        for bad in [
+            "",
+            "relative/path",
+            "~/proj/.worktrees/feat",
+            "/home/u/proj/../../etc",
+            "/home/u/proj/.worktrees/..",
+            "/home/u/proj/.worktrees/bad\nname",
+            "/home/u/proj/.worktrees/-rf",
+        ] {
+            let err = remote_worktree_path("worktree_path", bad).expect_err(bad);
+            assert_eq!(err.code, "E_INVALID", "{bad}");
+        }
     }
 }

@@ -186,38 +186,15 @@ fn apply_prompt_submit_hook(
 /// absolute, no `..` component, no control characters, and its basename a
 /// safe path component. The hook body is network input signed only by a
 /// host token, so it gets the same scrutiny as a frontend value.
+///
+/// Delegates the rule itself to [`crate::validate::remote_worktree_path`] —
+/// the same check a worktree row's stored `path` gets on the session-lifecycle
+/// side (`service::sessions`) — and only re-maps the error code: a hook
+/// handler answers 400 with `E_VALIDATE`, not the frontend-facing `E_INVALID`
+/// `validate.rs` uses everywhere else.
 pub fn validate_worktree_path(path: &str) -> Result<(), IpcError> {
-    if path.is_empty() || path.len() > 4096 {
-        return Err(IpcError::new(
-            codes::E_VALIDATE,
-            "worktree_path must be a non-empty path under 4096 bytes",
-        ));
-    }
-    if !path.starts_with('/') {
-        return Err(IpcError::new(
-            codes::E_VALIDATE,
-            "worktree_path must be absolute",
-        ));
-    }
-    if path.chars().any(|c| c.is_control()) {
-        return Err(IpcError::new(
-            codes::E_VALIDATE,
-            "worktree_path must not contain control characters",
-        ));
-    }
-    if path.split('/').any(|c| c == "..") {
-        return Err(IpcError::new(
-            codes::E_VALIDATE,
-            "worktree_path must not contain a '..' component",
-        ));
-    }
-    let name = std::path::Path::new(path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| IpcError::new(codes::E_VALIDATE, "worktree_path has no final component"))?;
-    crate::validate::path_component("worktree name", name)
-        .map_err(|e| IpcError::new(codes::E_VALIDATE, e.message))?;
-    Ok(())
+    crate::validate::remote_worktree_path("worktree_path", path)
+        .map_err(|e| IpcError::new(codes::E_VALIDATE, e.message))
 }
 
 /// The worktree path + branch an `EnterWorktree` call reported. Claude
@@ -631,23 +608,19 @@ mod tests {
         }
     }
 
+    // The rule itself (empty / too long / relative / `..` / control chars /
+    // bad basename / valid) is tested once, on `crate::validate::remote_worktree_path`,
+    // in `validate.rs`. What's specific to this wrapper — and so worth testing
+    // here — is that a rejection surfaces as `E_VALIDATE` (a hook handler's
+    // 400) rather than the `E_INVALID` `validate.rs` uses everywhere else.
     #[test]
-    fn validate_worktree_path_accepts_absolute_clean_paths() {
+    fn validate_worktree_path_accepts_a_clean_path() {
         assert!(validate_worktree_path("/home/u/proj/.worktrees/feat").is_ok());
-        assert!(validate_worktree_path("/home/u/proj/.worktrees/feat-x.y_z").is_ok());
     }
 
     #[test]
-    fn validate_worktree_path_rejects_relative_traversal_and_control() {
-        for bad in [
-            "",
-            "relative/path",
-            "~/proj/.worktrees/feat",
-            "/home/u/proj/../../etc",
-            "/home/u/proj/.worktrees/..",
-            "/home/u/proj/.worktrees/bad\nname",
-            "/home/u/proj/.worktrees/-rf",
-        ] {
+    fn validate_worktree_path_maps_the_shared_rule_s_rejection_to_e_validate() {
+        for bad in ["", "relative/path", "/home/u/proj/.worktrees/bad\nname"] {
             let err = validate_worktree_path(bad).expect_err(bad);
             assert_eq!(err.code, "E_VALIDATE", "{bad}");
         }
