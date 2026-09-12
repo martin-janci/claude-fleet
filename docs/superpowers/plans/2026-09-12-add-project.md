@@ -436,7 +436,7 @@ pub(crate) fn clone_script(dest: &str, clone_url: &str) -> String {
 
 Write the remaining helpers to match the codebase:
 
-- `refuse_existing_project(store, owner, repo)` — `codes::E_EXISTS` (add it to the codes module in this task) with the message `"<owner>/<repo> is already a fleet project"` when `Store::list_projects` already holds the pair. Takes and drops the lock, no `.await` inside.
+- `refuse_existing_project(store, owner, repo)` — `codes::E_EXISTS` (add it to the codes module in this task) with the message `"<owner>/<repo> is already a fleet project"` when `Store::list_projects` already holds the pair. Compare CASE-INSENSITIVELY: GitHub treats owner and repo names case-insensitively and the default macOS filesystem does too, so `Owner/Repo` and `owner/repo` would otherwise become two project rows pointing at one checkout. The parser deliberately does NOT lowercase (the sidebar shows the owner as typed, and `FrantisekSefcik` must not become `franteseksefcik`), so the de-duplication belongs here. Takes and drops the lock, no `.await` inside.
 - `roots(store, host)` — under one lock, returns `(project_base_for(s, host), local_projects_root(s) as String, layout(s))`.
 - `run_local_script(script, wall_clock)` — `tokio::process::Command::new("bash").arg("-lc").arg(script)` with the same wall-clock/kill handling `SshClient::run_child` uses; map a non-zero exit to `E_GIT_SETUP` with stderr, exit code 3 to `E_EXISTS`.
 - `git_error(host, out)` — exit code 3 → `E_EXISTS` ("already cloned at that path; it should appear after a refresh"); otherwise `E_GIT_SETUP` with stderr, falling back to stdout, and `(no stderr)` when both are empty.
