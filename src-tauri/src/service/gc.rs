@@ -105,7 +105,9 @@ pub fn plan(
     }
     let mut out = Vec::new();
     for r in rows {
-        if r.status != "running" || r.safe_kill_state.is_some() {
+        // Fleet does not own an `external` session's process (it runs
+        // outside tmux, wherever the user started it): never collected.
+        if r.status != "running" || r.safe_kill_state.is_some() || r.kind == "external" {
             continue;
         }
         if !reachable_hosts.contains(&r.host_alias) {
@@ -431,6 +433,17 @@ mod tests {
         };
         let rows = vec![row(1, "bg", Some(0), 0)];
         assert!(plan(&rows, &cfg, None, &local(), 10_000).is_empty());
+    }
+
+    #[test]
+    fn external_rows_are_never_collected() {
+        // Fleet does not own an interactive session running outside tmux:
+        // no action of any kind, however idle, even with a worktree linked.
+        let mut ext = row(1, "external", Some(0), 0);
+        ext.worktree_id = Some(1);
+        let mut no_status = row(2, "external", None, 0);
+        no_status.claude_status = None;
+        assert!(plan(&[ext, no_status], &CFG, None, &local(), 1_000_000).is_empty());
     }
 
     #[test]

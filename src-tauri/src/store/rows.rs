@@ -50,6 +50,14 @@ pub(super) fn worktree_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Wor
     })
 }
 
+/// Whether a session `kind` has no tmux pane: a `claude --bg` agent (`bg`) or
+/// an interactive Claude session running outside fleet (`external`). Both
+/// carry a `bg:<sessionId>` sentinel `tmux_name`; nothing that needs a pane,
+/// a worktree or process ownership may act on them.
+pub fn has_no_pane(kind: &str) -> bool {
+    matches!(kind, "bg" | "external")
+}
+
 /// `PartialEq` covers every wire field, so `upsert_session_in_tx` can tell a
 /// no-op reconcile pass from a real change before emitting `session:updated`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]

@@ -25,8 +25,9 @@
 //! [`MAX_REPAIRS_PER_TICK`] repairs per tick, and the whole run is detached
 //! from the reconcile loop so a slow `git worktree add` never delays a pass.
 //! Never touched: the registered controller, a session with a safe-kill in
-//! flight, review sessions (they share their source's worktree), `bg`
-//! sessions, ghosts / lost rows, and sessions on unreachable or hidden hosts.
+//! flight, review sessions (they share their source's worktree), pane-less
+//! (`bg` / `external`) sessions, ghosts / lost rows, and sessions on
+//! unreachable or hidden hosts.
 //!
 //! **Record + backoff.** Every attempt leaves exactly one
 //! `workspace_repaired` / `workspace_repair_failed` event (the repair writes
@@ -277,7 +278,7 @@ pub fn eligible<'a>(
 ) -> Vec<&'a SessionRow> {
     rows.iter()
         .filter(|r| r.status == "running")
-        .filter(|r| !matches!(r.kind.as_str(), "bg" | "review"))
+        .filter(|r| !crate::store::has_no_pane(&r.kind) && r.kind != "review")
         .filter(|r| r.safe_kill_state.is_none())
         .filter(|r| {
             !controller
@@ -784,6 +785,24 @@ mod tests {
             ids.push(id);
         }
         (Arc::new(Mutex::new(s)), ids)
+    }
+
+    #[test]
+    fn eligible_skips_pane_less_rows() {
+        let (store, ids) = seed(&[("local", "a"), ("local", "b"), ("local", "c")]);
+        let s = store.lock().unwrap();
+        let c = s.conn_ref();
+        c.execute("UPDATE sessions SET kind='bg' WHERE id=?1", [ids[0]])
+            .unwrap();
+        c.execute("UPDATE sessions SET kind='external' WHERE id=?1", [ids[1]])
+            .unwrap();
+        let rows = s.list_all_sessions().unwrap();
+        let usable = HashSet::from(["local".to_string()]);
+        let got: Vec<i64> = eligible(&rows, None, &usable)
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(got, vec![ids[2]]);
     }
 
     fn events(store: &Mutex<Store>, id: i64, kind: &str) -> usize {

@@ -457,8 +457,8 @@ impl Store {
     /// One-shot startup pass: give every session row with `friendly_name IS
     /// NULL` a deterministic label derived from its branch (or the worktree
     /// name when no branch is recorded, or the tmux name as last resort).
-    /// Skips `kind='bg'` rows — their synthetic `bg:<uuid>` tmux names
-    /// humanise poorly. Bypasses the event bus by design: the frontend hasn't
+    /// Skips pane-less rows (`kind IN ('bg','external')`) — their synthetic
+    /// `bg:<uuid>` tmux names humanise poorly. Bypasses the event bus by design: the frontend hasn't
     /// subscribed yet, and emitting one event per row at boot is pure noise.
     /// Returns the number of rows updated.
     pub fn backfill_friendly_names(&self) -> Result<usize, rusqlite::Error> {
@@ -471,7 +471,7 @@ impl Store {
                LEFT JOIN projects p ON p.id = s.project_id
                LEFT JOIN worktrees w ON w.id = s.worktree_id
               WHERE s.friendly_name IS NULL
-                AND COALESCE(s.kind, 'work') != 'bg'",
+                AND COALESCE(s.kind, 'work') NOT IN ('bg','external')",
         )?;
         let rows: Vec<(i64, String, String, String, Option<String>)> = stmt
             .query_map([], |r| {
@@ -503,7 +503,7 @@ impl Store {
 
     /// The deterministic branch-derived label `new_session` /
     /// `backfill_friendly_names` would give this row (PR #28), or `None` for
-    /// bg rows and rows whose humanised name is empty. Lets callers tell a
+    /// pane-less (bg / external) rows and rows whose humanised name is empty. Lets callers tell a
     /// still-default label from one a human or agent chose.
     pub fn default_friendly_name(&self, id: i64) -> Result<Option<String>, rusqlite::Error> {
         let row: Option<(String, String, String, Option<String>, String)> = self
@@ -533,7 +533,7 @@ impl Store {
         let Some((tmux_name, owner, repo, branch, kind)) = row else {
             return Ok(None);
         };
-        if kind == "bg" {
+        if super::has_no_pane(&kind) {
             return Ok(None);
         }
         let source = branch.unwrap_or(tmux_name);
@@ -1555,6 +1555,31 @@ mod tests {
                 .as_deref(),
             Some("Friendly name")
         );
+    }
+
+    #[test]
+    fn friendly_name_defaults_skip_pane_less_rows() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        for (name, kind) in [("bg:u-bg", "bg"), ("bg:u-ext", "external")] {
+            s.upsert_bg_session("local", name, None, &name[3..], Some("idle"), 1, kind)
+                .unwrap();
+        }
+        assert_eq!(s.backfill_friendly_names().unwrap(), 0);
+        for name in ["bg:u-bg", "bg:u-ext"] {
+            let row = s.get_session(name, "local").unwrap().unwrap();
+            assert_eq!(row.friendly_name, None, "{name}");
+            assert_eq!(s.default_friendly_name(row.id).unwrap(), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn has_no_pane_covers_bg_and_external_only() {
+        assert!(crate::store::has_no_pane("bg"));
+        assert!(crate::store::has_no_pane("external"));
+        for kind in ["work", "shell", "review", ""] {
+            assert!(!crate::store::has_no_pane(kind), "{kind}");
+        }
     }
 
     #[test]

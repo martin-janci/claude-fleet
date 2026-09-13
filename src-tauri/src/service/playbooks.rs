@@ -69,7 +69,7 @@ pub struct Planned {
 /// Pure: decide which rows get which playbook this tick.
 ///
 /// A row qualifies when it is a live tmux session (`status == running`, not a
-/// `bg` sentinel) with a `stuck_kind` AND a `stuck_since` stamp that is newer
+/// pane-less `bg` / `external` sentinel) with a `stuck_kind` AND a `stuck_since` stamp that is newer
 /// than its `last_playbook_at`. Keystroke actions never target the registered
 /// controller session (it would be steering itself); notify still applies.
 pub fn plan(
@@ -80,7 +80,7 @@ pub fn plan(
 ) -> Vec<Planned> {
     let mut out = Vec::new();
     for r in rows {
-        if r.status != "running" || r.kind == "bg" {
+        if r.status != "running" || crate::store::has_no_pane(&r.kind) {
             continue;
         }
         let (Some(kind), Some(since)) = (r.stuck_kind.as_deref(), r.stuck_since) else {
@@ -402,6 +402,13 @@ mod tests {
             .map(|p| p.session_id)
             .collect();
         assert_eq!(ids, vec![3]);
+    }
+
+    #[test]
+    fn plan_never_targets_external_rows() {
+        let mut ext = row(1, "bg:x", Some("press_enter"), Some(1), None);
+        ext.kind = "external".into();
+        assert!(plan(&[ext], &ALL_ON, None, 10).is_empty());
     }
 
     #[test]

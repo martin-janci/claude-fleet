@@ -1652,7 +1652,10 @@ fn adoption_conflict(
         adopt_key.to_string()
     };
     for o in &sessions {
-        if Some(o.id) == spec.session_id || o.kind == "bg" || o.project_id != Some(pid) {
+        if Some(o.id) == spec.session_id
+            || crate::store::has_no_pane(&o.kind)
+            || o.project_id != Some(pid)
+        {
             continue;
         }
         // A key equal to ours is our own workspace group (reviews, twins).
@@ -2089,7 +2092,7 @@ fn auto_context_from(
     };
     let mapped = sessions.iter().any(|o| {
         Some(o.id) != spec.session_id
-            && o.kind != "bg"
+            && !crate::store::has_no_pane(&o.kind)
             && o.project_id == Some(pid)
             && (o.worktree_key.as_deref() == Some(w.name.as_str())
                 || o.worktree_id
@@ -2258,10 +2261,10 @@ pub async fn spec_for_session(
         let row = s
             .get_session_by_id(session_id)?
             .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?;
-        if row.kind == "bg" {
+        if crate::store::has_no_pane(&row.kind) {
             return Err(IpcError::new(
                 codes::E_BG_SESSION,
-                "background sessions have no worktree or tmux pane to repair",
+                "sessions outside tmux have no worktree or tmux pane to repair",
             ));
         }
         seed_for_session(&s, &row)?
@@ -3948,6 +3951,9 @@ mod tests {
         s.upsert_bg_session("local", "bg:abc", None, "abc", None, 1, "bg")
             .unwrap();
         let bg = s.get_session("bg:abc", "local").unwrap().unwrap().id;
+        s.upsert_bg_session("local", "bg:ext", None, "ext", None, 1, "external")
+            .unwrap();
+        let ext = s.get_session("bg:ext", "local").unwrap().unwrap().id;
         let pa = s.upsert_project("o", "a", "/a").unwrap();
         let pb = s.upsert_project("o", "b", "/b").unwrap();
         let wid_b = s
@@ -3976,6 +3982,10 @@ mod tests {
         );
         assert_eq!(
             spec_for_session(&store, &ssh, bg).await.unwrap_err().code,
+            codes::E_BG_SESSION
+        );
+        assert_eq!(
+            spec_for_session(&store, &ssh, ext).await.unwrap_err().code,
             codes::E_BG_SESSION
         );
         assert_eq!(
@@ -4779,6 +4789,50 @@ mod tests {
         assert_eq!(
             adoption_conflict(&spec, w, adopt, None, |p: &str| p.to_string()),
             None
+        );
+    }
+
+    /// Pane-less rows (bg agents, sessions outside fleet) never own a
+    /// checkout, so neither guard counts them even when a key matches.
+    #[test]
+    fn workspace_guards_ignore_pane_less_rows() {
+        let (store, sid, pid) = seeded_store("/repo/.claude/worktrees/feat");
+        {
+            let s = store.lock().unwrap();
+            for (name, kind) in [("bg:u-bg", "bg"), ("bg:u-ext", "external")] {
+                let id = s
+                    .upsert_bg_session("local", name, Some(pid), &name[3..], None, 1, kind)
+                    .unwrap();
+                // Both keys: our workspace's and the adopt target's.
+                s.set_worktree_key(id, Some(if kind == "bg" { "feat" } else { "other" }))
+                    .unwrap();
+            }
+            for (name, kind) in [("bg:u-bg2", "bg"), ("bg:u-ext2", "external")] {
+                let id = s
+                    .upsert_bg_session("local", name, Some(pid), &name[3..], None, 1, kind)
+                    .unwrap();
+                s.set_worktree_key(id, Some(if kind == "bg" { "other" } else { "feat" }))
+                    .unwrap();
+            }
+        }
+        let spec = spec_with_ids(sid, pid);
+        let w = spec.worktree.as_ref().unwrap();
+        let snap = || {
+            let s = store.lock().unwrap();
+            adoption_snapshot(&s, &spec).unwrap()
+        };
+        assert_eq!(
+            adoption_conflict(&spec, w, "/repo/.worktrees/other", snap(), |p: &str| p
+                .to_string()),
+            None
+        );
+        let auto = || {
+            let s = store.lock().unwrap();
+            auto_snapshot(&s, &spec, &Probe::default())
+        };
+        assert_eq!(
+            auto_context_from(&spec, auto(), |p: &str| p.to_string()).other_sessions_mapped,
+            Some(false)
         );
     }
 
