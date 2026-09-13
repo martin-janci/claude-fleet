@@ -163,6 +163,15 @@ pub(crate) struct ReconcileDeps {
     /// Per-session probe throttle; production shares one process-wide cache,
     /// tests get a fresh one per deps.
     pub(super) pr_cache: Arc<crate::service::outcome::PrProbeCache>,
+    /// Home directory `reconcile_sessions_with` probes to link `local`'s
+    /// Claude account when it isn't known yet (see
+    /// `service::hosts::ensure_local_account_linked`). `None` in ordinary
+    /// test deps (`fake`/`fake_with_shell`) so the huge majority of reconcile
+    /// tests never shell out to a REAL `tmux`/`claude` or read a REAL
+    /// `~/.claude.json` — only `fake_with_local_home` sets it, for tests that
+    /// specifically exercise this behaviour. `real()` always sets it to the
+    /// process's actual `$HOME`.
+    pub(super) local_home: Option<std::path::PathBuf>,
 }
 
 /// `host alias → tmux executor` factory used by `ReconcileDeps`.
@@ -180,6 +189,7 @@ impl ReconcileDeps {
             probe_timeout: HOST_PROBE_TIMEOUT,
             shell,
             pr_cache: crate::service::outcome::pr_probe_cache(),
+            local_home: Some(crate::service::hosts::local_home_dir()),
         })
     }
 
@@ -206,7 +216,23 @@ impl ReconcileDeps {
             pr_cache: Arc::new(crate::service::outcome::PrProbeCache::new(
                 crate::service::outcome::PR_PROBE_TTL,
             )),
+            local_home: None,
         })
+    }
+
+    /// Like `fake`, but with `local_home` set so a test can exercise the
+    /// `local`-account-linking step (see `ReconcileDeps::local_home`).
+    #[cfg(test)]
+    pub(crate) fn fake_with_local_home(
+        exec: impl Fn(&str) -> Box<dyn TmuxExec> + Send + Sync + 'static,
+        probe_timeout: std::time::Duration,
+        local_home: std::path::PathBuf,
+    ) -> Arc<Self> {
+        let deps = Self::fake(exec, probe_timeout);
+        // Freshly constructed above — refcount is 1, so `get_mut` succeeds.
+        let mut deps = deps;
+        Arc::get_mut(&mut deps).expect("fresh Arc").local_home = Some(local_home);
+        deps
     }
 }
 
@@ -742,6 +768,26 @@ pub(crate) async fn reconcile_sessions_with(
     store: &Mutex<Store>,
     deps: &Arc<ReconcileDeps>,
 ) -> Result<(), IpcError> {
+    // 0. Ensure the `local` row exists (idempotent; step 1 does this again
+    //    but `ensure_local_account_linked` needs the row to already be
+    //    there — on the very first pass of a fresh install there is no
+    //    `local` row yet, and `set_host_account` is a no-op UPDATE against a
+    //    row that doesn't exist).
+    {
+        let s = store.lock().map_err(|_| IpcError::lock())?;
+        s.upsert_host("local")?;
+    }
+    // Link the local Claude account if it isn't known yet — cheap no-op once
+    // linked (see `ReconcileDeps::local_home` and
+    // `service::hosts::ensure_local_account_linked` for why this is needed:
+    // `local`'s account has no other automatic discovery path). Best-effort:
+    // a probe hiccup here must not abort session reconcile.
+    if let Some(home) = deps.local_home.clone() {
+        if let Err(e) = crate::service::hosts::ensure_local_account_linked(store, home).await {
+            tracing::warn!(error = %e.message, "[reconcile] local account probe failed");
+        }
+    }
+
     // 1. Snapshot under lock (brief). Ensure local host exists first.
     let hosts = {
         let s = store.lock().map_err(|_| IpcError::lock())?;

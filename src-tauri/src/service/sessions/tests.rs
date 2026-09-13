@@ -822,6 +822,64 @@ async fn fleet_reconcile_completes_when_one_host_never_answers() {
 }
 
 #[tokio::test]
+async fn reconcile_links_the_local_account_when_it_becomes_known() {
+    // The bug: `local` is auto-created by `reconcile_sessions_with`'s
+    // `Store::upsert_host("local")` with no probe attached, so a fleet that
+    // has been reconciling for a long time (the `local` row exists,
+    // `reachable`, freshly `last_pinged_at`) can still have never once
+    // discovered which Claude account is logged in locally — the account
+    // only ever got linked through the separate, manually-triggered
+    // `service::hosts::probe_host` ("Re-probe" in Settings). This test
+    // drives the REAL automatic path (`reconcile_sessions_with`, exactly
+    // what the background tick and app startup call) with a temp
+    // `$HOME`-like directory standing in for `~/.claude.json`, and asserts
+    // the account ends up linked without anything else being asked to
+    // probe it.
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".claude.json"),
+        r#"{"oauthAccount":{"accountUuid":"796436ed-fd1f-436d-bc15-ad1a81f78a71","emailAddress":"mj.janci@gmail.com","seatTier":null}}"#,
+    )
+    .unwrap();
+    let deps = ReconcileDeps::fake_with_local_home(
+        |_alias| {
+            Box::new(ScriptedTmux {
+                sessions: Vec::new(),
+                delay: std::time::Duration::from_millis(0),
+                hang: false,
+                probes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            })
+        },
+        std::time::Duration::from_secs(5),
+        dir.path().to_path_buf(),
+    );
+
+    // Note: `local` does not exist in the store yet — `reconcile_sessions_with`
+    // creates it via `upsert_host`, exactly as it does on every real pass.
+    reconcile_sessions_with(&store, &deps)
+        .await
+        .expect("reconcile completes");
+
+    let s = store.lock().unwrap();
+    let local = s
+        .list_hosts()
+        .unwrap()
+        .into_iter()
+        .find(|h| h.alias == "local")
+        .expect("local host row exists after reconcile");
+    assert_eq!(
+        local.account_uuid.as_deref(),
+        Some("796436ed-fd1f-436d-bc15-ad1a81f78a71"),
+        "reconcile must link the logged-in local account automatically, \
+         without requiring a manual Re-probe click"
+    );
+    let accounts = s.list_accounts().unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].email.as_deref(), Some("mj.janci@gmail.com"));
+}
+
+#[tokio::test]
 async fn concurrent_list_sessions_share_one_reconcile_pass() {
     // BE-2: two callers racing into `list_sessions` (UI focus + MCP tool,
     // say) must cause ONE fleet probe; the loser is served the stored

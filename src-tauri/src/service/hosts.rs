@@ -308,7 +308,32 @@ async fn probe_lenient_with_token(
     probe_with_token(ssh, host, token).await.unwrap_or_default()
 }
 
+/// The real local home directory (`$HOME`), used by production callers of
+/// [`probe_local`]/[`ensure_local_account_linked`]. Falls back to the system
+/// temp dir (almost certainly without a `.claude.json`) on the exotic case
+/// where `HOME` is unset, so the account simply comes back `None` instead of
+/// accidentally reading a relative `.claude.json` from the current dir.
+pub(crate) fn local_home_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// Thin wrapper around [`probe_local_in`] that resolves the real `$HOME`.
+/// Kept zero-arg so `tokio::task::spawn_blocking(probe_local)` (blocking
+/// std::process + fs I/O, off the async runtime worker thread) needs no
+/// closure allocation at its one production call site.
 fn probe_local() -> (bool, Option<String>, Option<String>, Option<OauthAccount>) {
+    probe_local_in(&local_home_dir())
+}
+
+/// Probe the local machine's tmux/claude versions and `oauthAccount`, reading
+/// `<home>/.claude.json` for the account instead of `$HOME` directly — so
+/// tests can drive this with a temp directory and never touch the real
+/// `~/.claude.json`.
+pub(crate) fn probe_local_in(
+    home: &std::path::Path,
+) -> (bool, Option<String>, Option<String>, Option<OauthAccount>) {
     let tmux = std::process::Command::new("tmux")
         .arg("-V")
         .output()
@@ -332,21 +357,76 @@ fn probe_local() -> (bool, Option<String>, Option<String>, Option<OauthAccount>)
             }
         });
     // Read local ~/.claude.json directly — no subprocess needed.
-    let account = std::env::var("HOME").ok().and_then(|home| {
-        let path = std::path::Path::new(&home).join(".claude.json");
-        let contents = std::fs::read_to_string(path).ok()?;
-        let v: serde_json::Value = serde_json::from_str(&contents).ok()?;
-        let oa = v.get("oauthAccount")?;
-        serde_json::from_value::<OauthAccount>(oa.clone())
-            .ok()
-            .filter(|a| a.uuid.is_some())
-    });
+    let account = {
+        let path = home.join(".claude.json");
+        std::fs::read_to_string(path).ok().and_then(|contents| {
+            let v: serde_json::Value = serde_json::from_str(&contents).ok()?;
+            let oa = v.get("oauthAccount")?;
+            serde_json::from_value::<OauthAccount>(oa.clone())
+                .ok()
+                .filter(|a| a.uuid.is_some())
+        })
+    };
     (
         true,
         parse_claude_version(claude.as_deref().unwrap_or("")),
         parse_tmux_version(tmux.as_deref().unwrap_or("")),
         account,
     )
+}
+
+/// Link the currently logged-in local Claude account to the `local` host row,
+/// if it isn't already known. No-op (and does zero I/O) once linked.
+///
+/// This is `local`'s ONLY automatic account-discovery path. A remote host
+/// gets its account captured once, unavoidably, when the user runs `add_host`
+/// (see `add_host` above) — but `local` never goes through that flow: it is
+/// auto-created by `reconcile_sessions_with`'s `Store::upsert_host("local")`
+/// (see `service::sessions::reconcile`), which only ever touches `reachable`.
+/// Before this function existed, NOTHING ever probed `local`'s account
+/// automatically — the ONLY way to populate it was the user manually
+/// clicking the small "Re-probe" icon on the `local` row in Settings ⇒ Hosts
+/// (`probe_host` below, wired to `HostsTable.svelte`'s `onProbe`). A user who
+/// never happens to click that (there is no first-run nudge, and remote hosts
+/// never need it since `add_host` already did it for them) sees `local`
+/// listed as reachable forever with an empty Account column, even while
+/// actively logged in to Claude — this was the reported bug. Called once per
+/// reconcile pass (see `ReconcileDeps::local_home`), so a fresh login is
+/// picked up within one tick without any user action.
+pub(crate) async fn ensure_local_account_linked(
+    store: &Mutex<Store>,
+    home: std::path::PathBuf,
+) -> Result<(), IpcError> {
+    let already_known = {
+        let s = store
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        s.list_hosts()?
+            .into_iter()
+            .find(|h| h.alias == "local")
+            .and_then(|h| h.account_uuid)
+            .is_some()
+    };
+    if already_known {
+        return Ok(());
+    }
+    // Off the async worker thread: this does a blocking fs read (and, via
+    // `probe_local_in`, two blocking subprocess spawns we don't need the
+    // result of here, but `probe_local_in` bundles them — see its doc).
+    let (_, _, _, account) = tokio::task::spawn_blocking(move || probe_local_in(&home))
+        .await
+        .unwrap_or_default();
+    if let Some(acc) = account
+        .as_ref()
+        .and_then(|a| account_row_from(a, now_unix()))
+    {
+        let s = store
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        s.upsert_account(&acc)?;
+        s.set_host_account("local", Some(&acc.uuid))?;
+    }
+    Ok(())
 }
 
 fn parse_tmux_version(line: &str) -> Option<String> {
@@ -480,6 +560,127 @@ mod tests {
     fn parse_oauth_account_returns_none_for_malformed_json() {
         assert!(parse_oauth_account("{not-json").is_none());
         assert!(parse_oauth_account("not even an object").is_none());
+    }
+
+    // ── probe_local_in / ensure_local_account_linked ───────────────────────
+
+    fn write_claude_json(dir: &std::path::Path, oauth_account_json: &str) {
+        std::fs::write(
+            dir.join(".claude.json"),
+            format!(r#"{{"oauthAccount":{oauth_account_json}}}"#),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn probe_local_in_reads_oauth_account_from_the_given_home_and_tolerates_null_seat_tier() {
+        // Reproduces the evidence gathered from a real `~/.claude.json`:
+        // `seatTier` present but JSON `null`. `OauthAccount`'s fields are all
+        // `Option<String>`, so this must parse cleanly, not silently drop
+        // the whole account.
+        let dir = tempfile::tempdir().unwrap();
+        write_claude_json(
+            dir.path(),
+            r#"{"accountUuid":"796436ed-fd1f-436d-bc15-ad1a81f78a71","emailAddress":"mj.janci@gmail.com","seatTier":null}"#,
+        );
+        let (reachable, _claude_ver, _tmux_ver, account) = probe_local_in(dir.path());
+        assert!(reachable);
+        let account = account.expect("oauthAccount must parse despite seatTier: null");
+        assert_eq!(
+            account.uuid.as_deref(),
+            Some("796436ed-fd1f-436d-bc15-ad1a81f78a71")
+        );
+        assert_eq!(account.email.as_deref(), Some("mj.janci@gmail.com"));
+        assert!(account.seat_tier.is_none());
+    }
+
+    #[test]
+    fn probe_local_in_returns_no_account_without_a_claude_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let (reachable, _, _, account) = probe_local_in(dir.path());
+        assert!(reachable, "local is always reachable to itself");
+        assert!(account.is_none());
+    }
+
+    #[tokio::test]
+    async fn ensure_local_account_linked_links_from_home_when_unknown() {
+        // Mirrors exactly what `reconcile_sessions_with` does in production:
+        // `local` is auto-created via `Store::upsert_host`, which never
+        // probes anything — before this function existed, nothing else ever
+        // populated its account either (see the doc comment on
+        // `ensure_local_account_linked`).
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        store.lock().unwrap().upsert_host("local").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        write_claude_json(
+            dir.path(),
+            r#"{"accountUuid":"acc-1","emailAddress":"a@b.c","seatTier":null}"#,
+        );
+
+        ensure_local_account_linked(&store, dir.path().to_path_buf())
+            .await
+            .unwrap();
+
+        let row = host_row(&store, "local").expect("local row exists");
+        assert_eq!(row.account_uuid.as_deref(), Some("acc-1"));
+        let accounts = store.lock().unwrap().list_accounts().unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].uuid, "acc-1");
+        assert_eq!(accounts[0].email.as_deref(), Some("a@b.c"));
+    }
+
+    #[tokio::test]
+    async fn ensure_local_account_linked_is_a_noop_without_a_claude_json() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        store.lock().unwrap().upsert_host("local").unwrap();
+        let dir = tempfile::tempdir().unwrap(); // no .claude.json inside
+
+        ensure_local_account_linked(&store, dir.path().to_path_buf())
+            .await
+            .unwrap();
+
+        assert!(host_row(&store, "local").unwrap().account_uuid.is_none());
+        assert!(store.lock().unwrap().list_accounts().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ensure_local_account_linked_does_not_clobber_an_already_known_account() {
+        // The account survives future reconcile passes: once linked (whether
+        // by this function or by a manual Re-probe), a later pass — even one
+        // that sees a DIFFERENT `.claude.json` (a stale probe timing, a
+        // logout/login race) — must not silently overwrite it. This is the
+        // "keep, don't clear" invariant `set_host_account` callers rely on
+        // elsewhere (see `reconcile_write_one_host`'s session-level
+        // preservation comment).
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            s.upsert_account(&crate::store::AccountRow {
+                uuid: "existing-acc".into(),
+                email: Some("existing@x.com".into()),
+                display_name: None,
+                organization_name: None,
+                organization_uuid: None,
+                seat_tier: None,
+                last_seen_at: None,
+            })
+            .unwrap();
+            s.set_host_account("local", Some("existing-acc")).unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        write_claude_json(dir.path(), r#"{"accountUuid":"different-acc"}"#);
+
+        ensure_local_account_linked(&store, dir.path().to_path_buf())
+            .await
+            .unwrap();
+
+        let row = host_row(&store, "local").unwrap();
+        assert_eq!(
+            row.account_uuid.as_deref(),
+            Some("existing-acc"),
+            "an already-linked account must survive a later pass"
+        );
     }
 
     // ── probe script: ssh argv-join + login-shell re-tokenization ─────────────
