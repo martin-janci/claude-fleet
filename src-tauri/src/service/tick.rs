@@ -1,8 +1,21 @@
-//! The background reconcile tick started from Tauri setup.
+//! The background reconcile tick started from Tauri setup, and the
+//! independent account-usage poll loop started beside it.
 
-use crate::store::Store;
+use crate::events::EventBus;
+use crate::service::account_usage::UsageCache;
+use crate::service::account_usage_poll::{self, AccountUsagePoller};
+use crate::ssh::SshExec;
+use crate::store::{HostRow, Store};
 use crate::{service, ssh};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+/// Cadence of the account-usage poll loop (Task 4). Independent of
+/// `reconcile.interval_secs` — which may be `0`, disabling the reconcile
+/// tick entirely — because `service::account_usage`'s own 5-minute-per-account
+/// floor already caps real requests; this loop only decides how often to ASK
+/// whether an account is due.
+const USAGE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Spawn the proactive background reconcile loop (Task H). The interval is read
 /// once at startup from the `reconcile.interval_secs` setting; `0` disables the
@@ -82,6 +95,55 @@ pub(crate) fn spawn_reconcile_tick(
             // registered with git (removed without ExitWorktree). One
             // read-only probe per reachable host; detached and rate-limited.
             service::worktree_prune::maybe_run(&store, &ssh);
+        }
+    });
+}
+
+/// Spawn the independent account-usage poll loop (Task 4). Ticks every
+/// [`USAGE_POLL_INTERVAL`] regardless of the reconcile tick's own interval
+/// (or whether it is disabled): each tick reads the current host rows and
+/// hands them to [`account_usage_poll::poll_due_accounts`], which spawns a
+/// bounded, de-duplicated fetch per due account and returns immediately — a
+/// slow or hung host can delay neither this loop's next tick nor the
+/// reconcile tick, which does not touch usage at all.
+pub(crate) fn spawn_account_usage_tick(
+    store: Arc<Mutex<Store>>,
+    ssh: Arc<ssh::SshClient>,
+    cache: Arc<Mutex<UsageCache>>,
+    bus: Arc<dyn EventBus>,
+) {
+    let poller = Arc::new(AccountUsagePoller::new());
+    // See `spawn_reconcile_tick`: this also runs from the Tauri `setup`
+    // closure, before any tokio runtime is entered on this thread, so it
+    // must use `tauri::async_runtime::spawn`, not a bare `tokio::spawn`.
+    tauri::async_runtime::spawn(async move {
+        let mut ticker = tokio::time::interval(USAGE_POLL_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            let hosts: Vec<HostRow> = match store.lock() {
+                Ok(s) => match s.list_hosts() {
+                    Ok(h) => h,
+                    Err(e) => {
+                        tracing::warn!("account usage tick: list_hosts failed: {e}");
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("account usage tick: store mutex poisoned: {e}");
+                    continue;
+                }
+            };
+            let ssh_dyn: Arc<dyn SshExec> = Arc::clone(&ssh) as Arc<dyn SshExec>;
+            // Fire-and-forget: the handles are only useful to tests, which
+            // call `account_usage_poll::poll_due_accounts` directly.
+            let _handles = account_usage_poll::poll_due_accounts(
+                &poller,
+                Arc::new(hosts),
+                ssh_dyn,
+                Arc::clone(&cache),
+                Arc::clone(&bus),
+            );
         }
     });
 }

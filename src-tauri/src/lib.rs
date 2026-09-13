@@ -34,7 +34,7 @@ use bootstrap::env::{
 use bootstrap::mcp::maybe_start_mcp;
 use bootstrap::singleton::kill_other_instances;
 use pty::PtyState;
-use service::tick::spawn_reconcile_tick;
+use service::tick::{spawn_account_usage_tick, spawn_reconcile_tick};
 use std::sync::Mutex;
 use store::Store;
 
@@ -111,6 +111,12 @@ pub fn run() {
             let handle = app.handle().clone();
             let bus: std::sync::Arc<dyn crate::events::EventBus> =
                 std::sync::Arc::new(crate::events::AppHandleEventBus::new(handle));
+            // Kept alongside the clone moved into `Store` below: the account
+            // usage poller and its commands emit `account_usage:updated`
+            // straight through the bus, not through a `Store` row mutation
+            // (usage isn't a `Store` row), so they need their own handle to
+            // it as managed state.
+            let bus_for_usage = std::sync::Arc::clone(&bus);
             // The data dir was resolved once, before logging started; IPC
             // handlers read it from managed state instead of re-resolving.
             app.manage(commands::diagnostics::AppDataDir(data_dir.clone()));
@@ -167,6 +173,13 @@ pub fn run() {
             }
             app.manage(std::sync::Arc::clone(&store));
             app.manage(Mutex::new(mcp::McpRuntime::default()));
+            app.manage(std::sync::Arc::clone(&bus_for_usage));
+            // Task 4: one in-memory usage cache for the app's lifetime,
+            // shared by the background poller (below) and the
+            // `list_account_usage` / `refresh_account_usage` commands.
+            let usage_cache =
+                std::sync::Arc::new(Mutex::new(crate::service::account_usage::UsageCache::new()));
+            app.manage(std::sync::Arc::clone(&usage_cache));
             // Start the MCP control API if the user has enabled it (off by
             // default). Reuses the same Store / SshClient / registry as the UI.
             maybe_start_mcp(
@@ -188,6 +201,17 @@ pub fn run() {
             spawn_reconcile_tick(
                 std::sync::Arc::clone(&store),
                 std::sync::Arc::clone(&ssh_client_for_setup),
+            );
+            // Task 4: independent 60s account-usage poll loop. Deliberately
+            // separate from the reconcile tick above (which `reconcile
+            // .interval_secs=0` can disable entirely) so usage keeps polling
+            // on its own cadence; `service::account_usage`'s 5-minute floor
+            // still caps real requests to one per account.
+            spawn_account_usage_tick(
+                std::sync::Arc::clone(&store),
+                std::sync::Arc::clone(&ssh_client_for_setup),
+                std::sync::Arc::clone(&usage_cache),
+                bus_for_usage,
             );
             Ok(())
         })
@@ -267,6 +291,8 @@ pub fn run() {
             commands::hosts::remove_host,
             commands::hosts::hide_host,
             commands::hosts::set_account_nickname,
+            commands::account_usage::list_account_usage,
+            commands::account_usage::refresh_account_usage,
             commands::mcp::mcp_status,
             commands::mcp::mcp_configure,
             commands::mcp::install_fleet_hook,

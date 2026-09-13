@@ -40,10 +40,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// Minimum seconds between two usage attempts for one account.
-#[allow(dead_code)] // Wired into the poller and commands in Task 4.
 pub const USAGE_POLL_FLOOR_SECS: i64 = 300;
 /// Ceiling of the doubling backoff.
-#[allow(dead_code)] // Wired into the poller and commands in Task 4.
 pub const USAGE_BACKOFF_CAP_SECS: i64 = 1800;
 
 /// The only URL the script ever calls.
@@ -168,7 +166,6 @@ exit 0
 "#;
 
 /// The honest User-Agent: `claude-fleet/<version>`. Never Claude Code's.
-#[allow(dead_code)] // Wired into the poller and commands in Task 4.
 pub fn user_agent() -> String {
     format!("claude-fleet/{}", env!("CARGO_PKG_VERSION"))
 }
@@ -203,7 +200,6 @@ pub fn user_agent() -> String {
 ///   RESPONSE headers, and the response body — or, with no HTTP response,
 ///   curl's exit code and at most two `curl: (N) …` lines (never headers).
 /// - Nothing refreshes the token and nothing writes `.credentials.json`.
-#[allow(dead_code)] // Wired into the poller and commands in Task 4.
 pub fn usage_script(user_agent: &str) -> String {
     SCRIPT_TEMPLATE
         .replace("@@SKEW@@", &ACCESS_TOKEN_SKEW_SECS.to_string())
@@ -213,7 +209,6 @@ pub fn usage_script(user_agent: &str) -> String {
 
 /// One usage window. `utilization` is percent USED, clamped to `0..=100`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-#[allow(dead_code)] // Wired into the poller and commands in Task 4.
 pub struct Window {
     pub utilization: f64,
     /// Unix seconds; `None` when absent or not RFC 3339.
@@ -222,7 +217,6 @@ pub struct Window {
 
 /// The endpoint's buckets. Any may be absent.
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]
-#[allow(dead_code)] // Wired into the poller and commands in Task 4.
 pub struct AccountUsage {
     pub five_hour: Option<Window>,
     pub seven_day: Option<Window>,
@@ -233,7 +227,6 @@ pub struct AccountUsage {
 /// What one host's script run said.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[allow(dead_code)] // Wired into the poller and commands in Task 4.
 pub enum UsageOutcome {
     Ok {
         usage: AccountUsage,
@@ -297,7 +290,6 @@ impl UsageOutcome {
 /// The wire status of an account's usage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[allow(dead_code)] // Wired into the poller and commands in Task 4.
 pub enum UsageOutcomeKind {
     Ok,
     NoCredentials,
@@ -365,7 +357,6 @@ const MARK_USAGE_START: &str = "__usage_start__";
 /// header. Numeric markers are validated; labels must be short and plain.
 ///
 /// Expiry decisions are made on the host with the host's clock.
-#[allow(dead_code)] // Wired into the poller and commands in Task 4.
 pub fn parse_usage_output(stdout: &str) -> UsageOutcome {
     let mut terminal: Option<UsageOutcome> = None;
     let mut status: Option<u16> = None;
@@ -625,7 +616,6 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 /// Hosts to ask for `account_uuid`'s usage, in order: reachable hosts on that
 /// account; the sticky host first; `local` last (usually a macOS host whose
 /// token is in the Keychain, which fleet never reads); the rest alphabetical.
-#[allow(dead_code)] // Wired into the poller and commands in Task 4.
 pub fn source_hosts(account_uuid: &str, hosts: &[HostRow], sticky: Option<&str>) -> Vec<String> {
     let local = crate::service::projects::LOCAL_HOST;
     let mut out: Vec<String> = hosts
@@ -654,7 +644,6 @@ pub fn source_hosts(account_uuid: &str, hosts: &[HostRow], sticky: Option<&str>)
 /// timestamp nor a wall clock stepping backwards can shorten or freeze the
 /// polling floor. `now_unix` only stamps display values (`fetched_at`,
 /// `next_try_at`).
-#[allow(dead_code)] // Wired into the poller and commands in Task 4.
 pub trait Clock: Send + Sync {
     fn now_instant(&self) -> Instant;
     fn now_unix(&self) -> i64;
@@ -662,7 +651,6 @@ pub trait Clock: Send + Sync {
 
 /// The real clock: `Instant::now()` and `SystemTime::now()`.
 #[derive(Debug, Clone, Copy, Default)]
-#[allow(dead_code)] // Wired into the poller and commands in Task 4.
 pub struct SystemClock;
 
 impl Clock for SystemClock {
@@ -680,7 +668,6 @@ impl Clock for SystemClock {
 
 /// One account's cache entry.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)] // Wired into the poller and commands in Task 4.
 pub struct AccountUsageEntry {
     /// Last successful answer: usage, subscription, fetched_at (unix, for
     /// display). Kept across failures so the UI can show last-known values
@@ -701,7 +688,6 @@ pub struct AccountUsageEntry {
 }
 
 /// In-memory usage cache, per account uuid, with its clock.
-#[allow(dead_code)] // Wired into the poller and commands in Task 4.
 pub struct UsageCache {
     pub entries: HashMap<String, AccountUsageEntry>,
     clock: Arc<dyn Clock>,
@@ -715,7 +701,6 @@ impl Default for UsageCache {
 
 /// What a fetch attempt ended with, before it is written to the cache.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)] // Wired into the poller and commands in Task 4.
 pub enum FetchResult {
     /// A host answered with `Ok`, `RateLimited` or `Unavailable`. `notes`
     /// lists hosts skipped before it.
@@ -756,7 +741,6 @@ fn secs(delay: i64) -> Duration {
     Duration::from_secs(u64::try_from(delay).unwrap_or(0))
 }
 
-#[allow(dead_code)] // Wired into the poller and commands in Task 4.
 impl UsageCache {
     /// A cache on the real clock.
     pub fn new() -> Self {
@@ -907,7 +891,6 @@ impl UsageCache {
 
 /// One account's usage as the UI sees it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-#[allow(dead_code)] // Wired into the poller and commands in Task 4.
 pub struct AccountUsageSnapshot {
     pub account_uuid: String,
     /// Last-known usage (from the last `ok`), even when `status` is a failure.
@@ -1035,7 +1018,6 @@ fn classify_run(res: Result<std::process::Output, IpcError>) -> HostRun {
 /// The cache mutex is never held across an `.await`: the attempt is reserved
 /// under one lock, the SSH calls run unlocked, and the result is written
 /// under a second lock.
-#[allow(dead_code)] // Wired into the poller and commands in Task 4.
 pub async fn fetch_account_usage_with(
     account_uuid: &str,
     hosts: &[HostRow],

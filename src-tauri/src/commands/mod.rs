@@ -1,3 +1,4 @@
+pub mod account_usage;
 pub mod diagnostics;
 pub mod files;
 pub mod health;

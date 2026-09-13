@@ -4,6 +4,7 @@ import type { HostRow, HostEvent } from './hosts';
 import type { AccountRow } from './accounts';
 import type { ProjectRow, WorktreeRow, ProjectEvent } from './projects';
 import type { TaskRow, TaskEvent } from './tasks';
+import type { AccountUsageSnapshot } from './account_usage_store';
 
 /**
  * How long a flush waits for more events after the first one arrives. Tauri
@@ -49,6 +50,8 @@ export type RowEventHandlers = {
   onAccountEvents?: (rows: AccountRow[]) => void;
   onProjectEvents?: (events: ProjectEvent[]) => void;
   onTaskEvents?: (events: TaskEvent[]) => void;
+  /** Task 4: one call per flush with every `account_usage:updated` row. */
+  onAccountUsageEvents?: (rows: AccountUsageSnapshot[]) => void;
 };
 
 type Queued =
@@ -60,7 +63,8 @@ type Queued =
   | { name: 'project:updated'; payload: ProjectRow }
   | { name: 'worktree:updated'; payload: WorktreeRow }
   | { name: 'worktree:removed'; payload: { id: number } }
-  | { name: 'task:updated'; payload: TaskRow };
+  | { name: 'task:updated'; payload: TaskRow }
+  | { name: 'account_usage:updated'; payload: AccountUsageSnapshot };
 
 /**
  * Subscribe to every row-change event from the backend. Returns a single
@@ -94,6 +98,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     const accountRows: AccountRow[] = [];
     const projectEvents: ProjectEvent[] = [];
     const taskEvents: TaskEvent[] = [];
+    const accountUsageEvents: AccountUsageSnapshot[] = [];
     for (const ev of batch) {
       switch (ev.name) {
         case 'session:created':
@@ -139,6 +144,9 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
         case 'task:updated':
           taskEvents.push({ type: 'updated', row: ev.payload });
           break;
+        case 'account_usage:updated':
+          accountUsageEvents.push(ev.payload);
+          break;
       }
     }
     if (sessionEvents.length > 0) handlers.onSessionEvents?.(sessionEvents);
@@ -146,6 +154,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     if (accountRows.length > 0) handlers.onAccountEvents?.(accountRows);
     if (projectEvents.length > 0) handlers.onProjectEvents?.(projectEvents);
     if (taskEvents.length > 0) handlers.onTaskEvents?.(taskEvents);
+    if (accountUsageEvents.length > 0) handlers.onAccountUsageEvents?.(accountUsageEvents);
   };
 
   const enqueue = (ev: Queued) => {
@@ -174,6 +183,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
       handlers.onProjectEvents
     ),
     task: !!handlers.onTaskEvents,
+    accountUsage: !!handlers.onAccountUsageEvents,
   };
 
   const sub = <N extends Queued['name']>(
@@ -199,6 +209,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub('worktree:updated', wanted.project),
     sub('worktree:removed', wanted.project),
     sub('task:updated', wanted.task),
+    sub('account_usage:updated', wanted.accountUsage),
   ]);
   return () => {
     disposed = true;

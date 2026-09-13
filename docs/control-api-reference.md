@@ -405,6 +405,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hosts::remove_host`
 - `commands::hosts::hide_host`
 - `commands::hosts::set_account_nickname`
+- `commands::account_usage::list_account_usage`
+- `commands::account_usage::refresh_account_usage`
 - `commands::mcp::mcp_status`
 - `commands::mcp::mcp_configure`
 - `commands::mcp::install_fleet_hook`

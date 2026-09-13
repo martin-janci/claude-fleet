@@ -6,6 +6,7 @@
 //! `NoopEventBus` (silent) or `RecordingEventBus` (captures every emit for
 //! assertion).
 
+use crate::service::account_usage::AccountUsageSnapshot;
 use crate::store::{AccountRow, HostRow, ProjectRow, SessionRow, TaskRow, WorktreeRow};
 use serde::Serialize;
 
@@ -52,6 +53,12 @@ pub trait EventBus: Send + Sync {
     /// A task row was created or changed state (migration 020). There is no
     /// `task:removed` — tasks only ever move to a terminal state.
     fn task_updated(&self, row: &TaskRow);
+
+    /// An account's usage snapshot changed (Task 4): a fetch that was due
+    /// completed with a result different from what the cache already held.
+    /// A call the floor turns away (not due, snapshot unchanged) never
+    /// reaches this. Default no-op so no existing bus needs to change.
+    fn account_usage_updated(&self, _row: &AccountUsageSnapshot) {}
 
     /// Flush a single deferred `RowChange` through the matching typed method.
     /// Used by batched (transactional) writes to emit AFTER commit. The
@@ -168,6 +175,9 @@ impl EventBus for AppHandleEventBus {
     fn task_updated(&self, row: &TaskRow) {
         self.queue("task:updated", row);
     }
+    fn account_usage_updated(&self, row: &AccountUsageSnapshot) {
+        self.queue("account_usage:updated", row);
+    }
 }
 
 /// Records every event in order. Used in unit tests to assert that a Store
@@ -256,5 +266,11 @@ impl EventBus for RecordingEventBus {
             .lock()
             .unwrap()
             .push(format!("task:updated:{}:{}", r.id, r.state));
+    }
+    fn account_usage_updated(&self, r: &AccountUsageSnapshot) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("account_usage:updated:{}", r.account_uuid));
     }
 }

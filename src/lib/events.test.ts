@@ -114,6 +114,32 @@ describe('subscribeToRowEvents', () => {
     expect(seen).toEqual([[5, 'running'], [5, 'done']]);
   });
 
+  it('delivers account_usage:updated to onAccountUsageEvents as one batch', async () => {
+    const seen: Array<[string, string]> = [];
+    await subscribeToRowEvents({
+      onAccountUsageEvents: (rows) => {
+        for (const r of rows) seen.push([r.account_uuid, r.status]);
+      },
+    });
+    const snap = {
+      account_uuid: 'acct-1',
+      usage: null,
+      subscription: null,
+      fetched_at: null,
+      source_host: null,
+      status: 'never_fetched',
+      detail: null,
+      next_try_at: 0,
+    };
+    fire('account_usage:updated', snap);
+    fire('account_usage:updated', { ...snap, status: 'ok', fetched_at: 100 });
+    await flush();
+    expect(seen).toEqual([
+      ['acct-1', 'never_fetched'],
+      ['acct-1', 'ok'],
+    ]);
+  });
+
   it('returns unsubscribe that detaches all listeners', async () => {
     const seen: number[] = [];
     const unlisten = await subscribeToRowEvents({

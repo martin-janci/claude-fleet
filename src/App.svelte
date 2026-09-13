@@ -13,6 +13,7 @@
   import { bootstrapHosts, applyHostEvents, hosts } from './lib/hosts';
   import { bootstrapAccounts, applyAccountEvents } from './lib/accounts';
   import { loadTasks, applyTaskEvents } from './lib/tasks';
+  import { loadAccountUsage, applyAccountUsageEvents } from './lib/account_usage_store';
   import { subscribeToRowEvents } from './lib/events';
   import Toasts from './lib/Toasts.svelte';
   import QuickSwitcher from './lib/QuickSwitcher.svelte';
@@ -160,11 +161,16 @@
       onAccountEvents: applyAccountEvents,
       onProjectEvents: applyProjectEvents,
       onTaskEvents: applyTaskEvents,
+      onAccountUsageEvents: applyAccountUsageEvents,
     });
     // Tasks are secondary to the session list: load after the row
     // subscription is live so no `task:updated` is missed, and never block
     // startup on it (a failure only leaves the Tasks panel empty).
     void loadTasks();
+    // Account usage (Task 4): same reasoning — not on the critical bootstrap
+    // path, loaded after the subscription so no `account_usage:updated` is
+    // missed. Not surfaced in the UI yet (Tasks 6-9).
+    void loadAccountUsage();
   });
 
   // Catch-up net for missed Tauri events (e.g. sleep/wake, dropped events).
