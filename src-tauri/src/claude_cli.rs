@@ -58,8 +58,9 @@ pub fn parse_session_id_from_bg_output(output: &str) -> Option<String> {
 // `[prompt]` and `project purge [path]`), so a value that starts with `-` can
 // never be parsed as an option. `claude logs <id>` / `claude stop <id>` reject
 // `--` with "unknown option" (verified against Claude Code 2.1.x), so those
-// two rely on `validate::claude_session_id` — a strict lowercase-UUID shape —
-// instead. Pure functions so the argv shape is unit-testable.
+// two rely on a strict shape check instead: `validate::claude_session_id`
+// (lowercase UUID) for `logs`, `claude_agents::is_job_id` (lowercase-hex short
+// job id) for `stop`. Pure functions so the argv shape is unit-testable.
 
 /// `claude --bg --name <name> -- <prompt>`.
 ///
@@ -82,10 +83,17 @@ pub fn logs_script(session_id: &str) -> Result<String, IpcError> {
     Ok(format!("claude logs {}", quote(session_id)))
 }
 
-/// `claude stop <session_id>` (no `--`: the subcommand rejects it).
-pub fn stop_script(session_id: &str) -> Result<String, IpcError> {
-    validate::claude_session_id(session_id)?;
-    Ok(format!("claude stop {}", quote(session_id)))
+/// `claude stop <job_id>` — the short background job id (`44366faf`) that
+/// `claude agents --json` reports, not the full session UUID. No `--`: the
+/// subcommand rejects it, so the id is held to [`is_job_id`]'s lowercase-hex
+/// shape (which can never look like an option) before it is quoted.
+///
+/// [`is_job_id`]: crate::claude_agents::is_job_id
+pub fn stop_script(job_id: &str) -> Result<String, IpcError> {
+    if !crate::claude_agents::is_job_id(job_id) {
+        return Err(IpcError::new("E_INVALID", "invalid background job id"));
+    }
+    Ok(format!("claude stop {}", quote(job_id)))
 }
 
 /// Marker prefixing every machine-readable line the purge script prints, so a
@@ -244,18 +252,18 @@ pub async fn claude_logs(
     }
 }
 
-/// Run `claude stop <session_id>` on `host_alias` to stop a background
-/// (`claude --bg`) session. Idempotent: a "no job matching" response — the
-/// session already exited or was stopped elsewhere — is success, so callers
-/// can use this to clear a stale fleet row without racing the agent's own
-/// exit. Returns `true` when a live job was actually stopped, `false` when
-/// there was nothing left to stop.
+/// Run `claude stop <job_id>` on `host_alias` to stop a background
+/// (`claude --bg`) job, addressed by its short job id (see [`stop_script`]).
+/// Idempotent: a "no job matching" response — the job already exited or was
+/// stopped elsewhere — is success, so callers can use this to clear a stale
+/// fleet row without racing the agent's own exit. Returns `true` when a live
+/// job was actually stopped, `false` when there was nothing left to stop.
 pub async fn claude_stop(
     ssh: &Arc<SshClient>,
     host_alias: &str,
-    session_id: &str,
+    job_id: &str,
 ) -> Result<bool, IpcError> {
-    let script = stop_script(session_id)?;
+    let script = stop_script(job_id)?;
     match run_claude_script(ssh, host_alias, &script, CLAUDE_TIMEOUT).await {
         Ok(_) => Ok(true),
         Err(e) if is_no_running_job(&e.message) => Ok(false),
@@ -448,9 +456,8 @@ mod tests {
     }
 
     #[test]
-    fn logs_and_stop_scripts_require_uuid_and_skip_double_dash() {
+    fn logs_script_requires_uuid_and_skips_double_dash() {
         assert_eq!(logs_script(UUID).unwrap(), format!("claude logs '{UUID}'"));
-        assert_eq!(stop_script(UUID).unwrap(), format!("claude stop '{UUID}'"));
         // `claude logs -- <id>` is rejected by the CLI, so no `--` here…
         assert!(!logs_script(UUID).unwrap().contains(" -- "));
         // …and an option-shaped or non-UUID id is refused up front instead.
@@ -462,6 +469,17 @@ mod tests {
             "550E8400-E29B-41D4-A716-446655440000",
         ] {
             assert_eq!(logs_script(bad).unwrap_err().code, "E_INVALID", "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn stop_script_takes_the_short_job_id_without_double_dash() {
+        let s = stop_script("44366faf").unwrap();
+        assert!(s.starts_with("claude stop "), "{s}");
+        assert!(s.contains("44366faf"), "{s}");
+        assert!(!s.contains(" -- "), "{s}");
+        // A shell-hostile or option-shaped value is refused before quoting.
+        for bad in ["'; rm", "--foo", "-h", "", "4436", "44366FAF", "job 1234"] {
             assert_eq!(stop_script(bad).unwrap_err().code, "E_INVALID", "{bad:?}");
         }
     }

@@ -52,10 +52,14 @@ pub struct FleetSummary {
 const CONTEXT_RED_THRESHOLD: f64 = 85.0;
 
 /// Roll cached session + host rows into fleet aggregates. Pure: no I/O.
+///
+/// `kind='external'` rows (interactive Claude sessions running outside fleet,
+/// which fleet only observes) are left out of every session count — they are
+/// not fleet work and must not raise its blocked / stuck roll-ups. Usage
+/// still sums every row: it is real spend on that host.
 pub fn summarize(sessions: &[SessionRow], hosts: &[HostRow]) -> FleetSummary {
     let mut summary = FleetSummary {
         hosts_total: hosts.len() as u32,
-        sessions_total: sessions.len() as u32,
         ..Default::default()
     };
 
@@ -65,7 +69,8 @@ pub fn summarize(sessions: &[SessionRow], hosts: &[HostRow]) -> FleetSummary {
         }
     }
 
-    for s in sessions {
+    for s in sessions.iter().filter(|s| s.kind != "external") {
+        summary.sessions_total += 1;
         let status = s.claude_status.as_deref().unwrap_or("unknown");
         *summary.by_status.entry(status.to_string()).or_insert(0) += 1;
 
@@ -283,6 +288,49 @@ mod tests {
         assert_eq!(h.sessions_total, 2);
         assert_eq!(h.ghosts, 1);
         assert_eq!(serde_json::to_value(&h).unwrap()["ghosts"], 1);
+    }
+
+    #[test]
+    fn health_from_store_skips_external_rows() {
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        // An interactive Claude session running outside fleet, blocked.
+        store
+            .upsert_bg_session(
+                "alpha",
+                "bg:ext-1",
+                None,
+                "ext-1",
+                Some("blocked"),
+                1,
+                "external",
+            )
+            .unwrap();
+        // A fleet tmux session, blocked.
+        let id = store
+            .upsert_session("dev", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store.set_claude_session_id(id, "tmux-1").unwrap();
+        store
+            .set_claude_status_by_session_id("tmux-1", "blocked")
+            .unwrap();
+
+        let h = health_from_store(&store);
+        assert_eq!(h.sessions_total, 1);
+        assert_eq!(h.by_status.get("blocked"), Some(&1));
+        assert_eq!(h.by_status.values().sum::<u32>(), 1);
+    }
+
+    #[test]
+    fn summarize_skips_external_rows() {
+        let mut ext = session(Some("blocked"), Some(99.0), Some("press_enter"));
+        ext.kind = "external".to_string();
+        let sessions = vec![ext, session(Some("blocked"), None, None)];
+        let s = summarize(&sessions, &[]);
+        assert_eq!(s.sessions_total, 1);
+        assert_eq!(s.by_status.get("blocked"), Some(&1));
+        assert_eq!(s.context_red, 0);
+        assert_eq!(s.stuck, 0);
     }
 
     #[test]

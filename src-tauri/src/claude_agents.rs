@@ -243,10 +243,6 @@ pub fn find_by_name<'a>(rows: &'a [ClaudeAgentRow], tmux_name: &str) -> Option<&
 
 /// Find the first `ClaudeAgentRow` whose `session_id` matches exactly (the
 /// full Claude session id, not the short `job_id`).
-// Not called outside tests yet: a later task in this plan (kill / attach by
-// job id, or the Conversation tab) wires this in. See
-// .superpowers/sdd/2026-09-13-agent-rows-and-conversation/.
-#[allow(dead_code)]
 pub fn find_by_session_id<'a>(
     rows: &'a [ClaudeAgentRow],
     session_id: &str,

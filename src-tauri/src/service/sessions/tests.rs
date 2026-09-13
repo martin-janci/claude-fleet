@@ -25,16 +25,56 @@ fn known_agent_status_keeps_vocabulary_and_drops_the_rest() {
     assert_eq!(known_agent_status("dev", None), None);
 }
 
+fn job_agent(session_id: &str, job_id: Option<&str>) -> crate::claude_agents::ClaudeAgentRow {
+    crate::claude_agents::ClaudeAgentRow {
+        session_id: Some(session_id.into()),
+        name: Some("n".into()),
+        status: Some("working".into()),
+        cwd: Some("/w".into()),
+        kind: crate::claude_agents::AgentKind::Background,
+        job_id: job_id.map(Into::into),
+        started_at: None,
+    }
+}
+
 #[test]
-fn bg_claude_session_id_prefers_row_id_falls_back_to_name() {
-    // Stored claude_session_id wins…
+fn bg_stop_target_refuses_an_external_row() {
+    // Even when the agent is listed with a job id: fleet never stops a
+    // session that runs outside it.
+    let agents = vec![job_agent("sid-1", Some("44366faf"))];
+    let err = bg_stop_target("external", &agents, "sid-1").unwrap_err();
+    assert_eq!(err.code, "E_INVALID_STATE");
     assert_eq!(
-        bg_claude_session_id("bg:aaa-111", Some("bbb-222")),
-        "bbb-222"
+        err.message,
+        "this Claude session runs outside fleet; close it where it runs"
     );
-    // …a missing or blank one falls back to the uuid in the tmux_name.
-    assert_eq!(bg_claude_session_id("bg:aaa-111", None), "aaa-111");
-    assert_eq!(bg_claude_session_id("bg:aaa-111", Some("  ")), "aaa-111");
+}
+
+#[test]
+fn bg_stop_target_absent_agent_is_already_gone() {
+    let agents = vec![job_agent("other", Some("44366faf"))];
+    assert_eq!(bg_stop_target("bg", &agents, "sid-1").unwrap(), None);
+    assert_eq!(bg_stop_target("bg", &[], "sid-1").unwrap(), None);
+}
+
+#[test]
+fn bg_stop_target_returns_the_listed_job_id() {
+    let agents = vec![
+        job_agent("other", Some("aaaaaaaa")),
+        job_agent("sid-1", Some("44366faf")),
+    ];
+    assert_eq!(
+        bg_stop_target("bg", &agents, "sid-1").unwrap().as_deref(),
+        Some("44366faf")
+    );
+}
+
+#[test]
+fn bg_stop_target_present_without_job_id_suggests_remove_from_list() {
+    let agents = vec![job_agent("sid-1", None)];
+    let err = bg_stop_target("bg", &agents, "sid-1").unwrap_err();
+    assert_eq!(err.code, "E_INVALID_STATE");
+    assert!(err.message.contains("Remove from list"), "{}", err.message);
 }
 
 /// Build a `SessionRow` with sensible defaults for selector tests.

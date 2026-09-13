@@ -151,8 +151,17 @@ pub async fn new_bg_session_tracked(
     ssh: &Arc<SshClient>,
 ) -> Result<NewBgSessionResult, IpcError> {
     let host_alias = args.host_alias.clone();
+    let name = args.name.clone();
     let prompt = args.prompt.clone();
     let mut res = new_bg_session(args, ssh).await?;
+    if res.claude_session_id.is_none() {
+        // `claude --bg` output did not carry the id; the agent is listed
+        // under the `--name` we launched it with once it registers.
+        res.claude_session_id = find_launched_id(ssh, &host_alias, &name).await;
+        if res.claude_session_id.is_some() {
+            res.warning = None;
+        }
+    }
     let Some(ref claude_id) = res.claude_session_id else {
         return Ok(res);
     };
@@ -166,6 +175,41 @@ pub async fn new_bg_session_tracked(
     }
     res.session = stamp_bg_row(store, claude_id, &prompt);
     Ok(res)
+}
+
+/// How many times `new_bg_session_tracked` lists `claude agents` looking for
+/// a just-launched agent by name, and the pause between tries.
+const LAUNCH_LOOKUP_TRIES: usize = 3;
+const LAUNCH_LOOKUP_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The Claude session id of a just-launched agent: the id parsed from the
+/// `claude --bg` output when there is one, else the `session_id` of the agent
+/// listed under `name`, else `None`. Pure so the precedence is testable.
+fn pick_launched_id(
+    parsed: Option<String>,
+    agents: &[crate::claude_agents::ClaudeAgentRow],
+    name: &str,
+) -> Option<String> {
+    parsed.or_else(|| {
+        crate::claude_agents::find_by_name(agents, name).and_then(|a| a.session_id.clone())
+    })
+}
+
+/// Poll `claude agents` on `host_alias` (up to [`LAUNCH_LOOKUP_TRIES`] times,
+/// [`LAUNCH_LOOKUP_DELAY`] apart) for the agent launched as `name`. Touches
+/// no store, so nothing is held across the sleeps.
+async fn find_launched_id(ssh: &Arc<SshClient>, host_alias: &str, name: &str) -> Option<String> {
+    let tmux = crate::service::sessions::exec_for(host_alias, ssh);
+    for attempt in 0..LAUNCH_LOOKUP_TRIES {
+        if attempt > 0 {
+            tokio::time::sleep(LAUNCH_LOOKUP_DELAY).await;
+        }
+        let agents = tmux.list_claude_agents().await;
+        if let Some(id) = pick_launched_id(None, &agents, name) {
+            return Some(id);
+        }
+    }
+    None
 }
 
 /// Find the bg row for `claude_id` and record the launch prompt on it.
@@ -195,6 +239,47 @@ fn stamp_bg_row(
         Some(&prompt.chars().take(120).collect::<String>()),
     );
     s.get_session_by_id(row.id).ok().flatten()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DismissAgentArgs {
+    pub session_id: i64,
+}
+
+/// Remove an inactive background agent from the list (spec §3): records the
+/// dismissal and deletes its `bg:<id>` row (`session:removed`). Only a
+/// `kind='bg'` row that is not `working` qualifies — an `external` row leaves
+/// the list when its process ends, and a working agent must be stopped first.
+pub fn dismiss_agent_session(args: DismissAgentArgs, store: &Mutex<Store>) -> Result<(), IpcError> {
+    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let sess = s
+        .get_session_by_id(args.session_id)?
+        .ok_or_else(|| IpcError::new("E_NOTFOUND", "session not found"))?;
+    if sess.kind != "bg" {
+        return Err(IpcError::new(
+            "E_INVALID_STATE",
+            "only background agents can be removed from the list",
+        ));
+    }
+    if sess.claude_status.as_deref() == Some("working") {
+        return Err(IpcError::new("E_INVALID_STATE", "stop the agent first"));
+    }
+    let Some(cid) = sess
+        .claude_session_id
+        .as_deref()
+        .filter(|c| !c.trim().is_empty())
+    else {
+        return Err(IpcError::new(
+            "E_INVALID_STATE",
+            "background agent has no Claude session id",
+        ));
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    s.dismiss_agent(&sess.host_alias, cid, now)?;
+    Ok(())
 }
 
 /// Resolve a `peek_session` target (MCP-7) from any of: a fleet `session_id`,
@@ -424,6 +509,100 @@ mod tests {
             resolve_peek_target(&s, None, None, None).unwrap_err().code,
             "E_INVALID"
         );
+    }
+
+    fn agent(session_id: &str, name: &str) -> crate::claude_agents::ClaudeAgentRow {
+        crate::claude_agents::ClaudeAgentRow {
+            session_id: Some(session_id.into()),
+            name: Some(name.into()),
+            status: Some("working".into()),
+            cwd: None,
+            kind: crate::claude_agents::AgentKind::Background,
+            job_id: Some("44366faf".into()),
+            started_at: None,
+        }
+    }
+
+    #[test]
+    fn pick_launched_id_prefers_the_parsed_id() {
+        let agents = vec![agent("listed", "review-auth")];
+        assert_eq!(
+            pick_launched_id(Some("parsed".into()), &agents, "review-auth").as_deref(),
+            Some("parsed")
+        );
+    }
+
+    #[test]
+    fn pick_launched_id_falls_back_to_the_agent_with_that_name() {
+        let agents = vec![
+            agent("other", "something-else"),
+            agent("listed", "review-auth"),
+        ];
+        assert_eq!(
+            pick_launched_id(None, &agents, "review-auth").as_deref(),
+            Some("listed")
+        );
+    }
+
+    #[test]
+    fn pick_launched_id_none_when_neither_is_known() {
+        let agents = vec![agent("other", "something-else")];
+        assert_eq!(pick_launched_id(None, &agents, "review-auth"), None);
+        assert_eq!(pick_launched_id(None, &[], "review-auth"), None);
+    }
+
+    fn seed_agent_row(store: &Mutex<Store>, cid: &str, status: &str, kind: &str) -> i64 {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_bg_session(
+            "local",
+            &format!("bg:{cid}"),
+            None,
+            cid,
+            Some(status),
+            5,
+            kind,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn dismiss_agent_session_refuses_an_external_row() {
+        let store = make_store();
+        let id = seed_agent_row(&store, "ext-1", "idle", "external");
+        let err = dismiss_agent_session(DismissAgentArgs { session_id: id }, &store).unwrap_err();
+        assert_eq!(err.code, "E_INVALID_STATE");
+        let s = store.lock().unwrap();
+        assert!(s.get_session_by_id(id).unwrap().is_some());
+        assert!(s.dismissed_agents("local").unwrap().is_empty());
+    }
+
+    #[test]
+    fn dismiss_agent_session_refuses_a_working_bg_agent() {
+        let store = make_store();
+        let id = seed_agent_row(&store, "bg-1", "working", "bg");
+        let err = dismiss_agent_session(DismissAgentArgs { session_id: id }, &store).unwrap_err();
+        assert_eq!(err.code, "E_INVALID_STATE");
+        let s = store.lock().unwrap();
+        assert!(s.get_session_by_id(id).unwrap().is_some());
+        assert!(s.dismissed_agents("local").unwrap().is_empty());
+    }
+
+    #[test]
+    fn dismiss_agent_session_removes_a_stopped_bg_agent() {
+        let store = make_store();
+        let id = seed_agent_row(&store, "bg-2", "stopped", "bg");
+        dismiss_agent_session(DismissAgentArgs { session_id: id }, &store).unwrap();
+        let s = store.lock().unwrap();
+        assert!(s.get_session_by_id(id).unwrap().is_none());
+        assert!(s.dismissed_agents("local").unwrap().contains_key("bg-2"));
+    }
+
+    #[test]
+    fn dismiss_agent_session_unknown_id_is_not_found() {
+        let store = make_store();
+        let err = dismiss_agent_session(DismissAgentArgs { session_id: 4242 }, &store).unwrap_err();
+        assert_eq!(err.code, "E_NOTFOUND");
     }
 
     #[test]

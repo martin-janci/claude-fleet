@@ -4,7 +4,9 @@
 
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::IpcError;
-use crate::service::bg_sessions::{self, NewBgSessionArgs, PeekSessionArgs, PurgeProjectArgs};
+use crate::service::bg_sessions::{
+    self, DismissAgentArgs, NewBgSessionArgs, PeekSessionArgs, PurgeProjectArgs,
+};
 use crate::service::repair::{self, RepairReport};
 use crate::service::safe_kill::{
     self, DiscardKillSessionArgs, InspectSafeKillArgs, SafeKillInspection, SafeKillSessionArgs,
@@ -156,6 +158,16 @@ pub fn dismiss_ghost_session(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<(), IpcError> {
     sessions::dismiss_ghost_session(args, &store)
+}
+
+/// Remove an inactive background agent (`kind='bg'`, not working) from the
+/// list. Frontend-only; logic lives in `service::bg_sessions`.
+#[tauri::command]
+pub fn dismiss_agent_session(
+    args: DismissAgentArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<(), IpcError> {
+    bg_sessions::dismiss_agent_session(args, &store)
 }
 
 /// Make the session's directory a healthy git worktree on its branch and its
