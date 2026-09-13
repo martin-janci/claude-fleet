@@ -77,7 +77,7 @@ Parameters: `limit`, `mark_read`, `session_id`, `summary`, `unread_only`
 
 ### `kill_session`
 
-Kill a session on a host: a tmux session by name, or a background agent row (name `bg:<uuid>`) via `claude stop` — the latter is idempotent, so it also clears a stale row whose process already died. Use when the session's work is disposable or already pushed and you want it gone NOW; prefer safe_kill_session when the worktree may hold unpushed work. Returns the killed session's id. Address the session with session_id OR host_alias + name. May return E_CONFIRM_REQUIRED when desktop confirmation is on.
+Kill a session on a host: a tmux session by name, or a background agent row (name `bg:<uuid>`, kind `bg`) via `claude stop`. An inactive background agent (claude_status `stopped`) is removed from the list instead, without `claude stop`. Rows of kind `external` (interactive Claude sessions running outside fleet) are refused with E_INVALID_STATE — close them where they run. Use when the session's work is disposable or already pushed and you want it gone NOW; prefer safe_kill_session when the worktree may hold unpushed work. Returns the killed session's id. Address the session with session_id OR host_alias + name. May return E_CONFIRM_REQUIRED when desktop confirmation is on.
 
 Parameters: `confirm_nonce`, `force`, `host_alias`, `name`, `session_id`
 

@@ -221,8 +221,8 @@ pub fn tmux_name(value: &str) -> Result<(), IpcError> {
 
 /// Validate a tmux session name used as a **lookup key**, not a creation
 /// value. Mirrors `tmux_name` but additionally allows `:` so synthetic
-/// `bg:<uuid>` rows (background `claude --bg` agents that have no tmux pane —
-/// see `Store::upsert_bg_session`) can be addressed. Still rejects whitespace,
+/// `bg:<uuid>` rows (background agents and external interactive sessions
+/// that have no tmux pane — see `Store::upsert_bg_session`) can be addressed. Still rejects whitespace,
 /// control characters, `.`, and a leading `-` — none of those appear in any
 /// row claude-fleet actually inserts, so a value containing them can only be
 /// a malformed/hostile caller.
@@ -250,17 +250,17 @@ pub fn tmux_name_lookup(value: &str) -> Result<(), IpcError> {
 
 /// Validate a tmux session name for operations that need a real tmux pane
 /// (send-keys, capture, restart, rename, safe-kill…). Synthetic `bg:<uuid>`
-/// rows (background `claude --bg` agents — see `Store::upsert_bg_session`)
-/// have no pane, so targeting one is rejected with a dedicated
-/// `E_BG_SESSION` code and a pointer to the tools that DO work on them,
-/// instead of the generic (and misleading) `tmux_name` character-set error.
+/// rows (background agents and external interactive sessions — see
+/// `Store::upsert_bg_session`) have no pane, so targeting one is rejected
+/// with a dedicated `E_BG_SESSION` code and a pointer to the tool that works
+/// for both kinds, instead of the generic (and misleading) `tmux_name`
+/// character-set error.
 /// Everything else defers to `tmux_name`.
 pub fn tmux_name_addressable(value: &str) -> Result<(), IpcError> {
     if value.starts_with("bg:") {
         return Err(IpcError::new(
             "E_BG_SESSION",
-            "this is a background (claude --bg) session with no tmux pane — \
-             use session_transcript for its conversation or kill_session to stop it",
+            "this session runs outside tmux; use session_transcript to read it",
         ));
     }
     tmux_name(value)
@@ -301,8 +301,8 @@ pub fn not_blank(label: &str, value: &str) -> Result<(), IpcError> {
 }
 
 /// Validate a value handed to a CLI as an option *value* or a positional the
-/// CLI cannot take after `--` (`claude --name <x>`, `claude logs <id>`,
-/// a project path). It may contain anything a shell quote can carry — spaces,
+/// CLI cannot take after `--` (`claude --bg --name <x>`, a project path).
+/// It may contain anything a shell quote can carry — spaces,
 /// unicode — but it must be non-blank and must not begin with `-`, since an
 /// option parser would read `--foo` as a flag.
 pub fn not_option_like(label: &str, value: &str) -> Result<(), IpcError> {
@@ -530,6 +530,13 @@ mod tests {
         let err = tmux_name_addressable("bg:550e8400-e29b-41d4-a716-446655440000")
             .expect_err("bg rows have no tmux pane");
         assert_eq!(err.code, "E_BG_SESSION");
+        // Kind-neutral: a `bg:` row may be a background agent OR an external
+        // interactive session, which kill_session refuses — so the message
+        // must not point at kill_session.
+        assert_eq!(
+            err.message,
+            "this session runs outside tmux; use session_transcript to read it"
+        );
         // Plain names behave exactly like `tmux_name`.
         assert!(tmux_name_addressable("dev-foo").is_ok());
         assert!(tmux_name_addressable("has:colon").is_err()); // non-bg colon still E_INVALID

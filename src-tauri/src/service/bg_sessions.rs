@@ -139,11 +139,14 @@ pub async fn new_bg_session_tracked(
     let host_alias = args.host_alias.clone();
     let name = args.name.clone();
     let prompt = args.prompt.clone();
+    // Recorded before `claude --bg` runs so the by-name fallback can tell
+    // this launch apart from an older agent listed under the same name.
+    let launch_started = now_unix();
     let mut res = new_bg_session(args, ssh).await?;
     if res.claude_session_id.is_none() {
         // `claude --bg` output did not carry the id; the agent is listed
         // under the `--name` we launched it with once it registers.
-        res.claude_session_id = find_launched_id(ssh, &host_alias, &name).await;
+        res.claude_session_id = find_launched_id(ssh, &host_alias, &name, launch_started).await;
         if res.claude_session_id.is_some() {
             res.warning = None;
         }
@@ -168,30 +171,62 @@ pub async fn new_bg_session_tracked(
 const LAUNCH_LOOKUP_TRIES: usize = 3;
 const LAUNCH_LOOKUP_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// Current wall-clock time in unix seconds (0 if the clock is before 1970).
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Clock-skew slack (seconds) between fleet's clock and the host's when
+/// matching a just-launched agent's `startedAt` against the launch time.
+const LAUNCH_SKEW_SECS: i64 = 60;
+
 /// The Claude session id of a just-launched agent: the id parsed from the
-/// `claude --bg` output when there is one, else the `session_id` of the agent
-/// listed under `name`, else `None`. Pure so the precedence is testable.
+/// `claude --bg` output when there is one, else the `session_id` of the
+/// newest agent listed under `name` that started no earlier than
+/// `launch_started - LAUNCH_SKEW_SECS`, else `None`.
+///
+/// Dead agents stay listed by `claude agents`, so a reused name can match an
+/// older run; only agents that started around this launch count, and agents
+/// without a `startedAt` are ignored by the name lookup. Pure so the
+/// precedence is testable.
 fn pick_launched_id(
     parsed: Option<String>,
     agents: &[crate::claude_agents::ClaudeAgentRow],
     name: &str,
+    launch_started: i64,
 ) -> Option<String> {
     parsed.or_else(|| {
-        crate::claude_agents::find_by_name(agents, name).and_then(|a| a.session_id.clone())
+        agents
+            .iter()
+            .filter(|a| a.name.as_deref() == Some(name))
+            .filter_map(|a| a.started_at.map(|t| (t, a)))
+            .filter(|(t, _)| *t >= launch_started - LAUNCH_SKEW_SECS)
+            .filter(|(_, a)| a.session_id.is_some())
+            .max_by_key(|(t, _)| *t)
+            .and_then(|(_, a)| a.session_id.clone())
     })
 }
 
 /// Poll `claude agents` on `host_alias` (up to [`LAUNCH_LOOKUP_TRIES`] times,
-/// [`LAUNCH_LOOKUP_DELAY`] apart) for the agent launched as `name`. Touches
-/// no store, so nothing is held across the sleeps.
-async fn find_launched_id(ssh: &Arc<SshClient>, host_alias: &str, name: &str) -> Option<String> {
+/// [`LAUNCH_LOOKUP_DELAY`] apart) for the agent launched as `name` at
+/// `launch_started` (unix seconds). Touches no store, so nothing is held
+/// across the sleeps.
+async fn find_launched_id(
+    ssh: &Arc<SshClient>,
+    host_alias: &str,
+    name: &str,
+    launch_started: i64,
+) -> Option<String> {
     let tmux = crate::service::sessions::exec_for(host_alias, ssh);
     for attempt in 0..LAUNCH_LOOKUP_TRIES {
         if attempt > 0 {
             tokio::time::sleep(LAUNCH_LOOKUP_DELAY).await;
         }
         let agents = tmux.list_claude_agents().await;
-        if let Some(id) = pick_launched_id(None, &agents, name) {
+        if let Some(id) = pick_launched_id(None, &agents, name, launch_started) {
             return Some(id);
         }
     }
@@ -208,10 +243,7 @@ fn stamp_bg_row(
 ) -> Option<crate::store::SessionRow> {
     let s = store.lock().ok()?;
     let row = s.get_session_by_claude_id(claude_id).ok().flatten()?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now = now_unix();
     let _ = s.set_started_at(row.id, now);
     let _ = s.set_last_prompt(row.id, prompt);
     if row.friendly_name.is_none() {
@@ -260,10 +292,7 @@ pub fn dismiss_agent_session(args: DismissAgentArgs, store: &Mutex<Store>) -> Re
             "background agent has no Claude session id",
         ));
     };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now = now_unix();
     s.dismiss_agent(&sess.host_alias, cid, now)?;
     Ok(())
 }
@@ -492,7 +521,12 @@ mod tests {
         );
     }
 
-    fn agent(session_id: &str, name: &str) -> crate::claude_agents::ClaudeAgentRow {
+    /// A listed background agent launched at `started_at` (unix seconds).
+    fn agent(
+        session_id: &str,
+        name: &str,
+        started_at: Option<i64>,
+    ) -> crate::claude_agents::ClaudeAgentRow {
         crate::claude_agents::ClaudeAgentRow {
             session_id: Some(session_id.into()),
             name: Some(name.into()),
@@ -500,15 +534,17 @@ mod tests {
             cwd: None,
             kind: crate::claude_agents::AgentKind::Background,
             job_id: Some("44366faf".into()),
-            started_at: None,
+            started_at,
         }
     }
 
+    const LAUNCH: i64 = 1_800_000_000;
+
     #[test]
     fn pick_launched_id_prefers_the_parsed_id() {
-        let agents = vec![agent("listed", "review-auth")];
+        let agents = vec![agent("listed", "review-auth", Some(LAUNCH))];
         assert_eq!(
-            pick_launched_id(Some("parsed".into()), &agents, "review-auth").as_deref(),
+            pick_launched_id(Some("parsed".into()), &agents, "review-auth", LAUNCH).as_deref(),
             Some("parsed")
         );
     }
@@ -516,20 +552,53 @@ mod tests {
     #[test]
     fn pick_launched_id_falls_back_to_the_agent_with_that_name() {
         let agents = vec![
-            agent("other", "something-else"),
-            agent("listed", "review-auth"),
+            agent("other", "something-else", Some(LAUNCH + 1)),
+            agent("listed", "review-auth", Some(LAUNCH + 1)),
         ];
         assert_eq!(
-            pick_launched_id(None, &agents, "review-auth").as_deref(),
+            pick_launched_id(None, &agents, "review-auth", LAUNCH).as_deref(),
             Some("listed")
         );
     }
 
     #[test]
     fn pick_launched_id_none_when_neither_is_known() {
-        let agents = vec![agent("other", "something-else")];
-        assert_eq!(pick_launched_id(None, &agents, "review-auth"), None);
-        assert_eq!(pick_launched_id(None, &[], "review-auth"), None);
+        let agents = vec![agent("other", "something-else", Some(LAUNCH))];
+        assert_eq!(pick_launched_id(None, &agents, "review-auth", LAUNCH), None);
+        assert_eq!(pick_launched_id(None, &[], "review-auth", LAUNCH), None);
+    }
+
+    #[test]
+    fn pick_launched_id_ignores_an_older_agent_with_the_same_name() {
+        // A dead agent from an earlier launch stays listed under the reused
+        // name; it started well before this launch, so it is not ours.
+        let agents = vec![agent("stale", "review-auth", Some(LAUNCH - 3_600))];
+        assert_eq!(pick_launched_id(None, &agents, "review-auth", LAUNCH), None);
+        // Just inside the 60 s clock-skew window still counts.
+        let agents = vec![agent("skewed", "review-auth", Some(LAUNCH - 60))];
+        assert_eq!(
+            pick_launched_id(None, &agents, "review-auth", LAUNCH).as_deref(),
+            Some("skewed")
+        );
+    }
+
+    #[test]
+    fn pick_launched_id_newest_of_two_recent_same_name_agents_wins() {
+        let agents = vec![
+            agent("stale", "review-auth", Some(LAUNCH - 7_200)),
+            agent("newer", "review-auth", Some(LAUNCH + 5)),
+            agent("older", "review-auth", Some(LAUNCH - 10)),
+        ];
+        assert_eq!(
+            pick_launched_id(None, &agents, "review-auth", LAUNCH).as_deref(),
+            Some("newer")
+        );
+    }
+
+    #[test]
+    fn pick_launched_id_ignores_a_same_name_agent_without_started_at() {
+        let agents = vec![agent("unknown", "review-auth", None)];
+        assert_eq!(pick_launched_id(None, &agents, "review-auth", LAUNCH), None);
     }
 
     fn seed_agent_row(store: &Mutex<Store>, cid: &str, status: &str, kind: &str) -> i64 {

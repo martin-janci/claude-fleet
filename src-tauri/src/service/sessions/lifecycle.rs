@@ -783,6 +783,51 @@ pub(super) fn bg_stop_target(
     }
 }
 
+/// What `kill_session` does with a pane-less `bg:<id>` row.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum BgKillAction {
+    /// An inactive agent (stored `claude_status = stopped`, its daemon is
+    /// gone): skip `claude stop` and remove the row from the list.
+    Dismiss,
+    /// A live agent: `claude stop <job_id>`.
+    Stop(String),
+    /// A live row whose agent is no longer listed: already gone.
+    Nothing,
+}
+
+/// Whether deciding a kill needs a fresh `claude agents` listing: only a live
+/// (non-`stopped`) `bg` row does. External rows are refused and inactive
+/// agents are dismissed without touching the host.
+pub(super) fn bg_kill_needs_listing(kind: &str, claude_status: Option<&str>) -> bool {
+    kind == "bg" && claude_status != Some("stopped")
+}
+
+/// Decide the kill of a pane-less row from its `kind`, stored
+/// `claude_status` and (for live rows) the host's `claude agents` listing.
+/// Pure so every branch is unit-testable without ssh:
+///
+/// - `external` → refused (`E_INVALID_STATE`), whatever its status;
+/// - `bg` + `stopped` → [`BgKillAction::Dismiss`] (a dead daemon cannot
+///   answer `claude stop`, and the listed agent would be re-imported);
+/// - otherwise the [`bg_stop_target`] decision: `Stop(job)` or `Nothing`.
+pub(super) fn bg_kill_action(
+    kind: &str,
+    claude_status: Option<&str>,
+    agents: &[crate::claude_agents::ClaudeAgentRow],
+    claude_session_id: &str,
+) -> Result<BgKillAction, IpcError> {
+    if kind == "external" {
+        return Err(IpcError::new(codes::E_INVALID_STATE, EXTERNAL_STOP_REFUSED));
+    }
+    if claude_status == Some("stopped") {
+        return Ok(BgKillAction::Dismiss);
+    }
+    Ok(match bg_stop_target(kind, agents, claude_session_id)? {
+        Some(job) => BgKillAction::Stop(job),
+        None => BgKillAction::Nothing,
+    })
+}
+
 pub async fn kill_session(
     args: KillSessionArgs,
     store: &Mutex<Store>,
@@ -794,7 +839,7 @@ pub async fn kill_session(
     crate::validate::tmux_name_lookup(&args.name)?;
     // Look up id BEFORE killing so we can return it after. Read the controller
     // under the same lock and refuse to nuke ourselves unless forced.
-    let (id, kind, claude_sid) = {
+    let (id, kind, claude_sid, claude_status) = {
         let s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
@@ -805,7 +850,7 @@ pub async fn kill_session(
             args.force,
         )?;
         s.get_session(&args.name, &args.host_alias)?
-            .map(|r| (r.id, r.kind, r.claude_session_id))
+            .map(|r| (r.id, r.kind, r.claude_session_id, r.claude_status))
             .ok_or_else(|| {
                 IpcError::new("E_NOTFOUND", format!("session {} not found", args.name))
             })?
@@ -813,20 +858,37 @@ pub async fn kill_session(
     if args.name.starts_with("bg:") {
         // A pane-less agent row — there is no tmux pane to kill. An
         // `external` row (an interactive session outside fleet) is refused
-        // before any ssh / CLI call.
-        if kind == "external" {
-            return Err(IpcError::new(codes::E_INVALID_STATE, EXTERNAL_STOP_REFUSED));
-        }
-        // A `bg` agent is stopped by its short job id, looked up in a fresh
-        // `claude agents` listing. An agent no longer listed is already gone
-        // (the reconcile below prunes the row); `claude stop` itself is
-        // idempotent too, so a job that exits in between is not an error.
+        // before any ssh / CLI call; an inactive `bg` agent is removed from
+        // the list without `claude stop` (its daemon is gone).
         let sid = claude_sid
             .filter(|c| !c.trim().is_empty())
             .unwrap_or_else(|| args.name.trim_start_matches("bg:").to_string());
-        let agents = exec_for(&args.host_alias, ssh).list_claude_agents().await;
-        if let Some(job) = bg_stop_target(&kind, &agents, &sid)? {
-            crate::claude_cli::claude_stop(ssh, &args.host_alias, &job).await?;
+        let status = claude_status.as_deref();
+        let agents = if bg_kill_needs_listing(&kind, status) {
+            exec_for(&args.host_alias, ssh).list_claude_agents().await
+        } else {
+            Vec::new()
+        };
+        match bg_kill_action(&kind, status, &agents, &sid)? {
+            BgKillAction::Dismiss => {
+                let s = store
+                    .lock()
+                    .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+                if let Err(e) = s.insert_session_event(id, "killed", None) {
+                    tracing::warn!(session_id = id, error = %e, "[event] insert killed failed");
+                }
+                // Records the dismissal and deletes the row, so there is
+                // nothing left for a reconcile pass to prune.
+                s.dismiss_agent(&args.host_alias, &sid, now_unix())?;
+                return Ok(id);
+            }
+            // `claude stop` is idempotent, so a job that exits in between is
+            // not an error.
+            BgKillAction::Stop(job) => {
+                crate::claude_cli::claude_stop(ssh, &args.host_alias, &job).await?;
+            }
+            // No longer listed: already gone; the reconcile below prunes it.
+            BgKillAction::Nothing => {}
         }
         if let Ok(s) = store.lock() {
             if let Err(e) = s.insert_session_event(id, "killed", None) {

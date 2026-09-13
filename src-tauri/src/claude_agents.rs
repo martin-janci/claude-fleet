@@ -35,7 +35,8 @@ pub enum AgentKind {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(from = "RawAgentRow")]
 pub struct ClaudeAgentRow {
-    /// The Claude-internal session ID (used to call `claude logs <id>`).
+    /// The Claude-internal session ID: names the transcript
+    /// (`~/.claude/projects/*/<id>.jsonl`) and keys the fleet row.
     pub session_id: Option<String>,
     /// Display name. Equals the tmux session name only for background
     /// sessions fleet launches with `claude --bg --name`; interactive rows
@@ -137,12 +138,16 @@ impl From<RawAgentRow> for ClaudeAgentRow {
 }
 
 /// `claude stop` / `claude attach` take the short job id (`44366faf`).
-/// Only lowercase hex, 8–36 chars (hyphens allowed for a full id) is accepted,
-/// so the value is safe to pass as an argv word even before quoting.
+/// Only lowercase hex, 8–36 chars, starting with a hex digit (hyphens allowed
+/// after it, for a full id) is accepted, so the value can never look like an
+/// option and is safe to pass as an argv word even before quoting.
 pub fn is_job_id(s: &str) -> bool {
+    fn lower_hex(c: char) -> bool {
+        c.is_ascii_hexdigit() && !c.is_ascii_uppercase()
+    }
     (8..=36).contains(&s.len())
-        && s.chars()
-            .all(|c| c == '-' || (c.is_ascii_hexdigit() && !c.is_ascii_uppercase()))
+        && s.chars().next().is_some_and(lower_hex)
+        && s.chars().all(|c| c == '-' || lower_hex(c))
 }
 
 /// A trimmed, lowercased, non-empty string out of a loose JSON value.
@@ -722,6 +727,28 @@ mod tests {
         );
         assert_eq!(rows[3].kind, AgentKind::Background, "unknown kind = bg");
         assert_eq!(rows[3].job_id, None, "invalid job id shape is dropped");
+    }
+
+    #[test]
+    fn is_job_id_requires_a_leading_lowercase_hex_digit() {
+        for good in [
+            "44366faf",
+            "0abcdef1",
+            "44366faf-ae97-426a-91cd-beaf3c74f1d7",
+        ] {
+            assert!(is_job_id(good), "{good:?}");
+        }
+        for bad in [
+            "-0abcdef",
+            "--------",
+            "-44366faf",
+            "--help-00",
+            "44366FAF",
+            "4436",
+            "",
+        ] {
+            assert!(!is_job_id(bad), "{bad:?}");
+        }
     }
 
     #[test]

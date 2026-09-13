@@ -44,10 +44,16 @@ pub trait TmuxExec: Send + Sync {
     /// the fleet treats missing Claude agent data as degraded-gracefully.
     async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow>;
     /// `sessionId → transcript mtime (unix s)` for the given ids; ids that are not
-    /// valid Claude session ids are skipped; any failure yields an empty map.
-    async fn transcript_mtimes(&self, ids: &[String]) -> std::collections::HashMap<String, i64> {
+    /// valid Claude session ids are skipped. `Some(map)` when the call succeeded
+    /// (possibly empty: no transcript found, or no valid id to ask about);
+    /// `None` on any failure (spawn error, non-zero exit, timeout), so callers
+    /// can tell "unknown" apart from "no transcript".
+    async fn transcript_mtimes(
+        &self,
+        ids: &[String],
+    ) -> Option<std::collections::HashMap<String, i64>> {
         let _ = ids;
-        std::collections::HashMap::new()
+        Some(std::collections::HashMap::new())
     }
 }
 
@@ -158,9 +164,12 @@ impl TmuxExec for LocalTmux {
             .unwrap_or_else(|| "[]".to_string());
         crate::claude_agents::parse_claude_agents_json(&json)
     }
-    async fn transcript_mtimes(&self, ids: &[String]) -> std::collections::HashMap<String, i64> {
+    async fn transcript_mtimes(
+        &self,
+        ids: &[String],
+    ) -> Option<std::collections::HashMap<String, i64>> {
         let Some(script) = transcript_mtimes_script(ids) else {
-            return std::collections::HashMap::new();
+            return Some(std::collections::HashMap::new());
         };
         // No login shell: the script needs only `$HOME`, which is inherited.
         match tokio::process::Command::new("bash")
@@ -168,8 +177,8 @@ impl TmuxExec for LocalTmux {
             .output()
             .await
         {
-            Ok(o) if o.status.success() => parse_mtimes(&String::from_utf8_lossy(&o.stdout)),
-            _ => std::collections::HashMap::new(),
+            Ok(o) if o.status.success() => Some(parse_mtimes(&String::from_utf8_lossy(&o.stdout))),
+            _ => None,
         }
     }
 }
@@ -370,13 +379,19 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             .unwrap_or_else(|| "[]".to_string());
         crate::claude_agents::parse_claude_agents_json(&json)
     }
-    async fn transcript_mtimes(&self, ids: &[String]) -> std::collections::HashMap<String, i64> {
+    async fn transcript_mtimes(
+        &self,
+        ids: &[String],
+    ) -> Option<std::collections::HashMap<String, i64>> {
         let Some(script) = transcript_mtimes_script(ids) else {
-            return std::collections::HashMap::new();
+            return Some(std::collections::HashMap::new());
         };
+        // `remote_bash` bounds the call (its timeout surfaces as `Err`); an
+        // unreachable host is ssh exiting 255 — both are failures, not "no
+        // transcript".
         match self.remote_bash(&script).await {
-            Ok(o) if o.status.success() => parse_mtimes(&String::from_utf8_lossy(&o.stdout)),
-            _ => std::collections::HashMap::new(),
+            Ok(o) if o.status.success() => Some(parse_mtimes(&String::from_utf8_lossy(&o.stdout))),
+            _ => None,
         }
     }
 }
@@ -883,6 +898,60 @@ mod tests {
             "mtime {} vs now {now}",
             m[found]
         );
+    }
+
+    #[tokio::test]
+    async fn remote_transcript_mtimes_is_none_on_failure_and_some_on_success() {
+        use crate::ssh_fake::{FakeSsh, Match, Reply};
+        let id = "44366faf-ae97-426a-91cd-beaf3c74f1d7".to_string();
+        let ids = std::slice::from_ref(&id);
+        let tmux = |fake: &FakeSsh| RemoteTmux {
+            client: fake.clone(),
+            host: "h".to_string(),
+        };
+
+        // Non-zero exit → None (not "no transcript").
+        let fake = FakeSsh::new();
+        fake.on(Match::script_contains("date -r"), Reply::fail(1, "boom"));
+        assert_eq!(tmux(&fake).transcript_mtimes(ids).await, None);
+
+        // Unreachable host (ssh exit 255) → None.
+        let fake = FakeSsh::new();
+        fake.unreachable("h");
+        assert_eq!(tmux(&fake).transcript_mtimes(ids).await, None);
+
+        // Spawn error → None.
+        let fake = FakeSsh::new();
+        fake.on(
+            Match::Any,
+            Reply::SpawnError {
+                message: "no ssh".into(),
+            },
+        );
+        assert_eq!(tmux(&fake).transcript_mtimes(ids).await, None);
+
+        // Success: a map, possibly empty.
+        let fake = FakeSsh::new();
+        fake.on(
+            Match::script_contains("date -r"),
+            Reply::ok(&format!("{id}\t1779999999\n")),
+        );
+        let got = tmux(&fake).transcript_mtimes(ids).await;
+        assert_eq!(got.and_then(|m| m.get(&id).copied()), Some(1_779_999_999));
+        let fake = FakeSsh::new();
+        fake.on(Match::script_contains("date -r"), Reply::ok(""));
+        assert_eq!(
+            tmux(&fake).transcript_mtimes(ids).await,
+            Some(std::collections::HashMap::new())
+        );
+
+        // No valid id: nothing to ask, not a failure.
+        let fake = FakeSsh::new();
+        assert_eq!(
+            tmux(&fake).transcript_mtimes(&["bad".into()]).await,
+            Some(std::collections::HashMap::new())
+        );
+        assert!(fake.calls().is_empty());
     }
 
     #[test]

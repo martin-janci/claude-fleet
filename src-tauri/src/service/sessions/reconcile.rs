@@ -139,10 +139,12 @@ pub(super) struct HostProbe {
     pub(super) result: Result<Vec<crate::tmux::TmuxSession>, IpcError>,
     pub(super) agent_rows: Vec<crate::claude_agents::ClaudeAgentRow>,
     /// `sessionId → transcript mtime (unix s)` for this pass's `Background`
-    /// agents (one extra host call, only when there is at least one). Empty
-    /// on timeout, error, or when the host call failed — every agent then
-    /// counts as active.
-    pub(super) agent_mtimes: std::collections::HashMap<String, i64>,
+    /// agents (one extra host call, only when there is at least one; no bg
+    /// agent ⇒ `Some` empty map). `None` when that call failed (spawn error,
+    /// non-zero exit, timeout) or the whole probe timed out: the mtimes are
+    /// unknown, so `reconcile_agent_rows` applies neither the inactive rule
+    /// nor dismissal revival that pass — every agent counts as active.
+    pub(super) agent_mtimes: Option<std::collections::HashMap<String, i64>>,
     pub(super) intel: PaneIntelMap,
     /// `tmux_name → gh pr view` result for the sessions probed THIS pass
     /// (PROD-5). A name absent from the map was not probed (cache still
@@ -512,7 +514,7 @@ pub(super) fn reconcile_write_one_host(
                 live,
                 projects,
                 agent_rows,
-                &probe.agent_mtimes,
+                probe.agent_mtimes.as_ref(),
                 now_unix(),
             )?;
             // Task H: stamp freshness on every session this pass observed live,
@@ -601,7 +603,11 @@ pub(super) fn agent_is_inactive(
 /// job. A bg agent idle for [`AGENT_INACTIVE_SECS`] (transcript mtime from
 /// `mtimes`, else `started_at`) is stored as `stopped`. An agent the user
 /// dismissed is skipped until it shows activity newer than the dismissal,
-/// which clears the dismissal. Then prune the host's pane-less rows whose
+/// which clears the dismissal. `mtimes` is `None` when the transcript probe
+/// failed: the mtimes are unknown (an empty map would read as "no
+/// transcript" and let an old `started_at` retire a live agent), so that
+/// pass skips the inactive rule entirely and keeps every dismissal in
+/// force. Then prune the host's pane-less rows whose
 /// agent is NOT in this pass. The prune is two-phase (ghost this pass,
 /// hard-delete next pass) via `ghost_and_clean_bg_sessions`, so a
 /// transiently-failed agents probe — which comes back as an empty list — only
@@ -613,20 +619,34 @@ pub(super) fn reconcile_agent_rows(
     live: &[crate::tmux::TmuxSession],
     projects: &[ProjectRow],
     agents: &[crate::claude_agents::ClaudeAgentRow],
-    mtimes: &std::collections::HashMap<String, i64>,
+    mtimes: Option<&std::collections::HashMap<String, i64>>,
     now: i64,
 ) -> Result<(), IpcError> {
     let mut keep: Vec<String> = Vec::new();
     let paths = HostPaths::for_host(s, host_alias);
-    let dismissed = s.dismissed_agents(host_alias).unwrap_or_default();
+    let dismissed = match s.dismissed_agents(host_alias) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(
+                host = %host_alias,
+                error = %e,
+                "[reconcile] reading dismissed agents failed"
+            );
+            Default::default()
+        }
+    };
     for agent in unmatched_bg_agents(live, agents, host_alias == "local") {
         let Some(session_id) = agent.session_id.as_deref() else {
             continue;
         };
-        let last_activity = mtimes.get(session_id).copied().or(agent.started_at);
+        let last_activity = mtimes
+            .and_then(|m| m.get(session_id).copied())
+            .or(agent.started_at);
         if let Some(&at) = dismissed.get(session_id) {
             match last_activity {
-                Some(t) if t > at => {
+                // Revive only on known evidence: with the mtimes unknown the
+                // dismissal stays in force.
+                Some(t) if mtimes.is_some() && t > at => {
                     if let Err(e) = s.clear_agent_dismissal(host_alias, session_id) {
                         tracing::warn!(
                             host = %host_alias,
@@ -655,7 +675,10 @@ pub(super) fn reconcile_agent_rows(
         // Same vocabulary filter as tmux rows: an unknown value is logged and
         // dropped (the upsert's COALESCE then keeps the prior status).
         let mut status = known_agent_status(&tmux_name, agent.status.as_deref());
-        if kind == "bg" && agent_is_inactive(status.as_deref(), last_activity, now) {
+        if kind == "bg"
+            && mtimes.is_some()
+            && agent_is_inactive(status.as_deref(), last_activity, now)
+        {
             status = Some("stopped".to_string());
         }
         if let Err(e) = s.upsert_bg_session(
@@ -779,7 +802,7 @@ pub(super) async fn probe_with_timeout(
             .filter_map(|a| a.session_id.clone())
             .collect();
         let agent_mtimes = if bg_ids.is_empty() {
-            std::collections::HashMap::new()
+            Some(std::collections::HashMap::new())
         } else {
             tmux.transcript_mtimes(&bg_ids).await
         };
@@ -810,7 +833,7 @@ pub(super) async fn probe_with_timeout(
                 host,
                 result: Err(IpcError::new("E_TIMEOUT", "host probe timed out")),
                 agent_rows: Vec::new(),
-                agent_mtimes: std::collections::HashMap::new(),
+                agent_mtimes: None,
                 intel: PaneIntelMap::new(),
                 pr_info: PrInfoMap::new(),
                 started_at,

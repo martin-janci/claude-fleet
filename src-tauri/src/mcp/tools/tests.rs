@@ -410,6 +410,28 @@ fn control_skill_quotes_status_vocabulary() {
     }
 }
 
+#[test]
+fn kill_session_description_covers_external_and_inactive_agent_rows() {
+    let tools = FleetTools::tool_router_for_doc().list_all();
+    let desc = tools
+        .iter()
+        .find(|t| t.name == "kill_session")
+        .and_then(|t| t.description.clone())
+        .expect("kill_session description");
+    assert!(
+        desc.contains("`external`") && desc.contains("refused"),
+        "must say external rows are refused: {desc}"
+    );
+    assert!(
+        desc.contains("removed from the list"),
+        "must say inactive bg rows are removed from the list: {desc}"
+    );
+    assert!(
+        !desc.contains("clears a stale row"),
+        "stale wording must be gone: {desc}"
+    );
+}
+
 // ---- handler-level gates (review of #50) ----
 
 fn test_tools(store: Store) -> FleetTools {

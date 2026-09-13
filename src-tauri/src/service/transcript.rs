@@ -176,6 +176,11 @@ fn one_line(s: &str) -> String {
 /// Turns kept by `session_conversation`, and its character budget.
 pub const CONV_TURNS: usize = 10;
 pub const CONV_MAX_CHARS: usize = 64_000;
+/// Bytes of JSONL tail `session_conversation` reads per fetch. Fixed (not
+/// [`read_bytes_for`]`(CONV_MAX_CHARS)`, a 4 MB tail): the Conversation panel
+/// polls every 5 s, over ssh for remote hosts. `session_transcript` keeps its
+/// char-derived budget.
+pub const CONV_READ_BYTES: usize = 1_048_576;
 
 /// One turn of a conversation: the human prompt that opened it and what the
 /// assistant said / did in reply.
@@ -491,26 +496,42 @@ pub fn resolve_args(
     })
 }
 
-/// Read the JSONL tail for `args` (validated; `read_bytes_for(max_chars)`
-/// bytes). Errors: `E_INVALID` (bad id / host / pane name),
-/// `E_NO_TRANSCRIPT` (file absent — the session has not written a turn yet,
-/// or runs on another cwd), `E_SHELL` / `E_SSH*` for transport
-/// failures.
-async fn read_tail(args: &TranscriptArgs, ssh: &Arc<SshClient>) -> Result<String, IpcError> {
+/// Validate `args` and build the script that prints the last `max_bytes` of
+/// its transcript. Errors: `E_INVALID` (bad id / host / pane name).
+fn tail_script(args: &TranscriptArgs, max_bytes: usize) -> Result<String, IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
     crate::validate::claude_session_id(&args.claude_session_id)?;
     if let Some(name) = args.tmux_name.as_deref() {
         crate::validate::tmux_name_addressable(name)?;
     }
-    let max_chars = args.max_chars.clamp(1, MAX_MAX_CHARS);
-    let script = read_script(
+    Ok(read_script(
         args.tmux_name.as_deref(),
         args.transcript_path.as_deref(),
         args.cwd.as_deref(),
         &args.claude_session_id,
-        read_bytes_for(max_chars),
-    );
-    let out = run_shell(ssh, &args.host_alias, &script).await?;
+        max_bytes,
+    ))
+}
+
+/// `session_transcript`'s read: `read_bytes_for(max_chars)` bytes.
+fn transcript_read_script(args: &TranscriptArgs) -> Result<String, IpcError> {
+    tail_script(args, read_bytes_for(args.max_chars.clamp(1, MAX_MAX_CHARS)))
+}
+
+/// `session_conversation`'s read: a fixed [`CONV_READ_BYTES`] tail.
+fn conversation_read_script(args: &TranscriptArgs) -> Result<String, IpcError> {
+    tail_script(args, CONV_READ_BYTES)
+}
+
+/// Run a read `script` built for `args`. Errors: `E_NO_TRANSCRIPT` (file
+/// absent — the session has not written a turn yet, or runs on another cwd),
+/// `E_SHELL` / `E_SSH*` for transport failures.
+async fn read_tail(
+    args: &TranscriptArgs,
+    script: &str,
+    ssh: &Arc<SshClient>,
+) -> Result<String, IpcError> {
+    let out = run_shell(ssh, &args.host_alias, script).await?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         if stderr.contains(NO_TRANSCRIPT) {
@@ -532,12 +553,14 @@ async fn read_tail(args: &TranscriptArgs, ssh: &Arc<SshClient>) -> Result<String
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Fetch and render a transcript as plain text. Errors as [`read_tail`].
+/// Fetch and render a transcript as plain text. Errors as [`tail_script`] /
+/// [`read_tail`].
 pub async fn fetch_transcript(
     args: TranscriptArgs,
     ssh: &Arc<SshClient>,
 ) -> Result<String, IpcError> {
-    let text = read_tail(&args, ssh).await?;
+    let script = transcript_read_script(&args)?;
+    let text = read_tail(&args, &script, ssh).await?;
     let turns = parse_turns(&text);
     Ok(render_tail(
         &turns,
@@ -547,13 +570,15 @@ pub async fn fetch_transcript(
 }
 
 /// Fetch a transcript as structured turns, trimmed to `args.turns` and
-/// `args.max_chars` (callers pass [`CONV_TURNS`] / [`CONV_MAX_CHARS`]).
-/// Errors as [`read_tail`].
+/// `args.max_chars` (callers pass [`CONV_TURNS`] / [`CONV_MAX_CHARS`]),
+/// from a fixed [`CONV_READ_BYTES`] tail. Errors as [`tail_script`] /
+/// [`read_tail`].
 pub async fn fetch_conversation(
     args: TranscriptArgs,
     ssh: &Arc<SshClient>,
 ) -> Result<Conversation, IpcError> {
-    let text = read_tail(&args, ssh).await?;
+    let script = conversation_read_script(&args)?;
+    let text = read_tail(&args, &script, ssh).await?;
     Ok(trim_conversation(
         parse_conversation(&text),
         args.turns.max(1),
@@ -1136,6 +1161,48 @@ mod tests {
             resolve_args(&store, &no_id, 1, 1).unwrap_err().code,
             "E_INVALID_STATE"
         );
+    }
+
+    fn tail_args(max_chars: usize) -> TranscriptArgs {
+        TranscriptArgs {
+            host_alias: "mefistos".into(),
+            tmux_name: None,
+            transcript_path: None,
+            cwd: Some("/w".into()),
+            claude_session_id: "00000000-0000-0000-0000-00000000beef".into(),
+            turns: CONV_TURNS,
+            max_chars,
+        }
+    }
+
+    #[test]
+    fn conversation_reads_a_fixed_one_mib_tail() {
+        // The Conversation panel polls every 5 s; a 4 MB tail per poll over
+        // ssh is too heavy, so it reads a fixed 1 MiB regardless of budget.
+        assert_eq!(CONV_READ_BYTES, 1_048_576);
+        let script = conversation_read_script(&tail_args(CONV_MAX_CHARS)).unwrap();
+        assert!(script.contains("tail -c 1048576 "), "{script}");
+        let script = conversation_read_script(&tail_args(100)).unwrap();
+        assert!(script.contains("tail -c 1048576 "), "{script}");
+    }
+
+    #[test]
+    fn session_transcript_keeps_its_char_derived_read_budget() {
+        let script = transcript_read_script(&tail_args(CONV_MAX_CHARS)).unwrap();
+        let expected = format!("tail -c {} ", read_bytes_for(CONV_MAX_CHARS));
+        assert!(script.contains(&expected), "{script}");
+        assert_eq!(read_bytes_for(CONV_MAX_CHARS), 4_096_000);
+    }
+
+    #[test]
+    fn read_scripts_validate_their_inputs() {
+        let mut bad = tail_args(100);
+        bad.claude_session_id = "../../etc".into();
+        assert_eq!(
+            conversation_read_script(&bad).unwrap_err().code,
+            "E_INVALID"
+        );
+        assert_eq!(transcript_read_script(&bad).unwrap_err().code, "E_INVALID");
     }
 
     #[tokio::test]

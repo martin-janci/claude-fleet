@@ -79,7 +79,8 @@ pub fn bg_script(name: &str, prompt: &str) -> Result<String, IpcError> {
 /// `claude stop <job_id>` — the short background job id (`44366faf`) that
 /// `claude agents --json` reports, not the full session UUID. No `--`: the
 /// subcommand rejects it, so the id is held to [`is_job_id`]'s lowercase-hex
-/// shape (which can never look like an option) before it is quoted.
+/// shape (it must start with a hex digit, so it can never look like an
+/// option) before it is quoted.
 ///
 /// [`is_job_id`]: crate::claude_agents::is_job_id
 pub fn stop_script(job_id: &str) -> Result<String, IpcError> {
@@ -432,7 +433,9 @@ mod tests {
         assert!(s.contains("44366faf"), "{s}");
         assert!(!s.contains(" -- "), "{s}");
         // A shell-hostile or option-shaped value is refused before quoting.
-        for bad in ["'; rm", "--foo", "-h", "", "4436", "44366FAF", "job 1234"] {
+        for bad in [
+            "'; rm", "--foo", "-h", "", "4436", "44366FAF", "job 1234", "-0abcdef", "--------",
+        ] {
             assert_eq!(stop_script(bad).unwrap_err().code, "E_INVALID", "{bad:?}");
         }
     }
