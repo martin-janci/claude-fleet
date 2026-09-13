@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { toasts, dismiss } from './toasts';
+  import { toasts, dismiss, runToastAction } from './toasts';
 </script>
 
 <!-- Polite live region: screen readers announce new toasts without
@@ -11,6 +11,9 @@
         <code class="code" data-testid="toast-code">{t.code}</code>
       {/if}
       <span class="msg">{t.message}</span>
+      {#if t.action}
+        <button class="action" onclick={() => runToastAction(t.id)} data-testid="toast-action">{t.action.label}</button>
+      {/if}
       {#if t.count > 1}
         <span class="count" title="repeated">×{t.count}</span>
       {/if}
@@ -60,6 +63,17 @@
   }
   .msg { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
   .count { color: var(--fg-muted); font-size: 0.7rem; }
+  .action {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--accent);
+    cursor: pointer;
+    font-size: 0.75rem;
+    padding: 0 0.4rem;
+  }
+  .action:hover { border-color: var(--accent); }
   .close {
     flex: 0 0 auto;
     background: transparent;

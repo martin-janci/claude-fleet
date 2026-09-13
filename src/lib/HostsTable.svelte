@@ -1,13 +1,13 @@
 <script lang="ts">
   import { hosts, probeHost, deleteHost, hideHost } from './hosts';
   import { accounts, type AccountRow } from './accounts';
+  import type { TokenMode } from './mcp';
   import {
-    listHostTokens,
-    setHostTokenMode,
-    rotateHostToken,
-    type HostTokenInfo,
-    type TokenMode,
-  } from './mcp';
+    hostTokens,
+    loadHostTokens as loadSharedHostTokens,
+    rotateToken,
+    setTokenMode,
+  } from './host_actions';
   import { sessions } from './sessions';
   import { hookHealth, hookHealthLabel } from './hook_health';
 
@@ -16,9 +16,7 @@
   let busy: string | null = $state(null);
   let error: string | null = $state(null);
 
-  // --- Per-host control-API tokens ---
-  // alias -> token info; a host absent here has never been provisioned.
-  let hostTokens = $state<Map<string, HostTokenInfo>>(new Map());
+  // --- Per-host control-API tokens (shared with the Hosts view) ---
   let tokenBusy: string | null = $state(null);
   let tokenError: string | null = $state(null);
 
@@ -30,34 +28,23 @@
   });
 
   export async function loadHostTokens() {
-    const r = await listHostTokens();
-    if (r.ok && Array.isArray(r.value)) {
-      hostTokens = new Map(r.value.map((t) => [t.host_alias, t]));
-    }
+    await loadSharedHostTokens();
   }
 
   async function onTokenMode(alias: string, mode: TokenMode) {
     tokenBusy = alias;
     tokenError = null;
-    const r = await setHostTokenMode(alias, mode);
+    const r = await setTokenMode(alias, mode);
     tokenBusy = null;
-    if (r.ok && r.value) {
-      hostTokens = new Map(hostTokens).set(alias, r.value);
-    } else if (!r.ok) {
-      tokenError = r.error.message;
-    }
+    if (!r.ok) tokenError = r.error.message;
   }
 
   async function onRotateToken(alias: string) {
     tokenBusy = alias;
     tokenError = null;
-    const r = await rotateHostToken(alias);
+    const r = await rotateToken(alias);
     tokenBusy = null;
-    if (r.ok && r.value) {
-      hostTokens = new Map(hostTokens).set(alias, r.value);
-    } else if (!r.ok) {
-      tokenError = r.error.message;
-    }
+    if (!r.ok) tokenError = r.error.message;
   }
 
   const accountByUuid = $derived(
@@ -120,7 +107,7 @@
     </thead>
     <tbody>
       {#each $hosts as h (h.alias)}
-        {@const hh = hookHealth(h.alias, hostTokens.has(h.alias), $sessions)}
+        {@const hh = hookHealth(h.alias, $hostTokens.has(h.alias), $sessions)}
         <tr class:hidden-row={h.hidden}>
           <td class="alias">{h.alias}{#if h.ssh_alias && h.ssh_alias !== h.alias}<span class="muted"> ({h.ssh_alias})</span>{/if}</td>
           <td>{h.tmux_version ?? '—'}</td>
@@ -132,10 +119,10 @@
             </span>
           </td>
           <td class="token-cell" data-testid="token-cell">
-            {#if hostTokens.get(h.alias)}
+            {#if $hostTokens.get(h.alias)}
               <select
                 class="mode"
-                value={hostTokens.get(h.alias)!.mode}
+                value={$hostTokens.get(h.alias)!.mode}
                 disabled={tokenBusy === h.alias}
                 onchange={(e) => onTokenMode(h.alias, (e.currentTarget as HTMLSelectElement).value as TokenMode)}
                 aria-label="Token mode"

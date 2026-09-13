@@ -25,6 +25,7 @@
     onRefresh,
     locale,
     timeZone,
+    suppressUnavailable = false,
   }: {
     account: AccountRow | null;
     snapshot: AccountUsageSnapshot | null;
@@ -35,6 +36,9 @@
     onRefresh?: () => void;
     locale?: string;
     timeZone?: string;
+    /** The owner shows ONE endpoint-unavailable banner for every account, so
+     *  this block drops its own unavailable line and Copy details. */
+    suppressUnavailable?: boolean;
   } = $props();
 
   const msg = $derived(statusMessage(snapshot, account, sharedWith, now, locale, timeZone));
@@ -47,7 +51,14 @@
   let toggled = $state<boolean | null>(null);
   const perModelOpen = $derived(toggled ?? autoOpen);
   const countdown = $derived(snapshot ? refreshCountdown(snapshot.next_try_at, now) : null);
-  const generalLines = $derived(msg.lines.filter((l) => !l.window));
+  const generalLines = $derived(
+    msg.lines.filter((l) => !l.window && !(suppressUnavailable && l.kind === 'unavailable')),
+  );
+  const showCopy = $derived(
+    msg.copyDetail !== null &&
+      snapshot?.status !== 'ok' &&
+      !(suppressUnavailable && snapshot?.status === 'unavailable'),
+  );
   let copied = $state(false);
 
   function noteFor(w: UsageWindowKind): string | null {
@@ -97,7 +108,7 @@
       {/each}
     </ul>
   {/if}
-  {#if msg.copyDetail && snapshot?.status !== 'ok'}
+  {#if showCopy}
     <button type="button" class="link" data-testid="usage-copy-details" onclick={copyDetails}
       >{copied ? 'Copied' : 'Copy details'}</button
     >

@@ -383,7 +383,8 @@ export function missingToolText(noteText: string | null, host: string): string {
   return `curl 7.55+ or python3/jq needed on ${host}`;
 }
 
-function httpHint(detail: string | null): string {
+/** `HTTP 404` / `no response` from a backend `detail`, or `''`. */
+export function httpHint(detail: string | null): string {
   const code = /^HTTP (\d{3})/.exec(detail ?? '')?.[1];
   if (code) return `HTTP ${code}`;
   if ((detail ?? '').startsWith('no HTTP response')) return 'no response';

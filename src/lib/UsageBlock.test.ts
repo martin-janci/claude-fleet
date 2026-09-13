@@ -54,6 +54,7 @@ function mount(
     sharedWith?: string[];
     now?: number;
     onRefresh?: () => void;
+    suppressUnavailable?: boolean;
   } = {},
 ) {
   return render(UsageBlock, {
@@ -279,6 +280,15 @@ describe('UsageBlock — statuses', () => {
     mount({ snapshot: snap({ usage: null, fetched_at: null, status: 'unavailable', detail: 'HTTP 404: <html>nope</html>' }) });
     expect(norm(screen.getByTestId('usage-block'))).not.toContain('nope');
     expect(screen.getByTestId('usage-copy-details')).toHaveTextContent('Copy details');
+  });
+
+  it('drops its unavailable line and Copy details when the owner shows the banner', () => {
+    const dead = snap({ fetched_at: NOW - 20 * MIN, status: 'unavailable', next_try_at: NOW + 8 * MIN, detail: 'HTTP 404: nope' });
+    mount({ snapshot: dead, suppressUnavailable: true });
+    expect(screen.queryAllByTestId('usage-message').map((m) => m.dataset.kind)).not.toContain('unavailable');
+    expect(screen.queryByTestId('usage-copy-details')).toBeNull();
+    // The age line still says why the number is old.
+    expect(messages()[0]).toContain('last check failed: usage endpoint unavailable (HTTP 404)');
   });
 
   it('a host problem while another host answered is a muted note', () => {
