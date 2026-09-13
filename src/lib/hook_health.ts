@@ -1,4 +1,4 @@
-// Per-host fleet-hook health for Settings → Hosts (Q8 / R10).
+// Per-host fleet-hook health for the Hosts view's Integration section (Q8 / R10).
 //
 // "Installed" is inferred from the host's control-API token: both the
 // Settings button / enable-time auto-install (local) and `provision_hosts`

@@ -1,4 +1,4 @@
-/* Rules shared by SettingsDialog, HostsTable and McpSettings, which all render
+/* Rules shared by SettingsDialog and McpSettings, which both render
    inside the settings dialog. Namespaced under the dialog root so they never
    reach other components' same-named classes (Sidebar and others define their
    own .err / .status). Single-class selectors keep the specificity of the

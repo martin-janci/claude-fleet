@@ -1,9 +1,11 @@
 // Pure model for QuickSwitcher.svelte: which rows exist, how a query ranks
 // them, and the MRU list that puts recently opened sessions first.
 //
-// Rows are sessions (Enter attaches) and projects (Enter opens the
-// new-session dialog for that project), like VS Code's quick open mixing
-// "recently opened" with "create new". Ranking is `fuzzy.ts` over every
+// Rows are sessions (Enter attaches), projects (Enter opens the
+// new-session dialog for that project) and hosts (`host: <alias>`, Enter opens
+// the Hosts view on that host), like VS Code's quick open mixing "recently
+// opened" with "create new". Host rows always rank below every session row so
+// they never displace a session result. Ranking is `fuzzy.ts` over every
 // searchable facet (friendly name, tmux name, project, host, branch,
 // status) so `"blue mef"` finds the blue-sirius session on mefistos.
 import { get, writable } from 'svelte/store';
@@ -11,10 +13,11 @@ import { fuzzyMatchFields } from './fuzzy';
 import type { ProjectTreeRow } from './projects';
 import { readPref, writePref } from './prefs';
 import type { SessionRow } from './sessions';
+import type { HostRow } from './hosts';
 
 export interface SwitcherEntry {
-  kind: 'session' | 'project';
-  /** `session:<id>` or `project:<id>`. */
+  kind: 'session' | 'project' | 'host';
+  /** `session:<id>`, `project:<id>` or `host:<alias>`. */
   key: string;
   label: string;
   description: string;
@@ -23,6 +26,7 @@ export interface SwitcherEntry {
   fields: string[];
   session?: SessionRow;
   project?: ProjectTreeRow;
+  host?: HostRow;
 }
 
 /** Stable identity used for the MRU list (ids churn on re-discovery). */
@@ -61,6 +65,7 @@ function worktreeLabel(s: SessionRow, p: ProjectTreeRow | undefined): string | n
 export function buildEntries(
   sessions: readonly SessionRow[],
   projects: readonly ProjectTreeRow[],
+  hosts: readonly HostRow[] = [],
 ): SwitcherEntry[] {
   const byId = new Map(projects.map((p) => [p.project.id, p]));
   const out: SwitcherEntry[] = [];
@@ -101,6 +106,19 @@ export function buildEntries(
       project: p,
     });
   }
+  for (const h of hosts) {
+    const count = sessions.filter((s) => s.host_alias === h.alias).length;
+    const state = h.reachable ? 'online' : 'offline';
+    out.push({
+      kind: 'host',
+      key: `host:${h.alias}`,
+      label: `host: ${h.alias}`,
+      description: `${state} · ${count} session${count === 1 ? '' : 's'}${h.hidden ? ' · hidden' : ''}`,
+      meta: 'Hosts',
+      fields: [h.alias, `host ${h.alias}`, h.ssh_alias ?? '', 'hosts'].filter(Boolean),
+      host: h,
+    });
+  }
   return out;
 }
 
@@ -127,9 +145,11 @@ export function rankEntries(
       ? (e.session?.last_activity_at ?? 0)
       : (e.project?.project.last_session_at ?? 0);
   const q = query.trim();
-  const scored = entries
+  type Scored = { e: SwitcherEntry; score: number };
+  const all = entries
     .map((e) => ({ e, score: q ? fuzzyMatchFields(q, e.fields) : 0 }))
-    .filter((x): x is { e: SwitcherEntry; score: number } => x.score !== null);
+    .filter((x): x is Scored => x.score !== null);
+  const scored = all.filter((x) => x.e.kind !== 'host');
   scored.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
     // Sessions before projects when nothing else separates them.
@@ -139,7 +159,24 @@ export function rankEntries(
     if (ra !== rb) return ra - rb;
     return activity(b.e) - activity(a.e);
   });
-  return scored.map((x) => x.e);
+  // Host rows never precede a session row: they merge by score into what
+  // follows the last session, ahead of an equally scored project.
+  const hostRows = all
+    .filter((x) => x.e.kind === 'host')
+    .sort((a, b) => b.score - a.score || a.e.label.localeCompare(b.e.label));
+  let lastSession = -1;
+  scored.forEach((x, i) => {
+    if (x.e.kind === 'session') lastSession = i;
+  });
+  const out: Scored[] = scored.slice(0, lastSession + 1);
+  const rest = scored.slice(lastSession + 1);
+  let h = 0;
+  for (const x of rest) {
+    while (h < hostRows.length && hostRows[h].score >= x.score) out.push(hostRows[h++]);
+    out.push(x);
+  }
+  out.push(...hostRows.slice(h));
+  return out.map((x) => x.e);
 }
 
 /**

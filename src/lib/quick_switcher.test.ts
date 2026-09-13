@@ -12,6 +12,7 @@ import {
 } from './quick_switcher';
 import type { SessionRow } from './sessions';
 import type { ProjectTreeRow } from './projects';
+import { host } from './hosts_fixture';
 
 function sess(over: Partial<SessionRow> & { id: number }): SessionRow {
   return {
@@ -134,6 +135,46 @@ describe('rankEntries', () => {
     const entries = buildEntries([a, b], projects);
     const keys = rankEntries(entries, 'alpha', ['local/dev-o-r--s7']).map((e) => e.key);
     expect(keys).toEqual(['session:7', 'session:8']);
+  });
+});
+
+describe('host entries', () => {
+  const hostRows = [host('mefistos'), host('hetzner', { reachable: false }), host('local')];
+
+  it('adds a `host: <alias>` row per host with its state and session count', () => {
+    const entries = buildEntries(sessions, projects, hostRows);
+    const mef = entries.find((e) => e.key === 'host:mefistos')!;
+    expect(mef.kind).toBe('host');
+    expect(mef.label).toBe('host: mefistos');
+    expect(mef.description).toBe('online · 1 session');
+    expect(entries.find((e) => e.key === 'host:hetzner')!.description).toBe('offline · 1 session');
+    expect(entries.find((e) => e.key === 'host:local')!.description).toBe('online · 1 session');
+  });
+
+  it('buildEntries without hosts stays sessions + projects', () => {
+    expect(buildEntries(sessions, projects).some((e) => e.kind === 'host')).toBe(false);
+  });
+
+  it('never ranks a host row above a session row, even when it matches better', () => {
+    const entries = buildEntries(sessions, projects, hostRows);
+    // "mefistos" is an exact host alias but only a host facet of session 1.
+    const ranked = rankEntries(entries, 'mefistos', []);
+    const kinds = ranked.map((e) => e.kind);
+    expect(kinds[0]).toBe('session');
+    expect(ranked.find((e) => e.kind === 'host')?.key).toBe('host:mefistos');
+    const firstHost = kinds.indexOf('host');
+    expect(kinds.slice(firstHost).includes('session')).toBe(false);
+  });
+
+  it('empty query: sessions, then hosts, then projects', () => {
+    const ranked = rankEntries(buildEntries(sessions, projects, hostRows), '', []);
+    const kinds = ranked.map((e) => e.kind);
+    expect(kinds).toEqual(['session', 'session', 'session', 'host', 'host', 'host', 'project', 'project']);
+  });
+
+  it('`host` narrows to host rows first when no session matches', () => {
+    const ranked = rankEntries(buildEntries([], projects, hostRows), 'host hetz', []);
+    expect(ranked[0].key).toBe('host:hetzner');
   });
 });
 

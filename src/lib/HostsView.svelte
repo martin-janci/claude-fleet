@@ -42,6 +42,7 @@
     onClose,
     onFilterSidebar,
     onNewSession,
+    onSelectionChange,
     clock = () => Math.floor(Date.now() / 1000),
     locale,
     timeZone,
@@ -54,6 +55,8 @@
     onFilterSidebar: (alias: string) => void;
     /** `n`: start a new session on this host. */
     onNewSession: (alias: string) => void;
+    /** The selected host changed (App remembers the last-viewed host). */
+    onSelectionChange?: (alias: string) => void;
     /** Unix seconds; injectable for tests. */
     clock?: () => number;
     locale?: string;
@@ -144,6 +147,10 @@
     if (selectedAlias === null || !ordered.some((h) => h.alias === selectedAlias)) {
       selectedAlias = defaultSelection();
     }
+  });
+
+  $effect(() => {
+    if (selectedAlias !== null) onSelectionChange?.(selectedAlias);
   });
 
   onMount(() => {

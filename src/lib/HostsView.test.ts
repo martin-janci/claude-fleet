@@ -591,3 +591,48 @@ describe('HostsView: detail sections', () => {
     expect(calls('set_host_token_mode')[0][1]).toEqual({ hostAlias: 'mefistos', mode: 'readonly' });
   });
 });
+
+// Moved from SettingsDialog.test.ts when the Settings hosts table was removed:
+// every fact that table showed (versions, account + tier, status, token mode,
+// hook health) and every action it offered (re-probe, hide, remove, token
+// mode, rotate) must still be reachable in the Hosts view.
+describe('HostsView: what the former Settings hosts table covered', () => {
+  it('the detail shows the account email and the group header its seat tier', async () => {
+    accounts.set(fleetAccounts().map((a) => (a.uuid === WORK.uuid ? { ...a, seat_tier: 'max' } : a)));
+    mount({ preselect: 'claude-fleet-htz' });
+    await tick();
+    expect(within(detail()).getByTestId('detail-account').textContent).toContain('m.janci@32bit.sk');
+    const header = screen.getAllByTestId('hosts-group-header').find((g) => g.textContent?.includes('m.janci@32bit.sk'))!;
+    expect(within(header).getByTestId('group-tier').textContent).toBe('max');
+  });
+
+  it('a host missing from the token list reads "none", a provisioned one shows its mode', async () => {
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_host_tokens') return [{ host_alias: 'mefistos', mode: 'full', created_at: 1 }];
+      return null;
+    });
+    mount({ preselect: 'claude-fleet-oci' });
+    await waitFor(() => expect(get(hostTokensLoaded)).toBe(true));
+    expect(detail().textContent).toContain('none — provision hosts to mint one');
+    expect(within(detail()).getByTestId('detail-hooks').textContent).toBe('not installed');
+    expect(within(detail()).getByTestId('detail-hooks').dataset.state).toBe('not_installed');
+    await key(list(), 'j'); // claude-fleet-oci → mefistos (same account group)
+    expect(detailAlias()).toBe('mefistos');
+    expect((within(detail()).getByTestId('detail-token-mode') as HTMLSelectElement).value).toBe('full');
+  });
+
+  it('installed hooks with no Stop event yet read "installed · never seen"', async () => {
+    sessions.set([]);
+    mount({ preselect: 'mefistos' });
+    await waitFor(() => expect(within(detail()).getByTestId('detail-hooks').dataset.state).toBe('never_seen'));
+    expect(within(detail()).getByTestId('detail-hooks').textContent).toBe('installed · never seen');
+  });
+
+  it('the Re-probe button probes the selected host', async () => {
+    mount({ preselect: 'claude-fleet-trn' });
+    await tick();
+    await fireEvent.click(within(detail()).getByTestId('detail-reprobe'));
+    await waitFor(() => expect(calls('probe_host')).toHaveLength(1));
+    expect(calls('probe_host')[0][1]).toEqual({ args: { alias: 'claude-fleet-trn' } });
+  });
+});

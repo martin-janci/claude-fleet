@@ -157,7 +157,7 @@
         pushError(r.error, 'Rename failed');
         return;
       }
-      selectSession(r.value);
+      selectSession(r.value, { follow: true });
       renaming = null;
     } finally {
       committingRename = false;
@@ -211,7 +211,7 @@
       // the selection effect would not fire on its own).
       selectSession(null);
       await tick();
-      selectSession(session);
+      selectSession(session, { follow: true });
     }
   }
 
@@ -388,7 +388,7 @@
     // panel shows the selected session, so force a re-attach.
     selectSession(null);
     await tick();
-    selectSession(r.value);
+    selectSession(r.value, { follow: true });
   }
 </script>
 

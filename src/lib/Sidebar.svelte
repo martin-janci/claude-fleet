@@ -26,6 +26,12 @@
   import OnboardingCard from './OnboardingCard.svelte';
   import { hostFilter } from './hosts';
   import { onboardingDismissed } from './onboarding';
+  import {
+    hostsViewOpen,
+    newSessionHostRequest,
+    requestHostsView,
+    settingsOpen,
+  } from './app_views';
   import { hintAnchor } from './hints';
   import {
     buildSessionsByProject,
@@ -49,7 +55,6 @@
   import NewBgSessionDialog from './NewBgSessionDialog.svelte';
   import { isRecency, matchesRecency, type Recency } from './session_status';
 
-  let showSettings = $state(false);
   let showTasks = $state(false);
 
   // Optional collapse handler injected by the parent (App.svelte). When
@@ -332,18 +337,50 @@
   /** Host to preselect in NewSessionDialog: where Add project put the project. */
   let dialogHost: string | undefined = $state(undefined);
 
-  // Onboarding card actions — open the same flows as existing UI.
-  const openAddHost = () => { showSettings = true; };
-  const openNewSession = () => { showProjectPicker = true; };
+  /** Host the open project picker preselects (the Hosts view's `n`). */
+  let pickerHost: string | undefined = $state(undefined);
+
+  // Onboarding card actions — open the same flows as existing UI. Hosts are
+  // managed in the Hosts view, not Settings.
+  const openAddHost = () => requestHostsView();
+  const openNewSession = () => {
+    pickerHost = undefined;
+    showProjectPicker = true;
+  };
+
+  function toggleProjectPicker() {
+    pickerHost = undefined;
+    showProjectPicker = !showProjectPicker;
+  }
+
+  // "New session on <host>" from the Hosts view: the same project picker,
+  // then NewSessionDialog with that host preselected.
+  $effect(() => {
+    const host = $newSessionHostRequest;
+    if (host === null) return;
+    newSessionHostRequest.set(null);
+    pickerHost = host;
+    showProjectPicker = true;
+    // Keyboard flow from the Hosts view: land on the first project.
+    void tick().then(() => {
+      const first =
+        sidebarEl?.querySelector<HTMLElement>('.picker .picker-item:not(.add-project)') ??
+        sidebarEl?.querySelector<HTMLElement>('.picker .picker-item');
+      first?.focus();
+    });
+  });
 
   function openNew(p: ProjectTreeRow, e?: Event) {
     e?.stopPropagation();
-    dialogHost = undefined;
+    // A row's own `+` has no host intent; the picker may carry one.
+    dialogHost = e ? undefined : pickerHost;
+    pickerHost = undefined;
     dialogProject = p;
     showProjectPicker = false;
   }
 
   function openAddProject() {
+    pickerHost = undefined;
     showProjectPicker = false;
     showAddProject = true;
   }
@@ -388,7 +425,9 @@
       cancelRename();
     }
     const cur = $selectedSession;
-    if (cur && cur.id === sess.id) {
+    // While the Hosts view covers the terminal, clicking the open session
+    // means "go to it", not "deselect".
+    if (cur && cur.id === sess.id && !$hostsViewOpen) {
       selectSession(null);
     } else {
       selectSession(sess);
@@ -474,7 +513,7 @@
       // If the renamed session was the selected one, follow the rename.
       const cur = $selectedSession;
       if (cur && sameSession(cur, target)) {
-        selectSession(r.value);
+        selectSession(r.value, { follow: true });
       }
       cancelRename();
     } finally {
@@ -547,7 +586,7 @@
     if (cur && sameSession(cur, sess)) {
       selectSession(null);
       await tick();
-      selectSession(r.value);
+      selectSession(r.value, { follow: true });
     }
   }
 
@@ -648,9 +687,9 @@
     {onRefresh}
     {onCollapse}
     {showTasks}
-    {showSettings}
+    showSettings={$settingsOpen}
     onOpenTasks={() => (showTasks = true)}
-    onOpenSettings={() => (showSettings = true)}
+    onOpenSettings={() => settingsOpen.set(true)}
     {stuckCount}
     {attentionCount}
     {selectMode}
@@ -734,7 +773,7 @@
     <div class="footer-row">
       <button
         class="new-btn"
-        onclick={() => (showProjectPicker = !showProjectPicker)}
+        onclick={toggleProjectPicker}
         data-testid="new-session-footer"
       >
         + New session
@@ -837,8 +876,8 @@
   </ConfirmDialog>
 {/if}
 
-{#if showSettings}
-  <SettingsDialog onClose={() => (showSettings = false)} />
+{#if $settingsOpen}
+  <SettingsDialog onClose={() => settingsOpen.set(false)} />
 {/if}
 
 {#if showTasks}

@@ -40,8 +40,8 @@ host — `register_self`, `send_message` (`from_session_id`) and `inbox` refuse
 sessions on any other host with `E_FORBIDDEN`, so a token lifted from one
 machine cannot impersonate another.
 
-Each host's token has a **mode**, shown in the **Token** column of
-**Settings → Hosts**:
+Each host's token has a **mode**, shown and changed under **Integration** in
+the host's detail in the **Hosts** view (⌘I):
 
 - `full` (default) — whole-fleet **session** control: every tool except the
   fleet-admin set. Cross-host `send_prompt`, `kill_session`, `new_session`

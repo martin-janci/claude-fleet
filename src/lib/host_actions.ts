@@ -1,8 +1,9 @@
-// Host actions shared by every surface that manages hosts (the Hosts view and,
-// until it is removed, Settings' HostsTable): the per-host control-API token
-// state (list, mode, rotate), re-probe, and hide with Undo. Store mutations
-// stay in `hosts.ts` / `mcp.ts`; this module owns the token cache both
-// surfaces read and the user-facing toasts, so no logic exists twice.
+// Host actions for every surface that manages hosts (the Hosts view, and
+// Settings' Control-API section, which refreshes the token cache after
+// provisioning): the per-host control-API token state (list, mode, rotate),
+// re-probe, and hide with Undo. Store mutations stay in `hosts.ts` / `mcp.ts`;
+// this module owns the shared token cache and the user-facing toasts, so no
+// logic exists twice.
 import { writable } from 'svelte/store';
 import { hideHost, probeHost, type HostRow } from './hosts';
 import {

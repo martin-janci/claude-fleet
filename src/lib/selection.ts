@@ -75,7 +75,20 @@ export function selectProject(p: ProjectTreeRow | null): void {
   if (p !== null) selectedRef.set(null);
 }
 
-export function selectSession(s: SessionRow | null): void {
+// Listeners told each time a session is deliberately OPENED (a sidebar
+// click, the quick switcher, a Hosts-view jump, a fresh create) — App leaves
+// the Hosts view on it. Re-syncs that merely follow the same session (a
+// rename, a recreate, restore-on-launch) pass `{ follow: true }` and stay
+// silent, so they never yank the user out of a view.
+const openedListeners = new Set<(s: SessionRow) => void>();
+
+/** Subscribe to deliberate session opens; returns the unsubscribe. */
+export function onSessionOpened(fn: (s: SessionRow) => void): () => void {
+  openedListeners.add(fn);
+  return () => openedListeners.delete(fn);
+}
+
+export function selectSession(s: SessionRow | null, opts: { follow?: boolean } = {}): void {
   if (s === null) {
     selectedRef.set(null);
     return;
@@ -91,6 +104,7 @@ export function selectSession(s: SessionRow | null): void {
     host_alias: s.host_alias,
     tmux_name: s.tmux_name,
   });
+  if (!opts.follow) for (const fn of openedListeners) fn(s);
 }
 
 /**
@@ -105,7 +119,7 @@ export function restoreLastSession(): void {
     (s) => s.host_alias === ident.host_alias && s.tmux_name === ident.tmux_name,
   );
   if (match && match.status !== 'ghost') {
-    selectSession(match);
+    selectSession(match, { follow: true });
   } else {
     writePref<SessionIdent | null>(LAST_SESSION_KEY, null);
   }

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy, untrack } from 'svelte';
+  import { onMount, onDestroy, tick, untrack } from 'svelte';
   import Pane from './lib/Pane.svelte';
   import Resizer from './lib/Resizer.svelte';
   import { healthCheck, type Health } from './lib/ipc';
@@ -8,9 +8,10 @@
   import TerminalView from './lib/TerminalView.svelte';
   import BgSessionPanel from './lib/BgSessionPanel.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
+  import HostsView from './lib/HostsView.svelte';
   import { loadProjects, bootstrapProjects, applyProjectEvents } from './lib/projects';
   import { loadSessions, bootstrapSessions, applySessionEvents, sessions } from './lib/sessions';
-  import { bootstrapHosts, applyHostEvents, hosts } from './lib/hosts';
+  import { bootstrapHosts, applyHostEvents, hosts, hostFilter } from './lib/hosts';
   import { bootstrapAccounts, applyAccountEvents } from './lib/accounts';
   import { loadTasks, applyTaskEvents } from './lib/tasks';
   import { loadAccountUsage, applyAccountUsageEvents } from './lib/account_usage_store';
@@ -22,7 +23,16 @@
   import { push, pushError } from './lib/toasts';
   import type { Result } from './lib/result';
   import type { UnlistenFn } from '@tauri-apps/api/event';
-  import { selectedSession, restoreLastSession, selectSession } from './lib/selection';
+  import { selectedSession, restoreLastSession, selectSession, onSessionOpened } from './lib/selection';
+  import {
+    appChord,
+    hostsChordLabel,
+    hostsViewOpen,
+    hostsViewRequest,
+    requestNewSessionOnHost,
+    settingsOpen,
+  } from './lib/app_views';
+  import { detectMac } from './lib/terminal_keys';
   import { loadSessionUi, saveSessionUi, DEFAULT_UI } from './lib/session_ui';
   import { readPref, writePref } from './lib/prefs';
   import WelcomeDialog from './lib/WelcomeDialog.svelte';
@@ -190,11 +200,21 @@
   onMount(() => {
     window.addEventListener('focus', onFocus);
     window.addEventListener('keydown', onKeydown);
+    // Capture phase: the app chords must beat the terminal's own keydown
+    // handler (same approach as the quick switcher).
+    window.addEventListener('keydown', onChordKeydown, true);
   });
+
+  // Opening a session from anywhere (sidebar, quick switcher, a Hosts-view
+  // session row, a fresh create) means "go to it": leave the Hosts view so
+  // the terminal shows that session.
+  const unsubOpened = onSessionOpened(() => closeHosts());
 
   onDestroy(() => {
     window.removeEventListener('focus', onFocus);
     window.removeEventListener('keydown', onKeydown);
+    window.removeEventListener('keydown', onChordKeydown, true);
+    unsubOpened();
     unlistenEvents?.();
   });
 
@@ -219,21 +239,124 @@
   $effect(() => {
     if (!$selectedSession || $selectedSession.kind === 'bg') filesMode = false;
   });
+
+  // Hosts mode reuses the Files-mode mechanism: the center pane collapses and
+  // an opaque overlay covers the terminal, which stays mounted so its PTY
+  // survives the round trip. Hosts is fleet-scoped, so unlike Files it never
+  // needs a selected session. Files and Hosts are mutually exclusive.
+  const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
+  const hostsChord = hostsChordLabel(isMac);
+  let hostsMode = $state(false);
+  let hostsPreselect = $state<string | null>(null);
+  // Bumped to remount the view when a request names a host while it is open.
+  let hostsViewKey = $state(0);
+  /** Last host shown in the Hosts view, for this app session only. */
+  let lastViewedHost: string | null = null;
+  /** What had focus when Hosts opened (normally the terminal). */
+  let hostsReturnFocus: HTMLElement | null = null;
+  $effect(() => {
+    hostsViewOpen.set(hostsMode);
+  });
+
+  function openHosts(host: string | null = null) {
+    const preselect = host ?? $selectedSession?.host_alias ?? lastViewedHost ?? null;
+    if (hostsMode) {
+      // Already open: only a request naming a host changes anything.
+      if (host !== null) {
+        hostsPreselect = host;
+        hostsViewKey++;
+      }
+      return;
+    }
+    const active = document.activeElement;
+    hostsReturnFocus = active instanceof HTMLElement && active !== document.body ? active : null;
+    hostsPreselect = preselect;
+    filesMode = false;
+    hostsMode = true;
+  }
+
+  function closeHosts(restoreFocus = true) {
+    if (!hostsMode) return;
+    hostsMode = false;
+    const el = hostsReturnFocus;
+    hostsReturnFocus = null;
+    if (restoreFocus && el) {
+      void tick().then(() => {
+        if (el.isConnected) el.focus();
+      });
+    }
+  }
+
+  function toggleHosts() {
+    if (hostsMode) closeHosts();
+    else openHosts();
+  }
+
+  // Requests from outside App (quick switcher, Settings, onboarding card).
+  $effect(() => {
+    const req = $hostsViewRequest;
+    if (!req) return;
+    hostsViewRequest.set(null);
+    untrack(() => openHosts(req.host));
+  });
+
   function showTerminal() {
     filesMode = false;
+    closeHosts();
   }
   function showFiles() {
-    if ($selectedSession) filesMode = true;
+    if (!$selectedSession) return;
+    closeHosts(false);
+    filesMode = true;
   }
+
+  function onHostsFilterSidebar(alias: string) {
+    sidebarCollapsed = false;
+    hostFilter.set(alias);
+  }
+  function onHostsNewSession(alias: string) {
+    sidebarCollapsed = false;
+    requestNewSessionOnHost(alias);
+  }
+
+  function onChordKeydown(e: KeyboardEvent) {
+    const chord = appChord(e, isMac);
+    if (!chord) return;
+    // Another modal owns the keyboard while open; don't open a view (or a
+    // second dialog) underneath it.
+    if ((e.target as Element | null)?.closest?.('dialog')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (chord === 'hosts') toggleHosts();
+    else settingsOpen.set(true);
+  }
+
+  function isEditable(el: HTMLElement | null): boolean {
+    const tag = el?.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || !!el?.isContentEditable;
+  }
+
   function onKeydown(e: KeyboardEvent) {
+    if (e.key !== 'Escape') return;
+    const target = e.target as HTMLElement | null;
     // Esc leaves files mode (the terminal is covered while it's open, so Esc
     // can't be meant for the terminal here) — but not while the user is
     // typing in a field such as the file filter, where Esc belongs to that
     // input and exiting the whole panel would be surprising.
-    if (e.key === 'Escape' && filesMode) {
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    if (filesMode) {
+      if (isEditable(target)) return;
       filesMode = false;
+      return;
+    }
+    // Inside the Hosts view, HostsView owns Esc (back to the list, clear the
+    // filter, close from the list). This catches only an Esc with focus lost
+    // to the page or left on the right column's chrome; a dialog, an input
+    // or the sidebar keep their own Esc.
+    if (hostsMode && !e.defaultPrevented) {
+      if (isEditable(target) || target?.closest?.('dialog')) return;
+      if (target?.closest?.('[data-testid="hosts-view"]')) return;
+      const onPage = !target || target === document.body || target === document.documentElement;
+      if (onPage || target.closest('[data-testid="pane-terminal"]')) closeHosts();
     }
   }
 
@@ -246,8 +369,9 @@
     const sbResizer = sidebarCollapsed ? '0px' : '4px';
     // In files mode the center pane collapses to zero — the file viewer
     // takes the whole region right of the sidebar.
-    const center = filesMode ? '0px' : centerCollapsed ? '20px' : `${centerPx}px`;
-    const centerResizer = filesMode || centerCollapsed ? '0px' : '4px';
+    const wide = filesMode || hostsMode;
+    const center = wide ? '0px' : centerCollapsed ? '20px' : `${centerPx}px`;
+    const centerResizer = wide || centerCollapsed ? '0px' : '4px';
     return `${sb} ${sbResizer} ${center} ${centerResizer} 1fr`;
   });
 </script>
@@ -307,8 +431,8 @@
     <Resizer id="sidebar" onresize={onResizeSidebar} />
   {/if}
 
-  {#if filesMode}
-    <!-- Center collapsed to 0 in files mode — two empty grid cells. -->
+  {#if filesMode || hostsMode}
+    <!-- Center collapsed to 0 in files/hosts mode — two empty grid cells. -->
     <div></div>
     <div></div>
   {:else if centerCollapsed}
@@ -342,9 +466,9 @@
     <div class="view-tabs" role="tablist">
       <button
         class="view-tab"
-        class:active={!filesMode}
+        class:active={!filesMode && !hostsMode}
         role="tab"
-        aria-selected={!filesMode}
+        aria-selected={!filesMode && !hostsMode}
         onclick={showTerminal}
         data-testid="tab-terminal">Terminal</button
       >
@@ -361,6 +485,17 @@
             : 'Browse the session worktree'}
         onclick={showFiles}
         data-testid="tab-files">Files</button
+      >
+      <!-- Fleet-scoped, so set apart on the right and never disabled. -->
+      <button
+        class="view-tab hosts-tab"
+        class:active={hostsMode}
+        role="tab"
+        aria-selected={hostsMode}
+        aria-keyshortcuts={isMac ? 'Meta+I' : 'Control+Shift+H'}
+        title="Every host, grouped by Claude account ({hostsChord})"
+        onclick={toggleHosts}
+        data-testid="tab-hosts">Hosts <kbd>{hostsChord}</kbd></button
       >
     </div>
     <div class="right-body">
@@ -385,6 +520,19 @@
             <FilesPanel session={$selectedSession} />
           </div>
         {/if}
+      {/if}
+      {#if hostsMode}
+        <div class="view-slot overlay" data-testid="hosts-overlay">
+          {#key hostsViewKey}
+            <HostsView
+              preselect={hostsPreselect}
+              onClose={() => closeHosts()}
+              onFilterSidebar={onHostsFilterSidebar}
+              onNewSession={onHostsNewSession}
+              onSelectionChange={(alias) => (lastViewedHost = alias)}
+            />
+          {/key}
+        </div>
       {/if}
     </div>
   </div>
@@ -507,6 +655,25 @@
     padding-bottom: calc(0.25rem + 1px);
   }
   .view-tab:disabled { opacity: 0.4; cursor: not-allowed; }
+  .hosts-tab {
+    margin-left: auto;
+    position: relative;
+  }
+  /* A thin rule sets the fleet-scoped tab apart from the session tabs. */
+  .hosts-tab::before {
+    content: '';
+    position: absolute;
+    left: -0.5rem;
+    top: 0.3rem;
+    bottom: 0.3rem;
+    border-left: 1px solid var(--border);
+  }
+  .hosts-tab kbd {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.65rem;
+    color: var(--fg-muted);
+    margin-left: 0.25rem;
+  }
 
   .right-body {
     position: relative;
