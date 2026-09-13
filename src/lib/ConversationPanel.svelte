@@ -23,14 +23,30 @@
   let scroller: HTMLDivElement | undefined = $state();
   let nowMs = $state(Date.now());
   let seq = 0;
+  // Fetches still pending, per session id. A poll tick never starts a read
+  // while one is in flight for the same session (a remote read can take up
+  // to its 20 s wall clock); a manual Retry or a session switch still does.
+  const inFlight = new Map<number, number>();
+  // Keyed on the id, not the row object: a store patch hands a new object
+  // for the same session, which must neither reset nor refetch.
+  const sessionId = $derived(session.id);
 
-  async function load() {
+  async function load(opts: { poll?: boolean } = {}) {
     const id = session.id;
     if (!session.claude_session_id) return;
+    if (opts.poll && (inFlight.get(id) ?? 0) > 0) return;
     const mine = ++seq;
     loading = conv === null;
     const pinned = scroller ? isPinned(scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight) : true;
-    const r = await sessionConversation(id);
+    inFlight.set(id, (inFlight.get(id) ?? 0) + 1);
+    let r: Awaited<ReturnType<typeof sessionConversation>>;
+    try {
+      r = await sessionConversation(id);
+    } finally {
+      const left = (inFlight.get(id) ?? 1) - 1;
+      if (left > 0) inFlight.set(id, left);
+      else inFlight.delete(id);
+    }
     // Drop a stale response: either a newer fetch has started, or the
     // session prop moved on while this one was in flight.
     if (mine !== seq || session.id !== id) return;
@@ -53,7 +69,7 @@
 
   // Reset + immediate fetch on session change.
   $effect(() => {
-    void session.id;
+    void sessionId;
     untrack(() => {
       seq++;
       conv = null;
@@ -63,12 +79,21 @@
     });
   });
 
-  // Poll while shown. Depends only on `visible` so a `conv` update from
-  // `load()` does not tear down and restart the interval.
+  // Poll while shown, and refetch at once when it becomes shown again (not
+  // up to a poll interval later). Depends only on `visible` so a `conv`
+  // update from `load()` does not tear down and restart the interval.
+  let wasVisible = untrack(() => visible);
   $effect(() => {
-    if (!visible) return;
+    if (!visible) {
+      wasVisible = false;
+      return;
+    }
+    if (!wasVisible) {
+      wasVisible = true;
+      void untrack(() => load({ poll: true }));
+    }
     const t = setInterval(() => {
-      if (document.visibilityState === 'visible') void untrack(load);
+      if (document.visibilityState === 'visible') void untrack(() => load({ poll: true }));
     }, CONVERSATION_POLL_MS);
     return () => clearInterval(t);
   });
@@ -104,12 +129,14 @@
       {#if conv}
         {#each conv.turns as turn, i (i)}
           <div class="turn">
-            <blockquote data-testid="conv-prompt">
-              <span class="prompt-text">{turn.prompt}</span>
-              {#if turn.at}
-                <time datetime={turn.at}>{relativeTime(turn.at, nowMs)}</time>
-              {/if}
-            </blockquote>
+            {#if turn.prompt !== null}
+              <blockquote data-testid="conv-prompt">
+                <span class="prompt-text">{turn.prompt}</span>
+                {#if turn.at}
+                  <time datetime={turn.at}>{relativeTime(turn.at, nowMs)}</time>
+                {/if}
+              </blockquote>
+            {/if}
             {#each turn.items as item, j (j)}
               {#if item.kind === 'text'}
                 <p class="text" data-testid="conv-text">{item.text}</p>

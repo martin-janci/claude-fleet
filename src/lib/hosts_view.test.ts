@@ -87,6 +87,20 @@ describe('sessionCounts', () => {
     expect(sessionCounts('claude-fleet-trn', rows).text).toBe('14 ⚡2 ⏸1');
     expect(sessionCounts('local', rows)).toMatchObject({ text: '0', title: '0 sessions, 0 working, 0 blocked' });
   });
+
+  it('ignores external rows (sessions running outside fleet)', () => {
+    const rows = fleetSessions().filter((s) => s.host_alias === 'mefistos');
+    const ext = (i: number, claude_status: 'working' | 'blocked') => ({
+      ...rows[0],
+      id: 9000 + i,
+      tmux_name: `bg:ext-${i}`,
+      kind: 'external',
+      claude_status,
+    });
+    const counts = sessionCounts('mefistos', [...rows, ext(1, 'working'), ext(2, 'blocked')]);
+    expect(counts.text).toBe('6 ⚡2 ⏸1');
+    expect(counts.total).toBe(6);
+  });
 });
 
 describe('hostAttention', () => {

@@ -147,7 +147,7 @@
   onkeydown={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onKeySession(e, sess)}
   use:hintAnchor={{ id: 'session-actions', when: !!sess.claude_session_id && sess.status !== 'ghost' }}
 >
-  {#if selectMode}
+  {#if selectMode && !readOnly}
     <!-- a11y smell, known: an <input> nested in a role="button" row. The
          row is the click target for open/toggle; the box is a visible
          affordance for the same toggle and stops propagation so the two
@@ -176,7 +176,29 @@
       onblur={commitRename}
     />
   {:else}
-    {#if sess.status === 'ghost'}
+    {#if readOnly}
+      <!-- "Outside fleet": a Claude session running entirely outside tmux.
+           Read-only — name and status chip only, no actions. Checked before
+           the ghost branch: a ghosted external row must not offer
+           Recreate / Dismiss either. -->
+      <span class="status-dot status-{sess.status}" title={sess.status} aria-hidden="true"></span>
+      <span class="sess-name" title={sess.tmux_name}>{primaryName}</span>
+      {#if sess.stuck_kind}
+        <span
+          class="claude-chip stuck-chip"
+          data-testid="stuck-chip"
+          style="background: {STUCK_COLOR}22; color: {STUCK_COLOR}; border-color: {STUCK_COLOR}66;"
+          title="Stuck: {stuckKindLabel(sess.stuck_kind)}"
+        >⚠ stuck: {stuckKindLabel(sess.stuck_kind)}</span>
+      {:else if sess.claude_status}
+        <span
+          class="claude-chip"
+          data-testid="claude-chip"
+          style="background: {claudeStatusColor(sess.claude_status)}22; color: {claudeStatusColor(sess.claude_status)}; border-color: {claudeStatusColor(sess.claude_status)}44;"
+          title="Claude: {sess.claude_status}"
+        >{claudeStatusLabel(sess.claude_status)}</span>
+      {/if}
+    {:else if sess.status === 'ghost'}
       <span class="status-dot status-ghost" title="ghost — session lost" aria-hidden="true"></span>
       <span class="host-badge" data-testid="host-badge" aria-label="host {sess.host_alias}">{sess.host_alias}</span>
       <span class="sess-name" title={sess.tmux_name}>{
@@ -204,26 +226,6 @@
           aria-label="Dismiss"
         >×</button>
       </div>
-    {:else if readOnly}
-      <!-- "Outside fleet": a Claude session running entirely outside tmux.
-           Read-only — name and status chip only, no actions. -->
-      <span class="status-dot status-{sess.status}" title={sess.status} aria-hidden="true"></span>
-      <span class="sess-name" title={sess.tmux_name}>{primaryName}</span>
-      {#if sess.stuck_kind}
-        <span
-          class="claude-chip stuck-chip"
-          data-testid="stuck-chip"
-          style="background: {STUCK_COLOR}22; color: {STUCK_COLOR}; border-color: {STUCK_COLOR}66;"
-          title="Stuck: {stuckKindLabel(sess.stuck_kind)}"
-        >⚠ stuck: {stuckKindLabel(sess.stuck_kind)}</span>
-      {:else if sess.claude_status}
-        <span
-          class="claude-chip"
-          data-testid="claude-chip"
-          style="background: {claudeStatusColor(sess.claude_status)}22; color: {claudeStatusColor(sess.claude_status)}; border-color: {claudeStatusColor(sess.claude_status)}44;"
-          title="Claude: {sess.claude_status}"
-        >{claudeStatusLabel(sess.claude_status)}</span>
-      {/if}
     {:else}
       <div class="sess-lines">
         <div class="sess-line1">
@@ -304,7 +306,11 @@
                 : 'Host is offline'}
               aria-label="Recreate"
             >♻</button>
-            <button class="icon-btn small danger" onclick={(e) => askKill(sess, e)} title="Kill session" aria-label="Kill">×</button>
+            {#if !isInactiveAgent(sess)}
+              <!-- An inactive agent's daemon is gone: Remove from list is its
+                   only removal action. -->
+              <button class="icon-btn small danger" onclick={(e) => askKill(sess, e)} title="Kill session" aria-label="Kill">×</button>
+            {/if}
           </div>
         </div>
         {#if $showRowDetails}

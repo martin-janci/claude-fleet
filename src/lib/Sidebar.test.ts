@@ -1342,4 +1342,77 @@ describe('Outside fleet group', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0][1]).toEqual({ args: { session_id: bg.id } });
   });
+
+  it('an inactive bg agent row offers no Kill action', async () => {
+    const bg = { ...sessionFor(1, 'bg:abc'), kind: 'bg', claude_status: 'stopped' as const };
+    mockBackend(fakeProjects, [bg]);
+    render(Sidebar);
+    await tick(); await tick();
+    const row = screen.getByTestId('remove-from-list').closest('[data-testid="sess-row"]') as HTMLElement;
+    expect(row.querySelector('[aria-label="Kill"]')).toBeNull();
+  });
+
+  it('a live bg agent row keeps its Kill action', async () => {
+    const bg = { ...sessionFor(1, 'bg:live'), kind: 'bg', claude_status: 'working' as const };
+    mockBackend(fakeProjects, [bg]);
+    render(Sidebar);
+    await tick(); await tick();
+    const row = screen.getByTestId('sess-row');
+    expect(row.querySelector('[aria-label="Kill"]')).not.toBeNull();
+  });
+
+  it('a ghosted external row stays read-only: no Recreate / Dismiss', async () => {
+    const ext = { ...sessionFor(null, 'claude-desktop-ghost'), kind: 'external', status: 'ghost', lost_at: 1 };
+    mockBackend(fakeProjects, [ext]);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('outside-fleet'));
+    await tick();
+    const section = screen.getByTestId('outside-fleet-section');
+    expect(section.querySelectorAll('[data-testid="sess-row"]')).toHaveLength(1);
+    expect(section.querySelector('[data-testid="ghost-recreate"]')).toBeNull();
+    expect(section.querySelector('[data-testid="ghost-dismiss"]')).toBeNull();
+    expect(section.querySelector('.row-actions')).toBeNull();
+  });
+
+  it('Outside fleet rows cannot be bulk-selected (modifier click or select mode)', async () => {
+    const ext = { ...sessionFor(null, 'claude-desktop-session'), kind: 'external' };
+    const work = sessionFor(1, 'dev-a');
+    mockBackend(fakeProjects, [ext, work]);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('outside-fleet'));
+    await tick();
+    const extRow = screen.getByText('claude-desktop-session').closest('[data-testid="sess-row"]') as HTMLElement;
+    await fireEvent.click(extRow, { shiftKey: true });
+    await tick();
+    expect(screen.queryByTestId('bulk-bar')).toBeNull();
+
+    await fireEvent.click(screen.getByTestId('select-mode'));
+    await tick();
+    expect(extRow.querySelector('[data-testid="select-box"]')).toBeNull();
+    await fireEvent.click(extRow);
+    await tick();
+    expect(screen.queryByTestId('bulk-bar')).toBeNull();
+    // A fleet row in the same mode still selects.
+    const workRow = screen.getByText('dev-a').closest('[data-testid="sess-row"]') as HTMLElement;
+    await fireEvent.click(workRow.querySelector('[data-testid="select-box"]') as HTMLElement);
+    await tick();
+    expect(screen.getByTestId('bulk-bar')).toHaveTextContent('1 selected');
+  });
+
+  it('the bg-session hint needs a session with a tmux pane, not just a non-bg row', async () => {
+    const { anchorEl } = await import('./hints');
+    const ext = { ...sessionFor(null, 'claude-desktop-session'), kind: 'external' };
+    mockBackend(fakeProjects, [ext]);
+    const first = render(Sidebar);
+    await tick(); await tick();
+    expect(anchorEl('bg-session')).toBeUndefined();
+    first.unmount();
+
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a')]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(anchorEl('bg-session')).toBeDefined();
+  });
 });

@@ -501,3 +501,64 @@ describe('SessionDetails Remove from list (inactive bg agents)', () => {
     }
   });
 });
+
+describe('SessionDetails actions for pane-less rows (external read-only, inactive agents)', () => {
+  const ACTION_IDS = [
+    'rename-from-details',
+    'restart-from-details',
+    'repair-from-details',
+    'send-prompt-from-details',
+    'open-review',
+    'recreate-from-details',
+    'move-from-details',
+    'remove-from-list-details',
+    'safe-kill-from-details',
+    'kill-from-details',
+  ];
+
+  it('an external row shows no action except Edit label, and no tmux attach command', async () => {
+    const ext = {
+      ...sampleSession,
+      id: 21,
+      kind: 'external',
+      tmux_name: 'bg:ext-1',
+      project_id: 1,
+      worktree_id: 10,
+      claude_session_id: 'ext-1',
+      claude_status: 'working' as const,
+    };
+    render(SessionDetails, { props: { session: ext } });
+    await tick();
+    expect(screen.getByTestId('label-from-details')).toBeTruthy();
+    for (const id of ACTION_IDS) {
+      expect(screen.queryByTestId(id), id).toBeNull();
+    }
+    expect(screen.queryByTestId('attach-command')).toBeNull();
+    expect(screen.queryByTestId('copy-attach')).toBeNull();
+  });
+
+  it('a bg row does not offer a tmux attach command', async () => {
+    const bg = { ...sampleSession, id: 22, kind: 'bg', tmux_name: 'bg:c22', claude_status: 'working' as const };
+    render(SessionDetails, { props: { session: bg } });
+    await tick();
+    expect(screen.queryByTestId('attach-command')).toBeNull();
+    // A live agent keeps its stop path.
+    expect(screen.getByTestId('kill-from-details')).toBeTruthy();
+  });
+
+  it('an inactive bg agent offers Remove from list as its only removal action', async () => {
+    const bg = { ...sampleSession, id: 23, kind: 'bg', tmux_name: 'bg:c23', claude_status: 'stopped' as const };
+    render(SessionDetails, { props: { session: bg } });
+    await tick();
+    expect(screen.getByTestId('remove-from-list-details')).toBeTruthy();
+    expect(screen.queryByTestId('kill-from-details')).toBeNull();
+    expect(screen.queryByTestId('safe-kill-from-details')).toBeNull();
+  });
+
+  it('a tmux row still shows its attach command and Kill', async () => {
+    render(SessionDetails, { props: { session: sampleSession } });
+    await tick();
+    expect(screen.getByTestId('attach-command').textContent).toBe('tmux attach -t dev-foo');
+    expect(screen.getByTestId('kill-from-details')).toBeTruthy();
+  });
+});

@@ -587,76 +587,86 @@
     refreshKey={`${session.turn_seq}|${session.status}|${session.claude_status}|${session.stuck_kind}|${session.last_prompt}|${session.safe_kill_state}`}
   />
 
-  <section class="block">
-    <h3>Attach from another terminal</h3>
-    <div class="cmd-row">
-      <code class="cmd" data-testid="attach-command">{attachCommand}</code>
-      <button class="copy" onclick={onCopy} data-testid="copy-attach">
-        {copied ? '✓ copied' : 'copy'}
-      </button>
-    </div>
-  </section>
+  {#if !hasNoPane(session)}
+    <section class="block">
+      <h3>Attach from another terminal</h3>
+      <div class="cmd-row">
+        <code class="cmd" data-testid="attach-command">{attachCommand}</code>
+        <button class="copy" onclick={onCopy} data-testid="copy-attach">
+          {copied ? '✓ copied' : 'copy'}
+        </button>
+      </div>
+    </section>
+  {/if}
 
   <section class="block actions">
     <button class="ghost" onclick={beginLabelEdit} data-testid="label-from-details">
       🏷 Edit label
     </button>
-    <button class="ghost" onclick={beginRename} data-testid="rename-from-details">
-      ✎ Rename tmux session
-    </button>
-    <button class="ghost" onclick={onRestart} data-testid="restart-from-details">
-      ↻ Restart
-    </button>
-    {#if !hasNoPane(session) && session.project_id !== null}
-      <button
-        class="ghost"
-        onclick={onRepair}
-        disabled={repairing}
-        title="Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it"
-        data-testid="repair-from-details"
-      >
-        🩹 Repair workspace
+    <!-- An external row runs outside fleet: the label (local fleet metadata)
+         is the only thing fleet can change about it. -->
+    {#if session.kind !== 'external'}
+      <button class="ghost" onclick={beginRename} data-testid="rename-from-details">
+        ✎ Rename tmux session
       </button>
-    {/if}
-    {#if session.kind !== 'shell'}
-      <button class="ghost" onclick={openComposer} data-testid="send-prompt-from-details">
-        → Send prompt
+      <button class="ghost" onclick={onRestart} data-testid="restart-from-details">
+        ↻ Restart
       </button>
-    {/if}
-    <button class="ghost" onclick={() => (reviewOpen = true)} data-testid="open-review">
-      🔍 Review
-    </button>
-    <button class="ghost" onclick={askRecreate} data-testid="recreate-from-details">
-      ♻ Recreate
-    </button>
-    {#if canMove}
-      <button
-        class="ghost"
-        onclick={openMove}
-        title="Continue this conversation on another host: same branch, same Claude session"
-        data-testid="move-from-details"
-      >
-        ⇄ Move to host…
+      {#if !hasNoPane(session) && session.project_id !== null}
+        <button
+          class="ghost"
+          onclick={onRepair}
+          disabled={repairing}
+          title="Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it"
+          data-testid="repair-from-details"
+        >
+          🩹 Repair workspace
+        </button>
+      {/if}
+      {#if session.kind !== 'shell'}
+        <button class="ghost" onclick={openComposer} data-testid="send-prompt-from-details">
+          → Send prompt
+        </button>
+      {/if}
+      <button class="ghost" onclick={() => (reviewOpen = true)} data-testid="open-review">
+        🔍 Review
       </button>
-    {/if}
-    {#if isInactiveAgent(session)}
-      <button
-        class="ghost"
-        onclick={onRemoveFromList}
-        title="Hide this inactive agent until it becomes active again"
-        data-testid="remove-from-list-details"
-      >
-        Remove from list
+      <button class="ghost" onclick={askRecreate} data-testid="recreate-from-details">
+        ♻ Recreate
       </button>
+      {#if canMove}
+        <button
+          class="ghost"
+          onclick={openMove}
+          title="Continue this conversation on another host: same branch, same Claude session"
+          data-testid="move-from-details"
+        >
+          ⇄ Move to host…
+        </button>
+      {/if}
+      {#if isInactiveAgent(session)}
+        <button
+          class="ghost"
+          onclick={onRemoveFromList}
+          title="Hide this inactive agent until it becomes active again"
+          data-testid="remove-from-list-details"
+        >
+          Remove from list
+        </button>
+      {/if}
+      <!-- An inactive agent's daemon is gone: Remove from list (above) is its
+           only removal action. -->
+      {#if !isInactiveAgent(session)}
+        {#if session.kind !== 'shell' && session.status === 'running' && session.safe_kill_state !== 'requested'}
+          <button class="ghost" onclick={askSafeKill} data-testid="safe-kill-from-details">
+            ⏏ Safe remove
+          </button>
+        {/if}
+        <button class="danger" onclick={askKill} data-testid="kill-from-details">
+          Kill session
+        </button>
+      {/if}
     {/if}
-    {#if session.kind !== 'shell' && session.status === 'running' && session.safe_kill_state !== 'requested'}
-      <button class="ghost" onclick={askSafeKill} data-testid="safe-kill-from-details">
-        ⏏ Safe remove
-      </button>
-    {/if}
-    <button class="danger" onclick={askKill} data-testid="kill-from-details">
-      Kill session
-    </button>
   </section>
 
   {#if session.safe_kill_state === 'requested'}

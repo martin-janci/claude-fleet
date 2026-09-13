@@ -115,7 +115,8 @@ export function sessionCounts(alias: string, rows: readonly SessionRow[]): Sessi
   let working = 0;
   let blocked = 0;
   for (const s of rows) {
-    if (s.host_alias !== alias) continue;
+    // External rows are Claude sessions running outside fleet: not counted.
+    if (s.host_alias !== alias || s.kind === 'external') continue;
     total++;
     if (s.claude_status === 'working') working++;
     else if (s.claude_status === 'blocked') blocked++;

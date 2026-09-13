@@ -215,4 +215,136 @@ describe('ConversationPanel', () => {
 
     expect(screen.getByTestId('conv-prompt').textContent).toContain('1m ago');
   });
+  it('never starts a poll fetch while one is in flight for the same session', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    let resolveFirst!: (v: { ok: true; value: Conversation }) => void;
+    const first = new Promise<{ ok: true; value: Conversation }>((res) => (resolveFirst = res));
+    mockedConv.mockReturnValueOnce(first);
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    expect(mockedConv).toHaveBeenCalledTimes(1);
+
+    // Two interval ticks while the first read is still pending: no new call.
+    vi.advanceTimersByTime(CONVERSATION_POLL_MS);
+    await Promise.resolve();
+    await tick();
+    vi.advanceTimersByTime(CONVERSATION_POLL_MS);
+    await Promise.resolve();
+    await tick();
+    expect(mockedConv).toHaveBeenCalledTimes(1);
+
+    // Once it settles, the next tick polls again.
+    resolveFirst({ ok: true, value: conv() });
+    await Promise.resolve();
+    await tick();
+    vi.advanceTimersByTime(CONVERSATION_POLL_MS);
+    await Promise.resolve();
+    await tick();
+    expect(mockedConv).toHaveBeenCalledTimes(2);
+  });
+
+  it('a manual Retry still fetches while a poll is in flight', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    mockedConv.mockReturnValueOnce(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+
+    mockedConv.mockReturnValueOnce(err('E_SSH', 'connection refused'));
+    vi.advanceTimersByTime(CONVERSATION_POLL_MS);
+    await Promise.resolve();
+    await tick();
+    expect(screen.getByTestId('conv-error')).toBeTruthy();
+
+    // A poll starts and hangs.
+    mockedConv.mockReturnValueOnce(new Promise(() => {}));
+    vi.advanceTimersByTime(CONVERSATION_POLL_MS);
+    await Promise.resolve();
+    await tick();
+    expect(mockedConv).toHaveBeenCalledTimes(3);
+
+    mockedConv.mockReturnValueOnce(ok(conv({ turns: [{ prompt: 'after retry', at: null, items: [] }] })));
+    await fireEvent.click(screen.getByTestId('conv-retry'));
+    await Promise.resolve();
+    await tick();
+    expect(mockedConv).toHaveBeenCalledTimes(4);
+    expect(screen.getByTestId('conv-prompt').textContent).toContain('after retry');
+    expect(screen.queryByTestId('conv-error')).toBeNull();
+  });
+
+  it('a session switch fetches even while the old session\'s read is in flight', async () => {
+    mockedConv.mockReturnValueOnce(new Promise(() => {}));
+    const { rerender } = render(ConversationPanel, { session: session({ id: 1 }), visible: true });
+    await tick();
+    mockedConv.mockReturnValueOnce(ok(conv()));
+    await rerender({ session: session({ id: 2 }), visible: true });
+    await tick();
+    expect(mockedConv).toHaveBeenCalledTimes(2);
+    expect(mockedConv).toHaveBeenLastCalledWith(2);
+  });
+
+  it('does not render an empty quote block for a turn without a prompt', async () => {
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            { prompt: null, at: '2026-09-13T10:00:00.000Z', items: [{ kind: 'text', text: 'resumed reply' }] },
+            { prompt: 'next ask', at: null, items: [{ kind: 'text', text: 'ok' }] },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    const quotes = screen.getAllByTestId('conv-prompt');
+    expect(quotes).toHaveLength(1);
+    expect(quotes[0].textContent).toContain('next ask');
+    expect(screen.getByText('resumed reply')).toBeTruthy();
+  });
+
+  it('refetches immediately when it becomes visible again', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    mockedConv.mockReturnValue(ok(conv()));
+    const { rerender } = render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    expect(mockedConv).toHaveBeenCalledTimes(1);
+
+    await rerender({ session: session(), visible: false });
+    await tick();
+    expect(mockedConv).toHaveBeenCalledTimes(1);
+
+    // No timer advance: the flip itself triggers the fetch.
+    await rerender({ session: session(), visible: true });
+    await tick();
+    expect(mockedConv).toHaveBeenCalledTimes(2);
+  });
+
+  it('mounting visible fetches once, not twice', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    expect(mockedConv).toHaveBeenCalledTimes(1);
+  });
+  it('a new row object for the same session (a store patch) neither resets nor refetches', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    const { rerender } = render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    const node = screen.getByTestId('conv-prompt');
+    await rerender({ session: session({ claude_status: 'working' }), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    expect(mockedConv).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('conv-prompt')).toBe(node);
+  });
 });

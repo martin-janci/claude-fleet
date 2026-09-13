@@ -69,18 +69,27 @@ describe('sessionVisible / buildSessionsByProject', () => {
 });
 
 describe('buildOutsideFleet', () => {
-  it('returns only external rows, respects the host filter, ignores the bg toggle, sorted by last_activity_at desc', () => {
-    const extOld = row({ kind: 'external', host_alias: 'local', last_activity_at: 10 });
-    const extNew = row({ kind: 'external', host_alias: 'local', last_activity_at: 30 });
-    const extRemote = row({ kind: 'external', host_alias: 'mefistos', last_activity_at: 20 });
-    const bg = row({ kind: 'bg', host_alias: 'local', last_activity_at: 40 });
-    const work = row({ kind: 'work', host_alias: 'local', last_activity_at: 50 });
+  it('returns only external rows, respects the host filter, ignores the bg toggle, sorted by created_at desc', () => {
+    // last_activity_at is rewritten to "now" on every reconcile pass, so it
+    // must not drive the order; created_at is set once, on insert.
+    const extOld = row({ kind: 'external', host_alias: 'local', created_at: 10, last_activity_at: 99 });
+    const extNew = row({ kind: 'external', host_alias: 'local', created_at: 30, last_activity_at: 1 });
+    const extRemote = row({ kind: 'external', host_alias: 'mefistos', created_at: 20, last_activity_at: 50 });
+    const bg = row({ kind: 'bg', host_alias: 'local', created_at: 40 });
+    const work = row({ kind: 'work', host_alias: 'local', created_at: 50 });
 
     const all = buildOutsideFleet([extOld, extNew, extRemote, bg, work], 'all');
     expect(all.map((s) => s.id)).toEqual([extNew.id, extRemote.id, extOld.id]);
 
     const local = buildOutsideFleet([extOld, extNew, extRemote, bg, work], 'local');
     expect(local.map((s) => s.id)).toEqual([extNew.id, extOld.id]);
+  });
+
+  it('breaks a created_at tie by id, newest first', () => {
+    const a = row({ kind: 'external', created_at: 5 });
+    const b = row({ kind: 'external', created_at: 5 });
+    expect(buildOutsideFleet([a, b], 'all').map((s) => s.id)).toEqual([b.id, a.id]);
+    expect(buildOutsideFleet([b, a], 'all').map((s) => s.id)).toEqual([b.id, a.id]);
   });
 });
 

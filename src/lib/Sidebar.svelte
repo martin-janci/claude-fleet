@@ -11,6 +11,7 @@
     purgeProject,
     showBgAgents,
     sameSession,
+    hasNoPane,
     type SessionRow,
   } from './sessions';
   import { describePurge, purgeHostsForProject } from './purge';
@@ -161,6 +162,8 @@
   const selectedRows = $derived($sessions.filter((s) => selectedIds.has(s.id)));
 
   function toggleSelected(sess: SessionRow) {
+    // Outside-fleet rows are read-only: bulk kill / send would only fail.
+    if (sess.kind === 'external') return;
     const next = new Set(selectedIds);
     if (next.has(sess.id)) next.delete(sess.id);
     else next.add(sess.id);
@@ -801,7 +804,7 @@
         title="Launch a supervised Claude background session"
         onclick={() => (showBgModal = true)}
         data-testid="new-bg-session-btn"
-        use:hintAnchor={{ id: 'bg-session', when: $sessions.some((s) => s.kind !== 'bg') && !$sessions.some((s) => s.kind === 'bg') }}
+        use:hintAnchor={{ id: 'bg-session', when: $sessions.some((s) => !hasNoPane(s)) && !$sessions.some((s) => s.kind === 'bg') }}
       >⚡</button>
     </div>
     <button
