@@ -58,7 +58,7 @@ describe('SessionDetails', () => {
       { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: 'u1', provisioned: false },
     ]);
     accounts.set([
-      { uuid: 'u1', email: 'm.janci@32bit.sk', display_name: 'M', organization_name: null, organization_uuid: null, seat_tier: 'max', last_seen_at: 1 },
+      { uuid: 'u1', email: 'm.janci@32bit.sk', display_name: 'M', organization_name: null, organization_uuid: null, seat_tier: 'max', last_seen_at: 1, nickname: null, has_extra_usage: false },
     ]);
     render(SessionDetails, { props: { session: sampleSession } });
     await tick();

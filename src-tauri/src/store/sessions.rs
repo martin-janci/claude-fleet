@@ -1116,6 +1116,8 @@ mod tests {
             organization_uuid: None,
             seat_tier: None,
             last_seen_at: None,
+            nickname: None,
+            has_extra_usage: false,
         })
         .unwrap();
         s.upsert_session("dev-foo", "h", None, None, 1, 1, "running", Some("u1"))

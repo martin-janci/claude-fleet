@@ -469,6 +469,8 @@ fn upsert_session_preserves_account_uuid_when_passed_existing_value() {
         organization_uuid: None,
         seat_tier: None,
         last_seen_at: None,
+        nickname: None,
+        has_extra_usage: false,
     })
     .unwrap();
     // First reconcile captures host's account
@@ -483,6 +485,8 @@ fn upsert_session_preserves_account_uuid_when_passed_existing_value() {
         organization_uuid: None,
         seat_tier: None,
         last_seen_at: None,
+        nickname: None,
+        has_extra_usage: false,
     })
     .unwrap();
     // Second reconcile: caller reads existing account before upsert
@@ -1097,6 +1101,8 @@ fn upsert_session_captures_new_account_for_fresh_row() {
         organization_uuid: None,
         seat_tier: None,
         last_seen_at: None,
+        nickname: None,
+        has_extra_usage: false,
     })
     .unwrap();
     // Brand new session — no existing row

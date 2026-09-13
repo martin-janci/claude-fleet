@@ -5,6 +5,7 @@ use crate::cancel::CancellationRegistry;
 use crate::ipc_error::IpcError;
 use crate::service::hosts::{
     self, AddHostArgs, HideHostArgs, HostAliasArgs, ProbePreview, ProbeSshAliasArgs,
+    SetAccountNicknameArgs,
 };
 use crate::ssh::SshClient;
 use crate::ssh_config::SshHost;
@@ -69,4 +70,12 @@ pub fn hide_host(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<HostRow, IpcError> {
     hosts::hide_host(args, &store)
+}
+
+#[tauri::command]
+pub fn set_account_nickname(
+    args: SetAccountNicknameArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<AccountRow, IpcError> {
+    hosts::set_account_nickname(args, &store)
 }

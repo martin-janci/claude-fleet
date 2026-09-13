@@ -81,6 +81,19 @@ fn projects_has_adopted(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 028: `accounts` already has BOTH its
+/// `nickname` and `has_extra_usage` columns, and `ALTER TABLE ... ADD COLUMN`
+/// would fail again. See [`Migration`].
+fn accounts_has_nickname_and_extra_usage(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('accounts') \
+         WHERE name IN ('nickname', 'has_extra_usage')",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n >= 2)
+}
+
 /// Ordered schema migrations, `(version, sql)`. Versions are contiguous from
 /// 1 and every script must end by recording its own version with
 /// `INSERT OR IGNORE INTO schema_version (version) VALUES (N)` — the tests
@@ -168,6 +181,12 @@ const MIGRATIONS: &[Migration] = &[
         version: 27,
         sql: include_str!("../../migrations/027_project_adopted.sql"),
         already_applied: Some(projects_has_adopted),
+    },
+    // `ALTER TABLE ... ADD COLUMN` fails if either column is already there.
+    Migration {
+        version: 28,
+        sql: include_str!("../../migrations/028_account_nickname.sql"),
+        already_applied: Some(accounts_has_nickname_and_extra_usage),
     },
 ];
 
@@ -1029,6 +1048,44 @@ mod tests {
         );
     }
 
+    /// 028 on a database with an account row (stopped at 027): both columns
+    /// are added (`nickname` NULL, `has_extra_usage` defaulting to false for
+    /// existing rows), and a re-run (tests roll the recorded version back and
+    /// migrate again) is a no-op that keeps a nickname set after the upgrade.
+    #[test]
+    fn migration_028_adds_nickname_and_extra_usage_columns_and_reruns_safely() {
+        let old = store_at_version(27);
+        old.conn
+            .execute_batch("INSERT INTO accounts (uuid, email) VALUES ('u1', 'a@b.com');")
+            .unwrap();
+        old.migrate().expect("028 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let row = old
+            .get_account_by_uuid("u1")
+            .unwrap()
+            .expect("row survives");
+        assert_eq!(row.nickname, None, "a pre-028 row has no nickname");
+        assert!(
+            !row.has_extra_usage,
+            "a pre-028 row defaults to no extra usage"
+        );
+        old.set_account_nickname("u1", Some("Home")).unwrap();
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 28;")
+            .unwrap();
+        old.migrate().expect("re-running 028 is safe");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert_eq!(
+            old.get_account_by_uuid("u1")
+                .unwrap()
+                .unwrap()
+                .nickname
+                .as_deref(),
+            Some("Home"),
+            "the nickname survives a re-run"
+        );
+    }
+
     #[test]
     fn migration_008_adds_lost_at_column() {
         let store = Store::open_in_memory().expect("store");
@@ -1036,7 +1093,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 27, "schema_version should be 27 after migration");
+        assert_eq!(v, 28, "schema_version should be 28 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store

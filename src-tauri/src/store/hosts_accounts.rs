@@ -2,6 +2,19 @@
 
 use super::*;
 
+/// Whether `last_seen_at` moved enough to be worth a database write: newly
+/// known, cleared, or more than 10 minutes later (or earlier) than the
+/// stored value. See `Store::upsert_account`.
+const LAST_SEEN_MATERIAL_DELTA_SECS: i64 = 600;
+
+fn last_seen_moved_materially(prior: Option<i64>, incoming: Option<i64>) -> bool {
+    match (prior, incoming) {
+        (None, None) => false,
+        (None, Some(_)) | (Some(_), None) => true,
+        (Some(p), Some(n)) => (n - p).abs() >= LAST_SEEN_MATERIAL_DELTA_SECS,
+    }
+}
+
 impl Store {
     // ---- host_tokens (migration 018) ----
 
@@ -202,7 +215,7 @@ impl Store {
     pub fn list_accounts(&self) -> Result<Vec<AccountRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT uuid, email, display_name, organization_name, organization_uuid,
-                    seat_tier, last_seen_at
+                    seat_tier, last_seen_at, nickname, has_extra_usage
              FROM accounts
              ORDER BY uuid ASC",
         )?;
@@ -215,23 +228,65 @@ impl Store {
                 organization_uuid: row.get(4)?,
                 seat_tier: row.get(5)?,
                 last_seen_at: row.get(6)?,
+                nickname: row.get(7)?,
+                has_extra_usage: row.get::<_, i64>(8)? != 0,
             })
         })?;
         rows.collect()
     }
 
+    /// Insert or refresh a probed account. `nickname` is user data and is
+    /// NEVER written here — only [`Store::set_account_nickname`] changes it
+    /// (a probe run every reconcile tick must not clobber it).
+    ///
+    /// No-op-free (see the W1 Track A pattern in `store/reconcile.rs`): the
+    /// prior row is read first and compared against the incoming one on the
+    /// fields a user can see (`email`, `display_name`, `organization_name`,
+    /// `organization_uuid`, `seat_tier`, `has_extra_usage`). `sync_local_account`
+    /// calls this every ~20s background tick for an account that essentially
+    /// never changes, so without this diff every tick wrote the row and fired
+    /// `account_upserted` — a store write and a frontend patch, forever, for
+    /// nothing. `last_seen_at` moves every call (it's `now`), so it can't be
+    /// diffed the same way: it is refreshed in the database only when it has
+    /// moved materially (more than 10 minutes since the stored value), so the
+    /// column still means "recently seen" without a write every tick. When
+    /// NEITHER a visible field changed NOR `last_seen_at` moved materially,
+    /// this is a complete no-op: no write, no event.
     pub fn upsert_account(&self, a: &AccountRow) -> Result<(), rusqlite::Error> {
+        let prior = self.get_account_by_uuid(&a.uuid)?;
+        let visible_changed = match &prior {
+            None => true,
+            Some(p) => {
+                p.email != a.email
+                    || p.display_name != a.display_name
+                    || p.organization_name != a.organization_name
+                    || p.organization_uuid != a.organization_uuid
+                    || p.seat_tier != a.seat_tier
+                    || p.has_extra_usage != a.has_extra_usage
+            }
+        };
+        let seen_moved =
+            last_seen_moved_materially(prior.as_ref().and_then(|p| p.last_seen_at), a.last_seen_at);
+        if !visible_changed && !seen_moved {
+            return Ok(());
+        }
+        let last_seen_at = if seen_moved {
+            a.last_seen_at
+        } else {
+            prior.as_ref().and_then(|p| p.last_seen_at)
+        };
         self.conn.execute(
             "INSERT INTO accounts (uuid, email, display_name, organization_name,
-                                   organization_uuid, seat_tier, last_seen_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                                   organization_uuid, seat_tier, last_seen_at, has_extra_usage)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(uuid) DO UPDATE SET
                email=excluded.email,
                display_name=excluded.display_name,
                organization_name=excluded.organization_name,
                organization_uuid=excluded.organization_uuid,
                seat_tier=excluded.seat_tier,
-               last_seen_at=excluded.last_seen_at",
+               last_seen_at=excluded.last_seen_at,
+               has_extra_usage=excluded.has_extra_usage",
             rusqlite::params![
                 a.uuid,
                 a.email,
@@ -239,17 +294,22 @@ impl Store {
                 a.organization_name,
                 a.organization_uuid,
                 a.seat_tier,
-                a.last_seen_at
+                last_seen_at,
+                a.has_extra_usage
             ],
         )?;
-        self.bus.account_upserted(a);
+        if visible_changed {
+            if let Some(row) = self.get_account_by_uuid(&a.uuid)? {
+                self.bus.account_upserted(&row);
+            }
+        }
         Ok(())
     }
 
     pub fn get_account_by_uuid(&self, uuid: &str) -> Result<Option<AccountRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT uuid, email, display_name, organization_name, organization_uuid,
-                    seat_tier, last_seen_at
+                    seat_tier, last_seen_at, nickname, has_extra_usage
              FROM accounts WHERE uuid=?1",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![uuid], |row| {
@@ -261,12 +321,56 @@ impl Store {
                 organization_uuid: row.get(4)?,
                 seat_tier: row.get(5)?,
                 last_seen_at: row.get(6)?,
+                nickname: row.get(7)?,
+                has_extra_usage: row.get::<_, i64>(8)? != 0,
             })
         })?;
         match rows.next() {
             Some(r) => Ok(Some(r?)),
             None => Ok(None),
         }
+    }
+
+    /// Set (clear, if `nickname` is `None` or blank after trimming) an
+    /// account's nickname (migration 028). Always emits `account_upserted`
+    /// with the updated row — unlike `upsert_account`, this is a deliberate
+    /// user edit, never a background no-op. `E_NOTFOUND` when the uuid is
+    /// unknown; `E_INVALID` when the trimmed nickname exceeds 32 characters.
+    pub fn set_account_nickname(
+        &self,
+        uuid: &str,
+        nickname: Option<&str>,
+    ) -> Result<AccountRow, crate::ipc_error::IpcError> {
+        let trimmed = nickname.map(str::trim).filter(|n| !n.is_empty());
+        if let Some(n) = trimmed {
+            if n.chars().count() > 32 {
+                return Err(crate::ipc_error::IpcError::new(
+                    "E_INVALID",
+                    "nickname must be 32 characters or fewer",
+                ));
+            }
+        }
+        let n = self
+            .conn
+            .execute(
+                "UPDATE accounts SET nickname = ?1 WHERE uuid = ?2",
+                rusqlite::params![trimmed, uuid],
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        if n == 0 {
+            return Err(crate::ipc_error::IpcError::new(
+                "E_NOTFOUND",
+                format!("account {uuid} not found"),
+            ));
+        }
+        let row = self
+            .get_account_by_uuid(uuid)
+            .map_err(crate::ipc_error::IpcError::from)?
+            .ok_or_else(|| {
+                crate::ipc_error::IpcError::new("E_INTERNAL", format!("account {uuid} vanished"))
+            })?;
+        self.bus.account_upserted(&row);
+        Ok(row)
     }
 
     pub fn set_host_account(
@@ -614,6 +718,8 @@ mod tests {
             organization_uuid: None,
             seat_tier: Some("max".into()),
             last_seen_at: Some(1000),
+            nickname: None,
+            has_extra_usage: false,
         };
         s.upsert_account(&a).unwrap();
         let mut a2 = a.clone();
@@ -639,6 +745,8 @@ mod tests {
                 organization_uuid: None,
                 seat_tier: None,
                 last_seen_at: None,
+                nickname: None,
+                has_extra_usage: false,
             })
             .unwrap();
         }
@@ -666,6 +774,8 @@ mod tests {
             organization_uuid: None,
             seat_tier: None,
             last_seen_at: None,
+            nickname: None,
+            has_extra_usage: false,
         })
         .unwrap();
         let got = s.get_account_by_uuid("u1").unwrap().unwrap();
@@ -684,6 +794,8 @@ mod tests {
             organization_uuid: None,
             seat_tier: None,
             last_seen_at: None,
+            nickname: None,
+            has_extra_usage: false,
         })
         .unwrap();
         s.set_host_account("h", Some("u1")).unwrap();
@@ -781,5 +893,173 @@ mod tests {
             bus.take().contains(&format!("session:updated:{elsewhere}")),
             "the cleared session is announced"
         );
+    }
+
+    // ── upsert_account: no-op-free (W1 Track A pattern) + nickname ──
+
+    fn account(uuid: &str, last_seen_at: Option<i64>) -> AccountRow {
+        AccountRow {
+            uuid: uuid.into(),
+            email: Some("a@b.com".into()),
+            display_name: None,
+            organization_name: None,
+            organization_uuid: None,
+            seat_tier: None,
+            last_seen_at,
+            nickname: None,
+            has_extra_usage: false,
+        }
+    }
+
+    #[test]
+    fn upsert_account_two_identical_upserts_emit_exactly_one_event() {
+        let (s, bus) = store_with_recorder();
+        let a = account("u1", Some(1_000));
+        s.upsert_account(&a).unwrap();
+        s.upsert_account(&a).unwrap();
+        let evts = bus.take();
+        assert_eq!(
+            evts,
+            vec!["account:upserted:u1".to_string()],
+            "the second, identical upsert emits nothing"
+        );
+    }
+
+    #[test]
+    fn upsert_account_last_seen_at_drift_alone_emits_nothing_and_does_not_write() {
+        let (s, bus) = store_with_recorder();
+        s.upsert_account(&account("u1", Some(1_000))).unwrap();
+        bus.take();
+        // Same visible fields, `last_seen_at` a few seconds later — well under
+        // the 10-minute material-change floor.
+        s.upsert_account(&account("u1", Some(1_010))).unwrap();
+        assert!(
+            bus.take().is_empty(),
+            "a few seconds of last_seen_at drift is not worth an event"
+        );
+        let row = s.get_account_by_uuid("u1").unwrap().unwrap();
+        assert_eq!(
+            row.last_seen_at,
+            Some(1_000),
+            "the stored last_seen_at was not written either"
+        );
+    }
+
+    #[test]
+    fn upsert_account_last_seen_at_moving_materially_writes_but_does_not_emit() {
+        let (s, bus) = store_with_recorder();
+        s.upsert_account(&account("u1", Some(1_000))).unwrap();
+        bus.take();
+        // Same visible fields, last_seen_at moved by more than 10 minutes.
+        s.upsert_account(&account("u1", Some(1_000 + 601))).unwrap();
+        assert!(
+            bus.take().is_empty(),
+            "last_seen_at alone is not user-visible; no event"
+        );
+        let row = s.get_account_by_uuid("u1").unwrap().unwrap();
+        assert_eq!(
+            row.last_seen_at,
+            Some(1_000 + 601),
+            "but the material move IS written"
+        );
+    }
+
+    #[test]
+    fn upsert_account_changed_email_emits_once() {
+        let (s, bus) = store_with_recorder();
+        s.upsert_account(&account("u1", Some(1_000))).unwrap();
+        bus.take();
+        let mut changed = account("u1", Some(1_000));
+        changed.email = Some("new@b.com".into());
+        s.upsert_account(&changed).unwrap();
+        assert_eq!(bus.take(), vec!["account:upserted:u1".to_string()]);
+        assert_eq!(
+            s.get_account_by_uuid("u1")
+                .unwrap()
+                .unwrap()
+                .email
+                .as_deref(),
+            Some("new@b.com")
+        );
+    }
+
+    /// The nickname is user data: a probe upsert (what `upsert_account`
+    /// always receives — probes never know about nicknames, see
+    /// `service::hosts::account_row_from`) must never clobber an existing
+    /// one, even when it also changes a visible field and so does write.
+    #[test]
+    fn upsert_account_probe_keeps_existing_nickname() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_account(&account("u1", Some(1_000))).unwrap();
+        s.set_account_nickname("u1", Some("Home")).unwrap();
+        let mut changed = account("u1", Some(2_000));
+        changed.seat_tier = Some("max".into());
+        s.upsert_account(&changed).unwrap();
+        let row = s.get_account_by_uuid("u1").unwrap().unwrap();
+        assert_eq!(row.nickname.as_deref(), Some("Home"));
+        assert_eq!(row.seat_tier.as_deref(), Some("max"));
+    }
+
+    // ── set_account_nickname ──
+
+    #[test]
+    fn set_account_nickname_sets_clears_and_trims() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_account(&account("u1", Some(1_000))).unwrap();
+        let row = s.set_account_nickname("u1", Some("  Home  ")).unwrap();
+        assert_eq!(row.nickname.as_deref(), Some("Home"), "trimmed");
+        assert_eq!(
+            s.get_account_by_uuid("u1")
+                .unwrap()
+                .unwrap()
+                .nickname
+                .as_deref(),
+            Some("Home")
+        );
+        // Clear with an empty string.
+        let row = s.set_account_nickname("u1", Some("")).unwrap();
+        assert_eq!(row.nickname, None);
+        s.set_account_nickname("u1", Some("Home")).unwrap();
+        // Clear with whitespace only.
+        let row = s.set_account_nickname("u1", Some("   ")).unwrap();
+        assert_eq!(row.nickname, None, "whitespace-only clears");
+        // Clear with None.
+        s.set_account_nickname("u1", Some("Home")).unwrap();
+        let row = s.set_account_nickname("u1", None).unwrap();
+        assert_eq!(row.nickname, None);
+    }
+
+    #[test]
+    fn set_account_nickname_rejects_too_long() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_account(&account("u1", Some(1_000))).unwrap();
+        let too_long = "x".repeat(33);
+        let err = s.set_account_nickname("u1", Some(&too_long)).unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+        assert_eq!(s.get_account_by_uuid("u1").unwrap().unwrap().nickname, None);
+        // Exactly 32 is fine.
+        let exactly_32 = "x".repeat(32);
+        let row = s.set_account_nickname("u1", Some(&exactly_32)).unwrap();
+        assert_eq!(row.nickname.as_deref(), Some(exactly_32.as_str()));
+    }
+
+    #[test]
+    fn set_account_nickname_unknown_uuid_is_not_found() {
+        let s = Store::open_in_memory().unwrap();
+        let err = s.set_account_nickname("nope", Some("Home")).unwrap_err();
+        assert_eq!(err.code, "E_NOTFOUND");
+    }
+
+    #[test]
+    fn set_account_nickname_always_emits() {
+        let (s, bus) = store_with_recorder();
+        s.upsert_account(&account("u1", Some(1_000))).unwrap();
+        bus.take();
+        s.set_account_nickname("u1", Some("Home")).unwrap();
+        assert_eq!(bus.take(), vec!["account:upserted:u1".to_string()]);
+        // Setting the SAME nickname again still emits — a deliberate user
+        // edit, not folded into upsert_account's no-op detection.
+        s.set_account_nickname("u1", Some("Home")).unwrap();
+        assert_eq!(bus.take(), vec!["account:upserted:u1".to_string()]);
     }
 }

@@ -9,6 +9,23 @@ export interface AccountRow {
   organization_uuid: string | null;
   seat_tier: string | null;
   last_seen_at: number | null;
+  nickname: string | null;
+  has_extra_usage: boolean;
+}
+
+/**
+ * The compact label for an account: its nickname when set, else its email,
+ * else the first 8 characters of its uuid, else a fallback for "no account
+ * at all" (a `null`/`undefined` row — e.g. a host with no linked account).
+ */
+export function accountLabel(a: AccountRow | null | undefined): string {
+  if (!a) return 'unknown account';
+  const nickname = a.nickname?.trim();
+  if (nickname) return nickname;
+  const email = a.email?.trim();
+  if (email) return email;
+  if (a.uuid) return a.uuid.slice(0, 8);
+  return 'unknown account';
 }
 
 export const accounts = writable<AccountRow[]>([]);
@@ -38,6 +55,16 @@ function mergeInto(arr: AccountRow[], row: AccountRow): AccountRow[] {
 
 export function mergeAccount(row: AccountRow): void {
   accounts.update((arr) => mergeInto(arr, row));
+}
+
+/** Set (or, with `null`/empty/whitespace, clear) an account's nickname. */
+export async function setAccountNickname(
+  uuid: string,
+  nickname: string | null,
+): Promise<Result<AccountRow>> {
+  const r = await invokeCmd<AccountRow>('set_account_nickname', { args: { uuid, nickname } });
+  if (r.ok) mergeAccount(r.value);
+  return r;
 }
 
 /** Apply a burst of `account:upserted` rows in ONE store update. */

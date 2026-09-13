@@ -6,9 +6,17 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { accounts, loadAccounts, probeSshAlias, probeSshAliasAbortable } from './accounts';
+import {
+  accounts,
+  loadAccounts,
+  probeSshAlias,
+  probeSshAliasAbortable,
+  accountLabel,
+  setAccountNickname,
+  type AccountRow,
+} from './accounts';
 
-const sample = {
+const sample: AccountRow = {
   uuid: 'u1',
   email: 'a@b.com',
   display_name: 'A B',
@@ -16,6 +24,8 @@ const sample = {
   organization_uuid: 'org-1',
   seat_tier: 'max',
   last_seen_at: 1000,
+  nickname: null,
+  has_extra_usage: false,
 };
 
 beforeEach(() => {
@@ -95,5 +105,61 @@ describe('accounts store', () => {
     const r = await probeSshAliasAbortable('test-alias', ac.signal);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe('E_CANCELLED');
+  });
+
+  it('setAccountNickname sends uuid and nickname, and merges the returned row', async () => {
+    accounts.set([sample]);
+    const updated: AccountRow = { ...sample, nickname: 'Home' };
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(updated);
+    const r = await setAccountNickname('u1', 'Home');
+    expect(r.ok).toBe(true);
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
+      'set_account_nickname',
+      { args: { uuid: 'u1', nickname: 'Home' } },
+    ]);
+    expect(get(accounts)[0].nickname).toBe('Home');
+  });
+
+  it('setAccountNickname passes null to clear', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ...sample,
+      nickname: null,
+    });
+    await setAccountNickname('u1', null);
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
+      'set_account_nickname',
+      { args: { uuid: 'u1', nickname: null } },
+    ]);
+  });
+});
+
+describe('accountLabel', () => {
+  it('prefers the nickname when set', () => {
+    expect(accountLabel({ ...sample, nickname: 'Home' })).toBe('Home');
+  });
+
+  it('falls back to the email when there is no nickname', () => {
+    expect(accountLabel({ ...sample, nickname: null })).toBe('a@b.com');
+  });
+
+  it('falls back to the trimmed nickname over a blank one', () => {
+    expect(accountLabel({ ...sample, nickname: '   ' })).toBe('a@b.com');
+  });
+
+  it('falls back to the first 8 characters of the uuid when there is no email', () => {
+    expect(
+      accountLabel({ ...sample, nickname: null, email: null, uuid: 'abcdefghijkl' }),
+    ).toBe('abcdefgh');
+  });
+
+  it('falls back to "unknown account" when there is nothing at all', () => {
+    expect(accountLabel({ ...sample, nickname: null, email: null, uuid: '' })).toBe(
+      'unknown account',
+    );
+  });
+
+  it('returns "unknown account" for null or undefined', () => {
+    expect(accountLabel(null)).toBe('unknown account');
+    expect(accountLabel(undefined)).toBe('unknown account');
   });
 });

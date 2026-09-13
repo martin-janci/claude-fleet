@@ -337,6 +337,14 @@ pub struct AccountRow {
     pub organization_uuid: Option<String>,
     pub seat_tier: Option<String>,
     pub last_seen_at: Option<i64>,
+    /// User-set short label (migration 028). Never overwritten by
+    /// `Store::upsert_account` (the probe path) — only `set_account_nickname`
+    /// changes it.
+    pub nickname: Option<String>,
+    /// `oauthAccount.hasExtraUsageEnabled` from the last probe (migration
+    /// 028): hitting a usage limit spends pay-as-you-go money instead of
+    /// blocking the account.
+    pub has_extra_usage: bool,
 }
 
 /// One row of the append-only per-session event timeline (migration 013).

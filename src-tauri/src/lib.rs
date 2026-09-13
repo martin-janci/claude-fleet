@@ -266,6 +266,7 @@ pub fn run() {
             commands::hosts::probe_ssh_alias,
             commands::hosts::remove_host,
             commands::hosts::hide_host,
+            commands::hosts::set_account_nickname,
             commands::mcp::mcp_status,
             commands::mcp::mcp_configure,
             commands::mcp::install_fleet_hook,

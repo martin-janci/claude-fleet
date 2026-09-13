@@ -209,6 +209,22 @@ pub fn hide_host(args: HideHostArgs, store: &Mutex<Store>) -> Result<HostRow, Ip
     list_one(store, &args.alias)
 }
 
+#[derive(Deserialize)]
+pub struct SetAccountNicknameArgs {
+    pub uuid: String,
+    pub nickname: Option<String>,
+}
+
+pub fn set_account_nickname(
+    args: SetAccountNicknameArgs,
+    store: &Mutex<Store>,
+) -> Result<crate::store::AccountRow, IpcError> {
+    let s = store
+        .lock()
+        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    s.set_account_nickname(&args.uuid, args.nickname.as_deref())
+}
+
 // --- helpers ---
 
 fn list_one(store: &Mutex<Store>, alias: &str) -> Result<HostRow, IpcError> {
@@ -507,6 +523,10 @@ pub struct OauthAccount {
     pub organization_uuid: Option<String>,
     #[serde(rename = "seatTier")]
     pub seat_tier: Option<String>,
+    /// Whether hitting a usage limit spends pay-as-you-go money instead of
+    /// blocking the account (migration 028).
+    #[serde(rename = "hasExtraUsageEnabled")]
+    pub has_extra_usage_enabled: Option<bool>,
 }
 
 /// Parse the third probe section. Empty / "null" / "{}" → None.
@@ -522,7 +542,9 @@ fn parse_oauth_account(line: &str) -> Option<OauthAccount> {
 }
 
 /// Convert a probed `OauthAccount` into a storable `AccountRow`, dropping
-/// records without a uuid (can't be primary-keyed).
+/// records without a uuid (can't be primary-keyed). `nickname` is always
+/// `None` here — it is never read from a probe, and `Store::upsert_account`
+/// never writes it from this field anyway (see its doc comment).
 fn account_row_from(a: &OauthAccount, now: i64) -> Option<crate::store::AccountRow> {
     let uuid = a.uuid.clone()?;
     Some(crate::store::AccountRow {
@@ -533,6 +555,8 @@ fn account_row_from(a: &OauthAccount, now: i64) -> Option<crate::store::AccountR
         organization_uuid: a.organization_uuid.clone(),
         seat_tier: a.seat_tier.clone(),
         last_seen_at: Some(now),
+        nickname: None,
+        has_extra_usage: a.has_extra_usage_enabled.unwrap_or(false),
     })
 }
 
@@ -589,6 +613,50 @@ mod tests {
     }
 
     #[test]
+    fn parse_oauth_account_parses_has_extra_usage_enabled_true_false_and_absent() {
+        let true_line =
+            r#"{"accountUuid":"abc","emailAddress":"a@b.com","hasExtraUsageEnabled":true}"#;
+        assert_eq!(
+            parse_oauth_account(true_line)
+                .unwrap()
+                .has_extra_usage_enabled,
+            Some(true)
+        );
+        let false_line =
+            r#"{"accountUuid":"abc","emailAddress":"a@b.com","hasExtraUsageEnabled":false}"#;
+        assert_eq!(
+            parse_oauth_account(false_line)
+                .unwrap()
+                .has_extra_usage_enabled,
+            Some(false)
+        );
+        let absent_line = r#"{"accountUuid":"abc","emailAddress":"a@b.com"}"#;
+        assert_eq!(
+            parse_oauth_account(absent_line)
+                .unwrap()
+                .has_extra_usage_enabled,
+            None
+        );
+    }
+
+    #[test]
+    fn account_row_from_maps_has_extra_usage_true_false_and_absent_to_false() {
+        let mut a = OauthAccount {
+            uuid: Some("u1".into()),
+            has_extra_usage_enabled: Some(true),
+            ..Default::default()
+        };
+        assert!(account_row_from(&a, 0).unwrap().has_extra_usage);
+        a.has_extra_usage_enabled = Some(false);
+        assert!(!account_row_from(&a, 0).unwrap().has_extra_usage);
+        a.has_extra_usage_enabled = None;
+        assert!(
+            !account_row_from(&a, 0).unwrap().has_extra_usage,
+            "absent defaults to false"
+        );
+    }
+
+    #[test]
     fn parse_oauth_account_returns_none_for_empty_or_null_or_empty_obj() {
         assert!(parse_oauth_account("").is_none());
         assert!(parse_oauth_account("   ").is_none());
@@ -606,6 +674,58 @@ mod tests {
     fn parse_oauth_account_returns_none_for_malformed_json() {
         assert!(parse_oauth_account("{not-json").is_none());
         assert!(parse_oauth_account("not even an object").is_none());
+    }
+
+    // ── set_account_nickname (service layer) ────────────────────────────────
+
+    #[test]
+    fn set_account_nickname_service_notfound_and_invalid() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        store
+            .lock()
+            .unwrap()
+            .upsert_account(&crate::store::AccountRow {
+                uuid: "u1".into(),
+                email: Some("a@b.com".into()),
+                display_name: None,
+                organization_name: None,
+                organization_uuid: None,
+                seat_tier: None,
+                last_seen_at: None,
+                nickname: None,
+                has_extra_usage: false,
+            })
+            .unwrap();
+
+        let err = set_account_nickname(
+            SetAccountNicknameArgs {
+                uuid: "nope".into(),
+                nickname: Some("Home".into()),
+            },
+            &store,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "E_NOTFOUND");
+
+        let err = set_account_nickname(
+            SetAccountNicknameArgs {
+                uuid: "u1".into(),
+                nickname: Some("x".repeat(33)),
+            },
+            &store,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+
+        let row = set_account_nickname(
+            SetAccountNicknameArgs {
+                uuid: "u1".into(),
+                nickname: Some("  Home  ".into()),
+            },
+            &store,
+        )
+        .unwrap();
+        assert_eq!(row.nickname.as_deref(), Some("Home"));
     }
 
     // ── probe_local_in / sync_local_account ─────────────────────────────────
@@ -634,6 +754,8 @@ mod tests {
             organization_uuid: None,
             seat_tier: None,
             last_seen_at: None,
+            nickname: None,
+            has_extra_usage: false,
         })
         .unwrap();
         s.set_host_account("local", Some(uuid)).unwrap();
