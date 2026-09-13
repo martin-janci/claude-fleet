@@ -82,17 +82,27 @@ export function contextLevel(pct: number | null): ContextLevel | null {
   return 'ok';
 }
 
+/** A CSS colour for the context meter. warn/crit use the theme tokens shared
+ *  with the usage bars (`--usage-warn` / `--usage-crit` in app.css), so they
+ *  keep their contrast in both themes. Being `var(...)`, the result cannot be
+ *  suffixed with hex alpha — use `contextTint` for a translucent border. */
 export function contextColor(level: ContextLevel | null): string {
   switch (level) {
     case 'crit':
-      return '#e64a4a';
+      return 'var(--usage-crit)';
     case 'warn':
-      return '#d29b4a';
+      return 'var(--usage-warn)';
     case 'ok':
       return '#50c86e';
     default:
       return 'transparent';
   }
+}
+
+/** `contextColor` at one-third opacity, for the meter's border. */
+export function contextTint(level: ContextLevel | null): string {
+  if (level === null) return 'transparent';
+  return `color-mix(in srgb, ${contextColor(level)} 33%, transparent)`;
 }
 
 // ── needs attention ──

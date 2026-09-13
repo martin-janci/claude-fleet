@@ -5,6 +5,8 @@ import {
   claudeStatusColor,
   claudeStatusLabel,
   contextLevel,
+  contextColor,
+  contextTint,
   displayName,
   formatElapsed,
   isClaudeStatus,
@@ -94,6 +96,17 @@ describe('contextLevel', () => {
     expect(contextLevel(90)).toBe('crit');
     expect(contextLevel(100)).toBe('crit');
     expect(contextLevel(Number.NaN)).toBeNull();
+  });
+});
+
+describe('contextColor', () => {
+  it('uses the shared usage theme tokens for warn and crit', () => {
+    expect(contextColor('crit')).toBe('var(--usage-crit)');
+    expect(contextColor('warn')).toBe('var(--usage-warn)');
+    expect(contextColor('ok')).toBe('#50c86e');
+    expect(contextColor(null)).toBe('transparent');
+    expect(contextTint('crit')).toBe('color-mix(in srgb, var(--usage-crit) 33%, transparent)');
+    expect(contextTint(null)).toBe('transparent');
   });
 });
 

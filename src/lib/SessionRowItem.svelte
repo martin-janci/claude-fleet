@@ -18,6 +18,7 @@
     claudeStatusColor,
     claudeStatusLabel,
     contextColor,
+    contextTint,
     contextLevel,
     ciStatusColor,
     ciStatusLabel,
@@ -288,7 +289,7 @@
                 class="ctx-badge ctx-{ctxLevel}"
                 data-testid="context-badge"
                 data-level={ctxLevel}
-                style="color: {contextColor(ctxLevel)}; border-color: {contextColor(ctxLevel)}55;"
+                style="color: {contextColor(ctxLevel)}; border-color: {contextTint(ctxLevel)};"
                 title="Context window {Math.round(sess.context_pct)}% used"
                 role="meter"
                 aria-valuemin="0"

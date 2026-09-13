@@ -32,6 +32,7 @@
     claudeStatusColor,
     claudeStatusLabel,
     contextColor,
+    contextTint,
     contextLevel,
     formatElapsed,
     sessionStart,
@@ -439,7 +440,7 @@
           class="chip"
           data-testid="details-context"
           data-level={ctxLevel}
-          style="color: {contextColor(ctxLevel)}; border-color: {contextColor(ctxLevel)}55;"
+          style="color: {contextColor(ctxLevel)}; border-color: {contextTint(ctxLevel)};"
           title="Context window used"
         >ctx {Math.round(session.context_pct)}%</span>
       {/if}
