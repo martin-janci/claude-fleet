@@ -1070,6 +1070,16 @@ describe('Sidebar triage (W2 Track D)', () => {
     expect(screen.getAllByTestId('sess-row')).toHaveLength(2);
   });
 
+  it('"N stuck" counter ignores a stuck_kind on an external (Outside fleet) row', async () => {
+    const stuck = { ...sessionFor(1, 'dev-stuck'), stuck_kind: 'oom' as const };
+    const externalStuck = { ...sessionFor(null, 'claude-desktop-session'), kind: 'external', stuck_kind: 'oom' as const };
+    mockBackend(fakeProjects, [stuck, externalStuck]);
+    render(Sidebar);
+    await tick(); await tick();
+    const pill = screen.getByTestId('stuck-filter');
+    expect(pill).toHaveTextContent('1 stuck');
+  });
+
   it('"needs attention" filter keeps stuck, safe-kill, ghost and failed rows', async () => {
     const stuck = { ...sessionFor(1, 'dev-stuck'), stuck_kind: 'auth_menu' as const };
     const sk = { ...sessionFor(1, 'dev-sk'), safe_kill_state: 'failed' };

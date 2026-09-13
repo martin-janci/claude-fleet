@@ -42,6 +42,7 @@
   } from './sidebar_index';
   import {
     attentionReason,
+    stuckSnapshot,
     worstSeverityByProject,
   } from './attention';
   import { attentionIdleMinutes } from './notify';
@@ -268,7 +269,10 @@
   const hostVisibleSessions = $derived(
     $sessions.filter((s) => sessionVisible(s, $hostFilter, $showBgAgents)),
   );
-  const stuckCount = $derived(hostVisibleSessions.filter((s) => s.stuck_kind !== null).length);
+  // Via stuckSnapshot (not a raw `stuck_kind !== null` filter) so an
+  // `external` row — read-only, excluded from every attention signal per
+  // spec §5 — never inflates the "N stuck" pill.
+  const stuckCount = $derived(stuckSnapshot(hostVisibleSessions).size);
   const attentionCount = $derived.by(() => {
     const opts = attentionOpts;
     return hostVisibleSessions.filter((s) => attentionReason(s, opts) !== null).length;
