@@ -36,7 +36,7 @@ use crate::ssh::SshExec;
 use crate::store::HostRow;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// Minimum seconds between two usage attempts for one account.
@@ -73,12 +73,14 @@ const USER_AGENT_PLACEHOLDER: &str = "@@USER_AGENT@@";
 
 /// The script run on the host. Placeholders are filled by [`usage_script`];
 /// read its "where is the token" notes before changing a line.
-const SCRIPT_TEMPLATE: &str = r#"\unalias -a 2>/dev/null
-\unset -f curl python3 jq rm mktemp command cat head tail tr sed grep date printf echo set trap umask 2>/dev/null
+const SCRIPT_TEMPLATE: &str = r#"builtin unalias -a 2>/dev/null
+builtin unset -f unset unalias builtin command set trap umask exit echo printf test [ curl python3 jq rm mktemp cat head tail tr sed grep date 2>/dev/null
 set +x
+set +e +u +o pipefail +o noclobber
 umask 077
 trap '' PIPE
 unset SSLKEYLOGFILE
+echo __usage_start__
 cred="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"
 if [ ! -f "$cred" ]; then echo __no_credentials__; exit 0; fi
 if command -v python3 >/dev/null 2>&1; then json=python3
@@ -174,10 +176,14 @@ pub fn user_agent() -> String {
 /// Build the usage script for `bash -lc` on a host.
 ///
 /// Where the token is (and is not):
-/// - Lines 1–6 isolate the shell: drop aliases and functions shadowing the
-///   tools used (`rm() { trash-put …; }` would keep files), no xtrace,
-///   `umask 077`, ignore SIGPIPE (a closed channel makes writes fail instead
-///   of killing bash before the EXIT trap), no `SSLKEYLOGFILE`.
+/// - Lines 1–7 isolate the shell from the login profile: drop aliases and
+///   functions shadowing the builtins and tools used (via `builtin`, so even
+///   a function named `unset` cannot intercept it; `rm() { trash-put …; }`
+///   would keep files), no xtrace, no `errexit`/`nounset`/`pipefail`/
+///   `noclobber`, `umask 077`, ignore SIGPIPE (a closed channel makes writes
+///   fail instead of killing bash before the EXIT trap), no `SSLKEYLOGFILE`.
+/// - Line 8 prints `__usage_start__`: proof for the fetch layer that the
+///   script ran, so an exit-255 run is never mistaken for "never connected".
 /// - `cred=…` holds only the credentials file PATH. The curl version check
 ///   (≥ 7.55, needed for `-H @-`) runs before anything reads the file.
 /// - Pass 1 (`meta_py` via `python3 -I`, or `jq`): prints only NON-secret
@@ -345,6 +351,8 @@ const MARK_CURL_EXIT: &str = "__curl_exit__=";
 const MARK_RETRY_AFTER: &str = "__retry_after__=";
 const MARK_SUBSCRIPTION: &str = "__subscription__=";
 const MARK_BODY: &str = "__body__";
+/// Printed by the script right after its isolation lines: proof it ran.
+const MARK_USAGE_START: &str = "__usage_start__";
 
 /// Classify the script's stdout.
 ///
@@ -356,10 +364,9 @@ const MARK_BODY: &str = "__body__";
 /// was no response), neither of which contains the request's Authorization
 /// header. Numeric markers are validated; labels must be short and plain.
 ///
-/// `_now_unix` is accepted for the fetch layer's uniform signature; expiry
-/// decisions are made on the host with the host's clock.
+/// Expiry decisions are made on the host with the host's clock.
 #[allow(dead_code)] // Wired into the poller and commands in Task 4.
-pub fn parse_usage_output(stdout: &str, _now_unix: i64) -> UsageOutcome {
+pub fn parse_usage_output(stdout: &str) -> UsageOutcome {
     let mut terminal: Option<UsageOutcome> = None;
     let mut status: Option<u16> = None;
     let mut saw_status = false;
@@ -642,33 +649,68 @@ pub fn source_hosts(account_uuid: &str, hosts: &[HostRow], sticky: Option<&str>)
     out
 }
 
+/// Time source for the usage cache. Scheduling uses the monotonic
+/// `now_instant`, read inside the cache itself, so neither a caller's stale
+/// timestamp nor a wall clock stepping backwards can shorten or freeze the
+/// polling floor. `now_unix` only stamps display values (`fetched_at`,
+/// `next_try_at`).
+#[allow(dead_code)] // Wired into the poller and commands in Task 4.
+pub trait Clock: Send + Sync {
+    fn now_instant(&self) -> Instant;
+    fn now_unix(&self) -> i64;
+}
+
+/// The real clock: `Instant::now()` and `SystemTime::now()`.
+#[derive(Debug, Clone, Copy, Default)]
+#[allow(dead_code)] // Wired into the poller and commands in Task 4.
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_instant(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn now_unix(&self) -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+            .unwrap_or(0)
+    }
+}
+
 /// One account's cache entry.
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)] // Wired into the poller and commands in Task 4.
 pub struct AccountUsageEntry {
-    /// Last successful answer: usage, subscription, fetched_at. Kept across
-    /// failures so the UI can show last-known values under its staleness
-    /// rules.
+    /// Last successful answer: usage, subscription, fetched_at (unix, for
+    /// display). Kept across failures so the UI can show last-known values
+    /// under its staleness rules.
     pub last_ok: Option<(AccountUsage, Option<String>, i64)>,
     pub last_outcome: Option<UsageOutcomeKind>,
     pub last_detail: Option<String>,
     /// The host that last answered (`Ok`, `RateLimited`, `Unavailable`); tried
     /// first next time so the "via" label does not flap.
     pub source_host: Option<String>,
+    /// The monotonic deadline before which no attempt may start. `None` =
+    /// never scheduled. This, not `next_try_at`, is what `due` checks.
+    pub next_try: Option<Instant>,
+    /// `next_try` as unix seconds, computed when it was set. Display only.
     pub next_try_at: i64,
-    /// The wall-clock second `next_try_at` was computed at. If the clock is
-    /// later seen BEFORE it, the schedule is shifted back by the same amount
-    /// so a clock step backwards cannot freeze polling.
-    pub scheduled_at: i64,
     /// 0 = no backoff in force.
     pub backoff_secs: i64,
 }
 
-/// In-memory usage cache, per account uuid.
-#[derive(Debug, Default)]
+/// In-memory usage cache, per account uuid, with its clock.
 #[allow(dead_code)] // Wired into the poller and commands in Task 4.
 pub struct UsageCache {
     pub entries: HashMap<String, AccountUsageEntry>,
+    clock: Arc<dyn Clock>,
+}
+
+impl Default for UsageCache {
+    fn default() -> Self {
+        Self::with_clock(Arc::new(SystemClock))
+    }
 }
 
 /// What a fetch attempt ended with, before it is written to the cache.
@@ -710,37 +752,54 @@ fn join_notes(notes: &[String]) -> Option<String> {
     (!notes.is_empty()).then(|| cap_detail(&notes.join("; ")))
 }
 
+fn secs(delay: i64) -> Duration {
+    Duration::from_secs(u64::try_from(delay).unwrap_or(0))
+}
+
 #[allow(dead_code)] // Wired into the poller and commands in Task 4.
 impl UsageCache {
+    /// A cache on the real clock.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// True when `account` may be attempted now (never attempted, or the
-    /// floor/backoff has passed). Also re-bases the schedule if the wall
-    /// clock went backwards since it was set.
-    pub fn due(&mut self, account: &str, now: i64) -> bool {
-        match self.entries.get_mut(account) {
-            None => true,
-            Some(e) => {
-                if now < e.scheduled_at {
-                    let back = e.scheduled_at - now;
-                    e.next_try_at -= back;
-                    e.scheduled_at = now;
-                }
-                now >= e.next_try_at
-            }
+    /// A cache on `clock` (tests inject a manually advanced one).
+    pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
+        Self {
+            entries: HashMap::new(),
+            clock,
         }
     }
 
-    /// Write one fetch result and schedule the next try. `end` is the wall
-    /// clock at the END of the attempt, so the floor separates requests, not
-    /// attempt starts.
-    pub fn record(&mut self, account: &str, result: FetchResult, end: i64) {
+    /// True when `account` may be attempted now: never scheduled, or the
+    /// monotonic deadline has passed.
+    pub fn due(&self, account: &str) -> bool {
+        match self.entries.get(account).and_then(|e| e.next_try) {
+            None => true,
+            Some(deadline) => self.clock.now_instant() >= deadline,
+        }
+    }
+
+    /// Push `account`'s deadline to at least now + `delay` seconds.
+    fn schedule_at_least(&mut self, account: &str, delay: i64) {
+        let (now_i, now_u) = (self.clock.now_instant(), self.clock.now_unix());
+        let e = self.entries.entry(account.to_string()).or_default();
+        let deadline = now_i + secs(delay);
+        if e.next_try.is_none_or(|d| d < deadline) {
+            e.next_try = Some(deadline);
+            e.next_try_at = now_u + delay;
+        }
+    }
+
+    /// Write one fetch result and schedule the next try, `delay` seconds from
+    /// NOW as read from the cache's clock — i.e. from the END of the attempt,
+    /// so the floor separates requests, not attempt starts.
+    pub fn record(&mut self, account: &str, result: FetchResult) {
+        let (now_i, now_u) = (self.clock.now_instant(), self.clock.now_unix());
         let e = self.entries.entry(account.to_string()).or_default();
         let schedule = |e: &mut AccountUsageEntry, delay: i64| {
-            e.next_try_at = end + delay;
-            e.scheduled_at = end;
+            e.next_try = Some(now_i + secs(delay));
+            e.next_try_at = now_u + delay;
         };
         match result {
             FetchResult::NoOnlineHost => {
@@ -761,7 +820,7 @@ impl UsageCache {
                         usage,
                         subscription,
                     } => {
-                        e.last_ok = Some((usage, subscription, end));
+                        e.last_ok = Some((usage, subscription, now_u));
                         e.backoff_secs = 0;
                         schedule(e, USAGE_POLL_FLOOR_SECS);
                         e.last_detail = join_notes(&notes);
@@ -859,7 +918,8 @@ pub struct AccountUsageSnapshot {
     pub source_host: Option<String>,
     pub status: UsageOutcomeKind,
     pub detail: Option<String>,
-    /// Earliest unix second the next attempt is allowed.
+    /// Unix second the next attempt becomes allowed, as computed when it was
+    /// scheduled (display only; scheduling itself is monotonic).
     pub next_try_at: i64,
 }
 
@@ -880,26 +940,36 @@ fn first_line(s: &str) -> String {
     .collect()
 }
 
-/// ssh's own messages for a connection that never came up (exit 255). Any
-/// other exit-255 stderr — "Connection to h closed by remote host", a broken
-/// pipe mid-session — may mean the script already sent its request.
-fn connection_never_established(stderr: &str) -> bool {
-    const PATTERNS: &[&str] = &[
-        "ssh: connect to host",
-        "could not resolve hostname",
-        "connection refused",
-        "no route to host",
-        "network is unreachable",
-        "permission denied (",
-        "host key verification failed",
-        "kex_exchange_identification",
-        "ssh_exchange_identification",
-        "banner exchange",
-        "connection closed by ",
-        "control socket connect",
+/// Whether an exit-255 run never reached the host, so falling back to the
+/// next host cannot duplicate a request. ssh's stderr also carries the remote
+/// login profile's and the tools' stderr, so both must hold:
+/// - stdout lacks `__usage_start__` (the script prints it right after its
+///   isolation lines, so its presence proves the script ran), and
+/// - the LAST non-empty stderr line is one of ssh's own connect-failure
+///   messages (matched as a prefix, not anywhere in the text).
+fn connection_never_established(stdout: &str, stderr: &str) -> bool {
+    if stdout
+        .lines()
+        .any(|l| l.trim_end_matches('\r') == MARK_USAGE_START)
+    {
+        return false;
+    }
+    let Some(last) = stderr
+        .lines()
+        .map(|l| l.trim_matches(|c: char| c == '\r' || c.is_whitespace()))
+        .rfind(|l| !l.is_empty())
+    else {
+        return false;
+    };
+    const PREFIXES: &[&str] = &[
+        "ssh: connect to host ",
+        "ssh: Could not resolve hostname",
+        "Permission denied (",
+        "Host key verification failed.",
+        "kex_exchange_identification:",
     ];
-    let lower = stderr.to_ascii_lowercase();
-    PATTERNS.iter().any(|p| lower.contains(p))
+    PREFIXES.iter().any(|p| last.starts_with(p))
+        || (last.starts_with("Connection closed by ") && last.contains(" port "))
 }
 
 /// How one host's run ended, for the fallback decision.
@@ -909,12 +979,12 @@ enum HostRun {
     /// SSH never connected: nothing ran on the host, try the next one.
     NeverConnected(String),
     /// The run failed after the connection came up (timeout, dropped
-    /// session, killed script, oversized output): the request may already
-    /// have left, so stop.
+    /// session, killed script, oversized output), or it cannot be proven
+    /// otherwise: the request may already have left, so stop.
     FailedAfterConnect(String),
 }
 
-fn classify_run(res: Result<std::process::Output, IpcError>, now: i64) -> HostRun {
+fn classify_run(res: Result<std::process::Output, IpcError>) -> HostRun {
     match res {
         Err(e) if e.code == "E_SSH_TIMEOUT" || e.code == "E_CANCELLED" => {
             HostRun::FailedAfterConnect(first_line(&e.message))
@@ -922,6 +992,7 @@ fn classify_run(res: Result<std::process::Output, IpcError>, now: i64) -> HostRu
         // A spawn failure: ssh never ran.
         Err(e) => HostRun::NeverConnected(first_line(&e.message)),
         Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
             let code = out.status.code().unwrap_or(-1);
             let describe = || {
@@ -933,7 +1004,7 @@ fn classify_run(res: Result<std::process::Output, IpcError>, now: i64) -> HostRu
                 }
             };
             if !out.status.success() {
-                if code == 255 && connection_never_established(&stderr) {
+                if code == 255 && connection_never_established(&stdout, &stderr) {
                     HostRun::NeverConnected(describe())
                 } else {
                     HostRun::FailedAfterConnect(describe())
@@ -941,10 +1012,7 @@ fn classify_run(res: Result<std::process::Output, IpcError>, now: i64) -> HostRu
             } else if out.stdout.len() >= OUTPUT_CAP {
                 HostRun::FailedAfterConnect("output exceeded the cap".to_string())
             } else {
-                HostRun::Outcome(parse_usage_output(
-                    &String::from_utf8_lossy(&out.stdout),
-                    now,
-                ))
+                HostRun::Outcome(parse_usage_output(&stdout))
             }
         }
     }
@@ -952,15 +1020,17 @@ fn classify_run(res: Result<std::process::Output, IpcError>, now: i64) -> HostRu
 
 /// Fetch `account_uuid`'s usage through its hosts, respecting the floor.
 ///
-/// Not due → the cached snapshot, with no SSH call — also when `force` is
-/// true: the spec forbids a refresh that bypasses the floor. Otherwise each
-/// source host is asked in order. Fallback to the next host happens only when
-/// no request can have left: the script reported `no_credentials`,
-/// `access_token_expired`, `login_expired` or `host_unsupported`, or SSH
-/// never connected. After `token_rejected` (a request was sent) at most one
-/// more host is asked. Everything else stops the attempt: `ok`,
-/// `rate_limited`, `unavailable`, an SSH timeout, or any failure after the
-/// connection came up. The next try is scheduled from the attempt's end.
+/// Time comes only from the cache's [`Clock`]; there is no caller-supplied
+/// timestamp to be stale. Not due → the cached snapshot, with no SSH call —
+/// also when `force` is true: the spec forbids a refresh that bypasses the
+/// floor. Otherwise each source host is asked in order. Fallback to the next
+/// host happens only when no request can have left: the script reported
+/// `no_credentials`, `access_token_expired`, `login_expired` or
+/// `host_unsupported`, or SSH provably never connected. After
+/// `token_rejected` (a request was sent) at most one more host is asked.
+/// Everything else stops the attempt: `ok`, `rate_limited`, `unavailable`, an
+/// SSH timeout, or any failure after the connection came up. The next try is
+/// scheduled from the attempt's end.
 ///
 /// The cache mutex is never held across an `.await`: the attempt is reserved
 /// under one lock, the SSH calls run unlocked, and the result is written
@@ -971,14 +1041,13 @@ pub async fn fetch_account_usage_with(
     hosts: &[HostRow],
     ssh: &dyn SshExec,
     cache: &Mutex<UsageCache>,
-    now: i64,
     force: bool,
 ) -> AccountUsageSnapshot {
     // `force` only expresses the caller's intent; it never bypasses the floor.
     let _ = force;
     let candidates = {
         let mut c = lock(cache);
-        if !c.due(account_uuid, now) {
+        if !c.due(account_uuid) {
             return c.snapshot(account_uuid);
         }
         let sticky = c
@@ -987,18 +1056,15 @@ pub async fn fetch_account_usage_with(
             .and_then(|e| e.source_host.clone());
         let candidates = source_hosts(account_uuid, hosts, sticky.as_deref());
         if candidates.is_empty() {
-            c.record(account_uuid, FetchResult::NoOnlineHost, now);
+            c.record(account_uuid, FetchResult::NoOnlineHost);
             return c.snapshot(account_uuid);
         }
         // Reserve the attempt so a concurrent caller sees "not due" instead
         // of issuing a second request inside the floor.
-        let e = c.entries.entry(account_uuid.to_string()).or_default();
-        e.next_try_at = e.next_try_at.max(now + USAGE_POLL_FLOOR_SECS);
-        e.scheduled_at = now;
+        c.schedule_at_least(account_uuid, USAGE_POLL_FLOOR_SECS);
         candidates
     };
 
-    let started = Instant::now();
     let script = usage_script(&user_agent());
     let quoted = quote(&script);
     let mut notes: Vec<String> = Vec::new();
@@ -1022,7 +1088,7 @@ pub async fn fetch_account_usage_with(
                 OUTPUT_CAP,
             )
             .await;
-        match classify_run(res, now) {
+        match classify_run(res) {
             HostRun::NeverConnected(msg) => {
                 transport_error = true;
                 notes.push(format!("{host}: {msg}"));
@@ -1052,7 +1118,6 @@ pub async fn fetch_account_usage_with(
             }
         }
     }
-    let end = now + i64::try_from(started.elapsed().as_secs()).unwrap_or(i64::MAX / 4);
 
     let result = match answered {
         Some((host, outcome)) => FetchResult::Answered {
@@ -1067,7 +1132,8 @@ pub async fn fetch_account_usage_with(
         },
     };
     let mut c = lock(cache);
-    c.record(account_uuid, result, end);
+    // `record` reads the clock now, at the end of the attempt.
+    c.record(account_uuid, result);
     c.snapshot(account_uuid)
 }
 
@@ -1109,7 +1175,7 @@ mod tests {
 
     #[test]
     fn parses_ok_with_all_buckets_and_rfc3339_offsets() {
-        let out = parse_usage_output(&ok_output(OK_BODY), NOW);
+        let out = parse_usage_output(&ok_output(OK_BODY));
         let UsageOutcome::Ok {
             usage,
             subscription,
@@ -1162,7 +1228,7 @@ mod tests {
     fn unparseable_resets_at_is_none_not_an_error() {
         let body =
             r#"{"five_hour":{"utilization":10,"resets_at":"soon"},"seven_day":{"utilization":5}}"#;
-        let UsageOutcome::Ok { usage, .. } = parse_usage_output(&ok_output(body), NOW) else {
+        let UsageOutcome::Ok { usage, .. } = parse_usage_output(&ok_output(body)) else {
             panic!()
         };
         assert_eq!(usage.five_hour.unwrap().resets_at, None);
@@ -1172,7 +1238,7 @@ mod tests {
     #[test]
     fn clamps_utilization() {
         let body = r#"{"five_hour":{"utilization":142.5,"resets_at":null},"seven_day":{"utilization":-3}}"#;
-        let UsageOutcome::Ok { usage, .. } = parse_usage_output(&ok_output(body), NOW) else {
+        let UsageOutcome::Ok { usage, .. } = parse_usage_output(&ok_output(body)) else {
             panic!()
         };
         assert_eq!(usage.five_hour.unwrap().utilization, 100.0);
@@ -1182,7 +1248,7 @@ mod tests {
     #[test]
     fn missing_bucket_is_tolerated() {
         let body = r#"{"seven_day":{"utilization":50,"resets_at":"2026-02-12T20:00:00Z"},"new_field":[1,2]}"#;
-        let UsageOutcome::Ok { usage, .. } = parse_usage_output(&ok_output(body), NOW) else {
+        let UsageOutcome::Ok { usage, .. } = parse_usage_output(&ok_output(body)) else {
             panic!()
         };
         assert!(usage.five_hour.is_none());
@@ -1198,7 +1264,7 @@ mod tests {
             r#"{"five_hour":"35%","seven_day":7}"#,
             "",
         ] {
-            let out = parse_usage_output(&ok_output(body), NOW);
+            let out = parse_usage_output(&ok_output(body));
             assert!(
                 matches!(
                     out,
@@ -1216,38 +1282,34 @@ mod tests {
     fn terminal_markers() {
         let banner = "Welcome to vps\n";
         assert_eq!(
-            parse_usage_output(&format!("{banner}__no_credentials__\n"), NOW),
+            parse_usage_output(&format!("{banner}__no_credentials__\n")),
             UsageOutcome::NoCredentials
         );
         assert_eq!(
             parse_usage_output(
-                "__expires_at__=1\n__refresh_expires_at__=2\n__subscription__=pro\n__login_expired__\n",
-                NOW
-            ),
+                "__expires_at__=1\n__refresh_expires_at__=2\n__subscription__=pro\n__login_expired__\n"),
             UsageOutcome::LoginExpired
         );
         assert_eq!(
             parse_usage_output(
-                "__expires_at__=1\n__refresh_expires_at__=2099999999\n__access_token_expired__\n__no_credentials__\n",
-                NOW
-            ),
+                "__expires_at__=1\n__refresh_expires_at__=2099999999\n__access_token_expired__\n__no_credentials__\n"),
             UsageOutcome::AccessTokenExpired,
             "the first terminal marker wins"
         );
         assert_eq!(
-            parse_usage_output("__host_unsupported__=curl\n", NOW),
+            parse_usage_output("__host_unsupported__=curl\n"),
             UsageOutcome::HostUnsupported {
                 detail: "missing curl".into()
             }
         );
         assert_eq!(
-            parse_usage_output("__host_unsupported__=curl_7.55\n", NOW),
+            parse_usage_output("__host_unsupported__=curl_7.55\n"),
             UsageOutcome::HostUnsupported {
                 detail: "curl is older than 7.55".into()
             }
         );
         assert!(matches!(
-            parse_usage_output("bash: something odd\n", NOW),
+            parse_usage_output("bash: something odd\n"),
             UsageOutcome::HostUnsupported { .. }
         ));
     }
@@ -1255,10 +1317,9 @@ mod tests {
     #[test]
     fn http_statuses() {
         let with = |status: &str, extra: &str, body: &str| {
-            parse_usage_output(
-                &format!("__subscription__=max\n__http_status__={status}\n{extra}__body__\n{body}"),
-                NOW,
-            )
+            parse_usage_output(&format!(
+                "__subscription__=max\n__http_status__={status}\n{extra}__body__\n{body}"
+            ))
         };
         assert_eq!(with("401", "", "{}"), UsageOutcome::TokenRejected);
         assert_eq!(with("403", "", "{}"), UsageOutcome::TokenRejected);
@@ -1316,7 +1377,7 @@ mod tests {
     fn snippet_and_detail_drop_control_and_bidi_characters() {
         let body = "bad\u{1b}[31mred\u{0}nul\u{202e}rtl\u{2066}iso\u{9b}c1 end";
         let UsageOutcome::Unavailable { snippet, .. } =
-            parse_usage_output(&format!("__http_status__=502\n__body__\n{body}"), NOW)
+            parse_usage_output(&format!("__http_status__=502\n__body__\n{body}"))
         else {
             panic!()
         };
@@ -1332,7 +1393,6 @@ mod tests {
                     first_line("exit 255: \u{1b}]0;x\u{7}boom\u{202e}")
                 )],
             },
-            NOW,
         );
         assert_eq!(
             c.snapshot("a").detail.as_deref(),
@@ -1360,11 +1420,11 @@ mod tests {
             format!("{noise}__no_credentials__\n"),
         ];
         assert!(matches!(
-            parse_usage_output(&cases[0], NOW),
+            parse_usage_output(&cases[0]),
             UsageOutcome::Ok { .. }
         ));
         for out in &cases {
-            let outcome = parse_usage_output(out, NOW);
+            let outcome = parse_usage_output(out);
             let rendered = format!("{outcome:?} {}", serde_json::to_string(&outcome).unwrap());
             assert!(!rendered.contains(CANARY), "{rendered}");
             // And through the cache into the snapshot's detail.
@@ -1382,16 +1442,14 @@ mod tests {
                     notes: vec![],
                 }
             };
-            cache.record("acct", result, NOW);
+            cache.record("acct", result);
             let snap = serde_json::to_string(&cache.snapshot("acct")).unwrap();
             assert!(!snap.contains(CANARY), "{snap}");
         }
         // The only path in: the body itself (documented, and impossible in
         // practice because the endpoint does not echo request headers).
-        let outcome = parse_usage_output(
-            &format!("__http_status__=500\n__body__\necho {FAKE_TOKEN}"),
-            NOW,
-        );
+        let outcome =
+            parse_usage_output(&format!("__http_status__=500\n__body__\necho {FAKE_TOKEN}"));
         let UsageOutcome::Unavailable { snippet, .. } = outcome else {
             panic!()
         };
@@ -1408,10 +1466,12 @@ mod tests {
     fn script_isolates_the_shell_first() {
         let s = script();
         let lines: Vec<&str> = s.lines().collect();
-        assert_eq!(lines[0], "\\unalias -a 2>/dev/null");
-        assert!(lines[1].starts_with("\\unset -f "));
+        assert_eq!(lines[0], "builtin unalias -a 2>/dev/null");
+        // `builtin` so a profile function named `unset` cannot intercept it.
+        assert!(lines[1].starts_with("builtin unset -f "));
         for f in [
-            "curl", "python3", "jq", "rm", "mktemp", "command", "cat", "head", "sed", "grep",
+            "unset", "builtin", "command", "set", "trap", "curl", "python3", "jq", "rm", "mktemp",
+            "cat", "head", "sed", "grep",
         ] {
             assert!(
                 lines[1].split_whitespace().any(|w| w == f),
@@ -1419,9 +1479,12 @@ mod tests {
             );
         }
         assert_eq!(lines[2], "set +x");
-        assert_eq!(lines[3], "umask 077");
-        assert_eq!(lines[4], "trap '' PIPE");
-        assert_eq!(lines[5], "unset SSLKEYLOGFILE");
+        assert_eq!(lines[3], "set +e +u +o pipefail +o noclobber");
+        assert_eq!(lines[4], "umask 077");
+        assert_eq!(lines[5], "trap '' PIPE");
+        assert_eq!(lines[6], "unset SSLKEYLOGFILE");
+        assert_eq!(lines[7], "echo __usage_start__");
+        assert!(!s.contains("trap - DEBUG"));
         assert!(!s.contains("set -x"));
         assert!(!s.contains("-o xtrace"));
         // Every python run is isolated (-I: no PYTHON* env, no user site).
@@ -1471,7 +1534,8 @@ mod tests {
         for l in s.lines() {
             for (i, _) in l.match_indices("curl ") {
                 let before = &l[..i];
-                if before.ends_with("command -v ") || before.ends_with("\\unset -f ")
+                if before.ends_with("command -v ")
+                    || l.starts_with("builtin unset -f ")
                     // the `sed` pattern matching `curl --version` output
                     || before.ends_with('^')
                 {
@@ -1585,6 +1649,7 @@ verbose=
 if [ "$1" != -q ] && grep -q verbose "$HOME/.curlrc" 2>/dev/null; then verbose=1; fi
 : > "$log/argv"
 for a in "$@"; do printf '%s\n' "$a" >> "$log/argv"; done
+env >> "$log/curl_env"
 src= hdr= body=
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -1818,14 +1883,14 @@ curl() { echo HIJACKED; }
 
         // No credentials file: nothing else happens.
         let out = sb.run(&[]);
-        assert_eq!(out, "__no_credentials__\n");
+        assert_eq!(out, "__usage_start__\n__no_credentials__\n");
         assert!(sb.log("argv").is_none(), "curl must not run");
 
         // Login expired (refresh token in the past, epoch in ms).
         sb.write_credentials(&creds((now + 3600) * 1000, (now - 10) * 1000));
         let out = sb.run(&[]);
         assert_eq!(
-            parse_usage_output(&out, now),
+            parse_usage_output(&out),
             UsageOutcome::LoginExpired,
             "{out}"
         );
@@ -1835,7 +1900,7 @@ curl() { echo HIJACKED; }
         sb.write_credentials(&creds(now - 5, now + 86_400));
         let out = sb.run(&[]);
         assert_eq!(
-            parse_usage_output(&out, now),
+            parse_usage_output(&out),
             UsageOutcome::AccessTokenExpired,
             "{out}"
         );
@@ -1849,7 +1914,7 @@ curl() { echo HIJACKED; }
         let valid = creds((now + 3600) * 1000, (now + 86_400) * 1000);
         sb.write_credentials(&valid);
         let out = sb.run(&[]);
-        let outcome = parse_usage_output(&out, now);
+        let outcome = parse_usage_output(&out);
         assert!(
             matches!(&outcome, UsageOutcome::Ok { subscription: Some(s), .. } if s == "max"),
             "{out}"
@@ -1888,7 +1953,7 @@ curl() { echo HIJACKED; }
             ("FAKE_BODY", "{}"),
         ]);
         assert_eq!(
-            parse_usage_output(&out, now),
+            parse_usage_output(&out),
             UsageOutcome::RateLimited {
                 retry_after_secs: Some(90)
             },
@@ -1900,7 +1965,7 @@ curl() { echo HIJACKED; }
         std::fs::write(sb.path("home/.curlrc"), "verbose\n").unwrap();
         let out = sb.run(&[("FAKE_STATUS", "000")]);
         assert_eq!(
-            parse_usage_output(&out, now),
+            parse_usage_output(&out),
             UsageOutcome::Unavailable {
                 status: None,
                 snippet: "curl exit 6: curl: (6) Could not resolve host: api.anthropic.com".into()
@@ -1912,7 +1977,7 @@ curl() { echo HIJACKED; }
         // curl older than 7.55 cannot read -H @-: host_unsupported, no call.
         let out = sb.run(&[("FAKE_CURL_VERSION", "7.29.0")]);
         assert_eq!(
-            parse_usage_output(&out, now),
+            parse_usage_output(&out),
             UsageOutcome::HostUnsupported {
                 detail: "curl is older than 7.55".into()
             },
@@ -1923,7 +1988,7 @@ curl() { echo HIJACKED; }
         // A credentials file without claudeAiOauth.
         sb.write_credentials(r#"{"somethingElse":{}}"#);
         let out = sb.run(&[]);
-        assert_eq!(parse_usage_output(&out, now), UsageOutcome::NoCredentials);
+        assert_eq!(parse_usage_output(&out), UsageOutcome::NoCredentials);
         assert!(sb.log("argv").is_none(), "curl must not run");
 
         // Nothing token-bearing in the tool shims' argv/env logs either (the
@@ -2022,6 +2087,74 @@ curl() { echo HIJACKED; }
         }
     }
 
+    /// L-2: a hostile login profile (`set -euo pipefail`, a function named
+    /// `unset`, shadowing `rm`/`curl`, the variable trace) cannot change the
+    /// script's control flow or make it leak the token.
+    #[test]
+    fn a_hostile_profile_does_not_change_the_outcome_or_leak() {
+        for tool in ["python3", "jq"] {
+            let Some(sb) = Sandbox::new(tool) else {
+                continue;
+            };
+            let hostile = sb.path("bash_env_hostile");
+            std::fs::write(
+                &hostile,
+                format!("{BASH_ENV}set -euo pipefail\nunset() {{ echo HIJACKED-unset; }}\n"),
+            )
+            .unwrap();
+            let env = [("BASH_ENV", hostile.to_str().unwrap())];
+            let now = unix_now();
+
+            // No credentials file: the failing `[ -f ]` test must not abort.
+            let out = sb.run(&env);
+            assert_eq!(out, "__usage_start__\n__no_credentials__\n", "{tool}");
+
+            // Access token expired: unset variables and failing tests abound.
+            sb.write_credentials(&creds(now - 5, now + 86_400));
+            let out = sb.run(&env);
+            assert_eq!(
+                parse_usage_output(&out),
+                UsageOutcome::AccessTokenExpired,
+                "{tool}: {out}"
+            );
+
+            // Valid: the full request path, token never on disk (the scan in
+            // `run` covers curl's env log too).
+            sb.write_credentials(&creds((now + 3600) * 1000, (now + 86_400) * 1000));
+            let out = sb.run(&env);
+            assert!(out.starts_with("__usage_start__\n"), "{tool}: {out}");
+            assert!(!out.contains("HIJACKED"), "{tool}: {out}");
+            assert!(
+                matches!(parse_usage_output(&out), UsageOutcome::Ok { .. }),
+                "{tool}: {out}"
+            );
+            assert_eq!(
+                sb.log("auth_cksum").unwrap(),
+                cksum_of(&format!("Authorization: Bearer {FAKE_TOKEN}\n"))
+            );
+            assert!(sb.log("curl_env").is_some_and(|e| e.contains("PATH=")));
+            let tmpdir = sb.log("tmpdir").unwrap();
+            assert!(
+                !Path::new(tmpdir.trim()).exists(),
+                "{tool}: temp dir removed"
+            );
+
+            // No HTTP response: curl exits non-zero and writes no headers
+            // file — under the profile's errexit/pipefail this would abort
+            // the script before it reports anything.
+            let out = sb.run(&[env[0], ("FAKE_STATUS", "000")]);
+            assert_eq!(
+                parse_usage_output(&out),
+                UsageOutcome::Unavailable {
+                    status: None,
+                    snippet: "curl exit 6: curl: (6) Could not resolve host: api.anthropic.com"
+                        .into()
+                },
+                "{tool}: {out}"
+            );
+        }
+    }
+
     // ── host order ─────────────────────────────────────────────────────────
 
     #[test]
@@ -2056,6 +2189,123 @@ curl() { echo HIJACKED; }
         assert!(source_hosts("C", &hosts, None).is_empty());
     }
 
+    // ── clock ──────────────────────────────────────────────────────────────
+
+    /// A manually advanced clock. `advance` moves both the monotonic and the
+    /// wall clock; `set_unix` moves only the wall clock (a stale or stepped
+    /// wall clock must not affect scheduling).
+    struct FakeClock {
+        base: Instant,
+        state: Mutex<(Duration, i64)>,
+    }
+
+    impl FakeClock {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                base: Instant::now(),
+                state: Mutex::new((Duration::ZERO, NOW)),
+            })
+        }
+
+        fn advance(&self, secs: u64) {
+            let mut st = self.state.lock().unwrap();
+            st.0 += Duration::from_secs(secs);
+            st.1 += secs as i64;
+        }
+
+        fn set_unix(&self, unix: i64) {
+            self.state.lock().unwrap().1 = unix;
+        }
+    }
+
+    impl Clock for FakeClock {
+        fn now_instant(&self) -> Instant {
+            self.base + self.state.lock().unwrap().0
+        }
+
+        fn now_unix(&self) -> i64 {
+            self.state.lock().unwrap().1
+        }
+    }
+
+    fn fake_cache() -> (Arc<FakeClock>, Mutex<UsageCache>) {
+        let clock = FakeClock::new();
+        let cache = Mutex::new(UsageCache::with_clock(clock.clone()));
+        (clock, cache)
+    }
+
+    /// An `SshExec` whose `run_bounded` takes `took` seconds of fake time,
+    /// so a test can prove the next try is scheduled from the attempt's END.
+    struct SlowSsh {
+        inner: FakeSsh,
+        clock: Arc<FakeClock>,
+        took: u64,
+    }
+
+    #[async_trait::async_trait]
+    impl SshExec for SlowSsh {
+        async fn run(
+            &self,
+            host: &str,
+            args: &[&str],
+            timeout: Duration,
+        ) -> Result<std::process::Output, IpcError> {
+            self.inner.run(host, args, timeout).await
+        }
+
+        async fn run_bounded(
+            &self,
+            host: &str,
+            args: &[&str],
+            connect_timeout: Duration,
+            wall_clock: Duration,
+        ) -> Result<std::process::Output, IpcError> {
+            self.clock.advance(self.took);
+            self.inner
+                .run_bounded(host, args, connect_timeout, wall_clock)
+                .await
+        }
+
+        async fn run_cancellable(
+            &self,
+            host: &str,
+            args: &[&str],
+            timeout: Duration,
+            token: tokio_util::sync::CancellationToken,
+        ) -> Result<std::process::Output, IpcError> {
+            self.inner.run_cancellable(host, args, timeout, token).await
+        }
+
+        async fn run_bounded_cancellable(
+            &self,
+            host: &str,
+            args: &[&str],
+            connect_timeout: Duration,
+            wall_clock: Duration,
+            token: tokio_util::sync::CancellationToken,
+        ) -> Result<std::process::Output, IpcError> {
+            self.inner
+                .run_bounded_cancellable(host, args, connect_timeout, wall_clock, token)
+                .await
+        }
+
+        async fn upload_file(
+            &self,
+            host: &str,
+            local_path: &Path,
+            remote_path: &str,
+            timeout: Duration,
+        ) -> Result<(), IpcError> {
+            self.inner
+                .upload_file(host, local_path, remote_path, timeout)
+                .await
+        }
+
+        async fn remote_home(&self, host: &str) -> Result<String, IpcError> {
+            self.inner.remote_home(host).await
+        }
+    }
+
     // ── fetch ──────────────────────────────────────────────────────────────
 
     fn usage_calls(fake: &FakeSsh, h: &str) -> usize {
@@ -2072,15 +2322,15 @@ curl() { echo HIJACKED; }
         fake.on_host(
             "a",
             Match::script_contains("api/oauth/usage"),
-            Reply::ok("__expires_at__=1\n__access_token_expired__\n"),
+            Reply::ok("__usage_start__\n__expires_at__=1\n__access_token_expired__\n"),
         )
         .on_host(
             "b",
             Match::script_contains("api/oauth/usage"),
             Reply::ok(&ok_output(OK_BODY)),
         );
-        let cache = Mutex::new(UsageCache::new());
-        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW, false).await;
+        let (clock, cache) = fake_cache();
+        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, false).await;
         assert_eq!(snap.status, UsageOutcomeKind::Ok);
         assert_eq!(snap.source_host.as_deref(), Some("b"));
         assert_eq!(snap.subscription.as_deref(), Some("max"));
@@ -2099,7 +2349,8 @@ curl() { echo HIJACKED; }
 
         // Next due fetch: b (sticky) is asked first, a is not asked at all.
         fake.clear_calls();
-        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW + 300, false).await;
+        clock.advance(300);
+        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, false).await;
         assert_eq!(snap.status, UsageOutcomeKind::Ok);
         assert_eq!(fake.calls().len(), 1);
         assert_eq!(fake.calls()[0].host, "b");
@@ -2115,8 +2366,8 @@ curl() { echo HIJACKED; }
             Reply::ok("__subscription__=max\n__http_status__=429\n__body__\n{}"),
         )
         .on_host("b", Match::Any, Reply::ok(&ok_output(OK_BODY)));
-        let cache = Mutex::new(UsageCache::new());
-        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW, false).await;
+        let (_clock, cache) = fake_cache();
+        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, false).await;
         assert_eq!(snap.status, UsageOutcomeKind::RateLimited);
         assert_eq!(snap.source_host.as_deref(), Some("a"));
         assert_eq!(snap.next_try_at, NOW + 300);
@@ -2145,8 +2396,8 @@ curl() { echo HIJACKED; }
                 Match::Any,
                 Reply::ok("__http_status__=404\n__body__\n{\"error\":\"gone\"}"),
             );
-        let cache = Mutex::new(UsageCache::new());
-        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW, false).await;
+        let (_clock, cache) = fake_cache();
+        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, false).await;
         assert_eq!(snap.status, UsageOutcomeKind::Unavailable);
         assert_eq!(snap.source_host.as_deref(), Some("c"));
         assert_eq!(
@@ -2163,18 +2414,66 @@ curl() { echo HIJACKED; }
         let fake = FakeSsh::new();
         fake.hanging("a")
             .on_host("b", Match::Any, Reply::ok(&ok_output(OK_BODY)))
-            .set_wall_clock(Duration::from_millis(1100));
-        let cache = Mutex::new(UsageCache::new());
-        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW, false).await;
+            .set_wall_clock(Duration::from_millis(50));
+        let (_clock, cache) = fake_cache();
+        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, false).await;
         assert!(fake.calls_for("b").is_empty(), "the request may have left");
         assert_eq!(snap.status, UsageOutcomeKind::NoOnlineHost);
         assert!(
             snap.detail.as_deref().unwrap().starts_with("a: "),
             "{snap:?}"
         );
-        // Scheduled from the END of the attempt (≥ 1 s after it started).
-        assert!(snap.next_try_at >= NOW + 1 + 300, "{}", snap.next_try_at);
-        assert!(snap.next_try_at <= NOW + 10 + 300, "{}", snap.next_try_at);
+    }
+
+    #[tokio::test]
+    async fn the_next_try_is_scheduled_from_the_end_of_the_attempt() {
+        let hosts = vec![host("a", Some("acct"), true)];
+        let inner = FakeSsh::new();
+        inner.on(Match::Any, Reply::ok(&ok_output(OK_BODY)));
+        let (clock, cache) = fake_cache();
+        let ssh = SlowSsh {
+            inner: inner.clone(),
+            clock: clock.clone(),
+            took: 80,
+        };
+        let snap = fetch_account_usage_with("acct", &hosts, &ssh, &cache, false).await;
+        assert_eq!(snap.fetched_at, Some(NOW + 80));
+        assert_eq!(snap.next_try_at, NOW + 80 + 300);
+        clock.advance(300 - 80); // 300 s after the attempt STARTED
+        fetch_account_usage_with("acct", &hosts, &ssh, &cache, false).await;
+        assert_eq!(inner.calls().len(), 1, "80 s short of the floor");
+        clock.advance(79);
+        fetch_account_usage_with("acct", &hosts, &ssh, &cache, false).await;
+        assert_eq!(inner.calls().len(), 1, "1 s short of the floor");
+        clock.advance(1);
+        fetch_account_usage_with("acct", &hosts, &ssh, &cache, false).await;
+        assert_eq!(inner.calls().len(), 2);
+    }
+
+    /// M-1: with a caller-supplied timestamp, a stale `now` (a poller that
+    /// read the clock once per sweep) shortened the floor. Time now comes
+    /// only from the cache's monotonic clock; a wall clock that lags or
+    /// steps back changes nothing.
+    #[tokio::test]
+    async fn a_stale_or_stepped_wall_clock_cannot_shorten_the_floor() {
+        let hosts = vec![host("a", Some("acct"), true)];
+        let fake = FakeSsh::new();
+        fake.on(Match::Any, Reply::ok(&ok_output(OK_BODY)));
+        let (clock, cache) = fake_cache();
+        fetch_account_usage_with("acct", &hosts, &fake, &cache, false).await;
+        assert_eq!(fake.calls().len(), 1);
+        // 100 s of real (monotonic) time pass, but the wall clock reads an
+        // hour in the past — as a stale or stepped-back clock would.
+        clock.advance(100);
+        clock.set_unix(NOW - 3600);
+        fetch_account_usage_with("acct", &hosts, &fake, &cache, true).await;
+        // And far in the future.
+        clock.set_unix(NOW + 86_400);
+        fetch_account_usage_with("acct", &hosts, &fake, &cache, true).await;
+        assert_eq!(fake.calls().len(), 1, "the floor is monotonic");
+        clock.advance(200);
+        fetch_account_usage_with("acct", &hosts, &fake, &cache, false).await;
+        assert_eq!(fake.calls().len(), 2);
     }
 
     #[tokio::test]
@@ -2183,41 +2482,99 @@ curl() { echo HIJACKED; }
         for reply in [
             Reply::fail(255, "Connection to a closed by remote host.\r\n"),
             Reply::fail(255, "client_loop: send disconnect: Broken pipe\r\n"),
+            // A profile line that merely LOOKS like a connect failure, after
+            // the script started.
+            Reply::Exit {
+                code: 255,
+                stdout: b"__usage_start__\n".to_vec(),
+                stderr: b"proxy check: ssh: connect to host proxy port 3128: Connection refused\nConnection refused\n".to_vec(),
+            },
+            // Even with a genuine-looking last line, the start marker wins.
+            Reply::Exit {
+                code: 255,
+                stdout: b"__usage_start__\n".to_vec(),
+                stderr: b"ssh: connect to host a port 22: Connection refused\n".to_vec(),
+            },
+            // No marker, but ssh's message is not the LAST stderr line.
+            Reply::fail(
+                255,
+                "ssh: connect to host a port 22: Connection refused\nsomething else\n",
+            ),
             Reply::fail(1, ""),
             // Output at the cap: markers may have been cut off.
             Reply::ok(&"x".repeat(OUTPUT_CAP + 10)),
         ] {
             let fake = FakeSsh::new();
-            fake.on_host("a", Match::Any, reply).on_host(
-                "b",
-                Match::Any,
-                Reply::ok(&ok_output(OK_BODY)),
-            );
-            let cache = Mutex::new(UsageCache::new());
-            let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW, false).await;
-            assert!(fake.calls_for("b").is_empty(), "{snap:?}");
+            fake.on_host("a", Match::Any, reply.clone())
+                .on_host("b", Match::Any, Reply::ok(&ok_output(OK_BODY)));
+            let (_clock, cache) = fake_cache();
+            let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, false).await;
+            assert!(fake.calls_for("b").is_empty(), "{reply:?} → {snap:?}");
             assert_eq!(snap.status, UsageOutcomeKind::NoOnlineHost);
         }
     }
 
-    #[test]
-    fn connect_failures_are_recognised() {
-        for s in [
-            "ssh: connect to host h port 22: Connection refused",
-            "ssh: Could not resolve hostname h: nodename nor servname provided",
-            "Permission denied (publickey).",
-            "Host key verification failed.",
-            "kex_exchange_identification: read: Connection reset by peer",
-            "Connection closed by 10.0.0.1 port 22",
+    #[tokio::test]
+    async fn a_genuine_connect_failure_falls_back() {
+        let hosts = vec![host("a", Some("acct"), true), host("b", Some("acct"), true)];
+        for stderr in [
+            "ssh: connect to host a port 22: Connection refused\r\n",
+            "Warning: Permanently added 'a' to known hosts.\nssh: Could not resolve hostname a: Name or service not known\n",
+            "Permission denied (publickey).\n",
+            "Host key verification failed.\n",
+            "kex_exchange_identification: read: Connection reset by peer\n",
+            "Connection closed by 10.0.0.1 port 22\n",
         ] {
-            assert!(connection_never_established(s), "{s}");
+            let fake = FakeSsh::new();
+            fake.on_host("a", Match::Any, Reply::fail(255, stderr))
+                .on_host("b", Match::Any, Reply::ok(&ok_output(OK_BODY)));
+            let (_clock, cache) = fake_cache();
+            let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, false).await;
+            assert_eq!(snap.status, UsageOutcomeKind::Ok, "{stderr}");
+            assert_eq!(snap.source_host.as_deref(), Some("b"));
         }
-        for s in [
-            "Connection to h closed by remote host.",
-            "client_loop: send disconnect: Broken pipe",
-            "",
-        ] {
-            assert!(!connection_never_established(s), "{s}");
+    }
+
+    #[test]
+    fn connect_failure_detection_is_strict() {
+        let yes = [
+            ("", "ssh: connect to host h port 22: Connection refused"),
+            (
+                "",
+                "ssh: Could not resolve hostname h: nodename nor servname provided",
+            ),
+            ("", "Permission denied (publickey)."),
+            ("", "Host key verification failed."),
+            (
+                "",
+                "kex_exchange_identification: read: Connection reset by peer",
+            ),
+            ("", "Connection closed by 10.0.0.1 port 22"),
+            (
+                "banner\n",
+                "debug noise\nssh: connect to host h port 22: Operation timed out\r\n",
+            ),
+        ];
+        for (out, err) in yes {
+            assert!(connection_never_established(out, err), "{err}");
+        }
+        let no = [
+            (
+                "__usage_start__\n",
+                "ssh: connect to host h port 22: Connection refused",
+            ),
+            ("", "Connection refused"),
+            ("", "Connection to h closed by remote host."),
+            ("", "client_loop: send disconnect: Broken pipe"),
+            ("", "Connection closed by remote"),
+            (
+                "",
+                "ssh: connect to host h port 22: Connection refused\nlater line",
+            ),
+            ("", ""),
+        ];
+        for (out, err) in no {
+            assert!(!connection_never_established(out, err), "{out:?} {err}");
         }
     }
 
@@ -2236,8 +2593,8 @@ curl() { echo HIJACKED; }
             Match::Any,
             Reply::ok(&ok_output(OK_BODY)),
         );
-        let cache = Mutex::new(UsageCache::new());
-        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW, false).await;
+        let (_clock, cache) = fake_cache();
+        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, false).await;
         assert_eq!(snap.status, UsageOutcomeKind::TokenRejected);
         assert_eq!(fake.calls_for("b").len(), 1);
         assert!(fake.calls_for("c").is_empty());
@@ -2248,8 +2605,8 @@ curl() { echo HIJACKED; }
         fake.on_host("a", Match::Any, Reply::ok(rejected))
             .on_host("b", Match::Any, Reply::ok("__no_credentials__\n"))
             .on_host("c", Match::Any, Reply::ok(&ok_output(OK_BODY)));
-        let cache = Mutex::new(UsageCache::new());
-        fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW, false).await;
+        let (_clock, cache) = fake_cache();
+        fetch_account_usage_with("acct", &hosts, &fake, &cache, false).await;
         assert!(fake.calls_for("c").is_empty());
 
         // a rejected, b answers → ok via b.
@@ -2259,8 +2616,8 @@ curl() { echo HIJACKED; }
             Match::Any,
             Reply::ok(&ok_output(OK_BODY)),
         );
-        let cache = Mutex::new(UsageCache::new());
-        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW, false).await;
+        let (_clock, cache) = fake_cache();
+        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, false).await;
         assert_eq!(snap.status, UsageOutcomeKind::Ok);
         assert_eq!(snap.source_host.as_deref(), Some("b"));
     }
@@ -2274,8 +2631,8 @@ curl() { echo HIJACKED; }
         let fake = FakeSsh::new();
         fake.on_host("local", Match::Any, Reply::ok("__no_credentials__\n"))
             .on_host("trn", Match::Any, Reply::ok("__login_expired__\n"));
-        let cache = Mutex::new(UsageCache::new());
-        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW, false).await;
+        let (clock, cache) = fake_cache();
+        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, false).await;
         assert_eq!(snap.status, UsageOutcomeKind::LoginExpired);
         assert_eq!(snap.next_try_at, NOW + 300);
         assert_eq!(
@@ -2283,9 +2640,11 @@ curl() { echo HIJACKED; }
             Some("trn: login expired; local: no credentials file")
         );
         assert_eq!(cache.lock().unwrap().entries["acct"].backoff_secs, 0);
-        fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW + 300, false).await;
-        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW + 600, false).await;
-        assert_eq!(snap.next_try_at, NOW + 900);
+        clock.advance(300);
+        fetch_account_usage_with("acct", &hosts, &fake, &cache, false).await;
+        clock.advance(300);
+        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, false).await;
+        assert_eq!(snap.next_try_at, NOW + 900, "no escalation");
     }
 
     #[tokio::test]
@@ -2293,12 +2652,13 @@ curl() { echo HIJACKED; }
         let hosts = vec![host("a", Some("acct"), true)];
         let fake = FakeSsh::new();
         fake.unreachable("a");
-        let cache = Mutex::new(UsageCache::new());
-        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW, false).await;
+        let (clock, cache) = fake_cache();
+        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, false).await;
         assert_eq!(snap.status, UsageOutcomeKind::NoOnlineHost);
         assert_eq!(snap.next_try_at, NOW + 300);
         assert!(snap.detail.unwrap().starts_with("a: exit 255"));
-        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW + 300, false).await;
+        clock.advance(300);
+        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, false).await;
         assert_eq!(snap.next_try_at, NOW + 300 + 600);
     }
 
@@ -2309,11 +2669,12 @@ curl() { echo HIJACKED; }
             host("b", Some("other"), true),
         ];
         let fake = FakeSsh::new();
-        let cache = Mutex::new(UsageCache::new());
-        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW, false).await;
+        let (_clock, cache) = fake_cache();
+        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, false).await;
         assert_eq!(snap.status, UsageOutcomeKind::NoOnlineHost);
         assert!(fake.calls().is_empty());
         assert_eq!(snap.next_try_at, 0, "no request made; schedule untouched");
+        assert!(cache.lock().unwrap().due("acct"));
     }
 
     #[tokio::test]
@@ -2321,28 +2682,32 @@ curl() { echo HIJACKED; }
         let hosts = vec![host("a", Some("acct"), true)];
         let fake = FakeSsh::new();
         fake.on(Match::Any, Reply::ok(&ok_output(OK_BODY)));
-        let cache = Mutex::new(UsageCache::new());
-        let first = fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW, true).await;
+        let (clock, cache) = fake_cache();
+        let first = fetch_account_usage_with("acct", &hosts, &fake, &cache, true).await;
         assert_eq!(fake.calls().len(), 1);
-        for dt in [1, 60, 299] {
-            let snap =
-                fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW + dt, true).await;
+        for dt in [1, 59, 239] {
+            clock.advance(dt);
+            let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, true).await;
             assert_eq!(snap, first);
         }
         assert_eq!(fake.calls().len(), 1, "no ssh call inside the floor");
-        fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW + 300, true).await;
+        clock.advance(1);
+        fetch_account_usage_with("acct", &hosts, &fake, &cache, true).await;
         assert_eq!(fake.calls().len(), 2);
     }
 
     #[test]
     fn never_fetched_snapshot() {
-        let snap = UsageCache::new().snapshot("acct");
+        let (_clock, cache) = fake_cache();
+        let c = cache.lock().unwrap();
+        let snap = c.snapshot("acct");
         assert_eq!(snap.status, UsageOutcomeKind::NeverFetched);
         assert!(snap.usage.is_none());
         let json = serde_json::to_value(&snap).unwrap();
         assert_eq!(json["status"], "never_fetched");
         assert!(json["usage"].is_null());
-        assert!(UsageCache::new().due("acct", 0));
+        assert!(c.due("acct"));
+        assert!(UsageCache::new().due("acct"), "the real-clock cache works");
     }
 
     // ── backoff arithmetic ─────────────────────────────────────────────────
@@ -2372,7 +2737,7 @@ curl() { echo HIJACKED; }
         let UsageOutcome::Ok {
             usage,
             subscription,
-        } = parse_usage_output(&ok_output(OK_BODY), NOW)
+        } = parse_usage_output(&ok_output(OK_BODY))
         else {
             panic!()
         };
@@ -2382,23 +2747,46 @@ curl() { echo HIJACKED; }
         })
     }
 
+    fn fake_plain_cache() -> (Arc<FakeClock>, UsageCache) {
+        let clock = FakeClock::new();
+        let cache = UsageCache::with_clock(clock.clone());
+        (clock, cache)
+    }
+
     #[test]
     fn rate_limit_backoff_with_and_without_retry_after() {
-        let mut c = UsageCache::new();
-        c.record("a", rate_limited(None), NOW);
+        let (clock, mut c) = fake_plain_cache();
+        c.record("a", rate_limited(None));
         assert_eq!(c.entries["a"].next_try_at, NOW + 300);
-        assert!(!c.due("a", NOW + 299));
-        assert!(c.due("a", NOW + 300));
-        c.record("a", rate_limited(None), NOW);
-        assert_eq!(c.entries["a"].next_try_at, NOW + 600);
-        // Retry-After larger than the backoff wins.
-        c.record("a", rate_limited(Some(3000)), NOW);
+        clock.advance(299);
+        assert!(!c.due("a"));
+        clock.advance(1);
+        assert!(c.due("a"));
+        // Second 429 at NOW+300: backoff doubles to 600.
+        c.record("a", rate_limited(None));
+        assert_eq!(c.entries["a"].next_try_at, NOW + 300 + 600);
+        clock.advance(599);
+        assert!(!c.due("a"));
+        clock.advance(1);
+        assert!(c.due("a"));
+        // Retry-After larger than the backoff (1200) wins.
+        let t = NOW + 900;
+        c.record("a", rate_limited(Some(3000)));
         assert_eq!(c.entries["a"].backoff_secs, 1200);
-        assert_eq!(c.entries["a"].next_try_at, NOW + 3000);
-        // Retry-After smaller than the backoff loses.
-        c.record("a", rate_limited(Some(10)), NOW);
+        assert_eq!(c.entries["a"].next_try_at, t + 3000);
+        clock.advance(2999);
+        assert!(!c.due("a"));
+        clock.advance(1);
+        assert!(c.due("a"));
+        // Retry-After smaller than the backoff (1800) loses.
+        let t = t + 3000;
+        c.record("a", rate_limited(Some(10)));
         assert_eq!(c.entries["a"].backoff_secs, 1800);
-        assert_eq!(c.entries["a"].next_try_at, NOW + 1800);
+        assert_eq!(c.entries["a"].next_try_at, t + 1800);
+        clock.advance(1799);
+        assert!(!c.due("a"));
+        clock.advance(1);
+        assert!(c.due("a"));
         let snap = c.snapshot("a");
         assert_eq!(snap.status, UsageOutcomeKind::RateLimited);
         assert_eq!(
@@ -2409,44 +2797,53 @@ curl() { echo HIJACKED; }
 
     #[test]
     fn unavailable_backoff_doubles_to_the_cap_and_resets_after_ok() {
-        let mut c = UsageCache::new();
+        let (_clock, mut c) = fake_plain_cache();
         let mut seen = vec![];
         for _ in 0..6 {
-            c.record("a", unavailable(), NOW);
+            c.record("a", unavailable());
             seen.push(c.entries["a"].next_try_at - NOW);
         }
         assert_eq!(seen, vec![300, 600, 1200, 1800, 1800, 1800]);
-        c.record("a", ok_result(), NOW);
+        c.record("a", ok_result());
         assert_eq!(c.entries["a"].backoff_secs, 0);
         assert_eq!(c.entries["a"].next_try_at, NOW + 300);
-        c.record("a", unavailable(), NOW);
+        c.record("a", unavailable());
         assert_eq!(c.entries["a"].next_try_at, NOW + 300, "backoff restarted");
     }
 
     #[test]
     fn a_clock_stepping_backwards_does_not_freeze_polling() {
-        let mut c = UsageCache::new();
-        c.record("a", ok_result(), NOW);
-        assert!(!c.due("a", NOW + 299));
-        // The clock jumps back an hour: the 300 s wait is re-based on it.
-        let back = NOW - 3600;
-        assert!(!c.due("a", back));
-        assert!(!c.due("a", back + 299));
-        assert!(c.due("a", back + 300));
-        // Rate-limit waits survive a re-base too (not reset to the floor).
-        c.record("a", rate_limited(Some(3000)), NOW);
-        assert!(!c.due("a", NOW - 10_000));
-        assert!(!c.due("a", NOW - 10_000 + 2999));
-        assert!(c.due("a", NOW - 10_000 + 3000));
+        let (clock, mut c) = fake_plain_cache();
+        c.record("a", ok_result());
+        // The wall clock jumps back an hour; monotonic time moves on.
+        clock.set_unix(NOW - 3600);
+        clock.advance(299);
+        assert!(!c.due("a"));
+        clock.advance(1);
+        assert!(c.due("a"), "due 300 s later despite the wall clock");
+        // A rate-limit wait keeps its full length across a step back too.
+        c.record("a", rate_limited(Some(3000)));
+        clock.set_unix(NOW - 100_000);
+        clock.advance(2999);
+        assert!(!c.due("a"));
+        clock.advance(1);
+        assert!(c.due("a"));
+        // And a wall clock jumping FORWARD does not make it due early.
+        c.record("a", ok_result());
+        clock.set_unix(NOW + 1_000_000);
+        assert!(!c.due("a"));
     }
 
     #[test]
     fn last_known_values_survive_later_failures() {
-        let mut c = UsageCache::new();
-        c.record("a", ok_result(), NOW);
+        let (clock, mut c) = fake_plain_cache();
+        c.record("a", ok_result());
         let ok = c.snapshot("a");
-        c.record("a", unavailable(), NOW + 300);
-        c.record("a", rate_limited(Some(60)), NOW + 900);
+        clock.advance(300);
+        c.record("a", unavailable());
+        clock.advance(600);
+        c.record("a", rate_limited(Some(60)));
+        clock.advance(1100);
         c.record(
             "a",
             FetchResult::AllFailed {
@@ -2454,9 +2851,9 @@ curl() { echo HIJACKED; }
                 transport_error: false,
                 notes: vec!["h: login expired".into()],
             },
-            NOW + 2000,
         );
-        c.record("a", FetchResult::NoOnlineHost, NOW + 2400);
+        clock.advance(400);
+        c.record("a", FetchResult::NoOnlineHost);
         let snap = c.snapshot("a");
         assert_eq!(snap.status, UsageOutcomeKind::NoOnlineHost);
         assert_eq!(snap.usage, ok.usage);
