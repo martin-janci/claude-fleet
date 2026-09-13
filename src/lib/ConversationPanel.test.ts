@@ -185,4 +185,34 @@ describe('ConversationPanel', () => {
 
     expect(screen.getByTestId('conv-prompt')).toBe(node);
   });
+
+  it('the relative-time label advances on an independent clock while the poll payload stays identical', async () => {
+    const start = new Date('2026-09-13T12:00:00.000Z');
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    vi.setSystemTime(start);
+    const c = conv({
+      turns: [
+        {
+          prompt: 'fix the bug',
+          at: start.toISOString(),
+          items: [{ kind: 'text', text: 'looking into it' }],
+        },
+      ],
+    });
+    mockedConv.mockReturnValue(ok(c));
+    render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    expect(screen.getByTestId('conv-prompt').textContent).toContain('just now');
+
+    // Advance a full minute: the 5s poll fires several times with an
+    // unchanged payload (never touching `conv`), but the label still ages
+    // because its clock (`nowMs`) ticks independently every 30s.
+    vi.advanceTimersByTime(60_000);
+    await Promise.resolve();
+    await tick();
+
+    expect(screen.getByTestId('conv-prompt').textContent).toContain('1m ago');
+  });
 });

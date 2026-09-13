@@ -40,7 +40,6 @@
       errorMsg = null;
       if (!sameConversation(conv, r.value)) {
         conv = r.value;
-        nowMs = Date.now();
         if (pinned) {
           await tick();
           if (scroller) scroller.scrollTop = scroller.scrollHeight;
@@ -71,6 +70,15 @@
     const t = setInterval(() => {
       if (document.visibilityState === 'visible') void untrack(load);
     }, CONVERSATION_POLL_MS);
+    return () => clearInterval(t);
+  });
+
+  // Independent clock for the relative-time labels, decoupled from content
+  // changes: an unchanged conversation (the common case between polls) must
+  // still see "just now" age into "1m ago" etc. (same pattern as
+  // SessionDetails.svelte's `nowSec` ticker).
+  $effect(() => {
+    const t = setInterval(() => (nowMs = Date.now()), 30_000);
     return () => clearInterval(t);
   });
 
