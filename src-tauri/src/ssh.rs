@@ -214,6 +214,29 @@ impl SshClient {
         self.run_child(host, cmd, wall_clock, None, "E_SSH").await
     }
 
+    /// `run_bounded` with stdout and stderr each capped at `max_output`
+    /// bytes. Output past the cap is read and discarded (so the child never
+    /// blocks on a full pipe) rather than buffered, so a compromised host or
+    /// a noisy login profile cannot stream unbounded data into the app for
+    /// the whole wall clock.
+    pub async fn run_bounded_capped(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+        max_output: usize,
+    ) -> Result<Output, IpcError> {
+        self.inner.seen.insert(host.to_string(), ());
+        let mut cmd = tokio::process::Command::new("ssh");
+        for opt in self.mux_opts(host, connect_timeout) {
+            cmd.arg(opt);
+        }
+        cmd.arg("--").arg(host).args(args);
+        self.run_child_capped(host, cmd, wall_clock, None, "E_SSH", Some(max_output))
+            .await
+    }
+
     /// `run_bounded` raced against a `CancellationToken`, for a long-running
     /// script that must keep an independent connect timeout / wall-clock
     /// pair (see `run_bounded`'s doc comment) while still being abortable —
@@ -337,10 +360,25 @@ impl SshClient {
     pub(crate) async fn run_child(
         &self,
         host: &str,
+        cmd: tokio::process::Command,
+        wall_clock: Duration,
+        token: Option<CancellationToken>,
+        spawn_code: &str,
+    ) -> Result<Output, IpcError> {
+        self.run_child_capped(host, cmd, wall_clock, token, spawn_code, None)
+            .await
+    }
+
+    /// `run_child` with an optional per-stream byte cap (see
+    /// `run_bounded_capped`). `None` keeps the uncapped behaviour.
+    pub(crate) async fn run_child_capped(
+        &self,
+        host: &str,
         mut cmd: tokio::process::Command,
         wall_clock: Duration,
         token: Option<CancellationToken>,
         spawn_code: &str,
+        max_output: Option<usize>,
     ) -> Result<Output, IpcError> {
         let in_flight = InFlight::enter(&self.inner, host);
         let mut child = cmd
@@ -357,20 +395,8 @@ impl SshClient {
         // full pipe.
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
-        let stdout_task = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut s) = stdout {
-                let _ = tokio::io::AsyncReadExt::read_to_end(&mut s, &mut buf).await;
-            }
-            buf
-        });
-        let stderr_task = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut s) = stderr {
-                let _ = tokio::io::AsyncReadExt::read_to_end(&mut s, &mut buf).await;
-            }
-            buf
-        });
+        let stdout_task = tokio::spawn(read_capped(stdout, max_output));
+        let stderr_task = tokio::spawn(read_capped(stderr, max_output));
 
         // Without a token this arm never fires; `select!` still needs a
         // future, so use a pending one.
@@ -572,6 +598,37 @@ impl Default for SshClient {
     }
 }
 
+/// Drain `stream` to EOF, keeping at most `cap` bytes (all of them for
+/// `None`). Bytes past the cap are read and dropped so the child keeps
+/// running instead of blocking on a full pipe.
+async fn read_capped<R>(stream: Option<R>, cap: Option<usize>) -> Vec<u8>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut buf = Vec::new();
+    let Some(mut s) = stream else {
+        return buf;
+    };
+    match cap {
+        None => {
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut s, &mut buf).await;
+        }
+        Some(cap) => {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match tokio::io::AsyncReadExt::read(&mut s, &mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let room = cap.saturating_sub(buf.len());
+                        buf.extend_from_slice(&chunk[..n.min(room)]);
+                    }
+                }
+            }
+        }
+    }
+    buf
+}
+
 /// The transport the service layer talks to a host through. `SshClient` is
 /// the production implementation (ControlMaster-multiplexed `ssh`);
 /// tests use `LocalExec` (the same argv through a local `bash -c`) and a
@@ -607,6 +664,25 @@ pub trait SshExec: Send + Sync {
         connect_timeout: Duration,
         wall_clock: Duration,
     ) -> Result<Output, IpcError>;
+
+    /// `run_bounded` with stdout and stderr each capped at `max_output`
+    /// bytes. The default truncates after the fact (fine for the test
+    /// transports); `SshClient` overrides it to bound memory while reading.
+    async fn run_bounded_capped(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+        max_output: usize,
+    ) -> Result<Output, IpcError> {
+        let mut out = self
+            .run_bounded(host, args, connect_timeout, wall_clock)
+            .await?;
+        out.stdout.truncate(max_output);
+        out.stderr.truncate(max_output);
+        Ok(out)
+    }
 
     async fn run_cancellable(
         &self,
@@ -653,6 +729,18 @@ impl SshExec for SshClient {
         wall_clock: Duration,
     ) -> Result<Output, IpcError> {
         SshClient::run_bounded(self, host, args, connect_timeout, wall_clock).await
+    }
+
+    async fn run_bounded_capped(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+        max_output: usize,
+    ) -> Result<Output, IpcError> {
+        SshClient::run_bounded_capped(self, host, args, connect_timeout, wall_clock, max_output)
+            .await
     }
 
     async fn run_cancellable(
@@ -710,6 +798,19 @@ impl<T: SshExec + ?Sized> SshExec for Arc<T> {
     ) -> Result<Output, IpcError> {
         (**self)
             .run_bounded(host, args, connect_timeout, wall_clock)
+            .await
+    }
+
+    async fn run_bounded_capped(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+        max_output: usize,
+    ) -> Result<Output, IpcError> {
+        (**self)
+            .run_bounded_capped(host, args, connect_timeout, wall_clock, max_output)
             .await
     }
 
@@ -1220,6 +1321,56 @@ mod tests {
         assert_eq!(out.status.code(), Some(3));
         assert_eq!(out.stdout, b"hello");
         assert_eq!(out.stderr, b"err");
+    }
+
+    #[tokio::test]
+    async fn run_child_capped_keeps_at_most_the_cap_and_still_drains() {
+        if !have_sh() {
+            eprintln!("skipping: no sh on this box");
+            return;
+        }
+        let c = SshClient::new();
+        // ~1 MB on each stream; the child must still exit 0 (not block on a
+        // full pipe) and only the cap is kept.
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args([
+            "-c",
+            "i=0; while [ $i -lt 20000 ]; do echo 0123456789012345678901234567890123456789012345678; echo e012345678901234567890123456789012345678901234567 >&2; i=$((i+1)); done",
+        ]);
+        let out = c
+            .run_child_capped(
+                "fleet-test-nonexistent-host",
+                cmd,
+                Duration::from_secs(60),
+                None,
+                "E_SSH",
+                Some(1000),
+            )
+            .await
+            .expect("completes");
+        assert!(out.status.success());
+        assert_eq!(out.stdout.len(), 1000);
+        assert_eq!(out.stderr.len(), 1000);
+        assert!(out.stdout.starts_with(b"0123456789"));
+
+        // `None` keeps everything.
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args([
+            "-c",
+            "i=0; while [ $i -lt 100 ]; do echo 123456789; i=$((i+1)); done",
+        ]);
+        let out = c
+            .run_child_capped(
+                "fleet-test-nonexistent-host",
+                cmd,
+                Duration::from_secs(60),
+                None,
+                "E_SSH",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.stdout.len(), 1000);
     }
 
     #[tokio::test]

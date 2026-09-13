@@ -6,13 +6,17 @@
 //! the account's OAuth access token. That token must never leave the host it
 //! lives on, so fleet does not fetch the endpoint itself: it runs
 //! [`usage_script`] ON a host logged in to the account (over SSH, via
-//! `bash -lc`). The script reads the token there, hands it to `curl` through a
-//! private header file, and prints only machine-readable markers, the HTTP
+//! `bash -lc`). The script reads the token there and pipes the header
+//! straight into `curl`; it prints only machine-readable markers, the HTTP
 //! status and the response body. Fleet's process never holds the token.
 //!
-//! Security invariants (enforced by tests on the script text and by a test
-//! that runs the script locally against a fake `curl` and fake credentials):
-//! - the token never reaches stdout, stderr, argv or a shell variable;
+//! Security invariants (enforced by tests on the script text and by tests
+//! that run the script locally against a fake `curl` and fake credentials,
+//! tracing every shell variable and scanning the sandbox for the token):
+//! - the token never reaches stdout, stderr, argv, the environment, a shell
+//!   variable or the disk — it exists only in the reading process and the
+//!   pipe into `curl`;
+//! - `curl` runs with `-q` (no `~/.curlrc`), HTTPS only, no redirects;
 //! - the token is never refreshed and `.credentials.json` is never written
 //!   (Claude Code refreshes it itself; racing it would corrupt the login);
 //! - the macOS Keychain is never read (a macOS host simply has no
@@ -20,9 +24,11 @@
 //! - the `User-Agent` is the honest `claude-fleet/<version>`.
 //!
 //! Polling is gentle: at most one attempt per account per
-//! [`USAGE_POLL_FLOOR_SECS`], doubling backoff up to [`USAGE_BACKOFF_CAP_SECS`]
-//! on endpoint trouble, and `Retry-After` honoured on 429. The floor is never
-//! bypassed, not even by a forced refresh.
+//! [`USAGE_POLL_FLOOR_SECS`] measured from the END of the previous attempt,
+//! at most two endpoint requests per attempt, doubling backoff up to
+//! [`USAGE_BACKOFF_CAP_SECS`] on endpoint or transport trouble, and
+//! `Retry-After` honoured on 429. The floor is never bypassed, not even by a
+//! forced refresh.
 
 use crate::ipc_error::IpcError;
 use crate::shell::quote;
@@ -31,7 +37,7 @@ use crate::store::HostRow;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Minimum seconds between two usage attempts for one account.
 #[allow(dead_code)] // Wired into the poller and commands in Task 4.
@@ -44,8 +50,12 @@ pub const USAGE_BACKOFF_CAP_SECS: i64 = 1800;
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 /// SSH connect budget for one host.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Whole-script budget (curl itself is capped at 15 s).
-const WALL_CLOCK: Duration = Duration::from_secs(25);
+/// Whole-script budget: connect (≤ 10 s) + a slow login profile + curl's own
+/// 15 s cap, with room so a timeout rarely fires after the request left.
+const WALL_CLOCK: Duration = Duration::from_secs(40);
+/// Most bytes kept from the host's stdout / stderr. The script's own output
+/// is at most ~66 KB (markers + a 64 KB body).
+const OUTPUT_CAP: usize = 128 * 1024;
 /// Longest `snippet` kept from a response body.
 const SNIPPET_MAX_CHARS: usize = 200;
 /// Longest `detail` kept on a snapshot.
@@ -55,30 +65,39 @@ const RETRY_AFTER_MAX_SECS: i64 = 86_400;
 /// The script treats an access token expiring within this many seconds as
 /// already expired, so a request never races the expiry.
 const ACCESS_TOKEN_SKEW_SECS: i64 = 60;
+/// After a host's token is rejected (a request WAS sent), at most this many
+/// further hosts are asked in the same attempt.
+const FOLLOW_UPS_AFTER_REJECT: u8 = 1;
 
 const USER_AGENT_PLACEHOLDER: &str = "@@USER_AGENT@@";
 
-/// The script run on the host. Placeholder `@@USER_AGENT@@` is replaced by the
-/// `shell::quote`d User-Agent. Read the "where is the token" notes in
-/// [`usage_script`] before changing a line.
-const SCRIPT_TEMPLATE: &str = r#"set +x
+/// The script run on the host. Placeholders are filled by [`usage_script`];
+/// read its "where is the token" notes before changing a line.
+const SCRIPT_TEMPLATE: &str = r#"\unalias -a 2>/dev/null
+\unset -f curl python3 jq rm mktemp command cat head tail tr sed grep date printf echo set trap umask 2>/dev/null
+set +x
 umask 077
+trap '' PIPE
+unset SSLKEYLOGFILE
 cred="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"
 if [ ! -f "$cred" ]; then echo __no_credentials__; exit 0; fi
 if command -v python3 >/dev/null 2>&1; then json=python3
 elif command -v jq >/dev/null 2>&1; then json=jq
 else echo __host_unsupported__=python3_or_jq; exit 0; fi
 if ! command -v curl >/dev/null 2>&1; then echo __host_unsupported__=curl; exit 0; fi
-dir=$(mktemp -d 2>/dev/null) || { echo __host_unsupported__=mktemp; exit 0; }
-trap 'rm -rf "$dir"' EXIT
-trap 'exit 1' HUP INT TERM
+cv=$(curl -q --version 2>/dev/null | sed -n '1s/^curl \([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2/p')
+cmaj=${cv%% *}
+cmin=${cv##* }
+case "$cmaj" in ''|*[!0-9]*) cmaj=0 ;; esac
+case "$cmin" in ''|*[!0-9]*) cmin=0 ;; esac
+if [ "$cmaj" -lt 7 ] || { [ "$cmaj" -eq 7 ] && [ "$cmin" -lt 55 ]; }; then echo __host_unsupported__=curl_7.55; exit 0; fi
 if [ "$json" = python3 ]; then
-py='import json, os, re, sys, time
+meta_py='import json, re, sys
 def secs(v):
     if isinstance(v, bool) or not isinstance(v, (int, float)):
-        return None
+        return ""
     v = int(v)
-    return v // 1000 if v > 10 ** 12 else v
+    return str(v // 1000 if v > 10 ** 12 else v)
 def label(v):
     return re.sub(r"[^A-Za-z0-9_.-]", "", v)[:32] if isinstance(v, str) else ""
 try:
@@ -87,39 +106,25 @@ try:
 except Exception:
     o = None
 if not isinstance(o, dict):
-    print("__no_credentials__")
-    sys.exit(0)
-exp = secs(o.get("expiresAt"))
-rexp = secs(o.get("refreshTokenExpiresAt"))
-print("__expires_at__=" + ("" if exp is None else str(exp)))
-print("__refresh_expires_at__=" + ("" if rexp is None else str(rexp)))
+    o = {}
+t = o.get("accessToken")
+usable = isinstance(t, str) and len(t) > 0 and "\r" not in t and "\n" not in t
+print("__has_token__=" + ("1" if usable else "0"))
+print("__expires_at__=" + secs(o.get("expiresAt")))
+print("__refresh_expires_at__=" + secs(o.get("refreshTokenExpiresAt")))
 print("__subscription__=" + label(o.get("subscriptionType")))
-print("__rate_limit_tier__=" + label(o.get("rateLimitTier")))
-now = int(time.time())
-tok = o.get("accessToken")
-if not isinstance(tok, str) or not tok or "\r" in tok or "\n" in tok:
-    print("__no_credentials__")
-elif rexp is not None and rexp <= now:
-    print("__login_expired__")
-elif exp is not None and exp <= now + @@SKEW@@:
-    print("__access_token_expired__")
-else:
-    try:
-        fd = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as out:
-            out.write("Authorization: Bearer " + tok + "\n")
-    except Exception:
-        print("__host_unsupported__=tempfile")'
-python3 -c "$py" "$cred" "$dir/auth" 2>/dev/null
+print("__rate_limit_tier__=" + label(o.get("rateLimitTier")))'
+meta=$(python3 -I -c "$meta_py" "$cred" 2>/dev/null)
 else
 meta=$(jq -r 'def secs: if type == "number" then (if . > 1000000000000 then . / 1000 else . end | floor | tostring) else "" end;
 def safelabel: if type == "string" then (gsub("[^A-Za-z0-9_.-]"; "") | .[0:32]) else "" end;
 (.claudeAiOauth // {}) as $o
-| "__has_token__=" + (if ($o.accessToken | type) == "string" and ($o.accessToken | length) > 0 then "1" else "0" end),
+| "__has_token__=" + (if ($o.accessToken | type) == "string" and ($o.accessToken | length) > 0 and ($o.accessToken | test("[\r\n]") | not) then "1" else "0" end),
   "__expires_at__=" + ($o.expiresAt | secs),
   "__refresh_expires_at__=" + ($o.refreshTokenExpiresAt | secs),
   "__subscription__=" + ($o.subscriptionType | safelabel),
   "__rate_limit_tier__=" + ($o.rateLimitTier | safelabel)' "$cred" 2>/dev/null)
+fi
 field() { printf '%s\n' "$meta" | sed -n "s/^__$1__=//p" | head -n 1; }
 printf '%s\n' "$meta" | grep -v '^__has_token__='
 now=$(date +%s)
@@ -130,17 +135,33 @@ case "$rexp" in *[!0-9]*) rexp= ;; esac
 if [ "$(field has_token)" != 1 ]; then echo __no_credentials__; exit 0; fi
 if [ -n "$rexp" ] && [ "$rexp" -le "$now" ]; then echo __login_expired__; exit 0; fi
 if [ -n "$exp" ] && [ "$exp" -le "$((now + @@SKEW@@))" ]; then echo __access_token_expired__; exit 0; fi
-jq -r '.claudeAiOauth.accessToken | select(type == "string" and length > 0 and (test("[\r\n]") | not)) | "Authorization: Bearer " + .' "$cred" > "$dir/auth" 2>/dev/null
-fi
-if [ ! -s "$dir/auth" ]; then echo __no_credentials__; exit 0; fi
-code=$(curl -sS --max-time 15 -H @"$dir/auth" -H 'anthropic-beta: oauth-2025-04-20' -A @@USER_AGENT@@ -D "$dir/headers" -o "$dir/body" -w '%{http_code}' @@URL@@ 2>"$dir/err")
-rm -f "$dir/auth"
-ra=$(tr -d '\r' < "$dir/headers" 2>/dev/null | sed -n 's/^[Rr][Ee][Tt][Rr][Yy]-[Aa][Ff][Tt][Ee][Rr]:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' | tail -n 1)
+dir=$(mktemp -d 2>/dev/null) || { echo __host_unsupported__=mktemp; exit 0; }
+trap 'rm -rf "$dir"' EXIT
+trap 'exit 1' HUP INT TERM
+hdr_py='import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        t = json.load(f)["claudeAiOauth"]["accessToken"]
+except Exception:
+    sys.exit(1)
+if isinstance(t, str) and t and "\r" not in t and "\n" not in t:
+    sys.stdout.write("Authorization: Bearer " + t + "\n")'
+auth_header() {
+  if [ "$json" = python3 ]; then
+    python3 -I -c "$hdr_py" "$cred" 2>/dev/null
+  else
+    jq -r '.claudeAiOauth.accessToken | select(type == "string" and length > 0 and (test("[\r\n]") | not)) | "Authorization: Bearer " + .' "$cred" 2>/dev/null
+  fi
+}
+code=$(auth_header | curl -q -sS --proto =https --proto-redir =https --max-redirs 0 --max-time 15 -H @- -H 'anthropic-beta: oauth-2025-04-20' -A @@USER_AGENT@@ -D "$dir/headers" -o "$dir/body" -w '%{http_code}' @@URL@@ 2>"$dir/err")
+rc=$?
 case "$code" in [0-9][0-9][0-9]) ;; *) code=000 ;; esac
+ra=$(tr -d '\r' < "$dir/headers" 2>/dev/null | sed -n 's/^[Rr][Ee][Tt][Rr][Yy]-[Aa][Ff][Tt][Ee][Rr]:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' | tail -n 1)
 echo "__http_status__=$code"
+if [ "$code" = 000 ]; then echo "__curl_exit__=$rc"; fi
 if [ -n "$ra" ]; then echo "__retry_after__=$ra"; fi
 echo __body__
-if [ "$code" = 000 ]; then head -c 2000 "$dir/err" 2>/dev/null; else head -c 65536 "$dir/body" 2>/dev/null; fi
+if [ "$code" = 000 ]; then grep -a '^curl: (' "$dir/err" 2>/dev/null | head -n 2; else head -c 65536 "$dir/body" 2>/dev/null; fi
 exit 0
 "#;
 
@@ -153,30 +174,28 @@ pub fn user_agent() -> String {
 /// Build the usage script for `bash -lc` on a host.
 ///
 /// Where the token is (and is not):
-/// - `cred=…` holds only the credentials file PATH.
-/// - python path: one `python3 -c "$py"` process reads the file, prints the
-///   NON-secret markers (`__expires_at__`, `__refresh_expires_at__`,
-///   `__subscription__`, `__rate_limit_tier__`), decides login / access-token
-///   expiry on the host's own clock, and — only when the endpoint should be
-///   called — writes `Authorization: Bearer <token>` straight into
-///   `$dir/auth` (`O_EXCL`, mode 0600). The token lives only in that
-///   process's memory and that file; `$py` is program text, its argv is two
-///   paths.
-/// - jq path (no python3): `meta` holds only the non-secret markers (the
-///   token is reduced to `__has_token__=1|0` inside jq); the expiry decision
-///   is shell arithmetic on the non-secret epochs; a second `jq` writes the
-///   header line straight into `$dir/auth` via a redirect.
-/// - `umask 077` precedes everything; `$dir` is `mktemp -d` (0700) and
-///   `trap 'rm -rf "$dir"' EXIT` removes it however the script ends (a
-///   HUP/INT/TERM, e.g. the SSH wall clock, becomes an exit that runs it);
-///   `$dir/auth` is also removed right after `curl` returns.
-/// - `curl` gets the token ONLY through `-H @"$dir/auth"` (curl reads the
-///   file itself; `ps` shows only the path). No `-v`, no `--trace`.
-/// - stderr of python/jq is discarded; curl's stderr (connection errors,
-///   never headers) is shown only when there was no HTTP response.
-/// - stdout carries markers, the HTTP status, `Retry-After` from the saved
-///   RESPONSE headers, and the response body — none of which contain the
-///   token.
+/// - Lines 1–6 isolate the shell: drop aliases and functions shadowing the
+///   tools used (`rm() { trash-put …; }` would keep files), no xtrace,
+///   `umask 077`, ignore SIGPIPE (a closed channel makes writes fail instead
+///   of killing bash before the EXIT trap), no `SSLKEYLOGFILE`.
+/// - `cred=…` holds only the credentials file PATH. The curl version check
+///   (≥ 7.55, needed for `-H @-`) runs before anything reads the file.
+/// - Pass 1 (`meta_py` via `python3 -I`, or `jq`): prints only NON-secret
+///   markers. The token is reduced to `__has_token__=1|0` inside that
+///   process; `meta` never holds it. The call/no-call decision is shell
+///   arithmetic on the non-secret epochs.
+/// - `$dir` (`mktemp -d`, removed by `trap … EXIT`) holds only the response
+///   headers, the response body and curl's stderr — never the token.
+/// - Pass 2: `auth_header` (`hdr_py` via `python3 -I`, or `jq`) re-reads the
+///   file and writes `Authorization: Bearer <token>` to its stdout, which is
+///   the pipe into `curl … -H @-`. The token exists only in that process, the
+///   kernel pipe buffer and curl — no file, no variable, no argv.
+/// - `curl -q` (FIRST argument, so `~/.curlrc` cannot add `verbose`, `trace`,
+///   `proxy`, `insecure`…), `--proto =https --proto-redir =https
+///   --max-redirs 0`, no `-v`.
+/// - Returned: markers, the HTTP status, `Retry-After` parsed from the saved
+///   RESPONSE headers, and the response body — or, with no HTTP response,
+///   curl's exit code and at most two `curl: (N) …` lines (never headers).
 /// - Nothing refreshes the token and nothing writes `.credentials.json`.
 #[allow(dead_code)] // Wired into the poller and commands in Task 4.
 pub fn usage_script(user_agent: &str) -> String {
@@ -215,26 +234,27 @@ pub enum UsageOutcome {
         subscription: Option<String>,
     },
     /// No credentials file (a macOS host keeps its token in the Keychain,
-    /// which fleet never reads) or no usable token in it. Try another host.
+    /// which fleet never reads) or no usable token in it. No request sent.
     NoCredentials,
     /// The access token expired but the login is valid; Claude Code refreshes
-    /// it the next time it runs there. Benign — try another host.
+    /// it the next time it runs there. No request sent.
     AccessTokenExpired,
-    /// The refresh token expired: that host needs `claude /login`.
+    /// The refresh token expired: that host needs `claude /login`. No request
+    /// sent.
     LoginExpired,
-    /// HTTP 401/403 despite a non-expired token.
+    /// HTTP 401/403 despite a non-expired token. A request WAS sent.
     TokenRejected,
     /// HTTP 429.
     RateLimited { retry_after_secs: Option<i64> },
     /// Any other non-2xx, no HTTP response, or a 2xx with an unexpected
-    /// shape. `snippet` is at most 200 characters of the response body (or
-    /// of curl's own error when there was no response).
+    /// shape. `snippet` is at most 200 sanitised characters of the response
+    /// body (or, with no response, curl's exit code and error line).
     Unavailable {
         status: Option<u16>,
         snippet: String,
     },
-    /// The host cannot run the check (no python3/jq, no curl, no temp dir, or
-    /// output without any usage marker). Try another host.
+    /// The host cannot run the check (no python3/jq, no or too old curl, no
+    /// temp dir, or output without any usage marker). No request sent.
     HostUnsupported { detail: String },
 }
 
@@ -321,6 +341,7 @@ const TERMINAL_LOGIN_EXPIRED: &str = "__login_expired__";
 const TERMINAL_ACCESS_EXPIRED: &str = "__access_token_expired__";
 const MARK_HOST_UNSUPPORTED: &str = "__host_unsupported__=";
 const MARK_HTTP_STATUS: &str = "__http_status__=";
+const MARK_CURL_EXIT: &str = "__curl_exit__=";
 const MARK_RETRY_AFTER: &str = "__retry_after__=";
 const MARK_SUBSCRIPTION: &str = "__subscription__=";
 const MARK_BODY: &str = "__body__";
@@ -331,8 +352,9 @@ const MARK_BODY: &str = "__body__";
 /// login-shell banner, an unknown marker) is ignored and never copied into
 /// the outcome. The first terminal marker wins. The only free text that can
 /// reach the outcome is `snippet`, taken from what follows `__body__` — the
-/// endpoint's response body (or curl's connection error when there was no
-/// response), which never contains the request's Authorization header.
+/// endpoint's response body (or curl's `curl: (N) …` error lines when there
+/// was no response), neither of which contains the request's Authorization
+/// header. Numeric markers are validated; labels must be short and plain.
 ///
 /// `_now_unix` is accepted for the fetch layer's uniform signature; expiry
 /// decisions are made on the host with the host's clock.
@@ -341,6 +363,7 @@ pub fn parse_usage_output(stdout: &str, _now_unix: i64) -> UsageOutcome {
     let mut terminal: Option<UsageOutcome> = None;
     let mut status: Option<u16> = None;
     let mut saw_status = false;
+    let mut curl_exit: Option<u16> = None;
     let mut retry_after: Option<i64> = None;
     let mut subscription: Option<String> = None;
     let mut body = String::new();
@@ -365,7 +388,8 @@ pub fn parse_usage_output(stdout: &str, _now_unix: i64) -> UsageOutcome {
                 terminal = Some(UsageOutcome::AccessTokenExpired);
             } else if let Some(what) = l.strip_prefix(MARK_HOST_UNSUPPORTED) {
                 terminal = Some(UsageOutcome::HostUnsupported {
-                    detail: match safe_label(what) {
+                    detail: match safe_label(what).as_deref() {
+                        Some("curl_7.55") => "curl is older than 7.55".to_string(),
                         Some(w) => format!("missing {w}"),
                         None => "missing a required tool".to_string(),
                     },
@@ -377,8 +401,10 @@ pub fn parse_usage_output(stdout: &str, _now_unix: i64) -> UsageOutcome {
                 saw_status = true;
                 status = v.trim().parse::<u16>().ok().filter(|c| *c != 0);
             }
+        } else if let Some(v) = l.strip_prefix(MARK_CURL_EXIT) {
+            curl_exit = parse_small_number(v).and_then(|n| u16::try_from(n).ok());
         } else if let Some(v) = l.strip_prefix(MARK_RETRY_AFTER) {
-            retry_after = parse_retry_after(v);
+            retry_after = parse_small_number(v);
         } else if let Some(v) = l.strip_prefix(MARK_SUBSCRIPTION) {
             subscription = safe_label(v);
         }
@@ -396,12 +422,19 @@ pub fn parse_usage_output(stdout: &str, _now_unix: i64) -> UsageOutcome {
             detail: "no usage markers in the host's output".to_string(),
         };
     }
-    let snippet = snippet_of(&body);
     match status {
-        None => UsageOutcome::Unavailable {
-            status: None,
-            snippet,
-        },
+        None => {
+            let body = snippet_of(&body);
+            let snippet = match curl_exit {
+                Some(n) if body.is_empty() => format!("curl exit {n}"),
+                Some(n) => format!("curl exit {n}: {body}"),
+                None => body,
+            };
+            UsageOutcome::Unavailable {
+                status: None,
+                snippet: snippet.chars().take(SNIPPET_MAX_CHARS).collect(),
+            }
+        }
         Some(401) | Some(403) => UsageOutcome::TokenRejected,
         Some(429) => UsageOutcome::RateLimited {
             retry_after_secs: retry_after,
@@ -413,12 +446,12 @@ pub fn parse_usage_output(stdout: &str, _now_unix: i64) -> UsageOutcome {
             },
             None => UsageOutcome::Unavailable {
                 status: Some(code),
-                snippet,
+                snippet: snippet_of(&body),
             },
         },
         Some(code) => UsageOutcome::Unavailable {
             status: Some(code),
-            snippet,
+            snippet: snippet_of(&body),
         },
     }
 }
@@ -435,7 +468,8 @@ fn safe_label(v: &str) -> Option<String> {
     ok.then(|| v.to_string())
 }
 
-fn parse_retry_after(v: &str) -> Option<i64> {
+/// Up to 10 ASCII digits, else `None`.
+fn parse_small_number(v: &str) -> Option<i64> {
     let v = v.trim();
     if v.is_empty() || v.len() > 10 || !v.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -443,11 +477,28 @@ fn parse_retry_after(v: &str) -> Option<i64> {
     v.parse::<i64>().ok()
 }
 
-/// At most [`SNIPPET_MAX_CHARS`] characters of `body`, whitespace collapsed.
+/// Text from a host that reaches the UI or the control API: control
+/// characters (ESC/ANSI, NUL, C1, DEL) and bidi overrides/isolates removed.
+fn sanitize_text(s: &str) -> String {
+    s.chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(
+                    c,
+                    '\u{061C}'
+                        | '\u{200E}'
+                        | '\u{200F}'
+                        | '\u{202A}'..='\u{202E}'
+                        | '\u{2066}'..='\u{2069}'
+                )
+        })
+        .collect()
+}
+
+/// At most [`SNIPPET_MAX_CHARS`] characters of `body`, whitespace collapsed,
+/// sanitised.
 fn snippet_of(body: &str) -> String {
-    body.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    sanitize_text(&body.split_whitespace().collect::<Vec<_>>().join(" "))
         .chars()
         .take(SNIPPET_MAX_CHARS)
         .collect()
@@ -605,6 +656,10 @@ pub struct AccountUsageEntry {
     /// first next time so the "via" label does not flap.
     pub source_host: Option<String>,
     pub next_try_at: i64,
+    /// The wall-clock second `next_try_at` was computed at. If the clock is
+    /// later seen BEFORE it, the schedule is shifted back by the same amount
+    /// so a clock step backwards cannot freeze polling.
+    pub scheduled_at: i64,
     /// 0 = no backoff in force.
     pub backoff_secs: i64,
 }
@@ -627,9 +682,9 @@ pub enum FetchResult {
         outcome: UsageOutcome,
         notes: Vec<String>,
     },
-    /// Every candidate failed. `host_state` is the most actionable
-    /// host-specific outcome seen (`None` when all failures were transport
-    /// errors); `transport_error` is true when any host failed in transport.
+    /// No host answered. `host_state` is the most actionable host-specific
+    /// outcome seen (`None` when there was none); `transport_error` is true
+    /// when any host failed in transport.
     AllFailed {
         host_state: Option<UsageOutcomeKind>,
         transport_error: bool,
@@ -647,16 +702,12 @@ fn next_backoff(current: i64) -> i64 {
     }
 }
 
-fn cap_detail(s: String) -> String {
-    if s.chars().count() <= DETAIL_MAX_CHARS {
-        s
-    } else {
-        s.chars().take(DETAIL_MAX_CHARS).collect()
-    }
+fn cap_detail(s: &str) -> String {
+    sanitize_text(s).chars().take(DETAIL_MAX_CHARS).collect()
 }
 
 fn join_notes(notes: &[String]) -> Option<String> {
-    (!notes.is_empty()).then(|| cap_detail(notes.join("; ")))
+    (!notes.is_empty()).then(|| cap_detail(&notes.join("; ")))
 }
 
 #[allow(dead_code)] // Wired into the poller and commands in Task 4.
@@ -666,16 +717,31 @@ impl UsageCache {
     }
 
     /// True when `account` may be attempted now (never attempted, or the
-    /// floor/backoff has passed).
-    pub fn due(&self, account: &str, now: i64) -> bool {
-        self.entries
-            .get(account)
-            .is_none_or(|e| now >= e.next_try_at)
+    /// floor/backoff has passed). Also re-bases the schedule if the wall
+    /// clock went backwards since it was set.
+    pub fn due(&mut self, account: &str, now: i64) -> bool {
+        match self.entries.get_mut(account) {
+            None => true,
+            Some(e) => {
+                if now < e.scheduled_at {
+                    let back = e.scheduled_at - now;
+                    e.next_try_at -= back;
+                    e.scheduled_at = now;
+                }
+                now >= e.next_try_at
+            }
+        }
     }
 
-    /// Write one fetch result and schedule the next try.
-    pub fn record(&mut self, account: &str, result: FetchResult, now: i64) {
+    /// Write one fetch result and schedule the next try. `end` is the wall
+    /// clock at the END of the attempt, so the floor separates requests, not
+    /// attempt starts.
+    pub fn record(&mut self, account: &str, result: FetchResult, end: i64) {
         let e = self.entries.entry(account.to_string()).or_default();
+        let schedule = |e: &mut AccountUsageEntry, delay: i64| {
+            e.next_try_at = end + delay;
+            e.scheduled_at = end;
+        };
         match result {
             FetchResult::NoOnlineHost => {
                 // No request was made: leave the schedule alone so the
@@ -695,15 +761,16 @@ impl UsageCache {
                         usage,
                         subscription,
                     } => {
-                        e.last_ok = Some((usage, subscription, now));
+                        e.last_ok = Some((usage, subscription, end));
                         e.backoff_secs = 0;
-                        e.next_try_at = now + USAGE_POLL_FLOOR_SECS;
+                        schedule(e, USAGE_POLL_FLOOR_SECS);
                         e.last_detail = join_notes(&notes);
                     }
                     UsageOutcome::RateLimited { retry_after_secs } => {
                         e.backoff_secs = next_backoff(e.backoff_secs);
                         let ra = retry_after_secs.unwrap_or(0).clamp(0, RETRY_AFTER_MAX_SECS);
-                        e.next_try_at = now + ra.max(e.backoff_secs);
+                        let delay = ra.max(e.backoff_secs);
+                        schedule(e, delay);
                         e.last_detail = Some(match retry_after_secs {
                             Some(s) => {
                                 format!("rate limited by the usage endpoint (Retry-After: {s}s)")
@@ -713,12 +780,13 @@ impl UsageCache {
                     }
                     UsageOutcome::Unavailable { status, snippet } => {
                         e.backoff_secs = next_backoff(e.backoff_secs);
-                        e.next_try_at = now + e.backoff_secs;
+                        let delay = e.backoff_secs;
+                        schedule(e, delay);
                         let head = match status {
                             Some(code) => format!("HTTP {code}"),
                             None => "no HTTP response".to_string(),
                         };
-                        e.last_detail = Some(cap_detail(if snippet.is_empty() {
+                        e.last_detail = Some(cap_detail(&if snippet.is_empty() {
                             head
                         } else {
                             format!("{head}: {snippet}")
@@ -727,7 +795,7 @@ impl UsageCache {
                     // Host-specific outcomes never arrive as `Answered`; treat
                     // one defensively like an all-hosts host-state failure.
                     other => {
-                        e.next_try_at = now + USAGE_POLL_FLOOR_SECS;
+                        schedule(e, USAGE_POLL_FLOOR_SECS);
                         e.last_detail = Some(other.kind().describe().to_string());
                     }
                 }
@@ -741,10 +809,11 @@ impl UsageCache {
                 e.last_detail = join_notes(&notes);
                 if transport_error {
                     e.backoff_secs = next_backoff(e.backoff_secs);
-                    e.next_try_at = now + e.backoff_secs;
+                    let delay = e.backoff_secs;
+                    schedule(e, delay);
                 } else {
                     // Host-state problems: no escalating backoff.
-                    e.next_try_at = now + USAGE_POLL_FLOOR_SECS;
+                    schedule(e, USAGE_POLL_FLOOR_SECS);
                 }
             }
         }
@@ -798,26 +867,104 @@ fn lock(cache: &Mutex<UsageCache>) -> std::sync::MutexGuard<'_, UsageCache> {
     cache.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// First line of `s`, trimmed, at most 160 characters.
+/// First non-empty line of `s`, trimmed, sanitised, at most 160 characters.
 fn first_line(s: &str) -> String {
-    s.lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .unwrap_or("")
-        .chars()
-        .take(160)
-        .collect()
+    sanitize_text(
+        s.lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or(""),
+    )
+    .chars()
+    .take(160)
+    .collect()
+}
+
+/// ssh's own messages for a connection that never came up (exit 255). Any
+/// other exit-255 stderr — "Connection to h closed by remote host", a broken
+/// pipe mid-session — may mean the script already sent its request.
+fn connection_never_established(stderr: &str) -> bool {
+    const PATTERNS: &[&str] = &[
+        "ssh: connect to host",
+        "could not resolve hostname",
+        "connection refused",
+        "no route to host",
+        "network is unreachable",
+        "permission denied (",
+        "host key verification failed",
+        "kex_exchange_identification",
+        "ssh_exchange_identification",
+        "banner exchange",
+        "connection closed by ",
+        "control socket connect",
+    ];
+    let lower = stderr.to_ascii_lowercase();
+    PATTERNS.iter().any(|p| lower.contains(p))
+}
+
+/// How one host's run ended, for the fallback decision.
+enum HostRun {
+    /// The script reported an outcome.
+    Outcome(UsageOutcome),
+    /// SSH never connected: nothing ran on the host, try the next one.
+    NeverConnected(String),
+    /// The run failed after the connection came up (timeout, dropped
+    /// session, killed script, oversized output): the request may already
+    /// have left, so stop.
+    FailedAfterConnect(String),
+}
+
+fn classify_run(res: Result<std::process::Output, IpcError>, now: i64) -> HostRun {
+    match res {
+        Err(e) if e.code == "E_SSH_TIMEOUT" || e.code == "E_CANCELLED" => {
+            HostRun::FailedAfterConnect(first_line(&e.message))
+        }
+        // A spawn failure: ssh never ran.
+        Err(e) => HostRun::NeverConnected(first_line(&e.message)),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let code = out.status.code().unwrap_or(-1);
+            let describe = || {
+                let line = first_line(&stderr);
+                if line.is_empty() {
+                    format!("exit {code}")
+                } else {
+                    format!("exit {code}: {line}")
+                }
+            };
+            if !out.status.success() {
+                if code == 255 && connection_never_established(&stderr) {
+                    HostRun::NeverConnected(describe())
+                } else {
+                    HostRun::FailedAfterConnect(describe())
+                }
+            } else if out.stdout.len() >= OUTPUT_CAP {
+                HostRun::FailedAfterConnect("output exceeded the cap".to_string())
+            } else {
+                HostRun::Outcome(parse_usage_output(
+                    &String::from_utf8_lossy(&out.stdout),
+                    now,
+                ))
+            }
+        }
+    }
 }
 
 /// Fetch `account_uuid`'s usage through its hosts, respecting the floor.
 ///
 /// Not due → the cached snapshot, with no SSH call — also when `force` is
 /// true: the spec forbids a refresh that bypasses the floor. Otherwise each
-/// source host is asked in order; host-specific failures and transport errors
-/// move on to the next host, while `Ok`, `RateLimited` and `Unavailable` stop
-/// (they concern the account or the endpoint). The cache mutex is never held
-/// across an `.await`: the attempt is reserved under one lock, the SSH calls
-/// run unlocked, and the result is written under a second lock.
+/// source host is asked in order. Fallback to the next host happens only when
+/// no request can have left: the script reported `no_credentials`,
+/// `access_token_expired`, `login_expired` or `host_unsupported`, or SSH
+/// never connected. After `token_rejected` (a request was sent) at most one
+/// more host is asked. Everything else stops the attempt: `ok`,
+/// `rate_limited`, `unavailable`, an SSH timeout, or any failure after the
+/// connection came up. The next try is scheduled from the attempt's end.
+///
+/// The cache mutex is never held across an `.await`: the attempt is reserved
+/// under one lock, the SSH calls run unlocked, and the result is written
+/// under a second lock.
 #[allow(dead_code)] // Wired into the poller and commands in Task 4.
 pub async fn fetch_account_usage_with(
     account_uuid: &str,
@@ -847,45 +994,45 @@ pub async fn fetch_account_usage_with(
         // of issuing a second request inside the floor.
         let e = c.entries.entry(account_uuid.to_string()).or_default();
         e.next_try_at = e.next_try_at.max(now + USAGE_POLL_FLOOR_SECS);
+        e.scheduled_at = now;
         candidates
     };
 
+    let started = Instant::now();
     let script = usage_script(&user_agent());
     let quoted = quote(&script);
     let mut notes: Vec<String> = Vec::new();
     let mut host_state: Option<UsageOutcomeKind> = None;
     let mut transport_error = false;
     let mut answered: Option<(String, UsageOutcome)> = None;
+    let mut follow_ups_left: Option<u8> = None;
 
     for host in &candidates {
-        let res: Result<UsageOutcome, IpcError> = match ssh
-            .run_bounded(host, &["bash", "-lc", &quoted], CONNECT_TIMEOUT, WALL_CLOCK)
-            .await
-        {
-            Err(e) => Err(e),
-            Ok(out) if out.status.success() => Ok(parse_usage_output(
-                &String::from_utf8_lossy(&out.stdout),
-                now,
-            )),
-            Ok(out) => {
-                let stderr = first_line(&String::from_utf8_lossy(&out.stderr));
-                let code = out.status.code().unwrap_or(-1);
-                Err(IpcError::new(
-                    "E_SSH",
-                    if stderr.is_empty() {
-                        format!("exit {code}")
-                    } else {
-                        format!("exit {code}: {stderr}")
-                    },
-                ))
-            }
-        };
-        match res {
-            Err(e) => {
+        match follow_ups_left.as_mut() {
+            Some(0) => break,
+            Some(n) => *n -= 1,
+            None => {}
+        }
+        let res = ssh
+            .run_bounded_capped(
+                host,
+                &["bash", "-lc", &quoted],
+                CONNECT_TIMEOUT,
+                WALL_CLOCK,
+                OUTPUT_CAP,
+            )
+            .await;
+        match classify_run(res, now) {
+            HostRun::NeverConnected(msg) => {
                 transport_error = true;
-                notes.push(format!("{host}: {}", first_line(&e.message)));
+                notes.push(format!("{host}: {msg}"));
             }
-            Ok(outcome) if outcome.is_host_specific() => {
+            HostRun::FailedAfterConnect(msg) => {
+                transport_error = true;
+                notes.push(format!("{host}: {msg}"));
+                break;
+            }
+            HostRun::Outcome(outcome) if outcome.is_host_specific() => {
                 let kind = outcome.kind();
                 let text = match &outcome {
                     UsageOutcome::HostUnsupported { detail } => detail.clone(),
@@ -895,13 +1042,17 @@ pub async fn fetch_account_usage_with(
                 if host_state.is_none_or(|k| kind.host_state_rank() > k.host_state_rank()) {
                     host_state = Some(kind);
                 }
+                if kind == UsageOutcomeKind::TokenRejected && follow_ups_left.is_none() {
+                    follow_ups_left = Some(FOLLOW_UPS_AFTER_REJECT);
+                }
             }
-            Ok(outcome) => {
+            HostRun::Outcome(outcome) => {
                 answered = Some((host.clone(), outcome));
                 break;
             }
         }
     }
+    let end = now + i64::try_from(started.elapsed().as_secs()).unwrap_or(i64::MAX / 4);
 
     let result = match answered {
         Some((host, outcome)) => FetchResult::Answered {
@@ -916,7 +1067,7 @@ pub async fn fetch_account_usage_with(
         },
     };
     let mut c = lock(cache);
-    c.record(account_uuid, result, now);
+    c.record(account_uuid, result, end);
     c.snapshot(account_uuid)
 }
 
@@ -924,8 +1075,12 @@ pub async fn fetch_account_usage_with(
 mod tests {
     use super::*;
     use crate::ssh_fake::{FakeSsh, Match, Reply};
+    use std::path::{Path, PathBuf};
 
-    const FAKE_TOKEN: &str = "sk-ant-oat01-FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE_do_not_leak";
+    /// A fake access token. `CANARY` is its distinctive middle; it must never
+    /// be found anywhere but the fake credentials file.
+    const CANARY: &str = "LeakCanary7Qz";
+    const FAKE_TOKEN: &str = "sk-ant-oat01-LeakCanary7Qz-0123456789abcdefFAKE";
     const NOW: i64 = 1_770_000_000;
 
     fn host(alias: &str, account: Option<&str>, reachable: bool) -> HostRow {
@@ -1085,6 +1240,12 @@ mod tests {
                 detail: "missing curl".into()
             }
         );
+        assert_eq!(
+            parse_usage_output("__host_unsupported__=curl_7.55\n", NOW),
+            UsageOutcome::HostUnsupported {
+                detail: "curl is older than 7.55".into()
+            }
+        );
         assert!(matches!(
             parse_usage_output("bash: something odd\n", NOW),
             UsageOutcome::HostUnsupported { .. }
@@ -1129,12 +1290,19 @@ mod tests {
         assert_eq!(
             with(
                 "000",
-                "",
+                "__curl_exit__=6\n",
                 "curl: (6) Could not resolve host: api.anthropic.com\n"
             ),
             UsageOutcome::Unavailable {
                 status: None,
-                snippet: "curl: (6) Could not resolve host: api.anthropic.com".into()
+                snippet: "curl exit 6: curl: (6) Could not resolve host: api.anthropic.com".into()
+            }
+        );
+        assert_eq!(
+            with("000", "__curl_exit__=28\n", ""),
+            UsageOutcome::Unavailable {
+                status: None,
+                snippet: "curl exit 28".into()
             }
         );
         let long = "x".repeat(1000);
@@ -1144,20 +1312,49 @@ mod tests {
         assert_eq!(snippet.chars().count(), 200);
     }
 
+    #[test]
+    fn snippet_and_detail_drop_control_and_bidi_characters() {
+        let body = "bad\u{1b}[31mred\u{0}nul\u{202e}rtl\u{2066}iso\u{9b}c1 end";
+        let UsageOutcome::Unavailable { snippet, .. } =
+            parse_usage_output(&format!("__http_status__=502\n__body__\n{body}"), NOW)
+        else {
+            panic!()
+        };
+        assert_eq!(snippet, "bad[31mrednulrtlisoc1 end");
+        let mut c = UsageCache::new();
+        c.record(
+            "a",
+            FetchResult::AllFailed {
+                host_state: None,
+                transport_error: true,
+                notes: vec![format!(
+                    "h: {}",
+                    first_line("exit 255: \u{1b}]0;x\u{7}boom\u{202e}")
+                )],
+            },
+            NOW,
+        );
+        assert_eq!(
+            c.snapshot("a").detail.as_deref(),
+            Some("h: exit 255: ]0;xboom")
+        );
+    }
+
     /// The token can only reach an outcome through the body, and the body is
     /// the endpoint's response, which never echoes the request's
     /// Authorization header. A token-shaped string anywhere else in the
     /// output (a banner, an unknown marker, an over-long subscription, a bad
-    /// Retry-After) must never surface.
+    /// Retry-After or curl exit) must never surface.
     #[test]
     fn token_like_text_outside_the_body_never_surfaces() {
         let noise = format!(
-            "Authorization: Bearer {FAKE_TOKEN}\n__access_token__={FAKE_TOKEN}\n__subscription__={FAKE_TOKEN}\n__retry_after__={FAKE_TOKEN}\n"
+            "Authorization: Bearer {FAKE_TOKEN}\n__access_token__={FAKE_TOKEN}\n__subscription__={FAKE_TOKEN}\n__retry_after__={FAKE_TOKEN}\n__curl_exit__={FAKE_TOKEN}\n"
         );
         let cases = [
             format!("{noise}__http_status__=200\n__body__\n{OK_BODY}"),
             format!("{noise}__http_status__=429\n__body__\n{{}}"),
             format!("{noise}__http_status__=502\n__body__\nBad gateway"),
+            format!("{noise}__http_status__=000\n__body__\n"),
             format!("{noise}__http_status__=401\n__body__\n{{}}"),
             format!("{noise}__host_unsupported__=x{FAKE_TOKEN}\n"),
             format!("{noise}__no_credentials__\n"),
@@ -1169,7 +1366,7 @@ mod tests {
         for out in &cases {
             let outcome = parse_usage_output(out, NOW);
             let rendered = format!("{outcome:?} {}", serde_json::to_string(&outcome).unwrap());
-            assert!(!rendered.contains("FAKEFAKE"), "{rendered}");
+            assert!(!rendered.contains(CANARY), "{rendered}");
             // And through the cache into the snapshot's detail.
             let mut cache = UsageCache::new();
             let result = if outcome.is_host_specific() {
@@ -1187,7 +1384,7 @@ mod tests {
             };
             cache.record("acct", result, NOW);
             let snap = serde_json::to_string(&cache.snapshot("acct")).unwrap();
-            assert!(!snap.contains("FAKEFAKE"), "{snap}");
+            assert!(!snap.contains(CANARY), "{snap}");
         }
         // The only path in: the body itself (documented, and impossible in
         // practice because the endpoint does not echo request headers).
@@ -1198,7 +1395,7 @@ mod tests {
         let UsageOutcome::Unavailable { snippet, .. } = outcome else {
             panic!()
         };
-        assert!(snippet.contains("FAKEFAKE"));
+        assert!(snippet.contains(CANARY));
     }
 
     // ── script text ────────────────────────────────────────────────────────
@@ -1208,11 +1405,28 @@ mod tests {
     }
 
     #[test]
-    fn script_has_no_xtrace() {
+    fn script_isolates_the_shell_first() {
         let s = script();
+        let lines: Vec<&str> = s.lines().collect();
+        assert_eq!(lines[0], "\\unalias -a 2>/dev/null");
+        assert!(lines[1].starts_with("\\unset -f "));
+        for f in [
+            "curl", "python3", "jq", "rm", "mktemp", "command", "cat", "head", "sed", "grep",
+        ] {
+            assert!(
+                lines[1].split_whitespace().any(|w| w == f),
+                "unset -f misses {f}"
+            );
+        }
+        assert_eq!(lines[2], "set +x");
+        assert_eq!(lines[3], "umask 077");
+        assert_eq!(lines[4], "trap '' PIPE");
+        assert_eq!(lines[5], "unset SSLKEYLOGFILE");
         assert!(!s.contains("set -x"));
         assert!(!s.contains("-o xtrace"));
-        assert!(s.starts_with("set +x\n"));
+        // Every python run is isolated (-I: no PYTHON* env, no user site).
+        assert_eq!(s.matches("python3 -").count(), 2);
+        assert_eq!(s.matches("python3 -I -c ").count(), 2);
     }
 
     #[test]
@@ -1222,7 +1436,7 @@ mod tests {
             let l = line.to_ascii_lowercase();
             let prints = l.contains("echo") || l.contains("printf") || l.contains("print(");
             if prints {
-                for needle in ["accesstoken", "tok)", "tok ", "+ tok", "bearer", "$token"] {
+                for needle in ["accesstoken", "(t)", "+ t)", "+ t ", "bearer", "$token"] {
                     assert!(!l.contains(needle), "prints a token: {line}");
                 }
             }
@@ -1230,44 +1444,90 @@ mod tests {
         // No shell variable ever holds the token.
         assert!(!s.contains("token="));
         assert!(!s.contains("TOKEN="));
-        // Only the non-secret `__has_token__` flag leaves jq's metadata pass.
-        let meta_start = s.find("meta=$(jq").unwrap();
-        let meta_end = meta_start + s[meta_start..].find("\"$cred\"").unwrap();
+        // Only the non-secret `__has_token__` flag leaves pass 1.
+        let meta_start = s.find("meta_py='").unwrap();
+        let meta_end = s.find("\nfield() {").unwrap();
         let meta = &s[meta_start..meta_end];
         assert!(!meta.contains("Bearer"));
-        assert!(meta.contains("($o.accessToken | length) > 0"));
+        assert!(meta.contains("__has_token__="));
     }
 
     #[test]
-    fn curl_gets_the_token_only_from_a_header_file() {
+    fn curl_gets_the_token_only_from_a_pipe() {
         let s = script();
-        let curl: Vec<&str> = s.lines().filter(|l| l.contains("curl -")).collect();
+        let curl: Vec<&str> = s.lines().filter(|l| l.contains("curl -q -sS")).collect();
         assert_eq!(curl.len(), 1, "{curl:?}");
         let curl = curl[0];
-        assert!(curl.contains("-H @\"$dir/auth\""));
+        // `-q` must be curl's FIRST argument or ~/.curlrc still applies.
+        assert!(
+            curl.contains("$(auth_header | curl -q -sS --proto =https --proto-redir =https --max-redirs 0 --max-time 15 -H @- "),
+            "{curl}"
+        );
         assert!(!curl.to_ascii_lowercase().contains("bearer"));
-        assert!(!curl.contains("authorization"));
-        assert!(!curl.contains(" -v") && !curl.contains("--trace"));
-        assert!(curl.contains("--max-time 15"));
+        assert!(!curl.contains(" -v") && !curl.contains("--trace") && !curl.contains("-k "));
+        assert!(!curl.contains("-L") && !curl.contains("--location"));
         assert!(curl.contains("-H 'anthropic-beta: oauth-2025-04-20'"));
-        // The header file is written only by python (`os.open`) or jq's
-        // redirect, and both go straight to "$dir/auth".
+        // Every curl invocation starts with -q.
+        for l in s.lines() {
+            for (i, _) in l.match_indices("curl ") {
+                let before = &l[..i];
+                if before.ends_with("command -v ") || before.ends_with("\\unset -f ")
+                    // the `sed` pattern matching `curl --version` output
+                    || before.ends_with('^')
+                {
+                    continue;
+                }
+                assert!(l[i..].starts_with("curl -q "), "{l}");
+            }
+        }
+        // The token never touches disk: no header file, no here-string.
+        assert!(!s.contains("$dir/auth"));
+        assert!(!s.contains("<<<"));
+        assert!(!s.contains("os.open"));
+        // The header is written only by `auth_header`, used once, into curl.
         let writers: Vec<&str> = s.lines().filter(|l| l.contains("Bearer")).collect();
         assert_eq!(writers.len(), 2, "{writers:?}");
-        assert!(writers[0].contains("out.write("));
-        assert!(writers[1].contains("> \"$dir/auth\""));
+        assert!(writers[0].contains("sys.stdout.write("));
+        assert!(writers[1].trim_start().starts_with("jq -r "));
+        for w in &writers {
+            assert!(!w.contains('>') || w.contains("2>/dev/null"), "{w}");
+            assert!(!w.contains("> \""), "{w}");
+        }
+        assert_eq!(s.matches("auth_header").count(), 2);
+        // SSLKEYLOGFILE unset and SIGPIPE ignored before curl runs.
+        let call = s.find("code=$(auth_header").unwrap();
+        assert!(s.find("unset SSLKEYLOGFILE").unwrap() < call);
+        assert!(s.find("trap '' PIPE").unwrap() < call);
     }
 
     #[test]
-    fn umask_and_trap_precede_the_header_file() {
+    fn curl_stderr_is_never_returned_wholesale() {
+        let s = script();
+        let reads: Vec<&str> = s
+            .lines()
+            .filter(|l| l.contains("\"$dir/err\"") && !l.contains("2>\"$dir/err\""))
+            .collect();
+        assert_eq!(reads.len(), 1, "{reads:?}");
+        assert!(reads[0].contains("grep -a '^curl: (' \"$dir/err\""));
+        assert!(!s.contains("cat \"$dir/err\"") && !s.contains("head -c 2000 \"$dir/err\""));
+    }
+
+    #[test]
+    fn script_checks_curl_version_before_reading_credentials() {
+        let s = script();
+        let version = s.find("curl -q --version").unwrap();
+        assert!(s.contains("__host_unsupported__=curl_7.55"));
+        assert!(version < s.find("meta_py=").unwrap());
+    }
+
+    #[test]
+    fn umask_and_trap_precede_the_temp_files() {
         let s = script();
         let umask = s.find("umask 077").unwrap();
         let mktemp = s.find("mktemp -d").unwrap();
         let trap = s.find("trap 'rm -rf \"$dir\"' EXIT").unwrap();
-        let auth = s.find("$dir/auth").unwrap();
-        assert!(umask < mktemp && mktemp < trap && trap < auth);
-        assert!(s.contains("0o600"));
-        assert!(s.contains("rm -f \"$dir/auth\""));
+        let first_use = s.find("\"$dir/").unwrap();
+        assert!(umask < mktemp && mktemp < trap && trap < first_use);
     }
 
     #[test]
@@ -1282,7 +1542,7 @@ mod tests {
         }
         // Never writes the credentials file; never touches the Keychain.
         assert!(!s.contains("> \"$cred\"") && !s.contains(">\"$cred\""));
-        assert!(!s.contains("open(sys.argv[1], \"w\")"));
+        assert!(!s.contains("\"w\""));
         assert!(!s.contains("security "));
         assert!(!s.to_ascii_lowercase().contains("keychain"));
         assert!(s.contains("${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"));
@@ -1303,8 +1563,13 @@ mod tests {
     //
     // Runs `bash -c <script>` with an EMPTY environment: HOME and
     // CLAUDE_CONFIG_DIR point into a temp dir holding FAKE credentials, and
-    // PATH holds only symlinks to the needed tools plus a fake `curl` — the
-    // real curl is unreachable, so no request can leave this machine.
+    // PATH holds only symlinks to the needed tools, logging shims for
+    // python3/jq, and a fake `curl` — the real curl is unreachable, so no
+    // request can leave this machine. `BASH_ENV` installs a DEBUG trap that
+    // dumps every shell variable before every command (functions and
+    // subshells included), plus hostile `rm`/`curl` functions the script
+    // must remove. After every run the whole sandbox except the fake
+    // credentials file is scanned for the token.
 
     struct Sandbox {
         dir: tempfile::TempDir,
@@ -1312,31 +1577,90 @@ mod tests {
 
     const FAKE_CURL: &str = r#"#!/bin/sh
 log="$FAKE_LOG"
+if [ "$1" = -q ]; then echo yes > "$log/q_first"; fi
+for a in "$@"; do
+  if [ "$a" = --version ]; then echo "curl ${FAKE_CURL_VERSION:-8.4.0} (fake) libcurl/8.4.0"; exit 0; fi
+done
+verbose=
+if [ "$1" != -q ] && grep -q verbose "$HOME/.curlrc" 2>/dev/null; then verbose=1; fi
 : > "$log/argv"
 for a in "$@"; do printf '%s\n' "$a" >> "$log/argv"; done
+src= hdr= body=
 while [ $# -gt 0 ]; do
   case "$1" in
-    -H) case "$2" in @*) f="${2#@}"; cat "$f" > "$log/auth_seen"; dirname "$f" > "$log/tmpdir"; find "$f" -perm 0600 > "$log/auth_mode";; esac; shift 2;;
+    -H) case "$2" in @-) src=-;; @*) src="${2#@}";; esac; shift 2;;
     -D) hdr="$2"; shift 2;;
     -o) body="$2"; shift 2;;
-    -A|-w|--max-time) shift 2;;
+    -A|-w|--max-time|--proto|--proto-redir|--max-redirs) shift 2;;
     *) shift;;
   esac
 done
+dirname "$hdr" > "$log/tmpdir"
+if [ -n "$verbose" ]; then
+  echo "* Trying 1.2.3.4:443..." >&2
+  if [ "$src" = - ]; then sed 's/^/> /' >&2; elif [ -n "$src" ]; then sed 's/^/> /' "$src" >&2; fi
+elif [ "$src" = - ]; then
+  cksum > "$log/auth_cksum"
+elif [ -n "$src" ]; then
+  cksum < "$src" > "$log/auth_cksum"
+fi
+if [ -n "$FAKE_SLEEP" ]; then echo $$ > "$log/curl_pid"; exec sleep "$FAKE_SLEEP"; fi
+if [ "$FAKE_STATUS" = 000 ]; then
+  echo "curl: (6) Could not resolve host: api.anthropic.com" >&2
+  printf 000
+  exit 6
+fi
 printf 'HTTP/2 %s\r\n%s\r\n\r\n' "$FAKE_STATUS" "$FAKE_HEADER" > "$hdr"
 printf '%s' "$FAKE_BODY" > "$body"
 printf '%s' "$FAKE_STATUS"
 "#;
 
-    fn find_tool(name: &str) -> Option<std::path::PathBuf> {
+    /// BASH_ENV for the sandboxed bash: trace every variable, and plant
+    /// hostile functions the script must unset before use.
+    const BASH_ENV: &str = r#"set -o functrace
+trap 'declare -p >>"$FAKE_LOG/vars" 2>/dev/null' DEBUG
+rm() { :; }
+curl() { echo HIJACKED; }
+"#;
+
+    const SHIM: &str = "#!/bin/sh\n{ echo \"== $0\"; printf '%s\\n' \"$@\"; env; } >> \"$FAKE_LOG/tool_calls\"\nexec @@REAL@@ \"$@\"\n";
+
+    fn find_tool(name: &str) -> Option<PathBuf> {
         ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
             .iter()
-            .map(|d| std::path::Path::new(d).join(name))
+            .map(|d| Path::new(d).join(name))
             .find(|p| p.is_file())
     }
 
+    /// Recursively list regular files under `dir` whose bytes contain
+    /// `needle`, skipping symlinks and `skip`.
+    fn files_containing(dir: &Path, needle: &[u8], skip: &Path) -> Vec<PathBuf> {
+        let mut hits = Vec::new();
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return hits;
+        };
+        for entry in rd.flatten() {
+            let p = entry.path();
+            let Ok(md) = std::fs::symlink_metadata(&p) else {
+                continue;
+            };
+            if md.file_type().is_symlink() || p == skip {
+                continue;
+            }
+            if md.is_dir() {
+                hits.extend(files_containing(&p, needle, skip));
+            } else if let Ok(bytes) = std::fs::read(&p) {
+                if bytes.windows(needle.len()).any(|w| w == needle) {
+                    hits.push(p);
+                }
+            }
+        }
+        hits
+    }
+
     impl Sandbox {
-        /// `None` when a needed tool is missing on this machine (skip).
+        /// `None` when a needed tool is missing on this machine: the test
+        /// skips, except under CI where it must fail loudly.
         fn new(json_tool: &str) -> Option<Self> {
             use std::os::unix::fs::PermissionsExt;
             let dir = tempfile::tempdir().unwrap();
@@ -1344,77 +1668,162 @@ printf '%s' "$FAKE_STATUS"
             for d in ["bin", "cfg", "tmp", "log", "home"] {
                 std::fs::create_dir(dir.path().join(d)).unwrap();
             }
-            for t in [
-                "sh", "cat", "sed", "grep", "head", "tail", "tr", "date", "mktemp", "rm",
-                "dirname", "find", json_tool,
-            ] {
-                let src = find_tool(t)?;
-                std::os::unix::fs::symlink(src, bin.join(t)).unwrap();
+            let exe = |p: &Path, body: &str| {
+                std::fs::write(p, body).unwrap();
+                std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            };
+            let needed = [
+                "cat", "sed", "grep", "head", "tail", "tr", "date", "rm", "dirname", "cksum",
+                "sleep", "env",
+            ];
+            for t in needed.iter().copied().chain(["bash", "mktemp"]) {
+                if find_tool(t).is_none() {
+                    return missing(t);
+                }
             }
-            let curl = bin.join("curl");
-            std::fs::write(&curl, FAKE_CURL).unwrap();
-            std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+            for t in needed {
+                std::os::unix::fs::symlink(find_tool(t).unwrap(), bin.join(t)).unwrap();
+            }
+            let Some(real) = find_tool(json_tool) else {
+                return missing(json_tool);
+            };
+            exe(
+                &bin.join(json_tool),
+                &SHIM.replace("@@REAL@@", &quote(&real.to_string_lossy())),
+            );
+            exe(&bin.join("curl"), FAKE_CURL);
+            // Some `mktemp`s (macOS) ignore $TMPDIR; pin the script's temp
+            // dir inside the sandbox so the leak scan covers it.
+            exe(
+                &bin.join("mktemp"),
+                &format!(
+                    "#!/bin/sh\n[ \"$1\" = -d ] || exit 1\nexec {} -d \"$TMPDIR/tmp.XXXXXXXX\"\n",
+                    quote(&find_tool("mktemp").unwrap().to_string_lossy())
+                ),
+            );
+            std::fs::write(dir.path().join("bash_env"), BASH_ENV).unwrap();
             Some(Self { dir })
         }
 
+        fn path(&self, rel: &str) -> PathBuf {
+            self.dir.path().join(rel)
+        }
+
         fn write_credentials(&self, json: &str) {
-            std::fs::write(self.dir.path().join("cfg/.credentials.json"), json).unwrap();
+            std::fs::write(self.path("cfg/.credentials.json"), json).unwrap();
         }
 
         fn log(&self, name: &str) -> Option<String> {
-            std::fs::read_to_string(self.dir.path().join("log").join(name)).ok()
+            std::fs::read_to_string(self.path("log").join(name)).ok()
         }
 
-        fn run(&self, status: &str, header: &str, body: &str) -> String {
-            let bash = find_tool("bash").expect("bash");
+        fn clear_log(&self, name: &str) {
+            let _ = std::fs::remove_file(self.path("log").join(name));
+        }
+
+        fn command(&self, env: &[(&str, &str)], script: &str) -> std::process::Command {
             let p = self.dir.path();
-            let out = std::process::Command::new(bash)
-                .arg("-c")
-                .arg(usage_script("claude-fleet/test"))
+            let mut cmd = std::process::Command::new(find_tool("bash").unwrap());
+            cmd.arg("-c")
+                .arg(script)
                 .env_clear()
                 .env("PATH", p.join("bin"))
                 .env("HOME", p.join("home"))
                 .env("CLAUDE_CONFIG_DIR", p.join("cfg"))
                 .env("TMPDIR", p.join("tmp"))
                 .env("FAKE_LOG", p.join("log"))
-                .env("FAKE_STATUS", status)
-                .env("FAKE_HEADER", header)
-                .env("FAKE_BODY", body)
-                .output()
-                .unwrap();
+                .env("BASH_ENV", p.join("bash_env"))
+                .env("FAKE_STATUS", "200")
+                .env("FAKE_BODY", OK_BODY);
+            for (k, v) in env {
+                cmd.env(k, v);
+            }
+            cmd
+        }
+
+        /// The token must be nowhere in the sandbox but the credentials file.
+        fn assert_no_token_on_disk(&self) {
+            let hits = files_containing(
+                self.dir.path(),
+                CANARY.as_bytes(),
+                &self.path("cfg/.credentials.json"),
+            );
+            assert!(hits.is_empty(), "token found in {hits:?}");
+        }
+
+        fn run_script(&self, script: &str, env: &[(&str, &str)]) -> String {
+            self.clear_log("argv");
+            self.clear_log("auth_cksum");
+            self.clear_log("q_first");
+            let out = self.command(env, script).output().unwrap();
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
             assert!(out.status.success(), "stdout={stdout} stderr={stderr}");
-            assert!(!stdout.contains("FAKEFAKE"), "token on stdout: {stdout}");
-            assert!(!stderr.contains("FAKEFAKE"), "token on stderr: {stderr}");
+            assert!(!stdout.contains(CANARY), "token on stdout: {stdout}");
+            assert!(!stderr.contains(CANARY), "token on stderr: {stderr}");
+            let vars = self.log("vars").unwrap_or_default();
+            assert!(vars.contains("declare"), "the DEBUG trace ran");
+            self.assert_no_token_on_disk();
             stdout
         }
+
+        fn run(&self, env: &[(&str, &str)]) -> String {
+            self.run_script(&usage_script("claude-fleet/test"), env)
+        }
+    }
+
+    fn missing(tool: &str) -> Option<Sandbox> {
+        if std::env::var_os("CI").is_some() {
+            panic!("{tool} is required for the usage-script tests under CI");
+        }
+        eprintln!("skipping: {tool} is not installed");
+        None
     }
 
     fn creds(expires_at: i64, refresh_expires_at: i64) -> String {
         format!(
-            r#"{{"claudeAiOauth":{{"accessToken":"{FAKE_TOKEN}","refreshToken":"sk-ant-ort01-FAKEFAKE-refresh","expiresAt":{expires_at},"refreshTokenExpiresAt":{refresh_expires_at},"scopes":["user:inference"],"subscriptionType":"max","rateLimitTier":"default_claude_max_20x"}}}}"#
+            r#"{{"claudeAiOauth":{{"accessToken":"{FAKE_TOKEN}","refreshToken":"sk-ant-ort01-refresh-FAKE","expiresAt":{expires_at},"refreshTokenExpiresAt":{refresh_expires_at},"scopes":["user:inference"],"subscriptionType":"max","rateLimitTier":"default_claude_max_20x"}}}}"#
         )
+    }
+
+    fn unix_now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    /// POSIX `cksum` of `data`, computed by the system tool.
+    fn cksum_of(data: &str) -> String {
+        use std::io::Write;
+        let mut child = std::process::Command::new(find_tool("cksum").unwrap())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(data.as_bytes())
+            .unwrap();
+        String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
     }
 
     fn run_script_paths(json_tool: &str) {
         let Some(sb) = Sandbox::new(json_tool) else {
-            eprintln!("skipping: {json_tool} or a coreutil is not installed");
             return;
         };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let now = unix_now();
 
         // No credentials file: nothing else happens.
-        let out = sb.run("200", "", OK_BODY);
+        let out = sb.run(&[]);
         assert_eq!(out, "__no_credentials__\n");
         assert!(sb.log("argv").is_none(), "curl must not run");
 
         // Login expired (refresh token in the past, epoch in ms).
         sb.write_credentials(&creds((now + 3600) * 1000, (now - 10) * 1000));
-        let out = sb.run("200", "", OK_BODY);
+        let out = sb.run(&[]);
         assert_eq!(
             parse_usage_output(&out, now),
             UsageOutcome::LoginExpired,
@@ -1424,7 +1833,7 @@ printf '%s' "$FAKE_STATUS"
 
         // Access token expired (seconds epoch), login still valid.
         sb.write_credentials(&creds(now - 5, now + 86_400));
-        let out = sb.run("200", "", OK_BODY);
+        let out = sb.run(&[]);
         assert_eq!(
             parse_usage_output(&out, now),
             UsageOutcome::AccessTokenExpired,
@@ -1436,40 +1845,48 @@ printf '%s' "$FAKE_STATUS"
         );
         assert!(sb.log("argv").is_none(), "curl must not run");
 
-        // Valid: curl runs, gets the token only through the header file.
-        let creds_before = creds((now + 3600) * 1000, (now + 86_400) * 1000);
-        sb.write_credentials(&creds_before);
-        let out = sb.run("200", "", OK_BODY);
+        // Valid: curl runs with -q first and gets the header on stdin.
+        let valid = creds((now + 3600) * 1000, (now + 86_400) * 1000);
+        sb.write_credentials(&valid);
+        let out = sb.run(&[]);
         let outcome = parse_usage_output(&out, now);
         assert!(
             matches!(&outcome, UsageOutcome::Ok { subscription: Some(s), .. } if s == "max"),
             "{out}"
         );
+        assert_eq!(sb.log("q_first").as_deref(), Some("yes\n"));
         let argv = sb.log("argv").unwrap();
-        assert!(!argv.contains("FAKEFAKE"), "token in curl argv: {argv}");
         assert!(argv.contains("claude-fleet/test"));
+        assert!(argv.contains("@-\n"), "{argv}");
         assert!(argv.contains("https://api.anthropic.com/api/oauth/usage"));
         assert_eq!(
-            sb.log("auth_seen").unwrap(),
-            format!("Authorization: Bearer {FAKE_TOKEN}\n")
-        );
-        assert!(
-            !sb.log("auth_mode").unwrap().trim().is_empty(),
-            "header file is mode 0600"
+            sb.log("auth_cksum").unwrap(),
+            cksum_of(&format!("Authorization: Bearer {FAKE_TOKEN}\n")),
+            "curl received exactly the Authorization header"
         );
         let tmpdir = sb.log("tmpdir").unwrap();
         assert!(
-            !std::path::Path::new(tmpdir.trim()).exists(),
-            "trap removed the temp dir"
+            Path::new(tmpdir.trim()).starts_with(sb.path("tmp")),
+            "the leak scan covers the script's temp dir: {tmpdir}"
+        );
+        assert!(
+            !Path::new(tmpdir.trim()).exists(),
+            "trap removed the temp dir despite a hostile rm() function"
         );
         assert_eq!(
-            std::fs::read_to_string(sb.dir.path().join("cfg/.credentials.json")).unwrap(),
-            creds_before,
+            std::fs::read_to_string(sb.path("cfg/.credentials.json")).unwrap(),
+            valid,
             "credentials file untouched"
         );
+        let calls = sb.log("tool_calls").unwrap();
+        assert!(calls.contains(&format!("== {}", sb.path("bin").join(json_tool).display())));
 
         // 429 with Retry-After in the response headers.
-        let out = sb.run("429", "Retry-After: 90", "{}");
+        let out = sb.run(&[
+            ("FAKE_STATUS", "429"),
+            ("FAKE_HEADER", "Retry-After: 90"),
+            ("FAKE_BODY", "{}"),
+        ]);
         assert_eq!(
             parse_usage_output(&out, now),
             UsageOutcome::RateLimited {
@@ -1478,12 +1895,44 @@ printf '%s' "$FAKE_STATUS"
             "{out}"
         );
 
+        // A hostile ~/.curlrc asking for `verbose`, and no HTTP response:
+        // with -q the config is ignored and only the `curl: (N)` line returns.
+        std::fs::write(sb.path("home/.curlrc"), "verbose\n").unwrap();
+        let out = sb.run(&[("FAKE_STATUS", "000")]);
+        assert_eq!(
+            parse_usage_output(&out, now),
+            UsageOutcome::Unavailable {
+                status: None,
+                snippet: "curl exit 6: curl: (6) Could not resolve host: api.anthropic.com".into()
+            },
+            "{out}"
+        );
+        std::fs::remove_file(sb.path("home/.curlrc")).unwrap();
+
+        // curl older than 7.55 cannot read -H @-: host_unsupported, no call.
+        let out = sb.run(&[("FAKE_CURL_VERSION", "7.29.0")]);
+        assert_eq!(
+            parse_usage_output(&out, now),
+            UsageOutcome::HostUnsupported {
+                detail: "curl is older than 7.55".into()
+            },
+            "{out}"
+        );
+        assert!(sb.log("argv").is_none(), "curl must not run");
+
         // A credentials file without claudeAiOauth.
         sb.write_credentials(r#"{"somethingElse":{}}"#);
-        std::fs::remove_file(sb.dir.path().join("log/argv")).unwrap();
-        let out = sb.run("200", "", OK_BODY);
+        let out = sb.run(&[]);
         assert_eq!(parse_usage_output(&out, now), UsageOutcome::NoCredentials);
         assert!(sb.log("argv").is_none(), "curl must not run");
+
+        // Nothing token-bearing in the tool shims' argv/env logs either (the
+        // sandbox scan covers them) and the variable trace saw the pipeline.
+        let vars = sb.log("vars").unwrap();
+        assert!(
+            vars.contains("meta="),
+            "trace covers the script's variables"
+        );
     }
 
     #[test]
@@ -1494,6 +1943,83 @@ printf '%s' "$FAKE_STATUS"
     #[test]
     fn script_runs_end_to_end_with_jq_against_a_fake_curl() {
         run_script_paths("jq");
+    }
+
+    /// The leak detectors themselves work: a script that keeps the token in
+    /// a shell variable, or writes it to a temp file, is caught.
+    #[test]
+    fn leak_detectors_catch_a_token_in_a_variable_or_on_disk() {
+        let Some(sb) = Sandbox::new("jq") else {
+            return;
+        };
+        sb.write_credentials(&creds(
+            (unix_now() + 3600) * 1000,
+            (unix_now() + 86_400) * 1000,
+        ));
+        let in_var = "h=$(jq -r .claudeAiOauth.accessToken \"$CLAUDE_CONFIG_DIR/.credentials.json\"); true; echo ok";
+        let out = sb.command(&[], in_var).output().unwrap();
+        assert!(out.status.success());
+        let hits = files_containing(
+            sb.dir.path(),
+            CANARY.as_bytes(),
+            &sb.path("cfg/.credentials.json"),
+        );
+        assert_eq!(hits, vec![sb.path("log/vars")], "the DEBUG trace caught it");
+        std::fs::remove_file(sb.path("log/vars")).unwrap();
+
+        let on_disk = "jq -r .claudeAiOauth.accessToken \"$CLAUDE_CONFIG_DIR/.credentials.json\" > \"$TMPDIR/auth\"";
+        sb.command(&[], on_disk).output().unwrap();
+        let hits = files_containing(
+            sb.dir.path(),
+            CANARY.as_bytes(),
+            &sb.path("cfg/.credentials.json"),
+        );
+        assert_eq!(hits, vec![sb.path("tmp/auth")]);
+    }
+
+    /// SIGKILL while curl is in flight (OOM killer): no token may be left on
+    /// disk. This failed when the header went through a temp file.
+    #[test]
+    fn sigkill_during_the_request_leaves_no_token_on_disk() {
+        for tool in ["python3", "jq"] {
+            let Some(sb) = Sandbox::new(tool) else {
+                continue;
+            };
+            let now = unix_now();
+            sb.write_credentials(&creds((now + 3600) * 1000, (now + 86_400) * 1000));
+            let mut child = sb
+                .command(&[("FAKE_SLEEP", "30")], &usage_script("claude-fleet/test"))
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let pid_file = sb.path("log/curl_pid");
+            let started = Instant::now();
+            while !pid_file.exists() {
+                assert!(
+                    started.elapsed() < Duration::from_secs(20),
+                    "fake curl never started"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // Let the fake curl finish reading the header and exec sleep.
+            std::thread::sleep(Duration::from_millis(200));
+            child.kill().unwrap();
+            child.wait().unwrap();
+            let curl_pid = std::fs::read_to_string(&pid_file).unwrap();
+            if let Some(kill) = find_tool("kill") {
+                let _ = std::process::Command::new(kill)
+                    .args(["-9", curl_pid.trim()])
+                    .status();
+            }
+            let tmpdir = sb.log("tmpdir").unwrap();
+            assert!(Path::new(tmpdir.trim()).starts_with(sb.path("tmp")));
+            sb.assert_no_token_on_disk();
+            assert!(
+                sb.log("auth_cksum").is_some(),
+                "{tool}: curl had the header"
+            );
+        }
     }
 
     // ── host order ─────────────────────────────────────────────────────────
@@ -1563,7 +2089,6 @@ printf '%s' "$FAKE_STATUS"
         assert_eq!(snap.detail.as_deref(), Some("a: access token expired"));
         assert_eq!(usage_calls(&fake, "a"), 1);
         assert_eq!(usage_calls(&fake, "b"), 1);
-        // The script went through bash -lc with the honest UA and bounded ssh.
         let call = &fake.calls_for("b")[0];
         assert_eq!(call.args[0], "bash");
         assert_eq!(call.args[1], "-lc");
@@ -1599,7 +2124,7 @@ printf '%s' "$FAKE_STATUS"
     }
 
     #[tokio::test]
-    async fn stops_at_unavailable_and_moves_on_after_transport_errors() {
+    async fn moves_on_only_when_ssh_never_connected_and_stops_at_unavailable() {
         let hosts = vec![
             host("a", Some("acct"), true),
             host("b", Some("acct"), true),
@@ -1633,35 +2158,138 @@ printf '%s' "$FAKE_STATUS"
     }
 
     #[tokio::test]
-    async fn every_host_in_a_host_state_failure_retries_at_the_floor() {
+    async fn an_ssh_timeout_stops_the_fallback() {
+        let hosts = vec![host("a", Some("acct"), true), host("b", Some("acct"), true)];
+        let fake = FakeSsh::new();
+        fake.hanging("a")
+            .on_host("b", Match::Any, Reply::ok(&ok_output(OK_BODY)))
+            .set_wall_clock(Duration::from_millis(1100));
+        let cache = Mutex::new(UsageCache::new());
+        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW, false).await;
+        assert!(fake.calls_for("b").is_empty(), "the request may have left");
+        assert_eq!(snap.status, UsageOutcomeKind::NoOnlineHost);
+        assert!(
+            snap.detail.as_deref().unwrap().starts_with("a: "),
+            "{snap:?}"
+        );
+        // Scheduled from the END of the attempt (≥ 1 s after it started).
+        assert!(snap.next_try_at >= NOW + 1 + 300, "{}", snap.next_try_at);
+        assert!(snap.next_try_at <= NOW + 10 + 300, "{}", snap.next_try_at);
+    }
+
+    #[tokio::test]
+    async fn a_failure_after_the_connection_came_up_stops_the_fallback() {
+        let hosts = vec![host("a", Some("acct"), true), host("b", Some("acct"), true)];
+        for reply in [
+            Reply::fail(255, "Connection to a closed by remote host.\r\n"),
+            Reply::fail(255, "client_loop: send disconnect: Broken pipe\r\n"),
+            Reply::fail(1, ""),
+            // Output at the cap: markers may have been cut off.
+            Reply::ok(&"x".repeat(OUTPUT_CAP + 10)),
+        ] {
+            let fake = FakeSsh::new();
+            fake.on_host("a", Match::Any, reply).on_host(
+                "b",
+                Match::Any,
+                Reply::ok(&ok_output(OK_BODY)),
+            );
+            let cache = Mutex::new(UsageCache::new());
+            let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW, false).await;
+            assert!(fake.calls_for("b").is_empty(), "{snap:?}");
+            assert_eq!(snap.status, UsageOutcomeKind::NoOnlineHost);
+        }
+    }
+
+    #[test]
+    fn connect_failures_are_recognised() {
+        for s in [
+            "ssh: connect to host h port 22: Connection refused",
+            "ssh: Could not resolve hostname h: nodename nor servname provided",
+            "Permission denied (publickey).",
+            "Host key verification failed.",
+            "kex_exchange_identification: read: Connection reset by peer",
+            "Connection closed by 10.0.0.1 port 22",
+        ] {
+            assert!(connection_never_established(s), "{s}");
+        }
+        for s in [
+            "Connection to h closed by remote host.",
+            "client_loop: send disconnect: Broken pipe",
+            "",
+        ] {
+            assert!(!connection_never_established(s), "{s}");
+        }
+    }
+
+    #[tokio::test]
+    async fn token_rejected_allows_exactly_one_follow_up_host() {
+        let hosts = vec![
+            host("a", Some("acct"), true),
+            host("b", Some("acct"), true),
+            host("c", Some("acct"), true),
+        ];
+        let rejected = "__http_status__=401\n__body__\n{}";
+        // a rejected, b rejected → c is never asked.
+        let fake = FakeSsh::new();
+        fake.on(Match::Any, Reply::ok(rejected)).on_host(
+            "c",
+            Match::Any,
+            Reply::ok(&ok_output(OK_BODY)),
+        );
+        let cache = Mutex::new(UsageCache::new());
+        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW, false).await;
+        assert_eq!(snap.status, UsageOutcomeKind::TokenRejected);
+        assert_eq!(fake.calls_for("b").len(), 1);
+        assert!(fake.calls_for("c").is_empty());
+
+        // a rejected, b has no credentials (no request) → still only one
+        // follow-up: c is not asked.
+        let fake = FakeSsh::new();
+        fake.on_host("a", Match::Any, Reply::ok(rejected))
+            .on_host("b", Match::Any, Reply::ok("__no_credentials__\n"))
+            .on_host("c", Match::Any, Reply::ok(&ok_output(OK_BODY)));
+        let cache = Mutex::new(UsageCache::new());
+        fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW, false).await;
+        assert!(fake.calls_for("c").is_empty());
+
+        // a rejected, b answers → ok via b.
+        let fake = FakeSsh::new();
+        fake.on_host("a", Match::Any, Reply::ok(rejected)).on_host(
+            "b",
+            Match::Any,
+            Reply::ok(&ok_output(OK_BODY)),
+        );
+        let cache = Mutex::new(UsageCache::new());
+        let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW, false).await;
+        assert_eq!(snap.status, UsageOutcomeKind::Ok);
+        assert_eq!(snap.source_host.as_deref(), Some("b"));
+    }
+
+    #[tokio::test]
+    async fn every_host_in_a_pre_request_state_retries_at_the_floor() {
         let hosts = vec![
             host("local", Some("acct"), true),
             host("trn", Some("acct"), true),
         ];
         let fake = FakeSsh::new();
         fake.on_host("local", Match::Any, Reply::ok("__no_credentials__\n"))
-            .on_host(
-                "trn",
-                Match::Any,
-                Reply::ok("__http_status__=401\n__body__\n{}"),
-            );
+            .on_host("trn", Match::Any, Reply::ok("__login_expired__\n"));
         let cache = Mutex::new(UsageCache::new());
         let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW, false).await;
-        assert_eq!(snap.status, UsageOutcomeKind::TokenRejected);
+        assert_eq!(snap.status, UsageOutcomeKind::LoginExpired);
         assert_eq!(snap.next_try_at, NOW + 300);
         assert_eq!(
             snap.detail.as_deref(),
-            Some("trn: token rejected; local: no credentials file")
+            Some("trn: login expired; local: no credentials file")
         );
         assert_eq!(cache.lock().unwrap().entries["acct"].backoff_secs, 0);
-        // Twice more: still the floor, no escalation.
         fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW + 300, false).await;
         let snap = fetch_account_usage_with("acct", &hosts, &fake, &cache, NOW + 600, false).await;
         assert_eq!(snap.next_try_at, NOW + 900);
     }
 
     #[tokio::test]
-    async fn all_transport_errors_back_off() {
+    async fn all_hosts_unreachable_backs_off() {
         let hosts = vec![host("a", Some("acct"), true)];
         let fake = FakeSsh::new();
         fake.unreachable("a");
@@ -1793,6 +2421,23 @@ printf '%s' "$FAKE_STATUS"
         assert_eq!(c.entries["a"].next_try_at, NOW + 300);
         c.record("a", unavailable(), NOW);
         assert_eq!(c.entries["a"].next_try_at, NOW + 300, "backoff restarted");
+    }
+
+    #[test]
+    fn a_clock_stepping_backwards_does_not_freeze_polling() {
+        let mut c = UsageCache::new();
+        c.record("a", ok_result(), NOW);
+        assert!(!c.due("a", NOW + 299));
+        // The clock jumps back an hour: the 300 s wait is re-based on it.
+        let back = NOW - 3600;
+        assert!(!c.due("a", back));
+        assert!(!c.due("a", back + 299));
+        assert!(c.due("a", back + 300));
+        // Rate-limit waits survive a re-base too (not reset to the floor).
+        c.record("a", rate_limited(Some(3000)), NOW);
+        assert!(!c.due("a", NOW - 10_000));
+        assert!(!c.due("a", NOW - 10_000 + 2999));
+        assert!(c.due("a", NOW - 10_000 + 3000));
     }
 
     #[test]
