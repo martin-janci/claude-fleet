@@ -3945,7 +3945,7 @@ mod tests {
         let orphan = s
             .upsert_session("orphan", "local", None, None, 1, 1, "running", None)
             .unwrap();
-        s.upsert_bg_session("local", "bg:abc", None, "abc", None, 1)
+        s.upsert_bg_session("local", "bg:abc", None, "abc", None, 1, "bg")
             .unwrap();
         let bg = s.get_session("bg:abc", "local").unwrap().unwrap().id;
         let pa = s.upsert_project("o", "a", "/a").unwrap();

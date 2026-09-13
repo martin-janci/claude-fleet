@@ -74,16 +74,20 @@ impl Store {
         Ok(id)
     }
 
-    /// Upsert a synthetic `kind='bg'` session for a `claude --bg` agent that has
-    /// NO matching tmux session. The sentinel `tmux_name` (`bg:<sessionId>`)
-    /// keeps it unique under the `(host_alias, tmux_name)` constraint and signals
-    /// to the UI that there is no tmux pane to attach. Refreshes the live
-    /// `claude_status` on every reconcile; the row's `kind='bg'` exempts it from
-    /// the tmux-keyed ghost cleanup (it is never in the tmux `keep` set) — bg
-    /// rows are instead pruned against the `claude agents --json` result by
-    /// `ghost_and_clean_bg_sessions`. A row that was ghosted by that pruner and
-    /// whose agent reappears is resurrected here (`status='running'`,
+    /// Upsert a synthetic `kind IN ('bg','external')` session for a
+    /// `claude --bg` (`kind='bg'`) or interactive-but-tmux-less (`kind='external'`)
+    /// agent that has NO matching tmux session. The sentinel `tmux_name`
+    /// (`bg:<sessionId>`) keeps it unique under the `(host_alias, tmux_name)`
+    /// constraint and signals to the UI that there is no tmux pane to attach.
+    /// Refreshes the live `claude_status` and `kind` on every reconcile (an
+    /// existing row is reclassified when the agent's kind changes); the
+    /// synthetic kinds exempt the row from the tmux-keyed ghost cleanup (it
+    /// is never in the tmux `keep` set) — such rows are instead pruned
+    /// against the `claude agents --json` result by
+    /// `ghost_and_clean_bg_sessions`. A row that was ghosted by that pruner
+    /// and whose agent reappears is resurrected here (`status='running'`,
     /// `lost_at=NULL`), mirroring the tmux upsert's ghost revival.
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_bg_session(
         &self,
         host_alias: &str,
@@ -92,7 +96,12 @@ impl Store {
         claude_session_id: &str,
         claude_status: Option<&str>,
         last_activity_at: i64,
+        kind: &str,
     ) -> Result<i64, rusqlite::Error> {
+        debug_assert!(
+            kind == "bg" || kind == "external",
+            "upsert_bg_session: invalid agent kind {kind:?}"
+        );
         let existing_id: Option<i64> = self
             .conn
             .query_row(
@@ -106,12 +115,12 @@ impl Store {
             "INSERT INTO sessions (tmux_name, host_alias, project_id, worktree_id,
                                    created_at, last_activity_at, status, kind,
                                    claude_session_id, claude_status, idle_since)
-             VALUES (?1, ?2, ?3, NULL, ?4, ?4, 'running', 'bg', ?5, ?6,
+             VALUES (?1, ?2, ?3, NULL, ?4, ?4, 'running', ?8, ?5, ?6,
                      CASE WHEN ?6 IN ('idle','completed','stopped') THEN ?7 ELSE NULL END)
              ON CONFLICT(host_alias, tmux_name) DO UPDATE SET
                project_id=COALESCE(excluded.project_id, project_id),
                last_activity_at=excluded.last_activity_at,
-               kind='bg',
+               kind=excluded.kind,
                status='running',
                lost_at=NULL,
                claude_session_id=COALESCE(excluded.claude_session_id, claude_session_id),
@@ -129,7 +138,8 @@ impl Store {
                 last_activity_at,
                 claude_session_id,
                 claude_status,
-                now_unix()
+                now_unix(),
+                kind
             ],
             |row| row.get(0),
         )?;
@@ -143,10 +153,10 @@ impl Store {
         Ok(id)
     }
 
-    /// Two-phase cleanup for synthetic `kind='bg'` rows on one host, keyed on
-    /// the CURRENT `claude agents --json` result (`keep_names` = the sentinel
-    /// `bg:<sessionId>` names observed this reconcile pass) instead of the tmux
-    /// `keep` set. Mirrors `ghost_and_clean_sessions_in_tx`:
+    /// Two-phase cleanup for synthetic `kind IN ('bg','external')` rows on one
+    /// host, keyed on the CURRENT `claude agents --json` result (`keep_names`
+    /// = the sentinel `bg:<sessionId>` names observed this reconcile pass)
+    /// instead of the tmux `keep` set. Mirrors `ghost_and_clean_sessions_in_tx`:
     ///
     /// Phase 1: live bg rows not in `keep_names` → `status='ghost'`,
     /// `lost_at=now`. Phase 2: bg rows already ghost BEFORE this pass and still
@@ -171,7 +181,7 @@ impl Store {
         // ghosted this pass survive one more cycle.
         let pre_ghost_ids: Vec<i64> = if keep_names.is_empty() {
             let mut stmt = tx.prepare_cached(
-                "SELECT id FROM sessions WHERE host_alias=?1 AND status='ghost' AND kind='bg'",
+                "SELECT id FROM sessions WHERE host_alias=?1 AND status='ghost' AND kind IN ('bg','external')",
             )?;
             let ids = stmt
                 .query_map(rusqlite::params![host_alias], |r| r.get(0))?
@@ -181,7 +191,7 @@ impl Store {
             let phs = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!(
                 "SELECT id FROM sessions
-                 WHERE host_alias=?1 AND status='ghost' AND kind='bg' AND tmux_name NOT IN ({phs})"
+                 WHERE host_alias=?1 AND status='ghost' AND kind IN ('bg','external') AND tmux_name NOT IN ({phs})"
             );
             let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
             for n in keep_names {
@@ -198,7 +208,7 @@ impl Store {
         let ghost_ids: Vec<i64> = if keep_names.is_empty() {
             let mut stmt = tx.prepare_cached(
                 "UPDATE sessions SET status='ghost', lost_at=?1
-                 WHERE host_alias=?2 AND status!='ghost' AND kind='bg'
+                 WHERE host_alias=?2 AND status!='ghost' AND kind IN ('bg','external')
                  RETURNING id",
             )?;
             let ids = stmt
@@ -209,7 +219,7 @@ impl Store {
             let phs = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!(
                 "UPDATE sessions SET status='ghost', lost_at=?1
-                 WHERE host_alias=?2 AND status!='ghost' AND kind='bg' AND tmux_name NOT IN ({phs})
+                 WHERE host_alias=?2 AND status!='ghost' AND kind IN ('bg','external') AND tmux_name NOT IN ({phs})
                  RETURNING id"
             );
             let mut params: Vec<&dyn rusqlite::ToSql> = vec![&now, &host_alias];
@@ -263,6 +273,71 @@ impl Store {
         for change in &changes {
             self.bus.emit_change(change);
         }
+        Ok(())
+    }
+
+    /// User-initiated removal of an agent row (`claude agents --json`, not a
+    /// tmux session) from the list: records `claude_session_id` as dismissed
+    /// as of `now` in `dismissed_agents`, then hard-deletes its `sessions`
+    /// row the same way `delete_session` does (and emits the same
+    /// `session:removed`/killed event via it). Reconcile is expected to skip
+    /// re-creating the row while the agent's last activity is no newer than
+    /// `dismissed_at` — see `dismissed_agents`.
+    pub fn dismiss_agent(
+        &self,
+        host_alias: &str,
+        claude_session_id: &str,
+        now: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO dismissed_agents (host_alias, claude_session_id, dismissed_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(host_alias, claude_session_id) DO UPDATE SET
+               dismissed_at=excluded.dismissed_at",
+            rusqlite::params![host_alias, claude_session_id, now],
+        )?;
+        let tmux_name = format!("bg:{claude_session_id}");
+        let id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM sessions WHERE host_alias=?1 AND tmux_name=?2",
+                rusqlite::params![host_alias, tmux_name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(id) = id {
+            self.delete_session(id)?;
+        }
+        Ok(())
+    }
+
+    /// Every dismissed `claude_session_id` on `host_alias`, mapped to its
+    /// `dismissed_at` stamp. Used by reconcile to skip re-surfacing an agent
+    /// the user removed (see `dismiss_agent`).
+    pub fn dismissed_agents(
+        &self,
+        host_alias: &str,
+    ) -> Result<std::collections::HashMap<String, i64>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT claude_session_id, dismissed_at FROM dismissed_agents WHERE host_alias=?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![host_alias], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Clear a dismissal (e.g. the agent produced new activity and should be
+    /// surfaced again).
+    pub fn clear_agent_dismissal(
+        &self,
+        host_alias: &str,
+        claude_session_id: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "DELETE FROM dismissed_agents WHERE host_alias=?1 AND claude_session_id=?2",
+            rusqlite::params![host_alias, claude_session_id],
+        )?;
         Ok(())
     }
 
@@ -880,6 +955,55 @@ mod tests {
     use super::*;
     use crate::store::test_support::*;
 
+    /// In-memory store with the `local` host already registered, for the
+    /// `kind`/dismissal tests below (`sessions.host_alias` has a FK to
+    /// `hosts.alias`, enforced under `PRAGMA foreign_keys = ON`).
+    fn store() -> Store {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        s
+    }
+
+    #[test]
+    fn upsert_bg_session_writes_kind_and_flips_a_misfiled_row() {
+        let s = store();
+        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("idle"), 1, "bg")
+            .unwrap();
+        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("idle"), 2, "external")
+            .unwrap();
+        assert_eq!(
+            s.get_session("bg:u1", "local").unwrap().unwrap().kind,
+            "external"
+        );
+    }
+
+    #[test]
+    fn cleanup_ghosts_external_rows_too() {
+        let s = store();
+        s.upsert_bg_session("local", "bg:e1", None, "e1", Some("idle"), 1, "external")
+            .unwrap();
+        s.ghost_and_clean_bg_sessions("local", &[], 10).unwrap();
+        assert_eq!(
+            s.get_session("bg:e1", "local").unwrap().unwrap().status,
+            "ghost"
+        );
+        s.ghost_and_clean_bg_sessions("local", &[], 20).unwrap();
+        assert!(s.get_session("bg:e1", "local").unwrap().is_none());
+    }
+
+    #[test]
+    fn dismiss_agent_records_and_deletes_the_row() {
+        let s = store();
+        s.upsert_bg_session("local", "bg:u2", None, "u2", Some("stopped"), 1, "bg")
+            .unwrap();
+        s.dismiss_agent("local", "u2", 100).unwrap();
+        assert!(s.get_session("bg:u2", "local").unwrap().is_none());
+        assert_eq!(s.dismissed_agents("local").unwrap().get("u2"), Some(&100));
+        assert!(s.dismissed_agents("other").unwrap().is_empty());
+        s.clear_agent_dismissal("local", "u2").unwrap();
+        assert!(s.dismissed_agents("local").unwrap().is_empty());
+    }
+
     #[test]
     fn ghost_and_clean_bg_sessions_two_phase_with_event_cleanup() {
         let (store, bus) = store_with_recorder();
@@ -887,14 +1011,14 @@ mod tests {
         store.upsert_host("beta").unwrap();
         bus.take();
         let id = store
-            .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 100)
+            .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 100, "bg")
             .unwrap();
         store
             .insert_session_event(id, "status_change", None)
             .unwrap();
         // A bg row on ANOTHER host must never be touched.
         let other = store
-            .upsert_bg_session("beta", "bg:u9", None, "u9", Some("working"), 100)
+            .upsert_bg_session("beta", "bg:u9", None, "u9", Some("working"), 100, "bg")
             .unwrap();
         bus.take();
 
@@ -933,7 +1057,7 @@ mod tests {
         let mut store = Store::open_in_memory().unwrap();
         store.upsert_host("alpha").unwrap();
         let kept = store
-            .upsert_bg_session("alpha", "bg:live", None, "live", Some("working"), 100)
+            .upsert_bg_session("alpha", "bg:live", None, "live", Some("working"), 100, "bg")
             .unwrap();
         // A normal tmux-backed row — ghosted or not, the bg pruner must skip it.
         store
@@ -976,14 +1100,14 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("alpha").unwrap();
         let id = s
-            .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 100)
+            .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 100, "bg")
             .unwrap();
         s.ghost_and_clean_bg_sessions("alpha", &[], 200).unwrap();
         assert_eq!(s.get_session_by_id(id).unwrap().unwrap().status, "ghost");
 
         // Agent reappears (e.g. the previous probe transiently failed).
         let id2 = s
-            .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 300)
+            .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 300, "bg")
             .unwrap();
         assert_eq!(id2, id, "same row, not a new one");
         let row = s.get_session_by_id(id).unwrap().unwrap();
@@ -996,7 +1120,7 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         store.upsert_host("alpha").unwrap();
         let bg = store
-            .upsert_bg_session("alpha", "bg:gone", None, "uuid-gone", Some("idle"), 1)
+            .upsert_bg_session("alpha", "bg:gone", None, "uuid-gone", Some("idle"), 1, "bg")
             .unwrap();
         let peer = store
             .upsert_session("peer", "alpha", None, None, 1, 1, "running", None)
@@ -1587,13 +1711,13 @@ mod tests {
     fn bg_upsert_maintains_idle_since_from_agent_status() {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("local").unwrap();
-        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 1)
+        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 1, "bg")
             .unwrap();
         assert_eq!(
             s.get_session("bg:u1", "local").unwrap().unwrap().idle_since,
             None
         );
-        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("completed"), 2)
+        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("completed"), 2, "bg")
             .unwrap();
         let stamp = s
             .get_session("bg:u1", "local")
@@ -1601,13 +1725,13 @@ mod tests {
             .unwrap()
             .idle_since
             .expect("stamped");
-        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("completed"), 3)
+        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("completed"), 3, "bg")
             .unwrap();
         assert_eq!(
             s.get_session("bg:u1", "local").unwrap().unwrap().idle_since,
             Some(stamp)
         );
-        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 4)
+        s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 4, "bg")
             .unwrap();
         assert_eq!(
             s.get_session("bg:u1", "local").unwrap().unwrap().idle_since,

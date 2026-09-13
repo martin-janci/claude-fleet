@@ -603,6 +603,7 @@ pub(super) fn reconcile_bg_agents(
             session_id,
             status.as_deref(),
             now_unix(),
+            "bg",
         ) {
             tracing::warn!(
                 host = %host_alias,

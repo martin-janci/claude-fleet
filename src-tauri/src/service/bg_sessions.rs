@@ -340,7 +340,7 @@ mod tests {
         {
             let s = store.lock().unwrap();
             s.upsert_host("local").unwrap();
-            s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 5)
+            s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 5, "bg")
                 .unwrap();
         }
         let row = stamp_bg_row(&store, "u1", "Review the auth PR, carefully!").expect("row");
@@ -371,6 +371,7 @@ mod tests {
                     UUID,
                     Some("working"),
                     5,
+                    "bg",
                 )
                 .unwrap();
             let plain = s

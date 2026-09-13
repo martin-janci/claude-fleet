@@ -359,8 +359,16 @@ fn reconcile_bg_agents_cleanup_spares_other_hosts_and_tmux_rows() {
     s.upsert_host("local").unwrap();
     s.upsert_host("remote").unwrap();
     // A bg row on ANOTHER host and a normal tmux row on this host.
-    s.upsert_bg_session("remote", "bg:other", None, "other", Some("working"), 1)
-        .unwrap();
+    s.upsert_bg_session(
+        "remote",
+        "bg:other",
+        None,
+        "other",
+        Some("working"),
+        1,
+        "bg",
+    )
+    .unwrap();
     s.upsert_session("work-a", "local", None, None, 1, 1, "running", None)
         .unwrap();
 

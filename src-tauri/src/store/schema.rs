@@ -188,6 +188,11 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/028_account_nickname.sql"),
         already_applied: Some(accounts_has_nickname_and_extra_usage),
     },
+    // `CREATE TABLE IF NOT EXISTS` is safe to run as written on a re-run.
+    Migration::plain(
+        29,
+        include_str!("../../migrations/029_dismissed_agents.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -1086,6 +1091,38 @@ mod tests {
         );
     }
 
+    /// 029 on a database stopped at 028: `dismissed_agents` is created and a
+    /// row survives a re-run (tests roll the recorded version back and
+    /// migrate again). Its SQL is `CREATE TABLE IF NOT EXISTS`, so unlike 024
+    /// (rebuild) or 025/027/028 (`ALTER TABLE ADD COLUMN`) it needs no
+    /// `already_applied` guard — a re-run is safe as written.
+    #[test]
+    fn migration_029_is_idempotent() {
+        let old = store_at_version(28);
+        old.migrate().expect("029 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        old.conn
+            .execute_batch(
+                "INSERT INTO dismissed_agents (host_alias, claude_session_id, dismissed_at) \
+                 VALUES ('local', 'u1', 100);",
+            )
+            .unwrap();
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 29;")
+            .unwrap();
+        old.migrate().expect("re-running 029 is safe");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let dismissed_at: i64 = old
+            .conn
+            .query_row(
+                "SELECT dismissed_at FROM dismissed_agents WHERE host_alias='local' AND claude_session_id='u1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dismissed_at, 100, "the row survives a re-run");
+    }
+
     #[test]
     fn migration_008_adds_lost_at_column() {
         let store = Store::open_in_memory().expect("store");
@@ -1093,7 +1130,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 28, "schema_version should be 28 after migration");
+        assert_eq!(v, 29, "schema_version should be 29 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store

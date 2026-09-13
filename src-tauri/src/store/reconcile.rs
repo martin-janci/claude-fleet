@@ -1046,6 +1046,7 @@ mod tests {
                 "sess-uuid-1",
                 Some("working"),
                 100,
+                "bg",
             )
             .unwrap();
         store
