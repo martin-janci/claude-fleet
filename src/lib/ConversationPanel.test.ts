@@ -1,0 +1,188 @@
+import { render, screen, fireEvent } from '@testing-library/svelte';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { tick } from 'svelte';
+
+vi.mock('./conversation', async () => {
+  const actual = await vi.importActual<typeof import('./conversation')>('./conversation');
+  return { ...actual, sessionConversation: vi.fn() };
+});
+import { sessionConversation, CONVERSATION_POLL_MS, type Conversation } from './conversation';
+import ConversationPanel from './ConversationPanel.svelte';
+import type { SessionRow } from './sessions';
+
+const mockedConv = sessionConversation as unknown as ReturnType<typeof vi.fn>;
+
+function session(over: Partial<SessionRow> = {}): SessionRow {
+  return {
+    id: 1, tmux_name: 'ctl', host_alias: 'local', project_id: null, worktree_id: null,
+    created_at: 1, last_activity_at: 1, status: 'running', notes: null, account_uuid: null,
+    kind: 'work', reviews_session_id: null, worktree_key: null, lost_at: null,
+    claude_session_id: 'sess-abc', claude_status: null, effort_level: null, pr_url: null,
+    current_activity: null, context_pct: null, stuck_kind: null, friendly_name: null,
+    safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null,
+    idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null,
+    last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [],
+    ...over,
+  } as SessionRow;
+}
+
+function conv(over: Partial<Conversation> = {}): Conversation {
+  return {
+    truncated: false,
+    turns: [
+      {
+        prompt: 'fix the bug',
+        at: '2026-09-13T10:00:00.000Z',
+        items: [
+          { kind: 'text', text: 'looking into it' },
+          { kind: 'tool', summary: 'Bash(command=ls -la)' },
+        ],
+      },
+    ],
+    ...over,
+  };
+}
+
+function ok(value: Conversation) {
+  return Promise.resolve({ ok: true as const, value });
+}
+function err(code: string, message = code) {
+  return Promise.resolve({ ok: false as const, error: { code, message } });
+}
+
+function setVisibility(state: 'visible' | 'hidden') {
+  Object.defineProperty(document, 'visibilityState', { value: state, configurable: true });
+}
+
+beforeEach(() => {
+  mockedConv.mockReset();
+  setVisibility('visible');
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  setVisibility('visible');
+});
+
+describe('ConversationPanel', () => {
+  it('renders prompt blocks, text items, tool items, and the truncated notice', async () => {
+    mockedConv.mockReturnValue(ok(conv({ truncated: true })));
+    render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    expect(screen.getByTestId('conv-prompt').textContent).toContain('fix the bug');
+    expect(screen.getByTestId('conv-text').textContent).toContain('looking into it');
+    expect(screen.getByTestId('conv-tool').textContent).toContain('Bash(command=ls -la)');
+    expect(screen.getByText('Older turns not shown')).toBeTruthy();
+  });
+
+  it('shows "No conversation yet" for E_NO_TRANSCRIPT', async () => {
+    mockedConv.mockReturnValue(err('E_NO_TRANSCRIPT'));
+    render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    expect(screen.getByText('No conversation yet')).toBeTruthy();
+  });
+
+  it('shows "No Claude session id yet" and does not fetch when the session has no claude_session_id', async () => {
+    render(ConversationPanel, { session: session({ claude_session_id: null }), visible: true });
+    await tick();
+    expect(screen.getByText('No Claude session id yet')).toBeTruthy();
+    expect(mockedConv).not.toHaveBeenCalled();
+  });
+
+  it('other errors show the message plus a retry button that refetches, keeping earlier good turns visible', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    mockedConv.mockReturnValueOnce(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    expect(screen.getByTestId('conv-prompt').textContent).toContain('fix the bug');
+
+    mockedConv.mockReturnValueOnce(err('E_SSH', 'connection refused'));
+    vi.advanceTimersByTime(CONVERSATION_POLL_MS);
+    await Promise.resolve();
+    await tick();
+
+    expect(screen.getByTestId('conv-error').textContent).toContain('connection refused');
+    expect(screen.getByTestId('conv-prompt').textContent).toContain('fix the bug');
+
+    mockedConv.mockReturnValueOnce(ok(conv()));
+    await fireEvent.click(screen.getByTestId('conv-retry'));
+    await Promise.resolve();
+    await tick();
+
+    expect(mockedConv).toHaveBeenCalledTimes(3);
+    expect(screen.queryByTestId('conv-error')).toBeNull();
+  });
+
+  it('polls every 5s while visible; stops when not visible; skips a tick when the document is hidden', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    mockedConv.mockReturnValue(ok(conv()));
+    const { rerender } = render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    expect(mockedConv).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(CONVERSATION_POLL_MS);
+    await Promise.resolve();
+    await tick();
+    expect(mockedConv).toHaveBeenCalledTimes(2);
+
+    setVisibility('hidden');
+    vi.advanceTimersByTime(CONVERSATION_POLL_MS);
+    await Promise.resolve();
+    await tick();
+    expect(mockedConv).toHaveBeenCalledTimes(2);
+
+    setVisibility('visible');
+    await rerender({ session: session(), visible: false });
+    mockedConv.mockClear();
+    vi.advanceTimersByTime(CONVERSATION_POLL_MS * 3);
+    await Promise.resolve();
+    await tick();
+    expect(mockedConv).not.toHaveBeenCalled();
+  });
+
+  it('drops an in-flight response for the old session when the session changes', async () => {
+    let resolveFirst!: (v: { ok: true; value: Conversation }) => void;
+    const first = new Promise<{ ok: true; value: Conversation }>((res) => (resolveFirst = res));
+    mockedConv.mockReturnValueOnce(first);
+    const { rerender } = render(ConversationPanel, { session: session({ id: 1 }), visible: true });
+    await tick();
+
+    mockedConv.mockReturnValueOnce(ok(conv({ turns: [{ prompt: 'second session prompt', at: null, items: [{ kind: 'text', text: 'hi' }] }] })));
+    await rerender({ session: session({ id: 2 }), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+
+    // Now let the stale first-session promise resolve; its content must never appear.
+    resolveFirst(ok(conv({ turns: [{ prompt: 'STALE first session prompt', at: null, items: [] }] })) as unknown as { ok: true; value: Conversation });
+    await Promise.resolve();
+    await tick();
+
+    expect(screen.queryByText('STALE first session prompt')).toBeNull();
+    expect(screen.getByText('second session prompt')).toBeTruthy();
+  });
+
+  it('does not replace DOM nodes when a poll result is identical', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    const node = screen.getByTestId('conv-prompt');
+
+    vi.advanceTimersByTime(CONVERSATION_POLL_MS);
+    await Promise.resolve();
+    await tick();
+
+    expect(screen.getByTestId('conv-prompt')).toBe(node);
+  });
+});
