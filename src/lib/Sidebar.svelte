@@ -8,7 +8,6 @@
     renameSession,
     setFriendlyName,
     recreateSession,
-    peekSession,
     purgeProject,
     showBgAgents,
     sameSession,
@@ -35,6 +34,7 @@
   import { hintAnchor } from './hints';
   import {
     buildSessionsByProject,
+    buildOutsideFleet,
     buildRelatedCountById,
     sessionVisible,
     sortProjectsBySeverity,
@@ -70,6 +70,15 @@
   let recency: Recency = $state(readPref('recency', 'all' as Recency, isRecency));
   $effect(() => {
     writePref('recency', recency);
+  });
+  const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
+  // "Outside fleet" (interactive Claude sessions running entirely outside
+  // tmux) is collapsed by default — most users never need it — and its
+  // open/closed state persists across restarts like the other section
+  // toggles in this file.
+  let outsideOpen = $state(readPref('outside-fleet-open', false, isBool));
+  $effect(() => {
+    writePref('outside-fleet-open', outsideOpen);
   });
   let search = $state('');
   // `filtered` re-derives the whole project tree on its dependencies; debounce
@@ -313,11 +322,21 @@
   }
 
   // Sessions whose tmux working directory didn't map to any known project.
+  // `external` rows never land here — they have their own read-only
+  // "Outside fleet" section below.
   const orphanSessions = $derived(
     $sessions.filter(
-      (s) => s.project_id === null && sessionVisible(s, $hostFilter, $showBgAgents, rowPredicate),
+      (s) =>
+        s.project_id === null &&
+        s.kind !== 'external' &&
+        sessionVisible(s, $hostFilter, $showBgAgents, rowPredicate),
     ),
   );
+
+  // Interactive Claude sessions running entirely outside fleet (Claude
+  // Desktop, a bare terminal). Read-only; the host filter applies but the
+  // bg-agent toggle does not.
+  const outsideFleet = $derived(buildOutsideFleet($sessions, $hostFilter));
 
   // Picker for the footer "+ New session" — shows ALL projects regardless
   // of the recency filter or search query. The filter is for the live-
@@ -590,28 +609,6 @@
     }
   }
 
-  // Per-session peek panel state: row id → log text | "loading" | null
-  let peekState = $state<Record<number, string | "loading" | null>>({});
-
-  async function doPeek(sess: SessionRow) {
-    if (!sess.claude_session_id) return;
-    peekState[sess.id] = "loading";
-    try {
-      const result = await peekSession(sess.host_alias, sess.claude_session_id);
-      if (result.ok) {
-        peekState[sess.id] = result.value || "(no output yet)";
-      } else {
-        peekState[sess.id] = "Error: " + result.error.message;
-      }
-    } catch (e: unknown) {
-      peekState[sess.id] = "Error: " + (e instanceof Error ? e.message : String(e));
-    }
-  }
-
-  function closePeek(sessId: number) {
-    peekState[sessId] = null;
-  }
-
   // --- New BG Session modal ---
   let showBgModal = $state(false);
   let bgModalHost = $state('local');
@@ -650,7 +647,7 @@
 </script>
 
 <div class="sidebar" data-testid="sidebar-tree" bind:this={sidebarEl}>
-  {#snippet sessionRow(sess: SessionRow)}
+  {#snippet sessionRow(sess: SessionRow, readOnly = false)}
     <SessionRowItem
       {sess}
       {selectMode}
@@ -662,7 +659,7 @@
       {renameError}
       relatedCount={relatedCountFor(sess)}
       {nowSec}
-      peek={peekState[sess.id]}
+      {readOnly}
       {onSelectSession}
       {onKeySession}
       {toggleSelected}
@@ -672,8 +669,6 @@
       {commitRename}
       {askRecreate}
       {askKill}
-      {doPeek}
-      {closePeek}
     />
   {/snippet}
 
@@ -765,6 +760,25 @@
         {#each orphanSessions as sess (sess.id)}
           {@render sessionRow(sess)}
         {/each}
+      </div>
+    {/if}
+
+    {#if outsideFleet.length > 0}
+      <div class="orphan-section" data-testid="outside-fleet-section">
+        <button
+          class="section-header section-toggle"
+          data-testid="outside-fleet"
+          aria-expanded={outsideOpen}
+          onclick={() => (outsideOpen = !outsideOpen)}
+        >
+          <span class="caret" class:collapsed={!outsideOpen}>▾</span>
+          Outside fleet ({outsideFleet.length})
+        </button>
+        {#if outsideOpen}
+          {#each outsideFleet as sess (sess.id)}
+            {@render sessionRow(sess, true)}
+          {/each}
+        {/if}
       </div>
     {/if}
   </div>
@@ -1013,6 +1027,25 @@
     color: var(--fg-muted);
     padding: 0 0 0.2rem 0.4rem;
   }
+  .section-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    width: 100%;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .section-toggle .caret {
+    color: var(--fg-muted);
+    font-size: 0.65rem;
+    width: 0.7rem;
+    text-align: center;
+    transition: transform 0.1s ease;
+    display: inline-block;
+  }
+  .section-toggle .caret.collapsed { transform: rotate(-90deg); }
 
   .sidebar-footer {
     flex: 0 0 auto;

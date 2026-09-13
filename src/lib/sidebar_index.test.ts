@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildSessionsByProject, sessionVisible, sortProjectsBySeverity } from './sidebar_index';
+import { buildOutsideFleet, buildSessionsByProject, sessionVisible, sortProjectsBySeverity } from './sidebar_index';
 import type { SessionRow } from './sessions';
 
 let nextId = 1;
@@ -58,6 +58,29 @@ describe('sessionVisible / buildSessionsByProject', () => {
     expect(m.get(1)?.map((s) => s.id)).toEqual([stuck.id]);
     const all = buildSessionsByProject([stuck, plain, remote, bg], 'all', true);
     expect(all.get(1)).toHaveLength(4);
+  });
+
+  it('excludes external rows even when they carry a project_id', () => {
+    const external = row({ kind: 'external', project_id: 1 });
+    const plain = row({ project_id: 1 });
+    const all = buildSessionsByProject([external, plain], 'all', true);
+    expect(all.get(1)?.map((s) => s.id)).toEqual([plain.id]);
+  });
+});
+
+describe('buildOutsideFleet', () => {
+  it('returns only external rows, respects the host filter, ignores the bg toggle, sorted by last_activity_at desc', () => {
+    const extOld = row({ kind: 'external', host_alias: 'local', last_activity_at: 10 });
+    const extNew = row({ kind: 'external', host_alias: 'local', last_activity_at: 30 });
+    const extRemote = row({ kind: 'external', host_alias: 'mefistos', last_activity_at: 20 });
+    const bg = row({ kind: 'bg', host_alias: 'local', last_activity_at: 40 });
+    const work = row({ kind: 'work', host_alias: 'local', last_activity_at: 50 });
+
+    const all = buildOutsideFleet([extOld, extNew, extRemote, bg, work], 'all');
+    expect(all.map((s) => s.id)).toEqual([extNew.id, extRemote.id, extOld.id]);
+
+    const local = buildOutsideFleet([extOld, extNew, extRemote, bg, work], 'local');
+    expect(local.map((s) => s.id)).toEqual([extNew.id, extOld.id]);
   });
 });
 

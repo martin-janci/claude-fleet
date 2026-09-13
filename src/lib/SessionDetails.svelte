@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import { sessions, type SessionRow, type SafeKillInspection } from './sessions';
+  import { sessions, hasNoPane, type SessionRow, type SafeKillInspection } from './sessions';
   import { formatCostMicros, formatTokens, sessionUsageTokens } from './sessions';
   import {
     killSession,
@@ -593,7 +593,7 @@
     <button class="ghost" onclick={onRestart} data-testid="restart-from-details">
       ↻ Restart
     </button>
-    {#if session.kind !== 'bg' && session.project_id !== null}
+    {#if !hasNoPane(session) && session.project_id !== null}
       <button
         class="ghost"
         onclick={onRepair}

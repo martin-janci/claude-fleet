@@ -6,11 +6,10 @@
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
   import TerminalView from './lib/TerminalView.svelte';
-  import BgSessionPanel from './lib/BgSessionPanel.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
   import HostsView from './lib/HostsView.svelte';
   import { loadProjects, bootstrapProjects, applyProjectEvents } from './lib/projects';
-  import { loadSessions, bootstrapSessions, applySessionEvents, sessions } from './lib/sessions';
+  import { loadSessions, bootstrapSessions, applySessionEvents, sessions, hasNoPane } from './lib/sessions';
   import { bootstrapHosts, applyHostEvents, hosts, hostFilter } from './lib/hosts';
   import { bootstrapAccounts, applyAccountEvents, accounts } from './lib/accounts';
   import { loadTasks, applyTaskEvents } from './lib/tasks';
@@ -160,7 +159,7 @@
     if (sr.ok) restoreLastSession();
     // First-run welcome: only when never shown AND the fleet is empty.
     const visibleHostCount = get(hosts).filter((h) => !h.hidden).length;
-    const workSessionCount = get(sessions).filter((s) => s.kind !== 'bg').length;
+    const workSessionCount = get(sessions).filter((s) => !hasNoPane(s)).length;
     if (!get(onboardingWelcomed) && visibleHostCount === 0 && workSessionCount === 0) {
       showWelcome = true;
     }
@@ -513,10 +512,12 @@
              TerminalView here so pty_open is never attempted (it would error
              with "no tmux"). The tradeoff: selecting a bg session unmounts the
              terminal, so returning to a normal session reconnects its PTY.
-             Acceptable — bg agents run unattended and are rarely interleaved. -->
-        <div class="view-slot">
-          <BgSessionPanel session={$selectedSession} />
-        </div>
+             Acceptable — bg agents run unattended and are rarely interleaved.
+             BgSessionPanel (the old, always-broken "peek at claude logs" view)
+             was removed in the "agent rows and conversation" rework; this
+             placeholder holds the spot until the Conversation tab (Task 8)
+             replaces it. -->
+        <div class="view-slot" data-testid="no-pane-placeholder"></div>
       {:else}
         <!-- TerminalView stays mounted underneath so the PTY and its ANSI
              buffer survive a Files-mode round trip — flipping back is instant

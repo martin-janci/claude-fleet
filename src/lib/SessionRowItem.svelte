@@ -3,6 +3,8 @@
     restartSession,
     recreateSession,
     dismissGhostSession,
+    dismissAgentSession,
+    isInactiveAgent,
     showFriendlyNames,
     showRowDetails,
     formatCostMicros,
@@ -27,9 +29,8 @@
   } from './attention';
   import { pushError } from './toasts';
   import { rowElapsed, rowPrompt, timeAgo } from './session_status';
-  import PeekPanel from './PeekPanel.svelte';
 
-  // Rename, selection and peek state stay in the Sidebar (they must survive a
+  // Rename and selection state stay in the Sidebar (they must survive a
   // sessions store refresh); the row gets them as props and calls back.
   let {
     sess,
@@ -42,7 +43,7 @@
     renameError,
     relatedCount,
     nowSec,
-    peek,
+    readOnly = false,
     onSelectSession,
     onKeySession,
     toggleSelected,
@@ -52,8 +53,6 @@
     commitRename,
     askRecreate,
     askKill,
-    doPeek,
-    closePeek,
   }: {
     sess: SessionRow;
     selectMode: boolean;
@@ -66,7 +65,10 @@
     renameError: string | null;
     relatedCount: number;
     nowSec: number;
-    peek: string | 'loading' | null | undefined;
+    /** True for a read-only row (the "Outside fleet" group): name + status
+     *  chip only, no rename / restart / recreate / kill actions. Selecting
+     *  still works. */
+    readOnly?: boolean;
     onSelectSession: (sess: SessionRow, e?: MouseEvent) => void;
     onKeySession: (e: KeyboardEvent, sess: SessionRow) => void;
     toggleSelected: (sess: SessionRow) => void;
@@ -76,8 +78,6 @@
     commitRename: () => unknown;
     askRecreate: (sess: SessionRow, e?: Event) => void;
     askKill: (sess: SessionRow, e?: Event) => void;
-    doPeek: (sess: SessionRow) => unknown;
-    closePeek: (sessId: number) => void;
   } = $props();
 
   const sessSelected = $derived($selectedSession?.id === sess.id);
@@ -116,6 +116,16 @@
     forgetSessionUi(sess.host_alias, sess.tmux_name);
   }
 
+  /** Remove an inactive bg agent from the list. The row itself disappears
+   *  via the `session:removed` event the backend emits on success. */
+  async function doDismissAgent(sess: SessionRow, e?: Event) {
+    e?.stopPropagation();
+    const r = await dismissAgentSession(sess.id);
+    if (!r.ok) {
+      pushError(r.error, 'Remove failed');
+    }
+  }
+
   function hostIsReachable(alias: string): boolean {
     return $hostByAlias.get(alias)?.reachable ?? false;
   }
@@ -132,7 +142,7 @@
   data-stuck={sess.stuck_kind ?? undefined}
   role="button"
   tabindex="0"
-  ondblclick={(e) => sess.status !== 'ghost' && beginLabelEdit(sess, e)}
+  ondblclick={(e) => sess.status !== 'ghost' && !readOnly && beginLabelEdit(sess, e)}
   onclick={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onSelectSession(sess, e)}
   onkeydown={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onKeySession(e, sess)}
   use:hintAnchor={{ id: 'session-actions', when: !!sess.claude_session_id && sess.status !== 'ghost' }}
@@ -194,6 +204,26 @@
           aria-label="Dismiss"
         >×</button>
       </div>
+    {:else if readOnly}
+      <!-- "Outside fleet": a Claude session running entirely outside tmux.
+           Read-only — name and status chip only, no actions. -->
+      <span class="status-dot status-{sess.status}" title={sess.status} aria-hidden="true"></span>
+      <span class="sess-name" title={sess.tmux_name}>{primaryName}</span>
+      {#if sess.stuck_kind}
+        <span
+          class="claude-chip stuck-chip"
+          data-testid="stuck-chip"
+          style="background: {STUCK_COLOR}22; color: {STUCK_COLOR}; border-color: {STUCK_COLOR}66;"
+          title="Stuck: {stuckKindLabel(sess.stuck_kind)}"
+        >⚠ stuck: {stuckKindLabel(sess.stuck_kind)}</span>
+      {:else if sess.claude_status}
+        <span
+          class="claude-chip"
+          data-testid="claude-chip"
+          style="background: {claudeStatusColor(sess.claude_status)}22; color: {claudeStatusColor(sess.claude_status)}; border-color: {claudeStatusColor(sess.claude_status)}44;"
+          title="Claude: {sess.claude_status}"
+        >{claudeStatusLabel(sess.claude_status)}</span>
+      {/if}
     {:else}
       <div class="sess-lines">
         <div class="sess-line1">
@@ -226,6 +256,11 @@
               style="background: {STUCK_COLOR}22; color: {STUCK_COLOR}; border-color: {STUCK_COLOR}66;"
               title="Stuck: {stuckKindLabel(sess.stuck_kind)}{sess.current_activity ? ' — ' + sess.current_activity : ''}"
             >⚠ stuck: {stuckKindLabel(sess.stuck_kind)}</span>
+          {:else if isInactiveAgent(sess)}
+            <!-- A bg agent whose CLI process is gone: shown as stopped
+                 (grey), offering Remove from list instead of the usual
+                 claude_status chip. -->
+            <span class="claude-chip inactive-chip" data-testid="inactive-chip">inactive</span>
           {:else if sess.claude_status}
             <span
               class="claude-chip"
@@ -235,14 +270,14 @@
             >{claudeStatusLabel(sess.claude_status)}</span>
           {/if}
           <div class="row-actions">
-            {#if sess.claude_session_id && sess.status !== 'ghost'}
+            {#if isInactiveAgent(sess)}
               <button
-                class="icon-btn small peek-btn"
-                data-testid="peek-session"
-                title="Peek at session logs"
-                onclick={(e) => { e.stopPropagation(); doPeek(sess); }}
-                aria-label="Peek"
-              >📋</button>
+                class="icon-btn small danger"
+                data-testid="remove-from-list"
+                onclick={(e) => doDismissAgent(sess, e)}
+                title="Remove from list"
+                aria-label="Remove from list"
+              >×</button>
             {/if}
             <button class="icon-btn small" onclick={(e) => doRestart(sess, e)} title="Restart claude in this session" aria-label="Restart">↻</button>
             <button
@@ -346,9 +381,6 @@
 </div>
 {#if isRenaming && renameError}
   <p class="err inline-err">{renameError}</p>
-{/if}
-{#if peek !== undefined && peek !== null}
-  <PeekPanel tmuxName={sess.tmux_name} {peek} onClose={() => closePeek(sess.id)} />
 {/if}
 
 <style>
@@ -498,6 +530,11 @@
     white-space: nowrap;
   }
   .stuck-chip { font-weight: 600; }
+  .inactive-chip {
+    background: color-mix(in srgb, var(--fg-muted) 18%, transparent);
+    color: var(--fg-muted);
+    border-color: color-mix(in srgb, var(--fg-muted) 40%, transparent);
+  }
   .ctx-badge {
     position: relative;
     display: inline-flex;
@@ -604,8 +641,4 @@
     min-width: 0;
   }
 
-  .peek-btn {
-    opacity: 0.6;
-  }
-  .peek-btn:hover { opacity: 1; }
 </style>

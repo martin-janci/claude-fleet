@@ -581,13 +581,29 @@ export async function newBgSession(
   return r;
 }
 
-/** Fetch recent log output from a background Claude session (no PTY). */
-export async function peekSession(
-  hostAlias: string,
-  claudeSessionId: string,
-): Promise<Result<string>> {
-  return invokeCmd<string>('peek_session', {
-    args: { host_alias: hostAlias, claude_session_id: claudeSessionId },
+/** True for a row with no attached tmux pane: a supervised background agent
+ *  (`bg`) or an interactive Claude session running outside fleet entirely
+ *  (`external`, e.g. Claude Desktop). Every "no PTY" check in the app should
+ *  go through this instead of comparing `kind` directly. */
+export function hasNoPane(s: Pick<SessionRow, 'kind'>): boolean {
+  return s.kind === 'bg' || s.kind === 'external';
+}
+
+/** True for a background agent whose CLI process is gone (backend marks it
+ *  `claude_status: 'stopped'` once its transcript has been quiet past
+ *  `AGENT_INACTIVE_SECS`). Never true for `external` rows — those leave the
+ *  list on their own when the process ends. */
+export function isInactiveAgent(s: Pick<SessionRow, 'kind' | 'claude_status'>): boolean {
+  return s.kind === 'bg' && s.claude_status === 'stopped';
+}
+
+/** Remove a `bg` agent row from the list without touching the underlying
+ *  process (it does not use fleet). Refused by the backend for `external`
+ *  rows and for a row still `working`. The row itself is removed by the
+ *  `session:removed` event the backend emits, not by this call. */
+export async function dismissAgentSession(sessionId: number): Promise<Result<null>> {
+  return invokeCmd<null>('dismiss_agent_session', {
+    args: { session_id: sessionId },
   });
 }
 

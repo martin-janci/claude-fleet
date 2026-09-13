@@ -83,6 +83,7 @@ function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof session
     // patch even though these tests only assert that the IPC was invoked.
     const id = args?.args?.id ?? 0;
     if (cmd === 'kill_session') return id;
+    if (cmd === 'dismiss_agent_session') return null;
     if (cmd === 'set_session_friendly_name') {
       const a = (args?.args ?? {}) as { tmux_name?: string; friendly_name?: string };
       const found = sess.find((s) => s.tmux_name === a.tmux_name) ?? sess[0];
@@ -1259,5 +1260,76 @@ describe('Sidebar triage (W2 Track D)', () => {
     await fireEvent.click(btn);
     await screen.findByTestId('rename-input');
     expect(screen.queryByTestId('sess-details')).toBeNull();
+  });
+});
+
+describe('Outside fleet group', () => {
+  it('groups external rows under a collapsed header that toggles and persists', async () => {
+    const ext = { ...sessionFor(null, 'claude-desktop-session'), kind: 'external' };
+    mockBackend(fakeProjects, [ext]);
+    render(Sidebar);
+    await tick(); await tick();
+
+    const header = screen.getByTestId('outside-fleet');
+    expect(header).toHaveTextContent('Outside fleet (1)');
+    expect(header).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText('claude-desktop-session')).toBeNull();
+
+    await fireEvent.click(header);
+    await tick();
+    expect(header).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('claude-desktop-session')).toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem('cf:pref:outside-fleet-open')!)).toBe(true);
+
+    await fireEvent.click(header);
+    await tick();
+    expect(header).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText('claude-desktop-session')).toBeNull();
+    expect(JSON.parse(localStorage.getItem('cf:pref:outside-fleet-open')!)).toBe(false);
+  });
+
+  it('renders external rows read-only: no label/rename/recreate/kill actions', async () => {
+    const ext = { ...sessionFor(null, 'claude-desktop-session'), kind: 'external' };
+    mockBackend(fakeProjects, [ext]);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('outside-fleet'));
+    await tick();
+    const row = screen.getByText('claude-desktop-session').closest('[data-testid="sess-row"]') as HTMLElement;
+    expect(row.querySelector('[data-testid="edit-label"]')).toBeNull();
+    expect(row.querySelector('[data-testid="rename-tmux"]')).toBeNull();
+    expect(row.querySelector('[data-testid="recreate-live"]')).toBeNull();
+    expect(row.querySelector('.row-actions')).toBeNull();
+
+    // Double-click is the label-edit trigger on a normal row; a read-only
+    // row must not enter rename mode either.
+    await fireEvent.dblClick(row);
+    await tick();
+    expect(screen.queryByTestId('label-input')).toBeNull();
+  });
+
+  it('no session row anywhere shows a peek-session button', async () => {
+    mockBackend(fakeProjects, [{ ...sessionFor(1, 'dev-a'), claude_session_id: 'sess-1' }]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('peek-session')).toBeNull();
+  });
+
+  it('an inactive bg agent shows an inactive chip and a working remove-from-list action', async () => {
+    const bg = { ...sessionFor(1, 'bg:abc'), kind: 'bg', claude_status: 'stopped' as const };
+    mockBackend(fakeProjects, [bg]);
+    render(Sidebar);
+    await tick(); await tick();
+
+    const chip = screen.getByTestId('inactive-chip');
+    expect(chip).toHaveTextContent('inactive');
+    expect(screen.queryByTestId('claude-chip')).toBeNull();
+
+    const removeBtn = screen.getByTestId('remove-from-list');
+    await fireEvent.click(removeBtn);
+    await tick(); await tick();
+    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'dismiss_agent_session');
+    expect(calls).toHaveLength(1);
+    expect(calls[0][1]).toEqual({ args: { session_id: bg.id } });
   });
 });

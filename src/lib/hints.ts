@@ -2,7 +2,7 @@ import { writable, derived, type Readable } from 'svelte/store';
 import { readPref, writePref } from './prefs';
 import { onboardingWelcomed } from './onboarding';
 import { hosts } from './hosts';
-import { sessions } from './sessions';
+import { sessions, hasNoPane } from './sessions';
 
 export type HintId =
   | 'host-filter'
@@ -171,7 +171,7 @@ export const activeHintId: Readable<HintId | null> = derived(
   [registeredIds, seenHints, hintsEnabled, onboardingWelcomed, hosts, sessions],
   ([reg, seen, enabled, welcomed, hostList, sessionList]) => {
     const visibleHostCount = hostList.filter((h) => !h.hidden).length;
-    const workSessionCount = sessionList.filter((s) => s.kind !== 'bg').length;
+    const workSessionCount = sessionList.filter((s) => !hasNoPane(s)).length;
     const gateOpen = hintsGateOpen(welcomed, visibleHostCount, workSessionCount);
     return pickActiveHint(order, reg, seen, enabled, gateOpen);
   },

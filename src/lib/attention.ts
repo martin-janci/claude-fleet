@@ -121,6 +121,9 @@ export type AttentionReason = 'stuck' | 'safe_kill' | 'ghost' | 'failed' | 'idle
 /** Why a row needs the operator, or null when it does not. Checked in
  *  priority order so the strongest reason wins. */
 export function attentionReason(s: SessionRow, opts: AttentionOptions): AttentionReason | null {
+  // A Claude session running outside fleet entirely is read-only and cannot
+  // be acted on from here — it never needs the operator's attention via us.
+  if (s.kind === 'external') return null;
   if (s.stuck_kind) return 'stuck';
   if (s.safe_kill_state === 'failed' || s.safe_kill_state === 'requested') return 'safe_kill';
   if (s.status === 'ghost' || s.lost_at !== null) return 'ghost';
@@ -137,8 +140,11 @@ export function needsAttention(s: SessionRow, opts: AttentionOptions): boolean {
 
 // ── severity (for sorting projects by worst child) ──
 
-/** Higher = worse. stuck > blocked > lost > failed > working > idle > rest. */
+/** Higher = worse. stuck > blocked > lost > failed > working > idle > rest.
+ *  An `external` row always sits in the lowest ("rest") bucket — it is
+ *  read-only and never worth floating a project to the top for. */
 export function severity(s: SessionRow): number {
+  if (s.kind === 'external') return 0;
   if (s.stuck_kind) return 6;
   if (s.claude_status === 'blocked') return 5;
   if (s.status === 'ghost' || s.lost_at !== null) return 4;
@@ -162,21 +168,24 @@ export function worstSeverityByProject(sessions: readonly SessionRow[]): Map<num
 
 // ── stuck transitions ──
 
-/** session.id → stuck_kind for every currently-stuck row. */
+/** session.id → stuck_kind for every currently-stuck row. `external` rows
+ *  are read-only and excluded even if the backend ever set a stuck_kind on
+ *  one. */
 export function stuckSnapshot(sessions: readonly SessionRow[]): Map<number, StuckKind> {
   const m = new Map<number, StuckKind>();
-  for (const s of sessions) if (s.stuck_kind) m.set(s.id, s.stuck_kind);
+  for (const s of sessions) if (s.kind !== 'external' && s.stuck_kind) m.set(s.id, s.stuck_kind);
   return m;
 }
 
 /** Rows that became stuck (or changed stuck kind) since `prev`. Clearing is
- *  not a transition worth announcing. */
+ *  not a transition worth announcing. `external` rows never announce. */
 export function newlyStuck(
   prev: ReadonlyMap<number, StuckKind>,
   sessions: readonly SessionRow[],
 ): SessionRow[] {
   const out: SessionRow[] = [];
   for (const s of sessions) {
+    if (s.kind === 'external') continue;
     if (!s.stuck_kind) continue;
     if (prev.get(s.id) !== s.stuck_kind) out.push(s);
   }

@@ -10,7 +10,7 @@
   import { hintAnchor } from './hints';
   import { toIpcError } from './result';
   import { push, pushError } from './toasts';
-  import { repairSession } from './sessions';
+  import { repairSession, hasNoPane } from './sessions';
   import { keyToBytes, detectMac } from './terminal_keys';
   import { createDrainLoop } from './terminal_drain';
   import { createTerminalClipboard, pathsToPasteText } from './terminal_clipboard';
@@ -291,7 +291,7 @@
     // those are Repair workspace only; we say so instead. A healthy session
     // costs one probe; orphans and background rows have nothing to check. An
     // offline host is left to the attach error.
-    if (sess.project_id != null && sess.kind !== 'bg') {
+    if (sess.project_id != null && !hasNoPane(sess)) {
       const rep = await repairSession(sess.id);
       if (rep.ok) {
         const v = rep.value;
