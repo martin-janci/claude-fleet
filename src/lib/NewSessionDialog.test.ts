@@ -54,7 +54,7 @@ function worktreeLabels(): string[] {
 describe('NewSessionDialog remote path preview (W5 G3)', () => {
   async function pickMefistos() {
     const btn = Array.from(document.querySelectorAll('.host-pick')).find(
-      (p) => p.textContent?.trim() === 'mefistos',
+      (p) => (p as HTMLElement).dataset.alias === 'mefistos',
     ) as HTMLButtonElement;
     await fireEvent.click(btn);
     await tick();
@@ -97,14 +97,14 @@ describe('NewSessionDialog', () => {
     await tick();
     const picks = document.querySelectorAll('.host-pick');
     expect(picks).toHaveLength(2);
-    expect(Array.from(picks).map((p) => p.textContent?.trim())).toEqual(['local', 'mefistos']);
+    expect(Array.from(picks).map((p) => (p as HTMLElement).dataset.alias)).toEqual(['local', 'mefistos']);
   });
 
   it('defaults to last-host pref (local on first run)', async () => {
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await tick();
     const active = document.querySelector('.host-pick.active');
-    expect(active?.textContent?.trim()).toBe('local');
+    expect(active?.getAttribute('data-alias')).toBe('local');
   });
 
   it('clicking a host pick + Create sends host_alias to new_session', async () => {
@@ -118,7 +118,7 @@ describe('NewSessionDialog', () => {
     });
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await tick();
-    const mefBtn = Array.from(document.querySelectorAll('.host-pick')).find((p) => p.textContent?.trim() === 'mefistos') as HTMLButtonElement;
+    const mefBtn = Array.from(document.querySelectorAll('.host-pick')).find((p) => (p as HTMLElement).dataset.alias === 'mefistos') as HTMLButtonElement;
     await fireEvent.click(mefBtn);
     await vi.waitFor(() => expect(worktreeLabels()).toContain('main'));
     await fireEvent.click(screen.getByText('Create'));
@@ -486,7 +486,7 @@ describe('NewSessionDialog — generated names', () => {
     expect((screen.getByTestId('new-session-name') as HTMLInputElement).value)
       .toBe(`dev-martin-janci-claude-fleet--${slugOf(friendly)}`);
     // …but only on the same host.
-    const mefBtn = Array.from(document.querySelectorAll('.host-pick')).find((p) => p.textContent?.trim() === 'mefistos') as HTMLButtonElement;
+    const mefBtn = Array.from(document.querySelectorAll('.host-pick')).find((p) => (p as HTMLElement).dataset.alias === 'mefistos') as HTMLButtonElement;
     await fireEvent.click(mefBtn);
     await vi.waitFor(() => expect(worktreeLabels()).toContain('main'));
     expect((screen.getByTestId('new-session-name') as HTMLInputElement).value).toBe('dev-martin-janci-claude-fleet');
@@ -573,7 +573,7 @@ describe('NewSessionDialog — generated names', () => {
       { alias: 'hetzner', ssh_alias: 'hetzner', reachable: false, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
       { alias: 'hidden-box', ssh_alias: 'hidden-box', reachable: true, claude_version: null, tmux_version: null, hidden: true, last_pinged_at: 1, account_uuid: null, provisioned: false },
     ] as typeof h);
-    const active = () => document.querySelector('.host-pick.active')?.textContent?.trim();
+    const active = () => document.querySelector('.host-pick.active')?.getAttribute('data-alias');
     const open = async () => {
       const r = render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
       await tick();
@@ -647,7 +647,7 @@ describe('NewSessionDialog — generated names', () => {
     const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({ ok: true, value: okRow() });
     const { unmount } = render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await tick();
-    const mefBtn = Array.from(document.querySelectorAll('.host-pick')).find((p) => p.textContent?.trim() === 'mefistos') as HTMLButtonElement;
+    const mefBtn = Array.from(document.querySelectorAll('.host-pick')).find((p) => (p as HTMLElement).dataset.alias === 'mefistos') as HTMLButtonElement;
     await fireEvent.click(mefBtn);
     await fireEvent.click(screen.getByTestId('kind-shell'));
     await fireEvent.click(screen.getByTestId('new-worktree-chip'));
@@ -661,7 +661,7 @@ describe('NewSessionDialog — generated names', () => {
     // Re-open: the remembered choices are applied.
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await tick();
-    expect(document.querySelector('.host-pick.active')?.textContent?.trim()).toBe('mefistos');
+    expect(document.querySelector('.host-pick.active')?.getAttribute('data-alias')).toBe('mefistos');
     expect((document.querySelector('.kind-pick.active') as HTMLElement).textContent?.trim()).toBe('Shell');
     expect(screen.getByTestId('new-worktree-name')).toBeTruthy();
     spy.mockRestore();
@@ -698,7 +698,7 @@ describe('NewSessionDialog — generated names', () => {
 describe('NewSessionDialog host-scoped worktrees', () => {
   async function pickHost(alias: string) {
     const btn = Array.from(document.querySelectorAll('.host-pick')).find(
-      (p) => p.textContent?.trim() === alias,
+      (p) => (p as HTMLElement).dataset.alias === alias,
     ) as HTMLButtonElement;
     await fireEvent.click(btn);
     await tick();
@@ -898,5 +898,139 @@ describe('NewSessionDialog host-scoped worktrees', () => {
     expect(mem.host).toBe('local');
     expect(mem.worktrees).toEqual({ local: 11 });
     spy.mockRestore();
+  });
+});
+
+describe('NewSessionDialog: account headroom on the host chips', () => {
+  const USAGE = { locale: 'en-GB', timeZone: 'UTC' };
+  const M = 60;
+
+  async function setup(over: { hosts?: unknown[] } = {}) {
+    const { NOW, RESET_5H, ADMIN, WORK, GMAIL, host, snapshot } = await import('./hosts_fixture');
+    const { accounts } = await import('./accounts');
+    const { accountUsage } = await import('./account_usage_store');
+    const five = (uuid: string, left: number, fetchedAgo = 2 * M) =>
+      snapshot(uuid, {
+        fetched_at: NOW - fetchedAgo,
+        usage: {
+          five_hour: { utilization: 100 - left, resets_at: RESET_5H },
+          seven_day: { utilization: 2, resets_at: NOW + 3 * 86400 },
+          seven_day_opus: null,
+          seven_day_sonnet: null,
+        },
+      });
+    hosts.set(
+      (over.hosts as never) ?? [
+        host('local', { account_uuid: GMAIL.uuid }),
+        host('mefistos', { account_uuid: ADMIN.uuid }),
+        host('claude-fleet-oci', { account_uuid: ADMIN.uuid }),
+        host('claude-fleet-htz', { account_uuid: WORK.uuid }),
+        host('nas', { account_uuid: null }),
+        host('claude-fleet-trn', { account_uuid: GMAIL.uuid, reachable: false }),
+        host('hidden-box', { account_uuid: 'acc-hidden', hidden: true }),
+      ],
+    );
+    accounts.set([ADMIN, WORK, GMAIL]);
+    accountUsage.set({
+      [GMAIL.uuid]: five(GMAIL.uuid, 91), // fresh
+      [ADMIN.uuid]: five(ADMIN.uuid, 8), // low
+      [WORK.uuid]: five(WORK.uuid, 62, 14 * M), // stale
+    });
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'refresh_account_usage') throw { code: 'E_RATE_LIMITED', message: 'floor' };
+      return null;
+    });
+    return { NOW, five, accountUsage, ADMIN, WORK, GMAIL, inv };
+  }
+
+  const chip = (alias: string) => document.querySelector<HTMLButtonElement>(`.host-pick[data-alias="${alias}"]`)!;
+  const chipUsage = (alias: string) => chip(alias).querySelector('[data-testid="chip-usage"]')?.textContent?.trim();
+  const active = () => document.querySelector('.host-pick.active')?.getAttribute('data-alias');
+
+  it('each chip shows % left and the reset; stale gets ~ and ◷; expired ? left; no account; offline', async () => {
+    const { NOW, five, accountUsage, WORK } = await setup();
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {}, clock: () => NOW, ...USAGE } });
+    await tick();
+    expect(chipUsage('local')).toBe('91% left · resets 15:10');
+    expect(chipUsage('mefistos')).toBe('▲ 8% left · resets 15:10');
+    expect(chipUsage('claude-fleet-htz')).toBe('~62% left ◷ · resets 15:10');
+    expect(chipUsage('nas')).toBe('no account');
+    expect(chipUsage('claude-fleet-trn')).toBe('offline');
+    expect(chip('hidden-box')).toBeNull();
+    accountUsage.update((m) => ({ ...m, [WORK.uuid]: five(WORK.uuid, 62, 45 * M) }));
+    await tick();
+    expect(chipUsage('claude-fleet-htz')).toBe('? left');
+    // The alias itself stays the chip's first line.
+    expect(chip('local').querySelector('.alias')?.textContent).toBe('local');
+  });
+
+  it('the selected chip gets one full line below the row', async () => {
+    const { NOW } = await setup();
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {}, clock: () => NOW, ...USAGE } });
+    await tick();
+    expect(active()).toBe('local');
+    expect(screen.getByTestId('host-usage-line').textContent).toBe(
+      'mj.janci@gmail.com · 5h 91% left, resets 15:10 · weekly 98% left · 2 min ago',
+    );
+    expect(screen.queryByTestId('host-usage-warning')).toBeNull();
+    await fireEvent.click(chip('claude-fleet-htz'));
+    await tick();
+    expect(screen.getByTestId('host-usage-line').textContent).toBe(
+      'm.janci@32bit.sk · 5h ~62% left, resets 15:10 · weekly ~98% left · 14 min ago',
+    );
+  });
+
+  it('a low account warns, naming the account and the other hosts sharing it — and never switches the host', async () => {
+    const { NOW } = await setup();
+    render(NewSessionDialog, {
+      props: { project, onCreate: () => {}, onCancel: () => {}, clock: () => NOW, initialHost: 'mefistos', ...USAGE },
+    });
+    await tick();
+    expect(active()).toBe('mefistos');
+    expect(screen.getByTestId('host-usage-warning').textContent).toBe(
+      '▲ admin@32bit.sk has 8% of its 5-hour window left (resets 15:10). Also used by claude-fleet-oci.',
+    );
+    // Choosing the other low host on the same account: still no auto-switch.
+    await fireEvent.click(chip('claude-fleet-oci'));
+    await tick();
+    await tick();
+    expect(active()).toBe('claude-fleet-oci');
+    expect(screen.getByTestId('host-usage-warning').textContent).toContain('Also used by mefistos.');
+  });
+
+  it('a host whose account drops to low while the dialog is open stays chosen', async () => {
+    const { NOW, five, accountUsage, GMAIL } = await setup();
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {}, clock: () => NOW, ...USAGE } });
+    await tick();
+    expect(active()).toBe('local');
+    accountUsage.update((m) => ({ ...m, [GMAIL.uuid]: five(GMAIL.uuid, 3) }));
+    await tick();
+    expect(active()).toBe('local');
+    expect(screen.getByTestId('host-usage-warning').textContent).toContain('mj.janci@gmail.com has 3%');
+  });
+
+  it('opening refreshes usage for the visible hosts’ accounts, once each, and shows no error when refused', async () => {
+    const { NOW, inv, ADMIN, WORK, GMAIL } = await setup();
+    const { toasts, clearToasts } = await import('./toasts');
+    const { get } = await import('svelte/store');
+    clearToasts();
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {}, clock: () => NOW, ...USAGE } });
+    await tick();
+    await tick();
+    const refreshed = inv.mock.calls
+      .filter((c) => c[0] === 'refresh_account_usage')
+      .map((c) => (c[1] as { args: { account_uuid: string } }).args.account_uuid)
+      .sort();
+    expect(refreshed).toEqual([ADMIN.uuid, GMAIL.uuid, WORK.uuid].sort());
+    expect(get(toasts)).toHaveLength(0);
+    expect(document.body.textContent).not.toContain('floor');
+  });
+
+  it('is about 520px wide', async () => {
+    const { NOW } = await setup();
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {}, clock: () => NOW, ...USAGE } });
+    await tick();
+    expect((screen.getByRole('dialog', { name: 'New session' }) as HTMLElement).style.width).toBe('520px');
   });
 });

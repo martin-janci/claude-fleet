@@ -636,7 +636,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     await fireEvent.click(screen.getByTestId('add-project-row'));
     await tick();
     const chipFor = (alias: string) =>
-      Array.from(document.querySelectorAll<HTMLButtonElement>('.host-pick')).find((b) => b.textContent?.trim() === alias)!;
+      Array.from(document.querySelectorAll<HTMLButtonElement>('.host-pick')).find((b) => (b as HTMLElement).dataset.alias === alias)!;
     await fireEvent.click(chipFor('mefistos'));
     await fireEvent.click(screen.getByTestId('add-mode-folder'));
     await fireEvent.click(screen.getByTestId('choose-folder'));
@@ -644,7 +644,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     await fireEvent.click(screen.getByTestId('add-create'));
     await vi.waitFor(() => expect(screen.queryByTestId('add-project-dialog')).toBeNull());
     expect(screen.getByRole('heading', { name: /New session/ }).textContent).toContain('me/thing');
-    expect(document.querySelector('.host-pick.active')?.textContent?.trim()).toBe('local');
+    expect(document.querySelector('.host-pick.active')?.getAttribute('data-alias')).toBe('local');
   });
 
   it('a native <dialog> close on NewSessionDialog still closes it (Modal reopen only when the parent declines)', async () => {

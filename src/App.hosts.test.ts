@@ -1,6 +1,7 @@
-// App integration of the Hosts view (Task 8): the ⌘I / Ctrl+Shift+H toggle,
-// ⌘, for Settings, leaving the view, focus restore, the terminal surviving a
-// round trip, Files/Hosts exclusivity, and the entry points that open it.
+// App integration of the Hosts view: the ⌘I / Ctrl+Shift+H toggle, ⌘, for
+// Settings, leaving the view, focus restore, the terminal surviving a round
+// trip, Files/Hosts exclusivity, the entry points that open it, and the
+// footer's usage segment.
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
@@ -12,7 +13,25 @@ import { clearSelection, selectSession, selectedSession } from './lib/selection'
 import { hostFilter } from './lib/hosts';
 import { hostsViewOpen, settingsOpen } from './lib/app_views';
 import type { SessionRow } from './lib/sessions';
-import { fleetAccounts, fleetHosts, fleetUsage, session } from './lib/hosts_fixture';
+import type { AccountUsageSnapshot } from './lib/account_usage_store';
+import { clock } from './lib/account_usage';
+import {
+  ADMIN,
+  GMAIL,
+  HOUR,
+  MIN,
+  NOW,
+  RESET_5H,
+  RESET_WEEK,
+  SPARE,
+  WORK,
+  fleetAccounts,
+  fleetHosts,
+  fleetUsage,
+  outageUsage,
+  session,
+  snapshot,
+} from './lib/hosts_fixture';
 
 const project = {
   project: { id: 7, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: 1, adopted: false },
@@ -282,7 +301,7 @@ describe('App: the Hosts view', () => {
     await fireEvent.click(pick);
     const dialog = await screen.findByRole('dialog', { name: 'New session' });
     await waitFor(() =>
-      expect(dialog.querySelector('.host-pick.active')?.textContent?.trim()).toBe('mefistos'),
+      expect(dialog.querySelector('.host-pick.active')?.getAttribute('data-alias')).toBe('mefistos'),
     );
   });
 
@@ -327,5 +346,85 @@ describe('App: the Hosts view', () => {
     await waitFor(() => expect(hostsView()).not.toBeNull());
     expect(get(settingsOpen)).toBe(false);
     expect(screen.queryByRole('dialog', { name: 'Settings' })).toBeNull();
+  });
+});
+
+describe('App: the footer usage segment', () => {
+  // Pin the wall clock (Date only, so timers and waitFor keep working) to the
+  // fixture's NOW; clock text uses the system locale like the app does.
+  async function withUsage(snaps: Record<string, AccountUsageSnapshot>, at = NOW) {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(at * 1000);
+    const routed = inv.getMockImplementation() as (cmd: string, ...rest: unknown[]) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, ...rest: unknown[]) => {
+      if (cmd === 'list_account_usage') return Object.values(snaps);
+      if (cmd === 'refresh_account_usage') {
+        return snaps[(rest[0] as { args: { account_uuid: string } }).args.account_uuid];
+      }
+      return routed(cmd, ...rest);
+    });
+    await mountApp();
+    return waitFor(() => {
+      const seg = screen.getByTestId('footer-usage');
+      expect(seg.tagName).toBe('BUTTON');
+      return seg;
+    });
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const fresh = (): Record<string, AccountUsageSnapshot> => ({
+    [ADMIN.uuid]: snapshot(ADMIN.uuid, { source_host: 'mefistos', fetched_at: NOW - 3 * MIN }),
+    [WORK.uuid]: snapshot(WORK.uuid, { source_host: 'claude-fleet-htz' }),
+    [GMAIL.uuid]: snapshot(GMAIL.uuid, { source_host: 'claude-fleet-trn' }),
+    // No host is logged in to SPARE: its dead state must not alarm.
+    [SPARE.uuid]: snapshot(SPARE.uuid, { usage: null, fetched_at: null, status: 'no_online_host' }),
+  });
+
+  const lowAdmin = (): AccountUsageSnapshot =>
+    snapshot(ADMIN.uuid, {
+      source_host: 'mefistos',
+      usage: {
+        five_hour: { utilization: 92, resets_at: RESET_5H },
+        seven_day: { utilization: 20, resets_at: RESET_WEEK },
+        seven_day_opus: null,
+        seven_day_sonnet: null,
+      },
+    });
+
+  it('all accounts fresh and ok — an account with no hosts does not trigger the alarm', async () => {
+    const seg = await withUsage(fresh());
+    await waitFor(() => expect(seg.textContent).toBe('usage ✓ all accounts · 3m'));
+    expect(seg.dataset.state).toBe('ok');
+    expect(seg.getAttribute('aria-label')).toContain('all 3 accounts have headroom');
+    // It sits in the footer beside the version line.
+    expect(seg.closest('footer')?.textContent).toContain('db: ok');
+  });
+
+  it('names the worst account, and clicking it opens Hosts on that account’s host', async () => {
+    const seg = await withUsage({ ...fresh(), [ADMIN.uuid]: lowAdmin() });
+    await waitFor(() => expect(seg.dataset.state).toBe('attention'));
+    expect(seg.textContent).toBe(`usage ▲ admin@32bit.sk 5h 8% left · resets ${clock(RESET_5H)}`);
+    expect(seg.classList.contains('tone-alarm')).toBe(true);
+    expect(seg.getAttribute('aria-label')).toMatch(/^Account usage: admin@32bit\.sk has 8% of its 5-hour window left, resets in 38 min/);
+    await fireEvent.click(seg);
+    await waitFor(() => expect(hostsView()).not.toBeNull());
+    expect(screen.getByTestId('host-detail').dataset.alias).toBe('mefistos');
+  });
+
+  it('every account unavailable: ◷ unavailable since the last good check', async () => {
+    const seg = await withUsage(outageUsage());
+    await waitFor(() => expect(seg.dataset.state).toBe('unavailable'));
+    expect(seg.textContent).toBe(`usage ◷ unavailable since ${clock(NOW - 82 * MIN)}`);
+    expect(seg.getAttribute('aria-label')).toBe(`Account usage unavailable since ${clock(NOW - 82 * MIN)}. Open Hosts.`);
+  });
+
+  it('after 24 hours unavailable it collapses to a muted `usage off`', async () => {
+    const seg = await withUsage(outageUsage(), NOW - 82 * MIN + 25 * HOUR);
+    await waitFor(() => expect(seg.dataset.state).toBe('off'));
+    expect(seg.textContent).toBe('usage off');
+    expect(seg.classList.contains('tone-muted')).toBe(true);
   });
 });

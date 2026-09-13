@@ -52,7 +52,7 @@ function deferred<T = unknown>() {
 
 function chip(alias: string): HTMLButtonElement {
   return Array.from(document.querySelectorAll<HTMLButtonElement>('.host-pick')).find(
-    (b) => b.textContent?.trim() === alias,
+    (b) => (b as HTMLElement).dataset.alias === alias,
   )!;
 }
 

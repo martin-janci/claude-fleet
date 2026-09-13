@@ -8,6 +8,8 @@
   import { generateName, nameWords, tmuxNameSuffix } from './names';
   import Modal from './Modal.svelte';
   import PickerList from './PickerList.svelte';
+  import HostChips from './HostChips.svelte';
+  import { refreshAccountUsage } from './account_usage_store';
   import type { PickerItem } from './PickerList.svelte';
   import {
     fleetSettings,
@@ -25,6 +27,9 @@
     onCancel,
     initialName,
     initialHost,
+    clock = () => Math.floor(Date.now() / 1000),
+    locale,
+    timeZone,
   }: {
     project: ProjectTreeRow;
     onCreate: (s: SessionRow) => void;
@@ -34,7 +39,19 @@
     /** Preselect this host (e.g. where Add project just put the project);
      *  wins over the remembered choices while it is pickable. */
     initialHost?: string;
+    /** Unix seconds for the host chips' usage wording; injectable for tests. */
+    clock?: () => number;
+    locale?: string;
+    timeZone?: string;
   } = $props();
+
+  // One coarse clock for the chips' "resets 15:10" / "2 min ago" wording.
+  const readClock = () => clock();
+  let now = $state(readClock());
+  $effect(() => {
+    const t = setInterval(() => (now = readClock()), 30_000);
+    return () => clearInterval(t);
+  });
 
   // The project is fixed for the dialog's lifetime (the parent remounts for
   // a different one), so these snapshots are intentional.
@@ -75,7 +92,7 @@
 
   // A remembered host is only honoured while it is still pickable (visible,
   // and reachable unless it is `local`) — otherwise fall back to the global
-  // last-host, then `local`. Mirrors the chip `disabled` rule below.
+  // last-host, then `local`. Mirrors the chip `disabled` rule in HostChips.
   function usableHost(alias: string | null | undefined): alias is string {
     return (
       !!alias &&
@@ -345,6 +362,13 @@
   onMount(() => {
     // The remote preview needs the backend's per-host roots; best effort.
     void loadFleetSettings();
+    // "The New-session dialog opening" is a usage fetch trigger. The backend
+    // keeps the 5-minute floor; a refused or failed refresh just leaves the
+    // last-known snapshot, so nothing is surfaced here.
+    const uuids = new Set(
+      $hosts.filter((h) => !h.hidden && h.account_uuid).map((h) => h.account_uuid as string),
+    );
+    for (const uuid of uuids) void refreshAccountUsage(uuid);
   });
   const pathPreview = $derived.by(() => {
     const root =
@@ -555,7 +579,7 @@
   }
 </script>
 
-<Modal label="New session" onclose={onCancel} width="420px">
+<Modal label="New session" onclose={onCancel} width="520px">
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="dialog" onkeydown={onKeydown}>
   <h3>New session — {owner}/{repo}</h3>
@@ -612,22 +636,18 @@
       />
     {/if}
 
-    <label for="host-picker">Host</label>
-    <div class="host-row" id="host-picker" role="group">
-      {#each $hosts.filter((h) => !h.hidden) as h (h.alias)}
-        <button
-          class="host-pick"
-          class:active={chosenHost === h.alias}
-          disabled={!h.reachable && h.alias !== 'local'}
-          onclick={() => {
-            chosenHost = h.alias;
-            nameOverride = null;
-          }}
-        >
-          {h.alias}
-        </button>
-      {/each}
-    </div>
+    <HostChips
+      active={chosenHost}
+      labelId="new-session-host-label"
+      showUsage
+      {now}
+      {locale}
+      {timeZone}
+      onpick={(alias) => {
+        chosenHost = alias;
+        nameOverride = null;
+      }}
+    />
 
     <label for="wt-picker">Worktree</label>
     {#if worktreeStatus}
@@ -739,25 +759,6 @@
     cursor: pointer;
   }
   .dice:hover { border-color: var(--accent); }
-  .host-row {
-    display: flex;
-    gap: 0.3rem;
-    flex-wrap: wrap;
-    max-height: 5.2rem;
-    overflow-y: auto;
-  }
-  .host-pick {
-    font-size: 0.75rem;
-    padding: 0.2rem 0.6rem;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--fg-muted);
-    border-radius: 999px;
-    cursor: pointer;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
-  .host-pick.active { color: var(--fg); border-color: var(--accent); }
-  .host-pick:disabled { opacity: 0.4; cursor: not-allowed; }
   .kind-row { display: flex; gap: 0.3rem; }
   .kind-pick {
     font-size: 0.75rem;

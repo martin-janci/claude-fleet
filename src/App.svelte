@@ -12,9 +12,10 @@
   import { loadProjects, bootstrapProjects, applyProjectEvents } from './lib/projects';
   import { loadSessions, bootstrapSessions, applySessionEvents, sessions } from './lib/sessions';
   import { bootstrapHosts, applyHostEvents, hosts, hostFilter } from './lib/hosts';
-  import { bootstrapAccounts, applyAccountEvents } from './lib/accounts';
+  import { bootstrapAccounts, applyAccountEvents, accounts } from './lib/accounts';
   import { loadTasks, applyTaskEvents } from './lib/tasks';
-  import { loadAccountUsage, applyAccountUsageEvents } from './lib/account_usage_store';
+  import { loadAccountUsage, applyAccountUsageEvents, accountUsage } from './lib/account_usage_store';
+  import { footerUsage } from './lib/usage_glance';
   import { subscribeToRowEvents } from './lib/events';
   import Toasts from './lib/Toasts.svelte';
   import QuickSwitcher from './lib/QuickSwitcher.svelte';
@@ -177,9 +178,8 @@
     // subscription is live so no `task:updated` is missed, and never block
     // startup on it (a failure only leaves the Tasks panel empty).
     void loadTasks();
-    // Account usage (Task 4): same reasoning — not on the critical bootstrap
-    // path, loaded after the subscription so no `account_usage:updated` is
-    // missed. Not surfaced in the UI yet (Tasks 6-9).
+    // Account usage: same reasoning — not on the critical bootstrap path,
+    // loaded after the subscription so no `account_usage:updated` is missed.
     void loadAccountUsage();
   });
 
@@ -309,6 +309,15 @@
     closeHosts(false);
     filesMode = true;
   }
+
+  // Footer usage segment: whether to look at usage, not the numbers. A coarse
+  // clock is enough for "3m" ages and staleness.
+  let nowSec = $state(Math.floor(Date.now() / 1000));
+  $effect(() => {
+    const t = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 30_000);
+    return () => clearInterval(t);
+  });
+  const usageFooter = $derived(footerUsage($hosts, $accounts, $accountUsage, nowSec));
 
   function onHostsFilterSidebar(alias: string) {
     sidebarCollapsed = false;
@@ -548,6 +557,17 @@
   {:else}
     <span class="muted">connecting…</span>
   {/if}
+  {#if usageFooter}
+    <button
+      type="button"
+      class="usage-seg tone-{usageFooter.tone}"
+      data-testid="footer-usage"
+      data-state={usageFooter.state}
+      aria-label={usageFooter.ariaLabel}
+      title={usageFooter.ariaLabel}
+      onclick={() => openHosts(usageFooter.host)}>{usageFooter.text}</button
+    >
+  {/if}
 </footer>
 
 <style>
@@ -565,8 +585,28 @@
     border-top: 1px solid var(--border);
     font-size: 0.75rem;
     color: var(--fg-muted);
+    display: flex;
+    align-items: center;
+    gap: 1rem;
   }
   .status .err { color: #e64a4a; }
+  .usage-seg {
+    margin-left: auto;
+    background: transparent;
+    border: none;
+    padding: 0 0.3rem;
+    font: inherit;
+    font-variant-numeric: tabular-nums;
+    color: var(--fg);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .usage-seg:hover { text-decoration: underline; }
+  .usage-seg.tone-muted { color: var(--fg-muted); }
+  .usage-seg.tone-warn { color: var(--usage-warn); }
+  .usage-seg.tone-alarm { color: var(--usage-crit); }
 
   /* Collapsed-pane strip: a thin always-visible vertical button. Same
      visual language for both sidebar and center collapse so the user
