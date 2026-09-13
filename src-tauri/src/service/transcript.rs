@@ -343,8 +343,8 @@ fn prompt_chars(turn: &ConvTurn) -> usize {
 
 /// Keep the last `max_turns` turns, then drop the oldest items (and a turn
 /// once it has none left) until prompts + items fit `max_chars`. The newest
-/// item is never dropped: when it alone is over budget its text is cut from
-/// the front (the end of a reply is what a reader waits for).
+/// item is never dropped; see [`fit_last_turn`] for what happens when the
+/// last turn alone is over budget.
 pub fn trim_conversation(
     mut turns: Vec<ConvTurn>,
     max_turns: usize,
@@ -360,16 +360,8 @@ pub fn trim_conversation(
         .map(|t| prompt_chars(t) + t.items.iter().map(item_chars).sum::<usize>())
         .sum();
     while total > max_chars && !turns.is_empty() {
-        let last_item = turns.len() == 1 && turns[0].items.len() <= 1;
-        if last_item {
-            let budget = max_chars.saturating_sub(prompt_chars(&turns[0]));
-            if let Some(ConvItem::Text { text }) = turns[0].items.first_mut() {
-                let n = text.chars().count();
-                if n > budget {
-                    *text = text.chars().skip(n - budget).collect();
-                    truncated = true;
-                }
-            }
+        if turns.len() == 1 && turns[0].items.len() <= 1 {
+            truncated |= fit_last_turn(&mut turns[0], max_chars);
             break;
         }
         let first = &mut turns[0];
@@ -383,6 +375,41 @@ pub fn trim_conversation(
         truncated = true;
     }
     Conversation { turns, truncated }
+}
+
+/// Fit a lone turn holding at most one item into `max_chars`. The reply
+/// keeps what the prompt leaves over, but never less than half the budget
+/// (and never less than one char, so a Text item is never blanked); its text
+/// is cut from the front, since the end of a reply is what a reader waits
+/// for. The prompt then gets the rest and keeps its head. Tool summaries are
+/// one short line and are left whole. Returns whether anything was cut.
+fn fit_last_turn(turn: &mut ConvTurn, max_chars: usize) -> bool {
+    let mut cut = false;
+    let item_len = turn.items.first().map_or(0, item_chars);
+    let item_budget = item_len
+        .min(
+            max_chars
+                .saturating_sub(prompt_chars(turn))
+                .max(max_chars / 2),
+        )
+        .max(item_len.min(1));
+    if let Some(ConvItem::Text { text }) = turn.items.first_mut() {
+        if item_len > item_budget {
+            *text = text.chars().skip(item_len - item_budget).collect();
+            cut = true;
+        }
+    }
+    let prompt_budget = max_chars.saturating_sub(turn.items.first().map_or(0, item_chars));
+    if let Some(prompt) = turn.prompt.as_mut() {
+        if prompt.chars().count() > prompt_budget {
+            *prompt = prompt.chars().take(prompt_budget).collect();
+            cut = true;
+        }
+    }
+    if turn.prompt.as_deref() == Some("") {
+        turn.prompt = None;
+    }
+    cut
 }
 
 /// The last `count` turns joined with a separator, trimmed from the FRONT
@@ -961,6 +988,91 @@ mod tests {
             summarize_tool_use(&exact).chars().count(),
             TOOL_SUMMARY_CHARS
         );
+    }
+
+    #[test]
+    fn a_single_oversized_newest_item_is_cut_from_the_front() {
+        let turn = ConvTurn {
+            prompt: Some("q".into()),
+            at: None,
+            items: vec![ConvItem::Text {
+                text: format!("{}END", "x".repeat(100)),
+            }],
+        };
+        let c = trim_conversation(vec![turn], 10, 21);
+        assert!(c.truncated);
+        assert_eq!(c.turns.len(), 1);
+        assert_eq!(c.turns[0].prompt.as_deref(), Some("q"));
+        let ConvItem::Text { text } = &c.turns[0].items[0] else {
+            panic!("text item expected");
+        };
+        assert_eq!(text.chars().count(), 20);
+        assert!(text.ends_with("END"), "{text}");
+    }
+
+    #[test]
+    fn a_huge_prompt_still_keeps_its_reply() {
+        let older = ConvTurn {
+            prompt: Some("old".into()),
+            at: None,
+            items: vec![ConvItem::Text {
+                text: "earlier".into(),
+            }],
+        };
+        let turn = ConvTurn {
+            prompt: Some(format!("HEAD{}", "p".repeat(70_000))),
+            at: None,
+            items: vec![
+                ConvItem::Tool {
+                    summary: "Bash(command=ls)".into(),
+                },
+                ConvItem::Text {
+                    text: "the reply!".into(),
+                },
+            ],
+        };
+        let c = trim_conversation(vec![older, turn], 10, CONV_MAX_CHARS);
+        assert!(c.truncated);
+        assert_eq!(c.turns.len(), 1);
+        let last = &c.turns[0];
+        assert_eq!(
+            last.items,
+            vec![ConvItem::Text {
+                text: "the reply!".into()
+            }],
+            "the newest reply survives whole"
+        );
+        let prompt = last.prompt.as_deref().unwrap();
+        assert!(prompt.starts_with("HEAD"), "the prompt keeps its head");
+        assert_eq!(prompt.chars().count() + 10, CONV_MAX_CHARS);
+
+        // Both oversized: the reply gets half the budget (its end), the
+        // prompt the rest (its head); nothing is blanked.
+        let both = ConvTurn {
+            prompt: Some(format!("HEAD{}", "p".repeat(100))),
+            at: None,
+            items: vec![ConvItem::Text {
+                text: format!("{}END", "x".repeat(100)),
+            }],
+        };
+        let c = trim_conversation(vec![both], 10, 40);
+        assert!(c.truncated);
+        let ConvItem::Text { text } = &c.turns[0].items[0] else {
+            panic!("text item expected");
+        };
+        assert_eq!(text.chars().count(), 20);
+        assert!(text.ends_with("END"));
+        assert_eq!(c.turns[0].prompt.as_deref(), Some("HEADpppppppppppppppp"));
+
+        // Even a one-char budget leaves a non-empty reply.
+        let tiny = ConvTurn {
+            prompt: Some("long prompt".into()),
+            at: None,
+            items: vec![ConvItem::Text { text: "abc".into() }],
+        };
+        let c = trim_conversation(vec![tiny], 10, 1);
+        assert_eq!(c.turns[0].items, vec![ConvItem::Text { text: "c".into() }]);
+        assert_eq!(c.turns[0].prompt, None);
     }
 
     const RA_UUID: &str = "550e8400-e29b-41d4-a716-446655440001";
