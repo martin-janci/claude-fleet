@@ -450,3 +450,54 @@ describe('SessionDetails label editing and timeline', () => {
     expect((await screen.findByTestId('timeline-empty')).textContent).toContain('No events recorded');
   });
 });
+
+describe('SessionDetails Remove from list (inactive bg agents)', () => {
+  const inv = () => mockedInvoke as ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    inv().mockReset();
+    inv().mockImplementation(async () => undefined);
+  });
+
+  it('shows Remove from list for a stopped bg row and calls dismiss_agent_session', async () => {
+    const row = { ...sampleSession, id: 9, kind: 'bg', tmux_name: 'bg:c9', claude_status: 'stopped' as const };
+    render(SessionDetails, { props: { session: row } });
+    await tick();
+    const btn = await screen.findByTestId('remove-from-list-details');
+    expect(btn.textContent).toContain('Remove from list');
+    inv().mockResolvedValueOnce(null);
+    await fireEvent.click(btn);
+    await tick();
+    expect(inv().mock.calls).toContainEqual(['dismiss_agent_session', { args: { session_id: 9 } }]);
+  });
+
+  it('surfaces a failed removal as an error toast', async () => {
+    const { toasts, clearToasts } = await import('./toasts');
+    const { get } = await import('svelte/store');
+    clearToasts();
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'dismiss_agent_session') throw { code: 'E_INVALID_STATE', message: 'still working' };
+      return undefined;
+    });
+    const row = { ...sampleSession, id: 9, kind: 'bg', tmux_name: 'bg:c9', claude_status: 'stopped' as const };
+    render(SessionDetails, { props: { session: row } });
+    await fireEvent.click(await screen.findByTestId('remove-from-list-details'));
+    await tick();
+    await tick();
+    const err = get(toasts).find((t) => t.kind === 'error');
+    expect(err?.message).toContain('still working');
+  });
+
+  it('hides it for a live bg row, an external row and a tmux row', async () => {
+    for (const row of [
+      { ...sampleSession, id: 10, kind: 'bg', tmux_name: 'bg:c10', claude_status: 'working' as const },
+      { ...sampleSession, id: 11, kind: 'external', tmux_name: 'bg:c11', claude_status: 'stopped' as const },
+      { ...sampleSession, id: 12, claude_status: 'stopped' as const },
+    ]) {
+      const { unmount } = render(SessionDetails, { props: { session: row } });
+      await tick();
+      expect(screen.queryByTestId('remove-from-list-details')).toBeNull();
+      unmount();
+    }
+  });
+});

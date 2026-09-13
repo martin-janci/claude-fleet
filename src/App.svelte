@@ -8,6 +8,7 @@
   import TerminalView from './lib/TerminalView.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
   import HostsView from './lib/HostsView.svelte';
+  import ConversationPanel from './lib/ConversationPanel.svelte';
   import { loadProjects, bootstrapProjects, applyProjectEvents } from './lib/projects';
   import { loadSessions, bootstrapSessions, applySessionEvents, sessions, hasNoPane } from './lib/sessions';
   import { bootstrapHosts, applyHostEvents, hosts, hostFilter } from './lib/hosts';
@@ -235,8 +236,39 @@
   // viewer. The Files tab needs a selected session (the worktree to browse);
   // deselecting one drops back to the terminal automatically.
   let filesMode = $state(false);
+  // Primitive projections of the selection: `$selectedSession` changes
+  // identity on every `session:updated`, but these only change (and re-run
+  // the effects below) when the fact they carry does.
+  const selId = $derived($selectedSession?.id ?? null);
+  const selNoPane = $derived(!!$selectedSession && hasNoPane($selectedSession));
+  const selHasClaudeId = $derived(!!$selectedSession?.claude_session_id);
   $effect(() => {
-    if (!$selectedSession || $selectedSession.kind === 'bg') filesMode = false;
+    if (selId === null || selNoPane) filesMode = false;
+  });
+
+  // Conversation mode shows the transcript-backed Conversation panel (spec
+  // §6). For a tmux row it reuses the Files overlay, so the PTY stays mounted
+  // underneath; Files, Hosts and Conversation are mutually exclusive. Unlike
+  // Files/Hosts it keeps the center (Details) pane — it is a view of the
+  // session, like the terminal. A row with no pane (bg / external) has no
+  // terminal to show, so selecting one opens Conversation by default, and
+  // moving from such a row to a tmux row drops back to the terminal.
+  let conversationMode = $state(false);
+  let prevNoPane = false;
+  $effect(() => {
+    void selId;
+    const noPane = selNoPane;
+    const hasId = selHasClaudeId;
+    untrack(() => {
+      if (noPane) {
+        conversationMode = true;
+        filesMode = false;
+      } else if (prevNoPane) {
+        conversationMode = false;
+      }
+      if (!noPane && !hasId) conversationMode = false;
+    });
+    prevNoPane = noPane;
   });
 
   // Hosts mode reuses the Files-mode mechanism: the center pane collapses and
@@ -271,6 +303,9 @@
     hostsReturnFocus = active instanceof HTMLElement && active !== document.body ? active : null;
     hostsPreselect = preselect;
     filesMode = false;
+    // A no-pane row has nothing but the Conversation under the Hosts overlay,
+    // so it stays the view to return to; a tmux row returns to the terminal.
+    if (!selNoPane) conversationMode = false;
     hostsMode = true;
   }
 
@@ -301,13 +336,22 @@
 
   function showTerminal() {
     filesMode = false;
+    conversationMode = false;
     closeHosts();
   }
   function showFiles() {
     if (!$selectedSession) return;
     closeHosts(false);
+    conversationMode = false;
     filesMode = true;
   }
+  function showConversation() {
+    if (!$selectedSession?.claude_session_id) return;
+    closeHosts(false);
+    filesMode = false;
+    conversationMode = true;
+  }
+  const NO_PANE_TITLE = 'Runs outside tmux — no terminal';
 
   // Footer usage segment: whether to look at usage, not the numbers. A coarse
   // clock is enough for "3m" ages and staleness.
@@ -474,9 +518,11 @@
     <div class="view-tabs" role="tablist">
       <button
         class="view-tab"
-        class:active={!filesMode && !hostsMode}
+        class:active={!filesMode && !hostsMode && !conversationMode}
         role="tab"
-        aria-selected={!filesMode && !hostsMode}
+        aria-selected={!filesMode && !hostsMode && !conversationMode}
+        disabled={selNoPane}
+        title={selNoPane ? NO_PANE_TITLE : undefined}
         onclick={showTerminal}
         data-testid="tab-terminal">Terminal</button
       >
@@ -485,14 +531,24 @@
         class:active={filesMode}
         role="tab"
         aria-selected={filesMode}
-        disabled={!$selectedSession || $selectedSession.kind === 'bg'}
+        disabled={!$selectedSession || selNoPane}
         title={!$selectedSession
           ? 'Select a session first'
-          : $selectedSession.kind === 'bg'
-            ? 'Not available for background sessions'
+          : selNoPane
+            ? NO_PANE_TITLE
             : 'Browse the session worktree'}
         onclick={showFiles}
         data-testid="tab-files">Files</button
+      >
+      <button
+        class="view-tab"
+        class:active={conversationMode && !hostsMode}
+        role="tab"
+        aria-selected={conversationMode && !hostsMode}
+        disabled={!selHasClaudeId}
+        title={!selHasClaudeId ? 'No Claude session id yet' : 'Claude conversation from the transcript'}
+        onclick={showConversation}
+        data-testid="tab-conversation">Conversation</button
       >
       <!-- Fleet-scoped, so set apart on the right and never disabled. -->
       <button
@@ -507,17 +563,16 @@
       >
     </div>
     <div class="right-body">
-      {#if $selectedSession?.kind === 'bg'}
-        <!-- Background sessions have no PTY. We intentionally do NOT mount
-             TerminalView here so pty_open is never attempted (it would error
-             with "no tmux"). The tradeoff: selecting a bg session unmounts the
-             terminal, so returning to a normal session reconnects its PTY.
-             Acceptable — bg agents run unattended and are rarely interleaved.
-             BgSessionPanel (the old, always-broken "peek at claude logs" view)
-             was removed in the "agent rows and conversation" rework; this
-             placeholder holds the spot until the Conversation tab (Task 8)
-             replaces it. -->
-        <div class="view-slot" data-testid="no-pane-placeholder"></div>
+      {#if $selectedSession && selNoPane}
+        <!-- Rows with no pane (bg agents, external Claude sessions) have no
+             PTY. We intentionally do NOT mount TerminalView here so pty_open
+             is never attempted (it would error with "no tmux"). The tradeoff:
+             selecting such a row unmounts the terminal, so returning to a
+             normal session reconnects its PTY. The Conversation is the only
+             view these rows have. -->
+        <div class="view-slot">
+          <ConversationPanel session={$selectedSession} visible={!hostsMode} />
+        </div>
       {:else}
         <!-- TerminalView stays mounted underneath so the PTY and its ANSI
              buffer survive a Files-mode round trip — flipping back is instant
@@ -528,6 +583,11 @@
         {#if filesMode && $selectedSession}
           <div class="view-slot overlay">
             <FilesPanel session={$selectedSession} />
+          </div>
+        {/if}
+        {#if conversationMode && $selectedSession}
+          <div class="view-slot overlay">
+            <ConversationPanel session={$selectedSession} visible={!hostsMode} />
           </div>
         {/if}
       {/if}

@@ -1,6 +1,7 @@
-import { findByTestId, render, screen } from '@testing-library/svelte';
+import { findByTestId, render, screen, waitFor } from '@testing-library/svelte';
 import { fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { tick } from 'svelte';
 import { vi } from 'vitest';
 import App from './App.svelte';
 import { onboardingDismissed } from './lib/onboarding';
@@ -112,5 +113,168 @@ describe('App layout', () => {
     expect(after).toBeGreaterThan(before);
     const cmds = (invoke as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
     expect(cmds).toEqual(expect.arrayContaining(['list_projects', 'list_sessions']));
+  });
+});
+
+// Spec §6: the Conversation tab. Reuses the Files-overlay mechanism for tmux
+// rows; bg / external rows (no pane) open it by default and have Terminal and
+// Files disabled.
+describe('App: the Conversation tab', () => {
+  const base = {
+    project_id: null, worktree_id: null, created_at: 1, last_activity_at: 1, status: 'running',
+    notes: null, account_uuid: null, reviews_session_id: null, worktree_key: null, lost_at: null,
+    claude_status: 'idle', effort_level: null, pr_url: null, current_activity: null,
+    friendly_name: null, safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null,
+    safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null,
+    stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null,
+    last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null,
+    tags: [],
+  };
+  const work = { ...base, id: 101, tmux_name: 'dev-work', host_alias: 'local', kind: 'work', claude_session_id: 'c-work' };
+  const noId = { ...base, id: 102, tmux_name: 'dev-noid', host_alias: 'local', kind: 'work', claude_session_id: null };
+  const bg = { ...base, id: 103, tmux_name: 'bg:c-bg', host_alias: 'local', kind: 'bg', claude_session_id: 'c-bg' };
+  const ext = { ...base, id: 104, tmux_name: 'bg:c-ext', host_alias: 'local', kind: 'external', claude_session_id: 'c-ext' };
+
+  let inv: ReturnType<typeof vi.fn>;
+  let original: ((cmd: string, ...rest: unknown[]) => Promise<unknown>) | undefined;
+
+  beforeEach(async () => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    inv = invoke as ReturnType<typeof vi.fn>;
+    original = inv.getMockImplementation() as typeof original;
+    inv.mockImplementation(async (cmd: string, ...rest: unknown[]) => {
+      if (cmd === 'list_sessions') return [work, noId, bg, ext];
+      if (cmd === 'session_conversation') return { turns: [], truncated: false };
+      if (cmd === 'repo_changes') return [];
+      if (cmd === 'repo_tree') return { entries: [], truncated: false };
+      return original ? original(cmd, ...rest) : null;
+    });
+    localStorage.removeItem('cf:pref:session.last');
+  });
+
+  afterEach(async () => {
+    inv.mockImplementation(original!);
+    const { clearSelection } = await import('./lib/selection');
+    clearSelection();
+  });
+
+  async function mountAndSelect(row: { id: number }) {
+    render(App);
+    const { sessions } = await import('./lib/sessions');
+    const { get } = await import('svelte/store');
+    await waitFor(() => expect(get(sessions).length).toBe(4));
+    const { selectSession } = await import('./lib/selection');
+    selectSession(get(sessions).find((s) => s.id === row.id)!);
+    await tick();
+  }
+
+  async function select(row: { id: number }) {
+    const { sessions } = await import('./lib/sessions');
+    const { get } = await import('svelte/store');
+    const { selectSession } = await import('./lib/selection');
+    selectSession(get(sessions).find((s) => s.id === row.id)!);
+    await tick();
+  }
+
+  const tab = (id: string) => screen.getByTestId(id) as HTMLButtonElement;
+  const selected = (id: string) => tab(id).getAttribute('aria-selected');
+
+  it('the tab is disabled without a claude_session_id and enabled with one', async () => {
+    await mountAndSelect(noId);
+    expect(tab('tab-conversation').disabled).toBe(true);
+    expect(tab('tab-conversation').title).toBe('No Claude session id yet');
+    await select(work);
+    expect(tab('tab-conversation').disabled).toBe(false);
+  });
+
+  it('clicking it shows the panel over the terminal; Terminal hides it; Hosts hides it', async () => {
+    await mountAndSelect(work);
+    const grid = await screen.findByTestId('terminal-host');
+    await fireEvent.click(tab('tab-conversation'));
+    await tick();
+    expect(screen.getByTestId('conversation-panel')).toBeInTheDocument();
+    expect(selected('tab-conversation')).toBe('true');
+    expect(selected('tab-terminal')).toBe('false');
+    expect(selected('tab-files')).toBe('false');
+    expect(selected('tab-hosts')).toBe('false');
+    // The PTY stays mounted underneath.
+    expect(grid.isConnected).toBe(true);
+    // The center (Details) pane stays visible, unlike Files/Hosts.
+    expect(screen.getByTestId('pane-center')).toBeInTheDocument();
+
+    await fireEvent.click(tab('tab-terminal'));
+    await tick();
+    expect(screen.queryByTestId('conversation-panel')).toBeNull();
+    expect(selected('tab-terminal')).toBe('true');
+
+    await fireEvent.click(tab('tab-conversation'));
+    await tick();
+    expect(screen.getByTestId('conversation-panel')).toBeInTheDocument();
+    await fireEvent.click(tab('tab-files'));
+    await tick();
+    expect(screen.queryByTestId('conversation-panel')).toBeNull();
+    expect(selected('tab-files')).toBe('true');
+    expect(selected('tab-conversation')).toBe('false');
+
+    await fireEvent.click(tab('tab-conversation'));
+    await tick();
+    expect(selected('tab-files')).toBe('false');
+    await fireEvent.click(tab('tab-hosts'));
+    await tick();
+    expect(screen.queryByTestId('conversation-panel')).toBeNull();
+    expect(selected('tab-conversation')).toBe('false');
+    expect(selected('tab-hosts')).toBe('true');
+  });
+
+  it.each([
+    ['bg', bg],
+    ['external', ext],
+  ])('a %s row opens Conversation by default with Terminal and Files disabled', async (_k, row) => {
+    await mountAndSelect(row);
+    expect(await screen.findByTestId('conversation-panel')).toBeInTheDocument();
+    expect(selected('tab-conversation')).toBe('true');
+    for (const id of ['tab-terminal', 'tab-files']) {
+      expect(tab(id).disabled).toBe(true);
+      expect(tab(id).title).toBe('Runs outside tmux — no terminal');
+    }
+    expect(screen.queryByTestId('terminal-host')).toBeNull();
+    expect(screen.queryByTestId('bg-panel')).toBeNull();
+    expect(inv.mock.calls).toContainEqual(['session_conversation', { args: { session_id: row.id } }]);
+  });
+
+  it('a bg row keeps Conversation as its view across a Hosts round trip', async () => {
+    await mountAndSelect(bg);
+    expect(await screen.findByTestId('conversation-panel')).toBeInTheDocument();
+    await fireEvent.click(tab('tab-hosts'));
+    await tick();
+    expect(selected('tab-hosts')).toBe('true');
+    expect(selected('tab-conversation')).toBe('false');
+    expect(screen.getByTestId('hosts-overlay')).toBeInTheDocument();
+    await fireEvent.click(tab('tab-hosts'));
+    await tick();
+    expect(screen.queryByTestId('hosts-overlay')).toBeNull();
+    expect(selected('tab-conversation')).toBe('true');
+    expect(selected('tab-terminal')).toBe('false');
+  });
+
+  it('selecting a tmux row after a bg row returns to the terminal', async () => {
+    await mountAndSelect(bg);
+    expect(await screen.findByTestId('conversation-panel')).toBeInTheDocument();
+    await select(work);
+    expect(await screen.findByTestId('terminal-host')).toBeInTheDocument();
+    expect(screen.queryByTestId('conversation-panel')).toBeNull();
+    expect(selected('tab-terminal')).toBe('true');
+    expect(selected('tab-conversation')).toBe('false');
+    expect(tab('tab-terminal').disabled).toBe(false);
+  });
+
+  it('selecting a row with no claude_session_id drops conversation mode', async () => {
+    await mountAndSelect(work);
+    await fireEvent.click(tab('tab-conversation'));
+    await tick();
+    expect(screen.getByTestId('conversation-panel')).toBeInTheDocument();
+    await select(noId);
+    expect(screen.queryByTestId('conversation-panel')).toBeNull();
+    expect(selected('tab-terminal')).toBe('true');
   });
 });

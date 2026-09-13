@@ -1,6 +1,13 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import { sessions, hasNoPane, type SessionRow, type SafeKillInspection } from './sessions';
+  import {
+    sessions,
+    hasNoPane,
+    isInactiveAgent,
+    dismissAgentSession,
+    type SessionRow,
+    type SafeKillInspection,
+  } from './sessions';
   import { formatCostMicros, formatTokens, sessionUsageTokens } from './sessions';
   import {
     killSession,
@@ -176,6 +183,13 @@
       e.preventDefault();
       cancelRename();
     }
+  }
+
+  // Inactive bg agent: drop the row. The backend emits `session:removed`,
+  // which removes it from the store (and clears the selection).
+  async function onRemoveFromList() {
+    const r = await dismissAgentSession(session.id);
+    if (!r.ok) pushError(r.error, 'Remove failed');
   }
 
   async function onRestart() {
@@ -623,6 +637,16 @@
         data-testid="move-from-details"
       >
         ⇄ Move to host…
+      </button>
+    {/if}
+    {#if isInactiveAgent(session)}
+      <button
+        class="ghost"
+        onclick={onRemoveFromList}
+        title="Hide this inactive agent until it becomes active again"
+        data-testid="remove-from-list-details"
+      >
+        Remove from list
       </button>
     {/if}
     {#if session.kind !== 'shell' && session.status === 'running' && session.safe_kill_state !== 'requested'}
