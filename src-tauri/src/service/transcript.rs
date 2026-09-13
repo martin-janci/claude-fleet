@@ -1,5 +1,6 @@
 //! Read a session's Claude Code JSONL transcript and render the last
-//! assistant turn(s) as plain text (MCP-4).
+//! assistant turn(s) as plain text (MCP-4), or as structured turns for the
+//! app's Conversation tab (`session_conversation`).
 //!
 //! Claude Code writes one transcript per session at
 //! `~/.claude/projects/<encoded cwd>/<claude_session_id>.jsonl`, where the
@@ -17,7 +18,9 @@
 use crate::ipc_error::IpcError;
 use crate::shell::quote;
 use crate::ssh::SshClient;
-use std::sync::Arc;
+use crate::store::{SessionRow, Store};
+use serde::Serialize;
+use std::sync::{Arc, Mutex};
 
 /// Default / hard cap on the characters returned by `session_transcript`.
 pub const DEFAULT_MAX_CHARS: usize = 8_000;
@@ -114,8 +117,12 @@ tail -c {max_bytes} "$f"
     )
 }
 
-/// One-line summary of a `tool_use` block: `[tool_use] Name(input…)`.
-fn summarize_tool_use(block: &serde_json::Value) -> String {
+/// Prefix of a tool call's line in the plain-text rendering.
+const TOOL_USE_PREFIX: &str = "[tool_use] ";
+
+/// One-line summary of a `tool_use` block: `Name(input…)`, capped so the
+/// prefixed text line stays within [`TOOL_SUMMARY_CHARS`] (+ `"…)"`).
+fn tool_summary(block: &serde_json::Value) -> String {
     let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
     let input = block
         .get("input")
@@ -147,33 +154,100 @@ fn summarize_tool_use(block: &serde_json::Value) -> String {
             other => one_line(&other.to_string()),
         })
         .unwrap_or_default();
-    let mut s = format!("[tool_use] {name}({input})");
-    if s.chars().count() > TOOL_SUMMARY_CHARS {
-        s = s.chars().take(TOOL_SUMMARY_CHARS).collect::<String>() + "…)";
+    let s = format!("{name}({input})");
+    let cap = TOOL_SUMMARY_CHARS - TOOL_USE_PREFIX.chars().count();
+    if s.chars().count() > cap {
+        s.chars().take(cap).collect::<String>() + "…)"
+    } else {
+        s
     }
-    s
+}
+
+/// The plain-text line for a tool call: `[tool_use] Name(input…)`.
+#[cfg(test)]
+fn summarize_tool_use(block: &serde_json::Value) -> String {
+    format!("{TOOL_USE_PREFIX}{}", tool_summary(block))
 }
 
 fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Split a transcript (JSONL text; a leading partial line is tolerated)
-/// into assistant turns. A turn starts at every human `user` prompt (a
-/// string body, or a content array without `tool_result` blocks); every
-/// `assistant` entry until the next prompt contributes its text blocks and
-/// one summary line per `tool_use`. Turns with no assistant content are
-/// dropped. Sidechain (subagent) entries are ignored.
-pub fn parse_turns(jsonl: &str) -> Vec<String> {
-    let mut turns: Vec<String> = Vec::new();
-    let mut current: Vec<String> = Vec::new();
-    let flush = |current: &mut Vec<String>, turns: &mut Vec<String>| {
-        let text = current.join("\n").trim().to_string();
-        if !text.is_empty() {
-            turns.push(text);
+/// Turns kept by `session_conversation`, and its character budget.
+pub const CONV_TURNS: usize = 10;
+pub const CONV_MAX_CHARS: usize = 64_000;
+
+/// One turn of a conversation: the human prompt that opened it and what the
+/// assistant said / did in reply.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct ConvTurn {
+    /// `None` for assistant output whose prompt lies before the read tail.
+    pub prompt: Option<String>,
+    /// ISO timestamp of the prompt entry (else of the first assistant entry).
+    pub at: Option<String>,
+    pub items: Vec<ConvItem>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConvItem {
+    Text {
+        text: String,
+    },
+    /// The tool one-liner, without the `[tool_use] ` prefix.
+    Tool {
+        summary: String,
+    },
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Conversation {
+    pub turns: Vec<ConvTurn>,
+    /// Older turns or items were dropped to fit the turn / char budget.
+    pub truncated: bool,
+}
+
+/// The prompt text of a human `user` entry, or `None` when the entry is not
+/// a prompt (a `tool_result` carrier, or no content). A string body is used
+/// as is; a content array joins its text blocks with newlines.
+fn prompt_text(content: Option<&serde_json::Value>) -> Option<String> {
+    match content {
+        Some(serde_json::Value::String(s)) => Some(s.trim().to_string()),
+        Some(serde_json::Value::Array(blocks)) => {
+            if blocks
+                .iter()
+                .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+            {
+                return None;
+            }
+            let texts: Vec<&str> = blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect();
+            Some(texts.join("\n").trim().to_string())
         }
-        current.clear();
-    };
+        _ => None,
+    }
+}
+
+/// Split a transcript (JSONL text; a leading partial line is tolerated)
+/// into turns. A turn starts at every human `user` prompt (a string body,
+/// or a content array without `tool_result` blocks); every `assistant`
+/// entry until the next prompt contributes its text blocks and one tool
+/// summary per `tool_use`. Assistant output before the first prompt forms a
+/// prompt-less turn. Thinking blocks, tool results and sidechain (subagent)
+/// entries are excluded; a turn with neither prompt nor items is dropped.
+pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
+    fn push(turns: &mut Vec<ConvTurn>, turn: Option<ConvTurn>) {
+        if let Some(t) = turn {
+            if t.prompt.is_some() || !t.items.is_empty() {
+                turns.push(t);
+            }
+        }
+    }
+    let mut turns: Vec<ConvTurn> = Vec::new();
+    let mut current: Option<ConvTurn> = None;
     for line in jsonl.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -183,31 +257,44 @@ pub fn parse_turns(jsonl: &str) -> Vec<String> {
         }
         let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
         let content = v.get("message").and_then(|m| m.get("content"));
+        let at = || {
+            v.get("timestamp")
+                .and_then(|t| t.as_str())
+                .map(String::from)
+        };
         match kind {
             "user" => {
-                let is_prompt = match content {
-                    Some(serde_json::Value::String(_)) => true,
-                    Some(serde_json::Value::Array(blocks)) => !blocks
-                        .iter()
-                        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result")),
-                    _ => false,
-                };
-                if is_prompt {
-                    flush(&mut current, &mut turns);
+                if let Some(prompt) = prompt_text(content) {
+                    push(&mut turns, current.take());
+                    current = Some(ConvTurn {
+                        // An image-only prompt still opens a turn, unquoted.
+                        prompt: (!prompt.is_empty()).then_some(prompt),
+                        at: at(),
+                        items: Vec::new(),
+                    });
                 }
             }
             "assistant" => {
                 if let Some(serde_json::Value::Array(blocks)) = content {
+                    let turn = current.get_or_insert_with(|| ConvTurn {
+                        prompt: None,
+                        at: at(),
+                        items: Vec::new(),
+                    });
                     for b in blocks {
                         match b.get("type").and_then(|t| t.as_str()) {
                             Some("text") => {
                                 if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
                                     if !t.trim().is_empty() {
-                                        current.push(t.trim_end().to_string());
+                                        turn.items.push(ConvItem::Text {
+                                            text: t.trim_end().to_string(),
+                                        });
                                     }
                                 }
                             }
-                            Some("tool_use") => current.push(summarize_tool_use(b)),
+                            Some("tool_use") => turn.items.push(ConvItem::Tool {
+                                summary: tool_summary(b),
+                            }),
                             _ => {}
                         }
                     }
@@ -216,8 +303,86 @@ pub fn parse_turns(jsonl: &str) -> Vec<String> {
             _ => {}
         }
     }
-    flush(&mut current, &mut turns);
+    push(&mut turns, current);
     turns
+}
+
+/// Split a transcript into assistant turns rendered as plain text: each
+/// turn's text blocks and `[tool_use] ` summary lines joined with newlines.
+/// Turns without assistant content are dropped. Built on
+/// [`parse_conversation`].
+pub fn parse_turns(jsonl: &str) -> Vec<String> {
+    parse_conversation(jsonl)
+        .into_iter()
+        .filter(|t| !t.items.is_empty())
+        .map(|t| {
+            t.items
+                .iter()
+                .map(|i| match i {
+                    ConvItem::Text { text } => text.clone(),
+                    ConvItem::Tool { summary } => format!("{TOOL_USE_PREFIX}{summary}"),
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_string()
+        })
+        .collect()
+}
+
+fn item_chars(item: &ConvItem) -> usize {
+    match item {
+        ConvItem::Text { text } => text.chars().count(),
+        ConvItem::Tool { summary } => summary.chars().count(),
+    }
+}
+
+fn prompt_chars(turn: &ConvTurn) -> usize {
+    turn.prompt.as_deref().map_or(0, |p| p.chars().count())
+}
+
+/// Keep the last `max_turns` turns, then drop the oldest items (and a turn
+/// once it has none left) until prompts + items fit `max_chars`. The newest
+/// item is never dropped: when it alone is over budget its text is cut from
+/// the front (the end of a reply is what a reader waits for).
+pub fn trim_conversation(
+    mut turns: Vec<ConvTurn>,
+    max_turns: usize,
+    max_chars: usize,
+) -> Conversation {
+    let mut truncated = false;
+    if turns.len() > max_turns {
+        turns.drain(..turns.len() - max_turns);
+        truncated = true;
+    }
+    let mut total: usize = turns
+        .iter()
+        .map(|t| prompt_chars(t) + t.items.iter().map(item_chars).sum::<usize>())
+        .sum();
+    while total > max_chars && !turns.is_empty() {
+        let last_item = turns.len() == 1 && turns[0].items.len() <= 1;
+        if last_item {
+            let budget = max_chars.saturating_sub(prompt_chars(&turns[0]));
+            if let Some(ConvItem::Text { text }) = turns[0].items.first_mut() {
+                let n = text.chars().count();
+                if n > budget {
+                    *text = text.chars().skip(n - budget).collect();
+                    truncated = true;
+                }
+            }
+            break;
+        }
+        let first = &mut turns[0];
+        if !first.items.is_empty() {
+            total -= item_chars(&first.items.remove(0));
+        }
+        if first.items.is_empty() {
+            total -= prompt_chars(first);
+            turns.remove(0);
+        }
+        truncated = true;
+    }
+    Conversation { turns, truncated }
 }
 
 /// The last `count` turns joined with a separator, trimmed from the FRONT
@@ -236,6 +401,7 @@ pub fn render_tail(turns: &[String], count: usize, max_chars: usize) -> String {
 }
 
 /// What to read and how much to render.
+#[derive(Debug)]
 pub struct TranscriptArgs {
     pub host_alias: String,
     /// tmux session whose pane cwd locates the transcript (interactive
@@ -251,14 +417,59 @@ pub struct TranscriptArgs {
     pub max_chars: usize,
 }
 
-/// Fetch and render a transcript. Errors: `E_INVALID` (bad id),
-/// `E_INVALID_STATE` (no cwd resolvable), `E_NO_TRANSCRIPT` (file absent —
-/// the session has not written a turn yet, or runs on another cwd),
-/// `E_SHELL` / `E_SSH*` for transport failures.
-pub async fn fetch_transcript(
-    args: TranscriptArgs,
-    ssh: &Arc<SshClient>,
-) -> Result<String, IpcError> {
+/// Build the [`TranscriptArgs`] for a fleet row: the fallback cwd (the
+/// worktree, else the project root), the hook-reported transcript path, and
+/// the pane name — `None` for rows without a pane (`bg` / `external`).
+/// `E_INVALID_STATE` when the row has no `claude_session_id` yet. The store
+/// lock is released before returning.
+pub fn resolve_args(
+    store: &Mutex<Store>,
+    row: &SessionRow,
+    turns: usize,
+    max_chars: usize,
+) -> Result<TranscriptArgs, IpcError> {
+    let claude_session_id = row.claude_session_id.clone().ok_or_else(|| {
+        IpcError::new(
+            "E_INVALID_STATE",
+            format!(
+                "session {} has no claude_session_id yet (not reconciled, or not a Claude session)",
+                row.id
+            ),
+        )
+    })?;
+    let (cwd, transcript_path) = {
+        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let wt = match row.worktree_id {
+            Some(wid) => s.worktree_path(wid).ok().flatten(),
+            None => None,
+        };
+        let cwd = match wt {
+            Some(p) => Some(p),
+            None => match row.project_id {
+                Some(pid) => s.project_base_path(pid).ok().flatten(),
+                None => None,
+            },
+        };
+        (cwd, s.session_transcript_path(row.id).ok().flatten())
+    };
+    let no_pane = crate::store::has_no_pane(&row.kind) || row.tmux_name.starts_with("bg:");
+    Ok(TranscriptArgs {
+        host_alias: row.host_alias.clone(),
+        tmux_name: (!no_pane).then(|| row.tmux_name.clone()),
+        transcript_path,
+        cwd,
+        claude_session_id,
+        turns,
+        max_chars,
+    })
+}
+
+/// Read the JSONL tail for `args` (validated; `read_bytes_for(max_chars)`
+/// bytes). Errors: `E_INVALID` (bad id / host / pane name),
+/// `E_NO_TRANSCRIPT` (file absent — the session has not written a turn yet,
+/// or runs on another cwd), `E_SHELL` / `E_SSH*` for transport
+/// failures.
+async fn read_tail(args: &TranscriptArgs, ssh: &Arc<SshClient>) -> Result<String, IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
     crate::validate::claude_session_id(&args.claude_session_id)?;
     if let Some(name) = args.tmux_name.as_deref() {
@@ -291,9 +502,36 @@ pub async fn fetch_transcript(
             format!("transcript read failed: {}", stderr.trim()),
         ));
     }
-    let text = String::from_utf8_lossy(&out.stdout);
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Fetch and render a transcript as plain text. Errors as [`read_tail`].
+pub async fn fetch_transcript(
+    args: TranscriptArgs,
+    ssh: &Arc<SshClient>,
+) -> Result<String, IpcError> {
+    let text = read_tail(&args, ssh).await?;
     let turns = parse_turns(&text);
-    Ok(render_tail(&turns, args.turns, max_chars))
+    Ok(render_tail(
+        &turns,
+        args.turns,
+        args.max_chars.clamp(1, MAX_MAX_CHARS),
+    ))
+}
+
+/// Fetch a transcript as structured turns, trimmed to `args.turns` and
+/// `args.max_chars` (callers pass [`CONV_TURNS`] / [`CONV_MAX_CHARS`]).
+/// Errors as [`read_tail`].
+pub async fn fetch_conversation(
+    args: TranscriptArgs,
+    ssh: &Arc<SshClient>,
+) -> Result<Conversation, IpcError> {
+    let text = read_tail(&args, ssh).await?;
+    Ok(trim_conversation(
+        parse_conversation(&text),
+        args.turns.max(1),
+        args.max_chars.clamp(1, MAX_MAX_CHARS),
+    ))
 }
 
 /// Run a bash script on `host_alias` (local or via ssh), bounded by
@@ -570,6 +808,243 @@ mod tests {
         assert!(!s.contains('\n'));
         let none = serde_json::json!({"type":"tool_use","name":"Skill","input":{"other":1}});
         assert_eq!(summarize_tool_use(&none), "[tool_use] Skill({\"other\":1})");
+    }
+
+    #[test]
+    fn parse_conversation_keeps_prompts_text_and_tool_lines() {
+        let jsonl = [
+            line(serde_json::json!({"type":"user","timestamp":"2026-09-13T10:00:00Z","message":{"role":"user","content":"first"}})),
+            line(serde_json::json!({"type":"assistant","message":{"content":[
+                {"type":"thinking","thinking":"secret"},
+                {"type":"text","text":"Let me look."},
+                {"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}]}})),
+            line(serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"x","content":"a"}]}})),
+            line(serde_json::json!({"type":"user","message":{"content":[{"type":"text","text":"second"},{"type":"text","text":"part"}]}})),
+            line(serde_json::json!({"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"noise"}]}})),
+            line(serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}})),
+        ].join("\n");
+        let turns = parse_conversation(&jsonl);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].prompt.as_deref(), Some("first"));
+        assert_eq!(turns[0].at.as_deref(), Some("2026-09-13T10:00:00Z"));
+        assert_eq!(
+            turns[0].items,
+            vec![
+                ConvItem::Text {
+                    text: "Let me look.".into()
+                },
+                ConvItem::Tool {
+                    summary: "Bash(command=ls -la)".into()
+                },
+            ]
+        );
+        assert_eq!(turns[1].prompt.as_deref(), Some("second\npart"));
+        assert_eq!(
+            turns[1].items,
+            vec![ConvItem::Text {
+                text: "Done.".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_prompt_without_reply_is_kept_in_conversation_but_not_in_turns() {
+        let jsonl = line(serde_json::json!({"type":"user","message":{"content":"waiting"}}));
+        assert_eq!(parse_conversation(&jsonl).len(), 1);
+        assert!(parse_turns(&jsonl).is_empty());
+    }
+
+    #[test]
+    fn trim_conversation_drops_oldest_first() {
+        let t = |p: &str, n: usize| ConvTurn {
+            prompt: Some(p.into()),
+            at: None,
+            items: vec![ConvItem::Text {
+                text: "x".repeat(n),
+            }],
+        };
+        let c = trim_conversation(vec![t("a", 10), t("b", 10), t("c", 10)], 2, 1_000);
+        assert_eq!(c.turns.len(), 2);
+        assert!(c.truncated);
+        assert_eq!(c.turns[0].prompt.as_deref(), Some("b"));
+        let c = trim_conversation(vec![t("a", 50), t("b", 50)], 10, 60);
+        assert!(c.truncated);
+        assert_eq!(c.turns.last().unwrap().prompt.as_deref(), Some("b"));
+        let c = trim_conversation(vec![t("a", 5)], 10, 1_000);
+        assert!(!c.truncated);
+    }
+
+    #[test]
+    fn leading_assistant_entries_form_a_prompt_less_turn_stamped_by_the_first_entry() {
+        // The JSONL tail can start mid-turn: the opening prompt was cut off.
+        let jsonl = [
+            line(serde_json::json!({"type":"assistant","timestamp":"2026-09-13T09:00:00Z","message":{"content":[{"type":"text","text":"tail"}]}})),
+            line(serde_json::json!({"type":"assistant","timestamp":"2026-09-13T09:00:05Z","message":{"content":[{"type":"text","text":"more"}]}})),
+            line(serde_json::json!({"type":"user","message":{"content":"next"}})),
+            line(serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}})),
+        ]
+        .join("\n");
+        let turns = parse_conversation(&jsonl);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].prompt, None);
+        assert_eq!(turns[0].at.as_deref(), Some("2026-09-13T09:00:00Z"));
+        assert_eq!(turns[1].at, None, "no timestamp on the prompt entry");
+        // A prompt-less turn with no items never appears.
+        assert!(parse_conversation("").is_empty());
+    }
+
+    #[test]
+    fn conversation_serializes_to_the_frontend_shape() {
+        let c = Conversation {
+            turns: vec![ConvTurn {
+                prompt: None,
+                at: Some("2026-09-13T10:00:00Z".into()),
+                items: vec![
+                    ConvItem::Text { text: "hi".into() },
+                    ConvItem::Tool {
+                        summary: "Bash(command=ls)".into(),
+                    },
+                ],
+            }],
+            truncated: false,
+        };
+        assert_eq!(
+            serde_json::to_value(&c).unwrap(),
+            serde_json::json!({"turns":[{"prompt":null,"at":"2026-09-13T10:00:00Z","items":[
+                {"kind":"text","text":"hi"},{"kind":"tool","summary":"Bash(command=ls)"}]}],
+                "truncated":false})
+        );
+    }
+
+    #[test]
+    fn trim_conversation_counts_prompts_and_keeps_the_newest_item() {
+        let turn = ConvTurn {
+            prompt: Some("p".repeat(10)),
+            at: None,
+            items: vec![
+                ConvItem::Text {
+                    text: "a".repeat(10),
+                },
+                ConvItem::Tool {
+                    summary: "b".repeat(10),
+                },
+            ],
+        };
+        // 30 chars total; a 25 budget drops the oldest item only.
+        let c = trim_conversation(vec![turn.clone()], 10, 25);
+        assert!(c.truncated);
+        assert_eq!(c.turns.len(), 1);
+        assert_eq!(c.turns[0].prompt.as_deref(), Some("pppppppppp"));
+        assert_eq!(
+            c.turns[0].items,
+            vec![ConvItem::Tool {
+                summary: "b".repeat(10)
+            }]
+        );
+        // Exactly at budget: nothing dropped.
+        assert!(!trim_conversation(vec![turn], 10, 30).truncated);
+    }
+
+    #[test]
+    fn capped_tool_line_matches_the_pre_split_rendering_exactly() {
+        // Before the Name(input) / prefix split the whole prefixed line was
+        // cut at TOOL_SUMMARY_CHARS chars and "…)" appended.
+        let long = serde_json::json!({"type":"tool_use","name":"Bash","input":{"command":"é".repeat(500)}});
+        let full = format!("[tool_use] Bash(command={})", "é".repeat(500));
+        let old = full.chars().take(TOOL_SUMMARY_CHARS).collect::<String>() + "…)";
+        assert_eq!(summarize_tool_use(&long), old);
+        // At exactly the cap nothing is cut.
+        let fits = "[tool_use] Bash(command=)".chars().count();
+        let exact = serde_json::json!({"type":"tool_use","name":"Bash","input":{"command":"y".repeat(TOOL_SUMMARY_CHARS - fits)}});
+        assert!(!summarize_tool_use(&exact).contains('…'));
+        assert_eq!(
+            summarize_tool_use(&exact).chars().count(),
+            TOOL_SUMMARY_CHARS
+        );
+    }
+
+    const RA_UUID: &str = "550e8400-e29b-41d4-a716-446655440001";
+
+    #[test]
+    fn resolve_args_uses_the_pane_only_for_rows_that_have_one() {
+        let store = std::sync::Mutex::new(crate::store::Store::open_in_memory().unwrap());
+        let (tmux_id, bg_id) = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let tmux_id = s
+                .upsert_session("dev-x", "local", None, None, 1, 1, "running", None)
+                .unwrap();
+            s.set_claude_session_id(tmux_id, SID).unwrap();
+            s.set_transcript_path_by_claude_id(SID, "/h/.claude/projects/p/x.jsonl")
+                .unwrap();
+            let bg_id = s
+                .upsert_bg_session(
+                    "local",
+                    &format!("bg:{RA_UUID}"),
+                    None,
+                    RA_UUID,
+                    None,
+                    1,
+                    "external",
+                )
+                .unwrap();
+            (tmux_id, bg_id)
+        };
+        let row = |id| {
+            store
+                .lock()
+                .unwrap()
+                .get_session_by_id(id)
+                .unwrap()
+                .unwrap()
+        };
+
+        let a = resolve_args(&store, &row(tmux_id), 3, 500).unwrap();
+        assert_eq!(a.host_alias, "local");
+        assert_eq!(a.tmux_name.as_deref(), Some("dev-x"));
+        assert_eq!(
+            a.transcript_path.as_deref(),
+            Some("/h/.claude/projects/p/x.jsonl")
+        );
+        assert_eq!(a.claude_session_id, SID);
+        assert_eq!((a.turns, a.max_chars), (3, 500));
+
+        let a = resolve_args(&store, &row(bg_id), 1, 1).unwrap();
+        assert_eq!(a.tmux_name, None);
+        assert_eq!(a.claude_session_id, RA_UUID);
+
+        // The kind decides, not only the sentinel prefix.
+        let mut odd = row(tmux_id);
+        odd.kind = "external".into();
+        assert_eq!(resolve_args(&store, &odd, 1, 1).unwrap().tmux_name, None);
+
+        let mut no_id = row(tmux_id);
+        no_id.claude_session_id = None;
+        assert_eq!(
+            resolve_args(&store, &no_id, 1, 1).unwrap_err().code,
+            "E_INVALID_STATE"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_conversation_maps_a_missing_local_transcript_to_e_no_transcript() {
+        let ssh = Arc::new(SshClient::new());
+        let dir = tempfile::tempdir().unwrap();
+        let err = fetch_conversation(
+            TranscriptArgs {
+                host_alias: "local".into(),
+                tmux_name: None,
+                transcript_path: None,
+                cwd: Some(dir.path().to_string_lossy().into_owned()),
+                claude_session_id: "00000000-0000-0000-0000-00000000beef".into(),
+                turns: CONV_TURNS,
+                max_chars: CONV_MAX_CHARS,
+            },
+            &ssh,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "E_NO_TRANSCRIPT");
     }
 
     #[tokio::test]

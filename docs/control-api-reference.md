@@ -121,7 +121,7 @@ Parameters: `confirm_nonce`, `keep_source`, `session_id`, `target_host_alias`
 
 ### `new_bg_session`
 
-Launch a supervised headless (background) Claude session on a host with an initial prompt. Returns JSON with the new claude_session_id AND the fleet row (`session`, registered by an immediate reconcile; the key is absent if the agent was not matched yet — it appears on the next tick) so the next call can be peek_session { session_id }. The prompt becomes the row's default friendly name and last_prompt.
+Launch a supervised headless (background) Claude session on a host with an initial prompt. Returns JSON with the new claude_session_id AND the fleet row (`session`, registered by an immediate reconcile; the key is absent if the agent was not matched yet — it appears on the next tick) so the next call can be session_transcript { session_id }. The prompt becomes the row's default friendly name and last_prompt.
 
 Parameters: `host_alias`, `name`, `prompt`
 
@@ -139,7 +139,7 @@ Parameters: `base_branch`, `host_alias`, `name`, `new_worktree`, `project_id`, `
 
 ### `peek_session`
 
-Peek at a session's background Claude logs. Address it with session_id (from list_sessions) OR claude_session_id (the id new_bg_session returned; add host_alias while the fleet row does not exist yet). Returns an informational message for interactive sessions with no background job.
+Deprecated: use session_transcript. Returns the session's last assistant turn from its transcript. Address it with session_id OR claude_session_id (+ host_alias while the fleet row does not exist yet).
 
 Parameters: `claude_session_id`, `host_alias`, `session_id`
 
@@ -364,6 +364,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::rename_session`
 - `commands::sessions::set_session_friendly_name`
 - `commands::sessions::session_history`
+- `commands::sessions::session_conversation`
 - `commands::sessions::restart_session`
 - `commands::sessions::send_prompt`
 - `commands::sessions::spawn_review`
@@ -372,7 +373,6 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::dismiss_ghost_session`
 - `commands::sessions::dismiss_agent_session`
 - `commands::sessions::new_bg_session`
-- `commands::sessions::peek_session`
 - `commands::sessions::purge_project`
 - `commands::sessions::get_fleet_settings`
 - `commands::sessions::set_fleet_setting`

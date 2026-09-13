@@ -1,4 +1,4 @@
-//! Async wrappers around the `claude` CLI for background sessions and log peeking.
+//! Async wrappers around the `claude` CLI for background sessions.
 //!
 //! IMPORTANT: `claude` is invoked via `bash -lc` even locally so the user's
 //! PATH (which includes ~/.local/bin where claude lives) is honoured.
@@ -10,7 +10,7 @@ use crate::validate;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Timeout for `claude logs` and `claude project purge` (fast local operations).
+/// Timeout for `claude stop` and `claude project purge` (fast local operations).
 const CLAUDE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Timeout for `claude --bg` (involves Anthropic API handshake + session setup).
@@ -56,11 +56,10 @@ pub fn parse_session_id_from_bg_output(output: &str) -> Option<String> {
 // Every `claude` invocation is assembled here from validated parts. Positional
 // arguments are preceded by `--` wherever the CLI accepts it (the top-level
 // `[prompt]` and `project purge [path]`), so a value that starts with `-` can
-// never be parsed as an option. `claude logs <id>` / `claude stop <id>` reject
-// `--` with "unknown option" (verified against Claude Code 2.1.x), so those
-// two rely on a strict shape check instead: `validate::claude_session_id`
-// (lowercase UUID) for `logs`, `claude_agents::is_job_id` (lowercase-hex short
-// job id) for `stop`. Pure functions so the argv shape is unit-testable.
+// never be parsed as an option. `claude stop <id>` rejects `--` with "unknown
+// option" (verified against Claude Code 2.1.x), so it relies on a strict shape
+// check instead: `claude_agents::is_job_id` (lowercase-hex short job id).
+// Pure functions so the argv shape is unit-testable.
 
 /// `claude --bg --name <name> -- <prompt>`.
 ///
@@ -75,12 +74,6 @@ pub fn bg_script(name: &str, prompt: &str) -> Result<String, IpcError> {
         quote(name),
         quote(prompt)
     ))
-}
-
-/// `claude logs <session_id>` (no `--`: the subcommand rejects it).
-pub fn logs_script(session_id: &str) -> Result<String, IpcError> {
-    validate::claude_session_id(session_id)?;
-    Ok(format!("claude logs {}", quote(session_id)))
 }
 
 /// `claude stop <job_id>` — the short background job id (`44366faf`) that
@@ -224,32 +217,11 @@ pub async fn claude_bg(
     Ok(parse_session_id_from_bg_output(&output))
 }
 
-/// `claude logs <id>` only knows about background *jobs*. For an interactive
-/// session (which has a resumable `claude_session_id` but no background job),
-/// it fails with "No job matching '<id>'…". Detect that so `claude_logs` can
-/// degrade to a friendly message instead of surfacing it as an error.
+/// `claude stop <id>` only knows about running background *jobs*; for a job
+/// that already exited it fails with "No job matching '<id>'…". Detect that
+/// so `claude_stop` can treat it as nothing-left-to-stop.
 fn is_no_running_job(stderr: &str) -> bool {
     stderr.contains("No job matching")
-}
-
-/// Message shown when peeking a session that isn't a background job.
-const NO_BG_LOGS_MSG: &str =
-    "No background logs — this is an interactive session. Resume it by opening the session.";
-
-/// Run `claude logs <session_id>` on `host_alias`. Interactive sessions have a
-/// resumable id but no background job, so a "No job matching" failure is
-/// reported as an informational message rather than an error.
-pub async fn claude_logs(
-    ssh: &Arc<SshClient>,
-    host_alias: &str,
-    session_id: &str,
-) -> Result<String, IpcError> {
-    let script = logs_script(session_id)?;
-    match run_claude_script(ssh, host_alias, &script, CLAUDE_TIMEOUT).await {
-        Ok(out) => Ok(out),
-        Err(e) if is_no_running_job(&e.message) => Ok(NO_BG_LOGS_MSG.to_string()),
-        Err(e) => Err(e),
-    }
 }
 
 /// Run `claude stop <job_id>` on `host_alias` to stop a background
@@ -414,8 +386,6 @@ mod tests {
 
     // ─── script builders ─────────────────────────────────────────────────
 
-    const UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
-
     #[test]
     fn bg_script_places_end_of_options_before_prompt() {
         let s = bg_script("review-1", "Summarise the diff").unwrap();
@@ -453,23 +423,6 @@ mod tests {
     fn bg_script_quotes_shell_metacharacters() {
         let s = bg_script("n", "it's $(rm -rf /) `x`").unwrap();
         assert_eq!(s, "claude --bg --name 'n' -- 'it'\\''s $(rm -rf /) `x`'");
-    }
-
-    #[test]
-    fn logs_script_requires_uuid_and_skips_double_dash() {
-        assert_eq!(logs_script(UUID).unwrap(), format!("claude logs '{UUID}'"));
-        // `claude logs -- <id>` is rejected by the CLI, so no `--` here…
-        assert!(!logs_script(UUID).unwrap().contains(" -- "));
-        // …and an option-shaped or non-UUID id is refused up front instead.
-        for bad in [
-            "--foo",
-            "-h",
-            "abc-123",
-            "",
-            "550E8400-E29B-41D4-A716-446655440000",
-        ] {
-            assert_eq!(logs_script(bad).unwrap_err().code, "E_INVALID", "{bad:?}");
-        }
     }
 
     #[test]

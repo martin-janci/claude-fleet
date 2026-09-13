@@ -260,7 +260,7 @@ pub fn tmux_name_addressable(value: &str) -> Result<(), IpcError> {
         return Err(IpcError::new(
             "E_BG_SESSION",
             "this is a background (claude --bg) session with no tmux pane — \
-             use peek_session for its logs or kill_session to stop it",
+             use session_transcript for its conversation or kill_session to stop it",
         ));
     }
     tmux_name(value)

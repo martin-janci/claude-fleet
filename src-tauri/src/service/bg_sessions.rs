@@ -59,20 +59,6 @@ pub struct NewBgSessionResult {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct PeekSessionArgs {
-    pub host_alias: String,
-    pub claude_session_id: String,
-}
-
-impl PeekSessionArgs {
-    pub fn validate(&self) -> Result<(), IpcError> {
-        validate::host_alias(&self.host_alias)?;
-        validate::claude_session_id(&self.claude_session_id)?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Deserialize)]
 pub struct PurgeProjectArgs {
     /// Every host whose Claude state must go. The fleet row is deleted only
     /// after all of them succeed.
@@ -330,11 +316,6 @@ pub fn resolve_peek_target(
             "pass session_id, or claude_session_id (+ host_alias)",
         )),
     }
-}
-
-pub async fn peek_session(args: PeekSessionArgs, ssh: &Arc<SshClient>) -> Result<String, IpcError> {
-    args.validate()?;
-    claude_cli::claude_logs(ssh, &args.host_alias, &args.claude_session_id).await
 }
 
 /// Purge Claude Code state for a project on every host in `host_aliases`,
@@ -619,15 +600,6 @@ mod tests {
         assert!(res.warning.is_none());
     }
 
-    #[test]
-    fn peek_session_args_validates_missing_session_id() {
-        let args = PeekSessionArgs {
-            host_alias: "local".into(),
-            claude_session_id: "".into(),
-        };
-        assert!(args.validate().is_err());
-    }
-
     const UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
     #[test]
@@ -670,27 +642,6 @@ mod tests {
             host_alias: "-oProxyCommand=id".into(),
             name: "ok".into(),
             ..ctrl_name
-        };
-        assert_eq!(bad_host.validate().unwrap_err().code, "E_INVALID");
-    }
-
-    #[test]
-    fn peek_session_args_requires_uuid_id_and_valid_host() {
-        let ok = PeekSessionArgs {
-            host_alias: "local".into(),
-            claude_session_id: UUID.into(),
-        };
-        assert!(ok.validate().is_ok());
-        for bad in ["--foo", "-h", "abc-123", "'; rm -rf / #"] {
-            let args = PeekSessionArgs {
-                host_alias: "local".into(),
-                claude_session_id: bad.into(),
-            };
-            assert_eq!(args.validate().unwrap_err().code, "E_INVALID", "{bad:?}");
-        }
-        let bad_host = PeekSessionArgs {
-            host_alias: "-tt".into(),
-            claude_session_id: UUID.into(),
         };
         assert_eq!(bad_host.validate().unwrap_err().code, "E_INVALID");
     }

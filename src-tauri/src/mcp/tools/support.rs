@@ -690,61 +690,18 @@ impl FleetTools {
         since_turn: Option<i64>,
         max_chars: Option<usize>,
     ) -> Result<String, McpError> {
-        let claude_id = row.claude_session_id.clone().ok_or_else(|| {
-            mcp_err(
-                "E_INVALID_STATE",
-                format!(
-                    "session {} has no claude_session_id yet (not reconciled, or not a Claude session)",
-                    row.id
-                ),
-                None,
-            )
-        })?;
-        // Fallback cwd for sessions without a pane (bg) or whose pane
-        // lookup fails: the worktree, else the project root.
-        let (cwd, stored_path) = {
-            let s = self
-                .store
-                .lock()
-                .map_err(|_| to_mcp_err(IpcError::lock()))?;
-            let wt = match row.worktree_id {
-                Some(wid) => s.worktree_path(wid).ok().flatten(),
-                None => None,
-            };
-            let cwd = match wt {
-                Some(p) => Some(p),
-                None => match row.project_id {
-                    Some(pid) => s.project_base_path(pid).ok().flatten(),
-                    None => None,
-                },
-            };
-            (cwd, s.session_transcript_path(row.id).ok().flatten())
-        };
         let turns = match since_turn {
             Some(t) => usize::try_from(row.turn_seq - t).unwrap_or(0).max(1),
             None => 1,
         };
-        let is_bg = row.tmux_name.starts_with("bg:");
-        transcript::fetch_transcript(
-            transcript::TranscriptArgs {
-                host_alias: row.host_alias.clone(),
-                tmux_name: if is_bg {
-                    None
-                } else {
-                    Some(row.tmux_name.clone())
-                },
-                transcript_path: stored_path,
-                cwd,
-                claude_session_id: claude_id,
-                turns,
-                max_chars: max_chars
-                    .unwrap_or(transcript::DEFAULT_MAX_CHARS)
-                    .clamp(1, transcript::MAX_MAX_CHARS),
-            },
-            &self.ssh,
-        )
-        .await
-        .map_err(to_mcp_err)
+        let max_chars = max_chars
+            .unwrap_or(transcript::DEFAULT_MAX_CHARS)
+            .clamp(1, transcript::MAX_MAX_CHARS);
+        let args =
+            transcript::resolve_args(&self.store, row, turns, max_chars).map_err(to_mcp_err)?;
+        transcript::fetch_transcript(args, &self.ssh)
+            .await
+            .map_err(to_mcp_err)
     }
 
     /// A long-poll permit for `caller`, or `E_RATE_LIMITED` when it already

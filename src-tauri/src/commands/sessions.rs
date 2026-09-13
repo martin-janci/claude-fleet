@@ -4,9 +4,7 @@
 
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::IpcError;
-use crate::service::bg_sessions::{
-    self, DismissAgentArgs, NewBgSessionArgs, PeekSessionArgs, PurgeProjectArgs,
-};
+use crate::service::bg_sessions::{self, DismissAgentArgs, NewBgSessionArgs, PurgeProjectArgs};
 use crate::service::repair::{self, RepairReport};
 use crate::service::safe_kill::{
     self, DiscardKillSessionArgs, InspectSafeKillArgs, SafeKillInspection, SafeKillSessionArgs,
@@ -204,15 +202,6 @@ pub async fn new_bg_session(
     bg_sessions::new_bg_session_tracked(args, &store, &ssh).await
 }
 
-/// Fetch recent log output from a background Claude session without opening a PTY.
-#[tauri::command]
-pub async fn peek_session(
-    args: PeekSessionArgs,
-    ssh: State<'_, Arc<SshClient>>,
-) -> Result<String, IpcError> {
-    bg_sessions::peek_session(args, &ssh).await
-}
-
 /// Delete all Claude Code state for a project and remove it from the fleet database.
 #[tauri::command]
 pub async fn purge_project(
@@ -285,6 +274,44 @@ pub fn session_history(
 ) -> Result<Vec<crate::store::SessionEvent>, IpcError> {
     let s = store.lock().map_err(|_| IpcError::lock())?;
     s.list_session_events(args.session_id, history_limit(args.limit))
+}
+
+// ── Conversation (structured transcript) ────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct SessionConversationArgs {
+    pub session_id: i64,
+}
+
+/// The session's recent conversation — prompts, assistant text and one line
+/// per tool call — read from its Claude Code transcript. Rendered by the
+/// details pane's Conversation tab. Errors: `E_NOTFOUND`, `E_INVALID_STATE`
+/// (no `claude_session_id` yet), `E_NO_TRANSCRIPT`, transport codes.
+#[tauri::command]
+pub async fn session_conversation(
+    args: SessionConversationArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<crate::service::transcript::Conversation, IpcError> {
+    use crate::service::transcript;
+    let row = {
+        let s = store.lock().map_err(|_| IpcError::lock())?;
+        s.get_session_by_id(args.session_id)?.ok_or_else(|| {
+            IpcError::new(
+                "E_NOTFOUND",
+                format!("session {} not found", args.session_id),
+            )
+        })?
+    };
+    // `resolve_args` takes (and releases) the lock itself; nothing holds it
+    // across the fetch.
+    let targs = transcript::resolve_args(
+        &store,
+        &row,
+        transcript::CONV_TURNS,
+        transcript::CONV_MAX_CHARS,
+    )?;
+    transcript::fetch_conversation(targs, &ssh).await
 }
 
 #[cfg(test)]
