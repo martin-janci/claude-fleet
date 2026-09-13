@@ -79,9 +79,9 @@ included: on a `readonly` host you cannot set your session's label. Treat
 `kill_session`, `safe_kill_session`, `restart_session`, `rename_session`,
 `set_friendly_name`, `register_self` — accepts **either** `session_id` **or**
 the `host_alias` + `tmux_name` pair. `session_id` (from `list_sessions` /
-`whoami`) is the stable form and wins when both are given. `peek_session`
-likewise takes `session_id` or `claude_session_id` (+ `host_alias` until the
-row exists).
+`whoami`) is the stable form and wins when both are given. `peek_session` is
+deprecated (use `session_transcript`); it still takes `session_id` or
+`claude_session_id` (+ `host_alias` until the row exists).
 
 ## Spawning — `new_session` / `new_shell_session` / `new_bg_session`
 
@@ -95,10 +95,16 @@ row exists).
   like a Claude session.
 - `new_bg_session { host_alias, name, prompt }` — supervised headless run; rows are
   named `bg:<uuid>`. Returns the Claude id **and** the fleet row (`session`),
-  so the very next call can be `peek_session { session_id }`; the launch
+  so the very next call can be `session_transcript { session_id }`; the launch
   prompt becomes the row's default friendly name and `last_prompt`. Track
-  with `peek_session`; `capture_session` does not apply (no pane).
-  `kill_session` stops it via `claude stop`.
+  it with `session_transcript` (`peek_session` is deprecated);
+  `capture_session` does not apply (no pane). `kill_session` stops it via
+  `claude stop`; an inactive agent (`claude_status: stopped`) is removed from
+  the list instead.
+- Rows with `kind: external` are interactive Claude sessions running outside
+  tmux (a terminal or Claude Desktop): fleet can read them
+  (`session_transcript`) but not control them — `kill_session`,
+  `send_prompt` and the other pane tools refuse them.
 
 ## Steering — the act, wait, observe loop
 

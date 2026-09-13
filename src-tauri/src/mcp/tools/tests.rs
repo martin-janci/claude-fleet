@@ -432,6 +432,35 @@ fn kill_session_description_covers_external_and_inactive_agent_rows() {
     );
 }
 
+const CONTROL_API_GUIDE: &str = include_str!("../../../../docs/control-api.md");
+
+#[test]
+fn docs_track_background_runs_with_session_transcript_not_peek_session() {
+    for (name, text) in [
+        ("SKILL.md", CONTROL_SKILL),
+        ("docs/control-api.md", CONTROL_API_GUIDE),
+    ] {
+        assert!(
+            !text.contains("Track\n  with `peek_session`")
+                && !text.contains("Track with `peek_session`")
+                && !text.contains("next call can be `peek_session"),
+            "{name} still points at peek_session for tracking bg runs"
+        );
+        assert!(
+            text.contains("`peek_session` is deprecated"),
+            "{name} must note that peek_session is deprecated"
+        );
+        assert!(
+            text.contains("`kind: external`"),
+            "{name} must explain kind: external rows"
+        );
+    }
+    assert!(
+        CONTROL_SKILL.contains("so the very next call can be `session_transcript"),
+        "SKILL.md must point bg runs at session_transcript"
+    );
+}
+
 // ---- handler-level gates (review of #50) ----
 
 fn test_tools(store: Store) -> FleetTools {

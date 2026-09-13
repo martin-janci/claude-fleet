@@ -47,8 +47,8 @@ the host's detail in the **Hosts** view (⌘I):
   fleet-admin set. Cross-host `send_prompt`, `kill_session`, `new_session`
   etc. remain allowed by design.
 - `readonly` — only tools that observe the fleet (`list_*`, `capture_session`,
-  `session_history`, `inbox`, `peer_status`, `peek_session`, `repo_*`,
-  `get_clipboard`, `wait_for_session`, `session_transcript`,
+  `session_history`, `inbox`, `peer_status`, `session_transcript`,
+  `peek_session` (deprecated), `repo_*`, `get_clipboard`, `wait_for_session`,
   `wait_for_task`, `list_tasks`, …). Anything that sends, kills, deletes,
   provisions, dispatches, writes the clipboard, or writes a session row
   (including `set_friendly_name`, so an agent on a `readonly` host cannot
@@ -114,8 +114,12 @@ Index by area (names only; see the reference for details):
   `new_shell_session`, `new_bg_session`, `spawn_review`, `rename_session`,
   `set_friendly_name`, `register_self`, `whoami`.
 - **Steering & observing** — `send_prompt`, `broadcast_prompt`,
-  `capture_session`, `peek_session`, `peer_status`, `session_history`,
-  `send_message`, `inbox`.
+  `capture_session`, `session_transcript` (the conversation of any session,
+  including pane-less `bg:<uuid>` rows — track background runs with it),
+  `peek_session` (`peek_session` is deprecated: use `session_transcript`),
+  `peer_status`, `session_history`, `send_message`, `inbox`. Rows with
+  `kind: external` are interactive Claude sessions running outside tmux:
+  fleet can read them (`session_transcript`) but not control them.
 - **Lifecycle & recovery** — `restart_session`, `recreate_session`,
   `repair_session` (explicit repair, same as the Repair workspace button:
   may unregister this worktree's stale entry, adopt a moved checkout,
