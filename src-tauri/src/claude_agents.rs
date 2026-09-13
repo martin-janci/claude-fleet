@@ -18,8 +18,18 @@
 //! `None`) and callers such as `known_agent_status` never see CLI spellings.
 
 use crate::service::pane_intel::ClaudeStatus;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// Whether an agent row is an interactive Claude session (a terminal /
+/// Claude Desktop session running outside fleet's tmux panes) or a fleet-
+/// launched (or legacy-CLI) background job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub enum AgentKind {
+    Interactive,
+    #[default]
+    Background,
+}
 
 /// One row from `claude agents --json`, with `status` already normalized.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -38,6 +48,15 @@ pub struct ClaudeAgentRow {
     pub status: Option<String>,
     /// Working directory of the Claude session.
     pub cwd: Option<String>,
+    /// `Interactive` for `kind: "interactive"`; `Background` for
+    /// `"background"` and for a missing or unknown value (older CLIs only
+    /// ever listed background agents).
+    pub kind: AgentKind,
+    /// The short job id (`44366faf`) that `claude stop` / `claude attach`
+    /// take, validated by [`is_job_id`]; `None` when absent or malformed.
+    pub job_id: Option<String>,
+    /// `startedAt` (CLI milliseconds) converted to unix seconds.
+    pub started_at: Option<i64>,
 }
 
 /// A row exactly as the CLI prints it. The status-ish fields are loose
@@ -52,10 +71,16 @@ struct RawAgentRow {
     name: Option<String>,
     #[serde(default)]
     cwd: Option<String>,
-    /// `"interactive"` | `"background"` (new CLI). Logged only: `state`
-    /// already wins over `status`, whichever kind of row carries it.
+    /// `"interactive"` | `"background"` (new CLI).
     #[serde(default)]
     kind: Option<Value>,
+    /// The short job id (background rows); `claude stop` / `claude attach`
+    /// take this, not the full `sessionId`.
+    #[serde(default)]
+    id: Option<Value>,
+    /// Unix milliseconds the agent started.
+    #[serde(rename = "startedAt", default)]
+    started_at: Option<Value>,
     /// Lifecycle state (new CLI, background rows).
     #[serde(default)]
     state: Option<Value>,
@@ -89,13 +114,35 @@ impl From<RawAgentRow> for ClaudeAgentRow {
                 "claude agents: no known status in row; the pane fallback decides"
             );
         }
+        let kind = match value_str(raw.kind.as_ref()).as_deref() {
+            Some("interactive") => AgentKind::Interactive,
+            _ => AgentKind::Background,
+        };
+        let job_id = value_str(raw.id.as_ref()).filter(|s| is_job_id(s));
+        let started_at = raw
+            .started_at
+            .as_ref()
+            .and_then(Value::as_i64)
+            .map(|ms| ms / 1000);
         ClaudeAgentRow {
             session_id: raw.session_id,
             name: raw.name,
             status: normalized.map(|s| s.as_str().to_string()),
             cwd: raw.cwd,
+            kind,
+            job_id,
+            started_at,
         }
     }
+}
+
+/// `claude stop` / `claude attach` take the short job id (`44366faf`).
+/// Only lowercase hex, 8–36 chars (hyphens allowed for a full id) is accepted,
+/// so the value is safe to pass as an argv word even before quoting.
+pub fn is_job_id(s: &str) -> bool {
+    (8..=36).contains(&s.len())
+        && s.chars()
+            .all(|c| c == '-' || (c.is_ascii_hexdigit() && !c.is_ascii_uppercase()))
 }
 
 /// A trimmed, lowercased, non-empty string out of a loose JSON value.
@@ -194,6 +241,20 @@ pub fn find_by_name<'a>(rows: &'a [ClaudeAgentRow], tmux_name: &str) -> Option<&
     rows.iter().find(|r| r.name.as_deref() == Some(tmux_name))
 }
 
+/// Find the first `ClaudeAgentRow` whose `session_id` matches exactly (the
+/// full Claude session id, not the short `job_id`).
+// Not called outside tests yet: a later task in this plan (kill / attach by
+// job id, or the Conversation tab) wires this in. See
+// .superpowers/sdd/2026-09-13-agent-rows-and-conversation/.
+#[allow(dead_code)]
+pub fn find_by_session_id<'a>(
+    rows: &'a [ClaudeAgentRow],
+    session_id: &str,
+) -> Option<&'a ClaudeAgentRow> {
+    rows.iter()
+        .find(|r| r.session_id.as_deref() == Some(session_id))
+}
+
 /// Correlate a fleet session to its running Claude agent so we can capture the
 /// real `sessionId`. Prefer an exact `name` match (set when the session was
 /// launched with `--name <tmux_name>`). Otherwise — for sessions launched
@@ -253,6 +314,9 @@ mod tests {
             name: name.map(Into::into),
             status: None,
             cwd: cwd.map(Into::into),
+            kind: AgentKind::Background,
+            job_id: None,
+            started_at: None,
         }
     }
 
@@ -388,12 +452,18 @@ mod tests {
                 name: Some("alpha".into()),
                 status: Some("working".into()),
                 cwd: None,
+                kind: AgentKind::Background,
+                job_id: None,
+                started_at: None,
             },
             ClaudeAgentRow {
                 session_id: Some("s2".into()),
                 name: Some("beta".into()),
                 status: Some("blocked".into()),
                 cwd: None,
+                kind: AgentKind::Background,
+                job_id: None,
+                started_at: None,
             },
         ];
         let hit = find_by_name(&rows, "beta").unwrap();
@@ -634,6 +704,39 @@ mod tests {
 
     /// A row that does not parse is skipped on its own: one mistyped `name`
     /// or `cwd` must not drop every other agent on the host.
+    #[test]
+    fn kind_job_id_and_started_at_are_parsed() {
+        let json = r#"[
+          {"id":"44366faf","kind":"background","sessionId":"44366faf-ae97-426a-91cd-beaf3c74f1d7","startedAt":1779471359317,"state":"blocked","name":"Test","cwd":"/a"},
+          {"pid":1,"kind":"interactive","sessionId":"3f01a60c-6d6c-4186-888e-5696f03d2197","startedAt":1789165229915,"name":"x-f2","cwd":"/b"},
+          {"sessionId":"00000000-0000-0000-0000-000000000001","status":"working"},
+          {"id":"NOT A JOB; rm","kind":"weird","sessionId":"00000000-0000-0000-0000-000000000002"}
+        ]"#;
+        let rows = parse_claude_agents_json(json);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].kind, AgentKind::Background);
+        assert_eq!(rows[0].job_id.as_deref(), Some("44366faf"));
+        assert_eq!(rows[0].started_at, Some(1_779_471_359));
+        assert_eq!(rows[1].kind, AgentKind::Interactive);
+        assert_eq!(rows[1].job_id, None);
+        assert_eq!(
+            rows[2].kind,
+            AgentKind::Background,
+            "missing kind = legacy bg"
+        );
+        assert_eq!(rows[3].kind, AgentKind::Background, "unknown kind = bg");
+        assert_eq!(rows[3].job_id, None, "invalid job id shape is dropped");
+    }
+
+    #[test]
+    fn find_by_session_id_matches_exactly() {
+        let rows = parse_claude_agents_json(
+            r#"[{"id":"aaaaaaaa","sessionId":"aaaaaaaa-0000-0000-0000-000000000000"}]"#,
+        );
+        assert!(find_by_session_id(&rows, "aaaaaaaa-0000-0000-0000-000000000000").is_some());
+        assert!(find_by_session_id(&rows, "aaaaaaaa").is_none());
+    }
+
     #[test]
     fn a_row_that_does_not_parse_is_skipped_not_the_whole_host() {
         let json = r#"[

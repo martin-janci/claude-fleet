@@ -230,6 +230,9 @@ fn agent(
         name: name.map(Into::into),
         status: Some("working".into()),
         cwd: cwd.map(Into::into),
+        kind: crate::claude_agents::AgentKind::Background,
+        job_id: None,
+        started_at: None,
     }
 }
 
@@ -267,6 +270,9 @@ fn unmatched_bg_agents_skips_agents_without_session_id() {
         name: Some("ghosty".into()),
         status: None,
         cwd: None,
+        kind: crate::claude_agents::AgentKind::Background,
+        job_id: None,
+        started_at: None,
     }];
     assert!(unmatched_bg_agents(&[], &agents, true).is_empty());
 }
@@ -1843,6 +1849,9 @@ fn reconcile_writes_claude_session_id_when_name_matches() {
         name: Some("my-session".into()),
         status: Some("working".into()),
         cwd: None,
+        kind: crate::claude_agents::AgentKind::Background,
+        job_id: None,
+        started_at: None,
     }];
     let hit = crate::claude_agents::find_by_name(&agent_rows, "my-session");
     assert_eq!(hit.unwrap().session_id.as_deref(), Some("abc123"));
