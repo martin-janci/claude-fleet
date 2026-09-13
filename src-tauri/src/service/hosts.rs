@@ -309,9 +309,9 @@ async fn probe_lenient_with_token(
 }
 
 /// The real local home directory (`$HOME`), used by production callers of
-/// [`probe_local`]/[`ensure_local_account_linked`]. Falls back to the system
-/// temp dir (almost certainly without a `.claude.json`) on the exotic case
-/// where `HOME` is unset, so the account simply comes back `None` instead of
+/// [`probe_local`]/[`sync_local_account`]. Falls back to the system temp dir
+/// (almost certainly without a `.claude.json`) on the exotic case where
+/// `HOME` is unset, so the account simply comes back `None` instead of
 /// accidentally reading a relative `.claude.json` from the current dir.
 pub(crate) fn local_home_dir() -> std::path::PathBuf {
     std::env::var_os("HOME")
@@ -357,15 +357,9 @@ pub(crate) fn probe_local_in(
             }
         });
     // Read local ~/.claude.json directly — no subprocess needed.
-    let account = {
-        let path = home.join(".claude.json");
-        std::fs::read_to_string(path).ok().and_then(|contents| {
-            let v: serde_json::Value = serde_json::from_str(&contents).ok()?;
-            let oa = v.get("oauthAccount")?;
-            serde_json::from_value::<OauthAccount>(oa.clone())
-                .ok()
-                .filter(|a| a.uuid.is_some())
-        })
+    let account = match probe_local_account_in(home) {
+        LocalAccountProbe::LoggedIn(a) => Some(a),
+        LocalAccountProbe::LoggedOut | LocalAccountProbe::Unavailable => None,
     };
     (
         true,
@@ -375,8 +369,59 @@ pub(crate) fn probe_local_in(
     )
 }
 
-/// Link the currently logged-in local Claude account to the `local` host row,
-/// if it isn't already known. No-op (and does zero I/O) once linked.
+/// Outcome of reading `<home>/.claude.json`'s `oauthAccount`, distinguishing
+/// a real state (logged in / explicitly logged out) from a failed read. See
+/// `sync_local_account`, the only caller that cares about the distinction —
+/// `probe_local_in` collapses `LoggedOut` and `Unavailable` to `None` since
+/// its caller (a manual "Re-probe") already treats "no account" uniformly.
+enum LocalAccountProbe {
+    /// The file parsed and has an `oauthAccount` with a uuid.
+    LoggedIn(OauthAccount),
+    /// The file parsed but has no `oauthAccount` (or one without a uuid) —
+    /// an explicit logout.
+    LoggedOut,
+    /// The file is missing, unreadable, or not valid JSON — a failed read,
+    /// not evidence of anything about the account.
+    Unavailable,
+}
+
+fn probe_local_account_in(home: &std::path::Path) -> LocalAccountProbe {
+    let Ok(contents) = std::fs::read_to_string(home.join(".claude.json")) else {
+        return LocalAccountProbe::Unavailable;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return LocalAccountProbe::Unavailable;
+    };
+    match v.get("oauthAccount") {
+        None => LocalAccountProbe::LoggedOut,
+        Some(oa) => match serde_json::from_value::<OauthAccount>(oa.clone()) {
+            Ok(a) if a.uuid.is_some() => LocalAccountProbe::LoggedIn(a),
+            // Present but malformed/uuid-less: same as absent — nothing to
+            // link to.
+            _ => LocalAccountProbe::LoggedOut,
+        },
+    }
+}
+
+/// Keep `local`'s linked Claude account in sync with `<home>/.claude.json`,
+/// distinguishing a real account change from a failed read so a transient
+/// glitch never clears or changes an established link:
+///
+///   - readable, parses, `oauthAccount.accountUuid` DIFFERS from the stored
+///     `account_uuid` (including "nothing stored yet") ⇒ the user switched
+///     (or first linked) accounts: upsert the account row and relink.
+///   - readable, parses, SAME uuid ⇒ no-op on the link, but the account row
+///     is still upserted so `email`/`display_name`/`organization_name`/
+///     `seat_tier` stay current.
+///   - unreadable / unparseable / no `oauthAccount` / no uuid ⇒ leave the
+///     existing link untouched. This deliberately treats an EXPLICIT logout
+///     (file parses fine, `oauthAccount` just isn't there) the same as a
+///     failed read: we can't tell "the user logged out" apart from "a
+///     partial write of ~/.claude.json (claude was mid-rewrite when we
+///     read it)" from this file alone, and flapping the link off on every
+///     partial-write race would be worse than briefly showing usage under
+///     an account the user has since left. See PR discussion: showing
+///     stale usage beats flapping.
 ///
 /// This is `local`'s ONLY automatic account-discovery path. A remote host
 /// gets its account captured once, unavoidably, when the user runs `add_host`
@@ -384,20 +429,17 @@ pub(crate) fn probe_local_in(
 /// auto-created by `reconcile_sessions_with`'s `Store::upsert_host("local")`
 /// (see `service::sessions::reconcile`), which only ever touches `reachable`.
 /// Before this function existed, NOTHING ever probed `local`'s account
-/// automatically — the ONLY way to populate it was the user manually
-/// clicking the small "Re-probe" icon on the `local` row in Settings ⇒ Hosts
-/// (`probe_host` below, wired to `HostsTable.svelte`'s `onProbe`). A user who
-/// never happens to click that (there is no first-run nudge, and remote hosts
-/// never need it since `add_host` already did it for them) sees `local`
-/// listed as reachable forever with an empty Account column, even while
-/// actively logged in to Claude — this was the reported bug. Called once per
-/// reconcile pass (see `ReconcileDeps::local_home`), so a fresh login is
-/// picked up within one tick without any user action.
-pub(crate) async fn ensure_local_account_linked(
+/// automatically — the ONLY way to populate (or update) it was the user
+/// manually clicking the small "Re-probe" icon on the `local` row in
+/// Settings ⇒ Hosts (`probe_host` below, wired to `HostsTable.svelte`'s
+/// `onProbe`). Called once per reconcile pass (see `ReconcileDeps::local_home`),
+/// so a login, logout-then-login-elsewhere, or account switch is picked up
+/// within one tick without any user action.
+pub(crate) async fn sync_local_account(
     store: &Mutex<Store>,
     home: std::path::PathBuf,
 ) -> Result<(), IpcError> {
-    let already_known = {
+    let stored_uuid = {
         let s = store
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
@@ -405,26 +447,30 @@ pub(crate) async fn ensure_local_account_linked(
             .into_iter()
             .find(|h| h.alias == "local")
             .and_then(|h| h.account_uuid)
-            .is_some()
     };
-    if already_known {
-        return Ok(());
-    }
-    // Off the async worker thread: this does a blocking fs read (and, via
-    // `probe_local_in`, two blocking subprocess spawns we don't need the
-    // result of here, but `probe_local_in` bundles them — see its doc).
-    let (_, _, _, account) = tokio::task::spawn_blocking(move || probe_local_in(&home))
+    // Off the async worker thread: probe_local_account_in does a blocking fs
+    // read.
+    let probe = tokio::task::spawn_blocking(move || probe_local_account_in(&home))
         .await
-        .unwrap_or_default();
-    if let Some(acc) = account
-        .as_ref()
-        .and_then(|a| account_row_from(a, now_unix()))
-    {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-        s.upsert_account(&acc)?;
-        s.set_host_account("local", Some(&acc.uuid))?;
+        .unwrap_or(LocalAccountProbe::Unavailable);
+    let account = match probe {
+        LocalAccountProbe::LoggedIn(a) => a,
+        // Failed read or explicit logout: never touch an existing link (see
+        // the doc comment above).
+        LocalAccountProbe::LoggedOut | LocalAccountProbe::Unavailable => return Ok(()),
+    };
+    let Some(row) = account_row_from(&account, now_unix()) else {
+        // Defensive: `LoggedIn` already guarantees a uuid.
+        return Ok(());
+    };
+    let s = store
+        .lock()
+        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    // Refresh the account row's fields (email/org/seat_tier) whether or not
+    // the link itself is changing.
+    s.upsert_account(&row)?;
+    if stored_uuid.as_deref() != Some(row.uuid.as_str()) {
+        s.set_host_account("local", Some(&row.uuid))?;
     }
     Ok(())
 }
@@ -562,7 +608,7 @@ mod tests {
         assert!(parse_oauth_account("not even an object").is_none());
     }
 
-    // ── probe_local_in / ensure_local_account_linked ───────────────────────
+    // ── probe_local_in / sync_local_account ─────────────────────────────────
 
     fn write_claude_json(dir: &std::path::Path, oauth_account_json: &str) {
         std::fs::write(
@@ -570,6 +616,27 @@ mod tests {
             format!(r#"{{"oauthAccount":{oauth_account_json}}}"#),
         )
         .unwrap();
+    }
+
+    /// `.claude.json` with no `oauthAccount` key at all — an explicit logout.
+    fn write_logged_out_claude_json(dir: &std::path::Path) {
+        std::fs::write(dir.join(".claude.json"), r#"{}"#).unwrap();
+    }
+
+    fn seed_existing_account(store: &Mutex<Store>, uuid: &str, email: &str) {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_account(&crate::store::AccountRow {
+            uuid: uuid.into(),
+            email: Some(email.into()),
+            display_name: None,
+            organization_name: None,
+            organization_uuid: None,
+            seat_tier: None,
+            last_seen_at: None,
+        })
+        .unwrap();
+        s.set_host_account("local", Some(uuid)).unwrap();
     }
 
     #[test]
@@ -603,12 +670,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_local_account_linked_links_from_home_when_unknown() {
+    async fn sync_local_account_links_from_home_when_unknown() {
         // Mirrors exactly what `reconcile_sessions_with` does in production:
         // `local` is auto-created via `Store::upsert_host`, which never
-        // probes anything — before this function existed, nothing else ever
-        // populated its account either (see the doc comment on
-        // `ensure_local_account_linked`).
+        // probes anything — before `sync_local_account` existed, nothing
+        // else ever populated its account either (see its doc comment).
         let store = Mutex::new(Store::open_in_memory().unwrap());
         store.lock().unwrap().upsert_host("local").unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -617,7 +683,7 @@ mod tests {
             r#"{"accountUuid":"acc-1","emailAddress":"a@b.c","seatTier":null}"#,
         );
 
-        ensure_local_account_linked(&store, dir.path().to_path_buf())
+        sync_local_account(&store, dir.path().to_path_buf())
             .await
             .unwrap();
 
@@ -630,12 +696,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_local_account_linked_is_a_noop_without_a_claude_json() {
+    async fn sync_local_account_is_a_noop_without_a_claude_json() {
         let store = Mutex::new(Store::open_in_memory().unwrap());
         store.lock().unwrap().upsert_host("local").unwrap();
         let dir = tempfile::tempdir().unwrap(); // no .claude.json inside
 
-        ensure_local_account_linked(&store, dir.path().to_path_buf())
+        sync_local_account(&store, dir.path().to_path_buf())
             .await
             .unwrap();
 
@@ -644,34 +710,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_local_account_linked_does_not_clobber_an_already_known_account() {
-        // The account survives future reconcile passes: once linked (whether
-        // by this function or by a manual Re-probe), a later pass — even one
-        // that sees a DIFFERENT `.claude.json` (a stale probe timing, a
-        // logout/login race) — must not silently overwrite it. This is the
-        // "keep, don't clear" invariant `set_host_account` callers rely on
-        // elsewhere (see `reconcile_write_one_host`'s session-level
-        // preservation comment).
+    async fn sync_local_account_relinks_on_a_different_uuid() {
+        // The user logged out and into a DIFFERENT account: this must
+        // relink (and upsert the new account row), unlike the old
+        // fill-blank-only behaviour — otherwise per-account usage on `local`
+        // would keep attributing to the account the user left.
         let store = Mutex::new(Store::open_in_memory().unwrap());
-        {
-            let s = store.lock().unwrap();
-            s.upsert_host("local").unwrap();
-            s.upsert_account(&crate::store::AccountRow {
-                uuid: "existing-acc".into(),
-                email: Some("existing@x.com".into()),
-                display_name: None,
-                organization_name: None,
-                organization_uuid: None,
-                seat_tier: None,
-                last_seen_at: None,
-            })
-            .unwrap();
-            s.set_host_account("local", Some("existing-acc")).unwrap();
-        }
+        seed_existing_account(&store, "existing-acc", "existing@x.com");
         let dir = tempfile::tempdir().unwrap();
-        write_claude_json(dir.path(), r#"{"accountUuid":"different-acc"}"#);
+        write_claude_json(
+            dir.path(),
+            r#"{"accountUuid":"different-acc","emailAddress":"new@x.com"}"#,
+        );
 
-        ensure_local_account_linked(&store, dir.path().to_path_buf())
+        sync_local_account(&store, dir.path().to_path_buf())
+            .await
+            .unwrap();
+
+        let row = host_row(&store, "local").unwrap();
+        assert_eq!(
+            row.account_uuid.as_deref(),
+            Some("different-acc"),
+            "a different uuid in ~/.claude.json must relink local"
+        );
+        let accounts = store.lock().unwrap().list_accounts().unwrap();
+        assert!(accounts.iter().any(|a| a.uuid == "different-acc"));
+    }
+
+    #[tokio::test]
+    async fn sync_local_account_refreshes_fields_when_the_uuid_is_unchanged() {
+        // Same account: the link is a no-op, but the account row's fields
+        // (email here) still get refreshed.
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        seed_existing_account(&store, "acc-1", "old@x.com");
+        let dir = tempfile::tempdir().unwrap();
+        write_claude_json(
+            dir.path(),
+            r#"{"accountUuid":"acc-1","emailAddress":"new@x.com"}"#,
+        );
+
+        sync_local_account(&store, dir.path().to_path_buf())
+            .await
+            .unwrap();
+
+        let row = host_row(&store, "local").unwrap();
+        assert_eq!(row.account_uuid.as_deref(), Some("acc-1"));
+        let accounts = store.lock().unwrap().list_accounts().unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(
+            accounts[0].email.as_deref(),
+            Some("new@x.com"),
+            "the account row's fields must refresh even when the link doesn't change"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_local_account_leaves_the_link_intact_when_the_file_is_missing() {
+        // A failed read (missing file here; unreadable/unparseable are the
+        // same code path via `LocalAccountProbe::Unavailable`) must NEVER
+        // clear or change an existing link — a transient glitch reading
+        // `~/.claude.json` is not evidence the user logged out.
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        seed_existing_account(&store, "existing-acc", "existing@x.com");
+        let dir = tempfile::tempdir().unwrap(); // no .claude.json inside
+
+        sync_local_account(&store, dir.path().to_path_buf())
             .await
             .unwrap();
 
@@ -679,7 +782,30 @@ mod tests {
         assert_eq!(
             row.account_uuid.as_deref(),
             Some("existing-acc"),
-            "an already-linked account must survive a later pass"
+            "an already-linked account must survive a failed read"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_local_account_leaves_the_link_intact_on_an_explicit_logout() {
+        // The file parses fine but has no `oauthAccount` at all: this is the
+        // deliberately ambiguous case (real logout vs. a partial write of
+        // ~/.claude.json mid-rewrite) — we keep the existing link rather
+        // than flap it, per `sync_local_account`'s doc comment.
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        seed_existing_account(&store, "existing-acc", "existing@x.com");
+        let dir = tempfile::tempdir().unwrap();
+        write_logged_out_claude_json(dir.path());
+
+        sync_local_account(&store, dir.path().to_path_buf())
+            .await
+            .unwrap();
+
+        let row = host_row(&store, "local").unwrap();
+        assert_eq!(
+            row.account_uuid.as_deref(),
+            Some("existing-acc"),
+            "an explicit logout must not clear the existing link"
         );
     }
 

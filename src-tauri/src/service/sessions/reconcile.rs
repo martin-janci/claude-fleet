@@ -163,14 +163,15 @@ pub(crate) struct ReconcileDeps {
     /// Per-session probe throttle; production shares one process-wide cache,
     /// tests get a fresh one per deps.
     pub(super) pr_cache: Arc<crate::service::outcome::PrProbeCache>,
-    /// Home directory `reconcile_sessions_with` probes to link `local`'s
-    /// Claude account when it isn't known yet (see
-    /// `service::hosts::ensure_local_account_linked`). `None` in ordinary
-    /// test deps (`fake`/`fake_with_shell`) so the huge majority of reconcile
-    /// tests never shell out to a REAL `tmux`/`claude` or read a REAL
-    /// `~/.claude.json` — only `fake_with_local_home` sets it, for tests that
-    /// specifically exercise this behaviour. `real()` always sets it to the
-    /// process's actual `$HOME`.
+    /// Home directory `reconcile_sessions_with` reads every pass to keep
+    /// `local`'s linked Claude account in sync (see
+    /// `service::hosts::sync_local_account` — it links a new/changed
+    /// account, refreshes an unchanged one's fields, and otherwise leaves
+    /// the existing link untouched). `None` in ordinary test deps
+    /// (`fake`/`fake_with_shell`) so the huge majority of reconcile tests
+    /// never read a REAL `~/.claude.json` — only `fake_with_local_home` sets
+    /// it, for tests that specifically exercise this behaviour. `real()`
+    /// always sets it to the process's actual `$HOME`.
     pub(super) local_home: Option<std::path::PathBuf>,
 }
 
@@ -769,21 +770,22 @@ pub(crate) async fn reconcile_sessions_with(
     deps: &Arc<ReconcileDeps>,
 ) -> Result<(), IpcError> {
     // 0. Ensure the `local` row exists (idempotent; step 1 does this again
-    //    but `ensure_local_account_linked` needs the row to already be
-    //    there — on the very first pass of a fresh install there is no
-    //    `local` row yet, and `set_host_account` is a no-op UPDATE against a
-    //    row that doesn't exist).
+    //    but `sync_local_account` needs the row to already be there — on the
+    //    very first pass of a fresh install there is no `local` row yet, and
+    //    `set_host_account` is a no-op UPDATE against a row that doesn't
+    //    exist).
     {
         let s = store.lock().map_err(|_| IpcError::lock())?;
         s.upsert_host("local")?;
     }
-    // Link the local Claude account if it isn't known yet — cheap no-op once
-    // linked (see `ReconcileDeps::local_home` and
-    // `service::hosts::ensure_local_account_linked` for why this is needed:
-    // `local`'s account has no other automatic discovery path). Best-effort:
-    // a probe hiccup here must not abort session reconcile.
+    // Sync the local Claude account every pass — not just once — so an
+    // account switch (logout + login as someone else) is picked up, not just
+    // a first-time link (see `ReconcileDeps::local_home` and
+    // `service::hosts::sync_local_account`: `local`'s account has no other
+    // automatic discovery path). Best-effort: a probe hiccup here must not
+    // abort session reconcile.
     if let Some(home) = deps.local_home.clone() {
-        if let Err(e) = crate::service::hosts::ensure_local_account_linked(store, home).await {
+        if let Err(e) = crate::service::hosts::sync_local_account(store, home).await {
             tracing::warn!(error = %e.message, "[reconcile] local account probe failed");
         }
     }
