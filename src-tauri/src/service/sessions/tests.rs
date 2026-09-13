@@ -237,6 +237,20 @@ fn agent(
 }
 
 #[test]
+fn inactive_rule() {
+    let now = 1_000_000;
+    let old = now - AGENT_INACTIVE_SECS - 1;
+    assert!(agent_is_inactive(Some("blocked"), Some(old), now));
+    assert!(agent_is_inactive(None, Some(old), now));
+    assert!(!agent_is_inactive(Some("working"), Some(old), now));
+    assert!(!agent_is_inactive(Some("blocked"), Some(now - 10), now));
+    assert!(
+        !agent_is_inactive(Some("blocked"), None, now),
+        "unknown time = active"
+    );
+}
+
+#[test]
 fn unmatched_bg_agents_selects_agents_with_no_tmux_session() {
     // No tmux sessions at all → every agent (with an id) is unmatched.
     let agents = vec![
@@ -278,13 +292,13 @@ fn unmatched_bg_agents_skips_agents_without_session_id() {
 }
 
 #[test]
-fn reconcile_bg_agents_upserts_bg_session_row() {
+fn reconcile_agent_rows_upserts_bg_session_row() {
     // Feed agent rows + an EMPTY tmux list → expect a `bg` SessionRow.
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("local").unwrap();
     let agents = vec![agent("bg-uuid-1", Some("my-bg-job"), Some("/tmp/proj"))];
 
-    reconcile_bg_agents(&s, "local", &[], &[], &agents).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, &no_mtimes(), now_unix()).unwrap();
 
     let rows = s.list_sessions_for_host("local").unwrap();
     let bg = rows
@@ -298,14 +312,14 @@ fn reconcile_bg_agents_upserts_bg_session_row() {
 }
 
 #[test]
-fn reconcile_bg_agents_prunes_vanished_agents_two_phase() {
+fn reconcile_agent_rows_prunes_vanished_agents_two_phase() {
     // A bg agent that disappears from `claude agents --json` is ghosted on
     // the next reconcile pass and hard-deleted (events included) on the one
     // after — so dead bg rows cannot accumulate.
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("local").unwrap();
     let agents = vec![agent("bg-uuid-1", Some("my-bg-job"), Some("/tmp/proj"))];
-    reconcile_bg_agents(&s, "local", &[], &[], &agents).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, &no_mtimes(), now_unix()).unwrap();
     let id = s
         .get_session("bg:bg-uuid-1", "local")
         .unwrap()
@@ -313,7 +327,7 @@ fn reconcile_bg_agents_prunes_vanished_agents_two_phase() {
         .id;
 
     // Pass 2: agent gone (empty listing) → ghosted, still present.
-    reconcile_bg_agents(&s, "local", &[], &[], &[]).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &[], &no_mtimes(), now_unix()).unwrap();
     let row = s
         .get_session("bg:bg-uuid-1", "local")
         .unwrap()
@@ -322,7 +336,7 @@ fn reconcile_bg_agents_prunes_vanished_agents_two_phase() {
     assert!(row.lost_at.is_some());
 
     // Pass 3: still gone → hard-deleted.
-    reconcile_bg_agents(&s, "local", &[], &[], &[]).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &[], &no_mtimes(), now_unix()).unwrap();
     assert!(
         s.get_session("bg:bg-uuid-1", "local").unwrap().is_none(),
         "dead bg row must be reaped on the second missing pass"
@@ -331,15 +345,15 @@ fn reconcile_bg_agents_prunes_vanished_agents_two_phase() {
 }
 
 #[test]
-fn reconcile_bg_agents_resurrects_ghost_when_agent_returns() {
+fn reconcile_agent_rows_resurrects_ghost_when_agent_returns() {
     // A single missing pass (e.g. a transiently failed `claude agents`
     // probe, which comes back as an empty list) must not lose the row.
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("local").unwrap();
     let agents = vec![agent("bg-uuid-1", Some("my-bg-job"), Some("/tmp/proj"))];
-    reconcile_bg_agents(&s, "local", &[], &[], &agents).unwrap();
-    reconcile_bg_agents(&s, "local", &[], &[], &[]).unwrap(); // ghosts it
-    reconcile_bg_agents(&s, "local", &[], &[], &agents).unwrap(); // returns
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, &no_mtimes(), now_unix()).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &[], &no_mtimes(), now_unix()).unwrap(); // ghosts it
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, &no_mtimes(), now_unix()).unwrap(); // returns
 
     let row = s
         .get_session("bg:bg-uuid-1", "local")
@@ -349,12 +363,12 @@ fn reconcile_bg_agents_resurrects_ghost_when_agent_returns() {
     assert_eq!(row.lost_at, None);
 
     // And it is NOT deleted on the next pass with the agent still live.
-    reconcile_bg_agents(&s, "local", &[], &[], &agents).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, &no_mtimes(), now_unix()).unwrap();
     assert!(s.get_session("bg:bg-uuid-1", "local").unwrap().is_some());
 }
 
 #[test]
-fn reconcile_bg_agents_cleanup_spares_other_hosts_and_tmux_rows() {
+fn reconcile_agent_rows_cleanup_spares_other_hosts_and_tmux_rows() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("local").unwrap();
     s.upsert_host("remote").unwrap();
@@ -374,8 +388,8 @@ fn reconcile_bg_agents_cleanup_spares_other_hosts_and_tmux_rows() {
 
     // Two empty-agent passes on `local` — enough to ghost + delete any
     // bg row this cleanup wrongly considered.
-    reconcile_bg_agents(&s, "local", &[], &[], &[]).unwrap();
-    reconcile_bg_agents(&s, "local", &[], &[], &[]).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &[], &no_mtimes(), now_unix()).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &[], &no_mtimes(), now_unix()).unwrap();
 
     let work = s.get_session("work-a", "local").unwrap().expect("tmux row");
     assert_eq!(work.status, "running", "tmux rows are not the bg pruner's");
@@ -384,6 +398,377 @@ fn reconcile_bg_agents_cleanup_spares_other_hosts_and_tmux_rows() {
         .unwrap()
         .expect("other host's bg row");
     assert_eq!(other.status, "running");
+}
+
+fn no_mtimes() -> std::collections::HashMap<String, i64> {
+    std::collections::HashMap::new()
+}
+
+const INTERACTIVE_ID: &str = "5f0c7a2e-1b9d-4c33-9a57-0d6f2b1e8c41";
+const BG_ID: &str = "0b8e2f41-9d3c-4a7e-b1f0-6c5d4e3a2b19";
+
+/// One `claude agents --json` row, parsed the way reconcile receives it.
+fn agent_json(
+    kind: &str,
+    session_id: &str,
+    status_fields: &str,
+    started_at_ms: Option<i64>,
+) -> crate::claude_agents::ClaudeAgentRow {
+    let started = started_at_ms
+        .map(|ms| format!(r#","startedAt":{ms}"#))
+        .unwrap_or_default();
+    let json = format!(
+        r#"[{{"id":"d89375a1","cwd":"/tmp/nowhere","kind":"{kind}","sessionId":"{session_id}","name":"n-{kind}"{started},{status_fields}}}]"#
+    );
+    let mut rows = crate::claude_agents::parse_claude_agents_json(&json);
+    assert_eq!(rows.len(), 1, "fixture must parse: {json}");
+    rows.remove(0)
+}
+
+fn local_store() -> Store {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    s
+}
+
+#[test]
+fn interactive_agents_land_as_external_and_background_as_bg() {
+    let s = local_store();
+    let now = 2_000_000_000;
+    let agents = vec![
+        agent_json("interactive", INTERACTIVE_ID, r#""status":"busy""#, None),
+        agent_json("background", BG_ID, r#""state":"working""#, None),
+    ];
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, &no_mtimes(), now).unwrap();
+
+    let ext = s
+        .get_session(&format!("bg:{INTERACTIVE_ID}"), "local")
+        .unwrap()
+        .expect("interactive agent row");
+    assert_eq!(ext.kind, "external");
+    assert_eq!(ext.claude_session_id.as_deref(), Some(INTERACTIVE_ID));
+    assert_eq!(ext.status, "running");
+    let bg = s
+        .get_session(&format!("bg:{BG_ID}"), "local")
+        .unwrap()
+        .expect("background agent row");
+    assert_eq!(bg.kind, "bg");
+    assert_eq!(bg.claude_status.as_deref(), Some("working"));
+}
+
+#[test]
+fn misfiled_bg_row_flips_to_external() {
+    // Rows stored by the old reconcile as `bg` flip on the first new pass.
+    let s = local_store();
+    let tmux_name = format!("bg:{INTERACTIVE_ID}");
+    s.upsert_bg_session(
+        "local",
+        &tmux_name,
+        None,
+        INTERACTIVE_ID,
+        Some("idle"),
+        1,
+        "bg",
+    )
+    .unwrap();
+    let agents = vec![agent_json(
+        "interactive",
+        INTERACTIVE_ID,
+        r#""status":"idle""#,
+        None,
+    )];
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, &no_mtimes(), 100).unwrap();
+    assert_eq!(
+        s.get_session(&tmux_name, "local").unwrap().unwrap().kind,
+        "external"
+    );
+}
+
+#[test]
+fn idle_background_agent_is_stored_stopped() {
+    let s = local_store();
+    let now = 2_000_000_000;
+    let agents = vec![agent_json(
+        "background",
+        BG_ID,
+        r#""state":"blocked""#,
+        None,
+    )];
+    let mtimes = std::collections::HashMap::from([(BG_ID.to_string(), now - 2 * 86_400)]);
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, &mtimes, now).unwrap();
+    let row = s
+        .get_session(&format!("bg:{BG_ID}"), "local")
+        .unwrap()
+        .expect("row");
+    assert_eq!(row.kind, "bg");
+    assert_eq!(row.claude_status.as_deref(), Some("stopped"));
+
+    // A recent transcript keeps the CLI's status.
+    let s = local_store();
+    let fresh = std::collections::HashMap::from([(BG_ID.to_string(), now - 60)]);
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, &fresh, now).unwrap();
+    let row = s
+        .get_session(&format!("bg:{BG_ID}"), "local")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.claude_status.as_deref(), Some("blocked"));
+}
+
+#[test]
+fn idle_interactive_agent_is_never_stopped() {
+    // The inactive rule is for bg agents only; external rows keep the CLI's
+    // status (they leave the list when their process ends).
+    let s = local_store();
+    let now = 2_000_000_000;
+    let agents = vec![agent_json(
+        "interactive",
+        INTERACTIVE_ID,
+        r#""status":"idle""#,
+        Some((now - 5 * 86_400) * 1000),
+    )];
+    let mtimes = std::collections::HashMap::from([(INTERACTIVE_ID.to_string(), now - 5 * 86_400)]);
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, &mtimes, now).unwrap();
+    let row = s
+        .get_session(&format!("bg:{INTERACTIVE_ID}"), "local")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.kind, "external");
+    assert_eq!(row.claude_status.as_deref(), Some("idle"));
+}
+
+#[test]
+fn working_background_agent_is_never_stopped() {
+    let s = local_store();
+    let now = 2_000_000_000;
+    let agents = vec![agent_json(
+        "background",
+        BG_ID,
+        r#""state":"working""#,
+        Some((now - 10 * 86_400) * 1000),
+    )];
+    let mtimes = std::collections::HashMap::from([(BG_ID.to_string(), now - 10 * 86_400)]);
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, &mtimes, now).unwrap();
+    let row = s
+        .get_session(&format!("bg:{BG_ID}"), "local")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.claude_status.as_deref(), Some("working"));
+}
+
+#[test]
+fn started_at_stands_in_when_no_transcript() {
+    let s = local_store();
+    let now = 2_000_000_000;
+    let agents = vec![agent_json(
+        "background",
+        BG_ID,
+        r#""state":"blocked""#,
+        Some((now - 2 * 86_400) * 1000),
+    )];
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, &no_mtimes(), now).unwrap();
+    let row = s
+        .get_session(&format!("bg:{BG_ID}"), "local")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.claude_status.as_deref(), Some("stopped"));
+
+    // Neither a transcript nor a start time: never guessed dead.
+    let s = local_store();
+    let agents = vec![agent_json(
+        "background",
+        BG_ID,
+        r#""state":"blocked""#,
+        None,
+    )];
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, &no_mtimes(), now).unwrap();
+    let row = s
+        .get_session(&format!("bg:{BG_ID}"), "local")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.claude_status.as_deref(), Some("blocked"));
+}
+
+#[test]
+fn transcript_mtime_wins_over_started_at() {
+    // Started long ago but the transcript moved recently → active.
+    let s = local_store();
+    let now = 2_000_000_000;
+    let agents = vec![agent_json(
+        "background",
+        BG_ID,
+        r#""state":"blocked""#,
+        Some((now - 30 * 86_400) * 1000),
+    )];
+    let mtimes = std::collections::HashMap::from([(BG_ID.to_string(), now - 3_600)]);
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, &mtimes, now).unwrap();
+    let row = s
+        .get_session(&format!("bg:{BG_ID}"), "local")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.claude_status.as_deref(), Some("blocked"));
+}
+
+#[test]
+fn dismissed_agent_is_skipped_until_newer_activity() {
+    let s = local_store();
+    let tmux_name = format!("bg:{BG_ID}");
+    let agents = vec![agent_json(
+        "background",
+        BG_ID,
+        r#""state":"blocked""#,
+        None,
+    )];
+    s.dismiss_agent("local", BG_ID, 100).unwrap();
+
+    // Activity older than the dismissal → skipped, no row, dismissal kept.
+    let old = std::collections::HashMap::from([(BG_ID.to_string(), 90)]);
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, &old, 200).unwrap();
+    assert!(s.get_session(&tmux_name, "local").unwrap().is_none());
+    assert_eq!(s.dismissed_agents("local").unwrap().get(BG_ID), Some(&100));
+
+    // Activity exactly at the dismissal → still dismissed.
+    let same = std::collections::HashMap::from([(BG_ID.to_string(), 100)]);
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, &same, 200).unwrap();
+    assert!(s.get_session(&tmux_name, "local").unwrap().is_none());
+    assert!(s.dismissed_agents("local").unwrap().contains_key(BG_ID));
+
+    // Newer activity → row reappears and the dismissal is cleared.
+    let newer = std::collections::HashMap::from([(BG_ID.to_string(), 150)]);
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, &newer, 200).unwrap();
+    let row = s
+        .get_session(&tmux_name, "local")
+        .unwrap()
+        .expect("reappears after newer activity");
+    assert_eq!(row.kind, "bg");
+    assert!(s.dismissed_agents("local").unwrap().is_empty());
+}
+
+#[test]
+fn dismissed_agent_without_known_time_stays_dismissed() {
+    let s = local_store();
+    let agents = vec![agent_json(
+        "background",
+        BG_ID,
+        r#""state":"blocked""#,
+        None,
+    )];
+    s.dismiss_agent("local", BG_ID, 100).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, &no_mtimes(), 200).unwrap();
+    assert!(s
+        .get_session(&format!("bg:{BG_ID}"), "local")
+        .unwrap()
+        .is_none());
+    assert!(s.dismissed_agents("local").unwrap().contains_key(BG_ID));
+}
+
+#[test]
+fn dismissal_on_another_host_does_not_hide_the_agent() {
+    let s = local_store();
+    s.upsert_host("remote").unwrap();
+    s.dismiss_agent("remote", BG_ID, 100).unwrap();
+    let agents = vec![agent_json(
+        "background",
+        BG_ID,
+        r#""state":"blocked""#,
+        None,
+    )];
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, &no_mtimes(), 200).unwrap();
+    assert!(s
+        .get_session(&format!("bg:{BG_ID}"), "local")
+        .unwrap()
+        .is_some());
+}
+
+/// Executor returning fixed agents and recording every `transcript_mtimes`
+/// call, for the probe's "one host call only when a bg agent exists" rule.
+struct AgentsTmux {
+    agents: Vec<crate::claude_agents::ClaudeAgentRow>,
+    mtime_calls: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+#[async_trait::async_trait]
+impl TmuxExec for AgentsTmux {
+    async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+        Ok(Vec::new())
+    }
+    async fn new_session(&self, _n: &str, _c: &std::path::Path, _p: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn kill_session(&self, _n: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn rename_session(&self, _o: &str, _n: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn restart_session(&self, _n: &str, _p: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn capture_pane(&self, _n: &str) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
+        self.agents.clone()
+    }
+    async fn transcript_mtimes(&self, ids: &[String]) -> std::collections::HashMap<String, i64> {
+        self.mtime_calls.lock().unwrap().push(ids.to_vec());
+        ids.iter().map(|id| (id.clone(), 42)).collect()
+    }
+}
+
+fn host_row(alias: &str) -> HostRow {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host(alias).unwrap();
+    s.list_hosts()
+        .unwrap()
+        .into_iter()
+        .find(|h| h.alias == alias)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn probe_reads_transcript_mtimes_for_background_agents_only() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let tmux = AgentsTmux {
+        agents: vec![
+            agent_json("interactive", INTERACTIVE_ID, r#""status":"busy""#, None),
+            agent_json("background", BG_ID, r#""state":"blocked""#, None),
+        ],
+        mtime_calls: Arc::clone(&calls),
+    };
+    let probe = probe_with_timeout(
+        host_row("h"),
+        Box::new(tmux),
+        std::time::Duration::from_secs(5),
+        None,
+    )
+    .await;
+    assert_eq!(*calls.lock().unwrap(), vec![vec![BG_ID.to_string()]]);
+    assert_eq!(probe.agent_mtimes.get(BG_ID), Some(&42));
+    assert_eq!(probe.agent_mtimes.len(), 1);
+
+    // Only interactive agents → no extra host call at all.
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let tmux = AgentsTmux {
+        agents: vec![agent_json(
+            "interactive",
+            INTERACTIVE_ID,
+            r#""status":"busy""#,
+            None,
+        )],
+        mtime_calls: Arc::clone(&calls),
+    };
+    let probe = probe_with_timeout(
+        host_row("h"),
+        Box::new(tmux),
+        std::time::Duration::from_secs(5),
+        None,
+    )
+    .await;
+    assert!(calls.lock().unwrap().is_empty());
+    assert!(probe.agent_mtimes.is_empty());
 }
 
 #[test]
@@ -1019,6 +1404,7 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         host: host.clone(),
         result: Ok(Vec::new()),
         agent_rows: Vec::new(),
+        agent_mtimes: std::collections::HashMap::new(),
         intel: PaneIntelMap::new(),
         pr_info: PrInfoMap::new(),
         started_at: now_unix(),
@@ -1063,6 +1449,7 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         host,
         result: Ok(Vec::new()),
         agent_rows: Vec::new(),
+        agent_mtimes: std::collections::HashMap::new(),
         intel: PaneIntelMap::new(),
         pr_info: PrInfoMap::new(),
         started_at: now_unix() + 5,
@@ -1635,6 +2022,7 @@ fn reconcile_linking(
             path: PathBuf::from(cwd),
         }]),
         agent_rows: Vec::new(),
+        agent_mtimes: std::collections::HashMap::new(),
         intel: PaneIntelMap::new(),
         pr_info: PrInfoMap::new(),
         started_at: now_unix(),

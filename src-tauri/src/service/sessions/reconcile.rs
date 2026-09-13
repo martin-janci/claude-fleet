@@ -138,6 +138,11 @@ pub(super) struct HostProbe {
     pub(super) host: HostRow,
     pub(super) result: Result<Vec<crate::tmux::TmuxSession>, IpcError>,
     pub(super) agent_rows: Vec<crate::claude_agents::ClaudeAgentRow>,
+    /// `sessionId → transcript mtime (unix s)` for this pass's `Background`
+    /// agents (one extra host call, only when there is at least one). Empty
+    /// on timeout, error, or when the host call failed — every agent then
+    /// counts as active.
+    pub(super) agent_mtimes: std::collections::HashMap<String, i64>,
     pub(super) intel: PaneIntelMap,
     /// `tmux_name → gh pr view` result for the sessions probed THIS pass
     /// (PROD-5). A name absent from the map was not probed (cache still
@@ -492,14 +497,24 @@ pub(super) fn reconcile_write_one_host(
                     }
                 }
             }
-            // SECOND pass: background (`claude --bg`) agents that matched NO tmux
-            // session are never in `keep` and would otherwise be invisible.
-            // Surface each as a synthetic `kind='bg'` SessionRow so it appears in
-            // `list_sessions`. These rows are exempt from the tmux-keyed ghost
-            // cleanup (`ghost_and_clean_sessions_in_tx`) — instead they are
-            // pruned inside `reconcile_bg_agents` against the current
-            // `claude agents --json` result, so dead agents can't accumulate.
-            reconcile_bg_agents(s, &host.alias, live, projects, agent_rows)?;
+            // SECOND pass: `claude agents` rows that matched NO tmux session
+            // are never in `keep` and would otherwise be invisible. Surface
+            // each as a synthetic pane-less SessionRow (`kind='external'` for
+            // interactive sessions, `kind='bg'` for background jobs) so it
+            // appears in `list_sessions`. These rows are exempt from the
+            // tmux-keyed ghost cleanup (`ghost_and_clean_sessions_in_tx`) —
+            // instead they are pruned inside `reconcile_agent_rows` against
+            // the current `claude agents --json` result, so dead agents can't
+            // accumulate.
+            reconcile_agent_rows(
+                s,
+                &host.alias,
+                live,
+                projects,
+                agent_rows,
+                &probe.agent_mtimes,
+                now_unix(),
+            )?;
             // Task H: stamp freshness on every session this pass observed live,
             // so a proactive (background) reconcile keeps `last_reconciled_at`
             // current and the UI can dim rows whose host has gone quiet. It is
@@ -565,45 +580,92 @@ pub(super) fn unmatched_bg_agents<'a>(
         .collect()
 }
 
-/// Upsert a synthetic `kind='bg'` SessionRow for every background agent that has
-/// no tmux session (the reconcile "second pass"), then prune the host's bg rows
-/// whose agent is NOT in the current `claude agents --json` result. The prune is
-/// two-phase (ghost this pass, hard-delete next pass) via
-/// `ghost_and_clean_bg_sessions`, so a transiently-failed agents probe — which
-/// comes back as an empty list — only ghosts rows for one cycle instead of
-/// deleting them. Per-agent write failures are logged and skipped so one bad
-/// row can't abort the others.
-pub(super) fn reconcile_bg_agents(
+/// Seconds without transcript activity after which a non-working background
+/// agent is shown as `stopped` (spec §2).
+pub(super) const AGENT_INACTIVE_SECS: i64 = 86_400;
+
+/// A background agent is inactive when its status is not `working` and its
+/// last known activity is at least [`AGENT_INACTIVE_SECS`] old. An unknown
+/// activity time means active — never guess an agent dead.
+pub(super) fn agent_is_inactive(
+    status: Option<&str>,
+    last_activity: Option<i64>,
+    now: i64,
+) -> bool {
+    status != Some("working") && last_activity.is_some_and(|t| now - t >= AGENT_INACTIVE_SECS)
+}
+
+/// Upsert a synthetic pane-less SessionRow for every `claude agents` row that
+/// has no tmux session (the reconcile "second pass"): `kind='external'` for an
+/// interactive session running outside fleet, `kind='bg'` for a background
+/// job. A bg agent idle for [`AGENT_INACTIVE_SECS`] (transcript mtime from
+/// `mtimes`, else `started_at`) is stored as `stopped`. An agent the user
+/// dismissed is skipped until it shows activity newer than the dismissal,
+/// which clears the dismissal. Then prune the host's pane-less rows whose
+/// agent is NOT in this pass. The prune is two-phase (ghost this pass,
+/// hard-delete next pass) via `ghost_and_clean_bg_sessions`, so a
+/// transiently-failed agents probe — which comes back as an empty list — only
+/// ghosts rows for one cycle instead of deleting them. Per-agent write
+/// failures are logged and skipped so one bad row can't abort the others.
+pub(super) fn reconcile_agent_rows(
     s: &Store,
     host_alias: &str,
     live: &[crate::tmux::TmuxSession],
     projects: &[ProjectRow],
     agents: &[crate::claude_agents::ClaudeAgentRow],
+    mtimes: &std::collections::HashMap<String, i64>,
+    now: i64,
 ) -> Result<(), IpcError> {
     let mut keep: Vec<String> = Vec::new();
     let paths = HostPaths::for_host(s, host_alias);
+    let dismissed = s.dismissed_agents(host_alias).unwrap_or_default();
     for agent in unmatched_bg_agents(live, agents, host_alias == "local") {
         let Some(session_id) = agent.session_id.as_deref() else {
             continue;
         };
+        let last_activity = mtimes.get(session_id).copied().or(agent.started_at);
+        if let Some(&at) = dismissed.get(session_id) {
+            match last_activity {
+                Some(t) if t > at => {
+                    if let Err(e) = s.clear_agent_dismissal(host_alias, session_id) {
+                        tracing::warn!(
+                            host = %host_alias,
+                            claude_session_id = %session_id,
+                            error = %e,
+                            "[reconcile] clearing agent dismissal failed"
+                        );
+                    }
+                }
+                // Still dismissed. Not in `keep`, so a leftover row (if any)
+                // is pruned below.
+                _ => continue,
+            }
+        }
         let tmux_name = format!("bg:{session_id}");
         // Keep the sentinel even if the upsert below fails — ghosting an
         // existing row over a transient write error would be wrong.
         keep.push(tmux_name.clone());
+        let kind = match agent.kind {
+            crate::claude_agents::AgentKind::Interactive => "external",
+            crate::claude_agents::AgentKind::Background => "bg",
+        };
         let project_id = agent.cwd.as_deref().and_then(|cwd| {
             find_project_id_for_path(projects, host_alias, std::path::Path::new(cwd), &paths)
         });
         // Same vocabulary filter as tmux rows: an unknown value is logged and
         // dropped (the upsert's COALESCE then keeps the prior status).
-        let status = known_agent_status(&tmux_name, agent.status.as_deref());
+        let mut status = known_agent_status(&tmux_name, agent.status.as_deref());
+        if kind == "bg" && agent_is_inactive(status.as_deref(), last_activity, now) {
+            status = Some("stopped".to_string());
+        }
         if let Err(e) = s.upsert_bg_session(
             host_alias,
             &tmux_name,
             project_id,
             session_id,
             status.as_deref(),
-            now_unix(),
-            "bg",
+            now,
+            kind,
         ) {
             tracing::warn!(
                 host = %host_alias,
@@ -613,7 +675,7 @@ pub(super) fn reconcile_bg_agents(
             );
         }
     }
-    if let Err(e) = s.ghost_and_clean_bg_sessions(host_alias, &keep, now_unix()) {
+    if let Err(e) = s.ghost_and_clean_bg_sessions(host_alias, &keep, now) {
         tracing::warn!(host = %host_alias, error = %e, "[reconcile] bg cleanup failed");
     }
     Ok(())
@@ -709,18 +771,31 @@ pub(super) async fn probe_with_timeout(
     let probe = async {
         let tmux_result = tmux.list_sessions().await;
         let agent_rows = tmux.list_claude_agents().await;
+        // Transcript mtimes feed the inactive-bg-agent rule; one host call,
+        // only when this pass saw a background agent.
+        let bg_ids: Vec<String> = agent_rows
+            .iter()
+            .filter(|a| a.kind == crate::claude_agents::AgentKind::Background)
+            .filter_map(|a| a.session_id.clone())
+            .collect();
+        let agent_mtimes = if bg_ids.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            tmux.transcript_mtimes(&bg_ids).await
+        };
         // One pane-tail read per live session, parsed into reconcile intel.
         let intel = match &tmux_result {
             Ok(live) => capture_pane_intel(tmux.as_ref(), live).await,
             Err(_) => PaneIntelMap::new(),
         };
-        (tmux_result, agent_rows, intel)
+        (tmux_result, agent_rows, agent_mtimes, intel)
     };
     let mut probe = match tokio::time::timeout(timeout, probe).await {
-        Ok((result, agent_rows, intel)) => HostProbe {
+        Ok((result, agent_rows, agent_mtimes, intel)) => HostProbe {
             host,
             result,
             agent_rows,
+            agent_mtimes,
             intel,
             pr_info: PrInfoMap::new(),
             started_at,
@@ -735,6 +810,7 @@ pub(super) async fn probe_with_timeout(
                 host,
                 result: Err(IpcError::new("E_TIMEOUT", "host probe timed out")),
                 agent_rows: Vec::new(),
+                agent_mtimes: std::collections::HashMap::new(),
                 intel: PaneIntelMap::new(),
                 pr_info: PrInfoMap::new(),
                 started_at,

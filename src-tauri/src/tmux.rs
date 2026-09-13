@@ -43,6 +43,49 @@ pub trait TmuxExec: Send + Sync {
     /// Returns an empty vec if claude CLI is not installed or the command fails —
     /// the fleet treats missing Claude agent data as degraded-gracefully.
     async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow>;
+    /// `sessionId → transcript mtime (unix s)` for the given ids; ids that are not
+    /// valid Claude session ids are skipped; any failure yields an empty map.
+    async fn transcript_mtimes(&self, ids: &[String]) -> std::collections::HashMap<String, i64> {
+        let _ = ids;
+        std::collections::HashMap::new()
+    }
+}
+
+/// Shell script printing `<sessionId>\t<mtime>` for the first
+/// `$HOME/.claude/projects/*/<sessionId>.jsonl` found per id. `date -r <file>
+/// +%s` behaves the same on GNU and BSD. Every id is validated as a Claude
+/// session id and shell-quoted; `None` when no id survives validation.
+pub fn transcript_mtimes_script(ids: &[String]) -> Option<String> {
+    let valid: Vec<String> = ids
+        .iter()
+        .filter(|id| crate::validate::claude_session_id(id).is_ok())
+        .map(|id| quote(id))
+        .collect();
+    if valid.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "for id in {}; do for f in \"$HOME\"/.claude/projects/*/\"$id\".jsonl; do \
+         if [ -f \"$f\" ]; then printf '%s\\t%s\\n' \"$id\" \"$(date -r \"$f\" +%s)\"; break; fi; \
+         done; done",
+        valid.join(" ")
+    ))
+}
+
+/// Parse [`transcript_mtimes_script`] output. Lines that are not exactly
+/// `<valid session id>\t<i64>` (login-shell noise, a failed `date`) are
+/// ignored.
+pub fn parse_mtimes(stdout: &str) -> std::collections::HashMap<String, i64> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let (id, mtime) = line.split_once('\t')?;
+            if mtime.contains('\t') || crate::validate::claude_session_id(id).is_err() {
+                return None;
+            }
+            Some((id.to_string(), mtime.trim().parse::<i64>().ok()?))
+        })
+        .collect()
 }
 
 pub struct LocalTmux;
@@ -114,6 +157,20 @@ impl TmuxExec for LocalTmux {
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
             .unwrap_or_else(|| "[]".to_string());
         crate::claude_agents::parse_claude_agents_json(&json)
+    }
+    async fn transcript_mtimes(&self, ids: &[String]) -> std::collections::HashMap<String, i64> {
+        let Some(script) = transcript_mtimes_script(ids) else {
+            return std::collections::HashMap::new();
+        };
+        // No login shell: the script needs only `$HOME`, which is inherited.
+        match tokio::process::Command::new("bash")
+            .args(["-c", &script])
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => parse_mtimes(&String::from_utf8_lossy(&o.stdout)),
+            _ => std::collections::HashMap::new(),
+        }
     }
 }
 
@@ -312,6 +369,15 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
             .unwrap_or_else(|| "[]".to_string());
         crate::claude_agents::parse_claude_agents_json(&json)
+    }
+    async fn transcript_mtimes(&self, ids: &[String]) -> std::collections::HashMap<String, i64> {
+        let Some(script) = transcript_mtimes_script(ids) else {
+            return std::collections::HashMap::new();
+        };
+        match self.remote_bash(&script).await {
+            Ok(o) if o.status.success() => parse_mtimes(&String::from_utf8_lossy(&o.stdout)),
+            _ => std::collections::HashMap::new(),
+        }
     }
 }
 
@@ -774,5 +840,57 @@ mod tests {
         let cmd = pane_command_for(None);
         assert!(cmd.contains("cl --continue || cl;"), "got: {cmd}");
         assert!(!cmd.contains("--session-id"), "got: {cmd}");
+    }
+
+    #[test]
+    fn mtimes_script_quotes_ids_and_skips_invalid() {
+        let ids = vec![
+            "44366faf-ae97-426a-91cd-beaf3c74f1d7".to_string(),
+            "'; rm -rf / #".to_string(),
+        ];
+        let s = crate::tmux::transcript_mtimes_script(&ids).unwrap();
+        assert!(s.contains("'44366faf-ae97-426a-91cd-beaf3c74f1d7'"));
+        assert!(!s.contains("rm -rf"));
+        assert!(s.contains("date -r"));
+        assert!(crate::tmux::transcript_mtimes_script(&["bad".into()]).is_none());
+    }
+
+    #[test]
+    fn mtimes_script_runs_against_a_real_projects_tree() {
+        // The script itself, through `bash -c` with a throwaway $HOME: finds a
+        // transcript in any project dir and skips ids with no transcript.
+        let home = tempfile::tempdir().unwrap();
+        let proj = home.path().join(".claude/projects/-Users-u-proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let found = "44366faf-ae97-426a-91cd-beaf3c74f1d7";
+        let missing = "0b8e2f41-9d3c-4a7e-b1f0-6c5d4e3a2b19";
+        std::fs::write(proj.join(format!("{found}.jsonl")), "{}\n").unwrap();
+        let script = transcript_mtimes_script(&[found.to_string(), missing.to_string()]).unwrap();
+        let out = std::process::Command::new("bash")
+            .args(["-c", &script])
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let m = parse_mtimes(&String::from_utf8_lossy(&out.stdout));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert_eq!(m.len(), 1, "{m:?}");
+        assert!(
+            (now - m[found]).abs() < 120,
+            "mtime {} vs now {now}",
+            m[found]
+        );
+    }
+
+    #[test]
+    fn parse_mtimes_reads_tab_lines_and_ignores_noise() {
+        let m = crate::tmux::parse_mtimes(
+            "motd\n44366faf-ae97-426a-91cd-beaf3c74f1d7\t1779999999\nx\tnotanumber\n",
+        );
+        assert_eq!(m.len(), 1);
+        assert_eq!(m["44366faf-ae97-426a-91cd-beaf3c74f1d7"], 1_779_999_999);
     }
 }

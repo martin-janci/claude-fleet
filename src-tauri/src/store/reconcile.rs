@@ -227,9 +227,10 @@ impl Store {
     /// Phase 2: sessions that are already ghost (from a previous cycle) and still
     /// not in `keep_names` are hard-deleted.
     ///
-    /// `kind='bg'` rows are EXCLUDED from both phases: background (`claude --bg`)
-    /// sessions are never tmux sessions, so they can never appear in
-    /// `keep_names`. Ghosting them on every reconcile would be wrong — they're
+    /// Pane-less rows (`kind IN ('bg','external')`) are EXCLUDED from both
+    /// phases: background (`claude --bg`) agents and interactive Claude
+    /// sessions outside fleet are never tmux sessions, so they can never
+    /// appear in `keep_names`. Ghosting them on every reconcile would be wrong — they're
     /// surfaced from `claude agents --json`, not from tmux. They get their own
     /// agents-keyed pruner instead: `ghost_and_clean_bg_sessions`.
     ///
@@ -252,7 +253,7 @@ impl Store {
         // so that sessions newly ghosted in Phase 1 are not immediately deleted.
         let pre_ghost_ids: Vec<i64> = if keep_names.is_empty() {
             let mut stmt = tx.prepare_cached(
-                "SELECT id FROM sessions WHERE host_alias=?1 AND status='ghost' AND kind!='bg'",
+                "SELECT id FROM sessions WHERE host_alias=?1 AND status='ghost' AND kind NOT IN ('bg','external')",
             )?;
             let ids = stmt
                 .query_map(rusqlite::params![host_alias], |r| r.get(0))?
@@ -262,7 +263,7 @@ impl Store {
             let phs = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!(
                 "SELECT id FROM sessions
-                 WHERE host_alias=?1 AND status='ghost' AND kind!='bg' AND tmux_name NOT IN ({phs})"
+                 WHERE host_alias=?1 AND status='ghost' AND kind NOT IN ('bg','external') AND tmux_name NOT IN ({phs})"
             );
             let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
             for n in keep_names {
@@ -280,7 +281,7 @@ impl Store {
         let ghost_ids: Vec<i64> = if keep_names.is_empty() {
             let mut stmt = tx.prepare_cached(
                 "UPDATE sessions SET status='ghost', lost_at=?1
-                 WHERE host_alias=?2 AND status!='ghost' AND kind!='bg'
+                 WHERE host_alias=?2 AND status!='ghost' AND kind NOT IN ('bg','external')
                    AND COALESCE(last_reconciled_at, 0) < ?3
                  RETURNING id",
             )?;
@@ -295,7 +296,7 @@ impl Store {
             let phs = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!(
                 "UPDATE sessions SET status='ghost', lost_at=?1
-                 WHERE host_alias=?2 AND status!='ghost' AND kind!='bg'
+                 WHERE host_alias=?2 AND status!='ghost' AND kind NOT IN ('bg','external')
                    AND COALESCE(last_reconciled_at, 0) < ?3 AND tmux_name NOT IN ({phs})
                  RETURNING id"
             );
@@ -1028,6 +1029,46 @@ mod tests {
             evts.iter().any(|e| e.starts_with("project:updated:")),
             "expected project:updated; got: {evts:?}"
         );
+    }
+
+    #[test]
+    fn external_session_survives_reconcile_with_empty_tmux() {
+        // An interactive Claude session outside tmux (`kind='external'`) has no
+        // pane either, so the tmux-keyed cleanup must leave it alone on every
+        // pass; only `ghost_and_clean_bg_sessions` prunes it.
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        store
+            .upsert_bg_session(
+                "alpha",
+                "bg:ext-uuid-1",
+                None,
+                "ext-uuid-1",
+                Some("idle"),
+                100,
+                "external",
+            )
+            .unwrap();
+        for pass in 1..=3 {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    alias: "alpha",
+                    reachable: true,
+                    claude_version: None,
+                    tmux_version: None,
+                    last_pinged_at: pass,
+                    probe_started_at: 0,
+                    sessions: &[],
+                    keep: &[],
+                })
+                .expect("reconcile ok");
+            let row = store
+                .get_session("bg:ext-uuid-1", "alpha")
+                .unwrap()
+                .unwrap_or_else(|| panic!("external row reaped on pass {pass}"));
+            assert_eq!(row.kind, "external");
+            assert_eq!(row.status, "running", "external row ghosted on pass {pass}");
+        }
     }
 
     #[test]
