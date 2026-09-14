@@ -375,8 +375,13 @@ impl Harness for Claude {
             "if command -v sha256sum >/dev/null 2>&1; then H=sha256sum; else H=\"shasum -a 256\"; fi; ",
         );
         s.push_str("echo \"##HASHES\"; ");
+        // `-exec $H {} +` (not `-print0 | xargs -0 $H`): `-exec ... +` only
+        // ever runs the hasher when find has at least one match, so an
+        // existing-but-empty directory produces no output instead of
+        // invoking the hasher with zero paths (which reads stdin, producing
+        // a bogus `<hash>  -` line or hanging on an open pipe).
         s.push_str(
-            "for d in .claude/skills .claude/agents; do if [ -d \"$d\" ]; then find -L \"$d\" -type f -print0 2>/dev/null | xargs -0 $H 2>/dev/null; fi; done; ",
+            "for d in .claude/skills .claude/agents; do if [ -d \"$d\" ]; then find -L \"$d\" -type f -exec $H {} + 2>/dev/null; fi; done; ",
         );
         for f in CONFIG_FILES {
             let rel = f.trim_start_matches("~/");
@@ -417,6 +422,13 @@ impl Harness for Claude {
             // `<hash>  <path>` (two spaces from sha256sum / shasum).
             if let Some((hash, path)) = line.split_once("  ") {
                 let path = path.trim_start_matches("./");
+                // Defensive: a hasher invoked with no path argument (should
+                // no longer happen with `-exec ... +`, but tolerate it if a
+                // host's `find`/`xargs` behaves unexpectedly) prints its
+                // hash against stdin as `-`; that is not a real file.
+                if path == "-" {
+                    continue;
+                }
                 snap.files
                     .insert(format!("~/{path}"), hash.trim().to_string());
             }
@@ -781,6 +793,57 @@ eyJwbHVnaW5zIjp7InN1cGVycG93ZXJzQHN1cGVycG93ZXJzLW1hcmtldHBsYWNlIjpbeyJ2ZXJzaW9u
             hook_asset_name("PostToolUse", Some("EnterWorktree|ExitWorktree")),
             "after-tool-enterworktree-exitworktree"
         );
+    }
+
+    /// Runs the real `scan_script()` under `bash -lc` (through `shell::quote`,
+    /// same as the real caller) against a temp `$HOME` with one real skill
+    /// file plus an existing-but-empty `.claude/agents` dir, and feeds the
+    /// output back through `parse_scan`. Regression test for the `-exec ...
+    /// +` vs `xargs` fix: an empty scanned directory must not produce a
+    /// bogus `~/-` entry (or hang), and only the one real file is reported.
+    #[test]
+    fn scan_script_runs_under_bash_and_parses_cleanly() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path();
+        let skill_dir = home.join(".claude/skills/worktree");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            b"---\nname: worktree\n---\nbody\n",
+        )
+        .unwrap();
+        // Exists but has no files: the case that hung / produced a bogus
+        // `<hash>  -` line under `xargs -0` with zero input paths.
+        std::fs::create_dir_all(home.join(".claude/agents")).unwrap();
+        std::fs::write(home.join(".claude/settings.json"), b"{}").unwrap();
+
+        // `bash -lc <script>` via `std::process::Command` passes `script` as
+        // one argv element straight to bash, with no intervening shell to
+        // re-parse it — unlike the eventual remote caller (Task 8), which
+        // embeds this same script, `shell::quote`d, inside an outer `ssh ...
+        // bash -lc <quoted>` command line. Quoting here would double-quote:
+        // the literal quote characters would become part of the script text
+        // bash executes.
+        let script = Claude.scan_script().unwrap();
+        let out = std::process::Command::new("bash")
+            .arg("-lc")
+            .arg(&script)
+            .env("HOME", home)
+            .output()
+            .expect("run scan script");
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8(out.stdout).expect("utf8 stdout");
+        let snap = Claude.parse_scan(&stdout).unwrap();
+        assert_eq!(
+            snap.files.keys().collect::<Vec<_>>(),
+            vec!["~/.claude/skills/worktree/SKILL.md"]
+        );
+        assert!(!snap.files.contains_key("~/-"));
+        assert_eq!(snap.configs[SETTINGS_PATH], serde_json::json!({}));
     }
 
     #[test]

@@ -106,7 +106,23 @@ pub fn compute_states(
                 .configs
                 .get(&m.file)
                 .and_then(|root| json_get(root, &m.json_path));
-            if have.is_some() {
+            let satisfied = merge_satisfied(snap, m);
+            // `Set`/`Subset` merges point `json_path` at an asset-specific
+            // key (e.g. `mcpServers.<name>`, `plugins.<plugin@marketplace>`),
+            // so resolving that path already means *this* asset's entry is
+            // present. `AppendUnique` merges (hooks) instead point at a
+            // *shared* array keyed only by event (e.g. `hooks.Stop`) that
+            // every hook on that event appends into, so resolving the path
+            // only proves some hook exists there — not this one. Treat an
+            // `AppendUnique` target as present only once its own value is
+            // actually found in the array, or a catalog hook whose sibling
+            // is installed but who is itself absent would read as `drifted`
+            // instead of `missing`.
+            let this_present = match m.mode {
+                MergeMode::AppendUnique => satisfied,
+                MergeMode::Set | MergeMode::Subset => have.is_some(),
+            };
+            if this_present {
                 present = true;
                 host_parts.push(format!(
                     "{}:{}={}",
@@ -115,7 +131,7 @@ pub fn compute_states(
                     have.map(|v| v.to_string()).unwrap_or_default()
                 ));
             }
-            if !merge_satisfied(snap, m) {
+            if !satisfied {
                 all_match = false;
             }
         }
@@ -298,6 +314,51 @@ mod tests {
         assert_eq!(
             rows.iter().find(|r| r.name == "s").unwrap().state,
             "missing"
+        );
+    }
+
+    /// Regression test: an `AppendUnique` (hook) merge's `json_path` points
+    /// at the *shared* per-event array (`hooks.Stop`), not an asset-specific
+    /// key, so a sibling hook occupying that array must not make an absent
+    /// catalog hook read as `drifted` — it must read as `missing`. Once the
+    /// catalog hook's own entry is actually present alongside the sibling,
+    /// it must read as `in_sync`.
+    #[test]
+    fn hook_presence_requires_its_own_entry_not_just_a_shared_sibling() {
+        use crate::service::catalog::harness::claude::SETTINGS_PATH;
+
+        let mut cat = Catalog::default();
+        cat.assets.push(
+            Asset::from_yaml(
+                None,
+                "kind: hook\nname: h\ndescription: d\nevent: stop\naction: { type: command, command: x }\n",
+            )
+            .unwrap(),
+        );
+        let claude = Claude;
+
+        let mut snap = HostSnapshot::default();
+        snap.configs.insert(
+            SETTINGS_PATH.into(),
+            json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "other"}]}]}}),
+        );
+        let rows = compute_states(&cat, &claude, "local", &snap, 1);
+        assert_eq!(
+            rows.iter().find(|r| r.name == "h").unwrap().state,
+            "missing"
+        );
+
+        snap.configs.insert(
+            SETTINGS_PATH.into(),
+            json!({"hooks": {"Stop": [
+                {"hooks": [{"type": "command", "command": "other"}]},
+                {"hooks": [{"type": "command", "command": "x"}]},
+            ]}}),
+        );
+        let rows = compute_states(&cat, &claude, "local", &snap, 1);
+        assert_eq!(
+            rows.iter().find(|r| r.name == "h").unwrap().state,
+            "in_sync"
         );
     }
 }
