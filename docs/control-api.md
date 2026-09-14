@@ -70,6 +70,9 @@ tools.
 | `new_session` / `kill_session` / `rename_session` / `restart_session` | Session lifecycle. |
 | `send_prompt` | Deliver a prompt to a running session's Claude REPL. |
 | `spawn_review` | Spawn a review session in another session's worktree. |
+| `list_assets` | Catalog assets with per-host drift state, unmanaged assets, parse problems. |
+| `scan_assets` | Re-scan hosts (read-only) and recompute asset states. |
+| `import_assets` | Import the controller's `~/.claude` into the catalog working tree (dry-run supported). |
 
 **Read session output**
 
