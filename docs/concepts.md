@@ -18,6 +18,19 @@ Each host has a **projects base**, the directory that holds its repositories, se
 
 An embedded MCP server (disabled by default, bound to `localhost`, protected by a bearer token, default port 4180) exposes the full fleet API so an AI assistant can drive sessions programmatically — creating sessions, sending prompts, reading output. When the control API is enabled, **reverse SSH tunnels** (`ssh -R`) forward that localhost port to each remote host's localhost, allowing remote agents to call back to the central server. Each tunnel is supervised: if the `ssh` process exits it restarts with capped exponential backoff. See [control-api.md](control-api.md) for the full tool reference.
 
+## Asset catalog
+
+Skills, subagents, hooks, MCP servers and plugin references can be kept in a
+git repo in a harness-neutral format and managed from the **Assets** tab.
+Fleet loads the repo on the controller, renders every asset the way each
+harness expects it (Claude Code fully; Codex CLI for skills and MCP servers),
+scans hosts read-only for what is actually installed, and shows each asset
+as in sync, drifted, missing or unsupported per host. Assets found on a host
+but not in the catalog are listed as unmanaged and can be imported. This
+version never writes to hosts; sync and in-app editing are later iterations.
+The format and layout are specified in
+`docs/superpowers/specs/2026-09-14-asset-catalog-design.md`.
+
 ## The terminal
 
 The in-app terminal is a hand-rolled ANSI screen-buffer renderer (`src/lib/ansi.ts` + `TerminalView.svelte`), not xterm.js. xterm.js was tried first but its renderer silently no-ops after the first write in the Tauri 2 + macOS WKWebView environment, producing a blank terminal. The custom renderer covers the escape-sequence surface area that tmux and Claude's TUI actually emit — SGR colors, cursor positioning, clear-screen/line, basic scrolling — and renders into a plain DOM node where repaint is reliable. The trade-off is fewer features: no mouse tracking, no application keypad, no scrollback beyond the visible window. Only one PTY is attached at a time.

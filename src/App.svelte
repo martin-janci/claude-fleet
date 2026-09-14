@@ -9,6 +9,7 @@
   import FilesPanel from './lib/FilesPanel.svelte';
   import HostsView from './lib/HostsView.svelte';
   import ConversationPanel from './lib/ConversationPanel.svelte';
+  import AssetsPanel from './lib/AssetsPanel.svelte';
   import { loadProjects, bootstrapProjects, applyProjectEvents } from './lib/projects';
   import { loadSessions, bootstrapSessions, applySessionEvents, sessions, hasNoPane } from './lib/sessions';
   import { bootstrapHosts, applyHostEvents, hosts, hostFilter } from './lib/hosts';
@@ -16,6 +17,7 @@
   import { loadTasks, applyTaskEvents } from './lib/tasks';
   import { loadAccountUsage, applyAccountUsageEvents, accountUsage } from './lib/account_usage_store';
   import { footerUsage } from './lib/usage_glance';
+  import { mergeInventoryRow, clearInventoryFor, loadAssets } from './lib/assets';
   import { subscribeToRowEvents } from './lib/events';
   import Toasts from './lib/Toasts.svelte';
   import QuickSwitcher from './lib/QuickSwitcher.svelte';
@@ -173,6 +175,9 @@
       onProjectEvents: applyProjectEvents,
       onTaskEvents: applyTaskEvents,
       onAccountUsageEvents: applyAccountUsageEvents,
+      onAssetInventoryUpdated: mergeInventoryRow,
+      onAssetInventoryCleared: (p) => clearInventoryFor(p.host_alias, p.harness),
+      onCatalogLoaded: () => { void loadAssets(); },
     });
     // Tasks are secondary to the session list: load after the row
     // subscription is live so no `task:updated` is missed, and never block
@@ -279,6 +284,10 @@
   const hostsChord = hostsChordLabel(isMac);
   let hostsMode = $state(false);
   let hostsPreselect = $state<string | null>(null);
+  // Assets mode shows the asset catalog. Like Hosts it is fleet-scoped (no
+  // selected session needed) and renders as an opaque overlay over the
+  // terminal, which stays mounted so its PTY survives the round trip.
+  let assetsMode = $state(false);
   // Bumped to remount the view when a request names a host while it is open.
   let hostsViewKey = $state(0);
   /** Last host shown in the Hosts view, for this app session only. */
@@ -303,6 +312,7 @@
     hostsReturnFocus = active instanceof HTMLElement && active !== document.body ? active : null;
     hostsPreselect = preselect;
     filesMode = false;
+    assetsMode = false;
     // A no-pane row has nothing but the Conversation under the Hosts overlay,
     // so it stays the view to return to; a tmux row returns to the terminal.
     if (!selNoPane) conversationMode = false;
@@ -337,19 +347,27 @@
   function showTerminal() {
     filesMode = false;
     conversationMode = false;
+    assetsMode = false;
     closeHosts();
   }
   function showFiles() {
     if (!$selectedSession) return;
     closeHosts(false);
     conversationMode = false;
+    assetsMode = false;
     filesMode = true;
   }
   function showConversation() {
     if (!$selectedSession?.claude_session_id) return;
     closeHosts(false);
     filesMode = false;
+    assetsMode = false;
     conversationMode = true;
+  }
+  function showAssets() {
+    closeHosts(false);
+    filesMode = false;
+    assetsMode = true;
   }
   const NO_PANE_TITLE = 'Runs outside tmux — no terminal';
 
@@ -400,6 +418,13 @@
       filesMode = false;
       return;
     }
+    // Assets is an overlay with no Esc handling of its own; the same rule as
+    // Files applies (not while typing in the catalog's filter field).
+    if (assetsMode) {
+      if (isEditable(target) || target?.closest?.('dialog')) return;
+      assetsMode = false;
+      return;
+    }
     // Inside the Hosts view, HostsView owns Esc (back to the list, clear the
     // filter, close from the list). This catches only an Esc with focus lost
     // to the page or left on the right column's chrome; a dialog, an input
@@ -421,7 +446,7 @@
     const sbResizer = sidebarCollapsed ? '0px' : '4px';
     // In files mode the center pane collapses to zero — the file viewer
     // takes the whole region right of the sidebar.
-    const wide = filesMode || hostsMode;
+    const wide = filesMode || hostsMode || assetsMode;
     const center = wide ? '0px' : centerCollapsed ? '20px' : `${centerPx}px`;
     const centerResizer = wide || centerCollapsed ? '0px' : '4px';
     return `${sb} ${sbResizer} ${center} ${centerResizer} 1fr`;
@@ -518,9 +543,9 @@
     <div class="view-tabs" role="tablist">
       <button
         class="view-tab"
-        class:active={!filesMode && !hostsMode && !conversationMode}
+        class:active={!filesMode && !hostsMode && !conversationMode && !assetsMode}
         role="tab"
-        aria-selected={!filesMode && !hostsMode && !conversationMode}
+        aria-selected={!filesMode && !hostsMode && !conversationMode && !assetsMode}
         disabled={selNoPane}
         title={selNoPane ? NO_PANE_TITLE : undefined}
         onclick={showTerminal}
@@ -542,13 +567,23 @@
       >
       <button
         class="view-tab"
-        class:active={conversationMode && !hostsMode}
+        class:active={conversationMode && !hostsMode && !assetsMode}
         role="tab"
-        aria-selected={conversationMode && !hostsMode}
+        aria-selected={conversationMode && !hostsMode && !assetsMode}
         disabled={!selHasClaudeId}
         title={!selHasClaudeId ? 'No Claude session id yet' : 'Claude conversation from the transcript'}
         onclick={showConversation}
         data-testid="tab-conversation">Conversation</button
+      >
+      <!-- Fleet-scoped like Hosts: never disabled, no selected session needed. -->
+      <button
+        class="view-tab"
+        class:active={assetsMode && !hostsMode}
+        role="tab"
+        aria-selected={assetsMode && !hostsMode}
+        title="The asset catalog and its per-host drift state"
+        onclick={showAssets}
+        data-testid="tab-assets">Assets</button
       >
       <!-- Fleet-scoped, so set apart on the right and never disabled. -->
       <button
@@ -571,7 +606,7 @@
              normal session reconnects its PTY. The Conversation is the only
              view these rows have. -->
         <div class="view-slot">
-          <ConversationPanel session={$selectedSession} visible={!hostsMode} />
+          <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode} />
         </div>
       {:else}
         <!-- TerminalView stays mounted underneath so the PTY and its ANSI
@@ -587,7 +622,7 @@
         {/if}
         {#if conversationMode && $selectedSession}
           <div class="view-slot overlay">
-            <ConversationPanel session={$selectedSession} visible={!hostsMode} />
+            <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode} />
           </div>
         {/if}
       {/if}
@@ -602,6 +637,11 @@
               onSelectionChange={(alias) => (lastViewedHost = alias)}
             />
           {/key}
+        </div>
+      {/if}
+      {#if assetsMode}
+        <div class="view-slot overlay" data-testid="assets-overlay">
+          <AssetsPanel />
         </div>
       {/if}
     </div>

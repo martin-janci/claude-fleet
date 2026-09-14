@@ -133,6 +133,11 @@ Index by area (names only; see the reference for details):
   `repo_file`, `repo_diff`, `repo_log`, `repo_branches`, `repo_commit`,
   `repo_commit_diff`.
 - **Host clipboard** — `get_clipboard`, `set_clipboard`.
+- **Asset catalog** — `list_assets` (catalog assets with per-host drift
+  state, unmanaged assets and parse problems), `scan_assets` (re-scan hosts,
+  read-only on the hosts, and recompute asset states), `import_assets`
+  (import the controller's `~/.claude` into the catalog working tree;
+  `dry_run` supported).
 - **Orchestration** — `wait_for_session`, `session_transcript`, `run_prompt`,
   `dispatch_task`, `wait_for_task`, `list_tasks`, `cancel_task`,
   `set_session_tags`.

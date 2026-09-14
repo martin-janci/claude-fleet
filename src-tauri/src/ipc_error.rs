@@ -145,6 +145,26 @@ pub mod codes {
     /// The call needs a desktop confirmation first (`mcp.confirm_destructive`);
     /// retry with the `confirm_nonce` from `details` once approved.
     pub const E_CONFIRM_REQUIRED: &str = "E_CONFIRM_REQUIRED";
+    /// Asset catalog: no catalog repo is configured, or it is configured but
+    /// not loaded yet (`catalog_configure` / `catalog_load` first).
+    pub const E_CATALOG_NOT_CONFIGURED: &str = "E_CATALOG_NOT_CONFIGURED";
+    /// Asset catalog: a git operation on the catalog repo (clone, pull,
+    /// `rev-parse HEAD`) failed. Distinct from `E_GIT`, which covers a
+    /// session's worktree.
+    pub const E_CATALOG_GIT: &str = "E_CATALOG_GIT";
+    /// Asset catalog: an asset file in the repo could not be parsed into the
+    /// IR (bad front-matter, unknown kind, duplicate name).
+    pub const E_CATALOG_PARSE: &str = "E_CATALOG_PARSE";
+    /// Asset catalog: the harness cannot express this asset kind.
+    pub const E_ASSET_UNSUPPORTED: &str = "E_ASSET_UNSUPPORTED";
+    /// Asset catalog: the import would overwrite an asset already in the
+    /// repo. The importer never overwrites.
+    pub const E_ASSET_EXISTS: &str = "E_ASSET_EXISTS";
+    /// Asset catalog: no asset of that kind and name is in the catalog.
+    pub const E_ASSET_NOT_FOUND: &str = "E_ASSET_NOT_FOUND";
+    /// Asset catalog: a host scan failed or returned unusable output. The
+    /// scan fails closed — a partial snapshot is never treated as empty.
+    pub const E_SCAN: &str = "E_SCAN";
 }
 
 #[derive(Debug, Serialize)]

@@ -193,6 +193,8 @@ const MIGRATIONS: &[Migration] = &[
         29,
         include_str!("../../migrations/029_dismissed_agents.sql"),
     ),
+    // Asset catalog: two fresh `CREATE TABLE IF NOT EXISTS`, safe to re-run.
+    Migration::plain(30, include_str!("../../migrations/030_asset_catalog.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -356,6 +358,8 @@ mod tests {
         "host_tokens",
         "tasks",
         "worktree_parent_fingerprints",
+        "catalog_config",
+        "asset_inventory",
     ];
 
     #[test]
@@ -1123,6 +1127,48 @@ mod tests {
         assert_eq!(dismissed_at, 100, "the row survives a re-run");
     }
 
+    /// 030 on a database stopped at 029: `catalog_config` and
+    /// `asset_inventory` are created and their rows survive a re-run. Both
+    /// statements are `CREATE TABLE IF NOT EXISTS`, so — like 029 — the
+    /// migration needs no `already_applied` guard.
+    #[test]
+    fn migration_030_is_idempotent() {
+        let old = store_at_version(29);
+        old.migrate().expect("030 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        old.conn
+            .execute_batch(
+                "INSERT INTO catalog_config (id, repo_path) VALUES (1, '/tmp/assets');\
+                 INSERT INTO asset_inventory \
+                   (host_alias, harness, kind, name, state, scanned_at) \
+                   VALUES ('local', 'claude', 'skill', 's', 'in_sync', 7);",
+            )
+            .unwrap();
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 30;")
+            .unwrap();
+        old.migrate().expect("re-running 030 is safe");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let repo_path: String = old
+            .conn
+            .query_row(
+                "SELECT repo_path FROM catalog_config WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(repo_path, "/tmp/assets", "the config row survives a re-run");
+        let scanned_at: i64 = old
+            .conn
+            .query_row(
+                "SELECT scanned_at FROM asset_inventory WHERE host_alias='local' AND name='s'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(scanned_at, 7, "the inventory row survives a re-run");
+    }
+
     #[test]
     fn migration_008_adds_lost_at_column() {
         let store = Store::open_in_memory().expect("store");
@@ -1130,7 +1176,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 29, "schema_version should be 29 after migration");
+        assert_eq!(v, 30, "schema_version should be 30 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store

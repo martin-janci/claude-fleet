@@ -688,3 +688,21 @@ pub struct RepairSessionParams {
     #[serde(default)]
     pub confirm_nonce: Option<String>,
 }
+
+// --- asset catalog ---------------------------------------------------------
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ScanAssetsParams {
+    /// Only scan this host alias. Omit to scan every reachable host.
+    #[serde(default)]
+    pub host_alias: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ImportAssetsParams {
+    /// Host to import from. Only `local` (the fleet controller) is supported.
+    pub host_alias: String,
+    /// Report what would be created without writing anything. Default false.
+    #[serde(default)]
+    pub dry_run: bool,
+}

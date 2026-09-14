@@ -11,6 +11,7 @@ use crate::events::{EventBus, NoopEventBus, RowChange};
 use rusqlite::{Connection, OptionalExtension, Result};
 use std::sync::Arc;
 
+mod catalog;
 mod hosts_accounts;
 mod projects;
 mod reconcile;

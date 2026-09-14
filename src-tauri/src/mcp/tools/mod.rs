@@ -16,7 +16,7 @@ use crate::cancel::CancellationRegistry;
 use crate::ipc_error::{codes, IpcError};
 use crate::service::pane_intel::{ClaudeStatus, StuckKind};
 use crate::service::{
-    health, hosts, projects, safe_kill, sessions, tasks, transcript, usage, worktrees,
+    catalog, health, hosts, projects, safe_kill, sessions, tasks, transcript, usage, worktrees,
 };
 use crate::ssh::SshClient;
 use crate::store::Store;
@@ -33,6 +33,7 @@ use rmcp::{
 };
 use std::sync::{Arc, Mutex};
 
+mod assets;
 mod fleet;
 mod lifecycle;
 mod messaging;
@@ -116,6 +117,7 @@ impl FleetTools {
             + Self::messaging_router()
             + Self::orchestration_router()
             + Self::repo_router()
+            + Self::assets_router()
     }
 }
 

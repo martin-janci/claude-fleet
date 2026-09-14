@@ -790,12 +790,28 @@ mod tests {
 
     #[test]
     fn expand_home_local_expands_tilde() {
+        // `HOME` is process-wide and this test never previously restored it,
+        // so once this test ran, every other test in the same (parallel,
+        // multi-threaded) `cargo test` process would see `HOME=/Users/test`
+        // for the rest of the run — a nonexistent directory on Linux. That
+        // silently corrupted anything spawning a real child process that
+        // relies on `$HOME` (e.g. the catalog scan script's `cd "$HOME"`),
+        // which used to fail *open* (an empty-but-"successful" snapshot) and
+        // so never surfaced here; it now fails *closed* (`E_SCAN`) per the
+        // asset-catalog hardening review, which is what actually exposed
+        // this pre-existing hazard. Save and restore the real value so this
+        // test's mutation cannot leak into any other test.
+        let original_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", "/Users/test");
         assert_eq!(
             super::expand_home_local("~/.claude.json").unwrap(),
             "/Users/test/.claude.json"
         );
         assert_eq!(super::expand_home_local("/abs/path").unwrap(), "/abs/path");
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     #[test]

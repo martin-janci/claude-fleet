@@ -818,8 +818,8 @@ fn capture_default_cap_matches_docs() {
 /// `FleetTools::tool_router()`, which both `new()` and the doc generator use.
 /// A block left out of the sum would silently drop its tools from the server
 /// and the reference, so the served count must match the `#[tool(`
-/// attributes in the router files. 57 is the count before the split; bump
-/// it when adding a tool.
+/// attributes in the router files. 57 was the count before the split, 60
+/// with the asset-catalog block; bump it when adding a tool.
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -829,6 +829,7 @@ fn router_sum_serves_every_tool() {
         include_str!("messaging.rs"),
         include_str!("orchestration.rs"),
         include_str!("repo.rs"),
+        include_str!("assets.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -838,6 +839,6 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 57);
+    assert_eq!(served, 60);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }

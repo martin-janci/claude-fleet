@@ -7,7 +7,9 @@
 //! assertion).
 
 use crate::service::account_usage::AccountUsageSnapshot;
-use crate::store::{AccountRow, HostRow, ProjectRow, SessionRow, TaskRow, WorktreeRow};
+use crate::store::{
+    AccountRow, AssetInventoryRow, HostRow, ProjectRow, SessionRow, TaskRow, WorktreeRow,
+};
 use serde::Serialize;
 
 /// A row mutation captured during a batched write (e.g. reconcile's
@@ -39,6 +41,20 @@ pub struct WorktreeRemovedPayload {
     pub id: i64,
 }
 
+#[derive(Serialize, Clone)]
+pub struct AssetInventoryClearedPayload {
+    pub host_alias: String,
+    pub harness: String,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct CatalogSummary {
+    pub head: String,
+    pub loaded_at: i64,
+    pub asset_count: usize,
+    pub problem_count: usize,
+}
+
 pub trait EventBus: Send + Sync {
     fn session_created(&self, row: &SessionRow);
     fn session_updated(&self, row: &SessionRow);
@@ -59,6 +75,18 @@ pub trait EventBus: Send + Sync {
     /// A call the floor turns away (not due, snapshot unchanged) never
     /// reaches this. Default no-op so no existing bus needs to change.
     fn account_usage_updated(&self, _row: &AccountUsageSnapshot) {}
+
+    /// One asset's drift state on one host changed (migration 030). Default
+    /// no-op so no existing bus needs to change.
+    fn asset_inventory_updated(&self, _row: &AssetInventoryRow) {}
+
+    /// Every inventory row for (host, harness) was dropped before a rescan
+    /// writes the new set. Default no-op.
+    fn asset_inventory_cleared(&self, _host_alias: &str, _harness: &str) {}
+
+    /// The catalog repo was (re)loaded; the summary carries its HEAD and
+    /// counts. Not a store row, so it has no `RowChange`. Default no-op.
+    fn catalog_loaded(&self, _summary: &CatalogSummary) {}
 
     /// Flush a single deferred `RowChange` through the matching typed method.
     /// Used by batched (transactional) writes to emit AFTER commit. The
@@ -178,6 +206,21 @@ impl EventBus for AppHandleEventBus {
     fn account_usage_updated(&self, row: &AccountUsageSnapshot) {
         self.queue("account_usage:updated", row);
     }
+    fn asset_inventory_updated(&self, row: &AssetInventoryRow) {
+        self.queue("asset_inventory:updated", row);
+    }
+    fn asset_inventory_cleared(&self, host_alias: &str, harness: &str) {
+        self.queue(
+            "asset_inventory:cleared",
+            &AssetInventoryClearedPayload {
+                host_alias: host_alias.to_string(),
+                harness: harness.to_string(),
+            },
+        );
+    }
+    fn catalog_loaded(&self, summary: &CatalogSummary) {
+        self.queue("catalog:loaded", summary);
+    }
 }
 
 /// Records every event in order. Used in unit tests to assert that a Store
@@ -272,5 +315,23 @@ impl EventBus for RecordingEventBus {
             .lock()
             .unwrap()
             .push(format!("account_usage:updated:{}", r.account_uuid));
+    }
+    fn asset_inventory_updated(&self, r: &AssetInventoryRow) {
+        self.events.lock().unwrap().push(format!(
+            "asset_inventory:updated:{}:{}:{}:{}",
+            r.host_alias, r.harness, r.kind, r.name
+        ));
+    }
+    fn asset_inventory_cleared(&self, host_alias: &str, harness: &str) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("asset_inventory:cleared:{host_alias}:{harness}"));
+    }
+    fn catalog_loaded(&self, s: &CatalogSummary) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("catalog:loaded:{}", s.head));
     }
 }

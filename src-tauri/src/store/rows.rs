@@ -419,6 +419,31 @@ pub struct TaskRow {
     pub worker_claude_session_id: Option<String>,
 }
 
+/// Where the catalog repo lives and its last-loaded HEAD (migration 030).
+/// Singleton row (`id = 1`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CatalogConfigRow {
+    pub repo_path: String,
+    pub remote_url: Option<String>,
+    pub head_commit: Option<String>,
+    pub last_loaded_at: Option<i64>,
+}
+
+/// Drift state of one catalog asset on one host for one harness
+/// (migration 030). `state` is one of in_sync | drifted | missing |
+/// unmanaged | unsupported.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AssetInventoryRow {
+    pub host_alias: String,
+    pub harness: String,
+    pub kind: String,
+    pub name: String,
+    pub state: String,
+    pub catalog_hash: Option<String>,
+    pub host_hash: Option<String>,
+    pub scanned_at: i64,
+}
+
 /// The task state machine: `queued → running → done | failed | cancelled`.
 pub const TASK_STATES: [&str; 5] = ["queued", "running", "done", "failed", "cancelled"];
 /// States a task never leaves.

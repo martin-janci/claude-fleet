@@ -66,6 +66,13 @@ pub const READONLY_TOOLS: &[&str] = &[
     "list_tasks",
     // Estimated token usage / cost roll-up (Wave 5 G1).
     "usage_report",
+    // Asset catalog: `list_assets` reads the catalog + cached inventory.
+    // `scan_assets` is read-only ON THE HOSTS — like `refresh_projects` it
+    // re-reads external state and refreshes the cache rows that describe it,
+    // changing nothing a session or host depends on. `import_assets` WRITES
+    // the controller's catalog repo working tree and is therefore mutating.
+    "list_assets",
+    "scan_assets",
 ];
 
 pub fn is_readonly_tool(name: &str) -> bool {
@@ -482,9 +489,16 @@ mod tests {
             // Writes the session row's label: a mutation, so a readonly
             // token may not call it.
             "set_friendly_name",
+            // Writes IR files into the catalog repo working tree.
+            "import_assets",
             "no_such_tool",
         ] {
             assert!(!is_readonly_tool(t), "{t} must be mutating");
+        }
+        // The catalog reads: `scan_assets` only refreshes cache rows that
+        // describe external state, the same shape as `refresh_projects`.
+        for t in ["list_assets", "scan_assets"] {
+            assert!(is_readonly_tool(t), "{t} must be readonly");
         }
     }
 

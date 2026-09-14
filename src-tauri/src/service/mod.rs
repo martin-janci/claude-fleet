@@ -12,6 +12,7 @@ pub mod account_usage;
 pub mod account_usage_poll;
 pub mod add_project;
 pub mod bg_sessions;
+pub mod catalog;
 pub mod clipboard;
 pub mod diagnostics;
 pub mod gc;

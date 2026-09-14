@@ -69,6 +69,12 @@ Hide or show a host. Hidden hosts are skipped during reconcile. Returns the upda
 
 Parameters: `alias`, `hidden`
 
+### `import_assets`
+
+Import a host's Claude config (~/.claude skills, agents, hooks, ~/.claude.json MCP servers, installed plugins) into the catalog repo working tree as IR assets. Never overwrites; collisions are reported. Only host_alias `local` is supported. Returns the import report as JSON.
+
+Parameters: `dry_run`, `host_alias`
+
 ### `inbox`
 
 Read a session's inbox — messages sent TO session_id, newest-first. Slim rows by default (metadata, reply_to, 80-char body preview); pass summary=false for full bodies. Task results arrive here as kind=task_result. mark_read (default true) flips returned unread rows to read — pass false to peek without consuming. A per-host token may only read inboxes of sessions on its own host (E_FORBIDDEN).
@@ -84,6 +90,10 @@ Parameters: `confirm_nonce`, `force`, `host_alias`, `name`, `session_id`
 ### `list_accounts`
 
 List the cached Claude accounts seen across hosts. Returns JSON.
+
+### `list_assets`
+
+List the asset catalog (skills, agents, hooks, MCP servers, plugin refs) with each asset's per-host drift state from the last scan, plus unmanaged assets found on hosts and catalog parse problems. Requires catalog_configure + catalog_load in the app. Returns JSON.
 
 ### `list_hosts`
 
@@ -267,6 +277,12 @@ Ask a running Claude session to safely persist its work (commit + push), then ar
 
 Parameters: `host_alias`, `session_id`, `tmux_name`
 
+### `scan_assets`
+
+Scan hosts for installed skills/agents/hooks/MCP servers/plugins and recompute each catalog asset's state (in_sync | drifted | missing | unmanaged | unsupported). Read-only on hosts. Returns per-host results as JSON.
+
+Parameters: `host_alias`
+
 ### `send_message`
 
 Send a peer-to-peer message from one session to another. The message is persisted to the recipient's inbox (read with `inbox`); set `deliver: true` to ALSO type the message into the recipient's tmux pane with a `[msg #id from name@host]:` header. The inbox row is the source of truth — it lands even if the pane delivery fails. Returns JSON with the new message id and the delivery outcome. Pass reply_to (an inbox message id) to thread an answer. A per-host token must send from a session on its own host (E_FORBIDDEN). The body is prefixed with an untrusted-content marker line unless raw=true (master token only).
@@ -419,6 +435,14 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mcp::mcp_pending_confirms`
 - `commands::onboarding::check_local_prereqs`
 - `commands::onboarding::tunnel_status`
+- `commands::assets::catalog_config`
+- `commands::assets::catalog_configure`
+- `commands::assets::catalog_load`
+- `commands::assets::catalog_list_assets`
+- `commands::assets::catalog_get_asset`
+- `commands::assets::catalog_import_host`
+- `commands::assets::assets_scan_hosts`
+- `commands::assets::assets_inventory`
 - `pty::pty_open`
 - `pty::pty_write`
 - `pty::pty_resize`
