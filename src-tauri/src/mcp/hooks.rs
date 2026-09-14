@@ -1,17 +1,21 @@
 //! `/hook` endpoint — receives Claude Code hook events and forwards them to
 //! the service layer.
+//!
+//! The route sits behind the same Origin/Host + bearer middleware as `/mcp`
+//! (see `mcp::start`); the middleware puts the authenticated [`Caller`] into
+//! the request extensions and this handler reads it from there. Hooks are
+//! installed as Claude Code `type: "http"` hooks carrying
+//! `Authorization: Bearer <per-host token>` (see
+//! `commands::mcp::merge_hook_into_settings_json`), so the token never
+//! appears in a process argv. The legacy `?token=` query form written by
+//! older installs is still accepted by the middleware until every host is
+//! re-provisioned.
 
-use axum::{
-    extract::{Query, State},
-    http::StatusCode,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, Extension, Json};
 use serde::Deserialize;
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
+use super::auth::Caller;
 use crate::ssh::SshClient;
 use crate::store::Store;
 
@@ -20,7 +24,6 @@ use crate::store::Store;
 pub struct HookState {
     pub store: Arc<Mutex<Store>>,
     pub ssh: Arc<SshClient>,
-    pub token: Arc<String>,
 }
 
 /// Body deserialized from a POST to `/hook`.
@@ -38,46 +41,47 @@ pub struct HookPayload {
     pub tool_input: Option<serde_json::Value>,
     pub tool_response: Option<serde_json::Value>,
     pub cwd: Option<String>,
+    /// Absolute path of the session's JSONL transcript. Claude Code sends it
+    /// in every hook body; fleet stores it (after validation) and prefers it
+    /// over any path derived from the cwd.
+    pub transcript_path: Option<String>,
 }
 
-/// Constant-time comparison of two token strings.
-///
-/// Returns `false` immediately if either string is empty, preventing
-/// acceptance of blank tokens regardless of configuration.
-pub fn check_query_token(expected: &str, provided: &str) -> bool {
-    if provided.is_empty() || expected.is_empty() {
-        return false;
-    }
-    provided.len() == expected.len()
-        && provided
-            .bytes()
-            .zip(expected.bytes())
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            == 0
-}
-
-/// Axum handler for `POST /hook?token=<token>`.
-///
-/// Validates the query-param token, then delegates to
-/// [`crate::service::hooks::apply_hook`].
+/// Axum handler for `POST /hook`. Auth has already happened in the
+/// middleware; the [`Caller`] extension says which host's token signed the
+/// request (or the master token).
 pub async fn handle_hook(
-    Query(params): Query<HashMap<String, String>>,
     State(state): State<HookState>,
+    Extension(caller): Extension<Caller>,
     Json(payload): Json<HookPayload>,
 ) -> StatusCode {
-    let provided = params.get("token").map(String::as_str).unwrap_or("");
-    if !check_query_token(&state.token, provided) {
-        eprintln!("[hook] rejected: bad token");
-        return StatusCode::UNAUTHORIZED;
-    }
-    eprintln!(
-        "[hook] event={:?} session={:?} tool={:?}",
-        payload.hook_event_name, payload.session_id, payload.tool_name
+    use crate::ipc_error::codes;
+    // Every hook event lands here (several per turn): debug, not info. Only
+    // identifiers are logged, never the payload body.
+    tracing::debug!(
+        caller = %caller.label(),
+        event = ?payload.hook_event_name,
+        session = ?payload.session_id,
+        tool = ?payload.tool_name,
+        "[hook] received"
     );
-    match crate::service::hooks::apply_hook(&state.store, &state.ssh, &payload) {
+    match crate::service::hooks::apply_hook(&state.store, &state.ssh, &payload, &caller) {
         Ok(()) => StatusCode::NO_CONTENT,
+        Err(e) if e.code == codes::E_VALIDATE || e.code == codes::E_INVALID => {
+            tracing::warn!(code = %e.code, error = %e.message, "[hook] rejected payload");
+            StatusCode::BAD_REQUEST
+        }
+        Err(e) if e.code == codes::E_FORBIDDEN => {
+            tracing::warn!(
+                caller = %caller.label(),
+                code = %e.code,
+                error = %e.message,
+                "[hook] refused"
+            );
+            StatusCode::FORBIDDEN
+        }
         Err(e) => {
-            eprintln!("[hook] apply_hook error: {} {}", e.code, e.message);
+            tracing::error!(code = %e.code, error = %e.message, "[hook] apply_hook failed");
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
@@ -115,24 +119,31 @@ mod tests {
     }
 
     #[test]
+    fn transcript_path_and_enter_worktree_response_deserialize() {
+        let json = r#"{
+            "session_id":"s1",
+            "hook_event_name":"PostToolUse",
+            "tool_name":"EnterWorktree",
+            "tool_input":{"name":"feat"},
+            "tool_response":{"worktreePath":"/home/u/proj/.claude/worktrees/feat","branch":"feat"},
+            "transcript_path":"/home/u/.claude/projects/-home-u-proj/s1.jsonl"
+        }"#;
+        let p: HookPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(p.tool_name.as_deref(), Some("EnterWorktree"));
+        assert_eq!(
+            p.transcript_path.as_deref(),
+            Some("/home/u/.claude/projects/-home-u-proj/s1.jsonl")
+        );
+        assert_eq!(
+            p.tool_response.unwrap()["worktreePath"],
+            "/home/u/proj/.claude/worktrees/feat"
+        );
+    }
+
+    #[test]
     fn extra_fields_are_ignored() {
         let json = r#"{"unknown_future_field":"x","session_id":"s1"}"#;
         let p: HookPayload = serde_json::from_str(json).unwrap();
         assert_eq!(p.session_id.as_deref(), Some("s1"));
-    }
-
-    #[test]
-    fn check_query_token_correct() {
-        assert!(check_query_token("mysecret", "mysecret"));
-    }
-
-    #[test]
-    fn check_query_token_wrong() {
-        assert!(!check_query_token("mysecret", "wrong"));
-    }
-
-    #[test]
-    fn check_query_token_empty_provided_rejected() {
-        assert!(!check_query_token("mysecret", ""));
     }
 }

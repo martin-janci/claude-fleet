@@ -87,9 +87,10 @@ export async function hideHost(
   return r;
 }
 
-export async function bootstrapHosts(): Promise<void> {
+export async function bootstrapHosts(): Promise<Result<HostRow[]>> {
   const r = await invokeCmd<HostRow[]>('list_hosts');
   if (r.ok) hosts.set(r.value);
+  return r;
 }
 
 // Recently-removed host aliases. `removeHost()` (optimistic) and the
@@ -98,6 +99,12 @@ export async function bootstrapHosts(): Promise<void> {
 // expire so re-adding a host with the same alias isn't blocked for long.
 const hostTombstones = new Map<string, number>();
 const HOST_TOMBSTONE_MS = 5000;
+
+/** Test hook: forget every tombstone (see `resetTombstonesForTests` in
+ *  sessions.ts). Not for production code. */
+export function resetTombstonesForTests(): void {
+  hostTombstones.clear();
+}
 
 function isHostTombstoned(alias: string): boolean {
   const t = hostTombstones.get(alias);
@@ -109,18 +116,44 @@ function isHostTombstoned(alias: string): boolean {
   return true;
 }
 
+function mergeInto(arr: HostRow[], row: HostRow): HostRow[] {
+  if (isHostTombstoned(row.alias)) return arr;
+  const i = arr.findIndex((h) => h.alias === row.alias);
+  if (i === -1) return [...arr, row];
+  const next = arr.slice();
+  next[i] = row;
+  return next;
+}
+
+function removeFrom(arr: HostRow[], alias: string): HostRow[] {
+  hostTombstones.set(alias, Date.now());
+  const next = arr.filter((h) => h.alias !== alias);
+  return next.length === arr.length ? arr : next;
+}
+
 export function mergeHost(row: HostRow): void {
   if (isHostTombstoned(row.alias)) return;
-  hosts.update((arr) => {
-    const i = arr.findIndex((h) => h.alias === row.alias);
-    if (i === -1) return [...arr, row];
-    const next = arr.slice();
-    next[i] = row;
-    return next;
-  });
+  hosts.update((arr) => mergeInto(arr, row));
 }
 
 export function removeHost(alias: string): void {
-  hostTombstones.set(alias, Date.now());
-  hosts.update((arr) => arr.filter((h) => h.alias !== alias));
+  hosts.update((arr) => removeFrom(arr, alias));
+}
+
+/** One backend host event, as delivered by `events.ts`. */
+export type HostEvent =
+  | { type: 'added' | 'probed'; row: HostRow }
+  | { type: 'removed'; alias: string };
+
+/** Apply a burst of host events in ONE store update, in order (see
+ *  `applySessionEvents` for the rationale). */
+export function applyHostEvents(events: readonly HostEvent[]): void {
+  if (events.length === 0) return;
+  hosts.update((arr) => {
+    let next = arr;
+    for (const ev of events) {
+      next = ev.type === 'removed' ? removeFrom(next, ev.alias) : mergeInto(next, ev.row);
+    }
+    return next;
+  });
 }

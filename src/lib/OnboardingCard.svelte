@@ -1,8 +1,9 @@
 <script lang="ts">
   import { hosts } from './hosts';
   import { projects, refreshProjects } from './projects';
-  import { sessions } from './sessions';
+  import { sessions, hasNoPane } from './sessions';
   import { mcpStatus, mcpConfigure, mcpClientConfig, provisionHosts, type McpStatus } from './mcp';
+  import { copyText } from './clipboard';
   import {
     deriveSteps,
     allRequiredComplete,
@@ -41,7 +42,7 @@
   });
 
   const visibleHosts = $derived($hosts.filter((h) => !h.hidden));
-  const workSessions = $derived($sessions.filter((s) => s.kind !== 'bg'));
+  const workSessions = $derived($sessions.filter((s) => !hasNoPane(s)));
 
   const steps = $derived(
     deriveSteps({
@@ -101,14 +102,6 @@
 
   function maskToken(t: string): string {
     return t.length > 4 ? '••••••••••••' + t.slice(-4) : '••••';
-  }
-
-  async function copyText(text: string) {
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      /* clipboard unavailable — no-op */
-    }
   }
 
   function dismiss() {

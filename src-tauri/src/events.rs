@@ -6,7 +6,10 @@
 //! `NoopEventBus` (silent) or `RecordingEventBus` (captures every emit for
 //! assertion).
 
-use crate::store::{AccountRow, AssetInventoryRow, HostRow, ProjectRow, SessionRow, WorktreeRow};
+use crate::service::account_usage::AccountUsageSnapshot;
+use crate::store::{
+    AccountRow, AssetInventoryRow, HostRow, ProjectRow, SessionRow, TaskRow, WorktreeRow,
+};
 use serde::Serialize;
 
 /// A row mutation captured during a batched write (e.g. reconcile's
@@ -63,9 +66,27 @@ pub trait EventBus: Send + Sync {
     fn project_updated(&self, row: &ProjectRow);
     fn worktree_updated(&self, row: &WorktreeRow);
     fn worktree_removed(&self, id: i64);
-    fn asset_inventory_updated(&self, row: &AssetInventoryRow);
-    fn asset_inventory_cleared(&self, host_alias: &str, harness: &str);
-    fn catalog_loaded(&self, summary: &CatalogSummary);
+    /// A task row was created or changed state (migration 020). There is no
+    /// `task:removed` — tasks only ever move to a terminal state.
+    fn task_updated(&self, row: &TaskRow);
+
+    /// An account's usage snapshot changed (Task 4): a fetch that was due
+    /// completed with a result different from what the cache already held.
+    /// A call the floor turns away (not due, snapshot unchanged) never
+    /// reaches this. Default no-op so no existing bus needs to change.
+    fn account_usage_updated(&self, _row: &AccountUsageSnapshot) {}
+
+    /// One asset's drift state on one host changed (migration 030). Default
+    /// no-op so no existing bus needs to change.
+    fn asset_inventory_updated(&self, _row: &AssetInventoryRow) {}
+
+    /// Every inventory row for (host, harness) was dropped before a rescan
+    /// writes the new set. Default no-op.
+    fn asset_inventory_cleared(&self, _host_alias: &str, _harness: &str) {}
+
+    /// The catalog repo was (re)loaded; the summary carries its HEAD and
+    /// counts. Not a store row, so it has no `RowChange`. Default no-op.
+    fn catalog_loaded(&self, _summary: &CatalogSummary) {}
 
     /// Flush a single deferred `RowChange` through the matching typed method.
     /// Used by batched (transactional) writes to emit AFTER commit. The
@@ -96,9 +117,7 @@ impl EventBus for NoopEventBus {
     fn project_updated(&self, _: &ProjectRow) {}
     fn worktree_updated(&self, _: &WorktreeRow) {}
     fn worktree_removed(&self, _: i64) {}
-    fn asset_inventory_updated(&self, _: &AssetInventoryRow) {}
-    fn asset_inventory_cleared(&self, _: &str, _: &str) {}
-    fn catalog_loaded(&self, _: &CatalogSummary) {}
+    fn task_updated(&self, _: &TaskRow) {}
 }
 
 /// Production event bus: forwards every event to the Tauri frontend.
@@ -180,6 +199,12 @@ impl EventBus for AppHandleEventBus {
     }
     fn worktree_removed(&self, id: i64) {
         self.queue("worktree:removed", &WorktreeRemovedPayload { id });
+    }
+    fn task_updated(&self, row: &TaskRow) {
+        self.queue("task:updated", row);
+    }
+    fn account_usage_updated(&self, row: &AccountUsageSnapshot) {
+        self.queue("account_usage:updated", row);
     }
     fn asset_inventory_updated(&self, row: &AssetInventoryRow) {
         self.queue("asset_inventory:updated", row);
@@ -278,6 +303,18 @@ impl EventBus for RecordingEventBus {
             .lock()
             .unwrap()
             .push(format!("worktree:removed:{}", id));
+    }
+    fn task_updated(&self, r: &TaskRow) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("task:updated:{}:{}", r.id, r.state));
+    }
+    fn account_usage_updated(&self, r: &AccountUsageSnapshot) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("account_usage:updated:{}", r.account_uuid));
     }
     fn asset_inventory_updated(&self, r: &AssetInventoryRow) {
         self.events.lock().unwrap().push(format!(

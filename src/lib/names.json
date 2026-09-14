@@ -1,0 +1,31 @@
+{
+  "adjectives": [
+    "amber", "azure", "blue", "bold", "brave", "bright", "bronze", "calm",
+    "cobalt", "coral", "cosmic", "crimson", "crisp", "dusky", "eager", "ember",
+    "fair", "gentle", "gilded", "golden", "green", "hazy", "indigo", "ivory",
+    "jade", "keen", "lively", "lucid", "lunar", "mellow", "misty", "nimble",
+    "noble", "ochre", "olive", "opal", "pale", "pearl", "plum", "proud",
+    "quick", "quiet", "rapid", "rosy", "ruby", "rustic", "sable", "saffron",
+    "scarlet", "serene", "silent", "silver", "sleek", "solar", "steady", "sunny",
+    "swift", "teal", "tidy", "umber", "velvet", "violet", "vivid", "warm",
+    "wild", "witty", "zesty"
+  ],
+  "nouns": [
+    "sirius", "vega", "rigel", "deneb", "altair", "antares", "polaris", "arcturus",
+    "capella", "castor", "pollux", "spica", "procyon", "regulus", "canopus", "achernar",
+    "hadar", "adhara", "alioth", "dubhe", "merak", "phecda", "megrez", "alkaid",
+    "thuban", "albireo", "sheliak", "izar", "kochab", "naos", "saiph", "wezen",
+    "mimosa", "acrux", "gacrux", "mira", "alcor", "mizar", "algol", "alnilam",
+    "alnitak", "orion", "lyra", "cygnus", "aquila", "draco", "vela", "carina",
+    "puppis", "pyxis", "crux", "corvus", "lacerta", "lynx", "pavo", "phoenix",
+    "tucana", "volans", "dorado", "grus", "indus", "octans", "pictor", "fornax",
+    "caelum", "columba", "auriga", "bootes", "cepheus", "cetus", "perseus", "pegasus",
+    "hercules", "serpens", "scutum", "sagitta", "leo", "virgo", "libra", "aries",
+    "taurus", "gemini", "pisces", "aquarius", "comet", "nebula", "quasar", "pulsar",
+    "nova", "meteor", "aurora", "zenith", "orbit", "halo", "corona", "eclipse",
+    "galaxy", "cosmos", "photon", "luna", "terra", "mars", "venus", "saturn",
+    "jupiter", "mercury", "neptune", "pluto", "titan", "europa", "callisto", "ganymede",
+    "phobos", "deimos", "triton", "charon", "ceres", "vesta", "pallas", "juno",
+    "atlas", "helios", "selene", "zephyr"
+  ]
+}

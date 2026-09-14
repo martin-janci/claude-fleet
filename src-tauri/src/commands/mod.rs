@@ -1,13 +1,17 @@
+pub mod account_usage;
 pub mod assets;
+pub mod diagnostics;
 pub mod files;
 pub mod health;
 pub mod history;
 pub mod hosts;
 pub mod mcp;
+pub mod move_session;
 pub mod mutate;
 pub mod onboarding;
 pub mod projects;
 pub mod repo;
 pub mod sessions;
+pub mod tasks;
 pub mod upload;
 pub mod worktrees;

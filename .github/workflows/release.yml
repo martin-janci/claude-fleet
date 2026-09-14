@@ -1,0 +1,135 @@
+name: release
+
+# Builds the desktop bundles and attaches them to a *draft* GitHub Release.
+#
+# Trigger: pushing the `vX.Y.Z` tag that `scripts/release.sh` creates
+# (`git push origin main --follow-tags`). `workflow_dispatch` is a manual
+# re-run: pick the tag under "Use workflow from". Both jobs are gated on
+# `github.ref_type == 'tag'`, so dispatching from a branch is a no-op rather
+# than creating a draft named after the branch. The draft is published by
+# hand by the repo owner after checking the assets; publishing it fires
+# docs.yml (release: published).
+#
+# `create-release` creates the draft exactly once (or reuses an existing
+# draft for the same tag on a re-run) and passes its id to the three build
+# legs, so concurrent legs never race to create duplicate drafts.
+#
+# CODE SIGNING IS INTENTIONALLY ABSENT. There is no Apple Developer ID
+# (and no Windows certificate) for this project yet, so nothing here is
+# signed or notarized. Consequences:
+#   - macOS Gatekeeper refuses the .app/.dmg on first launch. Users must
+#     right-click the app and choose "Open", or clear the quarantine flag:
+#       xattr -d com.apple.quarantine /Applications/claude-fleet.app
+#   - The Linux AppImage/.deb are unsigned; that is normal for those formats.
+# When a Developer ID exists, add APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD
+# / APPLE_SIGNING_IDENTITY / APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID secrets
+# and pass them through `env:` on the tauri-action step (see
+# https://v2.tauri.app/distribute/sign/macos/). Do not add ad-hoc signing
+# here; it would give users a false sense of provenance.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# One release run per tag at a time; a second push of the same tag queues
+# behind the first instead of racing it for the draft's assets.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  create-release:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    outputs:
+      release_id: ${{ steps.draft.outputs.result }}
+    steps:
+      - name: Create (or reuse) the draft release for this tag
+        id: draft
+        uses: actions/github-script@v7
+        with:
+          result-encoding: string
+          script: |
+            const tag = context.ref.replace(/^refs\/tags\//, '');
+            const { owner, repo } = context.repo;
+            // getReleaseByTag() does not return drafts, so scan the list.
+            const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
+            const existing = releases.find(r => r.tag_name === tag && r.draft);
+            if (existing) {
+              core.info(`Reusing existing draft release ${existing.id} for ${tag}`);
+              return existing.id;
+            }
+            const body = [
+              'Unsigned builds (no Apple Developer ID yet). On macOS, right-click the app and choose Open, or run `xattr -d com.apple.quarantine /Applications/claude-fleet.app`.',
+              '',
+              `Release notes: see the matching section of [CHANGELOG.md](https://github.com/${owner}/${repo}/blob/${tag}/CHANGELOG.md).`,
+            ].join('\n');
+            const { data } = await github.rest.repos.createRelease({
+              owner, repo,
+              tag_name: tag,
+              name: `claude-fleet ${tag}`,
+              body,
+              draft: true,
+              prerelease: false,
+            });
+            core.info(`Created draft release ${data.id} for ${tag}`);
+            return data.id;
+
+  build:
+    if: github.ref_type == 'tag'
+    needs: create-release
+    name: bundle (${{ matrix.os }}${{ matrix.target && format(', {0}', matrix.target) || '' }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            args: '--target aarch64-apple-darwin'
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            args: '--target x86_64-apple-darwin'
+          - os: ubuntu-24.04
+            target: ''
+            args: '--bundles appimage,deb'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # Same package list as ci.yml; keep them in sync.
+      - name: Install Tauri Linux prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev \
+            libssl-dev libayatana-appindicator3-dev librsvg2-dev \
+            libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev pkg-config
+      # pnpm version comes from "packageManager" in package.json.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Add cross-compile target
+        if: matrix.target != ''
+        run: rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.os }}-${{ matrix.target || 'native' }}
+      - run: pnpm install --frozen-lockfile
+      # tauri-action runs `beforeBuildCommand` (pnpm build) from
+      # src-tauri/tauri.conf.json, then `cargo tauri build`, and uploads the
+      # bundles to the draft created by the create-release job. All matrix
+      # legs attach to that same draft.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          args: ${{ matrix.args }}

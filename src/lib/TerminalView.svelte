@@ -3,12 +3,18 @@
   import { invoke } from '@tauri-apps/api/core';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { selectedSession } from './selection';
-  import { Screen, rowToRuns, colorToCss, encodeMouse, type Run } from './ansi';
-  import { sanitizePaste, framePaste } from './clipboard';
+  import { Screen, rowToRuns, colorToCss, type Run } from './ansi';
   import { pointInRect } from './geometry';
   import { selectionRects, type CellPos } from './terminal_selection';
-  import { nativeWriteText, nativeReadText } from './clipboard_native';
+  import { nativeWriteText } from './clipboard_native';
   import { hintAnchor } from './hints';
+  import { toIpcError } from './result';
+  import { push, pushError } from './toasts';
+  import { repairSession, hasNoPane } from './sessions';
+  import { keyToBytes, detectMac } from './terminal_keys';
+  import { createDrainLoop } from './terminal_drain';
+  import { createTerminalClipboard, pathsToPasteText } from './terminal_clipboard';
+  import { createMouseController } from './terminal_mouse';
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -19,12 +25,14 @@
   // branch `main` around 2026-05). Instead we maintain a virtual screen
   // buffer (`./ansi.ts`) and render it as styled `<div>` rows, which is
   // dirt-simple DOM that we can prove repaints. Tradeoffs:
-  //   - No mouse tracking, no application keypad, no scrollback beyond
-  //     what tmux's own scroll buffer can show with C-b [.
-  //   - No wide-glyph (CJK / emoji) width fixups.
-  //   - Keyboard input is forwarded as raw bytes; we translate the most
-  //     common keys (Enter/Backspace/arrows/Ctrl-*) and let everything
-  //     else go via printable character.
+  //   - No scrollback beyond what tmux's own scroll buffer can show with
+  //     C-b [.
+  //   - Keyboard input is forwarded as raw bytes via the xterm key table in
+  //     `./terminal_keys.ts` (arrows/Home/End/Ins/Del/F-keys with modifiers,
+  //     Ctrl chords, Alt/Option as an ESC prefix).
+  //   - Selection follows text-input conventions (`./terminal_mouse.ts` +
+  //     `./terminal_selection.ts`): drag, double-click word, triple-click
+  //     line, Shift+click extend; typing drops the highlight.
   // For our use case (tmux + claude TUI legibly visible in-app) these
   // limits are acceptable.
   // ─────────────────────────────────────────────────────────────────────
@@ -35,16 +43,25 @@
   /** Bumped after every screen.write() so the reactive view recomputes. */
   let renderVersion = $state(0);
   let resizeObserver: ResizeObserver | null = null;
-  // Drain loop: a self-rescheduling setTimeout (not setInterval) so a slow
-  // pty_drain round-trip can't pile up concurrent calls. The delay backs off
-  // adaptively — an idle terminal polls slowly, any output snaps it back to
-  // full rate — so an attached-but-quiet session costs almost nothing.
-  const DRAIN_MIN_MS = 30;
-  const DRAIN_MAX_MS = 250;
-  let drainTimer: ReturnType<typeof setTimeout> | null = null;
-  let drainDelay = DRAIN_MIN_MS;
+  // The attached PTY's identity. BOTH parts are compared by the open/attach
+  // guard: a tmux_name alone is ambiguous across hosts (default names are
+  // project-derived, so host A and host B often run a same-named session),
+  // and selecting the twin must reattach rather than silently keep showing
+  // the other host's terminal.
   let currentSession: string | null = $state(null);
   let currentHost: string | null = $state(null);
+
+  function isAttachedTo(sess: { tmux_name: string; host_alias: string } | null | undefined): boolean {
+    return !!sess && sess.tmux_name === currentSession && sess.host_alias === currentHost;
+  }
+
+  /** Forward bytes to the PTY. A rejection (PTY gone, host dropped) used to be
+   *  swallowed; now it surfaces once — the toast store dedupes repeats. */
+  function writePty(data: string) {
+    void invoke('pty_write', { args: { data } }).catch((e) => {
+      pushError(toIpcError(e), 'Terminal input failed');
+    });
+  }
   /** Drop-overlay state: shown while a drag is over the grid, switched to a
    *  spinner during the upload. */
   let dragOver = $state(false);
@@ -54,9 +71,16 @@
    *  old window.getSelection() path). */
   let selAnchor: CellPos | null = $state(null);
   let selFocus: CellPos | null = $state(null);
-  /** True while a drag-select is in progress (between mousedown and mouseup). */
-  let selecting = false;
   let openError: string | null = $state(null);
+  /** Keyboard focus is on the grid. Drives the cursor's look: a solid block
+   *  when focused, a hollow outline when not — so it is always clear where
+   *  typing will land, as with a text input's caret. */
+  let focused = $state(false);
+  /** Bumped on every keystroke / paste that reaches the PTY. The cursor
+   *  element is keyed on it so its blink animation restarts from the visible
+   *  phase — a caret that stays solid while you type and only blinks when
+   *  idle, as in a text input. */
+  let blinkEpoch = $state(0);
   /** Context-menu position (client px) or null when hidden. */
   let ctxMenu: { x: number; y: number } | null = $state(null);
   let ptyOpen = false;
@@ -82,71 +106,39 @@
   const MAX_AUTO_RECONNECT = 3;
   const AUTO_RECONNECT_BASE_MS = 600;
 
-  // ─── Mouse forwarding state ───────────────────────────────────────────
-  /** Which button (0/1/2, encoded as cb) is currently pressed. Null = none. */
-  let pressedButton: number | null = null;
-  /** When mouse reporting is on, a left press is deferred until we know whether
-   *  it becomes a drag (→ local selection) or a click (→ forward to the app). */
-  let pendingPress: { cell: CellPos; startX: number; startY: number } | null = null;
-  /** The last cell (1-based col, row) for which we sent a motion report,
-   *  used to throttle: we only send a new report when the cell changes. */
-  let lastMotionCell: { col: number; row: number } | null = null;
-  /** Cleanup functions for the window-level mousemove/mouseup listeners added
-   *  on mousedown. Removed on mouseup or component destroy. */
-  let removeWindowListeners: (() => void) | null = null;
-  /** Accumulated (pixel-normalized) wheel delta not yet turned into reports.
-   *  We forward one wheel report per WHEEL_TICK_PX of scroll instead of one
-   *  per event, so trackpads (many tiny deltas) don't flood tmux and line-mode
-   *  wheels still register — smooth, proportional scrolling either way. */
-  let wheelAccum = 0;
-  const WHEEL_TICK_PX = 40;
-  /** Pointer travel (px) before a deferred left-press promotes to a selection. */
-  const DRAG_PX = 4;
+  const drain = createDrainLoop({
+    drainOnce,
+    attached: () => !!screen && ptyOpen,
+  });
+  const { bumpDrain } = drain;
 
-  /** Map a MouseEvent's client coordinates to a 1-based terminal cell,
-   *  clamped to the visible grid. Accounts for the 4px left/top padding. */
-  function eventToCell(e: MouseEvent): { col: number; row: number } {
-    const rect = container!.getBoundingClientRect();
-    const col = Math.max(1, Math.min(lastCols,
-      Math.floor((e.clientX - rect.left - 4) / cellWidth) + 1));
-    const row = Math.max(1, Math.min(lastRows,
-      Math.floor((e.clientY - rect.top - 4) / cellHeight) + 1));
-    return { col, row };
-  }
+  const { sendPaste, copySelection, pasteFromClipboard } = createTerminalClipboard({
+    ptyOpen: () => ptyOpen,
+    screen: () => screen,
+    selAnchor: () => selAnchor,
+    selFocus: () => selFocus,
+    setOpenError: (message) => (openError = message),
+    writePty,
+    bumpDrain,
+  });
 
-  /** Write a mouse escape sequence to the PTY. */
-  function sendMouse(data: string) {
-    void invoke('pty_write', { args: { data } }).catch(() => {});
-  }
-
-  /** Send text to the PTY as a paste: strip any embedded paste-end marker,
-   *  then frame in bracketed-paste markers if the app requested mode 2004.
-   *  Shared by Cmd+V and the drag-drop path. */
-  function sendPaste(text: string) {
-    if (!ptyOpen) return;
-    const clean = sanitizePaste(text);
-    if (clean === '') return;
-    const framed = framePaste(clean, screen?.bracketedPaste ?? false);
-    void invoke('pty_write', { args: { data: framed } }).catch(() => {});
-    bumpDrain();
-  }
-
-  /** Copy the current selection to the native clipboard. No-op if empty. */
-  async function copySelection() {
-    if (!screen || !selAnchor || !selFocus) return;
-    const text = screen.selectionText(selAnchor, selFocus);
-    if (text === '') return;
-    const r = await nativeWriteText(text);
-    if (!r.ok) openError = `Copy failed: ${r.error.message}`;
-  }
-
-  /** Paste the native clipboard into the PTY (bracketed-paste framing happens
-   *  in sendPaste). Shared by Cmd+V and the context-menu Paste item. */
-  async function pasteFromClipboard() {
-    const r = await nativeReadText();
-    if (r.ok) sendPaste(r.value);
-    else openError = `Paste failed: ${r.error.message}`;
-  }
+  const mouse = createMouseController({
+    ptyOpen: () => ptyOpen,
+    screen: () => screen,
+    container: () => container,
+    lastCols: () => lastCols,
+    lastRows: () => lastRows,
+    cellWidth: () => cellWidth,
+    cellHeight: () => cellHeight,
+    selAnchor: () => selAnchor,
+    selFocus: () => selFocus,
+    setSelAnchor: (cell) => (selAnchor = cell),
+    setSelFocus: (cell) => (selFocus = cell),
+    clearSelection,
+    copySelection,
+    writePty,
+  });
+  const { onWheel, onMousedown } = mouse;
 
   function onContextMenu(e: MouseEvent) {
     if (!ptyOpen) return;
@@ -168,6 +160,14 @@
 
   async function ctxPaste() {
     closeCtxMenu();
+    await paste();
+  }
+
+  /** Paste from the native clipboard. Input replaces the selection in a text
+   *  input; here it simply drops the highlight and restarts the caret blink. */
+  async function paste() {
+    clearSelection();
+    blinkEpoch++;
     await pasteFromClipboard();
   }
 
@@ -175,12 +175,6 @@
     closeCtxMenu();
     selAnchor = { row: 0, col: 0 };
     selFocus = { row: lastRows - 1, col: lastCols - 1 };
-  }
-
-  /** Convert a 1-based eventToCell result to a 0-based grid cell. */
-  function cellFromEvent(e: MouseEvent): CellPos {
-    const { col, row } = eventToCell(e);
-    return { row: row - 1, col: col - 1 };
   }
 
   function clearSelection() {
@@ -195,18 +189,6 @@
   function pointOverGrid(px: number, py: number): boolean {
     if (!container) return false;
     return pointInRect(px, py, container.getBoundingClientRect());
-  }
-
-  /** Build the prompt text for a set of uploaded remote paths: space-joined,
-   *  POSIX single-quoted (embedded quotes escaped as '\'') when a path
-   *  contains whitespace or a quote, trailing space so the user can keep
-   *  typing. */
-  function pathsToPasteText(paths: string[]): string {
-    return (
-      paths
-        .map((p) => (/[\s']/.test(p) ? `'${p.replace(/'/g, "'\\''")}'` : p))
-        .join(' ') + ' '
-    );
   }
 
   async function handleDrop(paths: string[]) {
@@ -224,189 +206,13 @@
     }
   }
 
-  function onWheel(e: WheelEvent) {
-    if (e.altKey) return;
-    if (!ptyOpen || !screen || !screen.mouseEnabled) return;
-    e.preventDefault();
-    // Normalize the delta to pixels across deltaMode (0=px, 1=lines, 2=pages)
-    // so wheels and trackpads accumulate on the same scale.
-    const line = cellHeight || 16;
-    let dy = e.deltaY;
-    if (e.deltaMode === 1) dy *= line;
-    else if (e.deltaMode === 2) dy *= line * (lastRows || 24);
-    // Reset on direction change so a flip registers immediately.
-    if ((dy < 0 && wheelAccum > 0) || (dy > 0 && wheelAccum < 0)) wheelAccum = 0;
-    wheelAccum += dy;
-    const { col, row } = eventToCell(e);
-    const sgr = screen.mouseSgr;
-    // Emit one wheel report per WHEEL_TICK_PX of accumulated scroll. Batch all
-    // reports for this event into a single PTY write; guard caps a pathological
-    // delta at 64 reports.
-    let reports = '';
-    let guard = 0;
-    while (Math.abs(wheelAccum) >= WHEEL_TICK_PX && guard++ < 64) {
-      const up = wheelAccum < 0;
-      reports += encodeMouse(up ? 64 : 65, col, row, false, sgr);
-      wheelAccum += up ? WHEEL_TICK_PX : -WHEEL_TICK_PX;
-    }
-    if (reports) sendMouse(reports);
-  }
-
-  function onMousedown(e: MouseEvent) {
-    if (!ptyOpen || !screen) return;
-    // Right-click is reserved for our context menu (handled by onContextMenu).
-    if (e.button === 2) return;
-    // Left-button only for selection; other buttons fall through to app forwarding.
-    if (e.button === 0 && !screen.mouseEnabled && !e.altKey) {
-      // Plain shell: begin a local drag-selection.
-      e.preventDefault();
-      // Tear down any prior in-progress drag before starting a new one, so a
-      // missed mouseup can't leave a stale handler that wipes this selection.
-      removeWindowListeners?.();
-      (e.currentTarget as HTMLElement | null)?.focus();
-      const cell = cellFromEvent(e);
-      selAnchor = cell;
-      selFocus = cell;
-      selecting = true;
-      const handleMove = (ev: MouseEvent) => {
-        if (!selecting) return;
-        selFocus = cellFromEvent(ev);
-      };
-      const handleUp = () => {
-        if (!selecting) return;
-        selecting = false;
-        removeWindowListeners?.();
-        // Only copy a real drag-selection; a plain click clears any selection.
-        if (
-          selAnchor && selFocus &&
-          (selAnchor.row !== selFocus.row || selAnchor.col !== selFocus.col)
-        ) {
-          void copySelection();
-        } else {
-          clearSelection();
-        }
-      };
-      window.addEventListener('mousemove', handleMove);
-      window.addEventListener('mouseup', handleUp);
-      removeWindowListeners = () => {
-        window.removeEventListener('mousemove', handleMove);
-        window.removeEventListener('mouseup', handleUp);
-        removeWindowListeners = null;
-      };
-      return;
-    }
-    // Mouse reporting ON, left button, no Option → defer: a drag becomes a local
-    // selection, a click (no movement) forwards to the app.
-    if (e.button === 0 && screen.mouseEnabled && !e.altKey) {
-      e.preventDefault();
-      removeWindowListeners?.(); // drop any stale in-progress drag first
-      (e.currentTarget as HTMLElement | null)?.focus();
-      const cell = cellFromEvent(e);
-      pendingPress = { cell, startX: e.clientX, startY: e.clientY };
-      clearSelection();
-      const handleMove = (ev: MouseEvent) => {
-        if (!pendingPress) return;
-        const moved =
-          Math.abs(ev.clientX - pendingPress.startX) > DRAG_PX ||
-          Math.abs(ev.clientY - pendingPress.startY) > DRAG_PX;
-        if (moved && !selecting) {
-          // Promote to a local selection.
-          selecting = true;
-          selAnchor = pendingPress.cell;
-        }
-        if (selecting) selFocus = cellFromEvent(ev);
-      };
-      const handleUp = (ev: MouseEvent) => {
-        removeWindowListeners?.();
-        if (selecting) {
-          selecting = false;
-          void copySelection();
-        } else if (pendingPress) {
-          // No drag → forward a real click (press + release) to the app.
-          const c = cellFromEvent(ev);
-          const sgr = screen!.mouseSgr;
-          // Press + release in one write so the app sees an atomic click.
-          sendMouse(
-            encodeMouse(0, c.col + 1, c.row + 1, false, sgr) +
-              encodeMouse(0, c.col + 1, c.row + 1, true, sgr),
-          );
-        }
-        pendingPress = null;
-      };
-      window.addEventListener('mousemove', handleMove);
-      window.addEventListener('mouseup', handleUp);
-      removeWindowListeners = () => {
-        window.removeEventListener('mousemove', handleMove);
-        window.removeEventListener('mouseup', handleUp);
-        removeWindowListeners = null;
-      };
-      return;
-    }
-    // Not a left-button local-select gesture. Option-held drags and middle/right
-    // buttons fall through to app forwarding below.
-    if (!screen.mouseEnabled) return; // no reporting + not a left-select → ignore
-    // Only forward left (0), middle (1), right (2).
-    if (e.button > 2) return;
-    e.preventDefault();
-    // preventDefault() suppresses the browser's default focus-on-click; focus
-    // the terminal explicitly so keystrokes keep flowing after a mouse-mode click.
-    (e.currentTarget as HTMLElement | null)?.focus();
-    const { col, row } = eventToCell(e);
-    const cb = e.button; // 0=left 1=middle 2=right
-    pressedButton = cb;
-    lastMotionCell = { col, row };
-    const sgr = screen.mouseSgr;
-    sendMouse(encodeMouse(cb, col, row, false, sgr));
-
-    // Attach window-level listeners so we keep tracking if the pointer
-    // leaves the terminal element before the button is released.
-    const handleMove = (ev: MouseEvent) => onWindowMousemove(ev);
-    const handleUp   = (ev: MouseEvent) => onWindowMouseup(ev);
-    window.addEventListener('mousemove', handleMove);
-    window.addEventListener('mouseup', handleUp);
-    removeWindowListeners = () => {
-      window.removeEventListener('mousemove', handleMove);
-      window.removeEventListener('mouseup', handleUp);
-      removeWindowListeners = null;
-    };
-  }
-
-  function onWindowMousemove(e: MouseEvent) {
-    if (!ptyOpen || !screen || pressedButton === null && !screen.mouseAnyMotion) return;
-    const { col, row } = eventToCell(e);
-    // Throttle: only send a report if the cell actually changed.
-    if (lastMotionCell && lastMotionCell.col === col && lastMotionCell.row === row) return;
-    lastMotionCell = { col, row };
-    const sgr = screen.mouseSgr;
-    if (pressedButton !== null && screen.mouseButtonMotion) {
-      // Button held — report as motion with the pressed button.
-      sendMouse(encodeMouse(pressedButton + 32, col, row, false, sgr));
-    } else if (pressedButton === null && screen.mouseAnyMotion) {
-      // No button held — any-motion mode (cb = 3 + 32 = 35).
-      sendMouse(encodeMouse(35, col, row, false, sgr));
-    }
-  }
-
-  function onWindowMouseup(e: MouseEvent) {
-    if (pressedButton === null) return;
-    if (ptyOpen && screen && screen.mouseEnabled && container) {
-      const { col, row } = eventToCell(e);
-      const sgr = screen.mouseSgr;
-      sendMouse(encodeMouse(pressedButton, col, row, true, sgr));
-    }
-    pressedButton = null;
-    lastMotionCell = null;
-    removeWindowListeners?.();
-  }
-
-
   $effect(() => {
     const sess = $selectedSession;
     if (!sess) {
       void closeTerm();
       return;
     }
-    if (sess.tmux_name === currentSession) return;
+    if (isAttachedTo(sess)) return;
     void openTerm();
   });
 
@@ -415,7 +221,7 @@
   // PTY. Required because the first effect above can fire before the
   // <div bind:this> has populated `container`.
   $effect(() => {
-    if (container && $selectedSession && currentSession !== $selectedSession.tmux_name) {
+    if (container && $selectedSession && !isAttachedTo($selectedSession)) {
       void openTerm();
     }
   });
@@ -478,8 +284,7 @@
     screen = new Screen(dim.rows, dim.cols);
     clearSelection();
     // Reset any in-progress drag state so a session switch can't leave it stale.
-    selecting = false;
-    pendingPress = null;
+    mouse.reset();
     screen.onClipboard = (text) => {
       void nativeWriteText(text).then((r) => {
         if (!r.ok) openError = `Clipboard write failed: ${r.error.message}`;
@@ -487,19 +292,44 @@
     };
     renderVersion++;
 
+    // A pane drag fires ResizeObserver every frame; resizing the screen
+    // buffer (a full re-mark of every row) and sending pty_resize (a
+    // SIGWINCH + tmux redraw over SSH) on each one floods the PTY. Debounce
+    // on the trailing edge: only the settled size is applied, and it always
+    // is — the last frame of a drag is never dropped.
     resizeObserver = new ResizeObserver(() => {
-      if (!screen) return;
-      const next = computeDimensions();
-      if (next.cols === lastCols && next.rows === lastRows) return;
-      lastCols = next.cols;
-      lastRows = next.rows;
-      screen.resize(next.rows, next.cols);
-      renderVersion++;
-      if (ptyOpen) {
-        void invoke('pty_resize', { args: { cols: next.cols, rows: next.rows } }).catch(() => {});
-      }
+      if (resizeTimer !== null) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(applyResize, RESIZE_DEBOUNCE_MS);
     });
     resizeObserver.observe(container);
+
+    // Automatic workspace check before attach. It only CREATES what is
+    // confirmed missing: re-adds a deleted, unregistered worktree from its
+    // existing branch, and starts a tmux session that is confirmed dead. It
+    // never respawns a live pane (that would kill a running Claude just
+    // because it was selected), never unregisters, adopts or rebranches —
+    // those are Repair workspace only; we say so instead. A healthy session
+    // costs one probe; orphans and background rows have nothing to check. An
+    // offline host is left to the attach error.
+    if (sess.project_id != null && !hasNoPane(sess)) {
+      const rep = await repairSession(sess.id);
+      if (rep.ok) {
+        const v = rep.value;
+        const actions = v?.actions ?? [];
+        if (actions.length > 0) {
+          const branch = v?.branch_source ? ` [branch: ${v.branch_source}]` : '';
+          push({ kind: 'info', message: `Repaired workspace for ${sess.tmux_name}: ${actions.join('; ')}${branch}` });
+        }
+        if (v?.needs_explicit_repair || v?.tmux_cwd_stale) {
+          push({
+            kind: 'info',
+            message: `${sess.tmux_name} needs Repair workspace: ${(v.warnings ?? []).join('; ')}`,
+          });
+        }
+      } else if (rep.error.code !== 'E_HOST_OFFLINE') {
+        pushError(rep.error, 'Workspace check failed');
+      }
+    }
 
     try {
       await invoke('pty_open', {
@@ -521,8 +351,7 @@
 
     // Start the adaptive drain loop. 30 ms (~33 Hz) is the floor when output
     // is flowing; it backs off to DRAIN_MAX_MS when the terminal is idle.
-    drainDelay = DRAIN_MIN_MS;
-    scheduleDrain();
+    drain.start();
 
     // Hint tmux to redraw at our exact size by re-sending the dimensions
     // once after attach. Defends against race where pty_open runs before
@@ -532,6 +361,23 @@
       void invoke('pty_resize', { args: { cols: lastCols, rows: lastRows } }).catch(() => {});
     }, 150);
     opening = false;
+  }
+
+  const RESIZE_DEBOUNCE_MS = 50;
+  let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function applyResize() {
+    resizeTimer = null;
+    if (!screen) return;
+    const next = computeDimensions();
+    if (next.cols === lastCols && next.rows === lastRows) return;
+    lastCols = next.cols;
+    lastRows = next.rows;
+    screen.resize(next.rows, next.cols);
+    renderVersion++;
+    if (ptyOpen) {
+      void invoke('pty_resize', { args: { cols: next.cols, rows: next.rows } }).catch(() => {});
+    }
   }
 
   function measureCellSize() {
@@ -558,32 +404,6 @@
     };
   }
 
-  function scheduleDrain() {
-    drainTimer = setTimeout(runDrain, drainDelay);
-  }
-
-  /** One drain tick, then reschedule itself. The delay halves to the floor on
-   *  any output and doubles toward DRAIN_MAX_MS when idle. */
-  async function runDrain() {
-    drainTimer = null;
-    const got = await drainOnce();
-    drainDelay = got ? DRAIN_MIN_MS : Math.min(DRAIN_MAX_MS, drainDelay * 2);
-    // Reschedule only if still attached and no newer loop has taken over
-    // (a concurrent openTerm would have set its own drainTimer).
-    if (screen && ptyOpen && drainTimer === null) scheduleDrain();
-  }
-
-  /** Force the loop back to full rate now — called on keypress so typing
-   *  feels responsive even if the terminal had backed off while idle. */
-  function bumpDrain() {
-    drainDelay = DRAIN_MIN_MS;
-    if (drainTimer !== null) {
-      clearTimeout(drainTimer);
-      drainTimer = null;
-      scheduleDrain();
-    }
-  }
-
   /** Drain the PTY buffer once. Returns true if any bytes were consumed. */
   async function drainOnce(): Promise<boolean> {
     if (!screen || !ptyOpen) return false;
@@ -604,6 +424,10 @@
     totalBytes += result.bytes;
     screen.write(result.data);
     renderVersion++;
+    // Answer any terminal queries (DSR cursor position, DA) the output
+    // carried — the parser has no back-channel, so we forward its replies.
+    const reply = screen.takeReplies();
+    if (reply !== '') writePty(reply);
     // Markers injected by the Rust reader thread when the PTY closes (e.g. the
     // SSH child to a remote host died — now within ~10s thanks to the
     // ServerAlive keepalive in pty.rs, instead of hanging silently forever).
@@ -632,12 +456,14 @@
     reconnectAttempts += 1;
     autoReconnecting = true;
     const sessionAtSchedule = currentSession;
+    const hostAtSchedule = currentHost;
     const delay = AUTO_RECONNECT_BASE_MS * reconnectAttempts; // 0.6s, 1.2s, 1.8s
     autoReconnectTimer = setTimeout(() => {
       autoReconnectTimer = null;
       autoReconnecting = false;
       // Bail if the user switched away or detached while we waited.
-      if ($selectedSession?.tmux_name !== sessionAtSchedule) return;
+      const sel = $selectedSession;
+      if (!sel || sel.tmux_name !== sessionAtSchedule || sel.host_alias !== hostAtSchedule) return;
       void openTerm(true);
     }, delay);
   }
@@ -664,19 +490,20 @@
     // mount-time effect fires closeTerm() against a fresh component,
     // unconditionally writes state ($state assignments), and Svelte 5's
     // reactivity scheduler treats the cascade as an effect-update loop.
-    const hadAnything = screen !== null || ptyOpen || drainTimer !== null || resizeObserver !== null;
+    const hadAnything =
+      screen !== null || ptyOpen || drain.pending() || resizeObserver !== null || resizeTimer !== null;
     if (!hadAnything) return;
 
     // Drop the context menu so a session switch can't leave the backdrop stuck.
     ctxMenu = null;
 
-    if (drainTimer) {
-      clearTimeout(drainTimer);
-      drainTimer = null;
-    }
-    drainDelay = DRAIN_MIN_MS;
+    drain.stop();
     resizeObserver?.disconnect();
     resizeObserver = null;
+    if (resizeTimer !== null) {
+      clearTimeout(resizeTimer);
+      resizeTimer = null;
+    }
     screen = null;
     lastCols = 0;
     lastRows = 0;
@@ -692,40 +519,13 @@
       }
     }
     currentSession = null;
+    currentHost = null;
   }
 
-  /** Translate a KeyboardEvent into the byte sequence a real terminal would
-   *  send. Returns null for keys we choose not to forward (e.g. F-keys).
-   *  This is intentionally minimal — most apps only need printable chars,
-   *  Enter, Backspace, Tab, arrows, and Ctrl-letter chords. */
-  function keyToBytes(e: KeyboardEvent): string | null {
-    if (e.key === 'Enter') return '\r';
-    if (e.key === 'Backspace') return '\x7f';
-    if (e.key === 'Tab') return e.shiftKey ? '\x1b[Z' : '\t'; // Shift+Tab → CBT (back-tab)
-    if (e.key === 'Escape') return '\x1b';
-    if (e.key === 'ArrowUp') return '\x1b[A';
-    if (e.key === 'ArrowDown') return '\x1b[B';
-    if (e.key === 'ArrowRight') return '\x1b[C';
-    if (e.key === 'ArrowLeft') return '\x1b[D';
-    if (e.key === 'Home') return '\x1b[H';
-    if (e.key === 'End') return '\x1b[F';
-    if (e.key === 'PageUp') return '\x1b[5~';
-    if (e.key === 'PageDown') return '\x1b[6~';
-    // Ctrl + letter / common chord: send the C0 control byte.
-    if (e.ctrlKey && e.key.length === 1) {
-      const k = e.key.toLowerCase();
-      if (k >= 'a' && k <= 'z') {
-        return String.fromCharCode(k.charCodeAt(0) - 96);
-      }
-      if (k === ' ') return '\x00';
-      if (k === '[') return '\x1b';
-      if (k === '\\') return '\x1c';
-      if (k === ']') return '\x1d';
-    }
-    // A printable single character: forward as-is.
-    if (e.key.length === 1 && !e.metaKey) return e.key;
-    return null;
-  }
+  /** macOS: Cmd+C/V/A are the clipboard chords and Option is the ESC-prefix
+   *  key. Elsewhere Ctrl+Shift+C/V do copy/paste (the Linux terminal
+   *  convention) so plain Ctrl+C/V still reach the app as ^C / ^V. */
+  const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
 
   function onKeydown(e: KeyboardEvent) {
     if (!ptyOpen) return;
@@ -733,33 +533,43 @@
     // part of composing — the finished text arrives via compositionend.
     if (e.isComposing) return;
     if (e.key === 'Escape' && ctxMenu) { ctxMenu = null; return; }
-    // Cmd+V → paste from the native clipboard (bracketed-paste framing in
-    // sendPaste). Ctrl+V is intentionally NOT intercepted so ^V reaches the app.
-    if (e.metaKey && !e.altKey && e.key.toLowerCase() === 'v') {
+    const k = e.key.toLowerCase();
+    const cmdChord = e.metaKey && !e.altKey && !e.ctrlKey;
+    const ctrlShiftChord = !isMac && e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;
+    // Paste from the native clipboard (bracketed-paste framing in sendPaste).
+    // Plain Ctrl+V is intentionally NOT intercepted so ^V reaches the app.
+    if ((cmdChord || ctrlShiftChord) && k === 'v') {
       e.preventDefault();
-      void pasteFromClipboard();
+      void paste();
       return;
     }
-    // Cmd+C → copy the selection. No selection → no-op (Ctrl+C still sends
-    // SIGINT via keyToBytes).
-    if (e.metaKey && !e.altKey && e.key.toLowerCase() === 'c') {
+    // Copy the selection. Cmd+C with no selection falls through to the
+    // browser; Ctrl+Shift+C with no selection is swallowed (it is the copy
+    // chord, not SIGINT — plain Ctrl+C still sends ^C via keyToBytes).
+    if ((cmdChord || ctrlShiftChord) && k === 'c') {
       if (selAnchor && selFocus) {
         e.preventDefault();
         void copySelection();
+      } else if (ctrlShiftChord) {
+        e.preventDefault();
       }
       return;
     }
-    // Cmd+A → select the whole viewport.
-    if (e.metaKey && !e.altKey && e.key.toLowerCase() === 'a') {
+    // Cmd+A (Ctrl+Shift+A elsewhere) → select the whole viewport.
+    if ((cmdChord || ctrlShiftChord) && k === 'a') {
       e.preventDefault();
       selAnchor = { row: 0, col: 0 };
       selFocus = { row: lastRows - 1, col: lastCols - 1 };
       return;
     }
-    const bytes = keyToBytes(e);
+    const bytes = keyToBytes(e, { appCursor: screen?.appCursorKeys ?? false, isMac });
     if (bytes === null) return;
     e.preventDefault();
-    void invoke('pty_write', { args: { data: bytes } }).catch(() => {});
+    writePty(bytes);
+    // Typing into a text input collapses its selection; the highlight would
+    // otherwise sit on stale cells while the screen redraws under it.
+    clearSelection();
+    blinkEpoch++;
     // The keystroke will produce output (echo / TUI redraw); pull the drain
     // loop back to full rate so it doesn't sit on a backed-off delay.
     bumpDrain();
@@ -769,7 +579,9 @@
    *  never reaches `onKeydown` as a single printable char. */
   function onCompositionEnd(e: CompositionEvent) {
     if (!ptyOpen || !e.data) return;
-    void invoke('pty_write', { args: { data: e.data } }).catch(() => {});
+    writePty(e.data);
+    clearSelection();
+    blinkEpoch++;
     bumpDrain();
   }
 
@@ -782,7 +594,7 @@
 
   onDestroy(() => {
     void closeTerm();
-    removeWindowListeners?.();
+    mouse.dispose();
   });
 
   // Per-row render cache, keyed by the Screen instance so it resets on a
@@ -846,15 +658,31 @@
   // Cursor overlay position. Touch renderVersion so it tracks every drain.
   // Null when hidden (?25l) or before font metrics are measured. The grid has
   // 4px padding; cells run cellWidth × cellHeight from there.
-  const cursor = $derived.by<{ left: number; top: number; w: number; h: number } | null>(() => {
+  //
+  // Shape and blink follow the app's DECSCUSR request (`CSI Ps SP q`):
+  // 0/1 blinking block (the default), 2 steady block, 3/4 underline, 5/6
+  // bar — so a bar-caret app (a shell with `cursor-shape`, an editor in
+  // insert mode) looks the same here as in a real terminal. A cursor parked
+  // past the last column (deferred wrap) is drawn on the last column, as
+  // xterm does; a cursor on a wide glyph covers both of its cells.
+  const cursor = $derived.by<{
+    left: number; top: number; w: number; h: number;
+    shape: 'block' | 'underline' | 'bar'; blink: boolean;
+  } | null>(() => {
     void renderVersion;
     if (!screen || !screen.cursorVisible) return null;
     if (cellWidth <= 0 || cellHeight <= 0) return null;
+    const col = Math.min(screen.cursorCol, screen.cols - 1);
+    const row = screen.cells[screen.cursorRow];
+    const wide = row !== undefined && row[col]?.ch !== '' && row[col + 1]?.ch === '';
+    const st = screen.cursorStyle;
     return {
-      left: 4 + screen.cursorCol * cellWidth,
+      left: 4 + col * cellWidth,
       top: 4 + screen.cursorRow * cellHeight,
-      w: cellWidth,
+      w: wide ? 2 * cellWidth : cellWidth,
       h: cellHeight,
+      shape: st >= 5 ? 'bar' : st >= 3 ? 'underline' : 'block',
+      blink: st === 0 || st === 1 || st === 3 || st === 5,
     };
   });
 
@@ -939,6 +767,8 @@
       onwheel={onWheel}
       onmousedown={onMousedown}
       oncontextmenu={onContextMenu}
+      onfocus={() => (focused = true)}
+      onblur={() => (focused = false)}
       data-testid="terminal-host"
     >
       <!-- Hidden 1ch×1lh probe used once to measure font metrics. We can't
@@ -948,7 +778,7 @@
       {#each visibleRows as row (row.key)}
         <div class="row">
           {#each row.runs as run, i (i)}
-            <span style={runStyle(run)}>{run.text}</span>
+            <span class:wide={run.wide} style={runStyle(run)}>{run.text}</span>
           {/each}
         </div>
       {/each}
@@ -957,15 +787,22 @@
           class="selection"
           style="left:{r.left}px; top:{r.top}px; width:{r.width}px; height:{r.height}px"
           aria-hidden="true"
+          data-testid="terminal-selection"
         ></div>
       {/each}
       {#if cursor}
-        <div
-          class="cursor"
-          style="left:{cursor.left}px; top:{cursor.top}px; width:{cursor.w}px; height:{cursor.h}px"
-          aria-hidden="true"
-          data-testid="terminal-cursor"
-        ></div>
+        <!-- Keyed on blinkEpoch: each keystroke recreates the element, which
+             restarts the blink animation at its visible phase. -->
+        {#key blinkEpoch}
+          <div
+            class="cursor {cursor.shape}"
+            class:blink={cursor.blink && focused}
+            class:unfocused={!focused}
+            style="left:{cursor.left}px; top:{cursor.top}px; width:{cursor.w}px; height:{cursor.h}px"
+            aria-hidden="true"
+            data-testid="terminal-cursor"
+          ></div>
+        {/key}
       {/if}
       {#if dragOver || uploading}
         <div class="drop-overlay" data-testid="terminal-drop-overlay">
@@ -1126,21 +963,54 @@
     /* span color comes from inline style applied per run. */
     display: inline;
   }
+  /* A wide (2-column) glyph. Emoji and CJK come from a fallback font whose
+     advance is not two Menlo cells, so pin the box to exactly 2ch — the
+     column grid, the selection overlay and mouse→cell mapping all assume
+     every column is one cell wide. `ch` resolves against the grid's own
+     font, not the fallback. */
+  .row span.wide {
+    display: inline-block;
+    width: 2ch;
+    overflow: hidden;
+    text-align: center;
+    vertical-align: top;
+  }
   .selection {
     position: absolute;
     background: rgba(120, 170, 255, 0.35);
     pointer-events: none;
     z-index: 1;
   }
-  /* Block cursor overlay. Translucent so the glyph under it stays readable;
-     blinks like a standard terminal cursor. Position/size are set inline from
-     the measured cell metrics. Hidden automatically when the app sends ?25l. */
+  /* Cursor overlay. Translucent so the glyph under it stays readable.
+     Position/size are set inline from the measured cell metrics; hidden
+     automatically when the app sends ?25l. Shape classes follow DECSCUSR:
+     block (default), underline, bar. `blink` is applied only while the grid
+     has focus and the app asked for a blinking style; `unfocused` swaps the
+     fill for a hollow outline, the standard "input is elsewhere" cue. */
   .cursor {
     position: absolute;
     background: #e8e8e8;
     opacity: 0.55;
     pointer-events: none;
     z-index: 1;
+    box-sizing: border-box;
+  }
+  .cursor.underline {
+    background: none;
+    border-bottom: 2px solid #e8e8e8;
+    opacity: 0.9;
+  }
+  .cursor.bar {
+    background: none;
+    border-left: 2px solid #e8e8e8;
+    opacity: 0.9;
+  }
+  .cursor.unfocused {
+    background: none;
+    border: 1px solid #e8e8e8;
+    opacity: 0.6;
+  }
+  .cursor.blink {
     animation: cf-cursor-blink 1.1s steps(1, end) infinite;
   }
   @keyframes cf-cursor-blink {

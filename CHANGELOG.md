@@ -5,9 +5,8 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Note: release-please/CI is not in use; versions and this changelog are maintained
-by hand on each build. Entries before 0.2.4 were plain version bumps and were not
-recorded individually.
+Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
+Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
 ## [0.2.4] - 2026-05-25
 

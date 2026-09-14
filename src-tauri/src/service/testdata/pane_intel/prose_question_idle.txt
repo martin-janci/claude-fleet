@@ -1,0 +1,11 @@
+⏺ I found two ways to fix the ghost count. Do you want to:
+
+  1. Count by status (a one-line fix), or
+  2. Add a dedicated ghosts query to the store?
+
+  Either way the count stops reading 0. No, and tell Claude is not needed here.
+
+────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────
+  ? for shortcuts

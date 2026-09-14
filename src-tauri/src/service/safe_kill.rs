@@ -80,10 +80,6 @@ pub struct DiscardKillSessionArgs {
     pub tmux_name: String,
 }
 
-fn lock_err() -> IpcError {
-    IpcError::new("E_LOCK", "store mutex poisoned")
-}
-
 fn now_secs() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -146,7 +142,7 @@ pub async fn safe_kill_session(
     // Read + state-update happens under one lock; the SSH send afterwards is
     // off-lock.
     let (session_id, nonce) = {
-        let s = store.lock().map_err(|_| lock_err())?;
+        let s = store.lock().map_err(|_| IpcError::lock())?;
         let row = s
             .get_session(&args.tmux_name, &args.host_alias)
             .map_err(IpcError::from)?
@@ -202,7 +198,7 @@ pub async fn safe_kill_session(
         return Err(e);
     }
 
-    let s = store.lock().map_err(|_| lock_err())?;
+    let s = store.lock().map_err(|_| IpcError::lock())?;
     s.get_session_by_id(session_id)
         .map_err(IpcError::from)?
         .ok_or_else(|| IpcError::new("E_NOTFOUND", "session vanished after safe-kill request"))
@@ -220,7 +216,7 @@ pub async fn inspect_safe_kill(
     crate::validate::tmux_name_addressable(&args.tmux_name)?;
 
     let (worktree_path, _project_base) = {
-        let s = store.lock().map_err(|_| lock_err())?;
+        let s = store.lock().map_err(|_| IpcError::lock())?;
         let row = s
             .get_session(&args.tmux_name, &args.host_alias)
             .map_err(IpcError::from)?
@@ -363,7 +359,7 @@ pub async fn discard_kill_session(
     crate::validate::tmux_name_addressable(&args.tmux_name)?;
 
     let (session_id, worktree_id, worktree_path, project_base) = {
-        let s = store.lock().map_err(|_| lock_err())?;
+        let s = store.lock().map_err(|_| IpcError::lock())?;
         let row = s
             .get_session(&args.tmux_name, &args.host_alias)
             .map_err(IpcError::from)?
@@ -405,9 +401,15 @@ pub async fn discard_kill_session(
     }
 
     if let Some(wid) = worktree_id {
+        // Fingerprint keys are resolved before the lock (filesystem access).
+        let fp_keys = Store::fingerprint_keys_of_worktree(store, wid);
         if let Ok(s) = store.lock() {
-            if let Err(e) = s.delete_worktree(wid) {
-                eprintln!("[safe_kill] discard: delete_worktree({wid}) failed: {e}");
+            if let Err(e) = s.delete_worktree(wid, &fp_keys) {
+                tracing::warn!(
+                    worktree_id = wid,
+                    error = %e,
+                    "[safe_kill] discard: dropping the worktree row failed"
+                );
             }
             let _ = s.insert_session_event(
                 session_id,
@@ -496,9 +498,10 @@ pub async fn handle_stop_marker_check(
     claude_session_id: String,
 ) {
     if let Err(e) = handle_stop_marker_check_inner(&store, &ssh, &claude_session_id).await {
-        eprintln!(
-            "[safe_kill] marker check for claude_session_id={claude_session_id} failed: {}",
-            e.message
+        tracing::warn!(
+            claude_session_id = %claude_session_id,
+            error = %e,
+            "[safe_kill] marker check failed"
         );
     }
 }
@@ -510,7 +513,7 @@ async fn handle_stop_marker_check_inner(
 ) -> Result<(), IpcError> {
     // Snapshot what we need under one lock then drop it.
     let (session_id, tmux_name, host_alias, nonce, worktree_id, project_id) = {
-        let s = store.lock().map_err(|_| lock_err())?;
+        let s = store.lock().map_err(|_| IpcError::lock())?;
         let row = match s.get_session_by_claude_id(claude_session_id)? {
             Some(r) => r,
             None => return Ok(()),
@@ -539,9 +542,11 @@ async fn handle_stop_marker_check_inner(
     {
         Ok(p) => p,
         Err(e) => {
-            eprintln!(
-                "[safe_kill] capture_pane failed for {host_alias}/{tmux_name}: {}",
-                e.message
+            tracing::warn!(
+                host = %host_alias,
+                session = %tmux_name,
+                error = %e,
+                "[safe_kill] capture_pane failed; retrying on the next Stop"
             );
             return Ok(());
         }
@@ -587,7 +592,7 @@ async fn finalize_safe_kill(
 ) -> Result<(), IpcError> {
     // Resolve paths under a brief lock.
     let (worktree_path, project_base): (Option<String>, Option<String>) = {
-        let s = store.lock().map_err(|_| lock_err())?;
+        let s = store.lock().map_err(|_| IpcError::lock())?;
         let wt_path = match worktree_id {
             Some(wid) => s.worktree_path(wid).map_err(IpcError::from)?,
             None => None,
@@ -649,9 +654,15 @@ async fn finalize_safe_kill(
     // beyond this point — the git worktree is already gone on disk; we want
     // the DB and tmux to converge to the same reality.
     if let Some(wid) = worktree_id {
+        // Fingerprint keys are resolved before the lock (filesystem access).
+        let fp_keys = Store::fingerprint_keys_of_worktree(store, wid);
         if let Ok(s) = store.lock() {
-            if let Err(e) = s.delete_worktree(wid) {
-                eprintln!("[safe_kill] delete_worktree({wid}) failed: {e}");
+            if let Err(e) = s.delete_worktree(wid, &fp_keys) {
+                tracing::warn!(
+                    worktree_id = wid,
+                    error = %e,
+                    "[safe_kill] dropping the worktree row failed"
+                );
             }
         }
     }
@@ -673,9 +684,11 @@ async fn finalize_safe_kill(
     )
     .await
     {
-        eprintln!(
-            "[safe_kill] tmux kill after READY failed for {host_alias}/{tmux_name}: {}",
-            e.message
+        tracing::error!(
+            host = %host_alias,
+            session = %tmux_name,
+            error = %e,
+            "[safe_kill] tmux kill after READY failed; the worktree is gone but the session still runs"
         );
     }
     Ok(())

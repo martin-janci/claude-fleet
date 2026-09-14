@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { discoverHosts, addHost, type SshHost } from './hosts';
   import { probeSshAliasAbortable, type ProbePreview } from './accounts';
+  import Modal from './Modal.svelte';
 
   let { onClose }: { onClose: () => void } = $props();
 
@@ -80,8 +81,8 @@
   }
 </script>
 
-<div class="modal-backdrop" onclick={onClose} role="presentation">
-  <div class="dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-label="Add SSH host">
+<Modal label="Add SSH host" onclose={onClose} width="480px">
+  <div class="dialog">
     {#if !previewing}
       <h3>Add SSH host</h3>
       {#if loading}
@@ -137,23 +138,10 @@
       </div>
     {/if}
   </div>
-</div>
+</Modal>
 
 <style>
-  .modal-backdrop {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.4);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 20;
-  }
   .dialog {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 1rem;
-    width: 480px;
-    max-height: 80vh;
-    overflow: auto;
-    color: var(--fg);
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
@@ -179,7 +167,6 @@
   .host-row:disabled { opacity: 0.6; cursor: progress; }
   .alias { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; }
   .desc { color: var(--fg-muted); font-size: 0.8rem; flex: 1; }
-  .status { font-size: 0.75rem; color: var(--accent); }
 
   .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
   .actions { display: flex; gap: 0.4rem; justify-content: flex-end; }

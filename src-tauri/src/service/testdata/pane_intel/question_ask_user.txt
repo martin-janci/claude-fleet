@@ -1,0 +1,16 @@
+⏺ Before I wire this up I need one decision from you.
+
+────────────────────────────────────────────────────────────────────────────────
+ ☐ Retention
+
+Keep ghosted sessions for how long before deleting them?
+
+❯ 1. 24 hours (Recommended)
+     Long enough to recreate them after a tmux server restart.
+  2. 1 hour
+     A short window with less clutter in the sidebar.
+  3. Until dismissed
+     Never delete them automatically.
+  4. Type something.
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

@@ -1,0 +1,16 @@
+⏺ Write(docs/notes.md)
+
+────────────────────────────────────────────────────────────────────────────────
+ Create file
+ ╭──────────────────────────────────────────────────────────────────────────╮
+ │ docs/notes.md                                                            │
+ │                                                                          │
+ │ # Notes                                                                  │
+ │ Ghost retention defaults to 24 hours.                                    │
+ ╰──────────────────────────────────────────────────────────────────────────╯
+ Do you want to create notes.md?
+ ❯ 1. Yes
+   2. Yes, allow all edits during this session (shift+tab)
+   3. No
+
+ Esc to cancel · Tab to amend

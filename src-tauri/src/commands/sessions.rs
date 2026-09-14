@@ -4,7 +4,8 @@
 
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::IpcError;
-use crate::service::bg_sessions::{self, NewBgSessionArgs, PeekSessionArgs, PurgeProjectArgs};
+use crate::service::bg_sessions::{self, DismissAgentArgs, NewBgSessionArgs, PurgeProjectArgs};
+use crate::service::repair::{self, RepairReport};
 use crate::service::safe_kill::{
     self, DiscardKillSessionArgs, InspectSafeKillArgs, SafeKillInspection, SafeKillSessionArgs,
 };
@@ -18,12 +19,20 @@ use crate::store::{SessionRow, Store};
 use std::sync::{Arc, Mutex};
 use tauri::State;
 
+/// `force: true` (the sidebar Refresh button) always runs a fleet reconcile
+/// pass; the default serves stored rows while the last pass is within the
+/// configured interval.
 #[tauri::command]
 pub async fn list_sessions(
+    force: Option<bool>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<Vec<SessionRow>, IpcError> {
-    sessions::list_sessions(&store, &ssh).await
+    if force.unwrap_or(false) {
+        sessions::refresh_sessions(&store, &ssh).await
+    } else {
+        sessions::list_sessions(&store, &ssh).await
+    }
 }
 
 #[tauri::command]
@@ -149,22 +158,48 @@ pub fn dismiss_ghost_session(
     sessions::dismiss_ghost_session(args, &store)
 }
 
+/// Remove an inactive background agent (`kind='bg'`, not working) from the
+/// list. Frontend-only; logic lives in `service::bg_sessions`.
+#[tauri::command]
+pub fn dismiss_agent_session(
+    args: DismissAgentArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<(), IpcError> {
+    bg_sessions::dismiss_agent_session(args, &store)
+}
+
+/// Make the session's directory a healthy git worktree on its branch and its
+/// tmux session run there (creating tmux when it is gone). A no-op on a
+/// healthy session. Logic lives in `service::repair`.
+#[tauri::command]
+pub async fn repair_session(
+    args: RepairSessionArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<RepairReport, IpcError> {
+    repair::repair_session(args.session_id, args.explicit, &store, &ssh).await
+}
+
+#[derive(serde::Deserialize)]
+pub struct RepairSessionArgs {
+    pub session_id: i64,
+    /// `true`: the Repair workspace button — an explicit repair that may
+    /// unregister this worktree's stale entry, adopt a moved checkout,
+    /// recreate the branch from its base, re-link, and respawn a live pane.
+    /// `false` (default): the automatic pre-attach check, which only creates
+    /// what is confirmed missing and reports the rest.
+    #[serde(default)]
+    pub explicit: bool,
+}
+
 /// Launch a Claude background session on the given host.
 #[tauri::command]
 pub async fn new_bg_session(
     args: NewBgSessionArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<bg_sessions::NewBgSessionResult, IpcError> {
-    bg_sessions::new_bg_session(args, &ssh).await
-}
-
-/// Fetch recent log output from a background Claude session without opening a PTY.
-#[tauri::command]
-pub async fn peek_session(
-    args: PeekSessionArgs,
-    ssh: State<'_, Arc<SshClient>>,
-) -> Result<String, IpcError> {
-    bg_sessions::peek_session(args, &ssh).await
+    bg_sessions::new_bg_session_tracked(args, &store, &ssh).await
 }
 
 /// Delete all Claude Code state for a project and remove it from the fleet database.
@@ -173,6 +208,129 @@ pub async fn purge_project(
     args: PurgeProjectArgs,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
-) -> Result<(), IpcError> {
+) -> Result<Vec<bg_sessions::PurgeReport>, IpcError> {
     bg_sessions::purge_project(args, &store, &ssh).await
+}
+
+// ── Operator settings (Wave 2 Track D) ──────────────────────────────────────
+//
+// Typed key/value settings behind the Settings dialog's automation toggles
+// (playbooks, GC, reconcile cadence). The registry in `service::settings`
+// owns the key list, defaults and validation; these wrappers only adapt
+// `tauri::State`.
+
+/// Every registered operator setting with its effective value.
+#[tauri::command]
+pub fn get_fleet_settings(
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
+    let s = store.lock().map_err(|_| IpcError::lock())?;
+    Ok(crate::service::settings::read_all(&s))
+}
+
+/// Validate and persist one operator setting. `E_INVALID` for an unknown key
+/// or a value of the wrong shape. Returns the full effective map so the
+/// dialog can re-render from one source of truth.
+#[tauri::command]
+pub fn set_fleet_setting(
+    key: String,
+    value: String,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
+    let s = store.lock().map_err(|_| IpcError::lock())?;
+    crate::service::settings::set(&s, &key, &value)?;
+    Ok(crate::service::settings::read_all(&s))
+}
+
+// ── Session timeline (Q9) ───────────────────────────────────────────────────
+
+/// Default and ceiling for `session_history`'s `limit`. The store caps the
+/// timeline at 500 rows per session, so asking for more returns nothing extra.
+const HISTORY_DEFAULT_LIMIT: i64 = 200;
+const HISTORY_MAX_LIMIT: i64 = 500;
+
+#[derive(serde::Deserialize)]
+pub struct SessionHistoryArgs {
+    pub session_id: i64,
+    /// Newest-first cap; `None` or non-positive means the default.
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// Pure: clamp the requested timeline length into `1..=HISTORY_MAX_LIMIT`.
+fn history_limit(requested: Option<i64>) -> i64 {
+    match requested {
+        Some(n) if n > 0 => n.min(HISTORY_MAX_LIMIT),
+        _ => HISTORY_DEFAULT_LIMIT,
+    }
+}
+
+/// The recorded event timeline for one session, newest first. Same data as
+/// the MCP `session_history` tool; rendered by the details pane's Timeline.
+#[tauri::command]
+pub fn session_history(
+    args: SessionHistoryArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<crate::store::SessionEvent>, IpcError> {
+    let s = store.lock().map_err(|_| IpcError::lock())?;
+    s.list_session_events(args.session_id, history_limit(args.limit))
+}
+
+// ── Conversation (structured transcript) ────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct SessionConversationArgs {
+    pub session_id: i64,
+}
+
+/// The session's recent conversation — prompts, assistant text and one line
+/// per tool call — read from its Claude Code transcript. Rendered by the
+/// details pane's Conversation tab. Errors: `E_NOTFOUND`, `E_INVALID_STATE`
+/// (no `claude_session_id` yet), `E_NO_TRANSCRIPT`, transport codes.
+#[tauri::command]
+pub async fn session_conversation(
+    args: SessionConversationArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<crate::service::transcript::Conversation, IpcError> {
+    use crate::service::transcript;
+    let row = {
+        let s = store.lock().map_err(|_| IpcError::lock())?;
+        s.get_session_by_id(args.session_id)?.ok_or_else(|| {
+            IpcError::new(
+                "E_NOTFOUND",
+                format!("session {} not found", args.session_id),
+            )
+        })?
+    };
+    // `resolve_args` takes (and releases) the lock itself; nothing holds it
+    // across the fetch.
+    let targs = transcript::resolve_args(
+        &store,
+        &row,
+        transcript::CONV_TURNS,
+        transcript::CONV_MAX_CHARS,
+    )?;
+    transcript::fetch_conversation(targs, &ssh).await
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    #[test]
+    fn history_limit_defaults_and_clamps() {
+        assert_eq!(history_limit(None), HISTORY_DEFAULT_LIMIT);
+        assert_eq!(history_limit(Some(0)), HISTORY_DEFAULT_LIMIT);
+        assert_eq!(history_limit(Some(-3)), HISTORY_DEFAULT_LIMIT);
+        assert_eq!(history_limit(Some(25)), 25);
+        assert_eq!(history_limit(Some(10_000)), HISTORY_MAX_LIMIT);
+    }
+
+    #[test]
+    fn session_history_args_accept_a_missing_limit() {
+        let a: SessionHistoryArgs = serde_json::from_str(r#"{"session_id":7}"#).unwrap();
+        assert_eq!(a.session_id, 7);
+        assert!(a.limit.is_none());
+    }
 }

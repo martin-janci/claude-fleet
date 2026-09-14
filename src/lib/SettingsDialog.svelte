@@ -1,222 +1,329 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { hosts, probeHost, deleteHost, hideHost } from './hosts';
+  import { onMount, tick } from 'svelte';
+  import { hosts } from './hosts';
+  import { mcpStatus } from './mcp';
   import { onboardingDismissed, onboardingWelcomed } from './onboarding';
   import { hintsEnabled, resetHints } from './hints';
-  import { accounts, type AccountRow } from './accounts';
-  import { mcpStatus, mcpConfigure, mcpClientConfig, installFleetHook, provisionHosts, type McpStatus, type HostProvisionResult } from './mcp';
-  import AddHostPicker from './AddHostPicker.svelte';
+  import { copyOnSelect } from './prefs';
+  import { collectDiagnostics, copyDiagnostics, openLogFolder } from './diagnostics';
+  import { pushError } from './toasts';
+  import Modal from './Modal.svelte';
+  import McpSettings from './McpSettings.svelte';
+  import { loadHostTokens } from './host_actions';
+  import { hostsChordLabel, requestHostsView } from './app_views';
+  import { detectMac } from './terminal_keys';
+  import { copyText } from './clipboard';
+  import './settings_dialog.css';
+  import {
+    fleetSettings,
+    loadFleetSettings,
+    setFleetSetting,
+    settingBool,
+    settingSecs,
+    settingInt,
+    parseHoursInput,
+    parseIntInput,
+    parsePricesJsonInput,
+    secsToHours,
+    hoursToSecs,
+    SETTING_KEYS,
+    MAX_SECS,
+    MOVE_MAX_TRANSCRIPT_MB_MAX,
+    PROJECTS_LOCAL_ENV_KEY,
+    settingPathMap,
+    settingLayout,
+    basePathError,
+    projectPathPreview,
+    projectsDefaultRoot,
+    type SettingKey,
+    type ProjectsLayout,
+  } from './fleet_settings';
+  import { refreshProjects } from './projects';
+  import {
+    attentionIdleMinutes,
+    notificationPermission,
+    notifyStuckOs,
+    notifyStuckToast,
+    requestNotificationPermission,
+    type NotificationPermissionState,
+  } from './notify';
 
   let { onClose }: { onClose: () => void } = $props();
 
-  let showAddPicker = $state(false);
-  let busy: string | null = $state(null);
-  let error: string | null = $state(null);
-
-  // --- Control API (MCP) ---
-  let mcp: McpStatus | null = $state(null);
-  let mcpBusy = $state(false);
-  let mcpError: string | null = $state(null);
-  let tokenShown = $state(false);
-  // `bind:value` on a number input yields `null` when the field is cleared,
-  // so the state is genuinely `number | null`.
-  let portInput = $state<number | null>(4180);
-
-  const configBlock = $derived(mcp ? mcpClientConfig(mcp) : '');
-
-  // A valid TCP port: an integer in 1–65535. The Apply button and the
-  // enable/regenerate paths refuse to forward anything outside this range.
-  const portValid = $derived(
-    portInput !== null &&
-      Number.isInteger(portInput) &&
-      portInput >= 1 &&
-      portInput <= 65535,
+  // Hosts live in the Hosts view; Settings keeps fleet-wide configuration and
+  // a one-line summary that opens the view.
+  let mcpSettings = $state<ReturnType<typeof McpSettings>>();
+  const hostsChord = hostsChordLabel(
+    detectMac(typeof navigator === 'undefined' ? undefined : navigator),
   );
-  // The port to send with a non-port change (toggle/regenerate): the typed
-  // value when valid, else `undefined` so the backend keeps the current one.
-  const safePort = $derived(portValid ? (portInput ?? undefined) : undefined);
+  const offlineCount = $derived($hosts.filter((h) => !h.reachable).length);
+
+  async function openHosts() {
+    onClose();
+    // After the dialog has unmounted and restored focus, so the Hosts view
+    // remembers the right element to hand focus back to.
+    await tick();
+    requestHostsView();
+  }
 
   onMount(async () => {
     const r = await mcpStatus();
-    if (r.ok && r.value) {
-      mcp = r.value;
-      portInput = r.value.port;
-    } else if (!r.ok) {
-      mcpError = r.error.message;
-    }
+    // Optional call: Svelte nulls a `bind:this` ref on teardown, so closing
+    // Settings while mcpStatus() is in flight leaves it unset — and a throw
+    // here would also skip resetProjectDrafts() below.
+    mcpSettings?.applyStatus(r);
+    const fs = await loadFleetSettings();
+    if (!fs.ok) automationError = fs.error.message;
+    resetProjectDrafts();
   });
 
-  async function applyMcp(opts: {
-    enabled: boolean;
-    port?: number;
-    regenerateToken?: boolean;
-  }) {
-    mcpBusy = true;
-    mcpError = null;
-    const r = await mcpConfigure(opts);
-    mcpBusy = false;
-    if (r.ok && r.value) {
-      mcp = r.value;
-      portInput = r.value.port;
-    } else if (!r.ok) {
-      mcpError = r.error.message;
-    }
-  }
-
-  function maskToken(t: string): string {
-    return t.length > 4 ? '••••••••••••' + t.slice(-4) : '••••';
-  }
-
-  async function copyText(text: string) {
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      /* clipboard unavailable — no-op */
-    }
-  }
-
-  const accountByUuid = $derived(
-    new Map<string, AccountRow>($accounts.map((a) => [a.uuid, a])),
+  // --- Projects: per-host projects root + layout (backend settings) ---
+  // Drafts are edited locally and written together by "Save & rescan".
+  let baseDrafts = $state<Record<string, string>>({});
+  let layoutDraft = $state<ProjectsLayout>('github');
+  let projectsBusy = $state(false);
+  // Controls stay disabled until the drafts are seeded from the backend, so
+  // typing during the initial load cannot be wiped by the seeding.
+  let projectsLoaded = $state(false);
+  let projectsError: string | null = $state(null);
+  let projectsMsg: string | null = $state(null);
+  const savedBases = $derived(settingPathMap($fleetSettings, SETTING_KEYS.projectsBasePath));
+  const localEnv = $derived(($fleetSettings[PROJECTS_LOCAL_ENV_KEY] ?? '').trim());
+  const savedLayout = $derived(settingLayout($fleetSettings));
+  const projectsInvalid = $derived(
+    Object.values(baseDrafts).some((p) => basePathError(p) !== null),
   );
 
-  function accountCell(h: { account_uuid: string | null }): string {
-    if (!h.account_uuid) return '—';
-    const acc = accountByUuid.get(h.account_uuid);
-    if (!acc) return h.account_uuid;
-    const email = acc.email ?? acc.uuid;
-    return acc.seat_tier ? `${email} (${acc.seat_tier})` : email;
+  function resetProjectDrafts() {
+    baseDrafts = { ...savedBases };
+    layoutDraft = savedLayout;
+    projectsLoaded = true;
   }
 
-  async function onProbe(alias: string) {
-    busy = alias;
-    error = null;
-    const r = await probeHost(alias);
-    busy = null;
-    if (!r.ok) error = r.error.message;
+  // Root a host uses when its field is blank: on this machine the env var
+  // if set, otherwise (and on every remote host) the default for the layout
+  // currently selected, so the preview tracks an unsaved layout change.
+  function fallbackRoot(alias: string): string {
+    if (alias === 'local' && localEnv) return localEnv;
+    return projectsDefaultRoot(layoutDraft);
   }
 
-  async function onRemove(alias: string) {
-    if (alias === 'local') return;
-    busy = alias;
-    error = null;
-    const r = await deleteHost(alias);
-    busy = null;
-    if (!r.ok) error = r.error.message;
+  function previewRoot(alias: string): string {
+    return (baseDrafts[alias] ?? '').trim() || fallbackRoot(alias);
   }
 
-  async function onToggleHide(alias: string, hidden: boolean) {
-    busy = alias;
-    error = null;
-    const r = await hideHost(alias, hidden);
-    busy = null;
-    if (!r.ok) error = r.error.message;
+  function onBaseInput(alias: string, e: Event) {
+    baseDrafts = { ...baseDrafts, [alias]: (e.currentTarget as HTMLInputElement).value };
   }
 
-  // --- Install fleet hook ---
-  let hookInstallMsg = $state<string | null>(null);
-  let hookInstallError = $state<string | null>(null);
-  let installingHook = $state(false);
+  async function saveProjects() {
+    projectsBusy = true;
+    projectsError = null;
+    projectsMsg = null;
+    const map: Record<string, string> = {};
+    for (const [alias, p] of Object.entries(baseDrafts)) {
+      const t = p.trim();
+      if (t) map[alias] = t;
+    }
+    const wantLayout = layoutDraft;
+    let r = await setFleetSetting(SETTING_KEYS.projectsBasePath, JSON.stringify(map));
+    if (r.ok && wantLayout !== savedLayout) {
+      r = await setFleetSetting(SETTING_KEYS.projectsLayout, wantLayout);
+    }
+    if (r.ok) {
+      const pr = await refreshProjects();
+      if (pr.ok) projectsMsg = `Saved. Rescanned ${pr.value?.length ?? 0} local project(s).`;
+      else projectsError = pr.error.message;
+      resetProjectDrafts();
+    } else {
+      projectsError = r.error.message;
+    }
+    projectsBusy = false;
+  }
 
-  async function doInstallHook() {
-    installingHook = true;
-    hookInstallMsg = null;
-    hookInstallError = null;
-    try {
-      hookInstallMsg = await installFleetHook('local');
-    } catch (e: unknown) {
-      const err = e as { message?: string };
-      hookInstallError = err.message ?? String(e);
-    } finally {
-      installingHook = false;
+  // --- Notifications (stuck transitions) ---
+  let permission = $state<NotificationPermissionState>(notificationPermission());
+  async function enableOsNotifications() {
+    permission = await requestNotificationPermission();
+    if (permission === 'granted') notifyStuckOs.set(true);
+  }
+
+  // --- Automation: playbooks + GC (backend settings table) ---
+  let automationError: string | null = $state(null);
+  let automationBusy = $state(false);
+  async function applySetting(key: SettingKey, value: string) {
+    automationBusy = true;
+    automationError = null;
+    const r = await setFleetSetting(key, value);
+    automationBusy = false;
+    if (!r.ok) automationError = r.error.message;
+  }
+  function toggleSetting(key: SettingKey) {
+    void applySetting(key, settingBool($fleetSettings, key) ? 'false' : 'true');
+  }
+  // Hours in the inputs, seconds on the wire. `null` while the field is
+  // cleared; nothing is written until the value parses.
+  function onHoursChange(key: SettingKey, e: Event) {
+    const raw = (e.currentTarget as HTMLInputElement).value;
+    const hours = Number.parseFloat(raw);
+    if (!Number.isFinite(hours) || hours < 0) return;
+    void applySetting(key, String(hoursToSecs(hours)));
+  }
+  function onSecsChange(key: SettingKey, e: Event) {
+    const raw = (e.currentTarget as HTMLInputElement).value;
+    const secs = Number.parseInt(raw, 10);
+    if (!Number.isFinite(secs) || secs < 0) return;
+    void applySetting(key, String(secs));
+  }
+  // --- Limits: task TTL + move transcript cap (backend settings table) ---
+  // Values go to the backend as entered: it owns the range check, and its
+  // E_INVALID message is what the row shows.
+  let limitsError: string | null = $state(null);
+  let limitsBusy = $state(false);
+  async function applyLimit(key: SettingKey, value: string) {
+    limitsBusy = true;
+    limitsError = null;
+    const r = await setFleetSetting(key, value);
+    limitsBusy = false;
+    if (!r.ok) limitsError = r.error.message;
+  }
+  // Nothing is dropped silently: an input that cannot be sent (empty,
+  // negative hours, a value that rounds to 0 s = "never", a non-integer)
+  // gets a message naming the field instead.
+  function onLimitHoursChange(key: SettingKey, label: string, e: Event) {
+    const r = parseHoursInput((e.currentTarget as HTMLInputElement).value);
+    if ('error' in r) {
+      limitsError = `${label}: ${r.error}`;
+      return;
+    }
+    void applyLimit(key, String(r.secs));
+  }
+  function onLimitIntChange(key: SettingKey, label: string, e: Event) {
+    const r = parseIntInput((e.currentTarget as HTMLInputElement).value);
+    if ('error' in r) {
+      limitsError = `${label}: ${r.error}`;
+      return;
+    }
+    void applyLimit(key, r.value);
+  }
+  function onUsagePricesChange(e: Event) {
+    const r = parsePricesJsonInput((e.currentTarget as HTMLTextAreaElement).value);
+    if ('error' in r) {
+      limitsError = `Usage prices: ${r.error}`;
+      return;
+    }
+    void applyLimit(SETTING_KEYS.usagePricesJson, r.value);
+  }
+
+  function onIdleMinutesChange(e: Event) {
+    const v = Number.parseInt((e.currentTarget as HTMLInputElement).value, 10);
+    if (Number.isFinite(v) && v >= 0) attentionIdleMinutes.set(v);
+  }
+
+  // --- Diagnostics ---
+  let diagBusy = $state(false);
+  // Shown once known (after a copy, or when opening the folder failed) so the
+  // user can always find the logs by hand.
+  let logDir: string | null = $state(null);
+
+  async function onCopyDiagnostics() {
+    diagBusy = true;
+    const b = await copyDiagnostics();
+    if (b) logDir = b.log_dir;
+    diagBusy = false;
+  }
+
+  async function onOpenLogFolder() {
+    const r = await openLogFolder();
+    if (r.ok) {
+      logDir = r.value;
+    } else {
+      pushError(r.error, 'Open log folder failed');
+      // Fall back to showing the path (with a copy button) so the logs can
+      // still be found by hand. Collect only; nothing is copied here.
+      if (!logDir) {
+        const b = await collectDiagnostics();
+        if (b.ok) logDir = b.value.log_dir;
+      }
     }
   }
 
-  // --- Provision hosts ---
-  let provisionResults = $state<HostProvisionResult[] | null>(null);
-  let provisionBusy = $state(false);
-  let provisionError: string | null = $state(null);
-
-  async function doProvisionHosts() {
-    provisionBusy = true;
-    provisionError = null;
-    provisionResults = null;
-    const r = await provisionHosts();
-    provisionBusy = false;
-    if (r.ok && r.value) {
-      provisionResults = r.value;
-    } else if (!r.ok) {
-      provisionError = r.error.message;
-    }
-  }
 </script>
 
-<svelte:window
-  onkeydown={(e) => {
-    if (e.key === 'Escape') onClose();
-  }} />
-
-<div class="modal-backdrop" onclick={onClose} role="presentation">
-  <div class="dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-label="Settings">
+<!-- Escape + backdrop are handled by Modal (native <dialog>). -->
+<Modal label="Settings" onclose={onClose} width="min(640px, 92vw)">
+  <div class="dialog settings-dialog">
     <header>
       <h3>Settings</h3>
       <button class="close" onclick={onClose} aria-label="Close">×</button>
     </header>
 
-    <section class="block">
+    <section class="block hosts-line" data-testid="settings-hosts-line">
+      <h4>Hosts</h4>
+      <span class="hosts-summary" data-testid="settings-hosts-summary"
+        >{$hosts.length} configured · {offlineCount} offline</span
+      >
+      <button class="hook-btn" onclick={openHosts} data-testid="settings-open-hosts"
+        >Open Hosts <kbd>{hostsChord}</kbd></button
+      >
+    </section>
+
+    <section class="block" data-testid="projects-section">
       <div class="section-header">
-        <h4>Hosts</h4>
-        <button class="add" onclick={() => (showAddPicker = true)} data-testid="settings-add-host">
-          + Add host
-        </button>
+        <h4>Projects</h4>
       </div>
-      <table class="hosts-table" data-testid="hosts-table">
-        <thead>
-          <tr>
-            <th>Alias</th>
-            <th>tmux</th>
-            <th>claude</th>
-            <th>Account</th>
-            <th>Status</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each $hosts as h (h.alias)}
-            <tr class:hidden-row={h.hidden}>
-              <td class="alias">{h.alias}{#if h.ssh_alias && h.ssh_alias !== h.alias}<span class="muted"> ({h.ssh_alias})</span>{/if}</td>
-              <td>{h.tmux_version ?? '—'}</td>
-              <td>{h.claude_version ?? '—'}</td>
-              <td class="account" data-testid="account-cell">{accountCell(h)}</td>
-              <td>
-                <span class="status status-{h.reachable ? 'on' : 'off'}">
-                  {h.reachable ? 'online' : 'offline'}
-                </span>
-              </td>
-              <td class="row-actions">
-                <button
-                  disabled={busy === h.alias}
-                  onclick={() => onProbe(h.alias)}
-                  title="Re-probe"
-                  aria-label="Re-probe">↻</button>
-                {#if h.alias !== 'local'}
-                  <button
-                    disabled={busy === h.alias}
-                    onclick={() => onToggleHide(h.alias, !h.hidden)}
-                    title={h.hidden ? 'Show' : 'Hide'}
-                    aria-label="Toggle hide">{h.hidden ? '👁' : '🚫'}</button>
-                  <button
-                    class="danger"
-                    disabled={busy === h.alias}
-                    onclick={() => onRemove(h.alias)}
-                    title="Remove host"
-                    aria-label="Remove">×</button>
-                {/if}
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-      {#if error}<p class="err">{error}</p>{/if}
+      <p class="mcp-blurb">
+        Where each host keeps its git repositories. Leave a host blank for the
+        default (<code>~/projects/github.com</code>, or
+        <code>$CLAUDE_FLEET_PROJECTS_BASE</code> on this machine). Paths must be
+        absolute or start with <code>~/</code>.
+      </p>
+      <div class="mcp-field">
+        <span class="lbl">Layout</span>
+        <select
+          class="layout-select"
+          bind:value={layoutDraft}
+          disabled={projectsBusy || !projectsLoaded}
+          data-testid="projects-layout"
+          aria-label="Projects layout">
+          <option value="github">github: &lt;base&gt;/&lt;owner&gt;/&lt;repo&gt;</option>
+          <option value="flat">flat: &lt;base&gt;/&lt;repo&gt;</option>
+        </select>
+      </div>
+      {#each $hosts as h (h.alias)}
+        {@const draft = baseDrafts[h.alias] ?? ''}
+        {@const pathErr = basePathError(draft)}
+        <div class="project-base-row">
+          <div class="mcp-field">
+            <span class="lbl project-alias" title={h.alias}>{h.alias}</span>
+            <input
+              class="port base-input"
+              class:invalid={pathErr !== null}
+              type="text"
+              spellcheck="false"
+              value={draft}
+              placeholder={fallbackRoot(h.alias)}
+              disabled={projectsBusy || !projectsLoaded}
+              data-testid="projects-base-{h.alias}"
+              aria-label="Projects base path for {h.alias}"
+              oninput={(e) => onBaseInput(h.alias, e)} />
+          </div>
+          <span
+            class="hook-desc project-preview"
+            class:err={pathErr !== null}
+            data-testid="projects-preview-{h.alias}">
+            {pathErr ?? projectPathPreview(previewRoot(h.alias), layoutDraft)}
+          </span>
+        </div>
+      {/each}
+      <div class="mcp-field">
+        <button
+          onclick={saveProjects}
+          disabled={projectsBusy || projectsInvalid || !projectsLoaded}
+          data-testid="projects-save">Save &amp; rescan</button>
+        {#if projectsMsg}<span class="hook-desc" data-testid="projects-msg">{projectsMsg}</span>{/if}
+      </div>
+      {#if projectsError}<p class="err">{projectsError}</p>{/if}
     </section>
 
     <section class="block" data-testid="onboarding-section">
@@ -245,174 +352,275 @@
           Reset hints
         </button>
       </div>
+      <div class="hook-section">
+        <p class="hook-desc">
+          Copy a terminal drag-selection to the clipboard as soon as the mouse
+          is released. Off: use Cmd+C / Ctrl+Shift+C or the context menu.
+        </p>
+        <label class="toggle">
+          <input type="checkbox" bind:checked={$copyOnSelect} data-testid="copy-on-select" />
+          Copy on select
+        </label>
+      </div>
     </section>
 
-    <section class="block" data-testid="mcp-section">
+    <section class="block" data-testid="notifications-section">
       <div class="section-header">
-        <h4>Control API (MCP)</h4>
+        <h4>Notifications</h4>
       </div>
       <p class="mcp-blurb">
-        Lets an AI assistant drive claude-fleet over a localhost-only MCP
-        server. Off by default. Every request needs the bearer token.
+        When a session becomes stuck (auth menu, trust prompt, reconnect,
+        out of memory, press Enter) fleet announces it for screen readers and,
+        optionally, shows a toast and an OS notification.
       </p>
-      {#if mcp}
-        <div class="mcp-row">
-          <label class="toggle">
-            <input
-              type="checkbox"
-              checked={mcp.enabled}
-              disabled={mcpBusy}
-              onchange={() => applyMcp({ enabled: !mcp!.enabled, port: safePort })}
-              data-testid="mcp-enable" />
-            Enable control API
-          </label>
-          <span class="status status-{mcp.running ? 'on' : 'off'}">
-            {mcp.running ? 'running' : 'stopped'}
-          </span>
-        </div>
-        {#if mcp.bind_error}
-          <p class="err">Server could not start: {mcp.bind_error}</p>
-        {/if}
-
-        <div class="mcp-field">
-          <span class="lbl">Port</span>
+      <label class="toggle">
+        <input type="checkbox" bind:checked={$notifyStuckToast} data-testid="notify-toast" />
+        In-app toast on stuck transitions
+      </label>
+      <div class="mcp-row">
+        <label class="toggle">
           <input
-            class="port"
-            class:invalid={!portValid}
-            type="number"
-            min="1"
-            max="65535"
-            bind:value={portInput}
-            disabled={mcpBusy} />
-          <button
-            disabled={mcpBusy || !portValid || portInput === mcp.port}
-            onclick={() => applyMcp({ enabled: mcp!.enabled, port: portInput ?? undefined })}>
-            Apply
-          </button>
-          {#if !portValid}
-            <span class="err">Port must be 1–65535.</span>
-          {/if}
-        </div>
-
-        <div class="mcp-field">
-          <span class="lbl">URL</span>
-          <code class="mono">{mcp.url}</code>
-          <button onclick={() => copyText(mcp!.url)}>Copy</button>
-        </div>
-
-        <div class="mcp-field">
-          <span class="lbl">Token</span>
-          <code class="mono token">{tokenShown ? mcp.token : maskToken(mcp.token)}</code>
-          <button onclick={() => (tokenShown = !tokenShown)}>
-            {tokenShown ? 'Hide' : 'Show'}
-          </button>
-          <button onclick={() => copyText(mcp!.token)}>Copy</button>
-          <button
-            class="danger"
-            disabled={mcpBusy}
-            onclick={() =>
-              applyMcp({ enabled: mcp!.enabled, port: safePort, regenerateToken: true })}
-            title="Mint a new token — invalidates existing clients">
-            Regenerate
-          </button>
-        </div>
-
-        <details class="mcp-config">
-          <summary>MCP client config</summary>
-          <pre>{configBlock}</pre>
-          <button onclick={() => copyText(configBlock)}>Copy config</button>
-        </details>
-
-        <div class="hook-section">
-          <p class="hook-desc">
-            Install a real-time hook so local Claude Code sessions notify fleet
-            immediately on stop or worktree creation.
-          </p>
-          <button
-            class="hook-btn"
-            onclick={doInstallHook}
-            disabled={installingHook || !mcp.running}
-            data-testid="install-fleet-hook"
-          >
-            {installingHook ? "Installing…" : "Install Hook (local)"}
-          </button>
-          {#if hookInstallMsg}
-            <p class="hook-ok">{hookInstallMsg}</p>
-          {/if}
-          {#if hookInstallError}
-            <p class="hook-err">{hookInstallError}</p>
-          {/if}
-        </div>
-
-        <div class="hook-section">
-          <p class="hook-desc">
-            Push the MCP server config to every host so agents can connect to
-            the control API.
-          </p>
-          <button
-            class="hook-btn"
-            onclick={doProvisionHosts}
-            disabled={provisionBusy || !mcp.enabled}
-            data-testid="provision-hosts"
-          >
-            {provisionBusy ? "Provisioning…" : "Provision hosts"}
-          </button>
-          {#if provisionError}
-            <p class="hook-err">{provisionError}</p>
-          {/if}
-          {#if provisionResults}
-            <table class="provision-table">
-              <thead>
-                <tr>
-                  <th>Host</th>
-                  <th>Status</th>
-                  <th>Detail</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each provisionResults as row (row.host)}
-                  <tr>
-                    <td class="alias">{row.host}</td>
-                    <td>
-                      <span class="status status-{row.status === 'provisioned' ? 'on' : row.status === 'failed' ? 'off' : 'neutral'}">
-                        {row.status}
-                      </span>
-                    </td>
-                    <td class="provision-detail">{row.detail ?? '—'}</td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-            <p class="hook-desc provision-note">
-              Restart Claude on each host to load the server (the skill is picked up live).
-            </p>
-          {/if}
-        </div>
+            type="checkbox"
+            checked={$notifyStuckOs}
+            disabled={permission === 'unsupported'}
+            data-testid="notify-os"
+            onchange={() => {
+              if ($notifyStuckOs) notifyStuckOs.set(false);
+              else void enableOsNotifications();
+            }} />
+          OS notification on stuck transitions
+        </label>
+        <span class="status status-{permission === 'granted' ? 'on' : permission === 'denied' ? 'off' : 'neutral'}" data-testid="notify-permission">
+          {permission}
+        </span>
+      </div>
+      {#if permission === 'unsupported'}
+        <p class="hook-desc">This webview does not expose the Notification API; toasts and the live region still work.</p>
+      {:else if permission === 'denied'}
+        <p class="hook-desc">Notifications were denied at the OS level; allow them for claude-fleet in your system settings.</p>
       {/if}
-      {#if mcpError}<p class="err">{mcpError}</p>{/if}
+      <div class="mcp-field">
+        <span class="lbl">Idle</span>
+        <input
+          class="port"
+          type="number"
+          min="0"
+          value={$attentionIdleMinutes}
+          onchange={onIdleMinutesChange}
+          data-testid="attention-idle-minutes" />
+        <span class="hook-desc">minutes before an idle work session counts as "needs attention" (0 = never)</span>
+      </div>
+    </section>
+
+    <section class="block" data-testid="automation-section">
+      <div class="section-header">
+        <h4>Automation</h4>
+      </div>
+      <p class="mcp-blurb">
+        Stuck-session playbooks, the idle-session GC and workspace repair run
+        from the background reconcile tick. Everything here is off by default; changes apply on the
+        next tick.
+      </p>
+      <label class="toggle">
+        <input
+          type="checkbox"
+          checked={settingBool($fleetSettings, SETTING_KEYS.playbookPressEnter)}
+          disabled={automationBusy}
+          data-testid="playbook-press-enter"
+          onchange={() => toggleSetting(SETTING_KEYS.playbookPressEnter)} />
+        Press Enter for sessions stuck on a "Press Enter" prompt
+      </label>
+      <label class="toggle">
+        <input
+          type="checkbox"
+          checked={settingBool($fleetSettings, SETTING_KEYS.playbookOomRecreate)}
+          disabled={automationBusy}
+          data-testid="playbook-oom-recreate"
+          onchange={() => toggleSetting(SETTING_KEYS.playbookOomRecreate)} />
+        Recreate sessions that ran out of memory (at most once per hour)
+      </label>
+      <p class="hook-desc">Auth menus, trust prompts and reconnects are always notify-only.</p>
+
+      <label class="toggle gc-toggle">
+        <input
+          type="checkbox"
+          checked={settingBool($fleetSettings, SETTING_KEYS.gcEnabled)}
+          disabled={automationBusy}
+          data-testid="gc-enabled"
+          onchange={() => toggleSetting(SETTING_KEYS.gcEnabled)} />
+        Garbage-collect idle sessions
+      </label>
+      <div class="mcp-field">
+        <span class="lbl">bg</span>
+        <input class="port" type="number" min="0" step="0.5"
+          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.gcBgIdleSecs))}
+          disabled={automationBusy}
+          data-testid="gc-bg-hours"
+          onchange={(e) => onHoursChange(SETTING_KEYS.gcBgIdleSecs, e)} />
+        <span class="hook-desc">hours idle before a background agent is stopped (0 = never)</span>
+      </div>
+      <div class="mcp-field">
+        <span class="lbl">shell</span>
+        <input class="port" type="number" min="0" step="0.5"
+          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.gcShellIdleSecs))}
+          disabled={automationBusy}
+          data-testid="gc-shell-hours"
+          onchange={(e) => onHoursChange(SETTING_KEYS.gcShellIdleSecs, e)} />
+        <span class="hook-desc">hours inactive before a shell session is killed (0 = never)</span>
+      </div>
+      <div class="mcp-field">
+        <span class="lbl">work</span>
+        <input class="port" type="number" min="0" step="0.5"
+          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.gcWorkIdleSecs))}
+          disabled={automationBusy}
+          data-testid="gc-work-hours"
+          onchange={(e) => onHoursChange(SETTING_KEYS.gcWorkIdleSecs, e)} />
+        <span class="hook-desc">hours idle before a work session is removed — dirty worktrees go through safe-remove (0 = never)</span>
+      </div>
+      <div class="mcp-field">
+        <span class="lbl">sweep</span>
+        <input class="port" type="number" min="0"
+          value={settingSecs($fleetSettings, SETTING_KEYS.gcSweepIntervalSecs)}
+          disabled={automationBusy}
+          data-testid="gc-sweep-secs"
+          onchange={(e) => onSecsChange(SETTING_KEYS.gcSweepIntervalSecs, e)} />
+        <span class="hook-desc">seconds between GC sweeps</span>
+      </div>
+
+      <label class="toggle gc-toggle">
+        <input
+          type="checkbox"
+          checked={settingBool($fleetSettings, SETTING_KEYS.repairAutoOnTick)}
+          disabled={automationBusy}
+          data-testid="repair-auto-on-tick"
+          onchange={() => toggleSetting(SETTING_KEYS.repairAutoOnTick)} />
+        Re-create vanished worktree directories automatically
+      </label>
+      <p class="hook-desc">
+        Re-adds deleted worktrees without anyone opening them. A worktree
+        git still lists is dropped and re-added only when its parent folder
+        is the same one seen while it was healthy (so an unmounted or
+        remounted volume is never touched); otherwise use Repair workspace.
+        Never touches the controller, review sessions or a session being
+        safely removed.
+      </p>
+      <div class="mcp-field">
+        <span class="lbl">repair</span>
+        <input class="port" type="number" min="60"
+          value={settingSecs($fleetSettings, SETTING_KEYS.repairTickIntervalSecs)}
+          disabled={automationBusy}
+          data-testid="repair-tick-secs"
+          onchange={(e) => onSecsChange(SETTING_KEYS.repairTickIntervalSecs, e)} />
+        <span class="hook-desc">seconds between workspace checks (60 or more; at most 5 repairs each)</span>
+      </div>
+      <div class="mcp-field">
+        <span class="lbl">tick</span>
+        <input class="port" type="number" min="0"
+          value={settingSecs($fleetSettings, SETTING_KEYS.reconcileIntervalSecs)}
+          disabled={automationBusy}
+          data-testid="reconcile-secs"
+          onchange={(e) => onSecsChange(SETTING_KEYS.reconcileIntervalSecs, e)} />
+        <span class="hook-desc">seconds between reconcile passes (0 disables; restart to apply)</span>
+      </div>
+      {#if automationError}<p class="err">{automationError}</p>{/if}
+    </section>
+
+    <section class="block" data-testid="limits-section">
+      <div class="section-header">
+        <h4>Limits</h4>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="limit-tasks-hours">tasks</label>
+        <input class="port" id="limit-tasks-hours" type="number" min="0" max={secsToHours(MAX_SECS)} step="0.5"
+          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.tasksMaxAgeSecs))}
+          disabled={limitsBusy}
+          aria-describedby="limit-tasks-desc"
+          data-testid="tasks-max-age-hours"
+          onchange={(e) => onLimitHoursChange(SETTING_KEYS.tasksMaxAgeSecs, 'Task timeout', e)} />
+        <span class="hook-desc" id="limit-tasks-desc">hours before an open task (counted from its start, else its creation) is failed by the liveness sweep (0 = never)</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="limit-move-mb">move</label>
+        <input class="port" id="limit-move-mb" type="number" min="1" max={MOVE_MAX_TRANSCRIPT_MB_MAX} step="1"
+          value={settingInt($fleetSettings, SETTING_KEYS.moveMaxTranscriptMb)}
+          disabled={limitsBusy}
+          aria-describedby="limit-move-desc"
+          data-testid="move-max-transcript-mb"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.moveMaxTranscriptMb, 'Move transcript cap', e)} />
+        <span class="hook-desc" id="limit-move-desc">largest transcript (MiB, 1–{MOVE_MAX_TRANSCRIPT_MB_MAX}) Move to host… copies; a bigger one is refused (E_MOVE_TOO_LARGE)</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="usage-enabled">usage</label>
+        <input id="usage-enabled" type="checkbox"
+          checked={settingBool($fleetSettings, SETTING_KEYS.usageEnabled)}
+          disabled={limitsBusy}
+          aria-describedby="usage-enabled-desc"
+          data-testid="usage-enabled"
+          onchange={(e) => void applyLimit(SETTING_KEYS.usageEnabled, String((e.currentTarget as HTMLInputElement).checked))} />
+        <span class="hook-desc" id="usage-enabled-desc">sum each session's token usage from its Claude transcript and show an estimated cost</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="usage-interval-secs">usage every</label>
+        <input class="port" id="usage-interval-secs" type="number" min="0" max={MAX_SECS} step="1"
+          value={settingSecs($fleetSettings, SETTING_KEYS.usageIntervalSecs)}
+          disabled={limitsBusy}
+          aria-describedby="usage-interval-desc"
+          data-testid="usage-interval-secs"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.usageIntervalSecs, 'Usage interval', e)} />
+        <span class="hook-desc" id="usage-interval-desc">seconds between usage passes (one batched read per host; 0 = off)</span>
+      </div>
+      <div class="mcp-field">
+        <label class="lbl" for="usage-prices-json">prices</label>
+        <textarea id="usage-prices-json" rows="3" spellcheck="false"
+          value={$fleetSettings[SETTING_KEYS.usagePricesJson] ?? '{}'}
+          disabled={limitsBusy}
+          aria-describedby="usage-prices-desc"
+          data-testid="usage-prices-json"
+          onchange={onUsagePricesChange}></textarea>
+        <span class="hook-desc" id="usage-prices-desc">per-model price overrides for the estimated cost, USD per million tokens, e.g. {'{"opus-4-1":{"input":15,"output":75,"cache_write":30,"cache_read":1.5}}'} ({'{}'} = built-in prices only)</span>
+      </div>
+      {#if limitsError}<p class="err" role="alert" data-testid="limits-error">{limitsError}</p>{/if}
+    </section>
+
+    <!-- Provisioning mints host tokens: refresh the shared token cache the
+         Hosts view reads (host_actions.ts). Module-level, so it is safe even
+         when a slow multi-host provision outlives this dialog. -->
+    <McpSettings bind:this={mcpSettings} onProvisioned={loadHostTokens} />
+
+    <section class="block" data-testid="diagnostics-section">
+      <div class="section-header">
+        <h4>Diagnostics</h4>
+      </div>
+      <p class="hook-desc">
+        Copy a plain-text report for a bug report: app version, schema, hosts,
+        tunnels, control-API state, session counts and the last 200 log lines.
+        Tokens are never included; hostnames and paths are.
+      </p>
+      <div class="hook-actions">
+        <button
+          class="hook-btn"
+          onclick={onCopyDiagnostics}
+          disabled={diagBusy}
+          data-testid="copy-diagnostics"
+        >
+          {diagBusy ? 'Collecting…' : 'Copy diagnostics'}
+        </button>
+        <button class="hook-btn" onclick={onOpenLogFolder} data-testid="open-log-folder">
+          Open log folder
+        </button>
+      </div>
+      {#if logDir}
+        <p class="hook-desc log-path" data-testid="log-dir">
+          Logs: <code>{logDir}</code>
+          <button onclick={() => copyText(logDir ?? '')} aria-label="Copy log folder path">Copy path</button>
+        </p>
+      {/if}
     </section>
   </div>
-</div>
-
-{#if showAddPicker}
-  <AddHostPicker onClose={() => (showAddPicker = false)} />
-{/if}
+</Modal>
 
 <style>
-  .modal-backdrop {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.4);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 15;
-  }
   .dialog {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 1rem;
-    width: 560px;
-    max-height: 80vh;
-    overflow: auto;
-    color: var(--fg);
     display: flex;
     flex-direction: column;
     gap: 0.8rem;
@@ -429,238 +637,70 @@
   }
   .close:hover { color: var(--fg); }
 
-  .section-header {
+  .log-path code { word-break: break-all; }
+
+  .hosts-line {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 0.4rem;
+    align-items: baseline;
+    gap: 0.8rem;
   }
-  .section-header h4 {
+  .hosts-line h4 {
     margin: 0;
     font-size: 0.75rem;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
   }
-  .add {
-    font-size: 0.8rem;
-    padding: 0.25rem 0.6rem;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--fg);
-    border-radius: 4px;
-    cursor: pointer;
-  }
-  .add:hover { border-color: var(--accent); }
-
-  .hosts-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.85rem;
-  }
-  .hosts-table th {
-    text-align: left;
+  .hosts-summary { flex: 1; font-size: 0.8rem; color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+  .hosts-line kbd {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
     color: var(--fg-muted);
-    padding: 0.3rem 0.4rem;
-    border-bottom: 1px solid var(--border);
   }
-  .hosts-table td { padding: 0.4rem; border-bottom: 1px solid var(--border); }
-  .hosts-table tr.hidden-row td { opacity: 0.55; }
-  .alias { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .muted { color: var(--fg-muted); }
-
-  .hosts-table td.account {
-    font-size: 0.8rem;
-    max-width: 220px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--fg);
-  }
-
-  .status {
-    font-size: 0.7rem;
-    padding: 0.1rem 0.45rem;
-    border-radius: 999px;
-  }
-  .status-on { background: rgba(60,180,90,0.18); color: rgb(80,200,110); }
-  .status-off { background: rgba(180,100,100,0.18); color: rgb(220,130,130); }
-
-  .row-actions { display: flex; gap: 0.2rem; }
-  .row-actions button {
-    background: transparent;
-    border: 1px solid transparent;
-    color: var(--fg-muted);
-    cursor: pointer;
-    padding: 0.15rem 0.45rem;
-    font-size: 0.85rem;
-    border-radius: 4px;
-  }
-  .row-actions button:hover { border-color: var(--border); color: var(--fg); }
-  .row-actions button.danger:hover { color: #e64a4a; border-color: #e64a4a; }
 
   .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
 
-  .mcp-blurb {
-    font-size: 0.78rem;
-    color: var(--fg-muted);
-    margin: 0 0 0.6rem;
-    line-height: 1.4;
-  }
-  .mcp-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 0.5rem;
-  }
-  .toggle {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    font-size: 0.85rem;
-    cursor: pointer;
-  }
-  .mcp-field {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    margin-bottom: 0.4rem;
-    font-size: 0.82rem;
-  }
-  .mcp-field .lbl {
-    width: 3.2rem;
-    color: var(--fg-muted);
-    font-size: 0.72rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-  .mcp-field .mono {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    background: var(--bg-alt, rgba(127, 127, 127, 0.12));
-    padding: 0.1rem 0.4rem;
-    border-radius: 3px;
+  .project-base-row { margin-bottom: 0.3rem; }
+  .project-base-row .mcp-field { margin-bottom: 0.1rem; }
+  .mcp-field .project-alias {
+    width: 6rem;
+    text-transform: none;
+    letter-spacing: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .mcp-field .token {
+  .mcp-field .base-input {
     flex: 1;
     min-width: 0;
+    width: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
-  .mcp-field .port {
-    width: 6rem;
+  /* Qualified with .hook-desc: the preview span carries both classes, and the
+     later `.hook-desc { margin: 0 }` used to win the equal-specificity tie and
+     cancel the indent that lines the preview up under the input. */
+  .hook-desc.project-preview {
+    display: block;
+    margin-left: 6.4rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    word-break: break-all;
+  }
+  /* Same tie, for the invalid-path message: .hook-desc's muted colour used to
+     beat the .err red the class:err toggle asks for. */
+  .project-preview.err { color: #e64a4a; }
+  .layout-select {
     background: transparent;
     border: 1px solid var(--border);
     color: var(--fg);
     border-radius: 4px;
     padding: 0.2rem 0.4rem;
   }
-  .mcp-field .port.invalid {
-    border-color: #e64a4a;
-  }
-  .mcp-field button {
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--fg);
-    cursor: pointer;
-    padding: 0.18rem 0.5rem;
-    font-size: 0.78rem;
-    border-radius: 4px;
-  }
-  .mcp-field button:hover:not(:disabled) { border-color: var(--accent); }
-  .mcp-field button:disabled { opacity: 0.5; cursor: default; }
-  .mcp-field button.danger:hover:not(:disabled) {
-    color: #e64a4a;
-    border-color: #e64a4a;
-  }
-  .mcp-config { font-size: 0.8rem; margin-top: 0.3rem; }
-  .mcp-config summary { cursor: pointer; color: var(--fg-muted); }
-  .mcp-config pre {
-    background: var(--bg-alt, rgba(127, 127, 127, 0.12));
-    padding: 0.5rem;
-    border-radius: 4px;
-    overflow: auto;
-    font-size: 0.75rem;
-    margin: 0.4rem 0;
-  }
-  .mcp-config button {
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--fg);
-    cursor: pointer;
-    padding: 0.18rem 0.5rem;
-    font-size: 0.78rem;
-    border-radius: 4px;
-  }
-  .mcp-config button:hover { border-color: var(--accent); }
 
-  .hook-section {
-    margin-top: 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
   .hook-desc {
     margin: 0;
     font-size: 12px;
     color: var(--text-secondary, #888);
   }
-  .hook-btn {
-    align-self: flex-start;
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--fg);
-    cursor: pointer;
-    padding: 0.18rem 0.5rem;
-    font-size: 0.78rem;
-    border-radius: 4px;
-  }
-  .hook-btn:hover:not(:disabled) { border-color: var(--accent); }
-  .hook-btn:disabled { opacity: 0.5; cursor: default; }
-  .hook-ok {
-    margin: 0;
-    font-size: 12px;
-    color: var(--color-success, #4caf50);
-    white-space: pre-wrap;
-  }
-  .hook-err {
-    margin: 0;
-    font-size: 12px;
-    color: var(--color-error, #f44336);
-  }
 
-  .provision-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.82rem;
-    margin-top: 0.3rem;
-  }
-  .provision-table th {
-    text-align: left;
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--fg-muted);
-    padding: 0.3rem 0.4rem;
-    border-bottom: 1px solid var(--border);
-  }
-  .provision-table td {
-    padding: 0.35rem 0.4rem;
-    border-bottom: 1px solid var(--border);
-  }
-  .provision-detail {
-    color: var(--fg-muted);
-    font-size: 0.78rem;
-  }
-  .status-neutral {
-    background: rgba(127, 127, 127, 0.15);
-    color: var(--fg-muted);
-  }
-  .provision-note {
-    margin-top: 0.4rem;
-    font-style: italic;
-  }
+  .gc-toggle { margin-top: 0.6rem; }
 </style>

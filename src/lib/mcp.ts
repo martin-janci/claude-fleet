@@ -8,12 +8,15 @@ export interface McpStatus {
   /** Whether the server is actually listening right now. */
   running: boolean;
   port: number;
-  /** Bearer token clients must present. */
+  /** Master bearer token (desktop / local clients). Hosts get their own. */
   token: string;
   /** Full streamable-HTTP endpoint URL. */
   url: string;
   /** Most recent start failure (e.g. port in use), or null. */
   bind_error: string | null;
+  /** `mcp.confirm_destructive`: broadcast / kill / delete_worktree /
+   *  set_clipboard need a desktop confirmation. Default off. */
+  confirm_destructive: boolean;
 }
 
 /** Read the current control-API status. */
@@ -29,6 +32,7 @@ export async function mcpConfigure(opts: {
   enabled: boolean;
   port?: number;
   regenerateToken?: boolean;
+  confirmDestructive?: boolean;
 }): Promise<Result<McpStatus>> {
   // `?? null` is not enough — `NaN ?? null` is `NaN`. Only forward a real,
   // integral port; anything else is sent as null so the backend keeps the
@@ -40,6 +44,7 @@ export async function mcpConfigure(opts: {
       enabled: opts.enabled,
       port,
       regenerate_token: opts.regenerateToken ?? false,
+      confirm_destructive: opts.confirmDestructive ?? null,
     },
   });
 }
@@ -57,8 +62,61 @@ export interface HostProvisionResult {
   detail: string | null;
 }
 
-export function provisionHosts(): Promise<Result<HostProvisionResult[]>> {
-  return invokeCmd<HostProvisionResult[]>('provision_hosts');
+/** Provision every reachable host. `rotate` mints fresh per-host tokens. */
+export function provisionHosts(rotate = false): Promise<Result<HostProvisionResult[]>> {
+  return invokeCmd<HostProvisionResult[]>('provision_hosts', { rotate });
+}
+
+// --- per-host tokens ---------------------------------------------------------
+
+/** A host's control-API token row, minus the token itself. Mirrors the
+ *  backend `HostTokenInfo`. */
+export interface HostTokenInfo {
+  host_alias: string;
+  /** `full` | `readonly` */
+  mode: string;
+  created_at: number;
+}
+
+export type TokenMode = 'full' | 'readonly';
+
+export function listHostTokens(): Promise<Result<HostTokenInfo[]>> {
+  return invokeCmd<HostTokenInfo[]>('list_host_tokens');
+}
+
+export function setHostTokenMode(
+  hostAlias: string,
+  mode: TokenMode,
+): Promise<Result<HostTokenInfo>> {
+  return invokeCmd<HostTokenInfo>('set_host_token_mode', { hostAlias, mode });
+}
+
+/** Mint a fresh token for one host and re-provision it with it. */
+export function rotateHostToken(hostAlias: string): Promise<Result<HostTokenInfo>> {
+  return invokeCmd<HostTokenInfo>('rotate_host_token', { hostAlias });
+}
+
+// --- destructive-call confirmation -------------------------------------------
+
+/** Payload of the `mcp:confirm-required` event. Mirrors `guard::ConfirmRequest`. */
+export interface ConfirmRequest {
+  nonce: string;
+  tool: string;
+  /** Redacted argument summary (never a prompt body). */
+  summary: string;
+  /** `master` or `host:<alias>` */
+  caller: string;
+}
+
+export const MCP_CONFIRM_EVENT = 'mcp:confirm-required';
+
+/** Answer a confirmation prompt. Resolves `false` when the nonce expired. */
+export function mcpConfirm(nonce: string, approved: boolean): Promise<Result<boolean>> {
+  return invokeCmd<boolean>('mcp_confirm', { nonce, approved });
+}
+
+export function mcpPendingConfirms(): Promise<Result<{ nonce: string; tool: string }[]>> {
+  return invokeCmd<{ nonce: string; tool: string }[]>('mcp_pending_confirms');
 }
 
 /** Build the ready-to-paste MCP client config for an HTTP transport. */

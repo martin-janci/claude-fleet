@@ -12,6 +12,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+/// First id handed out by [`CancellationRegistry::register_anonymous`].
+///
+/// Frontend `call_id`s (`nextCallId()` in `src/lib/result.ts`) count up from
+/// 1, and both kinds share one map. If anonymous ids also counted from 1, an
+/// anonymous registration could overwrite a live frontend token with the same
+/// number — and its `CancelGuard` would then remove the frontend's slot, so a
+/// later Cancel click would find nothing to cancel. `1 << 53` sits far above
+/// any frontend counter and is still exactly representable as a JS number
+/// (`Number.MAX_SAFE_INTEGER` is `2^53 - 1`; `2^53` itself is exact).
+pub const ANONYMOUS_ID_BASE: u64 = 1 << 53;
+
 pub struct CancellationRegistry {
     tokens: DashMap<u64, CancellationToken>,
     next_id: AtomicU64,
@@ -21,12 +32,13 @@ impl CancellationRegistry {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             tokens: DashMap::new(),
-            next_id: AtomicU64::new(1),
+            next_id: AtomicU64::new(ANONYMOUS_ID_BASE),
         })
     }
 
     /// Mint a fresh token and bind it to a brand-new internal id (used by
-    /// commands that don't receive a frontend `call_id`).
+    /// commands that don't receive a frontend `call_id`). Ids start at
+    /// [`ANONYMOUS_ID_BASE`] so they never collide with frontend ids.
     pub fn register_anonymous(&self) -> (u64, CancellationToken) {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let token = CancellationToken::new();
@@ -112,6 +124,32 @@ mod tests {
     fn cancel_unknown_id_is_noop() {
         let reg = CancellationRegistry::new();
         reg.cancel(99); // must not panic
+    }
+
+    #[tokio::test]
+    async fn anonymous_ids_never_collide_with_frontend_call_ids() {
+        let reg = CancellationRegistry::new();
+        // A frontend call in flight under its own small counter value.
+        let frontend = CancellationToken::new();
+        reg.bind(1, frontend.clone());
+
+        // Anonymous registrations (and their guards) come and go meanwhile.
+        for _ in 0..3 {
+            let (id, _token) = reg.register_anonymous();
+            assert!(
+                id >= ANONYMOUS_ID_BASE,
+                "anonymous id {id} is in frontend range"
+            );
+            let _g = CancelGuard::new(Arc::clone(&reg), id);
+        }
+
+        // The frontend slot survived: its Cancel click still reaches the token.
+        assert!(reg.tokens.contains_key(&1));
+        reg.cancel(1);
+        assert!(frontend.is_cancelled());
+
+        // The base is exactly representable as a JS number.
+        assert_eq!((ANONYMOUS_ID_BASE as f64) as u64, ANONYMOUS_ID_BASE);
     }
 
     #[test]

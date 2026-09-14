@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Opt-in pre-commit hook: fast checks for the files staged in this commit.
+#
+# Enable it (once, per clone):
+#
+#   git config core.hooksPath .githooks
+#
+# Disable it again with `git config --unset core.hooksPath`, or skip a single
+# commit with `git commit --no-verify`.
+#
+#   staged path matches src-tauri/, deny.toml, rust-toolchain.toml
+#       -> cargo fmt --check, cargo clippy --all-targets -- -D warnings
+#   staged path matches src/, package.json, pnpm-lock.yaml, pnpm-workspace.yaml,
+#   vite/vitest/svelte/tsconfig config files or index.html
+#       -> scripts/ci-local.sh --frontend-only  (install, check, test, build, audit)
+#
+# `cargo test` and `cargo deny check` are deliberately not run here (they take
+# minutes); run `scripts/ci-local.sh --rust-only` before pushing, or wire it
+# into a pre-push hook in this directory if you want that automated.
+#
+# Note: the checks run against the working tree, not the staged index, so
+# unstaged edits in the same files are checked too.
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+staged="$(git diff --cached --name-only --diff-filter=ACMRD)"
+[[ -z "$staged" ]] && exit 0
+
+run_rust=0
+run_frontend=0
+while IFS= read -r path; do
+  case "$path" in
+    src-tauri/*|deny.toml|rust-toolchain.toml) run_rust=1 ;;
+    src/*|package.json|pnpm-lock.yaml|pnpm-workspace.yaml) run_frontend=1 ;;
+    vite.config.ts|vitest.config.ts|vitest.setup.ts|svelte.config.js|tsconfig.json|index.html) run_frontend=1 ;;
+  esac
+done <<< "$staged"
+
+if [[ "$run_rust" == 1 ]]; then
+  echo "pre-commit: rust files staged -> cargo fmt --check, cargo clippy"
+  cargo fmt --manifest-path src-tauri/Cargo.toml --check
+  cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+fi
+if [[ "$run_frontend" == 1 ]]; then
+  echo "pre-commit: frontend files staged -> scripts/ci-local.sh --frontend-only"
+  scripts/ci-local.sh --frontend-only
+fi

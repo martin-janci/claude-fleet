@@ -1,9 +1,10 @@
 [package]
 name = "claude-fleet"
-version = "0.2.10"
+version = "0.2.17"
 description = "Desktop app for managing Claude Code sessions across hosts"
 authors = ["martin-janci"]
 edition = "2021"
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -14,12 +15,22 @@ edition = "2021"
 name = "claude_fleet_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = []
+# Web Inspector in *release* builds. Debug builds always have devtools: tauri
+# gates them on `any(debug_assertions, feature = "devtools")`, so `pnpm tauri
+# dev` is unaffected. Opt in for a release build with
+# `cargo tauri build --features devtools`. (Cargo does not support
+# `[target.'cfg(debug_assertions)'.dependencies]`, hence a feature.)
+devtools = ["tauri/devtools"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["devtools"] }
+tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
 sysinfo = "0.33"
 serde = { version = "1", features = ["derive"] }
@@ -46,6 +57,14 @@ axum = "0.8"
 rand = "0.10"
 uuid = { version = "1", features = ["v4"] }
 dirs = "5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std", "registry", "tracing-log", "smallvec"] }
+tracing-appender = "0.2"
+
+# `run_local_script` (service/add_project.rs) signals a script's whole process
+# group (`kill(-pgid, ..)`). Already in the tree transitively; no new crate.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # Asset catalog (docs/superpowers/specs/2026-09-14-asset-catalog-design.md)
 serde_yaml = "0.9"
@@ -55,3 +74,6 @@ base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"
+# Property tests for shell::quote (see shell.rs). `std` only: no fork/timeout
+# runners, which keeps the transitive dev tree small.
+proptest = { version = "1", default-features = false, features = ["std"] }

@@ -135,3 +135,46 @@ if (typeof globalThis !== 'undefined') {
     disconnect() {}
   };
 }
+
+// jsdom ships an empty HTMLDialogElement (no show/showModal/close). Modal.svelte
+// opens itself with showModal() on mount; polyfill the three methods with the
+// `open` attribute so the dialog renders visible (and role="dialog" queries
+// resolve) in tests. A real browser's top-layer/focus-trap behaviour is not
+// emulated — those are covered by the engine, not by us.
+if (typeof HTMLDialogElement !== 'undefined') {
+  const proto = HTMLDialogElement.prototype as HTMLDialogElement & {
+    showModal?: () => void;
+    show?: () => void;
+    close?: (v?: string) => void;
+  };
+  if (typeof proto.showModal !== 'function') {
+    proto.showModal = function (this: HTMLDialogElement) {
+      this.setAttribute('open', '');
+    };
+  }
+  if (typeof proto.show !== 'function') {
+    proto.show = function (this: HTMLDialogElement) {
+      this.setAttribute('open', '');
+    };
+  }
+  if (typeof proto.close !== 'function') {
+    proto.close = function (this: HTMLDialogElement, returnValue?: string) {
+      if (!this.hasAttribute('open')) return;
+      this.removeAttribute('open');
+      if (returnValue !== undefined) this.returnValue = returnValue;
+      this.dispatchEvent(new Event('close'));
+    };
+  }
+  if (!Object.getOwnPropertyDescriptor(proto, 'open')) {
+    Object.defineProperty(proto, 'open', {
+      configurable: true,
+      get(this: HTMLDialogElement) {
+        return this.hasAttribute('open');
+      },
+      set(this: HTMLDialogElement, v: boolean) {
+        if (v) this.setAttribute('open', '');
+        else this.removeAttribute('open');
+      },
+    });
+  }
+}

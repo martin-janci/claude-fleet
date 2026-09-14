@@ -18,8 +18,10 @@ On first launch the app walks you through setup — see the **[Getting Started g
 
 - **Multi-host** — attach to tmux sessions on any host in `~/.ssh/config`, plus
   `local`. SSH connections are multiplexed via per-host ControlMaster.
-- **Project tree** — scans `~/projects/github.com/<owner>/<repo>` (and git
-  worktrees) on each host; sessions are grouped under their project.
+- **Project tree** — finds repos (and git worktrees) under a per-host projects
+  base set in Settings → Projects, laid out as `<base>/<owner>/<repo>` (default
+  `~/projects/github.com`) or flat `<base>/<repo>`; sessions are grouped under
+  their project.
 - **Account model** — each host's logged-in Claude account (email / org / tier)
   is auto-detected by probing the remote `~/.claude.json`. No credentials are
   ever read or stored.
@@ -45,9 +47,16 @@ On first launch the app walks you through setup — see the **[Getting Started g
 
 ### Requirements
 
-- macOS 13+ (primary) or Linux
+- macOS 13+ (primary) or Linux — CI runs on both (`macos-latest`,
+  `ubuntu-24.04`) and tagged releases ship unsigned macOS `.dmg` (arm64 and
+  x86_64) plus Linux `.AppImage`/`.deb` bundles (see `docs/RELEASING.md`)
 - Rust 1.83+ (`rustup install stable`)
-- pnpm 9+ (`npm i -g pnpm`)
+- Node 20 (`.node-version`) and pnpm 10 via `corepack enable` (or
+  `npm i -g pnpm@10`). The workspace file uses the pnpm 10 `allowBuilds` key;
+  if a local pnpm 9 prints `packages field missing or empty`, run
+  `corepack pnpm@10 <cmd>` or `npx -y pnpm@10 <cmd>` instead.
+- `cargo install cargo-deny --locked` for the local license/advisory audit
+  step (`cargo deny check`, run by `scripts/ci-local.sh` and CI).
 - Tauri 2 prerequisites: https://v2.tauri.app/start/prerequisites/
 
 ### Build & run
@@ -66,7 +75,12 @@ pnpm check                     # frontend Svelte/TS type-check
 cd src-tauri && cargo test     # backend (rusqlite + commands)
 cd src-tauri && cargo clippy --all-targets -- -D warnings
 cd src-tauri && cargo fmt --check
+cargo deny --manifest-path src-tauri/Cargo.toml check   # licenses + advisories
 ```
+
+Run `scripts/ci-local.sh` (or `--rust-only` / `--frontend-only`) before
+pushing; it mirrors CI. Opt in to the fast pre-commit hook with
+`git config core.hooksPath .githooks`.
 
 ### Project layout
 
@@ -74,7 +88,7 @@ cd src-tauri && cargo fmt --check
 src/lib/            # Svelte 5 components + TS stores (hosts, sessions, projects, accounts, events)
 src-tauri/src/      # Rust backend: Tauri commands, ssh/tmux/pty, SQLite store, event bus
 src-tauri/src/commands/  # IPC command handlers (hosts, sessions, projects, health)
-src-tauri/migrations/    # SQLite migrations (001–017)
+src-tauri/migrations/    # SQLite migrations (registered in the MIGRATIONS table in src-tauri/src/store.rs)
 docs/specs/         # per-iteration design specs
 docs/plans/         # per-iteration implementation plans
 CLAUDE.md           # orientation for Claude Code working in this repo
@@ -85,12 +99,14 @@ CLAUDE.md           # orientation for Claude Code working in this repo
 A hardening review (2026-05-21, see
 [docs/specs/2026-05-21-hardening-review.md](docs/specs/2026-05-21-hardening-review.md))
 catalogues open issues. Highest priority: SSH host-alias validation, migration
-atomicity, and the single-global-PTY races in `TerminalView`. Handoff and
-Freeze (original spec §8.3–8.4) remain unimplemented.
+atomicity, and the single-global-PTY races in `TerminalView`. Handoff
+(original spec §8.3) is replaced by Move to host… / `move_session`, and Freeze
+(§8.4) is descoped; see
+[ADR 0001](docs/adr/0001-descope-freeze-ship-move.md).
 
 ## Releasing & documentation
 
-- Versioning and changelog are automated via release-please — see
+- Versioning and changelog are cut manually with `scripts/release.sh` — see
   [docs/RELEASING.md](docs/RELEASING.md).
 - **Control API reference:** [docs/control-api-reference.md](docs/control-api-reference.md)
   (generated from source) and [docs/control-api.md](docs/control-api.md) (guide).
@@ -99,4 +115,5 @@ Freeze (original spec §8.3–8.4) remain unimplemented.
 
 ## License
 
-Personal project. No license declared yet.
+Personal project. `package.json` and `src-tauri/Cargo.toml` declare MIT; a
+`LICENSE` file has not been added to the repository yet.

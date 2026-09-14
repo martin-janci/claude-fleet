@@ -1,5 +1,6 @@
-// Pure helpers for terminal copy/paste. No DOM or Tauri deps so they can be
-// unit-tested directly and reused by both the Cmd+V and drag-drop paths.
+// Clipboard helpers. The terminal copy/paste helpers are pure (no DOM or Tauri
+// deps) so they can be unit-tested directly and reused by both the Cmd+V and
+// drag-drop paths. `copyText` wraps the web Clipboard API for Copy buttons.
 
 /** Bracketed-paste markers (DEC mode 2004). */
 const PASTE_START = '\x1b[200~';
@@ -26,4 +27,17 @@ export function sanitizePaste(text: string): string {
  *  2004; otherwise return it unchanged. */
 export function framePaste(text: string, bracketed: boolean): string {
   return bracketed ? `${PASTE_START}${text}${PASTE_END}` : text;
+}
+
+/** Copy text to the system clipboard via the web Clipboard API. Never throws:
+ *  resolves true on success, or false when the clipboard is unavailable or the
+ *  write is rejected — in which case `onError`, if given, receives the error. */
+export async function copyText(text: string, onError?: (e: unknown) => void): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (e) {
+    onError?.(e);
+    return false;
+  }
 }

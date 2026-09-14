@@ -1,21 +1,51 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import { sessions, type SessionRow, type SafeKillInspection } from './sessions';
+  import {
+    sessions,
+    hasNoPane,
+    isInactiveAgent,
+    dismissAgentSession,
+    type SessionRow,
+    type SafeKillInspection,
+  } from './sessions';
+  import { formatCostMicros, formatTokens, sessionUsageTokens } from './sessions';
   import {
     killSession,
     renameSession,
+    setFriendlyName,
     restartSession,
+    repairSession,
     recreateSession,
     safeKillSession,
     inspectSafeKill,
     discardKillSession,
   } from './sessions';
+  import { moveSession } from './moveSession';
   import { projectById } from './projects';
   import { selectSession, clearSelection } from './selection';
-  import { hostByAlias } from './hosts';
+  import { hosts, hostByAlias } from './hosts';
   import { accountByUuid, type AccountRow } from './accounts';
   import PromptComposer from './PromptComposer.svelte';
   import ReviewDialog from './ReviewDialog.svelte';
+  import Modal from './Modal.svelte';
+  import ConfirmDialog from './ConfirmDialog.svelte';
+  import TasksPanel from './TasksPanel.svelte';
+  import Timeline from './Timeline.svelte';
+  import { push, pushError } from './toasts';
+  import { copyText } from './clipboard';
+  import {
+    ciStatusColor,
+    ciStatusLabel,
+    claudeStatusColor,
+    claudeStatusLabel,
+    contextColor,
+    contextTint,
+    contextLevel,
+    formatElapsed,
+    sessionStart,
+    stuckKindLabel,
+    STUCK_COLOR,
+  } from './attention';
 
   let { session }: { session: SessionRow } = $props();
 
@@ -66,51 +96,83 @@
   }
 
   let copied = $state(false);
-  let actionError: string | null = $state(null);
 
-  // Title rename state — same UX as the sidebar's inline rename.
-  let renaming = $state(false);
+  // Coarse clock for the elapsed / idle counters (a minute-level readout
+  // does not need a per-second re-render).
+  let nowSec = $state(Math.floor(Date.now() / 1000));
+  $effect(() => {
+    const t = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 30_000);
+    return () => clearInterval(t);
+  });
+  const ctxLevel = $derived(contextLevel(session.context_pct));
+
+  // Inline editor state — same UX as the sidebar's. Double-clicking the
+  // title edits the display label (empty clears it); "Rename tmux session"
+  // renames tmux itself.
+  let renaming: 'label' | 'tmux' | null = $state(null);
   let renameValue = $state('');
+  // Enter commits and then the input unmounts, which can fire blur → a
+  // second commit. Same synchronous guard as the sidebar.
+  let committingRename = false;
 
   async function onCopy() {
-    actionError = null;
-    try {
-      await navigator.clipboard.writeText(attachCommand);
-      copied = true;
-      setTimeout(() => (copied = false), 1500);
-    } catch (e) {
-      actionError = String(e);
-    }
+    const ok = await copyText(attachCommand, (e) => {
+      push({ kind: 'error', code: 'E_CLIPBOARD', message: `Copy failed: ${String(e)}` });
+    });
+    if (!ok) return;
+    copied = true;
+    setTimeout(() => (copied = false), 1500);
   }
 
-  async function beginRename() {
-    renaming = true;
-    renameValue = session.tmux_name;
-    actionError = null;
+  let renameInput: HTMLInputElement | undefined = $state();
+
+  async function beginEdit(mode: 'label' | 'tmux') {
+    renaming = mode;
+    renameValue = mode === 'label' ? (session.friendly_name ?? '') : session.tmux_name;
     await tick();
-    const input = document.querySelector<HTMLInputElement>('[data-testid="details-rename"]');
-    input?.focus();
-    input?.select();
+    renameInput?.focus();
+    renameInput?.select();
   }
+
+  const beginRename = () => beginEdit('tmux');
+  const beginLabelEdit = () => beginEdit('label');
 
   async function commitRename() {
-    if (!renaming) return;
+    if (!renaming || committingRename) return;
     const next = renameValue.trim();
-    if (!next || next === session.tmux_name) {
-      renaming = false;
-      return;
+    committingRename = true;
+    try {
+      if (renaming === 'label') {
+        if (next === (session.friendly_name ?? '').trim()) {
+          renaming = null;
+          return;
+        }
+        const r = await setFriendlyName(session.host_alias, session.tmux_name, next);
+        if (!r.ok) {
+          pushError(r.error, 'Label update failed');
+          return;
+        }
+        renaming = null;
+        return;
+      }
+      if (!next || next === session.tmux_name) {
+        renaming = null;
+        return;
+      }
+      const r = await renameSession(session.host_alias, session.tmux_name, next);
+      if (!r.ok) {
+        pushError(r.error, 'Rename failed');
+        return;
+      }
+      selectSession(r.value, { follow: true });
+      renaming = null;
+    } finally {
+      committingRename = false;
     }
-    const r = await renameSession(session.host_alias, session.tmux_name, next);
-    if (!r.ok) {
-      actionError = r.error.message;
-      return;
-    }
-    selectSession(r.value);
-    renaming = false;
   }
 
   function cancelRename() {
-    renaming = false;
+    renaming = null;
   }
 
   function onRenameKey(e: KeyboardEvent) {
@@ -123,10 +185,48 @@
     }
   }
 
+  // Inactive bg agent: drop the row. The backend emits `session:removed`,
+  // which removes it from the store (and clears the selection).
+  async function onRemoveFromList() {
+    const r = await dismissAgentSession(session.id);
+    if (!r.ok) pushError(r.error, 'Remove failed');
+  }
+
   async function onRestart() {
-    actionError = null;
     const r = await restartSession(session.host_alias, session.tmux_name);
-    if (!r.ok) actionError = r.error.message;
+    if (!r.ok) pushError(r.error, 'Restart failed');
+  }
+
+  // Make the worktree directory + tmux pane healthy again (deleted dir,
+  // pruned registration, moved checkout, dead tmux). The backend emits the
+  // row events; the toast just says what it did.
+  let repairing = $state(false);
+  async function onRepair() {
+    if (repairing) return;
+    repairing = true;
+    // Explicit: the user asked, so this may unregister a stale entry, adopt a
+    // moved checkout, recreate the branch and respawn a live pane.
+    const r = await repairSession(session.id, { explicit: true });
+    repairing = false;
+    if (!r.ok) {
+      pushError(r.error, 'Repair failed');
+      return;
+    }
+    const rep = r.value;
+    if (rep.actions.length === 0) {
+      const notes = rep.warnings.length > 0 ? ` (${rep.warnings.join('; ')})` : '';
+      push({ kind: 'success', message: `Workspace is healthy: ${rep.cwd}${notes}` });
+      return;
+    }
+    const branch = rep.branch_source ? ` [branch: ${rep.branch_source}]` : '';
+    push({ kind: 'success', message: `Repaired workspace: ${rep.actions.join('; ')}${branch}` });
+    if (rep.tmux === 'created') {
+      // A recreated tmux session needs a fresh attach (same tmux_name, so
+      // the selection effect would not fire on its own).
+      selectSession(null);
+      await tick();
+      selectSession(session, { follow: true });
+    }
   }
 
   let composerOpen = $state(false);
@@ -157,7 +257,6 @@
   let busy = $state(false);
 
   async function askSafeKill() {
-    actionError = null;
     inspection = null;
     inspectError = null;
     confirmingSafeKill = true;
@@ -182,7 +281,7 @@
     const r = await safeKillSession(session.host_alias, session.tmux_name);
     busy = false;
     if (!r.ok) {
-      actionError = r.error.message;
+      pushError(r.error, 'Safe remove failed');
       return;
     }
     confirmingSafeKill = false;
@@ -200,7 +299,7 @@
       inspection = null;
       clearSelection();
     } else {
-      actionError = r.error.message;
+      pushError(r.error, 'Remove failed');
     }
   }
 
@@ -215,12 +314,11 @@
       inspection = null;
       clearSelection();
     } else {
-      actionError = r.error.message;
+      pushError(r.error, 'Discard & kill failed');
     }
   }
   function askKill() {
     confirmingKill = true;
-    actionError = null;
   }
   function cancelKill() {
     confirmingKill = false;
@@ -231,31 +329,80 @@
     if (r.ok) {
       clearSelection();
     } else {
-      actionError = r.error.message;
+      pushError(r.error, 'Kill failed');
     }
   }
 
   function askRecreate() {
     confirmingRecreate = true;
-    actionError = null;
   }
 
   function cancelRecreate() {
     confirmingRecreate = false;
   }
 
+  // Move to host…: continue this conversation on another host (same branch,
+  // same Claude session id). Only a worktree-backed work session with a
+  // Claude id can move; the backend refuses dirty or unpushed worktrees.
+  const canMove = $derived(
+    session.kind === 'work' && session.worktree_id !== null && session.claude_session_id !== null,
+  );
+  const moveTargets = $derived(
+    $hosts.filter(
+      (h) =>
+        h.alias !== session.host_alias &&
+        !h.hidden &&
+        h.reachable &&
+        (h.provisioned || h.alias === 'local'),
+    ),
+  );
+  let moveOpen = $state(false);
+  let moveTarget = $state('');
+  let moveKeepSource = $state(false);
+  let moving = $state(false);
+
+  function openMove() {
+    moveTarget = moveTargets[0]?.alias ?? '';
+    moveKeepSource = false;
+    moveOpen = true;
+  }
+
+  function closeMove() {
+    if (!moving) moveOpen = false;
+  }
+
+  async function doMove() {
+    if (moving || !moveTarget) return;
+    moving = true;
+    const r = await moveSession(session.id, moveTarget, { keepSource: moveKeepSource });
+    moving = false;
+    if (!r.ok) {
+      pushError(r.error, 'Move failed');
+      return;
+    }
+    moveOpen = false;
+    const rep = r.value;
+    const kept = rep.source_killed ? '' : '; the source keeps running';
+    const notes = rep.warnings.length > 0 ? ` (${rep.warnings.join('; ')})` : '';
+    push({
+      kind: 'success',
+      message: `Moved to ${rep.to_host} as ${rep.tmux_name}${kept}${notes}`,
+    });
+    selectSession(rep.target);
+  }
+
   async function doRecreate() {
     confirmingRecreate = false;
     const r = await recreateSession(session.id);
     if (!r.ok) {
-      actionError = r.error.message;
+      pushError(r.error, 'Recreate failed');
       return;
     }
     // kill-session severed the PTY; same tmux_name won't auto-reopen. This
     // panel shows the selected session, so force a re-attach.
     selectSession(null);
     await tick();
-    selectSession(r.value);
+    selectSession(r.value, { follow: true });
   }
 </script>
 
@@ -263,8 +410,13 @@
   <header class="header">
     {#if renaming}
       <input
+        bind:this={renameInput}
         class="title-input"
-        data-testid="details-rename"
+        data-testid={renaming === 'label' ? 'details-label' : 'details-rename'}
+        aria-label={renaming === 'label'
+          ? `Label for ${session.tmux_name} (empty clears it)`
+          : `New tmux session name for ${session.tmux_name}`}
+        placeholder={renaming === 'label' ? session.tmux_name : undefined}
         bind:value={renameValue}
         onkeydown={onRenameKey}
         onblur={commitRename}
@@ -272,13 +424,40 @@
     {:else}
       <h2
         class="title"
-        ondblclick={beginRename}
-        title="Double-click to rename"
+        ondblclick={beginLabelEdit}
+        title="Double-click to edit the label"
       >{session.tmux_name}</h2>
+    {/if}
+    {#if session.friendly_name && renaming !== 'label'}
+      <p class="friendly" data-testid="details-friendly-name">{session.friendly_name}</p>
     {/if}
     <div class="sub">
       <span class="host">{session.host_alias}</span>
       <span class="status status-{session.status}">{session.status}</span>
+      {#if session.stuck_kind}
+        <span
+          class="chip"
+          data-testid="details-stuck"
+          style="background: {STUCK_COLOR}22; color: {STUCK_COLOR}; border-color: {STUCK_COLOR}66;"
+          title={session.current_activity ?? undefined}
+        >⚠ stuck: {stuckKindLabel(session.stuck_kind)}{#if session.stuck_since !== null} · {formatElapsed(session.stuck_since, nowSec)}{/if}</span>
+      {:else if session.claude_status}
+        <span
+          class="chip"
+          data-testid="details-claude-status"
+          style="background: {claudeStatusColor(session.claude_status)}22; color: {claudeStatusColor(session.claude_status)}; border-color: {claudeStatusColor(session.claude_status)}44;"
+          title={session.current_activity ?? undefined}
+        >{claudeStatusLabel(session.claude_status)}</span>
+      {/if}
+      {#if ctxLevel !== null && session.context_pct !== null}
+        <span
+          class="chip"
+          data-testid="details-context"
+          data-level={ctxLevel}
+          style="color: {contextColor(ctxLevel)}; border-color: {contextTint(ctxLevel)};"
+          title="Context window used"
+        >ctx {Math.round(session.context_pct)}%</span>
+      {/if}
     </div>
   </header>
 
@@ -303,6 +482,47 @@
 
     <dt>Last activity</dt>
     <dd>{formatRelative(session.last_activity_at)}</dd>
+
+    <dt>Elapsed</dt>
+    <dd data-testid="details-elapsed" title={session.started_at === null ? 'since tmux created the session (fleet did not start it)' : 'since fleet started the session'}>
+      {formatElapsed(sessionStart(session), nowSec)}
+    </dd>
+
+    {#if session.last_turn_at !== null}
+      <dt>Last turn</dt>
+      <dd data-testid="details-last-turn">{formatRelative(session.last_turn_at)}</dd>
+    {/if}
+
+    {#if session.last_prompt}
+      <dt>Last prompt</dt>
+      <dd class="last-prompt" data-testid="details-last-prompt">{session.last_prompt}</dd>
+    {/if}
+
+    {#if sessionUsageTokens(session) > 0}
+      <dt>Usage</dt>
+      <dd
+        data-testid="details-usage"
+        title="Estimated from the Claude Code transcript's token counts and a built-in per-model price table (override: usage.prices_json). Not a bill."
+      >
+        <span data-testid="details-cost">{#if (session.usage_cost_micros ?? 0) > 0}{formatCostMicros(session.usage_cost_micros)} estimated{:else}unpriced ({session.usage_model ?? 'unknown model'}){/if}</span>
+        <span class="muted">· {formatTokens(session.usage_input_tokens)} in · {formatTokens(session.usage_output_tokens)} out · {formatTokens(session.usage_cache_write_tokens)} cache write · {formatTokens(session.usage_cache_read_tokens)} cache read{#if session.usage_model} · {session.usage_model}{/if}</span>
+      </dd>
+    {/if}
+
+    {#if session.pr_url}
+      <dt>Pull request</dt>
+      <dd data-testid="details-pr">
+        <a class="pr-link" href={session.pr_url} target="_blank" rel="noreferrer">{session.pr_url.replace(/^https:\/\/github\.com\//, '')}</a>
+        {#if session.ci_status}
+          <span
+            class="chip"
+            data-testid="details-ci"
+            style="color: {ciStatusColor(session.ci_status)}; border-color: {ciStatusColor(session.ci_status)}55;"
+            title="CI checks: {session.ci_status}"
+          >{ciStatusLabel(session.ci_status)}</span>
+        {/if}
+      </dd>
+    {/if}
 
     {#if reviewedSource}
       <dt class="meta-label">Reviewing</dt>
@@ -360,46 +580,93 @@
     </section>
   {/if}
 
-  <section class="block">
-    <h3>Attach from another terminal</h3>
-    <div class="cmd-row">
-      <code class="cmd" data-testid="attach-command">{attachCommand}</code>
-      <button class="copy" onclick={onCopy} data-testid="copy-attach">
-        {copied ? '✓ copied' : 'copy'}
-      </button>
-    </div>
-  </section>
+  <TasksPanel sessionId={session.id} />
 
-  {#if actionError}
-    <p class="err">{actionError}</p>
+  <Timeline
+    sessionId={session.id}
+    refreshKey={`${session.turn_seq}|${session.status}|${session.claude_status}|${session.stuck_kind}|${session.last_prompt}|${session.safe_kill_state}`}
+  />
+
+  {#if !hasNoPane(session)}
+    <section class="block">
+      <h3>Attach from another terminal</h3>
+      <div class="cmd-row">
+        <code class="cmd" data-testid="attach-command">{attachCommand}</code>
+        <button class="copy" onclick={onCopy} data-testid="copy-attach">
+          {copied ? '✓ copied' : 'copy'}
+        </button>
+      </div>
+    </section>
   {/if}
 
   <section class="block actions">
-    <button class="ghost" onclick={beginRename} data-testid="rename-from-details">
-      ✎ Rename
+    <button class="ghost" onclick={beginLabelEdit} data-testid="label-from-details">
+      🏷 Edit label
     </button>
-    <button class="ghost" onclick={onRestart} data-testid="restart-from-details">
-      ↻ Restart
-    </button>
-    {#if session.kind !== 'shell'}
-      <button class="ghost" onclick={openComposer} data-testid="send-prompt-from-details">
-        → Send prompt
+    <!-- An external row runs outside fleet: the label (local fleet metadata)
+         is the only thing fleet can change about it. -->
+    {#if session.kind !== 'external'}
+      <button class="ghost" onclick={beginRename} data-testid="rename-from-details">
+        ✎ Rename tmux session
       </button>
-    {/if}
-    <button class="ghost" onclick={() => (reviewOpen = true)} data-testid="open-review">
-      🔍 Review
-    </button>
-    <button class="ghost" onclick={askRecreate} data-testid="recreate-from-details">
-      ♻ Recreate
-    </button>
-    {#if session.kind !== 'shell' && session.status === 'running' && session.safe_kill_state !== 'requested'}
-      <button class="ghost" onclick={askSafeKill} data-testid="safe-kill-from-details">
-        ⏏ Safe remove
+      <button class="ghost" onclick={onRestart} data-testid="restart-from-details">
+        ↻ Restart
       </button>
+      {#if !hasNoPane(session) && session.project_id !== null}
+        <button
+          class="ghost"
+          onclick={onRepair}
+          disabled={repairing}
+          title="Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it"
+          data-testid="repair-from-details"
+        >
+          🩹 Repair workspace
+        </button>
+      {/if}
+      {#if session.kind !== 'shell'}
+        <button class="ghost" onclick={openComposer} data-testid="send-prompt-from-details">
+          → Send prompt
+        </button>
+      {/if}
+      <button class="ghost" onclick={() => (reviewOpen = true)} data-testid="open-review">
+        🔍 Review
+      </button>
+      <button class="ghost" onclick={askRecreate} data-testid="recreate-from-details">
+        ♻ Recreate
+      </button>
+      {#if canMove}
+        <button
+          class="ghost"
+          onclick={openMove}
+          title="Continue this conversation on another host: same branch, same Claude session"
+          data-testid="move-from-details"
+        >
+          ⇄ Move to host…
+        </button>
+      {/if}
+      {#if isInactiveAgent(session)}
+        <button
+          class="ghost"
+          onclick={onRemoveFromList}
+          title="Hide this inactive agent until it becomes active again"
+          data-testid="remove-from-list-details"
+        >
+          Remove from list
+        </button>
+      {/if}
+      <!-- An inactive agent's daemon is gone: Remove from list (above) is its
+           only removal action. -->
+      {#if !isInactiveAgent(session)}
+        {#if session.kind !== 'shell' && session.status === 'running' && session.safe_kill_state !== 'requested'}
+          <button class="ghost" onclick={askSafeKill} data-testid="safe-kill-from-details">
+            ⏏ Safe remove
+          </button>
+        {/if}
+        <button class="danger" onclick={askKill} data-testid="kill-from-details">
+          Kill session
+        </button>
+      {/if}
     {/if}
-    <button class="danger" onclick={askKill} data-testid="kill-from-details">
-      Kill session
-    </button>
   </section>
 
   {#if session.safe_kill_state === 'requested'}
@@ -428,21 +695,22 @@
 {/if}
 
 {#if confirmingKill}
-  <div class="modal-backdrop" onclick={cancelKill} role="presentation">
-    <div class="confirm" onclick={(e) => e.stopPropagation()} role="presentation">
-      <h3>Kill session?</h3>
-      <p>This will kill the tmux session <code>{session.tmux_name}</code> and lose any running claude state inside it. Continue?</p>
-      <div class="confirm-actions">
-        <button onclick={cancelKill}>Cancel</button>
-        <button class="danger" onclick={doKill} data-testid="confirm-kill-details">Kill</button>
-      </div>
-    </div>
-  </div>
+  <ConfirmDialog
+    title="Kill session?"
+    confirmLabel="Kill"
+    danger
+    onconfirm={doKill}
+    oncancel={cancelKill}
+    confirmTestId="confirm-kill-details"
+  >
+    This will kill the tmux session <code>{session.tmux_name}</code> on
+    <code>{session.host_alias}</code> and lose any running claude state inside it. Continue?
+  </ConfirmDialog>
 {/if}
 
 {#if confirmingSafeKill}
-  <div class="modal-backdrop" onclick={cancelSafeKill} role="presentation">
-    <div class="confirm wide" onclick={(e) => e.stopPropagation()} role="presentation">
+  <Modal label="Safe remove {session.tmux_name}" onclose={cancelSafeKill} width="480px" testid="safe-kill-dialog">
+    <div class="confirm wide">
       <h3>Safe remove <code>{session.tmux_name}</code>?</h3>
 
       {#if inspection === null && inspectError === null}
@@ -541,23 +809,60 @@
         </div>
       {/if}
     </div>
-  </div>
+  </Modal>
+{/if}
+
+{#if moveOpen}
+  <Modal title="Move {session.tmux_name} to another host" onclose={closeMove} width="480px" testid="move-dialog">
+    <p class="move-note">
+      Copies this conversation to the chosen host, creates the worktree there from the same
+      branch and resumes it with <code>--resume</code>. This session is killed only once the
+      new one is running. The worktree must be clean and pushed; nothing is pushed for you.
+    </p>
+    {#if moveTargets.length === 0}
+      <p class="move-note" data-testid="move-no-targets">No other reachable, provisioned host.</p>
+    {:else}
+      <label class="move-field">
+        Target host
+        <select bind:value={moveTarget} disabled={moving} data-testid="move-target">
+          {#each moveTargets as h (h.alias)}
+            <option value={h.alias}>{h.alias}</option>
+          {/each}
+        </select>
+      </label>
+      <label class="move-field">
+        <input type="checkbox" bind:checked={moveKeepSource} disabled={moving} data-testid="move-keep-source" />
+        Keep this session running
+      </label>
+    {/if}
+    <div class="move-buttons">
+      <button onclick={closeMove} disabled={moving}>Cancel</button>
+      <button onclick={doMove} disabled={moving || !moveTarget} data-testid="confirm-move">
+        {moving ? 'Moving…' : 'Move'}
+      </button>
+    </div>
+  </Modal>
 {/if}
 
 {#if confirmingRecreate}
-  <div class="modal-backdrop" onclick={cancelRecreate} role="presentation">
-    <div class="confirm" onclick={(e) => e.stopPropagation()} role="presentation">
-      <h3>Recreate session?</h3>
-      <p>This kills the tmux session <code>{session.tmux_name}</code> and the running claude state inside it, then starts a fresh session in the same worktree. Continue?</p>
-      <div class="confirm-actions">
-        <button onclick={cancelRecreate}>Cancel</button>
-        <button class="danger" onclick={doRecreate} data-testid="confirm-recreate-details">Recreate</button>
-      </div>
-    </div>
-  </div>
+  <ConfirmDialog
+    title="Recreate session?"
+    confirmLabel="Recreate"
+    danger
+    onconfirm={doRecreate}
+    oncancel={cancelRecreate}
+    confirmTestId="confirm-recreate-details"
+  >
+    This kills the tmux session <code>{session.tmux_name}</code> on
+    <code>{session.host_alias}</code> and the running claude state inside it, then
+    starts a fresh session in the same worktree. Continue?
+  </ConfirmDialog>
 {/if}
 
 <style>
+  .move-note { margin: 0 0 0.75rem; font-size: 0.85rem; color: var(--fg-muted); }
+  .move-field { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.6rem; font-size: 0.85rem; }
+  .move-buttons { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.75rem; }
   .details {
     display: flex;
     flex-direction: column;
@@ -586,7 +891,24 @@
     border-radius: 4px;
     outline: none;
   }
-  .sub { display: flex; gap: 0.5rem; align-items: center; font-size: 0.75rem; }
+  .sub { display: flex; gap: 0.5rem; align-items: center; font-size: 0.75rem; flex-wrap: wrap; }
+  .friendly { margin: 0; font-size: 0.85rem; color: var(--fg-muted); }
+  .chip {
+    padding: 0.1rem 0.4rem;
+    border-radius: 999px;
+    border: 1px solid;
+    font-size: 0.65rem;
+    white-space: nowrap;
+  }
+  .last-prompt {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 0.8rem;
+    color: var(--fg-muted);
+    max-height: 6rem;
+    overflow: auto;
+  }
+  .pr-link { color: var(--accent); font-size: 0.85rem; overflow-wrap: anywhere; }
   .host {
     color: var(--fg-muted);
     border: 1px solid var(--border);
@@ -716,18 +1038,8 @@
   }
   .link:hover { opacity: 0.8; }
 
-  .modal-backdrop {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.4);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 10;
-  }
+  /* Safe-remove body (lives inside Modal, which owns the box chrome). */
   .confirm {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 1rem;
-    width: 360px;
-    color: var(--fg);
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
@@ -742,7 +1054,6 @@
     color: var(--fg);
   }
   .confirm-actions { display: flex; gap: 0.4rem; justify-content: flex-end; flex-wrap: wrap; }
-  .confirm.wide { width: 480px; max-width: 90vw; }
   .confirm .primary {
     background: var(--accent);
     color: white;

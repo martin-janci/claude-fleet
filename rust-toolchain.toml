@@ -1,0 +1,6 @@
+# Keep in sync with README ("Rust 1.83+") and .github/workflows/ci.yml
+# (dtolnay/rust-toolchain@stable). Tracks stable rather than pinning a
+# specific version so local builds match what CI resolves.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

@@ -39,17 +39,11 @@ CREATE TABLE IF NOT EXISTS sessions (
   UNIQUE (host_alias, tmux_name)
 );
 
-CREATE TABLE IF NOT EXISTS handoffs (
-  id            INTEGER PRIMARY KEY,
-  session_id    INTEGER NOT NULL REFERENCES sessions(id),
-  from_host     TEXT NOT NULL,
-  to_host       TEXT NOT NULL,
-  mode          TEXT NOT NULL,
-  started_at    INTEGER NOT NULL,
-  finished_at   INTEGER,
-  status        TEXT NOT NULL,
-  error         TEXT
-);
+-- The `handoffs` table (Handoff, spec §8.3) was never used and is dropped by
+-- migration 022. It is no longer created here: this bootstrap script re-runs
+-- on every launch, so keeping the CREATE would resurrect the dropped table.
+-- (`sessions.frozen_scrollback` above stays in the CREATE so 022 can drop it
+-- unconditionally; the CREATE is a no-op on every existing database.)
 
 CREATE TABLE IF NOT EXISTS settings (
   key    TEXT PRIMARY KEY,

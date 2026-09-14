@@ -1,0 +1,19 @@
+● Bash(ls)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+
+   ls
+   List files in current directory
+
+ This command requires approval
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don’t ask again for: ls *
+   3. Yes, and switch to auto mode · auto mode handles these prompts for you
+   4. No
+
+ Esc to cancel · Tab to amend
+  [███████░░░░░░░░░░░░░] 34% used  |  Opus 5 (1M context)  |  /tmp/scratch
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
