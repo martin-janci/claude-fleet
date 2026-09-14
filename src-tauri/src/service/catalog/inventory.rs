@@ -5,8 +5,128 @@
 use super::harness::{json_get, ConfigMerge, Harness, HostSnapshot, MergeMode};
 use super::model::sha256_hex;
 use super::repo::Catalog;
+use crate::shell::quote;
+use crate::ssh::SshClient;
 use crate::store::AssetInventoryRow;
+use crate::store::Store;
 use serde_json::Value;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+const SCAN_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HostScanResult {
+    pub host: String,
+    /// "scanned" | "skipped" | "failed"
+    pub status: String,
+    pub detail: Option<String>,
+    pub rows: usize,
+}
+
+/// Run a bash script on a host and return stdout. `local` runs in-process;
+/// remote hosts go through the SSH multiplexer with the whole script as one
+/// quoted `bash -lc` word (ssh space-joins argv).
+pub async fn run_host_script(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    script: &str,
+) -> Result<String, crate::ipc_error::IpcError> {
+    if host == "local" {
+        let out = tokio::process::Command::new("bash")
+            .args(["-lc", script])
+            .output()
+            .await
+            .map_err(|e| crate::ipc_error::IpcError::new("E_IO", format!("spawn bash: {e}")))?;
+        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+    }
+    let quoted = quote(script);
+    let out = ssh
+        .run(host, &["bash", "-lc", &quoted], SCAN_TIMEOUT)
+        .await?;
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Scan every non-hidden reachable host (or just `only_host`) with every
+/// harness that supports scanning, persisting rows per (host, harness).
+/// Per-host failures never abort the others (mirrors `provision_hosts`).
+pub async fn scan_hosts(
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    only_host: Option<&str>,
+) -> Result<Vec<HostScanResult>, crate::ipc_error::IpcError> {
+    let hosts = {
+        let s = store
+            .lock()
+            .map_err(|_| crate::ipc_error::IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        s.list_hosts()?
+    };
+    let catalog = {
+        let g = super::CATALOG
+            .read()
+            .map_err(|_| crate::ipc_error::IpcError::new("E_LOCK", "catalog lock poisoned"))?;
+        g.clone().ok_or_else(|| {
+            crate::ipc_error::IpcError::new(
+                super::E_CATALOG_NOT_CONFIGURED,
+                "catalog not loaded; call catalog_load",
+            )
+        })?
+    };
+    let mut results = Vec::new();
+    for h in hosts {
+        if h.hidden || only_host.is_some_and(|o| o != h.alias) {
+            continue;
+        }
+        if h.alias != "local" && !h.reachable {
+            results.push(HostScanResult {
+                host: h.alias,
+                status: "skipped".into(),
+                detail: Some("unreachable".into()),
+                rows: 0,
+            });
+            continue;
+        }
+        let mut total = 0usize;
+        let mut failure: Option<String> = None;
+        for harness in super::harness::all() {
+            let Some(script) = harness.scan_script() else {
+                continue;
+            };
+            let scanned_at = super::now_secs();
+            let rows = match run_host_script(ssh, &h.alias, &script)
+                .await
+                .and_then(|out| harness.parse_scan(&out))
+            {
+                Ok(snap) => compute_states(&catalog, harness.as_ref(), &h.alias, &snap, scanned_at),
+                Err(e) => {
+                    failure = Some(format!("{}: {}", harness.id(), e.message));
+                    continue;
+                }
+            };
+            total += rows.len();
+            if let Ok(s) = store.lock() {
+                if let Err(e) = s.replace_host_inventory(&h.alias, harness.id(), &rows) {
+                    failure = Some(format!("persist inventory: {e}"));
+                }
+            }
+        }
+        results.push(match failure {
+            None => HostScanResult {
+                host: h.alias,
+                status: "scanned".into(),
+                detail: None,
+                rows: total,
+            },
+            Some(d) => HostScanResult {
+                host: h.alias,
+                status: "failed".into(),
+                detail: Some(d),
+                rows: total,
+            },
+        });
+    }
+    Ok(results)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetState {
@@ -360,5 +480,46 @@ mod tests {
             rows.iter().find(|r| r.name == "h").unwrap().state,
             "in_sync"
         );
+    }
+
+    #[tokio::test]
+    async fn run_host_script_local_executes_bash() {
+        let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
+        let out = run_host_script(&ssh, "local", "echo \"hi $((1+1))\"")
+            .await
+            .unwrap();
+        assert_eq!(out.trim(), "hi 2");
+    }
+
+    // `CATALOG_TEST_LOCK` only serialises tests against the process-global
+    // `CATALOG`; it guards no resource the async runtime itself needs, so
+    // holding it across `scan_hosts`'s awaits is safe despite the lint.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn scan_hosts_scans_local_and_persists_rows() {
+        let _g = crate::service::catalog::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("fleet-catalog-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("skills/s")).unwrap();
+        std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        std::fs::write(
+            root.join("skills/s/asset.yaml"),
+            "kind: skill\nname: s\ndescription: d\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("skills/s/body.md"), "b\n").unwrap();
+        let cat = crate::service::catalog::repo::load_dir(&root).unwrap();
+        *crate::service::catalog::CATALOG.write().unwrap() = Some(cat);
+
+        let store = std::sync::Mutex::new(crate::store::Store::open_in_memory().unwrap());
+        store.lock().unwrap().insert_host("local", None).unwrap();
+        let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
+        let results = scan_hosts(&store, &ssh, Some("local")).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, "scanned", "{:?}", results[0].detail);
+        let rows = store.lock().unwrap().list_inventory().unwrap();
+        assert!(rows.iter().any(|r| r.name == "s" && r.harness == "claude"));
     }
 }

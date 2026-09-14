@@ -981,6 +981,11 @@ impl Store {
         Ok(())
     }
 
+    /// Emit `catalog:loaded` (the catalog itself is not a store row).
+    pub fn bus_catalog_loaded(&self, summary: &crate::events::CatalogSummary) {
+        self.bus.catalog_loaded(summary);
+    }
+
     /// Replace every inventory row for (host, harness) in one transaction,
     /// then emit `asset_inventory:cleared` followed by one `:updated` per row.
     pub fn replace_host_inventory(
