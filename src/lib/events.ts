@@ -3,6 +3,7 @@ import type { SessionRow } from './sessions';
 import type { HostRow } from './hosts';
 import type { AccountRow } from './accounts';
 import type { ProjectRow, WorktreeRow } from './projects';
+import type { AssetInventoryRow, CatalogSummary } from './assets';
 
 export type RowEventHandlers = {
   onSessionCreated?: (row: SessionRow) => void;
@@ -15,6 +16,9 @@ export type RowEventHandlers = {
   onProjectUpdated?: (row: ProjectRow) => void;
   onWorktreeUpdated?: (row: WorktreeRow) => void;
   onWorktreeRemoved?: (payload: { id: number }) => void;
+  onAssetInventoryUpdated?: (row: AssetInventoryRow) => void;
+  onAssetInventoryCleared?: (payload: { host_alias: string; harness: string }) => void;
+  onCatalogLoaded?: (summary: CatalogSummary) => void;
 };
 
 /**
@@ -45,6 +49,9 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub<ProjectRow>('project:updated', handlers.onProjectUpdated),
     sub<WorktreeRow>('worktree:updated', handlers.onWorktreeUpdated),
     sub<{ id: number }>('worktree:removed', handlers.onWorktreeRemoved),
+    sub<AssetInventoryRow>('asset_inventory:updated', handlers.onAssetInventoryUpdated),
+    sub<{ host_alias: string; harness: string }>('asset_inventory:cleared', handlers.onAssetInventoryCleared),
+    sub<CatalogSummary>('catalog:loaded', handlers.onCatalogLoaded),
   ]);
   return () => {
     for (const u of unlisteners) u?.();

@@ -99,4 +99,17 @@ describe('subscribeToRowEvents → store integration', () => {
     await vi.mocked(emit)('session:killed', { id: 7 });
     expect(get(sessions)).toEqual([]);
   });
+
+  it('fires asset inventory and catalog handlers', async () => {
+    const seen: string[] = [];
+    await subscribeToRowEvents({
+      onAssetInventoryUpdated: (row) => seen.push(`upd:${row.host_alias}:${row.name}`),
+      onAssetInventoryCleared: (p) => seen.push(`clr:${p.host_alias}:${p.harness}`),
+      onCatalogLoaded: (s) => seen.push(`cat:${s.head}`),
+    });
+    await vi.mocked(emit)('asset_inventory:cleared', { host_alias: 'local', harness: 'claude' });
+    await vi.mocked(emit)('asset_inventory:updated', { host_alias: 'local', harness: 'claude', kind: 'skill', name: 's', state: 'in_sync', catalog_hash: null, host_hash: null, scanned_at: 1 });
+    await vi.mocked(emit)('catalog:loaded', { head: 'h', loaded_at: 1, asset_count: 0, problem_count: 0 });
+    expect(seen).toEqual(['clr:local:claude', 'upd:local:s', 'cat:h']);
+  });
 });
