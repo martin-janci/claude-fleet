@@ -606,7 +606,7 @@
              normal session reconnects its PTY. The Conversation is the only
              view these rows have. -->
         <div class="view-slot">
-          <ConversationPanel session={$selectedSession} visible={!hostsMode} />
+          <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode} />
         </div>
       {:else}
         <!-- TerminalView stays mounted underneath so the PTY and its ANSI
@@ -622,7 +622,7 @@
         {/if}
         {#if conversationMode && $selectedSession}
           <div class="view-slot overlay">
-            <ConversationPanel session={$selectedSession} visible={!hostsMode} />
+            <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode} />
           </div>
         {/if}
       {/if}

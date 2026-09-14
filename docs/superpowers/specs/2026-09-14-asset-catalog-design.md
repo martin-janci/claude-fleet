@@ -281,7 +281,7 @@ the working tree is left for the user or the authoring flow.
 
 ### Persisted state
 
-Migration `018_asset_catalog.sql`:
+Migration `030_asset_catalog.sql`:
 
 ```sql
 CREATE TABLE catalog_config (
@@ -395,7 +395,7 @@ grey column with a "skipped" tooltip.
 
 ## File-by-file change list
 
-- `src-tauri/migrations/018_asset_catalog.sql` — new.
+- `src-tauri/migrations/030_asset_catalog.sql` — new.
 - `src-tauri/src/store.rs` — migrate arm, row structs, helpers, bus calls.
 - `src-tauri/src/events.rs` — `asset_inventory_updated`, `catalog_loaded` on
   the trait and all three bus impls.
