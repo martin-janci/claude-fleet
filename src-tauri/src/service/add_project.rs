@@ -202,15 +202,19 @@ async fn clone_source(
         (out, dest)
     };
     if !out.status.success() {
-        // The script's own "already a checkout" guard fired: the repository
-        // is already sitting at exactly the path this clone would have
-        // created, and `refuse_existing_project` above proved the fleet holds
-        // no row for it. Adopt it instead of failing — the clone has nothing
-        // left to do, and `refresh_projects` can only ever rediscover a LOCAL
-        // checkout (it scans the local root; `folder_source` is local-only
-        // too), so failing here left a repo cloned on a REMOTE host with no
-        // way to be added at all.
-        if already_a_checkout(&out) {
+        // The script's own "already a checkout" guard fired AND that checkout
+        // is this very repository: it is already sitting at exactly the path
+        // this clone would have created, and `refuse_existing_project` above
+        // proved the fleet holds no row for it. Adopt it instead of failing —
+        // the clone has nothing left to do, and `refresh_projects` can only
+        // ever rediscover a LOCAL checkout (it scans the local root;
+        // `folder_source` is local-only too), so failing here left a repo
+        // cloned on a REMOTE host with no way to be added at all.
+        //
+        // Both halves are required: the guard alone says only that SOMETHING
+        // is checked out there — see [`checkout_is_this_repo`] for why
+        // adopting on that alone can register a row for the wrong repository.
+        if already_a_checkout(&out) && checkout_is_this_repo(&out, &owner, &repo) {
             return register(store, &owner, &repo, &local_base, false);
         }
         return Err(git_error(&args.host_alias, &owner, &repo, &dest, &out));
@@ -226,6 +230,28 @@ fn already_a_checkout(out: &std::process::Output) -> bool {
         && String::from_utf8_lossy(&out.stderr).contains(ALREADY_CLONED_MARKER)
 }
 
+/// The checkout [`already_a_checkout`] found is provably the repository being
+/// added: its `origin` (framed on stderr by [`clone_script`]'s guard) names
+/// exactly `owner/repo` on GitHub.
+///
+/// Adoption registers a row that points a project at whatever is on disk, so
+/// "a git checkout occupies the path" is NOT on its own enough to conclude it
+/// is the right repository. The destination is derived from `owner/repo`, so
+/// it usually is — but a fork cloned by hand, a directory left behind by a
+/// repository since renamed on GitHub, or any other checkout moved into that
+/// path would otherwise be silently adopted under a name that does not
+/// describe it, and every session and worktree opened from that row would
+/// then act on the wrong repository. `refuse_existing_project` (above) does
+/// not cover this: it proves the fleet holds no row for `owner/repo`, which
+/// says nothing about what the checkout on disk actually is.
+///
+/// `false` — i.e. let [`git_error`] report `E_EXISTS`, the pre-adoption
+/// behaviour — for a different repository, a different forge, a local path,
+/// no `origin` at all, or an `origin` that could not be read.
+fn checkout_is_this_repo(out: &std::process::Output, owner: &str, repo: &str) -> bool {
+    origin_url_from(out).is_some_and(|url| origin_is_github_repo(&url, owner, repo))
+}
+
 /// Clone `url` into `dest` unless `dest` is already a checkout. Every value
 /// quoted; [`SCRIPT_PROLOGUE`]'s `set -e` so a failed `mkdir` does not reach
 /// `git clone`. Exit code 3 plus [`ALREADY_CLONED_MARKER`] on stderr is the
@@ -236,11 +262,19 @@ pub(crate) fn clone_script(dest: &str, clone_url: &str) -> String {
     let d = quote(dest);
     format!(
         "{SCRIPT_PROLOGUE}\
-         if git -C {d} rev-parse --git-dir >/dev/null 2>&1; then echo {marker} >&2; cf_exit 3; fi\n\
+         if git -C {d} rev-parse --git-dir >/dev/null 2>&1; then\n\
+         echo {begin} >&2\n\
+         git -C {d} remote get-url origin >&2 || true\n\
+         echo {end} >&2\n\
+         echo {marker} >&2\n\
+         cf_exit 3\n\
+         fi\n\
          mkdir -p \"$(dirname -- {d})\"\n\
          git clone {url} {d}\n",
         url = quote(clone_url),
         marker = quote(ALREADY_CLONED_MARKER),
+        begin = quote(ORIGIN_URL_BEGIN_MARKER),
+        end = quote(ORIGIN_URL_END_MARKER),
     )
 }
 
@@ -1818,10 +1852,19 @@ fn git_error(
     out: &std::process::Output,
 ) -> IpcError {
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    // Reachable only when `clone_source` declined to adopt, i.e. something
+    // that is NOT this repository occupies `dest` (an adoptable checkout
+    // returns Ok before `git_error` is ever called). Name the `origin` that
+    // is actually there: the old "it should appear after a refresh" is false
+    // on a remote host — `refresh_projects` scans the LOCAL root only — and
+    // sends the user to a refresh that can never help.
     if already_a_checkout(out) {
+        let found = origin_url_from(out)
+            .map(|url| format!("a checkout of {url}"))
+            .unwrap_or_else(|| "a git checkout with no origin".to_string());
         return IpcError::new(
             codes::E_EXISTS,
-            format!("already cloned at {dest}; it should appear after a refresh"),
+            format!("{dest} already holds {found}, not {owner}/{repo}; move it aside or clone elsewhere"),
         );
     }
     // The marker is an internal implementation detail of `clone_script`'s own
@@ -1832,7 +1875,15 @@ fn git_error(
     // marker still falls through to stdout instead of the ladder picking
     // "stderr is non-empty", stripping it down to nothing, and reporting a
     // hardcoded "(no stderr)" even though stdout had real diagnostic text.
-    let stderr = stderr.replace(ALREADY_CLONED_MARKER, "").trim().to_string();
+    let stderr = [
+        ALREADY_CLONED_MARKER,
+        ORIGIN_URL_BEGIN_MARKER,
+        ORIGIN_URL_END_MARKER,
+    ]
+    .iter()
+    .fold(stderr, |acc, m| acc.replace(m, ""))
+    .trim()
+    .to_string();
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let detail = if !stderr.is_empty() {
         stderr
@@ -1965,6 +2016,74 @@ mod tests {
         );
     }
 
+    /// The stderr `clone_script`'s "already a checkout" guard produces when
+    /// `dest` holds a checkout whose `origin` is `url` — empty `url` standing
+    /// for a checkout with no origin, where `git remote get-url` prints
+    /// nothing and the guard's `|| true` carries on.
+    fn already_cloned_stderr(url: &str) -> String {
+        format!(
+            "{ORIGIN_URL_BEGIN_MARKER}\n{url}\n{ORIGIN_URL_END_MARKER}\n{ALREADY_CLONED_MARKER}\n"
+        )
+    }
+
+    /// Adoption points a project row at whatever is on disk, so it must be
+    /// the repository the user actually asked for. Anything else stays the
+    /// pre-adoption refusal rather than being registered under a name that
+    /// does not describe it.
+    #[tokio::test]
+    async fn a_checkout_of_some_other_repository_is_refused_not_adopted() {
+        for origin in [
+            "git@github.com:someone-else/r.git", // another owner (a fork)
+            "https://github.com/o/other.git",    // another repo
+            "https://gitlab.com/o/r.git",        // another forge
+            "/srv/git/o/r.git",                  // a local path, not GitHub
+            "",                                  // no origin at all
+        ] {
+            let store = store_with_no_projects();
+            let fake = FakeSsh::new();
+            fake.with_home("/home/u").on(
+                Match::script_contains("git clone"),
+                Reply::fail(3, &already_cloned_stderr(origin)),
+            );
+
+            let err = add_project_with(
+                AddProjectArgs {
+                    host_alias: "vps".into(),
+                    source: AddProjectSource::Clone {
+                        url: "https://github.com/o/r".into(),
+                    },
+                    call_id: None,
+                },
+                &store,
+                &fake,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(err.code, codes::E_EXISTS, "origin {origin:?}");
+            assert!(
+                store.lock().unwrap().list_projects().unwrap().is_empty(),
+                "nothing may be registered for origin {origin:?}"
+            );
+            // The refusal must say what is actually there — and must not
+            // send the user to a refresh, which only ever rescans the LOCAL
+            // root and so can never surface a remote checkout.
+            assert!(
+                !err.message.contains("after a refresh"),
+                "origin {origin:?}: {}",
+                err.message
+            );
+            for marker in [ORIGIN_URL_BEGIN_MARKER, ORIGIN_URL_END_MARKER] {
+                assert!(
+                    !err.message.contains(marker),
+                    "internal marker leaked for origin {origin:?}: {}",
+                    err.message
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn a_remote_host_that_already_has_the_checkout_registers_it_instead_of_failing() {
         // `refresh_projects` scans only the LOCAL root, and `folder_source`
@@ -1972,12 +2091,14 @@ mod tests {
         // remote host had no way into the project list at all: the clone
         // script's "already a checkout" guard came back as an error and
         // nothing was registered. `refuse_existing_project` has already
-        // proved the fleet holds no row for it, so adopting it is safe.
+        // proved the fleet holds no row for it, so adopting it is safe —
+        // provided the checkout really is this repository, which the guard
+        // proves by reporting its `origin` (see `checkout_is_this_repo`).
         let store = store_with_no_projects();
         let fake = FakeSsh::new();
         fake.with_home("/home/u").on(
             Match::script_contains("git clone"),
-            Reply::fail(3, ALREADY_CLONED_MARKER),
+            Reply::fail(3, &already_cloned_stderr("git@github.com:o/r.git")),
         );
 
         let row = add_project_with(
