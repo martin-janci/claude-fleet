@@ -11,7 +11,7 @@
 
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::IpcError;
-use crate::service::{health, hosts, projects, safe_kill, sessions, worktrees};
+use crate::service::{catalog, health, hosts, projects, safe_kill, sessions, worktrees};
 use crate::ssh::SshClient;
 use crate::store::Store;
 use rmcp::{
@@ -591,6 +591,22 @@ pub struct RepoCommitDiffParams {
     pub hash: String,
     /// Worktree-relative file path.
     pub path: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ScanAssetsParams {
+    /// Only scan this host alias. Omit to scan every reachable host.
+    #[serde(default)]
+    pub host_alias: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ImportAssetsParams {
+    /// Host to import from. Only `local` (the fleet controller) is supported.
+    pub host_alias: String,
+    /// Report what would be created without writing anything. Default false.
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 // --- tools -----------------------------------------------------------------
@@ -1635,6 +1651,64 @@ impl FleetTools {
         .await
         .map_err(to_mcp_err)?;
         ok_json(&res)
+    }
+
+    // ---- asset catalog ----
+
+    #[tool(description = "List the asset catalog (skills, agents, hooks, MCP \
+        servers, plugin refs) with each asset's per-host drift state from the \
+        last scan, plus unmanaged assets found on hosts and catalog parse \
+        problems. Requires catalog_configure + catalog_load in the app. Returns JSON.")]
+    async fn list_assets(&self) -> Result<CallToolResult, McpError> {
+        audit("list_assets", "");
+        ok_json_compact(&catalog::list_assets(&self.store).map_err(to_mcp_err)?)
+    }
+
+    #[tool(description = "Scan hosts for installed skills/agents/hooks/MCP \
+        servers/plugins and recompute each catalog asset's state (in_sync | \
+        drifted | missing | unmanaged | unsupported). Read-only on hosts. \
+        Returns per-host results as JSON.")]
+    async fn scan_assets(
+        &self,
+        Parameters(p): Parameters<ScanAssetsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "scan_assets",
+            &format!("host_alias={}", p.host_alias.as_deref().unwrap_or("*")),
+        );
+        let res = catalog::inventory::scan_hosts(&self.store, &self.ssh, p.host_alias.as_deref())
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&res)
+    }
+
+    #[tool(description = "Import a host's Claude config (~/.claude skills, \
+        agents, hooks, ~/.claude.json MCP servers, installed plugins) into the \
+        catalog repo working tree as IR assets. Never overwrites; collisions \
+        are reported. Only host_alias `local` is supported. Returns the import \
+        report as JSON.")]
+    async fn import_assets(
+        &self,
+        Parameters(p): Parameters<ImportAssetsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "import_assets",
+            &format!("host_alias={} dry_run={}", p.host_alias, p.dry_run),
+        );
+        let token = {
+            let s = self
+                .store
+                .lock()
+                .map_err(|_| McpError::internal_error("store mutex poisoned", None))?;
+            s.get_setting(crate::mcp::SETTING_TOKEN)
+                .map_err(|e| to_mcp_err(e.into()))?
+        };
+        let args = catalog::ImportArgs {
+            host_alias: p.host_alias,
+            dry_run: p.dry_run,
+        };
+        let rep = catalog::import_host(args, &self.store, token.as_deref()).map_err(to_mcp_err)?;
+        ok_json(&rep)
     }
 }
 
