@@ -9,6 +9,11 @@ import {
   isPinned,
   emptyStateText,
   relativeTime,
+  groupItems,
+  toolName,
+  toolGroupLabel,
+  isLongPrompt,
+  PROMPT_CLAMP_LINES,
   PIN_THRESHOLD_PX,
   type Conversation,
 } from './conversation';
@@ -106,5 +111,41 @@ describe('relativeTime', () => {
 
   it('reports days', () => {
     expect(relativeTime('2026-09-11T12:00:00Z', now)).toBe('2d ago');
+  });
+});
+
+describe('groupItems', () => {
+  it('keeps text items apart and folds consecutive tool calls together', () => {
+    const t = (text: string) => ({ kind: 'text' as const, text });
+    const u = (summary: string) => ({ kind: 'tool' as const, summary });
+    expect(groupItems([u('Read(a)'), u('Bash(ls)'), t('x'), u('Edit(b)'), t('y'), t('z')])).toEqual([
+      { kind: 'tools', tools: ['Read(a)', 'Bash(ls)'] },
+      { kind: 'text', text: 'x' },
+      { kind: 'tools', tools: ['Edit(b)'] },
+      { kind: 'text', text: 'y' },
+      { kind: 'text', text: 'z' },
+    ]);
+    expect(groupItems([])).toEqual([]);
+  });
+});
+
+describe('toolName / toolGroupLabel', () => {
+  it('takes the name before the argument list', () => {
+    expect(toolName('Bash(command=ls -la)')).toBe('Bash');
+    expect(toolName('mcp__fleet__list_sessions()')).toBe('mcp__fleet__list_sessions');
+    expect(toolName('NoParens')).toBe('NoParens');
+  });
+
+  it('counts calls and lists up to three distinct names in order', () => {
+    expect(toolGroupLabel(['Read(a)', 'Read(b)', 'Bash(x)'])).toBe('3 tool calls · Read, Bash');
+    expect(toolGroupLabel(['A()', 'B()', 'C()', 'D()', 'A()'])).toBe('5 tool calls · A, B, C +1');
+  });
+});
+
+describe('isLongPrompt', () => {
+  it('flags prompts over the clamp in lines or characters', () => {
+    expect(isLongPrompt('short')).toBe(false);
+    expect(isLongPrompt(Array.from({ length: PROMPT_CLAMP_LINES + 1 }, () => 'l').join('\n'))).toBe(true);
+    expect(isLongPrompt('x'.repeat(601))).toBe(true);
   });
 });

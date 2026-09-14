@@ -53,3 +53,43 @@ export function relativeTime(iso: string, nowMs: number): string {
   const days = Math.floor(ageSec / 86400);
   return `${days}d ago`;
 }
+
+/** A reply item after folding: prose, or a run of consecutive tool calls. */
+export type ConvGroup = { kind: 'text'; text: string } | { kind: 'tools'; tools: string[] };
+
+/** Fold consecutive tool one-liners into one group; text items stay apart. */
+export function groupItems(items: ConvItem[]): ConvGroup[] {
+  const out: ConvGroup[] = [];
+  for (const item of items) {
+    if (item.kind === 'text') {
+      out.push({ kind: 'text', text: item.text });
+      continue;
+    }
+    const last = out[out.length - 1];
+    if (last?.kind === 'tools') last.tools.push(item.summary);
+    else out.push({ kind: 'tools', tools: [item.summary] });
+  }
+  return out;
+}
+
+/** The tool name of a one-liner such as `Bash(command=ls)`. */
+export function toolName(summary: string): string {
+  const paren = summary.indexOf('(');
+  return paren > 0 ? summary.slice(0, paren) : summary;
+}
+
+/** `"7 tool calls · Bash, Read, Edit +2"` for a folded group. */
+export function toolGroupLabel(tools: string[]): string {
+  const names = [...new Set(tools.map(toolName))];
+  const shown = names.slice(0, 3).join(', ');
+  const more = names.length > 3 ? ` +${names.length - 3}` : '';
+  return `${tools.length} tool calls · ${shown}${more}`;
+}
+
+/** Prompts longer than this are clamped behind "Show more". */
+export const PROMPT_CLAMP_LINES = 6;
+const PROMPT_CLAMP_CHARS = 600;
+
+export function isLongPrompt(prompt: string): boolean {
+  return prompt.length > PROMPT_CLAMP_CHARS || prompt.split('\n').length > PROMPT_CLAMP_LINES;
+}

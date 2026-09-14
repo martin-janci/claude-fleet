@@ -347,4 +347,94 @@ describe('ConversationPanel', () => {
     expect(mockedConv).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId('conv-prompt')).toBe(node);
   });
+  it('renders reply text as markdown', async () => {
+    mockedConv.mockReturnValue(
+      ok(conv({ turns: [{ prompt: 'q', at: null, items: [{ kind: 'text', text: '## Done\n\n- **one**\n- two' }] }] })),
+    );
+    const { container } = render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    const reply = screen.getByTestId('conv-text');
+    expect(reply.querySelector('.md-h2')?.textContent).toBe('Done');
+    expect(reply.querySelectorAll('li')).toHaveLength(2);
+    expect(reply.querySelector('strong')?.textContent).toBe('one');
+    expect(container.textContent).not.toContain('**one**');
+  });
+
+  it('folds consecutive tool calls into one expandable group; a single call stays a line', async () => {
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            {
+              prompt: 'q',
+              at: null,
+              items: [
+                { kind: 'tool', summary: 'Read(file_path=a)' },
+                { kind: 'tool', summary: 'Bash(command=ls)' },
+                { kind: 'tool', summary: 'Read(file_path=b)' },
+                { kind: 'text', text: 'between' },
+                { kind: 'tool', summary: 'Edit(file_path=c)' },
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    const group = screen.getByTestId('conv-tools') as HTMLDetailsElement;
+    expect(group.open).toBe(false);
+    expect(group.querySelector('summary')?.textContent).toContain('3 tool calls · Read, Bash');
+    expect(group.querySelectorAll('[data-testid="conv-tool"]')).toHaveLength(3);
+    const all = screen.getAllByTestId('conv-tool');
+    expect(all).toHaveLength(4);
+    expect(all[3].closest('details')).toBeNull();
+    expect(all[3].textContent).toContain('Edit(file_path=c)');
+  });
+
+  it('clamps a long prompt with Show more / Show less', async () => {
+    const long = Array.from({ length: 12 }, (_, k) => `line ${k}`).join('\n');
+    mockedConv.mockReturnValue(ok(conv({ turns: [{ prompt: long, at: null, items: [{ kind: 'text', text: 'ok' }] }] })));
+    render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    const body = screen.getByTestId('conv-prompt').querySelector('.prompt-text')!;
+    expect(body.classList.contains('clamped')).toBe(true);
+    await fireEvent.click(screen.getByTestId('conv-prompt-toggle'));
+    expect(body.classList.contains('clamped')).toBe(false);
+    expect(screen.getByTestId('conv-prompt-toggle').textContent).toBe('Show less');
+  });
+
+  it('a short prompt has no toggle', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    expect(screen.queryByTestId('conv-prompt-toggle')).toBeNull();
+  });
+
+  it('shows a Latest button when scrolled up, which jumps back to the bottom', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    expect(screen.queryByTestId('conv-latest')).toBeNull();
+    const scroller = screen.getByTestId('conv-scroller');
+    Object.defineProperty(scroller, 'scrollHeight', { value: 2000, configurable: true });
+    Object.defineProperty(scroller, 'clientHeight', { value: 500, configurable: true });
+    scroller.scrollTop = 100;
+    await fireEvent.scroll(scroller);
+    const latest = screen.getByTestId('conv-latest');
+    await fireEvent.click(latest);
+    expect(scroller.scrollTop).toBe(2000);
+    await fireEvent.scroll(scroller);
+    expect(screen.queryByTestId('conv-latest')).toBeNull();
+  });
 });
