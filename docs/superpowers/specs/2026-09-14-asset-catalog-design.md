@@ -266,6 +266,14 @@ provides the inputs, with file contents fetched for the assets being imported):
 - Plugins: `installed_plugins.json` + `known_marketplaces.json` →
   `plugins/<name>.yaml` with the exact installed version.
 
+A `<name>` above that is not already valid kebab-case
+(`[a-z0-9][a-z0-9-]*`) — a skill/agent folder name, an MCP server key, or a
+plugin id — is slugified (lowercased, every run of other characters
+collapsed to a single `-`, leading/trailing `-` trimmed) rather than
+rejected; two different original names that slugify to the same value
+produce a collision problem row for the second one instead of one silently
+overwriting the other.
+
 Import never overwrites an existing catalog asset; a collision becomes a
 problem row. Dry-run returns the list of assets that would be created plus
 problems and flagged secrets, without touching disk. Import does not commit;
