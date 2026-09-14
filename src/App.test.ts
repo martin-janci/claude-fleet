@@ -43,4 +43,13 @@ describe('App layout', () => {
     const cmds = (invoke as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
     expect(cmds).toEqual(expect.arrayContaining(['list_projects', 'list_sessions']));
   });
+
+  it('marks only the Assets tab active (not Terminal) when Assets is open', async () => {
+    const { getByTestId } = render(App);
+    await fireEvent.click(getByTestId('tab-assets'));
+    expect(getByTestId('tab-terminal').classList.contains('active')).toBe(false);
+    expect(getByTestId('tab-terminal').getAttribute('aria-selected')).toBe('false');
+    expect(getByTestId('tab-assets').classList.contains('active')).toBe(true);
+    expect(getByTestId('tab-assets').getAttribute('aria-selected')).toBe('true');
+  });
 });

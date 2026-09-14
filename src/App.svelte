@@ -292,9 +292,9 @@
     <div class="view-tabs" role="tablist">
       <button
         class="view-tab"
-        class:active={!filesMode}
+        class:active={viewMode === 'terminal'}
         role="tab"
-        aria-selected={!filesMode}
+        aria-selected={viewMode === 'terminal'}
         onclick={showTerminal}
         data-testid="tab-terminal">Terminal</button
       >
