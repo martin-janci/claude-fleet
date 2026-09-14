@@ -71,51 +71,19 @@ pub fn unmap_event(claude: &str) -> Option<&'static str> {
         .map(|(n, _)| *n)
 }
 
-/// Render a YAML frontmatter block. String/bool/number scalars are emitted
-/// by hand, unquoted, to match Claude Code's own frontmatter style (see the
-/// comment on the match arms below); other value shapes fall back to
-/// `serde_yaml`.
+/// Render a YAML frontmatter block. Values are emitted with `serde_yaml`,
+/// which leaves an unambiguous plain scalar (e.g. `Make a worktree.`)
+/// unquoted and quotes anything that would otherwise reparse differently or
+/// not at all (a `": "`, a leading `#`/`-`/`:`/`*`, embedded newlines, ...) —
+/// the rendered file must be YAML Claude Code can parse back, so quoting is
+/// never optional here.
 pub fn frontmatter(fields: &[(&str, serde_yaml::Value)]) -> String {
-    let mut out = String::from("---\n");
+    let mut map = serde_yaml::Mapping::new();
     for (k, v) in fields {
-        match v {
-            // Plain scalars are emitted by hand, unquoted: serde_yaml's
-            // emitter quotes any string containing ": " (colon-space) to
-            // stay unambiguous on re-parse, but Claude Code frontmatter
-            // (and these goldens) expect them bare, e.g.
-            // `description: Base. Triggers: foo, bar`.
-            serde_yaml::Value::String(s) => {
-                out.push_str(k);
-                out.push_str(": ");
-                out.push_str(s);
-                out.push('\n');
-            }
-            serde_yaml::Value::Bool(b) => {
-                out.push_str(k);
-                out.push_str(": ");
-                out.push_str(if *b { "true" } else { "false" });
-                out.push('\n');
-            }
-            serde_yaml::Value::Number(n) => {
-                out.push_str(k);
-                out.push_str(": ");
-                out.push_str(&n.to_string());
-                out.push('\n');
-            }
-            // Non-scalar values (sequences, mappings, ...) have no
-            // ambiguous-plain-scalar problem worth hand-rolling; let
-            // serde_yaml render `{k: v}` and keep its block formatting.
-            other => {
-                let mut m = serde_yaml::Mapping::new();
-                m.insert(serde_yaml::Value::String(k.to_string()), other.clone());
-                out.push_str(
-                    &serde_yaml::to_string(&serde_yaml::Value::Mapping(m)).unwrap_or_default(),
-                );
-            }
-        }
+        map.insert(serde_yaml::Value::String(k.to_string()), v.clone());
     }
-    out.push_str("---\n");
-    out
+    let body = serde_yaml::to_string(&serde_yaml::Value::Mapping(map)).unwrap_or_default();
+    format!("---\n{body}---\n")
 }
 
 fn yaml_str(s: &str) -> serde_yaml::Value {
@@ -273,25 +241,47 @@ impl Claude {
         };
         let mut obj = serde_json::Map::new();
         obj.insert("type".into(), json!(transport));
+        // Note placeholders per field, in the same order the value is
+        // built (url, headers, command, args, env, extra), rather than
+        // from the finished JSON: a `serde_json::Map` without the
+        // `preserve_order` feature is BTreeMap-backed, so serializing it
+        // sorts keys alphabetically and would report placeholders in that
+        // order instead of the order fields appear in the source asset
+        // (matches the same fix in `render_hook`).
         if transport == "http" {
+            if let Some(u) = url {
+                plan.note_placeholders(u);
+            }
             obj.insert("url".into(), json!(url.clone().unwrap_or_default()));
             if !headers.is_empty() {
+                for v in headers.values() {
+                    plan.note_placeholders(v);
+                }
                 obj.insert("headers".into(), json!(headers));
             }
         } else {
+            if let Some(c) = command {
+                plan.note_placeholders(c);
+            }
             obj.insert("command".into(), json!(command.clone().unwrap_or_default()));
             if !args.is_empty() {
+                for arg in args {
+                    plan.note_placeholders(arg);
+                }
                 obj.insert("args".into(), json!(args));
             }
             if !env.is_empty() {
+                for v in env.values() {
+                    plan.note_placeholders(v);
+                }
                 obj.insert("env".into(), json!(env));
             }
         }
         for (k, v) in &a.target("claude").extra {
+            plan.note_placeholders(&v.to_string());
             obj.insert(k.clone(), v.clone());
         }
         let value = Value::Object(obj);
-        plan.note_placeholders(&value.to_string());
         plan.merges.push(ConfigMerge {
             file: CLAUDE_JSON_PATH.into(),
             json_path: vec!["mcpServers".into(), a.header.name.clone()],
@@ -404,15 +394,48 @@ mod tests {
         assert!(plan.merges.is_empty());
     }
 
+    /// Parse the YAML frontmatter block out of a rendered `SKILL.md`/agent
+    /// file (`---\n<yaml>---\n<body>`) into a mapping, so tests can assert
+    /// on the semantic value of a field regardless of whether `serde_yaml`
+    /// chose to quote it.
+    fn parse_frontmatter(text: &str) -> serde_yaml::Mapping {
+        let yaml = text.split("---\n").nth(1).expect("frontmatter block");
+        serde_yaml::from_str(yaml).expect("frontmatter is valid YAML")
+    }
+
     #[test]
     fn skill_triggers_fold_into_description() {
+        // The controller's ruling on this golden: rendered SKILL.md must be
+        // YAML Claude Code can parse back, so this asserts the semantic
+        // value of `description` (via a YAML parse) rather than pinning the
+        // exact quoting `serde_yaml` chooses to emit.
         let plan = render(
             "kind: skill\nname: s\ndescription: Base.\ntriggers: [\"foo\", \"bar\"]\n",
             "b\n",
         );
         let text = String::from_utf8(plan.files[0].bytes.clone()).unwrap();
-        assert!(
-            text.contains("description: Base. Triggers: foo, bar"),
+        let map = parse_frontmatter(&text);
+        assert_eq!(
+            map.get("description").and_then(|v| v.as_str()),
+            Some("Base. Triggers: foo, bar"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn skill_description_needing_quotes_round_trips_through_yaml() {
+        // `": "` would be misread as a mapping separator and `#` would
+        // start a comment if either were emitted unquoted; `frontmatter`
+        // must quote this description so it reparses to the exact string.
+        let plan = render(
+            "kind: skill\nname: s\ndescription: \"Use when: sorting #1 items\"\n",
+            "b\n",
+        );
+        let text = String::from_utf8(plan.files[0].bytes.clone()).unwrap();
+        let map = parse_frontmatter(&text);
+        assert_eq!(
+            map.get("description").and_then(|v| v.as_str()),
+            Some("Use when: sorting #1 items"),
             "{text}"
         );
     }
@@ -473,6 +496,17 @@ mod tests {
             serde_json::json!({"hooks": [{"type": "http", "url": "http://127.0.0.1:${FLEET_MCP_PORT}/hook", "headers": {"Authorization": "Bearer ${FLEET_MCP_TOKEN}"}}]})
         );
         assert_eq!(plan.placeholders, vec!["FLEET_MCP_PORT", "FLEET_MCP_TOKEN"]);
+    }
+
+    #[test]
+    fn hook_with_unknown_event_warns_and_renders_nothing() {
+        let plan = render(
+            "kind: hook\nname: h\ndescription: d\nevent: on_full_moon\naction:\n  type: command\n  command: \"echo hi\"\n",
+            "",
+        );
+        assert!(plan.files.is_empty());
+        assert!(plan.merges.is_empty());
+        assert_eq!(plan.warnings, vec!["unknown hook event 'on_full_moon'"]);
     }
 
     #[test]
