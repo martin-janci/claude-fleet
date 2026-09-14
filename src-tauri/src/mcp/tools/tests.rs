@@ -842,3 +842,47 @@ fn router_sum_serves_every_tool() {
     assert_eq!(served, 60);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
+
+// ---- tool errors become is_error results (spec §3) ----
+
+#[test]
+fn mcp_err_carries_the_code_in_data() {
+    let e = mcp_err("E_NOTFOUND", "no such session", None);
+    assert_eq!(e.message, "E_NOTFOUND: no such session");
+    assert_eq!(e.data.as_ref().unwrap()["code"], "E_NOTFOUND");
+    assert!(e.data.as_ref().unwrap()["details"].is_null());
+
+    let d = serde_json::json!({ "candidates": [1, 2] });
+    let e = to_mcp_err(IpcError::new("E_AMBIGUOUS", "two match").with_details(d.clone()));
+    assert_eq!(e.data.as_ref().unwrap()["code"], "E_AMBIGUOUS");
+    assert_eq!(e.data.as_ref().unwrap()["details"], d);
+}
+
+#[test]
+fn tool_error_result_turns_coded_errors_into_is_error_results() {
+    let e = mcp_err("E_FORBIDDEN", "readonly token", None);
+    let r = tool_error_result(e).expect("coded error is a tool result");
+    assert_eq!(r.is_error, Some(true));
+    assert_eq!(text_of(&r.content[0]), "E_FORBIDDEN: readonly token");
+    let sc = r.structured_content.unwrap();
+    assert_eq!(sc["code"], "E_FORBIDDEN");
+    assert_eq!(sc["message"], "readonly token");
+    assert!(sc["details"].is_null());
+
+    // Details ride along structured and are not duplicated into `message`.
+    let d = serde_json::json!({ "candidates": [7] });
+    let r = tool_error_result(mcp_err("E_AMBIGUOUS", "two match", Some(d.clone()))).unwrap();
+    let sc = r.structured_content.unwrap();
+    assert_eq!(sc["message"], "two match");
+    assert_eq!(sc["details"], d);
+    assert!(text_of(&r.content[0]).starts_with("E_AMBIGUOUS: two match"));
+}
+
+#[test]
+fn tool_error_result_keeps_protocol_errors_as_errors() {
+    // rmcp's own "tool not found" / bad-arguments errors carry no code and
+    // must stay JSON-RPC errors.
+    let e = McpError::invalid_params("tool not found", None);
+    let err = tool_error_result(e).expect_err("protocol error passes through");
+    assert_eq!(err.message, "tool not found");
+}

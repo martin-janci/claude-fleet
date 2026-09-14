@@ -562,4 +562,23 @@ mod tests {
         let r = raw_round_trip(addr, get).await;
         assert!(r.contains("405"), "GET must be 405 in stateless mode:\n{r}");
     }
+
+    /// A tool that fails in the service layer answers with a tool RESULT
+    /// carrying `isError: true` and the `E_*` code, not a JSON-RPC error.
+    #[tokio::test]
+    async fn tools_call_failure_is_an_is_error_result() {
+        let addr = serve_real_tools().await;
+        let call = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"set_friendly_name","arguments":{"session_id":999999,"friendly_name":"x"}}}"#;
+        let r = raw_round_trip(addr, &post_mcp(call)).await;
+        assert!(r.contains("200 OK"), "tools/call:\n{r}");
+        assert!(
+            r.contains(r#""isError":true"#),
+            "must be a tool result:\n{r}"
+        );
+        assert!(r.contains("E_NOTFOUND"), "code preserved:\n{r}");
+        assert!(
+            !r.contains(r#""error":{"#),
+            "must not be a JSON-RPC error:\n{r}"
+        );
+    }
 }

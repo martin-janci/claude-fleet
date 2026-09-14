@@ -133,16 +133,30 @@ impl ServerHandler for FleetTools {
     ) -> Result<CallToolResult, McpError> {
         // Fail closed: a request that somehow bypassed the auth middleware
         // has no caller and gets nothing.
-        let caller = caller_from_context(&context)
-            .ok_or_else(|| mcp_err("E_FORBIDDEN", "request carries no caller identity", None))?;
+        let caller = match caller_from_context(&context) {
+            Some(c) => c,
+            None => {
+                return tool_error_result(mcp_err(
+                    "E_FORBIDDEN",
+                    "request carries no caller identity",
+                    None,
+                ))
+            }
+        };
         let tool = request.name.to_string();
         // Audit first so refused calls are on the timeline too.
         persist_audit(&self.store, &tool, request.arguments.as_ref(), &caller);
-        enforce_mode(&caller, &tool)?;
-        enforce_admin(&caller, &tool)?;
+        if let Err(e) = enforce_mode(&caller, &tool).and_then(|()| enforce_admin(&caller, &tool)) {
+            return tool_error_result(e);
+        }
         context.extensions.insert(caller);
         let tcc = ToolCallContext::new(self, request, context);
-        self.tool_router.call(tcc).await
+        // Tool-execution failures travel as `is_error` results; only rmcp's
+        // own protocol errors (unknown tool, bad arguments) stay JSON-RPC.
+        match self.tool_router.call(tcc).await {
+            Ok(result) => Ok(result),
+            Err(e) => tool_error_result(e),
+        }
     }
 
     async fn list_tools(

@@ -21,15 +21,62 @@ pub(super) fn audit(tool: &str, detail: &str) {
     }
 }
 
+/// Key under which [`mcp_err`] stores the `E_*` code in `McpError::data`.
+/// `ServerHandler::call_tool` reads it back to tell a tool-execution error
+/// (→ `CallToolResult { is_error: true }`) from an rmcp protocol error.
+const ERR_CODE_KEY: &str = "code";
+
 /// Map a backend `IpcError` to an MCP tool error, preserving the `E_*` code.
 /// Structured `details` (e.g. `E_AMBIGUOUS` candidates) ride along as the
 /// error's data so a caller can act on them without parsing prose.
 pub(super) fn to_mcp_err(e: IpcError) -> McpError {
-    let msg = match &e.details {
-        Some(d) => format!("{}: {} {}", e.code, e.message, d),
-        None => format!("{}: {}", e.code, e.message),
+    mcp_err(&e.code, e.message, e.details)
+}
+
+/// Translate a router outcome for the wire (MCP spec: tool *execution*
+/// failures are a `CallToolResult` with `is_error: true`, which the client
+/// shows the model as the tool's output so it can correct the call; JSON-RPC
+/// errors are for *protocol* failures such as an unknown tool or malformed
+/// arguments). A coded error (built by [`mcp_err`] / [`to_mcp_err`], or by
+/// the readonly / admin / no-caller gates) becomes the result; anything else
+/// — rmcp's own `invalid_params` — passes through unchanged.
+pub(super) fn tool_error_result(e: McpError) -> Result<CallToolResult, McpError> {
+    let Some(code) = e
+        .data
+        .as_ref()
+        .and_then(|d| d.get(ERR_CODE_KEY))
+        .and_then(|c| c.as_str())
+        .map(str::to_string)
+    else {
+        return Err(e);
     };
-    McpError::internal_error(msg, e.details)
+    let details = e
+        .data
+        .as_ref()
+        .and_then(|d| d.get("details"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    // `message` is "CODE: message[ details]"; keep the human line as-is for
+    // the text block and the bare message for the structured field.
+    let bare = e
+        .message
+        .strip_prefix(&format!("{code}: "))
+        .unwrap_or(&e.message)
+        .to_string();
+    let bare = match &details {
+        serde_json::Value::Null => bare,
+        d => bare
+            .strip_suffix(&format!(" {d}"))
+            .unwrap_or(&bare)
+            .to_string(),
+    };
+    let mut r = CallToolResult::error(vec![Content::text(e.message.to_string())]);
+    r.structured_content = Some(serde_json::json!({
+        "code": code,
+        "message": bare,
+        "details": details,
+    }));
+    Ok(r)
 }
 
 /// Default `limit` for `repo_log` when the caller passes none. The Tauri UI
@@ -75,7 +122,15 @@ pub(super) fn mcp_err(
     message: impl std::fmt::Display,
     data: Option<serde_json::Value>,
 ) -> McpError {
-    McpError::internal_error(format!("{code}: {message}"), data)
+    let details = data.unwrap_or(serde_json::Value::Null);
+    let msg = match &details {
+        serde_json::Value::Null => format!("{code}: {message}"),
+        d => format!("{code}: {message} {d}"),
+    };
+    McpError::internal_error(
+        msg,
+        Some(serde_json::json!({ ERR_CODE_KEY: code, "details": details })),
+    )
 }
 
 /// The [`Caller`] the auth middleware attached to this request. The
