@@ -1,7 +1,7 @@
 //! Tauri IPC wrappers for the asset catalog. Logic lives in
 //! `service::catalog`; this file only adapts `tauri::State` to plain refs.
 
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::service::catalog::{
     self, import::ImportReport, inventory, model::Kind, AssetDetail, AssetListing, ConfigureArgs,
     ImportArgs,
@@ -63,7 +63,7 @@ pub fn catalog_get_asset(
 ) -> Result<AssetDetail, IpcError> {
     if !catalog::model::is_valid_name(&args.name) {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("invalid asset name '{}'", args.name),
         ));
     }
@@ -76,9 +76,7 @@ pub fn catalog_import_host(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<ImportReport, IpcError> {
     let token = {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = store.lock().map_err(|_| IpcError::lock())?;
         s.get_setting(crate::mcp::SETTING_TOKEN)?
     };
     catalog::import_host(args, &store, token.as_deref())

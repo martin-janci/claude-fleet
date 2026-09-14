@@ -27,7 +27,8 @@ pub struct ImportSources {
 
 impl ImportSources {
     pub fn for_local() -> Result<Self, IpcError> {
-        let home = std::env::var("HOME").map_err(|_| IpcError::new("E_IO", "HOME not set"))?;
+        let home = std::env::var("HOME")
+            .map_err(|_| IpcError::new(crate::ipc_error::codes::E_IO, "HOME not set"))?;
         Ok(Self {
             claude_dir: Path::new(&home).join(".claude"),
             claude_json: Path::new(&home).join(".claude.json"),

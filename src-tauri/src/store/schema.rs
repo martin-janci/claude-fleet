@@ -1151,9 +1151,11 @@ mod tests {
         assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
         let repo_path: String = old
             .conn
-            .query_row("SELECT repo_path FROM catalog_config WHERE id = 1", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT repo_path FROM catalog_config WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(repo_path, "/tmp/assets", "the config row survives a re-run");
         let scanned_at: i64 = old

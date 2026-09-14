@@ -9,12 +9,13 @@ pub mod inventory;
 pub mod model;
 pub mod repo;
 
-pub const E_CATALOG_NOT_CONFIGURED: &str = "E_CATALOG_NOT_CONFIGURED";
-pub const E_CATALOG_GIT: &str = "E_CATALOG_GIT";
-pub const E_CATALOG_PARSE: &str = "E_CATALOG_PARSE";
-pub const E_ASSET_UNSUPPORTED: &str = "E_ASSET_UNSUPPORTED";
-pub const E_ASSET_EXISTS: &str = "E_ASSET_EXISTS";
-pub const E_ASSET_NOT_FOUND: &str = "E_ASSET_NOT_FOUND";
+// The catalog's `IpcError::code` values live with every other code in
+// `ipc_error::codes`; re-exported here so the catalog modules can keep
+// saying `catalog::E_CATALOG_GIT`.
+pub use crate::ipc_error::codes::{
+    E_ASSET_EXISTS, E_ASSET_NOT_FOUND, E_ASSET_UNSUPPORTED, E_CATALOG_GIT,
+    E_CATALOG_NOT_CONFIGURED, E_CATALOG_PARSE,
+};
 
 /// The loaded catalog, process-wide. `None` until `load` succeeds. Both the
 /// Tauri commands and the MCP tools read it; only `load` writes it.
@@ -33,7 +34,7 @@ pub fn now_secs() -> i64 {
 pub static CATALOG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 use crate::events::CatalogSummary;
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::store::{AssetInventoryRow, CatalogConfigRow, Store};
 use harness::RenderPlan;
 use model::{Asset, Kind, Problem};
@@ -47,9 +48,7 @@ pub struct ConfigureArgs {
 }
 
 fn lock(store: &Mutex<Store>) -> Result<std::sync::MutexGuard<'_, Store>, IpcError> {
-    store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))
+    store.lock().map_err(|_| IpcError::lock())
 }
 
 fn expand_home(p: &str) -> String {
@@ -72,7 +71,10 @@ fn require_config(store: &Mutex<Store>) -> Result<CatalogConfigRow, IpcError> {
 pub fn configure(args: ConfigureArgs, store: &Mutex<Store>) -> Result<CatalogConfigRow, IpcError> {
     let path = expand_home(args.repo_path.trim());
     if path.is_empty() {
-        return Err(IpcError::new("E_INVALID", "repo_path must not be empty"));
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "repo_path must not be empty",
+        ));
     }
     let remote = args
         .remote_url
@@ -101,7 +103,7 @@ pub fn load(pull: bool, store: &Mutex<Store>) -> Result<CatalogSummary, IpcError
     };
     *CATALOG
         .write()
-        .map_err(|_| IpcError::new("E_LOCK", "catalog lock poisoned"))? = Some(cat);
+        .map_err(|_| IpcError::new(codes::E_LOCK, "catalog lock poisoned"))? = Some(cat);
     {
         let s = lock(store)?;
         s.set_catalog_head(&summary.head, summary.loaded_at)?;
@@ -113,7 +115,7 @@ pub fn load(pull: bool, store: &Mutex<Store>) -> Result<CatalogSummary, IpcError
 fn with_catalog<T>(f: impl FnOnce(&repo::Catalog) -> Result<T, IpcError>) -> Result<T, IpcError> {
     let guard = CATALOG
         .read()
-        .map_err(|_| IpcError::new("E_LOCK", "catalog lock poisoned"))?;
+        .map_err(|_| IpcError::new(codes::E_LOCK, "catalog lock poisoned"))?;
     match guard.as_ref() {
         Some(c) => f(c),
         None => Err(IpcError::new(

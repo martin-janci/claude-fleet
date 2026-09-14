@@ -4,6 +4,7 @@
 use super::harness::{json_get, ConfigMerge, Harness, HostSnapshot, MergeMode};
 use super::model::sha256_hex;
 use super::repo::Catalog;
+use crate::ipc_error::codes;
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::AssetInventoryRow;
@@ -33,7 +34,7 @@ fn scan_failed(host: &str, out: &std::process::Output) -> crate::ipc_error::IpcE
         .map(|c| c.to_string())
         .unwrap_or_else(|| "signal".to_string());
     crate::ipc_error::IpcError::new(
-        "E_SCAN",
+        codes::E_SCAN,
         format!(
             "{host}: scan script exited {code}: {}",
             String::from_utf8_lossy(&out.stderr).trim()
@@ -58,7 +59,9 @@ pub async fn run_host_script(
             .args(["-lc", script])
             .output()
             .await
-            .map_err(|e| crate::ipc_error::IpcError::new("E_IO", format!("spawn bash: {e}")))?;
+            .map_err(|e| {
+                crate::ipc_error::IpcError::new(codes::E_IO, format!("spawn bash: {e}"))
+            })?;
         if !out.status.success() {
             return Err(scan_failed(host, &out));
         }
@@ -85,13 +88,13 @@ pub async fn scan_hosts(
     let hosts = {
         let s = store
             .lock()
-            .map_err(|_| crate::ipc_error::IpcError::new("E_LOCK", "store mutex poisoned"))?;
+            .map_err(|_| crate::ipc_error::IpcError::lock())?;
         s.list_hosts()?
     };
     let catalog = {
         let g = super::CATALOG
             .read()
-            .map_err(|_| crate::ipc_error::IpcError::new("E_LOCK", "catalog lock poisoned"))?;
+            .map_err(|_| crate::ipc_error::IpcError::new(codes::E_LOCK, "catalog lock poisoned"))?;
         g.clone().ok_or_else(|| {
             crate::ipc_error::IpcError::new(
                 super::E_CATALOG_NOT_CONFIGURED,

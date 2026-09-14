@@ -449,7 +449,10 @@ impl Harness for Claude {
             }
         }
         if !saw_end {
-            return Err(IpcError::new("E_SCAN", "scan output truncated (no ##END)"));
+            return Err(IpcError::new(
+                crate::ipc_error::codes::E_SCAN,
+                "scan output truncated (no ##END)",
+            ));
         }
         Ok(snap)
     }
