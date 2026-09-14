@@ -304,3 +304,238 @@ describe('TerminalView keyboard (FE-6)', () => {
     }
   });
 });
+
+// ─── Selection & cursor: text-input conventions ───────────────────────────
+describe('TerminalView selection like a text input', () => {
+  const written = () => calls('pty_write').map((c) => (c[1] as { args: { data: string } }).args.data);
+  // jsdom: no layout, so the grid is the 10×2 minimum and cells use the
+  // 7.8×16 fallback metrics with the container rect at (0,0).
+  const CW = 7.8;
+  const CH = 16;
+  const xOf = (col: number) => 4 + col * CW + 1;
+  const yOf = (row: number) => 4 + row * CH + 1;
+
+  /** Mount, attach, and feed one chunk of output through pty_drain. */
+  async function mountWith(data: string): Promise<HTMLElement> {
+    let served = false;
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_drain') {
+        if (served) return { data: '', bytes: 0 };
+        served = true;
+        return { data, bytes: data.length };
+      }
+      return null;
+    });
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    await vi.advanceTimersByTimeAsync(40);
+    await settle();
+    return screen.getByTestId('terminal-host');
+  }
+
+  function mouse(type: string, init: MouseEventInit & { detail?: number }) {
+    return new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, ...init });
+  }
+
+  function selectionRectsPx(): Array<{ left: number; width: number; top: number }> {
+    return screen.queryAllByTestId('terminal-selection').map((el) => ({
+      left: parseFloat(el.style.left),
+      width: parseFloat(el.style.width),
+      top: parseFloat(el.style.top),
+    }));
+  }
+
+  beforeEach(() => {
+    clipboardReadText.mockReset();
+    clipboardWriteText.mockReset();
+    clipboardWriteText.mockResolvedValue(undefined);
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('double-click selects the word under the pointer; Ctrl+Shift+C copies it', async () => {
+    const host = await mountWith('ab cd ef');
+    host.dispatchEvent(mouse('mousedown', { detail: 2, clientX: xOf(4), clientY: yOf(0) }));
+    window.dispatchEvent(mouse('mouseup', { clientX: xOf(4), clientY: yOf(0) }));
+    await settle();
+    // "cd" = cols 3..4 → one rect from col 3, two cells wide.
+    expect(selectionRectsPx()).toEqual([{ left: 4 + 3 * CW, width: 2 * CW, top: 4 }]);
+    host.dispatchEvent(new KeyboardEvent('keydown', { key: 'C', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+    await settle();
+    expect(clipboardWriteText).toHaveBeenCalledWith('cd');
+  });
+
+  it('double-click, then drag into another word, extends by whole words', async () => {
+    const host = await mountWith('ab cd ef');
+    host.dispatchEvent(mouse('mousedown', { detail: 2, clientX: xOf(4), clientY: yOf(0) }));
+    window.dispatchEvent(mouse('mousemove', { clientX: xOf(6), clientY: yOf(0) }));
+    window.dispatchEvent(mouse('mouseup', { clientX: xOf(6), clientY: yOf(0) }));
+    await settle();
+    // From the start of "cd" (col 3) to the end of "ef" (col 7).
+    expect(selectionRectsPx()).toEqual([{ left: 4 + 3 * CW, width: 5 * CW, top: 4 }]);
+  });
+
+  it('triple-click selects the whole line', async () => {
+    const host = await mountWith('ab cd ef');
+    host.dispatchEvent(mouse('mousedown', { detail: 3, clientX: xOf(4), clientY: yOf(0) }));
+    window.dispatchEvent(mouse('mouseup', { clientX: xOf(4), clientY: yOf(0) }));
+    await settle();
+    expect(selectionRectsPx()).toEqual([{ left: 4, width: 10 * CW, top: 4 }]);
+    host.dispatchEvent(new KeyboardEvent('keydown', { key: 'C', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+    await settle();
+    // Trailing blanks are trimmed on copy.
+    expect(clipboardWriteText).toHaveBeenCalledWith('ab cd ef');
+  });
+
+  it('Shift+click extends the existing selection from its anchor', async () => {
+    const host = await mountWith('ab cd ef');
+    host.dispatchEvent(mouse('mousedown', { detail: 2, clientX: xOf(0), clientY: yOf(0) }));
+    window.dispatchEvent(mouse('mouseup', { clientX: xOf(0), clientY: yOf(0) }));
+    await settle();
+    expect(selectionRectsPx()).toEqual([{ left: 4, width: 2 * CW, top: 4 }]);
+    host.dispatchEvent(mouse('mousedown', { detail: 1, shiftKey: true, clientX: xOf(6), clientY: yOf(0) }));
+    window.dispatchEvent(mouse('mouseup', { clientX: xOf(6), clientY: yOf(0) }));
+    await settle();
+    expect(selectionRectsPx()).toEqual([{ left: 4, width: 7 * CW, top: 4 }]);
+  });
+
+  it('Ctrl+Shift+A selects the whole screen on Linux', async () => {
+    const host = await mountWith('ab cd ef');
+    host.dispatchEvent(new KeyboardEvent('keydown', { key: 'A', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+    await settle();
+    // 10×2 grid → one full-width rect per row.
+    expect(selectionRectsPx()).toEqual([
+      { left: 4, width: 10 * CW, top: 4 },
+      { left: 4, width: 10 * CW, top: 4 + CH },
+    ]);
+    expect(written()).toEqual([]);
+  });
+
+  it('a plain click clears the selection; typing clears it too', async () => {
+    const host = await mountWith('ab cd ef');
+    host.dispatchEvent(mouse('mousedown', { detail: 2, clientX: xOf(4), clientY: yOf(0) }));
+    window.dispatchEvent(mouse('mouseup', { clientX: xOf(4), clientY: yOf(0) }));
+    await settle();
+    expect(selectionRectsPx()).toHaveLength(1);
+    host.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', bubbles: true, cancelable: true }));
+    await settle();
+    expect(selectionRectsPx()).toHaveLength(0);
+    expect(written()).toContain('x');
+
+    // Select again, then a single click with no drag drops it.
+    host.dispatchEvent(mouse('mousedown', { detail: 2, clientX: xOf(4), clientY: yOf(0) }));
+    window.dispatchEvent(mouse('mouseup', { clientX: xOf(4), clientY: yOf(0) }));
+    await settle();
+    expect(selectionRectsPx()).toHaveLength(1);
+    host.dispatchEvent(mouse('mousedown', { detail: 1, clientX: xOf(1), clientY: yOf(0) }));
+    window.dispatchEvent(mouse('mouseup', { clientX: xOf(1), clientY: yOf(0) }));
+    await settle();
+    expect(selectionRectsPx()).toHaveLength(0);
+  });
+
+  it('a double-click selects locally even when the app has mouse reporting on', async () => {
+    const host = await mountWith('\x1b[?1000h\x1b[?1006hab cd ef');
+    host.dispatchEvent(mouse('mousedown', { detail: 2, clientX: xOf(4), clientY: yOf(0) }));
+    window.dispatchEvent(mouse('mouseup', { clientX: xOf(4), clientY: yOf(0) }));
+    await settle();
+    expect(selectionRectsPx()).toEqual([{ left: 4 + 3 * CW, width: 2 * CW, top: 4 }]);
+    // Nothing was forwarded to the app as a click.
+    expect(written().filter((d) => d.startsWith('\x1b[<'))).toHaveLength(0);
+  });
+
+  it('a wide glyph is rendered as a 2-cell span so columns after it line up', async () => {
+    const host = await mountWith('a😀b');
+    const wide = host.querySelectorAll('.row span.wide');
+    expect(wide).toHaveLength(1);
+    expect(wide[0].textContent).toBe('😀');
+    // Double-click on the glyph selects the whole "a😀b" word (cols 0..3).
+    host.dispatchEvent(mouse('mousedown', { detail: 2, clientX: xOf(2), clientY: yOf(0) }));
+    window.dispatchEvent(mouse('mouseup', { clientX: xOf(2), clientY: yOf(0) }));
+    await settle();
+    expect(selectionRectsPx()).toEqual([{ left: 4, width: 4 * CW, top: 4 }]);
+  });
+});
+
+describe('TerminalView cursor like a text input', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function mountWith(data: string): Promise<HTMLElement> {
+    let served = false;
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_drain') {
+        if (served) return { data: '', bytes: 0 };
+        served = true;
+        return { data, bytes: data.length };
+      }
+      return null;
+    });
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    await vi.advanceTimersByTimeAsync(40);
+    await settle();
+    return screen.getByTestId('terminal-host');
+  }
+
+  it('is a hollow outline until the grid has focus, then a blinking block', async () => {
+    const host = await mountWith('ab');
+    let cur = screen.getByTestId('terminal-cursor');
+    expect(cur.classList.contains('block')).toBe(true);
+    expect(cur.classList.contains('unfocused')).toBe(true);
+    expect(cur.classList.contains('blink')).toBe(false);
+    host.focus();
+    await settle();
+    cur = screen.getByTestId('terminal-cursor');
+    expect(cur.classList.contains('unfocused')).toBe(false);
+    expect(cur.classList.contains('blink')).toBe(true);
+    host.blur();
+    await settle();
+    cur = screen.getByTestId('terminal-cursor');
+    expect(cur.classList.contains('unfocused')).toBe(true);
+  });
+
+  it('follows DECSCUSR: a steady bar (CSI 6 SP q) neither blinks nor fills the cell', async () => {
+    const host = await mountWith('\x1b[6 qab');
+    host.focus();
+    await settle();
+    const cur = screen.getByTestId('terminal-cursor');
+    expect(cur.classList.contains('bar')).toBe(true);
+    expect(cur.classList.contains('blink')).toBe(false);
+    expect(parseFloat(cur.style.left)).toBeCloseTo(4 + 2 * 7.8, 5);
+  });
+
+  it('restarts the blink on each keystroke (the element is re-created)', async () => {
+    const host = await mountWith('ab');
+    host.focus();
+    await settle();
+    const before = screen.getByTestId('terminal-cursor');
+    host.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', bubbles: true, cancelable: true }));
+    await settle();
+    const after = screen.getByTestId('terminal-cursor');
+    expect(after).not.toBe(before);
+    expect(after.classList.contains('blink')).toBe(true);
+  });
+
+  it('covers both cells of a wide glyph', async () => {
+    // Cursor on the emoji head at col 1 → 2 cells wide.
+    await mountWith('a😀b\x1b[2G');
+    const cur = screen.getByTestId('terminal-cursor');
+    expect(parseFloat(cur.style.width)).toBeCloseTo(2 * 7.8, 5);
+  });
+
+  it('never sits past the last column', async () => {
+    // Ten chars fill the 10-column row: deferred wrap parks the cursor past
+    // the edge; it is drawn on the last column.
+    await mountWith('0123456789');
+    const cur = screen.getByTestId('terminal-cursor');
+    expect(parseFloat(cur.style.left)).toBeCloseTo(4 + 9 * 7.8, 5);
+  });
+});
