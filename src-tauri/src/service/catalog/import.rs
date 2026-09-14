@@ -162,7 +162,18 @@ fn import_skill(dir: &Path, name: &str, host: &str) -> Result<Asset, String> {
             .collect();
         entries.sort();
         for p in entries {
-            if p.is_dir() {
+            // `symlink_metadata` does not follow the link, so a symlink here
+            // (including one that cycles back into an ancestor directory) is
+            // detected and skipped rather than walked, mirroring repo.rs's
+            // `read_resources`.
+            let meta = match std::fs::symlink_metadata(&p) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
                 stack.push(p);
             } else if p != skill_md {
                 let rel = p
@@ -237,14 +248,19 @@ fn import_agent(file: &Path, name: &str, host: &str) -> Result<Asset, String> {
     })
 }
 
-/// Replace any header value equal to `Bearer <fleet_token>` with the placeholder.
-fn scrub_headers(headers: &mut BTreeMap<String, String>, fleet_token: Option<&str>) {
+/// Replace any occurrence of `fleet_token` in `value` with the placeholder.
+fn scrub_token(value: &mut String, fleet_token: Option<&str>) {
     if let Some(tok) = fleet_token {
-        for v in headers.values_mut() {
-            if v.contains(tok) {
-                *v = v.replace(tok, "${FLEET_MCP_TOKEN}");
-            }
+        if value.contains(tok) {
+            *value = value.replace(tok, "${FLEET_MCP_TOKEN}");
         }
+    }
+}
+
+/// Scrub `fleet_token` from every value in a header/env map.
+fn scrub_headers(headers: &mut BTreeMap<String, String>, fleet_token: Option<&str>) {
+    for v in headers.values_mut() {
+        scrub_token(v, fleet_token);
     }
 }
 
@@ -255,12 +271,15 @@ fn looks_secret(key: &str) -> bool {
         .any(|s| k.contains(s))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn import_hooks(
     settings: &Value,
     host: &str,
     path: &Path,
     fleet_token: Option<&str>,
     taken: &mut Vec<String>,
+    flagged: &mut Vec<String>,
+    problems: &mut Vec<Problem>,
 ) -> Vec<Asset> {
     let mut out = Vec::new();
     let Some(hooks) = settings.get("hooks").and_then(Value::as_object) else {
@@ -275,6 +294,15 @@ fn import_hooks(
                 .get("matcher")
                 .and_then(Value::as_str)
                 .filter(|m| !m.is_empty());
+            let hooks_arr = entry.get("hooks").and_then(Value::as_array);
+            let count = hooks_arr.map(|a| a.len()).unwrap_or(0);
+            // Only the first hook of an entry is imported in v1; extra
+            // entries would need distinct asset names. An entry with no
+            // hooks at all yields no asset and must not consume a name.
+            let Some(h) = hooks_arr.and_then(|a| a.first()) else {
+                continue;
+            };
+
             let base = hook_asset_name(claude_event, matcher);
             let mut name = base.clone();
             let mut n = 2;
@@ -283,74 +311,87 @@ fn import_hooks(
                 n += 1;
             }
             taken.push(name.clone());
-            // Only the first hook of an entry is imported in v1; extra
-            // entries would need distinct asset names.
-            if let Some(h) = entry
-                .get("hooks")
-                .and_then(Value::as_array)
-                .and_then(|a| a.first())
-            {
-                let kind = h
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("command")
-                    .to_string();
-                let mut headers: BTreeMap<String, String> = h
-                    .get("headers")
-                    .and_then(Value::as_object)
-                    .map(|o| {
-                        o.iter()
-                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                scrub_headers(&mut headers, fleet_token);
-                let extra: BTreeMap<String, Value> = h
-                    .as_object()
-                    .map(|o| {
-                        o.iter()
-                            .filter(|(k, _)| {
-                                !["type", "command", "url", "headers", "timeout"]
-                                    .contains(&k.as_str())
-                            })
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let mut hd = header(
-                    Kind::Hook,
-                    &name,
-                    format!(
-                        "Imported {claude_event} hook{}",
-                        matcher.map(|m| format!(" for {m}")).unwrap_or_default()
+
+            if count > 1 {
+                problems.push(Problem {
+                    path: path.to_string_lossy().to_string(),
+                    message: format!(
+                        "{claude_event}/{}: only the first of {count} hooks was imported",
+                        matcher.unwrap_or("-")
                     ),
-                    host,
-                    path,
-                    None,
-                );
-                hd.targets = claude_override(extra, None);
-                let tool = matcher.map(|m| {
-                    unmap_tool(m)
-                        .map(String::from)
-                        .unwrap_or_else(|| m.to_string())
-                });
-                out.push(Asset {
-                    header: hd,
-                    spec: AssetSpec::Hook {
-                        event: event.to_string(),
-                        r#match: tool.map(|t| HookMatch { tool: t }),
-                        action: HookAction {
-                            kind,
-                            command: h.get("command").and_then(Value::as_str).map(String::from),
-                            url: h.get("url").and_then(Value::as_str).map(String::from),
-                            headers,
-                            timeout_s: h.get("timeout").and_then(Value::as_u64),
-                        },
-                    },
-                    body: String::new(),
-                    resources: vec![],
                 });
             }
+
+            let kind = h
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("command")
+                .to_string();
+            let mut headers: BTreeMap<String, String> = h
+                .get("headers")
+                .and_then(Value::as_object)
+                .map(|o| {
+                    o.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default();
+            scrub_headers(&mut headers, fleet_token);
+            for (k, v) in &headers {
+                if looks_secret(k) && !v.contains("${") {
+                    flagged.push(format!(
+                        "hook {name}: {k} holds a literal secret; replace with a ${{PLACEHOLDER}}"
+                    ));
+                }
+            }
+            let mut url = h.get("url").and_then(Value::as_str).map(String::from);
+            if let Some(u) = &mut url {
+                scrub_token(u, fleet_token);
+            }
+            let extra: BTreeMap<String, Value> = h
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .filter(|(k, _)| {
+                            !["type", "command", "url", "headers", "timeout"].contains(&k.as_str())
+                        })
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut hd = header(
+                Kind::Hook,
+                &name,
+                format!(
+                    "Imported {claude_event} hook{}",
+                    matcher.map(|m| format!(" for {m}")).unwrap_or_default()
+                ),
+                host,
+                path,
+                None,
+            );
+            hd.targets = claude_override(extra, None);
+            let tool = matcher.map(|m| {
+                unmap_tool(m)
+                    .map(String::from)
+                    .unwrap_or_else(|| m.to_string())
+            });
+            out.push(Asset {
+                header: hd,
+                spec: AssetSpec::Hook {
+                    event: event.to_string(),
+                    r#match: tool.map(|t| HookMatch { tool: t }),
+                    action: HookAction {
+                        kind,
+                        command: h.get("command").and_then(Value::as_str).map(String::from),
+                        url,
+                        headers,
+                        timeout_s: h.get("timeout").and_then(Value::as_u64),
+                    },
+                },
+                body: String::new(),
+                resources: vec![],
+            });
         }
     }
     out
@@ -382,7 +423,7 @@ fn import_mcp(
             })
             .unwrap_or_default();
         scrub_headers(&mut headers, fleet_token);
-        let env: BTreeMap<String, String> = s
+        let mut env: BTreeMap<String, String> = s
             .get("env")
             .and_then(Value::as_object)
             .map(|o| {
@@ -391,6 +432,11 @@ fn import_mcp(
                     .collect()
             })
             .unwrap_or_default();
+        scrub_headers(&mut env, fleet_token);
+        let mut url = s.get("url").and_then(Value::as_str).map(String::from);
+        if let Some(u) = &mut url {
+            scrub_token(u, fleet_token);
+        }
         for (k, v) in headers.iter().chain(env.iter()) {
             if looks_secret(k) && !v.contains("${") {
                 flagged.push(format!(
@@ -422,7 +468,7 @@ fn import_mcp(
             header: hd,
             spec: AssetSpec::McpServer {
                 transport: transport.to_string(),
-                url: s.get("url").and_then(Value::as_str).map(String::from),
+                url,
                 headers,
                 command: s.get("command").and_then(Value::as_str).map(String::from),
                 args: s
@@ -443,7 +489,13 @@ fn import_mcp(
     out
 }
 
-fn import_plugins(installed: &Value, known: &Value, host: &str, path: &Path) -> Vec<Asset> {
+fn import_plugins(
+    installed: &Value,
+    known: &Value,
+    host: &str,
+    path: &Path,
+    problems: &mut Vec<Problem>,
+) -> Vec<Asset> {
     let mut out = Vec::new();
     let Some(plugins) = installed.get("plugins").and_then(Value::as_object) else {
         return out;
@@ -452,13 +504,19 @@ fn import_plugins(installed: &Value, known: &Value, host: &str, path: &Path) -> 
         let Some((plugin, market)) = key.split_once('@') else {
             continue;
         };
+        // Scan every record (not just the first) for an installed version;
+        // a plugin with none recorded is reported, not defaulted to latest.
         let version = records
             .as_array()
-            .and_then(|a| a.first())
-            .and_then(|r| r.get("version"))
-            .and_then(Value::as_str)
-            .unwrap_or("latest")
-            .to_string();
+            .and_then(|arr| arr.iter().find_map(|r| r.get("version")?.as_str()));
+        let Some(version) = version else {
+            problems.push(Problem {
+                path: path.to_string_lossy().to_string(),
+                message: format!("{plugin}@{market}: no installed version recorded"),
+            });
+            continue;
+        };
+        let version = version.to_string();
         let src = known.get(market).and_then(|m| m.get("source"));
         let marketplace = Marketplace {
             name: market.to_string(),
@@ -587,6 +645,8 @@ pub fn import_claude(
         &settings_path,
         fleet_token,
         &mut taken,
+        &mut report.flagged_secrets,
+        &mut report.problems,
     ));
     assets.extend(import_mcp(
         &read_json(&src.claude_json),
@@ -602,6 +662,7 @@ pub fn import_claude(
         &read_json(&known_path),
         host,
         &installed_path,
+        &mut report.problems,
     ));
 
     for a in assets {
@@ -866,14 +927,19 @@ mod tests {
 
         // Re-import collides on everything and creates nothing new. The
         // broken symlink is a standing fault independent of catalog state,
-        // so it is reported again too (see task-9-report.md for why this
-        // assertion accepts it alongside collisions).
+        // so it is reported again too on the second scan; check the
+        // collision count precisely instead of requiring every problem to
+        // be a collision.
         let again = import_claude(&src, &repo, "local", Some("SECRET123"), false).unwrap();
         assert!(again.created.is_empty());
-        assert!(again
-            .problems
-            .iter()
-            .all(|p| p.message.contains("already exists") || p.message.contains("broken symlink")));
+        assert_eq!(
+            again
+                .problems
+                .iter()
+                .filter(|p| p.message.contains("already exists"))
+                .count(),
+            rep.created.len()
+        );
     }
 
     #[test]
@@ -908,5 +974,215 @@ mod tests {
         assert!(rendered.contains("model: opus"));
         assert!(rendered.contains("color: blue"));
         assert!(rendered.ends_with("---\nYou are QA.\n"));
+    }
+
+    #[test]
+    fn hook_header_secret_is_flagged() {
+        let settings = serde_json::json!({
+            "hooks": {
+                "Stop": [{
+                    "hooks": [{
+                        "type": "http",
+                        "url": "http://h/hook",
+                        "headers": { "Authorization": "Bearer OTHER" }
+                    }]
+                }]
+            }
+        });
+        let mut taken = Vec::new();
+        let mut flagged = Vec::new();
+        let mut problems = Vec::new();
+        let assets = import_hooks(
+            &settings,
+            "local",
+            Path::new("settings.json"),
+            Some("SECRET123"),
+            &mut taken,
+            &mut flagged,
+            &mut problems,
+        );
+        assert_eq!(assets.len(), 1);
+        assert!(problems.is_empty());
+        assert!(
+            flagged
+                .iter()
+                .any(|s| s.contains("hook") && s.contains("Authorization")),
+            "{flagged:?}"
+        );
+    }
+
+    #[test]
+    fn fleet_token_is_scrubbed_from_env_and_url() {
+        let claude_json = serde_json::json!({
+            "mcpServers": {
+                "svc": { "type": "stdio", "command": "x", "env": { "FLEET_HDR": "x SECRET123 y" } }
+            }
+        });
+        let mut flagged = Vec::new();
+        let assets = import_mcp(
+            &claude_json,
+            "local",
+            Path::new(".claude.json"),
+            Some("SECRET123"),
+            &mut flagged,
+        );
+        let AssetSpec::McpServer { env, .. } = &assets[0].spec else {
+            panic!()
+        };
+        assert_eq!(env["FLEET_HDR"], "x ${FLEET_MCP_TOKEN} y");
+
+        let settings = serde_json::json!({
+            "hooks": {
+                "Stop": [{ "hooks": [{ "type": "http", "url": "http://h/?t=SECRET123" }] }]
+            }
+        });
+        let mut taken = Vec::new();
+        let mut flagged2 = Vec::new();
+        let mut problems = Vec::new();
+        let assets = import_hooks(
+            &settings,
+            "local",
+            Path::new("settings.json"),
+            Some("SECRET123"),
+            &mut taken,
+            &mut flagged2,
+            &mut problems,
+        );
+        let AssetSpec::Hook { action, .. } = &assets[0].spec else {
+            panic!()
+        };
+        assert_eq!(
+            action.url.as_deref(),
+            Some("http://h/?t=${FLEET_MCP_TOKEN}")
+        );
+    }
+
+    #[test]
+    fn multi_hook_entry_imports_first_and_reports_problem() {
+        let settings = serde_json::json!({
+            "hooks": {
+                "Stop": [{
+                    "hooks": [
+                        { "type": "command", "command": "a" },
+                        { "type": "command", "command": "b" }
+                    ]
+                }]
+            }
+        });
+        let mut taken = Vec::new();
+        let mut flagged = Vec::new();
+        let mut problems = Vec::new();
+        let assets = import_hooks(
+            &settings,
+            "local",
+            Path::new("settings.json"),
+            None,
+            &mut taken,
+            &mut flagged,
+            &mut problems,
+        );
+        assert_eq!(assets.len(), 1);
+        match &assets[0].spec {
+            AssetSpec::Hook { action, .. } => assert_eq!(action.command.as_deref(), Some("a")),
+            _ => panic!(),
+        }
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0]
+                .message
+                .contains("only the first of 2 hooks was imported"),
+            "{:?}",
+            problems[0]
+        );
+    }
+
+    #[test]
+    fn hooks_entry_with_no_hooks_does_not_consume_a_name() {
+        let settings = serde_json::json!({
+            "hooks": {
+                "Stop": [
+                    { "hooks": [] },
+                    { "hooks": [{ "type": "command", "command": "real" }] }
+                ]
+            }
+        });
+        let mut taken = Vec::new();
+        let mut flagged = Vec::new();
+        let mut problems = Vec::new();
+        let assets = import_hooks(
+            &settings,
+            "local",
+            Path::new("settings.json"),
+            None,
+            &mut taken,
+            &mut flagged,
+            &mut problems,
+        );
+        assert_eq!(assets.len(), 1);
+        // The empty entry did not reserve "stop"; the real one got it.
+        assert_eq!(assets[0].header.name, "stop");
+        assert!(problems.is_empty(), "{problems:?}");
+    }
+
+    #[test]
+    fn plugin_with_no_recorded_version_is_reported_and_skipped() {
+        let installed = serde_json::json!({ "plugins": { "foo@bar": [{"scope": "user"}] } });
+        let known = serde_json::json!({});
+        let mut problems = Vec::new();
+        let assets = import_plugins(
+            &installed,
+            &known,
+            "local",
+            Path::new("installed_plugins.json"),
+            &mut problems,
+        );
+        assert!(assets.is_empty());
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].message.contains("foo@bar"));
+        assert!(problems[0]
+            .message
+            .contains("no installed version recorded"));
+    }
+
+    #[test]
+    fn plugin_version_found_on_a_later_record_is_used() {
+        let installed = serde_json::json!({
+            "plugins": { "foo@bar": [{"scope": "user"}, {"scope": "project", "version": "2.0.0"}] }
+        });
+        let known = serde_json::json!({});
+        let mut problems = Vec::new();
+        let assets = import_plugins(
+            &installed,
+            &known,
+            "local",
+            Path::new("installed_plugins.json"),
+            &mut problems,
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+        match &assets[0].spec {
+            AssetSpec::PluginRef { version, .. } => assert_eq!(version, "2.0.0"),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn import_skill_skips_symlinked_resources_and_terminates() {
+        let base = std::env::temp_dir().join(format!("fleet-import-symres-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let skill_dir = base.join("skill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: s\ndescription: d\n---\nb\n",
+        )
+        .unwrap();
+        fs::write(skill_dir.join("real.txt"), "hi\n").unwrap();
+        // A symlink back up the tree: following it as a directory would
+        // recurse forever. It must be skipped entirely, not walked.
+        std::os::unix::fs::symlink("..", skill_dir.join("loop")).unwrap();
+
+        let asset = import_skill(&skill_dir, "s", "local").unwrap();
+        assert_eq!(asset.resources.len(), 1);
+        assert_eq!(asset.resources[0].rel_path, "resources/real.txt");
     }
 }
