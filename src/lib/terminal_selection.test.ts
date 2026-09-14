@@ -38,3 +38,106 @@ describe('selectionRects', () => {
     expect(rects).toEqual([{ left: 4 + 2 * 8, top: 4, width: (50 - 2 + 1) * 8, height: 16 }]);
   });
 });
+
+// ─── Word / line selection (double- and triple-click) ─────────────────────
+import { modeForClickCount, isWordChar, wordBoundsAt, expandSelection } from './terminal_selection';
+
+const row = (s: string) => Array.from(s).map((ch) => ({ ch }));
+
+describe('modeForClickCount', () => {
+  it('maps click count to granularity', () => {
+    expect(modeForClickCount(1)).toBe('cell');
+    expect(modeForClickCount(2)).toBe('word');
+    expect(modeForClickCount(3)).toBe('line');
+    expect(modeForClickCount(4)).toBe('line');
+    expect(modeForClickCount(0)).toBe('cell');
+  });
+});
+
+describe('isWordChar', () => {
+  it('keeps path/URL punctuation inside a word', () => {
+    for (const c of ['a', 'Z', '0', '/', '-', '_', '.', ':', '~', '+', '=', '@', '#', 'č', '😀']) {
+      expect(isWordChar(c), c).toBe(true);
+    }
+  });
+  it('breaks on blanks, quotes, brackets, separators and box drawing', () => {
+    for (const c of [' ', '\t', ' ', '"', "'", '`', '(', ')', '[', ']', '{', '}', '<', '>', '|', ';', ',', '│', '─', '╭']) {
+      expect(isWordChar(c), JSON.stringify(c)).toBe(false);
+    }
+  });
+  it('treats a wide glyph trailing placeholder as part of the word', () => {
+    expect(isWordChar('')).toBe(true);
+  });
+});
+
+describe('wordBoundsAt', () => {
+  it('selects the run of word chars around the column', () => {
+    expect(wordBoundsAt(row('ab cd ef'), 3)).toEqual({ from: 3, to: 4 });
+    expect(wordBoundsAt(row('ab cd ef'), 4)).toEqual({ from: 3, to: 4 });
+  });
+  it('grabs a whole path, including slashes and dots', () => {
+    const r = row('cd src/lib/ansi.ts && ls');
+    expect(wordBoundsAt(r, 8)).toEqual({ from: 3, to: 17 });
+  });
+  it('a blank selects the run of blanks', () => {
+    expect(wordBoundsAt(row('ab   cd'), 3)).toEqual({ from: 2, to: 4 });
+  });
+  it('a breaker selects only itself', () => {
+    expect(wordBoundsAt(row('a(b)'), 1)).toEqual({ from: 1, to: 1 });
+  });
+  it('stops at box-drawing borders', () => {
+    // Claude's prompt box: `│ > hello │`
+    expect(wordBoundsAt(row('│ > hello │'), 6)).toEqual({ from: 4, to: 8 });
+  });
+  it('keeps a wide glyph pair together', () => {
+    // 'a' + wide '😀' (head + '' trailing) + 'b'
+    const r = [{ ch: 'a' }, { ch: '😀' }, { ch: '' }, { ch: 'b' }, { ch: ' ' }];
+    expect(wordBoundsAt(r, 2)).toEqual({ from: 0, to: 3 });
+  });
+  it('clamps the column into the row', () => {
+    expect(wordBoundsAt(row('ab'), 99)).toEqual({ from: 0, to: 1 });
+    expect(wordBoundsAt(row('ab'), -5)).toEqual({ from: 0, to: 1 });
+    expect(wordBoundsAt([], 0)).toEqual({ from: 0, to: 0 });
+  });
+});
+
+describe('expandSelection', () => {
+  const cells = [row('ab cd ef  '), row('gh ij kl  '), row('          ')];
+  const cols = 10;
+
+  it('cell mode only orders the endpoints', () => {
+    expect(expandSelection('cell', { row: 1, col: 4 }, { row: 0, col: 1 }, cells, cols)).toEqual({
+      start: { row: 0, col: 1 },
+      end: { row: 1, col: 4 },
+    });
+  });
+  it('word mode snaps both ends outward to word boundaries', () => {
+    expect(expandSelection('word', { row: 0, col: 4 }, { row: 0, col: 4 }, cells, cols)).toEqual({
+      start: { row: 0, col: 3 },
+      end: { row: 0, col: 4 },
+    });
+    // Drag from inside "cd" back into "ab": start snaps to 0, end to end of "cd".
+    expect(expandSelection('word', { row: 0, col: 4 }, { row: 0, col: 1 }, cells, cols)).toEqual({
+      start: { row: 0, col: 0 },
+      end: { row: 0, col: 4 },
+    });
+  });
+  it('word mode across rows uses each row for its own boundary', () => {
+    expect(expandSelection('word', { row: 0, col: 7 }, { row: 1, col: 3 }, cells, cols)).toEqual({
+      start: { row: 0, col: 6 },
+      end: { row: 1, col: 4 },
+    });
+  });
+  it('line mode covers full rows', () => {
+    expect(expandSelection('line', { row: 1, col: 4 }, { row: 0, col: 2 }, cells, cols)).toEqual({
+      start: { row: 0, col: 0 },
+      end: { row: 1, col: cols - 1 },
+    });
+  });
+  it('tolerates a row index outside the cell grid', () => {
+    expect(expandSelection('word', { row: 5, col: 4 }, { row: 5, col: 4 }, cells, cols)).toEqual({
+      start: { row: 5, col: 0 },
+      end: { row: 5, col: 0 },
+    });
+  });
+});
