@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 pub mod harness;
+pub mod import;
 pub mod inventory;
 pub mod model;
 pub mod repo;
@@ -210,6 +211,37 @@ pub struct AssetDetail {
     pub asset: Asset,
     pub previews: Vec<Preview>,
     pub hosts: Vec<HostState>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImportArgs {
+    pub host_alias: String,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// Import from a host's Claude config. v1 supports the controller (`local`)
+/// only; other hosts return E_ASSET_UNSUPPORTED.
+pub fn import_host(
+    args: ImportArgs,
+    store: &Mutex<Store>,
+    fleet_token: Option<&str>,
+) -> Result<import::ImportReport, IpcError> {
+    let cfg = require_config(store)?;
+    if args.host_alias != "local" {
+        return Err(IpcError::new(
+            E_ASSET_UNSUPPORTED,
+            "importing from remote hosts is not supported yet; use local",
+        ));
+    }
+    let src = import::ImportSources::for_local()?;
+    import::import_claude(
+        &src,
+        std::path::Path::new(&cfg.repo_path),
+        &args.host_alias,
+        fleet_token,
+        args.dry_run,
+    )
 }
 
 pub fn get_asset(kind: Kind, name: &str, store: &Mutex<Store>) -> Result<AssetDetail, IpcError> {

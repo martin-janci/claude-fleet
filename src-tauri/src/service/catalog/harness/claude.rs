@@ -144,11 +144,14 @@ impl Claude {
             ("name", yaml_str(&a.header.name)),
             ("description", yaml_str(&description)),
         ];
-        if !allowed_tools.is_empty() {
-            let mapped: Vec<String> = allowed_tools.iter().map(|x| map_tool(x)).collect();
+        let mut mapped: Vec<String> = allowed_tools.iter().map(|x| map_tool(x)).collect();
+        if let Some(arr) = t.extra.get("tools").and_then(Value::as_array) {
+            mapped.extend(arr.iter().filter_map(Value::as_str).map(String::from));
+        }
+        if !mapped.is_empty() {
             fields.push(("allowed-tools", yaml_str(&mapped.join(", "))));
         }
-        for (k, v) in &t.extra {
+        for (k, v) in t.extra.iter().filter(|(k, _)| k.as_str() != "tools") {
             fields.push((k.as_str(), json_to_yaml(v)));
         }
         let text = format!("{}{}", frontmatter(&fields), a.body);
@@ -176,8 +179,11 @@ impl Claude {
             ("name", yaml_str(&a.header.name)),
             ("description", yaml_str(&a.header.description)),
         ];
-        if !tools.is_empty() {
-            let mapped: Vec<String> = tools.iter().map(|x| map_tool(x)).collect();
+        let mut mapped: Vec<String> = tools.iter().map(|x| map_tool(x)).collect();
+        if let Some(arr) = t.extra.get("tools").and_then(Value::as_array) {
+            mapped.extend(arr.iter().filter_map(Value::as_str).map(String::from));
+        }
+        if !mapped.is_empty() {
             fields.push(("tools", yaml_str(&mapped.join(", "))));
         }
         let model_id = t
@@ -185,7 +191,7 @@ impl Claude {
             .clone()
             .unwrap_or_else(|| map_tier(model).to_string());
         fields.push(("model", yaml_str(&model_id)));
-        for (k, v) in &t.extra {
+        for (k, v) in t.extra.iter().filter(|(k, _)| k.as_str() != "tools") {
             fields.push((k.as_str(), json_to_yaml(v)));
         }
         let text = format!("{}{}", frontmatter(&fields), a.body);
@@ -844,6 +850,14 @@ eyJwbHVnaW5zIjp7InN1cGVycG93ZXJzQHN1cGVycG93ZXJzLW1hcmtldHBsYWNlIjpbeyJ2ZXJzaW9u
         );
         assert!(!snap.files.contains_key("~/-"));
         assert_eq!(snap.configs[SETTINGS_PATH], serde_json::json!({}));
+    }
+
+    #[test]
+    fn extra_tools_are_appended_not_duplicated() {
+        let plan = render("kind: agent\nname: a\ndescription: d\ntools: [read]\ntargets:\n  claude:\n    extra:\n      tools: [Weird]\n", "p\n");
+        let text = String::from_utf8(plan.files[0].bytes.clone()).unwrap();
+        assert!(text.contains("tools: Read, Weird"), "{text}");
+        assert_eq!(text.matches("tools:").count(), 1);
     }
 
     #[test]
