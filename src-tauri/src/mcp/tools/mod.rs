@@ -164,7 +164,9 @@ impl ServerHandler for FleetTools {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
-            .with_protocol_version(ProtocolVersion::V_2024_11_05)
+            // 2025-11-25; rmcp negotiates down for a client that asks for an
+            // older known revision.
+            .with_protocol_version(ProtocolVersion::LATEST)
             .with_instructions(server_instructions())
     }
 }

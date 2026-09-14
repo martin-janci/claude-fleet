@@ -16,7 +16,7 @@ use crate::cancel::CancellationRegistry;
 use crate::ssh::SshClient;
 use crate::store::Store;
 use rmcp::transport::streamable_http_server::{
-    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    session::never::NeverSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -198,6 +198,27 @@ fn build_app(
         .layer(axum::middleware::from_fn_with_state(auth_state, authorize))
 }
 
+/// The rmcp streamable-HTTP service in **stateless** mode: every POST is a
+/// self-contained JSON-RPC exchange served by a fresh `FleetTools` clone, no
+/// `Mcp-Session-Id` is issued or required, and `GET`/`DELETE` are refused
+/// (405). The server never sends server-initiated messages (tools only), so a
+/// session bought nothing and cost a reconnect after every app restart, port
+/// or token change, or tunnel bounce. Responses keep SSE framing
+/// (`json_response` default `false`) so the 15 s keep-alive still flows on
+/// long polls (`wait_for_session`, `run_prompt`) through the reverse tunnel.
+pub(crate) fn streamable_service(
+    tools: FleetTools,
+    cancel: CancellationToken,
+) -> StreamableHttpService<FleetTools, NeverSessionManager> {
+    StreamableHttpService::new(
+        move || Ok(tools.clone()),
+        NeverSessionManager::default().into(),
+        StreamableHttpServerConfig::default()
+            .with_stateful_mode(false)
+            .with_cancellation_token(cancel),
+    )
+}
+
 /// Bind the listener and spawn the serve loop. Binds `127.0.0.1:<port>` only —
 /// never a routable address. Returns the server's cancellation token on
 /// success; an `Err` carries a human-readable bind failure (e.g. port in use).
@@ -229,12 +250,7 @@ pub async fn start(
             store: Arc::clone(&store),
         };
         let tools = FleetTools::new(store, ssh, reg, tunnels, guards);
-        let service = StreamableHttpService::new(
-            move || Ok(tools.clone()),
-            LocalSessionManager::default().into(),
-            StreamableHttpServerConfig::default()
-                .with_cancellation_token(serve_shutdown.child_token()),
-        );
+        let service = streamable_service(tools, serve_shutdown.child_token());
         let app = build_app(axum::routing::any_service(service), hook_state, auth_state);
 
         tracing::info!("[mcp] control API listening on http://{addr}/mcp");
@@ -441,5 +457,109 @@ mod tests {
 
         rt.stop();
         assert!(!rt.is_running());
+    }
+
+    // ---- real service, in-process (stateless transport contract) ----
+
+    /// Real `FleetTools` behind the real stateless service, bound on an
+    /// ephemeral loopback port. Requests authenticate with the master token
+    /// `s3cret`.
+    async fn serve_real_tools() -> std::net::SocketAddr {
+        use std::net::Ipv4Addr;
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let hook_state = hooks::HookState {
+            store: Arc::clone(&store),
+            ssh: Arc::new(SshClient::new()),
+        };
+        let auth_state = AuthState {
+            master: Arc::new("s3cret".to_string()),
+            store: Arc::clone(&store),
+        };
+        let tools = FleetTools::new(
+            store,
+            Arc::new(SshClient::new()),
+            crate::cancel::CancellationRegistry::new(),
+            Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
+            McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {})),
+        );
+        let service = streamable_service(tools, CancellationToken::new());
+        let app = build_app(axum::routing::any_service(service), hook_state, auth_state);
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        addr
+    }
+
+    /// One raw HTTP/1.1 exchange; reads until the server closes or 800 ms.
+    async fn raw_round_trip(addr: std::net::SocketAddr, req: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        s.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(800), async {
+            let mut tmp = [0u8; 8192];
+            loop {
+                match s.read(&mut tmp).await {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    Err(_) => break,
+                }
+            }
+        })
+        .await;
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    /// `POST /mcp` with the master token and the Accept pair rmcp requires.
+    fn post_mcp(body: &str) -> String {
+        format!(
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: application/json, \
+             text/event-stream\r\nContent-Type: application/json\r\n\
+             Authorization: Bearer s3cret\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// The control API is stateless streamable HTTP: no `Mcp-Session-Id` is
+    /// issued or required, every POST stands alone, `GET /mcp` is not served,
+    /// and the server advertises MCP 2025-11-25.
+    #[tokio::test]
+    async fn mcp_is_stateless_and_advertises_latest_protocol() {
+        let addr = serve_real_tools().await;
+
+        // initialize without any session header → 200, latest protocol, and
+        // no Mcp-Session-Id handed back.
+        let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#;
+        let r = raw_round_trip(addr, &post_mcp(init)).await;
+        assert!(r.contains("200 OK"), "initialize:\n{r}");
+        assert!(
+            r.contains(r#""protocolVersion":"2025-11-25""#),
+            "must advertise 2025-11-25:\n{r}"
+        );
+        assert!(
+            !r.to_ascii_lowercase().contains("mcp-session-id"),
+            "stateless: no session id must be issued:\n{r}"
+        );
+
+        // A second, unrelated POST (no session header) is served on its own.
+        let list = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+        let r = raw_round_trip(addr, &post_mcp(list)).await;
+        assert!(r.contains("200 OK"), "tools/list:\n{r}");
+        assert!(
+            r.contains(r#""name":"list_sessions""#),
+            "tools listed:\n{r}"
+        );
+
+        // GET /mcp (the stateful SSE channel) is not part of the contract.
+        let get = "GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\n\
+                   Authorization: Bearer s3cret\r\nConnection: close\r\n\r\n";
+        let r = raw_round_trip(addr, get).await;
+        assert!(r.contains("405"), "GET must be 405 in stateless mode:\n{r}");
     }
 }
