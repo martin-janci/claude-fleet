@@ -330,6 +330,7 @@ pub fn compute_states(
                 catalog_hash: None,
                 host_hash: None,
                 scanned_at,
+                managed: false,
             });
         }
     }

@@ -362,6 +362,7 @@ mod tests {
                         catalog_hash: None,
                         host_hash: None,
                         scanned_at: 1,
+                        managed: false,
                     },
                     crate::store::AssetInventoryRow {
                         host_alias: "local".into(),
@@ -372,6 +373,7 @@ mod tests {
                         catalog_hash: None,
                         host_hash: None,
                         scanned_at: 1,
+                        managed: false,
                     },
                 ],
             )
