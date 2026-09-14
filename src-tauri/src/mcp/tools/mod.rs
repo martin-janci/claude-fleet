@@ -153,7 +153,7 @@ impl ServerHandler for FleetTools {
         let tcc = ToolCallContext::new(self, request, context);
         // Tool-execution failures travel as `is_error` results; only rmcp's
         // own protocol errors (unknown tool, bad arguments) stay JSON-RPC.
-        match self.tool_router.call(tcc).await {
+        match bounded(&tool, tool_deadline(&tool), self.tool_router.call(tcc)).await {
             Ok(result) => Ok(result),
             Err(e) => tool_error_result(e),
         }

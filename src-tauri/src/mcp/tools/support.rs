@@ -808,3 +808,137 @@ impl FleetTools {
         Ok(task)
     }
 }
+
+// ---- per-call wall clock ----------------------------------------------------
+
+/// Tools that are themselves bounded long-polls (`timeout_s` ≤ 600):
+/// the wire cap sits above their own maximum.
+pub(super) const LONG_POLL_TOOLS: &[&str] = &["wait_for_session", "wait_for_task", "run_prompt"];
+pub(super) const LONG_POLL_CAP: std::time::Duration = std::time::Duration::from_secs(660);
+
+/// Tools that compose several SSH round trips or spawn processes on a host
+/// (session lifecycle, provisioning, host probes, fan-outs, reads that may
+/// page through large files).
+pub(super) const LIFECYCLE_TOOLS: &[&str] = &[
+    "add_host",
+    "probe_host",
+    "provision_hosts",
+    "new_session",
+    "new_bg_session",
+    "new_shell_session",
+    "recreate_session",
+    "restart_session",
+    "repair_session",
+    "move_session",
+    "spawn_review",
+    "dispatch_task",
+    "safe_kill_session",
+    "kill_session",
+    "delete_worktree",
+    "import_assets",
+    "scan_assets",
+    "refresh_projects",
+    "session_transcript",
+    "usage_report",
+    "broadcast_prompt",
+];
+pub(super) const LIFECYCLE_CAP: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Everything else: store reads and single SSH round trips.
+pub(super) const QUICK_TOOLS: &[&str] = &[
+    "cancel_task",
+    "capture_session",
+    "discover_hosts",
+    "dismiss_ghost_session",
+    "fleet_health",
+    "get_clipboard",
+    "hide_host",
+    "inbox",
+    "list_accounts",
+    "list_assets",
+    "list_hosts",
+    "list_projects",
+    "list_sessions",
+    "list_tasks",
+    "list_worktrees",
+    "peek_session",
+    "peer_status",
+    "register_self",
+    "related_sessions",
+    "remove_host",
+    "rename_session",
+    "repo_branches",
+    "repo_changes",
+    "repo_commit",
+    "repo_commit_diff",
+    "repo_diff",
+    "repo_file",
+    "repo_log",
+    "repo_tree",
+    "send_message",
+    "send_prompt",
+    "session_history",
+    "set_clipboard",
+    "set_friendly_name",
+    "set_session_tags",
+    "whoami",
+];
+pub(super) const QUICK_CAP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Wall-clock cap for one tool call. An unknown name gets the quick cap;
+/// the classification test guarantees every served tool is listed.
+pub(super) fn tool_deadline(tool: &str) -> std::time::Duration {
+    if LONG_POLL_TOOLS.contains(&tool) {
+        LONG_POLL_CAP
+    } else if LIFECYCLE_TOOLS.contains(&tool) {
+        LIFECYCLE_CAP
+    } else {
+        if !QUICK_TOOLS.contains(&tool) {
+            // Reachable only for a name the router does not serve (rmcp then
+            // answers "tool not found") — the classification test keeps every
+            // served tool in one of the three lists.
+            tracing::debug!(tool, "[mcp] unclassified tool name gets the quick cap");
+        }
+        QUICK_CAP
+    }
+}
+
+/// The `E_TIMEOUT` tool result for a call that outran [`tool_deadline`].
+pub(super) fn timeout_result(tool: &str, limit: std::time::Duration) -> CallToolResult {
+    let secs = limit.as_secs();
+    let mut r = CallToolResult::error(vec![Content::text(format!(
+        "E_TIMEOUT: {tool} exceeded its {secs} s limit; the call may have partially completed"
+    ))]);
+    r.structured_content = Some(serde_json::json!({
+        "code": "E_TIMEOUT",
+        "tool": tool,
+        "limit_secs": secs,
+    }));
+    r
+}
+
+/// Run one tool call under its wall clock. On elapse the future is dropped
+/// — safe because no code path holds the store guard across an `.await`,
+/// SSH children are reaped by `SshClient::run_child`'s own clock, and the
+/// long-poll permit releases in `Drop` — and the caller gets
+/// [`timeout_result`].
+pub(super) async fn bounded<F>(
+    tool: &str,
+    limit: std::time::Duration,
+    fut: F,
+) -> Result<CallToolResult, McpError>
+where
+    F: std::future::Future<Output = Result<CallToolResult, McpError>>,
+{
+    match tokio::time::timeout(limit, fut).await {
+        Ok(outcome) => outcome,
+        Err(_elapsed) => {
+            tracing::warn!(
+                tool,
+                limit_secs = limit.as_secs(),
+                "[mcp] tool call timed out"
+            );
+            Ok(timeout_result(tool, limit))
+        }
+    }
+}
