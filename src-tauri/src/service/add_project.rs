@@ -38,6 +38,26 @@ const CLONE_WALL_CLOCK: Duration = Duration::from_secs(600);
 /// that happens to exit 3 is never misread as "already cloned".
 const ALREADY_CLONED_MARKER: &str = "__add_project_clone_dest_exists__";
 
+/// Prologue for every script in this module that signals through a deliberate
+/// exit code: `set -e` for the happy path, plus `cf_exit` — the ONLY way those
+/// scripts may exit non-zero on purpose.
+///
+/// Why the helper: these scripts run under `bash -lc` (both
+/// [`run_local_script`] and the SSH path), which is a LOGIN shell, so bash
+/// sources `~/.bash_logout` on the way out. Debian's stock logout file runs
+/// `/usr/bin/clear_console`, which exits 1 whenever there is no tty — i.e.
+/// always, for us. With errexit still in effect bash aborts inside that file
+/// and reports ITS status, so a deliberate `exit 3` reaches the caller as
+/// `exit 1` and every `out.status.code() == Some(N)` sentinel check below
+/// silently stops matching. Observed on a fleet container host: re-adding an
+/// already-cloned repo reported the generic `E_GIT_SETUP` "(no stderr)" — the
+/// marker having been stripped from stderr by [`git_error`] — instead of
+/// `E_EXISTS`. Dropping errexit first is enough for the status to survive.
+///
+/// Falling off the end of the script is NOT affected (bash keeps the status
+/// there), so the success path and errexit aborts need nothing.
+const SCRIPT_PROLOGUE: &str = "set -e\ncf_exit() { set +e; exit \"$1\"; }\n";
+
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AddProjectSource {
@@ -182,21 +202,41 @@ async fn clone_source(
         (out, dest)
     };
     if !out.status.success() {
+        // The script's own "already a checkout" guard fired: the repository
+        // is already sitting at exactly the path this clone would have
+        // created, and `refuse_existing_project` above proved the fleet holds
+        // no row for it. Adopt it instead of failing — the clone has nothing
+        // left to do, and `refresh_projects` can only ever rediscover a LOCAL
+        // checkout (it scans the local root; `folder_source` is local-only
+        // too), so failing here left a repo cloned on a REMOTE host with no
+        // way to be added at all.
+        if already_a_checkout(&out) {
+            return register(store, &owner, &repo, &local_base, false);
+        }
         return Err(git_error(&args.host_alias, &owner, &repo, &dest, &out));
     }
     register(store, &owner, &repo, &local_base, false)
 }
 
+/// The script stopped at [`clone_script`]'s own "already a checkout" guard:
+/// exit code 3 AND [`ALREADY_CLONED_MARKER`] on stderr — both, so an unrelated
+/// command that happens to exit 3 is never misread as "already cloned".
+fn already_a_checkout(out: &std::process::Output) -> bool {
+    out.status.code() == Some(3)
+        && String::from_utf8_lossy(&out.stderr).contains(ALREADY_CLONED_MARKER)
+}
+
 /// Clone `url` into `dest` unless `dest` is already a checkout. Every value
-/// quoted; `set -e` so a failed `mkdir` does not reach `git clone`. Exit
-/// code 3 plus [`ALREADY_CLONED_MARKER`] on stderr is the script's own
-/// "already a checkout" guard, mapped to `E_EXISTS` by [`git_error`] —
-/// nothing here ever removes `dest`.
+/// quoted; [`SCRIPT_PROLOGUE`]'s `set -e` so a failed `mkdir` does not reach
+/// `git clone`. Exit code 3 plus [`ALREADY_CLONED_MARKER`] on stderr is the
+/// script's own "already a checkout" guard, mapped to `E_EXISTS` by
+/// [`git_error`] — nothing here ever removes `dest`. The guard exits through
+/// `cf_exit` so the 3 survives the login shell; see [`SCRIPT_PROLOGUE`].
 pub(crate) fn clone_script(dest: &str, clone_url: &str) -> String {
     let d = quote(dest);
     format!(
-        "set -e\n\
-         if git -C {d} rev-parse --git-dir >/dev/null 2>&1; then echo {marker} >&2; exit 3; fi\n\
+        "{SCRIPT_PROLOGUE}\
+         if git -C {d} rev-parse --git-dir >/dev/null 2>&1; then echo {marker} >&2; cf_exit 3; fi\n\
          mkdir -p \"$(dirname -- {d})\"\n\
          git clone {url} {d}\n",
         url = quote(clone_url),
@@ -788,7 +828,7 @@ fn new_project_script(dest: &str, owner: &str, repo: &str, create_remote: bool) 
              git commit --allow-empty -m 'Initial commit'\n\
              else\n\
              echo {marker} >&2\n\
-             exit 5\n\
+             cf_exit 5\n\
              fi\n",
             marker = quote(NO_GIT_IDENTITY_MARKER),
         )
@@ -807,7 +847,7 @@ fn new_project_script(dest: &str, owner: &str, repo: &str, create_remote: bool) 
         format!(
             "if ! {{ git -C / config user.email && git -C / config user.name; }} >/dev/null 2>&1; then\n\
              echo {marker} >&2\n\
-             exit 5\n\
+             cf_exit 5\n\
              fi\n",
             marker = quote(NO_GIT_IDENTITY_MARKER),
         )
@@ -821,7 +861,7 @@ fn new_project_script(dest: &str, owner: &str, repo: &str, create_remote: bool) 
              echo {begin} >&2\n\
              git remote get-url --push origin >&2\n\
              echo {end} >&2\n\
-             exit 6\n\
+             cf_exit 6\n\
              fi\n",
             begin = quote(ORIGIN_URL_BEGIN_MARKER),
             end = quote(ORIGIN_URL_END_MARKER),
@@ -837,7 +877,7 @@ fn new_project_script(dest: &str, owner: &str, repo: &str, create_remote: bool) 
                 "tag=$(git config --local --get {key} 2>/dev/null | tr '[:upper:]' '[:lower:]')\n\
                  if [ \"$tag\" != {expected} ]; then\n\
                  echo {exists_marker} >&2\n\
-                 exit 3\n\
+                 cf_exit 3\n\
                  fi\n",
                 key = quote(NEW_PROJECT_TAG_KEY),
                 expected = quote(&slug.to_ascii_lowercase()),
@@ -856,11 +896,11 @@ fn new_project_script(dest: &str, owner: &str, repo: &str, create_remote: bool) 
     let stage_init = quote(STAGE_INIT);
     let stage_commit = quote(STAGE_COMMIT);
     let mut s = format!(
-        "set -e\n\
+        "{SCRIPT_PROLOGUE}\
          export GIT_TERMINAL_PROMPT=0\n\
          if ! command -v git >/dev/null 2>&1; then\n\
          echo {nogit_marker} >&2\n\
-         exit 7\n\
+         cf_exit 7\n\
          fi\n\
          if [ -e {d} ]; then\n\
          if git -C {d} rev-parse --git-dir >/dev/null 2>&1; then\n\
@@ -869,7 +909,7 @@ fn new_project_script(dest: &str, owner: &str, repo: &str, create_remote: bool) 
          if git remote get-url origin >/dev/null 2>&1; then\n\
          {origin_resume}\
          echo {exists_marker} >&2\n\
-         exit 3\n\
+         cf_exit 3\n\
          fi\n\
          if ! git rev-parse --verify -q HEAD >/dev/null; then\n\
          echo {stage_commit} >&2\n\
@@ -877,7 +917,7 @@ fn new_project_script(dest: &str, owner: &str, repo: &str, create_remote: bool) 
          fi\n\
          else\n\
          echo {notgit_marker} >&2\n\
-         exit 4\n\
+         cf_exit 4\n\
          fi\n\
          else\n\
          {identity_precheck}\
@@ -915,12 +955,12 @@ fn new_project_script(dest: &str, owner: &str, repo: &str, create_remote: bool) 
 /// changed in between — so nothing is ever pushed to an unverified remote.
 fn push_only_script(dest: &str, origin_url: &str) -> String {
     format!(
-        "set -e\n\
+        "{SCRIPT_PROLOGUE}\
          export GIT_TERMINAL_PROMPT=0\n\
          cd {d}\n\
          if [ \"$(git remote get-url --push origin)\" != {url} ]; then\n\
          echo {changed} >&2\n\
-         exit 3\n\
+         cf_exit 3\n\
          fi\n\
          echo {stage_push} >&2\n\
          git push -u origin main\n",
@@ -1761,10 +1801,10 @@ impl Drop for ProcessGroup {
 }
 
 /// The clone script's failure at `dest` on `host`, mapped to an `IpcError`.
-/// Exit code 3 together with [`ALREADY_CLONED_MARKER`] on stderr (both, so
-/// an unrelated command that happens to exit 3 is never misread) is the
-/// script's own "already a checkout" guard, reported as `E_EXISTS` with the
-/// path so the caller knows where to look. Anything else is `E_GIT_SETUP`
+/// [`already_a_checkout`] — the script's own "already a checkout" guard — is
+/// reported as `E_EXISTS` with the path so the caller knows where to look;
+/// `clone_source` adopts that case before it ever gets here, so this branch
+/// is the safety net for any other caller. Anything else is `E_GIT_SETUP`
 /// naming `owner/repo` and `host`, with stderr (falling back to stdout, and
 /// `(no stderr)` when both are empty) — matching the sibling clone error at
 /// `service::sessions::lifecycle::git_setup_error`. Shared by the local and
@@ -1778,7 +1818,7 @@ fn git_error(
     out: &std::process::Output,
 ) -> IpcError {
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-    if out.status.code() == Some(3) && stderr.contains(ALREADY_CLONED_MARKER) {
+    if already_a_checkout(out) {
         return IpcError::new(
             codes::E_EXISTS,
             format!("already cloned at {dest}; it should appear after a refresh"),
@@ -1923,6 +1963,123 @@ mod tests {
             "{}",
             p[0].base_path
         );
+    }
+
+    #[tokio::test]
+    async fn a_remote_host_that_already_has_the_checkout_registers_it_instead_of_failing() {
+        // `refresh_projects` scans only the LOCAL root, and `folder_source`
+        // refuses any host but `local`, so a repository already sitting on a
+        // remote host had no way into the project list at all: the clone
+        // script's "already a checkout" guard came back as an error and
+        // nothing was registered. `refuse_existing_project` has already
+        // proved the fleet holds no row for it, so adopting it is safe.
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u").on(
+            Match::script_contains("git clone"),
+            Reply::fail(3, ALREADY_CLONED_MARKER),
+        );
+
+        let row = add_project_with(
+            AddProjectArgs {
+                host_alias: "vps".into(),
+                source: AddProjectSource::Clone {
+                    url: "https://github.com/o/r".into(),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            (row.project.owner.as_str(), row.project.repo.as_str()),
+            ("o", "r")
+        );
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.list_projects().unwrap().len(),
+            1,
+            "the existing remote checkout is registered, not rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_clone_guards_exit_3_survives_a_failing_bash_logout() {
+        // The live bug: these scripts run under `bash -lc`, a LOGIN shell,
+        // which sources `~/.bash_logout` on the way out. Debian's stock
+        // logout file runs `/usr/bin/clear_console`, which exits 1 with no
+        // tty — and with errexit still in effect bash aborts in there and
+        // reports THAT status, so the guard's `exit 3` arrived as 1 and
+        // `already_a_checkout` stopped matching. Stand in for that host with
+        // a `~/.bash_logout` that simply fails.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join(".bash_logout"), "false\n").unwrap();
+
+        // Keeps this test honest: without `cf_exit` the very same shell
+        // downgrades 3 to 1. Verified on bash 3.2 and 5.2/5.3; if some future
+        // bash stops doing this the assertion below would pass vacuously, so
+        // fail loudly here instead.
+        let bare = std::process::Command::new("bash")
+            .args(["-lc", "set -e\nexit 3\n"])
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        assert_eq!(bare.status.code(), Some(1), "the hazard must reproduce");
+
+        let dest_parent = tempfile::tempdir().unwrap();
+        let dest = dest_parent.path().join("checkout");
+        let dest_str = dest.to_str().unwrap();
+        let ok = std::process::Command::new("git")
+            .args(["init", "--", dest_str])
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git init failed");
+
+        // The URL is never reached — the guard fires first — so this stays
+        // entirely offline.
+        let script = clone_script(dest_str, "file:///nonexistent");
+        let out = std::process::Command::new("bash")
+            .args(["-lc", &script])
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+
+        assert_eq!(
+            out.status.code(),
+            Some(3),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(already_a_checkout(&out));
+    }
+
+    #[test]
+    fn every_deliberate_exit_goes_through_cf_exit() {
+        // A bare `exit N` in any of these scripts is silently downgraded to 1
+        // on a host whose `~/.bash_logout` fails, which breaks every
+        // `status.code() == Some(N)` sentinel below. Keep new ones on
+        // `cf_exit`.
+        for script in [
+            clone_script("/p/o/r", "git@github.com:o/r.git"),
+            new_project_script("/p/o/r", "o", "r", true),
+            new_project_script("/p/o/r", "o", "r", false),
+            push_only_script("/p/o/r", "git@github.com:o/r.git"),
+        ] {
+            assert!(script.starts_with(SCRIPT_PROLOGUE), "{script}");
+            for line in script[SCRIPT_PROLOGUE.len()..].lines() {
+                let t = line.trim();
+                assert!(
+                    !t.starts_with("exit ") && !t.contains("; exit "),
+                    "bare exit in:\n{script}\nuse cf_exit instead: {t}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
