@@ -25,28 +25,32 @@
     if (!i.ok) error = i.error.message;
   }
 
+  // Shared by every path that needs to re-read the catalog: `pull: false`
+  // just reloads the working tree as-is (used after import, and on initial
+  // mount/setup); `pull: true` is only the explicit "Pull" button.
+  async function reload(pull: boolean) {
+    error = null;
+    const l = await loadCatalog(pull);
+    if (!l.ok) { error = l.error.message; return; }
+    await refresh();
+  }
+
   onMount(async () => {
     const c = await loadCatalogConfig();
-    if (c.ok && c.value) {
-      const l = await loadCatalog(false);
-      if (!l.ok) { error = l.error.message; return; }
-      await refresh();
-    }
+    if (c.ok && c.value) await reload(false);
   });
 
   async function setup() {
     busy = 'setup'; error = null;
     const c = await configureCatalog(setupPath, setupRemote);
     if (!c.ok) { error = c.error.message; busy = ''; return; }
-    const l = await loadCatalog(false);
-    if (!l.ok) error = l.error.message; else await refresh();
+    await reload(false);
     busy = '';
   }
 
   async function pull() {
-    busy = 'pull'; error = null;
-    const l = await loadCatalog(true);
-    if (!l.ok) error = l.error.message; else await refresh();
+    busy = 'pull';
+    await reload(true);
     busy = '';
   }
 
@@ -111,7 +115,7 @@
     </div>
   {/if}
   {#if showImport}
-    <ImportDialog onclose={() => (showImport = false)} ondone={() => { showImport = false; pull(); }} />
+    <ImportDialog onclose={() => (showImport = false)} ondone={() => { showImport = false; reload(false); }} />
   {/if}
 </div>
 

@@ -37,7 +37,7 @@
   {:else}
     <h3 data-testid="asset-detail-title"><span class="kind">{detail.asset.kind}</span> {detail.asset.name} <span class="ver">v{detail.asset.version}</span></h3>
     <p class="desc">{detail.asset.description}</p>
-    {#if detail.asset.tags.length}<p class="tags">{#each detail.asset.tags as t}<span class="tag">{t}</span>{/each}</p>{/if}
+    {#if detail.asset.tags?.length}<p class="tags">{#each detail.asset.tags ?? [] as t}<span class="tag">{t}</span>{/each}</p>{/if}
 
     <h4>Hosts</h4>
     <table class="matrix">

@@ -33,7 +33,11 @@ export interface ConfigMerge { file: string; json_path: string[]; mode: 'set' | 
 export interface RenderPlan { files: FileWrite[]; merges: ConfigMerge[]; placeholders: string[]; warnings: string[] }
 export interface Preview { harness: string; plan: RenderPlan | null; unsupported: string | null }
 export interface AssetDetail {
-  asset: { kind: string; name: string; version: string; description: string; tags: string[]; body: string } & Record<string, unknown>;
+  // `tags` is optional here even though the backend now always serialises
+  // the key: a stale build, a hand-crafted IPC mock in a test, or any other
+  // producer of this shape may still omit it, and `AssetDetail.svelte` must
+  // not crash reading `.length` off `undefined`.
+  asset: { kind: string; name: string; version: string; description: string; tags?: string[]; body: string } & Record<string, unknown>;
   previews: Preview[];
   hosts: HostState[];
 }

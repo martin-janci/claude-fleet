@@ -96,6 +96,47 @@ describe('AssetsPanel', () => {
     expect(await screen.findByText(/codex cannot render/)).toBeTruthy();
   });
 
+  it('renders the detail title when catalog_get_asset omits the tags key entirely', async () => {
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: listing, assets_inventory: [],
+      catalog_get_asset: {
+        // No `tags` key at all — the regression this guards against.
+        asset: { kind: 'skill', name: 'worktree', version: '1', description: 'Make one.', body: '# b' },
+        previews: [
+          { harness: 'claude', plan: { files: [], merges: [], placeholders: [], warnings: [] }, unsupported: null },
+        ],
+        hosts: [],
+      },
+    });
+    render(AssetsPanel);
+    expect(await screen.findByTestId('asset-row-skill-worktree')).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('asset-row-skill-worktree'));
+    expect(await screen.findByTestId('asset-detail-title')).toBeTruthy();
+    expect(screen.getByTestId('asset-detail-title').textContent).toContain('worktree');
+  });
+
+  it('import completion reloads the catalog without pulling', async () => {
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: listing, assets_inventory: [],
+      catalog_import_host: { created: [['skill', 'new']], problems: [], flagged_secrets: [], dry_run: true },
+    });
+    render(AssetsPanel);
+    expect(await screen.findByText('Import from host')).toBeTruthy();
+    await fireEvent.click(screen.getByText('Import from host'));
+    await fireEvent.click(screen.getByTestId('import-dry-run'));
+    await waitFor(() => expect(screen.getByTestId('import-confirm')).not.toBeDisabled());
+
+    invoke.mockClear();
+    await fireEvent.click(screen.getByTestId('import-confirm'));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_load', { args: { pull: false } }));
+    expect(invoke).not.toHaveBeenCalledWith('catalog_load', { args: { pull: true } });
+  });
+
   it('scan button calls assets_scan_hosts and refreshes', async () => {
     byCmd({ catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 }, catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 }, catalog_list_assets: listing, assets_inventory: [], assets_scan_hosts: [{ host: 'local', status: 'scanned', detail: null, rows: 3 }] });
     render(AssetsPanel);
