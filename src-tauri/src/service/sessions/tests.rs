@@ -1498,6 +1498,170 @@ async fn reconcile_links_the_local_account_when_it_becomes_known() {
     assert_eq!(accounts[0].email.as_deref(), Some("mj.janci@gmail.com"));
 }
 
+/// `ScriptedTmux` plus a scripted `read_oauth_account` answer, standing in
+/// for a REMOTE host whose `~/.claude.json` is read over ssh every pass.
+struct AccountTmux {
+    inner: ScriptedTmux,
+    account: Option<crate::service::hosts::OauthAccount>,
+}
+
+#[async_trait::async_trait]
+impl TmuxExec for AccountTmux {
+    async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+        self.inner.list_sessions().await
+    }
+    async fn new_session(&self, _n: &str, _c: &std::path::Path, _p: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn kill_session(&self, _n: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn rename_session(&self, _o: &str, _n: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn restart_session(&self, _n: &str, _p: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn capture_pane(&self, _n: &str) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
+        vec![]
+    }
+    async fn read_oauth_account(&self) -> Option<crate::service::hosts::OauthAccount> {
+        self.account.clone()
+    }
+}
+
+fn oauth_account(uuid: &str, email: &str) -> crate::service::hosts::OauthAccount {
+    crate::service::hosts::OauthAccount {
+        uuid: Some(uuid.to_string()),
+        email: Some(email.to_string()),
+        ..Default::default()
+    }
+}
+
+/// Deps whose remote host `h` lists `sessions` and reports `account`;
+/// `local` (and any other alias) lists nothing and reports no account.
+fn remote_account_deps(
+    sessions: Vec<crate::tmux::TmuxSession>,
+    account: Option<crate::service::hosts::OauthAccount>,
+) -> Arc<ReconcileDeps> {
+    ReconcileDeps::fake(
+        move |alias| {
+            let is_h = alias == "h";
+            Box::new(AccountTmux {
+                inner: ScriptedTmux {
+                    sessions: if is_h { sessions.clone() } else { Vec::new() },
+                    delay: std::time::Duration::from_millis(0),
+                    hang: false,
+                    probes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                },
+                account: if is_h { account.clone() } else { None },
+            })
+        },
+        std::time::Duration::from_secs(5),
+    )
+}
+
+fn host_account(store: &Mutex<Store>, alias: &str) -> Option<String> {
+    store
+        .lock()
+        .unwrap()
+        .list_hosts()
+        .unwrap()
+        .into_iter()
+        .find(|h| h.alias == alias)
+        .expect("host row exists")
+        .account_uuid
+}
+
+#[tokio::test]
+async fn reconcile_relinks_a_remote_host_after_an_account_switch() {
+    // The bug: a remote host's account was captured ONCE by `add_host` and
+    // then only ever refreshed by the manual "Re-probe" click. The user
+    // ran `claude /login` as someone else on the host and the Hosts view
+    // kept showing the account they had left. Every pass now re-reads the
+    // host's `~/.claude.json` over ssh (`TmuxExec::read_oauth_account`)
+    // and relinks on a different uuid.
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("h").unwrap();
+
+    // Pass 1: logged in as acc-1, one session running.
+    let deps = remote_account_deps(
+        vec![tmux_session("old")],
+        Some(oauth_account("acc-1", "one@x.com")),
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert_eq!(host_account(&store, "h").as_deref(), Some("acc-1"));
+
+    // Pass 2: the user re-logged in as acc-2; a second session appeared.
+    let deps = remote_account_deps(
+        vec![tmux_session("old"), tmux_session("fresh")],
+        Some(oauth_account("acc-2", "two@x.com")),
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+
+    assert_eq!(
+        host_account(&store, "h").as_deref(),
+        Some("acc-2"),
+        "a different uuid in the host's ~/.claude.json must relink it without a Re-probe"
+    );
+    let s = store.lock().unwrap();
+    let accounts = s.list_accounts().unwrap();
+    assert!(
+        accounts
+            .iter()
+            .any(|a| a.uuid == "acc-2" && a.email.as_deref() == Some("two@x.com")),
+        "the new account row is upserted from the probe"
+    );
+    // Session attribution: the pre-existing session keeps the account it
+    // was started under (preservation invariant); the session first seen
+    // in the SAME pass as the switch is attributed to the NEW account, not
+    // the link snapshotted before the probe.
+    assert_eq!(
+        s.get_session_account("h", "old").unwrap().as_deref(),
+        Some("acc-1")
+    );
+    assert_eq!(
+        s.get_session_account("h", "fresh").unwrap().as_deref(),
+        Some("acc-2")
+    );
+}
+
+#[tokio::test]
+async fn reconcile_keeps_the_remote_link_when_the_account_read_yields_nothing() {
+    // A failed read (ssh hiccup, mid-rewrite ~/.claude.json) or a logout
+    // must not flap the link off — same rule as `sync_local_account`.
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("h").unwrap();
+    let deps = remote_account_deps(Vec::new(), Some(oauth_account("acc-1", "one@x.com")));
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert_eq!(host_account(&store, "h").as_deref(), Some("acc-1"));
+
+    let deps = remote_account_deps(vec![tmux_session("fresh")], None);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+
+    assert_eq!(
+        host_account(&store, "h").as_deref(),
+        Some("acc-1"),
+        "no readable account ⇒ the stored link is left untouched"
+    );
+    // ...and sessions found meanwhile still attribute to that stored link.
+    assert_eq!(
+        store
+            .lock()
+            .unwrap()
+            .get_session_account("h", "fresh")
+            .unwrap()
+            .as_deref(),
+        Some("acc-1")
+    );
+}
+
 #[tokio::test]
 async fn concurrent_list_sessions_share_one_reconcile_pass() {
     // BE-2: two callers racing into `list_sessions` (UI focus + MCP tool,
@@ -1622,6 +1786,7 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         agent_rows: Vec::new(),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
+        account: None,
         pr_info: PrInfoMap::new(),
         started_at: now_unix(),
     };
@@ -1667,6 +1832,7 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         agent_rows: Vec::new(),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
+        account: None,
         pr_info: PrInfoMap::new(),
         started_at: now_unix() + 5,
     };
@@ -2240,6 +2406,7 @@ fn reconcile_linking(
         agent_rows: Vec::new(),
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
+        account: None,
         pr_info: PrInfoMap::new(),
         started_at: now_unix(),
     };

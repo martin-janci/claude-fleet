@@ -55,6 +55,20 @@ pub trait TmuxExec: Send + Sync {
         let _ = ids;
         Some(std::collections::HashMap::new())
     }
+    /// The Claude account this host is currently logged into, read from its
+    /// `~/.claude.json` `oauthAccount`. `None` means "could not tell" (ssh
+    /// failure, file missing/unparseable, logged out, or an executor that
+    /// does not implement it) — reconcile then leaves the host's stored
+    /// account link untouched; it never clears it. Only `Some` with a uuid
+    /// can relink a host (see `service::hosts::sync_host_account`).
+    ///
+    /// The default is `None`: `LocalTmux` keeps it, because `local` is
+    /// synced by `service::hosts::sync_local_account` (an injectable-home
+    /// file read, exercised by its own tests) — implementing it here too
+    /// would probe `local` twice per pass. `RemoteTmux` overrides it.
+    async fn read_oauth_account(&self) -> Option<crate::service::hosts::OauthAccount> {
+        None
+    }
 }
 
 /// Shell script printing `<sessionId>\t<mtime>` for the first
@@ -393,6 +407,17 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             Ok(o) if o.status.success() => Some(parse_mtimes(&String::from_utf8_lossy(&o.stdout))),
             _ => None,
         }
+    }
+    async fn read_oauth_account(&self) -> Option<crate::service::hosts::OauthAccount> {
+        // Same script section `add_host`'s probe runs, on its own. The
+        // script itself never fails (`|| true`), so a non-zero exit is ssh
+        // (unreachable / timeout) — "could not tell", not "logged out".
+        let output = self
+            .remote_bash(crate::service::hosts::OAUTH_ACCOUNT_SCRIPT)
+            .await
+            .ok()
+            .filter(|o| o.status.success())?;
+        crate::service::hosts::parse_oauth_account(&String::from_utf8_lossy(&output.stdout))
     }
 }
 
@@ -898,6 +923,54 @@ mod tests {
             "mtime {} vs now {now}",
             m[found]
         );
+    }
+
+    #[tokio::test]
+    async fn remote_read_oauth_account_parses_json_and_is_none_when_it_cannot_tell() {
+        use crate::ssh_fake::{FakeSsh, Match, Reply};
+        let tmux = |fake: &FakeSsh| RemoteTmux {
+            client: fake.clone(),
+            host: "h".to_string(),
+        };
+
+        // Logged in: the compact JSON `jq -c .oauthAccount` prints.
+        let fake = FakeSsh::new();
+        fake.on(
+            Match::script_contains(".claude.json"),
+            Reply::ok(r#"{"accountUuid":"acc-2","emailAddress":"new@x.com","seatTier":null}"#),
+        );
+        let acc = tmux(&fake)
+            .read_oauth_account()
+            .await
+            .expect("a logged-in host yields its account");
+        assert_eq!(acc.uuid.as_deref(), Some("acc-2"));
+        assert_eq!(acc.email.as_deref(), Some("new@x.com"));
+
+        // Logged out / no file: the script prints nothing (or `null`) and
+        // still exits 0 — no account, never an error.
+        for stdout in ["", "\n", "null\n", "{}\n"] {
+            let fake = FakeSsh::new();
+            fake.on(Match::Any, Reply::ok(stdout));
+            assert!(
+                tmux(&fake).read_oauth_account().await.is_none(),
+                "stdout {stdout:?} must not yield an account"
+            );
+        }
+
+        // Unreachable host (ssh exit 255) → None.
+        let fake = FakeSsh::new();
+        fake.unreachable("h");
+        assert!(tmux(&fake).read_oauth_account().await.is_none());
+
+        // Spawn error → None.
+        let fake = FakeSsh::new();
+        fake.on(
+            Match::Any,
+            Reply::SpawnError {
+                message: "no ssh".into(),
+            },
+        );
+        assert!(tmux(&fake).read_oauth_account().await.is_none());
     }
 
     #[tokio::test]

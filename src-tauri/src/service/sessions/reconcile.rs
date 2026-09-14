@@ -151,6 +151,12 @@ pub(super) struct HostProbe {
     /// fresh, host has no `gh`, or the probe failed) and keeps its stored
     /// `pr_url` / `ci_status`.
     pub(super) pr_info: PrInfoMap,
+    /// The Claude account the host is logged into per this pass's read of
+    /// its `~/.claude.json` (`TmuxExec::read_oauth_account`). `None` when
+    /// the read failed or the executor cannot tell — the stored link is then
+    /// left untouched, never cleared. `local` always carries `None` here
+    /// (it is synced by `service::hosts::sync_local_account` instead).
+    pub(super) account: Option<crate::service::hosts::OauthAccount>,
     /// Unix-epoch second the probe STARTED. Forwarded as
     /// `HostReconcile::probe_started_at` so the writer never ghosts a row that
     /// a newer probe (e.g. `new_session`'s own reconcile) stamped after this
@@ -383,6 +389,28 @@ pub(super) fn reconcile_write_one_host(
     let intel = &probe.intel;
     match &probe.result {
         Ok(live) => {
+            // Relink the host to the account it is logged into NOW, before
+            // the sessions below are attributed: a session first seen in the
+            // same pass as the account switch must carry the new account,
+            // not the one snapshotted into `host` before the probe. `None`
+            // (read failed / logged out / `local`) leaves the link alone.
+            // Best-effort: a failure here must not cost the host its
+            // session reconcile — fall back to the snapshotted link.
+            let host_account = match crate::service::hosts::sync_host_account(
+                s,
+                &host.alias,
+                probe.account.as_ref(),
+            ) {
+                Ok(uuid) => uuid,
+                Err(e) => {
+                    tracing::warn!(
+                        host = %host.alias,
+                        error = %e.message,
+                        "[reconcile] host account sync failed; keeping the stored link"
+                    );
+                    host.account_uuid.clone()
+                }
+            };
             let mut keep: Vec<String> = Vec::with_capacity(live.len());
             let mut sessions: Vec<ReconcileSession> = Vec::with_capacity(live.len());
             // ── Task G: reconcile transition-detection (event timeline) ──
@@ -405,7 +433,7 @@ pub(super) fn reconcile_write_one_host(
                 // current account for newly-discovered sessions.
                 let account_uuid = s
                     .get_session_account(&host.alias, &sess.name)?
-                    .or_else(|| host.account_uuid.clone());
+                    .or_else(|| host_account.clone());
                 let worktree_key = worktree_key_for_host(&sess.path.to_string_lossy(), &paths);
                 // Match the running Claude agent by name (sessions launched
                 // with `--name <tmux_name>`) or, for older sessions without a
@@ -794,6 +822,16 @@ pub(super) async fn probe_with_timeout(
     let probe = async {
         let tmux_result = tmux.list_sessions().await;
         let agent_rows = tmux.list_claude_agents().await;
+        // Which account the host is logged into NOW — so a `claude /login`
+        // as someone else on a remote host relinks it within one pass
+        // instead of waiting for a manual Re-probe. Skipped when the list
+        // failed: the host is about to be marked unreachable and the read
+        // would only be one more round trip into a dead ssh.
+        let account = if tmux_result.is_ok() {
+            tmux.read_oauth_account().await
+        } else {
+            None
+        };
         // Transcript mtimes feed the inactive-bg-agent rule; one host call,
         // only when this pass saw a background agent.
         let bg_ids: Vec<String> = agent_rows
@@ -811,16 +849,17 @@ pub(super) async fn probe_with_timeout(
             Ok(live) => capture_pane_intel(tmux.as_ref(), live).await,
             Err(_) => PaneIntelMap::new(),
         };
-        (tmux_result, agent_rows, agent_mtimes, intel)
+        (tmux_result, agent_rows, agent_mtimes, intel, account)
     };
     let mut probe = match tokio::time::timeout(timeout, probe).await {
-        Ok((result, agent_rows, agent_mtimes, intel)) => HostProbe {
+        Ok((result, agent_rows, agent_mtimes, intel, account)) => HostProbe {
             host,
             result,
             agent_rows,
             agent_mtimes,
             intel,
             pr_info: PrInfoMap::new(),
+            account,
             started_at,
         },
         Err(_elapsed) => {
@@ -836,6 +875,7 @@ pub(super) async fn probe_with_timeout(
                 agent_mtimes: None,
                 intel: PaneIntelMap::new(),
                 pr_info: PrInfoMap::new(),
+                account: None,
                 started_at,
             };
         }
