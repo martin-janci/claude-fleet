@@ -71,6 +71,31 @@ pub fn unmap_event(claude: &str) -> Option<&'static str> {
         .map(|(n, _)| *n)
 }
 
+/// Name of a hook asset derived from its Claude event and matcher, e.g.
+/// `before-tool-bash`. Used by both the importer and `installed()` so the
+/// two agree on identity.
+pub fn hook_asset_name(claude_event: &str, matcher: Option<&str>) -> String {
+    let event = unmap_event(claude_event)
+        .unwrap_or(claude_event)
+        .replace('_', "-")
+        .to_lowercase();
+    let m: String = matcher
+        .unwrap_or("")
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if m.is_empty() {
+        event
+    } else {
+        format!("{event}-{m}")
+    }
+}
+
 /// Render a YAML frontmatter block. Values are emitted with `serde_yaml`,
 /// which leaves an unambiguous plain scalar (e.g. `Make a worktree.`)
 /// unquoted and quotes anything that would otherwise reparse differently or
@@ -314,6 +339,8 @@ impl Claude {
     }
 }
 
+const CONFIG_FILES: &[&str] = &[SETTINGS_PATH, CLAUDE_JSON_PATH, PLUGINS_PATH];
+
 impl Harness for Claude {
     fn id(&self) -> &'static str {
         "claude"
@@ -336,16 +363,122 @@ impl Harness for Claude {
         Ok(plan)
     }
 
+    /// Prints `##HASHES` + `<sha256>  <home-relative path>` lines for every
+    /// file under skills/ and agents/ (symlinks followed), then one
+    /// `##CONFIG <path>` block per config file with its base64 content on
+    /// one line, then `##END`. No single quotes: the caller wraps the whole
+    /// script in `shell::quote`.
     fn scan_script(&self) -> Option<String> {
-        None // Task 6
+        let mut s = String::new();
+        s.push_str("cd \"$HOME\" || exit 0; ");
+        s.push_str(
+            "if command -v sha256sum >/dev/null 2>&1; then H=sha256sum; else H=\"shasum -a 256\"; fi; ",
+        );
+        s.push_str("echo \"##HASHES\"; ");
+        s.push_str(
+            "for d in .claude/skills .claude/agents; do if [ -d \"$d\" ]; then find -L \"$d\" -type f -print0 2>/dev/null | xargs -0 $H 2>/dev/null; fi; done; ",
+        );
+        for f in CONFIG_FILES {
+            let rel = f.trim_start_matches("~/");
+            s.push_str(&format!(
+                "echo \"##CONFIG {f}\"; if [ -f \"{rel}\" ]; then base64 < \"{rel}\" | tr -d \"\\n\"; fi; echo; "
+            ));
+        }
+        s.push_str("echo \"##END\"");
+        Some(s)
     }
 
-    fn parse_scan(&self, _stdout: &str) -> Result<HostSnapshot, IpcError> {
-        Ok(HostSnapshot::default()) // Task 6
+    fn parse_scan(&self, stdout: &str) -> Result<HostSnapshot, IpcError> {
+        use base64::Engine;
+        let mut snap = HostSnapshot::default();
+        let mut current_config: Option<String> = None;
+        for line in stdout.lines() {
+            if line == "##HASHES" || line == "##END" {
+                current_config = None;
+                continue;
+            }
+            if let Some(path) = line.strip_prefix("##CONFIG ") {
+                current_config = Some(path.trim().to_string());
+                continue;
+            }
+            if let Some(path) = current_config.take() {
+                let b64 = line.trim();
+                if b64.is_empty() {
+                    continue;
+                }
+                let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) else {
+                    continue;
+                };
+                if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
+                    snap.configs.insert(path, v);
+                }
+                continue;
+            }
+            // `<hash>  <path>` (two spaces from sha256sum / shasum).
+            if let Some((hash, path)) = line.split_once("  ") {
+                let path = path.trim_start_matches("./");
+                snap.files
+                    .insert(format!("~/{path}"), hash.trim().to_string());
+            }
+        }
+        Ok(snap)
     }
 
-    fn installed(&self, _snap: &HostSnapshot) -> Vec<(Kind, String)> {
-        vec![] // Task 6
+    fn installed(&self, snap: &HostSnapshot) -> Vec<(Kind, String)> {
+        let mut out: Vec<(Kind, String)> = Vec::new();
+        let mut push = |k: Kind, n: String| {
+            if !out.iter().any(|(kk, nn)| *kk == k && *nn == n) {
+                out.push((k, n));
+            }
+        };
+        for path in snap.files.keys() {
+            if let Some(rest) = path.strip_prefix(&format!("{SKILLS_DIR}/")) {
+                if let Some((name, _)) = rest.split_once('/') {
+                    push(Kind::Skill, name.to_string());
+                }
+            } else if let Some(rest) = path.strip_prefix(&format!("{AGENTS_DIR}/")) {
+                if let Some(stem) = rest.strip_suffix(".md") {
+                    if !stem.contains('/') {
+                        push(Kind::Agent, stem.to_string());
+                    }
+                }
+            }
+        }
+        if let Some(hooks) = snap
+            .configs
+            .get(SETTINGS_PATH)
+            .and_then(|v| v.get("hooks"))
+            .and_then(Value::as_object)
+        {
+            for (event, entries) in hooks {
+                for e in entries.as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+                    let matcher = e.get("matcher").and_then(Value::as_str);
+                    push(Kind::Hook, hook_asset_name(event, matcher));
+                }
+            }
+        }
+        if let Some(servers) = snap
+            .configs
+            .get(CLAUDE_JSON_PATH)
+            .and_then(|v| v.get("mcpServers"))
+            .and_then(Value::as_object)
+        {
+            for name in servers.keys() {
+                push(Kind::McpServer, name.clone());
+            }
+        }
+        if let Some(plugins) = snap
+            .configs
+            .get(PLUGINS_PATH)
+            .and_then(|v| v.get("plugins"))
+            .and_then(Value::as_object)
+        {
+            for key in plugins.keys() {
+                let name = key.split('@').next().unwrap_or(key).to_string();
+                push(Kind::PluginRef, name);
+            }
+        }
+        out
     }
 }
 
@@ -564,6 +697,89 @@ mod tests {
         assert_eq!(
             plan.warnings,
             vec!["disabled for claude by targets.claude.enabled"]
+        );
+    }
+
+    const SCAN_OUT: &str = "##HASHES\n\
+aaaa  .claude/skills/worktree/SKILL.md\n\
+bbbb  .claude/skills/worktree/scripts/go.sh\n\
+cccc  .claude/agents/pm-qa.md\n\
+##CONFIG ~/.claude/settings.json\n\
+eyJob29rcyI6eyJTdG9wIjpbeyJob29rcyI6W3sidHlwZSI6ImNvbW1hbmQiLCJjb21tYW5kIjoieCJ9XX1dLCJQcmVUb29sVXNlIjpbeyJtYXRjaGVyIjoiQmFzaCIsImhvb2tzIjpbXX1dfX0=\n\
+##CONFIG ~/.claude.json\n\
+eyJtY3BTZXJ2ZXJzIjp7ImNsYXVkZS1mbGVldCI6eyJ0eXBlIjoiaHR0cCJ9fX0=\n\
+##CONFIG ~/.claude/plugins/installed_plugins.json\n\
+eyJwbHVnaW5zIjp7InN1cGVycG93ZXJzQHN1cGVycG93ZXJzLW1hcmtldHBsYWNlIjpbeyJ2ZXJzaW9uIjoiNi4zLjAifV19fQ==\n\
+##END\n";
+
+    #[test]
+    fn parse_scan_reads_hashes_and_configs() {
+        let snap = Claude.parse_scan(SCAN_OUT).unwrap();
+        assert_eq!(snap.files["~/.claude/skills/worktree/SKILL.md"], "aaaa");
+        assert_eq!(snap.files["~/.claude/agents/pm-qa.md"], "cccc");
+        assert_eq!(
+            snap.configs[SETTINGS_PATH]["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "x"
+        );
+        assert_eq!(
+            snap.configs[CLAUDE_JSON_PATH]["mcpServers"]["claude-fleet"]["type"],
+            "http"
+        );
+        assert_eq!(
+            snap.configs[PLUGINS_PATH]["plugins"]["superpowers@superpowers-marketplace"][0]
+                ["version"],
+            "6.3.0"
+        );
+    }
+
+    #[test]
+    fn parse_scan_tolerates_empty_or_invalid_config_blocks() {
+        let snap = Claude.parse_scan("##HASHES\n##CONFIG ~/.claude/settings.json\n\n##CONFIG ~/.claude.json\nbm90IGpzb24=\n##END\n").unwrap();
+        assert!(!snap.configs.contains_key(SETTINGS_PATH));
+        assert!(!snap.configs.contains_key(CLAUDE_JSON_PATH));
+    }
+
+    #[test]
+    fn installed_enumerates_every_kind() {
+        let snap = Claude.parse_scan(SCAN_OUT).unwrap();
+        let mut got = Claude.installed(&snap);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                (Kind::Skill, "worktree".to_string()),
+                (Kind::Agent, "pm-qa".to_string()),
+                (Kind::Hook, "before-tool-bash".to_string()),
+                (Kind::Hook, "stop".to_string()),
+                (Kind::McpServer, "claude-fleet".to_string()),
+                (Kind::PluginRef, "superpowers".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn scan_script_is_home_relative_and_quoted() {
+        let s = Claude.scan_script().unwrap();
+        assert!(s.contains("##HASHES"));
+        assert!(s.contains("##CONFIG ~/.claude/settings.json"));
+        assert!(s.contains("base64"));
+        assert!(
+            !s.contains('\''),
+            "no single quotes: the whole script is passed through shell::quote"
+        );
+    }
+
+    #[test]
+    fn hook_names_are_stable() {
+        assert_eq!(
+            hook_asset_name("PreToolUse", Some("Bash")),
+            "before-tool-bash"
+        );
+        assert_eq!(hook_asset_name("Stop", None), "stop");
+        assert_eq!(hook_asset_name("Stop", Some("")), "stop");
+        assert_eq!(
+            hook_asset_name("PostToolUse", Some("EnterWorktree|ExitWorktree")),
+            "after-tool-enterworktree-exitworktree"
         );
     }
 

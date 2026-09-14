@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 pub mod harness;
+pub mod inventory;
 pub mod model;
 pub mod repo;
 
