@@ -407,7 +407,8 @@ export function parseInline(src: string): Inline[] {
 
     if (c === '*' || c === '_' || c === '~') {
       const run = runLength(src, i, c);
-      const node = matchEmphasis(src, i, run, c);
+      // Four or more in a row (`****`, `____`) is never emphasis.
+      const node = run >= 4 ? null : matchEmphasis(src, i, run, c);
       if (node) {
         flush();
         out.push(node.inline);
@@ -445,8 +446,8 @@ function matchEmphasis(
         : [{ delim: ch, kind: 'em' }];
   for (const { delim, kind } of tries) {
     if (!canOpen(s, i, delim.length, ch)) continue;
-    const close = findClose(s, delim, i + delim.length + 1);
-    if (close < 0) continue;
+    const close = findClose(s, delim, i + delim.length);
+    if (close <= i + delim.length) continue;
     const inner = s.slice(i + delim.length, close);
     return { inline: { t: kind, c: parseInline(inner) }, end: close + delim.length };
   }

@@ -73,6 +73,9 @@ describe('Markdown', () => {
     expect(click.defaultPrevented).toBe(true);
     await Promise.resolve();
     expect(mockedOpen).toHaveBeenCalledWith('https://github.com/a/b/pull/1');
+    const middle = new MouseEvent('auxclick', { bubbles: true, cancelable: true, button: 1 });
+    link.dispatchEvent(middle);
+    expect(middle.defaultPrevented).toBe(true);
   });
 
   it('renders unsafe links as inert text', () => {

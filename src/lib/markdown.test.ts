@@ -42,6 +42,14 @@ describe('parseInline', () => {
     ]);
   });
 
+  it('parses emphasis that starts or ends with a code span', () => {
+    expect(parseInline('**`claude logs` needs the id**')).toEqual([
+      { t: 'strong', c: [{ t: 'code', v: 'claude logs' }, text(' needs the id')] },
+    ]);
+    expect(parseInline('*see `x`*')).toEqual([{ t: 'em', c: [text('see '), { t: 'code', v: 'x' }] }]);
+    expect(parseInline('****')).toEqual([text('****')]);
+  });
+
   it('keeps markup inside code spans literal', () => {
     expect(parseInline('`**x** <b>`')).toEqual([{ t: 'code', v: '**x** <b>' }]);
     expect(parseInline('``a ` b``')).toEqual([{ t: 'code', v: 'a ` b' }]);

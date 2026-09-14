@@ -330,9 +330,13 @@
     display: none;
   }
   .tools summary::before {
-    content: '▸';
+    content: '›';
     display: inline-block;
-    width: 1.1rem;
+    width: 0.7rem;
+    margin-right: 0.4rem;
+    text-align: center;
+    font-size: 1rem;
+    line-height: 1;
     transition: transform 0.12s ease;
   }
   .tools[open] summary::before {

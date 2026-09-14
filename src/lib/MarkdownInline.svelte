@@ -18,7 +18,8 @@
         href={n.href}
         title={n.href}
         rel="noreferrer noopener"
-        onclick={(e) => onLinkClick(e, n.href!)}><Self nodes={n.c} /></a
+        onclick={(e) => onLinkClick(e, n.href!)}
+        onauxclick={(e) => e.preventDefault()}><Self nodes={n.c} /></a
       >{:else}<span class="md-link-inert" title="Link target not allowed"><Self nodes={n.c} /></span>{/if}{/if}{/each}
 
 <style>

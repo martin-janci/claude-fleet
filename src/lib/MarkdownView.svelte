@@ -174,6 +174,9 @@
   .md-list li {
     margin: 0.15em 0;
   }
+  .md-list :global(.md-list) {
+    margin: 0.1em 0 0.2em;
+  }
   .md-list li > :global(p) {
     margin: 0;
   }
