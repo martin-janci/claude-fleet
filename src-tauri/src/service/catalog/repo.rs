@@ -46,6 +46,17 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, IpcError> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// The directory to run `git clone` from for a clone target of `path`: the
+/// parent directory, or `.` when `path` is relative with no parent segment
+/// (`Path::parent` returns `Some("")` for a single relative segment like
+/// `foo`, not `None`, so that empty-string case must be normalised too).
+fn clone_parent(path: &Path) -> &Path {
+    match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    }
+}
+
 /// Clone `remote` into `path` when `path` has no `.git`. With no remote, the
 /// directory must already be a git repo.
 pub fn ensure_repo(path: &Path, remote: Option<&str>) -> Result<(), IpcError> {
@@ -54,7 +65,7 @@ pub fn ensure_repo(path: &Path, remote: Option<&str>) -> Result<(), IpcError> {
     }
     match remote {
         Some(url) => {
-            let parent = path.parent().unwrap_or(Path::new("."));
+            let parent = clone_parent(path);
             std::fs::create_dir_all(parent)?;
             let target = path.to_string_lossy().to_string();
             git(parent, &["clone", "-q", url, &target])?;
@@ -113,7 +124,14 @@ fn read_resources(dir: &Path) -> std::io::Result<Vec<Resource>> {
         entries.sort_by_key(|e| e.path());
         for e in entries {
             let p = e.path();
-            if p.is_dir() {
+            // `symlink_metadata` does not follow the link, so a symlink here
+            // (including one that cycles back into an ancestor directory) is
+            // detected and skipped rather than walked.
+            let meta = std::fs::symlink_metadata(&p)?;
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
                 stack.push(p);
             } else {
                 out.push(Resource {
@@ -177,9 +195,16 @@ pub fn load_dir(root: &Path) -> Result<Catalog, IpcError> {
         if !dir.is_dir() {
             continue;
         }
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .collect();
+        let mut entries: Vec<PathBuf> = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.path())).collect(),
+            Err(e) => {
+                cat.problems.push(Problem {
+                    path: rel(root, &dir),
+                    message: e.to_string(),
+                });
+                continue;
+            }
+        };
         entries.sort();
         for p in entries {
             let (yaml_path, stem) = if kind.is_folder() {
@@ -415,5 +440,73 @@ mod tests {
         let _ = fs::remove_dir_all(&missing);
         let err = ensure_repo(&missing, None).unwrap_err();
         assert_eq!(err.code, "E_CATALOG_GIT");
+    }
+
+    #[test]
+    fn clone_parent_normalises_relative_single_segment_paths() {
+        assert_eq!(
+            clone_parent(std::path::Path::new("foo")),
+            std::path::Path::new(".")
+        );
+        assert_eq!(
+            clone_parent(std::path::Path::new("/tmp/x/foo")),
+            std::path::Path::new("/tmp/x")
+        );
+        assert_eq!(
+            clone_parent(std::path::Path::new("/foo")),
+            std::path::Path::new("/")
+        );
+    }
+
+    #[test]
+    fn load_dir_skips_symlinks_in_resources_and_terminates() {
+        let root = tmp("symlink");
+        write(&root, "catalog.yaml", "schema_version: 1\n");
+        write(
+            &root,
+            "skills/x/asset.yaml",
+            "kind: skill\nname: x\ndescription: d\n",
+        );
+        write(&root, "skills/x/body.md", "b\n");
+        write(&root, "skills/x/resources/real.txt", "hi\n");
+        // A symlink back up the tree: following it as a directory would
+        // recurse forever. It must be skipped entirely, not walked.
+        std::os::unix::fs::symlink("..", root.join("skills/x/resources/loop")).unwrap();
+
+        let cat = load_dir(&root).unwrap();
+        let skill = cat.find(Kind::Skill, "x").unwrap();
+        assert_eq!(skill.resources.len(), 1);
+        assert_eq!(skill.resources[0].rel_path, "resources/real.txt");
+    }
+
+    #[test]
+    fn load_dir_records_problem_when_kind_dir_unreadable_and_continues() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tmp("unreadable");
+        write(&root, "catalog.yaml", "schema_version: 1\n");
+        write(
+            &root,
+            "agents/pm/asset.yaml",
+            "kind: agent\nname: pm\ndescription: d\n",
+        );
+        write(&root, "agents/pm/prompt.md", "prompt\n");
+        let hooks_dir = root.join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        fs::set_permissions(&hooks_dir, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = load_dir(&root);
+
+        // Restore permissions unconditionally so tmp cleanup on a later run
+        // (and this test's own `tmp()` helper) can remove the directory.
+        fs::set_permissions(&hooks_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let cat = result.unwrap();
+        assert_eq!(cat.assets.len(), 1);
+        assert_eq!(cat.find(Kind::Agent, "pm").unwrap().body, "prompt\n");
+        assert!(
+            cat.problems.iter().any(|p| p.path.ends_with("hooks")),
+            "{:?}",
+            cat.problems
+        );
     }
 }

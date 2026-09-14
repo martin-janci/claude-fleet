@@ -3,8 +3,9 @@
 //! what each host actually has installed.
 //! Spec: docs/superpowers/specs/2026-09-14-asset-catalog-design.md
 
-// These error codes are the contract for commands/git/scan logic landing in
-// later catalog tasks, so they are unused today. See store.rs for the same
+// The error codes, `CATALOG`, and the `repo` module's public items are the
+// contract for commands/git/scan logic landing in later catalog tasks; only
+// this module's own tests call them today. See store.rs for the same
 // pattern.
 #![allow(dead_code)]
 
