@@ -9,6 +9,7 @@
 //! dependency on the Tauri runtime and are directly unit-testable.
 
 pub mod bg_sessions;
+pub mod catalog;
 pub mod clipboard;
 pub mod health;
 pub mod hooks;
