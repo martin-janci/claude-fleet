@@ -8,10 +8,12 @@
   import TerminalView from './lib/TerminalView.svelte';
   import BgSessionPanel from './lib/BgSessionPanel.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
+  import AssetsPanel from './lib/AssetsPanel.svelte';
   import { loadProjects, bootstrapProjects, mergeProjectFromEvent, mergeWorktree, removeWorktree } from './lib/projects';
   import { loadSessions, bootstrapSessions, mergeSession, removeSession, sessions } from './lib/sessions';
   import { bootstrapHosts, mergeHost, removeHost, hosts } from './lib/hosts';
   import { bootstrapAccounts, mergeAccount } from './lib/accounts';
+  import { mergeInventoryRow, clearInventoryFor, loadAssets } from './lib/assets';
   import { subscribeToRowEvents } from './lib/events';
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import { selectedSession, restoreLastSession } from './lib/selection';
@@ -126,6 +128,9 @@
       onProjectUpdated: mergeProjectFromEvent,
       onWorktreeUpdated: mergeWorktree,
       onWorktreeRemoved: (p) => removeWorktree(p.id),
+      onAssetInventoryUpdated: mergeInventoryRow,
+      onAssetInventoryCleared: (p) => clearInventoryFor(p.host_alias, p.harness),
+      onCatalogLoaded: () => { void loadAssets(); },
     });
   });
 
@@ -170,26 +175,32 @@
 
   // Files mode swaps the center + terminal region for the worktree file
   // viewer. The Files tab needs a selected session (the worktree to browse);
-  // deselecting one drops back to the terminal automatically.
-  let filesMode = $state(false);
+  // deselecting one drops back to the terminal automatically. Assets mode
+  // shows the asset catalog and is independent of the selected session.
+  type ViewMode = 'terminal' | 'files' | 'assets';
+  let viewMode = $state<ViewMode>('terminal');
+  const filesMode = $derived(viewMode === 'files');
   $effect(() => {
-    if (!$selectedSession || $selectedSession.kind === 'bg') filesMode = false;
+    if (viewMode === 'files' && (!$selectedSession || $selectedSession.kind === 'bg')) viewMode = 'terminal';
   });
   function showTerminal() {
-    filesMode = false;
+    viewMode = 'terminal';
   }
   function showFiles() {
-    if ($selectedSession) filesMode = true;
+    if ($selectedSession) viewMode = 'files';
+  }
+  function showAssets() {
+    viewMode = 'assets';
   }
   function onKeydown(e: KeyboardEvent) {
     // Esc leaves files mode (the terminal is covered while it's open, so Esc
     // can't be meant for the terminal here) — but not while the user is
     // typing in a field such as the file filter, where Esc belongs to that
     // input and exiting the whole panel would be surprising.
-    if (e.key === 'Escape' && filesMode) {
+    if (e.key === 'Escape' && viewMode !== 'terminal') {
       const tag = (e.target as HTMLElement | null)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-      filesMode = false;
+      viewMode = 'terminal';
     }
   }
 
@@ -301,6 +312,14 @@
         onclick={showFiles}
         data-testid="tab-files">Files</button
       >
+      <button
+        class="view-tab"
+        class:active={viewMode === 'assets'}
+        role="tab"
+        aria-selected={viewMode === 'assets'}
+        onclick={showAssets}
+        data-testid="tab-assets">Assets</button
+      >
     </div>
     <div class="right-body">
       {#if $selectedSession?.kind === 'bg'}
@@ -319,11 +338,16 @@
         <div class="view-slot">
           <TerminalView />
         </div>
-        {#if filesMode && $selectedSession}
+        {#if viewMode === 'files' && $selectedSession}
           <div class="view-slot overlay">
             <FilesPanel session={$selectedSession} />
           </div>
         {/if}
+      {/if}
+      {#if viewMode === 'assets'}
+        <div class="view-slot overlay">
+          <AssetsPanel />
+        </div>
       {/if}
     </div>
   </div>
