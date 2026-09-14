@@ -248,19 +248,33 @@ async fn probe(
     probe_with_token(ssh, host, token).await
 }
 
+/// The `oauthAccount` section of the probe on its own: prints
+/// `~/.claude.json`'s `oauthAccount` as one line of compact JSON (via `jq`,
+/// falling back to `python3`), or nothing when the file/tools are missing.
+/// Also run by itself every reconcile pass for each remote host
+/// (`RemoteTmux::read_oauth_account`) so an account switch on a remote host
+/// is picked up without a manual Re-probe. A macro rather than a `const` so
+/// `PROBE_SCRIPT` can `concat!` it. MUST be `quote`'d before it is handed to
+/// `bash -lc` over ssh.
+macro_rules! oauth_account_script {
+    () => {
+        r#"( cat "$HOME/.claude.json" 2>/dev/null | jq -c .oauthAccount 2>/dev/null \
+  || python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d.get("oauthAccount") or {}))' "$HOME/.claude.json" 2>/dev/null \
+  || true )"#
+    };
+}
+pub(crate) const OAUTH_ACCOUNT_SCRIPT: &str = oauth_account_script!();
+
 /// The remote probe script: reads tmux + claude versions AND the
 /// `oauthAccount` from `~/.claude.json` in one SSH round trip, with the three
 /// sections separated by a literal `---`. Each section is independently
 /// guarded (`|| true`) so a missing tool/file degrades to an empty section
 /// rather than failing the whole probe. MUST be `quote`'d before it's handed to
 /// `bash -lc` over ssh (see `probe_with_token`).
-const PROBE_SCRIPT: &str = r#"tmux -V 2>/dev/null || true
-echo ---
-claude --version 2>/dev/null || true
-echo ---
-( cat "$HOME/.claude.json" 2>/dev/null | jq -c .oauthAccount 2>/dev/null \
-  || python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d.get("oauthAccount") or {}))' "$HOME/.claude.json" 2>/dev/null \
-  || true )"#;
+const PROBE_SCRIPT: &str = concat!(
+    "tmux -V 2>/dev/null || true\necho ---\nclaude --version 2>/dev/null || true\necho ---\n",
+    oauth_account_script!()
+);
 
 /// Like `probe` but uses the provided `CancellationToken` so the caller can
 /// cancel the SSH round trip.
@@ -440,10 +454,12 @@ fn probe_local_account_in(home: &std::path::Path) -> LocalAccountProbe {
 ///     stale usage beats flapping.
 ///
 /// This is `local`'s ONLY automatic account-discovery path. A remote host
-/// gets its account captured once, unavoidably, when the user runs `add_host`
-/// (see `add_host` above) — but `local` never goes through that flow: it is
-/// auto-created by `reconcile_sessions_with`'s `Store::upsert_host("local")`
-/// (see `service::sessions::reconcile`), which only ever touches `reachable`.
+/// gets its account captured when the user runs `add_host` (see `add_host`
+/// above) and then re-read every reconcile pass over ssh
+/// (`TmuxExec::read_oauth_account` → [`sync_host_account`]) — but `local`
+/// never goes through either flow: it is auto-created by
+/// `reconcile_sessions_with`'s `Store::upsert_host("local")` (see
+/// `service::sessions::reconcile`), which only ever touches `reachable`.
 /// Before this function existed, NOTHING ever probed `local`'s account
 /// automatically — the ONLY way to populate (or update) it was the user
 /// manually clicking the small "Re-probe" icon on the `local` row in
@@ -455,40 +471,59 @@ pub(crate) async fn sync_local_account(
     store: &Mutex<Store>,
     home: std::path::PathBuf,
 ) -> Result<(), IpcError> {
-    let stored_uuid = {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-        s.list_hosts()?
-            .into_iter()
-            .find(|h| h.alias == "local")
-            .and_then(|h| h.account_uuid)
-    };
     // Off the async worker thread: probe_local_account_in does a blocking fs
     // read.
     let probe = tokio::task::spawn_blocking(move || probe_local_account_in(&home))
         .await
         .unwrap_or(LocalAccountProbe::Unavailable);
     let account = match probe {
-        LocalAccountProbe::LoggedIn(a) => a,
+        LocalAccountProbe::LoggedIn(a) => Some(a),
         // Failed read or explicit logout: never touch an existing link (see
         // the doc comment above).
-        LocalAccountProbe::LoggedOut | LocalAccountProbe::Unavailable => return Ok(()),
-    };
-    let Some(row) = account_row_from(&account, now_unix()) else {
-        // Defensive: `LoggedIn` already guarantees a uuid.
-        return Ok(());
+        LocalAccountProbe::LoggedOut | LocalAccountProbe::Unavailable => None,
     };
     let s = store
         .lock()
         .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    sync_host_account(&s, "local", account.as_ref()).map(|_| ())
+}
+
+/// Host-agnostic core of [`sync_local_account`], shared with the reconcile
+/// pass for REMOTE hosts (`service::sessions::reconcile::reconcile_write_one_host`,
+/// fed by `TmuxExec::read_oauth_account`). Same rules as documented there:
+///
+///   - `Some(account)` with a uuid that DIFFERS from the host's stored
+///     `account_uuid` ⇒ upsert the account row and relink the host.
+///   - `Some(account)` with the SAME uuid ⇒ the link is untouched, the
+///     account row's fields are refreshed.
+///   - `None` (unreadable, logged out, or the executor cannot tell) ⇒ the
+///     existing link is left alone. Never clears.
+///
+/// Returns the host's account uuid AFTER the sync (the fresh one when it
+/// relinked, otherwise whatever was stored), so a caller that snapshotted
+/// the host row before the probe can attribute newly-discovered sessions to
+/// the account the host is logged into NOW rather than the one it left.
+/// Takes the store guard the caller already holds — never `.await`s.
+pub(crate) fn sync_host_account(
+    s: &Store,
+    alias: &str,
+    account: Option<&OauthAccount>,
+) -> Result<Option<String>, IpcError> {
+    let stored_uuid = s
+        .list_hosts()?
+        .into_iter()
+        .find(|h| h.alias == alias)
+        .and_then(|h| h.account_uuid);
+    let Some(row) = account.and_then(|a| account_row_from(a, now_unix())) else {
+        return Ok(stored_uuid);
+    };
     // Refresh the account row's fields (email/org/seat_tier) whether or not
     // the link itself is changing.
     s.upsert_account(&row)?;
     if stored_uuid.as_deref() != Some(row.uuid.as_str()) {
-        s.set_host_account("local", Some(&row.uuid))?;
+        s.set_host_account(alias, Some(&row.uuid))?;
     }
-    Ok(())
+    Ok(Some(row.uuid))
 }
 
 fn parse_tmux_version(line: &str) -> Option<String> {
@@ -531,7 +566,7 @@ pub struct OauthAccount {
 
 /// Parse the third probe section. Empty / "null" / "{}" → None.
 /// Treats account-without-uuid as None (we use uuid as PK).
-fn parse_oauth_account(line: &str) -> Option<OauthAccount> {
+pub(crate) fn parse_oauth_account(line: &str) -> Option<OauthAccount> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed == "{}" || trimmed == "null" {
         return None;
