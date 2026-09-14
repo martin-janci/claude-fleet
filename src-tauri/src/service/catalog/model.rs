@@ -1,12 +1,5 @@
 //! The intermediate representation (IR) for catalog assets.
 
-// This is the first of several catalog tasks: the IR types here are a
-// contract for the renderers, repo loader, scanner and commands landing in
-// later tasks, so most of the public API is exercised only by `#[cfg(test)]`
-// code today and reads as dead in a non-test build. See store.rs for the
-// same pattern.
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -66,6 +59,9 @@ impl Kind {
         }
     }
 
+    /// Reserved for the sync engine (resolving a scanned/installed path back
+    /// to its `Kind`); not yet called from a non-test build.
+    #[allow(dead_code)]
     pub fn from_dir(dir: &str) -> Option<Kind> {
         Kind::ALL.iter().copied().find(|k| k.dir() == dir)
     }
@@ -142,7 +138,13 @@ pub struct Header {
     pub version: String,
     #[serde(default)]
     pub description: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    // No `skip_serializing_if` here (unlike the other optional header
+    // fields): `Asset`'s JSON (the Tauri/MCP API surface) must always carry
+    // a `tags` key so `AssetDetail.asset.tags` is never absent on the
+    // frontend. The on-disk YAML (`AssetFile`) instead strips an empty
+    // `tags` key by hand in its own `Serialize` impl, below, to keep the
+    // repo clean.
+    #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<Source>,
@@ -321,8 +323,15 @@ struct AssetFile {
 
 impl Serialize for AssetFile {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let map =
+        let mut map =
             merge_header_and_spec(&self.header, &self.spec).map_err(serde::ser::Error::custom)?;
+        // `Header::tags` no longer sets `skip_serializing_if` (see the
+        // comment on that field) so `Asset`'s JSON always has the key; the
+        // on-disk YAML strips it back out here when empty to keep
+        // `asset.yaml` clean.
+        if matches!(map.get("tags"), Some(serde_yaml::Value::Sequence(s)) if s.is_empty()) {
+            map.remove("tags");
+        }
         serde_yaml::Value::Mapping(map).serialize(serializer)
     }
 }
@@ -694,6 +703,33 @@ version: "6.3.0"
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn asset_json_always_includes_tags_even_when_empty() {
+        // Regression test: `AssetDetail::asset` (the Tauri/MCP JSON API) must
+        // always carry a `tags` key so `detail.asset.tags` is never `undefined`
+        // on the frontend, even for an asset whose header has no tags.
+        let a = Asset::from_yaml(None, "kind: skill\nname: s\ndescription: d\n").unwrap();
+        let v = serde_json::to_value(&a).unwrap();
+        let obj = v.as_object().unwrap();
+        for key in ["kind", "name", "version", "description", "tags", "body"] {
+            assert!(obj.contains_key(key), "missing '{key}': {obj:?}");
+        }
+        assert_eq!(obj["tags"], serde_json::json!([]));
+        // Fields that are genuinely absent stay absent.
+        assert!(!obj.contains_key("source"));
+        assert!(!obj.contains_key("resources"));
+    }
+
+    #[test]
+    fn to_yaml_omits_empty_tags_but_keeps_populated_ones() {
+        let a = Asset::from_yaml(None, "kind: skill\nname: s\ndescription: d\n").unwrap();
+        let yaml = a.to_yaml();
+        assert!(!yaml.contains("tags"), "{yaml}");
+
+        let tagged = Asset::from_yaml(None, SKILL_YAML).unwrap();
+        assert!(tagged.to_yaml().contains("tags"));
     }
 
     #[test]

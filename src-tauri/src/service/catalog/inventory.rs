@@ -1,6 +1,5 @@
 //! Host inventory: run a harness scan on a host, compare against rendered
 //! catalog assets, persist per-asset drift states.
-#![allow(dead_code)]
 
 use super::harness::{json_get, ConfigMerge, Harness, HostSnapshot, MergeMode};
 use super::model::sha256_hex;
@@ -24,9 +23,31 @@ pub struct HostScanResult {
     pub rows: usize,
 }
 
+/// Build an `E_SCAN` error from a non-zero exit `Output`. A failed scan
+/// script must never be treated as an empty (successful) snapshot — that
+/// would read as "every catalog asset is missing" on the host.
+fn scan_failed(host: &str, out: &std::process::Output) -> crate::ipc_error::IpcError {
+    let code = out
+        .status
+        .code()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "signal".to_string());
+    crate::ipc_error::IpcError::new(
+        "E_SCAN",
+        format!(
+            "{host}: scan script exited {code}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+    )
+}
+
 /// Run a bash script on a host and return stdout. `local` runs in-process;
 /// remote hosts go through the SSH multiplexer with the whole script as one
-/// quoted `bash -lc` word (ssh space-joins argv).
+/// quoted `bash -lc` word (ssh space-joins argv). A non-zero exit status is
+/// an error, not an empty snapshot: `tokio::process::Command::output` and
+/// `SshClient::run` both return `Ok` on a non-zero exit, so the status must
+/// be checked explicitly here or a script that fails partway through would
+/// silently read back as "nothing installed".
 pub async fn run_host_script(
     ssh: &Arc<SshClient>,
     host: &str,
@@ -38,12 +59,18 @@ pub async fn run_host_script(
             .output()
             .await
             .map_err(|e| crate::ipc_error::IpcError::new("E_IO", format!("spawn bash: {e}")))?;
+        if !out.status.success() {
+            return Err(scan_failed(host, &out));
+        }
         return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
     }
     let quoted = quote(script);
     let out = ssh
         .run(host, &["bash", "-lc", &quoted], SCAN_TIMEOUT)
         .await?;
+    if !out.status.success() {
+        return Err(scan_failed(host, &out));
+    }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
@@ -87,42 +114,55 @@ pub async fn scan_hosts(
             continue;
         }
         let mut total = 0usize;
-        let mut failure: Option<String> = None;
+        // Every per-harness failure is kept (not just the last): a host with
+        // both a broken claude scan and a broken codex scan must report
+        // both reasons, not silently drop the first.
+        let mut failures: Vec<String> = Vec::new();
         for harness in super::harness::all() {
             let Some(script) = harness.scan_script() else {
                 continue;
             };
             let scanned_at = super::now_secs();
-            let rows = match run_host_script(ssh, &h.alias, &script)
+            match run_host_script(ssh, &h.alias, &script)
                 .await
                 .and_then(|out| harness.parse_scan(&out))
             {
-                Ok(snap) => compute_states(&catalog, harness.as_ref(), &h.alias, &snap, scanned_at),
-                Err(e) => {
-                    failure = Some(format!("{}: {}", harness.id(), e.message));
-                    continue;
+                Ok(snap) => {
+                    let rows =
+                        compute_states(&catalog, harness.as_ref(), &h.alias, &snap, scanned_at);
+                    total += rows.len();
+                    match store.lock() {
+                        Ok(s) => {
+                            if let Err(e) = s.replace_host_inventory(&h.alias, harness.id(), &rows)
+                            {
+                                failures.push(format!("persist inventory: {e}"));
+                            }
+                        }
+                        Err(_) => failures.push(format!(
+                            "{}: store mutex poisoned while persisting inventory",
+                            harness.id()
+                        )),
+                    }
                 }
-            };
-            total += rows.len();
-            if let Ok(s) = store.lock() {
-                if let Err(e) = s.replace_host_inventory(&h.alias, harness.id(), &rows) {
-                    failure = Some(format!("persist inventory: {e}"));
+                Err(e) => {
+                    failures.push(format!("{}: {}", harness.id(), e.message));
                 }
             }
         }
-        results.push(match failure {
-            None => HostScanResult {
+        results.push(if failures.is_empty() {
+            HostScanResult {
                 host: h.alias,
                 status: "scanned".into(),
                 detail: None,
                 rows: total,
-            },
-            Some(d) => HostScanResult {
+            }
+        } else {
+            HostScanResult {
                 host: h.alias,
                 status: "failed".into(),
-                detail: Some(d),
+                detail: Some(failures.join("; ")),
                 rows: total,
-            },
+            }
         });
     }
     Ok(results)
@@ -489,6 +529,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.trim(), "hi 2");
+    }
+
+    /// Regression test: a scan script that exits non-zero must surface as an
+    /// error, never as an empty-but-successful snapshot (which previously
+    /// made every catalog asset read back as `missing`).
+    #[tokio::test]
+    async fn run_host_script_local_fails_on_nonzero_exit() {
+        let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
+        let err = run_host_script(&ssh, "local", "echo boom >&2; exit 3")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "E_SCAN");
+        assert!(err.message.contains("exited 3"), "{}", err.message);
+        assert!(err.message.contains("boom"), "{}", err.message);
     }
 
     // `CATALOG_TEST_LOCK` only serialises tests against the process-global

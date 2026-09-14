@@ -3,12 +3,6 @@
 //! what each host actually has installed.
 //! Spec: docs/superpowers/specs/2026-09-14-asset-catalog-design.md
 
-// The error codes, `CATALOG`, and the `repo` module's public items are the
-// contract for commands/git/scan logic landing in later catalog tasks; only
-// this module's own tests call them today. See store.rs for the same
-// pattern.
-#![allow(dead_code)]
-
 pub mod harness;
 pub mod import;
 pub mod inventory;
@@ -78,7 +72,7 @@ fn require_config(store: &Mutex<Store>) -> Result<CatalogConfigRow, IpcError> {
 pub fn configure(args: ConfigureArgs, store: &Mutex<Store>) -> Result<CatalogConfigRow, IpcError> {
     let path = expand_home(args.repo_path.trim());
     if path.is_empty() {
-        return Err(IpcError::new("E_VALIDATION", "repo_path must not be empty"));
+        return Err(IpcError::new("E_INVALID", "repo_path must not be empty"));
     }
     let remote = args
         .remote_url
@@ -105,14 +99,14 @@ pub fn load(pull: bool, store: &Mutex<Store>) -> Result<CatalogSummary, IpcError
         asset_count: cat.assets.len(),
         problem_count: cat.problems.len(),
     };
+    *CATALOG
+        .write()
+        .map_err(|_| IpcError::new("E_LOCK", "catalog lock poisoned"))? = Some(cat);
     {
         let s = lock(store)?;
         s.set_catalog_head(&summary.head, summary.loaded_at)?;
         s.bus_catalog_loaded(&summary);
     }
-    *CATALOG
-        .write()
-        .map_err(|_| IpcError::new("E_LOCK", "catalog lock poisoned"))? = Some(cat);
     Ok(summary)
 }
 

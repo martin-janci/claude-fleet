@@ -1,10 +1,9 @@
 //! Import a Claude Code config directory into the catalog as IR assets.
-#![allow(dead_code)]
 
 use super::harness::claude::{hook_asset_name, unmap_event, unmap_tier, unmap_tool};
 use super::model::{
-    Asset, AssetSpec, Header, HookAction, HookMatch, Kind, Marketplace, Problem, Resource, Source,
-    TargetOverride,
+    is_valid_name, Asset, AssetSpec, Header, HookAction, HookMatch, Kind, Marketplace, Problem,
+    Resource, Source, TargetOverride,
 };
 use super::repo::{asset_path, write_asset};
 use super::E_ASSET_EXISTS;
@@ -59,6 +58,70 @@ fn yaml_to_json(v: &serde_yaml::Value) -> Value {
 
 fn str_of(m: &serde_yaml::Mapping, key: &str) -> Option<String> {
     m.get(key).and_then(|v| v.as_str()).map(String::from)
+}
+
+/// Turn an arbitrary identifier (a skill folder name, an MCP server key, a
+/// plugin id, ...) into a valid catalog asset name (`is_valid_name`):
+/// lowercase, every run of characters outside `[a-z0-9]` collapsed to a
+/// single `-`, leading/trailing `-` trimmed. An input with no `[a-z0-9]`
+/// characters at all (including the empty string) slugifies to the empty
+/// string, which is not a valid name — that (and only that) case is
+/// prefixed with `x`.
+pub fn slugify(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut last_was_dash = false;
+    for c in name.chars() {
+        let lower = c.to_ascii_lowercase();
+        if lower.is_ascii_lowercase() || lower.is_ascii_digit() {
+            out.push(lower);
+            last_was_dash = false;
+        } else if !last_was_dash {
+            out.push('-');
+            last_was_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "x".to_string()
+    } else {
+        debug_assert!(
+            is_valid_name(trimmed),
+            "slugify produced an invalid name from {name:?}: {trimmed:?}"
+        );
+        trimmed.to_string()
+    }
+}
+
+/// (Kind, slug) -> the original identifier that produced it, so a second,
+/// *different* original that slugifies to the same name can be told apart
+/// from a re-import of the same one.
+type SlugMap = BTreeMap<(Kind, String), String>;
+
+/// Resolve `original` to a valid catalog name for `kind` via `slugify`. Two
+/// different `original` identifiers landing on the same slug become a
+/// collision problem (for the second one) instead of one silently
+/// overwriting the other's asset file.
+fn slug_or_problem(
+    slugs: &mut SlugMap,
+    kind: Kind,
+    original: &str,
+    path: &Path,
+    problems: &mut Vec<Problem>,
+) -> Option<String> {
+    let slug = slugify(original);
+    match slugs.get(&(kind, slug.clone())) {
+        Some(prev) if prev != original => {
+            problems.push(Problem {
+                path: path.to_string_lossy().to_string(),
+                message: format!("{} {slug}: name collides with {prev}", kind.as_str()),
+            });
+            None
+        }
+        _ => {
+            slugs.insert((kind, slug.clone()), original.to_string());
+            Some(slug)
+        }
+    }
 }
 
 /// Split a Claude tool list (`Read, Grep` or a YAML sequence) into
@@ -304,6 +367,13 @@ fn import_hooks(
             };
 
             let base = hook_asset_name(claude_event, matcher);
+            // `hook_asset_name` already produces a valid catalog name
+            // (lowercased event + sanitised matcher joined by `-`); no need
+            // to run it through `slugify` a second time.
+            debug_assert!(
+                is_valid_name(&base),
+                "hook_asset_name produced an invalid name: {base:?}"
+            );
             let mut name = base.clone();
             let mut n = 2;
             while taken.contains(&name) {
@@ -397,18 +467,24 @@ fn import_hooks(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn import_mcp(
     claude_json: &Value,
     host: &str,
     path: &Path,
     fleet_token: Option<&str>,
     flagged: &mut Vec<String>,
+    slugs: &mut SlugMap,
+    problems: &mut Vec<Problem>,
 ) -> Vec<Asset> {
     let mut out = Vec::new();
     let Some(servers) = claude_json.get("mcpServers").and_then(Value::as_object) else {
         return out;
     };
     for (name, s) in servers {
+        let Some(slug) = slug_or_problem(slugs, Kind::McpServer, name, path, problems) else {
+            continue;
+        };
         let transport = match s.get("type").and_then(Value::as_str) {
             Some("http") | Some("sse") => "http",
             _ => "stdio",
@@ -457,7 +533,7 @@ fn import_mcp(
             .unwrap_or_default();
         let mut hd = header(
             Kind::McpServer,
-            name,
+            &slug,
             format!("Imported MCP server {name}"),
             host,
             path,
@@ -495,6 +571,7 @@ fn import_plugins(
     host: &str,
     path: &Path,
     problems: &mut Vec<Problem>,
+    slugs: &mut SlugMap,
 ) -> Vec<Asset> {
     let mut out = Vec::new();
     let Some(plugins) = installed.get("plugins").and_then(Value::as_object) else {
@@ -517,6 +594,13 @@ fn import_plugins(
             continue;
         };
         let version = version.to_string();
+        // The catalog asset name (identity/filename) is slugified; the
+        // `plugin` field inside the spec below stays the real plugin id so
+        // `render_plugin`'s merge target (`plugins.<plugin>@<marketplace>`)
+        // still matches what is actually installed on the host.
+        let Some(slug) = slug_or_problem(slugs, Kind::PluginRef, plugin, path, problems) else {
+            continue;
+        };
         let src = known.get(market).and_then(|m| m.get("source"));
         let marketplace = Marketplace {
             name: market.to_string(),
@@ -534,7 +618,7 @@ fn import_plugins(
         out.push(Asset {
             header: header(
                 Kind::PluginRef,
-                plugin,
+                &slug,
                 format!("Imported plugin {plugin} from {market}"),
                 host,
                 path,
@@ -576,6 +660,11 @@ pub fn import_claude(
         dry_run,
     };
     let mut assets: Vec<Asset> = Vec::new();
+    // Shared across every kind whose identity comes from an arbitrary
+    // on-disk/JSON name (skills, agents, MCP servers, plugins) so a
+    // post-slug collision between two different originals is caught no
+    // matter which pass introduced each half of the pair.
+    let mut slugs: SlugMap = BTreeMap::new();
 
     let skills_dir = src.claude_dir.join("skills");
     if skills_dir.is_dir() {
@@ -604,7 +693,12 @@ pub fn import_claude(
             if !p.join("SKILL.md").is_file() {
                 continue;
             }
-            match import_skill(&p, &name, host) {
+            let Some(slug) =
+                slug_or_problem(&mut slugs, Kind::Skill, &name, &p, &mut report.problems)
+            else {
+                continue;
+            };
+            match import_skill(&p, &slug, host) {
                 Ok(a) => assets.push(a),
                 Err(message) => report.problems.push(Problem {
                     path: p.to_string_lossy().to_string(),
@@ -628,7 +722,12 @@ pub fn import_claude(
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-            match import_agent(&p, &name, host) {
+            let Some(slug) =
+                slug_or_problem(&mut slugs, Kind::Agent, &name, &p, &mut report.problems)
+            else {
+                continue;
+            };
+            match import_agent(&p, &slug, host) {
                 Ok(a) => assets.push(a),
                 Err(message) => report.problems.push(Problem {
                     path: p.to_string_lossy().to_string(),
@@ -654,6 +753,8 @@ pub fn import_claude(
         &src.claude_json,
         fleet_token,
         &mut report.flagged_secrets,
+        &mut slugs,
+        &mut report.problems,
     ));
     let installed_path = src.claude_dir.join("plugins/installed_plugins.json");
     let known_path = src.claude_dir.join("plugins/known_marketplaces.json");
@@ -663,6 +764,7 @@ pub fn import_claude(
         host,
         &installed_path,
         &mut report.problems,
+        &mut slugs,
     ));
 
     for a in assets {
@@ -1019,12 +1121,16 @@ mod tests {
             }
         });
         let mut flagged = Vec::new();
+        let mut slugs = SlugMap::new();
+        let mut problems = Vec::new();
         let assets = import_mcp(
             &claude_json,
             "local",
             Path::new(".claude.json"),
             Some("SECRET123"),
             &mut flagged,
+            &mut slugs,
+            &mut problems,
         );
         let AssetSpec::McpServer { env, .. } = &assets[0].spec else {
             panic!()
@@ -1129,12 +1235,14 @@ mod tests {
         let installed = serde_json::json!({ "plugins": { "foo@bar": [{"scope": "user"}] } });
         let known = serde_json::json!({});
         let mut problems = Vec::new();
+        let mut slugs = SlugMap::new();
         let assets = import_plugins(
             &installed,
             &known,
             "local",
             Path::new("installed_plugins.json"),
             &mut problems,
+            &mut slugs,
         );
         assert!(assets.is_empty());
         assert_eq!(problems.len(), 1);
@@ -1151,12 +1259,14 @@ mod tests {
         });
         let known = serde_json::json!({});
         let mut problems = Vec::new();
+        let mut slugs = SlugMap::new();
         let assets = import_plugins(
             &installed,
             &known,
             "local",
             Path::new("installed_plugins.json"),
             &mut problems,
+            &mut slugs,
         );
         assert!(problems.is_empty(), "{problems:?}");
         match &assets[0].spec {
@@ -1184,5 +1294,96 @@ mod tests {
         let asset = import_skill(&skill_dir, "s", "local").unwrap();
         assert_eq!(asset.resources.len(), 1);
         assert_eq!(asset.resources[0].rel_path, "resources/real.txt");
+    }
+
+    #[test]
+    fn slugify_examples() {
+        assert_eq!(
+            slugify("plugin:episodic-memory:episodic-memory"),
+            "plugin-episodic-memory-episodic-memory"
+        );
+        assert_eq!(slugify("Foo_Bar"), "foo-bar");
+        assert_eq!(slugify("--x--"), "x");
+        assert_eq!(slugify(""), "x");
+        // Already-kebab names are left alone.
+        assert_eq!(slugify("worktree"), "worktree");
+        assert_eq!(
+            slugify("plugin_superpowers-chrome_chrome"),
+            "plugin-superpowers-chrome-chrome"
+        );
+    }
+
+    #[test]
+    fn import_mcp_slugifies_non_kebab_server_keys() {
+        let claude_json = serde_json::json!({
+            "mcpServers": {
+                "plugin_superpowers-chrome_chrome": { "type": "stdio", "command": "x" }
+            }
+        });
+        let mut flagged = Vec::new();
+        let mut slugs = SlugMap::new();
+        let mut problems = Vec::new();
+        let assets = import_mcp(
+            &claude_json,
+            "local",
+            Path::new(".claude.json"),
+            None,
+            &mut flagged,
+            &mut slugs,
+            &mut problems,
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].header.name, "plugin-superpowers-chrome-chrome");
+    }
+
+    #[test]
+    fn slug_collision_between_two_skill_folders_is_reported() {
+        let base =
+            std::env::temp_dir().join(format!("fleet-import-collision-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let claude_dir = base.join("home/.claude");
+        let w = |rel: &str, c: &str| {
+            let p = base.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, c).unwrap();
+        };
+        // `Foo_Bar` and `foo-bar` both slugify to `foo-bar`: exactly one of
+        // them becomes an asset, the other a collision problem — never a
+        // silent overwrite of one by the other.
+        w(
+            "home/.claude/skills/Foo_Bar/SKILL.md",
+            "---\nname: Foo_Bar\ndescription: d\n---\nb\n",
+        );
+        w(
+            "home/.claude/skills/foo-bar/SKILL.md",
+            "---\nname: foo-bar\ndescription: d\n---\nb\n",
+        );
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        let src = ImportSources {
+            claude_dir,
+            claude_json: base.join("home/.claude.json"),
+        };
+
+        let rep = import_claude(&src, &repo, "local", None, false).unwrap();
+
+        assert_eq!(
+            rep.created
+                .iter()
+                .filter(|(kind, name)| kind == "skill" && name == "foo-bar")
+                .count(),
+            1,
+            "{:?}",
+            rep.created
+        );
+        assert!(
+            rep.problems
+                .iter()
+                .any(|p| p.message.contains("collides with")),
+            "{:?}",
+            rep.problems
+        );
     }
 }

@@ -1,5 +1,4 @@
 //! Claude Code renderer, scanner and installed-asset enumeration.
-#![allow(dead_code)]
 
 use super::{ConfigMerge, FileWrite, Harness, HostSnapshot, MergeMode, RenderPlan, Unsupported};
 use crate::ipc_error::IpcError;
@@ -403,8 +402,18 @@ impl Harness for Claude {
         use base64::Engine;
         let mut snap = HostSnapshot::default();
         let mut current_config: Option<String> = None;
+        // The scan script always ends with `echo "##END"`; its absence means
+        // the script was cut off partway through (killed, timed out, `bash`
+        // itself crashed after emitting a non-zero exit some other way) and
+        // the snapshot gathered so far must not be trusted as complete.
+        let mut saw_end = false;
         for line in stdout.lines() {
-            if line == "##HASHES" || line == "##END" {
+            if line == "##END" {
+                saw_end = true;
+                current_config = None;
+                continue;
+            }
+            if line == "##HASHES" {
                 current_config = None;
                 continue;
             }
@@ -438,6 +447,9 @@ impl Harness for Claude {
                 snap.files
                     .insert(format!("~/{path}"), hash.trim().to_string());
             }
+        }
+        if !saw_end {
+            return Err(IpcError::new("E_SCAN", "scan output truncated (no ##END)"));
         }
         Ok(snap)
     }
@@ -755,6 +767,22 @@ eyJwbHVnaW5zIjp7InN1cGVycG93ZXJzQHN1cGVycG93ZXJzLW1hcmtldHBsYWNlIjpbeyJ2ZXJzaW9u
         let snap = Claude.parse_scan("##HASHES\n##CONFIG ~/.claude/settings.json\n\n##CONFIG ~/.claude.json\nbm90IGpzb24=\n##END\n").unwrap();
         assert!(!snap.configs.contains_key(SETTINGS_PATH));
         assert!(!snap.configs.contains_key(CLAUDE_JSON_PATH));
+    }
+
+    /// Regression test: output cut off before the `##END` sentinel (a killed
+    /// or timed-out scan, a truncated SSH transfer) must be rejected rather
+    /// than parsed as a (falsely complete) empty-ish snapshot.
+    #[test]
+    fn parse_scan_rejects_truncated_output_missing_end_sentinel() {
+        let err = Claude
+            .parse_scan("##HASHES\naaaa  .claude/skills/x/SKILL.md\n")
+            .unwrap_err();
+        assert_eq!(err.code, "E_SCAN");
+        assert!(err.message.contains("##END"), "{}", err.message);
+
+        // Completely empty output (e.g. `cd "$HOME" || exit 0` firing before
+        // any `echo` ran) is truncated too, not an empty-but-valid snapshot.
+        assert_eq!(Claude.parse_scan("").unwrap_err().code, "E_SCAN");
     }
 
     #[test]

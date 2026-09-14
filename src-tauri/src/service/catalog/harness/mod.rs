@@ -2,11 +2,6 @@
 //! (files to write + JSON merges into config files), knows how to scan a
 //! host for what is installed, and can list the assets it finds there.
 
-// Task 2 lands the trait, render plan and registry; the renderers themselves
-// (Tasks 3 and 4) are the only callers today, so most of this reads as dead
-// in a non-test build. See model.rs for the same pattern.
-#![allow(dead_code)]
-
 pub mod claude;
 pub mod codex;
 
@@ -15,6 +10,9 @@ use crate::ipc_error::IpcError;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+/// Reserved for the sync engine (enumerating supported harness ids without
+/// going through `all()`); not yet called from a non-test build.
+#[allow(dead_code)]
 pub const HARNESS_IDS: &[&str] = &["claude", "codex"];
 
 /// A file the harness would write on the host. `path` uses `~/` for the home dir.
@@ -155,6 +153,10 @@ pub fn all() -> Vec<Box<dyn Harness>> {
     vec![Box::new(claude::Claude), Box::new(codex::Codex)]
 }
 
+/// Reserved for the sync engine (looking up one harness by id without
+/// building the whole registry via `all()`); not yet called from a
+/// non-test build.
+#[allow(dead_code)]
 pub fn by_id(id: &str) -> Option<Box<dyn Harness>> {
     match id {
         "claude" => Some(Box::new(claude::Claude)),

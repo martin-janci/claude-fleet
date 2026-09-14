@@ -1,5 +1,4 @@
 //! Codex CLI renderer (experimental): skills and MCP servers only.
-#![allow(dead_code)]
 
 use super::claude::frontmatter;
 use super::{ConfigMerge, FileWrite, Harness, HostSnapshot, MergeMode, RenderPlan, Unsupported};
@@ -46,13 +45,19 @@ impl Harness for Codex {
             kind: asset.kind(),
         };
         match &asset.spec {
-            AssetSpec::Skill { .. } => {
-                skill_file(
-                    &asset.header.name,
-                    &asset.header.description,
-                    &asset.body,
-                    &mut plan,
-                );
+            AssetSpec::Skill { triggers, .. } => {
+                // Codex skills have no dedicated triggers field either, so
+                // fold them into the description exactly like
+                // `claude::render_skill` does.
+                let mut description = asset.header.description.clone();
+                if !triggers.is_empty() {
+                    description = format!(
+                        "{} Triggers: {}",
+                        description.trim_end(),
+                        triggers.join(", ")
+                    );
+                }
+                skill_file(&asset.header.name, &description, &asset.body, &mut plan);
                 let dir = format!("{CODEX_SKILLS_DIR}/{}", asset.header.name);
                 for r in &asset.resources {
                     let rel = r.rel_path.strip_prefix("resources/").unwrap_or(&r.rel_path);
@@ -151,6 +156,30 @@ mod tests {
             String::from_utf8(plan.files[0].bytes.clone()).unwrap(),
             "---\nname: worktree\ndescription: Make one.\n---\nbody\n"
         );
+    }
+
+    #[test]
+    fn skill_triggers_fold_into_description() {
+        // Asserts the semantic value of `description` via a YAML parse
+        // rather than pinning the exact quoting `serde_yaml` chooses to
+        // emit (a `": "` inside the folded string may need quoting) —
+        // same rationale as `claude::render_skill`'s equivalent golden.
+        let mut a = Asset::from_yaml(
+            None,
+            "kind: skill\nname: s\ndescription: Base.\ntriggers: [\"foo\", \"bar\"]\n",
+        )
+        .unwrap();
+        a.body = "b\n".into();
+        let plan = Codex.render(&a).unwrap();
+        let text = String::from_utf8(plan.files[0].bytes.clone()).unwrap();
+        let yaml = text.split("---\n").nth(1).expect("frontmatter block");
+        let map: serde_yaml::Mapping = serde_yaml::from_str(yaml).expect("valid yaml");
+        assert_eq!(
+            map.get("description").and_then(|v| v.as_str()),
+            Some("Base. Triggers: foo, bar"),
+            "{text}"
+        );
+        assert!(text.ends_with("---\nb\n"), "{text}");
     }
 
     #[test]

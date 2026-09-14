@@ -63,7 +63,7 @@ pub fn catalog_get_asset(
 ) -> Result<AssetDetail, IpcError> {
     if !catalog::model::is_valid_name(&args.name) {
         return Err(IpcError::new(
-            "E_VALIDATION",
+            "E_INVALID",
             format!("invalid asset name '{}'", args.name),
         ));
     }
