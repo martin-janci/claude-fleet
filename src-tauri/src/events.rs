@@ -6,7 +6,7 @@
 //! `NoopEventBus` (silent) or `RecordingEventBus` (captures every emit for
 //! assertion).
 
-use crate::store::{AccountRow, HostRow, ProjectRow, SessionRow, WorktreeRow};
+use crate::store::{AccountRow, AssetInventoryRow, HostRow, ProjectRow, SessionRow, WorktreeRow};
 use serde::Serialize;
 
 /// A row mutation captured during a batched write (e.g. reconcile's
@@ -38,6 +38,20 @@ pub struct WorktreeRemovedPayload {
     pub id: i64,
 }
 
+#[derive(Serialize, Clone)]
+pub struct AssetInventoryClearedPayload {
+    pub host_alias: String,
+    pub harness: String,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct CatalogSummary {
+    pub head: String,
+    pub loaded_at: i64,
+    pub asset_count: usize,
+    pub problem_count: usize,
+}
+
 pub trait EventBus: Send + Sync {
     fn session_created(&self, row: &SessionRow);
     fn session_updated(&self, row: &SessionRow);
@@ -49,6 +63,9 @@ pub trait EventBus: Send + Sync {
     fn project_updated(&self, row: &ProjectRow);
     fn worktree_updated(&self, row: &WorktreeRow);
     fn worktree_removed(&self, id: i64);
+    fn asset_inventory_updated(&self, row: &AssetInventoryRow);
+    fn asset_inventory_cleared(&self, host_alias: &str, harness: &str);
+    fn catalog_loaded(&self, summary: &CatalogSummary);
 
     /// Flush a single deferred `RowChange` through the matching typed method.
     /// Used by batched (transactional) writes to emit AFTER commit. The
@@ -79,6 +96,9 @@ impl EventBus for NoopEventBus {
     fn project_updated(&self, _: &ProjectRow) {}
     fn worktree_updated(&self, _: &WorktreeRow) {}
     fn worktree_removed(&self, _: i64) {}
+    fn asset_inventory_updated(&self, _: &AssetInventoryRow) {}
+    fn asset_inventory_cleared(&self, _: &str, _: &str) {}
+    fn catalog_loaded(&self, _: &CatalogSummary) {}
 }
 
 /// Production event bus: forwards every event to the Tauri frontend.
@@ -160,6 +180,21 @@ impl EventBus for AppHandleEventBus {
     }
     fn worktree_removed(&self, id: i64) {
         self.queue("worktree:removed", &WorktreeRemovedPayload { id });
+    }
+    fn asset_inventory_updated(&self, row: &AssetInventoryRow) {
+        self.queue("asset_inventory:updated", row);
+    }
+    fn asset_inventory_cleared(&self, host_alias: &str, harness: &str) {
+        self.queue(
+            "asset_inventory:cleared",
+            &AssetInventoryClearedPayload {
+                host_alias: host_alias.to_string(),
+                harness: harness.to_string(),
+            },
+        );
+    }
+    fn catalog_loaded(&self, summary: &CatalogSummary) {
+        self.queue("catalog:loaded", summary);
     }
 }
 
@@ -243,5 +278,23 @@ impl EventBus for RecordingEventBus {
             .lock()
             .unwrap()
             .push(format!("worktree:removed:{}", id));
+    }
+    fn asset_inventory_updated(&self, r: &AssetInventoryRow) {
+        self.events.lock().unwrap().push(format!(
+            "asset_inventory:updated:{}:{}:{}:{}",
+            r.host_alias, r.harness, r.kind, r.name
+        ));
+    }
+    fn asset_inventory_cleared(&self, host_alias: &str, harness: &str) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("asset_inventory:cleared:{host_alias}:{harness}"));
+    }
+    fn catalog_loaded(&self, s: &CatalogSummary) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("catalog:loaded:{}", s.head));
     }
 }
