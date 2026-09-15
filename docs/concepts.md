@@ -39,7 +39,9 @@ host. A per-harness managed manifest (`~/.claude/.fleet-assets.json` and
 `~/.codex/.fleet-assets.json`) records what fleet installed, so only managed
 assets are ever removed. Secrets referenced as `${NAME}` in assets are resolved
 at apply time from the fleet database (global with per-host override) and never
-leave the controller. Codex support is experimental; TOML comments are not
+leave the controller. Secret values are stored in the fleet SQLite database in
+plaintext, the same as host tokens — there is no at-rest encryption layer.
+Codex support is experimental; TOML comments are not
 preserved during config merges, and config files containing TOML datetimes are
 rejected. The format and implementation are specified in
 `docs/superpowers/specs/2026-09-14-asset-catalog-design.md` and

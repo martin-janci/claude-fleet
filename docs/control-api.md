@@ -148,7 +148,8 @@ Index by area (names only; see the reference for details):
   per-host actions; mutating classification to update inventory), `apply_sync`
   (apply a `plan_sync` plan; master token only, behind desktop confirmation
   when `mcp.confirm_destructive` is enabled, and needs a `confirm_nonce` for
-  any action involving overwrite or remove), `set_secret` (store a `${NAME}`
+  ANY apply — not only one whose plan includes an overwrite or remove —
+  while the setting is on), `set_secret` (store a `${NAME}`
   placeholder value; master token only; the value is never returned, logged, or
   audited).
 - **Orchestration** — `wait_for_session`, `session_transcript`, `run_prompt`,

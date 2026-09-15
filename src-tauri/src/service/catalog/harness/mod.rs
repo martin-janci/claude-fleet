@@ -397,13 +397,6 @@ pub fn remove_merges(root: &mut Value, merges: &[ManifestMerge]) {
     }
 }
 
-/// Generalised `parse_scan`: `##HASHES` lines, then `##CONFIG <path>` blocks
-/// whose base64 body is decoded by `decode(path, bytes)` (a harness plugs in
-/// its own format — Claude's is plain JSON), then a required `##END`
-/// sentinel (its absence means the scan was cut off, and the snapshot
-/// gathered so far must not be trusted as complete: `E_SCAN`). A hash line
-/// whose path is `-` (a hasher invoked with no file argument, reading
-/// stdin) is skipped rather than recorded as a real file.
 /// Is `s` a plausible content digest — `[0-9a-f]{1,128}`? Hashes cross the
 /// SSH boundary as untrusted host output and are later interpolated into an
 /// apply script, so nothing else is ever accepted as one.
@@ -414,6 +407,13 @@ pub fn is_hex_hash(s: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// Generalised `parse_scan`: `##HASHES` lines, then `##CONFIG <path>` blocks
+/// whose base64 body is decoded by `decode(path, bytes)` (a harness plugs in
+/// its own format — Claude's is plain JSON), then a required `##END`
+/// sentinel (its absence means the scan was cut off, and the snapshot
+/// gathered so far must not be trusted as complete: `E_SCAN`). A hash line
+/// whose path is `-` (a hasher invoked with no file argument, reading
+/// stdin) is skipped rather than recorded as a real file.
 pub fn parse_scan_blocks(
     stdout: &str,
     decode: &dyn Fn(&str, &[u8]) -> Option<Value>,
