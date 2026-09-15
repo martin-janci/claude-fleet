@@ -7,7 +7,8 @@ pub mod codex;
 
 use super::model::{find_placeholders, sha256_hex, Asset, Kind};
 use crate::ipc_error::IpcError;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
 /// Reserved for the sync engine (enumerating supported harness ids without
@@ -35,7 +36,7 @@ fn ser_utf8_or_b64<S: serde::Serializer>(b: &[u8], s: S) -> Result<S::Ok, S::Err
 }
 
 /// How a `ConfigMerge` value relates to what is on the host.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MergeMode {
     /// The value at `json_path` must equal `value`.
@@ -53,6 +54,35 @@ pub struct ConfigMerge {
     pub json_path: Vec<String>,
     pub mode: MergeMode,
     pub value: serde_json::Value,
+}
+
+/// A record of one merge fleet already applied to a harness's manifest, kept
+/// so it can be undone later (an asset removed from the catalog, or a target
+/// disabled) without disturbing edits the merge never made. `value_hash`
+/// identifies the exact value that was merged in, without keeping the value
+/// itself around (`AppendUnique` uses it to find the element to remove
+/// again; `Set`/`Subset` just drop the whole key at `json_path`).
+///
+/// Reserved for the sync engine (Task 3+ persists these alongside the
+/// manifest file and replays them through `remove_merges`); not yet
+/// constructed from a non-test build.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ManifestMerge {
+    pub file: String,
+    pub json_path: Vec<String>,
+    pub mode: MergeMode,
+    pub value_hash: String,
+}
+
+/// Sha256 of `v`'s canonical (key-sorted, since `serde_json::Value` is
+/// BTreeMap-backed) `to_string()`.
+///
+/// Reserved for the sync engine (populating `ManifestMerge::value_hash`);
+/// not yet called from a non-test build.
+#[allow(dead_code)]
+pub fn value_hash(v: &Value) -> String {
+    sha256_hex(serde_json::to_string(v).unwrap_or_default().as_bytes())
 }
 
 /// Everything a harness would do to install one asset.
@@ -147,6 +177,25 @@ pub trait Harness: Send + Sync {
     fn parse_scan(&self, stdout: &str) -> Result<HostSnapshot, IpcError>;
     /// Every asset (kind, name) the snapshot shows as installed.
     fn installed(&self, snap: &HostSnapshot) -> Vec<(Kind, String)>;
+    /// Home-relative path (`~/...`) to the manifest file this harness uses
+    /// to track which merges/files the sync engine applied.
+    ///
+    /// Reserved for the sync engine; not yet called from a non-test build.
+    #[allow(dead_code)]
+    fn manifest_path(&self) -> &'static str;
+    /// Apply `merges` then `remove` to `existing`'s parsed content and
+    /// return the full new file text (with a trailing newline). An empty
+    /// `existing` means an empty document.
+    ///
+    /// Reserved for the sync engine; not yet called from a non-test build.
+    #[allow(dead_code)]
+    fn merge_config(
+        &self,
+        file: &str,
+        existing: &str,
+        merges: &[ConfigMerge],
+        remove: &[ManifestMerge],
+    ) -> Result<String, IpcError>;
 }
 
 pub fn all() -> Vec<Box<dyn Harness>> {
@@ -174,9 +223,267 @@ pub fn json_get<'a>(root: &'a serde_json::Value, path: &[String]) -> Option<&'a 
     Some(cur)
 }
 
+/// Mutable counterpart of `json_get`: walks `path` through nested JSON
+/// objects without creating anything, `None` if any segment is missing or
+/// not an object.
+///
+/// Reserved for the sync engine (`remove_merges`'s `AppendUnique` case); not
+/// yet called from a non-test build.
+#[allow(dead_code)]
+fn json_get_mut<'a>(root: &'a mut Value, path: &[String]) -> Option<&'a mut Value> {
+    let mut cur = root;
+    for key in path {
+        cur = cur.as_object_mut()?.get_mut(key)?;
+    }
+    Some(cur)
+}
+
+/// Does `have` satisfy `want`? Mirrors `inventory::is_subset`'s semantics
+/// exactly (an object is a subset when every key of `want` is present in
+/// `have` with a subset value; an array is a subset when every element of
+/// `want` has some element of `have` that is a superset of it). Duplicated
+/// here rather than shared, because `inventory` depends on `harness` and
+/// sharing the other way would be a cycle.
+///
+/// Reserved for the sync engine (`apply_merges`'s `Subset` case); not yet
+/// called from a non-test build.
+#[allow(dead_code)]
+fn is_subset(want: &Value, have: &Value) -> bool {
+    match (want, have) {
+        (Value::Object(w), Value::Object(h)) => w
+            .iter()
+            .all(|(k, v)| h.get(k).is_some_and(|hv| is_subset(v, hv))),
+        (Value::Array(w), Value::Array(h)) => {
+            w.iter().all(|wv| h.iter().any(|hv| is_subset(wv, hv)))
+        }
+        _ => want == have,
+    }
+}
+
+/// Navigate `path` through nested JSON objects from `root`, creating
+/// missing intermediate objects (and replacing anything in the way that
+/// isn't an object), and return a mutable reference to the value at `path`
+/// — inserting the result of `default` there first if it is not already
+/// present.
+///
+/// Reserved for the sync engine (`apply_merges`); not yet called from a
+/// non-test build.
+#[allow(dead_code)]
+fn ensure_at<'a>(
+    root: &'a mut Value,
+    path: &[String],
+    default: impl FnOnce() -> Value,
+) -> &'a mut Value {
+    if path.is_empty() {
+        return root;
+    }
+    let mut default = Some(default);
+    let mut cur = root;
+    let last = path.len() - 1;
+    for (i, key) in path.iter().enumerate() {
+        if !cur.is_object() {
+            *cur = Value::Object(Map::new());
+        }
+        let map = cur.as_object_mut().expect("just ensured object");
+        cur = if i == last {
+            let d = default
+                .take()
+                .expect("consumed exactly once, on the last segment");
+            map.entry(key.clone()).or_insert_with(d)
+        } else {
+            map.entry(key.clone())
+                .or_insert_with(|| Value::Object(Map::new()))
+        };
+    }
+    cur
+}
+
+/// Apply structured config edits in place. See `MergeMode` for what each
+/// mode means; `AppendUnique` and `Subset` are idempotent (re-applying an
+/// already-satisfied merge is a no-op).
+///
+/// Reserved for the sync engine (`Harness::merge_config`); not yet called
+/// from a non-test build.
+#[allow(dead_code)]
+pub fn apply_merges(root: &mut Value, merges: &[ConfigMerge]) {
+    for m in merges {
+        match m.mode {
+            MergeMode::Set => {
+                let slot = ensure_at(root, &m.json_path, || Value::Null);
+                *slot = m.value.clone();
+            }
+            MergeMode::AppendUnique => {
+                let slot = ensure_at(root, &m.json_path, || Value::Array(Vec::new()));
+                if !slot.is_array() {
+                    *slot = Value::Array(Vec::new());
+                }
+                let arr = slot.as_array_mut().expect("just ensured array");
+                if !arr.contains(&m.value) {
+                    arr.push(m.value.clone());
+                }
+            }
+            MergeMode::Subset => match &m.value {
+                Value::Array(items) => {
+                    let Some(first) = items.first() else {
+                        continue;
+                    };
+                    let slot = ensure_at(root, &m.json_path, || Value::Array(Vec::new()));
+                    if !slot.is_array() {
+                        *slot = Value::Array(Vec::new());
+                    }
+                    let arr = slot.as_array_mut().expect("just ensured array");
+                    let covered = arr.iter().any(|hv| is_subset(first, hv));
+                    if !covered {
+                        arr.push(first.clone());
+                    }
+                }
+                Value::Object(obj) => {
+                    let slot = ensure_at(root, &m.json_path, || Value::Object(Map::new()));
+                    if !slot.is_object() {
+                        *slot = Value::Object(Map::new());
+                    }
+                    let map = slot.as_object_mut().expect("just ensured object");
+                    for (k, v) in obj {
+                        map.insert(k.clone(), v.clone());
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+}
+
+/// Delete the value at `path` from `root`, then prune any ancestor object
+/// that becomes empty as a result — stopping before the root-level (first)
+/// path segment, which is always kept even once it becomes `{}`.
+///
+/// Reserved for the sync engine (`remove_merges`); not yet called from a
+/// non-test build.
+#[allow(dead_code)]
+fn remove_key_path(root: &mut Value, path: &[String]) {
+    // Returns whether `cur` is now empty (so the caller may prune it too).
+    fn prune(cur: &mut Value, path: &[String]) -> bool {
+        let Some(obj) = cur.as_object_mut() else {
+            return false;
+        };
+        if path.len() == 1 {
+            obj.remove(&path[0]);
+        } else if let Some(child) = obj.get_mut(&path[0]) {
+            if prune(child, &path[1..]) {
+                obj.remove(&path[0]);
+            }
+        }
+        obj.is_empty()
+    }
+    match path.len() {
+        0 => {}
+        1 => {
+            if let Some(obj) = root.as_object_mut() {
+                obj.remove(&path[0]);
+            }
+        }
+        _ => {
+            if let Some(obj) = root.as_object_mut() {
+                if let Some(child) = obj.get_mut(&path[0]) {
+                    // Discard the "did it become empty" result: the
+                    // root-level segment is never pruned, however empty.
+                    prune(child, &path[1..]);
+                }
+            }
+        }
+    }
+}
+
+/// Undo previously applied merges. See `ManifestMerge` for the mapping from
+/// `MergeMode` to how removal works.
+///
+/// Reserved for the sync engine (`Harness::merge_config`); not yet called
+/// from a non-test build.
+#[allow(dead_code)]
+pub fn remove_merges(root: &mut Value, merges: &[ManifestMerge]) {
+    for m in merges {
+        if m.json_path.is_empty() {
+            continue;
+        }
+        match m.mode {
+            MergeMode::Set | MergeMode::Subset => remove_key_path(root, &m.json_path),
+            MergeMode::AppendUnique => {
+                if let Some(arr) = json_get_mut(root, &m.json_path).and_then(Value::as_array_mut) {
+                    arr.retain(|v| value_hash(v) != m.value_hash);
+                    if arr.is_empty() {
+                        remove_key_path(root, &m.json_path);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Generalised `parse_scan`: `##HASHES` lines, then `##CONFIG <path>` blocks
+/// whose base64 body is decoded by `decode(path, bytes)` (a harness plugs in
+/// its own format — Claude's is plain JSON), then a required `##END`
+/// sentinel (its absence means the scan was cut off, and the snapshot
+/// gathered so far must not be trusted as complete: `E_SCAN`). A hash line
+/// whose path is `-` (a hasher invoked with no file argument, reading
+/// stdin) is skipped rather than recorded as a real file.
+pub fn parse_scan_blocks(
+    stdout: &str,
+    decode: &dyn Fn(&str, &[u8]) -> Option<Value>,
+) -> Result<HostSnapshot, IpcError> {
+    use base64::Engine;
+    let mut snap = HostSnapshot::default();
+    let mut current_config: Option<String> = None;
+    let mut saw_end = false;
+    for line in stdout.lines() {
+        if line == "##END" {
+            saw_end = true;
+            current_config = None;
+            continue;
+        }
+        if line == "##HASHES" {
+            current_config = None;
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("##CONFIG ") {
+            current_config = Some(path.trim().to_string());
+            continue;
+        }
+        if let Some(path) = current_config.take() {
+            let b64 = line.trim();
+            if b64.is_empty() {
+                continue;
+            }
+            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) else {
+                continue;
+            };
+            if let Some(v) = decode(&path, &bytes) {
+                snap.configs.insert(path, v);
+            }
+            continue;
+        }
+        // `<hash>  <path>` (two spaces from sha256sum / shasum).
+        if let Some((hash, path)) = line.split_once("  ") {
+            let path = path.trim_start_matches("./");
+            if path == "-" {
+                continue;
+            }
+            snap.files
+                .insert(format!("~/{path}"), hash.trim().to_string());
+        }
+    }
+    if !saw_end {
+        return Err(IpcError::new(
+            crate::ipc_error::codes::E_SCAN,
+            "scan output truncated (no ##END)",
+        ));
+    }
+    Ok(snap)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn plan_with(
         files: Vec<(&str, &str)>,
@@ -247,6 +554,58 @@ mod tests {
         );
         assert_eq!(json_get(&v, &["a".into(), "zz".into()]), None);
         assert_eq!(json_get(&v, &[]), Some(&v));
+    }
+
+    #[test]
+    fn apply_and_remove_merges_cover_every_mode() {
+        let mut root = json!({});
+        let set = ConfigMerge {
+            file: "f".into(),
+            json_path: vec!["mcpServers".into(), "x".into()],
+            mode: MergeMode::Set,
+            value: json!({"type":"http"}),
+        };
+        let app = ConfigMerge {
+            file: "f".into(),
+            json_path: vec!["hooks".into(), "Stop".into()],
+            mode: MergeMode::AppendUnique,
+            value: json!({"hooks":[{"type":"command","command":"x"}]}),
+        };
+        let sub = ConfigMerge {
+            file: "f".into(),
+            json_path: vec!["plugins".into(), "p@m".into()],
+            mode: MergeMode::Subset,
+            value: json!([{"version":"1"}]),
+        };
+        apply_merges(&mut root, &[set.clone(), app.clone(), sub.clone()]);
+        apply_merges(&mut root, &[app.clone(), sub.clone()]); // idempotent
+        assert_eq!(root["mcpServers"]["x"]["type"], "http");
+        assert_eq!(root["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        assert_eq!(root["plugins"]["p@m"].as_array().unwrap().len(), 1);
+        let rm = |m: &ConfigMerge| ManifestMerge {
+            file: m.file.clone(),
+            json_path: m.json_path.clone(),
+            mode: m.mode,
+            value_hash: value_hash(&m.value),
+        };
+        remove_merges(&mut root, &[rm(&set), rm(&app), rm(&sub)]);
+        assert!(root["mcpServers"].get("x").is_none());
+        assert!(root["hooks"].get("Stop").is_none(), "empty array removed");
+        assert!(root.get("hooks").is_some(), "top-level key kept");
+        assert!(root["plugins"].get("p@m").is_none());
+    }
+
+    #[test]
+    fn remove_append_unique_keeps_other_elements() {
+        let mut root = json!({"hooks":{"Stop":[{"a":1},{"b":2}]}});
+        let m = ManifestMerge {
+            file: "f".into(),
+            json_path: vec!["hooks".into(), "Stop".into()],
+            mode: MergeMode::AppendUnique,
+            value_hash: value_hash(&json!({"a":1})),
+        };
+        remove_merges(&mut root, &[m]);
+        assert_eq!(root["hooks"]["Stop"], json!([{"b":2}]));
     }
 
     #[test]

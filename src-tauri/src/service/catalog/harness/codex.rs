@@ -1,13 +1,20 @@
 //! Codex CLI renderer (experimental): skills and MCP servers only.
 
 use super::claude::frontmatter;
-use super::{ConfigMerge, FileWrite, Harness, HostSnapshot, MergeMode, RenderPlan, Unsupported};
+use super::{
+    ConfigMerge, FileWrite, Harness, HostSnapshot, ManifestMerge, MergeMode, RenderPlan,
+    Unsupported,
+};
 use crate::ipc_error::IpcError;
 use crate::service::catalog::model::{Asset, AssetSpec, Kind};
 use serde_json::json;
 
 pub const CODEX_SKILLS_DIR: &str = "~/.codex/skills";
 pub const CODEX_CONFIG_PATH: &str = "~/.codex/config.toml";
+/// Reserved for the sync engine (`Codex::manifest_path`); not yet read from
+/// a non-test build.
+#[allow(dead_code)]
+pub const CODEX_MANIFEST_PATH: &str = "~/.codex/.fleet-assets.json";
 
 pub struct Codex;
 
@@ -132,6 +139,24 @@ impl Harness for Codex {
 
     fn installed(&self, _snap: &HostSnapshot) -> Vec<(Kind, String)> {
         vec![]
+    }
+
+    fn manifest_path(&self) -> &'static str {
+        CODEX_MANIFEST_PATH
+    }
+
+    fn merge_config(
+        &self,
+        _file: &str,
+        _existing: &str,
+        _merges: &[ConfigMerge],
+        _remove: &[ManifestMerge],
+    ) -> Result<String, IpcError> {
+        // Task 3 replaces this with a real TOML merge/unmerge.
+        Err(IpcError::new(
+            super::super::E_ASSET_UNSUPPORTED,
+            "codex config merging is not implemented yet",
+        ))
     }
 }
 

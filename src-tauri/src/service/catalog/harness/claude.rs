@@ -1,6 +1,9 @@
 //! Claude Code renderer, scanner and installed-asset enumeration.
 
-use super::{ConfigMerge, FileWrite, Harness, HostSnapshot, MergeMode, RenderPlan, Unsupported};
+use super::{
+    ConfigMerge, FileWrite, Harness, HostSnapshot, ManifestMerge, MergeMode, RenderPlan,
+    Unsupported,
+};
 use crate::ipc_error::IpcError;
 use crate::service::catalog::model::{Asset, AssetSpec, Kind};
 use serde_json::{json, Value};
@@ -8,6 +11,7 @@ use serde_json::{json, Value};
 pub const SETTINGS_PATH: &str = "~/.claude/settings.json";
 pub const CLAUDE_JSON_PATH: &str = "~/.claude.json";
 pub const PLUGINS_PATH: &str = "~/.claude/plugins/installed_plugins.json";
+pub const MANIFEST_PATH: &str = "~/.claude/.fleet-assets.json";
 pub const SKILLS_DIR: &str = "~/.claude/skills";
 pub const AGENTS_DIR: &str = "~/.claude/agents";
 
@@ -344,7 +348,7 @@ impl Claude {
     }
 }
 
-const CONFIG_FILES: &[&str] = &[SETTINGS_PATH, CLAUDE_JSON_PATH, PLUGINS_PATH];
+const CONFIG_FILES: &[&str] = &[SETTINGS_PATH, CLAUDE_JSON_PATH, PLUGINS_PATH, MANIFEST_PATH];
 
 impl Harness for Claude {
     fn id(&self) -> &'static str {
@@ -388,6 +392,17 @@ impl Harness for Claude {
         s.push_str(
             "for d in .claude/skills .claude/agents; do if [ -d \"$d\" ]; then find -L \"$d\" -type f -exec $H {} + 2>/dev/null; fi; done; ",
         );
+        // Also hash the config files themselves (`~/.claude/settings.json`
+        // etc.) so `snap.files` carries a content hash for them alongside
+        // the parsed `snap.configs` entry.
+        let config_rel: Vec<&str> = CONFIG_FILES
+            .iter()
+            .map(|f| f.trim_start_matches("~/"))
+            .collect();
+        s.push_str(&format!(
+            "for f in {}; do if [ -f \"$f\" ]; then $H \"$f\"; fi; done; ",
+            config_rel.join(" ")
+        ));
         for f in CONFIG_FILES {
             let rel = f.trim_start_matches("~/");
             s.push_str(&format!(
@@ -399,62 +414,9 @@ impl Harness for Claude {
     }
 
     fn parse_scan(&self, stdout: &str) -> Result<HostSnapshot, IpcError> {
-        use base64::Engine;
-        let mut snap = HostSnapshot::default();
-        let mut current_config: Option<String> = None;
-        // The scan script always ends with `echo "##END"`; its absence means
-        // the script was cut off partway through (killed, timed out, `bash`
-        // itself crashed after emitting a non-zero exit some other way) and
-        // the snapshot gathered so far must not be trusted as complete.
-        let mut saw_end = false;
-        for line in stdout.lines() {
-            if line == "##END" {
-                saw_end = true;
-                current_config = None;
-                continue;
-            }
-            if line == "##HASHES" {
-                current_config = None;
-                continue;
-            }
-            if let Some(path) = line.strip_prefix("##CONFIG ") {
-                current_config = Some(path.trim().to_string());
-                continue;
-            }
-            if let Some(path) = current_config.take() {
-                let b64 = line.trim();
-                if b64.is_empty() {
-                    continue;
-                }
-                let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) else {
-                    continue;
-                };
-                if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
-                    snap.configs.insert(path, v);
-                }
-                continue;
-            }
-            // `<hash>  <path>` (two spaces from sha256sum / shasum).
-            if let Some((hash, path)) = line.split_once("  ") {
-                let path = path.trim_start_matches("./");
-                // Defensive: a hasher invoked with no path argument (should
-                // no longer happen with `-exec ... +`, but tolerate it if a
-                // host's `find`/`xargs` behaves unexpectedly) prints its
-                // hash against stdin as `-`; that is not a real file.
-                if path == "-" {
-                    continue;
-                }
-                snap.files
-                    .insert(format!("~/{path}"), hash.trim().to_string());
-            }
-        }
-        if !saw_end {
-            return Err(IpcError::new(
-                crate::ipc_error::codes::E_SCAN,
-                "scan output truncated (no ##END)",
-            ));
-        }
-        Ok(snap)
+        super::parse_scan_blocks(stdout, &|_path, bytes| {
+            serde_json::from_slice::<Value>(bytes).ok()
+        })
     }
 
     fn installed(&self, snap: &HostSnapshot) -> Vec<(Kind, String)> {
@@ -512,6 +474,35 @@ impl Harness for Claude {
             }
         }
         out
+    }
+
+    fn manifest_path(&self) -> &'static str {
+        MANIFEST_PATH
+    }
+
+    fn merge_config(
+        &self,
+        file: &str,
+        existing: &str,
+        merges: &[ConfigMerge],
+        remove: &[ManifestMerge],
+    ) -> Result<String, IpcError> {
+        let mut root: Value = if existing.trim().is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str(existing).map_err(|e| {
+                tracing::warn!(file, error = %e, "config file is not valid JSON");
+                IpcError::new(
+                    crate::ipc_error::codes::E_INVALID,
+                    format!("{file} is not a JSON object"),
+                )
+            })?
+        };
+        super::apply_merges(&mut root, merges);
+        super::remove_merges(&mut root, remove);
+        let mut out = serde_json::to_string_pretty(&root).unwrap_or_default();
+        out.push('\n');
+        Ok(out)
     }
 }
 
@@ -819,6 +810,36 @@ eyJwbHVnaW5zIjp7InN1cGVycG93ZXJzQHN1cGVycG93ZXJzLW1hcmtldHBsYWNlIjpbeyJ2ZXJzaW9u
     }
 
     #[test]
+    fn merge_config_json_round_trip_and_empty_existing() {
+        let m = ConfigMerge {
+            file: SETTINGS_PATH.into(),
+            json_path: vec!["hooks".into(), "Stop".into()],
+            mode: MergeMode::AppendUnique,
+            value: json!({"hooks":[{"type":"command","command":"x"}]}),
+        };
+        let out = Claude
+            .merge_config(SETTINGS_PATH, "", std::slice::from_ref(&m), &[])
+            .unwrap();
+        assert!(out.ends_with('\n'));
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], "x");
+        let again = Claude.merge_config(SETTINGS_PATH, &out, &[m], &[]).unwrap();
+        assert_eq!(again, out);
+        assert!(Claude
+            .merge_config(SETTINGS_PATH, "not json", &[], &[])
+            .is_err());
+    }
+
+    #[test]
+    fn scan_script_hashes_config_files_and_manifest() {
+        let s = Claude.scan_script().unwrap();
+        assert!(s.contains("##CONFIG ~/.claude/.fleet-assets.json"));
+        assert!(s.contains(".claude/settings.json"));
+        assert!(!s.contains('\''));
+        assert_eq!(Claude.manifest_path(), MANIFEST_PATH);
+    }
+
+    #[test]
     fn hook_names_are_stable() {
         assert_eq!(
             hook_asset_name("PreToolUse", Some("Bash")),
@@ -877,10 +898,19 @@ eyJwbHVnaW5zIjp7InN1cGVycG93ZXJzQHN1cGVycG93ZXJzLW1hcmtldHBsYWNlIjpbeyJ2ZXJzaW9u
         let snap = Claude.parse_scan(&stdout).unwrap();
         assert_eq!(
             snap.files.keys().collect::<Vec<_>>(),
-            vec!["~/.claude/skills/worktree/SKILL.md"]
+            vec![
+                "~/.claude/settings.json",
+                "~/.claude/skills/worktree/SKILL.md"
+            ]
         );
         assert!(!snap.files.contains_key("~/-"));
         assert_eq!(snap.configs[SETTINGS_PATH], serde_json::json!({}));
+        let settings_hash = &snap.files["~/.claude/settings.json"];
+        assert_eq!(settings_hash.len(), 64, "{settings_hash}");
+        assert!(
+            settings_hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "{settings_hash}"
+        );
     }
 
     #[test]
