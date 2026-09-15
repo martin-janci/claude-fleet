@@ -6,7 +6,7 @@
 //! the request extensions and this handler reads it from there. Hooks are
 //! installed as Claude Code `type: "http"` hooks carrying
 //! `Authorization: Bearer <per-host token>` (see
-//! `commands::mcp::merge_hook_into_settings_json`), so the token never
+//! `service::hooks_install::merge_hook_into_settings_json`), so the token never
 //! appears in a process argv. The legacy `?token=` query form written by
 //! older installs is still accepted by the middleware until every host is
 //! re-provisioned.

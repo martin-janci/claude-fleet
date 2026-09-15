@@ -108,7 +108,7 @@ pub async fn provision_hook(
 ) -> Result<(), IpcError> {
     let existing = read_host_file(ssh, host, SETTINGS_JSON).await?;
     // Errors (malformed JSON → E_PROVISION) fire BEFORE any write.
-    let merged = crate::commands::mcp::merge_hook_into_settings_json(&existing, mcp_port, token)?;
+    let merged = super::hooks_install::merge_hook_into_settings_json(&existing, mcp_port, token)?;
     if !existing.trim().is_empty() {
         // The file carries the user's permissions/env/hooks: back it up
         // first, like ~/.claude.json.
@@ -1061,7 +1061,7 @@ mod tests {
     }
 
     fn expected_settings() -> String {
-        crate::commands::mcp::merge_hook_into_settings_json("", PORT, TOKEN).unwrap()
+        crate::service::hooks_install::merge_hook_into_settings_json("", PORT, TOKEN).unwrap()
     }
 
     /// The three (or four, first time) steps [`write_host_file_secret`]

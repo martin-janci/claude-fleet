@@ -18,6 +18,7 @@ pub mod diagnostics;
 pub mod gc;
 pub mod health;
 pub mod hooks;
+pub mod hooks_install;
 pub mod hosts;
 pub mod messages;
 pub mod move_session;
