@@ -34,7 +34,7 @@ function setup(modes = '\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h') {
     copySelection: async () => {},
     writePty: (d) => writes.push(d),
   });
-  return { mouse, writes, container, screen };
+  return { mouse, writes, container, screen, sel: () => ({ anchor: selAnchor, focus: selFocus }) };
 }
 
 const down = (button: number, init: MouseEventInit = {}) =>
@@ -115,6 +115,40 @@ describe('createMouseController window listeners (N6)', () => {
     windowUp(60);
     expect(writes).toHaveLength(3);
     expect(writes[2]).toMatch(/^\x1b\[<1;.*m$/); // SGR release
+  });
+
+  it('a chord over a drag-select does not swallow the next click', () => {
+    const { mouse, writes } = setup();
+    controllers.push(mouse);
+    // Reporting is on, so the left press is deferred; the move promotes it to
+    // a local drag-select that the middle button then pre-empts — that
+    // gesture's mouseup never runs.
+    mouse.onMousedown(down(0, { clientX: 10, clientY: 20 }));
+    windowMove(100);
+    mouse.onMousedown(down(1, { clientX: 100, clientY: 20 }));
+    windowUp(100, 20);
+    writes.length = 0;
+    // The next plain click must reach the app, not be eaten as the tail of the
+    // drag that was pre-empted.
+    mouse.onMousedown(down(0, { clientX: 10, clientY: 20 }));
+    windowUp(10, 20);
+    expect(writes.join('')).toMatch(/\x1b\[<0;1;2M/);
+  });
+
+  it('a drag after a chord anchors where it started, not where the dead one did', () => {
+    const { mouse, sel } = setup();
+    controllers.push(mouse);
+    mouse.onMousedown(down(0, { clientX: 50, clientY: 20 })); // cell col 5
+    windowMove(100);
+    mouse.onMousedown(down(1, { clientX: 100, clientY: 20 })); // pre-empts it
+    windowUp(100, 20);
+    // A fresh drag from the left edge. The pre-empted gesture's anchor must be
+    // gone, or this one extends from cell 5 instead of cell 0.
+    mouse.onMousedown(down(0, { clientX: 10, clientY: 20 })); // cell col 0
+    windowMove(30); // cell col 3
+    expect(sel().anchor).toEqual({ row: 1, col: 0 });
+    expect(sel().focus).toEqual({ row: 1, col: 3 });
+    windowUp(30, 20);
   });
 
   it('dispose() removes the listeners of a gesture still in progress', () => {

@@ -53,17 +53,38 @@ export function createMouseController(host: MouseHost) {
   /** Cleanup for the window-level mousemove/mouseup listeners of the gesture
    *  currently in progress. Removed on mouseup, on reset() and on destroy. */
   let removeWindowListeners: (() => void) | null = null;
+  /** Undo for the *logical* state of that same gesture — what its own mouseup
+   *  would have cleared. Kept beside the listeners so a pre-empted gesture
+   *  leaves nothing of itself behind. */
+  let cancelGesture: (() => void) | null = null;
   /** Accumulated (pixel-normalized) wheel delta not yet turned into reports.
    *  We forward one wheel report per WHEEL_TICK_PX of scroll instead of one
    *  per event, so trackpads (many tiny deltas) don't flood tmux and line-mode
    *  wheels still register — smooth, proportional scrolling either way. */
   let wheelAccum = 0;
 
-  /** Install one gesture's window-level mousemove/mouseup pair, tearing down
+  /** End the gesture in progress before another one starts: its window
+   *  listeners AND the state its own mouseup would have cleared. Taking only
+   *  the listeners away left a drag whose handleUp can never run with
+   *  `selecting`/`pendingPress` still set, and the next plain click was then
+   *  swallowed as that dead drag's tail instead of reaching the app. */
+  function endGesture() {
+    // Take the undo first: removing the listeners clears the handle it lives in.
+    const cancel = cancelGesture;
+    cancelGesture = null;
+    removeWindowListeners?.();
+    cancel?.();
+  }
+
+  /** Install one gesture's window-level mousemove/mouseup pair, ending
    *  whatever gesture was live before it — a press that skipped that step left
    *  the previous pair on `window` for good, and with any-motion reporting on
    *  it kept forwarding a motion report for every pointer move anywhere in the
    *  app, long after the button was released.
+   *
+   *  `onCancel` undoes this gesture's own state if something pre-empts it;
+   *  callers that set that state before installing must call endGesture()
+   *  first, or their fresh state is what gets undone.
    *
    *  Returns THIS gesture's own remover, which its handlers must use: an
    *  orphaned handler calling the shared handle would tear down the newer
@@ -71,17 +92,28 @@ export function createMouseController(host: MouseHost) {
   function installWindowListeners(
     onMove: (e: MouseEvent) => void,
     onUp: (e: MouseEvent) => void,
+    onCancel: () => void,
   ): () => void {
-    removeWindowListeners?.();
+    endGesture();
     const off = () => {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
       if (removeWindowListeners === off) removeWindowListeners = null;
+      if (cancelGesture === onCancel) cancelGesture = null;
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
     removeWindowListeners = off;
+    cancelGesture = onCancel;
     return off;
+  }
+
+  /** Forget a local drag-select / deferred press in progress. */
+  function clearLocalGesture() {
+    selecting = false;
+    selectAnchor = null;
+    selectFocus = null;
+    pendingPress = null;
   }
 
   /** Map a MouseEvent's client coordinates to a 1-based terminal cell,
@@ -124,6 +156,7 @@ export function createMouseController(host: MouseHost) {
    *  single-click that moved nowhere clears any selection instead. */
   function beginLocalSelection(e: MouseEvent, mode: SelectMode, rawAnchor: CellPos, cell: CellPos) {
     (e.currentTarget as HTMLElement | null)?.focus();
+    endGesture();
     selecting = true;
     selectMode = mode;
     selectAnchor = rawAnchor;
@@ -151,7 +184,7 @@ export function createMouseController(host: MouseHost) {
     };
     // Installing tears down any prior in-progress drag, so a missed mouseup
     // can't leave a stale handler that wipes this selection.
-    off = installWindowListeners(handleMove, handleUp);
+    off = installWindowListeners(handleMove, handleUp, clearLocalGesture);
   }
 
   function onWheel(e: WheelEvent) {
@@ -209,6 +242,7 @@ export function createMouseController(host: MouseHost) {
       // selection, a click (no movement) forwards to the app.
       e.preventDefault();
       (e.currentTarget as HTMLElement | null)?.focus();
+      endGesture();
       pendingPress = { cell, startX: e.clientX, startY: e.clientY };
       let off = () => {};
       host.clearSelection();
@@ -243,7 +277,7 @@ export function createMouseController(host: MouseHost) {
         pendingPress = null;
       };
       // Drops any stale in-progress drag first.
-      off = installWindowListeners(handleMove, handleUp);
+      off = installWindowListeners(handleMove, handleUp, clearLocalGesture);
       return;
     }
     // Not a left-button local-select gesture. Option-held drags and middle/right
@@ -257,6 +291,9 @@ export function createMouseController(host: MouseHost) {
     (e.currentTarget as HTMLElement | null)?.focus();
     const { col, row } = eventToCell(e);
     const cb = e.button; // 0=left 1=middle 2=right
+    // A press here pre-empts whatever was live — a half-finished drag-select
+    // included — before it records its own.
+    endGesture();
     pressedButton = cb;
     lastMotionCell = { col, row };
     const sgr = screen.mouseSgr;
@@ -273,7 +310,10 @@ export function createMouseController(host: MouseHost) {
       onWindowMouseup(ev);
       off();
     };
-    off = installWindowListeners(handleMove, handleUp);
+    off = installWindowListeners(handleMove, handleUp, () => {
+      pressedButton = null;
+      lastMotionCell = null;
+    });
   }
 
   function onWindowMousemove(e: MouseEvent) {
@@ -310,6 +350,7 @@ export function createMouseController(host: MouseHost) {
    *  them installed kept a dead gesture forwarding reports to the new PTY. */
   function reset() {
     removeWindowListeners?.();
+    cancelGesture = null;
     selecting = false;
     selectAnchor = null;
     selectFocus = null;
@@ -321,6 +362,7 @@ export function createMouseController(host: MouseHost) {
   /** Remove the window-level listeners of a gesture still in progress. */
   function dispose() {
     removeWindowListeners?.();
+    cancelGesture = null;
   }
 
   return { onWheel, onMousedown, reset, dispose };
