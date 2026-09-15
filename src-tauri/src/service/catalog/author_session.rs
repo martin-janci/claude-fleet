@@ -34,11 +34,12 @@ pub struct SpawnAuthorArgs {
     pub call_id: Option<u64>,
 }
 
-/// The target asset `kind`/`name`, when both are present and `name` is
-/// non-empty; `None` means "create a new asset".
+/// The target asset `kind`/`name`, when both are present; `None` means
+/// "create a new asset". A blank `name` is rejected upstream as `E_INVALID`
+/// (both `spawn_author_session` and the command call `is_valid_name`), so
+/// callers never reach here with a blank-but-`Some` name.
 fn target_of(kind: Option<Kind>, name: Option<&str>) -> Option<(Kind, &str)> {
-    let name = name.map(str::trim).filter(|n| !n.is_empty())?;
-    kind.map(|k| (k, name))
+    kind.zip(name)
 }
 
 /// PURE: the tmux session name and the sidebar friendly name for delegating
@@ -48,7 +49,11 @@ fn target_of(kind: Option<Kind>, name: Option<&str>) -> Option<(Kind, &str)> {
 pub fn session_name_for(kind: Option<Kind>, name: Option<&str>) -> (String, String) {
     match target_of(kind, name) {
         Some((k, n)) => (
-            format!("catalog-{}-{n}", k.as_str()),
+            // tmux session names are conventionally kebab-case; `Kind::as_str()`
+            // uses snake_case for a couple of kinds (`mcp_server`,
+            // `plugin_ref`), so kebab-case it here. The friendly name keeps
+            // `as_str()` as-is.
+            format!("catalog-{}-{n}", k.as_str().replace('_', "-")),
             format!("author {}/{n}", k.as_str()),
         ),
         None => {
@@ -185,7 +190,28 @@ pub async fn ensure_catalog_project(
         ssh.as_ref(),
         reg,
     )
-    .await?;
+    .await
+    .map_err(|e| {
+        // `add_project` reports `E_EXISTS` here when the catalog repo's
+        // `add_project` raises E_EXISTS for two different reasons — the
+        // catalog's `origin` names a GitHub repo already adopted at some
+        // OTHER path (`refuse_existing_project`), or the resolved base path
+        // is already registered under a spelling `same_path` did not match
+        // (`refuse_existing_base_path`). Its stock messages say which, but
+        // not that it was the catalog repo being adopted or what to do about
+        // it, so keep the original text and add that context.
+        if e.code == codes::E_EXISTS {
+            let reason = e.message.clone();
+            return IpcError::new(
+                codes::E_EXISTS,
+                format!(
+                    "catalog repo {repo_path} could not be adopted as a fleet project \
+                     ({reason}); add the catalog folder as a project first"
+                ),
+            );
+        }
+        e
+    })?;
     Ok(tree.project.id)
 }
 
@@ -363,11 +389,14 @@ mod tests {
     }
 
     #[test]
-    fn session_name_for_treats_a_blank_name_as_new() {
-        let (tmux, _) = session_name_for(Some(Kind::Skill), Some("   "));
-        assert!(tmux.starts_with("catalog-new-"), "{tmux}");
-        let (tmux, _) = session_name_for(None, Some("named"));
-        assert!(tmux.starts_with("catalog-new-"), "{tmux}");
+    fn session_name_for_kebab_cases_the_kind_for_tmux_but_not_the_friendly_name() {
+        let (tmux, friendly) = session_name_for(Some(Kind::McpServer), Some("claude-fleet"));
+        assert_eq!(tmux, "catalog-mcp-server-claude-fleet");
+        assert_eq!(friendly, "author mcp_server/claude-fleet");
+
+        let (tmux, friendly) = session_name_for(Some(Kind::PluginRef), Some("superpowers"));
+        assert_eq!(tmux, "catalog-plugin-ref-superpowers");
+        assert_eq!(friendly, "author plugin_ref/superpowers");
     }
 
     // -------------------------------------------------- project adoption
@@ -425,6 +454,53 @@ mod tests {
                 .unwrap();
             assert_eq!(first, second);
             assert_eq!(store.lock().unwrap().list_projects().unwrap().len(), 1);
+        });
+    }
+
+    #[test]
+    fn ensure_catalog_project_explains_an_origin_already_adopted_elsewhere() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let root = init_repo("adopt-origin-conflict");
+            git(
+                &root,
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/acme/widget.git",
+                ],
+            );
+            let store = Mutex::new(Store::open_in_memory().unwrap());
+            // `acme/widget` is already a fleet project at a different path,
+            // so `add_project` refuses to adopt this checkout as a second
+            // row for the same origin (`E_EXISTS`).
+            store
+                .lock()
+                .unwrap()
+                .upsert_project("acme", "widget", "/somewhere/else")
+                .unwrap();
+            let ssh = Arc::new(SshClient::new());
+            let reg = CancellationRegistry::new();
+            let repo_path = root.to_string_lossy().into_owned();
+
+            let err = ensure_catalog_project(&store, &ssh, &reg, &repo_path)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, codes::E_EXISTS);
+            assert!(
+                err.message
+                    .starts_with(&format!("catalog repo {repo_path} could not be adopted")),
+                "{}",
+                err.message
+            );
+            assert!(err.message.contains("acme/widget"), "{}", err.message);
+            assert!(
+                err.message
+                    .ends_with("add the catalog folder as a project first"),
+                "{}",
+                err.message
+            );
         });
     }
 }

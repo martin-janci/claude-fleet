@@ -468,10 +468,10 @@ impl Asset {
                     out.push(format!("event '{event}' must be one of {EVENTS:?}"));
                 }
                 match action.kind.as_str() {
-                    "command" if action.command.is_none() => {
+                    "command" if is_blank(&action.command) => {
                         out.push("action.command is required for type command".into())
                     }
-                    "http" if action.url.is_none() => {
+                    "http" if is_blank(&action.url) => {
                         out.push("action.url is required for type http".into())
                     }
                     "command" | "http" => {}
@@ -484,8 +484,8 @@ impl Asset {
                 command,
                 ..
             } => match transport.as_str() {
-                "http" if url.is_none() => out.push("url is required for transport http".into()),
-                "stdio" if command.is_none() => {
+                "http" if is_blank(url) => out.push("url is required for transport http".into()),
+                "stdio" if is_blank(command) => {
                     out.push("command is required for transport stdio".into())
                 }
                 "http" | "stdio" => {}
@@ -506,6 +506,12 @@ impl Asset {
         }
         out
     }
+}
+
+/// `None` counts as missing, and so does a `Some` value that is empty or
+/// whitespace-only.
+fn is_blank(value: &Option<String>) -> bool {
+    value.as_deref().is_none_or(|s| s.trim().is_empty())
 }
 
 pub fn is_valid_name(name: &str) -> bool {
@@ -730,6 +736,122 @@ version: "6.3.0"
 
         let tagged = Asset::from_yaml(None, SKILL_YAML).unwrap();
         assert!(tagged.to_yaml().contains("tags"));
+    }
+
+    #[test]
+    fn blank_hook_action_command_counts_as_missing() {
+        let hook = Asset::from_yaml(
+            None,
+            "kind: hook\nname: x\ndescription: d\nevent: before_tool\naction: { type: command, command: \"\" }\n",
+        )
+        .unwrap();
+        let problems = hook.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p == "action.command is required for type command"),
+            "{problems:?}"
+        );
+
+        let hook = Asset::from_yaml(
+            None,
+            "kind: hook\nname: x\ndescription: d\nevent: before_tool\naction: { type: command, command: \"   \" }\n",
+        )
+        .unwrap();
+        let problems = hook.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p == "action.command is required for type command"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn blank_hook_action_url_counts_as_missing() {
+        let hook = Asset::from_yaml(
+            None,
+            "kind: hook\nname: x\ndescription: d\nevent: before_tool\naction: { type: http, url: \"\" }\n",
+        )
+        .unwrap();
+        let problems = hook.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p == "action.url is required for type http"),
+            "{problems:?}"
+        );
+
+        let hook = Asset::from_yaml(
+            None,
+            "kind: hook\nname: x\ndescription: d\nevent: before_tool\naction: { type: http, url: \"   \" }\n",
+        )
+        .unwrap();
+        let problems = hook.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p == "action.url is required for type http"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn blank_mcp_url_counts_as_missing() {
+        let mcp = Asset::from_yaml(
+            None,
+            "kind: mcp_server\nname: x\ndescription: d\ntransport: http\nurl: \"\"\n",
+        )
+        .unwrap();
+        let problems = mcp.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p == "url is required for transport http"),
+            "{problems:?}"
+        );
+
+        let mcp = Asset::from_yaml(
+            None,
+            "kind: mcp_server\nname: x\ndescription: d\ntransport: http\nurl: \"   \"\n",
+        )
+        .unwrap();
+        let problems = mcp.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p == "url is required for transport http"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn blank_mcp_command_counts_as_missing() {
+        let mcp = Asset::from_yaml(
+            None,
+            "kind: mcp_server\nname: x\ndescription: d\ntransport: stdio\ncommand: \"\"\n",
+        )
+        .unwrap();
+        let problems = mcp.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p == "command is required for transport stdio"),
+            "{problems:?}"
+        );
+
+        let mcp = Asset::from_yaml(
+            None,
+            "kind: mcp_server\nname: x\ndescription: d\ntransport: stdio\ncommand: \"   \"\n",
+        )
+        .unwrap();
+        let problems = mcp.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p == "command is required for transport stdio"),
+            "{problems:?}"
+        );
     }
 
     #[test]

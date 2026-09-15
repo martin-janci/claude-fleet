@@ -162,6 +162,19 @@ pub async fn plan_sync(
         let s = store.lock().map_err(|_| IpcError::lock())?;
         s.list_hosts()?
     };
+    // An unknown alias must fail loudly rather than silently plan nothing: a
+    // typo'd `host_alias` would otherwise come back as an empty-but-valid
+    // plan, indistinguishable from "the fleet has nothing to sync here". A
+    // hidden host still counts as existing (it is filtered out below, same
+    // as today) — only an alias no row has at all is rejected.
+    if let Some(alias) = args.host_alias.as_deref() {
+        if !hosts.iter().any(|h| h.alias == alias) {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                format!("host {alias} not found"),
+            ));
+        }
+    }
     let filter = PlanFilter {
         host_alias: args.host_alias.clone(),
         kind: args.kind,
@@ -616,6 +629,84 @@ mod tests {
         assert!(
             plan::registry_take(&plan.id).is_none(),
             "a plan is applied at most once"
+        );
+    }
+
+    /// A `host_alias` no host row has must fail loudly (`E_NOTFOUND`) instead
+    /// of silently returning an empty plan.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn plan_sync_rejects_an_unknown_host_alias() {
+        let _lock = super::super::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        let repo_dir = tempfile::tempdir().unwrap();
+        let files = one_skill("b\n");
+        load_catalog(
+            repo_dir.path(),
+            &files
+                .iter()
+                .map(|(a, b)| (*a, b.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        let ssh = Arc::new(SshClient::new());
+
+        let err = plan_sync(
+            PlanArgs {
+                host_alias: Some("bogus".into()),
+                ..Default::default()
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
+        assert!(err.message.contains("bogus"), "{}", err.message);
+    }
+
+    /// A `host_alias` that DOES name a host still plans normally — the
+    /// existence check must not disturb the happy path.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn plan_sync_with_a_known_host_alias_is_unchanged() {
+        let _lock = super::super::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        let repo_dir = tempfile::tempdir().unwrap();
+        let files = one_skill("b\n");
+        load_catalog(
+            repo_dir.path(),
+            &files
+                .iter()
+                .map(|(a, b)| (*a, b.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        let ssh = Arc::new(SshClient::new());
+
+        let plan = plan_sync(
+            PlanArgs {
+                host_alias: Some("local".into()),
+                ..Default::default()
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .unwrap();
+        assert_eq!(plan.hosts.len(), 2, "{:?}", plan.hosts);
+        assert!(
+            plan.hosts.iter().all(|h| h.host_alias == "local"),
+            "{:?}",
+            plan.hosts
         );
     }
 
