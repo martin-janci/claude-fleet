@@ -282,6 +282,30 @@ describe('TerminalView PTY death detection (F11/N8)', () => {
     expect(screen.queryByTestId('terminal-reconnect-banner')).toBeNull();
   });
 
+  it('re-attaches instead of rendering a stream the backend had to truncate (F6)', async () => {
+    let overflowed = true;
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_drain') {
+        if (overflowed) {
+          overflowed = false;
+          return drained({ overflowed: true, data: 'garbage', bytes: 7 });
+        }
+        return drained();
+      }
+      return null;
+    });
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    await vi.advanceTimersByTimeAsync(40);
+    await settle();
+    expect(calls('pty_close')).toHaveLength(1);
+    expect(calls('pty_open')).toHaveLength(2);
+    // Whatever survived the trim is mid-sequence and mode-desynced: it must
+    // never reach the screen.
+    expect(screen.getByTestId('terminal-host').textContent).not.toContain('garbage');
+  });
+
   it('an out-of-band eof with no bytes left reattaches', async () => {
     let dead = false;
     inv().mockImplementation(async (cmd: string) => {

@@ -439,6 +439,15 @@
       return false;
     }
     if (screen !== drainingInto) return false;
+    // The backend had to throw output away (the un-drained buffer hit its
+    // cap). What is left resumes mid-sequence and has lost the DECSET modes
+    // tmux sends once per attach — alt screen, mouse, bracketed paste, scroll
+    // region — so the Screen can't be repaired from the stream. Drop it and
+    // re-attach: a fresh attach re-sends all of that and redraws.
+    if (result.overflowed) {
+      void openTerm();
+      return false;
+    }
     if (result.bytes > 0) {
       totalBytes += result.bytes;
       try {
