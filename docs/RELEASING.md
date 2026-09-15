@@ -71,12 +71,18 @@ existing draft is reused and its assets replaced.
 this project yet, so `release.yml` deliberately contains no signing step
 (ad-hoc signing would only fake provenance). Until that changes:
 
-- macOS: Gatekeeper blocks the downloaded app on first launch. Right-click the
-  app and choose **Open**, or clear the quarantine flag:
+- macOS: Gatekeeper blocks the downloaded app on first launch with
+  *"claude-fleet.app is damaged and can't be opened"*. Copy the app to
+  `/Applications`, then clear the quarantine flag:
 
   ```bash
-  xattr -d com.apple.quarantine /Applications/claude-fleet.app
+  xattr -dr com.apple.quarantine /Applications/claude-fleet.app
   ```
+
+  Right-click → **Open** and the **Open Anyway** button in System Settings are
+  the bypass for a *signed but un-notarized* app; they are unreliable for an
+  unsigned one, so point users at `xattr`. The user-facing version of this is
+  in the README's *Installing a release build* section.
 
 - Linux: the AppImage and `.deb` are unsigned, which is normal for those
   formats. Mark the AppImage executable (`chmod +x`) before running it.

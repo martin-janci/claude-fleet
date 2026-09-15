@@ -14,6 +14,58 @@ pnpm tauri dev
 
 On first launch the app walks you through setup — see the **[Getting Started guide](docs/getting-started.md)**.
 
+## Installing a release build
+
+Grab the bundle for your platform from the
+[Releases page](https://github.com/martin-janci/claude-fleet/releases) —
+`.dmg` for macOS (`aarch64` for Apple Silicon, `x86_64` for Intel),
+`.AppImage` or `.deb` for Linux.
+
+### macOS — "claude-fleet.app is damaged and can't be opened"
+
+Expect this dialog on first launch. **The app is not damaged.** Release
+bundles are neither code-signed nor notarized — there is no Apple Developer ID
+for this project, so `release.yml` deliberately omits the signing step (ad-hoc
+signing would only fake provenance; see the
+[signing caveat](docs/RELEASING.md#signing-caveat)). Anything you download
+carries the `com.apple.quarantine` flag, Gatekeeper finds no signature to
+check, and macOS reports that as "damaged".
+
+To install:
+
+1. Open the `.dmg` and drag **claude-fleet.app** into `/Applications`.
+2. Clear the quarantine flag:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/claude-fleet.app
+   ```
+
+3. Open the app normally.
+
+Notes:
+
+- Do **not** click *Move to Bin* in the dialog — just Cancel, then run the
+  command above.
+- Right-click → **Open**, and the **Open Anyway** button under System Settings
+  → Privacy & Security, are the workarounds for a *signed but un-notarized*
+  app. They are unreliable here, because the binary carries no Developer ID
+  signature at all. Use `xattr`.
+- Don't reach for `sudo spctl --master-disable` ("Allow apps from: Anywhere").
+  That disables Gatekeeper for every app on the machine; the `xattr` command
+  above affects only this one.
+
+Building from source (see [Development](#development)) sidesteps all of this —
+a locally built `.app` is never quarantined.
+
+### Linux
+
+The `.AppImage` and `.deb` are unsigned, which is normal for those formats.
+Mark the AppImage executable before running it:
+
+```bash
+chmod +x claude-fleet_*.AppImage
+```
+
 ## Features
 
 - **Multi-host** — attach to tmux sessions on any host in `~/.ssh/config`, plus

@@ -25,7 +25,7 @@ The app drives the `claude` CLI and `tmux`, so both must be on your local `PATH`
 
 Once releases are published (see [RELEASING.md](RELEASING.md)), you will be able to download a build from the [releases page](https://github.com/martin-janci/claude-fleet/releases) instead: `.dmg` or `.app.tar.gz` on macOS, `.AppImage` or `.deb` on Linux. Those builds are not code-signed:
 
-- **macOS:** Gatekeeper blocks the first launch. Right-click the app and choose **Open**, or clear the quarantine flag with `xattr -d com.apple.quarantine /Applications/claude-fleet.app`.
+- **macOS:** Gatekeeper blocks the first launch, reporting the app as *"damaged"*. Drag it to `/Applications`, then clear the quarantine flag with `xattr -dr com.apple.quarantine /Applications/claude-fleet.app`. Full instructions — and why right-click → **Open** doesn't help here — are in the README's [Installing a release build](../README.md#installing-a-release-build) section.
 - **Linux:** mark the AppImage executable (`chmod +x`) before running it, or install the `.deb` with `sudo apt install ./claude-fleet_*.deb`.
 
 ### 2. Add one host
