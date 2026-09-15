@@ -70,18 +70,7 @@ async fn run_bash(
     script: &str,
     ssh: &Arc<SshClient>,
 ) -> Result<std::process::Output, IpcError> {
-    if host_alias == "local" {
-        tokio::process::Command::new("bash")
-            .args(["-lc", script])
-            .output()
-            .await
-            .map_err(|e| IpcError::new(codes::E_CLIPBOARD, format!("spawn bash: {e}")))
-    } else {
-        // Quote the whole script so it survives the ssh argv-join + remote
-        // login-shell re-tokenisation (same pattern as `worktree_add_script`).
-        ssh.run(host_alias, &["bash", "-lc", &quote(script)], SSH_TIMEOUT)
-            .await
-    }
+    crate::ssh::run_shell(ssh.as_ref(), host_alias, script, SSH_TIMEOUT).await
 }
 
 fn clipboard_err(stderr: &[u8]) -> IpcError {

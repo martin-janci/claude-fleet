@@ -594,23 +594,14 @@ async fn run_shell(
     host_alias: &str,
     script: &str,
 ) -> Result<std::process::Output, IpcError> {
-    if host_alias == "local" {
-        let child = tokio::process::Command::new("bash")
-            .args(["-lc", script])
-            .output();
-        tokio::time::timeout(READ_WALL_CLOCK, child)
-            .await
-            .map_err(|_| IpcError::new(codes::E_SHELL, "transcript read timed out"))?
-            .map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}")))
-    } else {
-        ssh.run_bounded(
-            host_alias,
-            &["bash", "-lc", &quote(script)],
-            std::time::Duration::from_secs(10),
-            READ_WALL_CLOCK,
-        )
-        .await
-    }
+    crate::ssh::run_shell_bounded(
+        ssh.as_ref(),
+        host_alias,
+        script,
+        std::time::Duration::from_secs(10),
+        READ_WALL_CLOCK,
+    )
+    .await
 }
 
 #[cfg(test)]

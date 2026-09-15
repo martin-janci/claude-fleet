@@ -232,31 +232,17 @@ pub async fn check_missing(
         return Ok(DirCheck::default());
     }
     let script = dir_check_script(targets);
-    let out = if host == "local" {
-        let child = tokio::process::Command::new("bash")
-            .args(["-lc", &script])
-            .kill_on_drop(true)
-            .output();
-        tokio::time::timeout(DIR_CHECK_TIMEOUT, child)
-            .await
-            .map_err(|_| IpcError::new(codes::E_TIMEOUT, "local directory check timed out"))?
-            .map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}")))?
-    } else {
-        let out = ssh
-            .run(host, &["bash", "-lc", &quote(&script)], DIR_CHECK_TIMEOUT)
-            .await?;
-        // `SshExec` contract: an unreachable host is exit 255, not `Err`.
-        if out.status.code() == Some(255) {
-            return Err(IpcError::new(
-                codes::E_SSH,
-                format!(
-                    "ssh {host} failed: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ),
-            ));
-        }
-        out
-    };
+    let out = crate::ssh::run_shell(ssh, host, &script, DIR_CHECK_TIMEOUT).await?;
+    // `SshExec` contract: an unreachable host is exit 255, not `Err`.
+    if host != "local" && out.status.code() == Some(255) {
+        return Err(IpcError::new(
+            codes::E_SSH,
+            format!(
+                "ssh {host} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        ));
+    }
     if !out.status.success() {
         return Err(IpcError::new(
             codes::E_SHELL,

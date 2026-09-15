@@ -106,21 +106,7 @@ pub(crate) async fn run_host_script(
     timeout: std::time::Duration,
 ) -> Result<std::process::Output, IpcError> {
     crate::validate::host_alias(host)?;
-    if host == "local" {
-        let child = tokio::process::Command::new("bash")
-            .args(["-lc", script])
-            .output();
-        match tokio::time::timeout(timeout, child).await {
-            Ok(res) => res.map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}"))),
-            Err(_) => Err(IpcError::new(
-                codes::E_TIMEOUT,
-                format!("local script exceeded {}s", timeout.as_secs()),
-            )),
-        }
-    } else {
-        ssh.run(host, &["bash", "-lc", &quote(script)], timeout)
-            .await
-    }
+    crate::ssh::run_shell(ssh.as_ref(), host, script, timeout).await
 }
 
 /// Wall clock for one host's PR probe script (one `gh pr view` per due
