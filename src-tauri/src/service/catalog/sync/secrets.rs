@@ -50,11 +50,59 @@ pub fn resolve(
     Ok(values)
 }
 
-/// A `RenderPlan` with every known `${NAME}` placeholder substituted.
+/// A post-substitution `RenderPlan`: its files' bytes and merges' values now
+/// contain real secret text, so unlike `RenderPlan` this type's `Debug`
+/// impl is hand-written to print only file paths, `file:json/path` strings
+/// for merges, and counts — never bytes or values. It also deliberately
+/// does not derive `Serialize`, so it can't be accidentally sent to the
+/// frontend or logged as JSON either. Access the real plan via `inner`/
+/// `into_inner` only where the caller actually needs to write it to disk.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
+pub struct SecretPlan(RenderPlan);
+
+#[allow(dead_code)]
+impl SecretPlan {
+    pub fn inner(&self) -> &RenderPlan {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> RenderPlan {
+        self.0
+    }
+}
+
+impl From<RenderPlan> for SecretPlan {
+    fn from(plan: RenderPlan) -> Self {
+        SecretPlan(plan)
+    }
+}
+
+impl std::fmt::Debug for SecretPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let file_paths: Vec<&str> = self.0.files.iter().map(|fw| fw.path.as_str()).collect();
+        let merge_paths: Vec<String> = self
+            .0
+            .merges
+            .iter()
+            .map(|m| format!("{}:{}", m.file, m.json_path.join("/")))
+            .collect();
+        f.debug_struct("SecretPlan")
+            .field("files", &file_paths)
+            .field("merges", &merge_paths)
+            .field("placeholders_count", &self.0.placeholders.len())
+            .field("warnings_count", &self.0.warnings.len())
+            .finish()
+    }
+}
+
+/// A `RenderPlan` with every known `${NAME}` placeholder substituted.
+/// `Debug` is hand-written (delegating to `SecretPlan`'s redacted impl) so
+/// that formatting a `Substituted` can never print a secret value.
+#[allow(dead_code)]
+#[derive(Clone, Default, PartialEq)]
 pub struct Substituted {
-    pub plan: RenderPlan,
+    pub plan: SecretPlan,
     /// Names referenced by the plan with no known value; left verbatim as
     /// `${NAME}` in the output.
     pub missing: Vec<String>,
@@ -64,6 +112,17 @@ pub struct Substituted {
     /// Config files whose merge value actually changed as a result of
     /// substitution.
     pub secret_merge_files: BTreeSet<String>,
+}
+
+impl std::fmt::Debug for Substituted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Substituted")
+            .field("plan", &self.plan)
+            .field("missing", &self.missing)
+            .field("secret_files", &self.secret_files)
+            .field("secret_merge_files", &self.secret_merge_files)
+            .finish()
+    }
 }
 
 /// Replace every `${NAME}` this function recognises (see
@@ -213,12 +272,12 @@ pub fn substitute(plan: &RenderPlan, values: &BTreeMap<String, String>) -> Subst
         .collect();
 
     Substituted {
-        plan: RenderPlan {
+        plan: SecretPlan::from(RenderPlan {
             files,
             merges,
             placeholders: plan.placeholders.clone(),
             warnings: plan.warnings.clone(),
-        },
+        }),
         missing,
         secret_files,
         secret_merge_files,
@@ -305,6 +364,7 @@ mod tests {
 
         let skill_md = out
             .plan
+            .inner()
             .files
             .iter()
             .find(|f| f.path.ends_with("SKILL.md"))
@@ -316,7 +376,7 @@ mod tests {
         assert!(out.secret_files.contains("~/.claude/skills/s/SKILL.md"));
         assert!(!out.secret_files.contains("~/.claude/skills/s/unchanged.md"));
 
-        let merged = &out.plan.merges[0].value;
+        let merged = &out.plan.inner().merges[0].value;
         assert_eq!(merged["fleet"]["headers"]["Authorization"], "Bearer sekret");
         assert_eq!(merged["fleet"]["tags"][1], "${MISSING_NAME}");
         assert!(out.secret_merge_files.contains("~/.claude/settings.json"));
@@ -333,7 +393,7 @@ mod tests {
             bytes: bytes.clone(),
         });
         let out = substitute(&plan, &BTreeMap::new());
-        assert_eq!(out.plan.files[0].bytes, bytes);
+        assert_eq!(out.plan.inner().files[0].bytes, bytes);
         assert!(out.secret_files.is_empty());
     }
 
@@ -346,11 +406,74 @@ mod tests {
         });
         let out = substitute(&plan, &BTreeMap::new());
         assert_eq!(
-            std::str::from_utf8(&out.plan.files[0].bytes).unwrap(),
+            std::str::from_utf8(&out.plan.inner().files[0].bytes).unwrap(),
             "literal ${lowercase} and unterminated ${OOPS"
         );
         assert!(out.missing.is_empty());
         assert!(out.secret_files.is_empty());
+    }
+
+    #[test]
+    fn substitute_replaces_adjacent_placeholders() {
+        let mut plan = RenderPlan::default();
+        plan.files.push(FileWrite {
+            path: "~/.claude/skills/s/SKILL.md".into(),
+            bytes: b"${A}${B}!".to_vec(),
+        });
+        let out = substitute(&plan, &values(&[("A", "aa"), ("B", "bb")]));
+        assert_eq!(
+            std::str::from_utf8(&out.plan.inner().files[0].bytes).unwrap(),
+            "aabb!"
+        );
+        assert!(out.missing.is_empty());
+    }
+
+    #[test]
+    fn substitute_handles_a_literal_dollar_prefix() {
+        let mut plan = RenderPlan::default();
+        plan.files.push(FileWrite {
+            path: "~/.claude/skills/s/SKILL.md".into(),
+            bytes: b"$${A} literally".to_vec(),
+        });
+        let out = substitute(&plan, &values(&[("A", "aa")]));
+        assert_eq!(
+            std::str::from_utf8(&out.plan.inner().files[0].bytes).unwrap(),
+            "$aa literally",
+            "the leading '$' is a literal character, not part of the placeholder"
+        );
+        assert!(out.missing.is_empty());
+    }
+
+    #[test]
+    fn debug_of_substituted_never_prints_secret_values() {
+        let mut plan = RenderPlan::default();
+        plan.files.push(FileWrite {
+            path: "~/.claude/skills/s/SKILL.md".into(),
+            bytes: b"token is ${TOKEN}".to_vec(),
+        });
+        plan.merges.push(ConfigMerge {
+            file: "~/.claude/settings.json".into(),
+            json_path: vec!["mcpServers".into(), "fleet".into()],
+            mode: MergeMode::Set,
+            value: json!({"auth": "${TOKEN}"}),
+        });
+
+        let out = substitute(&plan, &values(&[("TOKEN", "sekret-value-123")]));
+        // Sanity: the substitution actually happened.
+        assert_eq!(
+            std::str::from_utf8(&out.plan.inner().files[0].bytes).unwrap(),
+            "token is sekret-value-123"
+        );
+
+        let debug = format!("{out:?}");
+        assert!(
+            !debug.contains("sekret-value-123"),
+            "Debug output must never contain a substituted secret value: {debug}"
+        );
+        assert!(
+            debug.contains("~/.claude/skills/s/SKILL.md"),
+            "Debug output should still name the affected file: {debug}"
+        );
     }
 
     #[test]
