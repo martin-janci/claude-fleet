@@ -533,7 +533,7 @@ pub(super) fn reconcile_write_one_host(
             // each as a synthetic pane-less SessionRow (`kind='external'` for
             // interactive sessions, `kind='bg'` for background jobs) so it
             // appears in `list_sessions`. These rows are exempt from the
-            // tmux-keyed ghost cleanup (`ghost_and_clean_sessions_in_tx`) —
+            // tmux-keyed ghost cleanup (`Store::ghost_and_clean`) —
             // instead they are pruned inside `reconcile_agent_rows` against
             // the current `claude agents --json` result, so dead agents can't
             // accumulate.

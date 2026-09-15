@@ -4,8 +4,8 @@
 use super::*;
 
 /// Translate `HostReconcile::probe_started_at` into the `last_reconciled_at`
-/// cutoff used by `ghost_and_clean_sessions_in_tx`: rows stamped at or after
-/// the probe start are protected, and `0` ("no guard") protects nothing.
+/// cutoff used by [`Store::ghost_and_clean`]: rows stamped at or after the
+/// probe start are protected, and `0` ("no guard") protects nothing.
 fn ghost_cutoff(probe_started_at: i64) -> i64 {
     if probe_started_at <= 0 {
         i64::MAX
@@ -27,8 +27,7 @@ impl Store {
     // The public `update_host_probe` / `upsert_session` /
     // `touch_project_last_session_at` / `delete_sessions_not_in` methods are
     // intentionally left untouched — direct (non-reconcile) callers keep
-    // emitting immediately. Note: `ghost_and_clean_sessions_in_tx` has no
-    // public twin by design — reconcile is the only caller.
+    // emitting immediately.
     //
     // MAINTENANCE: each `*_in_tx` helper deliberately mirrors the SQL of its
     // public twin (same column lists, same upsert ON CONFLICT clause, same
@@ -37,7 +36,11 @@ impl Store {
     // a schema/SQL detail in a public method, change its `_in_tx` twin too.
     // Both paths are test-covered (direct: the `*_emits_*` event tests; tx: the
     // `apply_host_reconcile` rollback + happy-path tests), so a divergence will
-    // surface as a test failure rather than silent corruption.
+    // surface as a test failure rather than silent corruption. The ghost /
+    // reap pass is the exception: `ghost_and_clean` is ONE function shared by
+    // this write-burst (tmux rows, stale-probe guard on) and by the public
+    // `ghost_and_clean_bg_sessions` (pane-less rows, own transaction), so the
+    // two prunes cannot drift apart.
     //
     // `worktree_key` is written by `upsert_session_in_tx` ONLY — the public
     // `upsert_session` intentionally omits it (reconcile is the only path that
@@ -222,90 +225,83 @@ impl Store {
         Ok(())
     }
 
-    /// Phase 1: sessions not in `keep_names` that are currently live (`status !=
+    /// Two-phase ghost-then-reap of the rows `kind_filter` selects on one
+    /// host, keyed on the set of names this pass observed live. Runs only its
+    /// SQL against `tx` and pushes what to announce onto `out`; the caller
+    /// commits and flushes (`apply_host_reconcile` for tmux rows,
+    /// [`Store::ghost_and_clean_bg_sessions`] for pane-less ones).
+    ///
+    /// Phase 1: rows not in `keep_names` that are currently live (`status !=
     /// 'ghost'`) are soft-deleted by setting `status='ghost'` and `lost_at=now`.
-    /// Phase 2: sessions that are already ghost (from a previous cycle) and still
-    /// not in `keep_names` are hard-deleted.
+    /// Phase 2: rows that were already ghost BEFORE this pass and are still
+    /// not in `keep_names` are hard-deleted, together with their
+    /// `session_events` timeline and the messages addressed to them (neither
+    /// table has an FK cascade). The one-cycle grace is what makes a
+    /// transient probe miss recoverable: the row is only ghosted, and the
+    /// next upsert resurrects it.
     ///
-    /// Pane-less rows (`kind IN ('bg','external')`) are EXCLUDED from both
-    /// phases: background (`claude --bg`) agents and interactive Claude
-    /// sessions outside fleet are never tmux sessions, so they can never
-    /// appear in `keep_names`. Ghosting them on every reconcile would be wrong — they're
-    /// surfaced from `claude agents --json`, not from tmux. They get their own
-    /// agents-keyed pruner instead: `ghost_and_clean_bg_sessions`.
+    /// `kind_filter` is [`KIND_TMUX`] or [`KIND_PANE_LESS`]: tmux-backed rows
+    /// and pane-less (`bg` / `external`) rows are pruned by different callers
+    /// against different `keep` sets (the tmux list vs `claude agents
+    /// --json`), so each pruner must leave the other's rows alone.
     ///
-    /// `probe_started_at` (unix secs) guards Phase 1 against a stale probe:
-    /// a row stamped `last_reconciled_at >= probe_started_at` was observed
+    /// `cutoff` (unix secs, see [`ghost_cutoff`]) guards Phase 1 against a
+    /// stale probe: a row stamped `last_reconciled_at >= cutoff` was observed
     /// live by a writer whose probe began after this one's, so its absence
     /// from `keep_names` only means this probe is older than the row (e.g. a
     /// tick that listed tmux just before `new_session` created it). Such rows
     /// are left alone; the next pass, whose probe starts later, judges them.
-    /// `0` disables the guard.
-    fn ghost_and_clean_sessions_in_tx(
+    /// `None` disables the guard (the pane-less pruner has no such race).
+    pub(super) fn ghost_and_clean(
         tx: &rusqlite::Transaction,
         host_alias: &str,
         keep_names: &[String],
         now: i64,
-        probe_started_at: i64,
+        kind_filter: &str,
+        cutoff: Option<i64>,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
+        let not_in = if keep_names.is_empty() {
+            String::new()
+        } else {
+            format!(" AND tmux_name NOT IN ({})", in_clause(keep_names.len()))
+        };
+
         // ── Phase 2 prep: collect already-ghost IDs BEFORE Phase 1 modifies rows
         // so that sessions newly ghosted in Phase 1 are not immediately deleted.
-        let pre_ghost_ids: Vec<i64> = if keep_names.is_empty() {
-            let mut stmt = tx.prepare_cached(
-                "SELECT id FROM sessions WHERE host_alias=?1 AND status='ghost' AND kind NOT IN ('bg','external')",
-            )?;
-            let ids = stmt
-                .query_map(rusqlite::params![host_alias], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ids
-        } else {
+        let pre_ghost_ids: Vec<i64> = {
             let sql = format!(
                 "SELECT id FROM sessions
-                 WHERE host_alias=?1 AND status='ghost' AND kind NOT IN ('bg','external') AND tmux_name NOT IN ({phs})",
-                phs = in_clause(keep_names.len())
+                 WHERE host_alias=?1 AND status='ghost' AND {kind_filter}{not_in}"
             );
             let params = params_then(rusqlite::params![host_alias], keep_names);
-            let mut stmt = tx.prepare(&sql)?;
-            let ids = stmt
+            tx.prepare(&sql)?
                 .query_map(params.as_slice(), |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ids
+                .collect::<rusqlite::Result<Vec<_>>>()?
         };
 
         // ── Phase 1: ghost live sessions not in keep ──────────────────────────
         // Rows reconciled by a NEWER probe than ours are skipped (see doc).
-        let ghost_ids: Vec<i64> = if keep_names.is_empty() {
-            let mut stmt = tx.prepare_cached(
-                "UPDATE sessions SET status='ghost', lost_at=?1
-                 WHERE host_alias=?2 AND status!='ghost' AND kind NOT IN ('bg','external')
-                   AND COALESCE(last_reconciled_at, 0) < ?3
-                 RETURNING id",
-            )?;
-            let ids = stmt
-                .query_map(
-                    rusqlite::params![now, host_alias, ghost_cutoff(probe_started_at)],
-                    |r| r.get(0),
-                )?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ids
-        } else {
+        let ghost_ids: Vec<i64> = {
+            let guard = if cutoff.is_some() {
+                " AND COALESCE(last_reconciled_at, 0) < ?3"
+            } else {
+                ""
+            };
             let sql = format!(
                 "UPDATE sessions SET status='ghost', lost_at=?1
-                 WHERE host_alias=?2 AND status!='ghost' AND kind NOT IN ('bg','external')
-                   AND COALESCE(last_reconciled_at, 0) < ?3 AND tmux_name NOT IN ({phs})
-                 RETURNING id",
-                phs = in_clause(keep_names.len())
+                 WHERE host_alias=?2 AND status!='ghost' AND {kind_filter}{guard}{not_in}
+                 RETURNING id"
             );
-            let cutoff = ghost_cutoff(probe_started_at);
-            let params = params_then(rusqlite::params![now, host_alias, cutoff], keep_names);
-            let mut stmt = tx.prepare(&sql)?;
-            let ids = stmt
+            let head: Vec<&dyn rusqlite::ToSql> = match &cutoff {
+                Some(c) => vec![&now, &host_alias, c],
+                None => vec![&now, &host_alias],
+            };
+            let params = params_then(&head, keep_names);
+            tx.prepare(&sql)?
                 .query_map(params.as_slice(), |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ids
+                .collect::<rusqlite::Result<Vec<_>>>()?
         };
-
         for id in &ghost_ids {
             if let Some(row) = fetch_session_by_id(tx, *id)? {
                 out.push(RowChange::SessionUpdated(row));
@@ -396,13 +392,13 @@ impl Store {
                 for (pid, ts) in project_touch {
                     Self::touch_project_last_session_at_in_tx(tx, pid, ts, &mut out)?;
                 }
-                let now = now_unix();
-                Self::ghost_and_clean_sessions_in_tx(
+                Self::ghost_and_clean(
                     tx,
                     spec.alias,
                     spec.keep,
-                    now,
-                    spec.probe_started_at,
+                    now_unix(),
+                    KIND_TMUX,
+                    Some(ghost_cutoff(spec.probe_started_at)),
                     &mut out,
                 )?;
             }

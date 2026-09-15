@@ -82,6 +82,16 @@ pub fn has_no_pane(kind: &str) -> bool {
     matches!(kind, "bg" | "external")
 }
 
+/// `Store::ghost_and_clean` kind filter: tmux-backed rows, pruned by the
+/// reconcile write-burst against the host's tmux list.
+pub(super) const KIND_TMUX: &str = "kind NOT IN ('bg','external')";
+
+/// `Store::ghost_and_clean` kind filter: pane-less rows ([`has_no_pane`]),
+/// pruned by `Store::ghost_and_clean_bg_sessions` against `claude agents
+/// --json`. They are never tmux sessions, so the tmux-keyed pass must skip
+/// them.
+pub(super) const KIND_PANE_LESS: &str = "kind IN ('bg','external')";
+
 /// `PartialEq` covers every wire field, so `upsert_session_in_tx` can tell a
 /// no-op reconcile pass from a real change before emitting `session:updated`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]

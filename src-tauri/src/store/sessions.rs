@@ -157,12 +157,11 @@ impl Store {
     /// Two-phase cleanup for synthetic `kind IN ('bg','external')` rows on one
     /// host, keyed on the CURRENT `claude agents --json` result (`keep_names`
     /// = the sentinel `bg:<sessionId>` names observed this reconcile pass)
-    /// instead of the tmux `keep` set. Mirrors `ghost_and_clean_sessions_in_tx`:
+    /// instead of the tmux `keep` set. The two-phase ghost-then-reap itself is
+    /// [`Store::ghost_and_clean`], shared with the tmux-keyed reconcile pass;
+    /// this wrapper only owns the transaction and the post-commit emit.
     ///
-    /// Phase 1: live bg rows not in `keep_names` → `status='ghost'`,
-    /// `lost_at=now`. Phase 2: bg rows already ghost BEFORE this pass and still
-    /// absent → hard-deleted, together with their `session_events` (no FK
-    /// cascade exists). The one-cycle grace matters because a failed
+    /// The one-cycle grace matters because a failed
     /// `claude agents` probe is indistinguishable from "no agents" (both come
     /// back as an empty list): a transient miss only ghosts, and
     /// `upsert_bg_session` resurrects the row when the agent reappears.
@@ -177,84 +176,15 @@ impl Store {
     ) -> Result<(), rusqlite::Error> {
         let tx = self.conn.unchecked_transaction()?;
         let mut changes: Vec<RowChange> = Vec::new();
-
-        // Phase 2 prep: already-ghost bg ids, collected BEFORE Phase 1 so rows
-        // ghosted this pass survive one more cycle.
-        let pre_ghost_ids: Vec<i64> = if keep_names.is_empty() {
-            let mut stmt = tx.prepare_cached(
-                "SELECT id FROM sessions WHERE host_alias=?1 AND status='ghost' AND kind IN ('bg','external')",
-            )?;
-            let ids = stmt
-                .query_map(rusqlite::params![host_alias], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ids
-        } else {
-            let sql = format!(
-                "SELECT id FROM sessions
-                 WHERE host_alias=?1 AND status='ghost' AND kind IN ('bg','external') AND tmux_name NOT IN ({phs})",
-                phs = in_clause(keep_names.len())
-            );
-            let params = params_then(rusqlite::params![host_alias], keep_names);
-            let mut stmt = tx.prepare(&sql)?;
-            let ids = stmt
-                .query_map(params.as_slice(), |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ids
-        };
-
-        // Phase 1: ghost live bg rows whose agent vanished from the listing.
-        let ghost_ids: Vec<i64> = if keep_names.is_empty() {
-            let mut stmt = tx.prepare_cached(
-                "UPDATE sessions SET status='ghost', lost_at=?1
-                 WHERE host_alias=?2 AND status!='ghost' AND kind IN ('bg','external')
-                 RETURNING id",
-            )?;
-            let ids = stmt
-                .query_map(rusqlite::params![now, host_alias], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ids
-        } else {
-            let sql = format!(
-                "UPDATE sessions SET status='ghost', lost_at=?1
-                 WHERE host_alias=?2 AND status!='ghost' AND kind IN ('bg','external') AND tmux_name NOT IN ({phs})
-                 RETURNING id",
-                phs = in_clause(keep_names.len())
-            );
-            let params = params_then(rusqlite::params![now, host_alias], keep_names);
-            let mut stmt = tx.prepare(&sql)?;
-            let ids = stmt
-                .query_map(params.as_slice(), |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ids
-        };
-        for id in &ghost_ids {
-            if let Some(row) = fetch_session_by_id(&tx, *id)? {
-                changes.push(RowChange::SessionUpdated(row));
-            }
-        }
-
-        // Phase 2: hard-delete rows that were already ghost, plus their events.
-        if !pre_ghost_ids.is_empty() {
-            let phs = in_clause(pre_ghost_ids.len());
-            tx.execute(
-                &format!("DELETE FROM session_events WHERE session_id IN ({phs})"),
-                rusqlite::params_from_iter(&pre_ghost_ids),
-            )?;
-            // And the messages addressed to them (an inbox nobody can read),
-            // as `delete_session` does.
-            tx.execute(
-                &format!("DELETE FROM session_messages WHERE to_session_id IN ({phs})"),
-                rusqlite::params_from_iter(&pre_ghost_ids),
-            )?;
-            tx.execute(
-                &format!("DELETE FROM sessions WHERE id IN ({phs})"),
-                rusqlite::params_from_iter(&pre_ghost_ids),
-            )?;
-            for id in &pre_ghost_ids {
-                changes.push(RowChange::SessionKilled(*id));
-            }
-        }
-
+        Self::ghost_and_clean(
+            &tx,
+            host_alias,
+            keep_names,
+            now,
+            KIND_PANE_LESS,
+            None,
+            &mut changes,
+        )?;
         tx.commit()?;
         // Emit only after the commit so no event fires for a rolled-back write.
         for change in &changes {
