@@ -5,12 +5,26 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::State;
 
 /// Hard cap on the un-drained PTY byte buffer (1 MiB). The frontend normally
 /// drains every 30-250 ms; this only bites if it stops entirely.
 const PTY_BUFFER_CAP: usize = 1 << 20;
+
+/// How many un-written input chunks the writer thread may queue. One chunk is
+/// a keystroke or a whole paste, so this is generous for a human and still
+/// bounded if the PTY stops accepting input (a wedged `ssh -tt`, a child that
+/// stopped reading: the tty buffer fills after ~20 KB and `write` blocks for
+/// good). Past it, `pty_write` reports `E_PTY_BUSY` instead of blocking.
+const PTY_INPUT_QUEUE: usize = 256;
+
+/// How long `PtyParts::teardown` waits for a killed child before handing it
+/// to a detached reaper thread. SIGKILL is normally instant; a child stuck in
+/// an uninterruptible wait must not stall the caller.
+const PTY_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Smallest PTY the renderer is asked to lay out. A `fit()` result below this
 /// (a not-yet-laid-out pane reporting 0×0) is clamped up so tmux never sees a
@@ -38,7 +52,11 @@ const MIN_ROWS: u16 = 2;
 /// same on-screen latency (~one frame) and no missing-event class of bugs.
 pub struct PtyState {
     master: Option<Box<dyn MasterPty + Send>>,
-    writer: Option<Box<dyn Write + Send>>,
+    /// Input goes to the writer thread through a bounded channel. NOTHING
+    /// that can block may live under this mutex (see CLAUDE.md): a PTY whose
+    /// child stopped reading blocks `write` forever, and holding the lock
+    /// there froze drains, closes and — with sync commands — the whole app.
+    input_tx: Option<SyncSender<Vec<u8>>>,
     child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
     shared: Arc<PtyShared>,
 }
@@ -93,7 +111,7 @@ impl PtyState {
     pub fn new() -> Self {
         Self {
             master: None,
-            writer: None,
+            input_tx: None,
             child: None,
             shared: Arc::new(PtyShared::new()),
         }
@@ -105,24 +123,52 @@ impl PtyState {
         self.master.is_some()
     }
 
-    /// The single-PTY invariant: installing a new attachment ALWAYS closes
-    /// the previous one first (killing its child and dropping its fds), then
-    /// takes ownership of the new handles and the new reader's buffer.
+    /// The single-PTY invariant: installing a new attachment takes ownership
+    /// of the new handles and hands the PREVIOUS ones back, so the caller can
+    /// tear them down (kill, reap, drop fds — all blocking) after releasing
+    /// the state lock.
+    #[must_use = "the previous attachment must be torn down off-lock"]
     fn install(
         &mut self,
         master: Box<dyn MasterPty + Send>,
-        writer: Box<dyn Write + Send>,
+        input_tx: SyncSender<Vec<u8>>,
         child: Box<dyn portable_pty::Child + Send + Sync>,
         shared: Arc<PtyShared>,
-    ) {
-        self.close();
+    ) -> PtyParts {
+        let previous = self.take_parts();
         self.master = Some(master);
-        self.writer = Some(writer);
+        self.input_tx = Some(input_tx);
         self.child = Some(child);
         self.shared = shared;
+        previous
     }
 
-    pub(crate) fn close(&mut self) {
+    /// Detach everything from the state, leaving it closed. Cheap and
+    /// non-blocking: the returned parts do the blocking work.
+    #[must_use = "the attachment must be torn down off-lock"]
+    fn take_parts(&mut self) -> PtyParts {
+        PtyParts {
+            master: self.master.take(),
+            input_tx: self.input_tx.take(),
+            child: self.child.take(),
+            shared: Arc::clone(&self.shared),
+        }
+    }
+}
+
+/// One attachment's handles, taken out of `PtyState` so they can be torn down
+/// with NO lock held.
+struct PtyParts {
+    master: Option<Box<dyn MasterPty + Send>>,
+    input_tx: Option<SyncSender<Vec<u8>>>,
+    child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    shared: Arc<PtyShared>,
+}
+
+impl PtyParts {
+    /// Kill the child, reap it, then drop the fds. Blocking by nature — it
+    /// must never run under `Mutex<PtyState>` or on the main thread.
+    fn teardown(self) {
         // Terminate the child with SIGKILL BEFORE tearing down the pty fds.
         //
         // The child is the local `tmux attach`, or — for a remote host — the
@@ -136,28 +182,83 @@ impl PtyState {
         // bug. SIGKILL gives the child no chance to relay anything; the ssh
         // channel and remote tty then tear down on their own and tmux detaches
         // our client cleanly.
-        if let Some(mut child) = self.child.take() {
+        if let Some(mut child) = self.child {
             match child.process_id() {
-                Some(pid) => {
-                    let _ = std::process::Command::new("kill")
-                        .args(["-KILL", &pid.to_string()])
-                        .status();
-                }
+                // Signal directly: spawning `/bin/kill` is a fork+exec+wait
+                // we would otherwise do on the caller's thread.
+                Some(pid) => unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                },
                 // No pid (already exited / unsupported): fall back to SIGHUP.
                 None => {
                     let _ = child.kill();
                 }
             }
-            let _ = child.wait();
+            reap(child);
         }
         // Now the child is gone, drop our fds and let the reader thread observe
-        // EOF. Clear the buffer so a subsequent open delivers no stale bytes.
-        self.writer.take();
-        self.master.take();
+        // EOF. Dropping the sender ends the writer thread, which drops the
+        // writer — so portable-pty's blocking EOF write happens THERE, after
+        // the child is dead, not here. Clear the buffer so a subsequent open
+        // delivers no stale bytes.
+        drop(self.input_tx);
+        drop(self.master);
         if let Ok(mut b) = self.shared.buffer.lock() {
             *b = PtyBuffer::default();
         }
     }
+}
+
+/// Reap a killed child, bounded by `PTY_REAP_TIMEOUT`. A child that has not
+/// exited by then (uninterruptible wait) is handed to a detached thread so
+/// the caller never waits on it — the alternative is a frozen UI.
+fn reap(mut child: Box<dyn portable_pty::Child + Send + Sync>) {
+    let deadline = Instant::now() + PTY_REAP_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => {}
+        }
+        if Instant::now() >= deadline {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Close the current attachment: detach it under the lock, tear it down
+/// after releasing it.
+pub(crate) fn close_pty(state: &Mutex<PtyState>) {
+    let parts = match state.lock() {
+        Ok(mut s) => s.take_parts(),
+        // Poisoned: nothing safe to take, and the handles are dropped with
+        // the state at exit.
+        Err(_) => return,
+    };
+    parts.teardown();
+}
+
+/// Own the PTY's writer on a dedicated thread, fed by a bounded channel.
+/// `pty_write` only hands a chunk over, so a `write` that blocks — a paste
+/// into a session whose child stopped reading fills the tty buffer after
+/// ~20 KB and then blocks forever — can no longer stall the IPC thread or
+/// hold `Mutex<PtyState>` against drains and closes.
+fn spawn_writer(mut writer: Box<dyn Write + Send>, shared: Arc<PtyShared>) -> SyncSender<Vec<u8>> {
+    let (tx, rx) = sync_channel::<Vec<u8>>(PTY_INPUT_QUEUE);
+    std::thread::spawn(move || {
+        while let Ok(chunk) = rx.recv() {
+            if let Err(e) = writer.write_all(&chunk).and_then(|_| writer.flush()) {
+                shared.note(&format!("\r\n\x1b[31m[cf] writer error: {e}\x1b[0m\r\n"));
+                break;
+            }
+        }
+        // Dropping `rx` here disconnects the sender, so the next `pty_write`
+        // reports E_PTY_CLOSED instead of queueing into a dead thread.
+    });
+    tx
 }
 
 // ---- Pure building blocks (unit-tested below) ----
@@ -342,7 +443,7 @@ pub struct PtyOpenArgs {
     pub rows: u16,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pty_open(
     args: PtyOpenArgs,
     state: State<'_, Mutex<PtyState>>,
@@ -389,12 +490,15 @@ pub fn pty_open(
     // bytes from the old session can never bleed into the new screen. The
     // old buffer is orphaned and freed once that thread observes EOF.
     let shared = Arc::new(PtyShared::new());
-    {
+    let input_tx = spawn_writer(writer, Arc::clone(&shared));
+    let previous = {
         let mut s = state
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
-        s.install(pair.master, writer, child, Arc::clone(&shared));
-    }
+        s.install(pair.master, input_tx, child, Arc::clone(&shared))
+    };
+    // Kill and reap the attachment we just replaced with the lock released.
+    previous.teardown();
 
     shared.note(&attach_banner(&args.session_name, &args.host_alias));
 
@@ -450,7 +554,7 @@ pub struct PtyDrainResult {
     pub overflowed: bool,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pty_drain(state: State<'_, Mutex<PtyState>>) -> Result<PtyDrainResult, IpcError> {
     drain_from(&state)
 }
@@ -503,28 +607,36 @@ pub struct PtyWriteArgs {
     pub data: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pty_write(args: PtyWriteArgs, state: State<'_, Mutex<PtyState>>) -> Result<(), IpcError> {
     write_to(&state, &args.data)
 }
 
-/// Transport-agnostic body of `pty_write`: `E_PTY_CLOSED` when nothing is
-/// attached, otherwise the bytes are written and flushed to the master.
+/// Transport-agnostic body of `pty_write`. Hands the bytes to the writer
+/// thread and returns immediately: `E_PTY_CLOSED` when nothing is attached
+/// (or the writer thread died on an I/O error), `E_PTY_BUSY` when the input
+/// queue is full — the PTY is not draining our input, and blocking here
+/// would freeze the terminal instead of just this keystroke.
 fn write_to(state: &Mutex<PtyState>, data: &str) -> Result<(), IpcError> {
-    let mut s = state
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
-    let writer = s
-        .writer
-        .as_mut()
-        .ok_or_else(|| IpcError::new("E_PTY_CLOSED", "no PTY open"))?;
-    writer
-        .write_all(data.as_bytes())
-        .map_err(|e| IpcError::new("E_PTY", format!("write: {e}")))?;
-    writer
-        .flush()
-        .map_err(|e| IpcError::new("E_PTY", format!("flush: {e}")))?;
-    Ok(())
+    let tx = {
+        let s = state
+            .lock()
+            .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
+        s.input_tx
+            .as_ref()
+            .ok_or_else(|| IpcError::new("E_PTY_CLOSED", "no PTY open"))?
+            .clone()
+    };
+    match tx.try_send(data.as_bytes().to_vec()) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(_)) => Err(IpcError::new(
+            "E_PTY_BUSY",
+            "terminal is not accepting input",
+        )),
+        Err(TrySendError::Disconnected(_)) => {
+            Err(IpcError::new("E_PTY_CLOSED", "PTY input closed"))
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -533,7 +645,7 @@ pub struct PtyResizeArgs {
     pub rows: u16,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pty_resize(args: PtyResizeArgs, state: State<'_, Mutex<PtyState>>) -> Result<(), IpcError> {
     resize_in(&state, args.cols, args.rows)
 }
@@ -554,12 +666,9 @@ fn resize_in(state: &Mutex<PtyState>, cols: u16, rows: u16) -> Result<(), IpcErr
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pty_close(state: State<'_, Mutex<PtyState>>) -> Result<(), IpcError> {
-    let mut s = state
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
-    s.close();
+    close_pty(&state);
     Ok(())
 }
 
@@ -607,7 +716,11 @@ mod tests {
         // tmux a larger grid than the Screen holds: output wraps and scrolls
         // for the wrong geometry and the top rows (status line included) are
         // never rendered.
-        assert_eq!((MIN_COLS, MIN_ROWS), (10, 2), "must match computeDimensions");
+        assert_eq!(
+            (MIN_COLS, MIN_ROWS),
+            (10, 2),
+            "must match computeDimensions"
+        );
         let smallest = clamp_size(10, 2);
         assert_eq!((smallest.cols, smallest.rows), (10, 2));
     }
@@ -946,9 +1059,88 @@ mod tests {
         assert!(!state.lock().unwrap().is_open());
         assert_eq!(write_to(&state, "x").unwrap_err().code, "E_PTY_CLOSED");
         assert_eq!(resize_in(&state, 80, 24).unwrap_err().code, "E_PTY_CLOSED");
-        // close() on a never-opened state is a no-op.
-        state.lock().unwrap().close();
+        // Closing a never-opened state is a no-op.
+        close_pty(&state);
         assert!(!state.lock().unwrap().is_open());
+    }
+
+    /// A writer that blocks inside `write` until the test releases it — what
+    /// a PTY does once its child stops reading and the tty buffer is full.
+    struct BlockedSink(std::sync::mpsc::Receiver<()>);
+
+    impl Write for BlockedSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            // Returns as soon as the test drops the sender.
+            let _ = self.0.recv();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A writer that fails every write, like a master whose child is gone.
+    struct FailingSink;
+
+    impl Write for FailingSink {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "gone"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn input_never_blocks_the_caller_and_reports_e_pty_busy_when_the_queue_fills() {
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let state = Mutex::new(PtyState::new());
+        let shared = shared_of(&state);
+        state.lock().unwrap().input_tx = Some(spawn_writer(Box::new(BlockedSink(blocked)), shared));
+
+        let start = Instant::now();
+        let mut busy = 0usize;
+        for _ in 0..(PTY_INPUT_QUEUE * 2) {
+            if let Err(e) = write_to(&state, "x") {
+                assert_eq!(e.code, "E_PTY_BUSY");
+                busy += 1;
+            }
+        }
+        assert!(busy > 0, "the input queue must be bounded");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "writes must not block on a stuck PTY: {:?}",
+            start.elapsed()
+        );
+        // And the state was never held while the writer was stuck.
+        assert!(state.try_lock().is_ok(), "state lock stays free");
+        drop(release);
+    }
+
+    #[test]
+    fn a_writer_error_closes_the_input_channel_and_says_so_on_screen() {
+        let state = Mutex::new(PtyState::new());
+        let shared = shared_of(&state);
+        state.lock().unwrap().input_tx =
+            Some(spawn_writer(Box::new(FailingSink), Arc::clone(&shared)));
+
+        // The first chunk is queued; the thread then fails and exits, so
+        // every later write reports the PTY closed.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match write_to(&state, "x") {
+                Err(e) if e.code == "E_PTY_CLOSED" => break,
+                _ => {
+                    assert!(Instant::now() < deadline, "writer thread never closed");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+        let buf = shared.buffer.lock().unwrap();
+        assert!(
+            String::from_utf8_lossy(&buf.bytes).contains("[cf] writer error"),
+            "the user is told, as display text"
+        );
     }
 
     /// A live attachment's parts plus the child's pid.
@@ -958,6 +1150,19 @@ mod tests {
         Box<dyn portable_pty::Child + Send + Sync>,
         u32,
     );
+
+    /// `spawn_sleeper` with its writer already on a writer thread.
+    fn install_sleeper(state: &Mutex<PtyState>) -> Option<(u32, Arc<PtyShared>)> {
+        let (master, writer, child, pid) = spawn_sleeper()?;
+        let shared = Arc::new(PtyShared::new());
+        let input_tx = spawn_writer(writer, Arc::clone(&shared));
+        state
+            .lock()
+            .unwrap()
+            .install(master, input_tx, child, Arc::clone(&shared))
+            .teardown();
+        Some((pid, shared))
+    }
 
     /// Open a real PTY running `sleep` and return its parts plus the pid.
     fn spawn_sleeper() -> Option<Sleeper> {
@@ -998,27 +1203,23 @@ mod tests {
 
     #[test]
     fn installing_a_second_pty_kills_the_first_and_close_clears_everything() {
-        let Some((m1, w1, c1, pid1)) = spawn_sleeper() else {
+        let state = Mutex::new(PtyState::new());
+        let Some((pid1, sh1)) = install_sleeper(&state) else {
             return;
         };
         let _guard1 = KillOnDrop(pid1);
-        let state = Mutex::new(PtyState::new());
-        let sh1 = Arc::new(PtyShared::new());
         sh1.note("stale");
-        state.lock().unwrap().install(m1, w1, c1, Arc::clone(&sh1));
         assert!(state.lock().unwrap().is_open());
         assert!(alive(pid1));
         // A live attachment accepts writes and resizes.
         write_to(&state, "hello").unwrap();
         resize_in(&state, 100, 30).unwrap();
 
-        let Some((m2, w2, c2, pid2)) = spawn_sleeper() else {
-            state.lock().unwrap().close();
+        let Some((pid2, _sh2)) = install_sleeper(&state) else {
+            close_pty(&state);
             return;
         };
         let _guard2 = KillOnDrop(pid2);
-        let sh2 = Arc::new(PtyShared::new());
-        state.lock().unwrap().install(m2, w2, c2, Arc::clone(&sh2));
         // Single-PTY invariant: the first child is gone (killed + reaped) and
         // its buffer was cleared; the second is live with its own buffer.
         assert!(!alive(pid1), "first attachment must be killed on re-open");
@@ -1026,9 +1227,29 @@ mod tests {
         assert!(sh1.buffer.lock().unwrap().bytes.is_empty());
         assert!(state.lock().unwrap().is_open());
 
-        state.lock().unwrap().close();
+        close_pty(&state);
         assert!(!alive(pid2));
         assert!(!state.lock().unwrap().is_open());
         assert_eq!(write_to(&state, "x").unwrap_err().code, "E_PTY_CLOSED");
+    }
+
+    #[test]
+    fn the_child_is_killed_and_reaped_with_the_state_lock_released() {
+        let state = Mutex::new(PtyState::new());
+        let Some((pid, _shared)) = install_sleeper(&state) else {
+            return;
+        };
+        let _guard = KillOnDrop(pid);
+        // Detaching is all that happens under the lock...
+        let parts = state.lock().unwrap().take_parts();
+        assert!(alive(pid), "still running: nothing has been killed yet");
+        assert!(
+            state.try_lock().is_ok(),
+            "the state is free while the child is torn down"
+        );
+        assert_eq!(write_to(&state, "x").unwrap_err().code, "E_PTY_CLOSED");
+        // ...the kill + reap happens here, off-lock.
+        parts.teardown();
+        assert!(!alive(pid));
     }
 }
