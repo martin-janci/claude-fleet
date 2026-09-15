@@ -7,10 +7,13 @@
 //! catalog; `secrets` resolves `${NAME}` values (host override > global >
 //! built-ins) and substitutes them into a `RenderPlan`; `plan` consumes both
 //! to decide, per asset and per host, what a sync would actually do, and
-//! parks the result in a short-lived registry for the applier. The applier
-//! itself (Task 6) and the commands that drive it (Task 7) are not
-//! implemented yet, so nothing here is reachable from a non-test build.
+//! parks the result in a short-lived registry for the applier; `apply` then
+//! executes one host's plan — guarded writes, secret uploads, config merges,
+//! plugin CLI calls and the manifest rewrite. The commands that drive it
+//! (Task 7) are not implemented yet, so nothing here is reachable from a
+//! non-test build.
 
+pub mod apply;
 pub mod manifest;
 pub mod plan;
 pub mod secrets;

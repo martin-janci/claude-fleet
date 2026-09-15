@@ -13,6 +13,7 @@ use crate::store::Store;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 const SCAN_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -55,23 +56,73 @@ pub async fn run_host_script(
     host: &str,
     script: &str,
 ) -> Result<String, crate::ipc_error::IpcError> {
-    if host == "local" {
-        let out = tokio::process::Command::new("bash")
-            .args(["-lc", script])
-            .output()
-            .await
-            .map_err(|e| {
-                crate::ipc_error::IpcError::new(codes::E_IO, format!("spawn bash: {e}"))
-            })?;
-        if !out.status.success() {
-            return Err(scan_failed(host, &out));
-        }
-        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+    run_host_script_with(
+        ssh,
+        host,
+        script,
+        SshClient::default_wall_clock(SCAN_TIMEOUT),
+        &CancellationToken::new(),
+    )
+    .await
+}
+
+/// [`run_host_script`] with an explicit wall-clock bound and a cancellation
+/// token. The applier needs both: writing a host's assets legitimately takes
+/// longer than a scan, and a sync the user cancelled must stop between (and
+/// during) its scripts rather than run to completion.
+///
+/// Local: the child is killed when the future is dropped (`kill_on_drop`,
+/// whose reaping tokio's process driver handles) and the timeout is applied
+/// around `output()`, which drains both pipes so a chatty script cannot
+/// deadlock on a full pipe buffer. Remote: straight to
+/// `SshClient::run_bounded_cancellable`, which kills and reaps the ssh child
+/// itself.
+pub async fn run_host_script_with(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    script: &str,
+    wall_clock: Duration,
+    token: &CancellationToken,
+) -> Result<String, crate::ipc_error::IpcError> {
+    if token.is_cancelled() {
+        return Err(crate::ipc_error::IpcError::new(
+            codes::E_CANCELLED,
+            format!("{host}: cancelled"),
+        ));
     }
-    let quoted = quote(script);
-    let out = ssh
-        .run(host, &["bash", "-lc", &quoted], SCAN_TIMEOUT)
-        .await?;
+    let out = if host == "local" {
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.args(["-lc", script]).kill_on_drop(true);
+        tokio::select! {
+            res = tokio::time::timeout(wall_clock, cmd.output()) => match res {
+                Ok(out) => out.map_err(|e| {
+                    crate::ipc_error::IpcError::new(codes::E_IO, format!("spawn bash: {e}"))
+                })?,
+                Err(_) => {
+                    return Err(crate::ipc_error::IpcError::new(
+                        codes::E_TIMEOUT,
+                        format!("{host}: script did not finish within {}s", wall_clock.as_secs()),
+                    ))
+                }
+            },
+            _ = token.cancelled() => {
+                return Err(crate::ipc_error::IpcError::new(
+                    codes::E_CANCELLED,
+                    format!("{host}: cancelled"),
+                ))
+            }
+        }
+    } else {
+        let quoted = quote(script);
+        ssh.run_bounded_cancellable(
+            host,
+            &["bash", "-lc", &quoted],
+            SCAN_TIMEOUT,
+            wall_clock,
+            token.clone(),
+        )
+        .await?
+    };
     if !out.status.success() {
         return Err(scan_failed(host, &out));
     }
@@ -620,6 +671,43 @@ mod tests {
         assert_eq!(err.code, "E_SCAN");
         assert!(err.message.contains("exited 3"), "{}", err.message);
         assert!(err.message.contains("boom"), "{}", err.message);
+    }
+
+    /// A cancelled token stops a host script instead of waiting it out, and
+    /// an over-budget script fails on the wall clock rather than hanging.
+    #[tokio::test]
+    async fn run_host_script_with_honours_cancellation_and_the_wall_clock() {
+        let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
+
+        let token = CancellationToken::new();
+        let waiter = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            waiter.cancel();
+        });
+        let err = run_host_script_with(&ssh, "local", "sleep 30", Duration::from_secs(30), &token)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "E_CANCELLED");
+
+        // An already-cancelled token never spawns anything at all.
+        let dead = CancellationToken::new();
+        dead.cancel();
+        let err = run_host_script_with(&ssh, "local", "echo hi", Duration::from_secs(5), &dead)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "E_CANCELLED");
+
+        let err = run_host_script_with(
+            &ssh,
+            "local",
+            "sleep 30",
+            Duration::from_millis(100),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "E_TIMEOUT");
     }
 
     // `CATALOG_TEST_LOCK` only serialises tests against the process-global
