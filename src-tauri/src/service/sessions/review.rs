@@ -4,15 +4,22 @@ use super::*;
 use crate::ipc_error::codes;
 use crate::ipc_error::lock;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "SpawnReviewParams")]
 pub struct SpawnReviewArgs {
+    /// Id of the session whose work should be reviewed.
     pub source_session_id: i64,
+    /// The review prompt to seed the new review session with.
     pub prompt: String,
     // Reserved for future cancellation wiring. The frontend's
     // invokeCmdAbortable injects a call_id; v1 spawn_review doesn't register a
     // CancellationToken under it (the spawn is short — tmux create + reconcile
     // + ~1.5s seed delay), so an abort is currently a no-op on the backend.
+    // Skipped on both sides so the MCP schema (which takes this struct
+    // directly) never exposes it; a missing `Option` deserialises to `None`.
     #[allow(dead_code)]
+    #[serde(skip)]
+    #[schemars(skip)]
     pub call_id: Option<u64>,
 }
 

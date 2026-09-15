@@ -5,9 +5,12 @@
 //! Every tool calls into the transport-agnostic `service` layer — the exact
 //! same code path the Tauri IPC commands use; neither path is privileged.
 //!
-//! Tool arguments are MCP-specific structs (deriving `JsonSchema` so the AI
-//! sees a typed schema). They deliberately omit the `call_id` cancellation
-//! field the frontend uses — MCP tool calls run to completion.
+//! Tool arguments derive `JsonSchema` so the AI sees a typed schema. Where a
+//! tool's parameters are exactly a `service::*Args` struct it takes that
+//! struct directly; the MCP-specific structs in `params` cover the rest
+//! (optional `session_id` OR host+name addressing, `confirm_nonce` gates,
+//! MCP-side defaults). The frontend's `call_id` cancellation field is never
+//! exposed — MCP tool calls run to completion.
 
 use super::auth::{Caller, TokenMode};
 use super::guard::{self, ConfirmState};

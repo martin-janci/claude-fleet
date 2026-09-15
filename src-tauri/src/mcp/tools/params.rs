@@ -1,38 +1,15 @@
-//! Argument structs for the MCP tools. Each derives `JsonSchema`, so the
-//! client sees a typed schema for every tool.
+//! Argument structs for the MCP tools whose parameters differ from the
+//! `service::*Args` struct they end up calling (optional `session_id` OR
+//! host+name addressing, `confirm_nonce` gates, MCP-side defaults, …). Each
+//! derives `JsonSchema`, so the client sees a typed schema for every tool.
+//!
+//! Tools whose parameters are exactly a service `*Args` struct take that
+//! struct directly (it derives `JsonSchema` with the MCP field docs and
+//! keeps the original `*Params` schema title via `#[schemars(rename)]`).
 
 use super::*;
 
 // --- tool parameter structs ------------------------------------------------
-
-#[derive(serde::Deserialize, schemars::JsonSchema)]
-pub struct AddHostParams {
-    /// claude-fleet alias to register the host under (must be a safe
-    /// identifier — letters, digits, dashes).
-    pub alias: String,
-    /// SSH config alias used to reach the host (from `~/.ssh/config`).
-    pub ssh_alias: String,
-}
-
-#[derive(serde::Deserialize, schemars::JsonSchema)]
-pub struct HostAliasParams {
-    /// The claude-fleet host alias (e.g. "local", "mefistos").
-    pub alias: String,
-}
-
-#[derive(serde::Deserialize, schemars::JsonSchema)]
-pub struct HideHostParams {
-    /// The claude-fleet host alias.
-    pub alias: String,
-    /// `true` to hide the host (skipped during reconcile), `false` to show it.
-    pub hidden: bool,
-}
-
-#[derive(serde::Deserialize, schemars::JsonSchema)]
-pub struct RelatedSessionsParams {
-    /// The session id to find siblings of (same project + worktree).
-    pub session_id: i64,
-}
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct ListSessionsParams {
@@ -176,12 +153,6 @@ pub struct SafeKillSessionParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
-pub struct ListWorktreesParams {
-    /// Restrict to one project; omit for every worktree across the fleet.
-    pub project_id: Option<i64>,
-}
-
-#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct DeleteWorktreeParams {
     /// Worktree row id (from `list_worktrees`).
     pub worktree_id: i64,
@@ -299,14 +270,6 @@ pub struct BroadcastPromptParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
-pub struct SpawnReviewParams {
-    /// Id of the session whose work should be reviewed.
-    pub source_session_id: i64,
-    /// The review prompt to seed the new review session with.
-    pub prompt: String,
-}
-
-#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct CaptureSessionParams {
     /// Fleet session id (from list_sessions).
     pub session_id: i64,
@@ -316,12 +279,6 @@ pub struct CaptureSessionParams {
     /// capture are kept. Default 200; pass 0 for no cap. When the capture is
     /// longer than the cap the result starts with a one-line truncation note.
     pub max_lines: Option<u32>,
-}
-
-#[derive(serde::Deserialize, schemars::JsonSchema)]
-pub struct SessionIdParams {
-    /// Fleet session id (from list_sessions).
-    pub session_id: i64,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -413,15 +370,6 @@ pub struct PeerStatusParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
-pub struct RecreateSessionParams {
-    /// Fleet session id (from list_sessions).
-    pub session_id: i64,
-    /// Recreate even if this is the registered fleet controller. Default false.
-    #[serde(default)]
-    pub force: bool,
-}
-
-#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RegisterSelfParams {
     /// Your fleet session id (from whoami / list_sessions). Alternative to
     /// host_alias + tmux_name.
@@ -450,22 +398,6 @@ pub struct PeekSessionParams {
     /// Host the background session runs on (with `claude_session_id`).
     #[serde(default)]
     pub host_alias: Option<String>,
-}
-
-#[derive(serde::Deserialize, schemars::JsonSchema)]
-pub struct NewBgSessionParams {
-    /// Host alias to launch the background session on.
-    pub host_alias: String,
-    /// Display name for the session (also its tmux/agent name).
-    pub name: String,
-    /// Initial prompt for the headless Claude session.
-    pub prompt: String,
-}
-
-#[derive(serde::Deserialize, schemars::JsonSchema)]
-pub struct HostClipboardParams {
-    /// Host alias whose clipboard to read.
-    pub host_alias: String,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -618,14 +550,6 @@ pub struct SetSessionTagsParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
-pub struct RepoPathParams {
-    /// Fleet session id (from list_sessions).
-    pub session_id: i64,
-    /// Worktree-relative file path.
-    pub path: String,
-}
-
-#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RepoLogParams {
     /// Fleet session id.
     pub session_id: i64,
@@ -635,24 +559,6 @@ pub struct RepoLogParams {
     pub limit: Option<u32>,
     /// Commits to skip (pagination).
     pub skip: Option<u32>,
-}
-
-#[derive(serde::Deserialize, schemars::JsonSchema)]
-pub struct RepoCommitParams {
-    /// Fleet session id.
-    pub session_id: i64,
-    /// Commit hash.
-    pub hash: String,
-}
-
-#[derive(serde::Deserialize, schemars::JsonSchema)]
-pub struct RepoCommitDiffParams {
-    /// Fleet session id.
-    pub session_id: i64,
-    /// Commit hash.
-    pub hash: String,
-    /// Worktree-relative file path.
-    pub path: String,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -696,15 +602,6 @@ pub struct ScanAssetsParams {
     /// Only scan this host alias. Omit to scan every reachable host.
     #[serde(default)]
     pub host_alias: Option<String>,
-}
-
-#[derive(serde::Deserialize, schemars::JsonSchema)]
-pub struct ImportAssetsParams {
-    /// Host to import from. Only `local` (the fleet controller) is supported.
-    pub host_alias: String,
-    /// Report what would be created without writing anything. Default false.
-    #[serde(default)]
-    pub dry_run: bool,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

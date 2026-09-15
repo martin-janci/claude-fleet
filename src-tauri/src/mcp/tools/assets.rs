@@ -40,11 +40,11 @@ impl FleetTools {
         report as JSON.")]
     pub(super) async fn import_assets(
         &self,
-        Parameters(p): Parameters<ImportAssetsParams>,
+        Parameters(args): Parameters<catalog::ImportArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "import_assets",
-            &format!("host_alias={} dry_run={}", p.host_alias, p.dry_run),
+            &format!("host_alias={} dry_run={}", args.host_alias, args.dry_run),
         );
         let token = {
             let s = self
@@ -53,10 +53,6 @@ impl FleetTools {
                 .map_err(|_| mcp_err(codes::E_LOCK, "store mutex poisoned", None))?;
             s.get_setting(crate::mcp::SETTING_TOKEN)
                 .map_err(|e| to_mcp_err(e.into()))?
-        };
-        let args = catalog::ImportArgs {
-            host_alias: p.host_alias,
-            dry_run: p.dry_run,
         };
         let rep = catalog::import_host(args, &self.store, token.as_deref()).map_err(to_mcp_err)?;
         ok_json(&rep)

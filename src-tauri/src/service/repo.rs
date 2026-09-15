@@ -31,9 +31,13 @@ pub const MAX_TREE_ENTRIES: usize = 20_000;
 /// frontend can show a clean "worktree gone" state instead of a raw git error.
 pub const NO_WORKTREE_SENTINEL: &str = "__CF_NO_WORKTREE__";
 
-/// The one-field argument struct shared by every per-session repo call.
-#[derive(Deserialize)]
+// The one-field argument struct shared by every per-session repo call.
+// (A `//` comment, not `///`: a struct-level doc would become the schema's
+// top-level `description` once this is served as an MCP tool parameter.)
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "SessionIdParams")]
 pub struct SessionIdArgs {
+    /// Fleet session id (from list_sessions).
     pub session_id: i64,
 }
 

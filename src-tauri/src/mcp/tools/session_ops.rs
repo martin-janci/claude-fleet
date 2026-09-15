@@ -100,12 +100,12 @@ impl FleetTools {
         sharing the same project and worktree. Returns JSON.")]
     pub(super) async fn related_sessions(
         &self,
-        Parameters(p): Parameters<RelatedSessionsParams>,
+        Parameters(args): Parameters<sessions::RelatedSessionsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        audit("related_sessions", &format!("session_id={}", p.session_id));
-        let args = sessions::RelatedSessionsArgs {
-            session_id: p.session_id,
-        };
+        audit(
+            "related_sessions",
+            &format!("session_id={}", args.session_id),
+        );
         ok_json(&sessions::related_sessions(args, &self.store).map_err(to_mcp_err)?)
     }
 
@@ -354,19 +354,15 @@ impl FleetTools {
         running or ghost sessions. Returns the session row as JSON.")]
     pub(super) async fn recreate_session(
         &self,
-        Parameters(p): Parameters<RecreateSessionParams>,
+        Parameters(args): Parameters<sessions::RecreateSessionArgs>,
     ) -> Result<CallToolResult, McpError> {
-        audit("recreate_session", &format!("session_id={}", p.session_id));
-        let row = sessions::recreate_session(
-            sessions::RecreateSessionArgs {
-                session_id: p.session_id,
-                force: p.force,
-            },
-            &self.store,
-            &self.ssh,
-        )
-        .await
-        .map_err(to_mcp_err)?;
+        audit(
+            "recreate_session",
+            &format!("session_id={}", args.session_id),
+        );
+        let row = sessions::recreate_session(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
         ok_json(&row)
     }
 
@@ -376,20 +372,12 @@ impl FleetTools {
         ghost.")]
     pub(super) async fn dismiss_ghost_session(
         &self,
-        Parameters(p): Parameters<SessionIdParams>,
+        Parameters(args): Parameters<sessions::DismissGhostSessionArgs>,
     ) -> Result<CallToolResult, McpError> {
-        audit(
-            "dismiss_ghost_session",
-            &format!("session_id={}", p.session_id),
-        );
-        sessions::dismiss_ghost_session(
-            sessions::DismissGhostSessionArgs {
-                session_id: p.session_id,
-            },
-            &self.store,
-        )
-        .map_err(to_mcp_err)?;
-        ok_json(&serde_json::json!({ "dismissed": p.session_id }))
+        let session_id = args.session_id;
+        audit("dismiss_ghost_session", &format!("session_id={session_id}"));
+        sessions::dismiss_ghost_session(args, &self.store).map_err(to_mcp_err)?;
+        ok_json(&serde_json::json!({ "dismissed": session_id }))
     }
 
     #[tool(description = "Launch a supervised headless (background) Claude \
@@ -402,24 +390,16 @@ impl FleetTools {
     pub(super) async fn new_bg_session(
         &self,
         Extension(caller): Extension<Caller>,
-        Parameters(p): Parameters<NewBgSessionParams>,
+        Parameters(args): Parameters<crate::service::bg_sessions::NewBgSessionArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "new_bg_session",
-            &format!("host={} name={}", p.host_alias, p.name),
+            &format!("host={} name={}", args.host_alias, args.name),
         );
-        require_host(&caller, &p.host_alias, "the new background session")?;
-        let res = crate::service::bg_sessions::new_bg_session_tracked(
-            crate::service::bg_sessions::NewBgSessionArgs {
-                host_alias: p.host_alias,
-                name: p.name,
-                prompt: p.prompt,
-            },
-            &self.store,
-            &self.ssh,
-        )
-        .await
-        .map_err(to_mcp_err)?;
+        require_host(&caller, &args.host_alias, "the new background session")?;
+        let res = crate::service::bg_sessions::new_bg_session_tracked(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
         ok_json(&res)
     }
 

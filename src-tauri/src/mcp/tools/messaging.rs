@@ -205,20 +205,13 @@ impl FleetTools {
             ),
         );
         if !caller.is_master() {
-            let host = {
-                let s = lock(&self.store).map_err(to_mcp_err)?;
-                s.get_session_by_id(p.session_id)
-                    .map_err(|e| to_mcp_err(IpcError::from(e)))?
-                    .ok_or_else(|| {
-                        mcp_err(
-                            "E_NOTFOUND",
-                            format!("session {} not found", p.session_id),
-                            None,
-                        )
-                    })?
-                    .host_alias
-            };
-            require_host(&caller, &host, "the inbox's session")?;
+            self.resolve_target_row(
+                &caller,
+                Some(p.session_id),
+                None,
+                None,
+                "the inbox's session",
+            )?;
         }
         let limit = p.limit.unwrap_or(50);
         let msgs = crate::service::messages::list_inbox(

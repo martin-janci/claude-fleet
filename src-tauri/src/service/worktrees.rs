@@ -26,9 +26,10 @@ pub struct WorktreeOccupant {
     pub tmux_name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "ListWorktreesParams")]
 pub struct ListWorktreesArgs {
-    /// Filter to one project; omit for all projects across the fleet.
+    /// Restrict to one project; omit for every worktree across the fleet.
     pub project_id: Option<i64>,
 }
 
