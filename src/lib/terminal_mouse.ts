@@ -36,6 +36,10 @@ export function createMouseController(host: MouseHost) {
    *  hold the *expanded* endpoints, so the raw anchor is kept here. */
   let selectMode: SelectMode = 'cell';
   let selectAnchor: CellPos | null = null;
+  /** The raw cell the pointer last selected to. A cell-mode gesture is
+   *  empty when it never left `selectAnchor` — the expanded endpoints can't
+   *  tell, since a press on a wide glyph snaps to both of its cells. */
+  let selectFocus: CellPos | null = null;
 
   // ─── Mouse forwarding state ───────────────────────────────────────────
   /** Which button (0/1/2, encoded as cb) is currently pressed. Null = none. */
@@ -82,6 +86,7 @@ export function createMouseController(host: MouseHost) {
   function applySelection(focus: CellPos) {
     const screen = host.screen();
     if (!selectAnchor || !screen) return;
+    selectFocus = focus;
     const { start, end } = expandSelection(selectMode, selectAnchor, focus, screen.cells, host.lastCols());
     host.setSelAnchor(start);
     host.setSelFocus(end);
@@ -109,11 +114,10 @@ export function createMouseController(host: MouseHost) {
       if (!selecting) return;
       selecting = false;
       removeWindowListeners?.();
-      const selAnchor = host.selAnchor();
-      const selFocus = host.selFocus();
-      const nonEmpty =
-        selAnchor && selFocus &&
-        (mode !== 'cell' || selAnchor.row !== selFocus.row || selAnchor.col !== selFocus.col);
+      const moved =
+        selectAnchor !== null && selectFocus !== null &&
+        (selectAnchor.row !== selectFocus.row || selectAnchor.col !== selectFocus.col);
+      const nonEmpty = host.selAnchor() && host.selFocus() && (mode !== 'cell' || moved);
       if (nonEmpty) {
         if (get(copyOnSelect)) void host.copySelection();
       } else {
@@ -289,6 +293,7 @@ export function createMouseController(host: MouseHost) {
   function reset() {
     selecting = false;
     selectAnchor = null;
+    selectFocus = null;
     pendingPress = null;
   }
 

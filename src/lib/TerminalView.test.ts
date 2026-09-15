@@ -19,6 +19,7 @@ import { sessions, resetTombstonesForTests, type SessionRow } from './sessions';
 import { selectSession, clearSelection } from './selection';
 import { toasts, clearToasts } from './toasts';
 import { get } from 'svelte/store';
+import { copyOnSelect } from './prefs';
 
 function makeSession(over: Partial<SessionRow>): SessionRow {
   return {
@@ -456,6 +457,37 @@ describe('TerminalView selection like a text input', () => {
     window.dispatchEvent(mouse('mouseup', { clientX: xOf(2), clientY: yOf(0) }));
     await settle();
     expect(selectionRectsPx()).toEqual([{ left: 4, width: 4 * CW, top: 4 }]);
+  });
+
+  it('a plain click on either half of a wide glyph clears the selection and copies nothing', async () => {
+    // The highlight snaps a press on a wide glyph to both of its cells, so
+    // emptiness has to come from the gesture, not the snapped endpoints.
+    const prev = get(copyOnSelect);
+    copyOnSelect.set(true);
+    try {
+      const host = await mountWith('ab中cd');
+      for (const col of [2, 3]) {
+        host.dispatchEvent(mouse('mousedown', { detail: 2, clientX: xOf(4), clientY: yOf(0) }));
+        window.dispatchEvent(mouse('mouseup', { clientX: xOf(4), clientY: yOf(0) }));
+        await settle();
+        expect(selectionRectsPx()).toHaveLength(1);
+        clipboardWriteText.mockClear();
+        host.dispatchEvent(mouse('mousedown', { detail: 1, clientX: xOf(col), clientY: yOf(0) }));
+        window.dispatchEvent(mouse('mouseup', { clientX: xOf(col), clientY: yOf(0) }));
+        await settle();
+        expect(selectionRectsPx()).toHaveLength(0);
+        expect(clipboardWriteText).not.toHaveBeenCalled();
+      }
+      // A drag that ends on the glyph still copies it whole.
+      host.dispatchEvent(mouse('mousedown', { detail: 1, clientX: xOf(0), clientY: yOf(0) }));
+      window.dispatchEvent(mouse('mousemove', { clientX: xOf(2), clientY: yOf(0) }));
+      window.dispatchEvent(mouse('mouseup', { clientX: xOf(2), clientY: yOf(0) }));
+      await settle();
+      expect(selectionRectsPx()).toEqual([{ left: 4, width: 4 * CW, top: 4 }]);
+      expect(clipboardWriteText).toHaveBeenCalledWith('ab中');
+    } finally {
+      copyOnSelect.set(prev);
+    }
   });
 });
 
