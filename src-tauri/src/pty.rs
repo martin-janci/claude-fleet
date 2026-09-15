@@ -14,8 +14,14 @@ const PTY_BUFFER_CAP: usize = 1 << 20;
 /// Smallest PTY the renderer is asked to lay out. A `fit()` result below this
 /// (a not-yet-laid-out pane reporting 0×0) is clamped up so tmux never sees a
 /// degenerate size.
-const MIN_COLS: u16 = 40;
-const MIN_ROWS: u16 = 10;
+///
+/// These MUST stay equal to the floor in `computeDimensions`
+/// (src/lib/TerminalView.svelte). Clamping higher than the renderer does not
+/// give the user a bigger terminal — it gives tmux a grid the Screen does not
+/// have, so output wraps, scrolls and positions the cursor for the wrong
+/// geometry and the top rows (tmux status line included) never appear.
+const MIN_COLS: u16 = 10;
+const MIN_ROWS: u16 = 2;
 
 /// One active PTY at a time (we render a single terminal pane). Opening a new
 /// PTY closes the previous one. Holds the master (for resize), a writer (for
@@ -524,6 +530,18 @@ mod tests {
         let big = clamp_size(220, 60);
         assert_eq!((big.cols, big.rows), (220, 60));
         assert_eq!((big.pixel_width, big.pixel_height), (0, 0));
+    }
+
+    #[test]
+    fn clamp_size_leaves_the_renderers_smallest_grid_alone() {
+        // The backend minimum MUST equal `computeDimensions`'s floor in
+        // src/lib/TerminalView.svelte. A bigger floor here silently gives
+        // tmux a larger grid than the Screen holds: output wraps and scrolls
+        // for the wrong geometry and the top rows (status line included) are
+        // never rendered.
+        assert_eq!((MIN_COLS, MIN_ROWS), (10, 2), "must match computeDimensions");
+        let smallest = clamp_size(10, 2);
+        assert_eq!((smallest.cols, smallest.rows), (10, 2));
     }
 
     // ---- argv construction ----
