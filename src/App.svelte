@@ -10,10 +10,10 @@
   import HostsView from './lib/HostsView.svelte';
   import ConversationPanel from './lib/ConversationPanel.svelte';
   import AssetsPanel from './lib/AssetsPanel.svelte';
-  import { loadProjects, bootstrapProjects, applyProjectEvents } from './lib/projects';
-  import { loadSessions, bootstrapSessions, applySessionEvents, sessions, hasNoPane } from './lib/sessions';
-  import { bootstrapHosts, applyHostEvents, hosts, hostFilter } from './lib/hosts';
-  import { bootstrapAccounts, applyAccountEvents, accounts } from './lib/accounts';
+  import { loadProjects, applyProjectEvents } from './lib/projects';
+  import { loadSessions, applySessionEvents, sessions, hasNoPane } from './lib/sessions';
+  import { loadHosts, applyHostEvents, hosts, hostFilter } from './lib/hosts';
+  import { loadAccounts, applyAccountEvents, accounts } from './lib/accounts';
   import { loadTasks, applyTaskEvents } from './lib/tasks';
   import { loadAccountUsage, applyAccountUsageEvents, accountUsage } from './lib/account_usage_store';
   import { footerUsage } from './lib/usage_glance';
@@ -35,7 +35,7 @@
     requestNewSessionOnHost,
     settingsOpen,
   } from './lib/app_views';
-  import { detectMac } from './lib/terminal_keys';
+  import { detectMac, isEditable } from './lib/terminal_keys';
   import { loadSessionUi, saveSessionUi, DEFAULT_UI } from './lib/session_ui';
   import { readPref, writePref } from './lib/prefs';
   import WelcomeDialog from './lib/WelcomeDialog.svelte';
@@ -142,10 +142,10 @@
       push({ kind: 'error', code: 'E_IPC', message: `Health check failed: ${String(e)}` });
     }
     const [pr, sr, hr, ar] = await Promise.all([
-      bootstrapProjects(),
-      bootstrapSessions(),
-      bootstrapHosts(),
-      bootstrapAccounts(),
+      loadProjects(),
+      loadSessions(),
+      loadHosts(),
+      loadAccounts(),
     ]);
     const failures = [
       reportBootstrap('projects', pr),
@@ -400,11 +400,6 @@
     e.stopPropagation();
     if (chord === 'hosts') toggleHosts();
     else settingsOpen.set(true);
-  }
-
-  function isEditable(el: HTMLElement | null): boolean {
-    const tag = el?.tagName;
-    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || !!el?.isContentEditable;
   }
 
   function onKeydown(e: KeyboardEvent) {

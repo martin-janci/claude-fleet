@@ -2,7 +2,7 @@
   import { untrack } from 'svelte';
   import { get } from 'svelte/store';
   import { sessions, sendPrompt, type SessionRow } from './sessions';
-  import { accounts, type AccountRow } from './accounts';
+  import { accounts, accountEmailTier, type AccountRow } from './accounts';
   import Modal from './Modal.svelte';
 
   let {
@@ -77,12 +77,6 @@
     return $accounts.find((a) => a.uuid === s.account_uuid) ?? null;
   }
 
-  function accountText(a: AccountRow | null): string {
-    if (!a) return '—';
-    const email = a.email ?? a.uuid;
-    return a.seat_tier ? `${email} (${a.seat_tier})` : email;
-  }
-
   // Read from displayTargets — not the raw `checked` map — so stale entries
   // from a prior "Show all fleet" toggle can't keep Send enabled when none of
   // the currently-displayed rows are checked.
@@ -135,7 +129,7 @@
                   data-testid="target-checkbox-{t.id}"
                 />
                 <span class="host-badge">[{t.host_alias}]</span>
-                <span class="account">{accountText(accountForRow(t))}</span>
+                <span class="account">{accountEmailTier(accountForRow(t))}</span>
                 <span class="sess-name">{t.tmux_name}</span>
                 {#if t.status !== 'running'}
                   <span class="warn" title="session may not be in claude REPL">⚠</span>

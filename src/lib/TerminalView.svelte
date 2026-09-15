@@ -200,7 +200,7 @@
       });
       if (remote.length > 0) sendPaste(pathsToPasteText(remote));
     } catch (e) {
-      openError = `Upload failed: ${describeError(e)}`;
+      openError = `Upload failed: ${toIpcError(e).message}`;
     } finally {
       uploading = false;
     }
@@ -344,7 +344,7 @@
       currentHost = sess.host_alias;
       ptyOpen = true;
     } catch (e) {
-      openError = `PTY error: ${describeError(e)}`;
+      openError = `PTY error: ${toIpcError(e).message}`;
       opening = false;
       return;
     }
@@ -583,13 +583,6 @@
     clearSelection();
     blinkEpoch++;
     bumpDrain();
-  }
-
-  function describeError(e: unknown): string {
-    if (e && typeof e === 'object' && 'message' in e) {
-      return String((e as { message: unknown }).message);
-    }
-    return String(e);
   }
 
   onDestroy(() => {

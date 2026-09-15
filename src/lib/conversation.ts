@@ -1,3 +1,4 @@
+import { timeAgo } from './session_status';
 import { invokeCmd, type Result } from './result';
 
 export type ConvItem = { kind: 'text'; text: string } | { kind: 'tool'; summary: string };
@@ -46,12 +47,7 @@ export function emptyStateText(code: string | null, hasId: boolean): string | nu
 
 /** Pure relative-time formatter for an ISO timestamp against a reference clock. */
 export function relativeTime(iso: string, nowMs: number): string {
-  const ageSec = Math.floor((nowMs - new Date(iso).getTime()) / 1000);
-  if (ageSec < 60) return 'just now';
-  if (ageSec < 3600) return `${Math.floor(ageSec / 60)}m ago`;
-  if (ageSec < 86400) return `${Math.floor(ageSec / 3600)}h ago`;
-  const days = Math.floor(ageSec / 86400);
-  return `${days}d ago`;
+  return timeAgo(new Date(iso).getTime() / 1000, nowMs);
 }
 
 /** A reply item after folding: prose, or a run of consecutive tool calls. */

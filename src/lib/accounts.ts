@@ -30,16 +30,18 @@ export function accountLabel(a: AccountRow | null | undefined): string {
 
 export const accounts = writable<AccountRow[]>([]);
 
+/** "email (seat_tier)" — the one-line account label used in session
+ *  details and the prompt composer; '—' when there is no account. */
+export function accountEmailTier(a: AccountRow | null): string {
+  if (!a) return '—';
+  const email = a.email ?? a.uuid;
+  return a.seat_tier ? `${email} (${a.seat_tier})` : email;
+}
+
 /** O(1) uuid -> account lookup, derived once per `accounts` change. */
 export const accountByUuid = derived(accounts, ($a) => new Map($a.map((a) => [a.uuid, a])));
 
 export async function loadAccounts(): Promise<Result<AccountRow[]>> {
-  const r = await invokeCmd<AccountRow[]>('list_accounts');
-  if (r.ok) accounts.set(r.value);
-  return r;
-}
-
-export async function bootstrapAccounts(): Promise<Result<AccountRow[]>> {
   const r = await invokeCmd<AccountRow[]>('list_accounts');
   if (r.ok) accounts.set(r.value);
   return r;
@@ -53,7 +55,7 @@ function mergeInto(arr: AccountRow[], row: AccountRow): AccountRow[] {
   return next;
 }
 
-export function mergeAccount(row: AccountRow): void {
+function mergeAccount(row: AccountRow): void {
   accounts.update((arr) => mergeInto(arr, row));
 }
 

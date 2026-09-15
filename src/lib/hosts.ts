@@ -87,12 +87,6 @@ export async function hideHost(
   return r;
 }
 
-export async function bootstrapHosts(): Promise<Result<HostRow[]>> {
-  const r = await invokeCmd<HostRow[]>('list_hosts');
-  if (r.ok) hosts.set(r.value);
-  return r;
-}
-
 // Recently-removed host aliases. `removeHost()` (optimistic) and the
 // `host:removed` event both delete a row; a `host:probed` event still in
 // flight for that alias would otherwise re-insert the dead host. Entries
@@ -131,12 +125,12 @@ function removeFrom(arr: HostRow[], alias: string): HostRow[] {
   return next.length === arr.length ? arr : next;
 }
 
-export function mergeHost(row: HostRow): void {
+function mergeHost(row: HostRow): void {
   if (isHostTombstoned(row.alias)) return;
   hosts.update((arr) => mergeInto(arr, row));
 }
 
-export function removeHost(alias: string): void {
+function removeHost(alias: string): void {
   hosts.update((arr) => removeFrom(arr, alias));
 }
 

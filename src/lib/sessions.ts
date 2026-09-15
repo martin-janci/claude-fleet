@@ -378,15 +378,6 @@ export async function newSessionAbortable(
   return r;
 }
 
-export async function bootstrapSessions(): Promise<Result<SessionRow[]>> {
-  const r = await invokeCmd<SessionRow[]>('list_sessions');
-  if (r.ok) {
-    sessions.set(r.value);
-    sessionsLoaded.set(true);
-  }
-  return r;
-}
-
 // ─── identity ────────────────────────────────────────────────────────────────
 
 /** The stable identity of a session. `id` is the primary key; the

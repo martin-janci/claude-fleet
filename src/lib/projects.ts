@@ -46,12 +46,6 @@ export async function refreshProjects(): Promise<Result<ProjectTreeRow[]>> {
   return r;
 }
 
-export async function bootstrapProjects(): Promise<Result<ProjectTreeRow[]>> {
-  const r = await invokeCmd<ProjectTreeRow[]>('list_projects');
-  if (r.ok) projects.set(r.value);
-  return r;
-}
-
 export function mergeProject(row: ProjectTreeRow): void {
   projects.update((arr) => {
     const i = arr.findIndex((p) => p.project.id === row.project.id);
@@ -97,7 +91,7 @@ function removeWorktreeRow(arr: ProjectTreeRow[], id: number): ProjectTreeRow[] 
   });
 }
 
-export function removeWorktree(id: number): void {
+function removeWorktree(id: number): void {
   projects.update((arr) => removeWorktreeRow(arr, id));
 }
 

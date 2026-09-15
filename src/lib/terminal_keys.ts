@@ -172,3 +172,11 @@ export function keyToBytes(ev: KeyLike, opts: KeyOpts): string | null {
 
   return key;
 }
+
+/** True when `el` is a text-entry control — a keystroke there belongs to the
+ *  field, not to a global shortcut. */
+export function isEditable(el: HTMLElement | null): boolean {
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+}
