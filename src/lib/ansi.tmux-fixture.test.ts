@@ -54,6 +54,15 @@ describe('Screen replays a tmux 3.6a attach recording', () => {
     expect(paneRows(s)).toEqual(want);
   });
 
+  it('copies the long line tmux left to autowrap as one line, without a newline at the wrap', () => {
+    // tmux repaints the 125-char `long:` line as one run and lets the
+    // terminal wrap it at column 80 (rows 8-9).
+    const s = new Screen(24, 80);
+    s.write(stream);
+    const long = 'long:' + 'abcdefghij'.repeat(12);
+    expect(s.selectionText({ row: 8, col: 0 }, { row: 9, col: 79 })).toBe(long);
+  });
+
   it('matches capture-pane when fed in seeded random 1-64 char chunks', () => {
     for (let seed = 1; seed <= 50; seed++) {
       const rand = prng(seed);

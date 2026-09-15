@@ -195,11 +195,14 @@ describe('ansi.Screen properties', () => {
         for (const chunk of chunks) {
           s.write(chunk);
           expect(s.cells).toHaveLength(rows);
+          // One soft-wrap flag per row, whatever moved the rows.
+          expect(s.wrapped).toHaveLength(rows);
           for (const row of s.cells) checkRow(row, cols);
         }
         // Narrowing/widening must keep the invariant too.
         s.resize(after.rows, after.cols);
         expect(s.cells).toHaveLength(after.rows);
+        expect(s.wrapped).toHaveLength(after.rows);
         for (const row of s.cells) checkRow(row, after.cols);
       }),
       { numRuns: NUM_RUNS },

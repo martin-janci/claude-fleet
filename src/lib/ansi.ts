@@ -150,6 +150,7 @@ function emptyCell(): Cell {
 /** Snapshot of the primary buffer kept while the alt screen is active. */
 interface SavedScreenState {
   cells: Cell[][];
+  wrapped: boolean[];
   cursorRow: number;
   cursorCol: number;
   curFg: number;
@@ -239,6 +240,16 @@ export class Screen {
    *  rebuild into O(changed rows). */
   rowVersion: number[] = [];
   private dirtyClock = 0;
+  /** Per-row soft wrap: `wrapped[r]` is true when row r ended because the
+   *  cursor auto-wrapped off its last column (tmux leaves long lines to the
+   *  terminal's autowrap), so `selectionText` joins it to the next row with
+   *  no newline. Set when the deferred wrap fires; moved with the rows by
+   *  every scroll / IL / DL, kept with the primary buffer across the alt
+   *  screen; cleared by an erase that reaches the last column, RIS, a width
+   *  change, and on a row whose continuation was moved away. A plain write
+   *  into the last column does not clear it — tmux redraws that cell with a
+   *  cursor move and relies on the terminal keeping the wrap. */
+  wrapped: boolean[] = [];
 
   // ─── Mouse mode state (DECSET/DECRST) ────────────────────────────────
   // These track which mouse-reporting modes the host app (tmux) has
@@ -273,6 +284,7 @@ export class Screen {
     this.rows = Math.max(1, rows);
     this.cols = Math.max(1, cols);
     this.cells = makeGrid(this.rows, this.cols);
+    this.wrapped = new Array(this.rows).fill(false);
     this.scrollTop = 0;
     this.scrollBottom = this.rows - 1;
     this.rowVersion = new Array(this.rows);
@@ -320,9 +332,14 @@ export class Screen {
     cols = Math.max(1, cols);
     if (rows === this.rows && cols === this.cols) return;
     this.cells = resizeGrid(this.cells, this.rows, this.cols, rows, cols);
+    // Rows that survive a height change keep their flags; a width change
+    // moves the wrap column, so no row ends in a wrap any more.
+    const keepWraps = cols === this.cols;
+    this.wrapped = resizeWraps(this.wrapped, rows, keepWraps);
     if (this.savedScreen !== null) {
       const saved = this.savedScreen;
       saved.cells = resizeGrid(saved.cells, this.rows, this.cols, rows, cols);
+      saved.wrapped = resizeWraps(saved.wrapped, rows, keepWraps);
       if (saved.cursorRow >= rows) saved.cursorRow = rows - 1;
       if (saved.cursorCol >= cols) saved.cursorCol = cols - 1;
     }
@@ -519,10 +536,12 @@ export class Screen {
       width = 1;
     }
     if (this.cursorCol >= this.cols) {
+      this.wrapped[this.cursorRow] = true;
       this.cursorCol = 0;
       this.lineFeed();
     } else if (width === 2 && this.cursorCol === this.cols - 1) {
       this.blankCell(this.cursorRow, this.cursorCol);
+      this.wrapped[this.cursorRow] = true;
       this.cursorCol = 0;
       this.lineFeed();
     }
@@ -584,6 +603,9 @@ export class Screen {
       // inserting at `scrollBottom` lands the blank on the region's last row.
       this.cells.splice(this.scrollTop, 1);
       this.cells.splice(this.scrollBottom, 0, this.blankRow());
+      this.wrapped.splice(this.scrollTop, 1);
+      this.wrapped.splice(this.scrollBottom, 0, false);
+      this.unwrap(this.scrollTop - 1);
       this.markRows(this.scrollTop, this.scrollBottom);
     } else if (this.cursorRow < this.rows - 1) {
       this.cursorRow++;
@@ -599,6 +621,10 @@ export class Screen {
       // on the region's first row.
       this.cells.splice(this.scrollBottom, 1);
       this.cells.splice(this.scrollTop, 0, this.blankRow());
+      this.wrapped.splice(this.scrollBottom, 1);
+      this.wrapped.splice(this.scrollTop, 0, false);
+      this.unwrap(this.scrollTop - 1);
+      this.unwrap(this.scrollBottom);
       this.markRows(this.scrollTop, this.scrollBottom);
     } else if (this.cursorRow > 0) {
       this.cursorRow--;
@@ -618,6 +644,9 @@ export class Screen {
     this.cells.splice(this.scrollTop, n);
     const blanks = Array.from({ length: n }, () => this.blankRow());
     this.cells.splice(this.scrollBottom - n + 1, 0, ...blanks);
+    this.wrapped.splice(this.scrollTop, n);
+    this.wrapped.splice(this.scrollBottom - n + 1, 0, ...new Array<boolean>(n).fill(false));
+    this.unwrap(this.scrollTop - 1);
     this.markRows(this.scrollTop, this.scrollBottom);
   }
 
@@ -629,7 +658,17 @@ export class Screen {
     this.cells.splice(this.scrollBottom - n + 1, n);
     const blanks = Array.from({ length: n }, () => this.blankRow());
     this.cells.splice(this.scrollTop, 0, ...blanks);
+    this.wrapped.splice(this.scrollBottom - n + 1, n);
+    this.wrapped.splice(this.scrollTop, 0, ...new Array<boolean>(n).fill(false));
+    this.unwrap(this.scrollTop - 1);
+    this.unwrap(this.scrollBottom);
     this.markRows(this.scrollTop, this.scrollBottom);
+  }
+
+  /** Clear row `r`'s soft-wrap flag (no-op outside the screen): the row
+   *  after it is no longer its continuation. */
+  private unwrap(r: number): void {
+    if (r >= 0 && r < this.rows) this.wrapped[r] = false;
   }
 
   /** Bytes of parser state carried between writes (`pending` + a buffered
@@ -795,6 +834,7 @@ export class Screen {
 
   private fullReset(): void {
     this.cells = makeGrid(this.rows, this.cols);
+    this.wrapped = new Array(this.rows).fill(false);
     this.markAll();
     this.cursorRow = 0;
     this.cursorCol = 0;
@@ -1058,6 +1098,7 @@ export class Screen {
     if (this.savedScreen !== null) return;
     this.savedScreen = {
       cells: this.cells,
+      wrapped: this.wrapped,
       cursorRow: this.cursorRow,
       cursorCol: this.cursorCol,
       curFg: this.curFg,
@@ -1072,6 +1113,7 @@ export class Screen {
     // Hand the alt buffer a clean slate and reset transient state. Per
     // xterm: the alt screen starts blank with cursor at home.
     this.cells = makeGrid(this.rows, this.cols);
+    this.wrapped = new Array(this.rows).fill(false);
     this.markAll();
     this.cursorRow = 0;
     this.cursorCol = 0;
@@ -1096,6 +1138,7 @@ export class Screen {
     const saved = this.savedScreen;
     if (saved === null) return;
     this.cells = saved.cells;
+    this.wrapped = saved.wrapped;
     this.markAll();
     this.cursorRow = saved.cursorRow;
     this.cursorCol = saved.cursorCol;
@@ -1120,6 +1163,7 @@ export class Screen {
       for (let c = this.cursorCol; c < this.cols; c++) this.clearCell(this.cursorRow, c);
       for (let r = this.cursorRow + 1; r < this.rows; r++)
         for (let c = 0; c < this.cols; c++) this.clearCell(r, c);
+      for (let r = this.cursorRow; r < this.rows; r++) this.unwrap(r);
     } else if (mode === 1) {
       // From start of screen to cursor (a deferred-wrap cursor sits one past
       // the last column — clamp so the loop stays inside the row).
@@ -1127,21 +1171,28 @@ export class Screen {
         for (let c = 0; c < this.cols; c++) this.clearCell(r, c);
       const to = Math.min(this.cursorCol, this.cols - 1);
       for (let c = 0; c <= to; c++) this.clearCell(this.cursorRow, c);
+      for (let r = 0; r < this.cursorRow; r++) this.unwrap(r);
+      if (to === this.cols - 1) this.unwrap(this.cursorRow);
     } else if (mode === 2 || mode === 3) {
       // Whole screen (3 also clears scrollback in real terms; we have none).
       for (let r = 0; r < this.rows; r++)
         for (let c = 0; c < this.cols; c++) this.clearCell(r, c);
+      this.wrapped.fill(false);
     }
   }
 
   private eraseInLine(mode: number): void {
+    // An erase that reaches the last column ends the row there: not wrapped.
     if (mode === 0) {
       for (let c = this.cursorCol; c < this.cols; c++) this.clearCell(this.cursorRow, c);
+      this.unwrap(this.cursorRow);
     } else if (mode === 1) {
       const to = Math.min(this.cursorCol, this.cols - 1);
       for (let c = 0; c <= to; c++) this.clearCell(this.cursorRow, c);
+      if (to === this.cols - 1) this.unwrap(this.cursorRow);
     } else if (mode === 2) {
       for (let c = 0; c < this.cols; c++) this.clearCell(this.cursorRow, c);
+      this.unwrap(this.cursorRow);
     }
   }
 
@@ -1157,7 +1208,13 @@ export class Screen {
       // the cursor — everything between shifts down by one within the region.
       this.cells.splice(this.scrollBottom, 1);
       this.cells.splice(this.cursorRow, 0, this.blankRow());
+      this.wrapped.splice(this.scrollBottom, 1);
+      this.wrapped.splice(this.cursorRow, 0, false);
     }
+    // The row above lost its continuation, and so did the row now at the
+    // bottom (its old next row fell off the region).
+    this.unwrap(this.cursorRow - 1);
+    this.unwrap(this.scrollBottom);
     this.markRows(this.cursorRow, this.scrollBottom);
   }
 
@@ -1172,7 +1229,10 @@ export class Screen {
       // everything between shifts up by one within the region.
       this.cells.splice(this.cursorRow, 1);
       this.cells.splice(this.scrollBottom, 0, this.blankRow());
+      this.wrapped.splice(this.cursorRow, 1);
+      this.wrapped.splice(this.scrollBottom, 0, false);
     }
+    this.unwrap(this.cursorRow - 1);
     this.markRows(this.cursorRow, this.scrollBottom);
   }
 
@@ -1209,6 +1269,7 @@ export class Screen {
 
   private eraseChars(n: number): void {
     n = Math.min(n, this.cols);
+    if (this.cursorCol < this.cols && this.cursorCol + n >= this.cols) this.unwrap(this.cursorRow);
     for (let i = 0; i < n; i++) {
       const c = this.cursorCol + i;
       if (c >= this.cols) break;
@@ -1369,7 +1430,9 @@ export class Screen {
    *  middle rows are whole lines, the last row runs to its column. Trailing
    *  whitespace is trimmed per line (cells are space-padded to full width).
    *  A wide glyph at either edge is copied whole: a start on its trailing
-   *  half begins at the head, and an end on its head already carries it. */
+   *  half begins at the head, and an end on its head already carries it.
+   *  A soft-wrapped row (`wrapped`) runs straight into the next one: no
+   *  newline, and its trailing spaces are part of the text. */
   selectionText(a: { row: number; col: number }, b: { row: number; col: number }): string {
     // Order the two endpoints in reading order (row, then col).
     const before = a.row < b.row || (a.row === b.row && a.col <= b.col);
@@ -1377,7 +1440,7 @@ export class Screen {
     const end = before ? b : a;
     const r0 = Math.max(0, Math.min(this.rows - 1, start.row));
     const r1 = Math.max(0, Math.min(this.rows - 1, end.row));
-    const out: string[] = [];
+    let out = '';
     for (let r = r0; r <= r1; r++) {
       const colFrom = r === r0 ? start.col : 0;
       const colTo = r === r1 ? end.col : this.cols - 1; // inclusive
@@ -1388,9 +1451,10 @@ export class Screen {
       // A wide glyph's trailing `''` cell contributes nothing — the head
       // already carries the whole glyph.
       for (let c = from; c <= to; c++) line += this.cells[r][c].ch;
-      out.push(line.replace(/[ \t]+$/, ''));
+      if (r < r1 && this.wrapped[r]) out += line;
+      else out += line.replace(/[ \t]+$/, '') + (r < r1 ? '\n' : '');
     }
-    return out.join('\n');
+    return out;
   }
 }
 
@@ -1522,6 +1586,14 @@ function resizeGrid(
     // the head whose trailing cell fell off.
     if (newCols < oldCols && src[r][newCols].ch === '') next[r][newCols - 1].ch = ' ';
   }
+  return next;
+}
+
+/** Resize the per-row wrap flags to `rows`: surviving rows keep theirs when
+ *  `keep`, every other row is unwrapped. */
+function resizeWraps(src: boolean[], rows: number, keep: boolean): boolean[] {
+  const next = new Array<boolean>(rows).fill(false);
+  if (keep) for (let r = 0; r < Math.min(rows, src.length); r++) next[r] = src[r];
   return next;
 }
 

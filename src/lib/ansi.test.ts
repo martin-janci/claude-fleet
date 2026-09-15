@@ -1968,3 +1968,126 @@ describe('Screen.selectionText — wide glyph at a selection edge (N3)', () => {
     expect(s.selectionText({ row: 0, col: 2 }, { row: 1, col: 2 })).toBe('中\n中b');
   });
 });
+
+describe('Screen soft wraps — copied text joins wrapped rows (N2)', () => {
+  const sel = (s: Screen, r0: number, c0: number, r1: number, c1: number) =>
+    s.selectionText({ row: r0, col: c0 }, { row: r1, col: c1 });
+
+  it('a line the terminal wrapped copies back as one line', () => {
+    const s = new Screen(5, 20);
+    s.write('$ https://example.com/a/very/long/path?q=1\r\n');
+    expect(s.wrapped.slice(0, 3)).toEqual([true, true, false]);
+    expect(sel(s, 0, 2, 2, 19)).toBe('https://example.com/a/very/long/path?q=1');
+  });
+
+  it('a wrapped row keeps its trailing spaces', () => {
+    const s = new Screen(3, 5);
+    s.write('ab   cd');
+    expect(sel(s, 0, 0, 1, 4)).toBe('ab   cd');
+  });
+
+  it('a row filled exactly and ended by CR LF is not wrapped', () => {
+    const s = new Screen(3, 5);
+    s.write('abcde\r\nfg');
+    expect(s.wrapped[0]).toBe(false);
+    expect(sel(s, 0, 0, 1, 4)).toBe('abcde\nfg');
+  });
+
+  it('a wide glyph that straddles the edge wraps its row too', () => {
+    const s = new Screen(3, 5);
+    s.write('abcd中x');
+    expect(s.wrapped[0]).toBe(true);
+  });
+
+  it('flags move with rows on LF scroll, SU, RI and SD', () => {
+    const lf = new Screen(3, 5);
+    lf.write('x\r\nabcdefgh\r\n');
+    expect(lf.wrapped).toEqual([true, false, false]);
+    expect(sel(lf, 0, 0, 1, 4)).toBe('abcdefgh');
+    const su = new Screen(3, 5);
+    su.write('x\r\nabcdefgh\x1b[S');
+    expect(su.wrapped).toEqual([true, false, false]);
+    const ri = new Screen(3, 5);
+    ri.write('abcdefgh\x1b[H\x1bM');
+    expect(ri.wrapped).toEqual([false, true, false]);
+    expect(sel(ri, 1, 0, 2, 4)).toBe('abcdefgh');
+    const sd = new Screen(3, 5);
+    sd.write('abcdefgh\x1b[T');
+    expect(sd.wrapped).toEqual([false, true, false]);
+  });
+
+  it('IL / DL move flags, and a row whose continuation moved away is no longer wrapped', () => {
+    const dlHead = new Screen(3, 5);
+    dlHead.write('abcdefgh\x1b[H\x1b[M');
+    expect(dlHead.wrapped).toEqual([false, false, false]);
+    const dlTail = new Screen(3, 5);
+    dlTail.write('abcdefgh\r\nzz\x1b[2H\x1b[M');
+    expect(dlTail.wrapped).toEqual([false, false, false]);
+    expect(sel(dlTail, 0, 0, 1, 4)).toBe('abcde\nzz');
+    const ilHead = new Screen(3, 5);
+    ilHead.write('abcdefgh\x1b[H\x1b[L');
+    expect(ilHead.wrapped).toEqual([false, true, false]);
+    const ilTail = new Screen(3, 5);
+    ilTail.write('abcdefgh\x1b[2H\x1b[L');
+    expect(ilTail.wrapped).toEqual([false, false, false]);
+    expect(sel(ilTail, 0, 0, 2, 4)).toBe('abcde\n\nfgh');
+  });
+
+  it('a scroll region that scrolls a row\'s continuation away clears it', () => {
+    const s = new Screen(3, 5);
+    s.write('abcdefgh\x1b[2;3r\x1b[S');
+    expect(s.wrapped).toEqual([false, false, false]);
+  });
+
+  it('erasing the end of a wrapped row clears it; erasing elsewhere does not', () => {
+    const el = new Screen(3, 5);
+    el.write('abcdefgh\x1b[1;3H\x1b[K');
+    expect(el.wrapped[0]).toBe(false);
+    const el1 = new Screen(3, 5);
+    el1.write('abcdefgh\x1b[1;3H\x1b[1K');
+    expect(el1.wrapped[0]).toBe(true);
+    const ech = new Screen(3, 5);
+    ech.write('abcdefgh\x1b[1;4H\x1b[5X');
+    expect(ech.wrapped[0]).toBe(false);
+    const ed = new Screen(3, 5);
+    ed.write('abcdefghijkl\x1b[2;1H\x1b[J');
+    expect(ed.wrapped).toEqual([true, false, false]);
+    const ed2 = new Screen(3, 5);
+    ed2.write('abcdefgh\x1b[2J');
+    expect(ed2.wrapped).toEqual([false, false, false]);
+    const ed1 = new Screen(3, 5);
+    ed1.write('abcdefghijkl\x1b[2;1H\x1b[1J');
+    expect(ed1.wrapped).toEqual([false, true, false]);
+  });
+
+  it('RIS clears every flag', () => {
+    const s = new Screen(3, 5);
+    s.write('abcdefgh\x1bc');
+    expect(s.wrapped).toEqual([false, false, false]);
+  });
+
+  it('the alt screen starts unwrapped and leaving it restores the primary flags', () => {
+    const s = new Screen(3, 5);
+    s.write('abcdefgh\x1b[?1049h');
+    expect(s.wrapped).toEqual([false, false, false]);
+    s.write('\x1b[3;1Hvwxyz12');
+    // The bottom row wrapped and scrolled up with its flag.
+    expect(s.wrapped).toEqual([false, true, false]);
+    s.write('\x1b[?1049l');
+    expect(s.wrapped).toEqual([true, false, false]);
+    expect(sel(s, 0, 0, 1, 4)).toBe('abcdefgh');
+  });
+
+  it('resize keeps the flags of rows that survive a height change and drops them on a width change', () => {
+    const tall = new Screen(3, 5);
+    tall.write('abcdefgh');
+    tall.resize(5, 5);
+    expect(tall.wrapped).toEqual([true, false, false, false, false]);
+    tall.resize(1, 5);
+    expect(tall.wrapped).toEqual([true]);
+    const wide = new Screen(3, 5);
+    wide.write('abcdefgh');
+    wide.resize(3, 8);
+    expect(wide.wrapped).toEqual([false, false, false]);
+  });
+});
