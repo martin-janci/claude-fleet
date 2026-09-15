@@ -2,9 +2,10 @@
 //! and loading / writing IR assets on disk.
 
 use super::model::{Asset, Kind, Problem, Resource};
-use super::{E_ASSET_EXISTS, E_CATALOG_GIT, E_CATALOG_PARSE};
+use super::{E_ASSET_EXISTS, E_ASSET_NOT_FOUND, E_CATALOG_GIT, E_CATALOG_PARSE};
 use crate::ipc_error::IpcError;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub const SCHEMA_VERSION: u64 = 1;
@@ -87,6 +88,102 @@ pub fn pull(path: &Path) -> Result<(), IpcError> {
 
 pub fn head(path: &Path) -> Result<String, IpcError> {
     git(path, &["rev-parse", "HEAD"])
+}
+
+/// Repo working-tree status: dirty file count plus ahead/behind versus the
+/// upstream (`None` for both when there is no upstream).
+#[derive(Debug, Clone, Serialize)]
+pub struct RepoStatus {
+    pub head: String,
+    pub dirty: usize,
+    pub ahead: Option<u64>,
+    pub behind: Option<u64>,
+    pub has_upstream: bool,
+}
+
+/// Used by author.rs (Task 2): repo status for the toolbar / `status()`.
+#[allow(dead_code)]
+pub fn git_status(root: &Path) -> Result<RepoStatus, IpcError> {
+    let head_sha = head(root)?;
+    let porcelain = git(root, &["status", "--porcelain"])?;
+    let dirty = porcelain.lines().filter(|l| !l.is_empty()).count();
+    let has_upstream = git(root, &["rev-parse", "--abbrev-ref", "@{u}"]).is_ok();
+    let (behind, ahead) = if has_upstream {
+        let out = git(
+            root,
+            &["rev-list", "--left-right", "--count", "@{u}...HEAD"],
+        )?;
+        let mut parts = out.split_whitespace();
+        let behind = parts.next().and_then(|s| s.parse::<u64>().ok());
+        let ahead = parts.next().and_then(|s| s.parse::<u64>().ok());
+        (behind, ahead)
+    } else {
+        (None, None)
+    };
+    Ok(RepoStatus {
+        head: head_sha,
+        dirty,
+        ahead,
+        behind,
+        has_upstream,
+    })
+}
+
+/// Whether the repo has a local git identity configured (`git config
+/// --local user.email` succeeds). Scoped to `--local` so the result does not
+/// depend on the calling host's global `~/.gitconfig`, matching "identity
+/// fallback only when unset in the repo".
+/// Used by author.rs (Task 2) as well as `commit` below.
+#[allow(dead_code)]
+pub fn has_identity(root: &Path) -> bool {
+    git(root, &["config", "--local", "user.email"]).is_ok()
+}
+
+/// `git add -A -- <rel_paths>`, or `git add -A` for the whole tree when
+/// `rel_paths` is empty.
+/// Used by author.rs (Task 2).
+#[allow(dead_code)]
+pub fn stage_paths(root: &Path, rel_paths: &[String]) -> Result<(), IpcError> {
+    if rel_paths.is_empty() {
+        git(root, &["add", "-A"]).map(|_| ())
+    } else {
+        let mut args: Vec<&str> = vec!["add", "-A", "--"];
+        args.extend(rel_paths.iter().map(String::as_str));
+        git(root, &args).map(|_| ())
+    }
+}
+
+/// Commit whatever is currently staged (see `stage_paths`), falling back to
+/// a synthetic identity when the repo has none configured locally. Returns
+/// the new HEAD. `E_CATALOG_GIT` ("nothing to commit") when the working tree
+/// has no changes at all.
+/// Used by author.rs (Task 2).
+#[allow(dead_code)]
+pub fn commit(root: &Path, message: &str) -> Result<String, IpcError> {
+    let porcelain = git(root, &["status", "--porcelain"])?;
+    if porcelain.trim().is_empty() {
+        return Err(IpcError::new(E_CATALOG_GIT, "nothing to commit"));
+    }
+    let mut args: Vec<&str> = Vec::new();
+    if !has_identity(root) {
+        args.extend([
+            "-c",
+            "user.name=claude-fleet",
+            "-c",
+            "user.email=fleet@localhost",
+        ]);
+    }
+    args.extend(["commit", "-q", "-m", message]);
+    git(root, &args)?;
+    head(root)
+}
+
+/// `git push`; requires an existing upstream (git surfaces its own stderr
+/// through the shared `git()` helper on failure).
+/// Used by author.rs (Task 2).
+#[allow(dead_code)]
+pub fn push(root: &Path) -> Result<(), IpcError> {
+    git(root, &["push"]).map(|_| ())
 }
 
 pub fn asset_path(root: &Path, kind: Kind, name: &str) -> PathBuf {
@@ -242,7 +339,9 @@ pub fn load_dir(root: &Path) -> Result<Catalog, IpcError> {
     Ok(cat)
 }
 
-/// Write an asset into the working tree (asset.yaml + body + resources).
+/// Write an asset into the working tree (asset.yaml + body + resources). On
+/// `overwrite`, prunes files under `<dir>/resources/` that are no longer
+/// listed in `asset.resources`, removing directories left empty.
 pub fn write_asset(root: &Path, asset: &Asset, overwrite: bool) -> Result<(), IpcError> {
     let kind = asset.kind();
     let yaml_path = asset_path(root, kind, &asset.header.name);
@@ -268,8 +367,122 @@ pub fn write_asset(root: &Path, asset: &Asset, overwrite: bool) -> Result<(), Ip
             }
             std::fs::write(p, &r.bytes)?;
         }
+        if overwrite {
+            let keep: HashSet<&str> = asset
+                .resources
+                .iter()
+                .map(|r| r.rel_path.as_str())
+                .collect();
+            prune_resources(dir, &keep)?;
+        }
     }
     Ok(())
+}
+
+/// Deletes files under `<dir>/resources/` whose rel_path (relative to `dir`,
+/// e.g. `resources/x.txt`) is not in `keep`, then removes any directory
+/// under `resources/` (`resources/` itself included) left empty. Symlinks
+/// are left untouched (and count as occupying their parent), matching
+/// `read_resources`'s treatment of them.
+fn prune_resources(dir: &Path, keep: &HashSet<&str>) -> std::io::Result<()> {
+    let res = dir.join("resources");
+    if !res.is_dir() {
+        return Ok(());
+    }
+    if prune_dir(&res, dir, keep)? {
+        std::fs::remove_dir(&res)?;
+    }
+    Ok(())
+}
+
+/// Recursively prunes `current`, returning whether it ended up empty (so the
+/// caller can remove it too).
+fn prune_dir(current: &Path, root_dir: &Path, keep: &HashSet<&str>) -> std::io::Result<bool> {
+    let mut is_empty = true;
+    for entry in std::fs::read_dir(current)? {
+        let p = entry?.path();
+        let meta = std::fs::symlink_metadata(&p)?;
+        if meta.file_type().is_symlink() {
+            is_empty = false;
+            continue;
+        }
+        if meta.is_dir() {
+            if prune_dir(&p, root_dir, keep)? {
+                std::fs::remove_dir(&p)?;
+            } else {
+                is_empty = false;
+            }
+        } else if keep.contains(rel(root_dir, &p).as_str()) {
+            is_empty = false;
+        } else {
+            std::fs::remove_file(&p)?;
+        }
+    }
+    Ok(is_empty)
+}
+
+/// Repo-relative directory (folder kinds) or file path (single-file kinds)
+/// for an asset: `"skills/<name>"` or `"hooks/<name>.yaml"`.
+/// Used by author.rs (Task 2).
+#[allow(dead_code)]
+pub fn asset_rel_dir(kind: Kind, name: &str) -> String {
+    if kind.is_folder() {
+        format!("{}/{name}", kind.dir())
+    } else {
+        format!("{}/{name}.yaml", kind.dir())
+    }
+}
+
+/// Deletes an asset's folder (folder kinds) or file (single-file kinds),
+/// returning the repo-relative paths removed. `E_ASSET_NOT_FOUND` when the
+/// asset does not exist on disk.
+/// Used by author.rs (Task 2).
+#[allow(dead_code)]
+pub fn remove_asset(root: &Path, kind: Kind, name: &str) -> Result<Vec<String>, IpcError> {
+    let not_found = || {
+        IpcError::new(
+            E_ASSET_NOT_FOUND,
+            format!("{} {} not found in the catalog", kind.as_str(), name),
+        )
+    };
+    if kind.is_folder() {
+        let dir = root.join(kind.dir()).join(name);
+        if !dir.is_dir() {
+            return Err(not_found());
+        }
+        let removed = list_files_rel(root, &dir)?;
+        std::fs::remove_dir_all(&dir)?;
+        Ok(removed)
+    } else {
+        let path = asset_path(root, kind, name);
+        if !path.is_file() {
+            return Err(not_found());
+        }
+        std::fs::remove_file(&path)?;
+        Ok(vec![rel(root, &path)])
+    }
+}
+
+/// All non-symlink files under `dir`, as paths relative to `root`, sorted.
+fn list_files_rel(root: &Path, dir: &Path) -> std::io::Result<Vec<String>> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d)? {
+            let p = entry?.path();
+            let meta = std::fs::symlink_metadata(&p)?;
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                stack.push(p);
+            } else {
+                out.push(rel(root, &p));
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -507,6 +720,199 @@ mod tests {
             cat.problems.iter().any(|p| p.path.ends_with("hooks")),
             "{:?}",
             cat.problems
+        );
+    }
+
+    fn git_run(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn init_repo(root: &std::path::Path) {
+        git_run(root, &["init", "-q", "-b", "main"]);
+    }
+
+    fn commit_author_email(root: &std::path::Path) -> String {
+        let out = std::process::Command::new("git")
+            .args(["log", "-1", "--format=%ae"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn commit_uses_fallback_identity_when_unset() {
+        let root = tmp("commit-fallback");
+        init_repo(&root);
+        write(&root, "catalog.yaml", "schema_version: 1\n");
+        assert!(!has_identity(&root));
+
+        stage_paths(&root, &[]).unwrap();
+        let head_sha = commit(&root, "catalog: init").unwrap();
+        assert_eq!(head_sha.len(), 40);
+        assert_eq!(commit_author_email(&root), "fleet@localhost");
+    }
+
+    #[test]
+    fn commit_keeps_configured_identity() {
+        let root = tmp("commit-configured");
+        init_repo(&root);
+        git_run(&root, &["config", "user.email", "dev@example.com"]);
+        git_run(&root, &["config", "user.name", "Dev"]);
+        write(&root, "catalog.yaml", "schema_version: 1\n");
+        assert!(has_identity(&root));
+
+        stage_paths(&root, &[]).unwrap();
+        commit(&root, "catalog: init").unwrap();
+        assert_eq!(commit_author_email(&root), "dev@example.com");
+    }
+
+    #[test]
+    fn stage_paths_then_commit_returns_head() {
+        let root = tmp("stage-commit");
+        init_repo(&root);
+        git_run(&root, &["config", "user.email", "dev@example.com"]);
+        git_run(&root, &["config", "user.name", "Dev"]);
+        write(&root, "catalog.yaml", "schema_version: 1\n");
+        write(&root, "hooks/keep.yaml", "kind: hook\n");
+        write(&root, "hooks/ignored.yaml", "kind: hook\n");
+
+        stage_paths(
+            &root,
+            &["catalog.yaml".to_string(), "hooks/keep.yaml".to_string()],
+        )
+        .unwrap();
+        let head_sha = commit(&root, "catalog: partial").unwrap();
+        assert_eq!(head_sha.len(), 40);
+        assert_eq!(head(&root).unwrap(), head_sha);
+
+        // Only the staged paths were committed; the unstaged file is still
+        // untracked, so the tree remains dirty.
+        let status = git_status(&root).unwrap();
+        assert_eq!(status.dirty, 1);
+
+        // Nothing left to stage/commit for the already-committed paths.
+        let err = commit(&root, "catalog: nothing").unwrap_err();
+        assert_eq!(err.code, "E_CATALOG_GIT");
+    }
+
+    #[test]
+    fn git_status_counts_dirty_and_ahead() {
+        let root = tmp("status");
+        init_repo(&root);
+        git_run(&root, &["config", "user.email", "dev@example.com"]);
+        git_run(&root, &["config", "user.name", "Dev"]);
+        write(&root, "catalog.yaml", "schema_version: 1\n");
+        stage_paths(&root, &[]).unwrap();
+        commit(&root, "catalog: init").unwrap();
+
+        let status = git_status(&root).unwrap();
+        assert!(!status.has_upstream);
+        assert_eq!(status.ahead, None);
+        assert_eq!(status.behind, None);
+        assert_eq!(status.dirty, 0);
+
+        write(&root, "hooks/x.yaml", "kind: hook\n");
+        let status = git_status(&root).unwrap();
+        assert_eq!(status.dirty, 1);
+
+        let remote = tmp("status-remote");
+        git_run(&remote, &["init", "-q", "--bare", "-b", "main"]);
+        git_run(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git_run(&root, &["push", "-q", "-u", "origin", "main"]);
+
+        stage_paths(&root, &[]).unwrap();
+        commit(&root, "catalog: second").unwrap();
+        let status = git_status(&root).unwrap();
+        assert!(status.has_upstream);
+        assert_eq!(status.ahead, Some(1));
+        assert_eq!(status.behind, Some(0));
+        assert_eq!(status.dirty, 0);
+    }
+
+    #[test]
+    fn remove_asset_deletes_folder_and_file_kinds() {
+        let root = tmp("remove");
+        write(
+            &root,
+            "skills/s/asset.yaml",
+            "kind: skill\nname: s\ndescription: d\n",
+        );
+        write(&root, "skills/s/body.md", "b\n");
+        write(&root, "skills/s/resources/x.txt", "x");
+        write(&root, "hooks/h.yaml", "kind: hook\nname: h\ndescription: d\nevent: stop\naction: { type: command, command: x }\n");
+
+        let mut removed = remove_asset(&root, Kind::Skill, "s").unwrap();
+        removed.sort();
+        assert!(!root.join("skills/s").exists());
+        assert_eq!(
+            removed,
+            vec![
+                "skills/s/asset.yaml".to_string(),
+                "skills/s/body.md".to_string(),
+                "skills/s/resources/x.txt".to_string(),
+            ]
+        );
+
+        let removed = remove_asset(&root, Kind::Hook, "h").unwrap();
+        assert!(!root.join("hooks/h.yaml").exists());
+        assert_eq!(removed, vec!["hooks/h.yaml".to_string()]);
+
+        let err = remove_asset(&root, Kind::Skill, "missing").unwrap_err();
+        assert_eq!(err.code, "E_ASSET_NOT_FOUND");
+        let err = remove_asset(&root, Kind::Hook, "missing").unwrap_err();
+        assert_eq!(err.code, "E_ASSET_NOT_FOUND");
+    }
+
+    #[test]
+    fn write_asset_overwrite_prunes_stale_resources() {
+        let root = tmp("prune");
+        write(&root, "catalog.yaml", "schema_version: 1\n");
+        let mut a = Asset::from_yaml(None, "kind: skill\nname: s\ndescription: d\n").unwrap();
+        a.body = "b\n".into();
+        a.resources = vec![
+            Resource {
+                rel_path: "resources/keep.txt".into(),
+                bytes: b"keep".to_vec(),
+            },
+            Resource {
+                rel_path: "resources/sub/drop.txt".into(),
+                bytes: b"drop".to_vec(),
+            },
+        ];
+        write_asset(&root, &a, false).unwrap();
+        assert!(root.join("skills/s/resources/sub/drop.txt").exists());
+
+        a.resources = vec![Resource {
+            rel_path: "resources/keep.txt".into(),
+            bytes: b"keep2".to_vec(),
+        }];
+        write_asset(&root, &a, true).unwrap();
+
+        assert!(root.join("skills/s/resources/keep.txt").exists());
+        assert!(!root.join("skills/s/resources/sub/drop.txt").exists());
+        assert!(!root.join("skills/s/resources/sub").exists());
+
+        let cat = load_dir(&root).unwrap();
+        let skill = cat.find(Kind::Skill, "s").unwrap();
+        assert_eq!(skill.resources.len(), 1);
+        assert_eq!(skill.resources[0].rel_path, "resources/keep.txt");
+        assert_eq!(
+            fs::read(root.join("skills/s/resources/keep.txt")).unwrap(),
+            b"keep2"
         );
     }
 }
