@@ -2078,6 +2078,59 @@ describe('Screen soft wraps — copied text joins wrapped rows (N2)', () => {
     expect(sel(s, 0, 0, 1, 4)).toBe('abcdefgh');
   });
 
+  // tmux repaints a row (window switch, attach, pane redraw) by printing it
+  // from column 0 and then either moving the cursor with CUP (the row is not
+  // wrapped) or printing on with no cursor move so the terminal's autowrap
+  // fires (it is). Measured on tmux 3.6a, 80x24 client, rows 0-1 holding a
+  // 125-char wrapped line; bytes tmux sent → `capture-pane -J`:
+  //   \e[1;80HX\e[10;1H                   one cell, last column  → joined
+  //   \e[HY\e[10;1H                       one cell, column 0     → joined
+  //   select-window to a pane whose row 0 is 80 'B' + CR LF, row 1 'next':
+  //   \e[H + 80×B + \e[2;1Hnext\e[K                              → two lines
+  // So a run printed from column 0 through the last column ends the row's
+  // wrap (the autowrap re-sets it); a partial update keeps it. An app that
+  // rewrites a wrapped row full-width in place (\e[H + 80 chars + \e[10;1H)
+  // reaches the client as the same bytes as the repaint; tmux keeps its
+  // stale flag there (still joined), we end the wrap.
+  it('a full-width repaint followed by a cursor move ends the row\'s wrap', () => {
+    const s = new Screen(3, 10);
+    s.write('abcdefghijKL');
+    expect(s.wrapped[0]).toBe(true);
+    s.write('\x1b[H01234\x1b[1m56789\x1b[m\x1b[2;1Hnext\x1b[K');
+    expect(s.wrapped[0]).toBe(false);
+    expect(sel(s, 0, 0, 1, 9)).toBe('0123456789\nnext');
+    const wide = new Screen(3, 10);
+    wide.write('abcdefghijKL\x1b[H01234567中\x1b[2;1H');
+    expect(wide.wrapped[0]).toBe(false);
+  });
+
+  it('the tmux 3.6a window-switch repaint over a wrapped row copies as two lines', () => {
+    const s = new Screen(24, 80);
+    s.write(`${'abcdefghij'.repeat(12)}xxxxx\r\n`);
+    expect(s.wrapped.slice(0, 2)).toEqual([true, false]);
+    s.write(`\x1b[H${'B'.repeat(80)}\x1b[2;1Hnext\x1b[K`);
+    expect(s.wrapped[0]).toBe(false);
+    expect(sel(s, 0, 0, 1, 79)).toBe(`${'B'.repeat(80)}\nnext`);
+  });
+
+  it('a single-cell update at either end of a wrapped row keeps the wrap', () => {
+    const last = new Screen(3, 10);
+    last.write('abcdefghijKL\x1b[1;10HX\x1b[3;1H');
+    expect(last.wrapped[0]).toBe(true);
+    expect(sel(last, 0, 0, 1, 9)).toBe('abcdefghiXKL');
+    const first = new Screen(3, 10);
+    first.write('abcdefghijKL\x1b[1;1HY\x1b[3;1H');
+    expect(first.wrapped[0]).toBe(true);
+    expect(sel(first, 0, 0, 1, 9)).toBe('YbcdefghijKL');
+  });
+
+  it('a repaint that goes on through the autowrap keeps the row wrapped', () => {
+    const s = new Screen(3, 10);
+    s.write('abcdefghijKL\x1b[H01234\x1b[31m56789KL\x1b[m\x1b[3;1H');
+    expect(s.wrapped[0]).toBe(true);
+    expect(sel(s, 0, 0, 1, 9)).toBe('0123456789KL');
+  });
+
   it('resize keeps the flags of rows that survive a height change and drops them on a width change', () => {
     const tall = new Screen(3, 5);
     tall.write('abcdefgh');

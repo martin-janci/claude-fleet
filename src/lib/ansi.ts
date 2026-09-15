@@ -246,10 +246,18 @@ export class Screen {
    *  no newline. Set when the deferred wrap fires; moved with the rows by
    *  every scroll / IL / DL, kept with the primary buffer across the alt
    *  screen; cleared by an erase that reaches the last column, RIS, a width
-   *  change, and on a row whose continuation was moved away. A plain write
-   *  into the last column does not clear it — tmux redraws that cell with a
-   *  cursor move and relies on the terminal keeping the wrap. */
+   *  change, on a row whose continuation was moved away, and when a run of
+   *  glyphs printed from column 0 fills the row (tmux's repaint of a row it
+   *  holds unwrapped: print it whole, then move the cursor; the autowrap
+   *  re-sets the flag if the repaint goes on). A partial update — one cell
+   *  at either end, placed with a cursor move — keeps it, as tmux does. */
   wrapped: boolean[] = [];
+  /** Cursor position right after the last printed glyph (-1: none since a
+   *  reset), and whether that contiguous print run began at column 0 of the
+   *  cursor's row. A cursor that moved in between starts a new run. */
+  private printEndRow = -1;
+  private printEndCol = -1;
+  private runFromColZero = false;
 
   // ─── Mouse mode state (DECSET/DECRST) ────────────────────────────────
   // These track which mouse-reporting modes the host app (tmux) has
@@ -336,6 +344,7 @@ export class Screen {
     // moves the wrap column, so no row ends in a wrap any more.
     const keepWraps = cols === this.cols;
     this.wrapped = resizeWraps(this.wrapped, rows, keepWraps);
+    this.printEndRow = -1;
     if (this.savedScreen !== null) {
       const saved = this.savedScreen;
       saved.cells = resizeGrid(saved.cells, this.rows, this.cols, rows, cols);
@@ -503,7 +512,10 @@ export class Screen {
     if (utf8Length(base.ch) + utf8Length(ch) > CELL_UTF8_MAX) return zeroWidth;
     base.ch += ch;
     this.markRow(this.cursorRow);
-    if (!widen || n === 2) return true;
+    if (!widen || n === 2) {
+      this.notePrinted();
+      return true;
+    }
     if (c + 1 < this.cols) {
       // The cell right of the base becomes its trailing half.
       this.breakPairAt(row, c + 1);
@@ -518,6 +530,7 @@ export class Screen {
       // moves back onto it, so the next glyph replaces it (as in tmux).
       this.cursorCol = c;
     }
+    this.notePrinted();
     return true;
   }
 
@@ -535,6 +548,7 @@ export class Screen {
       ch = ' ';
       width = 1;
     }
+    const contiguous = this.cursorRow === this.printEndRow && this.cursorCol === this.printEndCol;
     if (this.cursorCol >= this.cols) {
       this.wrapped[this.cursorRow] = true;
       this.cursorCol = 0;
@@ -545,6 +559,7 @@ export class Screen {
       this.cursorCol = 0;
       this.lineFeed();
     }
+    this.runFromColZero = this.cursorCol === 0 || (contiguous && this.runFromColZero);
     const graphics = this.useG1 ? this.g1Graphics : this.g0Graphics;
     const mapped = graphics ? (DEC_SPECIAL_GRAPHICS[ch] ?? ch) : ch;
     const row = this.cells[this.cursorRow];
@@ -566,6 +581,16 @@ export class Screen {
     this.lastGlyph = { ch: mapped, width };
     this.markRow(this.cursorRow);
     this.cursorCol += width;
+    this.notePrinted();
+  }
+
+  /** Record where the print run now ends. A run that began at column 0 and
+   *  just filled the row repaints it whole: the row ends here unless the
+   *  deferred wrap fires on the next glyph (see `wrapped`). */
+  private notePrinted(): void {
+    if (this.runFromColZero && this.cursorCol >= this.cols) this.wrapped[this.cursorRow] = false;
+    this.printEndRow = this.cursorRow;
+    this.printEndCol = this.cursorCol;
   }
 
   /** Before overwriting, deleting or shifting `row[c]`: if it is one half of
@@ -835,6 +860,7 @@ export class Screen {
   private fullReset(): void {
     this.cells = makeGrid(this.rows, this.cols);
     this.wrapped = new Array(this.rows).fill(false);
+    this.printEndRow = -1;
     this.markAll();
     this.cursorRow = 0;
     this.cursorCol = 0;
@@ -1114,6 +1140,7 @@ export class Screen {
     // xterm: the alt screen starts blank with cursor at home.
     this.cells = makeGrid(this.rows, this.cols);
     this.wrapped = new Array(this.rows).fill(false);
+    this.printEndRow = -1;
     this.markAll();
     this.cursorRow = 0;
     this.cursorCol = 0;
@@ -1139,6 +1166,7 @@ export class Screen {
     if (saved === null) return;
     this.cells = saved.cells;
     this.wrapped = saved.wrapped;
+    this.printEndRow = -1;
     this.markAll();
     this.cursorRow = saved.cursorRow;
     this.cursorCol = saved.cursorCol;
