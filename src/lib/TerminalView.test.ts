@@ -1237,6 +1237,83 @@ describe('TerminalView IME input proxy (F9)', () => {
     expect(ime.style.top).toBe(cur.style.top);
   });
 
+  /** `isMac` is read once per component instance at render time, so shadowing
+   *  navigator.platform before mounting is enough to make the pane behave like
+   *  the macOS build. */
+  function asMac(): () => void {
+    Object.defineProperty(window.navigator, 'platform', { value: 'MacIntel', configurable: true });
+    return () => {
+      delete (window.navigator as unknown as { platform?: string }).platform;
+    };
+  }
+
+  it('lets a held key repeat through the proxy so the accent popup can open (macOS)', async () => {
+    const restore = asMac();
+    try {
+      const ime = await mountProxy();
+      // The first press is an ordinary keystroke: straight out through the key
+      // table, preventDefault and all.
+      const first = key({ key: 'e' });
+      ime.dispatchEvent(first);
+      await settle();
+      expect(first.defaultPrevented).toBe(true);
+      expect(written()).toEqual(['e']);
+
+      // The repeat is NOT prevented — a prevented keydown never reaches AppKit's
+      // interpretKeyEvents:, which is what opens the press-and-hold popup — and
+      // it sends nothing by itself.
+      const repeat = key({ key: 'e', repeat: true });
+      ime.dispatchEvent(repeat);
+      await settle();
+      expect(repeat.defaultPrevented).toBe(false);
+      expect(written()).toEqual(['e']);
+
+      // Whatever the OS does with it arrives as text in the proxy: a plain
+      // repeat when press-and-hold is off…
+      ime.value = 'e';
+      ime.dispatchEvent(inputEvent('insertText', 'e'));
+      await settle();
+      expect(written()).toEqual(['e', 'e']);
+
+      // …or the accent the user picked from the popup, exactly once.
+      ime.value = 'é';
+      ime.dispatchEvent(inputEvent('insertReplacementText', 'é'));
+      await settle();
+      expect(written()).toEqual(['e', 'e', 'é']);
+    } finally {
+      restore();
+    }
+  });
+
+  it('still forwards repeats that no popup can claim (macOS)', async () => {
+    const restore = asMac();
+    try {
+      const ime = await mountProxy();
+      // Held arrows and chords have no accent alternatives; letting them fall
+      // through would drop key-repeat scrolling and Ctrl+C.
+      const arrow = key({ key: 'ArrowDown', repeat: true });
+      const chord = key({ key: 'e', ctrlKey: true, repeat: true });
+      ime.dispatchEvent(arrow);
+      ime.dispatchEvent(chord);
+      await settle();
+      expect(arrow.defaultPrevented).toBe(true);
+      expect(chord.defaultPrevented).toBe(true);
+      expect(written()).toEqual(['\x1b[B', '\x05']);
+    } finally {
+      restore();
+    }
+  });
+
+  it('sends a repeating letter through the key table off macOS', async () => {
+    const ime = await mountProxy();
+    const repeat = key({ key: 'e', repeat: true });
+    ime.dispatchEvent(repeat);
+    await settle();
+    // No press-and-hold popup exists here, so the repeat is a plain keystroke.
+    expect(repeat.defaultPrevented).toBe(true);
+    expect(written()).toEqual(['e']);
+  });
+
   it('…and still rides the caret when the app hides the cursor (?25l)', async () => {
     // Full-screen TUIs — Ink-based Claude Code included — keep the cursor
     // hidden while they redraw, which is the state this terminal spends most

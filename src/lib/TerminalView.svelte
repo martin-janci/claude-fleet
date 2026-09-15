@@ -782,6 +782,13 @@
       selFocus = { row: lastRows - 1, col: lastCols - 1 };
       return;
     }
+    // macOS press-and-hold: holding a letter is supposed to open the accent
+    // popup (`é`, `ē`, …) rather than repeat it, but AppKit only gets to decide
+    // that if the repeating keydown is left unprevented — a prevented one never
+    // reaches interpretKeyEvents:. So hand the repeats to the proxy: it inserts
+    // them as ordinary input events (press-and-hold off) or delivers the accent
+    // the user picked (press-and-hold on), either way through flushImeInput.
+    if (isMac && e.repeat && !e.ctrlKey && !e.altKey && !e.metaKey && e.key.length === 1) return;
     const bytes = keyToBytes(e, { appCursor: screen?.appCursorKeys ?? false, isMac });
     if (bytes === null) return;
     e.preventDefault();
