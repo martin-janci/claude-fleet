@@ -193,19 +193,20 @@ pub async fn ensure_catalog_project(
     .await
     .map_err(|e| {
         // `add_project` reports `E_EXISTS` here when the catalog repo's
-        // `origin` names a GitHub repo that is already a fleet project at
-        // some OTHER path (`refuse_existing_project`) — its stock message
-        // ("owner/repo is already a fleet project") reads as if the catalog
-        // repo itself were the duplicate, which is backwards and leaves no
-        // hint of what to do about it. Replace it with the actual situation
-        // and the fix.
+        // `add_project` raises E_EXISTS for two different reasons — the
+        // catalog's `origin` names a GitHub repo already adopted at some
+        // OTHER path (`refuse_existing_project`), or the resolved base path
+        // is already registered under a spelling `same_path` did not match
+        // (`refuse_existing_base_path`). Its stock messages say which, but
+        // not that it was the catalog repo being adopted or what to do about
+        // it, so keep the original text and add that context.
         if e.code == codes::E_EXISTS {
+            let reason = e.message.clone();
             return IpcError::new(
                 codes::E_EXISTS,
                 format!(
-                    "catalog repo {repo_path} is not a fleet project and its origin is \
-                     already adopted as a project at another path; add the catalog \
-                     folder as a project first"
+                    "catalog repo {repo_path} could not be adopted as a fleet project \
+                     ({reason}); add the catalog folder as a project first"
                 ),
             );
         }
@@ -487,13 +488,18 @@ mod tests {
                 .await
                 .unwrap_err();
             assert_eq!(err.code, codes::E_EXISTS);
-            assert_eq!(
-                err.message,
-                format!(
-                    "catalog repo {repo_path} is not a fleet project and its origin is \
-                     already adopted as a project at another path; add the catalog \
-                     folder as a project first"
-                )
+            assert!(
+                err.message
+                    .starts_with(&format!("catalog repo {repo_path} could not be adopted")),
+                "{}",
+                err.message
+            );
+            assert!(err.message.contains("acme/widget"), "{}", err.message);
+            assert!(
+                err.message
+                    .ends_with("add the catalog folder as a project first"),
+                "{}",
+                err.message
             );
         });
     }
