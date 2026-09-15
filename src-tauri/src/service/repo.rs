@@ -12,6 +12,7 @@ use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::Store;
+use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -29,6 +30,12 @@ pub const MAX_TREE_ENTRIES: usize = 20_000;
 /// session lives on). `repo_err` maps this to the `E_NO_WORKTREE` code so the
 /// frontend can show a clean "worktree gone" state instead of a raw git error.
 pub const NO_WORKTREE_SENTINEL: &str = "__CF_NO_WORKTREE__";
+
+/// The one-field argument struct shared by every per-session repo call.
+#[derive(Deserialize)]
+pub struct SessionIdArgs {
+    pub session_id: i64,
+}
 
 /// Resolve a session id to its `(host_alias, tmux_name)`, validating both.
 pub fn session_target(store: &Mutex<Store>, session_id: i64) -> Result<(String, String), IpcError> {
