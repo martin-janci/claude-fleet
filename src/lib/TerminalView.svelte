@@ -1034,6 +1034,7 @@
         oninput={onImeInput}
         onfocus={() => (focused = true)}
         onblur={() => (focused = false)}
+        data-ime-proxy="true"
         data-testid="terminal-ime"
       ></textarea>
       {#each visibleRows as row (row.key)}

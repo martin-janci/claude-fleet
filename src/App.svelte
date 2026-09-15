@@ -402,6 +402,10 @@
   }
 
   function isEditable(el: HTMLElement | null): boolean {
+    // The terminal's hidden IME proxy is a <textarea> (it has to be, or
+    // WebKit runs no input method on it — TerminalView, F9), but it IS the
+    // terminal: Esc there must close the overlay, not be left to a field.
+    if (el?.dataset.imeProxy !== undefined) return false;
     const tag = el?.tagName;
     return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || !!el?.isContentEditable;
   }
