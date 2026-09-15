@@ -137,10 +137,13 @@ Index by area (names only; see the reference for details):
   state, unmanaged assets and parse problems), `scan_assets` (re-scan hosts,
   read-only on the hosts, and recompute asset states), `import_assets`
   (import the controller's `~/.claude` into the catalog working tree;
-  `dry_run` supported), `plan_sync` (compute a fleet-wide sync plan; nothing
-  is written), `apply_sync` (apply a `plan_sync` plan; master token only,
-  behind desktop confirmation), `set_secret` (store a `${NAME}` placeholder
-  value; master token only, value never returned or logged).
+  `dry_run` supported), `plan_sync` (compute a fleet-wide sync plan with
+  per-host actions; mutating classification to update inventory), `apply_sync`
+  (apply a `plan_sync` plan; master token only, behind desktop confirmation
+  when `mcp.confirm_destructive` is enabled, and needs a `confirm_nonce` for
+  any action involving overwrite or remove), `set_secret` (store a `${NAME}`
+  placeholder value; master token only; the value is never returned, logged, or
+  audited).
 - **Orchestration** — `wait_for_session`, `session_transcript`, `run_prompt`,
   `dispatch_task`, `wait_for_task`, `list_tasks`, `cancel_task`,
   `set_session_tags`.

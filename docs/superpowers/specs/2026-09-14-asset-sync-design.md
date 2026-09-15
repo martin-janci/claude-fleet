@@ -160,7 +160,9 @@ step or is reported `partial`.
 manifest), `parse_scan()` (TOML parsed into `serde_json::Value` for the
 snapshot), `installed()` (skills by folder, MCP servers by `mcp_servers`
 keys), and `merge_config()` for TOML. The renderer stays limited to skills
-and MCP servers.
+and MCP servers. **Note:** config merges do not preserve TOML comments, and
+config files containing TOML datetimes are refused (not merged). Codex support
+is experimental in this sub-project.
 
 ## Harness trait addition
 
