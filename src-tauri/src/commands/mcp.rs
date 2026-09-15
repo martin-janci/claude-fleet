@@ -405,14 +405,32 @@ pub fn build_hook_config(port: u16, token: &str) -> String {
 /// break it on every host.
 pub(crate) const WORKTREE_TOOL_MATCHER: &str = "EnterWorktree|ExitWorktree";
 
+/// `SessionEnd` reasons that mean the Claude process is gone. `clear` and
+/// `resume` are deliberately absent: the process lives on under a new
+/// session id, and marking the row `stopped` would be wrong.
+pub(crate) const SESSION_END_MATCHER: &str = "logout|prompt_input_exit|other";
+
+/// `Notification` types fleet turns into state (see
+/// `service::hooks::notification_effect`). `idle_prompt`, `auth_success`,
+/// the `elicitation_complete/response` pair and the agent-view-only
+/// `agent_*` types carry nothing fleet needs.
+pub(crate) const NOTIFICATION_MATCHER: &str = "permission_prompt|elicitation_dialog|elicitation_url_dialog|quota_auto_resume_stale|quota_auto_resume_disabled|quota_auto_resume_fired";
+
 /// The hook events fleet installs, with their matcher. `Stop` is the
 /// completion signal (turn over → idle, `turn_seq` bump), `UserPromptSubmit`
 /// the busy signal (turn starting → working), `PostToolUse(EnterWorktree|
-/// ExitWorktree)` the worktree registration and removal.
+/// ExitWorktree)` the worktree registration and removal, `SessionEnd` the
+/// exit signal (→ stopped), `StopFailure` the API-error completion (→ idle,
+/// `turn_seq` bump, `stop_failure` timeline event) and `Notification` the
+/// waiting-on-a-human signal (→ blocked). `SessionStart` cannot be an http
+/// hook (Claude Code allows only command / mcp_tool there) and is not used.
 pub(crate) const FLEET_HOOK_EVENTS: &[(&str, &str)] = &[
     ("Stop", ""),
     ("UserPromptSubmit", ""),
     ("PostToolUse", WORKTREE_TOOL_MATCHER),
+    ("SessionEnd", SESSION_END_MATCHER),
+    ("StopFailure", ""),
+    ("Notification", NOTIFICATION_MATCHER),
 ];
 
 /// Pure merge: given `existing` (current `~/.claude/settings.json` content,
@@ -737,6 +755,41 @@ mod tests {
             !e["url"].as_str().unwrap().contains("tok"),
             "token must not be in the URL: {e}"
         );
+    }
+
+    #[test]
+    fn hook_block_installs_all_six_events_with_their_matchers() {
+        let merged = merge_hook_into_settings_json("", 4180, "tok").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        let expect = [
+            ("Stop", ""),
+            ("UserPromptSubmit", ""),
+            ("PostToolUse", WORKTREE_TOOL_MATCHER),
+            ("SessionEnd", SESSION_END_MATCHER),
+            ("StopFailure", ""),
+            ("Notification", NOTIFICATION_MATCHER),
+        ];
+        assert_eq!(FLEET_HOOK_EVENTS.len(), expect.len());
+        for (event, matcher) in expect {
+            let arr = v["hooks"][event]
+                .as_array()
+                .unwrap_or_else(|| panic!("{event} missing"));
+            assert_eq!(arr.len(), 1, "{event}: {arr:?}");
+            assert_eq!(arr[0]["matcher"], matcher, "{event}");
+            assert_eq!(arr[0]["hooks"][0]["type"], "http", "{event}");
+            assert_eq!(arr[0]["hooks"][0]["url"], "http://127.0.0.1:4180/hook");
+        }
+        assert_eq!(SESSION_END_MATCHER, "logout|prompt_input_exit|other");
+        assert_eq!(
+            NOTIFICATION_MATCHER,
+            "permission_prompt|elicitation_dialog|elicitation_url_dialog|quota_auto_resume_stale|quota_auto_resume_disabled|quota_auto_resume_fired"
+        );
+        // Re-running is idempotent for the new events too.
+        let again = merge_hook_into_settings_json(&merged, 4180, "tok").unwrap();
+        let v2: serde_json::Value = serde_json::from_str(&again).unwrap();
+        for (event, _) in expect {
+            assert_eq!(v2["hooks"][event].as_array().unwrap().len(), 1, "{event}");
+        }
     }
 
     #[test]
