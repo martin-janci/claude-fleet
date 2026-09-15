@@ -17,7 +17,7 @@
   import { loadTasks, applyTaskEvents } from './lib/tasks';
   import { loadAccountUsage, applyAccountUsageEvents, accountUsage } from './lib/account_usage_store';
   import { footerUsage } from './lib/usage_glance';
-  import { mergeInventoryRow, clearInventoryFor, loadAssets } from './lib/assets';
+  import { mergeInventoryRow, clearInventoryFor, loadAssets, syncProgress } from './lib/assets';
   import { subscribeToRowEvents } from './lib/events';
   import Toasts from './lib/Toasts.svelte';
   import QuickSwitcher from './lib/QuickSwitcher.svelte';
@@ -178,6 +178,7 @@
       onAssetInventoryUpdated: mergeInventoryRow,
       onAssetInventoryCleared: (p) => clearInventoryFor(p.host_alias, p.harness),
       onCatalogLoaded: () => { void loadAssets(); },
+      onSyncProgress: (p) => syncProgress.set(p),
     });
     // Tasks are secondary to the session list: load after the row
     // subscription is live so no `task:updated` is missed, and never block

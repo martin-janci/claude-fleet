@@ -2,7 +2,20 @@
   import { getAsset, type AssetDetail } from './assets';
   import type { HostRow } from './hosts';
 
-  let { kind, name, hosts }: { kind: string; name: string; hosts: HostRow[] } = $props();
+  let {
+    kind,
+    name,
+    hosts,
+    onsync,
+  }: {
+    kind: string;
+    name: string;
+    hosts: HostRow[];
+    /** Requests a sync plan scoped to this asset (optionally to one host).
+     *  The caller (AssetsPanel) computes the plan and owns the dialog, the
+     *  same way `AssetList`'s `onimport` bubbles up to `ImportDialog`. */
+    onsync?: (filter: { hostAlias?: string; kind?: string; name?: string }) => void;
+  } = $props();
 
   let detail = $state<AssetDetail | null>(null);
   let error = $state<string | null>(null);
@@ -21,11 +34,27 @@
   const preview = $derived(detail?.previews.find((p) => p.harness === harnessTab) ?? null);
   const visibleHosts = $derived(hosts.filter((h) => !h.hidden));
 
+  // Raw state (`in_sync`, `drifted`, `missing`, `orphan`, `unsupported`, or
+  // `null` for "skipped"/"not scanned") — used to decide when a cell gets a
+  // Sync link, before `cell()` below turns it into display text.
+  function rawState(hostAlias: string, harness: string): string | null {
+    const host = visibleHosts.find((h) => h.alias === hostAlias);
+    if (host && host.alias !== 'local' && !host.reachable) return null;
+    return detail?.hosts.find((h) => h.host_alias === hostAlias && h.harness === harness)?.state ?? null;
+  }
+
   function cell(hostAlias: string, harness: string): string {
     const host = visibleHosts.find((h) => h.alias === hostAlias);
     if (host && host.alias !== 'local' && !host.reachable) return 'skipped';
-    const s = detail?.hosts.find((h) => h.host_alias === hostAlias && h.harness === harness)?.state;
+    const s = rawState(hostAlias, harness);
     return s ? s.replace('_', ' ') : 'not scanned';
+  }
+
+  const SYNCABLE_STATES = new Set(['missing', 'drifted', 'orphan']);
+
+  function requestSync(hostAlias: string) {
+    if (!detail) return;
+    onsync?.({ hostAlias, kind: detail.asset.kind, name: detail.asset.name });
   }
 </script>
 
@@ -35,7 +64,14 @@
   {:else if !detail}
     <p class="muted">Loading…</p>
   {:else}
-    <h3 data-testid="asset-detail-title"><span class="kind">{detail.asset.kind}</span> {detail.asset.name} <span class="ver">v{detail.asset.version}</span></h3>
+    <div class="title-row">
+      <h3 data-testid="asset-detail-title"><span class="kind">{detail.asset.kind}</span> {detail.asset.name} <span class="ver">v{detail.asset.version}</span></h3>
+      <button
+        class="sync-btn"
+        onclick={() => onsync?.({ kind: detail?.asset.kind, name: detail?.asset.name })}
+        data-testid="asset-sync"
+      >Sync this asset</button>
+    </div>
     <p class="desc">{detail.asset.description}</p>
     {#if detail.asset.tags?.length}<p class="tags">{#each detail.asset.tags ?? [] as t}<span class="tag">{t}</span>{/each}</p>{/if}
 
@@ -48,7 +84,13 @@
             <td>{host.alias}</td>
             {#each harnesses as h}
               {@const s = cell(host.alias, h)}
-              <td class={`state-${s.replace(' ', '-')}`} data-testid={`matrix-cell-${host.alias}-${h}`} title={s === 'skipped' ? 'host unreachable' : ''}>{s}</td>
+              {@const raw = rawState(host.alias, h)}
+              <td class={`state-${s.replace(' ', '-')}`} data-testid={`matrix-cell-${host.alias}-${h}`} title={s === 'skipped' ? 'host unreachable' : ''}>
+                {s}
+                {#if raw && SYNCABLE_STATES.has(raw)}
+                  <button class="cell-sync" onclick={() => requestSync(host.alias)} data-testid={`cell-sync-${host.alias}-${h}`}>Sync</button>
+                {/if}
+              </td>
             {/each}
           </tr>
         {/each}
@@ -85,12 +127,15 @@
 
 <style>
   .detail { padding: 10px 14px; overflow: auto; height: 100%; font-size: 13px; }
+  .title-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .sync-btn { font-size: 11px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 4px; background: transparent; color: var(--fg); cursor: pointer; }
+  .cell-sync { margin-left: 6px; font-size: 10px; padding: 0 4px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--accent); cursor: pointer; }
   h3 { margin: 0 0 4px; font-size: 15px; font-family: ui-monospace, monospace; }
   .kind, .ver { color: var(--fg-muted); font-size: 11px; font-family: system-ui; }
   h4 { margin: 14px 0 6px; font-size: 11px; text-transform: uppercase; color: var(--fg-muted); }
   .desc { margin: 0; } .tags { margin: 4px 0 0; } .tag { border: 1px solid var(--border); border-radius: 8px; padding: 0 6px; font-size: 11px; margin-right: 4px; }
   .matrix { border-collapse: collapse; } .matrix th, .matrix td { text-align: left; padding: 3px 10px 3px 0; border-bottom: 1px solid var(--border); }
-  .state-in-sync { color: #16a34a; } .state-drifted { color: #d97706; } .state-skipped, .state-not-scanned, .state-missing, .state-unsupported { color: var(--fg-muted); }
+  .state-in-sync { color: #16a34a; } .state-drifted { color: #d97706; } .state-skipped, .state-not-scanned, .state-missing, .state-unsupported, .state-orphan { color: var(--fg-muted); }
   .tabs { display: flex; gap: 2px; margin-bottom: 6px; } .tabs button { background: none; border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; color: var(--fg-muted); cursor: pointer; } .tabs button.active { color: var(--fg); border-color: var(--accent); }
   .file { margin: 6px 0; } .path { font-family: ui-monospace, monospace; font-size: 12px; color: var(--fg-muted); } .mode { opacity: 0.7; }
   pre { margin: 2px 0 0; padding: 8px; background: var(--bg-pane); border: 1px solid var(--border); border-radius: 4px; overflow: auto; max-height: 320px; font-size: 12px; }

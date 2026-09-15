@@ -186,10 +186,21 @@ describe('subscribeToRowEvents → store integration', () => {
       onCatalogLoaded: (s) => seen.push(`cat:${s.head}`),
     });
     fire('asset_inventory:cleared', { host_alias: 'local', harness: 'claude' });
-    fire('asset_inventory:updated', { host_alias: 'local', harness: 'claude', kind: 'skill', name: 's', state: 'in_sync', catalog_hash: null, host_hash: null, scanned_at: 1 });
+    fire('asset_inventory:updated', { host_alias: 'local', harness: 'claude', kind: 'skill', name: 's', state: 'in_sync', catalog_hash: null, host_hash: null, scanned_at: 1, managed: true });
     fire('catalog:loaded', { head: 'h', loaded_at: 1, asset_count: 0, problem_count: 0 });
     await flush();
     expect(seen).toEqual(['clr:local:claude', 'upd:local:s', 'cat:h']);
+  });
+
+  it('fires onSyncProgress for sync:progress events, including the terminal one', async () => {
+    const seen: string[] = [];
+    await subscribeToRowEvents({
+      onSyncProgress: (p) => seen.push(`${p.plan_id}:${p.done}/${p.total}:${p.host_alias}/${p.harness}`),
+    });
+    fire('sync:progress', { plan_id: 'p1', host_alias: 'local', harness: 'claude', done: 0, total: 2 });
+    fire('sync:progress', { plan_id: 'p1', host_alias: '', harness: '', done: 2, total: 2 });
+    await flush();
+    expect(seen).toEqual(['p1:0/2:local/claude', 'p1:2/2:/']);
   });
 });
 

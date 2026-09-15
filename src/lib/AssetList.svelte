@@ -47,7 +47,13 @@
       <div class="row unmanaged" data-testid={`unmanaged-row-${r.host_alias}-${r.harness}-${r.kind}-${r.name}`}>
         <span class="name">{r.name}</span>
         <span class="meta">{r.kind} · {r.host_alias}</span>
-        <button class="link" onclick={() => onimport(r)} title="Import from this host">Import</button>
+        {#if r.state === 'orphan'}
+          <!-- Fleet installed this and will remove it on the next sync — it
+               is not "yours to import", so no Import button here. -->
+          <span class="badge orphan" data-testid={`orphan-badge-${r.host_alias}-${r.harness}-${r.kind}-${r.name}`}>orphan</span>
+        {:else}
+          <button class="link" onclick={() => onimport(r)} title="Import from this host">Import</button>
+        {/if}
       </div>
     {/each}
   {/if}
@@ -67,4 +73,5 @@
   .chip { font-size: 10px; padding: 1px 6px; border-radius: 8px; border: 1px solid var(--border); }
   .chip.ok { color: #16a34a; } .chip.warn { color: #d97706; } .chip.muted { color: var(--fg-muted); }
   .link { background: none; border: 0; color: var(--accent); cursor: pointer; font-size: 12px; }
+  .badge.orphan { font-size: 10px; padding: 1px 6px; border-radius: 8px; border: 1px solid var(--border); color: #d97706; }
 </style>

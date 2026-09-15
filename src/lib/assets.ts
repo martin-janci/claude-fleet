@@ -1,6 +1,6 @@
 // Asset catalog store (sub-project 1). Mirrors src-tauri/src/service/catalog.
 import { writable } from 'svelte/store';
-import { invokeCmd, type Result } from './result';
+import { invokeCmd, invokeCmdAbortable, type Result } from './result';
 
 export type AssetKind = 'skill' | 'agent' | 'hook' | 'mcp_server' | 'plugin_ref';
 export const KIND_ORDER: AssetKind[] = ['skill', 'agent', 'hook', 'mcp_server', 'plugin_ref'];
@@ -21,6 +21,7 @@ export interface CatalogSummary { head: string; loaded_at: number; asset_count: 
 export interface AssetInventoryRow {
   host_alias: string; harness: string; kind: string; name: string; state: string;
   catalog_hash: string | null; host_hash: string | null; scanned_at: number;
+  managed: boolean;
 }
 export interface HostState { host_alias: string; harness: string; state: string }
 export interface Problem { path: string; message: string }
@@ -125,4 +126,124 @@ export function stateCounts(hosts: HostState[]): Record<'in_sync' | 'drifted' | 
   const c = { in_sync: 0, drifted: 0, missing: 0, unsupported: 0 };
   for (const h of hosts) if (h.state in c) c[h.state as keyof typeof c] += 1;
   return c;
+}
+
+// ── Sync engine (sub-project 2): plan/apply, secrets, progress. Mirrors
+// src-tauri/src/service/catalog/sync/*. ──
+
+export type ActionOp =
+  | 'create' | 'update' | 'overwrite' | 'adopt' | 'remove'
+  | 'plugin_install' | 'plugin_update' | 'noop' | 'blocked';
+
+export interface SyncAction {
+  kind: string;
+  name: string;
+  op: ActionOp;
+  reason: string | null;
+  files: string[];
+  merges: string[];
+  backup: boolean;
+  secrets: string[];
+  missing_secrets: string[];
+}
+
+export interface HostPlan {
+  host_alias: string;
+  harness: string;
+  status: string;
+  detail: string | null;
+  actions: SyncAction[];
+}
+
+export interface SyncPlan {
+  id: string;
+  computed_at: number;
+  hosts: HostPlan[];
+  counts: Record<string, number>;
+}
+
+export interface ActionResult {
+  kind: string;
+  name: string;
+  op: ActionOp;
+  outcome: string;
+  detail: string | null;
+}
+
+export interface HostSyncResult {
+  host_alias: string;
+  harness: string;
+  status: string;
+  detail: string | null;
+  restart_required: boolean;
+  actions: ActionResult[];
+}
+
+export interface SyncRunSummary {
+  plan_id: string;
+  started_at: number;
+  finished_at: number;
+  hosts: HostSyncResult[];
+}
+
+export interface SecretRow {
+  name: string;
+  host_alias: string | null;
+  updated_at: number;
+}
+
+export interface SyncProgress {
+  plan_id: string;
+  host_alias: string;
+  harness: string;
+  done: number;
+  total: number;
+}
+
+/** The most recently completed sync run, loaded on mount and refreshed
+ *  after `applySync` completes. */
+export const lastSyncRun = writable<SyncRunSummary | null>(null);
+
+/** The latest `sync:progress` event forwarded by `App.svelte`'s row-event
+ *  subscription, for `SyncPlanDialog` to render a progress line during an
+ *  in-flight apply. */
+export const syncProgress = writable<SyncProgress | null>(null);
+
+export function planSync(f: { hostAlias?: string; kind?: string; name?: string }): Promise<Result<SyncPlan>> {
+  return invokeCmd<SyncPlan>('catalog_plan_sync', {
+    args: { host_alias: f.hostAlias ?? null, kind: f.kind ?? null, name: f.name ?? null },
+  });
+}
+
+export function applySync(planId: string, forcePartial: boolean, signal?: AbortSignal): Promise<Result<SyncRunSummary>> {
+  return invokeCmdAbortable<SyncRunSummary>(
+    'catalog_apply_sync',
+    { args: { plan_id: planId, force_partial: forcePartial } },
+    signal,
+  );
+}
+
+export async function lastSync(): Promise<Result<SyncRunSummary | null>> {
+  const r = await invokeCmd<SyncRunSummary | null>('catalog_last_sync');
+  if (r.ok) lastSyncRun.set(r.value);
+  return r;
+}
+
+export function listSecrets(): Promise<Result<SecretRow[]>> {
+  return invokeCmd<SecretRow[]>('catalog_list_secrets');
+}
+
+export function setSecret(name: string, value: string, hostAlias?: string): Promise<Result<null>> {
+  return invokeCmd<null>('catalog_set_secret', { args: { name, host_alias: hostAlias ?? null, value } });
+}
+
+export function deleteSecret(name: string, hostAlias?: string): Promise<Result<boolean>> {
+  return invokeCmd<boolean>('catalog_delete_secret', { args: { name, host_alias: hostAlias ?? null } });
+}
+
+/** Whether applying `plan` would overwrite a host-edited asset or remove a
+ *  manifest entry — the cases `SyncPlanDialog` renders its Apply button red
+ *  for. */
+export function isDestructive(plan: SyncPlan): boolean {
+  return plan.hosts.some((h) => h.actions.some((a) => a.op === 'overwrite' || a.op === 'remove'));
 }
