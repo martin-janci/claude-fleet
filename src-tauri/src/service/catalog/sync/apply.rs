@@ -5,13 +5,14 @@
 //!
 //! - **plain files and deletions** — batched into `bash` scripts
 //!   (`write_scripts`) that compare-and-swap on the hash the plan was
-//!   computed against, back up what they replace (`<file>.fleet-bak-<epoch>`)
-//!   and print one `OK`/`CONFLICT`/`FAIL <~/path>` line per write. A host
-//!   that changed under a stale plan is reported as a conflict instead of
-//!   being overwritten;
-//! - **secret-bearing files** (a rendered body or a config file whose merge
-//!   value only became correct through `${NAME}` substitution) — hash-checked
-//!   the same way, then written through
+//!   computed against, back up what they replace
+//!   (`<file>.fleet-bak-<epoch>-<pid>`), write through a `.fleet-tmp`
+//!   sibling renamed into place, and print one `OK`/`CONFLICT`/`FAIL
+//!   <~/path>` line per write. A host that changed under a stale plan is
+//!   reported as a conflict instead of being overwritten;
+//! - **secret-bearing files** (a rendered body whose content only became
+//!   correct through `${NAME}` substitution) and **every config file** —
+//!   hash-checked the same way, then written through
 //!   `provision::write_host_file_secret`, which never puts the content in an
 //!   argv and creates the file 0600. A secret value must never reach a
 //!   script body, an error message, a result or a log line: report lines
@@ -22,7 +23,20 @@
 //! Config files are never patched blind: the plan's snapshot of the parsed
 //! file is re-serialised, run through `Harness::merge_config` (which applies
 //! this sync's merges and un-applies the previous manifest entry's), and the
-//! whole new text written back under the same compare-and-swap.
+//! whole new text written back under the same compare-and-swap. They take
+//! the secret path unconditionally — not because this sync's merge carries a
+//! secret, but because the file may ALREADY hold one (an earlier sync's
+//! token, or the user's own), and a merge that only touches an unrelated key
+//! would otherwise re-embed it, base64'd, in a `bash -lc` command line.
+//! **A config file fleet has synced is therefore mode 0600 afterwards.** A
+//! config file the scan could not parse is never rewritten at all: every
+//! action touching it is `blocked`.
+//!
+//! Failure is per file, not per asset: within one batch, the non-conflicting
+//! files of a multi-file asset are still written even when a sibling
+//! conflicts. The action is reported `conflict`/`failed` and gets NO manifest
+//! entry, so the next plan sees the half-written state, re-plans it, and the
+//! (idempotent) writes converge — nothing is rolled back on the host.
 //!
 //! Reserved for the sync command layer (Task 7); the per-item
 //! `#[allow(dead_code)]` markers come off once a Tauri command / MCP tool
@@ -30,7 +44,7 @@
 
 use super::super::harness::claude::PLUGINS_PATH;
 use super::super::harness::{
-    value_hash, ConfigMerge, Harness, HostSnapshot, ManifestMerge, MergeMode,
+    is_hex_hash, value_hash, ConfigMerge, Harness, HostSnapshot, ManifestMerge, MergeMode,
 };
 use super::super::inventory;
 use super::manifest::{Manifest, ManifestEntry};
@@ -194,7 +208,18 @@ pub fn write_scripts(writes: &[GuardedWrite]) -> Vec<String> {
         }
         let p = host_path(&w.path);
         let report = &w.path;
-        let expected = w.expected.as_deref().unwrap_or("absent");
+        let expected = match w.expected.as_deref() {
+            None => "absent",
+            Some(hash) if is_hex_hash(hash) => hash,
+            // The expected hash came off a host's stdout. A value that is
+            // not a digest is never interpolated into the test — it is
+            // reported as a conflict, which is what a plan computed against
+            // something unreadable deserves.
+            Some(_) => {
+                body.push_str(&format!("echo \"CONFLICT {report}\"\n"));
+                continue;
+            }
+        };
         body.push_str(&format!("p={p}; d=$(dirname \"$p\"); cur=$(h \"$p\")\n"));
         body.push_str(&format!(
             "if [ \"$cur\" != \"{expected}\" ]; then echo \"CONFLICT {report}\"; else\n"
@@ -209,8 +234,12 @@ pub fn write_scripts(writes: &[GuardedWrite]) -> Vec<String> {
         } else {
             let b64 = base64::engine::general_purpose::STANDARD.encode(&w.bytes);
             payload += b64.len();
+            // Decode into a sibling and rename: a link that drops mid
+            // transfer (or a full disk) leaves the original file intact
+            // rather than truncated, and `mv` within one directory is
+            // atomic.
             body.push_str(&format!(
-                "mkdir -p \"$d\" && printf %s \"{b64}\" | $B > \"$p\" && echo \"OK {report}\" || echo \"FAIL {report}\"\n"
+                "mkdir -p \"$d\" && printf %s \"{b64}\" | $B > \"$p.fleet-tmp\" && mv -f \"$p.fleet-tmp\" \"$p\" && echo \"OK {report}\" || {{ rm -f \"$p.fleet-tmp\"; echo \"FAIL {report}\"; }}\n"
             ));
         }
         body.push_str("fi\n");
@@ -346,6 +375,7 @@ pub fn parse_plugin_output(stdout: &str) -> PluginCliOutcome {
 /// thing between a catalog typo and a shell metacharacter.
 fn is_safe_token(t: &str) -> bool {
     !t.is_empty()
+        && !t.starts_with('-')
         && !t.contains("..")
         && t.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-' | '@' | ':'))
@@ -380,6 +410,15 @@ fn plugin_script(repo: Option<&str>, spec: &str, op: &str) -> Option<String> {
 /// an empty document over a file we failed to understand.
 fn existing_config_text(file: &str, snap: &HostSnapshot) -> Result<String, String> {
     let Some(value) = snap.configs.get(file) else {
+        // Hashed by the scan but not parsed by it: the file is there and
+        // fleet does not understand it. Treating that as "missing" would
+        // rewrite a malformed-but-real config from an empty document,
+        // throwing away whatever the user has in it.
+        if snap.files.contains_key(file) {
+            return Err(format!(
+                "{file} could not be parsed on the host; not written"
+            ));
+        }
         return Ok(String::new());
     };
     if file.ends_with(".toml") {
@@ -632,8 +671,20 @@ pub async fn apply_host(
     } else {
         "applied"
     };
+    // An `Adopt` changed nothing on the host — only the manifest — so it
+    // never asks the user to restart anything.
     let restart_required = plan.actions.iter().zip(actions.iter()).any(|(a, r)| {
-        r.outcome == DONE && matches!(a.kind.as_str(), "hook" | "mcp_server" | "plugin_ref")
+        r.outcome == DONE
+            && matches!(a.kind.as_str(), "hook" | "mcp_server" | "plugin_ref")
+            && matches!(
+                a.op,
+                ActionOp::Create
+                    | ActionOp::Update
+                    | ActionOp::Overwrite
+                    | ActionOp::Remove
+                    | ActionOp::PluginInstall
+                    | ActionOp::PluginUpdate
+            )
     });
     tracing::info!(
         host,
@@ -931,7 +982,6 @@ struct MergeJob {
     actions: Vec<usize>,
     adds: Vec<ConfigMerge>,
     removes: Vec<ManifestMerge>,
-    secret: bool,
 }
 
 /// Step 4: rewrite each touched config file once, applying this sync's
@@ -962,7 +1012,6 @@ async fn apply_config_merges(
                 if !job.actions.contains(&i) {
                     job.actions.push(i);
                 }
-                job.secret |= action.secret_files.contains(&m.file);
             }
         }
         if let Some(prev) = &action.remove_entry {
@@ -979,7 +1028,6 @@ async fn apply_config_merges(
         return;
     }
 
-    let mut writes: Vec<(usize, GuardedWrite)> = Vec::new();
     let mut secret_jobs: Vec<SecretJob> = Vec::new();
     for (file, job) in &jobs {
         if job.actions.iter().all(|i| !work[*i].pending()) {
@@ -1020,77 +1068,19 @@ async fn apply_config_merges(
         // one is always backed up first — that rewrite is what a backup is
         // for (TOML comments, unknown-but-valid keys fleet reformats).
         let backup = plan.snapshot.files.contains_key(file);
-        if job.secret {
-            secret_jobs.push(SecretJob {
-                actions: job.actions.clone(),
-                path: file.clone(),
-                content: merged,
-                expected,
-                backup,
-            });
-        } else {
-            // `actions[0]` only tags the write; `propagate_config_results`
-            // spreads the outcome over every action touching the file.
-            writes.push((
-                job.actions[0],
-                GuardedWrite {
-                    path: file.clone(),
-                    expected,
-                    bytes: merged.into_bytes(),
-                    backup,
-                    delete: false,
-                },
-            ));
-        }
-    }
-
-    if !writes.is_empty() {
-        let scripts = write_scripts(&writes.iter().map(|(_, w)| w.clone()).collect::<Vec<_>>());
-        let mut results: BTreeMap<String, WriteOutcome> = BTreeMap::new();
-        let mut err: Option<String> = None;
-        for script in &scripts {
-            match inventory::run_host_script_with(
-                ctx.ssh,
-                host_of(plan),
-                script,
-                APPLY_WALL_CLOCK,
-                &ctx.token,
-            )
-            .await
-            {
-                Ok(out) => results.extend(parse_write_output(&out)),
-                Err(e) => {
-                    host_detail.get_or_insert(e.message.clone());
-                    err = Some(e.message);
-                    break;
-                }
-            }
-        }
-        for (_, w) in &writes {
-            let Some(job) = jobs.get(&w.path) else {
-                continue;
-            };
-            let outcome = match results.get(&w.path) {
-                Some(WriteOutcome::Ok) => None,
-                Some(WriteOutcome::Conflict) => Some((
-                    CONFLICT,
-                    format!("{} changed on the host since the plan was computed", w.path),
-                )),
-                Some(WriteOutcome::Failed) => Some((FAILED, format!("could not write {}", w.path))),
-                None => Some((
-                    FAILED,
-                    err.clone()
-                        .unwrap_or_else(|| format!("no result for {}", w.path)),
-                )),
-            };
-            if let Some((outcome, detail)) = outcome {
-                for i in &job.actions {
-                    if work[*i].pending() {
-                        work[*i].set(outcome, detail.clone());
-                    }
-                }
-            }
-        }
+        // ALWAYS the secret path, regardless of whether THIS sync's merge
+        // carries a secret: the file may already hold one (an earlier
+        // sync's bearer token, or the user's own API key), and embedding
+        // that base64'd in a `bash -lc` command line would expose it in the
+        // host's process table. The cost is that a synced config file ends
+        // up 0600.
+        secret_jobs.push(SecretJob {
+            actions: job.actions.clone(),
+            path: file.clone(),
+            content: merged,
+            expected,
+            backup,
+        });
     }
 
     run_secret_jobs(ctx, host_of(plan), &secret_jobs, work, host_detail).await;
@@ -1310,7 +1300,7 @@ mod tests {
         assert!(s.contains("p=\"$HOME\"/.claude/skills/s/SKILL.md;"));
         assert!(s.contains("if [ \"$cur\" != \"absent\" ]; then echo \"CONFLICT ~/.claude/skills/s/SKILL.md\"; else"));
         assert!(!s.contains("fleet-bak"), "a create replaces nothing");
-        assert!(s.contains("mkdir -p \"$d\" && printf %s \"Ym9keQo=\" | $B > \"$p\" && echo \"OK ~/.claude/skills/s/SKILL.md\" || echo \"FAIL ~/.claude/skills/s/SKILL.md\""));
+        assert!(s.contains("mkdir -p \"$d\" && printf %s \"Ym9keQo=\" | $B > \"$p.fleet-tmp\" && mv -f \"$p.fleet-tmp\" \"$p\" && echo \"OK ~/.claude/skills/s/SKILL.md\" || { rm -f \"$p.fleet-tmp\"; echo \"FAIL ~/.claude/skills/s/SKILL.md\"; }"));
         assert!(!s.contains('\''), "no single quotes: {s}");
     }
 
@@ -1325,7 +1315,7 @@ mod tests {
         let backup = s
             .find("cp -p \"$p\" \"$p.fleet-bak-$T\"")
             .expect("backup line");
-        let write = s.find("| $B > \"$p\"").expect("write line");
+        let write = s.find("| $B > \"$p.fleet-tmp\"").expect("write line");
         assert!(backup < write, "backup must precede the write");
         assert!(s.contains("if [ \"$cur\" != \"deadbeef\" ]"));
         assert!(!s.contains('\''));
@@ -1342,7 +1332,10 @@ mod tests {
         let s = &scripts[0];
         assert!(s.contains("cp -p \"$p\" \"$p.fleet-bak-$T\""));
         assert!(s.contains("rm -f \"$p\" && { rmdir \"$d\" 2>/dev/null; echo \"OK ~/.claude/skills/s/SKILL.md\"; } || echo \"FAIL ~/.claude/skills/s/SKILL.md\""));
-        assert!(!s.contains("| $B > \"$p\""), "a delete carries no payload");
+        assert!(
+            !s.contains("| $B > \"$p.fleet-tmp\""),
+            "a delete carries no payload"
+        );
         assert!(!s.contains('\''));
     }
 
@@ -1370,6 +1363,27 @@ mod tests {
             })
             .collect();
         assert_eq!(write_scripts(&deletes).len(), 1);
+    }
+
+    /// A hash is host-supplied. One that is not a hex digest is never
+    /// interpolated into the compare-and-swap test — the write is reported
+    /// as a conflict and skipped entirely.
+    #[test]
+    fn a_non_hex_expected_hash_conflicts_instead_of_being_interpolated() {
+        let scripts = write_scripts(&[GuardedWrite {
+            expected: Some("\"; rm -rf ~; echo \"".into()),
+            ..w("~/.claude/skills/s/SKILL.md", b"body\n")
+        }]);
+        let s = &scripts[0];
+        assert!(s.contains("echo \"CONFLICT ~/.claude/skills/s/SKILL.md\"\n"));
+        assert!(!s.contains("rm -rf"), "{s}");
+        assert!(!s.contains("Ym9keQo="), "nothing is written: {s}");
+        assert!(!s.contains('\''));
+        assert_eq!(
+            parse_write_output(&format!("CONFLICT {}", "~/.claude/skills/s/SKILL.md"))
+                ["~/.claude/skills/s/SKILL.md"],
+            WriteOutcome::Conflict
+        );
     }
 
     #[test]
@@ -1418,6 +1432,9 @@ mod tests {
         assert!(plugin_script(Some("owner/repo; rm -rf /"), "a@b", "install").is_none());
         assert!(plugin_script(None, "a@b$(id)", "uninstall").is_none());
         assert!(plugin_script(None, "../evil", "uninstall").is_none());
+        // A leading `-` would be read by the CLI as a flag, not a name.
+        assert!(plugin_script(None, "-rf", "uninstall").is_none());
+        assert!(plugin_script(Some("--help"), "a@b", "install").is_none());
     }
 
     #[test]
@@ -1492,6 +1509,12 @@ mod tests {
             existing_config_text("~/.claude/nothing.json", &snap).unwrap(),
             ""
         );
+        // Hashed by the scan but absent from `configs`: the file is there
+        // and unparseable, which must block rather than read as empty.
+        snap.files
+            .insert("~/.claude/broken.json".into(), "a".repeat(64));
+        let err = existing_config_text("~/.claude/broken.json", &snap).unwrap_err();
+        assert!(err.contains("could not be parsed"), "{err}");
     }
 
     /// Restores `HOME` when the test (or a panic) ends: it is process-wide,
@@ -1686,6 +1709,19 @@ mod tests {
             backups(&home.path().join(".claude")).is_empty(),
             "nothing existed to back up"
         );
+        // EVERY config rewrite takes the 0600 upload path, not just a
+        // secret-bearing one: the file may already hold someone else's
+        // secret, which must not be re-embedded in a script.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(home.path().join(".claude/settings.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
 
         // 7. And that too is a no-op the second time around.
         let after = plan_for(&ssh, &hooks).await;
@@ -1790,6 +1826,59 @@ mod tests {
         let manifest: Manifest =
             serde_json::from_str(&std::fs::read_to_string(&manifest_file).unwrap()).unwrap();
         assert!(manifest.assets.contains_key("hook/stop"), "{manifest:?}");
+
+        // 11. An MCP server merges into `~/.claude.json`, whose parent dir
+        //     is a bare `~` — the local secret-write path must expand that
+        //     to `$HOME` rather than create a directory called `~`.
+        let mcp_repo = tempfile::tempdir().unwrap();
+        let mcps = write_catalog(
+            mcp_repo.path(),
+            &[(
+                "mcp/fleet.yaml",
+                "kind: mcp_server\nname: fleet\ndescription: d\ntransport: http\nurl: \"http://127.0.0.1:4180/mcp\"\n",
+            )],
+        );
+        let mcp_plan = plan_for(&ssh, &mcps).await;
+        assert_eq!(mcp_plan.actions[0].op, ActionOp::Create);
+        let res = apply_host(&ctx, &Claude, &mcp_plan).await;
+        assert_eq!(res.status, "applied", "{res:?}");
+        assert!(
+            !home.path().join("~").exists(),
+            "a bare ~ parent must expand, not become a directory"
+        );
+        let claude_json = read_json(&home.path().join(".claude.json"));
+        assert_eq!(
+            claude_json["mcpServers"]["fleet"]["url"],
+            "http://127.0.0.1:4180/mcp"
+        );
+
+        // 12. A config file the scan cannot parse is never rewritten: every
+        //     action touching it is blocked, and the bytes stay put.
+        let broken = b"{ this is not json";
+        std::fs::write(home.path().join(".claude/settings.json"), broken).unwrap();
+        let before_backups = backups(&home.path().join(".claude")).len();
+        let blocked_plan = plan_with_secrets(&ssh, &hooks, &secrets).await;
+        let res = apply_host(&ctx, &Claude, &blocked_plan).await;
+        assert_eq!(res.actions[0].outcome, BLOCKED, "{res:?}");
+        assert!(
+            res.actions[0]
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("could not be parsed"),
+            "{:?}",
+            res.actions[0].detail
+        );
+        assert_eq!(
+            std::fs::read(home.path().join(".claude/settings.json")).unwrap(),
+            broken,
+            "the unparseable file is left exactly as it was"
+        );
+        assert_eq!(
+            backups(&home.path().join(".claude")).len(),
+            before_backups,
+            "a blocked action backs nothing up"
+        );
     }
 
     /// A file the previous sync wrote that the asset no longer renders is

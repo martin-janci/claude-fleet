@@ -426,6 +426,16 @@ pub fn remove_merges(root: &mut Value, merges: &[ManifestMerge]) {
 /// gathered so far must not be trusted as complete: `E_SCAN`). A hash line
 /// whose path is `-` (a hasher invoked with no file argument, reading
 /// stdin) is skipped rather than recorded as a real file.
+/// Is `s` a plausible content digest — `[0-9a-f]{1,128}`? Hashes cross the
+/// SSH boundary as untrusted host output and are later interpolated into an
+/// apply script, so nothing else is ever accepted as one.
+pub fn is_hex_hash(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 pub fn parse_scan_blocks(
     stdout: &str,
     decode: &dyn Fn(&str, &[u8]) -> Option<Value>,
@@ -467,8 +477,17 @@ pub fn parse_scan_blocks(
             if path == "-" {
                 continue;
             }
-            snap.files
-                .insert(format!("~/{path}"), hash.trim().to_string());
+            // Scan output is host-supplied and ends up interpolated into a
+            // later apply script's compare-and-swap test, so only a real
+            // hex digest is ever recorded: anything else is dropped (the
+            // file then reads as absent, which plans a create, not a silent
+            // overwrite).
+            let hash = hash.trim();
+            if !is_hex_hash(hash) {
+                tracing::warn!(path, "scan reported a non-hex hash; ignoring the line");
+                continue;
+            }
+            snap.files.insert(format!("~/{path}"), hash.to_string());
         }
     }
     if !saw_end {
@@ -484,6 +503,29 @@ pub fn parse_scan_blocks(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A scan line whose "hash" is not a hex digest is dropped rather than
+    /// recorded: it would otherwise be interpolated verbatim into an apply
+    /// script's `[ "$cur" != "<expected>" ]` test.
+    #[test]
+    fn parse_scan_blocks_only_accepts_hex_hashes() {
+        let good = "a".repeat(64);
+        let stdout = format!(
+            "##HASHES\n{good}  .claude/skills/ok/SKILL.md\n\"; rm -rf /; echo \"  .claude/skills/evil/SKILL.md\nDEADBEEF  .claude/skills/upper/SKILL.md\n{}  .claude/skills/toolong/SKILL.md\n##END\n",
+            "a".repeat(129)
+        );
+        let snap = parse_scan_blocks(&stdout, &|_, _| None).unwrap();
+        assert_eq!(
+            snap.files.keys().collect::<Vec<_>>(),
+            vec!["~/.claude/skills/ok/SKILL.md"]
+        );
+        assert_eq!(snap.files["~/.claude/skills/ok/SKILL.md"], good);
+        assert!(is_hex_hash("0123456789abcdef"));
+        assert!(!is_hex_hash(""));
+        assert!(!is_hex_hash("ABCDEF"));
+        assert!(!is_hex_hash("abc def"));
+        assert!(!is_hex_hash(&"a".repeat(129)));
+    }
 
     fn plan_with(
         files: Vec<(&str, &str)>,

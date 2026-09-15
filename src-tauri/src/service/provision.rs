@@ -554,12 +554,18 @@ fn remote_touch_private_script(dir: &str, path: &str) -> String {
     )
 }
 
-/// Expand a leading `~/` against the LOCAL home dir.
+/// Expand a leading `~/` — or a bare `~` — against the LOCAL home dir.
+/// The bare form is the parent directory of a dotfile that lives directly in
+/// `$HOME` (`~/.claude.json`, `~/.tmux.conf`), so it reaches `create_dir_all`
+/// on the local path; leaving it literal would create a directory named `~`
+/// in the process's cwd (`remote_path` handles the same case remotely).
 fn expand_home_local(path: &str) -> Result<String, IpcError> {
+    let home = || std::env::var("HOME").map_err(|_| IpcError::new("E_PROVISION", "HOME not set"));
+    if path == "~" {
+        return home();
+    }
     if let Some(rest) = path.strip_prefix("~/") {
-        let home =
-            std::env::var("HOME").map_err(|_| IpcError::new("E_PROVISION", "HOME not set"))?;
-        Ok(format!("{home}/{rest}"))
+        Ok(format!("{}/{rest}", home()?))
     } else {
         Ok(path.to_string())
     }
@@ -807,6 +813,10 @@ mod tests {
             super::expand_home_local("~/.claude.json").unwrap(),
             "/Users/test/.claude.json"
         );
+        // A bare `~` is the parent dir of `~/.claude.json`; it must expand
+        // too, or a local write there would `create_dir_all("~")` in the
+        // process's cwd (mirrors `remote_path`).
+        assert_eq!(super::expand_home_local("~").unwrap(), "/Users/test");
         assert_eq!(super::expand_home_local("/abs/path").unwrap(), "/abs/path");
         match original_home {
             Some(home) => std::env::set_var("HOME", home),
