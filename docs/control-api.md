@@ -151,7 +151,10 @@ Index by area (names only; see the reference for details):
   ANY apply — not only one whose plan includes an overwrite or remove —
   while the setting is on), `set_secret` (store a `${NAME}`
   placeholder value; master token only; the value is never returned, logged, or
-  audited).
+  audited). Authoring (create, edit, delete assets) is desktop-only via the
+  Assets tab, which auto-commits every save; no MCP tools. Sessions may edit
+  the catalog repo directly and commit with `catalog:` prefixed messages,
+  which the app picks up on its next catalog load.
 - **Orchestration** — `wait_for_session`, `session_transcript`, `run_prompt`,
   `dispatch_task`, `wait_for_task`, `list_tasks`, `cancel_task`,
   `set_session_tags`.
