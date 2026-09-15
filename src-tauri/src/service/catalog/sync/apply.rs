@@ -68,6 +68,10 @@ const APPLY_WALL_CLOCK: Duration = Duration::from_secs(300);
 /// to be atomic).
 const CHUNK_B64_BYTES: usize = 512 * 1024;
 
+/// How many `.fleet-bak-*` backups of one file are kept; older ones are
+/// pruned right after each new backup is made (see `backup_and_prune`).
+const BACKUP_KEEP: usize = 3;
+
 /// Per-action outcome strings (also `ActionResult::outcome`).
 const DONE: &str = "done";
 const CONFLICT: &str = "conflict";
@@ -188,6 +192,20 @@ fn script_preamble() -> String {
     s
 }
 
+/// The backup-then-prune pair emitted for the current file `$p`: back it up
+/// as `<file>.fleet-bak-<epoch>-<pid>` if it exists, then drop all but the
+/// [`BACKUP_KEEP`] newest backups of that exact file. `tail -n +N` with
+/// `N = BACKUP_KEEP + 1` is POSIX-portable (no GNU-only `head -n -N`); the
+/// glob is unquoted only after `"$p"`, so it matches solely `$p`'s own
+/// backup names. Shared by `write_scripts` and `backup_script` so both call
+/// sites emit identical text.
+fn backup_and_prune() -> String {
+    format!(
+        "if [ -f \"$p\" ]; then cp -p \"$p\" \"$p.fleet-bak-$T\"; fi\nls -1t \"$p\".fleet-bak-* 2>/dev/null | tail -n +{} | while read -r f; do rm -f \"$f\"; done\n",
+        BACKUP_KEEP + 1
+    )
+}
+
 /// Bash scripts applying `writes` with compare-and-swap, chunked at roughly
 /// [`CHUNK_B64_BYTES`] of base64 payload each. The scripts contain no single
 /// quote, so the whole thing survives `shell::quote` on its way to a remote
@@ -221,7 +239,7 @@ pub fn write_scripts(writes: &[GuardedWrite]) -> Vec<String> {
             "if [ \"$cur\" != \"{expected}\" ]; then echo \"CONFLICT {report}\"; else\n"
         ));
         if w.backup {
-            body.push_str("if [ -f \"$p\" ]; then cp -p \"$p\" \"$p.fleet-bak-$T\"; fi\n");
+            body.push_str(&backup_and_prune());
         }
         if w.delete {
             body.push_str(&format!(
@@ -300,7 +318,7 @@ fn backup_script(paths: &[String]) -> String {
             continue;
         }
         s.push_str(&format!("p={}\n", host_path(path)));
-        s.push_str("if [ -f \"$p\" ]; then cp -p \"$p\" \"$p.fleet-bak-$T\"; fi\n");
+        s.push_str(&backup_and_prune());
     }
     s
 }
@@ -1306,8 +1324,12 @@ mod tests {
         let backup = s
             .find("cp -p \"$p\" \"$p.fleet-bak-$T\"")
             .expect("backup line");
+        let prune = s
+            .find("ls -1t \"$p\".fleet-bak-* 2>/dev/null | tail -n +4 | while read -r f; do rm -f \"$f\"; done")
+            .expect("prune line");
         let write = s.find("| $B > \"$p.fleet-tmp\"").expect("write line");
-        assert!(backup < write, "backup must precede the write");
+        assert!(backup < prune, "prune must follow the backup line");
+        assert!(prune < write, "backup+prune must precede the write");
         assert!(s.contains("if [ \"$cur\" != \"deadbeef\" ]"));
         assert!(!s.contains('\''));
     }
@@ -1322,11 +1344,24 @@ mod tests {
         }]);
         let s = &scripts[0];
         assert!(s.contains("cp -p \"$p\" \"$p.fleet-bak-$T\""));
+        assert!(s.contains(
+            "ls -1t \"$p\".fleet-bak-* 2>/dev/null | tail -n +4 | while read -r f; do rm -f \"$f\"; done"
+        ));
         assert!(s.contains("rm -f \"$p\" && { rmdir \"$d\" 2>/dev/null; echo \"OK ~/.claude/skills/s/SKILL.md\"; } || echo \"FAIL ~/.claude/skills/s/SKILL.md\""));
         assert!(
             !s.contains("| $B > \"$p.fleet-tmp\""),
             "a delete carries no payload"
         );
+        assert!(!s.contains('\''));
+    }
+
+    #[test]
+    fn backup_script_also_prunes_old_backups() {
+        let s = backup_script(&["~/.claude/settings.json".to_string()]);
+        assert!(s.contains("cp -p \"$p\" \"$p.fleet-bak-$T\""));
+        assert!(s.contains(
+            "ls -1t \"$p\".fleet-bak-* 2>/dev/null | tail -n +4 | while read -r f; do rm -f \"$f\"; done"
+        ));
         assert!(!s.contains('\''));
     }
 
@@ -1874,6 +1909,89 @@ mod tests {
             before_backups,
             "a blocked action backs nothing up"
         );
+    }
+
+    /// Repeated overwrites of the same file prune `.fleet-bak-*` backups
+    /// down to the [`BACKUP_KEEP`] newest, dropping the oldest first.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn repeated_overwrites_prune_backups_to_the_newest_three() {
+        let _lock = crate::service::catalog::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+
+        let skill_repo = tempfile::tempdir().unwrap();
+        let catalog = write_catalog(
+            skill_repo.path(),
+            &[
+                (
+                    "skills/s/asset.yaml",
+                    "kind: skill\nname: s\ndescription: d\n",
+                ),
+                ("skills/s/body.md", "v0\n"),
+            ],
+        );
+        let ssh = Arc::new(SshClient::new());
+        let ctx = ApplyCtx {
+            ssh: &ssh,
+            token: CancellationToken::new(),
+            now: 1_000,
+        };
+        let skill_dir = home.path().join(".claude/skills/s");
+
+        let create = plan_for(&ssh, &catalog).await;
+        let res = apply_host(&ctx, &Claude, &create).await;
+        assert_eq!(res.status, "applied", "{res:?}");
+        assert!(backups(&skill_dir).is_empty());
+
+        // Four overwrites, each changing the body so the plan sees a real
+        // change to apply. Each backs up the file as it was before that
+        // overwrite.
+        let mut first_backup_name: Option<String> = None;
+        for v in 1..=4 {
+            let catalog = write_catalog(
+                skill_repo.path(),
+                &[
+                    (
+                        "skills/s/asset.yaml",
+                        "kind: skill\nname: s\ndescription: d\n",
+                    ),
+                    ("skills/s/body.md", &format!("v{v}\n")),
+                ],
+            );
+            let overwrite = plan_for(&ssh, &catalog).await;
+            assert_eq!(overwrite.actions[0].op, ActionOp::Update, "v{v}");
+            assert!(overwrite.actions[0].backup, "v{v}");
+            let res = apply_host(&ctx, &Claude, &overwrite).await;
+            assert_eq!(res.status, "applied", "v{v}: {res:?}");
+            if v == 1 {
+                let baks = backups(&skill_dir);
+                assert_eq!(baks.len(), 1, "{baks:?}");
+                first_backup_name = Some(baks[0].clone());
+            }
+        }
+
+        let baks = backups(&skill_dir);
+        assert_eq!(
+            baks.len(),
+            3,
+            "kept only the {BACKUP_KEEP} newest backups: {baks:?}"
+        );
+        assert!(
+            !baks.contains(first_backup_name.as_ref().unwrap()),
+            "the oldest backup must have been pruned: {baks:?}"
+        );
+        let mut contents: Vec<String> = baks
+            .iter()
+            .map(|f| std::fs::read_to_string(skill_dir.join(f)).unwrap())
+            .collect();
+        contents.sort();
+        assert!(contents[0].ends_with("v1\n"), "{contents:?}");
+        assert!(contents[1].ends_with("v2\n"), "{contents:?}");
+        assert!(contents[2].ends_with("v3\n"), "{contents:?}");
     }
 
     /// A file the previous sync wrote that the asset no longer renders is
