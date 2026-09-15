@@ -116,7 +116,12 @@ pub struct Action {
     /// the applier can tighten permissions on config files too.
     #[serde(skip)]
     pub secret_files: BTreeSet<String>,
-    /// The manifest entry a `Remove` undoes.
+    /// The manifest entry this action supersedes: everything a previous sync
+    /// wrote for this asset. On a `Remove` it is the whole point — unmerge
+    /// and delete it. On a `Create`/`Update`/`Overwrite` it is present
+    /// whenever the manifest already named the asset, and means "unmerge
+    /// this before applying `plan`", so a changed `AppendUnique` value does
+    /// not leave its old element behind in the shared array.
     #[serde(skip)]
     pub remove_entry: Option<ManifestEntry>,
     #[serde(skip)]
@@ -271,8 +276,18 @@ fn expected_for<'a>(
 ///    `remove_entry` taken from the manifest entry. A manifest key
 ///    `Manifest::split_key` cannot parse is skipped (it names no kind, so
 ///    there is nothing to filter or display it as) and logged.
-/// 7. `backup` is true whenever a file that exists on the host right now
-///    would be replaced (`Update`/`Overwrite`) or deleted (`Remove`).
+/// 7. `backup` is true whenever something that exists on the host right now
+///    would be replaced (`Update`/`Overwrite`) or deleted (`Remove`) — a
+///    planned file that is already there, or, for a merge-only asset, a
+///    config file the merge would rewrite.
+/// 8. `remove_entry` on a *non*-`Remove` op means: unmerge the previous
+///    entry first. Whenever the manifest already names an asset whose op is
+///    `Create`/`Update`/`Overwrite`, the previous entry rides along so the
+///    applier can `remove_merges(previous)` before `apply_merges(new)`. That
+///    matters most for an `AppendUnique` (hook) merge whose value changed:
+///    its old element is still in the shared array and nothing else would
+///    ever take it out — and because the *new* value is absent from that
+///    array, rule 4 reads the asset as `Create`, not `Update`.
 ///
 /// A host that could not be reached never reaches this function: the caller
 /// pushes a `HostPlan` with `status: "skipped"` and a `detail` instead.
@@ -492,9 +507,24 @@ fn action_for(
         }
     };
 
-    // Rule 7.
+    // Rule 7. A merge-only asset (an MCP server, a hook) has no planned
+    // files, but rewriting the config file it merges into is just as
+    // destructive, so an existing *merge* target counts too.
     let replaces = matches!(op, ActionOp::Update | ActionOp::Overwrite);
-    let backup = replaces && plan.files.iter().any(|f| snap.files.contains_key(&f.path));
+    let touches_existing = plan.files.iter().any(|f| snap.files.contains_key(&f.path))
+        || plan
+            .merges
+            .iter()
+            .any(|m| snap.files.contains_key(&m.file) || snap.configs.contains_key(&m.file));
+    let backup = replaces && touches_existing;
+
+    // Rule 8.
+    let remove_entry = match op {
+        ActionOp::Create | ActionOp::Update | ActionOp::Overwrite => {
+            manifest.assets.get(&Manifest::key(kind, &name)).cloned()
+        }
+        _ => None,
+    };
 
     Action {
         op,
@@ -509,6 +539,7 @@ fn action_for(
         },
         expected,
         secret_files,
+        remove_entry,
         ..blank()
     }
 }
@@ -623,11 +654,17 @@ pub(crate) fn registry_put_with_ttl(mut plan: SyncPlan, ttl: Duration) -> String
 }
 
 /// Remove and return the plan stashed under `id`, or `None` if there is no
-/// such plan or it has expired.
+/// such plan or it has expired. Expired plans are dropped on the way past,
+/// like `registry_put` does: each one pins a `HostSnapshot` per host, and a
+/// session that computes plans but never applies them would otherwise hold
+/// every one of them until the next `registry_put`.
 #[allow(dead_code)]
 pub fn registry_take(id: &str) -> Option<SyncPlan> {
-    let (expires_at, plan) = plans().remove(id)?;
-    (expires_at > Instant::now()).then_some(plan)
+    let now = Instant::now();
+    let mut map = plans();
+    map.retain(|_, (expires_at, _)| *expires_at > now);
+    let (_, plan) = map.remove(id)?;
+    Some(plan)
 }
 
 #[cfg(test)]
@@ -859,6 +896,101 @@ mod tests {
             Some("present but differs; not managed")
         );
         assert!(a.backup);
+    }
+
+    /// A merge-only asset has no planned files, but overwriting the config
+    /// file it merges into is just as destructive — it must still back up.
+    #[test]
+    fn a_merge_only_asset_that_differs_is_backed_up_too() {
+        let mut snap = HostSnapshot::default();
+        snap.configs.insert(
+            crate::service::catalog::harness::claude::CLAUDE_JSON_PATH.into(),
+            json!({"mcpServers": {"fleet": {"type": "http", "url": "https://somewhere/else"}}}),
+        );
+        let hp = plan_for(
+            &catalog_of(&[MCP]),
+            &Claude,
+            &snap,
+            &Manifest::default(),
+            &secrets_map(),
+        );
+        let a = act(&hp, "fleet");
+        assert_eq!(a.op, ActionOp::Overwrite);
+        assert!(a.files.is_empty(), "an mcp server writes no files");
+        assert!(
+            a.backup,
+            "the config file it rewrites already exists on the host"
+        );
+    }
+
+    /// An `AppendUnique` hook whose catalog value changed reads as `Create`
+    /// (its *new* element is absent from the shared array), so the stale
+    /// element from the last sync would be left behind unless the previous
+    /// manifest entry rides along for the applier to unmerge first.
+    #[test]
+    fn a_changed_hook_carries_the_previous_manifest_entry_to_unmerge() {
+        use crate::service::catalog::harness::claude::SETTINGS_PATH;
+
+        // The host still holds what the *old* catalog value merged in.
+        let mut snap = HostSnapshot::default();
+        satisfy(
+            &mut snap,
+            &substituted(&Claude, &asset(HOOK), &secrets_map()),
+        );
+
+        // …while the catalog now renders a different command.
+        let changed = "kind: hook\nname: h\ndescription: d\nevent: stop\naction: { type: command, command: y }\n";
+        let mut manifest = manifest_with(&[("hook/h", "the-old-render")]);
+        let old = ManifestMerge {
+            file: SETTINGS_PATH.into(),
+            json_path: vec!["hooks".into(), "Stop".into()],
+            mode: MergeMode::AppendUnique,
+            value_hash: "the-old-value".into(),
+        };
+        manifest.assets.get_mut("hook/h").unwrap().merges = vec![old.clone()];
+
+        let hp = plan_for(
+            &catalog_of(&[changed]),
+            &Claude,
+            &snap,
+            &manifest,
+            &secrets_map(),
+        );
+        let a = act(&hp, "h");
+        assert_eq!(
+            a.op,
+            ActionOp::Create,
+            "the new element is not in the array"
+        );
+        let entry = a
+            .remove_entry
+            .as_ref()
+            .expect("the previous entry must ride along to be unmerged");
+        assert_eq!(entry.hash, "the-old-render");
+        assert_eq!(entry.merges, vec![old]);
+        assert!(a.plan.is_some(), "and the new plan is still applied after");
+
+        // Nothing to unmerge when the manifest never named the asset.
+        let hp = plan_for(
+            &catalog_of(&[changed]),
+            &Claude,
+            &snap,
+            &Manifest::default(),
+            &secrets_map(),
+        );
+        assert!(act(&hp, "h").remove_entry.is_none());
+
+        // …and a noop supersedes nothing.
+        let hp = plan_for(
+            &catalog_of(&[HOOK]),
+            &Claude,
+            &snap,
+            &manifest_with(&[("hook/h", "x")]),
+            &secrets_map(),
+        );
+        let a = act(&hp, "h");
+        assert_eq!(a.op, ActionOp::Noop);
+        assert!(a.remove_entry.is_none());
     }
 
     #[test]
@@ -1184,8 +1316,15 @@ mod tests {
 
     #[test]
     fn an_expired_plan_is_not_handed_back() {
-        let plan = SyncPlan::new(Vec::new());
-        let id = registry_put_with_ttl(plan, Duration::ZERO);
+        let id = registry_put_with_ttl(SyncPlan::new(Vec::new()), Duration::ZERO);
+        // A second expired plan nobody ever asks for: taking *any* id must
+        // sweep it out too, or a session that computes plans and never
+        // applies them pins every host snapshot it ever rendered.
+        let abandoned = registry_put_with_ttl(SyncPlan::new(Vec::new()), Duration::ZERO);
         assert!(registry_take(&id).is_none());
+        assert!(
+            !plans().contains_key(&abandoned),
+            "an expired plan is dropped, not left pinning its host snapshots"
+        );
     }
 }
