@@ -121,25 +121,10 @@ impl Store {
     }
 
     pub fn list_hosts(&self) -> Result<Vec<HostRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT alias, ssh_alias, reachable, claude_version, tmux_version, hidden,
-                    last_pinged_at, account_uuid, provisioned
-             FROM hosts
-             ORDER BY (alias='local') DESC, alias ASC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(HostRow {
-                alias: row.get(0)?,
-                ssh_alias: row.get(1)?,
-                reachable: row.get::<_, i64>(2)? != 0,
-                claude_version: row.get(3)?,
-                tmux_version: row.get(4)?,
-                hidden: row.get::<_, i64>(5)? != 0,
-                last_pinged_at: row.get(6)?,
-                account_uuid: row.get(7)?,
-                provisioned: row.get::<_, i64>(8)? != 0,
-            })
-        })?;
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {HOST_COLUMNS} FROM hosts ORDER BY (alias='local') DESC, alias ASC"
+        ))?;
+        let rows = stmt.query_map([], map_host_row)?;
         rows.collect()
     }
 
@@ -193,25 +178,10 @@ impl Store {
     }
 
     pub fn list_accounts(&self) -> Result<Vec<AccountRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT uuid, email, display_name, organization_name, organization_uuid,
-                    seat_tier, last_seen_at, nickname, has_extra_usage
-             FROM accounts
-             ORDER BY uuid ASC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(AccountRow {
-                uuid: row.get(0)?,
-                email: row.get(1)?,
-                display_name: row.get(2)?,
-                organization_name: row.get(3)?,
-                organization_uuid: row.get(4)?,
-                seat_tier: row.get(5)?,
-                last_seen_at: row.get(6)?,
-                nickname: row.get(7)?,
-                has_extra_usage: row.get::<_, i64>(8)? != 0,
-            })
-        })?;
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {ACCOUNT_COLUMNS} FROM accounts ORDER BY uuid ASC"
+        ))?;
+        let rows = stmt.query_map([], map_account_row)?;
         rows.collect()
     }
 
@@ -287,24 +257,10 @@ impl Store {
     }
 
     pub fn get_account_by_uuid(&self, uuid: &str) -> Result<Option<AccountRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT uuid, email, display_name, organization_name, organization_uuid,
-                    seat_tier, last_seen_at, nickname, has_extra_usage
-             FROM accounts WHERE uuid=?1",
-        )?;
-        let mut rows = stmt.query_map(rusqlite::params![uuid], |row| {
-            Ok(AccountRow {
-                uuid: row.get(0)?,
-                email: row.get(1)?,
-                display_name: row.get(2)?,
-                organization_name: row.get(3)?,
-                organization_uuid: row.get(4)?,
-                seat_tier: row.get(5)?,
-                last_seen_at: row.get(6)?,
-                nickname: row.get(7)?,
-                has_extra_usage: row.get::<_, i64>(8)? != 0,
-            })
-        })?;
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {ACCOUNT_COLUMNS} FROM accounts WHERE uuid=?1"
+        ))?;
+        let mut rows = stmt.query_map(rusqlite::params![uuid], map_account_row)?;
         match rows.next() {
             Some(r) => Ok(Some(r?)),
             None => Ok(None),

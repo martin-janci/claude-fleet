@@ -96,8 +96,7 @@ impl Store {
     ) -> Result<Option<SessionMessage>, crate::ipc_error::IpcError> {
         self.conn
             .query_row(
-                "SELECT id, from_session_id, to_session_id, body, kind, sent_at, read_at, reply_to \
-                 FROM session_messages WHERE id = ?1",
+                &format!("SELECT {MESSAGE_COLUMNS} FROM session_messages WHERE id = ?1"),
                 rusqlite::params![id],
                 map_message_row,
             )
@@ -113,18 +112,17 @@ impl Store {
         unread_only: bool,
         limit: i64,
     ) -> Result<Vec<SessionMessage>, crate::ipc_error::IpcError> {
-        let sql = if unread_only {
-            "SELECT id, from_session_id, to_session_id, body, kind, sent_at, read_at, reply_to \
-             FROM session_messages \
-             WHERE to_session_id = ?1 AND read_at IS NULL \
-             ORDER BY sent_at DESC, id DESC LIMIT ?2"
+        let unread = if unread_only {
+            " AND read_at IS NULL"
         } else {
-            "SELECT id, from_session_id, to_session_id, body, kind, sent_at, read_at, reply_to \
-             FROM session_messages \
-             WHERE to_session_id = ?1 \
-             ORDER BY sent_at DESC, id DESC LIMIT ?2"
+            ""
         };
-        let mut stmt = self.conn.prepare(sql)?;
+        let sql = format!(
+            "SELECT {MESSAGE_COLUMNS} FROM session_messages \
+             WHERE to_session_id = ?1{unread} \
+             ORDER BY sent_at DESC, id DESC LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params![to_session_id, limit], map_message_row)?;
         let mut out = Vec::new();
         for r in rows {

@@ -11,23 +11,12 @@ impl Store {
         &self,
         host_alias: &str,
     ) -> Result<Vec<UsageCursor>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT id, transcript_path, claude_session_id, usage_offset_bytes, usage_source, \
-             usage_last_msg_id, usage_last_msg_usage FROM sessions \
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {USAGE_CURSOR_COLUMNS} FROM sessions \
              WHERE host_alias = ?1 AND lost_at IS NULL AND claude_session_id IS NOT NULL \
-             ORDER BY COALESCE(usage_updated_at, 0), id",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![host_alias], |r| {
-            Ok(UsageCursor {
-                session_id: r.get(0)?,
-                transcript_path: r.get(1)?,
-                claude_session_id: r.get(2)?,
-                offset_bytes: r.get(3)?,
-                source: r.get(4)?,
-                last_msg_id: r.get(5)?,
-                last_msg_usage: r.get(6)?,
-            })
-        })?;
+             ORDER BY COALESCE(usage_updated_at, 0), id"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![host_alias], map_usage_cursor)?;
         rows.collect()
     }
 
@@ -104,20 +93,9 @@ impl Store {
     pub fn usage_cursor(&self, id: i64) -> Result<Option<UsageCursor>, rusqlite::Error> {
         self.conn
             .query_row(
-                "SELECT id, transcript_path, claude_session_id, usage_offset_bytes, usage_source, \
-                 usage_last_msg_id, usage_last_msg_usage FROM sessions WHERE id = ?1",
+                &format!("SELECT {USAGE_CURSOR_COLUMNS} FROM sessions WHERE id = ?1"),
                 rusqlite::params![id],
-                |r| {
-                    Ok(UsageCursor {
-                        session_id: r.get(0)?,
-                        transcript_path: r.get(1)?,
-                        claude_session_id: r.get(2)?,
-                        offset_bytes: r.get(3)?,
-                        source: r.get(4)?,
-                        last_msg_id: r.get(5)?,
-                        last_msg_usage: r.get(6)?,
-                    })
-                },
+                map_usage_cursor,
             )
             .optional()
     }

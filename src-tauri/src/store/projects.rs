@@ -76,19 +76,10 @@ impl Store {
     }
 
     pub fn list_projects(&self) -> Result<Vec<ProjectRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT id, owner, repo, base_path, last_session_at, adopted FROM projects ORDER BY owner, repo",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(ProjectRow {
-                id: row.get(0)?,
-                owner: row.get(1)?,
-                repo: row.get(2)?,
-                base_path: row.get(3)?,
-                last_session_at: row.get(4)?,
-                adopted: row.get::<_, i64>(5)? != 0,
-            })
-        })?;
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {PROJECT_COLUMNS} FROM projects ORDER BY owner, repo"
+        ))?;
+        let rows = stmt.query_map([], map_project_row)?;
         rows.collect()
     }
 
@@ -103,9 +94,10 @@ impl Store {
     pub fn list_projects_joined(
         &self,
     ) -> Result<Vec<crate::service::projects::ProjectTreeRow>, crate::ipc_error::IpcError> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT p.id, p.owner, p.repo, p.base_path, p.last_session_at, p.adopted,
-                    w.id, w.project_id, w.name, w.path, w.branch
+        // The project columns come first (offset 0, so `map_project_row`
+        // reads them as-is); the LEFT JOINed worktree columns follow.
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {cols}, w.id, w.name, w.path, w.branch
              FROM projects p
              LEFT JOIN worktrees w ON w.project_id = p.id AND w.host_alias = 'local'
              ORDER BY
@@ -113,36 +105,25 @@ impl Store {
                p.last_session_at DESC,
                p.id,
                w.id",
-        )?;
+            cols = qualified(PROJECT_COLUMNS, "p")
+        ))?;
         let rows = stmt.query_map([], |row| {
             Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-                row.get::<_, i64>(5)? != 0,
+                map_project_row(row)?,
                 row.get::<_, Option<i64>>(6)?,
-                row.get::<_, Option<i64>>(7)?,
+                row.get::<_, Option<String>>(7)?,
                 row.get::<_, Option<String>>(8)?,
                 row.get::<_, Option<String>>(9)?,
-                row.get::<_, Option<String>>(10)?,
             ))
         })?;
         let mut out: Vec<crate::service::projects::ProjectTreeRow> = Vec::new();
         let mut last_pid: Option<i64> = None;
         for r in rows {
-            let (pid, owner, repo, base, last, adopted, wid, _wpid, wname, wpath, wbranch) = r?;
+            let (project, wid, wname, wpath, wbranch) = r?;
+            let pid = project.id;
             if last_pid != Some(pid) {
                 out.push(crate::service::projects::ProjectTreeRow {
-                    project: ProjectRow {
-                        id: pid,
-                        owner,
-                        repo,
-                        base_path: base,
-                        last_session_at: last,
-                        adopted,
-                    },
+                    project,
                     worktrees: Vec::new(),
                 });
                 last_pid = Some(pid);
