@@ -10,7 +10,6 @@ pub mod move_session;
 pub mod mutate;
 pub mod onboarding;
 pub mod projects;
-pub mod repo;
 pub mod sessions;
 pub mod tasks;
 pub mod upload;

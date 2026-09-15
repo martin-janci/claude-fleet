@@ -1,22 +1,18 @@
 //! Mutating git commands for the Files tab: checkout, branch create/delete,
-//! stage/commit, and remote sync. Reuses the shared plumbing in `repo.rs`.
+//! stage/commit, and remote sync. Reuses the shared plumbing in
+//! `service::repo`.
 //! Branch names go through `validate::git_ref`, hashes through
 //! `validate::commit_hash`, paths through `validate::repo_rel_path`; every
 //! interpolated value is shell-quoted.
 
-use crate::commands::repo::{repo_err, repo_script, run_in_repo, session_target};
 use crate::ipc_error::{codes, IpcError};
+use crate::service::repo::{ensure_clean, repo_err, repo_script, run_in_repo, session_target};
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::Store;
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use tauri::State;
-
-/// True when `git status --porcelain` output indicates a dirty worktree.
-fn is_dirty(porcelain: &[u8]) -> bool {
-    !String::from_utf8_lossy(porcelain).trim().is_empty()
-}
 
 #[derive(Deserialize)]
 pub struct CheckoutArgs {
@@ -34,18 +30,7 @@ pub async fn repo_checkout(
 ) -> Result<(), IpcError> {
     crate::validate::git_ref(&args.branch)?;
     let (host, name) = session_target(&store, args.session_id)?;
-    // Guard: check dirty first.
-    let status = repo_script(&name, "git -C \"$root\" status --porcelain");
-    let so = run_in_repo(&ssh, &host, &status).await?;
-    if !so.status.success() {
-        return Err(repo_err(&so));
-    }
-    if is_dirty(&so.stdout) {
-        return Err(IpcError::new(
-            codes::E_DIRTY,
-            "worktree has uncommitted changes — the agent may have work in progress",
-        ));
-    }
+    ensure_clean(&ssh, &host, &name).await?;
     let body = format!("git -C \"$root\" checkout {}", quote(&args.branch));
     let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
     if !out.status.success() {
@@ -69,17 +54,7 @@ pub async fn repo_checkout_commit(
 ) -> Result<(), IpcError> {
     crate::validate::commit_hash(&args.hash)?;
     let (host, name) = session_target(&store, args.session_id)?;
-    let status = repo_script(&name, "git -C \"$root\" status --porcelain");
-    let so = run_in_repo(&ssh, &host, &status).await?;
-    if !so.status.success() {
-        return Err(repo_err(&so));
-    }
-    if is_dirty(&so.stdout) {
-        return Err(IpcError::new(
-            codes::E_DIRTY,
-            "worktree has uncommitted changes — the agent may have work in progress",
-        ));
-    }
+    ensure_clean(&ssh, &host, &name).await?;
     let body = format!("git -C \"$root\" checkout {}", quote(&args.hash));
     let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
     if !out.status.success() {
@@ -307,17 +282,4 @@ pub async fn repo_push(
         return Err(repo_err(&out));
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn is_dirty_detects_changes() {
-        assert!(!is_dirty(b""));
-        assert!(!is_dirty(b"   \n"));
-        assert!(is_dirty(b" M src/x.rs\n"));
-        assert!(is_dirty(b"?? new.txt\n"));
-    }
 }

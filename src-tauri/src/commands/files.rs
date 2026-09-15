@@ -11,11 +11,11 @@
 //! and the frontend-supplied file path is additionally validated
 //! (`validate::repo_rel_path`) so it cannot escape the worktree.
 
-use crate::commands::repo::{
+use crate::ipc_error::IpcError;
+use crate::service::repo::{
     diff_from_bytes, repo_err, repo_script, run_in_repo, session_target, MAX_FILE_BYTES,
     MAX_TREE_ENTRIES,
 };
-use crate::ipc_error::IpcError;
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::Store;

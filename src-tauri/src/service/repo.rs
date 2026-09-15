@@ -1,9 +1,11 @@
-//! Shared plumbing for the git-backed Files/History/Branches commands.
+//! Shared plumbing for the git-backed repo services (`repo_read`,
+//! `repo_mutate`) and their Tauri / MCP callers.
 //!
-//! Every command resolves the session's worktree live: ask tmux for the
+//! Every operation resolves the session's worktree live: ask tmux for the
 //! session pane's cwd, then `git rev-parse --show-toplevel`. This is
 //! host-correct for remote sessions. Every interpolated value is shell-quoted
-//! (`shell::quote`); frontend paths/refs/hashes are additionally validated.
+//! (`shell::quote`); caller-supplied paths/refs/hashes are additionally
+//! validated.
 
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
@@ -96,6 +98,45 @@ pub fn repo_err(out: &std::process::Output) -> IpcError {
     )
 }
 
+/// Run `body` in the session's worktree root (`$root`) and fail with
+/// `repo_err` unless the command exits 0. This is `repo_script` +
+/// `run_in_repo` + the success check that every git call otherwise repeats;
+/// callers that must inspect a non-zero exit themselves use the pieces.
+pub async fn run_git(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    tmux_name: &str,
+    body: &str,
+) -> Result<std::process::Output, IpcError> {
+    let out = run_in_repo(ssh, host, &repo_script(tmux_name, body)).await?;
+    if !out.status.success() {
+        return Err(repo_err(&out));
+    }
+    Ok(out)
+}
+
+/// True when `git status --porcelain` output indicates a dirty worktree.
+fn is_dirty(porcelain: &[u8]) -> bool {
+    !String::from_utf8_lossy(porcelain).trim().is_empty()
+}
+
+/// Refuse (`E_DIRTY`) when the session's worktree has uncommitted changes —
+/// the agent may be mid-edit. Guards every checkout.
+pub async fn ensure_clean(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    tmux_name: &str,
+) -> Result<(), IpcError> {
+    let so = run_git(ssh, host, tmux_name, "git -C \"$root\" status --porcelain").await?;
+    if is_dirty(&so.stdout) {
+        return Err(IpcError::new(
+            codes::E_DIRTY,
+            "worktree has uncommitted changes — the agent may have work in progress",
+        ));
+    }
+    Ok(())
+}
+
 /// Post-process raw diff bytes into a `(diff, binary, truncated)` triple,
 /// cutting on a UTF-8 boundary near `MAX_DIFF_BYTES`. Shared by `repo_diff`
 /// and `repo_commit_diff`.
@@ -168,6 +209,14 @@ mod tests {
         let e = repo_err(&out);
         assert_eq!(e.code, "E_REPO");
         assert!(e.message.contains("not a git repository"));
+    }
+
+    #[test]
+    fn is_dirty_detects_changes() {
+        assert!(!is_dirty(b""));
+        assert!(!is_dirty(b"   \n"));
+        assert!(is_dirty(b" M src/x.rs\n"));
+        assert!(is_dirty(b"?? new.txt\n"));
     }
 
     #[test]

@@ -32,6 +32,7 @@ pub mod provision;
 mod reconcile_tests;
 pub mod repair;
 pub mod repair_tick;
+pub mod repo;
 pub mod safe_kill;
 pub mod sessions;
 pub mod settings;

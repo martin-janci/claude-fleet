@@ -2,8 +2,8 @@
 //! one commit's metadata + changed files, and a file's diff within a commit.
 
 use crate::commands::files::{classify, ChangedFile, FileDiff};
-use crate::commands::repo::{diff_from_bytes, repo_err, repo_script, run_in_repo, session_target};
 use crate::ipc_error::IpcError;
+use crate::service::repo::{diff_from_bytes, repo_err, repo_script, run_in_repo, session_target};
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::Store;
