@@ -39,6 +39,9 @@ pub enum ActionOp {
     /// A manifest entry whose asset is no longer in the catalog.
     Remove,
     PluginInstall,
+    /// Reserved; v1 never schedules automatic plugin updates. A `latest` ref
+    /// whose plugin is installed at any version counts as satisfied (see
+    /// `plugin_op`), so nothing produces this op yet.
     PluginUpdate,
     /// Nothing to do.
     Noop,
@@ -241,13 +244,14 @@ fn expected_for<'a>(
 ///    they are decided from the rendered `Subset` merge alone: the record is
 ///    *present* when the merge with its version stripped (`[{}]`) is
 ///    satisfied, i.e. the `<plugin>@<marketplace>` key holds at least one
-///    object. Present and *matching* (a pinned ref whose installed version
-///    equals the pin, or a `latest` ref whose record carries no version at
-///    all) ⇒ `Noop` if the manifest names it, else `Adopt`. Present but not
-///    matching ⇒ `PluginUpdate` for a `latest` ref (the host is pinned to a
-///    concrete version; re-installing tracks latest again) and `Blocked` for
-///    a pinned ref (the CLI cannot install a specific version). Absent ⇒
-///    `PluginInstall`.
+///    object. Absent ⇒ `PluginInstall`. Present and *matching* ⇒ `Noop` if
+///    the manifest names it, else `Adopt`; a `latest` ref matches any
+///    installed version (the host's record says what is installed, never
+///    what the marketplace now offers, and v1 never re-installs
+///    speculatively — hence nothing produces `PluginUpdate` yet), and a
+///    pinned ref matches when the record carries its version. Present and
+///    pinned to a *different* version ⇒ `Blocked`: the CLI cannot install a
+///    specific version.
 /// 4. Every other kind, against the *substituted* plan: `present` when at
 ///    least one planned file exists in the snapshot or at least one merge's
 ///    `json_path` resolves (an `AppendUnique` merge points at a shared
@@ -535,22 +539,13 @@ fn plugin_op(
             )),
         );
     }
-    let installed: Option<String> = snap
-        .configs
-        .get(&merge.file)
-        .and_then(|root| json_get(root, &merge.json_path))
-        .and_then(|v| v.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|rec| rec.get("version"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let tracks_latest = target.version == "latest";
-    let matches = if tracks_latest {
-        installed.is_none()
-    } else {
-        installed.as_deref() == Some(target.version.as_str())
-    };
-    if matches {
+    // Does the record satisfy what the catalog asks for? A pinned ref
+    // renders `[{"version": v}]`, so this is "installed at v"; a `latest`
+    // ref renders `[{}]`, which any record satisfies — deliberately, since
+    // the host's record says what is installed, never what the marketplace
+    // now offers, so fleet cannot tell a stale copy from a current one and
+    // v1 does not re-install speculatively.
+    if merge_satisfied(snap, merge) {
         return (
             if in_manifest {
                 ActionOp::Noop
@@ -560,21 +555,22 @@ fn plugin_op(
             None,
         );
     }
-    let have = installed.as_deref().unwrap_or("an unknown version");
-    if tracks_latest {
-        (
-            ActionOp::PluginUpdate,
-            Some(format!("installed {have}; the catalog tracks latest")),
-        )
-    } else {
-        (
-            ActionOp::Blocked,
-            Some(format!(
-                "installed {have}, catalog pins {}; the CLI cannot pin versions",
-                target.version
-            )),
-        )
-    }
+    let installed = snap
+        .configs
+        .get(&merge.file)
+        .and_then(|root| json_get(root, &merge.json_path))
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|rec| rec.get("version"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("an unknown version");
+    (
+        ActionOp::Blocked,
+        Some(format!(
+            "installed {installed}, catalog pins {}; the CLI cannot pin versions",
+            target.version
+        )),
+    )
 }
 
 /// Tally every host's actions by `ActionOp::as_str()`. Ops with no actions
@@ -918,8 +914,46 @@ mod tests {
         );
     }
 
+    /// A `latest` ref is satisfied by whatever version is installed: v1 has
+    /// no way to tell a stale copy from a current one, so it never schedules
+    /// a re-install (`ActionOp::PluginUpdate` is reserved and unreachable).
     #[test]
-    fn plugin_ops_install_update_and_block_on_a_pin() {
+    fn a_latest_plugin_ref_matches_any_installed_version() {
+        let mut snap = HostSnapshot::default();
+        snap.configs.insert(
+            crate::service::catalog::harness::claude::PLUGINS_PATH.into(),
+            json!({"plugins": {"sp@mk": [{"version": "5.0.0"}]}}),
+        );
+        let catalog = catalog_of(&[PLUGIN_LATEST]);
+
+        let hp = plan_for(
+            &catalog,
+            &Claude,
+            &snap,
+            &Manifest::default(),
+            &secrets_map(),
+        );
+        let a = act(&hp, "sp");
+        assert_eq!(a.op, ActionOp::Adopt, "{:?}", a.reason);
+        assert_eq!(a.reason, None);
+
+        let hp = plan_for(
+            &catalog,
+            &Claude,
+            &snap,
+            &manifest_with(&[("plugin_ref/sp", "x")]),
+            &secrets_map(),
+        );
+        assert_eq!(act(&hp, "sp").op, ActionOp::Noop);
+
+        assert!(
+            !hp.actions.iter().any(|a| a.op == ActionOp::PluginUpdate),
+            "v1 never schedules an automatic plugin update"
+        );
+    }
+
+    #[test]
+    fn plugin_ops_install_adopt_and_block_on_a_pin() {
         let catalog = catalog_of(&[PLUGIN]);
         // Absent.
         let hp = plan_for(
@@ -950,19 +984,30 @@ mod tests {
         assert!(reason.contains("installed 5.0.0"), "{reason}");
         assert!(reason.contains("cannot pin versions"), "{reason}");
 
-        // Same host, but the catalog tracks latest: re-install to catch up.
+        // Installed at the pinned version: nothing to do.
+        let mut snap = HostSnapshot::default();
+        snap.configs.insert(
+            crate::service::catalog::harness::claude::PLUGINS_PATH.into(),
+            json!({"plugins": {"sp@mk": [{"version": "6.3.0", "scope": "user"}]}}),
+        );
         let hp = plan_for(
-            &catalog_of(&[PLUGIN_LATEST]),
+            &catalog,
             &Claude,
             &snap,
             &Manifest::default(),
             &secrets_map(),
         );
-        let a = act(&hp, "sp");
-        assert_eq!(a.op, ActionOp::PluginUpdate);
-        assert!(a.reason.as_deref().unwrap().contains("tracks latest"));
+        assert_eq!(act(&hp, "sp").op, ActionOp::Adopt);
+        let hp = plan_for(
+            &catalog,
+            &Claude,
+            &snap,
+            &manifest_with(&[("plugin_ref/sp", "x")]),
+            &secrets_map(),
+        );
+        assert_eq!(act(&hp, "sp").op, ActionOp::Noop);
 
-        // A record with no version at all is what "latest" looks like.
+        // A record with no version at all still counts as installed.
         let mut snap = HostSnapshot::default();
         snap.configs.insert(
             crate::service::catalog::harness::claude::PLUGINS_PATH.into(),
