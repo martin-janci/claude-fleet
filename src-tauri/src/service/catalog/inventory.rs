@@ -4,6 +4,7 @@
 use super::harness::{json_get, ConfigMerge, Harness, HostSnapshot, MergeMode};
 use super::model::sha256_hex;
 use super::repo::Catalog;
+use super::sync::manifest::Manifest;
 use crate::ipc_error::codes;
 use crate::shell::quote;
 use crate::ssh::SshClient;
@@ -77,6 +78,25 @@ pub async fn run_host_script(
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Scan one host with one harness: run its scan script and parse the
+/// output into a `HostSnapshot`. A harness with no scan script cannot be
+/// inventoried at all, which is `E_ASSET_UNSUPPORTED` rather than an empty
+/// snapshot (an empty snapshot would read as "every asset is missing").
+pub async fn scan_host_harness(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    harness: &dyn Harness,
+) -> Result<HostSnapshot, crate::ipc_error::IpcError> {
+    let Some(script) = harness.scan_script() else {
+        return Err(crate::ipc_error::IpcError::new(
+            codes::E_ASSET_UNSUPPORTED,
+            format!("{} cannot scan hosts", harness.id()),
+        ));
+    };
+    let out = run_host_script(ssh, host, &script).await?;
+    harness.parse_scan(&out)
+}
+
 /// Scan every non-hidden reachable host (or just `only_host`) with every
 /// harness that supports scanning, persisting rows per (host, harness).
 /// Per-host failures never abort the others (mirrors `provision_hosts`).
@@ -122,17 +142,21 @@ pub async fn scan_hosts(
         // both reasons, not silently drop the first.
         let mut failures: Vec<String> = Vec::new();
         for harness in super::harness::all() {
-            let Some(script) = harness.scan_script() else {
+            if harness.scan_script().is_none() {
                 continue;
-            };
+            }
             let scanned_at = super::now_secs();
-            match run_host_script(ssh, &h.alias, &script)
-                .await
-                .and_then(|out| harness.parse_scan(&out))
-            {
+            match scan_host_harness(ssh, &h.alias, harness.as_ref()).await {
                 Ok(snap) => {
-                    let rows =
-                        compute_states(&catalog, harness.as_ref(), &h.alias, &snap, scanned_at);
+                    let manifest = Manifest::from_snapshot(&snap, harness.manifest_path());
+                    let rows = compute_states(
+                        &catalog,
+                        harness.as_ref(),
+                        &h.alias,
+                        &snap,
+                        &manifest,
+                        scanned_at,
+                    );
                     total += rows.len();
                     match store.lock() {
                         Ok(s) => {
@@ -178,6 +202,9 @@ pub enum AssetState {
     Missing,
     Unmanaged,
     Unsupported,
+    /// The host's fleet manifest names an asset the catalog no longer has;
+    /// the next sync would remove it.
+    Orphan,
 }
 
 impl AssetState {
@@ -188,6 +215,7 @@ impl AssetState {
             AssetState::Missing => "missing",
             AssetState::Unmanaged => "unmanaged",
             AssetState::Unsupported => "unsupported",
+            AssetState::Orphan => "orphan",
         }
     }
 }
@@ -220,12 +248,17 @@ pub fn merge_satisfied(snap: &HostSnapshot, m: &ConfigMerge) -> bool {
 }
 
 /// Compare every catalog asset against the snapshot, then add `unmanaged`
-/// rows for installed assets the catalog does not know.
+/// rows for installed assets the catalog does not know and `orphan` rows for
+/// assets the host's fleet `manifest` still claims but the catalog has
+/// dropped. `managed` on a catalog row says whether the manifest names it —
+/// i.e. whether fleet put it there, as opposed to finding it already
+/// installed.
 pub fn compute_states(
     catalog: &Catalog,
     harness: &dyn Harness,
     host_alias: &str,
     snap: &HostSnapshot,
+    manifest: &Manifest,
     scanned_at: i64,
 ) -> Vec<AssetInventoryRow> {
     let mut rows = Vec::new();
@@ -235,6 +268,9 @@ pub fn compute_states(
             harness: harness.id().to_string(),
             kind: asset.kind().as_str().to_string(),
             name: asset.header.name.clone(),
+            managed: manifest
+                .assets
+                .contains_key(&Manifest::key(asset.kind(), &asset.header.name)),
             scanned_at,
             ..Default::default()
         };
@@ -319,8 +355,37 @@ pub fn compute_states(
             ..base
         });
     }
+    // Manifest entries the catalog has dropped. Computed before the
+    // `unmanaged` rows because an orphan whose files are still installed is
+    // *also* something `installed()` reports, and `(host, harness, kind,
+    // name)` is the inventory table's primary key: one row per asset, and
+    // `orphan` (fleet put it there, and the next sync removes it) says
+    // strictly more than `unmanaged`.
+    let mut orphans: Vec<AssetInventoryRow> = Vec::new();
+    for (key, _entry) in manifest.orphans(catalog) {
+        // A key that names no kind cannot be displayed as an asset row; the
+        // sync plan skips it for the same reason.
+        let Some((kind, name)) = Manifest::split_key(key) else {
+            continue;
+        };
+        orphans.push(AssetInventoryRow {
+            host_alias: host_alias.to_string(),
+            harness: harness.id().to_string(),
+            kind: kind.as_str().to_string(),
+            name,
+            state: AssetState::Orphan.as_str().into(),
+            catalog_hash: None,
+            host_hash: None,
+            scanned_at,
+            managed: true,
+        });
+    }
     for (kind, name) in harness.installed(snap) {
-        if catalog.find(kind, &name).is_none() {
+        if catalog.find(kind, &name).is_none()
+            && !orphans
+                .iter()
+                .any(|o| o.kind == kind.as_str() && o.name == name)
+        {
             rows.push(AssetInventoryRow {
                 host_alias: host_alias.to_string(),
                 harness: harness.id().to_string(),
@@ -334,6 +399,7 @@ pub fn compute_states(
             });
         }
     }
+    rows.extend(orphans);
     rows
 }
 
@@ -451,7 +517,7 @@ mod tests {
             json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "x"}]}]}}),
         );
 
-        let rows = compute_states(&cat, &claude, "local", &snap, 7);
+        let rows = compute_states(&cat, &claude, "local", &snap, &Manifest::default(), 7);
         let state = |kind: &str, name: &str| {
             rows.iter()
                 .find(|r| r.kind == kind && r.name == name)
@@ -470,7 +536,14 @@ mod tests {
         assert!(s.catalog_hash.is_some() && s.host_hash.is_some());
 
         let codex = crate::service::catalog::harness::codex::Codex;
-        let rows = compute_states(&cat, &codex, "local", &HostSnapshot::default(), 7);
+        let rows = compute_states(
+            &cat,
+            &codex,
+            "local",
+            &HostSnapshot::default(),
+            &Manifest::default(),
+            7,
+        );
         assert_eq!(
             rows.iter().find(|r| r.name == "gone").unwrap().state,
             "unsupported"
@@ -506,7 +579,7 @@ mod tests {
             SETTINGS_PATH.into(),
             json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "other"}]}]}}),
         );
-        let rows = compute_states(&cat, &claude, "local", &snap, 1);
+        let rows = compute_states(&cat, &claude, "local", &snap, &Manifest::default(), 1);
         assert_eq!(
             rows.iter().find(|r| r.name == "h").unwrap().state,
             "missing"
@@ -519,7 +592,7 @@ mod tests {
                 {"hooks": [{"type": "command", "command": "x"}]},
             ]}}),
         );
-        let rows = compute_states(&cat, &claude, "local", &snap, 1);
+        let rows = compute_states(&cat, &claude, "local", &snap, &Manifest::default(), 1);
         assert_eq!(
             rows.iter().find(|r| r.name == "h").unwrap().state,
             "in_sync"
@@ -579,5 +652,68 @@ mod tests {
         assert_eq!(results[0].status, "scanned", "{:?}", results[0].detail);
         let rows = store.lock().unwrap().list_inventory().unwrap();
         assert!(rows.iter().any(|r| r.name == "s" && r.harness == "claude"));
+    }
+
+    /// `managed` mirrors the host manifest, and a manifest entry the catalog
+    /// has dropped becomes its own `orphan` row — exactly one row, even when
+    /// the asset's files are still installed and `installed()` would
+    /// otherwise report it as `unmanaged` too.
+    #[test]
+    fn compute_states_marks_managed_rows_and_emits_orphans() {
+        use crate::service::catalog::sync::manifest::ManifestEntry;
+
+        let mut cat = Catalog::default();
+        let mut skill = Asset::from_yaml(None, "kind: skill\nname: s\ndescription: d\n").unwrap();
+        skill.body = "b\n".into();
+        cat.assets.push(skill.clone());
+
+        let claude = Claude;
+        let mut snap = HostSnapshot::default();
+        let skill_plan = claude.render(&skill).unwrap();
+        snap.files.insert(
+            "~/.claude/skills/s/SKILL.md".into(),
+            crate::service::catalog::model::sha256_hex(&skill_plan.files[0].bytes),
+        );
+        // Still installed on the host, and still in the manifest, but gone
+        // from the catalog.
+        snap.files
+            .insert("~/.claude/skills/gone/SKILL.md".into(), "abc".into());
+
+        let mut manifest = Manifest::default();
+        manifest
+            .assets
+            .insert("skill/s".into(), ManifestEntry::default());
+        manifest
+            .assets
+            .insert("skill/gone".into(), ManifestEntry::default());
+        manifest
+            .assets
+            .insert("not-a-kind/x".into(), ManifestEntry::default());
+
+        let rows = compute_states(&cat, &claude, "local", &snap, &manifest, 9);
+        let row = |name: &str| rows.iter().find(|r| r.name == name).unwrap();
+        assert_eq!(row("s").state, "in_sync");
+        assert!(row("s").managed, "the manifest names it");
+        assert_eq!(row("gone").state, "orphan");
+        assert!(row("gone").managed);
+        assert_eq!(row("gone").catalog_hash, None);
+        assert_eq!(row("gone").host_hash, None);
+        assert_eq!(
+            rows.iter().filter(|r| r.name == "gone").count(),
+            1,
+            "an orphan is never also listed as unmanaged"
+        );
+        assert!(
+            !rows.iter().any(|r| r.name == "x"),
+            "an unparseable manifest key names no asset"
+        );
+
+        // Without the manifest, the same host reads as unmanaged and
+        // nothing is managed.
+        let rows = compute_states(&cat, &claude, "local", &snap, &Manifest::default(), 9);
+        let row = |name: &str| rows.iter().find(|r| r.name == name).unwrap();
+        assert_eq!(row("gone").state, "unmanaged");
+        assert!(!row("gone").managed);
+        assert!(!row("s").managed);
     }
 }
