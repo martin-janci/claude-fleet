@@ -232,13 +232,44 @@ fn walk_strings(value: &serde_yaml::Value, path: &str, out: &mut Vec<(String, St
     }
 }
 
-/// A URL the lint accepts without a warning: TLS, or a loopback address
-/// (which never leaves the machine, so plaintext is fine there).
+/// The host of a URL: everything between `://` and the first `/`, `?` or
+/// `#`, with any `user:password@` prefix dropped and any `:port` suffix
+/// stripped (an IPv6 literal keeps its brackets). Lowercased, because host
+/// names are case-insensitive.
+fn url_host(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://")?.1;
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    // Userinfo can itself contain '@', so take the *last* one: everything
+    // after it is the real host (`http://127.0.0.1@evil.com/` is evil.com).
+    let authority = match authority.rsplit_once('@') {
+        Some((_, host)) => host,
+        None => authority,
+    };
+    let host = match authority.find(']') {
+        // `[::1]` / `[::1]:4180` — the brackets delimit the literal.
+        Some(end) if authority.starts_with('[') => &authority[..=end],
+        _ => authority.split(':').next().unwrap_or_default(),
+    };
+    Some(host.to_ascii_lowercase())
+}
+
+/// A URL the lint accepts without a warning: TLS, or a plain-http loopback
+/// address (which never leaves the machine, so plaintext is fine there).
+/// The host is compared exactly — `http://127.0.0.1.evil.com/` and
+/// `http://127.0.0.1@evil.com/` are not loopback, and neither is a scheme
+/// that is neither http nor https.
 fn url_is_safe(url: &str) -> bool {
-    url.starts_with("https://")
-        || url.starts_with("http://127.0.0.1")
-        || url.starts_with("http://localhost")
-        || url.starts_with("http://[::1]")
+    let scheme = url.split_once("://").map(|(s, _)| s.to_ascii_lowercase());
+    match scheme.as_deref() {
+        Some("https") => true,
+        Some("http") => {
+            url_host(url).is_some_and(|h| matches!(h.as_str(), "127.0.0.1" | "localhost" | "[::1]"))
+        }
+        _ => false,
+    }
 }
 
 /// Names of the `${NAME}` placeholders declared in `secrets.example.yaml`:
@@ -529,7 +560,15 @@ fn lint_in_repo(asset: &Asset, root: &Path) -> LintReport {
     lint(asset, catalog, &names, exists)
 }
 
-/// Stage `rel_paths`, commit them under `message`, then reload the catalog.
+/// Stage `rel_paths`, commit them under `message`, then reload the catalog
+/// and return the resulting HEAD.
+///
+/// A write that changes nothing (saving an asset whose serialised form is
+/// byte-identical to what is on disk) is a no-op, not an error: the commit
+/// is skipped and the current HEAD is returned. Only the staged state of
+/// `rel_paths` decides that, so an unrelated dirty file elsewhere in the
+/// tree neither forces an empty commit nor gets swept into this one. The
+/// catalog is reloaded either way, so the caller's view is always fresh.
 fn commit_and_reload(
     root: &Path,
     rel_paths: &[String],
@@ -537,7 +576,11 @@ fn commit_and_reload(
     store: &Mutex<Store>,
 ) -> Result<String, IpcError> {
     repo::stage_paths(root, rel_paths)?;
-    let commit = repo::commit(root, message)?;
+    let commit = if repo::has_staged(root, rel_paths)? {
+        repo::commit(root, message)?
+    } else {
+        repo::head(root)?
+    };
     super::load(false, store)?;
     Ok(commit)
 }
@@ -633,16 +676,35 @@ fn resource_message(kind: Kind, name: &str) -> String {
     format!("catalog: update {}/{name} resources", kind.as_str())
 }
 
+// Both resource operations rewrite the whole asset from the copy in the
+// in-memory `CATALOG` — its `resources` carry the bytes `load_dir` read, so
+// an overwrite reproduces the untouched files and prunes the rest. That
+// assumes `CATALOG` matches the working tree: it holds what the last
+// `catalog::load` saw, every authoring operation ends with one, and the
+// sequence here is synchronous, so the window in which someone could edit
+// the repo underneath is a single operation. A concurrent outside edit to
+// another of *this asset's* files would be reverted by the rewrite (and show
+// up in the commit); anything else in the repo is untouched, because only
+// this asset's path is ever staged.
+
 /// Copy a local file into the asset's `resources/…` and commit it.
 pub fn add_resource(args: AddResourceArgs, store: &Mutex<Store>) -> Result<WriteResult, IpcError> {
     let root = repo_root(store)?;
     check_name(&args.name)?;
     check_has_resources(args.kind)?;
+    // `symlink_metadata` does not follow the link, so a symlinked source is
+    // rejected rather than silently copied through — the same discipline
+    // `repo.rs` applies to everything it reads out of, or removes from, the
+    // repo.
     let local = PathBuf::from(&args.local_path);
-    if !local.is_absolute() || !local.is_file() {
+    let is_regular_file = std::fs::symlink_metadata(&local).is_ok_and(|m| m.is_file());
+    if !local.is_absolute() || !is_regular_file {
         return Err(IpcError::new(
             E_INVALID,
-            format!("{} is not an existing absolute file path", args.local_path),
+            format!(
+                "{} is not an absolute path to an existing regular file",
+                args.local_path
+            ),
         ));
     }
     let rel_path = match args.rel_path {
@@ -983,7 +1045,7 @@ mod tests {
         let mcp = |url: &str| {
             Asset::from_yaml(
                 None,
-                &format!("kind: mcp_server\nname: demo\ndescription: A reasonably long description here.\ntransport: http\nurl: {url}\n"),
+                &format!("kind: mcp_server\nname: demo\ndescription: A reasonably long description here.\ntransport: http\nurl: \"{url}\"\n"),
             )
             .unwrap()
         };
@@ -992,10 +1054,24 @@ mod tests {
         for ok in [
             "https://example.com/mcp",
             "http://127.0.0.1:4180/mcp",
+            "http://127.0.0.1/mcp",
             "http://localhost:4180/mcp",
+            "http://LocalHost/mcp",
             "http://[::1]:4180/mcp",
+            "http://[::1]/mcp",
         ] {
             assert!(lint_of(&mcp(ok)).warnings.is_empty(), "{ok}");
+        }
+        // A host that merely starts with — or hides behind — a loopback name
+        // is not loopback, and a non-http(s) scheme is never trusted.
+        for bad in [
+            "http://127.0.0.1.evil.com/x",
+            "http://localhost.attacker.com/x",
+            "http://127.0.0.1@evil.com/x",
+            "http://user@127.0.0.1.evil.com/x",
+            "ws://127.0.0.1:4180/mcp",
+        ] {
+            assert_eq!(fields(&lint_of(&mcp(bad)).warnings), vec!["url"], "{bad}");
         }
         let hook = Asset::from_yaml(
             None,
@@ -1222,6 +1298,65 @@ mod tests {
         assert!(!root.join("skills/ghost").exists());
     }
 
+    /// Saving an asset nothing changed in must not fail with git's "nothing
+    /// to commit", and must not sweep an unrelated dirty file into a commit
+    /// of its own (which is what a whole-tree check would have done).
+    #[test]
+    fn update_with_no_change_is_a_no_op_even_with_the_tree_dirty() {
+        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = init_repo("noop");
+        let store = configured_store(&root);
+        create(
+            CreateArgs {
+                kind: Kind::Skill,
+                name: "demo".into(),
+                duplicate_from: None,
+            },
+            &store,
+        )
+        .unwrap();
+        let head = repo_status(&store).unwrap().head;
+        let commits = subjects(&root).len();
+
+        let unchanged = catalog_asset(Kind::Skill, "demo").unwrap();
+        let saved = update(
+            UpdateArgs {
+                asset: unchanged.clone(),
+            },
+            &store,
+        )
+        .unwrap();
+        assert_eq!(saved.commit, head, "no new commit for an identical save");
+        assert_eq!(subjects(&root).len(), commits);
+        assert!(saved.lint.errors.is_empty());
+
+        // Same again with something else in the tree dirty: still a no-op,
+        // and the unrelated file stays uncommitted.
+        std::fs::write(root.join("notes.md"), "scratch\n").unwrap();
+        let saved = update(
+            UpdateArgs {
+                asset: unchanged.clone(),
+            },
+            &store,
+        )
+        .unwrap();
+        assert_eq!(saved.commit, head);
+        assert_eq!(subjects(&root).len(), commits);
+        assert_eq!(
+            repo_status(&store).unwrap().dirty,
+            1,
+            "notes.md is untouched"
+        );
+
+        // A real edit still commits, and still leaves the stray file alone.
+        let mut edited = unchanged;
+        edited.header.description = "A demo skill used by the authoring tests.".into();
+        let saved = update(UpdateArgs { asset: edited }, &store).unwrap();
+        assert_ne!(saved.commit, head);
+        assert_eq!(subjects(&root)[0], "catalog: update skill/demo");
+        assert_eq!(repo_status(&store).unwrap().dirty, 1);
+    }
+
     #[test]
     fn resources_add_and_remove_commit_and_prune() {
         let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1321,6 +1456,24 @@ mod tests {
             .code,
             E_INVALID
         );
+        // A symlinked source is refused rather than followed.
+        let link = src.parent().unwrap().join("link.sh");
+        std::os::unix::fs::symlink(&src, &link).unwrap();
+        assert_eq!(
+            add_resource(
+                AddResourceArgs {
+                    kind: Kind::Skill,
+                    name: "demo".into(),
+                    local_path: link.to_string_lossy().into(),
+                    rel_path: None,
+                },
+                &store,
+            )
+            .unwrap_err()
+            .code,
+            E_INVALID
+        );
+        assert!(!root.join("skills/demo/resources/link.sh").exists());
 
         // Removing the nested one prunes the file and the empty directory.
         remove_resource(

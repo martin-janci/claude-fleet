@@ -32,7 +32,11 @@ struct CatalogFile {
     schema_version: u64,
 }
 
-fn git(dir: &Path, args: &[&str]) -> Result<String, IpcError> {
+/// Run git and hand back the raw `Output`, exit status included. Only
+/// callers that give a non-zero status its own meaning (`has_staged`) use
+/// this directly; everything else goes through `git`, which turns a non-zero
+/// status into an `E_CATALOG_GIT`.
+fn git_output(dir: &Path, args: &[&str]) -> Result<std::process::Output, IpcError> {
     let mut cmd = std::process::Command::new("git");
     cmd.args(args).current_dir(dir);
     // Tests must not depend on (or be broken by) the host's own global git
@@ -44,9 +48,12 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, IpcError> {
     #[cfg(test)]
     cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1");
-    let out = cmd
-        .output()
-        .map_err(|e| IpcError::new(E_CATALOG_GIT, format!("spawn git: {e}")))?;
+    cmd.output()
+        .map_err(|e| IpcError::new(E_CATALOG_GIT, format!("spawn git: {e}")))
+}
+
+fn git(dir: &Path, args: &[&str]) -> Result<String, IpcError> {
+    let out = git_output(dir, args)?;
     if !out.status.success() {
         return Err(
             IpcError::new(E_CATALOG_GIT, format!("git {}: failed", args.join(" "))).with_details(
@@ -150,10 +157,10 @@ pub fn has_identity(root: &Path) -> bool {
 }
 
 /// `git add -A -- <rel_paths>`, or `git add -A` for the whole tree when
-/// `rel_paths` is empty. `rel_paths` are trusted here (author.rs, Task 2,
-/// validates any path that originates from the frontend before it reaches
-/// this function); the `--` before them still defuses flag injection (a
-/// path that happens to start with `-`) regardless.
+/// `rel_paths` is empty. `rel_paths` are trusted here (`author.rs` validates
+/// any path that originates from the frontend before it reaches this
+/// function); the `--` before them still defuses flag injection (a path that
+/// happens to start with `-`) regardless.
 pub fn stage_paths(root: &Path, rel_paths: &[String]) -> Result<(), IpcError> {
     if rel_paths.is_empty() {
         git(root, &["add", "-A"]).map(|_| ())
@@ -161,6 +168,31 @@ pub fn stage_paths(root: &Path, rel_paths: &[String]) -> Result<(), IpcError> {
         let mut args: Vec<&str> = vec!["add", "-A", "--"];
         args.extend(rel_paths.iter().map(String::as_str));
         git(root, &args).map(|_| ())
+    }
+}
+
+/// Whether the index differs from HEAD for `rel_paths` (for the whole index
+/// when empty) — i.e. whether a commit limited to those paths would record
+/// anything. `git diff --cached --quiet` exits 0 when there is nothing
+/// staged and 1 when there is (also in a repo with no commits yet, where it
+/// compares against the empty tree); any other status is a real failure.
+/// Lets a caller skip an empty commit without inspecting the whole working
+/// tree, which may legitimately be dirty elsewhere.
+pub fn has_staged(root: &Path, rel_paths: &[String]) -> Result<bool, IpcError> {
+    let mut args: Vec<&str> = vec!["diff", "--cached", "--quiet"];
+    if !rel_paths.is_empty() {
+        args.push("--");
+        args.extend(rel_paths.iter().map(String::as_str));
+    }
+    let out = git_output(root, &args)?;
+    match out.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => Err(
+            IpcError::new(E_CATALOG_GIT, "git diff --cached failed").with_details(
+                serde_json::json!({ "stderr": String::from_utf8_lossy(&out.stderr).trim() }),
+            ),
+        ),
     }
 }
 
@@ -851,6 +883,41 @@ mod tests {
         // Nothing left to stage/commit for the already-committed paths.
         let err = commit(&root, "catalog: nothing").unwrap_err();
         assert_eq!(err.code, "E_CATALOG_GIT");
+    }
+
+    /// `has_staged` is what lets a caller tell "this write changed nothing"
+    /// from "the tree is dirty somewhere else": it looks only at the index,
+    /// and only at the paths it is given.
+    #[test]
+    fn has_staged_is_scoped_to_its_paths() {
+        let root = tmp("has-staged");
+        init_repo(&root);
+        git_run(&root, &["config", "user.email", "dev@example.com"]);
+        git_run(&root, &["config", "user.name", "Dev"]);
+
+        // A repo with no commits at all: an empty index stages nothing.
+        assert!(!has_staged(&root, &[]).unwrap());
+        write(&root, "catalog.yaml", "schema_version: 1\n");
+        stage_paths(&root, &[]).unwrap();
+        assert!(has_staged(&root, &[]).unwrap());
+        commit(&root, "catalog: init").unwrap();
+        assert!(!has_staged(&root, &[]).unwrap());
+
+        // Re-writing identical content stages nothing…
+        write(&root, "catalog.yaml", "schema_version: 1\n");
+        write(&root, "hooks/other.yaml", "kind: hook\n");
+        stage_paths(&root, &["catalog.yaml".to_string()]).unwrap();
+        assert!(!has_staged(&root, &["catalog.yaml".to_string()]).unwrap());
+        // …even though another path is genuinely dirty and unstaged.
+        assert_eq!(git_status(&root).unwrap().dirty, 1);
+        assert!(!has_staged(&root, &[]).unwrap());
+
+        // A real change to the scoped path shows up; an unrelated one does not.
+        write(&root, "catalog.yaml", "schema_version: 1\n# changed\n");
+        stage_paths(&root, &["catalog.yaml".to_string()]).unwrap();
+        assert!(has_staged(&root, &["catalog.yaml".to_string()]).unwrap());
+        assert!(!has_staged(&root, &["hooks/other.yaml".to_string()]).unwrap());
+        assert!(!has_staged(&root, &["nosuch".to_string()]).unwrap());
     }
 
     #[test]
