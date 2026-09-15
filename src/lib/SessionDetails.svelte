@@ -24,7 +24,8 @@
   import { projectById } from './projects';
   import { selectSession, clearSelection } from './selection';
   import { hosts, hostByAlias } from './hosts';
-  import { accountByUuid, type AccountRow } from './accounts';
+  import { accountByUuid, accountEmailTier, type AccountRow } from './accounts';
+  import { timeAgo } from './session_status';
   import PromptComposer from './PromptComposer.svelte';
   import ReviewDialog from './ReviewDialog.svelte';
   import Modal from './Modal.svelte';
@@ -60,12 +61,6 @@
   const accountRow = $derived(
     hostRow?.account_uuid ? ($accountByUuid.get(hostRow.account_uuid) ?? null) : null,
   );
-  function accountText(a: AccountRow | null): string {
-    if (!a) return '—';
-    const email = a.email ?? a.uuid;
-    return a.seat_tier ? `${email} (${a.seat_tier})` : email;
-  }
-
   function accountForRow(s: SessionRow): AccountRow | null {
     if (!s.account_uuid) return null;
     return $accountByUuid.get(s.account_uuid) ?? null;
@@ -85,14 +80,11 @@
   // Local-only for v0.2 (Phase 4 will branch on host_alias for remote attach).
   const attachCommand = $derived(`tmux attach -t ${session.tmux_name}`);
 
+  // Past a month the relative form stops being useful; show the date.
   function formatRelative(unix: number): string {
     const ageSec = Math.floor(Date.now() / 1000) - unix;
-    if (ageSec < 60) return 'just now';
-    if (ageSec < 3600) return `${Math.floor(ageSec / 60)}m ago`;
-    if (ageSec < 86400) return `${Math.floor(ageSec / 3600)}h ago`;
-    const days = Math.floor(ageSec / 86400);
-    if (days < 30) return `${days}d ago`;
-    return new Date(unix * 1000).toISOString().slice(0, 10);
+    if (ageSec >= 30 * 86400) return new Date(unix * 1000).toISOString().slice(0, 10);
+    return timeAgo(unix);
   }
 
   let copied = $state(false);
@@ -466,7 +458,7 @@
     <dd data-testid="session-host">{session.host_alias}</dd>
 
     <dt>Account</dt>
-    <dd data-testid="session-account">{accountText(accountRow)}</dd>
+    <dd data-testid="session-account">{accountEmailTier(accountRow)}</dd>
 
     <dt>Project</dt>
     <dd>
@@ -546,7 +538,7 @@
               onclick={() => selectSession(r)}
             >
               <span class="host-badge">[{r.host_alias}]</span>
-              <span class="account">{accountText(accountForRow(r))}</span>
+              <span class="account">{accountEmailTier(accountForRow(r))}</span>
               <span class="status-dot status-{r.status}" title={r.status}></span>
               <span class="sess-name">{r.tmux_name}</span>
               <span class="age">{formatRelative(r.last_activity_at)}</span>
@@ -569,7 +561,7 @@
               onclick={() => selectSession(r)}
             >
               <span class="host-badge">[{r.host_alias}]</span>
-              <span class="account">{accountText(accountForRow(r))}</span>
+              <span class="account">{accountEmailTier(accountForRow(r))}</span>
               <span class="status-dot status-{r.status}" title={r.status}></span>
               <span class="sess-name">{r.tmux_name}</span>
               <span class="age">{formatRelative(r.last_activity_at)}</span>

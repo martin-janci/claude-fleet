@@ -43,7 +43,7 @@ function hostOffline(h: HostRow): boolean {
 }
 
 /** Other hosts logged in to `host`'s account, alphabetically. */
-export function otherHostsOnAccount(host: HostRow, hosts: readonly HostRow[]): string[] {
+function otherHostsOnAccount(host: HostRow, hosts: readonly HostRow[]): string[] {
   if (!host.account_uuid) return [];
   return hosts
     .filter((h) => h.alias !== host.alias && h.account_uuid === host.account_uuid)
@@ -62,7 +62,7 @@ export interface BindingNumber {
 }
 
 /** The binding window's number while it may still be shown (not expired). */
-export function bindingNumber(snapshot: AccountUsageSnapshot | null, now: number): BindingNumber | null {
+function bindingNumber(snapshot: AccountUsageSnapshot | null, now: number): BindingNumber | null {
   if (!snapshot?.usage) return null;
   const kind = bindingWindow(snapshot.usage);
   const w = kind ? windowOf(snapshot.usage, kind) : null;
