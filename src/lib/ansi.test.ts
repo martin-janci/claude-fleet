@@ -1587,3 +1587,23 @@ describe('ansi.Screen — DECSTBM clamps an oversize bottom margin (U1)', () => 
     expect([s.scrollTop, s.scrollBottom]).toEqual([1, 3]);
   });
 });
+
+describe('ansi.Screen — DEC Special Graphics never stores control chars (U2)', () => {
+  it('b / c / d / e map to the ␉ ␌ ␍ ␊ symbols tmux 3.6a sends, not TAB/FF/CR/LF', () => {
+    const s = new Screen(3, 12);
+    s.write('\x1b(0abcdefg_\x1b(B|end');
+    expect(s.cells[0].map((c) => c.ch)).toEqual(['▒', '␉', '␌', '␍', '␊', '°', '±', ' ', '|', 'e', 'n', 'd']);
+    expect([s.cursorRow, s.cursorCol]).toEqual([0, 12]);
+  });
+
+  it('no graphics-set character leaves a code point below 0x20 in a cell', () => {
+    const s = new Screen(1, 40);
+    let all = '';
+    for (let c = 0x5f; c <= 0x7e; c++) all += String.fromCharCode(c);
+    s.write(`\x1b(0${all}\x1b(B`);
+    for (const cell of s.cells[0]) {
+      for (const ch of cell.ch) expect(ch.codePointAt(0)!).toBeGreaterThanOrEqual(0x20);
+    }
+    expect(rowToRuns(s.cells[0]).map((r) => r.text).join('')).not.toMatch(/[\x00-\x1f]/);
+  });
+});

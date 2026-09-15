@@ -105,10 +105,13 @@ const DEC_SPECIAL_GRAPHICS: { [k: string]: string } = {
   '_': ' ',  // NBSP in spec; plain space renders the same in our DOM
   '`': '◆',
   'a': '▒',
-  'b': '\t',
-  'c': '\f',
-  'd': '\r',
-  'e': '\n',
+  // b-e are the VT100 control *pictures* (as tmux and xterm draw them), never
+  // the raw TAB/FF/CR/LF — a cell must not hold a control char, or the
+  // `white-space: pre` row span breaks onto two lines.
+  'b': '␉',
+  'c': '␌',
+  'd': '␍',
+  'e': '␊',
   'f': '°',
   'g': '±',
   'h': '␤',
