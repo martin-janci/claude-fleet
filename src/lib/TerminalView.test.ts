@@ -242,6 +242,135 @@ describe('TerminalView drain resilience (F1)', () => {
   });
 });
 
+describe('TerminalView PTY death detection (F11/N8)', () => {
+  /** A drain result with every field the backend sends. */
+  const drained = (over: Partial<{ data: string; bytes: number; eof: boolean; overflowed: boolean }> = {}) => ({
+    data: '',
+    bytes: 0,
+    eof: false,
+    overflowed: false,
+    ...over,
+  });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('session output that prints the EOF marker does not tear down a healthy attach', async () => {
+    // Exactly what `grep -n "PTY EOF" pty.rs` shows inside an attached pane.
+    const line = '[cf] PTY EOF after 0 bytes (tmux attach exited)';
+    let served = false;
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_drain') {
+        if (served) return drained();
+        served = true;
+        return drained({ data: line, bytes: line.length });
+      }
+      return null;
+    });
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    await vi.advanceTimersByTimeAsync(2000);
+    await settle();
+    expect(calls('pty_open')).toHaveLength(1);
+    expect(calls('pty_close')).toHaveLength(0);
+    expect(screen.queryByTestId('terminal-autoreconnect-banner')).toBeNull();
+    expect(screen.queryByTestId('terminal-reconnect-banner')).toBeNull();
+  });
+
+  it('an out-of-band eof with no bytes left reattaches', async () => {
+    let dead = false;
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_open') {
+        dead = false;
+        return null;
+      }
+      if (cmd === 'pty_drain') {
+        if (dead) return drained();
+        dead = true;
+        return drained({ eof: true });
+      }
+      return null;
+    });
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    await vi.advanceTimersByTimeAsync(40);
+    await settle();
+    expect(screen.queryByTestId('terminal-autoreconnect-banner')).not.toBeNull();
+    await vi.advanceTimersByTimeAsync(700);
+    await settle();
+    expect(calls('pty_open')).toHaveLength(2);
+  });
+
+  it('output from a doomed attach does not refill the self-heal budget', async () => {
+    // Every attach prints something (a login profile, a tmux error) and then
+    // dies. The output used to reset the retry count, so the cap was never
+    // reached and the pane said "reconnecting…" forever.
+    let served = false;
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_open') {
+        served = false;
+        return null;
+      }
+      if (cmd === 'pty_drain') {
+        if (!served) {
+          served = true;
+          return drained({ data: 'profile noise', bytes: 13 });
+        }
+        return drained({ eof: true });
+      }
+      return null;
+    });
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    await vi.advanceTimersByTimeAsync(8000);
+    await settle();
+    // 1 initial attach + MAX_AUTO_RECONNECT (3) tries, then the manual banner.
+    expect(calls('pty_open')).toHaveLength(4);
+    expect(screen.queryByTestId('terminal-reconnect-banner')).not.toBeNull();
+  });
+
+  it('an attach that stays up long enough earns a fresh budget', async () => {
+    let dead = false;
+    let deaths = 0;
+    let openedAt = Date.now();
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_open') {
+        dead = false;
+        return null;
+      }
+      if (cmd === 'pty_drain') {
+        // Die once per attach, but only after 12 s of healthy attachment.
+        if (!dead && Date.now() - openedAt >= 12_000) {
+          dead = true;
+          deaths += 1;
+          return drained({ eof: true });
+        }
+        return drained();
+      }
+      return null;
+    });
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    for (let i = 0; i < 5; i++) {
+      openedAt = Date.now();
+      await vi.advanceTimersByTimeAsync(13_000);
+      await settle();
+    }
+    expect(deaths).toBeGreaterThan(3);
+    // Every reattach stayed up past the health threshold, so the budget was
+    // restored each time and the manual banner never appeared.
+    expect(screen.queryByTestId('terminal-reconnect-banner')).toBeNull();
+  });
+});
+
 describe('TerminalView pty_write errors (FE-12)', () => {
   it('surfaces a rejected pty_write as one deduped error toast', async () => {
     inv().mockImplementation(async (cmd: string) => {

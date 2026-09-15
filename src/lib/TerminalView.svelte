@@ -101,13 +101,29 @@
    *  to a remote host dropped or its ControlMaster wedged), auto-reattach a
    *  bounded number of times with backoff before falling back to the manual
    *  reconnect banner. The budget resets on a fresh selection, a manual
-   *  reconnect, or sustained healthy output, so the cap only bites on a
-   *  genuinely persistent failure rather than a one-off blip. */
+   *  reconnect, or an attach that stayed up past HEALTHY_ATTACH_MS, so the cap
+   *  only bites on a genuinely persistent failure rather than a one-off blip. */
   let autoReconnecting = $state(false);
   let reconnectAttempts = 0;
   let autoReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** When the current attach came up, or null while nothing is attached. */
+  let attachedAt: number | null = null;
   const MAX_AUTO_RECONNECT = 3;
   const AUTO_RECONNECT_BASE_MS = 600;
+  /** How long an attach has to stay up before it counts as healthy and the
+   *  self-heal budget is restored. Longer than a failing attach survives
+   *  (ssh connect + a login profile + a tmux error is well under a second). */
+  const HEALTHY_ATTACH_MS = 10_000;
+
+  /** What `pty_drain` returns (src-tauri/src/pty.rs `PtyDrainResult`).
+   *  `eof` and `overflowed` are out-of-band flags — the reader thread's own
+   *  state, never something inferred from `data`. */
+  interface PtyDrainResult {
+    data: string;
+    bytes: number;
+    eof: boolean;
+    overflowed: boolean;
+  }
 
   const drain = createDrainLoop({
     drainOnce,
@@ -346,6 +362,7 @@
       currentSession = sess.tmux_name;
       currentHost = sess.host_alias;
       ptyOpen = true;
+      attachedAt = Date.now();
     } catch (e) {
       openError = `PTY error: ${describeError(e)}`;
       opening = false;
@@ -415,48 +432,64 @@
     // resolved bytes belong to the old PTY — discard them rather than write
     // stale output into the new screen.
     const drainingInto = screen;
-    let result: { data: string; bytes: number };
+    let result: PtyDrainResult;
     try {
-      result = await invoke<{ data: string; bytes: number }>('pty_drain');
+      result = await invoke<PtyDrainResult>('pty_drain');
     } catch {
       return false;
     }
     if (screen !== drainingInto) return false;
-    drainTicks += 1;
-    if (result.bytes === 0) return false;
-    totalBytes += result.bytes;
-    try {
-      screen.write(result.data);
-    } catch (e) {
-      // The bytes are already consumed, so a parser bug must not take the rest
-      // of the tick (query replies, the EOF handling below) with it — and the
-      // loop keeps polling, so the next tmux redraw repairs the screen.
-      console.error('[terminal] screen.write failed', e);
+    if (result.bytes > 0) {
+      totalBytes += result.bytes;
+      try {
+        screen.write(result.data);
+      } catch (e) {
+        // The bytes are already consumed, so a parser bug must not take the
+        // rest of the tick (query replies, the EOF handling below) with it —
+        // and the loop keeps polling, so the next tmux redraw repairs it.
+        console.error('[terminal] screen.write failed', e);
+      }
+      renderVersion++;
+      // Answer any terminal queries (DSR cursor position, DA) the output
+      // carried — the parser has no back-channel, so we forward its replies.
+      const reply = screen.takeReplies();
+      if (reply !== '') writePty(reply);
     }
-    renderVersion++;
-    // Answer any terminal queries (DSR cursor position, DA) the output
-    // carried — the parser has no back-channel, so we forward its replies.
-    const reply = screen.takeReplies();
-    if (reply !== '') writePty(reply);
-    // Markers injected by the Rust reader thread when the PTY closes (e.g. the
-    // SSH child to a remote host died — now within ~10s thanks to the
-    // ServerAlive keepalive in pty.rs, instead of hanging silently forever).
-    // Try to self-heal by auto-reattaching; fall back to the manual banner
-    // only after the retry budget is exhausted.
-    if (result.data.includes('[cf] PTY EOF') || result.data.includes('[cf] reader error')) {
+    // The PTY is gone (e.g. the SSH child to a remote host died — now within
+    // ~10s thanks to the ServerAlive keepalive in pty.rs, instead of hanging
+    // silently forever). `eof` is the reader thread's own flag, NOT a search
+    // for the `[cf]` line it also prints: output that merely contains that
+    // text (this repo's pty.rs on screen, say) used to tear down a healthy
+    // attach. It arrives once the last byte has been handed over, so it
+    // normally comes with bytes === 0 — hence checked outside that branch.
+    if (result.eof) {
       scheduleAutoReconnect();
-    } else if (reconnectAttempts > 0 && !result.data.includes('[cf] attached')) {
-      // Real session output after a reconnect (not our own status banner) ⇒
-      // the connection is healthy again; restore the self-heal budget.
+      return result.bytes > 0;
+    }
+    // Restore the self-heal budget on PROOF of health — an attach that has
+    // lived past HEALTHY_ATTACH_MS — never on "some output arrived". A doomed
+    // attach also prints (a login profile, `can't find session`), and taking
+    // that as healthy reset the count every cycle: the cap was never reached
+    // and the pane said "reconnecting…" forever.
+    if (
+      reconnectAttempts > 0 &&
+      attachedAt !== null &&
+      Date.now() - attachedAt >= HEALTHY_ATTACH_MS
+    ) {
       reconnectAttempts = 0;
     }
-    return true;
+    return result.bytes > 0;
   }
 
   /** Self-healing reattach. Called when the reader thread reports the PTY
    *  died. Schedules a bounded, backed-off reattach for the still-selected
-   *  session; once the budget is spent, surfaces the manual banner instead. */
-  function scheduleAutoReconnect() {
+   *  session; once the budget is spent, surfaces the manual banner instead.
+   *  The identity is a parameter because the caller may be an open whose
+   *  `pty_open` failed — `currentSession`/`currentHost` are null by then. */
+  function scheduleAutoReconnect(
+    sessionAtSchedule: string | null = currentSession,
+    hostAtSchedule: string | null = currentHost,
+  ) {
     if (autoReconnectTimer !== null) return; // one already pending
     if (reconnectAttempts >= MAX_AUTO_RECONNECT) {
       autoReconnecting = false;
@@ -465,8 +498,6 @@
     }
     reconnectAttempts += 1;
     autoReconnecting = true;
-    const sessionAtSchedule = currentSession;
-    const hostAtSchedule = currentHost;
     const delay = AUTO_RECONNECT_BASE_MS * reconnectAttempts; // 0.6s, 1.2s, 1.8s
     autoReconnectTimer = setTimeout(() => {
       autoReconnectTimer = null;
@@ -515,6 +546,7 @@
       resizeTimer = null;
     }
     screen = null;
+    attachedAt = null;
     lastCols = 0;
     lastRows = 0;
     totalBytes = 0;
