@@ -645,7 +645,11 @@ pub async fn apply_host(
     let mut manifest_failed = false;
     if !cancelled {
         match build_manifest(plan, &work, ctx.now) {
-            Some(manifest) if !work.iter().any(|w| w.outcome == Some(FAILED)) => {
+            Some(mut manifest) if !work.iter().any(|w| w.outcome == Some(FAILED)) => {
+                let dropped = manifest.drop_unparseable();
+                if !dropped.is_empty() {
+                    tracing::warn!(host = %host, dropped = ?dropped, "manifest: dropped unparseable keys");
+                }
                 let path = harness.manifest_path();
                 let dir = parent_dir(path);
                 if let Err(e) =
@@ -1992,6 +1996,74 @@ mod tests {
         assert!(contents[0].ends_with("v1\n"), "{contents:?}");
         assert!(contents[1].ends_with("v2\n"), "{contents:?}");
         assert!(contents[2].ends_with("v3\n"), "{contents:?}");
+    }
+
+    /// A manifest key `split_key` cannot parse (garbage, or a foreign
+    /// schema) is dropped the next time this host's manifest is rewritten,
+    /// while the parseable, just-synced entry survives.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn apply_drops_unparseable_manifest_keys_on_rewrite() {
+        let _lock = crate::service::catalog::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+
+        let manifest_dir = home.path().join(".claude");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        let manifest_file = manifest_dir.join(".fleet-assets.json");
+        std::fs::write(
+            &manifest_file,
+            serde_json::json!({
+                "version": 1,
+                "updated_at": 0,
+                "assets": {
+                    "bogus/x": {"hash": "h", "files": [], "merges": [], "synced_at": 0}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let skill_repo = tempfile::tempdir().unwrap();
+        let catalog = write_catalog(
+            skill_repo.path(),
+            &[
+                (
+                    "skills/s/asset.yaml",
+                    "kind: skill\nname: s\ndescription: d\n",
+                ),
+                ("skills/s/body.md", "body\n"),
+            ],
+        );
+        let ssh = Arc::new(SshClient::new());
+        let ctx = ApplyCtx {
+            ssh: &ssh,
+            token: CancellationToken::new(),
+            now: 1_000,
+        };
+
+        let create = plan_for(&ssh, &catalog).await;
+        assert_eq!(create.actions[0].op, ActionOp::Create);
+        assert!(
+            create.manifest.assets.contains_key("bogus/x"),
+            "the scanned manifest still carries the garbage key before apply"
+        );
+        let res = apply_host(&ctx, &Claude, &create).await;
+        assert_eq!(res.status, "applied", "{res:?}");
+
+        let manifest: Manifest =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_file).unwrap()).unwrap();
+        assert!(
+            !manifest.assets.contains_key("bogus/x"),
+            "the unparseable key must be dropped on rewrite: {manifest:?}"
+        );
+        assert!(
+            manifest.assets.contains_key("skill/s"),
+            "the parseable, just-synced entry must survive: {manifest:?}"
+        );
     }
 
     /// A file the previous sync wrote that the asset no longer renders is
