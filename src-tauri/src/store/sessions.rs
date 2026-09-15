@@ -347,16 +347,15 @@ impl Store {
         host_alias: &str,
         tmux_name: &str,
     ) -> Result<Option<String>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT account_uuid FROM sessions WHERE host_alias=?1 AND tmux_name=?2",
-        )?;
-        let mut rows = stmt.query_map(rusqlite::params![host_alias, tmux_name], |row| {
-            row.get::<_, Option<String>>(0)
-        })?;
-        match rows.next() {
-            Some(r) => Ok(r?),
-            None => Ok(None),
-        }
+        self.conn
+            .prepare_cached(
+                "SELECT account_uuid FROM sessions WHERE host_alias=?1 AND tmux_name=?2",
+            )?
+            .query_row(rusqlite::params![host_alias, tmux_name], |row| {
+                row.get::<_, Option<String>>(0)
+            })
+            .optional()
+            .map(Option::flatten)
     }
 
     pub fn list_sessions_for_host(
@@ -790,7 +789,7 @@ impl Store {
             .execute(&sql, rusqlite::params![status, claude_session_id, now])?;
         if changed > 0 {
             // Emit session_updated so the frontend patches the row in real-time.
-            if let Ok(row) = self.fetch_session_by_claude_id(claude_session_id) {
+            if let Ok(Some(row)) = self.fetch_session_by_claude_id(claude_session_id) {
                 self.bus.session_updated(&row);
             }
         }
@@ -819,8 +818,10 @@ impl Store {
             return Ok(None);
         }
         let row = self.fetch_session_by_claude_id(claude_session_id)?;
-        self.bus.session_updated(&row);
-        Ok(Some(row))
+        if let Some(ref r) = row {
+            self.bus.session_updated(r);
+        }
+        Ok(row)
     }
 
     /// The UserPromptSubmit hook's write: a turn is starting. Sets
@@ -841,8 +842,10 @@ impl Store {
             return Ok(None);
         }
         let row = self.fetch_session_by_claude_id(claude_session_id)?;
-        self.bus.session_updated(&row);
-        Ok(Some(row))
+        if let Some(ref r) = row {
+            self.bus.session_updated(r);
+        }
+        Ok(row)
     }
 
     /// The SessionEnd hook's write: the Claude process is gone. Sets
@@ -866,8 +869,10 @@ impl Store {
             return Ok(None);
         }
         let row = self.fetch_session_by_claude_id(claude_session_id)?;
-        self.bus.session_updated(&row);
-        Ok(Some(row))
+        if let Some(ref r) = row {
+            self.bus.session_updated(r);
+        }
+        Ok(row)
     }
 
     /// The StopFailure hook's write: the turn ended in an API error. The row
@@ -924,8 +929,10 @@ impl Store {
             return Ok(None);
         }
         let row = self.fetch_session_by_claude_id(claude_session_id)?;
-        self.bus.session_updated(&row);
-        Ok(Some(row))
+        if let Some(ref r) = row {
+            self.bus.session_updated(r);
+        }
+        Ok(row)
     }
 
     /// Replace a session's tags (migration 020). Emits `session_updated`.
@@ -996,31 +1003,20 @@ impl Store {
         &self,
         claude_session_id: &str,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
-        match self.fetch_session_by_claude_id(claude_session_id) {
-            Ok(row) => Ok(Some(row)),
-            Err(e) => {
-                // `query_row` returns this exact rusqlite error when zero rows
-                // matched. Treat it as a clean miss.
-                if e.message.contains("Query returned no rows") {
-                    Ok(None)
-                } else {
-                    Err(e)
-                }
-            }
-        }
+        self.fetch_session_by_claude_id(claude_session_id)
     }
 
     fn fetch_session_by_claude_id(
         &self,
         claude_session_id: &str,
-    ) -> Result<SessionRow, crate::ipc_error::IpcError> {
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {SESSION_COLUMNS} FROM sessions WHERE claude_session_id = ?1"
-        ))?;
-        stmt.query_row(rusqlite::params![claude_session_id], |row| {
-            map_session_row(row)
-        })
-        .map_err(crate::ipc_error::IpcError::from)
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        Ok(self
+            .conn
+            .prepare(&format!(
+                "SELECT {SESSION_COLUMNS} FROM sessions WHERE claude_session_id = ?1"
+            ))?
+            .query_row(rusqlite::params![claude_session_id], map_session_row)
+            .optional()?)
     }
 }
 

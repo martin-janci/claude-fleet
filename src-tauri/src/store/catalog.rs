@@ -5,19 +5,19 @@ use super::*;
 
 impl Store {
     pub fn get_catalog_config(&self) -> Result<Option<CatalogConfigRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT repo_path, remote_url, head_commit, last_loaded_at FROM catalog_config WHERE id = 1",
-        )?;
-        let mut rows = stmt.query([])?;
-        match rows.next()? {
-            Some(row) => Ok(Some(CatalogConfigRow {
-                repo_path: row.get(0)?,
-                remote_url: row.get(1)?,
-                head_commit: row.get(2)?,
-                last_loaded_at: row.get(3)?,
-            })),
-            None => Ok(None),
-        }
+        self.conn
+            .prepare_cached(
+                "SELECT repo_path, remote_url, head_commit, last_loaded_at FROM catalog_config WHERE id = 1",
+            )?
+            .query_row([], |row| {
+                Ok(CatalogConfigRow {
+                    repo_path: row.get(0)?,
+                    remote_url: row.get(1)?,
+                    head_commit: row.get(2)?,
+                    last_loaded_at: row.get(3)?,
+                })
+            })
+            .optional()
     }
 
     pub fn set_catalog_config(
@@ -226,19 +226,19 @@ impl Store {
 
     /// The most recent sync run, if any.
     pub fn last_sync_run(&self) -> Result<Option<SyncRunRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT id, started_at, finished_at, summary_json FROM sync_runs ORDER BY id DESC LIMIT 1",
-        )?;
-        let mut rows = stmt.query([])?;
-        match rows.next()? {
-            Some(row) => Ok(Some(SyncRunRow {
-                id: row.get(0)?,
-                started_at: row.get(1)?,
-                finished_at: row.get(2)?,
-                summary_json: row.get(3)?,
-            })),
-            None => Ok(None),
-        }
+        self.conn
+            .prepare_cached(
+                "SELECT id, started_at, finished_at, summary_json FROM sync_runs ORDER BY id DESC LIMIT 1",
+            )?
+            .query_row([], |row| {
+                Ok(SyncRunRow {
+                    id: row.get(0)?,
+                    started_at: row.get(1)?,
+                    finished_at: row.get(2)?,
+                    summary_json: row.get(3)?,
+                })
+            })
+            .optional()
     }
 
     /// Emit `sync:progress` (not a store row).

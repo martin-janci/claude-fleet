@@ -257,14 +257,12 @@ impl Store {
     }
 
     pub fn get_account_by_uuid(&self, uuid: &str) -> Result<Option<AccountRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {ACCOUNT_COLUMNS} FROM accounts WHERE uuid=?1"
-        ))?;
-        let mut rows = stmt.query_map(rusqlite::params![uuid], map_account_row)?;
-        match rows.next() {
-            Some(r) => Ok(Some(r?)),
-            None => Ok(None),
-        }
+        self.conn
+            .prepare_cached(&format!(
+                "SELECT {ACCOUNT_COLUMNS} FROM accounts WHERE uuid=?1"
+            ))?
+            .query_row(rusqlite::params![uuid], map_account_row)
+            .optional()
     }
 
     /// Set (clear, if `nickname` is `None` or blank after trimming) an

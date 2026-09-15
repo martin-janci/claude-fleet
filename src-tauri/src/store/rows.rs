@@ -667,30 +667,22 @@ pub(super) fn fetch_session(
     tmux_name: &str,
     host_alias: &str,
 ) -> Result<Option<SessionRow>, rusqlite::Error> {
-    let mut stmt = conn.prepare_cached(&format!(
+    conn.prepare_cached(&format!(
         "SELECT {SESSION_COLUMNS} FROM sessions WHERE tmux_name=?1 AND host_alias=?2"
-    ))?;
-    let mut rows = stmt.query_map(rusqlite::params![tmux_name, host_alias], |row| {
-        map_session_row(row)
-    })?;
-    match rows.next() {
-        Some(r) => Ok(Some(r?)),
-        None => Ok(None),
-    }
+    ))?
+    .query_row(rusqlite::params![tmux_name, host_alias], map_session_row)
+    .optional()
 }
 
 pub(super) fn fetch_session_by_id(
     conn: &Connection,
     id: i64,
 ) -> Result<Option<SessionRow>, rusqlite::Error> {
-    let mut stmt = conn.prepare_cached(&format!(
+    conn.prepare_cached(&format!(
         "SELECT {SESSION_COLUMNS} FROM sessions WHERE id=?1"
-    ))?;
-    let mut rows = stmt.query_map(rusqlite::params![id], map_session_row)?;
-    match rows.next() {
-        Some(r) => Ok(Some(r?)),
-        None => Ok(None),
-    }
+    ))?
+    .query_row(rusqlite::params![id], map_session_row)
+    .optional()
 }
 
 /// Map a `session_messages` row selected with [`MESSAGE_COLUMNS`].
@@ -711,25 +703,18 @@ pub(super) fn fetch_host(
     conn: &Connection,
     alias: &str,
 ) -> Result<Option<HostRow>, rusqlite::Error> {
-    let mut stmt =
-        conn.prepare_cached(&format!("SELECT {HOST_COLUMNS} FROM hosts WHERE alias=?1"))?;
-    let mut rows = stmt.query_map(rusqlite::params![alias], map_host_row)?;
-    match rows.next() {
-        Some(r) => Ok(Some(r?)),
-        None => Ok(None),
-    }
+    conn.prepare_cached(&format!("SELECT {HOST_COLUMNS} FROM hosts WHERE alias=?1"))?
+        .query_row(rusqlite::params![alias], map_host_row)
+        .optional()
 }
 
 pub(super) fn fetch_project(
     conn: &Connection,
     id: i64,
 ) -> Result<Option<ProjectRow>, rusqlite::Error> {
-    let mut stmt = conn.prepare_cached(&format!(
+    conn.prepare_cached(&format!(
         "SELECT {PROJECT_COLUMNS} FROM projects WHERE id=?1"
-    ))?;
-    let mut rows = stmt.query_map(rusqlite::params![id], map_project_row)?;
-    match rows.next() {
-        Some(r) => Ok(Some(r?)),
-        None => Ok(None),
-    }
+    ))?
+    .query_row(rusqlite::params![id], map_project_row)
+    .optional()
 }
