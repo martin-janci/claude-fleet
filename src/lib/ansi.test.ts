@@ -1936,3 +1936,35 @@ describe('ansi.Screen — grapheme clusters joined as tmux 3.6a does (F2)', () =
     });
   });
 });
+
+describe('Screen.selectionText — wide glyph at a selection edge (N3)', () => {
+  // Cells: a b 中 '' c d
+  const screen = () => {
+    const s = new Screen(2, 10);
+    s.write('ab中cd');
+    return s;
+  };
+
+  it('a start on the trailing half copies the whole glyph', () => {
+    expect(screen().selectionText({ row: 0, col: 3 }, { row: 0, col: 5 })).toBe('中cd');
+    expect(screen().selectionText({ row: 0, col: 5 }, { row: 0, col: 3 })).toBe('中cd');
+    expect(screen().selectionText({ row: 0, col: 3 }, { row: 0, col: 3 })).toBe('中');
+  });
+
+  it('an end on either half copies the whole glyph', () => {
+    expect(screen().selectionText({ row: 0, col: 0 }, { row: 0, col: 2 })).toBe('ab中');
+    expect(screen().selectionText({ row: 0, col: 0 }, { row: 0, col: 3 })).toBe('ab中');
+  });
+
+  it('a VS16-widened narrow base behaves the same way', () => {
+    const s = new Screen(2, 10);
+    s.write('a❤️b');
+    expect(s.selectionText({ row: 0, col: 2 }, { row: 0, col: 3 })).toBe('❤️b');
+  });
+
+  it('only the first row of a multi-row selection starts mid-glyph', () => {
+    const s = new Screen(2, 4);
+    s.write('a中\r\n中b');
+    expect(s.selectionText({ row: 0, col: 2 }, { row: 1, col: 2 })).toBe('中\n中b');
+  });
+});

@@ -141,3 +141,62 @@ describe('expandSelection', () => {
     });
   });
 });
+
+// ─── Wide glyphs: highlight and copy agree (N3) ──────────────────────────
+import { snapToGlyphs } from './terminal_selection';
+
+describe('selections never cut a wide glyph', () => {
+  // 'ab中cd' as the screen stores it: the head carries the glyph, '' trails.
+  const wide = [[{ ch: 'a' }, { ch: 'b' }, { ch: '中' }, { ch: '' }, { ch: 'c' }, { ch: 'd' }]];
+
+  it('snapToGlyphs moves a start on a trailing half back to its head', () => {
+    expect(snapToGlyphs({ row: 0, col: 3 }, { row: 0, col: 5 }, wide)).toEqual({
+      start: { row: 0, col: 2 },
+      end: { row: 0, col: 5 },
+    });
+  });
+
+  it('snapToGlyphs moves an end on a head forward onto its trailing half', () => {
+    expect(snapToGlyphs({ row: 0, col: 0 }, { row: 0, col: 2 }, wide)).toEqual({
+      start: { row: 0, col: 0 },
+      end: { row: 0, col: 3 },
+    });
+  });
+
+  it('snapToGlyphs leaves narrow endpoints and out-of-range columns alone', () => {
+    expect(snapToGlyphs({ row: 0, col: 1 }, { row: 0, col: 4 }, wide)).toEqual({
+      start: { row: 0, col: 1 },
+      end: { row: 0, col: 4 },
+    });
+    expect(snapToGlyphs({ row: 0, col: 0 }, { row: 3, col: 50 }, wide)).toEqual({
+      start: { row: 0, col: 0 },
+      end: { row: 3, col: 50 },
+    });
+  });
+
+  it('cell mode snaps a drag starting on the right half of a glyph, in either direction', () => {
+    expect(expandSelection('cell', { row: 0, col: 3 }, { row: 0, col: 5 }, wide, 6)).toEqual({
+      start: { row: 0, col: 2 },
+      end: { row: 0, col: 5 },
+    });
+    expect(expandSelection('cell', { row: 0, col: 5 }, { row: 0, col: 3 }, wide, 6)).toEqual({
+      start: { row: 0, col: 2 },
+      end: { row: 0, col: 5 },
+    });
+    // A single press on either half selects the whole glyph.
+    expect(expandSelection('cell', { row: 0, col: 3 }, { row: 0, col: 3 }, wide, 6)).toEqual({
+      start: { row: 0, col: 2 },
+      end: { row: 0, col: 3 },
+    });
+  });
+
+  it('selectionRects given the cells highlights the whole glyph', () => {
+    // cols=6, cellWidth=8, cellHeight=16, pad=4
+    expect(selectionRects({ row: 0, col: 3 }, { row: 0, col: 4 }, 6, 8, 16, 4, wide)).toEqual([
+      { left: 4 + 2 * 8, top: 4, width: 3 * 8, height: 16 },
+    ]);
+    expect(selectionRects({ row: 0, col: 0 }, { row: 0, col: 2 }, 6, 8, 16, 4, wide)).toEqual([
+      { left: 4, top: 4, width: 4 * 8, height: 16 },
+    ]);
+  });
+});

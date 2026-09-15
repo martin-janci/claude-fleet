@@ -29,9 +29,28 @@ export function normalizeSelection(a: CellPos, b: CellPos): { start: CellPos; en
   return before ? { start: a, end: b } : { start: b, end: a };
 }
 
+/** Widen an ordered selection so it never cuts a wide glyph: a start on a
+ *  trailing `''` cell moves back to its head, an end on a head moves forward
+ *  onto its trailing cell. The copied text (`Screen.selectionText`) always
+ *  takes a glyph whole, so this keeps the highlight covering exactly those
+ *  cells. Columns outside a row are left as they are. */
+export function snapToGlyphs(
+  start: CellPos,
+  end: CellPos,
+  cells: readonly (readonly CellLike[])[],
+): { start: CellPos; end: CellPos } {
+  let from = start.col;
+  if (from > 0 && cells[start.row]?.[from]?.ch === '') from--;
+  let to = end.col;
+  const endRow = cells[end.row];
+  if (endRow && endRow[to] && endRow[to].ch !== '' && endRow[to + 1]?.ch === '') to++;
+  return { start: { row: start.row, col: from }, end: { row: end.row, col: to } };
+}
+
 /** Build one overlay rect per selected row segment. Endpoints are inclusive.
  *  First row runs from its col to end-of-line, middle rows span the full width,
- *  the last row runs from col 0 to its col. `pad` is the grid's edge padding. */
+ *  the last row runs from col 0 to its col. `pad` is the grid's edge padding.
+ *  With `cells`, the ends are first snapped to whole glyphs (`snapToGlyphs`). */
 export function selectionRects(
   a: CellPos,
   b: CellPos,
@@ -39,8 +58,10 @@ export function selectionRects(
   cellWidth: number,
   cellHeight: number,
   pad: number,
+  cells?: readonly (readonly CellLike[])[],
 ): OverlayRect[] {
-  const { start, end } = normalizeSelection(a, b);
+  const ordered = normalizeSelection(a, b);
+  const { start, end } = cells ? snapToGlyphs(ordered.start, ordered.end, cells) : ordered;
   const rects: OverlayRect[] = [];
   for (let r = start.row; r <= end.row; r++) {
     const from = r === start.row ? start.col : 0;
@@ -104,10 +125,10 @@ export function wordBoundsAt(row: readonly CellLike[], col: number): { from: num
 }
 
 /** Expand a raw anchor/focus pair to the selection endpoints for a mode:
- *  `cell` keeps them (ordered), `word` snaps the start back to its word's
- *  first cell and the end forward to its word's last cell, `line` covers the
- *  full rows. Either end may lie before the other; the result is always in
- *  reading order. */
+ *  `cell` keeps them (ordered, snapped to whole wide glyphs), `word` snaps the
+ *  start back to its word's first cell and the end forward to its word's last
+ *  cell, `line` covers the full rows. Either end may lie before the other; the
+ *  result is always in reading order. */
 export function expandSelection(
   mode: SelectMode,
   anchor: CellPos,
@@ -116,7 +137,7 @@ export function expandSelection(
   cols: number,
 ): { start: CellPos; end: CellPos } {
   const { start, end } = normalizeSelection(anchor, focus);
-  if (mode === 'cell') return { start, end };
+  if (mode === 'cell') return snapToGlyphs(start, end, cells);
   if (mode === 'line') {
     return { start: { row: start.row, col: 0 }, end: { row: end.row, col: cols - 1 } };
   }

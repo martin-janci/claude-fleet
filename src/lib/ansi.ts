@@ -1367,7 +1367,9 @@ export class Screen {
   /** Extract selected text from the buffer for an inclusive cell range.
    *  Anchor/focus may be in any order. First row runs from its column to EOL,
    *  middle rows are whole lines, the last row runs to its column. Trailing
-   *  whitespace is trimmed per line (cells are space-padded to full width). */
+   *  whitespace is trimmed per line (cells are space-padded to full width).
+   *  A wide glyph at either edge is copied whole: a start on its trailing
+   *  half begins at the head, and an end on its head already carries it. */
   selectionText(a: { row: number; col: number }, b: { row: number; col: number }): string {
     // Order the two endpoints in reading order (row, then col).
     const before = a.row < b.row || (a.row === b.row && a.col <= b.col);
@@ -1379,7 +1381,8 @@ export class Screen {
     for (let r = r0; r <= r1; r++) {
       const colFrom = r === r0 ? start.col : 0;
       const colTo = r === r1 ? end.col : this.cols - 1; // inclusive
-      const from = Math.max(0, colFrom);
+      let from = Math.max(0, colFrom);
+      if (from > 0 && from < this.cols && this.cells[r][from].ch === '') from--;
       const to = Math.min(this.cols - 1, colTo);
       let line = '';
       // A wide glyph's trailing `''` cell contributes nothing — the head
