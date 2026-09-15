@@ -92,8 +92,10 @@
   let ptyOpen = false;
   let lastCols = $state(0);
   let lastRows = $state(0);
+  /** Bytes drained since this attach. The header shows this and nothing
+   *  per-tick: a counter that moved on every poll rewrote the header text
+   *  about four times a second on a terminal that was doing nothing. */
   let totalBytes = $state(0);
-  let drainTicks = $state(0);
   /** Measured advance width of a single monospace cell, in px. We compute
    *  this once after mount from a sample <span>. Without a sane fallback
    *  the geometry calc would yield NaN and the view would never size.
@@ -481,12 +483,21 @@
   }
 
   const RESIZE_DEBOUNCE_MS = 50;
+  /** Floor on the gap between two applied resizes. The debounce alone only
+   *  coalesces frames closer together than its window: a slow or jerky drag
+   *  (observer callbacks 60-70 ms apart, or a busy main thread) still sent one
+   *  pty_resize — a SIGWINCH plus a full tmux redraw over SSH — per frame. */
+  const RESIZE_MIN_INTERVAL_MS = 250;
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastResizeAt = 0;
 
-  /** One ResizeObserver frame: (re)arm the trailing timer. */
+  /** One ResizeObserver frame: (re)arm the trailing timer, never sooner than
+   *  RESIZE_MIN_INTERVAL_MS after the last applied resize. The settled size is
+   *  still never dropped — the last frame's timer always gets to run. */
   function scheduleResize() {
     if (resizeTimer !== null) clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(applyResize, RESIZE_DEBOUNCE_MS);
+    const wait = Math.max(RESIZE_DEBOUNCE_MS, lastResizeAt + RESIZE_MIN_INTERVAL_MS - Date.now());
+    resizeTimer = setTimeout(applyResize, wait);
   }
 
   function applyResize() {
@@ -498,6 +509,7 @@
     lastRows = next.rows;
     screen.resize(next.rows, next.cols);
     renderVersion++;
+    lastResizeAt = Date.now();
     if (ptyOpen) {
       void invoke('pty_resize', { args: { cols: next.cols, rows: next.rows } }).catch(() => {});
     }
@@ -667,12 +679,12 @@
       clearTimeout(resizeTimer);
       resizeTimer = null;
     }
+    lastResizeAt = 0;
     screen = null;
     attachedAt = null;
     lastCols = 0;
     lastRows = 0;
     totalBytes = 0;
-    drainTicks = 0;
     renderVersion++;
     if (ptyOpen) {
       ptyOpen = false;
@@ -883,9 +895,7 @@
       <span class="size" data-testid="terminal-size">
         {#if lastCols > 0}{lastCols}×{lastRows}{:else}measuring…{/if}
       </span>
-      <span class="counters" data-testid="terminal-counters">
-        ticks: {drainTicks} · {totalBytes}B
-      </span>
+      <span class="counters" data-testid="terminal-counters">{totalBytes}B</span>
       <button
         class="reconnect"
         onclick={() => void openTerm()}

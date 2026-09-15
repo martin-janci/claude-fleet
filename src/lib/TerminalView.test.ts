@@ -217,6 +217,39 @@ describe('TerminalView resize debounce (FE-11)', () => {
     }
   });
 
+  it('rate-limits a slow drag instead of resizing once per observer frame', async () => {
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    const host = screen.getByTestId('terminal-host');
+    await new Promise((r) => setTimeout(r, 200));
+    const before = calls('pty_resize').length;
+
+    vi.useFakeTimers();
+    try {
+      // A jerky drag: frames further apart than the debounce window, so each
+      // one used to send its own pty_resize (a SIGWINCH + a full tmux redraw
+      // over SSH).
+      Object.defineProperty(host, 'clientHeight', { configurable: true, value: 300 });
+      let width = 400;
+      for (let frame = 0; frame < 10; frame++) {
+        width += 30;
+        Object.defineProperty(host, 'clientWidth', { configurable: true, value: width });
+        resizeCallbacks[0]();
+        await vi.advanceTimersByTimeAsync(67);
+      }
+      await vi.advanceTimersByTimeAsync(300);
+      const sent = calls('pty_resize').slice(before);
+      // ~one per 250 ms of drag, not one per frame.
+      expect(sent.length).toBeLessThanOrEqual(5);
+      // The settled size is never dropped.
+      const args = (sent[sent.length - 1][1] as { args: { cols: number; rows: number } }).args;
+      expect(args.cols).toBe(Math.floor((width - 8) / 7.8));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('skips the resize entirely when the settled size is unchanged', async () => {
     render(TerminalView);
     selectSession(onAlpha);
@@ -594,6 +627,53 @@ describe('TerminalView drag-drop upload (N5)', () => {
     expect(written().join('')).not.toContain('big.zip');
     // The paths are not lost — they are reported instead.
     expect(get(toasts).some((t) => t.message.includes('/home/alpha/.cf-uploads/big.zip'))).toBe(true);
+  });
+});
+
+describe('TerminalView idle cost (F17)', () => {
+  it('an idle attached terminal does not rewrite the header', async () => {
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_drain') return drained();
+      return null;
+    });
+    vi.useFakeTimers();
+    try {
+      render(TerminalView);
+      selectSession(onAlpha);
+      await settle();
+      await vi.advanceTimersByTimeAsync(100);
+      const counters = screen.getByTestId('terminal-counters');
+      const text = counters.textContent;
+      // Several seconds of empty polls (the loop backs off to 250 ms, so ~15).
+      await vi.advanceTimersByTimeAsync(4000);
+      await settle();
+      expect(screen.getByTestId('terminal-counters').textContent).toBe(text);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('still reports the bytes that did arrive', async () => {
+    let served = false;
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_drain') {
+        if (served) return drained();
+        served = true;
+        return drained({ data: 'hello', bytes: 5 });
+      }
+      return null;
+    });
+    vi.useFakeTimers();
+    try {
+      render(TerminalView);
+      selectSession(onAlpha);
+      await settle();
+      await vi.advanceTimersByTimeAsync(100);
+      await settle();
+      expect(screen.getByTestId('terminal-counters').textContent).toContain('5B');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
