@@ -26,23 +26,39 @@ export function createDrainLoop(host: DrainHost) {
   }
 
   /** One drain tick, then reschedule itself. The delay halves to the floor on
-   *  any output and doubles toward DRAIN_MAX_MS when idle. */
+   *  any output and doubles toward DRAIN_MAX_MS when idle.
+   *
+   *  The reschedule lives in a `finally`: a tick that throws (a parser bug, an
+   *  invoke that rejects after the bytes were consumed) must not end the loop.
+   *  It used to — polling stopped for good, the terminal froze with nothing on
+   *  screen to say so, and only a manual reattach brought it back. */
   async function runDrain() {
     drainTimer = null;
-    const got = await host.drainOnce();
-    drainDelay = got ? DRAIN_MIN_MS : Math.min(DRAIN_MAX_MS, drainDelay * 2);
-    // Reschedule only if still attached and no newer loop has taken over
-    // (a concurrent openTerm would have set its own drainTimer).
-    if (host.attached() && drainTimer === null) scheduleDrain();
+    let got = false;
+    try {
+      got = await host.drainOnce();
+    } catch (e) {
+      console.error('[terminal] drain tick failed', e);
+    } finally {
+      drainDelay = got ? DRAIN_MIN_MS : Math.min(DRAIN_MAX_MS, drainDelay * 2);
+      // Reschedule only if still attached and no newer loop has taken over
+      // (a concurrent openTerm would have set its own drainTimer).
+      if (host.attached() && drainTimer === null) scheduleDrain();
+    }
   }
 
   /** Force the loop back to full rate now — called on keypress so typing
-   *  feels responsive even if the terminal had backed off while idle. */
+   *  feels responsive even if the terminal had backed off while idle. Also
+   *  the second line of defence for a loop that died anyway (a tick that
+   *  finished detached, then reattached): typing revives it. Never starts one
+   *  while detached — that is `start()`'s job, after a successful attach. */
   function bumpDrain() {
     drainDelay = DRAIN_MIN_MS;
     if (drainTimer !== null) {
       clearTimeout(drainTimer);
       drainTimer = null;
+      scheduleDrain();
+    } else if (host.attached()) {
       scheduleDrain();
     }
   }

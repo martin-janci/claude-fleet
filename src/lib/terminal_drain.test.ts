@@ -65,12 +65,40 @@ describe('createDrainLoop', () => {
     expect(gaps(t0, ticks)).toEqual([30, 60, 120, 240, 30, 60]);
   });
 
-  it('bumpDrain does not start a loop that is not running', async () => {
-    const { loop, ticks } = setup();
+  it('bumpDrain does not start a loop while the host is detached', async () => {
+    const { loop, ticks, detach } = setup();
+    detach();
     loop.bumpDrain();
     await vi.advanceTimersByTimeAsync(1000);
     expect(ticks).toEqual([]);
     expect(loop.pending()).toBe(false);
+  });
+
+  it('bumpDrain revives a loop that stopped rescheduling while attached', async () => {
+    let attached = true;
+    const ticks: number[] = [];
+    const loop = createDrainLoop({
+      drainOnce: async () => {
+        ticks.push(Date.now());
+        return false;
+      },
+      attached: () => attached,
+    });
+    loop.start();
+    // A tick that finishes while detached does not reschedule — the loop is
+    // dead even though the host is attached again a moment later.
+    attached = false;
+    await vi.advanceTimersByTimeAsync(30);
+    attached = true;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(ticks).toHaveLength(1);
+    expect(loop.pending()).toBe(false);
+
+    const t1 = Date.now();
+    loop.bumpDrain();
+    await vi.advanceTimersByTimeAsync(30);
+    expect(ticks).toHaveLength(2);
+    expect(ticks[1] - t1).toBe(30);
   });
 
   it('stop cancels the pending tick; start resumes at the floor', async () => {
@@ -111,6 +139,55 @@ describe('createDrainLoop', () => {
     // finished tick would have queued (at its backed-off 60 ms) would fire.
     await vi.advanceTimersByTimeAsync(90);
     expect(gaps(t0, ticks)).toEqual([30, 30]);
+  });
+
+  it('keeps polling after a tick rejects', async () => {
+    const ticks: number[] = [];
+    let fail = true;
+    const loop = createDrainLoop({
+      drainOnce: async () => {
+        ticks.push(Date.now());
+        if (fail) throw new Error('parser blew up');
+        return true;
+      },
+      attached: () => true,
+    });
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const t0 = Date.now();
+      loop.start();
+      await vi.advanceTimersByTimeAsync(30);
+      // The failed tick counts as idle (no output) and the loop lives on.
+      expect(ticks).toHaveLength(1);
+      expect(loop.pending()).toBe(true);
+      await vi.advanceTimersByTimeAsync(60);
+      expect(gaps(t0, ticks)).toEqual([30, 60]);
+      // …and a later healthy tick snaps it back to the floor.
+      fail = false;
+      await vi.advanceTimersByTimeAsync(120 + 30);
+      expect(gaps(t0, ticks)).toEqual([30, 60, 120, 30]);
+      expect(errors).toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it('a tick that rejects while detached stops the loop, and bumpDrain cannot revive it', async () => {
+    const { loop, ticks, detach } = setup(() => {
+      throw new Error('boom');
+    });
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      loop.start();
+      detach();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(ticks).toHaveLength(1);
+      loop.bumpDrain();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(ticks).toHaveLength(1);
+    } finally {
+      errors.mockRestore();
+    }
   });
 
   it('does not reschedule once the host is detached', async () => {

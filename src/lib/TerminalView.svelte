@@ -425,7 +425,14 @@
     drainTicks += 1;
     if (result.bytes === 0) return false;
     totalBytes += result.bytes;
-    screen.write(result.data);
+    try {
+      screen.write(result.data);
+    } catch (e) {
+      // The bytes are already consumed, so a parser bug must not take the rest
+      // of the tick (query replies, the EOF handling below) with it — and the
+      // loop keeps polling, so the next tmux redraw repairs the screen.
+      console.error('[terminal] screen.write failed', e);
+    }
     renderVersion++;
     // Answer any terminal queries (DSR cursor position, DA) the output
     // carried — the parser has no back-channel, so we forward its replies.

@@ -20,6 +20,7 @@ import { selectSession, clearSelection } from './selection';
 import { toasts, clearToasts } from './toasts';
 import { get } from 'svelte/store';
 import { copyOnSelect } from './prefs';
+import { Screen } from './ansi';
 
 function makeSession(over: Partial<SessionRow>): SessionRow {
   return {
@@ -204,6 +205,39 @@ describe('TerminalView resize debounce (FE-11)', () => {
       expect(calls('pty_resize').length - before).toBe(0);
     } finally {
       vi.useRealTimers();
+    }
+  });
+});
+
+describe('TerminalView drain resilience (F1)', () => {
+  it('keeps rendering after one chunk blows up the parser', async () => {
+    const chunks = ['boom', 'after'];
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_drain') {
+        const d = chunks.shift();
+        return d === undefined ? { data: '', bytes: 0 } : { data: d, bytes: d.length };
+      }
+      return null;
+    });
+    const write = vi.spyOn(Screen.prototype, 'write');
+    write.mockImplementationOnce(() => {
+      throw new Error('parser bug');
+    });
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.useFakeTimers();
+    try {
+      render(TerminalView);
+      selectSession(onAlpha);
+      await settle();
+      await vi.advanceTimersByTimeAsync(40); // tick 1: screen.write throws
+      await vi.advanceTimersByTimeAsync(40); // tick 2: must still be polling
+      await settle();
+      expect(screen.getByTestId('terminal-host').textContent).toContain('after');
+      expect(errors).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      write.mockRestore();
+      errors.mockRestore();
     }
   });
 });
