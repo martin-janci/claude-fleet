@@ -3,7 +3,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { selectedSession } from './selection';
-  import { Screen, rowToRuns, runStyleCss, type Run } from './ansi';
+  import { Screen, rowToRuns, runsKey, runStyleCss, type Run } from './ansi';
   import { pointInRect } from './geometry';
   import { selectionRects, type CellPos } from './terminal_selection';
   import { nativeWriteText } from './clipboard_native';
@@ -90,8 +90,11 @@
   let drainTicks = $state(0);
   /** Measured advance width of a single monospace cell, in px. We compute
    *  this once after mount from a sample <span>. Without a sane fallback
-   *  the geometry calc would yield NaN and the view would never size. */
-  let cellWidth = 0;
+   *  the geometry calc would yield NaN and the view would never size.
+   *  Reactive because the grid publishes it as `--cell-w`: every run's box
+   *  is pinned to a multiple of it, so the glyphs and the overlays that sit
+   *  on the col × cellWidth grid can't disagree. */
+  let cellWidth = $state(0);
   let cellHeight = 0;
   let disconnected = $state(false);
   /** Self-healing: when the PTY dies (EOF / reader error — e.g. the ssh attach
@@ -607,8 +610,9 @@
   // content-derived `key`. Reading `renderVersion` makes Svelte recompute
   // whenever screen.write() bumps it.
   //
-  // The key encodes the row index followed by every run's style + text. When
-  // a row's content changes, its key changes, so Svelte destroys and
+  // The key (`runsKey`) encodes the row index followed by every run's style,
+  // cell count and text. When a row's content changes, its key changes — and
+  // so does the width of any run that moved — so Svelte destroys and
   // recreates that row's <div> instead of mutating its text nodes in place.
   // Recreating the DOM node is what forces WKWebView to repaint it: in-place
   // text mutation across many rows in one frame leaves some rows unpainted,
@@ -635,14 +639,7 @@
         continue;
       }
       const runs = rowToRuns(scr.cells[r]);
-      // Row index + each run's style/text, joined with control bytes
-      // 0x01..0x04. Cells only ever hold printable chars (code >= 0x20), so
-      // those bytes never occur in run.text and the fields can't collide.
-      let key = String(r);
-      for (const run of runs) {
-        key += `\u0001${run.fg}\u0002${run.bg}\u0003${run.attrs}\u0004${run.text}`;
-      }
-      const entry = { ver, key, runs };
+      const entry = { ver, key: runsKey(r, runs), runs };
       rowCache[r] = entry;
       out[r] = entry;
     }
@@ -739,6 +736,7 @@
          spans for each style run. -->
     <div
       class="grid"
+      style:--cell-w={cellWidth > 0 ? `${cellWidth}px` : null}
       bind:this={container}
       tabindex="0"
       role="textbox"
@@ -760,7 +758,11 @@
       {#each visibleRows as row (row.key)}
         <div class="row">
           {#each row.runs as run, i (i)}
-            <span class:wide={run.wide} style={runStyle(run)}>{run.text}</span>
+            <span
+              class:wide={run.wide}
+              class:glyph={run.glyph}
+              style={runStyle(run)}
+              style:--n={run.cells}>{run.text}</span>
           {/each}
         </div>
       {/each}
@@ -915,6 +917,10 @@
   .reconnect:hover { color: var(--fg); border-color: var(--accent); }
   .grid {
     position: relative;
+    /* Width of one cell, republished from the measured metrics once the font
+       is up (see `measureCellSize`). Every run's box is a multiple of it, so
+       the text grid, the cursor and the selection overlay share one unit. */
+    --cell-w: 1ch;
     flex: 1 1 auto;
     min-height: 0;
     min-width: 0;
@@ -942,20 +948,25 @@
     line-height: 16px;
   }
   .row span {
-    /* span color comes from inline style applied per run. */
-    display: inline;
-  }
-  /* A wide (2-column) glyph. Emoji and CJK come from a fallback font whose
-     advance is not two Menlo cells, so pin the box to exactly 2ch — the
-     column grid, the selection overlay and mouse→cell mapping all assume
-     every column is one cell wide. `ch` resolves against the grid's own
-     font, not the fallback. */
-  .row span.wide {
+    /* span color comes from inline style applied per run. Each run is pinned
+       to exactly the cells it covers (`--n`), in the same unit the cursor,
+       the selection overlay and mouse→cell mapping use — so a run whose
+       glyphs are drawn a fraction wider can't push the rest of the row off
+       the column grid. */
     display: inline-block;
-    width: 2ch;
+    width: calc(var(--cell-w) * var(--n, 1));
+    height: 16px;
+    vertical-align: top;
+  }
+  /* A single glyph that may come from a fallback font: a wide (2-column)
+     emoji or CJK char, or a narrow one outside the grid font's coverage
+     (⏺ ⎿ ✻, DEC scan lines, a cell carrying a combining mark). The fallback
+     advance is not a whole number of cells, so centre the glyph in its
+     pinned box and clip whatever sticks out. */
+  .row span.wide,
+  .row span.glyph {
     overflow: hidden;
     text-align: center;
-    vertical-align: top;
   }
   .selection {
     position: absolute;

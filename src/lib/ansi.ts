@@ -1647,21 +1647,49 @@ export interface Run {
   fg: number;
   bg: number;
   attrs: number;
+  /** Columns the run covers. The renderer pins the run's box to exactly
+   *  `cells` × the measured cell width, so every run starts on the same
+   *  column grid the cursor, selection overlay and mouse mapping use. */
+  cells: number;
   /** A single wide (2-column) glyph. The renderer gives it exactly two
    *  cells of width so the DOM column grid matches the buffer — a fallback
    *  font's natural emoji/CJK advance is not a multiple of the cell. */
   wide?: true;
+  /** A single 1-column glyph that may be drawn from a fallback font
+   *  (see `fitsGridFont`). Pinned to one cell like `wide` is to two. */
+  glyph?: true;
+}
+
+/** Can every code point of `ch` be drawn from the grid font itself, at its
+ *  own one-cell advance? A deliberately conservative allowlist of what Menlo
+ *  (and the other stacks we fall back to) cover: printable ASCII, Latin-1,
+ *  Latin Extended-A/B, box drawing and block elements. Everything else —
+ *  Claude Code's ⏺ ⎿ ✻, dingbats, DEC scan lines, a cell carrying a
+ *  combining mark — may come from a fallback font whose advance is not one
+ *  cell. U+00AD SOFT HYPHEN is excluded too: browsers draw it with no
+ *  advance at all, while the buffer gives it a column. */
+function fitsGridFont(ch: string): boolean {
+  for (let i = 0; i < ch.length; i++) {
+    const c = ch.charCodeAt(i);
+    if (c >= 0x20 && c <= 0x7e) continue;
+    if (c >= 0xa0 && c <= 0x24f && c !== 0xad) continue;
+    if (c >= 0x2500 && c <= 0x259f) continue;
+    return false;
+  }
+  return true;
 }
 
 /** Group a row's cells into adjacent runs sharing fg/bg/attrs. Trailing
  *  default-styled blanks are kept so the column grid stays aligned in the
- *  rendered output (we depend on monospace + non-breaking spaces).
+ *  rendered output. Each run records how many cells it covers.
  *
  *  A wide glyph (head cell followed by its `''` trailing placeholder) is
  *  emitted as its own `wide` run and the placeholder is skipped, so the
- *  renderer can pin it to two cells. A placeholder with no head — never
- *  produced by `Screen`, but cheap to tolerate — renders as a blank so the
- *  columns after it don't shift. */
+ *  renderer can pin it to two cells. A narrow glyph outside the grid font
+ *  gets its own 1-cell `glyph` run for the same reason, so its fallback
+ *  advance can't shift the columns after it. A placeholder with no head —
+ *  never produced by `Screen`, but cheap to tolerate — renders as a blank so
+ *  the columns after it don't shift. */
 export function rowToRuns(row: Cell[]): Run[] {
   const runs: Run[] = [];
   let cur: Run | null = null;
@@ -1669,12 +1697,17 @@ export function rowToRuns(row: Cell[]): Run[] {
     const cell = row[i];
     const isHead = cell.ch !== '' && i + 1 < row.length && row[i + 1].ch === '';
     if (isHead) {
-      runs.push({ text: cell.ch, fg: cell.fg, bg: cell.bg, attrs: cell.attrs, wide: true });
+      runs.push({ text: cell.ch, fg: cell.fg, bg: cell.bg, attrs: cell.attrs, cells: 2, wide: true });
       cur = null;
       i++; // skip the trailing placeholder
       continue;
     }
     const ch = cell.ch === '' ? ' ' : cell.ch;
+    if (!fitsGridFont(ch)) {
+      runs.push({ text: ch, fg: cell.fg, bg: cell.bg, attrs: cell.attrs, cells: 1, glyph: true });
+      cur = null;
+      continue;
+    }
     if (
       cur !== null &&
       cur.fg === cell.fg &&
@@ -1682,12 +1715,27 @@ export function rowToRuns(row: Cell[]): Run[] {
       cur.attrs === cell.attrs
     ) {
       cur.text += ch;
+      cur.cells++;
     } else {
-      cur = { text: ch, fg: cell.fg, bg: cell.bg, attrs: cell.attrs };
+      cur = { text: ch, fg: cell.fg, bg: cell.bg, attrs: cell.attrs, cells: 1 };
       runs.push(cur);
     }
   }
   return runs;
+}
+
+/** Content key for a rendered row: the row index followed by every run's
+ *  style, cell count and text, joined with control bytes 0x01..0x05. Cells
+ *  only ever hold printable chars (code >= 0x20), so those bytes never occur
+ *  in `run.text` and the fields can't collide. The key changes whenever
+ *  anything that affects the row's DOM changes — including a run's width or
+ *  its boundaries — which is what makes the renderer recreate that row. */
+export function runsKey(row: number, runs: readonly Run[]): string {
+  let key = String(row);
+  for (const run of runs) {
+    key += `\u0001${run.fg}\u0002${run.bg}\u0003${run.attrs}\u0005${run.cells}\u0004${run.text}`;
+  }
+  return key;
 }
 
 /** Convert a palette/RGB/default color number into a CSS color string, or

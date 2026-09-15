@@ -459,6 +459,28 @@ describe('TerminalView selection like a text input', () => {
     expect(selectionRectsPx()).toEqual([{ left: 4, width: 4 * CW, top: 4 }]);
   });
 
+  it('pins every run to its cell count in units of the measured cell width', async () => {
+    // ⏺ (U+23FA) is not in Menlo; its fallback advance must not move " ok".
+    const host = await mountWith('\u23fa ok\u4e2d!');
+    expect(host.style.getPropertyValue('--cell-w')).toBe(`${CW}px`);
+    const row = host.querySelectorAll<HTMLElement>('.row')[0];
+    const spans = Array.from(row.querySelectorAll<HTMLElement>('span'));
+    expect(
+      spans.map((el) => [
+        el.textContent,
+        el.style.getPropertyValue('--n'),
+        el.classList.contains('glyph'),
+        el.classList.contains('wide'),
+      ]),
+    ).toEqual([
+      ['\u23fa', '1', true, false],
+      [' ok', '3', false, false],
+      ['\u4e2d', '2', false, true],
+      // jsdom's grid is the 10-column minimum.
+      ['!   ', '4', false, false],
+    ]);
+  });
+
   it('a plain click on either half of a wide glyph clears the selection and copies nothing', async () => {
     // The highlight snaps a press on a wide glyph to both of its cells, so
     // emptiness has to come from the gesture, not the snapped endpoints.

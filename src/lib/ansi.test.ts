@@ -10,6 +10,8 @@ import {
   ATTR_REVERSE,
   runStyleCss,
   rowToRuns,
+  runsKey,
+  type Run,
   rgb,
   isRgb,
   colorToCss,
@@ -555,6 +557,119 @@ describe('ansi.rowToRuns', () => {
     expect(runs[0].fg).toBe(1);
     expect(runs[1].text).toBe('CD  ');
     expect(runs[1].fg).toBe(COLOR_DEFAULT);
+  });
+
+  // The renderer pins every run to `cells` × the measured cell width, so the
+  // counts must add up to the row width and a glyph that may come from a
+  // fallback font must sit alone in a box of exactly its own cells.
+  const shape = (runs: ReturnType<typeof rowToRuns>) =>
+    runs.map((r) => [r.text, r.cells, r.glyph ?? false, r.wide ?? false]);
+
+  it('counts the cells every run covers, summing to the row width', () => {
+    const s = new Screen(1, 8);
+    s.write('\x1b[31mAB\x1b[0m中x');
+    const runs = rowToRuns(s.cells[0]);
+    expect(shape(runs)).toEqual([
+      ['AB', 2, false, false],
+      ['中', 2, false, true],
+      ['x   ', 4, false, false],
+    ]);
+    expect(runs.reduce((n, r) => n + r.cells, 0)).toBe(8);
+  });
+
+  it('gives each glyph outside the grid font its own 1-cell run (Claude Code bullets)', () => {
+    const s = new Screen(1, 10);
+    s.write('\u23fa x\u23bf\u273b\u2764y');
+    expect(shape(rowToRuns(s.cells[0]))).toEqual([
+      ['\u23fa', 1, true, false],
+      [' x', 2, false, false],
+      ['\u23bf', 1, true, false],
+      ['\u273b', 1, true, false],
+      ['\u2764', 1, true, false],
+      ['y   ', 4, false, false],
+    ]);
+  });
+
+  it('keeps ASCII, Latin-1, Latin Extended-A/B, box drawing and block elements in one run', () => {
+    const s = new Screen(1, 9);
+    s.write('a\u00e9\u00a0\u017e\u0192\u2500\u257f\u2588\u259f');
+    expect(shape(rowToRuns(s.cells[0]))).toEqual([
+      ['a\u00e9\u00a0\u017e\u0192\u2500\u257f\u2588\u259f', 9, false, false],
+    ]);
+  });
+
+  it('pins a cell carrying a combining mark, and a soft hyphen that draws no advance', () => {
+    const s = new Screen(1, 5);
+    s.write('a\u0301b\u00adc');
+    expect(shape(rowToRuns(s.cells[0]))).toEqual([
+      ['a\u0301', 1, true, false],
+      ['b', 1, false, false],
+      ['\u00ad', 1, true, false],
+      ['c ', 2, false, false],
+    ]);
+  });
+
+  it('pins DEC Special Graphics that map outside the grid font', () => {
+    const s = new Screen(1, 4);
+    s.write('\x1b(0qo\x1b(B');
+    // q → ─ (box drawing, grid font), o → ⎺ scan line 1 (U+23BA, fallback).
+    expect(shape(rowToRuns(s.cells[0]))).toEqual([
+      ['\u2500', 1, false, false],
+      ['\u23ba', 1, true, false],
+      ['  ', 2, false, false],
+    ]);
+  });
+
+  it('draws VS16 and ZWJ clusters as 2-cell wide runs', () => {
+    const s = new Screen(1, 6);
+    s.write('\u2764\ufe0f\u{1f468}\u200d\u{1f469}z');
+    expect(shape(rowToRuns(s.cells[0]))).toEqual([
+      ['\u2764\ufe0f', 2, false, true],
+      ['\u{1f468}\u200d\u{1f469}', 2, false, true],
+      ['z ', 2, false, false],
+    ]);
+  });
+
+  it('a narrow VS16 cluster at the right edge is a pinned 1-cell glyph', () => {
+    const s = new Screen(1, 3);
+    s.write('ab\u2764\ufe0f');
+    expect(shape(rowToRuns(s.cells[0]))).toEqual([
+      ['ab', 2, false, false],
+      ['\u2764\ufe0f', 1, true, false],
+    ]);
+  });
+});
+
+describe('ansi.runsKey', () => {
+  const run = (text: string, cells: number, extra: Partial<Run> = {}): Run => ({
+    text, fg: COLOR_DEFAULT, bg: COLOR_DEFAULT, attrs: 0, cells, ...extra,
+  });
+
+  it('is stable for identical runs and distinct per row index', () => {
+    const s = new Screen(1, 6);
+    s.write('\u23fa ok');
+    expect(runsKey(0, rowToRuns(s.cells[0]))).toBe(runsKey(0, rowToRuns(s.cells[0])));
+    expect(runsKey(0, rowToRuns(s.cells[0]))).not.toBe(runsKey(1, rowToRuns(s.cells[0])));
+  });
+
+  it('changes when only a run\'s cell count changes', () => {
+    // A VS16 cluster is a 2-cell pair mid-row but one cell at the right edge.
+    expect(runsKey(0, [run('\u2764\ufe0f', 2, { wide: true })])).not.toBe(
+      runsKey(0, [run('\u2764\ufe0f', 1, { glyph: true })]),
+    );
+    expect(runsKey(0, [run('ab', 2)])).not.toBe(runsKey(0, [run('ab', 3)]));
+  });
+
+  it('changes when run boundaries move even though the joined text is the same', () => {
+    expect(runsKey(0, [run('\u23fa', 1, { glyph: true }), run(' x', 2)])).not.toBe(
+      runsKey(0, [run('\u23fa x', 3)]),
+    );
+  });
+
+  it('changes with style', () => {
+    expect(runsKey(0, [run('a', 1)])).not.toBe(runsKey(0, [run('a', 1, { fg: 1 })]));
+    expect(runsKey(0, [run('a', 1)])).not.toBe(runsKey(0, [run('a', 1, { bg: 1 })]));
+    expect(runsKey(0, [run('a', 1)])).not.toBe(runsKey(0, [run('a', 1, { attrs: 1 })]));
   });
 });
 
