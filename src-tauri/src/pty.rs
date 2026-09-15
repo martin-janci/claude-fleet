@@ -123,11 +123,14 @@ pub(crate) fn clamp_size(cols: u16, rows: u16) -> PtySize {
 /// The script run by the remote login shell. We re-export
 /// LANG/LC_ALL/COLORTERM/TERM inside the remote shell so the embedded TUI gets
 /// proper Unicode glyph rendering even if the remote sshd has AcceptEnv
-/// disabled. `session_name` is quoted so it is one inert tmux argument.
+/// disabled. The target is `crate::tmux::exact_session` so a session that is
+/// gone fails the attach instead of prefix-matching a DIFFERENT session (every
+/// keystroke would otherwise go to another Claude); it is quoted so it crosses
+/// as one inert tmux argument.
 pub(crate) fn remote_attach_script(session_name: &str) -> String {
     format!(
         "LANG=${{LANG:-en_US.UTF-8}} LC_ALL=${{LC_ALL:-en_US.UTF-8}} COLORTERM=truecolor TERM=xterm-256color tmux attach -t {}",
-        quote(session_name)
+        quote(&crate::tmux::exact_session(session_name))
     )
 }
 
@@ -156,7 +159,7 @@ pub(crate) fn attach_argv(
             "tmux".into(),
             "attach".into(),
             "-t".into(),
-            session_name.into(),
+            crate::tmux::exact_session(session_name),
         ];
     }
     let mut argv: Vec<String> = vec!["ssh".into(), "-tt".into()];
@@ -515,10 +518,12 @@ mod tests {
     // ---- argv construction ----
 
     #[test]
-    fn local_attach_is_a_plain_tmux_attach() {
+    fn local_attach_targets_the_session_exactly() {
+        // `=` disables tmux's prefix / fnmatch lookup: attaching to a dead
+        // `dev-foo` must fail, not land in `dev-foo--feat-x`.
         assert_eq!(
             attach_argv("local", "dev-foo", &mux()),
-            vec!["tmux", "attach", "-t", "dev-foo"]
+            vec!["tmux", "attach", "-t", "=dev-foo"]
         );
     }
 
@@ -549,7 +554,7 @@ mod tests {
         assert!(out.status.success());
         let unquoted = String::from_utf8(out.stdout).unwrap();
         assert_eq!(unquoted, remote_attach_script("dev-foo"));
-        assert!(unquoted.ends_with("tmux attach -t 'dev-foo'"));
+        assert!(unquoted.ends_with("tmux attach -t '=dev-foo'"));
         for var in [
             "LANG=",
             "LC_ALL=",
@@ -565,7 +570,7 @@ mod tests {
         // Defence in depth behind validate::tmux_name: even a name full of
         // metacharacters is one inert tmux argument.
         let script = remote_attach_script("x'; rm -rf / #");
-        assert!(script.ends_with("tmux attach -t 'x'\\''; rm -rf / #'"));
+        assert!(script.ends_with("tmux attach -t '=x'\\''; rm -rf / #'"));
         // And the outer quoting keeps the whole thing a single word.
         if !bash_available() {
             eprintln!("SKIP remote_script_neutralises_a_hostile_session_name: bash not on PATH");

@@ -253,7 +253,7 @@ async fn reconcile_pass_updates_reachable_hosts_and_keeps_unreachable_ones() {
             LIST_SCRIPT.to_string(),
             "claude agents --json 2>/dev/null || echo '[]'".to_string(),
             crate::service::hosts::OAUTH_ACCOUNT_SCRIPT.to_string(),
-            "tmux capture-pane -t 'alpha-live' -S '-8' -p".to_string(),
+            "tmux capture-pane -t '=alpha-live:' -S '-8' -p".to_string(),
         ]
     );
     // beta and gamma: the list and the (unconditional) agents probe, and
