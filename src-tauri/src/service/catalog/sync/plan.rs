@@ -646,28 +646,40 @@ pub(crate) fn registry_put_with_ttl(mut plan: SyncPlan, ttl: Duration) -> String
 /// like `registry_put` does: each one pins a `HostSnapshot` per host, and a
 /// session that computes plans but never applies them would otherwise hold
 /// every one of them until the next `registry_put`.
-pub fn registry_take(id: &str) -> Option<SyncPlan> {
+///
+/// Test-only: production code needs the original deadline too, so it calls
+/// [`registry_take_with_expiry`] directly.
+#[cfg(test)]
+pub(crate) fn registry_take(id: &str) -> Option<SyncPlan> {
+    registry_take_with_expiry(id).map(|(_, plan)| plan)
+}
+
+/// [`registry_take`], also handing back the plan's original deadline so a
+/// caller that puts it back (`registry_put_existing`) can preserve it
+/// instead of minting a fresh one.
+pub(crate) fn registry_take_with_expiry(id: &str) -> Option<(Instant, SyncPlan)> {
     let now = Instant::now();
     let mut map = plans();
     map.retain(|_, (expires_at, _)| *expires_at > now);
-    let (_, plan) = map.remove(id)?;
-    Some(plan)
+    map.remove(id)
 }
 
-/// Put a plan the caller took with `registry_take` back under the SAME id,
-/// for a `sync_apply` that refused to run rather than one that ran: a plan
-/// rejected for missing secrets must still be there when the user sets the
-/// secret (or decides to force), addressed by the id they already hold.
+/// Put a plan the caller took with [`registry_take_with_expiry`] back under
+/// the SAME id and its ORIGINAL `expires_at`, for a `sync_apply` that
+/// refused to run rather than one that ran: a plan rejected for missing
+/// secrets must still be there when the user sets the secret (or decides to
+/// force), addressed by the id they already hold.
 ///
-/// The TTL restarts from now, exactly as if the plan had just been computed
-/// — the clock measures how long the host snapshot has gone unchecked, and
-/// a refused apply did not touch the host.
-pub fn registry_put_existing(id: &str, mut plan: SyncPlan) {
+/// The deadline does NOT restart: the clock measures how long the
+/// underlying host snapshot has gone unchecked, and a refused apply did not
+/// touch the host, so extending it here would let a plan quietly outlive
+/// how stale its snapshot actually is.
+pub fn registry_put_existing(id: &str, expires_at: Instant, mut plan: SyncPlan) {
     plan.id = id.to_string();
     let now = Instant::now();
     let mut map = plans();
-    map.retain(|_, (expires_at, _)| *expires_at > now);
-    map.insert(id.to_string(), (now + PLAN_TTL, plan));
+    map.retain(|_, (e, _)| *e > now);
+    map.insert(id.to_string(), (expires_at, plan));
 }
 
 #[cfg(test)]
@@ -1315,6 +1327,32 @@ mod tests {
         assert_eq!(back.hosts.len(), 1);
         assert!(registry_take(&id).is_none(), "taking a plan consumes it");
         assert!(registry_take("no-such-plan").is_none());
+    }
+
+    #[test]
+    fn registry_put_existing_keeps_the_original_deadline() {
+        // A short TTL so the test can prove the deadline was NOT restarted
+        // without sleeping for the real 10-minute `PLAN_TTL`.
+        let id = registry_put_with_ttl(
+            SyncPlan::new(vec![plan_for(
+                &cat(),
+                &Claude,
+                &HostSnapshot::default(),
+                &Manifest::default(),
+                &secrets_map(),
+            )]),
+            Duration::from_millis(50),
+        );
+        let (expires_at, plan) = registry_take_with_expiry(&id).expect("plan still live");
+        // Put it back, as `sync_apply` does on a refused (missing-secret)
+        // apply — the plan was not touched, so its deadline must be
+        // unchanged, not pushed out to `now + PLAN_TTL`.
+        registry_put_existing(&id, expires_at, plan);
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(
+            registry_take(&id).is_none(),
+            "the original (short) deadline must still apply after registry_put_existing"
+        );
     }
 
     #[test]

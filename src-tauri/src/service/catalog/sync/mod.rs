@@ -356,22 +356,24 @@ pub async fn apply_sync_with(
     ssh: &Arc<SshClient>,
     token: CancellationToken,
 ) -> Result<SyncRunSummary, IpcError> {
-    let computed = plan::registry_take(&args.plan_id).ok_or_else(|| {
-        IpcError::new(
-            codes::E_SYNC_PLAN_STALE,
-            "that sync plan is unknown or has expired; compute a new one",
-        )
-    })?;
+    let (expires_at, computed) =
+        plan::registry_take_with_expiry(&args.plan_id).ok_or_else(|| {
+            IpcError::new(
+                codes::E_SYNC_PLAN_STALE,
+                "that sync plan is unknown or has expired; compute a new one",
+            )
+        })?;
 
     if !args.force_partial {
         let missing = missing_secret_names(&computed);
         if !missing.is_empty() {
             // Refusing is not applying: the plan goes straight back into
-            // the registry under the id the caller already holds, so
-            // setting the secret (or deciding to force) is a second
-            // `sync_apply` with the same id rather than a re-plan.
+            // the registry under the id the caller already holds (and its
+            // ORIGINAL deadline — the host was never touched), so setting
+            // the secret (or deciding to force) is a second `sync_apply`
+            // with the same id rather than a re-plan.
             let names = missing.into_iter().collect::<Vec<_>>().join(", ");
-            plan::registry_put_existing(&args.plan_id, computed);
+            plan::registry_put_existing(&args.plan_id, expires_at, computed);
             return Err(IpcError::new(
                 codes::E_SECRET_MISSING,
                 format!(

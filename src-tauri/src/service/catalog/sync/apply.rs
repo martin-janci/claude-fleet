@@ -1812,6 +1812,10 @@ mod tests {
         let res = apply_host(&ctx, &Claude, &adopt).await;
         assert_eq!(res.status, "applied", "{res:?}");
         assert_eq!(res.actions[0].outcome, DONE);
+        assert!(
+            !res.restart_required,
+            "an adopt touches only the manifest, never the hook's own config"
+        );
         assert_eq!(std::fs::read_to_string(&settings_file).unwrap(), before);
         assert_eq!(backups(&home.path().join(".claude")).len(), 2);
         let manifest: Manifest =
