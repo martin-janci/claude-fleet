@@ -163,10 +163,7 @@ pub fn merge_hook_into_settings_json(
 /// control API has never been enabled (no master token yet).
 pub fn local_hook_token(store: &Mutex<Store>) -> Result<String, IpcError> {
     let s = lock(store)?;
-    let has_master = s
-        .get_setting(crate::mcp::SETTING_TOKEN)?
-        .is_some_and(|t| !t.is_empty());
-    if !has_master {
+    if crate::mcp::settings::McpSettings::read(&s)?.token.is_none() {
         return Err(IpcError::new(
             codes::E_NO_TOKEN,
             "MCP token not configured — enable the MCP server first",

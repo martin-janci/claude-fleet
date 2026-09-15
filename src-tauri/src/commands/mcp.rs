@@ -12,6 +12,7 @@
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
+use crate::mcp::settings::{configured_port, ensure_master_token, McpSettings};
 use crate::mcp::{self, McpGuards, McpRuntime};
 use crate::service::hooks_install;
 use crate::ssh::SshClient;
@@ -59,24 +60,9 @@ pub struct McpConfigureArgs {
 fn status(store: &Mutex<Store>, runtime: &Mutex<McpRuntime>) -> Result<McpStatus, IpcError> {
     let (enabled, port, token, confirm_destructive) = {
         let s = lock(store)?;
-        let enabled = s.get_setting(mcp::SETTING_ENABLED)?.as_deref() == Some("true");
-        let port = s
-            .get_setting(mcp::SETTING_PORT)?
-            .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(mcp::DEFAULT_PORT);
-        let token = match s.get_setting(mcp::SETTING_TOKEN)? {
-            Some(t) if !t.is_empty() => t,
-            _ => {
-                let fresh = mcp::generate_token();
-                s.set_setting(mcp::SETTING_TOKEN, &fresh)?;
-                fresh
-            }
-        };
-        let confirm = s
-            .get_setting(mcp::guard::SETTING_CONFIRM_DESTRUCTIVE)?
-            .as_deref()
-            == Some("true");
-        (enabled, port, token, confirm)
+        let cfg = McpSettings::read(&s)?;
+        let token = ensure_master_token(&s)?;
+        (cfg.enabled, cfg.port, token, cfg.confirm_destructive)
     };
     let rt = lock(runtime)?;
     Ok(McpStatus {
@@ -142,19 +128,7 @@ pub async fn mcp_configure(
     if args.enabled {
         let (port, token) = {
             let s = lock(&store)?;
-            let port = s
-                .get_setting(mcp::SETTING_PORT)?
-                .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(mcp::DEFAULT_PORT);
-            let token = match s.get_setting(mcp::SETTING_TOKEN)? {
-                Some(t) if !t.is_empty() => t,
-                _ => {
-                    let fresh = mcp::generate_token();
-                    s.set_setting(mcp::SETTING_TOKEN, &fresh)?;
-                    fresh
-                }
-            };
-            (port, token)
+            (McpSettings::read(&s)?.port, ensure_master_token(&s)?)
         };
         let result = mcp::start(
             Arc::clone(&store),
@@ -193,24 +167,6 @@ pub async fn mcp_configure(
     status(&store, &runtime)
 }
 
-/// Read the configured port, refusing when the control API has never been
-/// enabled (no master token yet — nothing to provision against).
-fn configured_port(store: &Mutex<Store>) -> Result<u16, IpcError> {
-    let s = lock(store)?;
-    let has_master = s
-        .get_setting(mcp::SETTING_TOKEN)?
-        .is_some_and(|t| !t.is_empty());
-    if !has_master {
-        return Err(IpcError::new(
-            codes::E_PROVISION,
-            "enable the control API first (no token yet)",
-        ));
-    }
-    Ok(s.get_setting(mcp::SETTING_PORT)?
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(mcp::DEFAULT_PORT))
-}
-
 #[tauri::command]
 pub async fn provision_hosts(
     rotate: Option<bool>,
@@ -218,7 +174,7 @@ pub async fn provision_hosts(
     ssh: State<'_, Arc<SshClient>>,
     tunnels: State<'_, Arc<crate::service::tunnel::TunnelSupervisor>>,
 ) -> Result<Vec<crate::service::provision::HostProvisionResult>, IpcError> {
-    let port = configured_port(&store)?;
+    let port = configured_port(&*lock(&store)?)?;
     crate::service::provision::provision_hosts(
         &store,
         &*ssh,
@@ -302,7 +258,7 @@ pub async fn rotate_host_token(
     tunnels: State<'_, Arc<crate::service::tunnel::TunnelSupervisor>>,
 ) -> Result<HostTokenInfo, IpcError> {
     crate::validate::host_alias(&host_alias)?;
-    let port = configured_port(&store)?;
+    let port = configured_port(&*lock(&store)?)?;
     crate::service::provision::provision_host_with_token(
         &store,
         &*ssh,
@@ -377,12 +333,7 @@ pub fn install_fleet_hook(
         ));
     }
 
-    let port = {
-        let s = lock(&store)?;
-        s.get_setting(mcp::SETTING_PORT)?
-            .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(mcp::DEFAULT_PORT)
-    };
+    let port = McpSettings::read(&*lock(&store)?)?.port;
     let token = hooks_install::local_hook_token(&store)?;
 
     {

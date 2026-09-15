@@ -10,6 +10,7 @@ mod auth;
 mod doc_gen;
 pub mod guard;
 pub mod hooks;
+pub mod settings;
 mod tools;
 
 use crate::cancel::CancellationRegistry;

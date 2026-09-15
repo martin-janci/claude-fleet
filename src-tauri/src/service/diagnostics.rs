@@ -90,17 +90,14 @@ pub fn collect(
         sessions,
     ) = {
         let s = lock(store)?;
-        let setting = |k: &str| s.get_setting(k).ok().flatten();
-        let master = setting(crate::mcp::SETTING_TOKEN).filter(|t| !t.is_empty());
+        let cfg = crate::mcp::settings::McpSettings::read(&s)?;
         (
             s.schema_version().unwrap_or(0),
             crate::service::settings::read_all(&s),
-            setting(crate::mcp::SETTING_ENABLED).as_deref() == Some("true"),
-            setting(crate::mcp::SETTING_PORT)
-                .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(crate::mcp::DEFAULT_PORT),
-            setting(crate::mcp::guard::SETTING_CONFIRM_DESTRUCTIVE).as_deref() == Some("true"),
-            master,
+            cfg.enabled,
+            cfg.port,
+            cfg.confirm_destructive,
+            cfg.token,
             s.list_hosts()?,
             s.list_host_tokens()?,
             s.list_all_sessions()?,
