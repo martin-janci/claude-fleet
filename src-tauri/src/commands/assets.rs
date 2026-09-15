@@ -314,10 +314,7 @@ pub fn catalog_repo_status(store: State<'_, Arc<Mutex<Store>>>) -> Result<RepoSt
 }
 
 #[tauri::command]
-pub fn catalog_template(
-    args: AssetRef,
-    _store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<Asset, IpcError> {
+pub fn catalog_template(args: AssetRef) -> Result<Asset, IpcError> {
     check_name(&args.name)?;
     Ok(author::template(args.kind, &args.name))
 }
