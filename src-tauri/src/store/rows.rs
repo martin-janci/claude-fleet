@@ -35,6 +35,30 @@ pub struct WorktreeRow {
 /// local path touches the filesystem, and pass them to the delete functions.
 pub type FingerprintKeys = std::collections::HashMap<i64, Vec<String>>;
 
+/// Columns every `ProjectRow` query selects, in [`map_project_row`] order.
+pub(super) const PROJECT_COLUMNS: &str = "id, owner, repo, base_path, last_session_at, adopted";
+
+/// Map a row selected with [`PROJECT_COLUMNS`] (at column offset 0).
+pub(super) fn map_project_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRow> {
+    Ok(ProjectRow {
+        id: row.get(0)?,
+        owner: row.get(1)?,
+        repo: row.get(2)?,
+        base_path: row.get(3)?,
+        last_session_at: row.get(4)?,
+        adopted: row.get::<_, i64>(5)? != 0,
+    })
+}
+
+/// `cols` (a comma-separated column list) with every column qualified by
+/// `alias.`, for joined queries.
+pub(super) fn qualified(cols: &str, alias: &str) -> String {
+    cols.split(',')
+        .map(|c| format!("{alias}.{}", c.trim()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Columns every `WorktreeRow` query selects, in [`worktree_from_row`] order.
 pub(super) const WORKTREE_COLUMNS: &str = "id, project_id, host_alias, name, path, branch";
 
@@ -57,6 +81,16 @@ pub(super) fn worktree_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Wor
 pub fn has_no_pane(kind: &str) -> bool {
     matches!(kind, "bg" | "external")
 }
+
+/// `Store::ghost_and_clean` kind filter: tmux-backed rows, pruned by the
+/// reconcile write-burst against the host's tmux list.
+pub(super) const KIND_TMUX: &str = "kind NOT IN ('bg','external')";
+
+/// `Store::ghost_and_clean` kind filter: pane-less rows ([`has_no_pane`]),
+/// pruned by `Store::ghost_and_clean_bg_sessions` against `claude agents
+/// --json`. They are never tmux sessions, so the tmux-keyed pass must skip
+/// them.
+pub(super) const KIND_PANE_LESS: &str = "kind IN ('bg','external')";
 
 /// `PartialEq` covers every wire field, so `upsert_session_in_tx` can tell a
 /// no-op reconcile pass from a real change before emitting `session:updated`.
@@ -146,7 +180,7 @@ pub(super) const SESSION_COLUMNS: &str =
 /// Decode the `sessions.tags` JSON column. NULL, empty, or malformed text
 /// (never written by us, but a hand-edited DB is possible) reads as no tags
 /// rather than failing every session read.
-pub fn decode_tags(raw: Option<String>) -> Vec<String> {
+pub(super) fn decode_tags(raw: Option<String>) -> Vec<String> {
     raw.as_deref()
         .filter(|s| !s.trim().is_empty())
         .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
@@ -155,7 +189,7 @@ pub fn decode_tags(raw: Option<String>) -> Vec<String> {
 
 /// Encode tags for the `sessions.tags` column: `None` for an empty list so
 /// an untagged row stays NULL (and `tag IS NULL` style queries work).
-pub fn encode_tags(tags: &[String]) -> Option<String> {
+pub(super) fn encode_tags(tags: &[String]) -> Option<String> {
     if tags.is_empty() {
         None
     } else {
@@ -294,6 +328,25 @@ pub struct UsageCursor {
     pub last_msg_usage: Option<String>,
 }
 
+/// The `sessions` columns every `UsageCursor` read selects, in
+/// [`map_usage_cursor`] order.
+pub(super) const USAGE_CURSOR_COLUMNS: &str =
+    "id, transcript_path, claude_session_id, usage_offset_bytes, usage_source, \
+     usage_last_msg_id, usage_last_msg_usage";
+
+/// Map a row selected with [`USAGE_CURSOR_COLUMNS`].
+pub(super) fn map_usage_cursor(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageCursor> {
+    Ok(UsageCursor {
+        session_id: row.get(0)?,
+        transcript_path: row.get(1)?,
+        claude_session_id: row.get(2)?,
+        offset_bytes: row.get(3)?,
+        source: row.get(4)?,
+        last_msg_id: row.get(5)?,
+        last_msg_usage: row.get(6)?,
+    })
+}
+
 /// One usage pass's result for a session, applied by `Store::apply_usage`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageDelta {
@@ -336,7 +389,27 @@ pub struct HostRow {
     pub provisioned: bool,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+/// Columns every `HostRow` query selects, in [`map_host_row`] order.
+pub(super) const HOST_COLUMNS: &str =
+    "alias, ssh_alias, reachable, claude_version, tmux_version, hidden, \
+     last_pinged_at, account_uuid, provisioned";
+
+/// Map a row selected with [`HOST_COLUMNS`].
+pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
+    Ok(HostRow {
+        alias: row.get(0)?,
+        ssh_alias: row.get(1)?,
+        reachable: row.get::<_, i64>(2)? != 0,
+        claude_version: row.get(3)?,
+        tmux_version: row.get(4)?,
+        hidden: row.get::<_, i64>(5)? != 0,
+        last_pinged_at: row.get(6)?,
+        account_uuid: row.get(7)?,
+        provisioned: row.get::<_, i64>(8)? != 0,
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct AccountRow {
     pub uuid: String,
     pub email: Option<String>,
@@ -353,6 +426,26 @@ pub struct AccountRow {
     /// 028): hitting a usage limit spends pay-as-you-go money instead of
     /// blocking the account.
     pub has_extra_usage: bool,
+}
+
+/// Columns every `AccountRow` query selects, in [`map_account_row`] order.
+pub(super) const ACCOUNT_COLUMNS: &str =
+    "uuid, email, display_name, organization_name, organization_uuid, \
+     seat_tier, last_seen_at, nickname, has_extra_usage";
+
+/// Map a row selected with [`ACCOUNT_COLUMNS`].
+pub(super) fn map_account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRow> {
+    Ok(AccountRow {
+        uuid: row.get(0)?,
+        email: row.get(1)?,
+        display_name: row.get(2)?,
+        organization_name: row.get(3)?,
+        organization_uuid: row.get(4)?,
+        seat_tier: row.get(5)?,
+        last_seen_at: row.get(6)?,
+        nickname: row.get(7)?,
+        has_extra_usage: row.get::<_, i64>(8)? != 0,
+    })
 }
 
 /// One row of the append-only per-session event timeline (migration 013).
@@ -394,6 +487,10 @@ pub struct SessionMessage {
     /// message is not a reply.
     pub reply_to: Option<i64>,
 }
+
+/// Columns every `SessionMessage` query selects, in [`map_message_row`] order.
+pub(super) const MESSAGE_COLUMNS: &str =
+    "id, from_session_id, to_session_id, body, kind, sent_at, read_at, reply_to";
 
 /// One dispatched unit of work (migration 020). `state` is one of
 /// [`TASK_STATES`]; `result` is the paragraph the worker printed after its
@@ -477,11 +574,7 @@ pub(super) const TASK_COLUMNS: &str =
 
 /// [`TASK_COLUMNS`] qualified with the `t.` alias for joined queries.
 pub(super) fn task_columns_t() -> String {
-    TASK_COLUMNS
-        .split(',')
-        .map(|c| format!("t.{}", c.trim()))
-        .collect::<Vec<_>>()
-        .join(", ")
+    qualified(TASK_COLUMNS, "t")
 }
 
 pub(super) fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
@@ -505,6 +598,7 @@ pub(super) fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow>
 /// `account_uuid`, and `worktree_key` are PRE-RESOLVED by the caller (they
 /// require reads — `find_project_id_for_path` / `get_session_account` /
 /// `worktree_key_for_path` — that must run before the transaction opens).
+#[derive(Default)]
 pub struct ReconcileSession<'a> {
     pub tmux_name: &'a str,
     pub project_id: Option<i64>,
@@ -535,6 +629,7 @@ pub struct ReconcileSession<'a> {
 
 /// All inputs for applying one host's probe result atomically. Consumed by
 /// `Store::apply_host_reconcile`.
+#[derive(Default)]
 pub struct HostReconcile<'a> {
     pub alias: &'a str,
     /// Whether the probe succeeded. `false` ⇒ only the host row's
@@ -565,6 +660,24 @@ pub const SESSION_EVENTS_CAP: i64 = 500;
 /// Max chars of a prompt kept in `sessions.last_prompt`.
 pub const LAST_PROMPT_CHARS: usize = 200;
 
+/// `?,?,…`: `n` positional placeholders for an `IN (…)` list.
+pub(super) fn in_clause(n: usize) -> String {
+    vec!["?"; n].join(",")
+}
+
+/// The bind list for a statement whose fixed parameters `head` (write them
+/// with `rusqlite::params![..]`) are followed by an `IN ({in_clause(tail.len())})`
+/// list of `tail`.
+pub(super) fn params_then<'a, T: rusqlite::ToSql>(
+    head: &[&'a dyn rusqlite::ToSql],
+    tail: &'a [T],
+) -> Vec<&'a dyn rusqlite::ToSql> {
+    head.iter()
+        .copied()
+        .chain(tail.iter().map(|t| t as &dyn rusqlite::ToSql))
+        .collect()
+}
+
 pub(super) fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -584,34 +697,25 @@ pub(super) fn fetch_session(
     tmux_name: &str,
     host_alias: &str,
 ) -> Result<Option<SessionRow>, rusqlite::Error> {
-    let mut stmt = conn.prepare_cached(&format!(
+    conn.prepare_cached(&format!(
         "SELECT {SESSION_COLUMNS} FROM sessions WHERE tmux_name=?1 AND host_alias=?2"
-    ))?;
-    let mut rows = stmt.query_map(rusqlite::params![tmux_name, host_alias], |row| {
-        map_session_row(row)
-    })?;
-    match rows.next() {
-        Some(r) => Ok(Some(r?)),
-        None => Ok(None),
-    }
+    ))?
+    .query_row(rusqlite::params![tmux_name, host_alias], map_session_row)
+    .optional()
 }
 
 pub(super) fn fetch_session_by_id(
     conn: &Connection,
     id: i64,
 ) -> Result<Option<SessionRow>, rusqlite::Error> {
-    let mut stmt = conn.prepare_cached(&format!(
+    conn.prepare_cached(&format!(
         "SELECT {SESSION_COLUMNS} FROM sessions WHERE id=?1"
-    ))?;
-    let mut rows = stmt.query_map(rusqlite::params![id], map_session_row)?;
-    match rows.next() {
-        Some(r) => Ok(Some(r?)),
-        None => Ok(None),
-    }
+    ))?
+    .query_row(rusqlite::params![id], map_session_row)
+    .optional()
 }
 
-/// Map one `SELECT id, from_session_id, to_session_id, body, kind, sent_at,
-/// read_at, reply_to` row of `session_messages`.
+/// Map a `session_messages` row selected with [`MESSAGE_COLUMNS`].
 pub(super) fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMessage> {
     Ok(SessionMessage {
         id: row.get(0)?,
@@ -629,49 +733,18 @@ pub(super) fn fetch_host(
     conn: &Connection,
     alias: &str,
 ) -> Result<Option<HostRow>, rusqlite::Error> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT alias, ssh_alias, reachable, claude_version, tmux_version, hidden,
-                last_pinged_at, account_uuid, provisioned
-         FROM hosts WHERE alias=?1",
-    )?;
-    let mut rows = stmt.query_map(rusqlite::params![alias], |row| {
-        Ok(HostRow {
-            alias: row.get(0)?,
-            ssh_alias: row.get(1)?,
-            reachable: row.get::<_, i64>(2)? != 0,
-            claude_version: row.get(3)?,
-            tmux_version: row.get(4)?,
-            hidden: row.get::<_, i64>(5)? != 0,
-            last_pinged_at: row.get(6)?,
-            account_uuid: row.get(7)?,
-            provisioned: row.get::<_, i64>(8)? != 0,
-        })
-    })?;
-    match rows.next() {
-        Some(r) => Ok(Some(r?)),
-        None => Ok(None),
-    }
+    conn.prepare_cached(&format!("SELECT {HOST_COLUMNS} FROM hosts WHERE alias=?1"))?
+        .query_row(rusqlite::params![alias], map_host_row)
+        .optional()
 }
 
 pub(super) fn fetch_project(
     conn: &Connection,
     id: i64,
 ) -> Result<Option<ProjectRow>, rusqlite::Error> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT id, owner, repo, base_path, last_session_at, adopted FROM projects WHERE id=?1",
-    )?;
-    let mut rows = stmt.query_map(rusqlite::params![id], |row| {
-        Ok(ProjectRow {
-            id: row.get(0)?,
-            owner: row.get(1)?,
-            repo: row.get(2)?,
-            base_path: row.get(3)?,
-            last_session_at: row.get(4)?,
-            adopted: row.get::<_, i64>(5)? != 0,
-        })
-    })?;
-    match rows.next() {
-        Some(r) => Ok(Some(r?)),
-        None => Ok(None),
-    }
+    conn.prepare_cached(&format!(
+        "SELECT {PROJECT_COLUMNS} FROM projects WHERE id=?1"
+    ))?
+    .query_row(rusqlite::params![id], map_project_row)
+    .optional()
 }

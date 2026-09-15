@@ -19,10 +19,7 @@ impl Store {
         kind: &str,
         detail: Option<&str>,
     ) -> Result<(), crate::ipc_error::IpcError> {
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let at = now_unix();
         self.conn.execute(
             "INSERT INTO session_events (session_id, at, kind, detail) \
                  VALUES (?1, ?2, ?3, ?4)",
@@ -58,11 +55,7 @@ impl Store {
                 detail: row.get(4)?,
             })
         })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Insert one inter-session message (migration 015). `sent_at` is stamped
@@ -76,10 +69,7 @@ impl Store {
         kind: &str,
         reply_to: Option<i64>,
     ) -> Result<i64, crate::ipc_error::IpcError> {
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let at = now_unix();
         self.conn.execute(
             "INSERT INTO session_messages \
                    (from_session_id, to_session_id, body, kind, sent_at, reply_to) \
@@ -96,8 +86,7 @@ impl Store {
     ) -> Result<Option<SessionMessage>, crate::ipc_error::IpcError> {
         self.conn
             .query_row(
-                "SELECT id, from_session_id, to_session_id, body, kind, sent_at, read_at, reply_to \
-                 FROM session_messages WHERE id = ?1",
+                &format!("SELECT {MESSAGE_COLUMNS} FROM session_messages WHERE id = ?1"),
                 rusqlite::params![id],
                 map_message_row,
             )
@@ -113,24 +102,19 @@ impl Store {
         unread_only: bool,
         limit: i64,
     ) -> Result<Vec<SessionMessage>, crate::ipc_error::IpcError> {
-        let sql = if unread_only {
-            "SELECT id, from_session_id, to_session_id, body, kind, sent_at, read_at, reply_to \
-             FROM session_messages \
-             WHERE to_session_id = ?1 AND read_at IS NULL \
-             ORDER BY sent_at DESC, id DESC LIMIT ?2"
+        let unread = if unread_only {
+            " AND read_at IS NULL"
         } else {
-            "SELECT id, from_session_id, to_session_id, body, kind, sent_at, read_at, reply_to \
-             FROM session_messages \
-             WHERE to_session_id = ?1 \
-             ORDER BY sent_at DESC, id DESC LIMIT ?2"
+            ""
         };
-        let mut stmt = self.conn.prepare(sql)?;
+        let sql = format!(
+            "SELECT {MESSAGE_COLUMNS} FROM session_messages \
+             WHERE to_session_id = ?1{unread} \
+             ORDER BY sent_at DESC, id DESC LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params![to_session_id, limit], map_message_row)?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Mark a set of inbox messages as read. Only rows whose `to_session_id`
@@ -144,23 +128,14 @@ impl Store {
         if ids.is_empty() {
             return Ok(0);
         }
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let at = now_unix();
         let sql = format!(
             "UPDATE session_messages SET read_at = ?1 \
-             WHERE to_session_id = ?2 AND read_at IS NULL AND id IN ({placeholders})",
+             WHERE to_session_id = ?2 AND read_at IS NULL AND id IN ({phs})",
+            phs = in_clause(ids.len())
         );
-        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&at, &recipient];
-        for id in ids {
-            params.push(id);
-        }
-        let n = self
-            .conn
-            .execute(sql.as_str(), rusqlite::params_from_iter(params))?;
-        Ok(n)
+        let params = params_then(rusqlite::params![at, recipient], ids);
+        Ok(self.conn.execute(&sql, params.as_slice())?)
     }
 }
 

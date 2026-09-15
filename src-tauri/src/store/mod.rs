@@ -117,7 +117,7 @@ impl Store {
     /// Run `f` inside a single `conn.transaction()`. Used by reconcile paths
     /// that batch many upserts/deletes after a fan-out of off-lock probes —
     /// one fsync per batch instead of one per row.
-    pub fn with_transaction<F, R>(&mut self, f: F) -> rusqlite::Result<R>
+    fn with_transaction<F, R>(&mut self, f: F) -> rusqlite::Result<R>
     where
         F: FnOnce(&rusqlite::Transaction) -> rusqlite::Result<R>,
     {

@@ -4,8 +4,8 @@
 use super::*;
 
 /// Translate `HostReconcile::probe_started_at` into the `last_reconciled_at`
-/// cutoff used by `ghost_and_clean_sessions_in_tx`: rows stamped at or after
-/// the probe start are protected, and `0` ("no guard") protects nothing.
+/// cutoff used by [`Store::ghost_and_clean`]: rows stamped at or after the
+/// probe start are protected, and `0` ("no guard") protects nothing.
 fn ghost_cutoff(probe_started_at: i64) -> i64 {
     if probe_started_at <= 0 {
         i64::MAX
@@ -27,8 +27,7 @@ impl Store {
     // The public `update_host_probe` / `upsert_session` /
     // `touch_project_last_session_at` / `delete_sessions_not_in` methods are
     // intentionally left untouched — direct (non-reconcile) callers keep
-    // emitting immediately. Note: `ghost_and_clean_sessions_in_tx` has no
-    // public twin by design — reconcile is the only caller.
+    // emitting immediately.
     //
     // MAINTENANCE: each `*_in_tx` helper deliberately mirrors the SQL of its
     // public twin (same column lists, same upsert ON CONFLICT clause, same
@@ -37,7 +36,11 @@ impl Store {
     // a schema/SQL detail in a public method, change its `_in_tx` twin too.
     // Both paths are test-covered (direct: the `*_emits_*` event tests; tx: the
     // `apply_host_reconcile` rollback + happy-path tests), so a divergence will
-    // surface as a test failure rather than silent corruption.
+    // surface as a test failure rather than silent corruption. The ghost /
+    // reap pass is the exception: `ghost_and_clean` is ONE function shared by
+    // this write-burst (tmux rows, stale-probe guard on) and by the public
+    // `ghost_and_clean_bg_sessions` (pane-less rows, own transaction), so the
+    // two prunes cannot drift apart.
     //
     // `worktree_key` is written by `upsert_session_in_tx` ONLY — the public
     // `upsert_session` intentionally omits it (reconcile is the only path that
@@ -222,96 +225,83 @@ impl Store {
         Ok(())
     }
 
-    /// Phase 1: sessions not in `keep_names` that are currently live (`status !=
+    /// Two-phase ghost-then-reap of the rows `kind_filter` selects on one
+    /// host, keyed on the set of names this pass observed live. Runs only its
+    /// SQL against `tx` and pushes what to announce onto `out`; the caller
+    /// commits and flushes (`apply_host_reconcile` for tmux rows,
+    /// [`Store::ghost_and_clean_bg_sessions`] for pane-less ones).
+    ///
+    /// Phase 1: rows not in `keep_names` that are currently live (`status !=
     /// 'ghost'`) are soft-deleted by setting `status='ghost'` and `lost_at=now`.
-    /// Phase 2: sessions that are already ghost (from a previous cycle) and still
-    /// not in `keep_names` are hard-deleted.
+    /// Phase 2: rows that were already ghost BEFORE this pass and are still
+    /// not in `keep_names` are hard-deleted, together with their
+    /// `session_events` timeline and the messages addressed to them (neither
+    /// table has an FK cascade). The one-cycle grace is what makes a
+    /// transient probe miss recoverable: the row is only ghosted, and the
+    /// next upsert resurrects it.
     ///
-    /// Pane-less rows (`kind IN ('bg','external')`) are EXCLUDED from both
-    /// phases: background (`claude --bg`) agents and interactive Claude
-    /// sessions outside fleet are never tmux sessions, so they can never
-    /// appear in `keep_names`. Ghosting them on every reconcile would be wrong — they're
-    /// surfaced from `claude agents --json`, not from tmux. They get their own
-    /// agents-keyed pruner instead: `ghost_and_clean_bg_sessions`.
+    /// `kind_filter` is [`KIND_TMUX`] or [`KIND_PANE_LESS`]: tmux-backed rows
+    /// and pane-less (`bg` / `external`) rows are pruned by different callers
+    /// against different `keep` sets (the tmux list vs `claude agents
+    /// --json`), so each pruner must leave the other's rows alone.
     ///
-    /// `probe_started_at` (unix secs) guards Phase 1 against a stale probe:
-    /// a row stamped `last_reconciled_at >= probe_started_at` was observed
+    /// `cutoff` (unix secs, see [`ghost_cutoff`]) guards Phase 1 against a
+    /// stale probe: a row stamped `last_reconciled_at >= cutoff` was observed
     /// live by a writer whose probe began after this one's, so its absence
     /// from `keep_names` only means this probe is older than the row (e.g. a
     /// tick that listed tmux just before `new_session` created it). Such rows
     /// are left alone; the next pass, whose probe starts later, judges them.
-    /// `0` disables the guard.
-    fn ghost_and_clean_sessions_in_tx(
+    /// `None` disables the guard (the pane-less pruner has no such race).
+    pub(super) fn ghost_and_clean(
         tx: &rusqlite::Transaction,
         host_alias: &str,
         keep_names: &[String],
         now: i64,
-        probe_started_at: i64,
+        kind_filter: &str,
+        cutoff: Option<i64>,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
+        let not_in = if keep_names.is_empty() {
+            String::new()
+        } else {
+            format!(" AND tmux_name NOT IN ({})", in_clause(keep_names.len()))
+        };
+
         // ── Phase 2 prep: collect already-ghost IDs BEFORE Phase 1 modifies rows
         // so that sessions newly ghosted in Phase 1 are not immediately deleted.
-        let pre_ghost_ids: Vec<i64> = if keep_names.is_empty() {
-            let mut stmt = tx.prepare_cached(
-                "SELECT id FROM sessions WHERE host_alias=?1 AND status='ghost' AND kind NOT IN ('bg','external')",
-            )?;
-            let ids = stmt
-                .query_map(rusqlite::params![host_alias], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ids
-        } else {
-            let phs = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let pre_ghost_ids: Vec<i64> = {
             let sql = format!(
                 "SELECT id FROM sessions
-                 WHERE host_alias=?1 AND status='ghost' AND kind NOT IN ('bg','external') AND tmux_name NOT IN ({phs})"
+                 WHERE host_alias=?1 AND status='ghost' AND {kind_filter}{not_in}"
             );
-            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
-            for n in keep_names {
-                params.push(n);
-            }
-            let mut stmt = tx.prepare(&sql)?;
-            let ids = stmt
+            let params = params_then(rusqlite::params![host_alias], keep_names);
+            tx.prepare(&sql)?
                 .query_map(params.as_slice(), |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ids
+                .collect::<rusqlite::Result<Vec<_>>>()?
         };
 
         // ── Phase 1: ghost live sessions not in keep ──────────────────────────
         // Rows reconciled by a NEWER probe than ours are skipped (see doc).
-        let ghost_ids: Vec<i64> = if keep_names.is_empty() {
-            let mut stmt = tx.prepare_cached(
-                "UPDATE sessions SET status='ghost', lost_at=?1
-                 WHERE host_alias=?2 AND status!='ghost' AND kind NOT IN ('bg','external')
-                   AND COALESCE(last_reconciled_at, 0) < ?3
-                 RETURNING id",
-            )?;
-            let ids = stmt
-                .query_map(
-                    rusqlite::params![now, host_alias, ghost_cutoff(probe_started_at)],
-                    |r| r.get(0),
-                )?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ids
-        } else {
-            let phs = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let ghost_ids: Vec<i64> = {
+            let guard = if cutoff.is_some() {
+                " AND COALESCE(last_reconciled_at, 0) < ?3"
+            } else {
+                ""
+            };
             let sql = format!(
                 "UPDATE sessions SET status='ghost', lost_at=?1
-                 WHERE host_alias=?2 AND status!='ghost' AND kind NOT IN ('bg','external')
-                   AND COALESCE(last_reconciled_at, 0) < ?3 AND tmux_name NOT IN ({phs})
+                 WHERE host_alias=?2 AND status!='ghost' AND {kind_filter}{guard}{not_in}
                  RETURNING id"
             );
-            let cutoff = ghost_cutoff(probe_started_at);
-            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&now, &host_alias, &cutoff];
-            for n in keep_names {
-                params.push(n);
-            }
-            let mut stmt = tx.prepare(&sql)?;
-            let ids = stmt
+            let head: Vec<&dyn rusqlite::ToSql> = match &cutoff {
+                Some(c) => vec![&now, &host_alias, c],
+                None => vec![&now, &host_alias],
+            };
+            let params = params_then(&head, keep_names);
+            tx.prepare(&sql)?
                 .query_map(params.as_slice(), |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ids
+                .collect::<rusqlite::Result<Vec<_>>>()?
         };
-
         for id in &ghost_ids {
             if let Some(row) = fetch_session_by_id(tx, *id)? {
                 out.push(RowChange::SessionUpdated(row));
@@ -320,30 +310,22 @@ impl Store {
 
         // ── Phase 2: hard-delete sessions that were already ghost before this cycle
         if !pre_ghost_ids.is_empty() {
-            let phs = pre_ghost_ids
-                .iter()
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(",");
-            let params: Vec<&dyn rusqlite::ToSql> = pre_ghost_ids
-                .iter()
-                .map(|id| id as &dyn rusqlite::ToSql)
-                .collect();
+            let phs = in_clause(pre_ghost_ids.len());
             // No FK cascade on session_events — delete them with the row or
             // they linger as orphans forever.
             tx.execute(
                 &format!("DELETE FROM session_events WHERE session_id IN ({phs})"),
-                params.as_slice(),
+                rusqlite::params_from_iter(&pre_ghost_ids),
             )?;
             // And the messages addressed to them (an inbox nobody can read),
             // as `delete_session` does.
             tx.execute(
                 &format!("DELETE FROM session_messages WHERE to_session_id IN ({phs})"),
-                params.as_slice(),
+                rusqlite::params_from_iter(&pre_ghost_ids),
             )?;
             tx.execute(
                 &format!("DELETE FROM sessions WHERE id IN ({phs})"),
-                params.as_slice(),
+                rusqlite::params_from_iter(&pre_ghost_ids),
             )?;
             for id in &pre_ghost_ids {
                 out.push(RowChange::SessionKilled(*id));
@@ -410,16 +392,13 @@ impl Store {
                 for (pid, ts) in project_touch {
                     Self::touch_project_last_session_at_in_tx(tx, pid, ts, &mut out)?;
                 }
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
-                Self::ghost_and_clean_sessions_in_tx(
+                Self::ghost_and_clean(
                     tx,
                     spec.alias,
                     spec.keep,
-                    now,
-                    spec.probe_started_at,
+                    now_unix(),
+                    KIND_TMUX,
+                    Some(ghost_cutoff(spec.probe_started_at)),
                     &mut out,
                 )?;
             }
@@ -448,15 +427,12 @@ impl Store {
         if keep_names.is_empty() {
             return Ok(0);
         }
-        let placeholders = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
             "UPDATE sessions SET last_reconciled_at=?1 \
-             WHERE host_alias=?2 AND tmux_name IN ({placeholders})"
+             WHERE host_alias=?2 AND tmux_name IN ({phs})",
+            phs = in_clause(keep_names.len())
         );
-        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&at, &host_alias];
-        for n in keep_names {
-            params.push(n);
-        }
+        let params = params_then(rusqlite::params![at, host_alias], keep_names);
         self.conn.execute(&sql, params.as_slice())
     }
 }
@@ -479,16 +455,7 @@ mod tests {
         // Two empty reconciles: ghost, then hard-delete.
         for ts in [10, 20] {
             store
-                .apply_host_reconcile(HostReconcile {
-                    alias: "alpha",
-                    reachable: true,
-                    claude_version: None,
-                    tmux_version: None,
-                    last_pinged_at: ts,
-                    probe_started_at: 0,
-                    sessions: &[],
-                    keep: &[],
-                })
+                .apply_host_reconcile(empty_probe("alpha", ts))
                 .unwrap();
         }
         assert!(store.get_session_by_id(id).unwrap().is_none());
@@ -523,16 +490,7 @@ mod tests {
         // Two empty reconciles: ghost, then hard-delete.
         for ts in [10, 20] {
             store
-                .apply_host_reconcile(HostReconcile {
-                    alias: "alpha",
-                    reachable: true,
-                    claude_version: None,
-                    tmux_version: None,
-                    last_pinged_at: ts,
-                    probe_started_at: 0,
-                    sessions: &[],
-                    keep: &[],
-                })
+                .apply_host_reconcile(empty_probe("alpha", ts))
                 .unwrap();
         }
         assert!(store.get_session_by_id(id).unwrap().is_none());
@@ -554,18 +512,11 @@ mod tests {
             project_id: Some(pid),
             created_at: 1,
             last_activity_at: activity,
-            account_uuid: None,
             worktree_key: Some("main".to_string()),
-            claude_session_id: None,
             claude_status: Some("idle".to_string()),
-            effort_level: None,
-            pr_url: None,
-            current_activity: None,
             context_pct: Some(12.5),
-            stuck_kind: None,
             intel_observed: true,
-            ci_status: None,
-            pr_observed: false,
+            ..Default::default()
         }
     }
 
@@ -635,14 +586,9 @@ mod tests {
         let sessions = vec![live_session("s1", pid, 10)];
         store
             .apply_host_reconcile(HostReconcile {
-                alias: "alpha",
-                reachable: true,
-                claude_version: None,
-                tmux_version: None,
-                last_pinged_at: 1,
-                probe_started_at: 0,
                 sessions: &sessions,
                 keep: &keep,
+                ..empty_probe("alpha", 1)
             })
             .unwrap();
         let evts = bus.take();
@@ -659,14 +605,9 @@ mod tests {
         let sessions = vec![live_session("s1", pid, 10)];
         store
             .apply_host_reconcile(HostReconcile {
-                alias: "alpha",
-                reachable: true,
-                claude_version: None,
-                tmux_version: None,
-                last_pinged_at: 2,
-                probe_started_at: 0,
                 sessions: &sessions,
                 keep: &keep,
+                ..empty_probe("alpha", 2)
             })
             .unwrap();
         assert_eq!(
@@ -680,14 +621,9 @@ mod tests {
         let sessions = vec![live_session("s1", pid, 20)];
         store
             .apply_host_reconcile(HostReconcile {
-                alias: "alpha",
-                reachable: true,
-                claude_version: None,
-                tmux_version: None,
-                last_pinged_at: 3,
-                probe_started_at: 0,
                 sessions: &sessions,
                 keep: &keep,
+                ..empty_probe("alpha", 3)
             })
             .unwrap();
         let evts = bus.take();
@@ -739,14 +675,9 @@ mod tests {
         let stale_write = |store: &mut Store, keep: &[String]| {
             store
                 .apply_host_reconcile(HostReconcile {
-                    alias: "alpha",
-                    reachable: true,
-                    claude_version: None,
-                    tmux_version: None,
-                    last_pinged_at: 5,
                     probe_started_at: probe_started,
-                    sessions: &[],
                     keep,
+                    ..empty_probe("alpha", 5)
                 })
                 .unwrap();
         };
@@ -783,14 +714,8 @@ mod tests {
         // A probe that started after the stamp is authoritative again.
         store
             .apply_host_reconcile(HostReconcile {
-                alias: "alpha",
-                reachable: true,
-                claude_version: None,
-                tmux_version: None,
-                last_pinged_at: 6,
                 probe_started_at: probe_started + 1,
-                sessions: &[],
-                keep: &[],
+                ..empty_probe("alpha", 6)
             })
             .unwrap();
         assert_eq!(status(&store, "fresh"), "ghost", "later probe ghosts it");
@@ -854,29 +779,15 @@ mod tests {
                 project_id: Some(pid),
                 created_at: 1,
                 last_activity_at: 1,
-                account_uuid: None,
-                worktree_key: None,
-                claude_session_id: None,
-                claude_status: None,
-                effort_level: None,
-                pr_url: None,
-                current_activity: None,
-                context_pct: None,
                 stuck_kind: stuck.map(|s| s.to_string()),
                 intel_observed: observed,
-                ci_status: None,
-                pr_observed: false,
+                ..Default::default()
             }];
             store
                 .apply_host_reconcile(HostReconcile {
-                    alias: "alpha",
-                    reachable: true,
-                    claude_version: None,
-                    tmux_version: None,
-                    last_pinged_at: 1,
-                    probe_started_at: 0,
                     sessions: &sessions,
                     keep: &["s1".to_string()],
+                    ..empty_probe("alpha", 1)
                 })
                 .unwrap();
         };
@@ -932,18 +843,8 @@ mod tests {
                 project_id: Some(pid),
                 created_at: 1,
                 last_activity_at: 50,
-                account_uuid: None,
                 worktree_key: Some("main".to_string()),
-                claude_session_id: None,
-                claude_status: None,
-                effort_level: None,
-                pr_url: None,
-                current_activity: None,
-                context_pct: None,
-                stuck_kind: None,
-                intel_observed: false,
-                ci_status: None,
-                pr_observed: false,
+                ..Default::default()
             },
             // brand new → create
             ReconcileSession {
@@ -951,31 +852,18 @@ mod tests {
                 project_id: Some(pid),
                 created_at: 10,
                 last_activity_at: 60,
-                account_uuid: None,
                 worktree_key: Some("main".to_string()),
-                claude_session_id: None,
-                claude_status: None,
-                effort_level: None,
-                pr_url: None,
-                current_activity: None,
-                context_pct: None,
-                stuck_kind: None,
-                intel_observed: false,
-                ci_status: None,
-                pr_observed: false,
+                ..Default::default()
             },
         ];
         let keep = vec!["keep-existing".to_string(), "fresh".to_string()];
         store
             .apply_host_reconcile(HostReconcile {
-                alias: "alpha",
-                reachable: true,
                 claude_version: Some("2.1"),
                 tmux_version: Some("3.6"),
-                last_pinged_at: 999,
-                probe_started_at: 0,
                 sessions: &sessions,
                 keep: &keep,
+                ..empty_probe("alpha", 999)
             })
             .expect("reconcile ok");
 
@@ -1051,16 +939,7 @@ mod tests {
             .unwrap();
         for pass in 1..=3 {
             store
-                .apply_host_reconcile(HostReconcile {
-                    alias: "alpha",
-                    reachable: true,
-                    claude_version: None,
-                    tmux_version: None,
-                    last_pinged_at: pass,
-                    probe_started_at: 0,
-                    sessions: &[],
-                    keep: &[],
-                })
+                .apply_host_reconcile(empty_probe("alpha", pass))
                 .expect("reconcile ok");
             let row = store
                 .get_session("bg:ext-uuid-1", "alpha")
@@ -1096,16 +975,7 @@ mod tests {
 
         // Reconcile with NO live tmux sessions (empty keep).
         store
-            .apply_host_reconcile(HostReconcile {
-                alias: "alpha",
-                reachable: true,
-                claude_version: None,
-                tmux_version: None,
-                last_pinged_at: 1,
-                probe_started_at: 0,
-                sessions: &[],
-                keep: &[],
-            })
+            .apply_host_reconcile(empty_probe("alpha", 1))
             .expect("reconcile ok");
 
         let rows = store.list_sessions_for_host("alpha").unwrap();
@@ -1123,16 +993,7 @@ mod tests {
         // A SECOND reconcile (the bg row is now an old row) still doesn't reap
         // it via the Phase-2 hard-delete.
         store
-            .apply_host_reconcile(HostReconcile {
-                alias: "alpha",
-                reachable: true,
-                claude_version: None,
-                tmux_version: None,
-                last_pinged_at: 2,
-                probe_started_at: 0,
-                sessions: &[],
-                keep: &[],
-            })
+            .apply_host_reconcile(empty_probe("alpha", 2))
             .expect("reconcile ok");
         assert!(
             store
@@ -1167,51 +1028,24 @@ mod tests {
         let sessions = vec![
             ReconcileSession {
                 tmux_name: "good",
-                project_id: None,
                 created_at: 1,
                 last_activity_at: 1,
-                account_uuid: None,
-                worktree_key: None,
-                claude_session_id: None,
-                claude_status: None,
-                effort_level: None,
-                pr_url: None,
-                current_activity: None,
-                context_pct: None,
-                stuck_kind: None,
-                intel_observed: false,
-                ci_status: None,
-                pr_observed: false,
+                ..Default::default()
             },
             ReconcileSession {
                 tmux_name: "bad",
                 project_id: Some(999_999), // no such project → FK violation
                 created_at: 1,
                 last_activity_at: 1,
-                account_uuid: None,
-                worktree_key: None,
-                claude_session_id: None,
-                claude_status: None,
-                effort_level: None,
-                pr_url: None,
-                current_activity: None,
-                context_pct: None,
-                stuck_kind: None,
-                intel_observed: false,
-                ci_status: None,
-                pr_observed: false,
+                ..Default::default()
             },
         ];
         let keep = vec!["good".to_string(), "bad".to_string()];
         let res = store.apply_host_reconcile(HostReconcile {
-            alias: "alpha",
-            reachable: true,
             claude_version: Some("9.9"),
-            tmux_version: None,
-            last_pinged_at: 12345,
-            probe_started_at: 0,
             sessions: &sessions,
             keep: &keep,
+            ..empty_probe("alpha", 12345)
         });
 
         assert!(res.is_err(), "FK violation should abort the batch");
@@ -1253,16 +1087,7 @@ mod tests {
 
         // First reachable probe with no sessions — s1 should become ghost
         store
-            .apply_host_reconcile(HostReconcile {
-                alias: "alpha",
-                reachable: true,
-                claude_version: None,
-                tmux_version: None,
-                last_pinged_at: 100,
-                probe_started_at: 0,
-                sessions: &[],
-                keep: &[],
-            })
+            .apply_host_reconcile(empty_probe("alpha", 100))
             .unwrap();
 
         let s1 = store.get_session_by_id(s1_id).unwrap().unwrap();
@@ -1281,16 +1106,7 @@ mod tests {
 
         // Second reachable probe with no sessions — ghost s1 should be deleted
         store
-            .apply_host_reconcile(HostReconcile {
-                alias: "alpha",
-                reachable: true,
-                claude_version: None,
-                tmux_version: None,
-                last_pinged_at: 200,
-                probe_started_at: 0,
-                sessions: &[],
-                keep: &[],
-            })
+            .apply_host_reconcile(empty_probe("alpha", 200))
             .unwrap();
 
         assert!(
@@ -1323,31 +1139,17 @@ mod tests {
             .unwrap();
         let write = |s: &mut Store, status: &str, probe_started_at: i64| -> SessionRow {
             s.apply_host_reconcile(HostReconcile {
-                alias: "local",
-                reachable: true,
-                claude_version: None,
-                tmux_version: None,
-                last_pinged_at: 1,
                 probe_started_at,
                 sessions: &[ReconcileSession {
                     tmux_name: "a",
-                    project_id: None,
                     created_at: 1,
                     last_activity_at: 1,
-                    account_uuid: None,
-                    worktree_key: None,
-                    claude_session_id: None,
                     claude_status: Some(status.to_string()),
-                    effort_level: None,
-                    pr_url: None,
-                    current_activity: None,
-                    context_pct: None,
-                    stuck_kind: None,
                     intel_observed: true,
-                    ci_status: None,
-                    pr_observed: false,
+                    ..Default::default()
                 }],
                 keep: &["a".to_string()],
+                ..empty_probe("local", 1)
             })
             .unwrap();
             s.get_session("a", "local").unwrap().unwrap()
@@ -1387,31 +1189,17 @@ mod tests {
             .unwrap();
         let pass = |s: &mut Store, started: i64| {
             s.apply_host_reconcile(HostReconcile {
-                alias: "local",
-                reachable: true,
-                claude_version: None,
-                tmux_version: None,
-                last_pinged_at: 1,
                 probe_started_at: started,
                 sessions: &[ReconcileSession {
                     tmux_name: "a",
-                    project_id: None,
                     created_at: 1,
                     last_activity_at: 1,
-                    account_uuid: None,
-                    worktree_key: None,
-                    claude_session_id: None,
                     claude_status: Some("idle".into()),
-                    effort_level: None,
-                    pr_url: None,
-                    current_activity: None,
-                    context_pct: None,
-                    stuck_kind: None,
                     intel_observed: true,
-                    ci_status: None,
-                    pr_observed: false,
+                    ..Default::default()
                 }],
                 keep: &["a".to_string()],
+                ..empty_probe("local", 1)
             })
             .unwrap();
             s.get_session("a", "local").unwrap().unwrap()

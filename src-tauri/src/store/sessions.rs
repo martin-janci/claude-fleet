@@ -157,12 +157,11 @@ impl Store {
     /// Two-phase cleanup for synthetic `kind IN ('bg','external')` rows on one
     /// host, keyed on the CURRENT `claude agents --json` result (`keep_names`
     /// = the sentinel `bg:<sessionId>` names observed this reconcile pass)
-    /// instead of the tmux `keep` set. Mirrors `ghost_and_clean_sessions_in_tx`:
+    /// instead of the tmux `keep` set. The two-phase ghost-then-reap itself is
+    /// [`Store::ghost_and_clean`], shared with the tmux-keyed reconcile pass;
+    /// this wrapper only owns the transaction and the post-commit emit.
     ///
-    /// Phase 1: live bg rows not in `keep_names` → `status='ghost'`,
-    /// `lost_at=now`. Phase 2: bg rows already ghost BEFORE this pass and still
-    /// absent → hard-deleted, together with their `session_events` (no FK
-    /// cascade exists). The one-cycle grace matters because a failed
+    /// The one-cycle grace matters because a failed
     /// `claude agents` probe is indistinguishable from "no agents" (both come
     /// back as an empty list): a transient miss only ghosts, and
     /// `upsert_bg_session` resurrects the row when the agent reappears.
@@ -177,98 +176,15 @@ impl Store {
     ) -> Result<(), rusqlite::Error> {
         let tx = self.conn.unchecked_transaction()?;
         let mut changes: Vec<RowChange> = Vec::new();
-
-        // Phase 2 prep: already-ghost bg ids, collected BEFORE Phase 1 so rows
-        // ghosted this pass survive one more cycle.
-        let pre_ghost_ids: Vec<i64> = if keep_names.is_empty() {
-            let mut stmt = tx.prepare_cached(
-                "SELECT id FROM sessions WHERE host_alias=?1 AND status='ghost' AND kind IN ('bg','external')",
-            )?;
-            let ids = stmt
-                .query_map(rusqlite::params![host_alias], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ids
-        } else {
-            let phs = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let sql = format!(
-                "SELECT id FROM sessions
-                 WHERE host_alias=?1 AND status='ghost' AND kind IN ('bg','external') AND tmux_name NOT IN ({phs})"
-            );
-            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
-            for n in keep_names {
-                params.push(n);
-            }
-            let mut stmt = tx.prepare(&sql)?;
-            let ids = stmt
-                .query_map(params.as_slice(), |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ids
-        };
-
-        // Phase 1: ghost live bg rows whose agent vanished from the listing.
-        let ghost_ids: Vec<i64> = if keep_names.is_empty() {
-            let mut stmt = tx.prepare_cached(
-                "UPDATE sessions SET status='ghost', lost_at=?1
-                 WHERE host_alias=?2 AND status!='ghost' AND kind IN ('bg','external')
-                 RETURNING id",
-            )?;
-            let ids = stmt
-                .query_map(rusqlite::params![now, host_alias], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ids
-        } else {
-            let phs = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let sql = format!(
-                "UPDATE sessions SET status='ghost', lost_at=?1
-                 WHERE host_alias=?2 AND status!='ghost' AND kind IN ('bg','external') AND tmux_name NOT IN ({phs})
-                 RETURNING id"
-            );
-            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&now, &host_alias];
-            for n in keep_names {
-                params.push(n);
-            }
-            let mut stmt = tx.prepare(&sql)?;
-            let ids = stmt
-                .query_map(params.as_slice(), |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            ids
-        };
-        for id in &ghost_ids {
-            if let Some(row) = fetch_session_by_id(&tx, *id)? {
-                changes.push(RowChange::SessionUpdated(row));
-            }
-        }
-
-        // Phase 2: hard-delete rows that were already ghost, plus their events.
-        if !pre_ghost_ids.is_empty() {
-            let phs = pre_ghost_ids
-                .iter()
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(",");
-            let params: Vec<&dyn rusqlite::ToSql> = pre_ghost_ids
-                .iter()
-                .map(|id| id as &dyn rusqlite::ToSql)
-                .collect();
-            tx.execute(
-                &format!("DELETE FROM session_events WHERE session_id IN ({phs})"),
-                params.as_slice(),
-            )?;
-            // And the messages addressed to them (an inbox nobody can read),
-            // as `delete_session` does.
-            tx.execute(
-                &format!("DELETE FROM session_messages WHERE to_session_id IN ({phs})"),
-                params.as_slice(),
-            )?;
-            tx.execute(
-                &format!("DELETE FROM sessions WHERE id IN ({phs})"),
-                params.as_slice(),
-            )?;
-            for id in &pre_ghost_ids {
-                changes.push(RowChange::SessionKilled(*id));
-            }
-        }
-
+        Self::ghost_and_clean(
+            &tx,
+            host_alias,
+            keep_names,
+            now,
+            KIND_PANE_LESS,
+            None,
+            &mut changes,
+        )?;
         tx.commit()?;
         // Emit only after the commit so no event fires for a rolled-back write.
         for change in &changes {
@@ -347,16 +263,15 @@ impl Store {
         host_alias: &str,
         tmux_name: &str,
     ) -> Result<Option<String>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT account_uuid FROM sessions WHERE host_alias=?1 AND tmux_name=?2",
-        )?;
-        let mut rows = stmt.query_map(rusqlite::params![host_alias, tmux_name], |row| {
-            row.get::<_, Option<String>>(0)
-        })?;
-        match rows.next() {
-            Some(r) => Ok(r?),
-            None => Ok(None),
-        }
+        self.conn
+            .prepare_cached(
+                "SELECT account_uuid FROM sessions WHERE host_alias=?1 AND tmux_name=?2",
+            )?
+            .query_row(rusqlite::params![host_alias, tmux_name], |row| {
+                row.get::<_, Option<String>>(0)
+            })
+            .optional()
+            .map(Option::flatten)
     }
 
     pub fn list_sessions_for_host(
@@ -425,9 +340,7 @@ impl Store {
             "UPDATE sessions SET kind = ?1, reviews_session_id = ?2 WHERE id = ?3",
             rusqlite::params![kind, reviews_session_id, id],
         )?;
-        if let Some(row) = self.get_session_by_id(id)? {
-            self.bus.session_updated(&row);
-        }
+        self.emit_session(id)?;
         Ok(())
     }
 
@@ -449,9 +362,7 @@ impl Store {
             "UPDATE sessions SET worktree_key = ?1 WHERE id = ?2",
             rusqlite::params![key, id],
         )?;
-        if let Some(row) = self.get_session_by_id(id)? {
-            self.bus.session_updated(&row);
-        }
+        self.emit_session(id)?;
         Ok(())
     }
 
@@ -583,11 +494,7 @@ impl Store {
               WHERE id=?3",
             rusqlite::params![nonce, requested_at, id],
         )?;
-        let row = fetch_session_by_id(&self.conn, id)?;
-        if let Some(ref r) = row {
-            self.bus.session_updated(r);
-        }
-        Ok(row)
+        self.emit_session(id)
     }
 
     /// Transition a safe-kill request to its terminal state ("ready" or
@@ -605,11 +512,7 @@ impl Store {
               WHERE id=?3",
             rusqlite::params![state, detail, id],
         )?;
-        let row = fetch_session_by_id(&self.conn, id)?;
-        if let Some(ref r) = row {
-            self.bus.session_updated(r);
-        }
-        Ok(row)
+        self.emit_session(id)
     }
 
     /// Clear the safe-kill state (used when the user cancels or retries a
@@ -624,11 +527,7 @@ impl Store {
               WHERE id=?1",
             rusqlite::params![id],
         )?;
-        let row = fetch_session_by_id(&self.conn, id)?;
-        if let Some(ref r) = row {
-            self.bus.session_updated(r);
-        }
-        Ok(row)
+        self.emit_session(id)
     }
 
     /// Transition a session back to running (clears `lost_at`). Called by the
@@ -639,6 +538,16 @@ impl Store {
             "UPDATE sessions SET status='running', lost_at=NULL WHERE id=?1",
             rusqlite::params![id],
         )?;
+        self.emit_session(id)
+    }
+
+    pub fn get_session_by_id(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
+        fetch_session_by_id(&self.conn, id)
+    }
+
+    /// Re-read `id` after a write and announce it: `session_updated` when
+    /// the row exists, nothing when it is gone. Returns the row.
+    pub(super) fn emit_session(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
         let row = fetch_session_by_id(&self.conn, id)?;
         if let Some(ref r) = row {
             self.bus.session_updated(r);
@@ -646,8 +555,16 @@ impl Store {
         Ok(row)
     }
 
-    pub fn get_session_by_id(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
-        fetch_session_by_id(&self.conn, id)
+    /// [`Self::emit_session`] keyed by `claude_session_id` (the hook writes).
+    fn emit_session_by_claude_id(
+        &self,
+        claude_session_id: &str,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        let row = self.fetch_session_by_claude_id(claude_session_id)?;
+        if let Some(ref r) = row {
+            self.bus.session_updated(r);
+        }
+        Ok(row)
     }
 
     /// Remember the most recent prompt sent to a session (first 200 chars,
@@ -662,11 +579,7 @@ impl Store {
             "UPDATE sessions SET last_prompt=?1 WHERE id=?2",
             rusqlite::params![truncated, id],
         )?;
-        let row = fetch_session_by_id(&self.conn, id)?;
-        if let Some(ref r) = row {
-            self.bus.session_updated(r);
-        }
-        Ok(row)
+        self.emit_session(id)
     }
 
     /// Stamp when fleet created this session (migration 019). Only sets the
@@ -699,11 +612,7 @@ impl Store {
                 "[playbook] session_event insert failed"
             );
         }
-        let row = fetch_session_by_id(&self.conn, id)?;
-        if let Some(ref r) = row {
-            self.bus.session_updated(r);
-        }
-        Ok(row)
+        self.emit_session(id)
     }
 
     /// Hard-delete one session row (ghost dismissal) together with what dies
@@ -746,14 +655,11 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             ids
         } else {
-            let placeholders = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!(
-                "DELETE FROM sessions WHERE host_alias=?1 AND tmux_name NOT IN ({placeholders}) RETURNING id"
+                "DELETE FROM sessions WHERE host_alias=?1 AND tmux_name NOT IN ({phs}) RETURNING id",
+                phs = in_clause(keep_names.len())
             );
-            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
-            for n in keep_names {
-                params.push(n);
-            }
+            let params = params_then(rusqlite::params![host_alias], keep_names);
             let mut stmt = self.conn.prepare(&sql)?;
             let ids = stmt
                 .query_map(params.as_slice(), |r| r.get::<_, i64>(0))?
@@ -790,7 +696,7 @@ impl Store {
             .execute(&sql, rusqlite::params![status, claude_session_id, now])?;
         if changed > 0 {
             // Emit session_updated so the frontend patches the row in real-time.
-            if let Ok(row) = self.fetch_session_by_claude_id(claude_session_id) {
+            if let Ok(Some(row)) = self.fetch_session_by_claude_id(claude_session_id) {
                 self.bus.session_updated(&row);
             }
         }
@@ -818,9 +724,7 @@ impl Store {
         if changed == 0 {
             return Ok(None);
         }
-        let row = self.fetch_session_by_claude_id(claude_session_id)?;
-        self.bus.session_updated(&row);
-        Ok(Some(row))
+        self.emit_session_by_claude_id(claude_session_id)
     }
 
     /// The UserPromptSubmit hook's write: a turn is starting. Sets
@@ -840,9 +744,7 @@ impl Store {
         if changed == 0 {
             return Ok(None);
         }
-        let row = self.fetch_session_by_claude_id(claude_session_id)?;
-        self.bus.session_updated(&row);
-        Ok(Some(row))
+        self.emit_session_by_claude_id(claude_session_id)
     }
 
     /// The SessionEnd hook's write: the Claude process is gone. Sets
@@ -865,9 +767,7 @@ impl Store {
         if changed == 0 {
             return Ok(None);
         }
-        let row = self.fetch_session_by_claude_id(claude_session_id)?;
-        self.bus.session_updated(&row);
-        Ok(Some(row))
+        self.emit_session_by_claude_id(claude_session_id)
     }
 
     /// The StopFailure hook's write: the turn ended in an API error. The row
@@ -923,9 +823,7 @@ impl Store {
         if changed == 0 {
             return Ok(None);
         }
-        let row = self.fetch_session_by_claude_id(claude_session_id)?;
-        self.bus.session_updated(&row);
-        Ok(Some(row))
+        self.emit_session_by_claude_id(claude_session_id)
     }
 
     /// Replace a session's tags (migration 020). Emits `session_updated`.
@@ -938,11 +836,7 @@ impl Store {
             "UPDATE sessions SET tags=?1 WHERE id=?2",
             rusqlite::params![encode_tags(tags), id],
         )?;
-        let row = fetch_session_by_id(&self.conn, id)?;
-        if let Some(ref r) = row {
-            self.bus.session_updated(r);
-        }
-        Ok(row)
+        self.emit_session(id)
     }
 
     /// Record which requester dispatched work to this session. Emits
@@ -956,11 +850,7 @@ impl Store {
             "UPDATE sessions SET parent_session_id=?1 WHERE id=?2",
             rusqlite::params![parent, id],
         )?;
-        let row = fetch_session_by_id(&self.conn, id)?;
-        if let Some(ref r) = row {
-            self.bus.session_updated(r);
-        }
-        Ok(row)
+        self.emit_session(id)
     }
 
     /// Store the transcript path a hook reported for this Claude session.
@@ -996,31 +886,20 @@ impl Store {
         &self,
         claude_session_id: &str,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
-        match self.fetch_session_by_claude_id(claude_session_id) {
-            Ok(row) => Ok(Some(row)),
-            Err(e) => {
-                // `query_row` returns this exact rusqlite error when zero rows
-                // matched. Treat it as a clean miss.
-                if e.message.contains("Query returned no rows") {
-                    Ok(None)
-                } else {
-                    Err(e)
-                }
-            }
-        }
+        self.fetch_session_by_claude_id(claude_session_id)
     }
 
     fn fetch_session_by_claude_id(
         &self,
         claude_session_id: &str,
-    ) -> Result<SessionRow, crate::ipc_error::IpcError> {
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {SESSION_COLUMNS} FROM sessions WHERE claude_session_id = ?1"
-        ))?;
-        stmt.query_row(rusqlite::params![claude_session_id], |row| {
-            map_session_row(row)
-        })
-        .map_err(crate::ipc_error::IpcError::from)
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        Ok(self
+            .conn
+            .prepare(&format!(
+                "SELECT {SESSION_COLUMNS} FROM sessions WHERE claude_session_id = ?1"
+            ))?
+            .query_row(rusqlite::params![claude_session_id], map_session_row)
+            .optional()?)
     }
 }
 
@@ -1137,18 +1016,7 @@ mod tests {
         store
             .upsert_session("work-a", "alpha", None, None, 1, 1, "running", None)
             .unwrap();
-        store
-            .apply_host_reconcile(HostReconcile {
-                alias: "alpha",
-                reachable: true,
-                claude_version: None,
-                tmux_version: None,
-                last_pinged_at: 1,
-                probe_started_at: 0,
-                sessions: &[],
-                keep: &[],
-            })
-            .unwrap(); // ghosts work-a
+        store.apply_host_reconcile(empty_probe("alpha", 1)).unwrap(); // ghosts work-a
 
         let keep = vec!["bg:live".to_string()];
         store
@@ -1308,14 +1176,7 @@ mod tests {
         // Upsert with an account uuid
         s.upsert_account(&AccountRow {
             uuid: "u1".into(),
-            email: None,
-            display_name: None,
-            organization_name: None,
-            organization_uuid: None,
-            seat_tier: None,
-            last_seen_at: None,
-            nickname: None,
-            has_extra_usage: false,
+            ..Default::default()
         })
         .unwrap();
         s.upsert_session("dev-foo", "h", None, None, 1, 1, "running", Some("u1"))

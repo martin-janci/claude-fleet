@@ -34,11 +34,7 @@ impl Store {
                 mode: row.get(3)?,
             })
         })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// The token row for one host, if it has been provisioned.
@@ -59,10 +55,7 @@ impl Store {
         host_alias: &str,
         token: &str,
     ) -> Result<(), crate::ipc_error::IpcError> {
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let at = now_unix();
         self.conn.execute(
             "INSERT INTO host_tokens (host_alias, token, created_at, mode) \
                  VALUES (?1, ?2, ?3, 'full') \
@@ -93,8 +86,18 @@ impl Store {
         Ok(())
     }
 
-    fn get_host(&self, alias: &str) -> Result<Option<HostRow>, rusqlite::Error> {
-        fetch_host(&self.conn, alias)
+    /// Re-read `alias` after a write and announce it through `emit`
+    /// (`EventBus::host_added` or `EventBus::host_probed`); nothing when the
+    /// row is gone.
+    fn emit_host(
+        &self,
+        alias: &str,
+        emit: fn(&dyn EventBus, &HostRow),
+    ) -> Result<(), rusqlite::Error> {
+        if let Some(row) = fetch_host(&self.conn, alias)? {
+            emit(self.bus.as_ref(), &row);
+        }
+        Ok(())
     }
 
     pub fn upsert_host(&self, alias: &str) -> Result<(), rusqlite::Error> {
@@ -113,33 +116,16 @@ impl Store {
             rusqlite::params![alias],
         )?;
         if !existed {
-            if let Some(row) = self.get_host(alias)? {
-                self.bus.host_added(&row);
-            }
+            self.emit_host(alias, |bus, row| bus.host_added(row))?;
         }
         Ok(())
     }
 
     pub fn list_hosts(&self) -> Result<Vec<HostRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT alias, ssh_alias, reachable, claude_version, tmux_version, hidden,
-                    last_pinged_at, account_uuid, provisioned
-             FROM hosts
-             ORDER BY (alias='local') DESC, alias ASC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(HostRow {
-                alias: row.get(0)?,
-                ssh_alias: row.get(1)?,
-                reachable: row.get::<_, i64>(2)? != 0,
-                claude_version: row.get(3)?,
-                tmux_version: row.get(4)?,
-                hidden: row.get::<_, i64>(5)? != 0,
-                last_pinged_at: row.get(6)?,
-                account_uuid: row.get(7)?,
-                provisioned: row.get::<_, i64>(8)? != 0,
-            })
-        })?;
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {HOST_COLUMNS} FROM hosts ORDER BY (alias='local') DESC, alias ASC"
+        ))?;
+        let rows = stmt.query_map([], map_host_row)?;
         rows.collect()
     }
 
@@ -149,10 +135,7 @@ impl Store {
              ON CONFLICT(alias) DO UPDATE SET ssh_alias=excluded.ssh_alias",
             rusqlite::params![alias, ssh_alias],
         )?;
-        if let Some(row) = self.get_host(alias)? {
-            self.bus.host_added(&row);
-        }
-        Ok(())
+        self.emit_host(alias, |bus, row| bus.host_added(row))
     }
 
     pub fn update_host_probe(
@@ -173,10 +156,7 @@ impl Store {
                 alias
             ],
         )?;
-        if let Some(row) = self.get_host(alias)? {
-            self.bus.host_probed(&row);
-        }
-        Ok(())
+        self.emit_host(alias, |bus, row| bus.host_probed(row))
     }
 
     pub fn set_host_hidden(&self, alias: &str, hidden: bool) -> Result<(), rusqlite::Error> {
@@ -186,32 +166,14 @@ impl Store {
         )?;
         // Emit like every other host mutation — the HostRow carries `hidden`,
         // so subscribers see the toggle without a manual refetch.
-        if let Some(row) = self.get_host(alias)? {
-            self.bus.host_probed(&row);
-        }
-        Ok(())
+        self.emit_host(alias, |bus, row| bus.host_probed(row))
     }
 
     pub fn list_accounts(&self) -> Result<Vec<AccountRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT uuid, email, display_name, organization_name, organization_uuid,
-                    seat_tier, last_seen_at, nickname, has_extra_usage
-             FROM accounts
-             ORDER BY uuid ASC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(AccountRow {
-                uuid: row.get(0)?,
-                email: row.get(1)?,
-                display_name: row.get(2)?,
-                organization_name: row.get(3)?,
-                organization_uuid: row.get(4)?,
-                seat_tier: row.get(5)?,
-                last_seen_at: row.get(6)?,
-                nickname: row.get(7)?,
-                has_extra_usage: row.get::<_, i64>(8)? != 0,
-            })
-        })?;
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {ACCOUNT_COLUMNS} FROM accounts ORDER BY uuid ASC"
+        ))?;
+        let rows = stmt.query_map([], map_account_row)?;
         rows.collect()
     }
 
@@ -286,29 +248,16 @@ impl Store {
         Ok(())
     }
 
-    pub fn get_account_by_uuid(&self, uuid: &str) -> Result<Option<AccountRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT uuid, email, display_name, organization_name, organization_uuid,
-                    seat_tier, last_seen_at, nickname, has_extra_usage
-             FROM accounts WHERE uuid=?1",
-        )?;
-        let mut rows = stmt.query_map(rusqlite::params![uuid], |row| {
-            Ok(AccountRow {
-                uuid: row.get(0)?,
-                email: row.get(1)?,
-                display_name: row.get(2)?,
-                organization_name: row.get(3)?,
-                organization_uuid: row.get(4)?,
-                seat_tier: row.get(5)?,
-                last_seen_at: row.get(6)?,
-                nickname: row.get(7)?,
-                has_extra_usage: row.get::<_, i64>(8)? != 0,
-            })
-        })?;
-        match rows.next() {
-            Some(r) => Ok(Some(r?)),
-            None => Ok(None),
-        }
+    pub(super) fn get_account_by_uuid(
+        &self,
+        uuid: &str,
+    ) -> Result<Option<AccountRow>, rusqlite::Error> {
+        self.conn
+            .prepare_cached(&format!(
+                "SELECT {ACCOUNT_COLUMNS} FROM accounts WHERE uuid=?1"
+            ))?
+            .query_row(rusqlite::params![uuid], map_account_row)
+            .optional()
     }
 
     /// Set (clear, if `nickname` is `None` or blank after trimming) an
@@ -356,10 +305,7 @@ impl Store {
             "UPDATE hosts SET account_uuid=?1 WHERE alias=?2",
             rusqlite::params![account_uuid, alias],
         )?;
-        if let Some(row) = self.get_host(alias)? {
-            self.bus.host_probed(&row);
-        }
-        Ok(())
+        self.emit_host(alias, |bus, row| bus.host_probed(row))
     }
 
     pub fn set_host_provisioned(
@@ -684,12 +630,9 @@ mod tests {
             uuid: "uuid-1".into(),
             email: Some("a@b.com".into()),
             display_name: Some("A".into()),
-            organization_name: None,
-            organization_uuid: None,
             seat_tier: Some("max".into()),
             last_seen_at: Some(1000),
-            nickname: None,
-            has_extra_usage: false,
+            ..Default::default()
         };
         s.upsert_account(&a).unwrap();
         let mut a2 = a.clone();
@@ -709,14 +652,7 @@ mod tests {
         for uuid in ["zzz", "aaa", "mmm"] {
             s.upsert_account(&AccountRow {
                 uuid: uuid.into(),
-                email: None,
-                display_name: None,
-                organization_name: None,
-                organization_uuid: None,
-                seat_tier: None,
-                last_seen_at: None,
-                nickname: None,
-                has_extra_usage: false,
+                ..Default::default()
             })
             .unwrap();
         }
@@ -739,13 +675,7 @@ mod tests {
         s.upsert_account(&AccountRow {
             uuid: "u1".into(),
             email: Some("x@y.com".into()),
-            display_name: None,
-            organization_name: None,
-            organization_uuid: None,
-            seat_tier: None,
-            last_seen_at: None,
-            nickname: None,
-            has_extra_usage: false,
+            ..Default::default()
         })
         .unwrap();
         let got = s.get_account_by_uuid("u1").unwrap().unwrap();
@@ -758,14 +688,7 @@ mod tests {
         s.insert_host("h", Some("h")).unwrap();
         s.upsert_account(&AccountRow {
             uuid: "u1".into(),
-            email: None,
-            display_name: None,
-            organization_name: None,
-            organization_uuid: None,
-            seat_tier: None,
-            last_seen_at: None,
-            nickname: None,
-            has_extra_usage: false,
+            ..Default::default()
         })
         .unwrap();
         s.set_host_account("h", Some("u1")).unwrap();
@@ -871,13 +794,8 @@ mod tests {
         AccountRow {
             uuid: uuid.into(),
             email: Some("a@b.com".into()),
-            display_name: None,
-            organization_name: None,
-            organization_uuid: None,
-            seat_tier: None,
             last_seen_at,
-            nickname: None,
-            has_extra_usage: false,
+            ..Default::default()
         }
     }
 

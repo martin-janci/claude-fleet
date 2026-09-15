@@ -8,6 +8,18 @@ pub(super) fn store_with_recorder() -> (Store, Arc<crate::events::RecordingEvent
     (store, bus)
 }
 
+/// A reachable probe of `alias` at `ts` that saw no sessions and no
+/// versions, with the stale-probe guard off — the shape most reconcile
+/// tests apply; spread the fields that matter over it.
+pub(super) fn empty_probe(alias: &str, ts: i64) -> HostReconcile<'_> {
+    HostReconcile {
+        alias,
+        reachable: true,
+        last_pinged_at: ts,
+        ..Default::default()
+    }
+}
+
 pub(super) fn reconcile_one(
     s: &mut Store,
     name: &'static str,
@@ -20,31 +32,20 @@ pub(super) fn reconcile_one(
         None => (None, None, false),
     };
     s.apply_host_reconcile(HostReconcile {
-        alias: "local",
-        reachable: true,
-        claude_version: None,
-        tmux_version: None,
-        last_pinged_at: 1,
-        probe_started_at: 0,
         sessions: &[ReconcileSession {
             tmux_name: name,
-            project_id: None,
             created_at: 1,
             last_activity_at: 1,
-            account_uuid: None,
-            worktree_key: None,
-            claude_session_id: None,
             claude_status: status.map(String::from),
-            effort_level: None,
             pr_url,
-            current_activity: None,
-            context_pct: None,
             stuck_kind: stuck.map(String::from),
             intel_observed: true,
             ci_status,
             pr_observed,
+            ..Default::default()
         }],
         keep: &[name.to_string()],
+        ..empty_probe("local", 1)
     })
     .unwrap();
     s.get_session(name, "local").unwrap().unwrap()

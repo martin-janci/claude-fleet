@@ -16,11 +16,12 @@ impl Store {
         fetch_project(&self.conn, id)
     }
 
-    fn get_worktree(&self, id: i64) -> Result<Option<WorktreeRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {WORKTREE_COLUMNS} FROM worktrees WHERE id=?1"
-        ))?;
-        stmt.query_row(rusqlite::params![id], worktree_from_row)
+    pub fn get_worktree_row(&self, id: i64) -> Result<Option<WorktreeRow>, rusqlite::Error> {
+        self.conn
+            .prepare_cached(&format!(
+                "SELECT {WORKTREE_COLUMNS} FROM worktrees WHERE id=?1"
+            ))?
+            .query_row(rusqlite::params![id], worktree_from_row)
             .optional()
     }
 
@@ -59,14 +60,11 @@ impl Store {
         base_path: &str,
         adopted: bool,
     ) -> Result<i64, rusqlite::Error> {
-        self.conn.execute(
-            "INSERT INTO projects (owner, repo, base_path, adopted) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(owner, repo) DO UPDATE SET base_path=excluded.base_path, adopted=excluded.adopted",
-            rusqlite::params![owner, repo, base_path, adopted as i64],
-        )?;
         let id: i64 = self.conn.query_row(
-            "SELECT id FROM projects WHERE owner=?1 AND repo=?2",
-            rusqlite::params![owner, repo],
+            "INSERT INTO projects (owner, repo, base_path, adopted) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(owner, repo) DO UPDATE SET base_path=excluded.base_path, adopted=excluded.adopted
+             RETURNING id",
+            rusqlite::params![owner, repo, base_path, adopted as i64],
             |row| row.get(0),
         )?;
         if let Some(row) = self.get_project(id)? {
@@ -76,19 +74,10 @@ impl Store {
     }
 
     pub fn list_projects(&self) -> Result<Vec<ProjectRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT id, owner, repo, base_path, last_session_at, adopted FROM projects ORDER BY owner, repo",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(ProjectRow {
-                id: row.get(0)?,
-                owner: row.get(1)?,
-                repo: row.get(2)?,
-                base_path: row.get(3)?,
-                last_session_at: row.get(4)?,
-                adopted: row.get::<_, i64>(5)? != 0,
-            })
-        })?;
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {PROJECT_COLUMNS} FROM projects ORDER BY owner, repo"
+        ))?;
+        let rows = stmt.query_map([], map_project_row)?;
         rows.collect()
     }
 
@@ -103,9 +92,10 @@ impl Store {
     pub fn list_projects_joined(
         &self,
     ) -> Result<Vec<crate::service::projects::ProjectTreeRow>, crate::ipc_error::IpcError> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT p.id, p.owner, p.repo, p.base_path, p.last_session_at, p.adopted,
-                    w.id, w.project_id, w.name, w.path, w.branch
+        // The project columns come first (offset 0, so `map_project_row`
+        // reads them as-is); the LEFT JOINed worktree columns follow.
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {cols}, w.id, w.name, w.path, w.branch
              FROM projects p
              LEFT JOIN worktrees w ON w.project_id = p.id AND w.host_alias = 'local'
              ORDER BY
@@ -113,36 +103,25 @@ impl Store {
                p.last_session_at DESC,
                p.id,
                w.id",
-        )?;
+            cols = qualified(PROJECT_COLUMNS, "p")
+        ))?;
         let rows = stmt.query_map([], |row| {
             Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-                row.get::<_, i64>(5)? != 0,
+                map_project_row(row)?,
                 row.get::<_, Option<i64>>(6)?,
-                row.get::<_, Option<i64>>(7)?,
+                row.get::<_, Option<String>>(7)?,
                 row.get::<_, Option<String>>(8)?,
                 row.get::<_, Option<String>>(9)?,
-                row.get::<_, Option<String>>(10)?,
             ))
         })?;
         let mut out: Vec<crate::service::projects::ProjectTreeRow> = Vec::new();
         let mut last_pid: Option<i64> = None;
         for r in rows {
-            let (pid, owner, repo, base, last, adopted, wid, _wpid, wname, wpath, wbranch) = r?;
+            let (project, wid, wname, wpath, wbranch) = r?;
+            let pid = project.id;
             if last_pid != Some(pid) {
                 out.push(crate::service::projects::ProjectTreeRow {
-                    project: ProjectRow {
-                        id: pid,
-                        owner,
-                        repo,
-                        base_path: base,
-                        last_session_at: last,
-                        adopted,
-                    },
+                    project,
                     worktrees: Vec::new(),
                 });
                 last_pid = Some(pid);
@@ -199,21 +178,18 @@ impl Store {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        self.conn.execute(
+        let id: i64 = self.conn.query_row(
             "INSERT INTO worktrees (project_id, host_alias, name, path, branch, updated_at_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(project_id, host_alias, name)
              DO UPDATE SET path=excluded.path, branch=excluded.branch,
-                           updated_at_ms=excluded.updated_at_ms",
+                           updated_at_ms=excluded.updated_at_ms
+             RETURNING id",
             rusqlite::params![project_id, host_alias, name, path, branch, now_ms],
-        )?;
-        let id: i64 = self.conn.query_row(
-            "SELECT id FROM worktrees WHERE project_id=?1 AND host_alias=?2 AND name=?3",
-            rusqlite::params![project_id, host_alias, name],
             |row| row.get(0),
         )?;
         if host_alias == crate::service::projects::LOCAL_HOST {
-            if let Some(row) = self.get_worktree(id)? {
+            if let Some(row) = self.get_worktree_row(id)? {
                 self.bus.worktree_updated(&row);
             }
         }
@@ -311,7 +287,7 @@ impl Store {
         id: i64,
         fp_keys: &[String],
     ) -> Result<Option<WorktreeRow>, rusqlite::Error> {
-        let Some(row) = self.get_worktree(id)? else {
+        let Some(row) = self.get_worktree_row(id)? else {
             return Ok(None);
         };
         let tx = self.conn.unchecked_transaction()?;
@@ -383,7 +359,7 @@ impl Store {
     /// the path is resolved. Empty when the row is gone.
     pub fn fingerprint_keys_of_worktree(store: &std::sync::Mutex<Store>, id: i64) -> Vec<String> {
         let row = match store.lock() {
-            Ok(s) => s.get_worktree(id).ok().flatten(),
+            Ok(s) => s.get_worktree_row(id).ok().flatten(),
             Err(_) => None,
         };
         row.map(|w| Self::fingerprint_keys(&w.host_alias, &w.path))
@@ -451,10 +427,6 @@ impl Store {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         rows.collect()
-    }
-
-    pub fn get_worktree_row(&self, id: i64) -> Result<Option<WorktreeRow>, rusqlite::Error> {
-        self.get_worktree(id)
     }
 
     /// Delete this project's worktree rows whose name is not in `keep_names`
@@ -525,9 +497,8 @@ impl Store {
     /// patches the sidebar at once instead of on the next reconcile pass.
     pub(super) fn emit_sessions_updated(&self, ids: &[i64]) {
         for id in ids {
-            if let Ok(Some(row)) = self.get_session_by_id(*id) {
-                self.bus.session_updated(&row);
-            }
+            // Best-effort: a failed re-read only skips that row's event.
+            let _ = self.emit_session(*id);
         }
     }
 
@@ -720,7 +691,6 @@ impl Store {
         host_alias: &str,
         wt_path: &str,
     ) -> Result<Option<String>, rusqlite::Error> {
-        use rusqlite::OptionalExtension;
         self.conn
             .query_row(
                 "SELECT parent_fp FROM worktree_parent_fingerprints
