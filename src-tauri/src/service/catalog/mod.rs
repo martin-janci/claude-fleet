@@ -4,6 +4,7 @@
 //! Spec: docs/superpowers/specs/2026-09-14-asset-catalog-design.md
 
 pub mod author;
+pub mod author_session;
 pub mod harness;
 pub mod import;
 pub mod inventory;
