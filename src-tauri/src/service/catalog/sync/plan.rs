@@ -13,10 +13,10 @@ use super::super::model::{sha256_hex, Asset, AssetSpec, Kind};
 use super::super::repo::Catalog;
 use super::manifest::{Manifest, ManifestEntry};
 use super::secrets::{self, SecretPlan};
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -613,8 +613,8 @@ const PLAN_TTL: Duration = Duration::from_secs(600);
 
 /// Computed plans awaiting `sync_apply`, keyed by id and stamped with the
 /// instant they stop being applicable.
-static PLANS: Lazy<Mutex<HashMap<String, (Instant, SyncPlan)>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static PLANS: LazyLock<Mutex<HashMap<String, (Instant, SyncPlan)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn plans() -> std::sync::MutexGuard<'static, HashMap<String, (Instant, SyncPlan)>> {
     // A poisoned registry is not worth failing a sync over: the map holds

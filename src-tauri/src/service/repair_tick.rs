@@ -569,8 +569,8 @@ impl Drop for InFlight {
 /// start one run in the background and return `true`. Cheap when disabled
 /// (one settings read). Detached so repairs never delay the reconcile loop.
 pub fn maybe_run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> bool {
-    static LAST: once_cell::sync::Lazy<Mutex<Option<std::time::Instant>>> =
-        once_cell::sync::Lazy::new(|| Mutex::new(None));
+    static LAST: std::sync::LazyLock<Mutex<Option<std::time::Instant>>> =
+        std::sync::LazyLock::new(|| Mutex::new(None));
     static RUNNING: AtomicBool = AtomicBool::new(false);
     let cfg = {
         let Ok(s) = store.lock() else {

@@ -49,6 +49,7 @@
 //!
 //! Local rows are never touched here: the local project refresh owns them.
 
+use crate::ipc_error::lock;
 use crate::ipc_error::IpcError;
 use crate::projects::Layout;
 use crate::service::projects::{expand_home, layout, project_base_for, LOCAL_HOST};
@@ -315,7 +316,7 @@ pub async fn prune_host(
     // written after it was (re-)created while this probe ran, so it is live.
     let probe_start_ms = unix_ms_now();
     let (rows, projects, base, layout) = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         (
             s.list_worktrees_on_host(host)?,
             s.list_projects()?,
@@ -361,7 +362,7 @@ pub async fn prune_host(
             (row, keys)
         })
         .collect();
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     let mut deleted = Vec::new();
     for (row, keys) in keyed {
         // Re-check under the lock: a row moved (host, path) or written after
@@ -434,8 +435,8 @@ impl Drop for InFlight {
 /// run in the background and return `true`. Detached, so a slow host never
 /// delays the reconcile loop.
 pub fn maybe_run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> bool {
-    static LAST: once_cell::sync::Lazy<Mutex<Option<std::time::Instant>>> =
-        once_cell::sync::Lazy::new(|| Mutex::new(None));
+    static LAST: std::sync::LazyLock<Mutex<Option<std::time::Instant>>> =
+        std::sync::LazyLock::new(|| Mutex::new(None));
     static RUNNING: AtomicBool = AtomicBool::new(false);
     {
         let Ok(mut last) = LAST.lock() else {

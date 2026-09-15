@@ -3,6 +3,7 @@
 //! (probing). Called by both the Tauri command wrappers and the MCP server.
 
 use crate::cancel::CancellationRegistry;
+use crate::ipc_error::lock;
 use crate::ipc_error::IpcError;
 use crate::shell::quote;
 use crate::ssh::SshExec;
@@ -18,16 +19,12 @@ pub fn discover_hosts() -> Result<Vec<SshHost>, IpcError> {
 }
 
 pub fn list_hosts(store: &Mutex<Store>) -> Result<Vec<HostRow>, IpcError> {
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = lock(store)?;
     s.list_hosts().map_err(IpcError::from)
 }
 
 pub fn list_accounts(store: &Mutex<Store>) -> Result<Vec<crate::store::AccountRow>, IpcError> {
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = lock(store)?;
     s.list_accounts().map_err(IpcError::from)
 }
 
@@ -48,9 +45,7 @@ pub async fn add_host(
     // Probe first; we don't want to persist a host we can't talk to.
     let (reachable, claude_ver, tmux_ver, account) = probe(ssh, &args.ssh_alias).await?;
     {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = lock(store)?;
         s.insert_host(&args.alias, Some(&args.ssh_alias))?;
         // Link account if probe found one
         if let Some(acc) = account
@@ -131,9 +126,7 @@ pub async fn probe_host(
     reg: &Arc<CancellationRegistry>,
 ) -> Result<HostRow, IpcError> {
     let ssh_alias = {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = lock(store)?;
         s.list_hosts()?
             .into_iter()
             .find(|h| h.alias == args.alias)
@@ -160,9 +153,7 @@ pub async fn probe_host(
         probe_lenient_with_token(ssh, target, token).await
     };
     {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = lock(store)?;
         if let Some(acc) = account
             .as_ref()
             .and_then(|a| account_row_from(a, now_unix()))
@@ -185,10 +176,8 @@ pub async fn probe_host(
 
 pub fn remove_host(args: HostAliasArgs, store: &Mutex<Store>) -> Result<HostRow, IpcError> {
     let row = list_one(store, &args.alias)?;
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    s.delete_host(&args.alias).map_err(IpcError::from)?;
+    let s = lock(store)?;
+    s.delete_host(&args.alias)?;
     Ok(row)
 }
 
@@ -200,11 +189,8 @@ pub struct HideHostArgs {
 
 pub fn hide_host(args: HideHostArgs, store: &Mutex<Store>) -> Result<HostRow, IpcError> {
     {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-        s.set_host_hidden(&args.alias, args.hidden)
-            .map_err(IpcError::from)?;
+        let s = lock(store)?;
+        s.set_host_hidden(&args.alias, args.hidden)?;
     }
     list_one(store, &args.alias)
 }
@@ -219,18 +205,14 @@ pub fn set_account_nickname(
     args: SetAccountNicknameArgs,
     store: &Mutex<Store>,
 ) -> Result<crate::store::AccountRow, IpcError> {
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = lock(store)?;
     s.set_account_nickname(&args.uuid, args.nickname.as_deref())
 }
 
 // --- helpers ---
 
 fn list_one(store: &Mutex<Store>, alias: &str) -> Result<HostRow, IpcError> {
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = lock(store)?;
     s.list_hosts()?
         .into_iter()
         .find(|h| h.alias == alias)
@@ -482,9 +464,7 @@ pub(crate) async fn sync_local_account(
         // the doc comment above).
         LocalAccountProbe::LoggedOut | LocalAccountProbe::Unavailable => None,
     };
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = lock(store)?;
     sync_host_account(&s, "local", account.as_ref()).map(|_| ())
 }
 

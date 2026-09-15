@@ -26,6 +26,7 @@ pub mod secrets;
 
 use crate::cancel::{CancelGuard, CancellationRegistry};
 use crate::events::SyncProgress;
+use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::ssh::SshClient;
 use crate::store::Store;
@@ -159,7 +160,7 @@ pub async fn plan_sync(
 ) -> Result<SyncPlan, IpcError> {
     let catalog = catalog()?;
     let hosts = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         s.list_hosts()?
     };
     // An unknown alias must fail loudly rather than silently plan nothing: a
@@ -496,7 +497,7 @@ pub async fn apply_sync_with(
 /// The most recent completed sync, deserialised from its `sync_runs` row.
 pub fn last_sync(store: &Mutex<Store>) -> Result<Option<SyncRunSummary>, IpcError> {
     let row = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         s.last_sync_run()?
     };
     match row {

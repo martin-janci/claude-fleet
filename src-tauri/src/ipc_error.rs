@@ -209,6 +209,13 @@ impl IpcError {
     }
 }
 
+/// Lock an app-level mutex (the `Store` first of all), mapping a poisoned
+/// lock to `E_LOCK`. `let s = lock(store)?;` is the one idiom every
+/// service / command / MCP tool uses; MCP sites chain `.map_err(to_mcp_err)`.
+pub fn lock<T>(m: &std::sync::Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, IpcError> {
+    m.lock().map_err(|_| IpcError::lock())
+}
+
 impl fmt::Display for IpcError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[{}] {}", self.code, self.message)

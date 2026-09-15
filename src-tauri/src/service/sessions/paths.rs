@@ -11,7 +11,7 @@ use super::*;
 /// but the GitHub portion is stable — so we match into the repo cell
 /// regardless of where the path starts.
 pub(super) fn extract_owner_repo(path: &str) -> Option<(String, String)> {
-    static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"/projects/github\.com/([^/]+)/([^/]+)").expect("static regex")
     });
     let caps = RE.captures(path)?;
@@ -32,7 +32,7 @@ pub(super) fn extract_owner_repo(path: &str) -> Option<(String, String)> {
 /// session living under either must key to its worktree name (not "main"), or
 /// recreate/restart would rebuild it at the repo root.
 pub(super) fn worktree_key_for_path(path: &str) -> Option<String> {
-    static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"/projects/github\.com/[^/]+/[^/]+(/.*)?$").expect("static regex")
     });
     let caps = RE.captures(path)?;

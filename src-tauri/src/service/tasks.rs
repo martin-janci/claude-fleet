@@ -14,6 +14,7 @@
 //! The wait primitives are bounded long-polls over the store: they lock,
 //! read one row, unlock, sleep — never holding the mutex across the sleep.
 
+use crate::ipc_error::lock;
 use crate::ipc_error::IpcError;
 use crate::ssh::SshClient;
 use crate::store::{SessionRow, Store, TaskRow, IDLE_STATUSES, TASK_TERMINAL_STATES};
@@ -184,7 +185,7 @@ pub async fn wait_for_session_with(
     loop {
         // Lock, read one row, unlock — never across the sleep.
         let row = {
-            let s = store.lock().map_err(|_| IpcError::lock())?;
+            let s = lock(store)?;
             s.get_session_by_id(session_id)?.ok_or_else(|| {
                 IpcError::new("E_NOTFOUND", format!("session {session_id} not found"))
             })?
@@ -225,7 +226,7 @@ pub async fn wait_for_task_with(
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let row = {
-            let s = store.lock().map_err(|_| IpcError::lock())?;
+            let s = lock(store)?;
             let row = s
                 .get_task(task_id)?
                 .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("task {task_id} not found")))?;
@@ -411,7 +412,7 @@ pub fn list_tasks_for(
             ));
         }
     }
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     // Converge stale tasks before reporting them (cheap; see sweep_open_tasks).
     let _ = sweep_open_tasks(&s, now_unix());
     s.list_tasks(requester_session_id, state, host, clamp_task_limit(limit))

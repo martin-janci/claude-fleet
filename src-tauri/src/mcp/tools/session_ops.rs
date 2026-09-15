@@ -1,6 +1,7 @@
 //! MCP tools: listing, spawning, inspecting and addressing sessions.
 
 use super::*;
+use crate::ipc_error::lock;
 
 #[tool_router(router = session_ops_router, vis = "pub(super)")]
 impl FleetTools {
@@ -40,10 +41,7 @@ impl FleetTools {
         }
         .map_err(to_mcp_err)?;
         let controller = {
-            let s = self
-                .store
-                .lock()
-                .map_err(|_| McpError::internal_error("E_LOCK: store mutex poisoned", None))?;
+            let s = lock(&self.store).map_err(to_mcp_err)?;
             s.get_controller()
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?
         };
@@ -136,10 +134,7 @@ impl FleetTools {
             "the session to register",
         )?;
         {
-            let s = self
-                .store
-                .lock()
-                .map_err(|_| McpError::internal_error("E_LOCK: store mutex poisoned", None))?;
+            let s = lock(&self.store).map_err(to_mcp_err)?;
             s.set_controller(&host_alias, &tmux_name)
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?;
         }
@@ -159,10 +154,7 @@ impl FleetTools {
         Parameters(p): Parameters<WhoamiParams>,
     ) -> Result<CallToolResult, McpError> {
         audit("whoami", &format!("tmux={}", p.tmux_name));
-        let s = self
-            .store
-            .lock()
-            .map_err(|_| to_mcp_err(IpcError::lock()))?;
+        let s = lock(&self.store).map_err(to_mcp_err)?;
         let row = sessions::find_session_by_tmux_name(&s, &p.tmux_name).map_err(to_mcp_err)?;
         let controller = s
             .get_controller()
@@ -303,10 +295,7 @@ impl FleetTools {
             ),
         );
         let resolved = {
-            let s = self
-                .store
-                .lock()
-                .map_err(|_| to_mcp_err(IpcError::lock()))?;
+            let s = lock(&self.store).map_err(to_mcp_err)?;
             crate::service::bg_sessions::resolve_peek_target(
                 &s,
                 p.session_id,
@@ -317,7 +306,7 @@ impl FleetTools {
                 // The fleet row, when there is one, supplies the pane, cwd and
                 // stored transcript path that locate the file precisely.
                 let row = match p.session_id {
-                    Some(id) => s.get_session_by_id(id).map_err(IpcError::from)?,
+                    Some(id) => s.get_session_by_id(id)?,
                     None => s
                         .get_session_by_claude_id(&claude_id)?
                         .filter(|r| r.host_alias == host_alias),

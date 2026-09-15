@@ -1,6 +1,7 @@
 //! MCP tools: kill, restart, rename, review, repair, move and the host clipboard.
 
 use super::*;
+use crate::ipc_error::lock;
 
 #[tool_router(router = lifecycle_router, vis = "pub(super)")]
 impl FleetTools {
@@ -328,10 +329,7 @@ impl FleetTools {
             &caller,
         )?;
         let id = {
-            let s = self
-                .store
-                .lock()
-                .map_err(|_| to_mcp_err(IpcError::lock()))?;
+            let s = lock(&self.store).map_err(to_mcp_err)?;
             s.get_session(&name, &host_alias)
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?
                 .map(|r| r.id)

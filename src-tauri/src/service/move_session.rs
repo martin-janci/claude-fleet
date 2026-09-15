@@ -39,6 +39,7 @@
 //! step (git inspection, transcript copy, target verification) goes through
 //! `&dyn SshExec`, so the whole flow runs end-to-end over `FakeSsh` in tests.
 
+use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::service::safe_kill::{parse_porcelain, DirtyFile};
 use crate::shell::quote;
@@ -1063,7 +1064,7 @@ async fn move_session_steps(
     crate::validate::host_alias(&args.target_host_alias)?;
     let _claim = MoveClaim::acquire(store, args.session_id)?;
     let snap = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         snapshot(&s, &args)?
     };
     let src = snap.row.host_alias.clone();
@@ -1075,7 +1076,7 @@ async fn move_session_steps(
     //    is fresh, then refuse a turn in progress or an unknown status.
     hooks.refresh_host(store, &src).await?;
     let status = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         s.get_session_by_id(snap.row.id)?
             .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?
             .claude_status
@@ -1285,7 +1286,7 @@ async fn move_session_steps(
         .await
         .map_err(|e| partial("reconciling the target host", &target, &tmux_name, None, &e))?;
     let new_row = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let row = s.get_session(&tmux_name, &target)?.ok_or_else(|| {
             partial(
                 "registering the target row",
@@ -1351,7 +1352,7 @@ async fn move_session_steps(
             _ => false,
         };
         let row = {
-            let s = store.lock().map_err(|_| IpcError::lock())?;
+            let s = lock(store)?;
             s.get_session_by_id(new_row.id)?
         };
         if size_ok && row.as_ref().is_some_and(|r| r.status == "running") {

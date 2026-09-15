@@ -139,12 +139,9 @@ impl Store {
     where
         F: FnOnce(&Store) -> Result<R, crate::ipc_error::IpcError>,
     {
-        let tx = self
-            .conn
-            .unchecked_transaction()
-            .map_err(crate::ipc_error::IpcError::from)?;
+        let tx = self.conn.unchecked_transaction()?;
         let r = f(self)?;
-        tx.commit().map_err(crate::ipc_error::IpcError::from)?;
+        tx.commit()?;
         Ok(r)
     }
 }

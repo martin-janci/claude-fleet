@@ -2,6 +2,7 @@
 //! outcome and timeline events, and capturing pane output.
 
 use super::*;
+use crate::ipc_error::lock;
 
 /// Build the tmux invocations that together send a prompt to a session:
 ///   1. send-keys -t <name> -l <body>   (literal, no key-name translation;
@@ -316,7 +317,7 @@ pub async fn broadcast_prompt(
     // Snapshot sessions + resolve the controller while holding the guard, then
     // drop it before any `.await` (never hold the mutex across await).
     let (sessions, controller) = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let sessions = s.list_all_sessions().map_err(|e| {
             IpcError::new(codes::E_SQLITE, format!("list sessions for broadcast: {e}"))
         })?;

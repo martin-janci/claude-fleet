@@ -2,6 +2,7 @@
 //!
 //! Called from `mcp::hooks::handle_hook` after token auth passes.
 
+use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::mcp::hooks::HookPayload;
 use crate::mcp::Caller;
@@ -131,7 +132,7 @@ fn apply_stop_hook(
     // Snapshot whether a safe-kill / open task is in flight BEFORE we update
     // status; the follow-ups (pane capture + SSH) run off the hook handler.
     let (safe_kill_in_flight, task_worker) = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let Some(before) = host_checked_row(&s, &session_id, caller)? else {
             return Ok(());
         };
@@ -177,7 +178,7 @@ fn apply_prompt_submit_hook(
         Some(id) => id.clone(),
         None => return Ok(()),
     };
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     if host_checked_row(&s, &session_id, caller)?.is_none() {
         return Ok(());
     }
@@ -205,7 +206,7 @@ fn apply_session_end_hook(
     if !SESSION_END_REASONS.contains(&reason) {
         return Ok(());
     }
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     if host_checked_row(&s, session_id, caller)?.is_none() {
         return Ok(());
     }
@@ -228,7 +229,7 @@ fn apply_stop_failure_hook(
     let Some(session_id) = &payload.session_id else {
         return Ok(());
     };
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     if host_checked_row(&s, session_id, caller)?.is_none() {
         return Ok(());
     }
@@ -280,7 +281,7 @@ fn apply_notification_hook(
     let Some((status, stuck)) = notification_effect(kind) else {
         return Ok(());
     };
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     if host_checked_row(&s, session_id, caller)?.is_none() {
         return Ok(());
     }
@@ -374,8 +375,8 @@ fn apply_worktree_exit_hook(
     } else {
         path
     };
-    let s = store.lock().map_err(|_| IpcError::lock())?;
-    s.delete_worktrees_at(host, &path).map_err(IpcError::from)?;
+    let s = lock(store)?;
+    s.delete_worktrees_at(host, &path)?;
     Ok(())
 }
 
@@ -415,8 +416,8 @@ fn apply_worktree_hook(
 
     let host = caller_host(caller);
     if host != LOCAL_HOST {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
-        let projects = s.list_projects().map_err(IpcError::from)?;
+        let s = lock(store)?;
+        let projects = s.list_projects()?;
         let paths = HostPaths::for_host(&s, host);
         let Some(project_id) = crate::service::sessions::find_project_id_for_path(
             &projects,
@@ -434,8 +435,7 @@ fn apply_worktree_hook(
             .and_then(|n| n.to_str())
             .unwrap_or("unnamed")
             .to_string();
-        s.upsert_worktree_on(host, project_id, &name, &path, branch)
-            .map_err(IpcError::from)?;
+        s.upsert_worktree_on(host, project_id, &name, &path, branch)?;
         return Ok(());
     }
 
@@ -449,8 +449,8 @@ fn apply_worktree_hook(
         .unwrap_or("unnamed")
         .to_string();
     let projects = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
-        s.list_projects().map_err(IpcError::from)?
+        let s = lock(store)?;
+        s.list_projects()?
     };
     let Some(project_id) = find_project_id_for_path(&projects, &path) else {
         return Err(IpcError::new(
@@ -458,9 +458,8 @@ fn apply_worktree_hook(
             format!("worktree_path {path} is not under any known project base"),
         ));
     };
-    let s = store.lock().map_err(|_| IpcError::lock())?;
-    s.upsert_worktree(project_id, &name, &path, branch)
-        .map_err(IpcError::from)?;
+    let s = lock(store)?;
+    s.upsert_worktree(project_id, &name, &path, branch)?;
     Ok(())
 }
 

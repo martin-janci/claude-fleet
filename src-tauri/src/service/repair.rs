@@ -41,6 +41,7 @@
 //! A healthy workspace costs exactly one probe and no writes.
 //! Spec: `docs/specs/2026-09-11-session-worktree-repair.md`.
 
+use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::{SshClient, SshExec};
@@ -1711,7 +1712,7 @@ pub async fn ensure_workspace_with(
     // it is released (the filesystem can hang on a dead NFS mount, and a hung
     // call must never hold the store mutex).
     let snap = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         auto_snapshot(&s, spec, &probe)
     };
     let ctx = AutoContext {
@@ -1766,7 +1767,7 @@ pub async fn ensure_workspace_with(
         // Read the rows under the store lock; canonicalize only after it is
         // released (a dead NFS path must never hold the store mutex).
         let snap = {
-            let s = store.lock().map_err(|_| IpcError::lock())?;
+            let s = lock(store)?;
             adoption_snapshot(&s, spec)?
         };
         let conflict = adoption_conflict(spec, w, &adopt_key, snap, local_canon);
@@ -1934,7 +1935,7 @@ pub async fn ensure_workspace_with(
 
     // ── record: rows + timeline (one lock, no awaits) ───────────────────
     {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         if let (Some(w), Some(pid)) = (&spec.worktree, spec.project_id) {
             let branch = final_branch.clone().unwrap_or_else(|| w.branch.clone());
             let existing = s
@@ -2257,7 +2258,7 @@ pub async fn spec_for_session(
     session_id: i64,
 ) -> Result<(WorkspaceSpec, Vec<i64>), IpcError> {
     let seed = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let row = s
             .get_session_by_id(session_id)?
             .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?;
@@ -2423,7 +2424,7 @@ pub async fn ensure_for_new_session(
         None
     } else {
         let (owner, repo, root, layout) = {
-            let s = store.lock().map_err(|_| IpcError::lock())?;
+            let s = lock(store)?;
             let (owner, repo) = crate::service::sessions::fetch_owner_repo(&s, w.project_id)?;
             (
                 owner,
@@ -2439,7 +2440,7 @@ pub async fn ensure_for_new_session(
         )
     };
     let spec = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         spec_for_new_session(&s, &w, remote_root)?
     };
     let exec = HostExec::new(w.host_alias, ssh);
@@ -2467,7 +2468,7 @@ pub async fn repair_session(
     ssh: &Arc<SshClient>,
 ) -> Result<RepairReport, IpcError> {
     {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let row = s
             .get_session_by_id(session_id)?
             .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?;

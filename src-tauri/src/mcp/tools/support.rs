@@ -3,6 +3,7 @@
 //! `FleetTools` methods several tools call.
 
 use super::*;
+use crate::ipc_error::lock;
 
 // --- shared helpers --------------------------------------------------------
 
@@ -614,10 +615,7 @@ impl FleetTools {
     /// True when the operator turned on desktop confirmation for
     /// destructive calls (`mcp.confirm_destructive`).
     pub(super) fn confirm_enabled(&self) -> Result<bool, McpError> {
-        let s = self
-            .store
-            .lock()
-            .map_err(|_| mcp_err("E_LOCK", "store mutex poisoned", None))?;
+        let s = lock(&self.store).map_err(to_mcp_err)?;
         Ok(s.get_setting(guard::SETTING_CONFIRM_DESTRUCTIVE)
             .map_err(|e| to_mcp_err(IpcError::from(e)))?
             .as_deref()
@@ -691,10 +689,7 @@ impl FleetTools {
         tmux_name: Option<&str>,
         what: &str,
     ) -> Result<(String, String), McpError> {
-        let s = self
-            .store
-            .lock()
-            .map_err(|_| to_mcp_err(IpcError::lock()))?;
+        let s = lock(&self.store).map_err(to_mcp_err)?;
         resolve_and_gate(&s, caller, session_id, host_alias, tmux_name, what)
     }
 
@@ -707,10 +702,7 @@ impl FleetTools {
         tmux_name: Option<&str>,
         what: &str,
     ) -> Result<crate::store::SessionRow, McpError> {
-        let s = self
-            .store
-            .lock()
-            .map_err(|_| to_mcp_err(IpcError::lock()))?;
+        let s = lock(&self.store).map_err(to_mcp_err)?;
         resolve_row_and_gate(&s, caller, session_id, host_alias, tmux_name, what)
     }
 
@@ -788,10 +780,7 @@ impl FleetTools {
         caller: &Caller,
         task_id: i64,
     ) -> Result<crate::store::TaskRow, McpError> {
-        let s = self
-            .store
-            .lock()
-            .map_err(|_| to_mcp_err(IpcError::lock()))?;
+        let s = lock(&self.store).map_err(to_mcp_err)?;
         let task = s
             .get_task(task_id)
             .map_err(to_mcp_err)?

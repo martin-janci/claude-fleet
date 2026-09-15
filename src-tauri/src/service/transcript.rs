@@ -15,6 +15,7 @@
 //! the reply text without the tool-result noise (and without the pane's
 //! TUI chrome that `capture_session` returns).
 
+use crate::ipc_error::lock;
 use crate::ipc_error::IpcError;
 use crate::shell::quote;
 use crate::ssh::SshClient;
@@ -470,7 +471,7 @@ pub fn resolve_args(
         )
     })?;
     let (cwd, transcript_path) = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let wt = match row.worktree_id {
             Some(wid) => s.worktree_path(wid).ok().flatten(),
             None => None,

@@ -2,6 +2,7 @@
 //! related sessions, and the controller self-target guard.
 
 use super::*;
+use crate::ipc_error::lock;
 
 #[derive(Deserialize)]
 pub struct RelatedSessionsArgs {
@@ -12,9 +13,7 @@ pub fn related_sessions(
     args: RelatedSessionsArgs,
     store: &Mutex<Store>,
 ) -> Result<Vec<SessionRow>, IpcError> {
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = lock(store)?;
     s.list_related_sessions(args.session_id)
         .map_err(IpcError::from)
 }

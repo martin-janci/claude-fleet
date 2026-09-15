@@ -3,6 +3,7 @@
 //! references.
 
 use crate::cancel::CancellationRegistry;
+use crate::ipc_error::lock;
 use crate::ipc_error::IpcError;
 use crate::service::bg_sessions::{self, DismissAgentArgs, NewBgSessionArgs, PurgeProjectArgs};
 use crate::service::repair::{self, RepairReport};
@@ -224,7 +225,7 @@ pub async fn purge_project(
 pub fn get_fleet_settings(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(&store)?;
     Ok(crate::service::settings::read_all(&s))
 }
 
@@ -237,7 +238,7 @@ pub fn set_fleet_setting(
     value: String,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(&store)?;
     crate::service::settings::set(&s, &key, &value)?;
     Ok(crate::service::settings::read_all(&s))
 }
@@ -272,7 +273,7 @@ pub fn session_history(
     args: SessionHistoryArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<crate::store::SessionEvent>, IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(&store)?;
     s.list_session_events(args.session_id, history_limit(args.limit))
 }
 
@@ -295,7 +296,7 @@ pub async fn session_conversation(
 ) -> Result<crate::service::transcript::Conversation, IpcError> {
     use crate::service::transcript;
     let row = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(&store)?;
         s.get_session_by_id(args.session_id)?.ok_or_else(|| {
             IpcError::new(
                 "E_NOTFOUND",

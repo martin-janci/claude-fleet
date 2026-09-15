@@ -5,6 +5,7 @@
 //! host-correct for remote sessions. Every interpolated value is shell-quoted
 //! (`shell::quote`); frontend paths/refs/hashes are additionally validated.
 
+use crate::ipc_error::lock;
 use crate::ipc_error::IpcError;
 use crate::shell::quote;
 use crate::ssh::SshClient;
@@ -29,9 +30,7 @@ pub const NO_WORKTREE_SENTINEL: &str = "__CF_NO_WORKTREE__";
 
 /// Resolve a session id to its `(host_alias, tmux_name)`, validating both.
 pub fn session_target(store: &Mutex<Store>, session_id: i64) -> Result<(String, String), IpcError> {
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = lock(store)?;
     let sess = s
         .get_session_by_id(session_id)?
         .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("session {session_id} not found")))?;

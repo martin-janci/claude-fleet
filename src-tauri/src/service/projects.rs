@@ -1,3 +1,4 @@
+use crate::ipc_error::lock;
 use crate::ipc_error::IpcError;
 use crate::projects::path_identity::{canonical, canonical_str};
 use crate::projects::{
@@ -134,7 +135,7 @@ pub fn resolved_bases(s: &Store) -> BTreeMap<String, String> {
 }
 
 pub fn list_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow>, IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     s.list_projects_joined()
 }
 
@@ -174,7 +175,7 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
     // 1. Resolve the scan root + layout and snapshot the current project list
     //    under a brief lock.
     let (base, layout, snapshot) = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         (
             local_projects_root(&s),
             layout(&s),
@@ -241,7 +242,7 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
 
     // 4. Apply all writes under a single brief lock.
     {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let canon = |p: &str| canon_of.get(p).cloned().unwrap_or_else(|| p.to_string());
         let mut fresh_ids = HashSet::new();
         // Canonical checkout path -> the fresh project that owns it.
@@ -338,7 +339,7 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
     }
 
     // 5. Return the fresh list under one final brief lock.
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     s.list_projects_joined()
 }
 

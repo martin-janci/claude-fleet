@@ -7,6 +7,7 @@
 //! run through `logging::redact_secrets` with every token the store knows, so
 //! a token that leaked into a log line or an error string is masked too.
 
+use crate::ipc_error::lock;
 use crate::ipc_error::IpcError;
 use crate::logging;
 use crate::store::Store;
@@ -88,7 +89,7 @@ pub fn collect(
         tokens,
         sessions,
     ) = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let setting = |k: &str| s.get_setting(k).ok().flatten();
         let master = setting(crate::mcp::SETTING_TOKEN).filter(|t| !t.is_empty());
         (

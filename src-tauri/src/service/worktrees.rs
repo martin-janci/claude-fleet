@@ -3,6 +3,7 @@
 //! drop the DB row. Refuses to delete an occupied worktree unless `force` is
 //! passed.
 
+use crate::ipc_error::lock;
 use crate::ipc_error::IpcError;
 use crate::shell::quote;
 use crate::ssh::{SshClient, SshExec};
@@ -35,8 +36,8 @@ pub fn list_worktrees(
     args: ListWorktreesArgs,
     store: &Mutex<Store>,
 ) -> Result<Vec<WorktreeOccupancy>, IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
-    let projects = s.list_projects().map_err(IpcError::from)?;
+    let s = lock(store)?;
+    let projects = s.list_projects()?;
     let mut out = Vec::new();
     for proj in projects {
         if let Some(pid) = args.project_id {
@@ -44,13 +45,10 @@ pub fn list_worktrees(
                 continue;
             }
         }
-        let worktrees = s
-            .list_worktrees_for_project(proj.id)
-            .map_err(IpcError::from)?;
+        let worktrees = s.list_worktrees_for_project(proj.id)?;
         for wt in worktrees {
             let occupants = s
-                .alive_sessions_for_worktree(wt.id)
-                .map_err(IpcError::from)?
+                .alive_sessions_for_worktree(wt.id)?
                 .into_iter()
                 .map(|(host_alias, tmux_name)| WorktreeOccupant {
                     host_alias,
@@ -194,8 +192,8 @@ pub async fn list_host_worktrees_with(
     let host = args.host_alias.as_str();
     let pid = args.project_id;
     if host == crate::service::projects::LOCAL_HOST {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
-        let worktrees = s.list_worktrees_for_project(pid).map_err(IpcError::from)?;
+        let s = lock(store)?;
+        let worktrees = s.list_worktrees_for_project(pid)?;
         return Ok(HostWorktrees {
             host_alias: host.to_string(),
             project_id: pid,
@@ -205,7 +203,7 @@ pub async fn list_host_worktrees_with(
     }
     // Everything the remote path needs, under one short lock.
     let (owner, repo, base, layout) = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let (owner, repo) = crate::service::sessions::fetch_owner_repo(&s, pid)?;
         (
             owner,
@@ -292,20 +290,17 @@ pub async fn list_host_worktrees_with(
     // is idempotent (`delete_host_worktrees_not_in`'s contract) and retries
     // whatever this one left behind.
     let worktrees = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let mut rows = Vec::with_capacity(found.len());
         let mut names = Vec::with_capacity(found.len());
         for (name, path, branch) in &found {
-            let id = s
-                .upsert_worktree_on(host, pid, name, path, branch.as_deref())
-                .map_err(IpcError::from)?;
-            if let Some(row) = s.get_worktree_row(id).map_err(IpcError::from)? {
+            let id = s.upsert_worktree_on(host, pid, name, path, branch.as_deref())?;
+            if let Some(row) = s.get_worktree_row(id)? {
                 rows.push(row);
             }
             names.push(name.clone());
         }
-        s.delete_host_worktrees_not_in(host, pid, &names)
-            .map_err(IpcError::from)?;
+        s.delete_host_worktrees_not_in(host, pid, &names)?;
         rows
     };
     Ok(HostWorktrees {
@@ -348,16 +343,13 @@ pub async fn delete_worktree(
     // Resolve everything we need under one lock; the SSH call below runs
     // off-lock.
     let (worktree_path, project_base_path, host_alias) = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
-        let wt = s
-            .get_worktree_row(args.worktree_id)
-            .map_err(IpcError::from)?
-            .ok_or_else(|| {
-                IpcError::new(
-                    "E_NOTFOUND",
-                    format!("worktree {} not found", args.worktree_id),
-                )
-            })?;
+        let s = lock(store)?;
+        let wt = s.get_worktree_row(args.worktree_id)?.ok_or_else(|| {
+            IpcError::new(
+                "E_NOTFOUND",
+                format!("worktree {} not found", args.worktree_id),
+            )
+        })?;
         // A remote host's row names a checkout on that host, reported by its
         // EnterWorktree hook; the `git -C <local project base>` below would
         // aim at the wrong filesystem. Its ExitWorktree hook removes it.
@@ -371,9 +363,7 @@ pub async fn delete_worktree(
             ));
         }
         if !args.force {
-            let occupants = s
-                .alive_sessions_for_worktree(wt.id)
-                .map_err(IpcError::from)?;
+            let occupants = s.alive_sessions_for_worktree(wt.id)?;
             if !occupants.is_empty() {
                 let who = occupants
                     .iter()
@@ -386,21 +376,17 @@ pub async fn delete_worktree(
                 ));
             }
         }
-        let proj_base = s
-            .project_base_path(wt.project_id)
-            .map_err(IpcError::from)?
-            .ok_or_else(|| {
-                IpcError::new(
-                    "E_NOTFOUND",
-                    format!("project {} for worktree has no base path", wt.project_id),
-                )
-            })?;
+        let proj_base = s.project_base_path(wt.project_id)?.ok_or_else(|| {
+            IpcError::new(
+                "E_NOTFOUND",
+                format!("project {} for worktree has no base path", wt.project_id),
+            )
+        })?;
         // Pick a host to run `git worktree remove` on. Prefer any session's
         // host (alive or not) so we hit the box where the worktree lives;
         // fall back to "local" when no session row remembers it.
         let host = s
-            .alive_sessions_for_worktree(wt.id)
-            .map_err(IpcError::from)?
+            .alive_sessions_for_worktree(wt.id)?
             .first()
             .map(|(h, _)| h.clone())
             .unwrap_or_else(|| "local".to_string());
@@ -439,9 +425,8 @@ pub async fn delete_worktree(
     // Resolve the fingerprint keys before taking the lock: canonicalizing a
     // local path touches the filesystem (it can hang on a dead NFS mount).
     let fp_keys = Store::fingerprint_keys_of_worktree(store, args.worktree_id);
-    let s = store.lock().map_err(|_| IpcError::lock())?;
-    s.delete_worktree(args.worktree_id, &fp_keys)
-        .map_err(IpcError::from)?;
+    let s = lock(store)?;
+    s.delete_worktree(args.worktree_id, &fp_keys)?;
     Ok(())
 }
 

@@ -316,8 +316,8 @@ pub async fn sweep_with(
 /// Tick entry point: sweep when `gc.enabled` and the sweep interval has
 /// elapsed since the last sweep. Cheap when disabled (one settings read).
 pub async fn maybe_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Option<GcReport> {
-    static LAST: once_cell::sync::Lazy<Mutex<Option<std::time::Instant>>> =
-        once_cell::sync::Lazy::new(|| Mutex::new(None));
+    static LAST: std::sync::LazyLock<Mutex<Option<std::time::Instant>>> =
+        std::sync::LazyLock::new(|| Mutex::new(None));
     let cfg = {
         let s = store.lock().ok()?;
         GcConfig::from_store(&s)

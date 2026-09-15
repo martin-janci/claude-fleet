@@ -1,6 +1,7 @@
 //! Service functions for Claude CLI background-session operations.
 
 use crate::claude_cli;
+use crate::ipc_error::lock;
 use crate::ipc_error::IpcError;
 use crate::ssh::SshClient;
 use crate::store::Store;
@@ -269,7 +270,7 @@ pub struct DismissAgentArgs {
 /// `kind='bg'` row that is not `working` qualifies — an `external` row leaves
 /// the list when its process ends, and a working agent must be stopped first.
 pub fn dismiss_agent_session(args: DismissAgentArgs, store: &Mutex<Store>) -> Result<(), IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     let sess = s
         .get_session_by_id(args.session_id)?
         .ok_or_else(|| IpcError::new("E_NOTFOUND", "session not found"))?;
@@ -380,9 +381,9 @@ where
     // Syntax is not enough: only registered hosts may be reached over ssh.
     // `local` never goes through ssh and has no guaranteed hosts row.
     {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         for host in args.host_aliases.iter().filter(|h| h.as_str() != "local") {
-            if s.get_host_row(host).map_err(IpcError::from)?.is_none() {
+            if s.get_host_row(host)?.is_none() {
                 return Err(IpcError::new("E_NOTFOUND", format!("unknown host: {host}")));
             }
         }
@@ -393,7 +394,7 @@ where
     }
     // Fingerprint keys are resolved before the lock (filesystem access).
     let fp_keys = Store::fingerprint_keys_of_project(store, args.project_id);
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     s.delete_project(args.project_id, &fp_keys)?;
     Ok(reports)
 }

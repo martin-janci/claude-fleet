@@ -547,10 +547,7 @@ impl Store {
         project_id: i64,
         fp_keys: &FingerprintKeys,
     ) -> Result<(), crate::ipc_error::IpcError> {
-        let tx = self
-            .conn
-            .unchecked_transaction()
-            .map_err(crate::ipc_error::IpcError::from)?;
+        let tx = self.conn.unchecked_transaction()?;
         // What dies with the sessions (as `delete_session` does): their
         // timeline and the messages addressed to them. And the recorded
         // parent fingerprints (repair) of the project's worktree rows, each
@@ -593,19 +590,16 @@ impl Store {
         tx.execute(
             "DELETE FROM sessions WHERE project_id = ?1",
             rusqlite::params![project_id],
-        )
-        .map_err(crate::ipc_error::IpcError::from)?;
+        )?;
         tx.execute(
             "DELETE FROM worktrees WHERE project_id = ?1",
             rusqlite::params![project_id],
-        )
-        .map_err(crate::ipc_error::IpcError::from)?;
+        )?;
         tx.execute(
             "DELETE FROM projects WHERE id = ?1",
             rusqlite::params![project_id],
-        )
-        .map_err(crate::ipc_error::IpcError::from)?;
-        tx.commit().map_err(crate::ipc_error::IpcError::from)?;
+        )?;
+        tx.commit()?;
         self.emit_sessions_updated(&cross);
         Ok(())
     }

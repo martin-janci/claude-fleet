@@ -1,5 +1,6 @@
 //! Provision a host's Claude with the fleet-control skill + MCP server entry.
 
+use crate::ipc_error::lock;
 use crate::ipc_error::IpcError;
 use crate::service::tunnel::TunnelSupervisor;
 use crate::shell::quote;
@@ -133,7 +134,7 @@ pub fn resolve_host_token(
     host: &str,
     rotate: bool,
 ) -> Result<(String, bool), IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     match s.get_host_token(host)? {
         Some(row) if !rotate => Ok((row.token, false)),
         _ => Ok((crate::mcp::generate_token(), true)),
@@ -150,7 +151,7 @@ pub fn commit_host_token(
     if !minted {
         return Ok(());
     }
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     s.upsert_host_token(host, token)
 }
 
@@ -278,9 +279,7 @@ pub async fn provision_hosts(
     rotate: bool,
 ) -> Result<Vec<HostProvisionResult>, IpcError> {
     let hosts = {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = lock(store)?;
         s.list_hosts()?
     };
     let mut results = Vec::new();
@@ -321,12 +320,7 @@ pub fn reestablish_tunnels(
     tunnels: &Arc<TunnelSupervisor>,
     mcp_port: u16,
 ) -> Result<(), IpcError> {
-    let hosts = {
-        store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?
-            .list_hosts()?
-    };
+    let hosts = { lock(store)?.list_hosts()? };
     for h in hosts {
         if h.provisioned && h.alias != "local" && !h.hidden {
             tunnels.ensure(&h.alias, mcp_port, mcp_port);
