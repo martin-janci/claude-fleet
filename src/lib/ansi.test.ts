@@ -1326,3 +1326,39 @@ describe('ansi.Screen — private-marker CSI is never run as its public form (F1
     expect(rowText(s, 1).trim()).toBe('');
   });
 });
+
+describe('ansi.Screen — RIS (ESC c) resets modes (F15)', () => {
+  it('clears mouse 1000/1002/1003/1006, bracketed paste, app cursor keys; shows the cursor', () => {
+    const s = new Screen(3, 10);
+    s.write('\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?25l\x1b[?1h\x1b[3 q');
+    expect([s.mouseEnabled, s.mouseButtonMotion, s.mouseAnyMotion, s.mouseSgr, s.bracketedPaste]).toEqual([
+      true, true, true, true, true,
+    ]);
+    s.write('\x1bc');
+    expect(s.mouseEnabled).toBe(false);
+    expect(s.mouseButtonMotion).toBe(false);
+    expect(s.mouseAnyMotion).toBe(false);
+    expect(s.mouseSgr).toBe(false);
+    expect(s.bracketedPaste).toBe(false);
+    expect(s.cursorVisible).toBe(true);
+    expect(s.appCursorKeys).toBe(false);
+    expect(s.cursorStyle).toBe(0);
+  });
+
+  it('forgets the DECSC saved cursor', () => {
+    const s = new Screen(4, 10);
+    s.write('\x1b[3;5H\x1b7\x1bc\x1b[2;2H\x1b8');
+    expect([s.cursorRow, s.cursorCol]).toEqual([0, 0]);
+  });
+
+  it('matches a freshly constructed Screen for every mode flag', () => {
+    const fresh = new Screen(2, 4);
+    const s = new Screen(2, 4);
+    s.write('\x1b[?1000h\x1b[?1006h\x1b[?2004h\x1b[?25l\x1b[?1h\x1b[5 q\x1bc');
+    const modes = (x: Screen) => [
+      x.mouseEnabled, x.mouseButtonMotion, x.mouseAnyMotion, x.mouseSgr,
+      x.bracketedPaste, x.cursorVisible, x.appCursorKeys, x.cursorStyle,
+    ];
+    expect(modes(s)).toEqual(modes(fresh));
+  });
+});

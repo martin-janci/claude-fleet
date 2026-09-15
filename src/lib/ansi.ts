@@ -164,19 +164,20 @@ export class Screen {
   cursorRow = 0;
   cursorCol = 0;
   /** Cursor visibility (DECSET ?25). Visible by default per the VT spec;
-   *  tmux/claude toggle it with ?25h / ?25l around redraws. */
-  cursorVisible = true;
+   *  tmux/claude toggle it with ?25h / ?25l around redraws. Mode fields
+   *  like this one get their power-on value from `resetModes()`. */
+  cursorVisible!: boolean;
   /** Bracketed-paste mode (DECSET ?2004). When on, the host app (e.g. Claude
    *  Code) wants pasted text wrapped in ESC[200~ … ESC[201~ so multi-line
    *  pastes aren't treated as typed input. The component reads this to decide
    *  whether to frame a paste. */
-  bracketedPaste = false;
+  bracketedPaste!: boolean;
   /** Application cursor keys (DECSET ?1). When on, arrows/Home/End are sent
    *  as SS3 (`ESC O A`) instead of CSI (`ESC [ A`). Read by the key mapper. */
-  appCursorKeys = false;
+  appCursorKeys!: boolean;
   /** Cursor style requested via DECSCUSR (`CSI Ps SP q`), stored only:
    *  0/1 blinking block, 2 steady block, 3/4 underline, 5/6 bar. */
-  cursorStyle = 0;
+  cursorStyle!: number;
   /** Bytes the terminal owes the host in answer to a query (DSR, DA). The
    *  parser has no back-channel of its own; the component drains this after
    *  every `write()` and forwards it to the PTY. */
@@ -200,8 +201,8 @@ export class Screen {
   /** Last printed glyph + its width, for REP (`CSI Ps b`). */
   private lastGlyph: { ch: string; width: 1 | 2 } | null = null;
   /** Saved cursor (ESC 7 / DECSC). */
-  private savedRow = 0;
-  private savedCol = 0;
+  private savedRow!: number;
+  private savedCol!: number;
   /** Whether G0 / G1 are currently designated as DEC Special Graphics.
    *  Default: both ASCII. tmux flips G0 around box drawing. */
   private g0Graphics = false;
@@ -243,10 +244,10 @@ export class Screen {
   //   mouseButtonMotion  — 1002 || 1003
   //   mouseAnyMotion     — 1003
   //   mouseSgr           — 1006
-  private _mouse1000 = false;
-  private _mouse1002 = false;
-  private _mouse1003 = false;
-  private _mouse1006 = false;
+  private _mouse1000!: boolean;
+  private _mouse1002!: boolean;
+  private _mouse1003!: boolean;
+  private _mouse1006!: boolean;
 
   get mouseEnabled(): boolean { return this._mouse1000 || this._mouse1002 || this._mouse1003; }
   get mouseButtonMotion(): boolean { return this._mouse1002 || this._mouse1003; }
@@ -265,6 +266,23 @@ export class Screen {
     this.scrollBottom = this.rows - 1;
     this.rowVersion = new Array(this.rows);
     this.markAll();
+    this.resetModes();
+  }
+
+  /** Power-on values of the terminal modes and the DECSC slot. Shared by the
+   *  constructor and RIS (`ESC c`) so a reset can never leave a mode — mouse
+   *  reporting, bracketed paste, a hidden cursor — that a fresh Screen lacks. */
+  private resetModes(): void {
+    this.cursorVisible = true;
+    this.bracketedPaste = false;
+    this.appCursorKeys = false;
+    this.cursorStyle = 0;
+    this._mouse1000 = false;
+    this._mouse1002 = false;
+    this._mouse1003 = false;
+    this._mouse1006 = false;
+    this.savedRow = 0;
+    this.savedCol = 0;
   }
 
   /** Mark a single row changed. */
@@ -734,8 +752,7 @@ export class Screen {
     this.useG1 = false;
     this.scrollTop = 0;
     this.scrollBottom = this.rows - 1;
-    this.appCursorKeys = false;
-    this.cursorStyle = 0;
+    this.resetModes();
     this.lastGlyph = null;
     // ESC c is a full power-on reset — drop any alt-screen snapshot so
     // we don't pop back into stale content the next time we leave alt.
