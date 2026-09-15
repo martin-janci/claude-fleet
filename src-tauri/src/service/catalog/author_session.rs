@@ -8,9 +8,8 @@
 //! mirroring `service::sessions::review::spawn_review`'s soft-fail seeding so
 //! a failed seed never discards the freshly spawned session.
 //!
-//! This module's commands land with `commands/assets.rs` in Task 4 of the
-//! authoring plan; until then it is reached only from its own tests, hence
-//! the per-item `#[allow(dead_code)]`s below.
+//! This module's command is `catalog_spawn_author_session` in
+//! `commands/assets.rs`.
 
 use super::model::{is_valid_name, Kind};
 use super::require_config;
@@ -24,11 +23,10 @@ use crate::store::{SessionRow, Store};
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 
-/// Args for `catalog_spawn_author_session` (wired up in Task 4). `kind` +
-/// `name` name an existing catalog asset to hand off; leaving either `None`
-/// means "create a new asset" (the session decides kind/name itself).
+/// Args for `catalog_spawn_author_session`. `kind` + `name` name an existing
+/// catalog asset to hand off; leaving either `None` means "create a new
+/// asset" (the session decides kind/name itself).
 #[derive(Deserialize)]
-#[allow(dead_code)] // reached only from tests until Task 4 wires the command
 pub struct SpawnAuthorArgs {
     pub kind: Option<Kind>,
     pub name: Option<String>,
@@ -160,7 +158,6 @@ fn same_path(repo_path: &str, candidate: &str) -> bool {
 /// always a local checkout) the first time it's delegated to. Idempotent:
 /// a second call with the same `repo_path` finds the row `add_project`
 /// registered and returns its id without touching the store again.
-#[allow(dead_code)] // reached only from tests until Task 4 wires the command
 pub async fn ensure_catalog_project(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
@@ -199,7 +196,6 @@ pub async fn ensure_catalog_project(
 /// `spawn_review`: seeding is soft-failed with `tracing::warn!` so a slow or
 /// unready REPL never discards an otherwise-live session — the row is
 /// returned either way and the UI selects it.
-#[allow(dead_code)] // reached only from tests until Task 4 wires the command
 pub async fn spawn_author_session(
     args: SpawnAuthorArgs,
     store: &Mutex<Store>,

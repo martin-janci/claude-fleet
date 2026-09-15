@@ -9,11 +9,7 @@
 //! `CATALOG` and the UI refresh through the existing `catalog:loaded` event.
 
 // This module is the service layer for the twelve `catalog_*` authoring
-// commands, which land with `commands/assets.rs` in task 4 of the authoring
-// plan. Until then every item here is reached only from this module's own
-// tests, so the whole module reads as dead in a non-test build. Drop this
-// attribute once the commands are wired up.
-#![allow(dead_code)]
+// commands in `commands/assets.rs`.
 
 use super::harness::HARNESS_IDS;
 use super::model::{
