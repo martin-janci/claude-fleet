@@ -13,6 +13,8 @@ function setup(modes = '\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h') {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const writes: string[] = [];
+  const input = document.createElement('textarea');
+  container.appendChild(input);
   let selAnchor: CellPos | null = null;
   let selFocus: CellPos | null = null;
   const mouse = createMouseController({
@@ -33,8 +35,9 @@ function setup(modes = '\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h') {
     },
     copySelection: async () => {},
     writePty: (d) => writes.push(d),
+    focusInput: () => input.focus(),
   });
-  return { mouse, writes, container, screen, sel: () => ({ anchor: selAnchor, focus: selFocus }) };
+  return { mouse, writes, container, screen, input, sel: () => ({ anchor: selAnchor, focus: selFocus }) };
 }
 
 const down = (button: number, init: MouseEventInit = {}) =>
@@ -159,5 +162,44 @@ describe('createMouseController window listeners (N6)', () => {
     for (const x of [30, 50]) windowMove(x);
     windowUp(50);
     expect(writes).toEqual([]);
+  });
+});
+
+// Every press here calls preventDefault(), so the browser never focuses
+// anything by itself. Focus must land on the component's hidden IME proxy —
+// focusing the grid instead would leave WebKit with no input-method session
+// and swallow every dead key and IME commit (F9).
+describe('createMouseController focus (F9)', () => {
+  let controllers: Array<{ dispose: () => void }> = [];
+  beforeEach(() => {
+    controllers = [];
+  });
+  afterEach(() => {
+    for (const c of controllers) c.dispose();
+    document.body.innerHTML = '';
+  });
+
+  it('a local drag-select focuses the input proxy', () => {
+    const { mouse, input } = setup('');
+    controllers.push(mouse);
+    mouse.onMousedown(down(0, { clientX: 10, clientY: 20 }));
+    expect(document.activeElement).toBe(input);
+    windowUp(10, 20);
+  });
+
+  it('a deferred press with mouse reporting on focuses the input proxy', () => {
+    const { mouse, input } = setup();
+    controllers.push(mouse);
+    mouse.onMousedown(down(0, { clientX: 10, clientY: 20 }));
+    expect(document.activeElement).toBe(input);
+    windowUp(10, 20);
+  });
+
+  it('a forwarded (Option / middle-button) press focuses the input proxy', () => {
+    const { mouse, input } = setup();
+    controllers.push(mouse);
+    mouse.onMousedown(down(1, { clientX: 10, clientY: 20 }));
+    expect(document.activeElement).toBe(input);
+    windowUp(10, 20);
   });
 });

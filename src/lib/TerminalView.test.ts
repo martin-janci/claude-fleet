@@ -1035,7 +1035,7 @@ describe('TerminalView cursor like a text input', () => {
     return screen.getByTestId('terminal-host');
   }
 
-  it('is a hollow outline until the grid has focus, then a blinking block', async () => {
+  it('is a hollow outline until the terminal has focus, then a blinking block', async () => {
     const host = await mountWith('ab');
     let cur = screen.getByTestId('terminal-cursor');
     expect(cur.classList.contains('block')).toBe(true);
@@ -1046,7 +1046,9 @@ describe('TerminalView cursor like a text input', () => {
     cur = screen.getByTestId('terminal-cursor');
     expect(cur.classList.contains('unfocused')).toBe(false);
     expect(cur.classList.contains('blink')).toBe(true);
-    host.blur();
+    // Focus sits on the hidden IME proxy, not the grid (F9) — blur whatever
+    // ended up holding it.
+    (document.activeElement as HTMLElement | null)?.blur();
     await settle();
     cur = screen.getByTestId('terminal-cursor');
     expect(cur.classList.contains('unfocused')).toBe(true);
@@ -1087,5 +1089,142 @@ describe('TerminalView cursor like a text input', () => {
     await mountWith('0123456789');
     const cur = screen.getByTestId('terminal-cursor');
     expect(parseFloat(cur.style.left)).toBeCloseTo(4 + 9 * 7.8, 5);
+  });
+});
+
+// ─── IME / dead-key input through the hidden proxy (F9) ───────────────────
+describe('TerminalView IME input proxy (F9)', () => {
+  const written = () => calls('pty_write').map((c) => (c[1] as { args: { data: string } }).args.data);
+
+  /** Mount, attach, and hand back the proxy the input method types into. */
+  async function mountProxy(data = ''): Promise<HTMLTextAreaElement> {
+    let served = false;
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_drain') {
+        if (served) return drained();
+        served = true;
+        return drained({ data, bytes: data.length });
+      }
+      return null;
+    });
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    return screen.getByTestId('terminal-ime') as HTMLTextAreaElement;
+  }
+
+  const key = (init: KeyboardEventInit) =>
+    new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init });
+  /** What the browser leaves behind for us: the text is in the proxy's value
+   *  by the time either event fires. */
+  const compose = (el: HTMLTextAreaElement, text: string) => {
+    el.value = text;
+    return new CompositionEvent('compositionend', { data: text, bubbles: true });
+  };
+  const inputEvent = (inputType: string, data: string) =>
+    new InputEvent('input', { inputType, data, bubbles: true });
+  /** Let the compositionJustEnded flag's setTimeout(0) run. */
+  const nextMacrotask = () => new Promise((r) => setTimeout(r, 0));
+
+  it('renders a focusable proxy inside the grid', async () => {
+    const ime = await mountProxy();
+    expect(ime.tagName).toBe('TEXTAREA');
+    expect(screen.getByTestId('terminal-host').contains(ime)).toBe(true);
+    // Nothing the OS adds on its own may reach the PTY.
+    expect(ime.getAttribute('autocapitalize')).toBe('off');
+    expect(ime.getAttribute('autocomplete')).toBe('off');
+    expect(ime.getAttribute('autocorrect')).toBe('off');
+    expect(ime.getAttribute('spellcheck')).toBe('false');
+  });
+
+  it('a dead-key composition reaches the PTY exactly once (compositionend first)', async () => {
+    const ime = await mountProxy();
+    ime.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    // The keystrokes the input method swallowed while composing.
+    ime.dispatchEvent(key({ key: 'Dead', keyCode: 229 }));
+    ime.dispatchEvent(key({ key: 'a', keyCode: 229, isComposing: true }));
+    ime.dispatchEvent(compose(ime, 'á'));
+    // Chromium follows compositionend with an input event for the same text.
+    ime.dispatchEvent(inputEvent('insertCompositionText', 'á'));
+    await settle();
+    expect(written()).toEqual(['á']);
+  });
+
+  it('…and once when the input event lands before compositionend (WebKit order)', async () => {
+    const ime = await mountProxy();
+    ime.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    ime.value = 'á';
+    ime.dispatchEvent(inputEvent('insertCompositionText', 'á'));
+    ime.dispatchEvent(compose(ime, 'á'));
+    await settle();
+    expect(written()).toEqual(['á']);
+  });
+
+  it('drops the keystrokes an IME is still holding', async () => {
+    const ime = await mountProxy();
+    ime.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    ime.dispatchEvent(key({ key: 'Process', keyCode: 229 }));
+    ime.dispatchEvent(key({ key: 'n', keyCode: 229, isComposing: true }));
+    ime.dispatchEvent(key({ key: 'i', keyCode: 229, isComposing: true }));
+    await settle();
+    expect(written()).toEqual([]);
+  });
+
+  it('swallows the Enter that commits a composition, but not the next one', async () => {
+    const ime = await mountProxy();
+    ime.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    ime.dispatchEvent(compose(ime, '日本'));
+    // WebKit delivers the committing key AFTER compositionend, isComposing
+    // already false. Sending it too would submit Claude Code's prompt.
+    ime.dispatchEvent(key({ key: 'Enter' }));
+    await settle();
+    expect(written()).toEqual(['日本']);
+
+    await nextMacrotask();
+    ime.dispatchEvent(key({ key: 'Enter' }));
+    await settle();
+    expect(written()).toEqual(['日本', '\r']);
+  });
+
+  it('sends an emoji-picker / accent-popup insert once', async () => {
+    const ime = await mountProxy();
+    ime.value = '🤖';
+    ime.dispatchEvent(inputEvent('insertText', '🤖'));
+    await settle();
+    expect(written()).toEqual(['🤖']);
+    // Nothing is left behind to be sent a second time.
+    ime.dispatchEvent(inputEvent('insertText', ''));
+    await settle();
+    expect(written()).toEqual(['🤖']);
+  });
+
+  it('keeps forwarding ordinary keys, which never reach the proxy as text', async () => {
+    const ime = await mountProxy();
+    ime.dispatchEvent(key({ key: 'x' }));
+    ime.dispatchEvent(key({ key: 'ArrowLeft' }));
+    await settle();
+    expect(written()).toEqual(['x', '\x1b[D']);
+  });
+
+  it('hands keyboard focus to the proxy, from the grid and from a click', async () => {
+    const ime = await mountProxy();
+    const host = screen.getByTestId('terminal-host');
+    host.focus();
+    await settle();
+    expect(document.activeElement).toBe(ime);
+    expect(screen.getByTestId('terminal-cursor').classList.contains('unfocused')).toBe(false);
+
+    ime.blur();
+    await settle();
+    host.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, detail: 1 }));
+    await settle();
+    expect(document.activeElement).toBe(ime);
+  });
+
+  it('parks the proxy on the cursor cell so the IME popup opens there', async () => {
+    const ime = await mountProxy('\x1b[2;4H');
+    const cur = screen.getByTestId('terminal-cursor');
+    expect(ime.style.left).toBe(cur.style.left);
+    expect(ime.style.top).toBe(cur.style.top);
   });
 });

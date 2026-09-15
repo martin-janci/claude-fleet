@@ -22,6 +22,10 @@ export interface MouseHost {
   clearSelection(): void;
   copySelection(): Promise<void>;
   writePty(data: string): void;
+  /** Put keyboard focus back where the component wants it — the hidden IME
+   *  proxy, not the grid. Every gesture here calls preventDefault(), which
+   *  suppresses the browser's own focus-on-click. */
+  focusInput(): void;
 }
 
 const WHEEL_TICK_PX = 40;
@@ -154,8 +158,8 @@ export function createMouseController(host: MouseHost) {
    *  it keeps following the pointer outside the grid. On release a
    *  non-empty selection is copied when the pref says so; a plain
    *  single-click that moved nowhere clears any selection instead. */
-  function beginLocalSelection(e: MouseEvent, mode: SelectMode, rawAnchor: CellPos, cell: CellPos) {
-    (e.currentTarget as HTMLElement | null)?.focus();
+  function beginLocalSelection(mode: SelectMode, rawAnchor: CellPos, cell: CellPos) {
+    host.focusInput();
     endGesture();
     selecting = true;
     selectMode = mode;
@@ -235,13 +239,13 @@ export function createMouseController(host: MouseHost) {
         // tmux's own word/line selection would land in *its* buffer, not the
         // clipboard the user is about to paste from.)
         e.preventDefault();
-        beginLocalSelection(e, mode, extend ? prevAnchor! : cell, cell);
+        beginLocalSelection(mode, extend ? prevAnchor! : cell, cell);
         return;
       }
       // Mouse reporting ON, single click → defer: a drag becomes a local
       // selection, a click (no movement) forwards to the app.
       e.preventDefault();
-      (e.currentTarget as HTMLElement | null)?.focus();
+      host.focusInput();
       endGesture();
       pendingPress = { cell, startX: e.clientX, startY: e.clientY };
       let off = () => {};
@@ -288,7 +292,7 @@ export function createMouseController(host: MouseHost) {
     e.preventDefault();
     // preventDefault() suppresses the browser's default focus-on-click; focus
     // the terminal explicitly so keystrokes keep flowing after a mouse-mode click.
-    (e.currentTarget as HTMLElement | null)?.focus();
+    host.focusInput();
     const { col, row } = eventToCell(e);
     const cb = e.button; // 0=left 1=middle 2=right
     // A press here pre-empts whatever was live — a half-finished drag-select

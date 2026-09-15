@@ -79,9 +79,22 @@
   let selAnchor: CellPos | null = $state(null);
   let selFocus: CellPos | null = $state(null);
   let openError: string | null = $state(null);
-  /** Keyboard focus is on the grid. Drives the cursor's look: a solid block
-   *  when focused, a hollow outline when not — so it is always clear where
-   *  typing will land, as with a text input's caret. */
+  /** The hidden textarea that actually owns keyboard focus. WebKit only runs
+   *  an input-method session on an editable element, so a dead key, the
+   *  press-and-hold accent popup, the emoji picker and every CJK IME need a
+   *  real editable target — the grid is a plain div and gets none of them.
+   *  It rides the cursor cell so the candidate window opens where the text
+   *  will appear. */
+  let imeInput: HTMLTextAreaElement | undefined = $state(undefined);
+  /** True between compositionstart and compositionend. */
+  let composing = false;
+  /** Set for one macrotask after compositionend: WebKit delivers the key that
+   *  COMMITTED the composition as a keydown right after it, with isComposing
+   *  already false. */
+  let compositionJustEnded = false;
+  /** Keyboard focus is on the terminal. Drives the cursor's look: a solid
+   *  block when focused, a hollow outline when not — so it is always clear
+   *  where typing will land, as with a text input's caret. */
   let focused = $state(false);
   /** Bumped on every keystroke / paste that reaches the PTY. The cursor
    *  element is keyed on it so its blink animation restarts from the visible
@@ -165,6 +178,7 @@
     clearSelection,
     copySelection,
     writePty,
+    focusInput,
   });
   const { onWheel, onMousedown } = mouse;
 
@@ -684,6 +698,11 @@
 
     // Drop the context menu so a session switch can't leave the backdrop stuck.
     ctxMenu = null;
+    // A composition half-typed into the pane that is going away must not be
+    // flushed into the next session's PTY.
+    composing = false;
+    compositionJustEnded = false;
+    if (imeInput) imeInput.value = '';
     // The overlay and the error belong to the pane that is going away; an
     // upload still in flight checks the generation before it touches either.
     uploading = false;
@@ -722,9 +741,17 @@
 
   function onKeydown(e: KeyboardEvent) {
     if (!ptyOpen) return;
-    // While an IME / dead-key composition is in progress the keydowns are
-    // part of composing — the finished text arrives via compositionend.
-    if (e.isComposing) return;
+    // An input method owns this keystroke: the finished text arrives through
+    // the proxy's composition/input events instead. WebKit reports the keys it
+    // swallowed while composing as keyCode 229 / key `Process`.
+    if (e.isComposing || composing || e.keyCode === 229 || e.key === 'Process') return;
+    // The key that COMMITTED a composition is delivered after compositionend
+    // with isComposing already false. Forwarding it as well would submit
+    // Claude Code's prompt (Enter) or append a stray space to the word.
+    if (compositionJustEnded && (e.key === 'Enter' || e.key === ' ')) {
+      e.preventDefault();
+      return;
+    }
     if (e.key === 'Escape' && ctxMenu) { ctxMenu = null; return; }
     const k = e.key.toLowerCase();
     const cmdChord = e.metaKey && !e.altKey && !e.ctrlKey;
@@ -768,14 +795,56 @@
     bumpDrain();
   }
 
-  /** Forward IME / dead-key composed text (e.g. Slovak `á`, CJK input) — it
-   *  never reaches `onKeydown` as a single printable char. */
-  function onCompositionEnd(e: CompositionEvent) {
-    if (!ptyOpen || !e.data) return;
-    writePty(e.data);
+  /** Move keyboard focus to the IME proxy. Everything that used to focus the
+   *  grid goes through here (its own onfocus included), so an input method
+   *  always has an editable element to attach to. */
+  function focusInput() {
+    (imeInput ?? container)?.focus({ preventScroll: true });
+  }
+
+  /** Send whatever the input method left in the proxy, and empty it.
+   *
+   *  Both compositionend and a non-composing input event call this, because
+   *  WebKit and Chromium disagree about which of the two fires first and with
+   *  what `data`. Reading the element's value rather than the event's payload
+   *  makes the proxy the single source of truth: whichever event runs second
+   *  finds it already empty and sends nothing, so the composed string can
+   *  never go out twice. */
+  function flushImeInput() {
+    const el = imeInput;
+    if (!el) return;
+    const text = el.value;
+    if (text) el.value = '';
+    if (!text || !ptyOpen) return;
+    writePty(text);
     clearSelection();
     blinkEpoch++;
     bumpDrain();
+  }
+
+  function onCompositionStart() {
+    composing = true;
+  }
+
+  /** Forward IME / dead-key composed text (Slovak `á`, the press-and-hold
+   *  accent popup, a CJK commit) — it never reaches `onKeydown` as a single
+   *  printable char. */
+  function onCompositionEnd() {
+    composing = false;
+    compositionJustEnded = true;
+    // One macrotask is all the commit keydown gets; anything later is a real
+    // keystroke the user meant to send.
+    setTimeout(() => (compositionJustEnded = false), 0);
+    flushImeInput();
+  }
+
+  /** Text inserted without a composition: the emoji picker, dictation, a
+   *  paste the OS routed through the proxy. A printable keystroke never gets
+   *  here — `onKeydown` calls preventDefault() for it, and a prevented
+   *  keydown produces no input event. */
+  function onImeInput(e: Event) {
+    if (composing || (e as InputEvent).isComposing) return;
+    flushImeInput();
   }
 
   function describeError(e: unknown): string {
@@ -922,9 +991,11 @@
         ↻ reconnect
       </button>
     </div>
-    <!-- The grid container. tabindex makes it focusable so keyboard
-         input lands here. We render lines as block <div>s with monospace
-         spans for each style run. -->
+    <!-- The grid container. tabindex keeps it in the tab order; the focus it
+         receives is handed straight to the IME proxy below, which is what
+         actually holds the caret. keydown stays here so it catches the
+         proxy's keystrokes as they bubble. We render lines as block <div>s
+         with monospace spans for each style run. -->
     <div
       class="grid"
       style:--cell-w={cellWidth > 0 ? `${cellWidth}px` : null}
@@ -934,18 +1005,37 @@
       aria-label="Terminal"
       aria-multiline="true"
       onkeydown={onKeydown}
-      oncompositionend={onCompositionEnd}
       onwheel={onWheel}
       onmousedown={onMousedown}
       oncontextmenu={onContextMenu}
-      onfocus={() => (focused = true)}
-      onblur={() => (focused = false)}
+      onfocus={focusInput}
       data-testid="terminal-host"
     >
       <!-- Hidden 1ch×1lh probe used once to measure font metrics. We can't
            rely on naive `font-size * 0.6` — system font metrics on macOS
            drift slightly between Menlo and SF Mono. -->
       <span class="measure" bind:this={measureCell} aria-hidden="true">M</span>
+      <!-- The real keyboard target. Invisible, one cell wide, parked on the
+           cursor so WebKit anchors the IME candidate window and the
+           press-and-hold accent popup where the text will land. Its own
+           content is never displayed: every handler empties it again. -->
+      <textarea
+        class="ime-proxy"
+        bind:this={imeInput}
+        style="left:{cursor?.left ?? 4}px; top:{cursor?.top ?? 4}px; height:{cursor?.h ?? 16}px"
+        rows="1"
+        autocapitalize="off"
+        autocomplete="off"
+        {...{ autocorrect: 'off' }}
+        spellcheck="false"
+        aria-label="Terminal input"
+        oncompositionstart={onCompositionStart}
+        oncompositionend={onCompositionEnd}
+        oninput={onImeInput}
+        onfocus={() => (focused = true)}
+        onblur={() => (focused = false)}
+        data-testid="terminal-ime"
+      ></textarea>
       {#each visibleRows as row (row.key)}
         <div class="row">
           {#each row.runs as run, i (i)}
@@ -1130,6 +1220,36 @@
   }
   .grid:focus-visible {
     box-shadow: inset 0 0 0 1px var(--accent, #4f8fff);
+  }
+  /* Focus lives on the proxy, so the ring has to follow it. Kept as its own
+     rule: where `:has()` is unsupported only this one is dropped. */
+  .grid:has(.ime-proxy:focus-visible) {
+    box-shadow: inset 0 0 0 1px var(--accent, #4f8fff);
+  }
+  /* Invisible, but NOT display:none / visibility:hidden and not off-screen —
+     WebKit only opens an input-method session on an element it considers
+     rendered, and positions the candidate window from its caret rect. Inherits
+     the grid font so that rect lines up with the cell it sits on. */
+  .ime-proxy {
+    position: absolute;
+    z-index: 2;
+    width: 1px;
+    min-width: 0;
+    padding: 0;
+    margin: 0;
+    border: 0;
+    outline: none;
+    resize: none;
+    overflow: hidden;
+    background: transparent;
+    color: transparent;
+    caret-color: transparent;
+    opacity: 0;
+    /* Clicks belong to the grid underneath — this only ever takes focus. */
+    pointer-events: none;
+    font: inherit;
+    line-height: inherit;
+    white-space: pre;
   }
   .row {
     white-space: pre;
