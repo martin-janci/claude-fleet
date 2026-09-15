@@ -506,9 +506,8 @@ impl Store {
     /// patches the sidebar at once instead of on the next reconcile pass.
     pub(super) fn emit_sessions_updated(&self, ids: &[i64]) {
         for id in ids {
-            if let Ok(Some(row)) = self.get_session_by_id(*id) {
-                self.bus.session_updated(&row);
-            }
+            // Best-effort: a failed re-read only skips that row's event.
+            let _ = self.emit_session(*id);
         }
     }
 

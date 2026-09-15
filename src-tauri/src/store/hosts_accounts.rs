@@ -93,8 +93,18 @@ impl Store {
         Ok(())
     }
 
-    fn get_host(&self, alias: &str) -> Result<Option<HostRow>, rusqlite::Error> {
-        fetch_host(&self.conn, alias)
+    /// Re-read `alias` after a write and announce it through `emit`
+    /// (`EventBus::host_added` or `EventBus::host_probed`); nothing when the
+    /// row is gone.
+    fn emit_host(
+        &self,
+        alias: &str,
+        emit: fn(&dyn EventBus, &HostRow),
+    ) -> Result<(), rusqlite::Error> {
+        if let Some(row) = fetch_host(&self.conn, alias)? {
+            emit(self.bus.as_ref(), &row);
+        }
+        Ok(())
     }
 
     pub fn upsert_host(&self, alias: &str) -> Result<(), rusqlite::Error> {
@@ -113,9 +123,7 @@ impl Store {
             rusqlite::params![alias],
         )?;
         if !existed {
-            if let Some(row) = self.get_host(alias)? {
-                self.bus.host_added(&row);
-            }
+            self.emit_host(alias, |bus, row| bus.host_added(row))?;
         }
         Ok(())
     }
@@ -134,10 +142,7 @@ impl Store {
              ON CONFLICT(alias) DO UPDATE SET ssh_alias=excluded.ssh_alias",
             rusqlite::params![alias, ssh_alias],
         )?;
-        if let Some(row) = self.get_host(alias)? {
-            self.bus.host_added(&row);
-        }
-        Ok(())
+        self.emit_host(alias, |bus, row| bus.host_added(row))
     }
 
     pub fn update_host_probe(
@@ -158,10 +163,7 @@ impl Store {
                 alias
             ],
         )?;
-        if let Some(row) = self.get_host(alias)? {
-            self.bus.host_probed(&row);
-        }
-        Ok(())
+        self.emit_host(alias, |bus, row| bus.host_probed(row))
     }
 
     pub fn set_host_hidden(&self, alias: &str, hidden: bool) -> Result<(), rusqlite::Error> {
@@ -171,10 +173,7 @@ impl Store {
         )?;
         // Emit like every other host mutation — the HostRow carries `hidden`,
         // so subscribers see the toggle without a manual refetch.
-        if let Some(row) = self.get_host(alias)? {
-            self.bus.host_probed(&row);
-        }
-        Ok(())
+        self.emit_host(alias, |bus, row| bus.host_probed(row))
     }
 
     pub fn list_accounts(&self) -> Result<Vec<AccountRow>, rusqlite::Error> {
@@ -310,10 +309,7 @@ impl Store {
             "UPDATE hosts SET account_uuid=?1 WHERE alias=?2",
             rusqlite::params![account_uuid, alias],
         )?;
-        if let Some(row) = self.get_host(alias)? {
-            self.bus.host_probed(&row);
-        }
-        Ok(())
+        self.emit_host(alias, |bus, row| bus.host_probed(row))
     }
 
     pub fn set_host_provisioned(

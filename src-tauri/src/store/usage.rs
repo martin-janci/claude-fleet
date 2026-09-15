@@ -160,11 +160,7 @@ impl Store {
                 target_id
             ],
         )?;
-        let row = fetch_session_by_id(&self.conn, target_id)?;
-        if let Some(ref r) = row {
-            self.bus.session_updated(r);
-        }
-        Ok(row)
+        self.emit_session(target_id)
     }
 
     /// Apply one usage pass to a session: add (or, on `reset`, replace) the
@@ -261,9 +257,7 @@ impl Store {
         }
         tx.commit()?;
         if changed {
-            if let Some(row) = fetch_session_by_id(&self.conn, session_id)? {
-                self.bus.session_updated(&row);
-            }
+            self.emit_session(session_id)?;
         }
         Ok(changed)
     }

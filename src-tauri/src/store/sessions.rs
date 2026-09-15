@@ -410,9 +410,7 @@ impl Store {
             "UPDATE sessions SET kind = ?1, reviews_session_id = ?2 WHERE id = ?3",
             rusqlite::params![kind, reviews_session_id, id],
         )?;
-        if let Some(row) = self.get_session_by_id(id)? {
-            self.bus.session_updated(&row);
-        }
+        self.emit_session(id)?;
         Ok(())
     }
 
@@ -434,9 +432,7 @@ impl Store {
             "UPDATE sessions SET worktree_key = ?1 WHERE id = ?2",
             rusqlite::params![key, id],
         )?;
-        if let Some(row) = self.get_session_by_id(id)? {
-            self.bus.session_updated(&row);
-        }
+        self.emit_session(id)?;
         Ok(())
     }
 
@@ -568,11 +564,7 @@ impl Store {
               WHERE id=?3",
             rusqlite::params![nonce, requested_at, id],
         )?;
-        let row = fetch_session_by_id(&self.conn, id)?;
-        if let Some(ref r) = row {
-            self.bus.session_updated(r);
-        }
-        Ok(row)
+        self.emit_session(id)
     }
 
     /// Transition a safe-kill request to its terminal state ("ready" or
@@ -590,11 +582,7 @@ impl Store {
               WHERE id=?3",
             rusqlite::params![state, detail, id],
         )?;
-        let row = fetch_session_by_id(&self.conn, id)?;
-        if let Some(ref r) = row {
-            self.bus.session_updated(r);
-        }
-        Ok(row)
+        self.emit_session(id)
     }
 
     /// Clear the safe-kill state (used when the user cancels or retries a
@@ -609,11 +597,7 @@ impl Store {
               WHERE id=?1",
             rusqlite::params![id],
         )?;
-        let row = fetch_session_by_id(&self.conn, id)?;
-        if let Some(ref r) = row {
-            self.bus.session_updated(r);
-        }
-        Ok(row)
+        self.emit_session(id)
     }
 
     /// Transition a session back to running (clears `lost_at`). Called by the
@@ -624,6 +608,16 @@ impl Store {
             "UPDATE sessions SET status='running', lost_at=NULL WHERE id=?1",
             rusqlite::params![id],
         )?;
+        self.emit_session(id)
+    }
+
+    pub fn get_session_by_id(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
+        fetch_session_by_id(&self.conn, id)
+    }
+
+    /// Re-read `id` after a write and announce it: `session_updated` when
+    /// the row exists, nothing when it is gone. Returns the row.
+    pub(super) fn emit_session(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
         let row = fetch_session_by_id(&self.conn, id)?;
         if let Some(ref r) = row {
             self.bus.session_updated(r);
@@ -631,8 +625,16 @@ impl Store {
         Ok(row)
     }
 
-    pub fn get_session_by_id(&self, id: i64) -> Result<Option<SessionRow>, rusqlite::Error> {
-        fetch_session_by_id(&self.conn, id)
+    /// [`Self::emit_session`] keyed by `claude_session_id` (the hook writes).
+    fn emit_session_by_claude_id(
+        &self,
+        claude_session_id: &str,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        let row = self.fetch_session_by_claude_id(claude_session_id)?;
+        if let Some(ref r) = row {
+            self.bus.session_updated(r);
+        }
+        Ok(row)
     }
 
     /// Remember the most recent prompt sent to a session (first 200 chars,
@@ -647,11 +649,7 @@ impl Store {
             "UPDATE sessions SET last_prompt=?1 WHERE id=?2",
             rusqlite::params![truncated, id],
         )?;
-        let row = fetch_session_by_id(&self.conn, id)?;
-        if let Some(ref r) = row {
-            self.bus.session_updated(r);
-        }
-        Ok(row)
+        self.emit_session(id)
     }
 
     /// Stamp when fleet created this session (migration 019). Only sets the
@@ -684,11 +682,7 @@ impl Store {
                 "[playbook] session_event insert failed"
             );
         }
-        let row = fetch_session_by_id(&self.conn, id)?;
-        if let Some(ref r) = row {
-            self.bus.session_updated(r);
-        }
-        Ok(row)
+        self.emit_session(id)
     }
 
     /// Hard-delete one session row (ghost dismissal) together with what dies
@@ -800,11 +794,7 @@ impl Store {
         if changed == 0 {
             return Ok(None);
         }
-        let row = self.fetch_session_by_claude_id(claude_session_id)?;
-        if let Some(ref r) = row {
-            self.bus.session_updated(r);
-        }
-        Ok(row)
+        self.emit_session_by_claude_id(claude_session_id)
     }
 
     /// The UserPromptSubmit hook's write: a turn is starting. Sets
@@ -824,11 +814,7 @@ impl Store {
         if changed == 0 {
             return Ok(None);
         }
-        let row = self.fetch_session_by_claude_id(claude_session_id)?;
-        if let Some(ref r) = row {
-            self.bus.session_updated(r);
-        }
-        Ok(row)
+        self.emit_session_by_claude_id(claude_session_id)
     }
 
     /// The SessionEnd hook's write: the Claude process is gone. Sets
@@ -851,11 +837,7 @@ impl Store {
         if changed == 0 {
             return Ok(None);
         }
-        let row = self.fetch_session_by_claude_id(claude_session_id)?;
-        if let Some(ref r) = row {
-            self.bus.session_updated(r);
-        }
-        Ok(row)
+        self.emit_session_by_claude_id(claude_session_id)
     }
 
     /// The StopFailure hook's write: the turn ended in an API error. The row
@@ -911,11 +893,7 @@ impl Store {
         if changed == 0 {
             return Ok(None);
         }
-        let row = self.fetch_session_by_claude_id(claude_session_id)?;
-        if let Some(ref r) = row {
-            self.bus.session_updated(r);
-        }
-        Ok(row)
+        self.emit_session_by_claude_id(claude_session_id)
     }
 
     /// Replace a session's tags (migration 020). Emits `session_updated`.
@@ -928,11 +906,7 @@ impl Store {
             "UPDATE sessions SET tags=?1 WHERE id=?2",
             rusqlite::params![encode_tags(tags), id],
         )?;
-        let row = fetch_session_by_id(&self.conn, id)?;
-        if let Some(ref r) = row {
-            self.bus.session_updated(r);
-        }
-        Ok(row)
+        self.emit_session(id)
     }
 
     /// Record which requester dispatched work to this session. Emits
@@ -946,11 +920,7 @@ impl Store {
             "UPDATE sessions SET parent_session_id=?1 WHERE id=?2",
             rusqlite::params![parent, id],
         )?;
-        let row = fetch_session_by_id(&self.conn, id)?;
-        if let Some(ref r) = row {
-            self.bus.session_updated(r);
-        }
-        Ok(row)
+        self.emit_session(id)
     }
 
     /// Store the transcript path a hook reported for this Claude session.
