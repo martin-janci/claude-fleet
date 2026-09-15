@@ -392,6 +392,7 @@ mod tests {
             tool_response: None,
             cwd: None,
             transcript_path: None,
+            ..Default::default()
         }
     }
 
@@ -588,6 +589,7 @@ mod tests {
             tool_response: None,
             cwd: None,
             transcript_path: None,
+            ..Default::default()
         };
         assert!(apply_hook(&store, &make_ssh(), &payload, &Caller::master()).is_ok());
     }
@@ -605,6 +607,7 @@ mod tests {
             tool_response: Some(response),
             cwd: None,
             transcript_path: None,
+            ..Default::default()
         }
     }
 
@@ -697,6 +700,7 @@ mod tests {
             tool_response: path.map(|p| serde_json::json!({ "worktreePath": p })),
             cwd: None,
             transcript_path: None,
+            ..Default::default()
         }
     }
 
