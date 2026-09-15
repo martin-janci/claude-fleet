@@ -849,6 +849,95 @@ impl Store {
         Ok(Some(row))
     }
 
+    /// The SessionEnd hook's write: the Claude process is gone. Sets
+    /// `claude_status = stopped`, starts `idle_since` if not already idle,
+    /// clears any stuck episode and stamps `last_hook_at` so the reconcile
+    /// guard keeps the verdict until a later pass observes the pane afresh.
+    /// Returns the row (`None` when unmatched). Emits `session_updated`.
+    pub fn record_session_end_hook(
+        &self,
+        claude_session_id: &str,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        let now = now_unix();
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE sessions SET claude_status = 'stopped', last_turn_at = ?2, \
+                 last_hook_at = ?2, idle_since = COALESCE(idle_since, ?2), \
+                 stuck_kind = NULL, stuck_since = NULL \
+                 WHERE claude_session_id = ?1",
+                rusqlite::params![claude_session_id, now],
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let row = self.fetch_session_by_claude_id(claude_session_id)?;
+        self.bus.session_updated(&row);
+        Ok(Some(row))
+    }
+
+    /// The StopFailure hook's write: the turn ended in an API error. The row
+    /// effect is exactly `Stop`'s (idle, `turn_seq` bump, stamps) so waiters
+    /// return and read the error from the transcript; the handler records
+    /// the `stop_failure` timeline event that tells the two apart.
+    pub fn record_stop_failure_hook(
+        &self,
+        claude_session_id: &str,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        self.record_stop_hook(claude_session_id)
+    }
+
+    /// The Notification hook's write. `status` is the mapped status;
+    /// `stuck` is `Some(Some(kind))` to set (restarting `stuck_since` when
+    /// the kind changes, keeping it when equal), `Some(None)` to clear,
+    /// `None` to leave the stuck fields untouched. Stamps `last_hook_at`;
+    /// `idle_since` follows the status. Returns the row (`None` when
+    /// unmatched). Emits `session_updated`.
+    pub fn record_notification_hook(
+        &self,
+        claude_session_id: &str,
+        status: crate::service::pane_intel::ClaudeStatus,
+        stuck: Option<Option<crate::service::pane_intel::StuckKind>>,
+    ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        let now = now_unix();
+        let status = status.as_str();
+        // SQLite evaluates every right-hand side against the row's OLD
+        // values, so `stuck_since` may compare against `stuck_kind` even
+        // though `stuck_kind` is assigned in the same statement.
+        let stuck_sql = match stuck {
+            None => "",
+            Some(None) => ", stuck_kind = NULL, stuck_since = NULL",
+            Some(Some(_)) => {
+                ", stuck_since = CASE WHEN ?3 IS stuck_kind \
+                   THEN COALESCE(stuck_since, ?2) ELSE ?2 END, \
+                   stuck_kind = ?3"
+            }
+        };
+        let sql = format!(
+            "UPDATE sessions SET claude_status = ?4, last_hook_at = ?2, \
+             idle_since = {idle}{stuck_sql} WHERE claude_session_id = ?1",
+            idle = idle_since_sql("?4", "?2"),
+        );
+        let kind = match stuck {
+            Some(Some(k)) => Some(k.as_str()),
+            _ => None,
+        };
+        let changed = self
+            .conn
+            .execute(
+                &sql,
+                rusqlite::params![claude_session_id, now, kind, status],
+            )
+            .map_err(crate::ipc_error::IpcError::from)?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let row = self.fetch_session_by_claude_id(claude_session_id)?;
+        self.bus.session_updated(&row);
+        Ok(Some(row))
+    }
+
     /// Replace a session's tags (migration 020). Emits `session_updated`.
     pub fn set_session_tags(
         &self,
@@ -1796,5 +1885,126 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| e.kind == "playbook_applied" && e.detail.as_deref() == Some("oom:recreate")));
+    }
+
+    // ---- hook writes: SessionEnd / StopFailure / Notification ----
+
+    fn hooked_session(s: &Store) -> i64 {
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("sess", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_claude_session_id(id, "uuid-h").unwrap();
+        id
+    }
+
+    fn last_hook_at(s: &Store) -> Option<i64> {
+        s.conn
+            .query_row(
+                "SELECT last_hook_at FROM sessions WHERE claude_session_id='uuid-h'",
+                [],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn record_session_end_hook_marks_stopped_and_clears_stuck() {
+        use crate::service::pane_intel::{ClaudeStatus, StuckKind};
+        let s = Store::open_in_memory().unwrap();
+        let id = hooked_session(&s);
+        s.record_notification_hook(
+            "uuid-h",
+            ClaudeStatus::Blocked,
+            Some(Some(StuckKind::PressEnter)),
+        )
+        .unwrap();
+        let row = s
+            .record_session_end_hook("uuid-h")
+            .unwrap()
+            .expect("matched");
+        assert_eq!(row.claude_status.as_deref(), Some("stopped"));
+        assert!(row.idle_since.is_some());
+        assert!(row.stuck_kind.is_none() && row.stuck_since.is_none());
+        assert!(last_hook_at(&s).is_some());
+        assert_eq!(row.id, id);
+        assert!(s.record_session_end_hook("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn record_stop_failure_hook_writes_like_stop() {
+        let s = Store::open_in_memory().unwrap();
+        hooked_session(&s);
+        let a = s.record_stop_failure_hook("uuid-h").unwrap().unwrap();
+        assert_eq!(a.claude_status.as_deref(), Some("idle"));
+        assert_eq!(a.turn_seq, 1);
+        assert_eq!(a.last_stop_at, a.last_turn_at);
+        let b = s.record_stop_failure_hook("uuid-h").unwrap().unwrap();
+        assert_eq!(b.turn_seq, 2);
+    }
+
+    #[test]
+    fn record_notification_hook_maps_status_and_stuck_episodes() {
+        use crate::service::pane_intel::{ClaudeStatus, StuckKind};
+        let s = Store::open_in_memory().unwrap();
+        hooked_session(&s);
+        // blocked, stuck untouched (None) → stays NULL
+        let r = s
+            .record_notification_hook("uuid-h", ClaudeStatus::Blocked, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.claude_status.as_deref(), Some("blocked"));
+        assert!(r.stuck_kind.is_none());
+        assert!(r.idle_since.is_none(), "blocked is not idle");
+        // set press_enter → episode starts
+        let r = s
+            .record_notification_hook(
+                "uuid-h",
+                ClaudeStatus::Blocked,
+                Some(Some(StuckKind::PressEnter)),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.stuck_kind.as_deref(), Some("press_enter"));
+        let since = r.stuck_since.expect("episode start");
+        // same kind again → episode start kept
+        let r = s
+            .record_notification_hook(
+                "uuid-h",
+                ClaudeStatus::Blocked,
+                Some(Some(StuckKind::PressEnter)),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.stuck_since, Some(since));
+        // a different kind → episode restarts (same second is fine: still Some)
+        let r = s
+            .record_notification_hook(
+                "uuid-h",
+                ClaudeStatus::Blocked,
+                Some(Some(StuckKind::AuthMenu)),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.stuck_kind.as_deref(), Some("auth_menu"));
+        assert!(r.stuck_since.is_some());
+        // None → untouched
+        let r = s
+            .record_notification_hook("uuid-h", ClaudeStatus::Blocked, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.stuck_kind.as_deref(), Some("auth_menu"));
+        // working + clear
+        let r = s
+            .record_notification_hook("uuid-h", ClaudeStatus::Working, Some(None))
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.claude_status.as_deref(), Some("working"));
+        assert!(r.stuck_kind.is_none() && r.stuck_since.is_none());
+        assert!(last_hook_at(&s).is_some());
+        assert!(s
+            .record_notification_hook("nope", ClaudeStatus::Blocked, None)
+            .unwrap()
+            .is_none());
     }
 }

@@ -206,8 +206,12 @@ most `max_chars` characters (default 8000, max 64000).
 and `last_stop_at`. Two Claude Code hooks maintain them: `Stop` marks the
 session `idle`, bumps `turn_seq` and stamps `last_stop_at`; `UserPromptSubmit`
 marks it `working`, so "idle because never started" and "idle after a turn"
-are distinguishable from "busy". A hook-stamped status that is newer than a
-reconcile pass's pane observation is never overwritten by the pane heuristic.
+are distinguishable from "busy". A turn that ends in an API error fires
+`StopFailure` instead of `Stop`; fleet ends the turn the same way (idle,
+`turn_seq` bump) and records a `stop_failure` timeline event with the error
+type, so `run_prompt` / `wait_for_session` return and `session_history` shows
+why. A hook-stamped status that is newer than a reconcile pass's pane
+observation is never overwritten by the pane heuristic.
 `send_prompt` returns `{ delivered, session_id, turn_seq_before }`;
 `wait_for_session { session_id, until: "idle" | "turn_gt", turn?, timeout_s? }`
 is a bounded long-poll (500 ms polls, default 120 s, max 600 s) returning
@@ -269,7 +273,7 @@ session's labels (up to 16 of 1–32 chars from `[A-Za-z0-9_.:-]`) and
    }
    ```
 4. **`~/.tmux.conf` clipboard passthrough** — ensures `set -g set-clipboard on` is present (appended if missing, file created if absent) so OSC 52 clipboard writes from inside tmux reach the host clipboard.
-5. **Hooks in `~/.claude/settings.json`** — merges fleet's `Stop`, `UserPromptSubmit` and `PostToolUse(EnterWorktree)` hooks as Claude Code `type: "http"` hooks, leaving the user's own hooks alone. Each entry POSTs the hook payload to `http://127.0.0.1:<port>/hook` with `"headers": { "Authorization": "Bearer <host-token>" }` and a 5 s timeout — the token never appears in a process argv. On a remote host the URL's `127.0.0.1:<port>` is the reverse tunnel's loopback end (step 6). Any older fleet entry for the same port (including the pre-0.3 `curl … /hook?token=` command form) is replaced, so re-running upgrades in place; the file is written `0600`. Required for `safe_kill_session` to finalize, for real-time `idle` / `working` status, `turn_seq` and task completion on every host that runs Claude Code. **Settings → Install Hook (local)** performs only this step for the `local` host, using the `local` host token. **Hosts provisioned before the `UserPromptSubmit` hook existed must be re-provisioned** (no rotate needed) to get the busy signal; until then their status only flips to `working` on the next reconcile pass.
+5. **Hooks in `~/.claude/settings.json`** — merges fleet's `Stop`, `UserPromptSubmit`, `PostToolUse(EnterWorktree|ExitWorktree)`, `SessionEnd(logout|prompt_input_exit|other)`, `StopFailure` and `Notification(permission_prompt|elicitation_dialog|elicitation_url_dialog|quota_auto_resume_stale|quota_auto_resume_disabled|quota_auto_resume_fired)` hooks as Claude Code `type: "http"` hooks, leaving the user's own hooks alone. Each entry POSTs the hook payload to `http://127.0.0.1:<port>/hook` with `"headers": { "Authorization": "Bearer <host-token>" }` and a 5 s timeout — the token never appears in a process argv. On a remote host the URL's `127.0.0.1:<port>` is the reverse tunnel's loopback end (step 6). Any older fleet entry for the same port (including the pre-0.3 `curl … /hook?token=` command form) is replaced, so re-running upgrades in place; the file is written `0600`. Required for `safe_kill_session` to finalize, for real-time `idle` / `working` status, `turn_seq` and task completion on every host that runs Claude Code. **Settings → Install Hook (local)** performs only this step for the `local` host, using the `local` host token. **Hosts provisioned before the `UserPromptSubmit` hook existed must be re-provisioned** (no rotate needed) to get the busy signal; until then their status only flips to `working` on the next reconcile pass. **Hosts provisioned before the `SessionEnd` / `StopFailure` / `Notification` hooks existed must be re-provisioned** to get `stopped`, API-error turn completion and hook-driven `blocked` (see *Hook contract*).
 6. **Reverse SSH tunnel** (remote hosts only) — starts an `ssh -R` tunnel so the remote host's `127.0.0.1:<port>` is forwarded to the central machine's MCP server. The server stays bound to `127.0.0.1` on the central machine; remote hosts reach it only through this authenticated tunnel.
 
 **After provisioning, each host must restart Claude** to load the MCP server (skill files and CLAUDE.md are picked up live, but the MCP server entry requires a restart).
@@ -297,6 +301,37 @@ Per-host failures do not abort provisioning of other hosts.
 - If `~/.claude.json` is missing or empty the file is created from scratch; if it exists and is not valid JSON provisioning fails for that host (before any write).
 - Re-running `provision_hosts` is safe: the skill is overwritten in place and the `claude-fleet` entry is replaced while all other `mcpServers` keys are preserved.
 - Disabling the control API tears down all reverse tunnels. Re-enabling it re-establishes them automatically for already-provisioned remote hosts.
+
+## Hook contract
+
+Claude Code on each host POSTs its hook events to `http://127.0.0.1:<port>/hook`
+(the reverse tunnel's loopback end on a remote host) as `type: "http"` hooks with
+`Authorization: Bearer <host-token>` and a 5 s timeout. The body is Claude Code's
+hook input JSON; fleet reads only the fields below and ignores the rest. Answers:
+`204` applied (or a no-op for an unknown session), `400` a body that fails
+validation (`E_VALIDATE` / `E_INVALID`, e.g. a worktree path outside a project),
+`403` a host token reporting about another host's session, `401` no valid token,
+`500` a store failure. A non-2xx answer is a non-blocking error on the Claude side:
+the session continues.
+
+| Event | Matcher | Fields read | Effect on the session row | Timeline |
+|---|---|---|---|---|
+| `UserPromptSubmit` | all | `session_id`, `transcript_path` | `claude_status = working`, `idle_since` cleared | — |
+| `Stop` | all | `session_id`, `transcript_path`, `cwd` | `idle`, `turn_seq + 1`, `last_stop_at`; triggers safe-kill and task-marker checks | — |
+| `StopFailure` | all | `session_id`, `error`, `error_details` | same as `Stop` | `stop_failure` — `<error>[: <details>]` |
+| `SessionEnd` | `logout\|prompt_input_exit\|other` | `session_id`, `reason` | `stopped`, `idle_since` started, stuck cleared | `session_end` — reason |
+| `Notification` | `permission_prompt\|elicitation_dialog\|elicitation_url_dialog` | `session_id`, `notification_type` | `blocked` | `notification` — type |
+| `Notification` | `quota_auto_resume_stale` | same | `blocked`, `stuck_kind = press_enter` | `notification` — type |
+| `Notification` | `quota_auto_resume_disabled` | same | `blocked` | `notification` — type |
+| `Notification` | `quota_auto_resume_fired` | same | `working`, stuck cleared | `notification` — type |
+| `PostToolUse` | `EnterWorktree\|ExitWorktree` | `tool_name`, `tool_input`, `tool_response` | worktree row registered / removed | — |
+
+Every hook write stamps `last_hook_at`; a reconcile pass that started before that
+stamp never overwrites the hook's status with its pane heuristic. `SessionEnd`
+with reason `clear` or `resume` is not installed (the process continues under a
+new session id). `SessionStart` is not used: Claude Code accepts only `command` /
+`mcp_tool` hooks there. Fleet never writes `allowedHttpHookUrls` — defining it
+at user level would block every other http hook on the host.
 
 ## Security
 

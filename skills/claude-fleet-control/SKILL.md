@@ -137,7 +137,11 @@ Step by step, when you need control between the steps:
 
 Sessions on hosts provisioned before the `UserPromptSubmit` hook only flip
 to `working` on the next reconcile pass; `turn_gt` still works there because
-the `Stop` hook is what bumps `turn_seq`.
+the `Stop` hook is what bumps `turn_seq`. On re-provisioned hosts `blocked`
+(permission prompt, elicitation, usage-limit wait) and `stopped` (Claude
+exited) are hook-driven and immediate; a turn that ended in an API error shows
+as `idle` with a `stop_failure` event in `session_history` — read it before
+re-sending.
 
 For coordination between sessions prefer the inbox over interrupting a peer:
 `send_message { from_session_id, to_session_id, body, kind?, deliver?,
