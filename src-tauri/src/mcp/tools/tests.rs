@@ -218,7 +218,14 @@ fn marker_is_applied_unless_master_asks_for_raw() {
 #[test]
 fn fleet_admin_tools_are_master_only() {
     let full = host_caller("mefistos", TokenMode::Full);
-    for t in ["provision_hosts", "add_host", "remove_host", "hide_host"] {
+    for t in [
+        "provision_hosts",
+        "add_host",
+        "remove_host",
+        "hide_host",
+        "apply_sync",
+        "set_secret",
+    ] {
         let err = enforce_admin(&full, t).expect_err(t);
         assert!(
             err.message.starts_with("E_FORBIDDEN"),
@@ -300,6 +307,43 @@ fn audit_row_falls_back_to_the_controller_session() {
     assert!(events
         .iter()
         .any(|e| e.kind == "mcp_call" && e.detail.as_deref() == Some("list_hosts by master")));
+}
+
+/// SEC: `set_secret`'s `value` argument must never reach the persisted
+/// audit trail — not the plain value, not even its length. `persist_audit`
+/// is exactly what `ServerHandler::call_tool` calls with the RAW request
+/// arguments (before the tool body ever redacts anything for its own
+/// tracing call), so this exercises the actual path a secret value would
+/// otherwise leak through into `session_events` (readable via
+/// `session_history`).
+#[test]
+fn set_secret_value_never_reaches_the_persisted_audit_trail() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("ctl", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("local", "ctl").unwrap();
+        id
+    };
+    let args = serde_json::json!({
+        "name": "FOO",
+        "value": "hunter2-unique",
+        "host_alias": "mefistos"
+    });
+    persist_audit(&store, "set_secret", args.as_object(), &Caller::master());
+    let s = store.lock().unwrap();
+    let events = s.list_session_events(id, 10).unwrap();
+    let row = events
+        .iter()
+        .find(|e| e.kind == "mcp_call")
+        .expect("mcp_call event");
+    let detail = row.detail.as_deref().unwrap();
+    assert!(!detail.contains("hunter2"), "{detail}");
+    assert!(!detail.contains("value"), "{detail}");
+    assert_eq!(detail, "set_secret by master: host_alias=mefistos name=FOO");
 }
 
 #[test]
@@ -819,7 +863,8 @@ fn capture_default_cap_matches_docs() {
 /// A block left out of the sum would silently drop its tools from the server
 /// and the reference, so the served count must match the `#[tool(`
 /// attributes in the router files. 57 was the count before the split, 60
-/// with the asset-catalog block; bump it when adding a tool.
+/// with the asset-catalog block, 63 with plan_sync/apply_sync/set_secret;
+/// bump it when adding a tool.
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -839,7 +884,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 60);
+    assert_eq!(served, 63);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 

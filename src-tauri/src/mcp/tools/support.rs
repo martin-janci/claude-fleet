@@ -405,7 +405,8 @@ pub(super) fn apply_marker(
 }
 
 /// Fleet-admin gate: `provision_hosts` / `add_host` / `remove_host` /
-/// `hide_host` are master-only, whatever the host token's mode.
+/// `hide_host` / `apply_sync` / `set_secret` are master-only, whatever the
+/// host token's mode.
 pub(super) fn enforce_admin(caller: &Caller, tool: &str) -> Result<(), McpError> {
     if guard::is_admin_tool(tool) && !caller.is_master() {
         return Err(mcp_err(
@@ -837,6 +838,13 @@ pub(super) const LIFECYCLE_TOOLS: &[&str] = &[
     "delete_worktree",
     "import_assets",
     "scan_assets",
+    // Sync: plan_sync scans every selected host (pass host_alias to scope
+    // the scan/plan to one host); apply_sync then applies the WHOLE plan —
+    // every host it covers, each bounded at 300 s — so a fleet-wide apply
+    // over many hosts may hit this cap over MCP; scope the plan itself via
+    // plan_sync's host_alias to keep one apply_sync call under it.
+    "plan_sync",
+    "apply_sync",
     "refresh_projects",
     "session_transcript",
     "usage_report",
@@ -867,6 +875,7 @@ pub(super) const QUICK_TOOLS: &[&str] = &[
     "related_sessions",
     "remove_host",
     "rename_session",
+    "set_secret",
     "repo_branches",
     "repo_changes",
     "repo_commit",

@@ -706,3 +706,45 @@ pub struct ImportAssetsParams {
     #[serde(default)]
     pub dry_run: bool,
 }
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct PlanSyncParams {
+    /// Only plan this host alias. Omit to plan every reachable host.
+    #[serde(default)]
+    pub host_alias: Option<String>,
+    /// Only plan assets of this kind (`skill`, `agent`, `hook`,
+    /// `mcp_server`, `plugin_ref`). Omit for every kind.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Only plan the asset with this name. Omit for every asset.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ApplySyncParams {
+    /// Plan id from a prior `plan_sync` call. Plans expire after 10 minutes.
+    pub plan_id: String,
+    /// Apply everything that is not blocked on a missing `${NAME}` secret
+    /// instead of refusing the whole run with `E_SECRET_MISSING`. Default
+    /// false.
+    #[serde(default)]
+    pub force_partial: bool,
+    /// Nonce from a prior `E_CONFIRM_REQUIRED` reply, once the user approved
+    /// it on the desktop. Only needed when `mcp.confirm_destructive` is on.
+    #[serde(default)]
+    pub confirm_nonce: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SetSecretParams {
+    /// Secret name referenced as `${NAME}` in the catalog. Must match
+    /// `[A-Z0-9_]+`.
+    pub name: String,
+    /// The secret's value. Never returned or logged.
+    pub value: String,
+    /// Set a per-host override instead of the global value. Omit for the
+    /// global value.
+    #[serde(default)]
+    pub host_alias: Option<String>,
+}

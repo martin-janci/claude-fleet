@@ -92,6 +92,9 @@ pub const CONFIRM_TOOLS: &[&str] = &[
     "cancel_task",
     // Starts a session on another host and kills the source.
     "move_session",
+    // Writes files (with backups), merges config and installs plugins
+    // across the fleet.
+    "apply_sync",
 ];
 
 pub fn needs_confirmation(name: &str) -> bool {
@@ -103,7 +106,19 @@ pub fn needs_confirmation(name: &str) -> bool {
 /// rotate, add or remove other hosts, or it could lock the whole fleet out.
 /// `full` therefore means whole-fleet *session* control (send / kill /
 /// new_session across hosts stay allowed by design), not fleet admin.
-pub const ADMIN_TOOLS: &[&str] = &["provision_hosts", "add_host", "remove_host", "hide_host"];
+pub const ADMIN_TOOLS: &[&str] = &[
+    "provision_hosts",
+    "add_host",
+    "remove_host",
+    "hide_host",
+    // Writes to every host in a plan; a per-host token must not be able to
+    // touch another host's filesystem or plugins through it.
+    "apply_sync",
+    // Secret values feed every host's rendered config; scoping this to the
+    // master token keeps a per-host token from setting values another
+    // host's assets would pick up.
+    "set_secret",
+];
 
 pub fn is_admin_tool(name: &str) -> bool {
     ADMIN_TOOLS.contains(&name)
@@ -419,8 +434,10 @@ pub fn mark_untrusted(text: &str, from: &str) -> String {
 /// never persisted, only their length.
 const REDACT_KEYS: &[&str] = &["prompt", "body", "content", "start_command"];
 /// Argument keys dropped from the summary entirely: a confirmation nonce is
-/// a one-time credential and must not land in the timeline.
-const SKIP_KEYS: &[&str] = &["confirm_nonce"];
+/// a one-time credential and must not land in the timeline, and `value` is
+/// `set_secret`'s secret value — not even its length may be persisted (a
+/// length still leaks information about a secret).
+const SKIP_KEYS: &[&str] = &["confirm_nonce", "value"];
 const SUMMARY_MAX_CHARS: usize = 240;
 
 /// One-line, key-sorted `k=v` summary of tool arguments with free-text
@@ -491,6 +508,10 @@ mod tests {
             "set_friendly_name",
             // Writes IR files into the catalog repo working tree.
             "import_assets",
+            // Writes files/config/plugins across the fleet; master-only.
+            "apply_sync",
+            // Writes a secret value; master-only.
+            "set_secret",
             "no_such_tool",
         ] {
             assert!(!is_readonly_tool(t), "{t} must be mutating");
@@ -516,10 +537,11 @@ mod tests {
             "repair_session",
             "cancel_task",
             "move_session",
+            "apply_sync",
         ] {
             assert!(needs_confirmation(t), "{t} must be confirm-gated");
         }
-        assert_eq!(CONFIRM_TOOLS.len(), 7);
+        assert_eq!(CONFIRM_TOOLS.len(), 8);
         assert!(!needs_confirmation("send_prompt"));
         assert!(!needs_confirmation("dispatch_task"));
     }
@@ -719,11 +741,24 @@ mod tests {
 
     #[test]
     fn admin_tools_are_the_fleet_admin_set_and_mutating() {
-        for t in ["provision_hosts", "add_host", "remove_host", "hide_host"] {
+        for t in [
+            "provision_hosts",
+            "add_host",
+            "remove_host",
+            "hide_host",
+            "apply_sync",
+            "set_secret",
+        ] {
             assert!(is_admin_tool(t), "{t}");
             assert!(!is_readonly_tool(t), "{t}");
         }
-        for t in ["kill_session", "send_prompt", "new_session", "list_hosts"] {
+        for t in [
+            "kill_session",
+            "send_prompt",
+            "new_session",
+            "list_hosts",
+            "plan_sync",
+        ] {
             assert!(!is_admin_tool(t), "{t} is not fleet admin");
         }
     }
@@ -776,6 +811,17 @@ mod tests {
         // A confirmation nonce is a credential: dropped, not even as a length.
         let with_nonce = serde_json::json!({ "confirm_nonce": "abc123", "name": "x" });
         assert_eq!(redact_args(with_nonce.as_object()), "name=x");
+        // `set_secret`'s value is a credential too: dropped entirely, not
+        // even rendered as a length (SEC: a length still leaks something).
+        let with_secret = serde_json::json!({
+            "value": "hunter2-unique",
+            "name": "FOO",
+            "host_alias": "mefistos"
+        });
+        let s = redact_args(with_secret.as_object());
+        assert!(!s.contains("hunter2"), "{s}");
+        assert!(!s.contains("value"), "{s}");
+        assert_eq!(s, "host_alias=mefistos name=FOO");
         for k in ["body", "content", "start_command"] {
             let a = serde_json::json!({ k: "xyz" });
             assert_eq!(redact_args(a.as_object()), format!("{k}=<3 chars>"));

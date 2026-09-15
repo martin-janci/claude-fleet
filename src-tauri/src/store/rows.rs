@@ -442,6 +442,28 @@ pub struct AssetInventoryRow {
     pub catalog_hash: Option<String>,
     pub host_hash: Option<String>,
     pub scanned_at: i64,
+    /// Whether the host's fleet manifest names this asset (migration 031).
+    pub managed: bool,
+}
+
+/// A secret name known to the sync engine (migration 031). Never carries the
+/// value: `list_secrets` is for display, `secret_values_for_host` resolves
+/// actual values.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SecretRow {
+    pub name: String,
+    pub host_alias: Option<String>,
+    pub updated_at: i64,
+}
+
+/// One completed sync apply (migration 031): kept so the UI can show the
+/// last run's summary across restarts.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SyncRunRow {
+    pub id: i64,
+    pub started_at: i64,
+    pub finished_at: i64,
+    pub summary_json: String,
 }
 
 /// The task state machine: `queued → running → done | failed | cancelled`.

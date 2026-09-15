@@ -62,10 +62,11 @@ impl Store {
         )?;
         for r in rows {
             tx.execute(
-                "INSERT INTO asset_inventory (host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO asset_inventory (host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 rusqlite::params![
-                    host_alias, harness, r.kind, r.name, r.state, r.catalog_hash, r.host_hash, r.scanned_at
+                    host_alias, harness, r.kind, r.name, r.state, r.catalog_hash, r.host_hash, r.scanned_at,
+                    if r.managed { 1 } else { 0 }
                 ],
             )?;
         }
@@ -79,7 +80,7 @@ impl Store {
 
     pub fn list_inventory(&self) -> Result<Vec<AssetInventoryRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at
+            "SELECT host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed
              FROM asset_inventory ORDER BY host_alias, harness, kind, name",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -92,9 +93,157 @@ impl Store {
                 catalog_hash: row.get(5)?,
                 host_hash: row.get(6)?,
                 scanned_at: row.get(7)?,
+                managed: row.get::<_, i64>(8)? != 0,
             })
         })?;
         rows.collect()
+    }
+
+    /// Every known secret name (migration 031): global rows (`host_alias:
+    /// None`) first, then per-host overrides. Never carries the value.
+    pub fn list_secrets(&self) -> Result<Vec<SecretRow>, rusqlite::Error> {
+        let mut out = Vec::new();
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT name, updated_at FROM catalog_secrets ORDER BY name")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(SecretRow {
+                name: row.get(0)?,
+                host_alias: None,
+                updated_at: row.get(1)?,
+            })
+        })?;
+        for r in rows {
+            out.push(r?);
+        }
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT host_alias, name, updated_at FROM catalog_secrets_host ORDER BY host_alias, name",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(SecretRow {
+                host_alias: Some(row.get(0)?),
+                name: row.get(1)?,
+                updated_at: row.get(2)?,
+            })
+        })?;
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Resolved secret values for `host_alias`: every global secret,
+    /// overlaid by that host's own overrides.
+    pub fn secret_values_for_host(
+        &self,
+        host_alias: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>, rusqlite::Error> {
+        let mut out = std::collections::BTreeMap::new();
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT name, value FROM catalog_secrets")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for r in rows {
+            let (name, value) = r?;
+            out.insert(name, value);
+        }
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT name, value FROM catalog_secrets_host WHERE host_alias = ?1")?;
+        let rows = stmt.query_map(rusqlite::params![host_alias], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for r in rows {
+            let (name, value) = r?;
+            out.insert(name, value);
+        }
+        Ok(out)
+    }
+
+    /// Upsert a secret's value: global (`host_alias: None`) or a per-host
+    /// override.
+    pub fn set_secret(
+        &self,
+        name: &str,
+        host_alias: Option<&str>,
+        value: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let updated_at = now_unix();
+        match host_alias {
+            None => {
+                self.conn.execute(
+                    "INSERT INTO catalog_secrets (name, value, updated_at) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(name) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                    rusqlite::params![name, value, updated_at],
+                )?;
+            }
+            Some(host_alias) => {
+                self.conn.execute(
+                    "INSERT INTO catalog_secrets_host (host_alias, name, value, updated_at) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(host_alias, name) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                    rusqlite::params![host_alias, name, value, updated_at],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Delete a secret (global or a per-host override). Returns whether a
+    /// row was actually removed.
+    pub fn delete_secret(
+        &self,
+        name: &str,
+        host_alias: Option<&str>,
+    ) -> Result<bool, rusqlite::Error> {
+        let changed = match host_alias {
+            None => self.conn.execute(
+                "DELETE FROM catalog_secrets WHERE name = ?1",
+                rusqlite::params![name],
+            )?,
+            Some(host_alias) => self.conn.execute(
+                "DELETE FROM catalog_secrets_host WHERE host_alias = ?1 AND name = ?2",
+                rusqlite::params![host_alias, name],
+            )?,
+        };
+        Ok(changed > 0)
+    }
+
+    /// Record a completed sync apply and return its id.
+    pub fn record_sync_run(
+        &self,
+        started_at: i64,
+        finished_at: i64,
+        summary_json: &str,
+    ) -> Result<i64, rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO sync_runs (started_at, finished_at, summary_json) VALUES (?1, ?2, ?3)",
+            rusqlite::params![started_at, finished_at, summary_json],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// The most recent sync run, if any.
+    pub fn last_sync_run(&self) -> Result<Option<SyncRunRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, started_at, finished_at, summary_json FROM sync_runs ORDER BY id DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query([])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(SyncRunRow {
+                id: row.get(0)?,
+                started_at: row.get(1)?,
+                finished_at: row.get(2)?,
+                summary_json: row.get(3)?,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// Emit `sync:progress` (not a store row).
+    pub fn bus_sync_progress(&self, p: &crate::events::SyncProgress) {
+        self.bus.sync_progress(p);
     }
 }
 
@@ -136,6 +285,7 @@ mod tests {
             catalog_hash: Some("c".into()),
             host_hash: Some("h".into()),
             scanned_at: 1,
+            managed: false,
         };
         s.replace_host_inventory(
             "local",
@@ -167,5 +317,72 @@ mod tests {
         assert!(all
             .iter()
             .any(|r| r.host_alias == "mefistos" && r.name == "z"));
+    }
+
+    #[test]
+    fn secrets_global_and_host_override_resolve_in_order() {
+        let s = Store::open_in_memory().unwrap();
+        s.set_secret("JIRA_TOKEN", None, "global").unwrap();
+        s.set_secret("JIRA_TOKEN", Some("mefistos"), "host")
+            .unwrap();
+        s.set_secret("OTHER", None, "o").unwrap();
+        let local = s.secret_values_for_host("local").unwrap();
+        assert_eq!(local["JIRA_TOKEN"], "global");
+        assert_eq!(local["OTHER"], "o");
+        let mef = s.secret_values_for_host("mefistos").unwrap();
+        assert_eq!(mef["JIRA_TOKEN"], "host");
+        let names = s.list_secrets().unwrap();
+        assert_eq!(names.len(), 3);
+        assert!(
+            names.iter().all(|r| !format!("{r:?}").contains("global")),
+            "list rows must not carry values"
+        );
+        assert!(s.delete_secret("JIRA_TOKEN", Some("mefistos")).unwrap());
+        assert!(!s.delete_secret("JIRA_TOKEN", Some("mefistos")).unwrap());
+        assert_eq!(
+            s.secret_values_for_host("mefistos").unwrap()["JIRA_TOKEN"],
+            "global"
+        );
+    }
+
+    #[test]
+    fn inventory_round_trips_managed_flag() {
+        let s = Store::open_in_memory().unwrap();
+        let row = AssetInventoryRow {
+            host_alias: "local".into(),
+            harness: "claude".into(),
+            kind: "skill".into(),
+            name: "s".into(),
+            state: "in_sync".into(),
+            managed: true,
+            ..Default::default()
+        };
+        s.replace_host_inventory("local", "claude", &[row]).unwrap();
+        assert!(s.list_inventory().unwrap()[0].managed);
+    }
+
+    #[test]
+    fn sync_runs_record_and_last() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.last_sync_run().unwrap().is_none());
+        let id = s.record_sync_run(1, 2, "{\"hosts\":[]}").unwrap();
+        assert!(id > 0);
+        let id2 = s.record_sync_run(3, 4, "{}").unwrap();
+        assert_eq!(s.last_sync_run().unwrap().unwrap().id, id2);
+    }
+
+    #[test]
+    fn bus_sync_progress_records_expected_event() {
+        let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+        let dyn_bus: std::sync::Arc<dyn crate::events::EventBus> = bus.clone();
+        let s = Store::open_with_bus_in_memory(dyn_bus).expect("open");
+        s.bus_sync_progress(&crate::events::SyncProgress {
+            plan_id: "p1".into(),
+            host_alias: "local".into(),
+            harness: "claude".into(),
+            done: 1,
+            total: 3,
+        });
+        assert_eq!(bus.take(), vec!["sync:progress:local:claude:1/3"]);
     }
 }

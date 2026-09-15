@@ -94,6 +94,18 @@ fn accounts_has_nickname_and_extra_usage(conn: &Connection) -> rusqlite::Result<
     Ok(n >= 2)
 }
 
+/// `already_applied` guard of migration 031: `asset_inventory` already has
+/// its `managed` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
+/// See [`Migration`].
+fn asset_inventory_has_managed(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('asset_inventory') WHERE name = 'managed'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// Ordered schema migrations, `(version, sql)`. Versions are contiguous from
 /// 1 and every script must end by recording its own version with
 /// `INSERT OR IGNORE INTO schema_version (version) VALUES (N)` — the tests
@@ -195,6 +207,12 @@ const MIGRATIONS: &[Migration] = &[
     ),
     // Asset catalog: two fresh `CREATE TABLE IF NOT EXISTS`, safe to re-run.
     Migration::plain(30, include_str!("../../migrations/030_asset_catalog.sql")),
+    // `ALTER TABLE ... ADD COLUMN` fails if the column is already there.
+    Migration {
+        version: 31,
+        sql: include_str!("../../migrations/031_asset_sync.sql"),
+        already_applied: Some(asset_inventory_has_managed),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -360,6 +378,9 @@ mod tests {
         "worktree_parent_fingerprints",
         "catalog_config",
         "asset_inventory",
+        "catalog_secrets",
+        "catalog_secrets_host",
+        "sync_runs",
     ];
 
     #[test]
@@ -1169,6 +1190,62 @@ mod tests {
         assert_eq!(scanned_at, 7, "the inventory row survives a re-run");
     }
 
+    /// 031 on a database stopped at 030 with an inventory row: `managed`
+    /// is added (defaulting to false for the existing row) and the new
+    /// `catalog_secrets`, `catalog_secrets_host`, `sync_runs` tables appear.
+    /// Rolling the recorded version back and migrating again (tests do this
+    /// to simulate re-running an already-applied migration) is a no-op that
+    /// keeps the row and does not re-add the column.
+    #[test]
+    fn migration_031_is_idempotent() {
+        let old = store_at_version(30);
+        old.conn
+            .execute_batch(
+                "INSERT INTO asset_inventory \
+                   (host_alias, harness, kind, name, state, scanned_at) \
+                   VALUES ('local', 'claude', 'skill', 's', 'in_sync', 7);",
+            )
+            .unwrap();
+        old.migrate().expect("031 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(
+            !old.list_inventory().unwrap()[0].managed,
+            "a pre-031 row is not managed"
+        );
+        let n: i64 = old
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('asset_inventory') WHERE name = 'managed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "the managed column exists exactly once");
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 31;")
+            .unwrap();
+        old.migrate().expect("re-running 031 is safe");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let n: i64 = old
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('asset_inventory') WHERE name = 'managed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "re-running 031 does not duplicate the column");
+        let scanned_at: i64 = old
+            .conn
+            .query_row(
+                "SELECT scanned_at FROM asset_inventory WHERE host_alias='local' AND name='s'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(scanned_at, 7, "the inventory row survives a re-run");
+    }
+
     #[test]
     fn migration_008_adds_lost_at_column() {
         let store = Store::open_in_memory().expect("store");
@@ -1176,7 +1253,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 30, "schema_version should be 30 after migration");
+        assert_eq!(v, 31, "schema_version should be 31 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store

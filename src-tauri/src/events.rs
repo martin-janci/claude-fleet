@@ -55,6 +55,20 @@ pub struct CatalogSummary {
     pub problem_count: usize,
 }
 
+/// Progress of one in-flight sync apply (migration 031 / sub-project 2):
+/// (host, harness) pairs finished / total pairs in the plan;
+/// `host_alias`/`harness` name the pair about to be applied. A run that
+/// completes ends with one terminal event at `done == total` whose
+/// `host_alias`/`harness` are empty — no pair is about to be applied.
+#[derive(Serialize, Clone, Debug)]
+pub struct SyncProgress {
+    pub plan_id: String,
+    pub host_alias: String,
+    pub harness: String,
+    pub done: usize,
+    pub total: usize,
+}
+
 pub trait EventBus: Send + Sync {
     fn session_created(&self, row: &SessionRow);
     fn session_updated(&self, row: &SessionRow);
@@ -87,6 +101,10 @@ pub trait EventBus: Send + Sync {
     /// The catalog repo was (re)loaded; the summary carries its HEAD and
     /// counts. Not a store row, so it has no `RowChange`. Default no-op.
     fn catalog_loaded(&self, _summary: &CatalogSummary) {}
+
+    /// Progress of an in-flight sync apply (sub-project 2). Not a store row,
+    /// so it has no `RowChange`. Default no-op.
+    fn sync_progress(&self, _p: &SyncProgress) {}
 
     /// Flush a single deferred `RowChange` through the matching typed method.
     /// Used by batched (transactional) writes to emit AFTER commit. The
@@ -221,6 +239,9 @@ impl EventBus for AppHandleEventBus {
     fn catalog_loaded(&self, summary: &CatalogSummary) {
         self.queue("catalog:loaded", summary);
     }
+    fn sync_progress(&self, p: &SyncProgress) {
+        self.queue("sync:progress", p);
+    }
 }
 
 /// Records every event in order. Used in unit tests to assert that a Store
@@ -333,5 +354,11 @@ impl EventBus for RecordingEventBus {
             .lock()
             .unwrap()
             .push(format!("catalog:loaded:{}", s.head));
+    }
+    fn sync_progress(&self, p: &SyncProgress) {
+        self.events.lock().unwrap().push(format!(
+            "sync:progress:{}:{}:{}/{}",
+            p.host_alias, p.harness, p.done, p.total
+        ));
     }
 }

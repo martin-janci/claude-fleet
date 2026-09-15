@@ -1,11 +1,11 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import AssetsPanel from './AssetsPanel.svelte';
-import { catalog, catalogConfig, inventory } from './assets';
+import { catalog, catalogConfig, inventory, lastSyncRun } from './assets';
 import { hosts } from './hosts';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
@@ -31,7 +31,7 @@ const listing = {
 
 beforeEach(() => {
   invoke.mockReset();
-  catalog.set(null); catalogConfig.set(null); inventory.set([]);
+  catalog.set(null); catalogConfig.set(null); inventory.set([]); lastSyncRun.set(null);
   hosts.set([
     { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null, account_uuid: null, provisioned: true },
     { alias: 'mefistos', ssh_alias: 'mefistos', reachable: false, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null, account_uuid: null, provisioned: true },
@@ -138,12 +138,104 @@ describe('AssetsPanel', () => {
   });
 
   it('scan button calls assets_scan_hosts and refreshes', async () => {
-    byCmd({ catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 }, catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 }, catalog_list_assets: listing, assets_inventory: [], assets_scan_hosts: [{ host: 'local', status: 'scanned', detail: null, rows: 3 }] });
+    byCmd({ catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 }, catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 }, catalog_list_assets: listing, assets_inventory: [], assets_scan_hosts: [{ host: 'local', status: 'scanned', detail: null, rows: 3 }], catalog_last_sync: null });
     render(AssetsPanel);
     expect(await screen.findByTestId('assets-scan')).toBeTruthy();
     await fireEvent.click(screen.getByTestId('assets-scan'));
     expect(await screen.findByTestId('assets-scan-result')).toBeTruthy();
     expect(invoke).toHaveBeenCalledWith('assets_scan_hosts', { args: { host_alias: null } });
     expect(screen.getByTestId('assets-scan-result').textContent).toContain('local: scanned');
+  });
+
+  it('an orphan row on hosts shows an "orphan" badge and no Import button', async () => {
+    const withOrphan = {
+      ...listing,
+      unmanaged: [
+        ...listing.unmanaged,
+        { host_alias: 'mefistos', harness: 'claude', kind: 'skill', name: 'ghost', state: 'orphan', catalog_hash: null, host_hash: null, scanned_at: 1, managed: true },
+      ],
+    };
+    byCmd({ catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 }, catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 }, catalog_list_assets: withOrphan, assets_inventory: [], catalog_last_sync: null });
+    render(AssetsPanel);
+
+    const row = await screen.findByTestId('unmanaged-row-mefistos-claude-skill-ghost');
+    expect(row.textContent).toContain('orphan');
+    expect(screen.getByTestId('orphan-badge-mefistos-claude-skill-ghost')).toBeTruthy();
+    expect(within(row).queryByText('Import')).toBeNull();
+    // The plain unmanaged row from `listing` still gets its Import button.
+    expect(screen.getByTestId('unmanaged-row-local-claude-skill-extra').textContent).toContain('Import');
+  });
+
+  it('Sync button calls catalog_plan_sync and opens the plan dialog', async () => {
+    const plan = { id: 'plan-1', computed_at: 1, hosts: [], counts: {} };
+    byCmd({ catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 }, catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 }, catalog_list_assets: listing, assets_inventory: [], catalog_last_sync: null, catalog_plan_sync: plan });
+    render(AssetsPanel);
+    expect(await screen.findByTestId('assets-sync')).toBeTruthy();
+
+    await fireEvent.click(screen.getByTestId('assets-sync'));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_plan_sync', { args: { host_alias: null, kind: null, name: null } }));
+    expect(await screen.findByTestId('sync-plan-dialog')).toBeTruthy();
+  });
+
+  it('Secrets button opens the secrets panel', async () => {
+    byCmd({ catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 }, catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 }, catalog_list_assets: listing, assets_inventory: [], catalog_last_sync: null, catalog_list_secrets: [] });
+    render(AssetsPanel);
+    expect(await screen.findByTestId('assets-secrets')).toBeTruthy();
+
+    await fireEvent.click(screen.getByTestId('assets-secrets'));
+
+    expect(await screen.findByTestId('secrets-panel')).toBeTruthy();
+  });
+
+  it('applying a plan keeps the dialog mounted, showing outcomes/restart and disabling re-apply', async () => {
+    const plan = {
+      id: 'plan-1',
+      computed_at: 1,
+      hosts: [
+        {
+          host_alias: 'local', harness: 'claude', status: 'ready', detail: null,
+          actions: [{ kind: 'skill', name: 'worktree', op: 'update', reason: null, files: [], merges: [], backup: false, secrets: [], missing_secrets: [] }],
+        },
+      ],
+      counts: { update: 1 },
+    };
+    const summary = {
+      plan_id: 'plan-1', started_at: 1, finished_at: 2,
+      hosts: [
+        {
+          host_alias: 'local', harness: 'claude', status: 'applied', detail: null, restart_required: true,
+          actions: [{ kind: 'skill', name: 'worktree', op: 'update', outcome: 'done', detail: null }],
+        },
+      ],
+    };
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: listing, assets_inventory: [], catalog_last_sync: null,
+      catalog_plan_sync: plan, catalog_apply_sync: summary,
+    });
+    render(AssetsPanel);
+    expect(await screen.findByTestId('assets-sync')).toBeTruthy();
+
+    await fireEvent.click(screen.getByTestId('assets-sync'));
+    expect(await screen.findByTestId('sync-plan-dialog')).toBeTruthy();
+
+    await fireEvent.click(screen.getByTestId('plan-apply'));
+
+    expect(await screen.findByTestId('plan-restart-local')).toBeTruthy();
+    expect(screen.getByTestId('plan-outcome-local-claude-skill-worktree').textContent).toContain('done');
+    // The dialog stays mounted (this is the whole point) and re-applying the
+    // now-consumed plan id is blocked.
+    expect(screen.getByTestId('sync-plan-dialog')).toBeTruthy();
+    expect(screen.getByTestId('plan-apply')).toBeDisabled();
+  });
+
+  it('shows a last-sync strip from lastSync() on mount', async () => {
+    const summary = { plan_id: 'plan-1', started_at: 1, finished_at: 2, hosts: [{ host_alias: 'local', harness: 'claude', status: 'applied', detail: null, restart_required: false, actions: [] }] };
+    byCmd({ catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 }, catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 }, catalog_list_assets: listing, assets_inventory: [], catalog_last_sync: summary });
+    render(AssetsPanel);
+    expect(await screen.findByTestId('assets-last-sync')).toBeTruthy();
+    expect(screen.getByTestId('assets-last-sync').textContent).toContain('applied');
   });
 });
