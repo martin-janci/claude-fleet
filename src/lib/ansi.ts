@@ -736,7 +736,11 @@ export class Screen {
     const b64 = parts[1];
     if (!b64 || b64 === '?') return; // '?' is a query, not a set
     try {
-      const text = atob(b64);
+      // atob yields one char per byte; the payload is UTF-8, so decode the
+      // bytes (invalid sequences become U+FFFD) or 'čšá' / emoji arrive as
+      // mojibake.
+      const bin = atob(b64.replace(/\s+/g, ''));
+      const text = UTF8.decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
       if (this.onClipboard) this.onClipboard(text);
     } catch {
       // Invalid base64 — ignore
@@ -1327,6 +1331,9 @@ export class Screen {
     return out.join('\n');
   }
 }
+
+/** Decoder for OSC 52 clipboard payloads (non-fatal: bad bytes → U+FFFD). */
+const UTF8 = new TextDecoder('utf-8');
 
 /** Longest OSC body we keep (OSC 52 clipboard payloads are base64 text;
  *  anything bigger is not something we would put on the clipboard). */

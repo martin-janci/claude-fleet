@@ -1461,3 +1461,33 @@ describe('ansi.runStyleCss — attribute → CSS (F16)', () => {
     expect(run(ATTR_REVERSE)).toBe('color:#0a0a0a;background:#e8e8e8');
   });
 });
+
+describe('ansi.Screen — OSC 52 decodes base64 as UTF-8 (F10)', () => {
+  function clip(seq: string): string[] {
+    const s = new Screen(2, 10);
+    const got: string[] = [];
+    s.onClipboard = (t) => got.push(t);
+    s.write(seq);
+    return got;
+  }
+
+  it('Slovak diacritics survive (BEL and ESC \\ terminators)', () => {
+    // base64 of the UTF-8 bytes of 'čšá'
+    expect(clip('\x1b]52;c;xI3FocOh\x07')).toEqual(['čšá']);
+    expect(clip('\x1b]52;c;xI3FocOh\x1b\\')).toEqual(['čšá']);
+  });
+
+  it('a 4-byte emoji survives, also when the sequence arrives one char at a time', () => {
+    expect(clip('\x1b]52;c;8J+klg==\x07')).toEqual(['🤖']);
+    const s = new Screen(2, 10);
+    const got: string[] = [];
+    s.onClipboard = (t) => got.push(t);
+    for (const ch of '\x1b]52;c;8J+klg==\x1b\\') s.write(ch);
+    expect(got).toEqual(['🤖']);
+  });
+
+  it('invalid UTF-8 becomes U+FFFD; invalid base64 is still ignored', () => {
+    expect(clip('\x1b]52;c;/w==\x07')).toEqual(['�']);
+    expect(clip('\x1b]52;c;!!!\x07')).toEqual([]);
+  });
+});
