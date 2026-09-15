@@ -30,7 +30,8 @@
   //     C-b [.
   //   - Keyboard input is forwarded as raw bytes via the xterm key table in
   //     `./terminal_keys.ts` (arrows/Home/End/Ins/Del/F-keys with modifiers,
-  //     Ctrl chords, Alt/Option as an ESC prefix).
+  //     Ctrl chords, Alt/Option as an ESC prefix unless the layout composed
+  //     a printable ASCII character under it).
   //   - Selection follows text-input conventions (`./terminal_mouse.ts` +
   //     `./terminal_selection.ts`): drag, double-click word, triple-click
   //     line, Shift+click extend; typing drops the highlight.

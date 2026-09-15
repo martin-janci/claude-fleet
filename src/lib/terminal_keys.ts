@@ -11,8 +11,8 @@
 
 export interface KeyLike {
   key: string;
-  /** Physical key (`KeyA`, `Digit1`, …). Used on macOS to recover the base
-   *  character for Option+key, where `key` is the composed glyph (`å`). */
+  /** Physical key (`KeyA`, `Digit1`, …). Used to recover the base character
+   *  for a composed chord: macOS Option+a → `å`, AltGr+v → `@`. */
   code?: string;
   ctrlKey: boolean;
   altKey: boolean;
@@ -23,7 +23,9 @@ export interface KeyLike {
 export interface KeyOpts {
   /** DECSET ?1 — arrows/Home/End as SS3 (`ESC O A`) instead of CSI. */
   appCursor: boolean;
-  /** macOS: Option is the ESC-prefix key and Cmd is reserved for the app. */
+  /** macOS: Cmd is reserved for the app, and Option is the layout's symbol
+   *  shift first / the ESC-prefix (Meta) key only when it composed a
+   *  non-ASCII glyph. */
   isMac: boolean;
 }
 
@@ -81,6 +83,16 @@ const TILDE_CODES: Record<string, number> = {
   F10: 21,
   F11: 23,
   F12: 24,
+  // F13–F20: xterm's codes, which skip 27 and 30 (those are Shift+F1/F2 on
+  // some terminals). Apple keyboards report F13–F15 on the print-screen row.
+  F13: 25,
+  F14: 26,
+  F15: 28,
+  F16: 29,
+  F17: 31,
+  F18: 32,
+  F19: 33,
+  F20: 34,
 };
 
 const SS3_FINALS: Record<string, string> = { F1: 'P', F2: 'Q', F3: 'R', F4: 'S' };
@@ -118,6 +130,30 @@ function baseChar(ev: KeyLike): string | null {
   return null;
 }
 
+/** A single printable ASCII character — something the user meant as text. */
+function isPrintableAscii(s: string): boolean {
+  return s.length === 1 && s >= ' ' && s <= '~';
+}
+
+/** The unshifted character the physical key carries, or null when `code`
+ *  doesn't name a letter/digit key we can reason about. */
+function codeBase(ev: KeyLike): string | null {
+  const code = ev.code ?? '';
+  if (/^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase();
+  if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+  return null;
+}
+
+/** Windows/Linux browsers report AltGr as Ctrl+Alt. When the layout composed
+ *  something other than the key's own base character under it (Slovak AltGr+v
+ *  → `@`, German AltGr+7 → `{`), that glyph is text the user typed, not a
+ *  Ctrl chord. ASCII letters are excluded so Ctrl+Alt+d stays `ESC ^D`. */
+function isAltGrText(ev: KeyLike): boolean {
+  if (ev.key.length !== 1 || /^[A-Za-z]$/.test(ev.key)) return false;
+  const base = codeBase(ev);
+  return base !== null && base !== ev.key.toLowerCase();
+}
+
 /**
  * Translate one keydown into the bytes a terminal sends, or null when the
  * key is not ours to forward (Cmd/Super chords, unknown special keys, bare
@@ -140,7 +176,10 @@ export function keyToBytes(ev: KeyLike, opts: KeyOpts): string | null {
 
   switch (key) {
     case 'Enter':
-      return altPrefix + '\r';
+      // Claude Code's prompt reads ESC CR as "insert a newline" rather than
+      // "submit". Option+Enter is the documented chord; Shift+Enter is what
+      // everyone reaches for, so both send it and plain Enter stays CR.
+      return ev.altKey || ev.shiftKey ? '\x1b\r' : '\r';
     case 'Backspace':
       // Ctrl+Backspace → BS (word-delete in readline), plain → DEL.
       return altPrefix + (ev.ctrlKey ? '\x08' : '\x7f');
@@ -156,6 +195,8 @@ export function keyToBytes(ev: KeyLike, opts: KeyOpts): string | null {
 
   // Ctrl + printable → C0 control byte (Shift is ignored, as in xterm).
   if (ev.ctrlKey) {
+    // AltGr (reported as Ctrl+Alt off macOS) composing a non-letter is text.
+    if (ev.altKey && !opts.isMac && isAltGrText(ev)) return key;
     const k = key.toLowerCase();
     if (k >= 'a' && k <= 'z') return altPrefix + String.fromCharCode(k.charCodeAt(0) - 96);
     const punct = CTRL_PUNCT[key] ?? CTRL_PUNCT[k];
@@ -165,7 +206,14 @@ export function keyToBytes(ev: KeyLike, opts: KeyOpts): string | null {
   }
 
   // Alt / Option + printable → ESC prefix + the base character.
+  //
+  // macOS is "text first, Meta fallback": Option is both the Meta key and the
+  // layout's symbol shift, and Slovak/Czech/German Macs put @ [ ] { } | \ ~
+  // behind it. A composition that is printable ASCII is therefore text and
+  // goes out as-is; only a non-ASCII one (∫ å ¡) is a Meta chord, which keeps
+  // Option+b/f/d word-jumping on US layouts.
   if (ev.altKey) {
+    if (opts.isMac && isPrintableAscii(key)) return key;
     const base = opts.isMac ? baseChar(ev) : key;
     return base === null ? null : '\x1b' + base;
   }
