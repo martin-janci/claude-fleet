@@ -21,15 +21,62 @@ pub(super) fn audit(tool: &str, detail: &str) {
     }
 }
 
+/// Key under which [`mcp_err`] stores the `E_*` code in `McpError::data`.
+/// `ServerHandler::call_tool` reads it back to tell a tool-execution error
+/// (→ `CallToolResult { is_error: true }`) from an rmcp protocol error.
+const ERR_CODE_KEY: &str = "code";
+
 /// Map a backend `IpcError` to an MCP tool error, preserving the `E_*` code.
 /// Structured `details` (e.g. `E_AMBIGUOUS` candidates) ride along as the
 /// error's data so a caller can act on them without parsing prose.
 pub(super) fn to_mcp_err(e: IpcError) -> McpError {
-    let msg = match &e.details {
-        Some(d) => format!("{}: {} {}", e.code, e.message, d),
-        None => format!("{}: {}", e.code, e.message),
+    mcp_err(&e.code, e.message, e.details)
+}
+
+/// Translate a router outcome for the wire (MCP spec: tool *execution*
+/// failures are a `CallToolResult` with `is_error: true`, which the client
+/// shows the model as the tool's output so it can correct the call; JSON-RPC
+/// errors are for *protocol* failures such as an unknown tool or malformed
+/// arguments). A coded error (built by [`mcp_err`] / [`to_mcp_err`], or by
+/// the readonly / admin / no-caller gates) becomes the result; anything else
+/// — rmcp's own `invalid_params` — passes through unchanged.
+pub(super) fn tool_error_result(e: McpError) -> Result<CallToolResult, McpError> {
+    let Some(code) = e
+        .data
+        .as_ref()
+        .and_then(|d| d.get(ERR_CODE_KEY))
+        .and_then(|c| c.as_str())
+        .map(str::to_string)
+    else {
+        return Err(e);
     };
-    McpError::internal_error(msg, e.details)
+    let details = e
+        .data
+        .as_ref()
+        .and_then(|d| d.get("details"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    // `message` is "CODE: message[ details]"; keep the human line as-is for
+    // the text block and the bare message for the structured field.
+    let bare = e
+        .message
+        .strip_prefix(&format!("{code}: "))
+        .unwrap_or(&e.message)
+        .to_string();
+    let bare = match &details {
+        serde_json::Value::Null => bare,
+        d => bare
+            .strip_suffix(&format!(" {d}"))
+            .unwrap_or(&bare)
+            .to_string(),
+    };
+    let mut r = CallToolResult::error(vec![Content::text(e.message.to_string())]);
+    r.structured_content = Some(serde_json::json!({
+        "code": code,
+        "message": bare,
+        "details": details,
+    }));
+    Ok(r)
 }
 
 /// Default `limit` for `repo_log` when the caller passes none. The Tauri UI
@@ -75,7 +122,15 @@ pub(super) fn mcp_err(
     message: impl std::fmt::Display,
     data: Option<serde_json::Value>,
 ) -> McpError {
-    McpError::internal_error(format!("{code}: {message}"), data)
+    let details = data.unwrap_or(serde_json::Value::Null);
+    let msg = match &details {
+        serde_json::Value::Null => format!("{code}: {message}"),
+        d => format!("{code}: {message} {d}"),
+    };
+    McpError::internal_error(
+        msg,
+        Some(serde_json::json!({ ERR_CODE_KEY: code, "details": details })),
+    )
 }
 
 /// The [`Caller`] the auth middleware attached to this request. The
@@ -751,5 +806,139 @@ impl FleetTools {
             ));
         }
         Ok(task)
+    }
+}
+
+// ---- per-call wall clock ----------------------------------------------------
+
+/// Tools that are themselves bounded long-polls (`timeout_s` ≤ 600):
+/// the wire cap sits above their own maximum.
+pub(super) const LONG_POLL_TOOLS: &[&str] = &["wait_for_session", "wait_for_task", "run_prompt"];
+pub(super) const LONG_POLL_CAP: std::time::Duration = std::time::Duration::from_secs(660);
+
+/// Tools that compose several SSH round trips or spawn processes on a host
+/// (session lifecycle, provisioning, host probes, fan-outs, reads that may
+/// page through large files).
+pub(super) const LIFECYCLE_TOOLS: &[&str] = &[
+    "add_host",
+    "probe_host",
+    "provision_hosts",
+    "new_session",
+    "new_bg_session",
+    "new_shell_session",
+    "recreate_session",
+    "restart_session",
+    "repair_session",
+    "move_session",
+    "spawn_review",
+    "dispatch_task",
+    "safe_kill_session",
+    "kill_session",
+    "delete_worktree",
+    "import_assets",
+    "scan_assets",
+    "refresh_projects",
+    "session_transcript",
+    "usage_report",
+    "broadcast_prompt",
+];
+pub(super) const LIFECYCLE_CAP: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Everything else: store reads and single SSH round trips.
+pub(super) const QUICK_TOOLS: &[&str] = &[
+    "cancel_task",
+    "capture_session",
+    "discover_hosts",
+    "dismiss_ghost_session",
+    "fleet_health",
+    "get_clipboard",
+    "hide_host",
+    "inbox",
+    "list_accounts",
+    "list_assets",
+    "list_hosts",
+    "list_projects",
+    "list_sessions",
+    "list_tasks",
+    "list_worktrees",
+    "peek_session",
+    "peer_status",
+    "register_self",
+    "related_sessions",
+    "remove_host",
+    "rename_session",
+    "repo_branches",
+    "repo_changes",
+    "repo_commit",
+    "repo_commit_diff",
+    "repo_diff",
+    "repo_file",
+    "repo_log",
+    "repo_tree",
+    "send_message",
+    "send_prompt",
+    "session_history",
+    "set_clipboard",
+    "set_friendly_name",
+    "set_session_tags",
+    "whoami",
+];
+pub(super) const QUICK_CAP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Wall-clock cap for one tool call. An unknown name gets the quick cap;
+/// the classification test guarantees every served tool is listed.
+pub(super) fn tool_deadline(tool: &str) -> std::time::Duration {
+    if LONG_POLL_TOOLS.contains(&tool) {
+        LONG_POLL_CAP
+    } else if LIFECYCLE_TOOLS.contains(&tool) {
+        LIFECYCLE_CAP
+    } else {
+        if !QUICK_TOOLS.contains(&tool) {
+            // Reachable only for a name the router does not serve (rmcp then
+            // answers "tool not found") — the classification test keeps every
+            // served tool in one of the three lists.
+            tracing::debug!(tool, "[mcp] unclassified tool name gets the quick cap");
+        }
+        QUICK_CAP
+    }
+}
+
+/// The `E_TIMEOUT` tool result for a call that outran [`tool_deadline`].
+pub(super) fn timeout_result(tool: &str, limit: std::time::Duration) -> CallToolResult {
+    let secs = limit.as_secs();
+    let mut r = CallToolResult::error(vec![Content::text(format!(
+        "E_TIMEOUT: {tool} exceeded its {secs} s limit; the call may have partially completed"
+    ))]);
+    r.structured_content = Some(serde_json::json!({
+        "code": "E_TIMEOUT",
+        "tool": tool,
+        "limit_secs": secs,
+    }));
+    r
+}
+
+/// Run one tool call under its wall clock. On elapse the future is dropped
+/// — safe because no code path holds the store guard across an `.await`,
+/// SSH children are reaped by `SshClient::run_child`'s own clock, and the
+/// long-poll permit releases in `Drop` — and the caller gets
+/// [`timeout_result`].
+pub(super) async fn bounded<F>(
+    tool: &str,
+    limit: std::time::Duration,
+    fut: F,
+) -> Result<CallToolResult, McpError>
+where
+    F: std::future::Future<Output = Result<CallToolResult, McpError>>,
+{
+    match tokio::time::timeout(limit, fut).await {
+        Ok(outcome) => outcome,
+        Err(_elapsed) => {
+            tracing::warn!(
+                tool,
+                limit_secs = limit.as_secs(),
+                "[mcp] tool call timed out"
+            );
+            Ok(timeout_result(tool, limit))
+        }
     }
 }

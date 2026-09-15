@@ -842,3 +842,121 @@ fn router_sum_serves_every_tool() {
     assert_eq!(served, 60);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
+
+// ---- tool errors become is_error results (spec §3) ----
+
+#[test]
+fn mcp_err_carries_the_code_in_data() {
+    let e = mcp_err("E_NOTFOUND", "no such session", None);
+    assert_eq!(e.message, "E_NOTFOUND: no such session");
+    assert_eq!(e.data.as_ref().unwrap()["code"], "E_NOTFOUND");
+    assert!(e.data.as_ref().unwrap()["details"].is_null());
+
+    let d = serde_json::json!({ "candidates": [1, 2] });
+    let e = to_mcp_err(IpcError::new("E_AMBIGUOUS", "two match").with_details(d.clone()));
+    assert_eq!(e.data.as_ref().unwrap()["code"], "E_AMBIGUOUS");
+    assert_eq!(e.data.as_ref().unwrap()["details"], d);
+}
+
+#[test]
+fn tool_error_result_turns_coded_errors_into_is_error_results() {
+    let e = mcp_err("E_FORBIDDEN", "readonly token", None);
+    let r = tool_error_result(e).expect("coded error is a tool result");
+    assert_eq!(r.is_error, Some(true));
+    assert_eq!(text_of(&r.content[0]), "E_FORBIDDEN: readonly token");
+    let sc = r.structured_content.unwrap();
+    assert_eq!(sc["code"], "E_FORBIDDEN");
+    assert_eq!(sc["message"], "readonly token");
+    assert!(sc["details"].is_null());
+
+    // Details ride along structured and are not duplicated into `message`.
+    let d = serde_json::json!({ "candidates": [7] });
+    let r = tool_error_result(mcp_err("E_AMBIGUOUS", "two match", Some(d.clone()))).unwrap();
+    let sc = r.structured_content.unwrap();
+    assert_eq!(sc["message"], "two match");
+    assert_eq!(sc["details"], d);
+    assert!(text_of(&r.content[0]).starts_with("E_AMBIGUOUS: two match"));
+}
+
+#[test]
+fn tool_error_result_keeps_protocol_errors_as_errors() {
+    // rmcp's own "tool not found" / bad-arguments errors carry no code and
+    // must stay JSON-RPC errors.
+    let e = McpError::invalid_params("tool not found", None);
+    let err = tool_error_result(e).expect_err("protocol error passes through");
+    assert_eq!(err.message, "tool not found");
+}
+
+// ---- per-tool wall clock (spec §4) ----
+
+#[test]
+fn every_router_tool_is_explicitly_classified() {
+    // A new tool must be placed in a class on purpose; the 60 s default is
+    // for the wire, not a way to skip the decision.
+    let listed: Vec<String> = FleetTools::tool_router_for_doc()
+        .list_all()
+        .into_iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    assert!(!listed.is_empty());
+    for name in &listed {
+        assert!(
+            LONG_POLL_TOOLS.contains(&name.as_str())
+                || LIFECYCLE_TOOLS.contains(&name.as_str())
+                || QUICK_TOOLS.contains(&name.as_str()),
+            "tool {name} is not classified in support.rs"
+        );
+    }
+    for name in LONG_POLL_TOOLS
+        .iter()
+        .chain(LIFECYCLE_TOOLS)
+        .chain(QUICK_TOOLS)
+    {
+        assert!(
+            listed.iter().any(|l| l == name),
+            "{name} is classified but not served"
+        );
+    }
+}
+
+#[test]
+fn tool_deadline_uses_the_documented_caps() {
+    use std::time::Duration;
+    assert_eq!(tool_deadline("wait_for_session"), Duration::from_secs(660));
+    assert_eq!(tool_deadline("run_prompt"), Duration::from_secs(660));
+    assert_eq!(tool_deadline("new_session"), Duration::from_secs(300));
+    assert_eq!(tool_deadline("provision_hosts"), Duration::from_secs(300));
+    assert_eq!(tool_deadline("list_sessions"), Duration::from_secs(60));
+    assert_eq!(tool_deadline("not_a_tool"), Duration::from_secs(60));
+}
+
+#[test]
+fn timeout_result_is_a_coded_is_error_result() {
+    let r = timeout_result("new_session", std::time::Duration::from_secs(300));
+    assert_eq!(r.is_error, Some(true));
+    assert_eq!(
+        text_of(&r.content[0]),
+        "E_TIMEOUT: new_session exceeded its 300 s limit; the call may have partially completed"
+    );
+    let sc = r.structured_content.unwrap();
+    assert_eq!(sc["code"], "E_TIMEOUT");
+    assert_eq!(sc["tool"], "new_session");
+    assert_eq!(sc["limit_secs"], 300);
+}
+
+#[tokio::test]
+async fn bounded_turns_a_hung_call_into_the_timeout_result() {
+    let hung = std::future::pending::<Result<CallToolResult, McpError>>();
+    let r = bounded("list_hosts", std::time::Duration::from_millis(10), hung)
+        .await
+        .expect("timeout is a result, not an error");
+    assert_eq!(r.is_error, Some(true));
+    assert!(text_of(&r.content[0]).starts_with("E_TIMEOUT: list_hosts"));
+
+    let quick = async { Ok(CallToolResult::success(vec![Content::text("ok")])) };
+    let r = bounded("list_hosts", std::time::Duration::from_secs(5), quick)
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true));
+    assert_eq!(text_of(&r.content[0]), "ok");
+}
