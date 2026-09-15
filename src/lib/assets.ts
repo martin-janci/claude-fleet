@@ -7,7 +7,9 @@ export const KIND_ORDER: AssetKind[] = ['skill', 'agent', 'hook', 'mcp_server', 
 export const KIND_LABEL: Record<AssetKind, string> = {
   skill: 'Skills', agent: 'Agents', hook: 'Hooks', mcp_server: 'MCP servers', plugin_ref: 'Plugins',
 };
-export type AssetState = 'in_sync' | 'drifted' | 'missing' | 'unmanaged' | 'unsupported';
+// `orphan` — a past sync's manifest entry whose asset the catalog has
+// dropped — is listed alongside `unmanaged` in `AssetListing.unmanaged`.
+export type AssetState = 'in_sync' | 'drifted' | 'missing' | 'unmanaged' | 'unsupported' | 'orphan';
 
 export interface CatalogConfigRow {
   repo_path: string;

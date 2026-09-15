@@ -4,9 +4,9 @@
 //! be reviewed (`sync_plan`) and then applied (`sync_apply`) by id without
 //! recomputing it against a host that may have changed underneath.
 //!
-//! Everything here is reserved for the sync engine's command layer (Task 7);
-//! the per-item `#[allow(dead_code)]` markers below come off once a Tauri
-//! command / MCP tool calls into this module.
+//! `sync::plan_sync` drives this module; the per-item `#[allow(dead_code)]`
+//! markers below come off once a Tauri command / MCP tool calls *that*
+//! (Task 8), since until then the orchestration itself is test-only.
 
 use super::super::harness::{json_get, ConfigMerge, Harness, HostSnapshot, MergeMode, RenderPlan};
 use super::super::inventory::merge_satisfied;

@@ -165,6 +165,13 @@ pub mod codes {
     /// Asset catalog: a host scan failed or returned unusable output. The
     /// scan fails closed — a partial snapshot is never treated as empty.
     pub const E_SCAN: &str = "E_SCAN";
+    /// Asset sync: the plan id handed to `sync_apply` is unknown or has
+    /// expired out of the in-process plan registry. Re-plan and apply again.
+    pub const E_SYNC_PLAN_STALE: &str = "E_SYNC_PLAN_STALE";
+    /// Asset sync: the plan contains actions blocked on `${NAME}` secrets
+    /// with no value. The message lists the NAMES only, never a value. Set
+    /// them (`catalog_set_secret`) or re-apply with `force_partial`.
+    pub const E_SECRET_MISSING: &str = "E_SECRET_MISSING";
 }
 
 #[derive(Debug, Serialize)]

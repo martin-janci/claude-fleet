@@ -4,8 +4,9 @@
 //! later sync can update or remove precisely what an earlier one added
 //! without disturbing anything else on the host.
 //!
-//! Reserved for the sync engine (Task 5/6); nothing here is called from a
-//! non-test build yet.
+//! Read by `inventory::compute_states` (to tell a managed asset from one
+//! that was merely found installed) and by `sync::plan`; written by
+//! `sync::apply` at the end of a successful host sync.
 
 use super::super::harness::{value_hash, HostSnapshot, ManifestMerge, RenderPlan};
 use super::super::model::Kind;

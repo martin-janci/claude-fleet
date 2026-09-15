@@ -192,6 +192,21 @@ pub async fn scan_hosts(
         // both a broken claude scan and a broken codex scan must report
         // both reasons, not silently drop the first.
         let mut failures: Vec<String> = Vec::new();
+        // Resolved once per host, and BEFORE the scan await: `resolve` takes
+        // the store lock internally, so it must never be called with a scan
+        // in flight (`await` while holding the guard).
+        let secrets = match super::sync::secrets::resolve(store, &h.alias) {
+            Ok(v) => v,
+            Err(e) => {
+                results.push(HostScanResult {
+                    host: h.alias,
+                    status: "failed".into(),
+                    detail: Some(format!("resolve secrets: {}", e.message)),
+                    rows: 0,
+                });
+                continue;
+            }
+        };
         for harness in super::harness::all() {
             if harness.scan_script().is_none() {
                 continue;
@@ -206,6 +221,7 @@ pub async fn scan_hosts(
                         &h.alias,
                         &snap,
                         &manifest,
+                        &secrets,
                         scanned_at,
                     );
                     total += rows.len();
@@ -304,12 +320,23 @@ pub fn merge_satisfied(snap: &HostSnapshot, m: &ConfigMerge) -> bool {
 /// dropped. `managed` on a catalog row says whether the manifest names it —
 /// i.e. whether fleet put it there, as opposed to finding it already
 /// installed.
+///
+/// `secrets` are this host's resolved `${NAME}` values, and the comparison
+/// runs against the *substituted* plan — the bytes a sync would actually
+/// write. Comparing the raw render instead would read every secret-bearing
+/// asset as `drifted` forever, since the host holds the real value where
+/// the render still says `${NAME}`. `catalog_hash` is likewise the
+/// substituted plan's hash, matching `ManifestEntry::hash` and
+/// `sync::plan`'s rule 4. A name with no value stays `${NAME}` in the
+/// comparison, so the asset reads as drifted/missing — which is what the
+/// plan will report as `blocked`.
 pub fn compute_states(
     catalog: &Catalog,
     harness: &dyn Harness,
     host_alias: &str,
     snap: &HostSnapshot,
     manifest: &Manifest,
+    secrets: &std::collections::BTreeMap<String, String>,
     scanned_at: i64,
 ) -> Vec<AssetInventoryRow> {
     let mut rows = Vec::new();
@@ -325,7 +352,7 @@ pub fn compute_states(
             scanned_at,
             ..Default::default()
         };
-        let plan = match harness.render(asset) {
+        let rendered = match harness.render(asset) {
             Ok(p) => p,
             Err(_) => {
                 rows.push(AssetInventoryRow {
@@ -335,6 +362,8 @@ pub fn compute_states(
                 continue;
             }
         };
+        let substituted = super::sync::secrets::substitute(&rendered, secrets);
+        let plan = substituted.plan.inner();
         let catalog_hash = plan.hash();
         let mut present = false;
         let mut all_match = true;
@@ -463,6 +492,12 @@ mod tests {
     use crate::service::catalog::repo::Catalog;
     use serde_json::json;
 
+    /// No secrets: the default for every test that does not exercise
+    /// `${NAME}` substitution.
+    fn empty() -> std::collections::BTreeMap<String, String> {
+        std::collections::BTreeMap::new()
+    }
+
     fn snap_with(configs: Vec<(&str, serde_json::Value)>) -> HostSnapshot {
         let mut s = HostSnapshot::default();
         for (k, v) in configs {
@@ -568,7 +603,15 @@ mod tests {
             json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "x"}]}]}}),
         );
 
-        let rows = compute_states(&cat, &claude, "local", &snap, &Manifest::default(), 7);
+        let rows = compute_states(
+            &cat,
+            &claude,
+            "local",
+            &snap,
+            &Manifest::default(),
+            &empty(),
+            7,
+        );
         let state = |kind: &str, name: &str| {
             rows.iter()
                 .find(|r| r.kind == kind && r.name == name)
@@ -593,6 +636,7 @@ mod tests {
             "local",
             &HostSnapshot::default(),
             &Manifest::default(),
+            &empty(),
             7,
         );
         assert_eq!(
@@ -630,7 +674,15 @@ mod tests {
             SETTINGS_PATH.into(),
             json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "other"}]}]}}),
         );
-        let rows = compute_states(&cat, &claude, "local", &snap, &Manifest::default(), 1);
+        let rows = compute_states(
+            &cat,
+            &claude,
+            "local",
+            &snap,
+            &Manifest::default(),
+            &empty(),
+            1,
+        );
         assert_eq!(
             rows.iter().find(|r| r.name == "h").unwrap().state,
             "missing"
@@ -643,7 +695,15 @@ mod tests {
                 {"hooks": [{"type": "command", "command": "x"}]},
             ]}}),
         );
-        let rows = compute_states(&cat, &claude, "local", &snap, &Manifest::default(), 1);
+        let rows = compute_states(
+            &cat,
+            &claude,
+            "local",
+            &snap,
+            &Manifest::default(),
+            &empty(),
+            1,
+        );
         assert_eq!(
             rows.iter().find(|r| r.name == "h").unwrap().state,
             "in_sync"
@@ -778,7 +838,7 @@ mod tests {
             .assets
             .insert("not-a-kind/x".into(), ManifestEntry::default());
 
-        let rows = compute_states(&cat, &claude, "local", &snap, &manifest, 9);
+        let rows = compute_states(&cat, &claude, "local", &snap, &manifest, &empty(), 9);
         let row = |name: &str| rows.iter().find(|r| r.name == name).unwrap();
         assert_eq!(row("s").state, "in_sync");
         assert!(row("s").managed, "the manifest names it");
@@ -798,10 +858,71 @@ mod tests {
 
         // Without the manifest, the same host reads as unmanaged and
         // nothing is managed.
-        let rows = compute_states(&cat, &claude, "local", &snap, &Manifest::default(), 9);
+        let rows = compute_states(
+            &cat,
+            &claude,
+            "local",
+            &snap,
+            &Manifest::default(),
+            &empty(),
+            9,
+        );
         let row = |name: &str| rows.iter().find(|r| r.name == name).unwrap();
         assert_eq!(row("gone").state, "unmanaged");
         assert!(!row("gone").managed);
         assert!(!row("s").managed);
+    }
+
+    /// A secret-bearing asset is compared against the *substituted* bytes:
+    /// a host holding exactly what a sync wrote reads `in_sync`, not
+    /// `drifted` forever (the rendered plan still says `${TOK}`).
+    #[test]
+    fn compute_states_compares_against_the_substituted_plan() {
+        let mut cat = Catalog::default();
+        let mut skill = Asset::from_yaml(None, "kind: skill\nname: s\ndescription: d\n").unwrap();
+        skill.body = "token ${TOK}\n".into();
+        cat.assets.push(skill.clone());
+
+        let claude = Claude;
+        let secrets: std::collections::BTreeMap<String, String> =
+            [("TOK".to_string(), "s3cr3t".to_string())]
+                .into_iter()
+                .collect();
+        let rendered = claude.render(&skill).unwrap();
+        let substituted = crate::service::catalog::sync::secrets::substitute(&rendered, &secrets);
+        let on_host = &substituted.plan.inner().files[0];
+        let mut snap = HostSnapshot::default();
+        snap.files.insert(
+            on_host.path.clone(),
+            crate::service::catalog::model::sha256_hex(&on_host.bytes),
+        );
+
+        let rows = compute_states(
+            &cat,
+            &claude,
+            "local",
+            &snap,
+            &Manifest::default(),
+            &secrets,
+            5,
+        );
+        assert_eq!(rows[0].state, "in_sync", "{rows:?}");
+        assert_eq!(
+            rows[0].catalog_hash.as_deref(),
+            Some(substituted.plan.inner().hash().as_str()),
+            "the row records the substituted plan's hash"
+        );
+
+        // Without the value the host's bytes cannot match: still drifted.
+        let rows = compute_states(
+            &cat,
+            &claude,
+            "local",
+            &snap,
+            &Manifest::default(),
+            &std::collections::BTreeMap::new(),
+            5,
+        );
+        assert_eq!(rows[0].state, "drifted");
     }
 }

@@ -186,9 +186,15 @@ pub fn list_assets(store: &Mutex<Store>) -> Result<AssetListing, IpcError> {
                     hosts: host_states(&rows, a.kind(), &a.header.name),
                 })
                 .collect(),
+            // `unmanaged` is the wire name for "installed on a host but not
+            // a catalog asset". An `orphan` — a past sync's manifest entry
+            // whose asset the catalog has dropped — belongs in the same
+            // list, or it would be invisible in the UI: it is not a catalog
+            // asset any more, so it has no `AssetSummary` row to hang a
+            // `HostState` off. The frontend groups the list by `state`.
             unmanaged: rows
                 .iter()
-                .filter(|r| r.state == "unmanaged")
+                .filter(|r| r.state == "unmanaged" || r.state == "orphan")
                 .cloned()
                 .collect(),
             problems: cat.problems.clone(),
@@ -423,5 +429,62 @@ mod tests {
             .unwrap();
         assert!(codex.plan.is_none());
         assert!(codex.unsupported.as_deref().unwrap().contains("codex"));
+    }
+
+    /// `orphan` rows — the host still holds something a past sync wrote but
+    /// the catalog has dropped — belong in the same "not in the catalog"
+    /// list the UI shows, alongside `unmanaged`.
+    #[test]
+    fn list_assets_lists_orphan_rows_as_unmanaged() {
+        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = repo_with_one_skill("orphan");
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        configure(
+            ConfigureArgs {
+                repo_path: root.to_string_lossy().into(),
+                remote_url: None,
+            },
+            &store,
+        )
+        .unwrap();
+        load(false, &store).unwrap();
+        let row = |name: &str, state: &str, managed: bool| crate::store::AssetInventoryRow {
+            host_alias: "local".into(),
+            harness: "claude".into(),
+            kind: "skill".into(),
+            name: name.into(),
+            state: state.into(),
+            catalog_hash: None,
+            host_hash: None,
+            scanned_at: 1,
+            managed,
+        };
+        store
+            .lock()
+            .unwrap()
+            .replace_host_inventory(
+                "local",
+                "claude",
+                &[
+                    row("extra", "unmanaged", false),
+                    row("gone", "orphan", true),
+                    row("s", "in_sync", true),
+                ],
+            )
+            .unwrap();
+
+        let listing = list_assets(&store).unwrap();
+        let mut names: Vec<&str> = listing.unmanaged.iter().map(|r| r.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["extra", "gone"], "{:?}", listing.unmanaged);
+        assert_eq!(
+            listing.assets[0].hosts,
+            vec![HostState {
+                host_alias: "local".into(),
+                harness: "claude".into(),
+                state: "in_sync".into()
+            }],
+            "an orphan is not a host state of a catalog asset"
+        );
     }
 }

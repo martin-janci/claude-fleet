@@ -38,9 +38,10 @@
 //! entry, so the next plan sees the half-written state, re-plans it, and the
 //! (idempotent) writes converge — nothing is rolled back on the host.
 //!
-//! Reserved for the sync command layer (Task 7); the per-item
+//! `sync::apply_sync` drives this module; the per-item
 //! `#[allow(dead_code)]` markers come off once a Tauri command / MCP tool
-//! calls `apply_host`.
+//! calls *that* (Task 8), since until then the orchestration itself is
+//! test-only.
 
 use super::super::harness::claude::PLUGINS_PATH;
 use super::super::harness::{
@@ -52,7 +53,7 @@ use super::plan::{Action, ActionOp, HostPlan, PluginTarget};
 use crate::service::provision;
 use crate::ssh::SshClient;
 use base64::Engine;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -99,9 +100,11 @@ pub enum WriteOutcome {
     Failed,
 }
 
-/// What the applier did about one planned action.
+/// What the applier did about one planned action. `Deserialize` because a
+/// whole `SyncRunSummary` is stored as JSON in `sync_runs` and read back by
+/// `sync::last_sync`.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionResult {
     pub kind: String,
     pub name: String,
@@ -111,9 +114,10 @@ pub struct ActionResult {
     pub detail: Option<String>,
 }
 
-/// What the applier did about one host.
+/// What the applier did about one host. `Deserialize` for the same reason
+/// as `ActionResult`.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostSyncResult {
     pub host_alias: String,
     pub harness: String,

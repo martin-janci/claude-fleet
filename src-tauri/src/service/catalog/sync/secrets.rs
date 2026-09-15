@@ -3,8 +3,10 @@
 //! Precedence is host override > global > built-ins (`resolve`). Values are
 //! never logged and never included in an error message — only names are.
 //!
-//! Reserved for the sync engine (Task 5/6); nothing here is called from a
-//! non-test build yet.
+//! `inventory::compute_states` substitutes before it compares (a host
+//! holding the real value must not read as drift), and `sync::plan_sync` /
+//! `sync::apply_sync` resolve once per host before every await — `resolve`
+//! takes the store lock internally.
 
 use super::super::harness::{ConfigMerge, FileWrite, RenderPlan};
 use crate::ipc_error::IpcError;
