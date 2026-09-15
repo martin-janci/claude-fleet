@@ -532,6 +532,33 @@ describe('TerminalView open lifecycle (F12/N4)', () => {
     expect(screen.getByTestId('terminal-size').textContent).not.toContain('measuring');
   });
 
+  it('reselecting the SAME session mid-probe still attaches', async () => {
+    // The user leaves and comes straight back while the SSH workspace probe is
+    // still out. The in-flight open stands down (its generation is gone), so
+    // the coalesced request is all that is left to attach the pane — and it is
+    // for the very session that open targeted.
+    const probe = deferred<unknown>();
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'repair_session') return probe.promise;
+      if (cmd === 'pty_drain') return drained();
+      return null;
+    });
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    expect(calls('pty_open')).toHaveLength(0);
+
+    clearSelection();
+    await settle();
+    selectSession(onAlpha);
+    await settle();
+    probe.resolve({ actions: [], warnings: [] });
+    await settle(16);
+
+    expect(calls('pty_open')).toHaveLength(1);
+    expect(screen.getByTestId('terminal-size').textContent).not.toContain('measuring');
+  });
+
   it('a stale open that already attached closes its own PTY', async () => {
     const gate = deferred<null>();
     inv().mockImplementation(async (cmd: string) => {

@@ -311,8 +311,9 @@
    *  Dropping such a request stranded the new selection whenever the running
    *  open then failed: nothing re-triggers the $effects, so the pane sat on
    *  the previous session's error. Coalesced here and run from openTerm's
-   *  `finally` — but only when the selection really moved on, since closeTerm
-   *  nulling `currentSession` re-runs the effects during every open. */
+   *  `finally` — but only when that open cannot have attached the pane
+   *  itself, since closeTerm nulling `currentSession` re-runs the effects
+   *  during every open. */
   let reopenPending = false;
   /** Open generation. closeTerm() and onDestroy bump it; every open captures
    *  it and abandons itself after any await once it no longer matches — the
@@ -343,6 +344,16 @@
     if (!container) return;
     const target = { tmux_name: sess.tmux_name, host_alias: sess.host_alias };
     opening = true;
+    /** Set when this open stood down as stale instead of running to a
+     *  conclusion for `target`. The coalesced request then has to run even
+     *  when it names the same session — leaving and coming straight back to
+     *  one session is exactly the case that bails out. */
+    let bailed = false;
+    /** This open's generation, claimed below once closeTerm has bumped it. */
+    let gen = 0;
+    /** The post-await re-check, recording that we stood down so the `finally`
+     *  can tell a stale exit from an open that really reached `target`. */
+    const standDown = () => (bailed = openIsStale(gen, target));
     try {
       // A fresh open (new selection, manual reconnect, detach/reattach button)
       // starts with a clean self-heal budget; an auto-reconnect must preserve
@@ -351,12 +362,12 @@
       await closeTerm();
       // Claim the generation closeTerm() just bumped. Anything that closes or
       // destroys from here on bumps it again and this open stands down.
-      const gen = ++openGeneration;
-      if (openIsStale(gen, target)) return;
+      gen = ++openGeneration;
+      if (standDown()) return;
       openError = null;
       disconnected = false;
       await tick();
-      if (openIsStale(gen, target)) return;
+      if (standDown()) return;
 
       measureCellSize();
       const dim = computeDimensions();
@@ -391,7 +402,7 @@
       // offline host is left to the attach error.
       if (sess.project_id != null && !hasNoPane(sess)) {
         const rep = await repairSession(sess.id);
-        if (openIsStale(gen, target)) return;
+        if (standDown()) return;
         if (rep.ok) {
           const v = rep.value;
           const actions = v?.actions ?? [];
@@ -422,7 +433,7 @@
       } catch (e) {
         // Only the session that caused the failure may show it; a stale open's
         // error under another session's header is pure confusion.
-        if (openIsStale(gen, target)) return;
+        if (standDown()) return;
         if (isAutoReconnect) {
           // Keep backing off instead of stopping after one try: nothing else
           // would ever call scheduleAutoReconnect again (the drain loop never
@@ -434,7 +445,7 @@
         }
         return;
       }
-      if (openIsStale(gen, target)) {
+      if (standDown()) {
         // The attach landed after the pane let go of it. Nobody will drain it
         // and the backend keeps exactly one PTY, so close it — no newer open
         // can have taken over, they are serialized by `opening`.
@@ -467,15 +478,20 @@
       const pending = reopenPending;
       reopenPending = false;
       const sel = $selectedSession;
-      // Only a request for a DIFFERENT session gets re-run here. Re-running it
-      // for the same one would retry a just-failed open in a tight loop (the
-      // self-heal backoff owns that case).
+      // Re-run the coalesced request when this open cannot have served it: it
+      // stood down as stale, or it was for another session. An open that ran
+      // its course for `target` and merely failed at pty_open is NOT re-run —
+      // that would retry a just-failed attach in a tight loop (the self-heal
+      // backoff owns that case). Comparing the identities alone was not
+      // enough: leaving a session and coming straight back while its workspace
+      // probe is out makes both identities equal, and the pane was then left
+      // unattached at 'measuring…' with nothing reactive left to fix it.
       if (
         pending &&
         sel &&
         !destroyed &&
         !isAttachedTo(sel) &&
-        (sel.tmux_name !== target.tmux_name || sel.host_alias !== target.host_alias)
+        (bailed || sel.tmux_name !== target.tmux_name || sel.host_alias !== target.host_alias)
       ) {
         void openTerm();
       }
