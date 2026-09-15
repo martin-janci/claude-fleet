@@ -3,6 +3,7 @@
 
 use super::model::{Asset, Kind, Problem, Resource};
 use super::{E_ASSET_EXISTS, E_ASSET_NOT_FOUND, E_CATALOG_GIT, E_CATALOG_PARSE};
+use crate::ipc_error::codes::E_INVALID;
 use crate::ipc_error::IpcError;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -152,7 +153,10 @@ pub fn has_identity(root: &Path) -> bool {
 }
 
 /// `git add -A -- <rel_paths>`, or `git add -A` for the whole tree when
-/// `rel_paths` is empty.
+/// `rel_paths` is empty. `rel_paths` are trusted here (author.rs, Task 2,
+/// validates any path that originates from the frontend before it reaches
+/// this function); the `--` before them still defuses flag injection (a
+/// path that happens to start with `-`) regardless.
 /// Used by author.rs (Task 2).
 #[allow(dead_code)]
 pub fn stage_paths(root: &Path, rel_paths: &[String]) -> Result<(), IpcError> {
@@ -212,6 +216,21 @@ fn body_file(kind: Kind) -> &'static str {
         Kind::Agent => "prompt.md",
         _ => "",
     }
+}
+
+/// A `Resource.rel_path` is safe to join onto an asset dir and write only
+/// when it starts with `resources/`, stays within `[A-Za-z0-9._/-]`, and has
+/// no empty or `..` segment (which would otherwise let it escape the asset
+/// directory or the `resources/` subtree). Defence in depth: `author.rs`
+/// (Task 2) validates resource paths coming from the frontend too.
+fn valid_resource_rel_path(rel_path: &str) -> bool {
+    rel_path.starts_with("resources/")
+        && rel_path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
+        && rel_path
+            .split('/')
+            .all(|seg| !seg.is_empty() && seg != "..")
 }
 
 fn rel(root: &Path, p: &Path) -> String {
@@ -355,6 +374,14 @@ pub fn load_dir(root: &Path) -> Result<Catalog, IpcError> {
 /// `overwrite`, prunes files under `<dir>/resources/` that are no longer
 /// listed in `asset.resources`, removing directories left empty.
 pub fn write_asset(root: &Path, asset: &Asset, overwrite: bool) -> Result<(), IpcError> {
+    for r in &asset.resources {
+        if !valid_resource_rel_path(&r.rel_path) {
+            return Err(IpcError::new(
+                E_INVALID,
+                format!("invalid resource path: {}", r.rel_path),
+            ));
+        }
+    }
     let kind = asset.kind();
     let yaml_path = asset_path(root, kind, &asset.header.name);
     if yaml_path.exists() && !overwrite {
@@ -459,19 +486,39 @@ pub fn remove_asset(root: &Path, kind: Kind, name: &str) -> Result<Vec<String>, 
     };
     if kind.is_folder() {
         let dir = root.join(kind.dir()).join(name);
-        if !dir.is_dir() {
-            return Err(not_found());
-        }
+        guard_removable(root, &dir, true, &not_found)?;
         let removed = list_files_rel(root, &dir)?;
         std::fs::remove_dir_all(&dir)?;
         Ok(removed)
     } else {
         let path = asset_path(root, kind, name);
-        if !path.is_file() {
-            return Err(not_found());
-        }
+        guard_removable(root, &path, false, &not_found)?;
         std::fs::remove_file(&path)?;
         Ok(vec![rel(root, &path)])
+    }
+}
+
+/// Checks `path` is safe for `remove_asset` to delete: absent -> `not_found`
+/// (via `E_ASSET_NOT_FOUND`); a symlink (whether it targets a directory,
+/// file, or nothing) -> `E_INVALID`, never followed or unlinked; present but
+/// the wrong type (a plain file where a directory was expected, or vice
+/// versa) -> `not_found` as well. `symlink_metadata` (not `metadata`) is
+/// essential here: it reports on the link itself rather than following it,
+/// which is what lets a symlink be detected before anything is removed.
+fn guard_removable(
+    root: &Path,
+    path: &Path,
+    want_dir: bool,
+    not_found: &dyn Fn() -> IpcError,
+) -> Result<(), IpcError> {
+    match std::fs::symlink_metadata(path) {
+        Err(_) => Err(not_found()),
+        Ok(meta) if meta.file_type().is_symlink() => Err(IpcError::new(
+            E_INVALID,
+            format!("{} is a symlink; refusing to remove", rel(root, path)),
+        )),
+        Ok(meta) if meta.is_dir() != want_dir => Err(not_found()),
+        Ok(_) => Ok(()),
     }
 }
 
@@ -887,6 +934,62 @@ mod tests {
         assert_eq!(err.code, "E_ASSET_NOT_FOUND");
         let err = remove_asset(&root, Kind::Hook, "missing").unwrap_err();
         assert_eq!(err.code, "E_ASSET_NOT_FOUND");
+    }
+
+    #[test]
+    fn remove_asset_refuses_symlinked_targets() {
+        let root = tmp("remove-symlink");
+        let outside = tmp("remove-symlink-outside");
+        write(&outside, "keep.txt", "keep");
+
+        // A folder-kind asset whose directory is actually a symlink out of
+        // the repo: must be refused, never unlinked or walked into.
+        fs::create_dir_all(root.join("skills")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("skills/link")).unwrap();
+        let err = remove_asset(&root, Kind::Skill, "link").unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+        assert!(root.join("skills/link").exists());
+        assert!(outside.join("keep.txt").exists());
+
+        // Same guard for a single-file kind whose yaml is a symlink.
+        let outside_file = outside.join("keep.txt");
+        fs::create_dir_all(root.join("hooks")).unwrap();
+        std::os::unix::fs::symlink(&outside_file, root.join("hooks/h.yaml")).unwrap();
+        let err = remove_asset(&root, Kind::Hook, "h").unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+        assert!(root.join("hooks/h.yaml").exists());
+        assert!(outside_file.exists());
+    }
+
+    #[test]
+    fn write_asset_rejects_invalid_resource_paths() {
+        let root = tmp("invalid-resource");
+        let mut a = Asset::from_yaml(None, "kind: skill\nname: s\ndescription: d\n").unwrap();
+        a.body = "b\n".into();
+
+        for bad in [
+            "not-resources/x.txt",     // must live under resources/
+            "resources/../escape.txt", // .. segment
+            "resources//x.txt",        // empty segment
+            "resources/x y.txt",       // space: outside [A-Za-z0-9._/-]
+            "resources/héllo.txt",     // non-ASCII: outside [A-Za-z0-9._/-]
+        ] {
+            a.resources = vec![Resource {
+                rel_path: bad.into(),
+                bytes: b"x".to_vec(),
+            }];
+            let err = write_asset(&root, &a, false).unwrap_err();
+            assert_eq!(err.code, "E_INVALID", "path: {bad}");
+        }
+        // None of the rejected writes touched disk.
+        assert!(!root.join("skills/s").exists());
+
+        a.resources = vec![Resource {
+            rel_path: "resources/ok.txt".into(),
+            bytes: b"ok".to_vec(),
+        }];
+        write_asset(&root, &a, false).unwrap();
+        assert!(root.join("skills/s/resources/ok.txt").exists());
     }
 
     #[test]
