@@ -8,6 +8,17 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 const clipboardReadText = vi.fn();
 const clipboardWriteText = vi.fn();
+type DragDropPayload = { type: string; position: { x: number; y: number }; paths?: string[] };
+let dragDrop: ((e: { payload: DragDropPayload }) => void) | null = null;
+vi.mock('@tauri-apps/api/webview', () => ({
+  getCurrentWebview: () => ({
+    onDragDropEvent: async (cb: (e: { payload: DragDropPayload }) => void) => {
+      dragDrop = cb;
+      return () => {};
+    },
+  }),
+}));
+
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({
   readText: (...a: unknown[]) => clipboardReadText(...a),
   writeText: (...a: unknown[]) => clipboardWriteText(...a),
@@ -63,6 +74,22 @@ const calls = (cmd: string) => inv().mock.calls.filter((c) => c[0] === cmd);
 const settle = async (n = 8) => {
   for (let i = 0; i < n; i++) await tick();
 };
+
+/** A drain result carrying every field the backend sends. */
+const drained = (
+  over: Partial<{ data: string; bytes: number; eof: boolean; overflowed: boolean }> = {},
+) => ({ data: '', bytes: 0, eof: false, overflowed: false, ...over });
+
+/** A promise a test resolves by hand, to hold one invoke in flight. */
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
 
 // ResizeObserver stub that lets a test fire the observer callback by hand.
 let resizeCallbacks: Array<() => void> = [];
@@ -243,15 +270,6 @@ describe('TerminalView drain resilience (F1)', () => {
 });
 
 describe('TerminalView PTY death detection (F11/N8)', () => {
-  /** A drain result with every field the backend sends. */
-  const drained = (over: Partial<{ data: string; bytes: number; eof: boolean; overflowed: boolean }> = {}) => ({
-    data: '',
-    bytes: 0,
-    eof: false,
-    overflowed: false,
-    ...over,
-  });
-
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -396,23 +414,13 @@ describe('TerminalView PTY death detection (F11/N8)', () => {
 });
 
 describe('TerminalView open lifecycle (F12/N4)', () => {
-  /** A promise a test resolves by hand, to hold one invoke in flight. */
-  function deferred<T>() {
-    let resolve!: (v: T) => void;
-    let reject!: (e: unknown) => void;
-    const promise = new Promise<T>((res, rej) => {
-      resolve = res;
-      reject = rej;
-    });
-    return { promise, resolve, reject };
-  }
   const openedHosts = () =>
     calls('pty_open').map((c) => (c[1] as { args: { host_alias: string } }).args.host_alias);
 
   it('a session switch during an open that then fails still attaches the new session', async () => {
     const gate = deferred<null>();
     inv().mockImplementation(async (cmd: string, args?: unknown) => {
-      if (cmd === 'pty_drain') return { data: '', bytes: 0, eof: false, overflowed: false };
+      if (cmd === 'pty_drain') return drained();
       if (cmd === 'pty_open') {
         const host = (args as { args: { host_alias: string } }).args.host_alias;
         if (host === 'alpha') return gate.promise;
@@ -445,7 +453,7 @@ describe('TerminalView open lifecycle (F12/N4)', () => {
         if (opened > 1) throw { message: 'ssh: Connection refused' };
         return null;
       }
-      if (cmd === 'pty_drain') return { data: '', bytes: 0, eof: true, overflowed: false };
+      if (cmd === 'pty_drain') return drained({ eof: true });
       return null;
     });
     vi.useFakeTimers();
@@ -467,7 +475,7 @@ describe('TerminalView open lifecycle (F12/N4)', () => {
     const probe = deferred<unknown>();
     inv().mockImplementation(async (cmd: string) => {
       if (cmd === 'repair_session') return probe.promise;
-      if (cmd === 'pty_drain') return { data: '', bytes: 0, eof: false, overflowed: false };
+      if (cmd === 'pty_drain') return drained();
       return null;
     });
     render(TerminalView);
@@ -495,7 +503,7 @@ describe('TerminalView open lifecycle (F12/N4)', () => {
     const gate = deferred<null>();
     inv().mockImplementation(async (cmd: string) => {
       if (cmd === 'pty_open') return gate.promise;
-      if (cmd === 'pty_drain') return { data: '', bytes: 0, eof: false, overflowed: false };
+      if (cmd === 'pty_drain') return drained();
       return null;
     });
     render(TerminalView);
@@ -513,7 +521,7 @@ describe('TerminalView open lifecycle (F12/N4)', () => {
     const probe = deferred<unknown>();
     inv().mockImplementation(async (cmd: string) => {
       if (cmd === 'repair_session') return probe.promise;
-      if (cmd === 'pty_drain') return { data: '', bytes: 0, eof: false, overflowed: false };
+      if (cmd === 'pty_drain') return drained();
       return null;
     });
     const view = render(TerminalView);
@@ -540,6 +548,52 @@ describe('TerminalView open lifecycle (F12/N4)', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('TerminalView drag-drop upload (N5)', () => {
+  const written = () => calls('pty_write').map((c) => (c[1] as { args: { data: string } }).args.data);
+  const drop = (paths: string[]) =>
+    dragDrop?.({ payload: { type: 'drop', position: { x: 0, y: 0 }, paths } });
+
+  it('pastes the uploaded paths into the session that started the upload', async () => {
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_drain') return drained();
+      if (cmd === 'upload_to_session') return ['/home/alpha/.cf-uploads/big.zip'];
+      return null;
+    });
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    drop(['/Users/me/big.zip']);
+    await settle(16);
+    expect(written().join('')).toContain('/home/alpha/.cf-uploads/big.zip');
+  });
+
+  it("never types one host's paths into the session attached later", async () => {
+    const upload = deferred<string[]>();
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_drain') return drained();
+      if (cmd === 'upload_to_session') return upload.promise;
+      return null;
+    });
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    drop(['/Users/me/big.zip']);
+    await settle();
+    expect(calls('upload_to_session')).toHaveLength(1);
+
+    // scp takes a while; the user moves to another host in the meantime.
+    selectSession(onBeta);
+    await settle(16);
+    expect(screen.queryByTestId('terminal-drop-overlay')).toBeNull();
+
+    upload.resolve(['/home/alpha/.cf-uploads/big.zip']);
+    await settle(16);
+    expect(written().join('')).not.toContain('big.zip');
+    // The paths are not lost — they are reported instead.
+    expect(get(toasts).some((t) => t.message.includes('/home/alpha/.cf-uploads/big.zip'))).toBe(true);
   });
 });
 

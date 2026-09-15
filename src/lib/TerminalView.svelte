@@ -217,16 +217,35 @@
 
   async function handleDrop(paths: string[]) {
     if (!ptyOpen || !currentSession || !currentHost || paths.length === 0) return;
+    // An scp of a large file takes many seconds. Pin the upload to the attach
+    // that started it: pasting on arrival regardless typed host A's paths into
+    // whatever session was attached by then — a different Claude prompt, on a
+    // machine where those paths don't exist.
+    const target = { tmux_name: currentSession, host_alias: currentHost };
+    const gen = openGeneration;
     uploading = true;
     try {
       const remote = await invoke<string[]>('upload_to_session', {
-        args: { host_alias: currentHost, session_name: currentSession, local_paths: paths },
+        args: { host_alias: target.host_alias, session_name: target.tmux_name, local_paths: paths },
       });
-      if (remote.length > 0) sendPaste(pathsToPasteText(remote));
+      if (remote.length === 0) return;
+      if (gen === openGeneration && isAttachedTo(target)) {
+        sendPaste(pathsToPasteText(remote));
+      } else {
+        push({
+          kind: 'info',
+          message: `Uploaded to ${target.host_alias}:${target.tmux_name}: ${remote.join(' ')}`,
+        });
+      }
     } catch (e) {
-      openError = `Upload failed: ${describeError(e)}`;
+      // Same rule for the error: it belongs to the pane that asked for it.
+      const message = `Upload failed: ${describeError(e)}`;
+      if (gen === openGeneration) openError = message;
+      else push({ kind: 'error', message });
     } finally {
-      uploading = false;
+      // closeTerm already cleared the overlay for a pane that moved on — and a
+      // newer upload may own it by now.
+      if (gen === openGeneration) uploading = false;
     }
   }
 
