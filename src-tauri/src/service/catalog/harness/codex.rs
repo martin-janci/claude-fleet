@@ -65,6 +65,60 @@ fn strip_nulls(v: &mut Value) {
     }
 }
 
+/// `serde`'s wire format for `toml::Value::Datetime`: a single-field struct
+/// serialized as a map with this one private key
+/// (`toml_datetime::datetime::FIELD`). `serde_json::to_value` on a
+/// `toml::Value::Datetime` round-trips through this shape rather than
+/// erroring, so a config file with a native TOML datetime would otherwise
+/// silently turn into this bogus table on the way back to TOML.
+const TOML_PRIVATE_DATETIME_KEY: &str = "$__toml_private_datetime";
+
+/// Walk a parsed `toml::Value` for any `Datetime` node and return its dotted
+/// path (`a.b`, with `[i]` array indices) the first time one is found.
+/// `fleet` cannot round-trip TOML datetimes through JSON (see
+/// `TOML_PRIVATE_DATETIME_KEY`), so `merge_config` must refuse to touch a
+/// file containing one rather than silently corrupt it.
+fn find_datetime_path(v: &toml::Value, path: &str) -> Option<String> {
+    match v {
+        toml::Value::Datetime(_) => Some(if path.is_empty() {
+            "<root>".to_string()
+        } else {
+            path.to_string()
+        }),
+        toml::Value::Table(map) => map.iter().find_map(|(k, val)| {
+            let child = if path.is_empty() {
+                k.clone()
+            } else {
+                format!("{path}.{k}")
+            };
+            find_datetime_path(val, &child)
+        }),
+        toml::Value::Array(arr) => arr
+            .iter()
+            .enumerate()
+            .find_map(|(i, val)| find_datetime_path(val, &format!("{path}[{i}]"))),
+        _ => None,
+    }
+}
+
+/// Second guard, applied to the JSON tree right before converting it back to
+/// TOML: is there any object anywhere in `v` whose only key is the toml
+/// crate's private datetime marker? A well-formed merge value never
+/// produces one (assets never set a "$__toml_private_datetime" field), so
+/// this only fires if a raw private-datetime object slipped through
+/// unnoticed — belt-and-suspenders alongside the `find_datetime_path` check
+/// on the parsed input.
+fn contains_toml_private_datetime(v: &Value) -> bool {
+    match v {
+        Value::Object(map) => {
+            (map.len() == 1 && map.contains_key(TOML_PRIVATE_DATETIME_KEY))
+                || map.values().any(contains_toml_private_datetime)
+        }
+        Value::Array(arr) => arr.iter().any(contains_toml_private_datetime),
+        _ => false,
+    }
+}
+
 impl Harness for Codex {
     fn id(&self) -> &'static str {
         "codex"
@@ -258,11 +312,40 @@ impl Harness for Codex {
                     format!("{file} is not a valid TOML document"),
                 )
             })?;
+            // Fail closed on a native TOML datetime: `serde_json::to_value`
+            // does not error on `toml::Value::Datetime`, it silently
+            // round-trips it through the toml crate's private wire format
+            // (`TOML_PRIVATE_DATETIME_KEY`) — converting that back to TOML
+            // later would emit a bogus table in its place, corrupting
+            // unrelated config. Refuse the whole merge instead.
+            if let Some(path) = find_datetime_path(&toml_value, "") {
+                tracing::warn!(file, key = %path, "config.toml contains a datetime; refusing to merge");
+                return Err(IpcError::new(
+                    crate::ipc_error::codes::E_INVALID,
+                    format!(
+                        "config.toml contains a datetime at {path}; fleet cannot merge this file yet"
+                    ),
+                ));
+            }
             serde_json::to_value(toml_value).unwrap_or_else(|_| json!({}))
         };
         super::apply_merges(&mut root, merges);
         super::remove_merges(&mut root, remove);
         strip_nulls(&mut root);
+        // Second guard, right before the JSON->TOML conversion: refuse a
+        // raw toml-private-datetime marker object anywhere in the merged
+        // tree rather than silently emitting it as a bogus TOML table (see
+        // `contains_toml_private_datetime`).
+        if contains_toml_private_datetime(&root) {
+            tracing::warn!(
+                file,
+                "merged config contains a raw toml-private datetime marker; refusing to write"
+            );
+            return Err(IpcError::new(
+                crate::ipc_error::codes::E_INVALID,
+                format!("{file} merge result contains a raw datetime marker; fleet cannot write this file"),
+            ));
+        }
         let toml_value = toml::Value::try_from(&root).map_err(|e| {
             tracing::warn!(file, error = %e, "merged config cannot be represented as TOML");
             IpcError::new(
@@ -471,6 +554,59 @@ mod tests {
             .merge_config(CODEX_CONFIG_PATH, "not [ valid = toml =", &[], &[])
             .unwrap_err();
         assert_eq!(err.code, "E_INVALID");
+    }
+
+    /// Regression for a controller-ruled fail-closed fix: a native TOML
+    /// datetime survives `serde_json::to_value` as the toml crate's private
+    /// wire format instead of erroring, and converting that back to TOML
+    /// would silently emit a bogus table — corrupting unrelated config.
+    /// `merge_config` must refuse the whole merge instead, naming the
+    /// offending dotted key path.
+    #[test]
+    fn merge_config_rejects_existing_toml_with_a_datetime() {
+        let existing = "created = 2024-01-01T00:00:00Z\n[mcp_servers.a]\nurl = \"x\"\n";
+        let err = Codex
+            .merge_config(CODEX_CONFIG_PATH, existing, &[], &[])
+            .unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+        assert!(err.message.contains("created"), "{}", err.message);
+        assert!(err.message.contains("datetime"), "{}", err.message);
+
+        // Nested under a table too, not just at the top level.
+        let nested = "[mcp_servers.a]\nurl = \"x\"\nupdated = 2024-01-01T00:00:00Z\n";
+        let err2 = Codex
+            .merge_config(CODEX_CONFIG_PATH, nested, &[], &[])
+            .unwrap_err();
+        assert_eq!(err2.code, "E_INVALID");
+        assert!(
+            err2.message.contains("mcp_servers.a.updated"),
+            "{}",
+            err2.message
+        );
+    }
+
+    /// Regression: an existing `config.toml` with no datetimes anywhere
+    /// still merges normally (the datetime guard must not be overbroad).
+    #[test]
+    fn merge_config_still_merges_when_no_datetime_present() {
+        let existing = "[mcp_servers.a]\nurl = \"x\"\nenabled = true\ncount = 3\n";
+        let set = ConfigMerge {
+            file: CODEX_CONFIG_PATH.into(),
+            json_path: vec!["mcp_servers".into(), "fleet".into()],
+            mode: MergeMode::Set,
+            value: json!({"url": "http://127.0.0.1:4180/mcp"}),
+        };
+        let out = Codex
+            .merge_config(CODEX_CONFIG_PATH, existing, &[set], &[])
+            .unwrap();
+        let v: toml::Value = toml::from_str(&out).expect("output must be valid TOML");
+        assert_eq!(v["mcp_servers"]["a"]["url"].as_str(), Some("x"));
+        assert_eq!(v["mcp_servers"]["a"]["enabled"].as_bool(), Some(true));
+        assert_eq!(v["mcp_servers"]["a"]["count"].as_integer(), Some(3));
+        assert_eq!(
+            v["mcp_servers"]["fleet"]["url"].as_str(),
+            Some("http://127.0.0.1:4180/mcp")
+        );
     }
 
     /// Runs the real `scan_script()` under `bash -lc` (through
