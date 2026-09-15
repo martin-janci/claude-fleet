@@ -170,7 +170,7 @@ pub(super) const SESSION_COLUMNS: &str =
 /// Decode the `sessions.tags` JSON column. NULL, empty, or malformed text
 /// (never written by us, but a hand-edited DB is possible) reads as no tags
 /// rather than failing every session read.
-pub fn decode_tags(raw: Option<String>) -> Vec<String> {
+pub(super) fn decode_tags(raw: Option<String>) -> Vec<String> {
     raw.as_deref()
         .filter(|s| !s.trim().is_empty())
         .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
@@ -179,7 +179,7 @@ pub fn decode_tags(raw: Option<String>) -> Vec<String> {
 
 /// Encode tags for the `sessions.tags` column: `None` for an empty list so
 /// an untagged row stays NULL (and `tag IS NULL` style queries work).
-pub fn encode_tags(tags: &[String]) -> Option<String> {
+pub(super) fn encode_tags(tags: &[String]) -> Option<String> {
     if tags.is_empty() {
         None
     } else {

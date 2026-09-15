@@ -16,11 +16,12 @@ impl Store {
         fetch_project(&self.conn, id)
     }
 
-    fn get_worktree(&self, id: i64) -> Result<Option<WorktreeRow>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {WORKTREE_COLUMNS} FROM worktrees WHERE id=?1"
-        ))?;
-        stmt.query_row(rusqlite::params![id], worktree_from_row)
+    pub fn get_worktree_row(&self, id: i64) -> Result<Option<WorktreeRow>, rusqlite::Error> {
+        self.conn
+            .prepare_cached(&format!(
+                "SELECT {WORKTREE_COLUMNS} FROM worktrees WHERE id=?1"
+            ))?
+            .query_row(rusqlite::params![id], worktree_from_row)
             .optional()
     }
 
@@ -188,7 +189,7 @@ impl Store {
             |row| row.get(0),
         )?;
         if host_alias == crate::service::projects::LOCAL_HOST {
-            if let Some(row) = self.get_worktree(id)? {
+            if let Some(row) = self.get_worktree_row(id)? {
                 self.bus.worktree_updated(&row);
             }
         }
@@ -286,7 +287,7 @@ impl Store {
         id: i64,
         fp_keys: &[String],
     ) -> Result<Option<WorktreeRow>, rusqlite::Error> {
-        let Some(row) = self.get_worktree(id)? else {
+        let Some(row) = self.get_worktree_row(id)? else {
             return Ok(None);
         };
         let tx = self.conn.unchecked_transaction()?;
@@ -358,7 +359,7 @@ impl Store {
     /// the path is resolved. Empty when the row is gone.
     pub fn fingerprint_keys_of_worktree(store: &std::sync::Mutex<Store>, id: i64) -> Vec<String> {
         let row = match store.lock() {
-            Ok(s) => s.get_worktree(id).ok().flatten(),
+            Ok(s) => s.get_worktree_row(id).ok().flatten(),
             Err(_) => None,
         };
         row.map(|w| Self::fingerprint_keys(&w.host_alias, &w.path))
@@ -426,10 +427,6 @@ impl Store {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         rows.collect()
-    }
-
-    pub fn get_worktree_row(&self, id: i64) -> Result<Option<WorktreeRow>, rusqlite::Error> {
-        self.get_worktree(id)
     }
 
     /// Delete this project's worktree rows whose name is not in `keep_names`

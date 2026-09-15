@@ -248,7 +248,10 @@ impl Store {
         Ok(())
     }
 
-    pub fn get_account_by_uuid(&self, uuid: &str) -> Result<Option<AccountRow>, rusqlite::Error> {
+    pub(super) fn get_account_by_uuid(
+        &self,
+        uuid: &str,
+    ) -> Result<Option<AccountRow>, rusqlite::Error> {
         self.conn
             .prepare_cached(&format!(
                 "SELECT {ACCOUNT_COLUMNS} FROM accounts WHERE uuid=?1"
