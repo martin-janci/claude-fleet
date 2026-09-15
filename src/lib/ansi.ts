@@ -537,7 +537,7 @@ export class Screen {
       // shifts up by one. After the removal the array is one shorter, so
       // inserting at `scrollBottom` lands the blank on the region's last row.
       this.cells.splice(this.scrollTop, 1);
-      this.cells.splice(this.scrollBottom, 0, makeRow(this.cols));
+      this.cells.splice(this.scrollBottom, 0, this.blankRow());
       this.markRows(this.scrollTop, this.scrollBottom);
     } else if (this.cursorRow < this.rows - 1) {
       this.cursorRow++;
@@ -552,7 +552,7 @@ export class Screen {
       // to scrollBottom shifts down. Inserting at `scrollTop` puts the blank
       // on the region's first row.
       this.cells.splice(this.scrollBottom, 1);
-      this.cells.splice(this.scrollTop, 0, makeRow(this.cols));
+      this.cells.splice(this.scrollTop, 0, this.blankRow());
       this.markRows(this.scrollTop, this.scrollBottom);
     } else if (this.cursorRow > 0) {
       this.cursorRow--;
@@ -570,7 +570,7 @@ export class Screen {
     // Batched: one splice removes the top `n` rows of the region, one more
     // inserts `n` blanks at the bottom — vs `n` individual splice pairs.
     this.cells.splice(this.scrollTop, n);
-    const blanks = Array.from({ length: n }, () => makeRow(this.cols));
+    const blanks = Array.from({ length: n }, () => this.blankRow());
     this.cells.splice(this.scrollBottom - n + 1, 0, ...blanks);
     this.markRows(this.scrollTop, this.scrollBottom);
   }
@@ -581,7 +581,7 @@ export class Screen {
     n = Math.min(n, this.scrollBottom - this.scrollTop + 1);
     if (n <= 0) return;
     this.cells.splice(this.scrollBottom - n + 1, n);
-    const blanks = Array.from({ length: n }, () => makeRow(this.cols));
+    const blanks = Array.from({ length: n }, () => this.blankRow());
     this.cells.splice(this.scrollTop, 0, ...blanks);
     this.markRows(this.scrollTop, this.scrollBottom);
   }
@@ -1106,7 +1106,7 @@ export class Screen {
       // Drop the line currently at the region bottom, then insert a blank at
       // the cursor — everything between shifts down by one within the region.
       this.cells.splice(this.scrollBottom, 1);
-      this.cells.splice(this.cursorRow, 0, makeRow(this.cols));
+      this.cells.splice(this.cursorRow, 0, this.blankRow());
     }
     this.markRows(this.cursorRow, this.scrollBottom);
   }
@@ -1121,7 +1121,7 @@ export class Screen {
       // Remove the cursor line, then insert a blank at the region bottom —
       // everything between shifts up by one within the region.
       this.cells.splice(this.cursorRow, 1);
-      this.cells.splice(this.scrollBottom, 0, makeRow(this.cols));
+      this.cells.splice(this.scrollBottom, 0, this.blankRow());
     }
     this.markRows(this.cursorRow, this.scrollBottom);
   }
@@ -1172,6 +1172,16 @@ export class Screen {
    *  and clearing gets the colour it asked for. fg/attrs are reset. */
   private blankWithBg(): Cell {
     return { ch: ' ', fg: COLOR_DEFAULT, bg: this.curBg, attrs: 0 };
+  }
+
+  /** A row of `blankWithBg` cells: the blank line LF / IND / RI / SU / SD /
+   *  IL / DL scroll in. xterm-256color advertises bce, so tmux relies on these
+   *  taking the current background and sends no repaint after them. (RIS,
+   *  resize and the alt screen still start from default-bg `makeRow`.) */
+  private blankRow(): Cell[] {
+    const row: Cell[] = new Array(this.cols);
+    for (let i = 0; i < this.cols; i++) row[i] = this.blankWithBg();
+    return row;
   }
 
   /** Erase one cell to a BCE blank. Erasing either half of a wide glyph

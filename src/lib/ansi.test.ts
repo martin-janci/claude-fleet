@@ -1491,3 +1491,69 @@ describe('ansi.Screen — OSC 52 decodes base64 as UTF-8 (F10)', () => {
     expect(clip('\x1b]52;c;!!!\x07')).toEqual([]);
   });
 });
+
+describe('ansi.Screen — line operations fill with the current background (N1)', () => {
+  // TERM=xterm-256color advertises bce, so tmux sends IL/DL/SD/RI after a
+  // bg change and expects the new blank lines in that colour (observed on a
+  // live tmux 3.6a: `\e[42m\e[5;1H\e[2L` with no repaint after it).
+  const bgs = (s: Screen, r: number) => [...new Set(s.cells[r].map((c) => c.bg))];
+
+  it('IL (CSI L) inserts blank lines in the current bg', () => {
+    const s = new Screen(6, 4);
+    s.write('\x1b[42m\x1b[3;1H\x1b[2L');
+    expect(bgs(s, 2)).toEqual([2]);
+    expect(bgs(s, 3)).toEqual([2]);
+    expect(bgs(s, 4)).toEqual([COLOR_DEFAULT]);
+    expect(s.cells[2][0].fg).toBe(COLOR_DEFAULT);
+    expect(s.cells[2][0].attrs).toBe(0);
+  });
+
+  it('DL (CSI M) fills the region bottom with the current bg', () => {
+    const s = new Screen(6, 4);
+    s.write('\x1b[42m\x1b[3;1H\x1b[2M');
+    expect(bgs(s, 4)).toEqual([2]);
+    expect(bgs(s, 5)).toEqual([2]);
+    expect(bgs(s, 3)).toEqual([COLOR_DEFAULT]);
+  });
+
+  it('SD (CSI T) and SU (CSI S) fill with the current bg', () => {
+    const s = new Screen(4, 4);
+    s.write('\x1b[43m\x1b[H\x1b[1T');
+    expect(bgs(s, 0)).toEqual([3]);
+    expect(bgs(s, 1)).toEqual([COLOR_DEFAULT]);
+    s.write('\x1b[44m\x1b[2S');
+    expect(bgs(s, 2)).toEqual([4]);
+    expect(bgs(s, 3)).toEqual([4]);
+  });
+
+  it('RI (ESC M) at the top margin fills with the current bg', () => {
+    const s = new Screen(4, 4);
+    s.write('\x1b[45m\x1b[H\x1bM\x1bM');
+    expect(bgs(s, 0)).toEqual([5]);
+    expect(bgs(s, 1)).toEqual([5]);
+    expect(bgs(s, 2)).toEqual([COLOR_DEFAULT]);
+  });
+
+  it('LF / IND / NEL scrolling at the bottom margin fills with the current bg', () => {
+    const s = new Screen(3, 4);
+    s.write('\x1b[46m\x1b[3;1H\n');
+    expect(bgs(s, 2)).toEqual([6]);
+    s.write('\x1b[41m\x1bD');
+    expect(bgs(s, 2)).toEqual([1]);
+    s.write('\x1b[47m\x1bE');
+    expect(bgs(s, 2)).toEqual([7]);
+    expect(bgs(s, 1)).toEqual([1]);
+  });
+
+  it('RIS, resize and alt-screen entry still blank to the default bg', () => {
+    const s = new Screen(2, 3);
+    s.write('\x1b[42m\x1bc');
+    expect(bgs(s, 0)).toEqual([COLOR_DEFAULT]);
+    s.write('\x1b[42m');
+    s.resize(4, 5);
+    expect(bgs(s, 3)).toEqual([COLOR_DEFAULT]);
+    expect(s.cells[0][4].bg).toBe(COLOR_DEFAULT);
+    s.write('\x1b[42m\x1b[?1049h');
+    expect(bgs(s, 0)).toEqual([COLOR_DEFAULT]);
+  });
+});
