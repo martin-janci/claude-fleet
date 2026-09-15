@@ -434,8 +434,10 @@ pub fn mark_untrusted(text: &str, from: &str) -> String {
 /// never persisted, only their length.
 const REDACT_KEYS: &[&str] = &["prompt", "body", "content", "start_command"];
 /// Argument keys dropped from the summary entirely: a confirmation nonce is
-/// a one-time credential and must not land in the timeline.
-const SKIP_KEYS: &[&str] = &["confirm_nonce"];
+/// a one-time credential and must not land in the timeline, and `value` is
+/// `set_secret`'s secret value — not even its length may be persisted (a
+/// length still leaks information about a secret).
+const SKIP_KEYS: &[&str] = &["confirm_nonce", "value"];
 const SUMMARY_MAX_CHARS: usize = 240;
 
 /// One-line, key-sorted `k=v` summary of tool arguments with free-text
@@ -809,6 +811,17 @@ mod tests {
         // A confirmation nonce is a credential: dropped, not even as a length.
         let with_nonce = serde_json::json!({ "confirm_nonce": "abc123", "name": "x" });
         assert_eq!(redact_args(with_nonce.as_object()), "name=x");
+        // `set_secret`'s value is a credential too: dropped entirely, not
+        // even rendered as a length (SEC: a length still leaks something).
+        let with_secret = serde_json::json!({
+            "value": "hunter2-unique",
+            "name": "FOO",
+            "host_alias": "mefistos"
+        });
+        let s = redact_args(with_secret.as_object());
+        assert!(!s.contains("hunter2"), "{s}");
+        assert!(!s.contains("value"), "{s}");
+        assert_eq!(s, "host_alias=mefistos name=FOO");
         for k in ["body", "content", "start_command"] {
             let a = serde_json::json!({ k: "xyz" });
             assert_eq!(redact_args(a.as_object()), format!("{k}=<3 chars>"));

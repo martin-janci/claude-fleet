@@ -116,7 +116,10 @@ impl FleetTools {
             &confirm_summary,
             &caller,
         )?;
-        enforce_admin(&caller, "apply_sync")?;
+        // Master-only enforcement already happened centrally in
+        // `ServerHandler::call_tool` (`enforce_admin` runs there before the
+        // tool router ever dispatches here) — `apply_sync` is in
+        // `guard::ADMIN_TOOLS`, so a non-master caller never reaches this body.
         let args = catalog::sync::ApplyArgs {
             plan_id: p.plan_id,
             force_partial: p.force_partial,
@@ -133,10 +136,12 @@ impl FleetTools {
         Master token only. The value is never returned or logged.")]
     pub(super) async fn set_secret(
         &self,
-        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<SetSecretParams>,
     ) -> Result<CallToolResult, McpError> {
-        enforce_admin(&caller, "set_secret")?;
+        // Master-only enforcement already happened centrally in
+        // `ServerHandler::call_tool` (`enforce_admin` runs there before the
+        // tool router ever dispatches here) — `set_secret` is in
+        // `guard::ADMIN_TOOLS`, so a non-master caller never reaches this body.
         audit(
             "set_secret",
             &format!(

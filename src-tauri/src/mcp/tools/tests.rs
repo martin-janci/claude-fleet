@@ -309,6 +309,43 @@ fn audit_row_falls_back_to_the_controller_session() {
         .any(|e| e.kind == "mcp_call" && e.detail.as_deref() == Some("list_hosts by master")));
 }
 
+/// SEC: `set_secret`'s `value` argument must never reach the persisted
+/// audit trail — not the plain value, not even its length. `persist_audit`
+/// is exactly what `ServerHandler::call_tool` calls with the RAW request
+/// arguments (before the tool body ever redacts anything for its own
+/// tracing call), so this exercises the actual path a secret value would
+/// otherwise leak through into `session_events` (readable via
+/// `session_history`).
+#[test]
+fn set_secret_value_never_reaches_the_persisted_audit_trail() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("ctl", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("local", "ctl").unwrap();
+        id
+    };
+    let args = serde_json::json!({
+        "name": "FOO",
+        "value": "hunter2-unique",
+        "host_alias": "mefistos"
+    });
+    persist_audit(&store, "set_secret", args.as_object(), &Caller::master());
+    let s = store.lock().unwrap();
+    let events = s.list_session_events(id, 10).unwrap();
+    let row = events
+        .iter()
+        .find(|e| e.kind == "mcp_call")
+        .expect("mcp_call event");
+    let detail = row.detail.as_deref().unwrap();
+    assert!(!detail.contains("hunter2"), "{detail}");
+    assert!(!detail.contains("value"), "{detail}");
+    assert_eq!(detail, "set_secret by master: host_alias=mefistos name=FOO");
+}
+
 #[test]
 fn ok_json_never_emits_an_empty_text_block() {
     // Even degenerate values must serialize to a non-empty text block, so a
