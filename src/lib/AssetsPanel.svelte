@@ -14,7 +14,7 @@
 
   let setupPath = $state('~/agent-assets');
   let setupRemote = $state('');
-  let busy = $state<'' | 'setup' | 'pull' | 'scan' | 'plan'>('');
+  let busy = $state<'' | 'setup' | 'pull' | 'scan' | 'plan' | 'apply'>('');
   let error = $state<string | null>(null);
   let scanResults = $state<HostScanResult[] | null>(null);
   let showProblems = $state(false);
@@ -85,8 +85,11 @@
   }
 
   function onSyncApplied(summary: SyncRunSummary) {
+    // Keep the dialog mounted: it renders the per-action outcome badges and
+    // the "restart Claude on <host>" strip from this same `summary`, and it
+    // now disables its own Apply button and relabels Close to "Done" once
+    // `summary` is set. The user dismisses it explicitly.
     lastSyncRun.set(summary);
-    syncPlan = null;
     void refresh();
   }
 
@@ -167,6 +170,7 @@
       onclose={() => (syncPlan = null)}
       onapplied={onSyncApplied}
       onopensecrets={() => (showSecrets = true)}
+      onapplying={(a) => (busy = a ? 'apply' : '')}
     />
   {/if}
   {#if showSecrets}

@@ -188,6 +188,49 @@ describe('AssetsPanel', () => {
     expect(await screen.findByTestId('secrets-panel')).toBeTruthy();
   });
 
+  it('applying a plan keeps the dialog mounted, showing outcomes/restart and disabling re-apply', async () => {
+    const plan = {
+      id: 'plan-1',
+      computed_at: 1,
+      hosts: [
+        {
+          host_alias: 'local', harness: 'claude', status: 'ready', detail: null,
+          actions: [{ kind: 'skill', name: 'worktree', op: 'update', reason: null, files: [], merges: [], backup: false, secrets: [], missing_secrets: [] }],
+        },
+      ],
+      counts: { update: 1 },
+    };
+    const summary = {
+      plan_id: 'plan-1', started_at: 1, finished_at: 2,
+      hosts: [
+        {
+          host_alias: 'local', harness: 'claude', status: 'applied', detail: null, restart_required: true,
+          actions: [{ kind: 'skill', name: 'worktree', op: 'update', outcome: 'done', detail: null }],
+        },
+      ],
+    };
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: listing, assets_inventory: [], catalog_last_sync: null,
+      catalog_plan_sync: plan, catalog_apply_sync: summary,
+    });
+    render(AssetsPanel);
+    expect(await screen.findByTestId('assets-sync')).toBeTruthy();
+
+    await fireEvent.click(screen.getByTestId('assets-sync'));
+    expect(await screen.findByTestId('sync-plan-dialog')).toBeTruthy();
+
+    await fireEvent.click(screen.getByTestId('plan-apply'));
+
+    expect(await screen.findByTestId('plan-restart-local')).toBeTruthy();
+    expect(screen.getByTestId('plan-outcome-local-claude-skill-worktree').textContent).toContain('done');
+    // The dialog stays mounted (this is the whole point) and re-applying the
+    // now-consumed plan id is blocked.
+    expect(screen.getByTestId('sync-plan-dialog')).toBeTruthy();
+    expect(screen.getByTestId('plan-apply')).toBeDisabled();
+  });
+
   it('shows a last-sync strip from lastSync() on mount', async () => {
     const summary = { plan_id: 'plan-1', started_at: 1, finished_at: 2, hosts: [{ host_alias: 'local', harness: 'claude', status: 'applied', detail: null, restart_required: false, actions: [] }] };
     byCmd({ catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 }, catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 }, catalog_list_assets: listing, assets_inventory: [], catalog_last_sync: summary });

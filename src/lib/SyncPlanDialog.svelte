@@ -7,6 +7,7 @@
     onclose,
     onapplied,
     onopensecrets,
+    onapplying,
   }: {
     plan: SyncPlan;
     onclose: () => void;
@@ -14,6 +15,10 @@
     /** Optional: a blocked-on-missing-secrets row links here so the caller
      *  can open the SecretsPanel. No-op if omitted. */
     onopensecrets?: () => void;
+    /** Optional: fires true when an apply starts and false when it settles,
+     *  so the caller (AssetsPanel) can disable its own Sync button for the
+     *  duration. */
+    onapplying?: (applying: boolean) => void;
   } = $props();
 
   let applying = $state(false);
@@ -41,10 +46,12 @@
 
   async function apply() {
     applying = true;
+    onapplying?.(true);
     error = null;
     controller = new AbortController();
     const r = await applySync(plan.id, forcePartial, controller.signal);
     applying = false;
+    onapplying?.(false);
     controller = null;
     if (!r.ok) {
       error = r.error.message;
@@ -127,7 +134,7 @@
   {/if}
 
   <div class="actions">
-    <button onclick={onclose} disabled={applying}>Close</button>
+    <button onclick={onclose} disabled={applying}>{summary ? 'Done' : 'Close'}</button>
     {#if applying}
       <button onclick={cancelApply} data-testid="plan-cancel">Cancel</button>
     {/if}
@@ -135,7 +142,7 @@
       class="primary"
       class:danger={destructive}
       onclick={apply}
-      disabled={applying || applicableCount === 0}
+      disabled={applying || applicableCount === 0 || summary !== null}
       data-testid="plan-apply"
     >{applying ? 'Applying…' : 'Apply'}</button>
   </div>

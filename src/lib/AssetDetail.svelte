@@ -50,7 +50,11 @@
     return s ? s.replace('_', ' ') : 'not scanned';
   }
 
-  const SYNCABLE_STATES = new Set(['missing', 'drifted', 'orphan']);
+  // `orphan` deliberately excluded: it only ever appears on an unmanaged
+  // inventory row (AssetsPanel's "On hosts, not in catalog" list), never in
+  // a catalog asset's own `hosts` — the array this component reads — so it
+  // can never reach `rawState()` here.
+  const SYNCABLE_STATES = new Set(['missing', 'drifted']);
 
   function requestSync(hostAlias: string) {
     if (!detail) return;
