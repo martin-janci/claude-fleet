@@ -1,5 +1,6 @@
 pub mod account_usage;
 pub mod assets;
+pub mod cancel;
 pub mod diagnostics;
 pub mod files;
 pub mod health;

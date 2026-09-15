@@ -33,19 +33,11 @@ use bootstrap::env::{
 };
 use bootstrap::mcp::maybe_start_mcp;
 use bootstrap::singleton::kill_other_instances;
+use commands::cancel::cancel_command;
 use pty::PtyState;
 use service::tick::{spawn_account_usage_tick, spawn_reconcile_tick};
 use std::sync::Mutex;
 use store::Store;
-
-#[tauri::command]
-async fn cancel_command(
-    call_id: u64,
-    reg: tauri::State<'_, std::sync::Arc<cancel::CancellationRegistry>>,
-) -> Result<(), crate::ipc_error::IpcError> {
-    reg.cancel(call_id);
-    Ok(())
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
