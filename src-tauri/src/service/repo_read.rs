@@ -400,9 +400,12 @@ pub async fn repo_tree(
     Ok(RepoTree { entries, truncated })
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "RepoPathParams")]
 pub struct RepoFileArgs {
+    /// Fleet session id (from list_sessions).
     pub session_id: i64,
+    /// Worktree-relative file path.
     pub path: String,
 }
 
@@ -572,9 +575,12 @@ pub async fn repo_branches(
     Ok(parse_branches(&out.stdout))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "RepoCommitParams")]
 pub struct RepoCommitArgs {
+    /// Fleet session id.
     pub session_id: i64,
+    /// Commit hash.
     pub hash: String,
 }
 
@@ -614,10 +620,14 @@ pub async fn repo_commit(
     Ok(detail)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "RepoCommitDiffParams")]
 pub struct RepoCommitDiffArgs {
+    /// Fleet session id.
     pub session_id: i64,
+    /// Commit hash.
     pub hash: String,
+    /// Worktree-relative file path.
     pub path: String,
 }
 

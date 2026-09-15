@@ -40,12 +40,12 @@ impl FleetTools {
         delete_worktree). Optional project filter.")]
     pub(super) async fn list_worktrees(
         &self,
-        Parameters(p): Parameters<ListWorktreesParams>,
+        Parameters(args): Parameters<worktrees::ListWorktreesArgs>,
     ) -> Result<CallToolResult, McpError> {
-        audit("list_worktrees", &format!("project_id={:?}", p.project_id));
-        let args = worktrees::ListWorktreesArgs {
-            project_id: p.project_id,
-        };
+        audit(
+            "list_worktrees",
+            &format!("project_id={:?}", args.project_id),
+        );
         let out = worktrees::list_worktrees(args, &self.store).map_err(to_mcp_err)?;
         ok_json(&out)
     }
@@ -85,18 +85,12 @@ impl FleetTools {
         worktree. Returns JSON array of changed files.")]
     pub(super) async fn repo_changes(
         &self,
-        Parameters(p): Parameters<SessionIdParams>,
+        Parameters(args): Parameters<repo::SessionIdArgs>,
     ) -> Result<CallToolResult, McpError> {
-        audit("repo_changes", &format!("session_id={}", p.session_id));
-        let v = repo_read::repo_changes(
-            repo::SessionIdArgs {
-                session_id: p.session_id,
-            },
-            &self.store,
-            &self.ssh,
-        )
-        .await
-        .map_err(to_mcp_err)?;
+        audit("repo_changes", &format!("session_id={}", args.session_id));
+        let v = repo_read::repo_changes(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
         ok_json(&v)
     }
 
@@ -104,18 +98,12 @@ impl FleetTools {
         gitignore respected). Returns JSON {entries, truncated}.")]
     pub(super) async fn repo_tree(
         &self,
-        Parameters(p): Parameters<SessionIdParams>,
+        Parameters(args): Parameters<repo::SessionIdArgs>,
     ) -> Result<CallToolResult, McpError> {
-        audit("repo_tree", &format!("session_id={}", p.session_id));
-        let v = repo_read::repo_tree(
-            repo::SessionIdArgs {
-                session_id: p.session_id,
-            },
-            &self.store,
-            &self.ssh,
-        )
-        .await
-        .map_err(to_mcp_err)?;
+        audit("repo_tree", &format!("session_id={}", args.session_id));
+        let v = repo_read::repo_tree(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
         ok_json(&v)
     }
 
@@ -123,22 +111,15 @@ impl FleetTools {
         JSON {path, content, truncated, binary, size}.")]
     pub(super) async fn repo_file(
         &self,
-        Parameters(p): Parameters<RepoPathParams>,
+        Parameters(args): Parameters<repo_read::RepoFileArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "repo_file",
-            &format!("session_id={} path={}", p.session_id, p.path),
+            &format!("session_id={} path={}", args.session_id, args.path),
         );
-        let v = repo_read::repo_file(
-            repo_read::RepoFileArgs {
-                session_id: p.session_id,
-                path: p.path,
-            },
-            &self.store,
-            &self.ssh,
-        )
-        .await
-        .map_err(to_mcp_err)?;
+        let v = repo_read::repo_file(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
         ok_json(&v)
     }
 
@@ -146,22 +127,15 @@ impl FleetTools {
         files render as all-added). Returns JSON {path, diff, binary, truncated}.")]
     pub(super) async fn repo_diff(
         &self,
-        Parameters(p): Parameters<RepoPathParams>,
+        Parameters(args): Parameters<repo_read::RepoFileArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "repo_diff",
-            &format!("session_id={} path={}", p.session_id, p.path),
+            &format!("session_id={} path={}", args.session_id, args.path),
         );
-        let v = repo_read::repo_diff(
-            repo_read::RepoFileArgs {
-                session_id: p.session_id,
-                path: p.path,
-            },
-            &self.store,
-            &self.ssh,
-        )
-        .await
-        .map_err(to_mcp_err)?;
+        let v = repo_read::repo_diff(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
         ok_json(&v)
     }
 
@@ -193,18 +167,12 @@ impl FleetTools {
         with ahead/behind. Returns JSON array.")]
     pub(super) async fn repo_branches(
         &self,
-        Parameters(p): Parameters<SessionIdParams>,
+        Parameters(args): Parameters<repo::SessionIdArgs>,
     ) -> Result<CallToolResult, McpError> {
-        audit("repo_branches", &format!("session_id={}", p.session_id));
-        let v = repo_read::repo_branches(
-            repo::SessionIdArgs {
-                session_id: p.session_id,
-            },
-            &self.store,
-            &self.ssh,
-        )
-        .await
-        .map_err(to_mcp_err)?;
+        audit("repo_branches", &format!("session_id={}", args.session_id));
+        let v = repo_read::repo_branches(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
         ok_json(&v)
     }
 
@@ -212,22 +180,15 @@ impl FleetTools {
         {hash, subject, body, author, date, files}.")]
     pub(super) async fn repo_commit(
         &self,
-        Parameters(p): Parameters<RepoCommitParams>,
+        Parameters(args): Parameters<repo_read::RepoCommitArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "repo_commit",
-            &format!("session_id={} hash={}", p.session_id, p.hash),
+            &format!("session_id={} hash={}", args.session_id, args.hash),
         );
-        let v = repo_read::repo_commit(
-            repo_read::RepoCommitArgs {
-                session_id: p.session_id,
-                hash: p.hash,
-            },
-            &self.store,
-            &self.ssh,
-        )
-        .await
-        .map_err(to_mcp_err)?;
+        let v = repo_read::repo_commit(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
         ok_json(&v)
     }
 
@@ -235,26 +196,18 @@ impl FleetTools {
         {path, diff, binary, truncated}.")]
     pub(super) async fn repo_commit_diff(
         &self,
-        Parameters(p): Parameters<RepoCommitDiffParams>,
+        Parameters(args): Parameters<repo_read::RepoCommitDiffArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "repo_commit_diff",
             &format!(
                 "session_id={} hash={} path={}",
-                p.session_id, p.hash, p.path
+                args.session_id, args.hash, args.path
             ),
         );
-        let v = repo_read::repo_commit_diff(
-            repo_read::RepoCommitDiffArgs {
-                session_id: p.session_id,
-                hash: p.hash,
-                path: p.path,
-            },
-            &self.store,
-            &self.ssh,
-        )
-        .await
-        .map_err(to_mcp_err)?;
+        let v = repo_read::repo_commit_diff(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
         ok_json(&v)
     }
 }

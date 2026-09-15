@@ -196,25 +196,20 @@ impl FleetTools {
     pub(super) async fn spawn_review(
         &self,
         Extension(caller): Extension<Caller>,
-        Parameters(p): Parameters<SpawnReviewParams>,
+        Parameters(args): Parameters<sessions::SpawnReviewArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "spawn_review",
-            &format!("source_session_id={}", p.source_session_id),
+            &format!("source_session_id={}", args.source_session_id),
         );
         // The review session is created on the source session's host.
         self.resolve_target_row(
             &caller,
-            Some(p.source_session_id),
+            Some(args.source_session_id),
             None,
             None,
             "the session to review",
         )?;
-        let args = sessions::SpawnReviewArgs {
-            source_session_id: p.source_session_id,
-            prompt: p.prompt,
-            call_id: None,
-        };
         let row = sessions::spawn_review(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -226,17 +221,12 @@ impl FleetTools {
         xsel, pbpaste in order. E_CLIPBOARD_UNAVAILABLE if none is installed.")]
     pub(super) async fn get_clipboard(
         &self,
-        Parameters(p): Parameters<HostClipboardParams>,
+        Parameters(args): Parameters<crate::service::clipboard::GetClipboardArgs>,
     ) -> Result<CallToolResult, McpError> {
-        audit("get_clipboard", &format!("host={}", p.host_alias));
-        let text = crate::service::clipboard::get_clipboard(
-            crate::service::clipboard::GetClipboardArgs {
-                host_alias: p.host_alias,
-            },
-            &self.ssh,
-        )
-        .await
-        .map_err(to_mcp_err)?;
+        audit("get_clipboard", &format!("host={}", args.host_alias));
+        let text = crate::service::clipboard::get_clipboard(args, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
         // Empty clipboard would yield an empty text block, which the Anthropic
         // API rejects (see EMPTY_RESULT_PLACEHOLDER) — `ok_json` substitutes
         // safely for "" but only after JSON-encoding; say it explicitly.

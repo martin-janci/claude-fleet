@@ -81,16 +81,12 @@ impl FleetTools {
         persists the host if it is reachable. Returns the host row as JSON.")]
     pub(super) async fn add_host(
         &self,
-        Parameters(p): Parameters<AddHostParams>,
+        Parameters(args): Parameters<hosts::AddHostArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "add_host",
-            &format!("alias={} ssh_alias={}", p.alias, p.ssh_alias),
+            &format!("alias={} ssh_alias={}", args.alias, args.ssh_alias),
         );
-        let args = hosts::AddHostArgs {
-            alias: p.alias,
-            ssh_alias: p.ssh_alias,
-        };
         let row = hosts::add_host(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -101,10 +97,9 @@ impl FleetTools {
         versions. Returns the updated host row as JSON.")]
     pub(super) async fn probe_host(
         &self,
-        Parameters(p): Parameters<HostAliasParams>,
+        Parameters(args): Parameters<hosts::HostAliasArgs>,
     ) -> Result<CallToolResult, McpError> {
-        audit("probe_host", &format!("alias={}", p.alias));
-        let args = hosts::HostAliasArgs { alias: p.alias };
+        audit("probe_host", &format!("alias={}", args.alias));
         let row = hosts::probe_host(args, &self.store, &self.ssh, &self.reg)
             .await
             .map_err(to_mcp_err)?;
@@ -115,10 +110,9 @@ impl FleetTools {
         Returns the removed host row as JSON.")]
     pub(super) async fn remove_host(
         &self,
-        Parameters(p): Parameters<HostAliasParams>,
+        Parameters(args): Parameters<hosts::HostAliasArgs>,
     ) -> Result<CallToolResult, McpError> {
-        audit("remove_host", &format!("alias={}", p.alias));
-        let args = hosts::HostAliasArgs { alias: p.alias };
+        audit("remove_host", &format!("alias={}", args.alias));
         ok_json(&hosts::remove_host(args, &self.store).map_err(to_mcp_err)?)
     }
 
@@ -126,16 +120,12 @@ impl FleetTools {
         reconcile. Returns the updated host row as JSON.")]
     pub(super) async fn hide_host(
         &self,
-        Parameters(p): Parameters<HideHostParams>,
+        Parameters(args): Parameters<hosts::HideHostArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "hide_host",
-            &format!("alias={} hidden={}", p.alias, p.hidden),
+            &format!("alias={} hidden={}", args.alias, args.hidden),
         );
-        let args = hosts::HideHostArgs {
-            alias: p.alias,
-            hidden: p.hidden,
-        };
         ok_json(&hosts::hide_host(args, &self.store).map_err(to_mcp_err)?)
     }
 

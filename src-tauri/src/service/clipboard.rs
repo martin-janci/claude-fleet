@@ -18,8 +18,10 @@ const MAX_CLIPBOARD_BYTES: usize = 64 * 1024;
 
 const SSH_TIMEOUT: Duration = Duration::from_secs(10);
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "HostClipboardParams")]
 pub struct GetClipboardArgs {
+    /// Host alias whose clipboard to read.
     pub host_alias: String,
 }
 

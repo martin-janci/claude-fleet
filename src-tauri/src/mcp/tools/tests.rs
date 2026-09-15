@@ -572,7 +572,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
     forbidden(
         t.new_bg_session(
             Extension(a.clone()),
-            Parameters(NewBgSessionParams {
+            Parameters(crate::service::bg_sessions::NewBgSessionArgs {
                 host_alias: "hostb".into(),
                 name: "x".into(),
                 prompt: "p".into(),
@@ -584,9 +584,10 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
     forbidden(
         t.spawn_review(
             Extension(a.clone()),
-            Parameters(SpawnReviewParams {
+            Parameters(sessions::SpawnReviewArgs {
                 source_session_id: on_b,
                 prompt: "review".into(),
+                call_id: None,
             }),
         )
         .await
@@ -1005,4 +1006,29 @@ async fn bounded_turns_a_hung_call_into_the_timeout_result() {
         .unwrap();
     assert_ne!(r.is_error, Some(true));
     assert_eq!(text_of(&r.content[0]), "ok");
+}
+
+/// The tool schemas are the published contract an MCP client sees: every
+/// parameter of every tool must carry a description. Set
+/// `FLEET_TOOL_SCHEMA_DUMP=<path>` to also write the full `list_tools`
+/// output (sorted by name, pretty JSON) so a refactor of the parameter
+/// structs can be diffed before/after.
+#[test]
+fn every_tool_parameter_is_documented() {
+    let mut tools = FleetTools::tool_router_for_doc().list_all();
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+    for t in &tools {
+        let props = t.input_schema.get("properties").and_then(|v| v.as_object());
+        for (name, schema) in props.into_iter().flatten() {
+            assert!(
+                schema.get("description").is_some(),
+                "{}.{name} has no description in its JSON schema",
+                t.name
+            );
+        }
+    }
+    if let Ok(path) = std::env::var("FLEET_TOOL_SCHEMA_DUMP") {
+        let json = serde_json::to_string_pretty(&tools).expect("serialise tools");
+        std::fs::write(&path, json).expect("write schema dump");
+    }
 }

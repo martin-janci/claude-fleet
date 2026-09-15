@@ -28,9 +28,13 @@ pub fn list_accounts(store: &Mutex<Store>) -> Result<Vec<crate::store::AccountRo
     s.list_accounts().map_err(IpcError::from)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "AddHostParams")]
 pub struct AddHostArgs {
+    /// claude-fleet alias to register the host under (must be a safe
+    /// identifier — letters, digits, dashes).
     pub alias: String,
+    /// SSH config alias used to reach the host (from `~/.ssh/config`).
     pub ssh_alias: String,
 }
 
@@ -114,8 +118,10 @@ pub async fn probe_ssh_alias(
     })
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "HostAliasParams")]
 pub struct HostAliasArgs {
+    /// The claude-fleet host alias (e.g. "local", "mefistos").
     pub alias: String,
 }
 
@@ -181,9 +187,12 @@ pub fn remove_host(args: HostAliasArgs, store: &Mutex<Store>) -> Result<HostRow,
     Ok(row)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "HideHostParams")]
 pub struct HideHostArgs {
+    /// The claude-fleet host alias.
     pub alias: String,
+    /// `true` to hide the host (skipped during reconcile), `false` to show it.
     pub hidden: bool,
 }
 

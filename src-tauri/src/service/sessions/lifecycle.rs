@@ -1082,10 +1082,12 @@ pub(crate) fn recreate_pane_command(kind: &str, claude_session_id: Option<&str>)
     crate::tmux::pane_command_for(id)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "RecreateSessionParams")]
 pub struct RecreateSessionArgs {
+    /// Fleet session id (from list_sessions).
     pub session_id: i64,
-    /// Override the controller self-target guard.
+    /// Recreate even if this is the registered fleet controller. Default false.
     #[serde(default)]
     pub force: bool,
 }
@@ -1172,8 +1174,10 @@ pub async fn recreate_session(
     Ok(row)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "SessionIdParams")]
 pub struct DismissGhostSessionArgs {
+    /// Fleet session id (from list_sessions).
     pub session_id: i64,
 }
 
