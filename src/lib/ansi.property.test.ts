@@ -26,6 +26,9 @@ const interesting = fc.constantFrom(
   '\x07', '\x9c', '\x18', '\x1a', '\r', '\n', '\t', '\x08', '\x0e', '\x0f', '\x7f',
   '0', '1', '2', '5', '9', '~', 'a', 'Z', 'b', 'I', 'n', 'c',
   '😀', '中', 'é', '́', '‍', '️', '\ud83d', '\ude00', '\ud800',
+  // Cluster joins tmux 3.6a makes: a skin-tone base and modifier, a
+  // regional indicator (two make a flag).
+  '\u{1F44B}', '\u{1F3FD}', '\u{1F1FA}',
 );
 
 const csiFinal = fc.constantFrom(...'ABCDEFGHJKLMPSTXZbcdfhlmnqrsu@I'.split(''));
@@ -79,14 +82,21 @@ function snapshot(s: Screen): string {
   return `${grid}\n${s.cursorRow},${s.cursorCol},${s.curFg},${s.curBg},${s.curAttrs},${s.cursorVisible},${s.takeReplies()}`;
 }
 
+/** What widens a narrow first code point to a 2-cell cluster (tmux 3.6a):
+ *  VS16, or a second regional indicator. */
+const WIDENED = /\u{FE0F}|^[\u{1F1E6}-\u{1F1FF}].*[\u{1F1E6}-\u{1F1FF}]/u;
+
 function checkRow(row: Cell[], cols: number) {
   expect(row).toHaveLength(cols);
   for (let c = 0; c < cols; c++) {
     const cell = row[c];
     if (cell.ch === '') {
-      // A trailing half must have a wide head directly before it.
+      // A trailing half must have a wide head directly before it: a wide
+      // first code point, or a narrow one a cluster join widened.
       expect(c).toBeGreaterThan(0);
-      expect(firstCharWidth(row[c - 1].ch)).toBe(2);
+      const head = row[c - 1].ch;
+      expect(head).not.toBe('');
+      if (firstCharWidth(head) !== 2) expect(head).toMatch(WIDENED);
     } else if (firstCharWidth(cell.ch) === 2) {
       // A wide head must have its trailing half inside the row.
       expect(c + 1).toBeLessThan(cols);

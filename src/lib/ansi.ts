@@ -14,17 +14,21 @@
  *
  * Text is handled per Unicode code point (not UTF-16 unit): astral emoji are
  * one glyph, East Asian Wide / emoji glyphs occupy two cells (head + a
- * reserved `''` trailing cell, see `wcwidth.ts`), and combining marks attach
- * to the preceding cell.
+ * reserved `''` trailing cell, see `wcwidth.ts`), and combining marks, VS16,
+ * ZWJ sequences, skin-tone modifiers and flags join the glyph before the
+ * cursor exactly as tmux 3.6a joins them (see `Screen.combine`).
  */
 
-import { wcwidth, firstCharWidth } from './wcwidth';
+import { wcwidth } from './wcwidth';
 
 export interface Cell {
-  /** One grapheme: a base code point plus any combining marks / variation
-   *  selectors that followed it. The empty string marks the trailing half of
-   *  a wide (2-column) glyph whose head is the cell to the left; the pair is
-   *  kept consistent by every write/erase/insert/delete operation. */
+  /** One grapheme: a base code point plus whatever tmux joined onto it
+   *  (combining marks, variation selectors, the rest of a ZWJ sequence, a
+   *  skin-tone modifier, a second regional indicator). The empty string marks
+   *  the trailing half of a wide (2-column) glyph whose head is the cell to
+   *  the left; the pair is kept consistent by every write/erase/insert/delete
+   *  operation. A head is recognised by that trailing cell, not by the width
+   *  of its first code point — VS16 can widen a narrow base. */
   ch: string;
   fg: number;
   bg: number;
@@ -438,27 +442,66 @@ export class Screen {
       const ch = cp === 0xfffd ? '�' : s.substr(i, len);
       i += len;
       const width = wcwidth(cp);
-      if (width === 0) {
-        this.combine(ch);
-        continue;
-      }
+      // Joined onto the glyph before the cursor — or zero-width with nothing
+      // to join, and dropped.
+      if (this.combine(cp, ch, width) || width === 0) continue;
       // Printable: write at cursor, advance. Wrap to next row if past edge.
       this.putChar(ch, width);
     }
   }
 
-  /** Attach a zero-width code point (combining mark, ZWJ, variation
-   *  selector, …) to the glyph before the cursor. With nothing before the
-   *  cursor on this row it is dropped — there is no base to combine with. */
-  private combine(mark: string): void {
-    let c = Math.min(this.cursorCol, this.cols) - 1;
-    if (c < 0) return;
+  /** Join code point `cp` onto the glyph that ends at the cursor, following
+   *  tmux 3.6a's `screen_write_combine`: tmux addresses later columns assuming
+   *  the terminal joined exactly what it joined.
+   *    - A zero-width code point (combining mark, ZWJ, VS16, …) joins; VS16
+   *      also widens a narrow base into a pair.
+   *    - Any other non-ASCII code point joins a glyph ending in ZWJ (keeping
+   *      its width), or joins as a skin-tone modifier / regional indicator
+   *      partner (`shouldCombine`), widening a narrow base.
+   *  The glyph must end exactly at the cursor — a narrow cell just left of
+   *  it, or a pair whose trailing half is — so a join never reaches across a
+   *  cursor move. ASCII never joins, nothing joins at column 0, and a cell
+   *  stops growing at tmux's 32 UTF-8 bytes. Returns true when `ch` was
+   *  consumed: joined, or zero-width with nothing to join (dropped). */
+  private combine(cp: number, ch: string, width: 0 | 1 | 2): boolean {
+    const zeroWidth = width === 0;
+    if (cp < 0x80 || this.cursorCol === 0) return zeroWidth;
     const row = this.cells[this.cursorRow];
-    // The cell left of the cursor may be the trailing half of a wide glyph.
-    if (row[c].ch === '' && c > 0) c--;
-    if (row[c].ch === '') return;
-    row[c].ch += mark;
+    // The cell left of the cursor (a deferred-wrap cursor sits at `cols`, so
+    // that is the last column) may be the trailing half of a pair.
+    let c = this.cursorCol - 1;
+    let n = 1;
+    if (c > 0 && row[c].ch === '') {
+      c--;
+      n = 2;
+    }
+    const base = row[c];
+    if (base.ch === '' || n !== (isHead(row, c) ? 2 : 1)) return zeroWidth;
+    let widen = cp === 0xfe0f;
+    if (!zeroWidth) {
+      const first = base.ch.codePointAt(0)!;
+      if (shouldCombine(first, cp) || shouldCombine(cp, first)) widen = true;
+      else if (!base.ch.endsWith('\u200d')) return false;
+    }
+    if (utf8Length(base.ch) + utf8Length(ch) > CELL_UTF8_MAX) return zeroWidth;
+    base.ch += ch;
     this.markRow(this.cursorRow);
+    if (!widen || n === 2) return true;
+    if (c + 1 < this.cols) {
+      // The cell right of the base becomes its trailing half.
+      this.breakPairAt(row, c + 1);
+      const tail = row[c + 1];
+      tail.ch = '';
+      tail.fg = base.fg;
+      tail.bg = base.bg;
+      tail.attrs = base.attrs;
+      this.cursorCol = c + 2;
+    } else {
+      // No room at the right edge: the base stays one cell and the cursor
+      // moves back onto it, so the next glyph replaces it (as in tmux).
+      this.cursorCol = c;
+    }
+    return true;
   }
 
   /** Write a glyph at the cursor with the current SGR state and advance by
@@ -514,7 +557,7 @@ export class Screen {
     if (cell.ch === '') {
       if (c > 0) row[c - 1].ch = ' ';
       cell.ch = ' ';
-    } else if (firstCharWidth(cell.ch) === 2 && c + 1 < row.length && row[c + 1].ch === '') {
+    } else if (isHead(row, c)) {
       row[c + 1].ch = ' ';
       cell.ch = ' ';
     }
@@ -1158,10 +1201,9 @@ export class Screen {
     if (row[c].ch === '') this.breakPairAt(row, c);
     const blanks = Array.from({ length: n }, () => this.blankWithBg());
     row.splice(c, 0, ...blanks);
+    // A head pushed to the last column loses its trailing half off the edge.
+    if (row[this.cols].ch === '') row[this.cols - 1].ch = ' ';
     if (row.length > this.cols) row.length = this.cols;
-    // A head pushed to the last column lost its trailing half off the edge.
-    const last = row[this.cols - 1];
-    if (firstCharWidth(last.ch) === 2) last.ch = ' ';
     this.markRow(this.cursorRow);
   }
 
@@ -1198,7 +1240,7 @@ export class Screen {
     const cell = row[c];
     if (cell.ch === '') {
       if (c > 0) this.resetCell(row[c - 1]);
-    } else if (firstCharWidth(cell.ch) === 2 && c + 1 < this.cols && row[c + 1].ch === '') {
+    } else if (isHead(row, c)) {
       this.resetCell(row[c + 1]);
     }
     this.resetCell(cell);
@@ -1349,6 +1391,54 @@ export class Screen {
   }
 }
 
+/** Is `row[c]` the head of a wide pair? Recognised by its `''` trailing
+ *  cell — VS16 can widen a base whose first code point is narrow. */
+function isHead(row: readonly Cell[], c: number): boolean {
+  return row[c].ch !== '' && c + 1 < row.length && row[c + 1].ch === '';
+}
+
+/** The most UTF-8 bytes tmux 3.6a keeps in one cell (`UTF8_SIZE`); a join
+ *  that would pass it is refused. */
+const CELL_UTF8_MAX = 32;
+
+/** tmux 3.6a `utf8_should_combine`'s emoji modifier bases, verbatim. tmux's
+ *  own list, not Unicode's Emoji_Modifier_Base: ✋ U+270B or 🤘 U+1F918 do
+ *  not take a skin tone there, so they must not here either. */
+const MODIFIER_BASES: ReadonlySet<number> = new Set([
+  0x1f44b, 0x1f44c, 0x1f44d, 0x1f44e, 0x1f44f, 0x1f450, 0x1f466, 0x1f467, 0x1f468, 0x1f469,
+  0x1f46e, 0x1f470, 0x1f471, 0x1f472, 0x1f473, 0x1f474, 0x1f475, 0x1f476, 0x1f477, 0x1f478,
+  0x1f47c, 0x1f481, 0x1f482, 0x1f483, 0x1f485, 0x1f486, 0x1f487, 0x1f4aa, 0x1f575, 0x1f57a,
+  0x1f590, 0x1f595, 0x1f596, 0x1f645, 0x1f646, 0x1f647, 0x1f64b, 0x1f64c, 0x1f64d, 0x1f64e,
+  0x1f64f, 0x1f6b4, 0x1f6b5, 0x1f6b6, 0x1f926, 0x1f937, 0x1f938, 0x1f939, 0x1f93d, 0x1f93e,
+  0x1f9b5, 0x1f9b6, 0x1f9b8, 0x1f9b9, 0x1f9cd, 0x1f9ce, 0x1f9cf, 0x1f9d1, 0x1f9d2, 0x1f9d3,
+  0x1f9d4, 0x1f9d5, 0x1f9d6, 0x1f9d7, 0x1f9d8, 0x1f9d9, 0x1f9da, 0x1f9db, 0x1f9dc, 0x1f9dd,
+  0x1f9de, 0x1f9df,
+]);
+
+/** tmux 3.6a `utf8_should_combine(with, add)`, on the first code point of
+ *  each side (what its `mbtowc` decodes): two regional indicators, or a
+ *  skin-tone modifier `w` with a modifier base `a`. The caller tries both
+ *  orders, so `👋🏽` and `🏽👋` both join. */
+function shouldCombine(w: number, a: number): boolean {
+  if (a >= 0x1f1e6 && a <= 0x1f1ff && w >= 0x1f1e6 && w <= 0x1f1ff) return true;
+  return w >= 0x1f3fb && w <= 0x1f3ff && MODIFIER_BASES.has(a);
+}
+
+/** UTF-8 length of a well-formed string (cells never hold lone surrogates). */
+function utf8Length(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const u = s.charCodeAt(i);
+    if (u < 0x80) n += 1;
+    else if (u < 0x800) n += 2;
+    else if (u >= 0xd800 && u <= 0xdbff) {
+      n += 4;
+      i++;
+    } else n += 3;
+  }
+  return n;
+}
+
 /** Decoder for OSC 52 clipboard payloads (non-fatal: bad bytes → U+FFFD). */
 const UTF8 = new TextDecoder('utf-8');
 
@@ -1427,8 +1517,7 @@ function resizeGrid(
     }
     // Narrowing can cut a wide glyph in half at the new right edge: blank
     // the head whose trailing cell fell off.
-    const last = next[r][newCols - 1];
-    if (firstCharWidth(last.ch) === 2) last.ch = ' ';
+    if (newCols < oldCols && src[r][newCols].ch === '') next[r][newCols - 1].ch = ' ';
   }
   return next;
 }

@@ -1625,3 +1625,314 @@ describe('ansi.Screen — DEC Special Graphics never stores control chars (U2)',
     expect(rowToRuns(s.cells[0]).map((r) => r.text).join('')).not.toMatch(/[\x00-\x1f]/);
   });
 });
+
+// ─── Grapheme clusters, as tmux 3.6a joins them (F2) ─────────────────────
+//
+// tmux 3.6a (variation-selector-always-wide on, its default) joins some
+// sequences into one cell in `screen_write_combine`, and the columns it
+// addresses afterwards assume the outer terminal did the same. Every
+// expectation below was measured on a local tmux 3.6a: the bytes were fed to a
+// detached pane (10x4 unless noted), synced on an OSC 2 title sentinel, then
+// `#{cursor_x},#{cursor_y}` and `capture-pane -p -N` were read.
+//
+//   input (CUP = ESC[r;cH)                  tmux cursor  tmux capture-pane row
+//   X VS16 Y                                3,0          "X️Y"
+//   ❤ VS16 Z                                3,0          "❤️Z"
+//   abcdefghi X VS16                        9,0          "abcdefghiX️"
+//   abcdefghi X VS16 Z                      10,0         "abcdefghiZ"
+//   abcdefghi X VS16 Z W                    1,1          "abcdefghiZ" / "W"
+//   abcdefgh X VS16                         10,0         "abcdefghX️"
+//   abcdefgh X VS16 Z                       1,1          "abcdefghX️" / "Z"
+//   ab:XYZ CUP(1,5) VS16 Q                  6,0          "ab:X️Q"
+//   ab:X VS16 X CUP(1,7) Q                  7,0          "ab:X️XQ"
+//   abc CUP(1,2) VS16 Q                     3,0          "a️Q"
+//   X VS16 VS16 Y                           3,0          "X️️Y"
+//   a U+0301 VS16 Y                         3,0          "á️Y"
+//   VS16 Y (column 0)                       1,0          "Y"
+//   中 CUP(1,2) VS16 Q                       2,0          " Q"
+//   中 CUP(1,2) U+0301 Q                     2,0          " Q"
+//   q VS16 X  (DEC graphics, ─)             3,0          "q️X" (tmux keeps q + charset attr)
+//   1 VS16 U+20E3 X (keycap)                3,0          "1️⃣X"
+//   👨 ZWJ 👩 ZWJ 👧 X                         3,0          "👨‍👩‍👧X"
+//   👨 ZWJ A X                               4,0          "👨‍AX"
+//   👨 ZWJ é X   (also ¡ NBSP ─ 中 🏽)          3,0          "👨‍éX"
+//   A ZWJ 👩 X                               2,0          "A‍👩X"
+//   👨 ZWJ x y CUP(1,3) é X                  3,0          "👨‍éXy"
+//   👨 ZWJ x y CUP(1,5) é X                  6,0          "👨‍xyéX"
+//   ab 👨 ZWJ CR 👩 X                         3,0          "👩X"
+//   👨 ZWJ SGR(1) 👩 X                        3,0          "👨‍👩X"
+//   abcdefgh 👨 ZWJ 👩 X                      1,1          "abcdefgh👨‍👩" / "X"
+//   abcdefghi 👨 ZWJ 👩 X                     3,1          "abcdefghi" / "👨‍👩X"
+//   👨 ZWJ 👩 ZWJ 👧 ZWJ 👦 X  (20 cols)        3,0          "👨‍👩‍👧‍👦X" (25 bytes)
+//   a (ZWJ é)×8 Y  (20 cols)                3,0          "a‍é‍é‍é‍é‍é‍é" "é‍é" "Y"
+//                                                        (a 7th ZWJ would pass 32 bytes: dropped)
+//   👋 🏽 X                                   3,0          "👋🏽X"
+//   👋 🏽 🏽 X                                 3,0          "👋🏽🏽X"
+//   🏽 👋 X                                   3,0          "🏽👋X"
+//   👨 ZWJ 👩 🏽 X                            3,0          "👨‍👩🏽X"
+//   🐶 ZWJ 👨 🏽 X                            5,0          "🐶‍👨🏽X"
+//   A 🏽 X / 中 🏽 X / ❤ VS16 🏽 X            4,0 / 5,0 / 5,0 (not joined)
+//   ✋ 🏽 X / 🤘 🏽 X  (not in tmux's table)    5,0          "✋🏽X"
+//   👋 CUP(1,5) 🏽 X                          7,0          "👋  🏽X"
+//   👋 CUP(1,2) 🏽 X                          4,0          " 🏽X"
+//   🇺 X                                     2,0          "🇺X"
+//   🇺 🇸 X  /  🇺 🇸 🇬 X                       3,0          "🇺🇸X" / "🇺🇸🇬X"
+//
+// One deliberate divergence: `ab:X中W CUP(1,5) VS16` — tmux widens X over the
+// head of 中 and leaves 中's padding cell orphaned in its grid (capture
+// "ab:X️W", a later write there wipes X too). We keep the pair invariant
+// instead: 中 is blanked whole, as for any other overwrite of a pair.
+describe('ansi.Screen — grapheme clusters joined as tmux 3.6a does (F2)', () => {
+  const cells = (s: Screen, r: number) => s.cells[r].map((c) => c.ch);
+  const text = (s: Screen, r: number) => cells(s, r).join('').trimEnd();
+  const ZWJ = '\u200d';
+  const VS16 = '\ufe0f';
+  const MAN = '\u{1F468}';
+  const WOMAN = '\u{1F469}';
+  const GIRL = '\u{1F467}';
+  const WAVE = '\u{1F44B}';
+  const TONE = '\u{1F3FD}';
+
+  describe('VS16 widens a narrow base', () => {
+    it('X VS16 Y: the base becomes a 2-cell pair', () => {
+      const s = new Screen(4, 10);
+      s.write(`X${VS16}Y`);
+      expect(cells(s, 0).slice(0, 4)).toEqual([`X${VS16}`, '', 'Y', ' ']);
+      expect(s.cursorCol).toBe(3);
+    });
+
+    it('❤ VS16 Z', () => {
+      const s = new Screen(4, 10);
+      s.write(`❤${VS16}Z`);
+      expect(s.cursorCol).toBe(3);
+      expect(cells(s, 0)[2]).toBe('Z');
+    });
+
+    it('at the right edge the base stays one cell and the cursor moves back onto it', () => {
+      const s = new Screen(4, 10);
+      s.write(`abcdefghiX${VS16}`);
+      expect(cells(s, 0)[9]).toBe(`X${VS16}`);
+      expect([s.cursorRow, s.cursorCol]).toEqual([0, 9]);
+      s.write('Z');
+      expect(text(s, 0)).toBe('abcdefghiZ');
+      expect([s.cursorRow, s.cursorCol]).toEqual([0, 10]);
+      s.write('W');
+      expect(text(s, 1)).toBe('W');
+      expect([s.cursorRow, s.cursorCol]).toEqual([1, 1]);
+    });
+
+    it('a base in the second-to-last column fills the row exactly (deferred wrap)', () => {
+      const s = new Screen(4, 10);
+      s.write(`abcdefghX${VS16}`);
+      expect(cells(s, 0).slice(8)).toEqual([`X${VS16}`, '']);
+      expect([s.cursorRow, s.cursorCol]).toEqual([0, 10]);
+      s.write('Z');
+      expect(text(s, 1)).toBe('Z');
+      expect([s.cursorRow, s.cursorCol]).toEqual([1, 1]);
+    });
+
+    it('widening overwrites the cell right of the base, and column updates stay aligned', () => {
+      const a = new Screen(4, 10);
+      a.write(`ab:XYZ\x1b[1;5H${VS16}Q`);
+      expect(cells(a, 0).slice(0, 7)).toEqual(['a', 'b', ':', `X${VS16}`, '', 'Q', ' ']);
+      expect(a.cursorCol).toBe(6);
+      const b = new Screen(4, 10);
+      b.write(`ab:X${VS16}X\x1b[1;7HQ`);
+      expect(text(b, 0)).toBe(`ab:X${VS16}XQ`);
+      expect(b.cursorCol).toBe(7);
+    });
+
+    it('joins the glyph left of the cursor even after a cursor move', () => {
+      const s = new Screen(4, 10);
+      s.write(`abc\x1b[1;2H${VS16}Q`);
+      expect(cells(s, 0).slice(0, 4)).toEqual([`a${VS16}`, '', 'Q', ' ']);
+      expect(s.cursorCol).toBe(3);
+    });
+
+    it('a second VS16, a combined base and column 0', () => {
+      const a = new Screen(4, 10);
+      a.write(`X${VS16}${VS16}Y`);
+      expect(a.cursorCol).toBe(3);
+      const b = new Screen(4, 10);
+      b.write(`á${VS16}Y`);
+      expect(cells(b, 0).slice(0, 3)).toEqual([`á${VS16}`, '', 'Y']);
+      const c = new Screen(4, 10);
+      c.write(`${VS16}Y`);
+      expect(text(c, 0)).toBe('Y');
+      expect(c.cursorCol).toBe(1);
+    });
+
+    it('a keycap and a DEC graphics base widen too', () => {
+      const a = new Screen(4, 10);
+      a.write(`1${VS16}\u20e3X`);
+      expect(cells(a, 0).slice(0, 3)).toEqual([`1${VS16}\u20e3`, '', 'X']);
+      const b = new Screen(4, 10);
+      b.write(`\x1b(0q${VS16}\x1b(BX`);
+      expect(cells(b, 0).slice(0, 3)).toEqual([`─${VS16}`, '', 'X']);
+    });
+
+    it('with the cursor on a trailing half a zero-width mark is dropped, not attached', () => {
+      const a = new Screen(4, 10);
+      a.write(`中\x1b[1;2H${VS16}`);
+      expect(cells(a, 0).slice(0, 2)).toEqual(['中', '']);
+      a.write('Q');
+      expect(text(a, 0)).toBe(' Q');
+      const b = new Screen(4, 10);
+      b.write('中\x1b[1;2H\u0301');
+      expect(cells(b, 0)[0]).toBe('中');
+    });
+
+    it('widening over a wide head blanks that pair whole (pair invariant kept)', () => {
+      const s = new Screen(4, 10);
+      s.write(`ab:X中W\x1b[1;5H${VS16}`);
+      expect(cells(s, 0).slice(0, 7)).toEqual(['a', 'b', ':', `X${VS16}`, '', ' ', 'W']);
+      expect(s.cursorCol).toBe(5);
+    });
+
+    it('a widened narrow base is a real pair for overwrite, erase, ICH and resize', () => {
+      const over = new Screen(1, 4);
+      over.write(`X${VS16}\x1b[1;2HQ`);
+      expect(cells(over, 0)).toEqual([' ', 'Q', ' ', ' ']);
+      const erase = new Screen(1, 4);
+      erase.write(`X${VS16}Y\x1b[1;2H\x1b[X`);
+      expect(cells(erase, 0)).toEqual([' ', ' ', 'Y', ' ']);
+      const ich = new Screen(1, 5);
+      ich.write(`abX${VS16}\x1b[1;1H\x1b[2@`);
+      expect(cells(ich, 0)).toEqual([' ', ' ', 'a', 'b', ' ']);
+      const narrow = new Screen(1, 4);
+      narrow.write(`aX${VS16}b`);
+      narrow.resize(1, 2);
+      expect(cells(narrow, 0)).toEqual(['a', ' ']);
+    });
+
+    it('rowToRuns draws a widened base as a 2-cell run', () => {
+      const s = new Screen(1, 5);
+      s.write(`❤${VS16}Z`);
+      expect(rowToRuns(s.cells[0]).map((r) => [r.text, r.wide ?? false])).toEqual([
+        [`❤${VS16}`, true],
+        ['Z  ', false],
+      ]);
+    });
+  });
+
+  describe('ZWJ sequences', () => {
+    it('a family is one 2-cell cluster', () => {
+      const s = new Screen(4, 10);
+      s.write(`${MAN}${ZWJ}${WOMAN}${ZWJ}${GIRL}X`);
+      expect(cells(s, 0).slice(0, 4)).toEqual([`${MAN}${ZWJ}${WOMAN}${ZWJ}${GIRL}`, '', 'X', ' ']);
+      expect(s.cursorCol).toBe(3);
+    });
+
+    it('any non-ASCII code point joins after a ZWJ; ASCII never does', () => {
+      const ascii = new Screen(4, 10);
+      ascii.write(`${MAN}${ZWJ}AX`);
+      expect(cells(ascii, 0).slice(0, 4)).toEqual([`${MAN}${ZWJ}`, '', 'A', 'X']);
+      for (const ch of ['é', '¡', '\u00a0', '─', '中', TONE]) {
+        const s = new Screen(4, 10);
+        s.write(`${MAN}${ZWJ}${ch}X`);
+        expect(s.cursorCol, ch).toBe(3);
+        expect(cells(s, 0)[0], ch).toBe(`${MAN}${ZWJ}${ch}`);
+      }
+    });
+
+    it('the joined cluster keeps its base width', () => {
+      const s = new Screen(4, 10);
+      s.write(`A${ZWJ}${WOMAN}X`);
+      expect(cells(s, 0).slice(0, 3)).toEqual([`A${ZWJ}${WOMAN}`, 'X', ' ']);
+      expect(s.cursorCol).toBe(2);
+    });
+
+    it('joining looks at the glyph left of the cursor, not at what was printed last', () => {
+      const back = new Screen(4, 10);
+      back.write(`${MAN}${ZWJ}xy\x1b[1;3HéX`);
+      expect(text(back, 0)).toBe(`${MAN}${ZWJ}éXy`);
+      expect(back.cursorCol).toBe(3);
+      const away = new Screen(4, 10);
+      away.write(`${MAN}${ZWJ}xy\x1b[1;5HéX`);
+      expect(text(away, 0)).toBe(`${MAN}${ZWJ}xyéX`);
+      expect(away.cursorCol).toBe(6);
+    });
+
+    it('a CR in between breaks the join; an SGR does not', () => {
+      const cr = new Screen(4, 10);
+      cr.write(`ab${MAN}${ZWJ}\r${WOMAN}X`);
+      expect(text(cr, 0)).toBe(`${WOMAN}X`);
+      expect(cr.cursorCol).toBe(3);
+      const sgr = new Screen(4, 10);
+      sgr.write(`${MAN}${ZWJ}\x1b[1m${WOMAN}X`);
+      expect(cells(sgr, 0)[0]).toBe(`${MAN}${ZWJ}${WOMAN}`);
+      expect(sgr.cursorCol).toBe(3);
+    });
+
+    it('at the right edge: joins while the wrap is deferred, and on the next row after a wrap', () => {
+      const pending = new Screen(4, 10);
+      pending.write(`abcdefgh${MAN}${ZWJ}${WOMAN}X`);
+      expect(text(pending, 0)).toBe(`abcdefgh${MAN}${ZWJ}${WOMAN}`);
+      expect(text(pending, 1)).toBe('X');
+      expect([pending.cursorRow, pending.cursorCol]).toEqual([1, 1]);
+      const wrapped = new Screen(4, 10);
+      wrapped.write(`abcdefghi${MAN}${ZWJ}${WOMAN}X`);
+      expect(text(wrapped, 0)).toBe('abcdefghi');
+      expect(cells(wrapped, 1).slice(0, 3)).toEqual([`${MAN}${ZWJ}${WOMAN}`, '', 'X']);
+      expect([wrapped.cursorRow, wrapped.cursorCol]).toEqual([1, 3]);
+    });
+    it('a family of four still joins; a cell stops growing at tmux\'s 32 UTF-8 bytes', () => {
+      const four = new Screen(4, 20);
+      four.write(`${MAN}${ZWJ}${WOMAN}${ZWJ}${GIRL}${ZWJ}\u{1F466}X`);
+      expect(cells(four, 0)[2]).toBe('X');
+      expect(four.cursorCol).toBe(3);
+      // 'a' + 6 × (ZWJ é) is 31 bytes; the 7th ZWJ would make 34 and is
+      // dropped, so the 7th é starts a cell and the last ZWJ é joins it.
+      const pair = `${ZWJ}\u00e9`;
+      const chain = new Screen(4, 20);
+      chain.write(`a${pair.repeat(8)}Y`);
+      expect(cells(chain, 0).slice(0, 3)).toEqual([`a${pair.repeat(6)}`, `\u00e9${pair}`, 'Y']);
+      expect(chain.cursorCol).toBe(3);
+    });
+  });
+
+  describe('skin-tone modifiers and regional indicators', () => {
+    it('a modifier joins a base from tmux\'s table, in either order', () => {
+      for (const seq of [`${WAVE}${TONE}`, `${WAVE}${TONE}${TONE}`, `${TONE}${WAVE}`, `${MAN}${ZWJ}${WOMAN}${TONE}`]) {
+        const s = new Screen(4, 10);
+        s.write(`${seq}X`);
+        expect(cells(s, 0).slice(0, 3), seq).toEqual([seq, '', 'X']);
+        expect(s.cursorCol, seq).toBe(3);
+      }
+    });
+
+    it('a modifier after anything else is its own wide glyph', () => {
+      // Only the first code point of the cluster counts (tmux's mbtowc).
+      for (const base of ['A', '中', `❤${VS16}`, '✋', '\u{1F918}', `\u{1F436}${ZWJ}${MAN}`]) {
+        const s = new Screen(4, 12);
+        s.write(`${base}${TONE}X`);
+        const w = base === 'A' ? 1 : 2;
+        expect(s.cursorCol, base).toBe(w + 3);
+        expect(cells(s, 0).slice(w, w + 2), base).toEqual([TONE, '']);
+      }
+    });
+
+    it('a modifier joins only a glyph that ends right at the cursor', () => {
+      const away = new Screen(4, 10);
+      away.write(`${WAVE}\x1b[1;5H${TONE}X`);
+      expect(text(away, 0)).toBe(`${WAVE}  ${TONE}X`);
+      expect(away.cursorCol).toBe(7);
+      const onTrail = new Screen(4, 10);
+      onTrail.write(`${WAVE}\x1b[1;2H${TONE}X`);
+      expect(cells(onTrail, 0).slice(0, 4)).toEqual([' ', TONE, '', 'X']);
+      expect(onTrail.cursorCol).toBe(4);
+    });
+
+    it('regional indicators pair into a 2-cell flag', () => {
+      const one = new Screen(4, 10);
+      one.write('\u{1F1FA}X');
+      expect(one.cursorCol).toBe(2);
+      const flag = new Screen(4, 10);
+      flag.write('\u{1F1FA}\u{1F1F8}X');
+      expect(cells(flag, 0).slice(0, 3)).toEqual(['\u{1F1FA}\u{1F1F8}', '', 'X']);
+      const three = new Screen(4, 10);
+      three.write('\u{1F1FA}\u{1F1F8}\u{1F1EC}X');
+      expect(three.cursorCol).toBe(3);
+    });
+  });
+});
