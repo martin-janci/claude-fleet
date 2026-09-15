@@ -1,6 +1,7 @@
 // Asset catalog store (sub-project 1). Mirrors src-tauri/src/service/catalog.
 import { writable } from 'svelte/store';
 import { invokeCmd, invokeCmdAbortable, type Result } from './result';
+import type { SessionRow } from './sessions';
 
 export type AssetKind = 'skill' | 'agent' | 'hook' | 'mcp_server' | 'plugin_ref';
 export const KIND_ORDER: AssetKind[] = ['skill', 'agent', 'hook', 'mcp_server', 'plugin_ref'];
@@ -35,12 +36,48 @@ export interface FileWrite { path: string; bytes: string }
 export interface ConfigMerge { file: string; json_path: string[]; mode: 'set' | 'append_unique' | 'subset'; value: unknown }
 export interface RenderPlan { files: FileWrite[]; merges: ConfigMerge[]; placeholders: string[]; warnings: string[] }
 export interface Preview { harness: string; plan: RenderPlan | null; unsupported: string | null }
+
+/** A skill/agent `resources/…` file: `bytes` is base64. Never decode/display
+ *  its content — only its size (see `resourceSize` below). */
+export interface ResourceRef { rel_path: string; bytes: string }
+
+/**
+ * The `Asset` wire shape (sub-project 3): a flat object mirroring the Rust
+ * manual serializer in `service/catalog/model.rs` (`merge_header_and_spec`).
+ * Header fields (`kind, name, version, description, tags, source?,
+ * targets?`) sit next to the kind-specific fields flattened in by
+ * `AssetSpec`'s internal tag, plus `body` and an optional `resources` (the
+ * backend omits the key when empty, hence optional here too — treat an
+ * absent array as `[]`, never as "unknown").
+ *
+ * `tags` stays optional for the same reason as `AssetDetail.asset` below: a
+ * stale build or hand-crafted IPC mock may omit it.
+ *
+ * Kind-specific fields (`allowed_tools`, `tools`, `model`, `event`, `match`,
+ * `action`, `transport`, `url`, `headers`, `command`, `args`, `env`,
+ * `harness`, `marketplace`, `plugin`, …) are not enumerated field-by-field
+ * here — the index signature covers them so a value round-trips untouched
+ * through the editor even for fields this UI does not render a control for
+ * (`source`, `targets`, per-harness extras). `AssetEditor` reads/writes the
+ * specific ones it renders through `KIND_FIELDS`.
+ */
+export interface EditableAsset {
+  kind: AssetKind;
+  name: string;
+  version: string;
+  description: string;
+  tags?: string[];
+  body: string;
+  resources?: ResourceRef[];
+  [key: string]: unknown;
+}
+
 export interface AssetDetail {
   // `tags` is optional here even though the backend now always serialises
   // the key: a stale build, a hand-crafted IPC mock in a test, or any other
   // producer of this shape may still omit it, and `AssetDetail.svelte` must
   // not crash reading `.length` off `undefined`.
-  asset: { kind: string; name: string; version: string; description: string; tags?: string[]; body: string } & Record<string, unknown>;
+  asset: EditableAsset;
   previews: Preview[];
   hosts: HostState[];
 }
@@ -246,4 +283,118 @@ export function deleteSecret(name: string, hostAlias?: string): Promise<Result<b
  *  for. */
 export function isDestructive(plan: SyncPlan): boolean {
   return plan.hosts.some((h) => h.actions.some((a) => a.op === 'overwrite' || a.op === 'remove'));
+}
+
+// ── Authoring (sub-project 3): templates, lint, editor writes, commit/push,
+// delegating to a session. Mirrors src-tauri/src/service/catalog/author.rs
+// and author_session.rs. ──
+
+export interface Finding { field: string; message: string }
+export interface LintReport { errors: Finding[]; warnings: Finding[] }
+export interface AssetLint { kind: string; name: string; report: LintReport }
+export interface LintAll { assets: AssetLint[]; problems: Problem[]; errors: number; warnings: number }
+export interface RepoStatus { head: string; dirty: number; ahead: number | null; behind: number | null; has_upstream: boolean }
+export interface WriteResult { commit: string; lint: LintReport }
+
+/** The neutral tool vocabulary (`service/catalog/model.rs::TOOLS`). An
+ *  `mcp:<server>` tool reference is also valid but is not one of these
+ *  fixed entries. */
+export const TOOLS = ['read', 'edit', 'write', 'bash', 'grep', 'glob', 'web_search', 'web_fetch', 'browser', 'agent', '*'];
+/** Neutral model tiers (`model.rs::TIERS`). */
+export const TIERS = ['fast', 'default', 'strong'];
+/** Neutral hook/agent-loop events (`model.rs::EVENTS`). */
+export const EVENTS = ['session_start', 'prompt_submit', 'before_tool', 'after_tool', 'stop', 'subagent_stop'];
+
+/** The kind-specific field names `AssetEditor` renders a control for, in
+ *  display order. Drives which `editor-field-<field>` blocks appear per
+ *  kind; each field's widget (checklist, select, text, nested group) is
+ *  chosen in `AssetEditor.svelte` itself. */
+export const KIND_FIELDS: Record<AssetKind, string[]> = {
+  skill: ['allowed_tools', 'user_invocable', 'triggers'],
+  agent: ['tools', 'model'],
+  hook: ['event', 'action'],
+  mcp_server: ['transport', 'url', 'command', 'args', 'env'],
+  plugin_ref: ['harness', 'marketplace', 'plugin'],
+};
+
+/** The most recently loaded repo status (dirty/ahead/behind/head), refreshed
+ *  after every authoring write and on `AssetsPanel` mount. */
+export const repoStatusStore = writable<RepoStatus | null>(null);
+
+export async function createAsset(kind: string, name: string, duplicateFrom?: string): Promise<Result<WriteResult>> {
+  return invokeCmd<WriteResult>('catalog_create_asset', {
+    args: { kind, name, duplicate_from: duplicateFrom ?? null },
+  });
+}
+
+/** Save an edited asset. `resources` defaults to `[]` — the backend expects
+ *  the key present (it decides on its own whether to omit it on disk). */
+export async function updateAsset(asset: EditableAsset): Promise<Result<WriteResult>> {
+  return invokeCmd<WriteResult>('catalog_update_asset', {
+    args: { asset: { ...asset, resources: asset.resources ?? [] } },
+  });
+}
+
+export function deleteAsset(kind: string, name: string): Promise<Result<string>> {
+  return invokeCmd<string>('catalog_delete_asset', { args: { kind, name } });
+}
+
+export function addResource(kind: string, name: string, localPath: string, relPath?: string): Promise<Result<WriteResult>> {
+  return invokeCmd<WriteResult>('catalog_add_resource', {
+    args: { kind, name, local_path: localPath, rel_path: relPath ?? null },
+  });
+}
+
+export function removeResource(kind: string, name: string, relPath: string): Promise<Result<WriteResult>> {
+  return invokeCmd<WriteResult>('catalog_remove_resource', { args: { kind, name, rel_path: relPath } });
+}
+
+export function lintAsset(kind: string, name: string): Promise<Result<LintReport>> {
+  return invokeCmd<LintReport>('catalog_lint_asset', { args: { kind, name } });
+}
+
+export function lintAll(): Promise<Result<LintAll>> {
+  return invokeCmd<LintAll>('catalog_lint_all');
+}
+
+export function commitPending(message?: string): Promise<Result<string>> {
+  return invokeCmd<string>('catalog_commit_pending', { args: { message: message ?? null } });
+}
+
+export async function pushCatalog(): Promise<Result<RepoStatus>> {
+  const r = await invokeCmd<RepoStatus>('catalog_push');
+  if (r.ok) repoStatusStore.set(r.value);
+  return r;
+}
+
+export async function repoStatus(): Promise<Result<RepoStatus>> {
+  const r = await invokeCmd<RepoStatus>('catalog_repo_status');
+  if (r.ok) repoStatusStore.set(r.value);
+  return r;
+}
+
+export function assetTemplate(kind: string, name: string): Promise<Result<EditableAsset>> {
+  return invokeCmd<EditableAsset>('catalog_template', { args: { kind, name } });
+}
+
+/** Delegate an asset (or "create a new asset" when `kind`/`name` are
+ *  omitted) to a freshly spawned interactive session in the catalog repo.
+ *  Abortable like `applySync` — the wrapper injects a `call_id`. */
+export function spawnAuthorSession(
+  f: { kind?: string; name?: string; instructions: string },
+  signal?: AbortSignal,
+): Promise<Result<SessionRow>> {
+  return invokeCmdAbortable<SessionRow>('catalog_spawn_author_session', {
+    args: { kind: f.kind ?? null, name: f.name ?? null, instructions: f.instructions },
+  }, signal);
+}
+
+/** Bytes of a base64 resource, for the "size" the editor shows (never the
+ *  content). Invalid/empty base64 yields 0 rather than throwing. */
+export function resourceSize(bytes: string): number {
+  try {
+    return atob(bytes).length;
+  } catch {
+    return 0;
+  }
 }

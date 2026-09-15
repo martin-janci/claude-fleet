@@ -642,7 +642,7 @@
       {/if}
       {#if assetsMode}
         <div class="view-slot overlay" data-testid="assets-overlay">
-          <AssetsPanel />
+          <AssetsPanel visible={assetsMode} />
         </div>
       {/if}
     </div>

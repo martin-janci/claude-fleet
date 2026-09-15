@@ -5,8 +5,9 @@ import { tick } from 'svelte';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import AssetsPanel from './AssetsPanel.svelte';
-import { catalog, catalogConfig, inventory, lastSyncRun } from './assets';
+import { catalog, catalogConfig, inventory, lastSyncRun, repoStatusStore } from './assets';
 import { hosts } from './hosts';
+import { authorSessionOpened, clearAuthorSessionOpened } from './AuthorSessionDialog.svelte';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -31,7 +32,8 @@ const listing = {
 
 beforeEach(() => {
   invoke.mockReset();
-  catalog.set(null); catalogConfig.set(null); inventory.set([]); lastSyncRun.set(null);
+  catalog.set(null); catalogConfig.set(null); inventory.set([]); lastSyncRun.set(null); repoStatusStore.set(null);
+  clearAuthorSessionOpened();
   hosts.set([
     { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null, account_uuid: null, provisioned: true },
     { alias: 'mefistos', ssh_alias: 'mefistos', reachable: false, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null, account_uuid: null, provisioned: true },
@@ -237,5 +239,202 @@ describe('AssetsPanel', () => {
     render(AssetsPanel);
     expect(await screen.findByTestId('assets-last-sync')).toBeTruthy();
     expect(screen.getByTestId('assets-last-sync').textContent).toContain('applied');
+  });
+});
+
+describe('AssetsPanel authoring', () => {
+  it('New asset creates via the dialog, then selects and opens the editor', async () => {
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: listing, assets_inventory: [], catalog_repo_status: { head: 'h', dirty: 0, ahead: null, behind: null, has_upstream: false },
+      catalog_create_asset: { commit: 'sha-new', lint: { errors: [], warnings: [] } },
+      catalog_lint_asset: { errors: [], warnings: [] },
+      catalog_get_asset: {
+        asset: { kind: 'skill', name: 'my-new-skill', version: '1', description: 'Describe when to use this skill.', tags: [], body: '# my-new-skill\n', allowed_tools: [], user_invocable: true, triggers: [] },
+        previews: [], hosts: [],
+      },
+    });
+    render(AssetsPanel, { visible: true });
+    expect(await screen.findByTestId('assets-new')).toBeTruthy();
+
+    await fireEvent.click(screen.getByTestId('assets-new'));
+    expect(await screen.findByTestId('new-asset-dialog')).toBeTruthy();
+    await fireEvent.input(screen.getByTestId('new-asset-name'), { target: { value: 'my-new-skill' } });
+    await fireEvent.click(screen.getByTestId('new-asset-create'));
+
+    await waitFor(() => expect(screen.getByTestId('asset-detail-title').textContent).toContain('my-new-skill'));
+    // A freshly created asset opens straight into edit mode.
+    expect(await screen.findByTestId('editor-save')).toBeTruthy();
+  });
+
+  it('Delete asks for confirmation, then clears the selection on success', async () => {
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: listing, assets_inventory: [], catalog_repo_status: { head: 'h', dirty: 0, ahead: null, behind: null, has_upstream: false },
+      catalog_get_asset: {
+        asset: { kind: 'skill', name: 'worktree', version: '1', description: 'Make one.', tags: [], body: '# b' },
+        previews: [], hosts: [],
+      },
+      catalog_delete_asset: 'sha-del',
+    });
+    render(AssetsPanel, { visible: true });
+    await fireEvent.click(await screen.findByTestId('asset-row-skill-worktree'));
+    await screen.findByTestId('asset-detail-title');
+
+    await fireEvent.click(screen.getByTestId('asset-delete'));
+    expect(await screen.findByTestId('confirm-dialog')).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('asset-delete-confirm'));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_delete_asset', { args: { kind: 'skill', name: 'worktree' } }));
+    await waitFor(() => expect(screen.queryByTestId('asset-detail-title')).toBeNull());
+    expect(screen.getByText('Select an asset.')).toBeTruthy();
+  });
+
+  it('Lint shows the inline report for the selected asset', async () => {
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: listing, assets_inventory: [], catalog_repo_status: { head: 'h', dirty: 0, ahead: null, behind: null, has_upstream: false },
+      catalog_get_asset: {
+        asset: { kind: 'skill', name: 'worktree', version: '1', description: 'Make one.', tags: [], body: '# b' },
+        previews: [], hosts: [],
+      },
+      catalog_lint_asset: { errors: [{ field: 'description', message: 'must not be empty' }], warnings: [] },
+    });
+    render(AssetsPanel, { visible: true });
+    await fireEvent.click(await screen.findByTestId('asset-row-skill-worktree'));
+    await screen.findByTestId('asset-detail-title');
+
+    await fireEvent.click(screen.getByTestId('asset-lint'));
+    expect(await screen.findByTestId('asset-lint-report')).toBeTruthy();
+    expect(screen.getByTestId('asset-lint-report').textContent).toContain('must not be empty');
+  });
+
+  it('shows the repo status strip and gates Commit pending / Push on dirty/ahead/has_upstream', async () => {
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: listing, assets_inventory: [],
+      catalog_repo_status: { head: 'abcdef1234567890', dirty: 3, ahead: 2, behind: 0, has_upstream: true },
+    });
+    render(AssetsPanel, { visible: true });
+
+    expect(await screen.findByTestId('assets-repo-status')).toBeTruthy();
+    expect(screen.getByTestId('assets-repo-status').textContent).toContain('3 dirty');
+    expect(await screen.findByTestId('assets-commit-pending')).toBeTruthy();
+    expect(screen.getByTestId('assets-push').textContent).toContain('↑2');
+    expect(screen.getByTestId('assets-push')).not.toBeDisabled();
+  });
+
+  it('Push is disabled without an upstream', async () => {
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: listing, assets_inventory: [],
+      catalog_repo_status: { head: 'h', dirty: 0, ahead: null, behind: null, has_upstream: false },
+    });
+    render(AssetsPanel, { visible: true });
+    expect(await screen.findByTestId('assets-push')).toBeDisabled();
+  });
+
+  it('Commit pending prompts for a message (defaulted) and calls catalog_commit_pending', async () => {
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: listing, assets_inventory: [],
+      catalog_repo_status: { head: 'h', dirty: 2, ahead: 0, behind: 0, has_upstream: true },
+      catalog_commit_pending: 'sha-commit',
+    });
+    render(AssetsPanel, { visible: true });
+    await fireEvent.click(await screen.findByTestId('assets-commit-pending'));
+
+    expect(await screen.findByTestId('prompt-dialog')).toBeTruthy();
+    expect((screen.getByTestId('prompt-input') as HTMLInputElement).value).toBe('catalog: commit pending changes');
+    await fireEvent.click(screen.getByTestId('prompt-submit'));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_commit_pending', { args: { message: 'catalog: commit pending changes' } }));
+  });
+
+  it('Push calls catalog_push and refreshes', async () => {
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: listing, assets_inventory: [],
+      catalog_repo_status: { head: 'h', dirty: 0, ahead: 3, behind: 0, has_upstream: true },
+      catalog_push: { head: 'h2', dirty: 0, ahead: 0, behind: 0, has_upstream: true },
+    });
+    render(AssetsPanel, { visible: true });
+    await fireEvent.click(await screen.findByTestId('assets-push'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_push', undefined));
+    await waitFor(() => expect(screen.getByTestId('assets-repo-status').textContent).not.toContain('↑3'));
+  });
+
+  it('Lint all opens the dialog and selecting a finding selects the asset', async () => {
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: listing, assets_inventory: [],
+      catalog_lint_all: {
+        errors: 1, warnings: 0, problems: [],
+        assets: [{ kind: 'skill', name: 'worktree', report: { errors: [{ field: 'body', message: 'empty' }], warnings: [] } }],
+      },
+      catalog_get_asset: {
+        asset: { kind: 'skill', name: 'worktree', version: '1', description: 'Make one.', tags: [], body: '# b' },
+        previews: [], hosts: [],
+      },
+    });
+    render(AssetsPanel, { visible: true });
+    await fireEvent.click(await screen.findByTestId('assets-lint-all'));
+    await fireEvent.click(await screen.findByTestId('lint-all-select-skill-worktree'));
+
+    expect(await screen.findByTestId('asset-detail-title')).toBeTruthy();
+    expect(screen.getByTestId('asset-detail-title').textContent).toContain('worktree');
+  });
+
+  it('reloads the catalog when the panel regains visibility after an author session was opened', async () => {
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: listing, assets_inventory: [], catalog_repo_status: { head: 'h', dirty: 0, ahead: null, behind: null, has_upstream: false },
+      catalog_get_asset: {
+        asset: { kind: 'skill', name: 'worktree', version: '1', description: 'Make one.', tags: [], body: '# b' },
+        previews: [], hosts: [],
+      },
+      catalog_spawn_author_session: { id: 1, tmux_name: 'catalog-skill-worktree' },
+    });
+    const { rerender } = render(AssetsPanel, { visible: true });
+    await fireEvent.click(await screen.findByTestId('asset-row-skill-worktree'));
+    await screen.findByTestId('asset-detail-title');
+
+    // Delegating to a session (through the real UI, not a test-only setter —
+    // the module flag is exported read-only) is what sets the flag.
+    await fireEvent.click(screen.getByTestId('asset-open-session'));
+    await fireEvent.click(await screen.findByTestId('author-open'));
+    await waitFor(() => expect(authorSessionOpened).toBe(true));
+
+    invoke.mockClear();
+    await rerender({ visible: false });
+    await rerender({ visible: true });
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_load', { args: { pull: false } }));
+    expect(authorSessionOpened).toBe(false);
+  });
+
+  it('does not reload on a visibility flip when no author session was opened', async () => {
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: listing, assets_inventory: [], catalog_repo_status: { head: 'h', dirty: 0, ahead: null, behind: null, has_upstream: false },
+    });
+    const { rerender } = render(AssetsPanel, { visible: true });
+    await screen.findByTestId('assets-new');
+    invoke.mockClear();
+
+    await rerender({ visible: false });
+    await rerender({ visible: true });
+
+    expect(invoke).not.toHaveBeenCalledWith('catalog_load', expect.anything());
   });
 });

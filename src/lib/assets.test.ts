@@ -8,7 +8,11 @@ import {
   loadAssets, scanHosts, importHost, configureCatalog, loadCatalog,
   mergeInventoryRow, clearInventoryFor, groupByKind, stateCounts,
   planSync, applySync, lastSync, listSecrets, setSecret, deleteSecret, isDestructive, lastSyncRun,
+  createAsset, updateAsset, deleteAsset, addResource, removeResource, lintAsset, lintAll,
+  commitPending, pushCatalog, repoStatus, assetTemplate, spawnAuthorSession, resourceSize,
+  repoStatusStore, KIND_FIELDS, TOOLS, TIERS, EVENTS,
   type AssetInventoryRow, type AssetListing, type SyncPlan, type HostPlan, type SyncAction,
+  type EditableAsset,
 } from './assets';
 
 const row = (over: Partial<AssetInventoryRow> = {}): AssetInventoryRow => ({
@@ -43,7 +47,12 @@ const listing: AssetListing = {
 
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
-  inventory.set([]); catalog.set(null); catalogConfig.set(null); lastSyncRun.set(null);
+  inventory.set([]); catalog.set(null); catalogConfig.set(null); lastSyncRun.set(null); repoStatusStore.set(null);
+});
+
+const editableAsset = (over: Partial<EditableAsset> = {}): EditableAsset => ({
+  kind: 'skill', name: 'worktree', version: '1', description: 'd', tags: [], body: '# b',
+  resources: [], allowed_tools: [], user_invocable: true, triggers: [], ...over,
 });
 
 describe('assets store', () => {
@@ -179,5 +188,127 @@ describe('sync engine wrappers', () => {
   it('isDestructive is true when any action removes', () => {
     const plan = syncPlan([hostPlan({ actions: [syncAction({ op: 'remove' })] }), hostPlan({ host_alias: 'mefistos', actions: [] })]);
     expect(isDestructive(plan)).toBe(true);
+  });
+});
+
+describe('authoring wrappers', () => {
+  it('createAsset defaults duplicate_from to null and passes it through when given', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ commit: 'abc', lint: { errors: [], warnings: [] } });
+    await createAsset('skill', 'my-skill');
+    expect(mockedInvoke).toHaveBeenCalledWith('catalog_create_asset', { args: { kind: 'skill', name: 'my-skill', duplicate_from: null } });
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ commit: 'def', lint: { errors: [], warnings: [] } });
+    await createAsset('skill', 'copy', 'my-skill');
+    expect(mockedInvoke).toHaveBeenCalledWith('catalog_create_asset', { args: { kind: 'skill', name: 'copy', duplicate_from: 'my-skill' } });
+  });
+
+  it('updateAsset sends the whole asset and defaults resources to []', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ commit: 'abc', lint: { errors: [], warnings: [] } });
+    const asset = editableAsset({ resources: undefined });
+    const r = await updateAsset(asset);
+    expect(r.ok).toBe(true);
+    expect(mockedInvoke).toHaveBeenCalledWith('catalog_update_asset', { args: { asset: { ...asset, resources: [] } } });
+  });
+
+  it('updateAsset surfaces E_LINT with the report in details', async () => {
+    const report = { errors: [{ field: 'description', message: 'must not be empty' }], warnings: [] };
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockRejectedValueOnce({ code: 'E_LINT', message: 'lint errors', details: report });
+    const r = await updateAsset(editableAsset());
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe('E_LINT');
+      expect(r.error.details).toEqual(report);
+    }
+  });
+
+  it('deleteAsset passes kind and name and returns the commit', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce('sha1');
+    const r = await deleteAsset('skill', 'worktree');
+    expect(mockedInvoke).toHaveBeenCalledWith('catalog_delete_asset', { args: { kind: 'skill', name: 'worktree' } });
+    expect(r.ok && r.value).toBe('sha1');
+  });
+
+  it('addResource defaults rel_path to null and removeResource requires it', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ commit: 'a', lint: { errors: [], warnings: [] } });
+    await addResource('skill', 'worktree', '/tmp/x.sh');
+    expect(mockedInvoke).toHaveBeenCalledWith('catalog_add_resource', { args: { kind: 'skill', name: 'worktree', local_path: '/tmp/x.sh', rel_path: null } });
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ commit: 'b', lint: { errors: [], warnings: [] } });
+    await removeResource('skill', 'worktree', 'resources/x.sh');
+    expect(mockedInvoke).toHaveBeenCalledWith('catalog_remove_resource', { args: { kind: 'skill', name: 'worktree', rel_path: 'resources/x.sh' } });
+  });
+
+  it('lintAsset and lintAll pass through', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ errors: [], warnings: [] });
+    await lintAsset('skill', 'worktree');
+    expect(mockedInvoke).toHaveBeenCalledWith('catalog_lint_asset', { args: { kind: 'skill', name: 'worktree' } });
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ assets: [], problems: [], errors: 0, warnings: 0 });
+    await lintAll();
+    expect(mockedInvoke).toHaveBeenCalledWith('catalog_lint_all', undefined);
+  });
+
+  it('commitPending defaults message to null and passes an override through', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce('sha1');
+    await commitPending();
+    expect(mockedInvoke).toHaveBeenCalledWith('catalog_commit_pending', { args: { message: null } });
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce('sha2');
+    await commitPending('catalog: commit pending changes');
+    expect(mockedInvoke).toHaveBeenCalledWith('catalog_commit_pending', { args: { message: 'catalog: commit pending changes' } });
+  });
+
+  it('pushCatalog and repoStatus call with no args and populate repoStatusStore', async () => {
+    const status = { head: 'h', dirty: 0, ahead: 2, behind: 0, has_upstream: true };
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(status);
+    await pushCatalog();
+    expect(mockedInvoke).toHaveBeenCalledWith('catalog_push', undefined);
+    expect(get(repoStatusStore)).toEqual(status);
+
+    repoStatusStore.set(null);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(status);
+    await repoStatus();
+    expect(mockedInvoke).toHaveBeenCalledWith('catalog_repo_status', undefined);
+    expect(get(repoStatusStore)).toEqual(status);
+  });
+
+  it('assetTemplate passes kind and name', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(editableAsset());
+    await assetTemplate('skill', 'new-skill');
+    expect(mockedInvoke).toHaveBeenCalledWith('catalog_template', { args: { kind: 'skill', name: 'new-skill' } });
+  });
+
+  it('spawnAuthorSession goes through invokeCmdAbortable, injecting a call_id and defaulting kind/name to null', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ id: 1, tmux_name: 'catalog-new-abc' });
+    const r = await spawnAuthorSession({ instructions: 'Create a new skill that …' });
+    expect(r.ok).toBe(true);
+    const call = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.find((c) => c[0] === 'catalog_spawn_author_session');
+    expect(call).toBeDefined();
+    const args = (call![1] as { args: { kind: string | null; name: string | null; instructions: string; call_id: number } }).args;
+    expect(args.kind).toBeNull();
+    expect(args.name).toBeNull();
+    expect(args.instructions).toBe('Create a new skill that …');
+    expect(args.call_id).toEqual(expect.any(Number));
+  });
+
+  it('spawnAuthorSession passes kind/name through when given', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ id: 1, tmux_name: 'catalog-skill-worktree' });
+    await spawnAuthorSession({ kind: 'skill', name: 'worktree', instructions: 'Improve this skill: …' });
+    const call = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.find((c) => c[0] === 'catalog_spawn_author_session');
+    const args = (call![1] as { args: { kind: string | null; name: string | null } }).args;
+    expect(args.kind).toBe('skill');
+    expect(args.name).toBe('worktree');
+  });
+
+  it('resourceSize decodes base64 length and tolerates invalid input', () => {
+    expect(resourceSize(btoa('hello'))).toBe(5);
+    expect(resourceSize('not-valid-base64!!')).toBe(0);
+  });
+
+  it('KIND_FIELDS, TOOLS, TIERS and EVENTS mirror the Rust vocabularies', () => {
+    expect(KIND_FIELDS.skill).toEqual(['allowed_tools', 'user_invocable', 'triggers']);
+    expect(KIND_FIELDS.agent).toEqual(['tools', 'model']);
+    expect(KIND_FIELDS.hook).toEqual(['event', 'action']);
+    expect(KIND_FIELDS.mcp_server).toEqual(['transport', 'url', 'command', 'args', 'env']);
+    expect(KIND_FIELDS.plugin_ref).toEqual(['harness', 'marketplace', 'plugin']);
+    expect(TOOLS).toContain('bash');
+    expect(TIERS).toEqual(['fast', 'default', 'strong']);
+    expect(EVENTS).toContain('session_start');
   });
 });
