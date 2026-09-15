@@ -38,10 +38,8 @@
 //! entry, so the next plan sees the half-written state, re-plans it, and the
 //! (idempotent) writes converge — nothing is rolled back on the host.
 //!
-//! `sync::apply_sync` drives this module; the per-item
-//! `#[allow(dead_code)]` markers come off once a Tauri command / MCP tool
-//! calls *that* (Task 8), since until then the orchestration itself is
-//! test-only.
+//! `sync::apply_sync` drives this module, wired to the `catalog_apply_sync`
+//! Tauri command and the `apply_sync` MCP tool.
 
 use super::super::harness::claude::PLUGINS_PATH;
 use super::super::harness::{
@@ -78,7 +76,6 @@ const BLOCKED: &str = "blocked";
 const SKIPPED: &str = "skipped";
 
 /// One compare-and-swap write (or deletion) of a `~/`-relative path.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct GuardedWrite {
     pub path: String,
@@ -91,7 +88,6 @@ pub struct GuardedWrite {
 }
 
 /// What the host reported for one path.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WriteOutcome {
@@ -103,7 +99,6 @@ pub enum WriteOutcome {
 /// What the applier did about one planned action. `Deserialize` because a
 /// whole `SyncRunSummary` is stored as JSON in `sync_runs` and read back by
 /// `sync::last_sync`.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionResult {
     pub kind: String,
@@ -116,7 +111,6 @@ pub struct ActionResult {
 
 /// What the applier did about one host. `Deserialize` for the same reason
 /// as `ActionResult`.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostSyncResult {
     pub host_alias: String,
@@ -131,7 +125,6 @@ pub struct HostSyncResult {
 }
 
 /// Everything `apply_host` needs besides the plan itself.
-#[allow(dead_code)]
 pub struct ApplyCtx<'a> {
     pub ssh: &'a Arc<SshClient>,
     pub token: CancellationToken,
@@ -200,7 +193,6 @@ fn script_preamble() -> String {
 /// quote, so the whole thing survives `shell::quote` on its way to a remote
 /// host. A write whose path fails [`is_safe_path`] is skipped (the caller
 /// must have failed its action already, hence the `debug_assert!`).
-#[allow(dead_code)]
 pub fn write_scripts(writes: &[GuardedWrite]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut body = String::new();
@@ -261,7 +253,6 @@ pub fn write_scripts(writes: &[GuardedWrite]) -> Vec<String> {
 
 /// Parse the `OK`/`CONFLICT`/`FAIL <~/path>` lines a write script prints.
 /// Anything else on stdout (a login shell's chatter) is ignored.
-#[allow(dead_code)]
 pub fn parse_write_output(stdout: &str) -> BTreeMap<String, WriteOutcome> {
     let mut out = BTreeMap::new();
     for line in stdout.lines() {
@@ -339,7 +330,6 @@ fn parse_hash_output(stdout: &str) -> BTreeMap<String, Option<String>> {
 }
 
 /// What the harness CLI said about a plugin operation.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum PluginCliOutcome {
     /// The host has no `claude` on `PATH`.
@@ -352,7 +342,6 @@ pub enum PluginCliOutcome {
 
 /// `NOCLI` beats everything; otherwise the LAST line that parses as JSON
 /// wins (the CLI prints progress before its `--json` result).
-#[allow(dead_code)]
 pub fn parse_plugin_output(stdout: &str) -> PluginCliOutcome {
     let mut found: Option<serde_json::Value> = None;
     for line in stdout.lines() {
@@ -389,7 +378,6 @@ fn is_safe_token(t: &str) -> bool {
 /// `uninstall`) on `spec` (`<plugin>@<marketplace>`), adding `repo` as a
 /// marketplace first when given (idempotent, hence `|| true`). `None` when
 /// any token is unsafe. Contains no single quote.
-#[allow(dead_code)]
 fn plugin_script(repo: Option<&str>, spec: &str, op: &str) -> Option<String> {
     if !is_safe_token(spec) || !is_safe_token(op) || repo.is_some_and(|r| !is_safe_token(r)) {
         return None;
@@ -527,7 +515,6 @@ fn manifest_key(action: &Action) -> String {
 /// wrong is reported per action (and rolled up into `status`), because one
 /// unreachable host or one conflicted file must not abort the fleet-wide
 /// sync around it.
-#[allow(dead_code)]
 pub async fn apply_host(
     ctx: &ApplyCtx<'_>,
     harness: &dyn Harness,

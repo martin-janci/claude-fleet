@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
-/// Reserved for the sync engine (enumerating supported harness ids without
-/// going through `all()`); not yet called from a non-test build.
+/// Reserved: enumerates supported harness ids without building the whole
+/// registry via `all()`. Nothing calls this outside tests yet.
 #[allow(dead_code)]
 pub const HARNESS_IDS: &[&str] = &["claude", "codex"];
 
@@ -63,10 +63,9 @@ pub struct ConfigMerge {
 /// itself around (`AppendUnique` uses it to find the element to remove
 /// again; `Set`/`Subset` just drop the whole key at `json_path`).
 ///
-/// Reserved for the sync engine (Task 3+ persists these alongside the
-/// manifest file and replays them through `remove_merges`); not yet
-/// constructed from a non-test build.
-#[allow(dead_code)]
+/// Persisted alongside the manifest file (see `manifest::ManifestEntry`) and
+/// replayed through `remove_merges` when a sync supersedes or drops the
+/// asset that produced it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ManifestMerge {
     pub file: String,
@@ -78,9 +77,7 @@ pub struct ManifestMerge {
 /// Sha256 of `v`'s canonical (key-sorted, since `serde_json::Value` is
 /// BTreeMap-backed) `to_string()`.
 ///
-/// Reserved for the sync engine (populating `ManifestMerge::value_hash`);
-/// not yet called from a non-test build.
-#[allow(dead_code)]
+/// Populates `ManifestMerge::value_hash`.
 pub fn value_hash(v: &Value) -> String {
     sha256_hex(serde_json::to_string(v).unwrap_or_default().as_bytes())
 }
@@ -179,16 +176,10 @@ pub trait Harness: Send + Sync {
     fn installed(&self, snap: &HostSnapshot) -> Vec<(Kind, String)>;
     /// Home-relative path (`~/...`) to the manifest file this harness uses
     /// to track which merges/files the sync engine applied.
-    ///
-    /// Reserved for the sync engine; not yet called from a non-test build.
-    #[allow(dead_code)]
     fn manifest_path(&self) -> &'static str;
     /// Apply `merges` then `remove` to `existing`'s parsed content and
     /// return the full new file text (with a trailing newline). An empty
     /// `existing` means an empty document.
-    ///
-    /// Reserved for the sync engine; not yet called from a non-test build.
-    #[allow(dead_code)]
     fn merge_config(
         &self,
         file: &str,
@@ -202,9 +193,8 @@ pub fn all() -> Vec<Box<dyn Harness>> {
     vec![Box::new(claude::Claude), Box::new(codex::Codex)]
 }
 
-/// Reserved for the sync engine (looking up one harness by id without
-/// building the whole registry via `all()`); not yet called from a
-/// non-test build.
+/// Reserved: looks up one harness by id without building the whole
+/// registry via `all()`. Nothing calls this outside tests yet.
 #[allow(dead_code)]
 pub fn by_id(id: &str) -> Option<Box<dyn Harness>> {
     match id {
@@ -227,9 +217,7 @@ pub fn json_get<'a>(root: &'a serde_json::Value, path: &[String]) -> Option<&'a 
 /// objects without creating anything, `None` if any segment is missing or
 /// not an object.
 ///
-/// Reserved for the sync engine (`remove_merges`'s `AppendUnique` case); not
-/// yet called from a non-test build.
-#[allow(dead_code)]
+/// Used by `remove_merges`'s `AppendUnique` case.
 fn json_get_mut<'a>(root: &'a mut Value, path: &[String]) -> Option<&'a mut Value> {
     let mut cur = root;
     for key in path {
@@ -245,9 +233,7 @@ fn json_get_mut<'a>(root: &'a mut Value, path: &[String]) -> Option<&'a mut Valu
 /// here rather than shared, because `inventory` depends on `harness` and
 /// sharing the other way would be a cycle.
 ///
-/// Reserved for the sync engine (`apply_merges`'s `Subset` case); not yet
-/// called from a non-test build.
-#[allow(dead_code)]
+/// Used by `apply_merges`'s `Subset` case.
 fn is_subset(want: &Value, have: &Value) -> bool {
     match (want, have) {
         (Value::Object(w), Value::Object(h)) => w
@@ -266,9 +252,7 @@ fn is_subset(want: &Value, have: &Value) -> bool {
 /// — inserting the result of `default` there first if it is not already
 /// present.
 ///
-/// Reserved for the sync engine (`apply_merges`); not yet called from a
-/// non-test build.
-#[allow(dead_code)]
+/// Used by `apply_merges`.
 fn ensure_at<'a>(
     root: &'a mut Value,
     path: &[String],
@@ -302,9 +286,7 @@ fn ensure_at<'a>(
 /// mode means; `AppendUnique` and `Subset` are idempotent (re-applying an
 /// already-satisfied merge is a no-op).
 ///
-/// Reserved for the sync engine (`Harness::merge_config`); not yet called
-/// from a non-test build.
-#[allow(dead_code)]
+/// Called from each harness's `Harness::merge_config` implementation.
 pub fn apply_merges(root: &mut Value, merges: &[ConfigMerge]) {
     for m in merges {
         match m.mode {
@@ -357,9 +339,7 @@ pub fn apply_merges(root: &mut Value, merges: &[ConfigMerge]) {
 /// that becomes empty as a result — stopping before the root-level (first)
 /// path segment, which is always kept even once it becomes `{}`.
 ///
-/// Reserved for the sync engine (`remove_merges`); not yet called from a
-/// non-test build.
-#[allow(dead_code)]
+/// Used by `remove_merges`.
 fn remove_key_path(root: &mut Value, path: &[String]) {
     // Returns whether `cur` is now empty (so the caller may prune it too).
     fn prune(cur: &mut Value, path: &[String]) -> bool {
@@ -397,9 +377,7 @@ fn remove_key_path(root: &mut Value, path: &[String]) {
 /// Undo previously applied merges. See `ManifestMerge` for the mapping from
 /// `MergeMode` to how removal works.
 ///
-/// Reserved for the sync engine (`Harness::merge_config`); not yet called
-/// from a non-test build.
-#[allow(dead_code)]
+/// Called from each harness's `Harness::merge_config` implementation.
 pub fn remove_merges(root: &mut Value, merges: &[ManifestMerge]) {
     for m in merges {
         if m.json_path.is_empty() {

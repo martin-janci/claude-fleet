@@ -4,9 +4,8 @@
 //! be reviewed (`sync_plan`) and then applied (`sync_apply`) by id without
 //! recomputing it against a host that may have changed underneath.
 //!
-//! `sync::plan_sync` drives this module; the per-item `#[allow(dead_code)]`
-//! markers below come off once a Tauri command / MCP tool calls *that*
-//! (Task 8), since until then the orchestration itself is test-only.
+//! `sync::plan_sync` drives this module, wired to the `catalog_plan_sync`
+//! Tauri command and the `plan_sync` MCP tool.
 
 use super::super::harness::{json_get, ConfigMerge, Harness, HostSnapshot, MergeMode, RenderPlan};
 use super::super::inventory::merge_satisfied;
@@ -22,7 +21,6 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// What the sync engine would do to one asset on one host.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionOp {
@@ -50,7 +48,6 @@ pub enum ActionOp {
     Blocked,
 }
 
-#[allow(dead_code)]
 impl ActionOp {
     /// The snake_case name, which is also the key this op tallies under in
     /// `SyncPlan::counts`.
@@ -71,7 +68,6 @@ impl ActionOp {
 
 /// The plugin a `PluginInstall`/`PluginUpdate` action refers to, lifted out
 /// of `AssetSpec::PluginRef` so the applier never has to re-find the asset.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct PluginTarget {
     pub plugin: String,
@@ -86,7 +82,6 @@ pub struct PluginTarget {
 /// bare `RenderPlan`), the host hashes the plan was computed against (for
 /// an optimistic-concurrency re-check at apply time), and the manifest
 /// entry a `Remove` undoes.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 pub struct Action {
     pub kind: String,
@@ -131,7 +126,6 @@ pub struct Action {
 /// Every action planned for one host under one harness. `snapshot` and
 /// `manifest` are the exact inputs the actions were computed from, kept so
 /// the applier can re-check and rewrite the manifest without re-scanning.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 pub struct HostPlan {
     pub host_alias: String,
@@ -147,7 +141,6 @@ pub struct HostPlan {
 }
 
 /// A whole fleet-wide plan, as handed to the UI and stashed in the registry.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 pub struct SyncPlan {
     pub id: String,
@@ -157,7 +150,6 @@ pub struct SyncPlan {
     pub counts: BTreeMap<String, usize>,
 }
 
-#[allow(dead_code)]
 impl SyncPlan {
     /// A plan over `hosts` with `counts` already tallied and an empty `id`
     /// (`registry_put` assigns one).
@@ -176,7 +168,6 @@ impl SyncPlan {
 /// Narrows a plan to one host / kind / name. `host_alias` is applied by the
 /// caller when choosing which hosts to visit; `compute_host_plan` honours
 /// `kind` and `name` only.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct PlanFilter {
     pub host_alias: Option<String>,
@@ -298,7 +289,6 @@ fn expected_for<'a>(
 /// `action.plan`'s hash, not the raw `Harness::render` output's. A rotated
 /// secret therefore reads as `Update` (the host's bytes really must change),
 /// not as a host edit.
-#[allow(dead_code)]
 pub fn compute_host_plan(
     catalog: &Catalog,
     harness: &dyn Harness,
@@ -606,7 +596,6 @@ fn plugin_op(
 
 /// Tally every host's actions by `ActionOp::as_str()`. Ops with no actions
 /// are absent rather than zero.
-#[allow(dead_code)]
 pub fn counts(plan: &SyncPlan) -> BTreeMap<String, usize> {
     let mut out: BTreeMap<String, usize> = BTreeMap::new();
     for host in &plan.hosts {
@@ -636,7 +625,6 @@ fn plans() -> std::sync::MutexGuard<'static, HashMap<String, (Instant, SyncPlan)
 /// Stash `plan` under a fresh uuid (also written into `plan.id`) for
 /// `PLAN_TTL`, dropping any already-expired plans on the way in. Returns the
 /// id to hand back to the caller.
-#[allow(dead_code)]
 pub fn registry_put(plan: SyncPlan) -> String {
     registry_put_with_ttl(plan, PLAN_TTL)
 }
@@ -658,7 +646,6 @@ pub(crate) fn registry_put_with_ttl(mut plan: SyncPlan, ttl: Duration) -> String
 /// like `registry_put` does: each one pins a `HostSnapshot` per host, and a
 /// session that computes plans but never applies them would otherwise hold
 /// every one of them until the next `registry_put`.
-#[allow(dead_code)]
 pub fn registry_take(id: &str) -> Option<SyncPlan> {
     let now = Instant::now();
     let mut map = plans();
@@ -675,7 +662,6 @@ pub fn registry_take(id: &str) -> Option<SyncPlan> {
 /// The TTL restarts from now, exactly as if the plan had just been computed
 /// — the clock measures how long the host snapshot has gone unchecked, and
 /// a refused apply did not touch the host.
-#[allow(dead_code)]
 pub fn registry_put_existing(id: &str, mut plan: SyncPlan) {
     plan.id = id.to_string();
     let now = Instant::now();

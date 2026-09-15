@@ -15,9 +15,9 @@
 //! host, computes and registers a fleet-wide plan (refreshing the inventory
 //! rows on the way), `apply_sync` applies one by id with progress events,
 //! cancellation and a `sync_runs` history entry, and `last_sync` reads the
-//! most recent entry back. The Tauri commands / MCP tools that call them
-//! (Task 8) are not wired yet, so nothing here is reachable from a non-test
-//! build.
+//! most recent entry back. `catalog_plan_sync` / `catalog_apply_sync` /
+//! `catalog_last_sync` (Tauri commands) and `plan_sync` / `apply_sync` (MCP
+//! tools) wire these in.
 
 pub mod apply;
 pub mod manifest;
@@ -39,8 +39,6 @@ use tokio_util::sync::CancellationToken;
 
 /// Which hosts / assets a plan covers. All three narrow; `None` everywhere
 /// means the whole fleet and the whole catalog.
-// Reachable only from tests until Task 8 wires the command layer.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PlanArgs {
     pub host_alias: Option<String>,
@@ -49,8 +47,6 @@ pub struct PlanArgs {
 }
 
 /// Apply a plan `plan_sync` computed and parked in the registry.
-// Reachable only from tests until Task 8 wires the command layer.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApplyArgs {
     pub plan_id: String,
@@ -67,8 +63,6 @@ pub struct ApplyArgs {
 /// One completed `apply_sync`, returned to the caller and stored verbatim
 /// as the `sync_runs` row's `summary_json` (hence `Deserialize` too — it is
 /// what `last_sync` reads back).
-// Reachable only from tests until Task 8 wires the command layer.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncRunSummary {
     pub plan_id: String,
@@ -158,8 +152,6 @@ async fn scan_and_persist(
 /// Per-host failures never abort the fleet: a hidden host is skipped
 /// silently, an unreachable non-`local` host and a harness whose scan failed
 /// each get a `skipped` `HostPlan` carrying the reason.
-// Reachable only from tests until Task 8 wires the command layer.
-#[allow(dead_code)]
 pub async fn plan_sync(
     args: PlanArgs,
     store: &Mutex<Store>,
@@ -333,8 +325,6 @@ async fn rescan_after_apply(
 /// `cancelled`, and no terminal event is emitted — and the run is recorded
 /// in `sync_runs` either way, so a cancelled sync still leaves a history
 /// entry saying how far it got.
-// Reachable only from tests until Task 8 wires the command layer.
-#[allow(dead_code)]
 pub async fn apply_sync(
     args: ApplyArgs,
     store: &Mutex<Store>,
@@ -360,7 +350,6 @@ pub async fn apply_sync(
 /// [`apply_sync`] with the cancellation token supplied directly, so a test
 /// can prove what an already-cancelled run does without racing the
 /// registry.
-#[allow(dead_code)]
 pub async fn apply_sync_with(
     args: ApplyArgs,
     store: &Mutex<Store>,
@@ -490,8 +479,6 @@ pub async fn apply_sync_with(
 }
 
 /// The most recent completed sync, deserialised from its `sync_runs` row.
-// Reachable only from tests until Task 8 wires the command layer.
-#[allow(dead_code)]
 pub fn last_sync(store: &Mutex<Store>) -> Result<Option<SyncRunSummary>, IpcError> {
     let row = {
         let s = store.lock().map_err(|_| IpcError::lock())?;

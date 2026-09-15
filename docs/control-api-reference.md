@@ -13,6 +13,12 @@ Register a new SSH host. Probes it first; only persists the host if it is reacha
 
 Parameters: `alias`, `ssh_alias`
 
+### `apply_sync`
+
+Apply a plan from plan_sync on hosts: writes files with compare-and-swap, backs up overwritten files, merges config (files end up mode 0600), installs plugins, writes the managed manifest, then re-scans. Master token only; requires confirmation. Returns per-host results; restart_required marks hosts whose Claude must be restarted.
+
+Parameters: `confirm_nonce`, `force_partial`, `plan_id`
+
 ### `broadcast_prompt`
 
 Send the same prompt to every matching work session (excludes the controller). Returns per-session results. Rate-limited per caller (default one call per 30 s; E_RATE_LIMITED with retry_after_secs). Marked as untrusted unless raw=true (master token only). May return E_CONFIRM_REQUIRED when desktop confirmation is on.
@@ -159,6 +165,12 @@ What is a peer session doing? Returns claude_status, current_activity, stuck_kin
 
 Parameters: `session_id`
 
+### `plan_sync`
+
+Compute a sync plan: scan the selected hosts, compare every catalog asset with what is installed, and return per-host actions (create | update | overwrite | adopt | remove | plugin_install | noop | blocked) plus a plan_id valid for 10 minutes. Inventory states now include orphan (in the host's fleet manifest, no longer in the catalog). Nothing is written. Pass the plan_id to apply_sync.
+
+Parameters: `host_alias`, `kind`, `name`
+
 ### `probe_host`
 
 Re-probe a registered host's reachability and versions. Returns the updated host row as JSON.
@@ -279,7 +291,7 @@ Parameters: `host_alias`, `session_id`, `tmux_name`
 
 ### `scan_assets`
 
-Scan hosts for installed skills/agents/hooks/MCP servers/plugins and recompute each catalog asset's state (in_sync | drifted | missing | unmanaged | unsupported). Read-only on hosts. Returns per-host results as JSON.
+Scan hosts for installed skills/agents/hooks/MCP servers/plugins and recompute each catalog asset's state (in_sync | drifted | missing | unmanaged | unsupported | orphan). Read-only on hosts. Returns per-host results as JSON.
 
 Parameters: `host_alias`
 
@@ -318,6 +330,12 @@ Parameters: `confirm_nonce`, `content`, `host_alias`
 Set the session's friendly display name (shown when the user toggles friendly names on). Called once per task by the in-session agent — short (3–6 words). Empty string clears. Returns the updated row. Address the session with session_id OR host_alias + tmux_name.
 
 Parameters: `friendly_name`, `host_alias`, `session_id`, `tmux_name`
+
+### `set_secret`
+
+Store a value for a ${NAME} placeholder used by the catalog (global, or a per-host override with host_alias). Master token only. The value is never returned or logged.
+
+Parameters: `host_alias`, `name`, `value`
 
 ### `set_session_tags`
 
@@ -443,6 +461,12 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::assets::catalog_import_host`
 - `commands::assets::assets_scan_hosts`
 - `commands::assets::assets_inventory`
+- `commands::assets::catalog_plan_sync`
+- `commands::assets::catalog_apply_sync`
+- `commands::assets::catalog_last_sync`
+- `commands::assets::catalog_list_secrets`
+- `commands::assets::catalog_set_secret`
+- `commands::assets::catalog_delete_secret`
 - `pty::pty_open`
 - `pty::pty_write`
 - `pty::pty_resize`

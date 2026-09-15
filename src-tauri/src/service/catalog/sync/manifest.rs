@@ -18,7 +18,6 @@ use std::collections::BTreeMap;
 /// config merges (as `ManifestMerge`, so the value itself is never kept
 /// around — only its hash), the overall `RenderPlan` hash it came from, and
 /// when it was last synced.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ManifestEntry {
     pub hash: String,
@@ -28,7 +27,6 @@ pub struct ManifestEntry {
 }
 
 /// The manifest file itself: every managed asset keyed by `Manifest::key`.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub version: u32,
@@ -36,7 +34,6 @@ pub struct Manifest {
     pub assets: BTreeMap<String, ManifestEntry>,
 }
 
-#[allow(dead_code)]
 impl Manifest {
     /// The manifest key for one asset, e.g. `"skill/worktree"`.
     pub fn key(kind: Kind, name: &str) -> String {

@@ -19,18 +19,26 @@ use std::sync::Mutex;
 /// Built-in secret name resolving to this host's control-API bearer token
 /// (absent when the host has not been provisioned — a reference to it is
 /// then reported as missing rather than filled in).
-#[allow(dead_code)]
 pub const BUILTIN_TOKEN: &str = "FLEET_MCP_TOKEN";
 /// Built-in secret name resolving to the control API's port (the
 /// `mcp.port` setting, or `"4180"` if unset).
-#[allow(dead_code)]
 pub const BUILTIN_PORT: &str = "FLEET_MCP_PORT";
 
 const DEFAULT_PORT: &str = "4180";
 
+/// Whether `name` is a valid `${NAME}` secret name: non-empty, uppercase
+/// letters/digits/underscore only — the same shape as an environment
+/// variable, so it never needs escaping wherever it lands. Shared by the
+/// Tauri command and the MCP tool so the rule cannot drift between them.
+pub fn is_valid_secret_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
 /// Resolve every secret value visible to `host_alias`: host override >
 /// global > built-ins. Never logs a value.
-#[allow(dead_code)]
 pub fn resolve(
     store: &Mutex<Store>,
     host_alias: &str,
@@ -59,16 +67,18 @@ pub fn resolve(
 /// does not derive `Serialize`, so it can't be accidentally sent to the
 /// frontend or logged as JSON either. Access the real plan via `inner`/
 /// `into_inner` only where the caller actually needs to write it to disk.
-#[allow(dead_code)]
 #[derive(Clone, Default, PartialEq)]
 pub struct SecretPlan(RenderPlan);
 
-#[allow(dead_code)]
 impl SecretPlan {
     pub fn inner(&self) -> &RenderPlan {
         &self.0
     }
 
+    /// Reserved: the owned counterpart of `inner()`, for a caller that
+    /// consumes the plan rather than reading it by reference. Nothing does
+    /// that yet — every writer reads through `inner()`.
+    #[allow(dead_code)]
     pub fn into_inner(self) -> RenderPlan {
         self.0
     }
@@ -101,7 +111,6 @@ impl std::fmt::Debug for SecretPlan {
 /// A `RenderPlan` with every known `${NAME}` placeholder substituted.
 /// `Debug` is hand-written (delegating to `SecretPlan`'s redacted impl) so
 /// that formatting a `Substituted` can never print a secret value.
-#[allow(dead_code)]
 #[derive(Clone, Default, PartialEq)]
 pub struct Substituted {
     pub plan: SecretPlan,
@@ -232,7 +241,6 @@ fn substitute_value(
 /// resolved to an unchanged value textually (e.g. a value equal to its own
 /// placeholder is still a "change" in this implementation, since it did
 /// perform a substitution rather than passing text through untouched).
-#[allow(dead_code)]
 pub fn substitute(plan: &RenderPlan, values: &BTreeMap<String, String>) -> Substituted {
     let mut missing = Vec::new();
     let mut secret_files = BTreeSet::new();
