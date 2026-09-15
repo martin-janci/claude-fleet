@@ -189,15 +189,12 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             ids
         } else {
-            let phs = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!(
                 "SELECT id FROM sessions
-                 WHERE host_alias=?1 AND status='ghost' AND kind IN ('bg','external') AND tmux_name NOT IN ({phs})"
+                 WHERE host_alias=?1 AND status='ghost' AND kind IN ('bg','external') AND tmux_name NOT IN ({phs})",
+                phs = in_clause(keep_names.len())
             );
-            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
-            for n in keep_names {
-                params.push(n);
-            }
+            let params = params_then(rusqlite::params![host_alias], keep_names);
             let mut stmt = tx.prepare(&sql)?;
             let ids = stmt
                 .query_map(params.as_slice(), |r| r.get(0))?
@@ -217,16 +214,13 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             ids
         } else {
-            let phs = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!(
                 "UPDATE sessions SET status='ghost', lost_at=?1
                  WHERE host_alias=?2 AND status!='ghost' AND kind IN ('bg','external') AND tmux_name NOT IN ({phs})
-                 RETURNING id"
+                 RETURNING id",
+                phs = in_clause(keep_names.len())
             );
-            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&now, &host_alias];
-            for n in keep_names {
-                params.push(n);
-            }
+            let params = params_then(rusqlite::params![now, host_alias], keep_names);
             let mut stmt = tx.prepare(&sql)?;
             let ids = stmt
                 .query_map(params.as_slice(), |r| r.get(0))?
@@ -241,28 +235,20 @@ impl Store {
 
         // Phase 2: hard-delete rows that were already ghost, plus their events.
         if !pre_ghost_ids.is_empty() {
-            let phs = pre_ghost_ids
-                .iter()
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(",");
-            let params: Vec<&dyn rusqlite::ToSql> = pre_ghost_ids
-                .iter()
-                .map(|id| id as &dyn rusqlite::ToSql)
-                .collect();
+            let phs = in_clause(pre_ghost_ids.len());
             tx.execute(
                 &format!("DELETE FROM session_events WHERE session_id IN ({phs})"),
-                params.as_slice(),
+                rusqlite::params_from_iter(&pre_ghost_ids),
             )?;
             // And the messages addressed to them (an inbox nobody can read),
             // as `delete_session` does.
             tx.execute(
                 &format!("DELETE FROM session_messages WHERE to_session_id IN ({phs})"),
-                params.as_slice(),
+                rusqlite::params_from_iter(&pre_ghost_ids),
             )?;
             tx.execute(
                 &format!("DELETE FROM sessions WHERE id IN ({phs})"),
-                params.as_slice(),
+                rusqlite::params_from_iter(&pre_ghost_ids),
             )?;
             for id in &pre_ghost_ids {
                 changes.push(RowChange::SessionKilled(*id));
@@ -745,14 +731,11 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             ids
         } else {
-            let placeholders = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!(
-                "DELETE FROM sessions WHERE host_alias=?1 AND tmux_name NOT IN ({placeholders}) RETURNING id"
+                "DELETE FROM sessions WHERE host_alias=?1 AND tmux_name NOT IN ({phs}) RETURNING id",
+                phs = in_clause(keep_names.len())
             );
-            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
-            for n in keep_names {
-                params.push(n);
-            }
+            let params = params_then(rusqlite::params![host_alias], keep_names);
             let mut stmt = self.conn.prepare(&sql)?;
             let ids = stmt
                 .query_map(params.as_slice(), |r| r.get::<_, i64>(0))?

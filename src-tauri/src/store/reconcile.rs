@@ -260,15 +260,12 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             ids
         } else {
-            let phs = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!(
                 "SELECT id FROM sessions
-                 WHERE host_alias=?1 AND status='ghost' AND kind NOT IN ('bg','external') AND tmux_name NOT IN ({phs})"
+                 WHERE host_alias=?1 AND status='ghost' AND kind NOT IN ('bg','external') AND tmux_name NOT IN ({phs})",
+                phs = in_clause(keep_names.len())
             );
-            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&host_alias];
-            for n in keep_names {
-                params.push(n);
-            }
+            let params = params_then(rusqlite::params![host_alias], keep_names);
             let mut stmt = tx.prepare(&sql)?;
             let ids = stmt
                 .query_map(params.as_slice(), |r| r.get(0))?
@@ -293,18 +290,15 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             ids
         } else {
-            let phs = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!(
                 "UPDATE sessions SET status='ghost', lost_at=?1
                  WHERE host_alias=?2 AND status!='ghost' AND kind NOT IN ('bg','external')
                    AND COALESCE(last_reconciled_at, 0) < ?3 AND tmux_name NOT IN ({phs})
-                 RETURNING id"
+                 RETURNING id",
+                phs = in_clause(keep_names.len())
             );
             let cutoff = ghost_cutoff(probe_started_at);
-            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&now, &host_alias, &cutoff];
-            for n in keep_names {
-                params.push(n);
-            }
+            let params = params_then(rusqlite::params![now, host_alias, cutoff], keep_names);
             let mut stmt = tx.prepare(&sql)?;
             let ids = stmt
                 .query_map(params.as_slice(), |r| r.get(0))?
@@ -320,30 +314,22 @@ impl Store {
 
         // ── Phase 2: hard-delete sessions that were already ghost before this cycle
         if !pre_ghost_ids.is_empty() {
-            let phs = pre_ghost_ids
-                .iter()
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(",");
-            let params: Vec<&dyn rusqlite::ToSql> = pre_ghost_ids
-                .iter()
-                .map(|id| id as &dyn rusqlite::ToSql)
-                .collect();
+            let phs = in_clause(pre_ghost_ids.len());
             // No FK cascade on session_events — delete them with the row or
             // they linger as orphans forever.
             tx.execute(
                 &format!("DELETE FROM session_events WHERE session_id IN ({phs})"),
-                params.as_slice(),
+                rusqlite::params_from_iter(&pre_ghost_ids),
             )?;
             // And the messages addressed to them (an inbox nobody can read),
             // as `delete_session` does.
             tx.execute(
                 &format!("DELETE FROM session_messages WHERE to_session_id IN ({phs})"),
-                params.as_slice(),
+                rusqlite::params_from_iter(&pre_ghost_ids),
             )?;
             tx.execute(
                 &format!("DELETE FROM sessions WHERE id IN ({phs})"),
-                params.as_slice(),
+                rusqlite::params_from_iter(&pre_ghost_ids),
             )?;
             for id in &pre_ghost_ids {
                 out.push(RowChange::SessionKilled(*id));
@@ -448,15 +434,12 @@ impl Store {
         if keep_names.is_empty() {
             return Ok(0);
         }
-        let placeholders = keep_names.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
             "UPDATE sessions SET last_reconciled_at=?1 \
-             WHERE host_alias=?2 AND tmux_name IN ({placeholders})"
+             WHERE host_alias=?2 AND tmux_name IN ({phs})",
+            phs = in_clause(keep_names.len())
         );
-        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&at, &host_alias];
-        for n in keep_names {
-            params.push(n);
-        }
+        let params = params_then(rusqlite::params![at, host_alias], keep_names);
         self.conn.execute(&sql, params.as_slice())
     }
 }

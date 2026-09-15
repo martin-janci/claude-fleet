@@ -648,6 +648,24 @@ pub const SESSION_EVENTS_CAP: i64 = 500;
 /// Max chars of a prompt kept in `sessions.last_prompt`.
 pub const LAST_PROMPT_CHARS: usize = 200;
 
+/// `?,?,…`: `n` positional placeholders for an `IN (…)` list.
+pub(super) fn in_clause(n: usize) -> String {
+    vec!["?"; n].join(",")
+}
+
+/// The bind list for a statement whose fixed parameters `head` (write them
+/// with `rusqlite::params![..]`) are followed by an `IN ({in_clause(tail.len())})`
+/// list of `tail`.
+pub(super) fn params_then<'a, T: rusqlite::ToSql>(
+    head: &[&'a dyn rusqlite::ToSql],
+    tail: &'a [T],
+) -> Vec<&'a dyn rusqlite::ToSql> {
+    head.iter()
+        .copied()
+        .chain(tail.iter().map(|t| t as &dyn rusqlite::ToSql))
+        .collect()
+}
+
 pub(super) fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -146,19 +146,13 @@ impl Store {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
             "UPDATE session_messages SET read_at = ?1 \
-             WHERE to_session_id = ?2 AND read_at IS NULL AND id IN ({placeholders})",
+             WHERE to_session_id = ?2 AND read_at IS NULL AND id IN ({phs})",
+            phs = in_clause(ids.len())
         );
-        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&at, &recipient];
-        for id in ids {
-            params.push(id);
-        }
-        let n = self
-            .conn
-            .execute(sql.as_str(), rusqlite::params_from_iter(params))?;
-        Ok(n)
+        let params = params_then(rusqlite::params![at, recipient], ids);
+        Ok(self.conn.execute(&sql, params.as_slice())?)
     }
 }
 
