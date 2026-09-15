@@ -39,17 +39,18 @@ const MIN_COLS: u16 = 10;
 const MIN_ROWS: u16 = 2;
 
 /// One active PTY at a time (we render a single terminal pane). Opening a new
-/// PTY closes the previous one. Holds the master (for resize), a writer (for
-/// input forwarding), and the child handle (for kill on close). The reader is
-/// moved into a background thread that emits chunks via the Tauri Channel
-/// supplied at open time.
-/// Polling-based PTY transport. The reader thread appends bytes to `buffer`;
-/// the frontend calls `pty_drain` on a short interval (e.g. 30 ms) to swap
-/// the buffer with an empty Vec and consume the bytes. This avoids the Tauri
-/// 2 `emit`/`Channel` from-thread reliability issues observed empirically:
-/// emits from the reader thread sometimes silently never reach JS, while
-/// emits from the command's main runtime thread always do. Polling has the
-/// same on-screen latency (~one frame) and no missing-event class of bugs.
+/// PTY closes the previous one. Holds the master (for resize), the writer
+/// thread's input channel (for keystrokes and pastes) and the child handle
+/// (for kill on close); output and liveness live in `PtyShared`, which the
+/// reader thread owns a clone of.
+///
+/// Polling-based transport: the reader thread appends bytes to the shared
+/// buffer and the frontend calls `pty_drain` on a short interval (e.g. 30 ms)
+/// to swap them out. This avoids the Tauri 2 `emit`/`Channel` from-thread
+/// reliability issues observed empirically: emits from the reader thread
+/// sometimes silently never reach JS, while emits from the command's own
+/// runtime thread always do. Polling has the same on-screen latency (~one
+/// frame) and no missing-event class of bugs.
 pub struct PtyState {
     master: Option<Box<dyn MasterPty + Send>>,
     /// Input goes to the writer thread through a bounded channel. NOTHING
