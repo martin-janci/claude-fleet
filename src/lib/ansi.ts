@@ -246,18 +246,18 @@ export class Screen {
    *  no newline. Set when the deferred wrap fires; moved with the rows by
    *  every scroll / IL / DL, kept with the primary buffer across the alt
    *  screen; cleared by an erase that reaches the last column, RIS, a width
-   *  change, on a row whose continuation was moved away, and when a run of
-   *  glyphs printed from column 0 fills the row (tmux's repaint of a row it
-   *  holds unwrapped: print it whole, then move the cursor; the autowrap
-   *  re-sets the flag if the repaint goes on). A partial update — one cell
-   *  at either end, placed with a cursor move — keeps it, as tmux does. */
+   *  change, on a row whose continuation was moved away, and when the row is
+   *  covered from column 0 through its last column (tmux's repaint of a row
+   *  it holds unwrapped: glyphs, ECH / EL1 for never-written cells, then a
+   *  cursor move; the autowrap re-sets the flag if the repaint goes on). A
+   *  partial update — cells at either end, reached with a cursor move —
+   *  keeps it, as tmux does. See `cover`. */
   wrapped: boolean[] = [];
-  /** Cursor position right after the last printed glyph (-1: none since a
-   *  reset), and whether that contiguous print run began at column 0 of the
-   *  cursor's row. A cursor that moved in between starts a new run. */
-  private printEndRow = -1;
-  private printEndCol = -1;
-  private runFromColZero = false;
+  /** The row (-1: none) whose cells [0, coverEnd) have been written since
+   *  coverage last started on it — by glyphs, ECH or EL1 / ED1 — with no gap.
+   *  Reset whenever rows move, so it never outlives the row it describes. */
+  private coverRow = -1;
+  private coverEnd = 0;
 
   // ─── Mouse mode state (DECSET/DECRST) ────────────────────────────────
   // These track which mouse-reporting modes the host app (tmux) has
@@ -344,7 +344,7 @@ export class Screen {
     // moves the wrap column, so no row ends in a wrap any more.
     const keepWraps = cols === this.cols;
     this.wrapped = resizeWraps(this.wrapped, rows, keepWraps);
-    this.printEndRow = -1;
+    this.coverRow = -1;
     if (this.savedScreen !== null) {
       const saved = this.savedScreen;
       saved.cells = resizeGrid(saved.cells, this.rows, this.cols, rows, cols);
@@ -512,10 +512,7 @@ export class Screen {
     if (utf8Length(base.ch) + utf8Length(ch) > CELL_UTF8_MAX) return zeroWidth;
     base.ch += ch;
     this.markRow(this.cursorRow);
-    if (!widen || n === 2) {
-      this.notePrinted();
-      return true;
-    }
+    if (!widen || n === 2) return true;
     if (c + 1 < this.cols) {
       // The cell right of the base becomes its trailing half.
       this.breakPairAt(row, c + 1);
@@ -525,12 +522,12 @@ export class Screen {
       tail.bg = base.bg;
       tail.attrs = base.attrs;
       this.cursorCol = c + 2;
+      this.cover(this.cursorRow, c, c + 2);
     } else {
       // No room at the right edge: the base stays one cell and the cursor
       // moves back onto it, so the next glyph replaces it (as in tmux).
       this.cursorCol = c;
     }
-    this.notePrinted();
     return true;
   }
 
@@ -548,7 +545,6 @@ export class Screen {
       ch = ' ';
       width = 1;
     }
-    const contiguous = this.cursorRow === this.printEndRow && this.cursorCol === this.printEndCol;
     if (this.cursorCol >= this.cols) {
       this.wrapped[this.cursorRow] = true;
       this.cursorCol = 0;
@@ -559,7 +555,6 @@ export class Screen {
       this.cursorCol = 0;
       this.lineFeed();
     }
-    this.runFromColZero = this.cursorCol === 0 || (contiguous && this.runFromColZero);
     const graphics = this.useG1 ? this.g1Graphics : this.g0Graphics;
     const mapped = graphics ? (DEC_SPECIAL_GRAPHICS[ch] ?? ch) : ch;
     const row = this.cells[this.cursorRow];
@@ -581,16 +576,22 @@ export class Screen {
     this.lastGlyph = { ch: mapped, width };
     this.markRow(this.cursorRow);
     this.cursorCol += width;
-    this.notePrinted();
+    this.cover(this.cursorRow, c, c + width);
   }
 
-  /** Record where the print run now ends. A run that began at column 0 and
-   *  just filled the row repaints it whole: the row ends here unless the
-   *  deferred wrap fires on the next glyph (see `wrapped`). */
-  private notePrinted(): void {
-    if (this.runFromColZero && this.cursorCol >= this.cols) this.wrapped[this.cursorRow] = false;
-    this.printEndRow = this.cursorRow;
-    this.printEndCol = this.cursorCol;
+  /** Note that cells [from, to) of row `r` were just written. Coverage starts
+   *  at column 0 and grows by any write that starts at or before its end; a
+   *  cursor move (CUF, CUP) never extends it, because tmux reaches the cells
+   *  it keeps with one. Once the row is covered through its last column it
+   *  has been repainted whole: the row ends here, unless the deferred wrap
+   *  fires on the next glyph (see `wrapped`). */
+  private cover(r: number, from: number, to: number): void {
+    if (r === this.coverRow && from <= this.coverEnd) this.coverEnd = Math.max(this.coverEnd, to);
+    else if (from === 0) {
+      this.coverRow = r;
+      this.coverEnd = to;
+    } else return;
+    if (this.coverEnd >= this.cols) this.wrapped[r] = false;
   }
 
   /** Before overwriting, deleting or shifting `row[c]`: if it is one half of
@@ -630,6 +631,7 @@ export class Screen {
       this.cells.splice(this.scrollBottom, 0, this.blankRow());
       this.wrapped.splice(this.scrollTop, 1);
       this.wrapped.splice(this.scrollBottom, 0, false);
+      this.coverRow = -1;
       this.unwrap(this.scrollTop - 1);
       this.markRows(this.scrollTop, this.scrollBottom);
     } else if (this.cursorRow < this.rows - 1) {
@@ -648,6 +650,7 @@ export class Screen {
       this.cells.splice(this.scrollTop, 0, this.blankRow());
       this.wrapped.splice(this.scrollBottom, 1);
       this.wrapped.splice(this.scrollTop, 0, false);
+      this.coverRow = -1;
       this.unwrap(this.scrollTop - 1);
       this.unwrap(this.scrollBottom);
       this.markRows(this.scrollTop, this.scrollBottom);
@@ -671,6 +674,7 @@ export class Screen {
     this.cells.splice(this.scrollBottom - n + 1, 0, ...blanks);
     this.wrapped.splice(this.scrollTop, n);
     this.wrapped.splice(this.scrollBottom - n + 1, 0, ...new Array<boolean>(n).fill(false));
+    this.coverRow = -1;
     this.unwrap(this.scrollTop - 1);
     this.markRows(this.scrollTop, this.scrollBottom);
   }
@@ -685,6 +689,7 @@ export class Screen {
     this.cells.splice(this.scrollTop, 0, ...blanks);
     this.wrapped.splice(this.scrollBottom - n + 1, n);
     this.wrapped.splice(this.scrollTop, 0, ...new Array<boolean>(n).fill(false));
+    this.coverRow = -1;
     this.unwrap(this.scrollTop - 1);
     this.unwrap(this.scrollBottom);
     this.markRows(this.scrollTop, this.scrollBottom);
@@ -860,7 +865,7 @@ export class Screen {
   private fullReset(): void {
     this.cells = makeGrid(this.rows, this.cols);
     this.wrapped = new Array(this.rows).fill(false);
-    this.printEndRow = -1;
+    this.coverRow = -1;
     this.markAll();
     this.cursorRow = 0;
     this.cursorCol = 0;
@@ -1140,7 +1145,7 @@ export class Screen {
     // xterm: the alt screen starts blank with cursor at home.
     this.cells = makeGrid(this.rows, this.cols);
     this.wrapped = new Array(this.rows).fill(false);
-    this.printEndRow = -1;
+    this.coverRow = -1;
     this.markAll();
     this.cursorRow = 0;
     this.cursorCol = 0;
@@ -1166,7 +1171,7 @@ export class Screen {
     if (saved === null) return;
     this.cells = saved.cells;
     this.wrapped = saved.wrapped;
-    this.printEndRow = -1;
+    this.coverRow = -1;
     this.markAll();
     this.cursorRow = saved.cursorRow;
     this.cursorCol = saved.cursorCol;
@@ -1201,6 +1206,7 @@ export class Screen {
       for (let c = 0; c <= to; c++) this.clearCell(this.cursorRow, c);
       for (let r = 0; r < this.cursorRow; r++) this.unwrap(r);
       if (to === this.cols - 1) this.unwrap(this.cursorRow);
+      this.cover(this.cursorRow, 0, to + 1);
     } else if (mode === 2 || mode === 3) {
       // Whole screen (3 also clears scrollback in real terms; we have none).
       for (let r = 0; r < this.rows; r++)
@@ -1218,6 +1224,7 @@ export class Screen {
       const to = Math.min(this.cursorCol, this.cols - 1);
       for (let c = 0; c <= to; c++) this.clearCell(this.cursorRow, c);
       if (to === this.cols - 1) this.unwrap(this.cursorRow);
+      this.cover(this.cursorRow, 0, to + 1);
     } else if (mode === 2) {
       for (let c = 0; c < this.cols; c++) this.clearCell(this.cursorRow, c);
       this.unwrap(this.cursorRow);
@@ -1239,6 +1246,7 @@ export class Screen {
       this.wrapped.splice(this.scrollBottom, 1);
       this.wrapped.splice(this.cursorRow, 0, false);
     }
+    this.coverRow = -1;
     // The row above lost its continuation, and so did the row now at the
     // bottom (its old next row fell off the region).
     this.unwrap(this.cursorRow - 1);
@@ -1260,6 +1268,7 @@ export class Screen {
       this.wrapped.splice(this.cursorRow, 1);
       this.wrapped.splice(this.scrollBottom, 0, false);
     }
+    this.coverRow = -1;
     this.unwrap(this.cursorRow - 1);
     this.markRows(this.cursorRow, this.scrollBottom);
   }
@@ -1277,6 +1286,7 @@ export class Screen {
     while (row.length < this.cols) row.push(this.blankWithBg());
     if (row.length > this.cols) row.length = this.cols;
     if (row[c].ch === '') row[c].ch = ' ';
+    if (this.cursorRow === this.coverRow) this.coverEnd = Math.min(this.coverEnd, c);
     this.markRow(this.cursorRow);
   }
 
@@ -1292,6 +1302,7 @@ export class Screen {
     // A head pushed to the last column loses its trailing half off the edge.
     if (row[this.cols].ch === '') row[this.cols - 1].ch = ' ';
     if (row.length > this.cols) row.length = this.cols;
+    if (this.cursorRow === this.coverRow) this.coverEnd = Math.min(this.coverEnd, c);
     this.markRow(this.cursorRow);
   }
 
@@ -1303,6 +1314,7 @@ export class Screen {
       if (c >= this.cols) break;
       this.clearCell(this.cursorRow, c);
     }
+    if (this.cursorCol < this.cols) this.cover(this.cursorRow, this.cursorCol, Math.min(this.cols, this.cursorCol + n));
   }
 
   /** A blank cell carrying the current background (BCE) — what EL/ED/ECH/

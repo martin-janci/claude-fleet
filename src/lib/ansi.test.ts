@@ -2131,6 +2131,54 @@ describe('Screen soft wraps — copied text joins wrapped rows (N2)', () => {
     expect(sel(s, 0, 0, 1, 9)).toBe('0123456789KL');
   });
 
+  // tmux repaints the never-written cells of a row with an erase plus a
+  // cursor move, not spaces, so the repaint is not one print run. Measured on
+  // tmux 3.6a (80x24 client, select-window from a window whose rows 0-1 hold
+  // a 125-char wrapped line); bytes tmux sent → `capture-pane -J`:
+  //   row 0 'A\e[78CB\r\n':  \e[HA\e[78X\e[78CB\e[2;1Hnext\e[K   → two lines
+  //   row 0 '\e[5C'+75×B:    \e[1;5H\e[1K\e[C+75×B+\e[2;1Hnext   → two lines
+  //   app redraws cols 0 and 79 of a wrapped row (\e7\e[1;1HY\e[1;80HX\e8):
+  //                          \e[HY\e[78CX                        → joined
+  // So the cells covered from column 0 by prints, ECH and EL1 count towards
+  // the repaint and a CUF does not: tmux moves the cursor over cells it keeps.
+  it('a repaint that erases a gap inside the row (ECH + CUF) ends the row\'s wrap', () => {
+    const s = new Screen(3, 10);
+    s.write('abcdefghijKL');
+    s.write('\x1b[HA\x1b[8X\x1b[8CB\x1b[2;1Hnext\x1b[K');
+    expect(s.wrapped[0]).toBe(false);
+    expect(sel(s, 0, 0, 1, 9)).toBe('A        B\nnext');
+    const tmux = new Screen(24, 80);
+    tmux.write(`${'abcdefghij'.repeat(12)}xxxxx\r\n`);
+    tmux.write(`\x1b[HA\x1b[78X\x1b[78CB\x1b[2;1Hnext\x1b[K`);
+    expect(tmux.wrapped[0]).toBe(false);
+    expect(sel(tmux, 0, 0, 1, 79)).toBe(`A${' '.repeat(78)}B\nnext`);
+  });
+
+  it('a repaint that erases a leading gap (EL1 + CUF) ends the row\'s wrap', () => {
+    const s = new Screen(3, 10);
+    s.write('abcdefghijKL');
+    s.write(`\x1b[1;5H\x1b[1K\x1b[C${'B'.repeat(5)}\x1b[2;1Hnext\x1b[K`);
+    expect(s.wrapped[0]).toBe(false);
+    expect(sel(s, 0, 0, 1, 9)).toBe('     BBBBB\nnext');
+    const tmux = new Screen(24, 80);
+    tmux.write(`${'abcdefghij'.repeat(12)}xxxxx\r\n`);
+    tmux.write(`\x1b[1;5H\x1b[1K\x1b[C${'B'.repeat(75)}\x1b[2;1Hnext\x1b[K`);
+    expect(tmux.wrapped[0]).toBe(false);
+    expect(sel(tmux, 0, 0, 1, 79)).toBe(`     ${'B'.repeat(75)}\nnext`);
+  });
+
+  it('an update of both ends of a wrapped row joined by a CUF keeps the wrap', () => {
+    const tmux = new Screen(24, 80);
+    tmux.write(`L0:${'abcdefghij'.repeat(12)}\r\ntail`);
+    tmux.write('\x1b[HY\x1b[78CX\x1b[4;6H');
+    expect(tmux.wrapped[0]).toBe(true);
+    expect(sel(tmux, 0, 0, 1, 79)).toBe(`Y0:${'abcdefghij'.repeat(7)}abcdefXhij${'abcdefghij'.repeat(4)}`);
+    const s = new Screen(3, 10);
+    s.write('abcdefghijKL\x1b[HY\x1b[8CX\x1b[3;1H');
+    expect(s.wrapped[0]).toBe(true);
+    expect(sel(s, 0, 0, 1, 9)).toBe('YbcdefghiXKL');
+  });
+
   it('resize keeps the flags of rows that survive a height change and drops them on a width change', () => {
     const tall = new Screen(3, 5);
     tall.write('abcdefgh');
