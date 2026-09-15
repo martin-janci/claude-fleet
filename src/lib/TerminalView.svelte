@@ -3,7 +3,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { selectedSession } from './selection';
-  import { Screen, rowToRuns, colorToCss, type Run } from './ansi';
+  import { Screen, rowToRuns, runStyleCss, type Run } from './ansi';
   import { pointInRect } from './geometry';
   import { selectionRects, type CellPos } from './terminal_selection';
   import { nativeWriteText } from './clipboard_native';
@@ -695,29 +695,11 @@
 
   function runStyle(run: Run): string {
     const cacheKey = `${run.fg}|${run.bg}|${run.attrs}`;
-    const hit = styleCache.get(cacheKey);
-    if (hit !== undefined) return hit;
-    const parts: string[] = [];
-    let fg = colorToCss(run.fg);
-    let bg = colorToCss(run.bg);
-    // Reverse video (SGR 7 → ATTR_REVERSE): swap fg/bg, substituting the grid
-    // defaults for cells that use the default color. This is how claude/tmux
-    // draw the input CARET (a reverse-video block) and selections — without it
-    // they render as plain text and are invisible.
-    if (run.attrs & 16) {
-      const f = fg ?? '#e8e8e8'; // grid default text color (.grid color)
-      const b = bg ?? '#0a0a0a'; // grid default background (.grid background)
-      fg = b;
-      bg = f;
+    let style = styleCache.get(cacheKey);
+    if (style === undefined) {
+      style = runStyleCss(run);
+      styleCache.set(cacheKey, style);
     }
-    if (fg) parts.push(`color:${fg}`);
-    if (bg) parts.push(`background:${bg}`);
-    if (run.attrs & 1) parts.push('font-weight:600'); // ATTR_BOLD
-    if (run.attrs & 2) parts.push('opacity:0.75'); // ATTR_DIM
-    if (run.attrs & 4) parts.push('font-style:italic'); // ATTR_ITALIC
-    if (run.attrs & 8) parts.push('text-decoration:underline'); // ATTR_UNDERLINE
-    const style = parts.join(';');
-    styleCache.set(cacheKey, style);
     return style;
   }
 </script>

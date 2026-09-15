@@ -37,6 +37,10 @@ export const ATTR_DIM = 1 << 1;
 export const ATTR_ITALIC = 1 << 2;
 export const ATTR_UNDERLINE = 1 << 3;
 export const ATTR_REVERSE = 1 << 4;
+/** SGR 8 (concealed): drawn transparent, still selectable. */
+export const ATTR_HIDDEN = 1 << 5;
+/** SGR 9 (crossed-out). */
+export const ATTR_STRIKE = 1 << 6;
 
 /** Sentinel "default" color. Distinct from any 256-color or RGB value. */
 export const COLOR_DEFAULT = -1;
@@ -873,7 +877,7 @@ export class Screen {
         this.restoreCursor();
         return;
       case 'm': // SGR - select graphic rendition
-        if (!isPrivate) this.applySgr(params);
+        if (!isPrivate) this.applySgr(parseSgrGroups(body));
         return;
       case 'h':
       case 'l':
@@ -1187,13 +1191,20 @@ export class Screen {
     cell.attrs = 0;
   }
 
-  private applySgr(params: number[]): void {
-    if (params.length === 0) {
+  /** SGR over `;`-separated groups (see `parseSgrGroups`). A group with
+   *  colon sub-parameters is self-contained (`applySgrColon`); a plain group
+   *  is one code, and 38/48/58 take their arguments from the groups after. */
+  private applySgr(groups: number[][]): void {
+    if (groups.length === 0) {
       this.resetSgr();
       return;
     }
-    for (let i = 0; i < params.length; i++) {
-      const p = params[i];
+    for (let i = 0; i < groups.length; i++) {
+      if (groups[i].length > 1) {
+        this.applySgrColon(groups[i]);
+        continue;
+      }
+      const p = groups[i][0];
       if (p === 0) {
         this.resetSgr();
       } else if (p === 1) {
@@ -1202,10 +1213,15 @@ export class Screen {
         this.curAttrs |= ATTR_DIM;
       } else if (p === 3) {
         this.curAttrs |= ATTR_ITALIC;
-      } else if (p === 4) {
+      } else if (p === 4 || p === 21) {
+        // 21 is double underline; we draw every underline style the same.
         this.curAttrs |= ATTR_UNDERLINE;
       } else if (p === 7) {
         this.curAttrs |= ATTR_REVERSE;
+      } else if (p === 8) {
+        this.curAttrs |= ATTR_HIDDEN;
+      } else if (p === 9) {
+        this.curAttrs |= ATTR_STRIKE;
       } else if (p === 22) {
         this.curAttrs &= ~(ATTR_BOLD | ATTR_DIM);
       } else if (p === 23) {
@@ -1214,36 +1230,32 @@ export class Screen {
         this.curAttrs &= ~ATTR_UNDERLINE;
       } else if (p === 27) {
         this.curAttrs &= ~ATTR_REVERSE;
+      } else if (p === 28) {
+        this.curAttrs &= ~ATTR_HIDDEN;
+      } else if (p === 29) {
+        this.curAttrs &= ~ATTR_STRIKE;
       } else if (p >= 30 && p <= 37) {
         this.curFg = p - 30;
-      } else if (p === 38) {
-        // 256-color: 38;5;N. 24-bit: 38;2;R;G;B. Consume sub-params.
-        if (params[i + 1] === 5 && i + 2 < params.length) {
-          this.curFg = params[i + 2];
+      } else if (p === 38 || p === 48 || p === 58) {
+        // 256-color: 38;5;N. 24-bit: 38;2;R;G;B. Consume sub-params. 58 is
+        // the underline colour — consumed so its arguments can't run as SGR
+        // codes (`58;5;4` is not underline), but not drawn.
+        const mode = groups[i + 1]?.[0];
+        if (mode === 5 && i + 2 < groups.length) {
+          this.setSgrColor(p, groups[i + 2][0]);
           i += 2;
-        } else if (params[i + 1] === 2 && i + 4 < params.length) {
-          this.curFg = rgb(params[i + 2], params[i + 3], params[i + 4]);
+        } else if (mode === 2 && i + 4 < groups.length) {
+          this.setSgrColor(p, rgb(groups[i + 2][0], groups[i + 3][0], groups[i + 4][0]));
           i += 4;
         } else {
-          // Truncated 38 sequence — abandon the rest of the params rather
-          // than re-reading `5`/`2`/RGB digits as standalone SGR codes.
-          i = params.length;
+          // Truncated sequence — abandon the rest of the params rather than
+          // re-reading `5`/`2`/RGB digits as standalone SGR codes.
+          i = groups.length;
         }
       } else if (p === 39) {
         this.curFg = COLOR_DEFAULT;
       } else if (p >= 40 && p <= 47) {
         this.curBg = p - 40;
-      } else if (p === 48) {
-        if (params[i + 1] === 5 && i + 2 < params.length) {
-          this.curBg = params[i + 2];
-          i += 2;
-        } else if (params[i + 1] === 2 && i + 4 < params.length) {
-          this.curBg = rgb(params[i + 2], params[i + 3], params[i + 4]);
-          i += 4;
-        } else {
-          // Truncated 48 sequence — abandon the rest of the params.
-          i = params.length;
-        }
       } else if (p === 49) {
         this.curBg = COLOR_DEFAULT;
       } else if (p >= 90 && p <= 97) {
@@ -1251,8 +1263,36 @@ export class Screen {
       } else if (p >= 100 && p <= 107) {
         this.curBg = (p - 100) + 8;
       }
-      // Anything else: silently ignore.
+      // Anything else (53/55 overline, 59 default underline colour, …):
+      // silently ignore.
     }
+  }
+
+  /** One ITU T.416 colon group: `38:5:N`, `38:2:R:G:B` / `38:2:CS:R:G:B`
+   *  (also 48 / 58), or `4:N` underline style. Follows tmux 3.6a: with six
+   *  or more values the RGB starts after the colour-space slot, with five
+   *  right after the `2`; a shorter group or any other code is ignored —
+   *  only this group, never the codes after it. */
+  private applySgrColon(g: number[]): void {
+    const p = g[0];
+    if (p === 4) {
+      if (g[1] === 0) this.curAttrs &= ~ATTR_UNDERLINE;
+      else if (g[1] >= 1 && g[1] <= 5) this.curAttrs |= ATTR_UNDERLINE;
+      return;
+    }
+    if (p !== 38 && p !== 48 && p !== 58) return;
+    if (g[1] === 5 && g.length >= 3 && g[2] >= 0) {
+      this.setSgrColor(p, g[2]);
+    } else if (g[1] === 2 && g.length >= 5) {
+      const k = g.length >= 6 ? 3 : 2;
+      this.setSgrColor(p, rgb(Math.max(0, g[k]), Math.max(0, g[k + 1]), Math.max(0, g[k + 2])));
+    }
+  }
+
+  /** Store a 38 / 48 colour; a 58 underline colour is accepted and dropped. */
+  private setSgrColor(code: number, color: number): void {
+    if (code === 38) this.curFg = color;
+    else if (code === 48) this.curBg = color;
   }
 
   private resetSgr(): void {
@@ -1318,6 +1358,18 @@ function findStringEnd(s: string, from: number, allowBel: boolean): number {
 function stringTermEnd(s: string, end: number): number {
   if (s.charCodeAt(end) !== 0x1b) return end + 1;
   return end + 1 < s.length && s.charCodeAt(end + 1) === 0x5c ? end + 2 : end;
+}
+
+/** Split an SGR parameter string into `;`-separated groups of `:`-separated
+ *  sub-parameters (`38:2::255:0:0` is one group). A group's leading value
+ *  defaults to 0 when empty, like any CSI param; an empty sub-parameter
+ *  after it is -1, so the colour-space slot in `38:2::R:G:B` is told apart
+ *  from a real 0. */
+function parseSgrGroups(body: string): number[][] {
+  if (body.length === 0) return [];
+  return body
+    .split(';')
+    .map((g) => g.split(':').map((x, j) => (x === '' ? (j === 0 ? 0 : -1) : parseInt(x, 10) || 0)));
 }
 
 function makeRow(cols: number): Cell[] {
@@ -1416,6 +1468,44 @@ export function colorToCss(c: number): string | null {
   if (c === COLOR_DEFAULT) return null;
   if (isRgb(c)) return rgbToCss(c);
   return paletteToCss(c);
+}
+
+/** The grid's default text / background colours (TerminalView's `.grid`
+ *  rule), substituted when reverse video swaps a default colour. */
+const GRID_FG = '#e8e8e8';
+const GRID_BG = '#0a0a0a';
+
+/** Inline CSS for a run's colours and attributes. Pure, so the renderer
+ *  can memoize it per (fg, bg, attrs). */
+export function runStyleCss(run: Pick<Run, 'fg' | 'bg' | 'attrs'>): string {
+  const parts: string[] = [];
+  let fg = colorToCss(run.fg);
+  let bg = colorToCss(run.bg);
+  // Reverse video (SGR 7): swap fg/bg, substituting the grid defaults for
+  // cells that use the default color. This is how claude/tmux draw the input
+  // CARET (a reverse-video block) and selections — without it they render as
+  // plain text and are invisible.
+  if (run.attrs & ATTR_REVERSE) {
+    const f = fg ?? GRID_FG;
+    const b = bg ?? GRID_BG;
+    fg = b;
+    bg = f;
+  }
+  // Hidden (SGR 8): transparent text over the (possibly swapped) background,
+  // so the cell keeps its colour and the text stays selectable.
+  if (run.attrs & ATTR_HIDDEN) fg = 'transparent';
+  if (fg) parts.push(`color:${fg}`);
+  if (bg) parts.push(`background:${bg}`);
+  if (run.attrs & ATTR_BOLD) parts.push('font-weight:600');
+  if (run.attrs & ATTR_DIM) parts.push('opacity:0.75');
+  if (run.attrs & ATTR_ITALIC) parts.push('font-style:italic');
+  // One text-decoration for both lines — a second declaration would
+  // override the first.
+  const lines: string[] = [];
+  if (run.attrs & ATTR_UNDERLINE) lines.push('underline');
+  if (run.attrs & ATTR_STRIKE) lines.push('line-through');
+  if (lines.length > 0) parts.push(`text-decoration:${lines.join(' ')}`);
+  return parts.join(';');
 }
 
 /**

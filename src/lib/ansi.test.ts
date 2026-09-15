@@ -3,7 +3,12 @@ import {
   Screen,
   COLOR_DEFAULT,
   ATTR_BOLD,
+  ATTR_ITALIC,
   ATTR_UNDERLINE,
+  ATTR_HIDDEN,
+  ATTR_STRIKE,
+  ATTR_REVERSE,
+  runStyleCss,
   rowToRuns,
   rgb,
   isRgb,
@@ -1360,5 +1365,99 @@ describe('ansi.Screen — RIS (ESC c) resets modes (F15)', () => {
       x.bracketedPaste, x.cursorVisible, x.appCursorKeys, x.cursorStyle,
     ];
     expect(modes(s)).toEqual(modes(fresh));
+  });
+});
+
+describe('ansi.Screen — SGR hidden / strike / ITU colon forms / underline colour (F16)', () => {
+  /** SGR `seq` then print X: the cell's style. */
+  function sgrCell(seq: string) {
+    const s = new Screen(1, 4);
+    s.write(`\x1b[${seq}mX`);
+    return s.cells[0][0];
+  }
+
+  it('8 / 28 set and clear hidden; 9 / 29 set and clear strikethrough', () => {
+    expect(sgrCell('8').attrs).toBe(ATTR_HIDDEN);
+    expect(sgrCell('8;28').attrs).toBe(0);
+    expect(sgrCell('9').attrs).toBe(ATTR_STRIKE);
+    expect(sgrCell('9;29').attrs).toBe(0);
+    expect(sgrCell('9;1').attrs).toBe(ATTR_STRIKE | ATTR_BOLD);
+  });
+
+  it('colon RGB forms (with and without the colour-space id) set the colour', () => {
+    // Expected values are what tmux 3.6a stores for each form (capture-pane -e).
+    expect(sgrCell('38:2::255:0:0').fg).toBe(rgb(255, 0, 0));
+    expect(sgrCell('38:2:255:0:0').fg).toBe(rgb(255, 0, 0));
+    expect(sgrCell('38:2:9:10:20:30').fg).toBe(rgb(10, 20, 30));
+    expect(sgrCell('38:2:1:2:3:4:5').fg).toBe(rgb(2, 3, 4));
+    expect(sgrCell('48:2::1:2:3').bg).toBe(rgb(1, 2, 3));
+  });
+
+  it('colon indexed forms set the colour', () => {
+    expect(sgrCell('38:5:196').fg).toBe(196);
+    expect(sgrCell('48:5:21').bg).toBe(21);
+    expect(sgrCell('1;38:5:3').fg).toBe(3);
+  });
+
+  it('a truncated or unknown colon group is ignored on its own', () => {
+    const c = sgrCell('38:5;1');
+    expect(c.fg).toBe(COLOR_DEFAULT);
+    expect(c.attrs).toBe(ATTR_BOLD);
+    expect(sgrCell('1:2').attrs).toBe(0);
+  });
+
+  it('4:N sets underline for N=1..5, 4:0 clears it, a bare 4: does nothing', () => {
+    expect(sgrCell('4:3').attrs).toBe(ATTR_UNDERLINE);
+    expect(sgrCell('4;4:0').attrs).toBe(0);
+    expect(sgrCell('4:').attrs).toBe(0);
+    expect(sgrCell('21').attrs).toBe(ATTR_UNDERLINE);
+  });
+
+  it('58 (underline colour) consumes its semicolon arguments instead of running them as SGR', () => {
+    const a = sgrCell('58;2;10;20;30;1');
+    expect(a.attrs).toBe(ATTR_BOLD);
+    expect(a.fg).toBe(COLOR_DEFAULT);
+    expect(sgrCell('58;5;4;3').attrs).toBe(ATTR_ITALIC);
+    expect(sgrCell('58:2::10:20:30;1').attrs).toBe(ATTR_BOLD);
+    expect(sgrCell('58;5;1;3').attrs).toBe(ATTR_ITALIC);
+  });
+
+  it('59 is a no-op; a truncated 58 abandons the rest like 38/48', () => {
+    expect(sgrCell('59;1').attrs).toBe(ATTR_BOLD);
+    expect(sgrCell('58;5').attrs).toBe(0);
+  });
+
+  it('semicolon 38/48 forms still work', () => {
+    expect(sgrCell('38;5;123').fg).toBe(123);
+    expect(sgrCell('48;2;1;2;3').bg).toBe(rgb(1, 2, 3));
+    expect(sgrCell(';1').attrs).toBe(ATTR_BOLD);
+  });
+});
+
+describe('ansi.runStyleCss — attribute → CSS (F16)', () => {
+  const run = (attrs: number, fg = COLOR_DEFAULT, bg = COLOR_DEFAULT) => runStyleCss({ fg, bg, attrs });
+
+  it('underline and strikethrough combine into one text-decoration', () => {
+    expect(run(ATTR_UNDERLINE)).toContain('text-decoration:underline');
+    expect(run(ATTR_STRIKE)).toContain('text-decoration:line-through');
+    const both = run(ATTR_UNDERLINE | ATTR_STRIKE);
+    expect(both).toContain('text-decoration:underline line-through');
+    expect(both.match(/text-decoration/g)).toHaveLength(1);
+  });
+
+  it('hidden text is transparent but keeps its background, also under reverse video', () => {
+    const h = run(ATTR_HIDDEN, 1, 4);
+    expect(h).toContain('color:transparent');
+    expect(h).toContain('background:#2472c8');
+    expect(h.match(/color:/g)).toHaveLength(1);
+    const rh = run(ATTR_HIDDEN | ATTR_REVERSE, 1, COLOR_DEFAULT);
+    expect(rh).toContain('color:transparent');
+    expect(rh).toContain('background:#cd3131');
+  });
+
+  it('keeps the existing bold / dim / italic / reverse mapping', () => {
+    expect(run(0, 1)).toBe('color:#cd3131');
+    expect(run(ATTR_BOLD | ATTR_ITALIC)).toBe('font-weight:600;font-style:italic');
+    expect(run(ATTR_REVERSE)).toBe('color:#0a0a0a;background:#e8e8e8');
   });
 });
