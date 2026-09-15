@@ -395,6 +395,154 @@ describe('TerminalView PTY death detection (F11/N8)', () => {
   });
 });
 
+describe('TerminalView open lifecycle (F12/N4)', () => {
+  /** A promise a test resolves by hand, to hold one invoke in flight. */
+  function deferred<T>() {
+    let resolve!: (v: T) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+  const openedHosts = () =>
+    calls('pty_open').map((c) => (c[1] as { args: { host_alias: string } }).args.host_alias);
+
+  it('a session switch during an open that then fails still attaches the new session', async () => {
+    const gate = deferred<null>();
+    inv().mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'pty_drain') return { data: '', bytes: 0, eof: false, overflowed: false };
+      if (cmd === 'pty_open') {
+        const host = (args as { args: { host_alias: string } }).args.host_alias;
+        if (host === 'alpha') return gate.promise;
+      }
+      return null;
+    });
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    expect(openedHosts()).toEqual(['alpha']);
+
+    // The user switches while alpha's pty_open is still in flight…
+    selectSession(onBeta);
+    await settle();
+    // …and alpha's open then fails.
+    gate.reject({ message: 'ssh: Connection refused' });
+    await settle(16);
+
+    expect(openedHosts()).toEqual(['alpha', 'beta']);
+    expect(screen.getByTestId('terminal-header').textContent).toContain('on beta');
+    // Alpha's failure must not be shown under beta's header.
+    expect(document.body.textContent).not.toContain('PTY error');
+  });
+
+  it('a failing auto-reconnect spends the whole budget, then offers the manual banner', async () => {
+    let opened = 0;
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_open') {
+        opened += 1;
+        if (opened > 1) throw { message: 'ssh: Connection refused' };
+        return null;
+      }
+      if (cmd === 'pty_drain') return { data: '', bytes: 0, eof: true, overflowed: false };
+      return null;
+    });
+    vi.useFakeTimers();
+    try {
+      render(TerminalView);
+      selectSession(onAlpha);
+      await settle();
+      await vi.advanceTimersByTimeAsync(8000);
+      await settle();
+      // The initial attach plus MAX_AUTO_RECONNECT (3) backed-off retries.
+      expect(calls('pty_open')).toHaveLength(4);
+      expect(screen.queryByTestId('terminal-reconnect-banner')).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a deselect during the workspace probe leaves no PTY behind', async () => {
+    const probe = deferred<unknown>();
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'repair_session') return probe.promise;
+      if (cmd === 'pty_drain') return { data: '', bytes: 0, eof: false, overflowed: false };
+      return null;
+    });
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    expect(calls('repair_session')).toHaveLength(1);
+    expect(calls('pty_open')).toHaveLength(0);
+
+    clearSelection();
+    await settle();
+    probe.resolve({ actions: [], warnings: [] });
+    await settle(16);
+    // The open was abandoned mid-flight: nothing was attached, so nothing
+    // has to be closed either.
+    expect(calls('pty_open')).toHaveLength(0);
+
+    // …and the session still attaches when it is selected again.
+    selectSession(onAlpha);
+    await settle(16);
+    expect(calls('pty_open')).toHaveLength(1);
+    expect(screen.getByTestId('terminal-size').textContent).not.toContain('measuring');
+  });
+
+  it('a stale open that already attached closes its own PTY', async () => {
+    const gate = deferred<null>();
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_open') return gate.promise;
+      if (cmd === 'pty_drain') return { data: '', bytes: 0, eof: false, overflowed: false };
+      return null;
+    });
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    expect(calls('pty_open')).toHaveLength(1);
+    clearSelection();
+    await settle();
+    gate.resolve(null); // the attach lands after the pane let it go
+    await settle(16);
+    expect(calls('pty_close')).toHaveLength(1);
+  });
+
+  it('destroying the pane mid-open neither attaches nor resizes afterwards', async () => {
+    const probe = deferred<unknown>();
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'repair_session') return probe.promise;
+      if (cmd === 'pty_drain') return { data: '', bytes: 0, eof: false, overflowed: false };
+      return null;
+    });
+    const view = render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    view.unmount();
+    await settle();
+    probe.resolve({ actions: [], warnings: [] });
+    await settle(16);
+    expect(calls('pty_open')).toHaveLength(0);
+    expect(calls('pty_resize')).toHaveLength(0);
+  });
+
+  it('the post-attach resize hint does not fire after the pane is closed', async () => {
+    vi.useFakeTimers();
+    try {
+      render(TerminalView);
+      selectSession(onAlpha);
+      await settle();
+      clearSelection();
+      await settle();
+      await vi.advanceTimersByTimeAsync(400);
+      expect(calls('pty_resize')).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('TerminalView pty_write errors (FE-12)', () => {
   it('surfaces a rejected pty_write as one deduped error toast', async () => {
     inv().mockImplementation(async (cmd: string) => {

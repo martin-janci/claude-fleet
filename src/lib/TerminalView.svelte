@@ -52,7 +52,12 @@
   let currentHost: string | null = $state(null);
 
   function isAttachedTo(sess: { tmux_name: string; host_alias: string } | null | undefined): boolean {
-    return !!sess && sess.tmux_name === currentSession && sess.host_alias === currentHost;
+    // `screen` too: a half-open pane (a PTY whose Screen was torn down under
+    // it) must never satisfy the guard, or selecting that session again would
+    // skip the reopen and leave a blank grid that still swallows keystrokes.
+    return (
+      !!sess && screen !== null && sess.tmux_name === currentSession && sess.host_alias === currentHost
+    );
   }
 
   /** Forward bytes to the PTY. A rejection (PTY gone, host dropped) used to be
@@ -280,111 +285,189 @@
    *  call would otherwise run a full second open — leaking a ResizeObserver
    *  and a drain timer and double-opening the PTY. */
   let opening = false;
+  /** Set when an open request arrives while one is already in flight.
+   *  Dropping such a request stranded the new selection whenever the running
+   *  open then failed: nothing re-triggers the $effects, so the pane sat on
+   *  the previous session's error. Coalesced here and run from openTerm's
+   *  `finally` — but only when the selection really moved on, since closeTerm
+   *  nulling `currentSession` re-runs the effects during every open. */
+  let reopenPending = false;
+  /** Open generation. closeTerm() and onDestroy bump it; every open captures
+   *  it and abandons itself after any await once it no longer matches — the
+   *  selection can go away (deselect, the row killed) or the whole pane can be
+   *  unmounted while `repair_session` probes a host over SSH, and the resumed
+   *  open would otherwise attach a PTY nobody drains. */
+  let openGeneration = 0;
+  /** Set by onDestroy: after this, nothing may touch the PTY. */
+  let destroyed = false;
+  /** The post-attach resize hint, so closeTerm can cancel it. */
+  let postAttachTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Has the open that captured `gen` been superseded — by a close, a destroy,
+   *  a newer open, or the selection moving on? */
+  function openIsStale(gen: number, target: { tmux_name: string; host_alias: string }): boolean {
+    if (destroyed || gen !== openGeneration) return true;
+    const sel = $selectedSession;
+    return !sel || sel.tmux_name !== target.tmux_name || sel.host_alias !== target.host_alias;
+  }
 
   async function openTerm(isAutoReconnect = false) {
-    if (opening) return;
+    if (opening) {
+      reopenPending = true;
+      return;
+    }
     const sess = $selectedSession;
     if (!sess) return;
     if (!container) return;
+    const target = { tmux_name: sess.tmux_name, host_alias: sess.host_alias };
     opening = true;
-    // A fresh open (new selection, manual reconnect, detach/reattach button)
-    // starts with a clean self-heal budget; an auto-reconnect must preserve the
-    // running attempt count so the cap can actually be reached.
-    if (!isAutoReconnect) reconnectAttempts = 0;
-    await closeTerm();
-    openError = null;
-    disconnected = false;
-    await tick();
-
-    measureCellSize();
-    const dim = computeDimensions();
-    lastCols = dim.cols;
-    lastRows = dim.rows;
-    screen = new Screen(dim.rows, dim.cols);
-    clearSelection();
-    // Reset any in-progress drag state so a session switch can't leave it stale.
-    mouse.reset();
-    screen.onClipboard = (text) => {
-      void nativeWriteText(text).then((r) => {
-        if (!r.ok) openError = `Clipboard write failed: ${r.error.message}`;
-      });
-    };
-    renderVersion++;
-
-    // A pane drag fires ResizeObserver every frame; resizing the screen
-    // buffer (a full re-mark of every row) and sending pty_resize (a
-    // SIGWINCH + tmux redraw over SSH) on each one floods the PTY. Debounce
-    // on the trailing edge: only the settled size is applied, and it always
-    // is — the last frame of a drag is never dropped.
-    resizeObserver = new ResizeObserver(() => {
-      if (resizeTimer !== null) clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(applyResize, RESIZE_DEBOUNCE_MS);
-    });
-    resizeObserver.observe(container);
-
-    // Automatic workspace check before attach. It only CREATES what is
-    // confirmed missing: re-adds a deleted, unregistered worktree from its
-    // existing branch, and starts a tmux session that is confirmed dead. It
-    // never respawns a live pane (that would kill a running Claude just
-    // because it was selected), never unregisters, adopts or rebranches —
-    // those are Repair workspace only; we say so instead. A healthy session
-    // costs one probe; orphans and background rows have nothing to check. An
-    // offline host is left to the attach error.
-    if (sess.project_id != null && !hasNoPane(sess)) {
-      const rep = await repairSession(sess.id);
-      if (rep.ok) {
-        const v = rep.value;
-        const actions = v?.actions ?? [];
-        if (actions.length > 0) {
-          const branch = v?.branch_source ? ` [branch: ${v.branch_source}]` : '';
-          push({ kind: 'info', message: `Repaired workspace for ${sess.tmux_name}: ${actions.join('; ')}${branch}` });
-        }
-        if (v?.needs_explicit_repair || v?.tmux_cwd_stale) {
-          push({
-            kind: 'info',
-            message: `${sess.tmux_name} needs Repair workspace: ${(v.warnings ?? []).join('; ')}`,
-          });
-        }
-      } else if (rep.error.code !== 'E_HOST_OFFLINE') {
-        pushError(rep.error, 'Workspace check failed');
-      }
-    }
-
     try {
-      await invoke('pty_open', {
-        args: {
-          session_name: sess.tmux_name,
-          host_alias: sess.host_alias,
-          cols: dim.cols,
-          rows: dim.rows,
-        },
-      });
+      // A fresh open (new selection, manual reconnect, detach/reattach button)
+      // starts with a clean self-heal budget; an auto-reconnect must preserve
+      // the running attempt count so the cap can actually be reached.
+      if (!isAutoReconnect) reconnectAttempts = 0;
+      await closeTerm();
+      // Claim the generation closeTerm() just bumped. Anything that closes or
+      // destroys from here on bumps it again and this open stands down.
+      const gen = ++openGeneration;
+      if (openIsStale(gen, target)) return;
+      openError = null;
+      disconnected = false;
+      await tick();
+      if (openIsStale(gen, target)) return;
+
+      measureCellSize();
+      const dim = computeDimensions();
+      lastCols = dim.cols;
+      lastRows = dim.rows;
+      screen = new Screen(dim.rows, dim.cols);
+      clearSelection();
+      // Reset any in-progress drag state so a session switch can't leave it stale.
+      mouse.reset();
+      screen.onClipboard = (text) => {
+        void nativeWriteText(text).then((r) => {
+          if (!r.ok && !openIsStale(gen, target)) openError = `Clipboard write failed: ${r.error.message}`;
+        });
+      };
+      renderVersion++;
+
+      // A pane drag fires ResizeObserver every frame; resizing the screen
+      // buffer (a full re-mark of every row) and sending pty_resize (a
+      // SIGWINCH + tmux redraw over SSH) on each one floods the PTY. Debounce
+      // on the trailing edge: only the settled size is applied, and it always
+      // is — the last frame of a drag is never dropped.
+      resizeObserver = new ResizeObserver(scheduleResize);
+      resizeObserver.observe(container);
+
+      // Automatic workspace check before attach. It only CREATES what is
+      // confirmed missing: re-adds a deleted, unregistered worktree from its
+      // existing branch, and starts a tmux session that is confirmed dead. It
+      // never respawns a live pane (that would kill a running Claude just
+      // because it was selected), never unregisters, adopts or rebranches —
+      // those are Repair workspace only; we say so instead. A healthy session
+      // costs one probe; orphans and background rows have nothing to check. An
+      // offline host is left to the attach error.
+      if (sess.project_id != null && !hasNoPane(sess)) {
+        const rep = await repairSession(sess.id);
+        if (openIsStale(gen, target)) return;
+        if (rep.ok) {
+          const v = rep.value;
+          const actions = v?.actions ?? [];
+          if (actions.length > 0) {
+            const branch = v?.branch_source ? ` [branch: ${v.branch_source}]` : '';
+            push({ kind: 'info', message: `Repaired workspace for ${sess.tmux_name}: ${actions.join('; ')}${branch}` });
+          }
+          if (v?.needs_explicit_repair || v?.tmux_cwd_stale) {
+            push({
+              kind: 'info',
+              message: `${sess.tmux_name} needs Repair workspace: ${(v.warnings ?? []).join('; ')}`,
+            });
+          }
+        } else if (rep.error.code !== 'E_HOST_OFFLINE') {
+          pushError(rep.error, 'Workspace check failed');
+        }
+      }
+
+      try {
+        await invoke('pty_open', {
+          args: {
+            session_name: sess.tmux_name,
+            host_alias: sess.host_alias,
+            cols: dim.cols,
+            rows: dim.rows,
+          },
+        });
+      } catch (e) {
+        // Only the session that caused the failure may show it; a stale open's
+        // error under another session's header is pure confusion.
+        if (openIsStale(gen, target)) return;
+        if (isAutoReconnect) {
+          // Keep backing off instead of stopping after one try: nothing else
+          // would ever call scheduleAutoReconnect again (the drain loop never
+          // started), so the budget — and with it the manual banner — was
+          // unreachable.
+          scheduleAutoReconnect(target.tmux_name, target.host_alias);
+        } else {
+          openError = `PTY error: ${describeError(e)}`;
+        }
+        return;
+      }
+      if (openIsStale(gen, target)) {
+        // The attach landed after the pane let go of it. Nobody will drain it
+        // and the backend keeps exactly one PTY, so close it — no newer open
+        // can have taken over, they are serialized by `opening`.
+        try {
+          await invoke('pty_close');
+        } catch {
+          /* nothing to undo */
+        }
+        return;
+      }
       currentSession = sess.tmux_name;
       currentHost = sess.host_alias;
       ptyOpen = true;
       attachedAt = Date.now();
-    } catch (e) {
-      openError = `PTY error: ${describeError(e)}`;
+
+      // Start the adaptive drain loop. 30 ms (~33 Hz) is the floor when output
+      // is flowing; it backs off to DRAIN_MAX_MS when the terminal is idle.
+      drain.start();
+
+      // Hint tmux to redraw at our exact size by re-sending the dimensions
+      // once after attach. Defends against race where pty_open runs before
+      // the slave-side process has set up SIGWINCH handling.
+      postAttachTimer = setTimeout(() => {
+        postAttachTimer = null;
+        if (!ptyOpen) return;
+        void invoke('pty_resize', { args: { cols: lastCols, rows: lastRows } }).catch(() => {});
+      }, 150);
+    } finally {
       opening = false;
-      return;
+      const pending = reopenPending;
+      reopenPending = false;
+      const sel = $selectedSession;
+      // Only a request for a DIFFERENT session gets re-run here. Re-running it
+      // for the same one would retry a just-failed open in a tight loop (the
+      // self-heal backoff owns that case).
+      if (
+        pending &&
+        sel &&
+        !destroyed &&
+        !isAttachedTo(sel) &&
+        (sel.tmux_name !== target.tmux_name || sel.host_alias !== target.host_alias)
+      ) {
+        void openTerm();
+      }
     }
-
-    // Start the adaptive drain loop. 30 ms (~33 Hz) is the floor when output
-    // is flowing; it backs off to DRAIN_MAX_MS when the terminal is idle.
-    drain.start();
-
-    // Hint tmux to redraw at our exact size by re-sending the dimensions
-    // once after attach. Defends against race where pty_open runs before
-    // the slave-side process has set up SIGWINCH handling.
-    setTimeout(() => {
-      if (!ptyOpen) return;
-      void invoke('pty_resize', { args: { cols: lastCols, rows: lastRows } }).catch(() => {});
-    }, 150);
-    opening = false;
   }
 
   const RESIZE_DEBOUNCE_MS = 50;
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** One ResizeObserver frame: (re)arm the trailing timer. */
+  function scheduleResize() {
+    if (resizeTimer !== null) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(applyResize, RESIZE_DEBOUNCE_MS);
+  }
 
   function applyResize() {
     resizeTimer = null;
@@ -526,10 +609,18 @@
   }
 
   async function closeTerm() {
+    // Invalidate every open in flight. Done FIRST and unconditionally: an
+    // open suspended in `repair_session` or `pty_open` must stand down even
+    // when there is nothing here to tear down yet.
+    openGeneration += 1;
     // Cancel any pending self-heal first — a scheduled auto-reconnect for a
     // now-stale session must never fire after a detach or session switch.
     // (Done before the no-op guard below so a lingering timer is always
     // cleared, and kept conditional so we don't write $state needlessly.)
+    if (postAttachTimer !== null) {
+      clearTimeout(postAttachTimer);
+      postAttachTimer = null;
+    }
     if (autoReconnectTimer !== null) {
       clearTimeout(autoReconnectTimer);
       autoReconnectTimer = null;
@@ -546,6 +637,10 @@
 
     // Drop the context menu so a session switch can't leave the backdrop stuck.
     ctxMenu = null;
+    // The overlay and the error belong to the pane that is going away; an
+    // upload still in flight checks the generation before it touches either.
+    uploading = false;
+    openError = null;
 
     drain.stop();
     resizeObserver?.disconnect();
@@ -644,6 +739,9 @@
   }
 
   onDestroy(() => {
+    // Before closeTerm, so an open resuming from an await sees it at once.
+    destroyed = true;
+    openGeneration += 1;
     void closeTerm();
     mouse.dispose();
   });
