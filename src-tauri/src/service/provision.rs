@@ -376,14 +376,18 @@ pub async fn write_host_file(
 }
 
 /// Like [`write_host_file`] for a file that carries a secret (the bearer
-/// token). The content never appears in a process argv on either side:
+/// token). The content never appears in a process argv on either side, and
+/// the target is never truncated in place — a write is either fully applied
+/// or leaves the previous content untouched:
 ///
-/// - remote: the file is first created empty under `umask 077` + `chmod 600`
-///   (a script with only paths in it), then the content is streamed over
-///   stdin through `SshExec::upload_file` (`cat > path`, which keeps the
-///   0600 mode when truncating);
-/// - local: the file is opened with mode 0600 from creation
-///   ([`write_private_file`]).
+/// - remote: an empty `<path>.fleet-tmp` is created under `umask 077` +
+///   `chmod 600` (a script with only paths in it), the content is streamed
+///   over stdin through `SshExec::upload_file` (`cat > <path>.fleet-tmp`),
+///   then `mv -f <path>.fleet-tmp <path>` renames it onto the target
+///   atomically. The tmp file is removed (best-effort) if any step fails;
+/// - local: the content is written to `<path>.fleet-tmp` with mode 0600
+///   ([`write_private_file`]), then renamed onto `path`; the tmp file is
+///   removed if either step fails.
 pub async fn write_host_file_secret(
     ssh: &dyn SshExec,
     host: &str,
@@ -391,33 +395,65 @@ pub async fn write_host_file_secret(
     path: &str,
     content: &str,
 ) -> Result<(), IpcError> {
+    let tmp_path = format!("{path}.fleet-tmp");
     if host == "local" {
         let edir = expand_home_local(dir)?;
         std::fs::create_dir_all(&edir)
             .map_err(|e| IpcError::new("E_PROVISION", format!("mkdir {edir}: {e}")))?;
         let epath = expand_home_local(path)?;
-        return write_private_file(std::path::Path::new(&epath), content)
-            .map_err(|e| IpcError::new("E_PROVISION", format!("write {epath}: {e}")));
+        let etmp = expand_home_local(&tmp_path)?;
+        let etmp_path = std::path::Path::new(&etmp);
+        if let Err(e) = write_private_file(etmp_path, content) {
+            let _ = std::fs::remove_file(etmp_path);
+            return Err(IpcError::new("E_PROVISION", format!("write {epath}: {e}")));
+        }
+        if let Err(e) = std::fs::rename(etmp_path, &epath) {
+            let _ = std::fs::remove_file(etmp_path);
+            return Err(IpcError::new("E_PROVISION", format!("write {epath}: {e}")));
+        }
+        return Ok(());
     }
-    // 1. Create the (empty) file 0600 — paths only, no secret in argv.
-    let script = quote(&remote_touch_private_script(dir, path));
-    run_remote_write(ssh, host, path, &script).await?;
-    // 2. Stream the content over stdin. `upload_file` runs `cat > '<abs>'`;
-    //    `~` is not expanded in a quoted word, so resolve $HOME first.
-    let abs = match path.strip_prefix("~/") {
+    // 1. Create the (empty) tmp file 0600 — paths only, no secret in argv.
+    let script = quote(&remote_touch_private_script(dir, &tmp_path));
+    run_remote_write(ssh, host, &tmp_path, &script).await?;
+    // 2. Stream the content over stdin to the tmp path. `upload_file` runs
+    //    `cat > '<abs>'`; `~` is not expanded in a quoted word, so resolve
+    //    $HOME first.
+    let abs_tmp = match tmp_path.strip_prefix("~/") {
         Some(rest) => format!("{}/{rest}", ssh.remote_home(host).await?),
-        None => path.to_string(),
+        None => tmp_path.clone(),
     };
-    let tmp = PrivateTempFile::create(content)
+    let spool = PrivateTempFile::create(content)
         .map_err(|e| IpcError::new("E_PROVISION", format!("spool secret for {path}: {e}")))?;
-    ssh.upload_file(host, tmp.path(), &abs, PROVISION_TIMEOUT)
+    if let Err(e) = ssh
+        .upload_file(host, spool.path(), &abs_tmp, PROVISION_TIMEOUT)
         .await
-        .map_err(|e| {
-            IpcError::new(
-                "E_PROVISION",
-                format!("write {path} on {host}: {}", e.message),
-            )
-        })
+    {
+        remove_remote_tmp(ssh, host, &tmp_path).await;
+        return Err(IpcError::new(
+            "E_PROVISION",
+            format!("write {path} on {host}: {}", e.message),
+        ));
+    }
+    // 3. Rename the tmp file onto the real path — atomic, no window where
+    //    `path` is truncated but not yet rewritten.
+    let mv_script = quote(&remote_rename_script(&tmp_path, path));
+    if let Err(e) = run_remote_write(ssh, host, path, &mv_script).await {
+        remove_remote_tmp(ssh, host, &tmp_path).await;
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Best-effort cleanup of a `.fleet-tmp` file left behind by a failed
+/// [`write_host_file_secret`] step. Never fails the caller — the write
+/// already failed for its own reason, and a stray 0600 tmp file under the
+/// user's own `~/.claude` is not a security issue, just clutter.
+async fn remove_remote_tmp(ssh: &dyn SshExec, host: &str, tmp_path: &str) {
+    let script = quote(&format!("rm -f {}", remote_path(tmp_path)));
+    let _ = ssh
+        .run(host, &["bash", "-lc", &script], PROVISION_TIMEOUT)
+        .await;
 }
 
 /// Write `content` to `path`, creating the file with mode 0600 (unix) so it is
@@ -552,6 +588,14 @@ fn remote_touch_private_script(dir: &str, path: &str) -> String {
         "umask 077 && mkdir -p {} && touch {p} && chmod 600 {p}",
         remote_path(dir),
     )
+}
+
+/// Remote `bash -lc` script body that atomically renames `tmp` onto `path` —
+/// the last step of [`write_host_file_secret`]'s tmp-file dance. `path` is
+/// never truncated in place: a reader either sees the old content or the
+/// new, never a partial write.
+fn remote_rename_script(tmp: &str, path: &str) -> String {
+    format!("mv -f {} {}", remote_path(tmp), remote_path(path))
 }
 
 /// Expand a leading `~/` — or a bare `~` — against the LOCAL home dir.
@@ -733,6 +777,64 @@ mod tests {
             t.path().to_path_buf()
         };
         assert!(!spool_path.exists(), "spool file must be removed on drop");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_host_file_secret_local_is_atomic_and_leaves_no_tmp_behind() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.json");
+        // `host == "local"` never touches `ssh`; an unscripted `FakeSsh`
+        // would panic if it somehow did.
+        let fake = FakeSsh::new();
+        write_host_file_secret(
+            &fake,
+            "local",
+            dir.path().to_str().unwrap(),
+            path.to_str().unwrap(),
+            "s3cret",
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "s3cret");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(
+            !dir.path().join("secret.json.fleet-tmp").exists(),
+            "the .fleet-tmp sibling must not survive a successful write"
+        );
+        assert!(fake.calls().is_empty(), "local writes never touch ssh");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_host_file_secret_local_failure_leaves_the_original_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.json");
+        std::fs::write(&path, "original").unwrap();
+        // Make the directory unwritable so creating `secret.json.fleet-tmp`
+        // fails — the failure mode this test simulates.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let fake = FakeSsh::new();
+        let result = write_host_file_secret(
+            &fake,
+            "local",
+            dir.path().to_str().unwrap(),
+            path.to_str().unwrap(),
+            "new-secret",
+        )
+        .await;
+        // Restore write access so the tempdir can clean itself up.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_err(), "an unwritable dir must fail the write");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "original",
+            "a failed write must never touch the existing file"
+        );
+        assert!(!dir.path().join("secret.json.fleet-tmp").exists());
     }
 
     #[test]
@@ -961,9 +1063,30 @@ mod tests {
         crate::commands::mcp::merge_hook_into_settings_json("", PORT, TOKEN).unwrap()
     }
 
+    /// The three (or four, first time) steps [`write_host_file_secret`]
+    /// issues for one file: touch the `.fleet-tmp` sibling 0600, optionally
+    /// resolve `$HOME` (only the first secret write on a fresh `FakeSsh`,
+    /// which caches it), upload the content to the tmp path, then rename it
+    /// onto `path`.
+    fn secret_write_steps(dir: &str, path: &str, content: &str, home_cached: bool) -> Vec<Step> {
+        use Step::*;
+        let tmp = format!("{path}.fleet-tmp");
+        let mut steps = vec![Script(remote_touch_private_script(dir, &tmp))];
+        if !home_cached {
+            steps.push(Cmd("printenv HOME".into()));
+        }
+        let abs_tmp = match tmp.strip_prefix("~/") {
+            Some(rest) => format!("{HOME}/{rest}"),
+            None => tmp.clone(),
+        };
+        steps.push(Upload(quote(&abs_tmp), content.to_string()));
+        steps.push(Script(remote_rename_script(&tmp, path)));
+        steps
+    }
+
     fn fresh_host_sequence() -> Vec<Step> {
         use Step::*;
-        vec![
+        let mut steps = vec![
             // 1. skills
             Script(remote_write_script(SKILL_DIR, SKILL_PATH, FLEET_SKILL)),
             Script(remote_write_script(
@@ -979,25 +1102,30 @@ mod tests {
                 &expected_claude_md(),
             )),
             // 2. MCP entry — no backup for an absent file; the token travels
-            //    over stdin into a 0600 file, never through argv.
+            //    over stdin into a 0600 tmp file, never through argv, then
+            //    an atomic rename lands it on the real path.
             Script(remote_read_script(CLAUDE_JSON)),
-            Script(remote_touch_private_script(CLAUDE_DIR, CLAUDE_JSON)),
-            Cmd("printenv HOME".into()),
-            Upload(
-                quote(&format!("{HOME}/.claude.json")),
-                merge_mcp_entry("", URL, TOKEN).unwrap(),
-            ),
+        ];
+        steps.extend(secret_write_steps(
+            CLAUDE_DIR,
+            CLAUDE_JSON,
+            &merge_mcp_entry("", URL, TOKEN).unwrap(),
+            false,
+        ));
+        steps.extend([
             // 3. tmux clipboard
             Script(remote_read_script(TMUX_CONF)),
             Script(remote_write_script("~", TMUX_CONF, &expected_tmux_conf())),
             // 4. Stop / WorktreeCreate hooks ($HOME is cached now).
             Script(remote_read_script(SETTINGS_JSON)),
-            Script(remote_touch_private_script(CLAUDE_DIR, SETTINGS_JSON)),
-            Upload(
-                quote(&format!("{HOME}/.claude/settings.json")),
-                expected_settings(),
-            ),
-        ]
+        ]);
+        steps.extend(secret_write_steps(
+            CLAUDE_DIR,
+            SETTINGS_JSON,
+            &expected_settings(),
+            true,
+        ));
+        steps
     }
 
     /// Every argument the remote shell sees must be inert: `bash -lc` gets
@@ -1117,40 +1245,69 @@ mod tests {
         assert!(steps.contains(&Step::Script(remote_read_script(TMUX_CONF))));
 
         // Token-bearing files: backed up BEFORE being rewritten, and
-        // rewritten with byte-identical content.
-        let json = quote(&format!("{HOME}/.claude.json"));
-        let json_bak = quote(&format!("{HOME}/.claude.json.fleet-bak"));
-        let settings = quote(&format!("{HOME}/.claude/settings.json"));
-        let settings_bak = quote(&format!("{HOME}/.claude/settings.json.fleet-bak"));
+        // rewritten with byte-identical content. Each write lands via its
+        // own `.fleet-tmp` upload + atomic rename (write_host_file_secret),
+        // never a direct upload to the final path.
+        let json_tmp = quote(&format!("{HOME}/.claude.json.fleet-tmp"));
+        let json_bak_tmp = quote(&format!("{HOME}/.claude.json.fleet-bak.fleet-tmp"));
+        let settings_tmp = quote(&format!("{HOME}/.claude/settings.json.fleet-tmp"));
+        let settings_bak_tmp = quote(&format!("{HOME}/.claude/settings.json.fleet-bak.fleet-tmp"));
         let pos = |target: &str| {
             steps
                 .iter()
                 .position(|s| matches!(s, Step::Upload(t, _) if t == target))
                 .unwrap_or_else(|| panic!("no upload to {target}"))
         };
-        assert!(pos(&json_bak) < pos(&json), "backup precedes the rewrite");
-        assert!(pos(&settings_bak) < pos(&settings));
+        assert!(
+            pos(&json_bak_tmp) < pos(&json_tmp),
+            "backup precedes the rewrite"
+        );
+        assert!(pos(&settings_bak_tmp) < pos(&settings_tmp));
         let content = |target: &str| match &steps[pos(target)] {
             Step::Upload(_, c) => c.clone(),
             _ => unreachable!(),
         };
-        assert_eq!(content(&json), merge_mcp_entry("", URL, TOKEN).unwrap());
-        assert_eq!(content(&json_bak), merge_mcp_entry("", URL, TOKEN).unwrap());
-        assert_eq!(content(&settings), expected_settings());
-        assert_eq!(content(&settings_bak), expected_settings());
-        // The backups are 0600 too (touch-private before each upload).
-        assert!(steps.contains(&Step::Script(remote_touch_private_script(
-            CLAUDE_DIR,
+        assert_eq!(content(&json_tmp), merge_mcp_entry("", URL, TOKEN).unwrap());
+        assert_eq!(
+            content(&json_bak_tmp),
+            merge_mcp_entry("", URL, TOKEN).unwrap()
+        );
+        assert_eq!(content(&settings_tmp), expected_settings());
+        assert_eq!(content(&settings_bak_tmp), expected_settings());
+        // Each tmp file is renamed onto its real path — the file is never
+        // truncated in place.
+        assert!(steps.contains(&Step::Script(remote_rename_script(
+            &format!("{CLAUDE_JSON}.fleet-tmp"),
+            CLAUDE_JSON
+        ))));
+        assert!(steps.contains(&Step::Script(remote_rename_script(
+            &format!("{CLAUDE_JSON}.fleet-bak.fleet-tmp"),
             &format!("{CLAUDE_JSON}.fleet-bak")
         ))));
-        assert!(steps.contains(&Step::Script(remote_touch_private_script(
-            CLAUDE_DIR,
+        assert!(steps.contains(&Step::Script(remote_rename_script(
+            &format!("{SETTINGS_JSON}.fleet-tmp"),
+            SETTINGS_JSON
+        ))));
+        assert!(steps.contains(&Step::Script(remote_rename_script(
+            &format!("{SETTINGS_JSON}.fleet-bak.fleet-tmp"),
             &format!("{SETTINGS_JSON}.fleet-bak")
         ))));
+        // The backups are 0600 too (touch-private before each upload) — on
+        // their own `.fleet-tmp` sibling, same as the main files.
+        assert!(steps.contains(&Step::Script(remote_touch_private_script(
+            CLAUDE_DIR,
+            &format!("{CLAUDE_JSON}.fleet-bak.fleet-tmp")
+        ))));
+        assert!(steps.contains(&Step::Script(remote_touch_private_script(
+            CLAUDE_DIR,
+            &format!("{SETTINGS_JSON}.fleet-bak.fleet-tmp")
+        ))));
 
-        // Nothing destructive, ever: no rm / mv / rmdir in the command
-        // skeleton (quoted payloads — the skill markdown — are data, so they
-        // are stripped before the scan).
+        // Nothing destructive beyond the sanctioned tmp-rename dance: no
+        // rmdir / unlink / truncate ever, and the only mv/rm that appear are
+        // `write_host_file_secret`'s own `.fleet-tmp` rename/cleanup — never
+        // an arbitrary path (quoted payloads — the skill markdown — are
+        // data, so they are stripped before the scan).
         // POSIX-ish: a `'…'` segment is inert, a `\` outside quotes escapes
         // the next char (that is how `quote` renders an embedded `'`).
         let skeleton = |body: &str| -> String {
@@ -1175,9 +1332,20 @@ mod tests {
             out
         };
         for c in &calls {
-            let body = skeleton(&c.script().unwrap_or_else(|| c.command()));
-            for bad in ["rm ", "mv ", "rmdir", "unlink", "truncate"] {
+            let raw = c.script().unwrap_or_else(|| c.command());
+            let body = skeleton(&raw);
+            for bad in ["rmdir", "unlink", "truncate"] {
                 assert!(!body.contains(bad), "destructive command in {body}");
+            }
+            if body.contains("mv ") || body.contains("rm ") {
+                // The path itself is quoted (redacted to `'…'` by
+                // `skeleton`), so check the raw, unredacted command for it —
+                // paths are not attacker-controlled data the way skill
+                // markdown content is.
+                assert!(
+                    raw.contains(".fleet-tmp"),
+                    "mv/rm outside the write_host_file_secret tmp-rename dance: {raw}"
+                );
             }
         }
         // Skills are re-shipped (same bytes) — the only unconditional writes.
