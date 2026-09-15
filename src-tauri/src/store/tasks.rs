@@ -144,21 +144,6 @@ impl Store {
         Ok(out)
     }
 
-    /// Attach (or replace) the worker of a queued task.
-    pub fn set_task_worker(
-        &self,
-        id: i64,
-        worker_session_id: i64,
-    ) -> Result<Option<TaskRow>, crate::ipc_error::IpcError> {
-        self.conn
-            .execute(
-                "UPDATE tasks SET worker_session_id = ?1 WHERE id = ?2",
-                rusqlite::params![worker_session_id, id],
-            )
-            .map_err(crate::ipc_error::IpcError::from)?;
-        self.emit_task(id)
-    }
-
     /// `queued → running`; stamps `started_at`. A no-op (returns the current
     /// row) for any other state.
     pub fn mark_task_running(
@@ -231,9 +216,7 @@ mod tests {
         assert_eq!((t.state.as_str(), t.nonce.as_str()), ("queued", "abcd1234"));
         assert_eq!(s.get_task(t.id).unwrap().unwrap(), t);
         assert!(s.get_task(999).unwrap().is_none());
-        let t2 = s.insert_task(None, None, "later", "ffff0000").unwrap();
-        let t2 = s.set_task_worker(t2.id, 2).unwrap().unwrap();
-        assert_eq!(t2.worker_session_id, Some(2));
+        let t2 = s.insert_task(None, Some(2), "later", "ffff0000").unwrap();
         // Listing: newest first, filters.
         let all = s.list_tasks(None, None, None, 50).unwrap();
         assert_eq!(

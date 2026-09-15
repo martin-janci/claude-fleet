@@ -114,8 +114,6 @@ export interface AttentionOptions {
   now: number;
 }
 
-export const DEFAULT_ATTENTION_IDLE_MINUTES = 30;
-
 export type AttentionReason = 'stuck' | 'safe_kill' | 'ghost' | 'failed' | 'idle';
 
 /** Why a row needs the operator, or null when it does not. Checked in

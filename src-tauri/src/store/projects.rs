@@ -531,21 +531,6 @@ impl Store {
         }
     }
 
-    pub fn touch_project_last_session_at(
-        &self,
-        project_id: i64,
-        ts: i64,
-    ) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
-            "UPDATE projects SET last_session_at = MAX(COALESCE(last_session_at, 0), ?1) WHERE id = ?2",
-            rusqlite::params![ts, project_id],
-        )?;
-        if let Some(row) = self.get_project(project_id)? {
-            self.bus.project_updated(&row);
-        }
-        Ok(())
-    }
-
     /// Delete a project and all its associated sessions and worktrees atomically.
     /// Called after `claude project purge` removes Claude's state on the remote machine.
     ///
@@ -946,24 +931,6 @@ mod tests {
         assert!(s
             .delete_project_if_unused(free, &FingerprintKeys::new())
             .unwrap());
-    }
-
-    #[test]
-    fn touch_project_last_session_at_takes_max() {
-        let s = Store::open_in_memory().unwrap();
-        let pid = s.upsert_project("o", "r", "/tmp/r").unwrap();
-        // First write
-        s.touch_project_last_session_at(pid, 1000).unwrap();
-        let rows = s.list_projects().unwrap();
-        assert_eq!(rows[0].last_session_at, Some(1000));
-        // Earlier timestamp shouldn't go backward
-        s.touch_project_last_session_at(pid, 500).unwrap();
-        let rows = s.list_projects().unwrap();
-        assert_eq!(rows[0].last_session_at, Some(1000));
-        // Later timestamp wins
-        s.touch_project_last_session_at(pid, 2000).unwrap();
-        let rows = s.list_projects().unwrap();
-        assert_eq!(rows[0].last_session_at, Some(2000));
     }
 
     #[test]

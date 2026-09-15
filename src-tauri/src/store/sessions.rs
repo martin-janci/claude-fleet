@@ -17,6 +17,7 @@ impl Store {
         fetch_session(&self.conn, tmux_name, host_alias)
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_session(
         &self,
@@ -728,6 +729,7 @@ impl Store {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn delete_sessions_not_in(
         &self,
         host_alias: &str,
@@ -767,6 +769,7 @@ impl Store {
 
     /// Update `claude_status` for the session whose `claude_session_id` matches.
     /// No-ops silently when no row matches (hook arrived before reconcile enriched it).
+    #[cfg(test)]
     pub fn set_claude_status_by_session_id(
         &self,
         claude_session_id: &str,

@@ -90,10 +90,6 @@ export interface ProbePreview {
   } | null;
 }
 
-export async function probeSshAlias(sshAlias: string): Promise<Result<ProbePreview>> {
-  return invokeCmd<ProbePreview>('probe_ssh_alias', { args: { ssh_alias: sshAlias } });
-}
-
 export async function probeSshAliasAbortable(
   sshAlias: string,
   signal?: AbortSignal,

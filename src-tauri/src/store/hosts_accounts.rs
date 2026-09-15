@@ -102,17 +102,6 @@ impl Store {
         Ok(())
     }
 
-    /// Drop a host's token (e.g. when the host is removed). Idempotent.
-    pub fn delete_host_token(&self, host_alias: &str) -> Result<(), crate::ipc_error::IpcError> {
-        self.conn
-            .execute(
-                "DELETE FROM host_tokens WHERE host_alias = ?1",
-                rusqlite::params![host_alias],
-            )
-            .map_err(crate::ipc_error::IpcError::from)?;
-        Ok(())
-    }
-
     fn get_host(&self, alias: &str) -> Result<Option<HostRow>, rusqlite::Error> {
         fetch_host(&self.conn, alias)
     }
@@ -516,10 +505,6 @@ mod tests {
         let all = s.list_host_tokens().unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].host_alias, "local", "alias-ordered");
-
-        s.delete_host_token("mefistos").unwrap();
-        s.delete_host_token("mefistos").unwrap(); // idempotent
-        assert_eq!(s.list_host_tokens().unwrap().len(), 1);
     }
 
     #[test]

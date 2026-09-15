@@ -726,7 +726,8 @@ mod tests {
     ) -> RenderPlan {
         secrets::substitute(&harness.render(a).unwrap(), values)
             .plan
-            .into_inner()
+            .inner()
+            .clone()
     }
 
     /// Make `snap` satisfy `plan` exactly: every file at its real hash,

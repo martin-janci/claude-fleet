@@ -1,15 +1,12 @@
 <script lang="ts">
-  import { selectedProject, selectedSession } from './selection';
-  import ProjectDetails from './ProjectDetails.svelte';
+  import { selectedSession } from './selection';
   import SessionDetails from './SessionDetails.svelte';
 </script>
 
 {#if $selectedSession}
   <SessionDetails session={$selectedSession} />
-{:else if $selectedProject}
-  <ProjectDetails />
 {:else}
-  <p class="empty" data-testid="details-empty">Pick a project or session to see details.</p>
+  <p class="empty" data-testid="details-empty">Pick a session to see details.</p>
 {/if}
 
 <style>
