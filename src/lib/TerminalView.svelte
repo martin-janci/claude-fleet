@@ -945,6 +945,22 @@
     };
   });
 
+  // Where the caret IS, as opposed to where it is drawn. The IME proxy rides
+  // this and not `cursor`, which is null whenever the app hid the cursor
+  // (`CSI ?25l`) — the normal state for a full-screen TUI, Ink-based Claude
+  // Code included. Anchoring the proxy to the overlay parked the candidate
+  // window, the press-and-hold accent popup and the emoji picker in the
+  // pane's top-left corner for exactly the app this terminal exists to run.
+  const caretAt = $derived.by<{ left: number; top: number; h: number } | null>(() => {
+    void renderVersion;
+    if (!screen || cellWidth <= 0 || cellHeight <= 0) return null;
+    return {
+      left: 4 + Math.min(screen.cursorCol, screen.cols - 1) * cellWidth,
+      top: 4 + screen.cursorRow * cellHeight,
+      h: cellHeight,
+    };
+  });
+
   // Selection highlight rects. Touch renderVersion so it tracks resizes/redraws.
   const selRects = $derived.by(() => {
     void renderVersion;
@@ -1022,7 +1038,7 @@
       <textarea
         class="ime-proxy"
         bind:this={imeInput}
-        style="left:{cursor?.left ?? 4}px; top:{cursor?.top ?? 4}px; height:{cursor?.h ?? 16}px"
+        style="left:{caretAt?.left ?? 4}px; top:{caretAt?.top ?? 4}px; height:{caretAt?.h ?? 16}px"
         rows="1"
         autocapitalize="off"
         autocomplete="off"

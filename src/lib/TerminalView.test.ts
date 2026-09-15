@@ -32,6 +32,7 @@ import { toasts, clearToasts } from './toasts';
 import { get } from 'svelte/store';
 import { copyOnSelect } from './prefs';
 import { Screen } from './ansi';
+import { DRAIN_MIN_MS } from './terminal_drain';
 
 function makeSession(over: Partial<SessionRow>): SessionRow {
   return {
@@ -1096,7 +1097,10 @@ describe('TerminalView cursor like a text input', () => {
 describe('TerminalView IME input proxy (F9)', () => {
   const written = () => calls('pty_write').map((c) => (c[1] as { args: { data: string } }).args.data);
 
-  /** Mount, attach, and hand back the proxy the input method types into. */
+  /** Mount, attach, and hand back the proxy the input method types into.
+   *  With `data`, wait out one real drain tick (DRAIN_MIN_MS) so the escape
+   *  sequence has actually reached the screen — this describe runs on real
+   *  timers, and `settle()` alone only flushes Svelte, not the drain loop. */
   async function mountProxy(data = ''): Promise<HTMLTextAreaElement> {
     let served = false;
     inv().mockImplementation(async (cmd: string) => {
@@ -1110,6 +1114,10 @@ describe('TerminalView IME input proxy (F9)', () => {
     render(TerminalView);
     selectSession(onAlpha);
     await settle();
+    if (data !== '') {
+      await new Promise((r) => setTimeout(r, DRAIN_MIN_MS + 30));
+      await settle();
+    }
     return screen.getByTestId('terminal-ime') as HTMLTextAreaElement;
   }
 
@@ -1224,7 +1232,20 @@ describe('TerminalView IME input proxy (F9)', () => {
   it('parks the proxy on the cursor cell so the IME popup opens there', async () => {
     const ime = await mountProxy('\x1b[2;4H');
     const cur = screen.getByTestId('terminal-cursor');
+    expect(parseFloat(cur.style.left)).toBeCloseTo(4 + 3 * 7.8, 5);
     expect(ime.style.left).toBe(cur.style.left);
     expect(ime.style.top).toBe(cur.style.top);
+  });
+
+  it('…and still rides the caret when the app hides the cursor (?25l)', async () => {
+    // Full-screen TUIs — Ink-based Claude Code included — keep the cursor
+    // hidden while they redraw, which is the state this terminal spends most
+    // of its life in. The popup has to open at the caret there too, so the
+    // proxy follows the cursor cell, not the cursor OVERLAY.
+    const ime = await mountProxy('\x1b[?25l\x1b[2;4H');
+    expect(screen.queryByTestId('terminal-cursor')).toBeNull();
+    expect(parseFloat(ime.style.left)).toBeCloseTo(4 + 3 * 7.8, 5);
+    expect(parseFloat(ime.style.top)).toBeCloseTo(4 + 1 * 16, 5);
+    expect(parseFloat(ime.style.height)).toBeCloseTo(16, 5);
   });
 });
