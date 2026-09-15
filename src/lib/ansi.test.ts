@@ -1586,6 +1586,24 @@ describe('ansi.Screen — DECSTBM clamps an oversize bottom margin (U1)', () => 
     s.write('\x1b[6;99r');
     expect([s.scrollTop, s.scrollBottom]).toEqual([1, 3]);
   });
+
+  it('a negative top or bottom margin is ignored, as tmux 3.6a does', () => {
+    // The CSI scanner keeps '-' in the body, so `-1` parses as a negative
+    // parameter. Reference: `\e[-1;4r` in a 20x8 tmux 3.6a pane leaves the
+    // region at rows 0..7.
+    const s = new Screen(6, 10);
+    s.write('\x1b[2;2H\x1b[-1;4r');
+    expect([s.scrollTop, s.scrollBottom]).toEqual([0, 5]);
+    expect([s.cursorRow, s.cursorCol]).toEqual([1, 1]);
+    s.write('\x1b[-3r\x1b[1;-3r');
+    expect([s.scrollTop, s.scrollBottom]).toEqual([0, 5]);
+    // A LF on the bottom row still scrolls the whole screen.
+    s.write('\x1b[1;1H');
+    for (let i = 0; i < 10; i++) s.write(`line${i}\r\n`);
+    expect(s.cells.map((_, r) => rowText(s, r).trim())).toEqual([
+      'line5', 'line6', 'line7', 'line8', 'line9', '',
+    ]);
+  });
 });
 
 describe('ansi.Screen — DEC Special Graphics never stores control chars (U2)', () => {
