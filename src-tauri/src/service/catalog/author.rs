@@ -683,6 +683,11 @@ fn resource_message(kind: Kind, name: &str) -> String {
 // up in the commit); anything else in the repo is untouched, because only
 // this asset's path is ever staged.
 
+/// Resources are base64'd whole into the asset's YAML and committed to the
+/// catalog repo, which is synced to every host — a large pick silently
+/// bloats the repo and every host's clone of it.
+const MAX_RESOURCE_BYTES: u64 = 1024 * 1024;
+
 /// Copy a local file into the asset's `resources/…` and commit it.
 pub fn add_resource(args: AddResourceArgs, store: &Mutex<Store>) -> Result<WriteResult, IpcError> {
     let root = repo_root(store)?;
@@ -691,9 +696,11 @@ pub fn add_resource(args: AddResourceArgs, store: &Mutex<Store>) -> Result<Write
     // `symlink_metadata` does not follow the link, so a symlinked source is
     // rejected rather than silently copied through — the same discipline
     // `repo.rs` applies to everything it reads out of, or removes from, the
-    // repo.
+    // repo. It also gives us the file size up front, before reading a single
+    // byte, to enforce `MAX_RESOURCE_BYTES`.
     let local = PathBuf::from(&args.local_path);
-    let is_regular_file = std::fs::symlink_metadata(&local).is_ok_and(|m| m.is_file());
+    let metadata = std::fs::symlink_metadata(&local).ok();
+    let is_regular_file = metadata.as_ref().is_some_and(|m| m.is_file());
     if !local.is_absolute() || !is_regular_file {
         return Err(IpcError::new(
             E_INVALID,
@@ -702,6 +709,18 @@ pub fn add_resource(args: AddResourceArgs, store: &Mutex<Store>) -> Result<Write
                 args.local_path
             ),
         ));
+    }
+    if let Some(len) = metadata.as_ref().map(|m| m.len()) {
+        if len > MAX_RESOURCE_BYTES {
+            return Err(IpcError::new(
+                E_INVALID,
+                format!(
+                    "{} is {len} bytes, over the {} MiB resource limit",
+                    args.local_path,
+                    MAX_RESOURCE_BYTES / (1024 * 1024)
+                ),
+            ));
+        }
     }
     let rel_path = match args.rel_path {
         Some(p) => p,
@@ -1512,6 +1531,44 @@ mod tests {
             E_ASSET_NOT_FOUND
         );
         assert_eq!(repo_status(&store).unwrap().dirty, 0);
+    }
+
+    #[test]
+    fn add_resource_refuses_a_file_over_the_size_cap() {
+        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = init_repo("resources-cap");
+        let store = configured_store(&root);
+        create(
+            CreateArgs {
+                kind: Kind::Skill,
+                name: "demo".into(),
+                duplicate_from: None,
+            },
+            &store,
+        )
+        .unwrap();
+
+        let src = tmp("resources-cap-src").join("big.bin");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, vec![0u8; (MAX_RESOURCE_BYTES + 1) as usize]).unwrap();
+
+        let err = add_resource(
+            AddResourceArgs {
+                kind: Kind::Skill,
+                name: "demo".into(),
+                local_path: src.to_string_lossy().into(),
+                rel_path: None,
+            },
+            &store,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, E_INVALID);
+        assert!(!root.join("skills/demo/resources/big.bin").exists());
+        assert_eq!(
+            catalog_asset(Kind::Skill, "demo").unwrap().resources.len(),
+            0
+        );
+        assert_eq!(repo_status(&store).unwrap().dirty, 0, "no commit was made");
     }
 
     #[test]
