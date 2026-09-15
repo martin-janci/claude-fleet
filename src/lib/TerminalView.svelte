@@ -15,6 +15,7 @@
   import { createDrainLoop } from './terminal_drain';
   import { createTerminalClipboard, pathsToPasteText } from './terminal_clipboard';
   import { createMouseController } from './terminal_mouse';
+  import { fitCells } from './terminal_size';
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -520,10 +521,8 @@
     // Subtract our own 4px padding (see CSS) from both sides.
     const w = Math.max(1, container.clientWidth - 8);
     const h = Math.max(1, container.clientHeight - 8);
-    return {
-      cols: Math.max(10, Math.floor(w / cw)),
-      rows: Math.max(2, Math.floor(h / ch)),
-    };
+    // MIN_COLS/MIN_ROWS are the same floor pty.rs clamps to — see terminal_size.ts.
+    return fitCells(w, h, cw, ch);
   }
 
   /** Drain the PTY buffer once. Returns true if any bytes were consumed. */
