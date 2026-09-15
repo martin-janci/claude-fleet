@@ -1,0 +1,1 @@
+src/lib/__fixtures__/*.raw.txt -text -diff

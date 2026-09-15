@@ -1,0 +1,23 @@
+⏺ truecolor bold-ul rev
+╭──────╮ ⎿ ✻ │ █
+CJK:中文Y
+emoji: ZX
+accent:áY
+vs16:X️Q
+zwj:👨‍👩‍👧Q
+skin:👋🏽Q
+long:abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcde
+fghijabcdefghijabcdefghijabcdefghijabcdefghij
+
+
+@@done@@
+
+
+
+
+
+
+
+
+
+
