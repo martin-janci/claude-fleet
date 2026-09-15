@@ -101,6 +101,45 @@ describe('createDrainLoop', () => {
     expect(ticks[1] - t1).toBe(30);
   });
 
+  it('bumpDrain during an in-flight tick does not start a second one', async () => {
+    const ticks: number[] = [];
+    const waiting: Array<() => void> = [];
+    let inflight = 0;
+    let peak = 0;
+    const loop = createDrainLoop({
+      drainOnce: async () => {
+        ticks.push(Date.now());
+        inflight += 1;
+        peak = Math.max(peak, inflight);
+        await new Promise<void>((resolve) => waiting.push(resolve));
+        inflight -= 1;
+        return false;
+      },
+      attached: () => true,
+    });
+    loop.start();
+    await vi.advanceTimersByTimeAsync(DRAIN_MIN_MS);
+    expect(inflight).toBe(1);
+
+    // A keystroke (or a paste) lands while the pty_drain round-trip is still
+    // outstanding. The loop is not dead, so nothing new may be scheduled —
+    // two ticks sharing the screen would apply the PTY bytes out of order.
+    loop.bumpDrain();
+    await vi.advanceTimersByTimeAsync(DRAIN_MIN_MS + 5);
+    expect(peak).toBe(1);
+    expect(ticks).toHaveLength(1);
+
+    // The in-flight tick still owns the loop, and the bump is not lost: it
+    // comes back at the floor instead of doubling the idle delay.
+    waiting.shift()!();
+    await vi.advanceTimersByTimeAsync(0);
+    const t1 = Date.now();
+    await vi.advanceTimersByTimeAsync(DRAIN_MIN_MS);
+    expect(ticks).toHaveLength(2);
+    expect(ticks[1] - t1).toBe(DRAIN_MIN_MS);
+    waiting.shift()?.();
+  });
+
   it('stop cancels the pending tick; start resumes at the floor', async () => {
     const { loop, ticks } = setup();
     loop.start();

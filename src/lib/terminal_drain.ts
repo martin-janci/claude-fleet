@@ -20,6 +20,12 @@ export interface DrainHost {
 export function createDrainLoop(host: DrainHost) {
   let drainTimer: ReturnType<typeof setTimeout> | null = null;
   let drainDelay = DRAIN_MIN_MS;
+  // A tick is between `drainOnce()` and its `finally`. `drainTimer` is null for
+  // that whole window, so it alone cannot tell a dead loop from a live one.
+  let running = false;
+  // A bump arrived while that tick was in flight — honour it when the tick
+  // reschedules, instead of letting the idle back-off swallow the keystroke.
+  let bumpedWhileRunning = false;
 
   function scheduleDrain() {
     drainTimer = setTimeout(runDrain, drainDelay);
@@ -34,13 +40,19 @@ export function createDrainLoop(host: DrainHost) {
    *  screen to say so, and only a manual reattach brought it back. */
   async function runDrain() {
     drainTimer = null;
+    running = true;
+    bumpedWhileRunning = false;
     let got = false;
     try {
       got = await host.drainOnce();
     } catch (e) {
       console.error('[terminal] drain tick failed', e);
     } finally {
-      drainDelay = got ? DRAIN_MIN_MS : Math.min(DRAIN_MAX_MS, drainDelay * 2);
+      running = false;
+      drainDelay =
+        got || bumpedWhileRunning
+          ? DRAIN_MIN_MS
+          : Math.min(DRAIN_MAX_MS, drainDelay * 2);
       // Reschedule only if still attached and no newer loop has taken over
       // (a concurrent openTerm would have set its own drainTimer).
       if (host.attached() && drainTimer === null) scheduleDrain();
@@ -58,6 +70,13 @@ export function createDrainLoop(host: DrainHost) {
       clearTimeout(drainTimer);
       drainTimer = null;
       scheduleDrain();
+    } else if (running) {
+      // Not a dead loop: a tick is mid-round-trip and reschedules itself from
+      // its `finally`. Starting one here would run a second `drainOnce`
+      // against the same screen, and the backend hands out disjoint chunks —
+      // the two could apply the PTY bytes out of order. Just ask the tick in
+      // flight to come back at the floor.
+      bumpedWhileRunning = true;
     } else if (host.attached()) {
       scheduleDrain();
     }
@@ -69,7 +88,9 @@ export function createDrainLoop(host: DrainHost) {
     scheduleDrain();
   }
 
-  /** Cancel any pending tick and reset the delay (on close). */
+  /** Cancel any pending tick and reset the delay (on close). A tick already in
+   *  flight is left alone — `drainOnce` drops its bytes once the screen it was
+   *  draining into is gone, and its `finally` sees `attached()` false. */
   function stop() {
     if (drainTimer) {
       clearTimeout(drainTimer);
