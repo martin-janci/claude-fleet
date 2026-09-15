@@ -50,14 +50,39 @@ export function createMouseController(host: MouseHost) {
   /** The last cell (1-based col, row) for which we sent a motion report,
    *  used to throttle: we only send a new report when the cell changes. */
   let lastMotionCell: { col: number; row: number } | null = null;
-  /** Cleanup functions for the window-level mousemove/mouseup listeners added
-   *  on mousedown. Removed on mouseup or component destroy. */
+  /** Cleanup for the window-level mousemove/mouseup listeners of the gesture
+   *  currently in progress. Removed on mouseup, on reset() and on destroy. */
   let removeWindowListeners: (() => void) | null = null;
   /** Accumulated (pixel-normalized) wheel delta not yet turned into reports.
    *  We forward one wheel report per WHEEL_TICK_PX of scroll instead of one
    *  per event, so trackpads (many tiny deltas) don't flood tmux and line-mode
    *  wheels still register — smooth, proportional scrolling either way. */
   let wheelAccum = 0;
+
+  /** Install one gesture's window-level mousemove/mouseup pair, tearing down
+   *  whatever gesture was live before it — a press that skipped that step left
+   *  the previous pair on `window` for good, and with any-motion reporting on
+   *  it kept forwarding a motion report for every pointer move anywhere in the
+   *  app, long after the button was released.
+   *
+   *  Returns THIS gesture's own remover, which its handlers must use: an
+   *  orphaned handler calling the shared handle would tear down the newer
+   *  gesture instead of itself. */
+  function installWindowListeners(
+    onMove: (e: MouseEvent) => void,
+    onUp: (e: MouseEvent) => void,
+  ): () => void {
+    removeWindowListeners?.();
+    const off = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      if (removeWindowListeners === off) removeWindowListeners = null;
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    removeWindowListeners = off;
+    return off;
+  }
 
   /** Map a MouseEvent's client coordinates to a 1-based terminal cell,
    *  clamped to the visible grid. Accounts for the 4px left/top padding. */
@@ -98,22 +123,22 @@ export function createMouseController(host: MouseHost) {
    *  non-empty selection is copied when the pref says so; a plain
    *  single-click that moved nowhere clears any selection instead. */
   function beginLocalSelection(e: MouseEvent, mode: SelectMode, rawAnchor: CellPos, cell: CellPos) {
-    // Tear down any prior in-progress drag before starting a new one, so a
-    // missed mouseup can't leave a stale handler that wipes this selection.
-    removeWindowListeners?.();
     (e.currentTarget as HTMLElement | null)?.focus();
     selecting = true;
     selectMode = mode;
     selectAnchor = rawAnchor;
     applySelection(cell);
+    let off = () => {};
     const handleMove = (ev: MouseEvent) => {
       if (!selecting) return;
       applySelection(cellFromEvent(ev));
     };
     const handleUp = () => {
+      // Unhook first: the early return below (reset() cleared `selecting`
+      // mid-drag) must still leave `window` clean.
+      off();
       if (!selecting) return;
       selecting = false;
-      removeWindowListeners?.();
       const moved =
         selectAnchor !== null && selectFocus !== null &&
         (selectAnchor.row !== selectFocus.row || selectAnchor.col !== selectFocus.col);
@@ -124,13 +149,9 @@ export function createMouseController(host: MouseHost) {
         host.clearSelection();
       }
     };
-    window.addEventListener('mousemove', handleMove);
-    window.addEventListener('mouseup', handleUp);
-    removeWindowListeners = () => {
-      window.removeEventListener('mousemove', handleMove);
-      window.removeEventListener('mouseup', handleUp);
-      removeWindowListeners = null;
-    };
+    // Installing tears down any prior in-progress drag, so a missed mouseup
+    // can't leave a stale handler that wipes this selection.
+    off = installWindowListeners(handleMove, handleUp);
   }
 
   function onWheel(e: WheelEvent) {
@@ -187,9 +208,9 @@ export function createMouseController(host: MouseHost) {
       // Mouse reporting ON, single click → defer: a drag becomes a local
       // selection, a click (no movement) forwards to the app.
       e.preventDefault();
-      removeWindowListeners?.(); // drop any stale in-progress drag first
       (e.currentTarget as HTMLElement | null)?.focus();
       pendingPress = { cell, startX: e.clientX, startY: e.clientY };
+      let off = () => {};
       host.clearSelection();
       const handleMove = (ev: MouseEvent) => {
         if (!pendingPress) return;
@@ -205,7 +226,7 @@ export function createMouseController(host: MouseHost) {
         if (selecting) applySelection(cellFromEvent(ev));
       };
       const handleUp = (ev: MouseEvent) => {
-        removeWindowListeners?.();
+        off();
         if (selecting) {
           selecting = false;
           if (get(copyOnSelect)) void host.copySelection();
@@ -221,13 +242,8 @@ export function createMouseController(host: MouseHost) {
         }
         pendingPress = null;
       };
-      window.addEventListener('mousemove', handleMove);
-      window.addEventListener('mouseup', handleUp);
-      removeWindowListeners = () => {
-        window.removeEventListener('mousemove', handleMove);
-        window.removeEventListener('mouseup', handleUp);
-        removeWindowListeners = null;
-      };
+      // Drops any stale in-progress drag first.
+      off = installWindowListeners(handleMove, handleUp);
       return;
     }
     // Not a left-button local-select gesture. Option-held drags and middle/right
@@ -248,15 +264,16 @@ export function createMouseController(host: MouseHost) {
 
     // Attach window-level listeners so we keep tracking if the pointer
     // leaves the terminal element before the button is released.
+    let off = () => {};
     const handleMove = (ev: MouseEvent) => onWindowMousemove(ev);
-    const handleUp   = (ev: MouseEvent) => onWindowMouseup(ev);
-    window.addEventListener('mousemove', handleMove);
-    window.addEventListener('mouseup', handleUp);
-    removeWindowListeners = () => {
-      window.removeEventListener('mousemove', handleMove);
-      window.removeEventListener('mouseup', handleUp);
-      removeWindowListeners = null;
+    const handleUp = (ev: MouseEvent) => {
+      // Unconditionally: onWindowMouseup early-returns when this gesture's
+      // button was already cleared (a chord's other press got the release),
+      // and these listeners still have to go.
+      onWindowMouseup(ev);
+      off();
     };
+    off = installWindowListeners(handleMove, handleUp);
   }
 
   function onWindowMousemove(e: MouseEvent) {
@@ -286,15 +303,19 @@ export function createMouseController(host: MouseHost) {
     }
     pressedButton = null;
     lastMotionCell = null;
-    removeWindowListeners?.();
   }
 
-  /** Reset any in-progress drag state (on a session switch). */
+  /** Reset any in-progress drag state (on a session switch). The gesture's
+   *  window listeners go with it: its mouseup may never arrive, and leaving
+   *  them installed kept a dead gesture forwarding reports to the new PTY. */
   function reset() {
+    removeWindowListeners?.();
     selecting = false;
     selectAnchor = null;
     selectFocus = null;
     pendingPress = null;
+    pressedButton = null;
+    lastMotionCell = null;
   }
 
   /** Remove the window-level listeners of a gesture still in progress. */
