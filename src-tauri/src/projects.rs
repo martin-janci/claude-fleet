@@ -1,4 +1,4 @@
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
@@ -222,10 +222,10 @@ pub async fn list_worktrees(repo_path: &Path) -> Result<Vec<DiscoveredWorktree>,
         .args(["worktree", "list", "--porcelain"])
         .output()
         .await
-        .map_err(|e| IpcError::new("E_GIT", format!("git worktree list failed: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_GIT, format!("git worktree list failed: {e}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        return Err(IpcError::new("E_GIT", stderr.trim()));
+        return Err(IpcError::new(codes::E_GIT, stderr.trim()));
     }
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     Ok(parse_worktree_porcelain(&stdout)

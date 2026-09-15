@@ -7,6 +7,7 @@
 //! plus the read-only `list_github_repos` (also Task 4).
 
 use crate::cancel::{CancelGuard, CancellationRegistry};
+use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::projects::Layout;
 use crate::repo_url::{clone_url_for, parse_repo_url};
@@ -1518,7 +1519,7 @@ fn git_out(handle: &tokio::runtime::Handle, dir: &str, args: &[&str]) -> Result<
 /// the owner as typed), so the de-duplication belongs here. Takes and drops
 /// the lock; no `.await` while held.
 fn refuse_existing_project(store: &Mutex<Store>, owner: &str, repo: &str) -> Result<(), IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     let exists = s
         .list_projects()?
         .into_iter()
@@ -1551,7 +1552,7 @@ fn existing_project_or_resume(
     local_base: &str,
     create_remote: bool,
 ) -> Result<Option<(String, String)>, IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     let same_name: Vec<_> = s
         .list_projects()?
         .into_iter()
@@ -1579,7 +1580,7 @@ fn existing_project_or_resume(
 /// [`refuse_existing_project`]'s name check. Takes and drops the lock; no
 /// `.await` while held.
 fn refuse_existing_base_path(store: &Mutex<Store>, base_path: &str) -> Result<(), IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     let exists = s
         .list_projects()?
         .into_iter()
@@ -1599,7 +1600,7 @@ fn refuse_existing_base_path(store: &Mutex<Store>, base_path: &str) -> Result<()
 /// projects root — the registered `base_path` always derives from it, even
 /// when the clone lands on a remote host.
 fn roots(store: &Mutex<Store>, host: &str) -> Result<(String, String, Layout), IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     Ok((
         crate::service::projects::project_base_for(&s, host),
         crate::service::projects::local_projects_root(&s)
@@ -1913,7 +1914,7 @@ fn register(
     base_path: &str,
     adopted: bool,
 ) -> Result<ProjectTreeRow, IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     if adopted {
         s.upsert_adopted_project(owner, repo, base_path)?;
     } else {

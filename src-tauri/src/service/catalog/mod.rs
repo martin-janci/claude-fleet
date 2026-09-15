@@ -22,8 +22,8 @@ pub use crate::ipc_error::codes::{
 
 /// The loaded catalog, process-wide. `None` until `load` succeeds. Both the
 /// Tauri commands and the MCP tools read it; only `load` writes it.
-pub static CATALOG: once_cell::sync::Lazy<std::sync::RwLock<Option<repo::Catalog>>> =
-    once_cell::sync::Lazy::new(|| std::sync::RwLock::new(None));
+pub static CATALOG: std::sync::LazyLock<std::sync::RwLock<Option<repo::Catalog>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(None));
 
 pub fn now_secs() -> i64 {
     std::time::SystemTime::now()
@@ -37,6 +37,7 @@ pub fn now_secs() -> i64 {
 pub static CATALOG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 use crate::events::CatalogSummary;
+use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::store::{AssetInventoryRow, CatalogConfigRow, Store};
 use harness::RenderPlan;
@@ -48,10 +49,6 @@ use std::sync::Mutex;
 pub struct ConfigureArgs {
     pub repo_path: String,
     pub remote_url: Option<String>,
-}
-
-fn lock(store: &Mutex<Store>) -> Result<std::sync::MutexGuard<'_, Store>, IpcError> {
-    store.lock().map_err(|_| IpcError::lock())
 }
 
 fn expand_home(p: &str) -> String {

@@ -1,6 +1,7 @@
 //! Provision a host's Claude with the fleet-control skill + MCP server entry.
 
-use crate::ipc_error::IpcError;
+use crate::ipc_error::lock;
+use crate::ipc_error::{codes, IpcError};
 use crate::service::tunnel::TunnelSupervisor;
 use crate::shell::quote;
 use crate::ssh::SshExec;
@@ -133,7 +134,7 @@ pub fn resolve_host_token(
     host: &str,
     rotate: bool,
 ) -> Result<(String, bool), IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     match s.get_host_token(host)? {
         Some(row) if !rotate => Ok((row.token, false)),
         _ => Ok((crate::mcp::generate_token(), true)),
@@ -150,7 +151,7 @@ pub fn commit_host_token(
     if !minted {
         return Ok(());
     }
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     s.upsert_host_token(host, token)
 }
 
@@ -278,9 +279,7 @@ pub async fn provision_hosts(
     rotate: bool,
 ) -> Result<Vec<HostProvisionResult>, IpcError> {
     let hosts = {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = lock(store)?;
         s.list_hosts()?
     };
     let mut results = Vec::new();
@@ -321,12 +320,7 @@ pub fn reestablish_tunnels(
     tunnels: &Arc<TunnelSupervisor>,
     mcp_port: u16,
 ) -> Result<(), IpcError> {
-    let hosts = {
-        store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?
-            .list_hosts()?
-    };
+    let hosts = { lock(store)?.list_hosts()? };
     for h in hosts {
         if h.provisioned && h.alias != "local" && !h.hidden {
             tunnels.ensure(&h.alias, mcp_port, mcp_port);
@@ -365,10 +359,10 @@ pub async fn write_host_file(
     if host == "local" {
         let edir = expand_home_local(dir)?;
         std::fs::create_dir_all(&edir)
-            .map_err(|e| IpcError::new("E_PROVISION", format!("mkdir {edir}: {e}")))?;
+            .map_err(|e| IpcError::new(codes::E_PROVISION, format!("mkdir {edir}: {e}")))?;
         let epath = expand_home_local(path)?;
         std::fs::write(&epath, content)
-            .map_err(|e| IpcError::new("E_PROVISION", format!("write {epath}: {e}")))?;
+            .map_err(|e| IpcError::new(codes::E_PROVISION, format!("write {epath}: {e}")))?;
         return Ok(());
     }
     let script = quote(&remote_write_script(dir, path, content));
@@ -399,17 +393,23 @@ pub async fn write_host_file_secret(
     if host == "local" {
         let edir = expand_home_local(dir)?;
         std::fs::create_dir_all(&edir)
-            .map_err(|e| IpcError::new("E_PROVISION", format!("mkdir {edir}: {e}")))?;
+            .map_err(|e| IpcError::new(codes::E_PROVISION, format!("mkdir {edir}: {e}")))?;
         let epath = expand_home_local(path)?;
         let etmp = expand_home_local(&tmp_path)?;
         let etmp_path = std::path::Path::new(&etmp);
         if let Err(e) = write_private_file(etmp_path, content) {
             let _ = std::fs::remove_file(etmp_path);
-            return Err(IpcError::new("E_PROVISION", format!("write {epath}: {e}")));
+            return Err(IpcError::new(
+                codes::E_PROVISION,
+                format!("write {epath}: {e}"),
+            ));
         }
         if let Err(e) = std::fs::rename(etmp_path, &epath) {
             let _ = std::fs::remove_file(etmp_path);
-            return Err(IpcError::new("E_PROVISION", format!("write {epath}: {e}")));
+            return Err(IpcError::new(
+                codes::E_PROVISION,
+                format!("write {epath}: {e}"),
+            ));
         }
         return Ok(());
     }
@@ -424,14 +424,14 @@ pub async fn write_host_file_secret(
         None => tmp_path.clone(),
     };
     let spool = PrivateTempFile::create(content)
-        .map_err(|e| IpcError::new("E_PROVISION", format!("spool secret for {path}: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_PROVISION, format!("spool secret for {path}: {e}")))?;
     if let Err(e) = ssh
         .upload_file(host, spool.path(), &abs_tmp, PROVISION_TIMEOUT)
         .await
     {
         remove_remote_tmp(ssh, host, &tmp_path).await;
         return Err(IpcError::new(
-            "E_PROVISION",
+            codes::E_PROVISION,
             format!("write {path} on {host}: {}", e.message),
         ));
     }
@@ -534,7 +534,7 @@ async fn run_remote_write(
         .await?;
     if !out.status.success() {
         return Err(IpcError::new(
-            "E_PROVISION",
+            codes::E_PROVISION,
             format!(
                 "write {path} on {host}: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
@@ -604,7 +604,8 @@ fn remote_rename_script(tmp: &str, path: &str) -> String {
 /// on the local path; leaving it literal would create a directory named `~`
 /// in the process's cwd (`remote_path` handles the same case remotely).
 fn expand_home_local(path: &str) -> Result<String, IpcError> {
-    let home = || std::env::var("HOME").map_err(|_| IpcError::new("E_PROVISION", "HOME not set"));
+    let home =
+        || std::env::var("HOME").map_err(|_| IpcError::new(codes::E_PROVISION, "HOME not set"));
     if path == "~" {
         return home();
     }
@@ -624,14 +625,14 @@ pub fn merge_mcp_entry(existing: &str, url: &str, token: &str) -> Result<String,
     } else {
         serde_json::from_str(existing).map_err(|e| {
             IpcError::new(
-                "E_PROVISION",
+                codes::E_PROVISION,
                 format!("~/.claude.json is not valid JSON: {e}"),
             )
         })?
     };
     if !root.is_object() {
         return Err(IpcError::new(
-            "E_PROVISION",
+            codes::E_PROVISION,
             "~/.claude.json is not a JSON object",
         ));
     }
@@ -642,7 +643,7 @@ pub fn merge_mcp_entry(existing: &str, url: &str, token: &str) -> Result<String,
         .or_insert_with(|| serde_json::json!({}));
     if !servers.is_object() {
         return Err(IpcError::new(
-            "E_PROVISION",
+            codes::E_PROVISION,
             "mcpServers is not a JSON object",
         ));
     }
@@ -655,7 +656,7 @@ pub fn merge_mcp_entry(existing: &str, url: &str, token: &str) -> Result<String,
         }),
     );
     serde_json::to_string_pretty(&root)
-        .map_err(|e| IpcError::new("E_PROVISION", format!("serialize: {e}")))
+        .map_err(|e| IpcError::new(codes::E_PROVISION, format!("serialize: {e}")))
 }
 
 #[cfg(test)]

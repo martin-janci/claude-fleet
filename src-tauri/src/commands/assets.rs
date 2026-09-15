@@ -2,6 +2,7 @@
 //! `service::catalog`; this file only adapts `tauri::State` to plain refs.
 
 use crate::cancel::CancellationRegistry;
+use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::service::catalog::{
     self,
@@ -143,7 +144,7 @@ pub fn catalog_import_host(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<ImportReport, IpcError> {
     let token = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(&store)?;
         s.get_setting(crate::mcp::SETTING_TOKEN)?
     };
     catalog::import_host(args, &store, token.as_deref())
@@ -195,7 +196,7 @@ pub fn catalog_last_sync(
 pub fn catalog_list_secrets(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<SecretRow>, IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(&store)?;
     Ok(s.list_secrets()?)
 }
 
@@ -210,7 +211,7 @@ pub fn catalog_set_secret(
             format!("invalid secret name '{}'; use [A-Z0-9_]+", args.name),
         ));
     }
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(&store)?;
     Ok(s.set_secret(&args.name, args.host_alias.as_deref(), &args.value)?)
 }
 
@@ -219,7 +220,7 @@ pub fn catalog_delete_secret(
     args: DeleteSecretArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<bool, IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(&store)?;
     Ok(s.delete_secret(&args.name, args.host_alias.as_deref())?)
 }
 

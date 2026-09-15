@@ -14,6 +14,7 @@
 use super::model::{is_valid_name, Kind};
 use super::require_config;
 use crate::cancel::CancellationRegistry;
+use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::service::add_project::{add_project, AddProjectArgs, AddProjectSource};
 use crate::service::sessions::{new_session, send_prompt, NewSessionArgs, SendPromptArgs};
@@ -170,7 +171,7 @@ pub async fn ensure_catalog_project(
     repo_path: &str,
 ) -> Result<i64, IpcError> {
     let existing = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         s.list_projects()?
             .into_iter()
             .find(|p| same_path(repo_path, &p.base_path))

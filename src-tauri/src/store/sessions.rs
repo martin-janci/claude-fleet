@@ -787,8 +787,7 @@ impl Store {
         );
         let changed = self
             .conn
-            .execute(&sql, rusqlite::params![status, claude_session_id, now])
-            .map_err(crate::ipc_error::IpcError::from)?;
+            .execute(&sql, rusqlite::params![status, claude_session_id, now])?;
         if changed > 0 {
             // Emit session_updated so the frontend patches the row in real-time.
             if let Ok(row) = self.fetch_session_by_claude_id(claude_session_id) {
@@ -809,16 +808,13 @@ impl Store {
         claude_session_id: &str,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
         let now = now_unix();
-        let changed = self
-            .conn
-            .execute(
-                "UPDATE sessions SET claude_status = 'idle', turn_seq = turn_seq + 1, \
+        let changed = self.conn.execute(
+            "UPDATE sessions SET claude_status = 'idle', turn_seq = turn_seq + 1, \
                  last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
                  idle_since = COALESCE(idle_since, ?2) \
                  WHERE claude_session_id = ?1",
-                rusqlite::params![claude_session_id, now],
-            )
-            .map_err(crate::ipc_error::IpcError::from)?;
+            rusqlite::params![claude_session_id, now],
+        )?;
         if changed == 0 {
             return Ok(None);
         }
@@ -836,14 +832,11 @@ impl Store {
         &self,
         claude_session_id: &str,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
-        let changed = self
-            .conn
-            .execute(
-                "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
+        let changed = self.conn.execute(
+            "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
                  last_hook_at = ?2 WHERE claude_session_id = ?1",
-                rusqlite::params![claude_session_id, now_unix()],
-            )
-            .map_err(crate::ipc_error::IpcError::from)?;
+            rusqlite::params![claude_session_id, now_unix()],
+        )?;
         if changed == 0 {
             return Ok(None);
         }
@@ -862,16 +855,13 @@ impl Store {
         claude_session_id: &str,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
         let now = now_unix();
-        let changed = self
-            .conn
-            .execute(
-                "UPDATE sessions SET claude_status = 'stopped', last_turn_at = ?2, \
+        let changed = self.conn.execute(
+            "UPDATE sessions SET claude_status = 'stopped', last_turn_at = ?2, \
                  last_hook_at = ?2, idle_since = COALESCE(idle_since, ?2), \
                  stuck_kind = NULL, stuck_since = NULL \
                  WHERE claude_session_id = ?1",
-                rusqlite::params![claude_session_id, now],
-            )
-            .map_err(crate::ipc_error::IpcError::from)?;
+            rusqlite::params![claude_session_id, now],
+        )?;
         if changed == 0 {
             return Ok(None);
         }
@@ -926,13 +916,10 @@ impl Store {
             Some(Some(k)) => Some(k.as_str()),
             _ => None,
         };
-        let changed = self
-            .conn
-            .execute(
-                &sql,
-                rusqlite::params![claude_session_id, now, kind, status],
-            )
-            .map_err(crate::ipc_error::IpcError::from)?;
+        let changed = self.conn.execute(
+            &sql,
+            rusqlite::params![claude_session_id, now, kind, status],
+        )?;
         if changed == 0 {
             return Ok(None);
         }
@@ -983,12 +970,10 @@ impl Store {
         claude_session_id: &str,
         path: &str,
     ) -> Result<(), crate::ipc_error::IpcError> {
-        self.conn
-            .execute(
-                "UPDATE sessions SET transcript_path = ?1 WHERE claude_session_id = ?2",
-                rusqlite::params![path, claude_session_id],
-            )
-            .map_err(crate::ipc_error::IpcError::from)?;
+        self.conn.execute(
+            "UPDATE sessions SET transcript_path = ?1 WHERE claude_session_id = ?2",
+            rusqlite::params![path, claude_session_id],
+        )?;
         Ok(())
     }
 
@@ -1029,12 +1014,9 @@ impl Store {
         &self,
         claude_session_id: &str,
     ) -> Result<SessionRow, crate::ipc_error::IpcError> {
-        let mut stmt = self
-            .conn
-            .prepare(&format!(
-                "SELECT {SESSION_COLUMNS} FROM sessions WHERE claude_session_id = ?1"
-            ))
-            .map_err(crate::ipc_error::IpcError::from)?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions WHERE claude_session_id = ?1"
+        ))?;
         stmt.query_row(rusqlite::params![claude_session_id], |row| {
             map_session_row(row)
         })

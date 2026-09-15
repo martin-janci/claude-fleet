@@ -1,6 +1,7 @@
 //! MCP tools: prompts, broadcasts, messages, inbox and history.
 
 use super::*;
+use crate::ipc_error::lock;
 
 #[tool_router(router = messaging_router, vis = "pub(super)")]
 impl FleetTools {
@@ -72,10 +73,7 @@ impl FleetTools {
             &caller,
         )?;
         let interval = {
-            let s = self
-                .store
-                .lock()
-                .map_err(|_| mcp_err("E_LOCK", "store mutex poisoned", None))?;
+            let s = lock(&self.store).map_err(to_mcp_err)?;
             guard::broadcast_interval(
                 s.get_setting(guard::SETTING_BROADCAST_INTERVAL)
                     .ok()
@@ -118,10 +116,7 @@ impl FleetTools {
         audit("session_history", &format!("session_id={}", p.session_id));
         let limit = p.limit.unwrap_or(50);
         let events = {
-            let s = self
-                .store
-                .lock()
-                .map_err(|_| to_mcp_err(IpcError::new("E_LOCK", "store mutex poisoned")))?;
+            let s = lock(&self.store).map_err(to_mcp_err)?;
             s.list_session_events(p.session_id, limit)
                 .map_err(to_mcp_err)?
         };
@@ -156,10 +151,7 @@ impl FleetTools {
         // The sender must exist and, for a per-host caller, live on that
         // host — otherwise any agent could spoof any `from_session_id`.
         let from_host = {
-            let s = self
-                .store
-                .lock()
-                .map_err(|_| mcp_err("E_LOCK", "store mutex poisoned", None))?;
+            let s = lock(&self.store).map_err(to_mcp_err)?;
             s.get_session_by_id(p.from_session_id)
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?
                 .ok_or_else(|| {
@@ -214,10 +206,7 @@ impl FleetTools {
         );
         if !caller.is_master() {
             let host = {
-                let s = self
-                    .store
-                    .lock()
-                    .map_err(|_| mcp_err("E_LOCK", "store mutex poisoned", None))?;
+                let s = lock(&self.store).map_err(to_mcp_err)?;
                 s.get_session_by_id(p.session_id)
                     .map_err(|e| to_mcp_err(IpcError::from(e)))?
                     .ok_or_else(|| {

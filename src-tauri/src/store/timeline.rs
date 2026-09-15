@@ -23,21 +23,17 @@ impl Store {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        self.conn
-            .execute(
-                "INSERT INTO session_events (session_id, at, kind, detail) \
+        self.conn.execute(
+            "INSERT INTO session_events (session_id, at, kind, detail) \
                  VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![session_id, at, kind, detail],
-            )
-            .map_err(crate::ipc_error::IpcError::from)?;
-        self.conn
-            .execute(
-                "DELETE FROM session_events WHERE session_id=?1 AND id NOT IN (\
+            rusqlite::params![session_id, at, kind, detail],
+        )?;
+        self.conn.execute(
+            "DELETE FROM session_events WHERE session_id=?1 AND id NOT IN (\
                    SELECT id FROM session_events WHERE session_id=?1 \
                    ORDER BY at DESC, id DESC LIMIT ?2)",
-                rusqlite::params![session_id, SESSION_EVENTS_CAP],
-            )
-            .map_err(crate::ipc_error::IpcError::from)?;
+            rusqlite::params![session_id, SESSION_EVENTS_CAP],
+        )?;
         Ok(())
     }
 
@@ -49,27 +45,22 @@ impl Store {
         session_id: i64,
         limit: i64,
     ) -> Result<Vec<SessionEvent>, crate::ipc_error::IpcError> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT id, session_id, at, kind, detail FROM session_events \
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, at, kind, detail FROM session_events \
                  WHERE session_id = ?1 ORDER BY at DESC, id DESC LIMIT ?2",
-            )
-            .map_err(crate::ipc_error::IpcError::from)?;
-        let rows = stmt
-            .query_map(rusqlite::params![session_id, limit], |row| {
-                Ok(SessionEvent {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    at: row.get(2)?,
-                    kind: row.get(3)?,
-                    detail: row.get(4)?,
-                })
+        )?;
+        let rows = stmt.query_map(rusqlite::params![session_id, limit], |row| {
+            Ok(SessionEvent {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                at: row.get(2)?,
+                kind: row.get(3)?,
+                detail: row.get(4)?,
             })
-            .map_err(crate::ipc_error::IpcError::from)?;
+        })?;
         let mut out = Vec::new();
         for r in rows {
-            out.push(r.map_err(crate::ipc_error::IpcError::from)?);
+            out.push(r?);
         }
         Ok(out)
     }
@@ -89,14 +80,12 @@ impl Store {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        self.conn
-            .execute(
-                "INSERT INTO session_messages \
+        self.conn.execute(
+            "INSERT INTO session_messages \
                    (from_session_id, to_session_id, body, kind, sent_at, reply_to) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![from_session_id, to_session_id, body, kind, at, reply_to],
-            )
-            .map_err(crate::ipc_error::IpcError::from)?;
+            rusqlite::params![from_session_id, to_session_id, body, kind, at, reply_to],
+        )?;
         Ok(self.conn.last_insert_rowid())
     }
 
@@ -135,16 +124,11 @@ impl Store {
              WHERE to_session_id = ?1 \
              ORDER BY sent_at DESC, id DESC LIMIT ?2"
         };
-        let mut stmt = self
-            .conn
-            .prepare(sql)
-            .map_err(crate::ipc_error::IpcError::from)?;
-        let rows = stmt
-            .query_map(rusqlite::params![to_session_id, limit], map_message_row)
-            .map_err(crate::ipc_error::IpcError::from)?;
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(rusqlite::params![to_session_id, limit], map_message_row)?;
         let mut out = Vec::new();
         for r in rows {
-            out.push(r.map_err(crate::ipc_error::IpcError::from)?);
+            out.push(r?);
         }
         Ok(out)
     }
@@ -175,8 +159,7 @@ impl Store {
         }
         let n = self
             .conn
-            .execute(sql.as_str(), rusqlite::params_from_iter(params))
-            .map_err(crate::ipc_error::IpcError::from)?;
+            .execute(sql.as_str(), rusqlite::params_from_iter(params))?;
         Ok(n)
     }
 }

@@ -3,6 +3,8 @@
 //! the `list_sessions` / `refresh_sessions` / `reconcile_now` entry points.
 
 use super::*;
+use crate::ipc_error::codes;
+use crate::ipc_error::lock;
 
 /// Number of pane lines captured per work session for the reconcile intel
 /// probe. Eight lines covers the REPL footer (status bar / context %) plus the
@@ -72,7 +74,7 @@ impl HostShell for RealHostShell {
         let out = run_host_script(&self.ssh, host, script, self.timeout).await?;
         if !out.status.success() {
             return Err(IpcError::new(
-                "E_SHELL",
+                codes::E_SHELL,
                 String::from_utf8_lossy(&out.stderr).trim().to_string(),
             ));
         }
@@ -89,7 +91,7 @@ pub(crate) struct NoHostShell;
 #[async_trait::async_trait]
 impl HostShell for NoHostShell {
     async fn run_script(&self, _host: &str, _script: &str) -> Result<String, IpcError> {
-        Err(IpcError::new("E_SHELL", "no shell in this test"))
+        Err(IpcError::new(codes::E_SHELL, "no shell in this test"))
     }
 }
 
@@ -109,9 +111,9 @@ pub(crate) async fn run_host_script(
             .args(["-lc", script])
             .output();
         match tokio::time::timeout(timeout, child).await {
-            Ok(res) => res.map_err(|e| IpcError::new("E_SHELL", format!("spawn bash: {e}"))),
+            Ok(res) => res.map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}"))),
             Err(_) => Err(IpcError::new(
-                "E_TIMEOUT",
+                codes::E_TIMEOUT,
                 format!("local script exceeded {}s", timeout.as_secs()),
             )),
         }
@@ -332,8 +334,7 @@ impl ReconcileGate {
 
 /// The process-wide gate every production entry point shares.
 pub fn reconcile_gate() -> &'static ReconcileGate {
-    static GATE: once_cell::sync::Lazy<ReconcileGate> =
-        once_cell::sync::Lazy::new(ReconcileGate::new);
+    static GATE: std::sync::LazyLock<ReconcileGate> = std::sync::LazyLock::new(ReconcileGate::new);
     &GATE
 }
 
@@ -870,7 +871,7 @@ pub(super) async fn probe_with_timeout(
             );
             return HostProbe {
                 host,
-                result: Err(IpcError::new("E_TIMEOUT", "host probe timed out")),
+                result: Err(IpcError::new(codes::E_TIMEOUT, "host probe timed out")),
                 agent_rows: Vec::new(),
                 agent_mtimes: None,
                 intel: PaneIntelMap::new(),
@@ -915,7 +916,7 @@ pub(crate) async fn reconcile_sessions_with(
     //    `set_host_account` is a no-op UPDATE against a row that doesn't
     //    exist).
     {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         s.upsert_host("local")?;
     }
     // Sync the local Claude account every pass — not just once — so an
@@ -932,7 +933,7 @@ pub(crate) async fn reconcile_sessions_with(
 
     // 1. Snapshot under lock (brief). Ensure local host exists first.
     let hosts = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         s.upsert_host("local")?;
         s.list_hosts()?
             .into_iter()
@@ -983,11 +984,11 @@ pub(crate) async fn reconcile_sessions_with(
     //    The project list is identical for every host — fetch it once here
     //    rather than re-querying inside `find_project_id_for_path` per session.
     let projects = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         s.list_projects()?
     };
     for probe in &probed {
-        let mut s = store.lock().map_err(|_| IpcError::lock())?;
+        let mut s = lock(store)?;
         // Per-host isolation: one host's DB write failure (e.g. an FK
         // violation on a stale account_uuid) must NOT abort reconcile for
         // every other host. apply_host_reconcile is transactional, so a
@@ -1060,7 +1061,7 @@ pub(super) async fn list_sessions_with(
         // rather than queue a second fleet-wide probe behind it.
         run_full_reconcile(store, deps, gate).await?;
     }
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     s.list_all_sessions().map_err(IpcError::from)
 }
 
@@ -1071,12 +1072,12 @@ pub(super) async fn reconcile_one_host_with(
 ) -> Result<(), IpcError> {
     // 1. Snapshot the host under lock (brief).
     let (host, paths) = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let host = s
             .list_hosts()?
             .into_iter()
             .find(|h| h.alias == alias)
-            .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("host {alias} not found")))?;
+            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("host {alias} not found")))?;
         let paths = HostPaths::for_host(&s, alias);
         (host, paths)
     };
@@ -1086,7 +1087,7 @@ pub(super) async fn reconcile_one_host_with(
 
     // 3. Apply writes under one brief lock, via the SAME per-host write path
     //    as the multi-host reconcile (single transaction + emit-after-commit).
-    let mut s = store.lock().map_err(|_| IpcError::lock())?;
+    let mut s = lock(store)?;
     let projects = s.list_projects()?;
     reconcile_write_one_host(&mut s, &probe, &projects)
 }

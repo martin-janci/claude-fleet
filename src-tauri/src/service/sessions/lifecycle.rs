@@ -2,6 +2,8 @@
 //! friendly name, restart, recreate, and dismissing ghosts.
 
 use super::*;
+use crate::ipc_error::codes;
+use crate::ipc_error::lock;
 use crate::service::repair::{render_git_script_expecting, BranchSource, Step, MIRROR_REFUSED};
 use crate::ssh::SshExec;
 
@@ -281,10 +283,10 @@ pub(super) async fn create_worktree_local(
         .args(["-lc", &script])
         .output()
         .await
-        .map_err(|e| IpcError::new("E_GIT_SETUP", format!("bash: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_GIT_SETUP, format!("bash: {e}")))?;
     if !out.status.success() {
         return Err(IpcError::new(
-            "E_GIT_SETUP",
+            codes::E_GIT_SETUP,
             String::from_utf8_lossy(&out.stderr).trim().to_string(),
         ));
     }
@@ -303,7 +305,7 @@ pub async fn new_session(
     // caller that doesn't care): mint it here so every caller shares the
     // same convention and the same collision policy.
     if args.name.trim().is_empty() {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         args.name = fill_session_name(&s, &args)?;
     }
     crate::validate::tmux_name(&args.name)?;
@@ -315,7 +317,7 @@ pub async fn new_session(
         crate::validate::git_ref(name)?;
         if name == "main" || name == "master" {
             return Err(IpcError::new(
-                "E_INVALID",
+                codes::E_INVALID,
                 "worktree name must not be 'main' or 'master'",
             ));
         }
@@ -435,9 +437,7 @@ pub(super) async fn new_session_inner(
         if let Some(ref name) = args.new_worktree {
             // NEW WORKTREE: create branch + worktree, return the new dir.
             let base_path = {
-                let s = store
-                    .lock()
-                    .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+                let s = lock(store)?;
                 let mut stmt = s
                     .conn_ref()
                     .prepare("SELECT base_path FROM projects WHERE id=?1")?;
@@ -449,9 +449,7 @@ pub(super) async fn new_session_inner(
                 create_worktree_local(&base_path, name, args.base_branch.as_deref()).await?,
             )
         } else {
-            let s = store
-                .lock()
-                .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+            let s = lock(store)?;
             if let Some(wid) = args.worktree_id {
                 // A worktree row names a checkout on ONE host — refuse a
                 // remote host's row here just as the remote arm below refuses
@@ -475,14 +473,12 @@ pub(super) async fn new_session_inner(
         if let Some(ref name) = args.new_worktree {
             // NEW WORKTREE on remote: ensure clone exists, then create worktree.
             let (owner, repo) = {
-                let s = store
-                    .lock()
-                    .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+                let s = lock(store)?;
                 fetch_owner_repo(&s, args.project_id)?
             };
             let home = ssh.remote_home(&args.host_alias).await?;
             let (project_root, _) = {
-                let s = store.lock().map_err(|_| IpcError::lock())?;
+                let s = lock(store)?;
                 remote_project_path_for(&s, &args.host_alias, &home, &owner, &repo, None)
             };
             ensure_remote_project(
@@ -509,16 +505,14 @@ pub(super) async fn new_session_inner(
                 .await?;
             if !out.status.success() {
                 return Err(IpcError::new(
-                    "E_GIT_SETUP",
+                    codes::E_GIT_SETUP,
                     String::from_utf8_lossy(&out.stderr).trim().to_string(),
                 ));
             }
             PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string())
         } else {
             let (owner, repo, wt_info) = {
-                let s = store
-                    .lock()
-                    .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+                let s = lock(store)?;
                 let (owner, repo) = fetch_owner_repo(&s, args.project_id)?;
                 let wt = if let Some(wid) = args.worktree_id {
                     // (name, branch, host_alias, path) — the row names a
@@ -537,7 +531,7 @@ pub(super) async fn new_session_inner(
             // worktree name (only its discarded second return value, the
             // `.claude/worktrees/<name>` cwd guess, does) — pass `None`.
             let (project_root, _) = {
-                let s = store.lock().map_err(|_| IpcError::lock())?;
+                let s = lock(store)?;
                 remote_project_path_for(&s, &args.host_alias, &home, &owner, &repo, None)
             };
             // The pane's cwd: for an existing non-main worktree, the row's
@@ -626,16 +620,14 @@ pub(super) async fn new_session_inner(
             Some(crate::service::repair::event_detail(rep)),
         );
     }
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = lock(store)?;
     let row = s
         .list_sessions_for_host(&args.host_alias)?
         .into_iter()
         .find(|r| r.tmux_name == args.name)
         .ok_or_else(|| {
             IpcError::new(
-                "E_INTERNAL",
+                codes::E_INTERNAL,
                 format!(
                     "session {} on {} vanished after creation",
                     args.name, args.host_alias
@@ -673,7 +665,7 @@ pub(super) async fn new_session_inner(
         s.set_session_kind(row.id, "shell", None)?;
         return s
             .get_session(&args.name, &args.host_alias)?
-            .ok_or_else(|| IpcError::new("E_INTERNAL", "session vanished after kind tag"));
+            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "session vanished after kind tag"));
     }
     // Persist the minted Claude session id. Soft-fail: the session is live; a
     // failed write just means a future recreate falls back to `cl --continue`.
@@ -840,9 +832,7 @@ pub async fn kill_session(
     // Look up id BEFORE killing so we can return it after. Read the controller
     // under the same lock and refuse to nuke ourselves unless forced.
     let (id, kind, claude_sid, claude_status) = {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = lock(store)?;
         guard_not_controller(
             s.get_controller()?.as_ref(),
             &args.host_alias,
@@ -852,7 +842,10 @@ pub async fn kill_session(
         s.get_session(&args.name, &args.host_alias)?
             .map(|r| (r.id, r.kind, r.claude_session_id, r.claude_status))
             .ok_or_else(|| {
-                IpcError::new("E_NOTFOUND", format!("session {} not found", args.name))
+                IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("session {} not found", args.name),
+                )
             })?
     };
     if args.name.starts_with("bg:") {
@@ -871,9 +864,7 @@ pub async fn kill_session(
         };
         match bg_kill_action(&kind, status, &agents, &sid)? {
             BgKillAction::Dismiss => {
-                let s = store
-                    .lock()
-                    .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+                let s = lock(store)?;
                 if let Err(e) = s.insert_session_event(id, "killed", None) {
                     tracing::warn!(session_id = id, error = %e, "[event] insert killed failed");
                 }
@@ -928,15 +919,13 @@ pub async fn rename_session(
     let tmux = exec_for(&args.host_alias, ssh);
     tmux.rename_session(&args.old_name, &args.new_name).await?;
     reconcile_one_host(store, ssh, &args.host_alias).await?;
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = lock(store)?;
     // `new_name` is validated verbatim (no padding), so look it up as-is —
     // consistent with kill_session / restart_session.
     s.get_session(&args.new_name, &args.host_alias)?
         .ok_or_else(|| {
             IpcError::new(
-                "E_NOTFOUND",
+                codes::E_NOTFOUND,
                 format!(
                     "renamed session {} on {} did not appear in list",
                     args.new_name, args.host_alias
@@ -972,13 +961,11 @@ pub fn set_session_friendly_name(
     } else {
         Some(trimmed)
     };
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = lock(store)?;
     s.set_friendly_name(&args.host_alias, &args.tmux_name, value)?
         .ok_or_else(|| {
             IpcError::new(
-                "E_NOTFOUND",
+                codes::E_NOTFOUND,
                 format!(
                     "session {} not found on {}",
                     args.tmux_name, args.host_alias
@@ -1008,9 +995,7 @@ pub async fn restart_session(
     // the controller under the same lock and refuse to restart ourselves
     // unless forced.
     let (kind, claude_id, session_id) = {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = lock(store)?;
         guard_not_controller(
             s.get_controller()?.as_ref(),
             &args.host_alias,
@@ -1057,12 +1042,10 @@ pub async fn restart_session(
         None => tmux.restart_session(&args.name, &pane_cmd).await?,
     }
     reconcile_one_host(store, ssh, &args.host_alias).await?;
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = lock(store)?;
     s.get_session(&args.name, &args.host_alias)?.ok_or_else(|| {
         IpcError::new(
-            "E_NOTFOUND",
+            codes::E_NOTFOUND,
             format!(
                 "restarted session {} on {} did not appear in list",
                 args.name, args.host_alias
@@ -1117,12 +1100,10 @@ pub async fn recreate_session(
     // hosts the cwd is finalized off-lock (needs `ssh.remote_home`), because the
     // local DB path is meaningless on the other machine.
     let (sess, cwd_src, pane_cmd) = {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = lock(store)?;
         let sess = s
             .get_session_by_id(args.session_id)?
-            .ok_or_else(|| IpcError::new("E_NOTFOUND", "session not found"))?;
+            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?;
         // Refuse to nuke-and-rebuild ourselves unless forced.
         guard_not_controller(
             s.get_controller()?.as_ref(),
@@ -1132,10 +1113,10 @@ pub async fn recreate_session(
         )?;
         let host = s
             .get_host_row(&sess.host_alias)?
-            .ok_or_else(|| IpcError::new("E_NOTFOUND", "host not found"))?;
+            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "host not found"))?;
         if !host.reachable {
             return Err(IpcError::new(
-                "E_HOST_OFFLINE",
+                codes::E_HOST_OFFLINE,
                 format!("host {} is not reachable", host.alias),
             ));
         }
@@ -1174,12 +1155,10 @@ pub async fn recreate_session(
 
     // Mark the row live again and return it.
     let row = {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = lock(store)?;
         let row = s
             .restore_session(sess.id)?
-            .ok_or_else(|| IpcError::new("E_INTERNAL", "session vanished after restore"))?;
+            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "session vanished after restore"))?;
         // Task G: record the recreate on the (preserved) row. Best-effort.
         if let Err(e) = s.insert_session_event(sess.id, "recreated", None) {
             tracing::warn!(
@@ -1202,15 +1181,13 @@ pub fn dismiss_ghost_session(
     args: DismissGhostSessionArgs,
     store: &Mutex<Store>,
 ) -> Result<(), IpcError> {
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = lock(store)?;
     let sess = s
         .get_session_by_id(args.session_id)?
-        .ok_or_else(|| IpcError::new("E_NOTFOUND", "session not found"))?;
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?;
     if sess.status != "ghost" {
         return Err(IpcError::new(
-            "E_INVALID_STATE",
+            codes::E_INVALID_STATE,
             format!(
                 "session {} is not a ghost (status={})",
                 sess.id, sess.status

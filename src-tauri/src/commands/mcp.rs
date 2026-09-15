@@ -10,7 +10,8 @@
 //! answer path (`mcp_confirm`, `mcp_pending_confirms`).
 
 use crate::cancel::CancellationRegistry;
-use crate::ipc_error::IpcError;
+use crate::ipc_error::lock;
+use crate::ipc_error::{codes, IpcError};
 use crate::mcp::{self, McpGuards, McpRuntime};
 use crate::ssh::SshClient;
 use crate::store::Store;
@@ -56,7 +57,7 @@ pub struct McpConfigureArgs {
 /// and persists a token on first call so the UI always has one to display.
 fn status(store: &Mutex<Store>, runtime: &Mutex<McpRuntime>) -> Result<McpStatus, IpcError> {
     let (enabled, port, token, confirm_destructive) = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let enabled = s.get_setting(mcp::SETTING_ENABLED)?.as_deref() == Some("true");
         let port = s
             .get_setting(mcp::SETTING_PORT)?
@@ -76,7 +77,7 @@ fn status(store: &Mutex<Store>, runtime: &Mutex<McpRuntime>) -> Result<McpStatus
             == Some("true");
         (enabled, port, token, confirm)
     };
-    let rt = runtime.lock().map_err(|_| IpcError::lock())?;
+    let rt = lock(runtime)?;
     Ok(McpStatus {
         enabled,
         running: rt.is_running(),
@@ -108,7 +109,7 @@ pub async fn mcp_configure(
 ) -> Result<McpStatus, IpcError> {
     // 1. Persist the requested settings.
     {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(&store)?;
         if let Some(p) = args.port {
             s.set_setting(mcp::SETTING_PORT, &p.to_string())?;
         }
@@ -129,7 +130,7 @@ pub async fn mcp_configure(
 
     // 2. Stop whatever is running — a port/token change is applied by restart.
     {
-        let mut rt = runtime.lock().map_err(|_| IpcError::lock())?;
+        let mut rt = lock(&runtime)?;
         rt.stop();
     }
     if !args.enabled {
@@ -139,7 +140,7 @@ pub async fn mcp_configure(
     // 3. If enabled, (re)start with the persisted port + token.
     if args.enabled {
         let (port, token) = {
-            let s = store.lock().map_err(|_| IpcError::lock())?;
+            let s = lock(&store)?;
             let port = s
                 .get_setting(mcp::SETTING_PORT)?
                 .and_then(|p| p.parse::<u16>().ok())
@@ -164,7 +165,7 @@ pub async fn mcp_configure(
             token,
         )
         .await;
-        let mut rt = runtime.lock().map_err(|_| IpcError::lock())?;
+        let mut rt = lock(&runtime)?;
         match result {
             Ok(shutdown) => {
                 // Re-establish tunnels for already-provisioned hosts (best-effort).
@@ -194,13 +195,13 @@ pub async fn mcp_configure(
 /// Read the configured port, refusing when the control API has never been
 /// enabled (no master token yet — nothing to provision against).
 fn configured_port(store: &Mutex<Store>) -> Result<u16, IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     let has_master = s
         .get_setting(mcp::SETTING_TOKEN)?
         .is_some_and(|t| !t.is_empty());
     if !has_master {
         return Err(IpcError::new(
-            "E_PROVISION",
+            codes::E_PROVISION,
             "enable the control API first (no token yet)",
         ));
     }
@@ -255,7 +256,7 @@ impl From<crate::store::HostTokenRow> for HostTokenInfo {
 pub fn list_host_tokens(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<HostTokenInfo>, IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(&store)?;
     Ok(s.list_host_tokens()?
         .into_iter()
         .map(HostTokenInfo::from)
@@ -268,7 +269,7 @@ pub fn parse_mode(mode: &str) -> Result<&'static str, IpcError> {
         "full" => Ok("full"),
         "readonly" => Ok("readonly"),
         other => Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("token mode must be 'full' or 'readonly', got {other:?}"),
         )),
     }
@@ -282,11 +283,11 @@ pub fn set_host_token_mode(
 ) -> Result<HostTokenInfo, IpcError> {
     crate::validate::host_alias(&host_alias)?;
     let mode = parse_mode(&mode)?;
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(&store)?;
     s.set_host_token_mode(&host_alias, mode)?;
     s.get_host_token(&host_alias)?
         .map(HostTokenInfo::from)
-        .ok_or_else(|| IpcError::new("E_NOTFOUND", "host token vanished"))
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "host token vanished"))
 }
 
 /// Mint a fresh token for one host and re-provision it (the new token is
@@ -310,10 +311,10 @@ pub async fn rotate_host_token(
         true,
     )
     .await?;
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(&store)?;
     s.get_host_token(&host_alias)?
         .map(HostTokenInfo::from)
-        .ok_or_else(|| IpcError::new("E_NOTFOUND", "host token vanished"))
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "host token vanished"))
 }
 
 // ---------------------------------------------------------------------------
@@ -439,7 +440,7 @@ pub(crate) fn merge_hook_into_settings_json(
         // `merge_mcp_entry` for ~/.claude.json.
         serde_json::from_str(existing).map_err(|e| {
             IpcError::new(
-                "E_PROVISION",
+                codes::E_PROVISION,
                 format!("~/.claude/settings.json is not valid JSON, refusing to overwrite it: {e}"),
             )
         })?
@@ -447,7 +448,7 @@ pub(crate) fn merge_hook_into_settings_json(
 
     if !settings.is_object() {
         return Err(IpcError::new(
-            "E_PARSE",
+            codes::E_PARSE,
             "settings.json root is not a JSON object",
         ));
     }
@@ -485,7 +486,7 @@ pub(crate) fn merge_hook_into_settings_json(
         .entry("hooks")
         .or_insert(serde_json::json!({}))
         .as_object_mut()
-        .ok_or_else(|| IpcError::new("E_PARSE", "hooks is not an object"))?;
+        .ok_or_else(|| IpcError::new(codes::E_PARSE, "hooks is not an object"))?;
 
     for (event, matcher) in FLEET_HOOK_EVENTS {
         let mut arr = strip_fleet(hooks.get(*event).unwrap_or(&serde_json::json!([])));
@@ -496,7 +497,8 @@ pub(crate) fn merge_hook_into_settings_json(
         hooks.insert((*event).to_string(), arr);
     }
 
-    serde_json::to_string_pretty(&settings).map_err(|e| IpcError::new("E_SERIALIZE", e.to_string()))
+    serde_json::to_string_pretty(&settings)
+        .map_err(|e| IpcError::new(codes::E_SERIALIZE, e.to_string()))
 }
 
 /// Install (or update) the fleet hook in the local `~/.claude/settings.json`.
@@ -516,13 +518,13 @@ pub fn install_fleet_hook(
 ) -> Result<String, IpcError> {
     if host_alias != "local" {
         return Err(IpcError::new(
-            "E_UNSUPPORTED",
+            codes::E_UNSUPPORTED,
             "install_fleet_hook only supports the local host; use Provision hosts for remote ones",
         ));
     }
 
     let port = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(&store)?;
         s.get_setting(mcp::SETTING_PORT)?
             .and_then(|p| p.parse::<u16>().ok())
             .unwrap_or(mcp::DEFAULT_PORT)
@@ -530,10 +532,10 @@ pub fn install_fleet_hook(
     let token = local_hook_token(&store)?;
 
     {
-        let rt = runtime.lock().map_err(|_| IpcError::lock())?;
+        let rt = lock(&runtime)?;
         if !rt.is_running() {
             return Err(IpcError::new(
-                "E_NOT_RUNNING",
+                codes::E_NOT_RUNNING,
                 "MCP server is not running — enable it in Settings > MCP first",
             ));
         }
@@ -552,13 +554,13 @@ pub fn install_fleet_hook(
 /// The `local` host's per-host token, minted on first use. Refuses when the
 /// control API has never been enabled (no master token yet).
 fn local_hook_token(store: &Mutex<Store>) -> Result<String, IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     let has_master = s
         .get_setting(mcp::SETTING_TOKEN)?
         .is_some_and(|t| !t.is_empty());
     if !has_master {
         return Err(IpcError::new(
-            "E_NO_TOKEN",
+            codes::E_NO_TOKEN,
             "MCP token not configured — enable the MCP server first",
         ));
     }
@@ -574,8 +576,9 @@ fn local_hook_token(store: &Mutex<Store>) -> Result<String, IpcError> {
 
 /// `~/.claude/settings.json` on this machine.
 fn local_settings_path() -> Result<std::path::PathBuf, IpcError> {
-    Ok(dirs::home_dir()
-        .ok_or_else(|| IpcError::new("E_HOME", "cannot determine home directory"))?
+    Ok(directories::BaseDirs::new()
+        .map(|b| b.home_dir().to_path_buf())
+        .ok_or_else(|| IpcError::new(codes::E_HOME, "cannot determine home directory"))?
         .join(".claude")
         .join("settings.json"))
 }
@@ -602,7 +605,7 @@ pub(crate) fn install_hook_at(
 ) -> Result<HookInstall, IpcError> {
     let existing = if settings_path.exists() {
         std::fs::read_to_string(settings_path)
-            .map_err(|e| IpcError::new("E_IO", format!("read settings.json: {e}")))?
+            .map_err(|e| IpcError::new(codes::E_IO, format!("read settings.json: {e}")))?
     } else {
         String::new()
     };
@@ -614,17 +617,18 @@ pub(crate) fn install_hook_at(
 
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| IpcError::new("E_IO", format!("create .claude dir: {e}")))?;
+            .map_err(|e| IpcError::new(codes::E_IO, format!("create .claude dir: {e}")))?;
     }
     // Back up the previous file before touching it (it may carry the user's
     // permissions/env), then write the merged file 0600 from creation.
     if !existing.trim().is_empty() {
         let bak = settings_path.with_extension("json.fleet-bak");
-        crate::service::provision::write_private_file(&bak, &existing)
-            .map_err(|e| IpcError::new("E_IO", format!("write settings.json.fleet-bak: {e}")))?;
+        crate::service::provision::write_private_file(&bak, &existing).map_err(|e| {
+            IpcError::new(codes::E_IO, format!("write settings.json.fleet-bak: {e}"))
+        })?;
     }
     crate::service::provision::write_private_file(settings_path, &merged)
-        .map_err(|e| IpcError::new("E_IO", format!("write settings.json: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_IO, format!("write settings.json: {e}")))?;
     Ok(HookInstall::Written)
 }
 

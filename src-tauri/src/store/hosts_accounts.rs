@@ -1,6 +1,7 @@
 //! Hosts, accounts and per-host MCP tokens.
 
 use super::*;
+use crate::ipc_error::codes;
 
 /// Whether `last_seen_at` moved enough to be worth a database write: newly
 /// known, cleared, or more than 10 minutes later (or earlier) than the
@@ -22,25 +23,20 @@ impl Store {
     /// this per request and compares in constant time, so a token never
     /// runs through a SQL string comparison.
     pub fn list_host_tokens(&self) -> Result<Vec<HostTokenRow>, crate::ipc_error::IpcError> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT host_alias, token, created_at, mode FROM host_tokens ORDER BY host_alias",
-            )
-            .map_err(crate::ipc_error::IpcError::from)?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(HostTokenRow {
-                    host_alias: row.get(0)?,
-                    token: row.get(1)?,
-                    created_at: row.get(2)?,
-                    mode: row.get(3)?,
-                })
+        let mut stmt = self.conn.prepare(
+            "SELECT host_alias, token, created_at, mode FROM host_tokens ORDER BY host_alias",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(HostTokenRow {
+                host_alias: row.get(0)?,
+                token: row.get(1)?,
+                created_at: row.get(2)?,
+                mode: row.get(3)?,
             })
-            .map_err(crate::ipc_error::IpcError::from)?;
+        })?;
         let mut out = Vec::new();
         for r in rows {
-            out.push(r.map_err(crate::ipc_error::IpcError::from)?);
+            out.push(r?);
         }
         Ok(out)
     }
@@ -67,15 +63,13 @@ impl Store {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        self.conn
-            .execute(
-                "INSERT INTO host_tokens (host_alias, token, created_at, mode) \
+        self.conn.execute(
+            "INSERT INTO host_tokens (host_alias, token, created_at, mode) \
                  VALUES (?1, ?2, ?3, 'full') \
                  ON CONFLICT(host_alias) DO UPDATE SET \
                    token = excluded.token, created_at = excluded.created_at",
-                rusqlite::params![host_alias, token, at],
-            )
-            .map_err(crate::ipc_error::IpcError::from)?;
+            rusqlite::params![host_alias, token, at],
+        )?;
         Ok(())
     }
 
@@ -86,16 +80,13 @@ impl Store {
         host_alias: &str,
         mode: &str,
     ) -> Result<(), crate::ipc_error::IpcError> {
-        let n = self
-            .conn
-            .execute(
-                "UPDATE host_tokens SET mode = ?2 WHERE host_alias = ?1",
-                rusqlite::params![host_alias, mode],
-            )
-            .map_err(crate::ipc_error::IpcError::from)?;
+        let n = self.conn.execute(
+            "UPDATE host_tokens SET mode = ?2 WHERE host_alias = ?1",
+            rusqlite::params![host_alias, mode],
+        )?;
         if n == 0 {
             return Err(crate::ipc_error::IpcError::new(
-                "E_NOTFOUND",
+                codes::E_NOTFOUND,
                 format!("host {host_alias} has no control-API token (provision it first)"),
             ));
         }
@@ -334,30 +325,24 @@ impl Store {
         if let Some(n) = trimmed {
             if n.chars().count() > 32 {
                 return Err(crate::ipc_error::IpcError::new(
-                    "E_INVALID",
+                    codes::E_INVALID,
                     "nickname must be 32 characters or fewer",
                 ));
             }
         }
-        let n = self
-            .conn
-            .execute(
-                "UPDATE accounts SET nickname = ?1 WHERE uuid = ?2",
-                rusqlite::params![trimmed, uuid],
-            )
-            .map_err(crate::ipc_error::IpcError::from)?;
+        let n = self.conn.execute(
+            "UPDATE accounts SET nickname = ?1 WHERE uuid = ?2",
+            rusqlite::params![trimmed, uuid],
+        )?;
         if n == 0 {
             return Err(crate::ipc_error::IpcError::new(
-                "E_NOTFOUND",
+                codes::E_NOTFOUND,
                 format!("account {uuid} not found"),
             ));
         }
-        let row = self
-            .get_account_by_uuid(uuid)
-            .map_err(crate::ipc_error::IpcError::from)?
-            .ok_or_else(|| {
-                crate::ipc_error::IpcError::new("E_INTERNAL", format!("account {uuid} vanished"))
-            })?;
+        let row = self.get_account_by_uuid(uuid)?.ok_or_else(|| {
+            crate::ipc_error::IpcError::new(codes::E_INTERNAL, format!("account {uuid} vanished"))
+        })?;
         self.bus.account_upserted(&row);
         Ok(row)
     }

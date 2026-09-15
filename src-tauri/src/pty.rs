@@ -1,4 +1,4 @@
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
@@ -268,7 +268,7 @@ pub fn pty_open(
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(clamp_size(args.cols, args.rows))
-        .map_err(|e| IpcError::new("E_PTY", format!("openpty: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_PTY, format!("openpty: {e}")))?;
 
     let mux_opts = if args.host_alias == "local" {
         Vec::new()
@@ -285,16 +285,16 @@ pub fn pty_open(
     let child = pair
         .slave
         .spawn_command(cmd)
-        .map_err(|e| IpcError::new("E_PTY", format!("spawn tmux attach: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_PTY, format!("spawn tmux attach: {e}")))?;
 
     let mut reader = pair
         .master
         .try_clone_reader()
-        .map_err(|e| IpcError::new("E_PTY", format!("clone reader: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_PTY, format!("clone reader: {e}")))?;
     let writer = pair
         .master
         .take_writer()
-        .map_err(|e| IpcError::new("E_PTY", format!("take writer: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_PTY, format!("take writer: {e}")))?;
 
     // A FRESH buffer for each open. The previous PTY's reader thread may
     // still be alive momentarily (kill+wait is best-effort and the thread
@@ -305,7 +305,7 @@ pub fn pty_open(
     {
         let mut s = state
             .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
+            .map_err(|_| IpcError::new(codes::E_LOCK, "pty mutex poisoned"))?;
         s.install(pair.master, writer, child, Arc::clone(&buffer_for_thread));
     }
 
@@ -380,11 +380,11 @@ fn drain_from(state: &Mutex<PtyState>) -> Result<PtyDrainResult, IpcError> {
     let raw: Vec<u8> = {
         let s = state
             .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
+            .map_err(|_| IpcError::new(codes::E_LOCK, "pty mutex poisoned"))?;
         let mut buf = s
             .buffer
             .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "pty buffer poisoned"))?;
+            .map_err(|_| IpcError::new(codes::E_LOCK, "pty buffer poisoned"))?;
         if buf.is_empty() {
             return Ok(PtyDrainResult {
                 data: String::new(),
@@ -397,11 +397,11 @@ fn drain_from(state: &Mutex<PtyState>) -> Result<PtyDrainResult, IpcError> {
     if valid_end < raw.len() {
         let s = state
             .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
+            .map_err(|_| IpcError::new(codes::E_LOCK, "pty mutex poisoned"))?;
         let mut buf = s
             .buffer
             .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "pty buffer poisoned"))?;
+            .map_err(|_| IpcError::new(codes::E_LOCK, "pty buffer poisoned"))?;
         buf.splice(0..0, raw[valid_end..].iter().copied());
     }
     Ok(PtyDrainResult {
@@ -425,17 +425,17 @@ pub fn pty_write(args: PtyWriteArgs, state: State<'_, Mutex<PtyState>>) -> Resul
 fn write_to(state: &Mutex<PtyState>, data: &str) -> Result<(), IpcError> {
     let mut s = state
         .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
+        .map_err(|_| IpcError::new(codes::E_LOCK, "pty mutex poisoned"))?;
     let writer = s
         .writer
         .as_mut()
-        .ok_or_else(|| IpcError::new("E_PTY_CLOSED", "no PTY open"))?;
+        .ok_or_else(|| IpcError::new(codes::E_PTY_CLOSED, "no PTY open"))?;
     writer
         .write_all(data.as_bytes())
-        .map_err(|e| IpcError::new("E_PTY", format!("write: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_PTY, format!("write: {e}")))?;
     writer
         .flush()
-        .map_err(|e| IpcError::new("E_PTY", format!("flush: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_PTY, format!("flush: {e}")))?;
     Ok(())
 }
 
@@ -455,14 +455,14 @@ pub fn pty_resize(args: PtyResizeArgs, state: State<'_, Mutex<PtyState>>) -> Res
 fn resize_in(state: &Mutex<PtyState>, cols: u16, rows: u16) -> Result<(), IpcError> {
     let s = state
         .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
+        .map_err(|_| IpcError::new(codes::E_LOCK, "pty mutex poisoned"))?;
     let master = s
         .master
         .as_ref()
-        .ok_or_else(|| IpcError::new("E_PTY_CLOSED", "no PTY open"))?;
+        .ok_or_else(|| IpcError::new(codes::E_PTY_CLOSED, "no PTY open"))?;
     master
         .resize(clamp_size(cols, rows))
-        .map_err(|e| IpcError::new("E_PTY", format!("resize: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_PTY, format!("resize: {e}")))?;
     Ok(())
 }
 
@@ -470,7 +470,7 @@ fn resize_in(state: &Mutex<PtyState>, cols: u16, rows: u16) -> Result<(), IpcErr
 pub fn pty_close(state: State<'_, Mutex<PtyState>>) -> Result<(), IpcError> {
     let mut s = state
         .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
+        .map_err(|_| IpcError::new(codes::E_LOCK, "pty mutex poisoned"))?;
     s.close();
     Ok(())
 }

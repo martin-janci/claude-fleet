@@ -5,6 +5,7 @@
 //! `generate_handler!` list in `lib.rs`), so adding, removing or renaming one
 //! needs a `REGEN_DOCS` run; changing a signature or body does not.
 
+use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::mcp::McpRuntime;
 use crate::service::diagnostics::{self, DiagnosticsBundle, DiagnosticsInputs};
@@ -81,7 +82,7 @@ pub fn collect_diagnostics(
     let data_dir = managed_data_dir(&app)?;
     let log_dir = crate::logging::log_dir_in(&data_dir);
     let (mcp_running, mcp_bind_error) = {
-        let rt = runtime.lock().map_err(|_| IpcError::lock())?;
+        let rt = lock(&runtime)?;
         (rt.is_running(), rt.last_error().map(str::to_string))
     };
     let mut bundle = diagnostics::collect(

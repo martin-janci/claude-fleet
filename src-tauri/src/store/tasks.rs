@@ -1,6 +1,7 @@
 //! Dispatched tasks and their state transitions.
 
 use super::*;
+use crate::ipc_error::codes;
 
 impl Store {
     /// Create a task in state `queued`. Returns the row. Emits `task_updated`.
@@ -11,24 +12,22 @@ impl Store {
         prompt: &str,
         nonce: &str,
     ) -> Result<TaskRow, crate::ipc_error::IpcError> {
-        self.conn
-            .execute(
-                "INSERT INTO tasks (requester_session_id, worker_session_id, prompt, state, \
+        self.conn.execute(
+            "INSERT INTO tasks (requester_session_id, worker_session_id, prompt, state, \
                                     created_at, nonce) \
                  VALUES (?1, ?2, ?3, 'queued', ?4, ?5)",
-                rusqlite::params![
-                    requester_session_id,
-                    worker_session_id,
-                    prompt,
-                    now_unix(),
-                    nonce
-                ],
-            )
-            .map_err(crate::ipc_error::IpcError::from)?;
+            rusqlite::params![
+                requester_session_id,
+                worker_session_id,
+                prompt,
+                now_unix(),
+                nonce
+            ],
+        )?;
         let id = self.conn.last_insert_rowid();
-        let row = self
-            .fetch_task(id)?
-            .ok_or_else(|| crate::ipc_error::IpcError::new("E_DB", "task vanished after insert"))?;
+        let row = self.fetch_task(id)?.ok_or_else(|| {
+            crate::ipc_error::IpcError::new(codes::E_INTERNAL, "task vanished after insert")
+        })?;
         self.bus.task_updated(&row);
         Ok(row)
     }
@@ -60,47 +59,37 @@ impl Store {
         host: Option<&str>,
         limit: i64,
     ) -> Result<Vec<TaskRow>, crate::ipc_error::IpcError> {
-        let mut stmt = self
-            .conn
-            .prepare(&format!(
-                "SELECT {cols} FROM tasks t \
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {cols} FROM tasks t \
                  LEFT JOIN sessions r ON r.id = t.requester_session_id \
                  LEFT JOIN sessions w ON w.id = t.worker_session_id \
                  WHERE (?1 IS NULL OR t.requester_session_id = ?1) \
                    AND (?2 IS NULL OR t.state = ?2) \
                    AND (?3 IS NULL OR r.host_alias = ?3 OR w.host_alias = ?3) \
                  ORDER BY t.created_at DESC, t.id DESC LIMIT ?4",
-                cols = task_columns_t()
-            ))
-            .map_err(crate::ipc_error::IpcError::from)?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params![requester_session_id, state, host, limit],
-                map_task_row,
-            )
-            .map_err(crate::ipc_error::IpcError::from)?;
+            cols = task_columns_t()
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![requester_session_id, state, host, limit],
+            map_task_row,
+        )?;
         let mut out = Vec::new();
         for r in rows {
-            out.push(r.map_err(crate::ipc_error::IpcError::from)?);
+            out.push(r?);
         }
         Ok(out)
     }
 
     /// Every `queued` / `running` task (oldest first), for the liveness sweep.
     pub fn open_tasks(&self) -> Result<Vec<TaskRow>, crate::ipc_error::IpcError> {
-        let mut stmt = self
-            .conn
-            .prepare(&format!(
-                "SELECT {TASK_COLUMNS} FROM tasks WHERE state IN ('queued','running') \
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {TASK_COLUMNS} FROM tasks WHERE state IN ('queued','running') \
                  ORDER BY created_at ASC, id ASC"
-            ))
-            .map_err(crate::ipc_error::IpcError::from)?;
-        let rows = stmt
-            .query_map([], map_task_row)
-            .map_err(crate::ipc_error::IpcError::from)?;
+        ))?;
+        let rows = stmt.query_map([], map_task_row)?;
         let mut out = Vec::new();
         for r in rows {
-            out.push(r.map_err(crate::ipc_error::IpcError::from)?);
+            out.push(r?);
         }
         Ok(out)
     }
@@ -111,12 +100,10 @@ impl Store {
         id: i64,
         claude_session_id: &str,
     ) -> Result<(), crate::ipc_error::IpcError> {
-        self.conn
-            .execute(
-                "UPDATE tasks SET worker_claude_session_id = ?1 WHERE id = ?2",
-                rusqlite::params![claude_session_id, id],
-            )
-            .map_err(crate::ipc_error::IpcError::from)?;
+        self.conn.execute(
+            "UPDATE tasks SET worker_claude_session_id = ?1 WHERE id = ?2",
+            rusqlite::params![claude_session_id, id],
+        )?;
         Ok(())
     }
 
@@ -126,20 +113,15 @@ impl Store {
         &self,
         worker_session_id: i64,
     ) -> Result<Vec<TaskRow>, crate::ipc_error::IpcError> {
-        let mut stmt = self
-            .conn
-            .prepare(&format!(
-                "SELECT {TASK_COLUMNS} FROM tasks \
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {TASK_COLUMNS} FROM tasks \
                  WHERE worker_session_id = ?1 AND state IN ('queued','running') \
                  ORDER BY created_at ASC, id ASC"
-            ))
-            .map_err(crate::ipc_error::IpcError::from)?;
-        let rows = stmt
-            .query_map(rusqlite::params![worker_session_id], map_task_row)
-            .map_err(crate::ipc_error::IpcError::from)?;
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![worker_session_id], map_task_row)?;
         let mut out = Vec::new();
         for r in rows {
-            out.push(r.map_err(crate::ipc_error::IpcError::from)?);
+            out.push(r?);
         }
         Ok(out)
     }
@@ -150,13 +132,11 @@ impl Store {
         &self,
         id: i64,
     ) -> Result<Option<TaskRow>, crate::ipc_error::IpcError> {
-        self.conn
-            .execute(
-                "UPDATE tasks SET state = 'running', started_at = ?1 \
+        self.conn.execute(
+            "UPDATE tasks SET state = 'running', started_at = ?1 \
                  WHERE id = ?2 AND state = 'queued'",
-                rusqlite::params![now_unix(), id],
-            )
-            .map_err(crate::ipc_error::IpcError::from)?;
+            rusqlite::params![now_unix(), id],
+        )?;
         self.emit_task(id)
     }
 
@@ -174,18 +154,15 @@ impl Store {
     ) -> Result<(Option<TaskRow>, bool), crate::ipc_error::IpcError> {
         if !TASK_TERMINAL_STATES.contains(&state) {
             return Err(crate::ipc_error::IpcError::new(
-                "E_INVALID",
+                codes::E_INVALID,
                 format!("{state} is not a terminal task state"),
             ));
         }
-        let changed = self
-            .conn
-            .execute(
-                "UPDATE tasks SET state = ?1, result = ?2, error = ?3, finished_at = ?4 \
+        let changed = self.conn.execute(
+            "UPDATE tasks SET state = ?1, result = ?2, error = ?3, finished_at = ?4 \
                  WHERE id = ?5 AND state IN ('queued','running')",
-                rusqlite::params![state, result, error, now_unix(), id],
-            )
-            .map_err(crate::ipc_error::IpcError::from)?;
+            rusqlite::params![state, result, error, now_unix(), id],
+        )?;
         let row = if changed > 0 {
             self.emit_task(id)?
         } else {

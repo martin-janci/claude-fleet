@@ -1,6 +1,8 @@
 //! MCP tools: fleet health, usage, hosts, accounts and provisioning.
 
 use super::*;
+use crate::ipc_error::codes;
+use crate::ipc_error::lock;
 
 #[tool_router(router = fleet_router, vis = "pub(super)")]
 impl FleetTools {
@@ -47,10 +49,7 @@ impl FleetTools {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let report = {
-            let s = self
-                .store
-                .lock()
-                .map_err(|_| mcp_err("E_LOCK", "store mutex poisoned", None))?;
+            let s = lock(&self.store).map_err(to_mcp_err)?;
             usage::report(&s, host.as_deref(), p.since_secs, now).map_err(to_mcp_err)?
         };
         ok_json(&report)
@@ -155,17 +154,14 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit("provision_hosts", &format!("rotate={}", p.rotate));
         let port = {
-            let s = self
-                .store
-                .lock()
-                .map_err(|_| to_mcp_err(IpcError::new("E_LOCK", "store mutex poisoned")))?;
+            let s = lock(&self.store).map_err(to_mcp_err)?;
             let has_master = s
                 .get_setting(crate::mcp::SETTING_TOKEN)
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?
                 .is_some_and(|t| !t.is_empty());
             if !has_master {
                 return Err(to_mcp_err(IpcError::new(
-                    "E_PROVISION",
+                    codes::E_PROVISION,
                     "control API has no token yet",
                 )));
             }

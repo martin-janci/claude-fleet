@@ -9,6 +9,7 @@
 //! takes the store lock internally.
 
 use super::super::harness::{ConfigMerge, FileWrite, RenderPlan};
+use crate::ipc_error::lock;
 use crate::ipc_error::IpcError;
 use crate::mcp::SETTING_PORT;
 use crate::store::Store;
@@ -43,7 +44,7 @@ pub fn resolve(
     store: &Mutex<Store>,
     host_alias: &str,
 ) -> Result<BTreeMap<String, String>, IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     let mut values = BTreeMap::new();
 
     let port = s

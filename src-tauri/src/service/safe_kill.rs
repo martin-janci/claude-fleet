@@ -9,7 +9,8 @@
 //! captures pane scrollback, finds the last line containing the per-request
 //! nonce, and branches on whether the marker says READY or FAILED.
 
-use crate::ipc_error::IpcError;
+use crate::ipc_error::lock;
+use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::{SessionRow, Store};
@@ -142,13 +143,12 @@ pub async fn safe_kill_session(
     // Read + state-update happens under one lock; the SSH send afterwards is
     // off-lock.
     let (session_id, nonce) = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let row = s
-            .get_session(&args.tmux_name, &args.host_alias)
-            .map_err(IpcError::from)?
+            .get_session(&args.tmux_name, &args.host_alias)?
             .ok_or_else(|| {
                 IpcError::new(
-                    "E_NOTFOUND",
+                    codes::E_NOTFOUND,
                     format!(
                         "session {} not found on {}",
                         args.tmux_name, args.host_alias
@@ -157,19 +157,18 @@ pub async fn safe_kill_session(
             })?;
         if row.status != "running" {
             return Err(IpcError::new(
-                "E_NOT_ALIVE",
+                codes::E_NOT_ALIVE,
                 format!("session {} is not running", args.tmux_name),
             ));
         }
         if row.safe_kill_state.as_deref() == Some("requested") {
             return Err(IpcError::new(
-                "E_SAFE_KILL_IN_PROGRESS",
+                codes::E_SAFE_KILL_IN_PROGRESS,
                 "a safe-kill request is already in flight for this session",
             ));
         }
         let nonce = make_nonce();
-        s.set_safe_kill_requested(row.id, &nonce, now_secs())
-            .map_err(IpcError::from)?;
+        s.set_safe_kill_requested(row.id, &nonce, now_secs())?;
         // Best-effort timeline entry.
         let _ = s.insert_session_event(row.id, "safe_kill_requested", Some(&nonce));
         (row.id, nonce)
@@ -198,10 +197,13 @@ pub async fn safe_kill_session(
         return Err(e);
     }
 
-    let s = store.lock().map_err(|_| IpcError::lock())?;
-    s.get_session_by_id(session_id)
-        .map_err(IpcError::from)?
-        .ok_or_else(|| IpcError::new("E_NOTFOUND", "session vanished after safe-kill request"))
+    let s = lock(store)?;
+    s.get_session_by_id(session_id)?.ok_or_else(|| {
+        IpcError::new(
+            codes::E_NOTFOUND,
+            "session vanished after safe-kill request",
+        )
+    })
 }
 
 /// Inspect a worktree-backed session so the UI can decide whether to even
@@ -216,13 +218,12 @@ pub async fn inspect_safe_kill(
     crate::validate::tmux_name_addressable(&args.tmux_name)?;
 
     let (worktree_path, _project_base) = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let row = s
-            .get_session(&args.tmux_name, &args.host_alias)
-            .map_err(IpcError::from)?
+            .get_session(&args.tmux_name, &args.host_alias)?
             .ok_or_else(|| {
                 IpcError::new(
-                    "E_NOTFOUND",
+                    codes::E_NOTFOUND,
                     format!(
                         "session {} not found on {}",
                         args.tmux_name, args.host_alias
@@ -230,11 +231,11 @@ pub async fn inspect_safe_kill(
                 )
             })?;
         let wt = match row.worktree_id {
-            Some(wid) => s.worktree_path(wid).map_err(IpcError::from)?,
+            Some(wid) => s.worktree_path(wid)?,
             None => None,
         };
         let base = match row.project_id {
-            Some(pid) => s.project_base_path(pid).map_err(IpcError::from)?,
+            Some(pid) => s.project_base_path(pid)?,
             None => None,
         };
         (wt, base)
@@ -359,13 +360,12 @@ pub async fn discard_kill_session(
     crate::validate::tmux_name_addressable(&args.tmux_name)?;
 
     let (session_id, worktree_id, worktree_path, project_base) = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let row = s
-            .get_session(&args.tmux_name, &args.host_alias)
-            .map_err(IpcError::from)?
+            .get_session(&args.tmux_name, &args.host_alias)?
             .ok_or_else(|| {
                 IpcError::new(
-                    "E_NOTFOUND",
+                    codes::E_NOTFOUND,
                     format!(
                         "session {} not found on {}",
                         args.tmux_name, args.host_alias
@@ -373,11 +373,11 @@ pub async fn discard_kill_session(
                 )
             })?;
         let wt = match row.worktree_id {
-            Some(wid) => s.worktree_path(wid).map_err(IpcError::from)?,
+            Some(wid) => s.worktree_path(wid)?,
             None => None,
         };
         let base = match row.project_id {
-            Some(pid) => s.project_base_path(pid).map_err(IpcError::from)?,
+            Some(pid) => s.project_base_path(pid)?,
             None => None,
         };
         (row.id, row.worktree_id, wt, base)
@@ -394,7 +394,7 @@ pub async fn discard_kill_session(
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             return Err(IpcError::new(
-                "E_WORKTREE_REMOVE",
+                codes::E_WORKTREE_REMOVE,
                 format!("git worktree remove failed: {}", stderr.trim()),
             ));
         }
@@ -513,7 +513,7 @@ async fn handle_stop_marker_check_inner(
 ) -> Result<(), IpcError> {
     // Snapshot what we need under one lock then drop it.
     let (session_id, tmux_name, host_alias, nonce, worktree_id, project_id) = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let row = match s.get_session_by_claude_id(claude_session_id)? {
             Some(r) => r,
             None => return Ok(()),
@@ -592,13 +592,13 @@ async fn finalize_safe_kill(
 ) -> Result<(), IpcError> {
     // Resolve paths under a brief lock.
     let (worktree_path, project_base): (Option<String>, Option<String>) = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let wt_path = match worktree_id {
-            Some(wid) => s.worktree_path(wid).map_err(IpcError::from)?,
+            Some(wid) => s.worktree_path(wid)?,
             None => None,
         };
         let proj_base = match _project_id {
-            Some(pid) => s.project_base_path(pid).map_err(IpcError::from)?,
+            Some(pid) => s.project_base_path(pid)?,
             None => None,
         };
         (wt_path, proj_base)
@@ -713,7 +713,7 @@ async fn run_shell(
             .args(["-lc", script])
             .output()
             .await
-            .map_err(|e| IpcError::new("E_SHELL", format!("spawn bash: {e}")))
+            .map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}")))
     } else {
         ssh.run(
             host_alias,

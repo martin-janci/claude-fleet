@@ -2,6 +2,8 @@
 //! outcome and timeline events, and capturing pane output.
 
 use super::*;
+use crate::ipc_error::codes;
+use crate::ipc_error::lock;
 
 /// Build the tmux invocations that together send a prompt to a session:
 ///   1. send-keys -t <name> -l <body>   (literal, no key-name translation;
@@ -58,7 +60,7 @@ pub(super) async fn send_prompt_inner(
             .args(["-c", &script])
             .output()
             .await
-            .map_err(|e| IpcError::new("E_TMUX", format!("spawn bash: {e}")))?
+            .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn bash: {e}")))?
     } else {
         ssh.run(
             host_alias,
@@ -69,7 +71,7 @@ pub(super) async fn send_prompt_inner(
     };
     if !out.status.success() {
         return Err(IpcError::new(
-            "E_TMUX",
+            codes::E_TMUX,
             String::from_utf8_lossy(&out.stderr).trim().to_string(),
         ));
     }
@@ -316,7 +318,7 @@ pub async fn broadcast_prompt(
     // Snapshot sessions + resolve the controller while holding the guard, then
     // drop it before any `.await` (never hold the mutex across await).
     let (sessions, controller) = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let sessions = s.list_all_sessions().map_err(|e| {
             IpcError::new(codes::E_SQLITE, format!("list sessions for broadcast: {e}"))
         })?;

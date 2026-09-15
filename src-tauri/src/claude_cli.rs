@@ -3,7 +3,7 @@
 //! IMPORTANT: `claude` is invoked via `bash -lc` even locally so the user's
 //! PATH (which includes ~/.local/bin where claude lives) is honoured.
 
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::validate;
@@ -42,7 +42,7 @@ pub fn parse_session_id_from_bg_output(output: &str) -> Option<String> {
         }
     }
     // Last resort: a bare UUID anywhere in the output.
-    static UUID_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+    static UUID_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(
             r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
         )
@@ -85,7 +85,7 @@ pub fn bg_script(name: &str, prompt: &str) -> Result<String, IpcError> {
 /// [`is_job_id`]: crate::claude_agents::is_job_id
 pub fn stop_script(job_id: &str) -> Result<String, IpcError> {
     if !crate::claude_agents::is_job_id(job_id) {
-        return Err(IpcError::new("E_INVALID", "invalid background job id"));
+        return Err(IpcError::new(codes::E_INVALID, "invalid background job id"));
     }
     Ok(format!("claude stop {}", quote(job_id)))
 }
@@ -124,7 +124,7 @@ pub fn purge_script(project_path: &str) -> Result<String, IpcError> {
     // have no business in a project path.
     if project_path.chars().any(|c| c.is_control()) {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "project_path must not contain control characters",
         ));
     }
@@ -198,7 +198,7 @@ pub fn parse_purge_output(
     }
     if report.purged.is_empty() && report.not_found.is_empty() {
         return Err(IpcError::new(
-            "E_CLAUDE_CLI",
+            codes::E_CLAUDE_CLI,
             format!("claude project purge on {host_alias} reported no result"),
         ));
     }
@@ -278,17 +278,17 @@ async fn run_claude_script(
         .await
         .map_err(|_| {
             IpcError::new(
-                "E_TIMEOUT",
+                codes::E_TIMEOUT,
                 format!("claude CLI timed out after {:.0}s", timeout.as_secs_f64()),
             )
         })?
-        .map_err(|e| IpcError::new("E_SPAWN", format!("spawn bash: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_SPAWN, format!("spawn bash: {e}")))?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             Err(IpcError::new(
-                "E_CLAUDE_CLI",
+                codes::E_CLAUDE_CLI,
                 format!(
                     "claude CLI failed (exit {}): {}",
                     output.status.code().unwrap_or(-1),
@@ -310,7 +310,7 @@ async fn run_claude_script(
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             Err(IpcError::new(
-                "E_CLAUDE_CLI",
+                codes::E_CLAUDE_CLI,
                 format!(
                     "claude CLI failed on {host_alias} (exit {}): {}",
                     output.status.code().unwrap_or(-1),

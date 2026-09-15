@@ -3,6 +3,7 @@
 //! local / remote cwd resolution the lifecycle calls use.
 
 use super::*;
+use crate::ipc_error::codes;
 
 /// Extract `(owner, repo)` from a path that follows the conventional
 /// `.../projects/github.com/<owner>/<repo>/...` layout (the same layout
@@ -11,7 +12,7 @@ use super::*;
 /// but the GitHub portion is stable — so we match into the repo cell
 /// regardless of where the path starts.
 pub(super) fn extract_owner_repo(path: &str) -> Option<(String, String)> {
-    static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"/projects/github\.com/([^/]+)/([^/]+)").expect("static regex")
     });
     let caps = RE.captures(path)?;
@@ -32,7 +33,7 @@ pub(super) fn extract_owner_repo(path: &str) -> Option<(String, String)> {
 /// session living under either must key to its worktree name (not "main"), or
 /// recreate/restart would rebuild it at the repo root.
 pub(super) fn worktree_key_for_path(path: &str) -> Option<String> {
-    static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"/projects/github\.com/[^/]+/[^/]+(/.*)?$").expect("static regex")
     });
     let caps = RE.captures(path)?;
@@ -421,7 +422,7 @@ pub(super) fn resolve_session_cwd(
         return Ok(base);
     }
     Err(IpcError::new(
-        "E_NOREPO",
+        codes::E_NOREPO,
         "cannot determine a worktree path for this session",
     ))
 }
@@ -474,7 +475,7 @@ pub(super) fn cwd_source_for_session(
     }
     let pid = row.project_id.ok_or_else(|| {
         IpcError::new(
-            "E_NOREPO",
+            codes::E_NOREPO,
             "cannot determine a remote path: session has no project",
         )
     })?;

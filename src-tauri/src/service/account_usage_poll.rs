@@ -18,7 +18,8 @@
 //!   returns the same snapshot, so it never emits.
 
 use crate::events::EventBus;
-use crate::ipc_error::IpcError;
+use crate::ipc_error::lock;
+use crate::ipc_error::{codes, IpcError};
 use crate::service::account_usage::{self, AccountUsageSnapshot, UsageCache};
 use crate::ssh::SshExec;
 use crate::store::{HostRow, Store};
@@ -159,9 +160,7 @@ pub(crate) fn list_account_usage(
     cache: &Mutex<UsageCache>,
 ) -> Result<Vec<AccountUsageSnapshot>, IpcError> {
     let accounts = {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = lock(store)?;
         s.list_accounts()?
     };
     let c = lock_cache(cache);
@@ -180,16 +179,14 @@ pub(crate) async fn refresh_account_usage(
     bus: &dyn EventBus,
 ) -> Result<AccountUsageSnapshot, IpcError> {
     let hosts = {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = lock(store)?;
         let known = s
             .list_accounts()?
             .into_iter()
             .any(|a| a.uuid == account_uuid);
         if !known {
             return Err(IpcError::new(
-                "E_NOTFOUND",
+                codes::E_NOTFOUND,
                 format!("account {account_uuid} not found"),
             ));
         }
