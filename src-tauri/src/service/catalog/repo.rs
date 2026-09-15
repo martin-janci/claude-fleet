@@ -32,9 +32,18 @@ struct CatalogFile {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String, IpcError> {
-    let out = std::process::Command::new("git")
-        .args(args)
-        .current_dir(dir)
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(args).current_dir(dir);
+    // Tests must not depend on (or be broken by) the host's own global git
+    // config: isolate every git invocation the production code makes from
+    // it. This has no effect on release builds — `git config user.email`
+    // there still resolves the normal local -> global -> system chain, so a
+    // real global identity is honoured and the claude-fleet fallback only
+    // kicks in when git itself has none.
+    #[cfg(test)]
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    let out = cmd
         .output()
         .map_err(|e| IpcError::new(E_CATALOG_GIT, format!("spawn git: {e}")))?;
     if !out.status.success() {
@@ -129,14 +138,17 @@ pub fn git_status(root: &Path) -> Result<RepoStatus, IpcError> {
     })
 }
 
-/// Whether the repo has a local git identity configured (`git config
-/// --local user.email` succeeds). Scoped to `--local` so the result does not
-/// depend on the calling host's global `~/.gitconfig`, matching "identity
-/// fallback only when unset in the repo".
+/// Whether git can resolve an identity for this repo (`git config
+/// user.email` succeeds) — the normal local -> global -> system resolution,
+/// so a user's own global identity is honoured and the claude-fleet fallback
+/// only applies when git itself has none configured anywhere. In test
+/// builds, `git()` isolates every invocation from the host's global/system
+/// config (see its doc comment) so this is deterministic regardless of the
+/// machine running the tests.
 /// Used by author.rs (Task 2) as well as `commit` below.
 #[allow(dead_code)]
 pub fn has_identity(root: &Path) -> bool {
-    git(root, &["config", "--local", "user.email"]).is_ok()
+    git(root, &["config", "user.email"]).is_ok()
 }
 
 /// `git add -A -- <rel_paths>`, or `git add -A` for the whole tree when
