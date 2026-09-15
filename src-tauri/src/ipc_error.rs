@@ -6,7 +6,6 @@ use std::fmt;
 /// never rename one without grepping both. New sites should pick a code from
 /// here rather than inventing a near-duplicate (`E_DB` / `E_REPO` for a
 /// rusqlite failure were consolidated onto `E_SQLITE`).
-#[allow(dead_code)]
 pub mod codes {
     /// A `std::sync::Mutex` guard (store, MCP runtime, …) was poisoned.
     pub const E_LOCK: &str = "E_LOCK";
@@ -20,6 +19,9 @@ pub mod codes {
     pub const E_VALIDATE: &str = "E_VALIDATE";
     /// The addressed host / session / project / worktree row does not exist.
     pub const E_NOTFOUND: &str = "E_NOTFOUND";
+    /// A name-only session lookup matched rows on several hosts; the
+    /// candidates ride along in `details` so the caller can pick a host.
+    pub const E_AMBIGUOUS: &str = "E_AMBIGUOUS";
     /// The thing being created already exists (a project's owner/repo, a
     /// checkout already at the destination path…) — the inverse of
     /// `E_NOTFOUND`.
@@ -29,6 +31,9 @@ pub mod codes {
     pub const E_GH: &str = "E_GH";
     /// The target exists but is in the wrong state for the operation.
     pub const E_INVALID_STATE: &str = "E_INVALID_STATE";
+    /// The task is already in a terminal state (`done` / `failed` /
+    /// `cancelled`), so the requested transition is refused.
+    pub const E_TASK_TERMINAL: &str = "E_TASK_TERMINAL";
     /// An invariant the code relies on was violated (row vanished mid-op…).
     pub const E_INTERNAL: &str = "E_INTERNAL";
     /// The operation was cancelled via the cancellation registry.
@@ -179,7 +184,6 @@ pub mod codes {
 }
 
 #[derive(Debug, Serialize)]
-#[allow(dead_code)]
 pub struct IpcError {
     pub code: String,
     pub message: String,
@@ -187,7 +191,6 @@ pub struct IpcError {
     pub details: Option<serde_json::Value>,
 }
 
-#[allow(dead_code)]
 impl IpcError {
     pub fn new(code: &str, message: impl Into<String>) -> Self {
         Self {

@@ -1,6 +1,7 @@
 //! Hosts, accounts and per-host MCP tokens.
 
 use super::*;
+use crate::ipc_error::codes;
 
 /// Whether `last_seen_at` moved enough to be worth a database write: newly
 /// known, cleared, or more than 10 minutes later (or earlier) than the
@@ -85,7 +86,7 @@ impl Store {
         )?;
         if n == 0 {
             return Err(crate::ipc_error::IpcError::new(
-                "E_NOTFOUND",
+                codes::E_NOTFOUND,
                 format!("host {host_alias} has no control-API token (provision it first)"),
             ));
         }
@@ -324,7 +325,7 @@ impl Store {
         if let Some(n) = trimmed {
             if n.chars().count() > 32 {
                 return Err(crate::ipc_error::IpcError::new(
-                    "E_INVALID",
+                    codes::E_INVALID,
                     "nickname must be 32 characters or fewer",
                 ));
             }
@@ -335,12 +336,12 @@ impl Store {
         )?;
         if n == 0 {
             return Err(crate::ipc_error::IpcError::new(
-                "E_NOTFOUND",
+                codes::E_NOTFOUND,
                 format!("account {uuid} not found"),
             ));
         }
         let row = self.get_account_by_uuid(uuid)?.ok_or_else(|| {
-            crate::ipc_error::IpcError::new("E_INTERNAL", format!("account {uuid} vanished"))
+            crate::ipc_error::IpcError::new(codes::E_INTERNAL, format!("account {uuid} vanished"))
         })?;
         self.bus.account_upserted(&row);
         Ok(row)

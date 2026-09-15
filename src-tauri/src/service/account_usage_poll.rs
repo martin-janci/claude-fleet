@@ -19,7 +19,7 @@
 
 use crate::events::EventBus;
 use crate::ipc_error::lock;
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::service::account_usage::{self, AccountUsageSnapshot, UsageCache};
 use crate::ssh::SshExec;
 use crate::store::{HostRow, Store};
@@ -186,7 +186,7 @@ pub(crate) async fn refresh_account_usage(
             .any(|a| a.uuid == account_uuid);
         if !known {
             return Err(IpcError::new(
-                "E_NOTFOUND",
+                codes::E_NOTFOUND,
                 format!("account {account_uuid} not found"),
             ));
         }

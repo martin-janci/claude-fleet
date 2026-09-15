@@ -2,6 +2,7 @@
 //! outcome and timeline events, and capturing pane output.
 
 use super::*;
+use crate::ipc_error::codes;
 use crate::ipc_error::lock;
 
 /// Build the tmux invocations that together send a prompt to a session:
@@ -59,7 +60,7 @@ pub(super) async fn send_prompt_inner(
             .args(["-c", &script])
             .output()
             .await
-            .map_err(|e| IpcError::new("E_TMUX", format!("spawn bash: {e}")))?
+            .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn bash: {e}")))?
     } else {
         ssh.run(
             host_alias,
@@ -70,7 +71,7 @@ pub(super) async fn send_prompt_inner(
     };
     if !out.status.success() {
         return Err(IpcError::new(
-            "E_TMUX",
+            codes::E_TMUX,
             String::from_utf8_lossy(&out.stderr).trim().to_string(),
         ));
     }

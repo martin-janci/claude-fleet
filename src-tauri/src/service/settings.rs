@@ -8,7 +8,7 @@
 //! Keys that other subsystems own (MCP `mcp.*`, `controller.*`) are NOT
 //! listed and cannot be written through this path.
 
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::store::Store;
 use std::collections::BTreeMap;
 
@@ -210,7 +210,7 @@ pub fn spec(key: &str) -> Option<&'static Spec> {
 /// The value ends up inside remote shell commands (always quoted) and in a
 /// local `read_dir`, so traversal and control bytes are refused outright.
 pub fn validate_base_path(label: &str, path: &str) -> Result<(), IpcError> {
-    let bad = |msg: &str| Err(IpcError::new("E_INVALID", format!("{label}: {msg}")));
+    let bad = |msg: &str| Err(IpcError::new(codes::E_INVALID, format!("{label}: {msg}")));
     if path.is_empty() {
         return bad("path must not be empty");
     }
@@ -233,7 +233,7 @@ pub fn validate_base_path(label: &str, path: &str) -> Result<(), IpcError> {
 pub fn parse_path_map(key: &str, raw: &str) -> Result<BTreeMap<String, String>, IpcError> {
     let map: BTreeMap<String, String> = serde_json::from_str(raw).map_err(|_| {
         IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("{key} must be a JSON object of host alias to path strings"),
         )
     })?;
@@ -250,18 +250,18 @@ pub fn parse_path_map(key: &str, raw: &str) -> Result<BTreeMap<String, String>, 
 /// Validate a `(key, value)` pair against the registry. `E_INVALID` on an
 /// unknown key or a value of the wrong shape.
 pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
-    let spec =
-        spec(key).ok_or_else(|| IpcError::new("E_INVALID", format!("unknown setting {key}")))?;
+    let spec = spec(key)
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, format!("unknown setting {key}")))?;
     let v = value.trim();
     match spec.kind {
         Kind::Bool if v == "true" || v == "false" => Ok(()),
         Kind::Bool => Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("{key} must be \"true\" or \"false\""),
         )),
         Kind::Secs if v.parse::<u64>().is_ok_and(|n| n <= MAX_SECS) => Ok(()),
         Kind::Secs => Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("{key} must be an integer number of seconds between 0 and {MAX_SECS}"),
         )),
         Kind::SecsMin(min)
@@ -271,19 +271,19 @@ pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
             Ok(())
         }
         Kind::SecsMin(min) => Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("{key} must be an integer number of seconds between {min} and {MAX_SECS}"),
         )),
         Kind::Int { min, max } if v.parse::<u64>().is_ok_and(|n| (min..=max).contains(&n)) => {
             Ok(())
         }
         Kind::Int { min, max } => Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("{key} must be an integer between {min} and {max}"),
         )),
         Kind::Choice(options) if options.contains(&v) => Ok(()),
         Kind::Choice(options) => Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("{key} must be one of: {}", options.join(", ")),
         )),
         Kind::PathMap => parse_path_map(key, v).map(|_| ()),
@@ -348,10 +348,10 @@ pub fn set(s: &Store, key: &str, value: &str) -> Result<(), IpcError> {
     let v = value.trim();
     let stored = match spec(key).map(|sp| sp.kind) {
         Some(Kind::PathMap) => serde_json::to_string(&parse_path_map(key, v)?)
-            .map_err(|e| IpcError::new("E_INVALID", e.to_string()))?,
+            .map_err(|e| IpcError::new(codes::E_INVALID, e.to_string()))?,
         Some(Kind::PriceMap) => {
             serde_json::to_string(&crate::service::usage::parse_price_overrides(v)?)
-                .map_err(|e| IpcError::new("E_INVALID", e.to_string()))?
+                .map_err(|e| IpcError::new(codes::E_INVALID, e.to_string()))?
         }
         _ => v.to_string(),
     };

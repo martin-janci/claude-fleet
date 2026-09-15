@@ -4,7 +4,7 @@
 
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::lock;
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::SshExec;
 use crate::ssh_config::{self, SshHost};
@@ -216,7 +216,7 @@ fn list_one(store: &Mutex<Store>, alias: &str) -> Result<HostRow, IpcError> {
     s.list_hosts()?
         .into_iter()
         .find(|h| h.alias == alias)
-        .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("host {alias} not found")))
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("host {alias} not found")))
 }
 
 /// Strict probe — returns Err(E_PROBE) if the SSH round trip fails. Used by
@@ -284,11 +284,11 @@ async fn probe_with_token(
             token,
         )
         .await
-        .map_err(|e| IpcError::new("E_PROBE", format!("ssh {host}: {}", e.message)))?;
+        .map_err(|e| IpcError::new(codes::E_PROBE, format!("ssh {host}: {}", e.message)))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(IpcError::new(
-            "E_PROBE",
+            codes::E_PROBE,
             format!(
                 "ssh {host} exited {:?}: {}",
                 out.status.code(),

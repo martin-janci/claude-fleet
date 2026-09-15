@@ -9,7 +9,7 @@
 //! callers can rely on the inbox.
 
 use crate::ipc_error::lock;
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::service::sessions;
 use crate::ssh::SshClient;
 use crate::store::{SessionMessage, Store};
@@ -94,13 +94,13 @@ pub async fn send_message(
 ) -> Result<SendMessageResult, IpcError> {
     if args.body.is_empty() {
         return Err(IpcError::new(
-            "E_VALIDATE",
+            codes::E_VALIDATE,
             "message body must be non-empty",
         ));
     }
     if args.from_session_id == args.to_session_id {
         return Err(IpcError::new(
-            "E_SELF_TARGET",
+            codes::E_SELF_TARGET,
             "from_session_id and to_session_id must differ",
         ));
     }
@@ -115,13 +115,13 @@ pub async fn send_message(
         s.atomically(|s| {
             let from = s.get_session_by_id(args.from_session_id)?.ok_or_else(|| {
                 IpcError::new(
-                    "E_NOTFOUND",
+                    codes::E_NOTFOUND,
                     format!("from session {} not found", args.from_session_id),
                 )
             })?;
             let to = s.get_session_by_id(args.to_session_id)?.ok_or_else(|| {
                 IpcError::new(
-                    "E_NOTFOUND",
+                    codes::E_NOTFOUND,
                     format!("to session {} not found", args.to_session_id),
                 )
             })?;
@@ -130,7 +130,7 @@ pub async fn send_message(
             if let Some(parent_id) = args.reply_to {
                 let parent = s.get_message(parent_id)?.ok_or_else(|| {
                     IpcError::new(
-                        "E_NOTFOUND",
+                        codes::E_NOTFOUND,
                         format!("reply_to message {parent_id} not found"),
                     )
                 })?;
@@ -138,7 +138,7 @@ pub async fn send_message(
                     && parent.to_session_id != args.from_session_id
                 {
                     return Err(IpcError::new(
-                        "E_INVALID",
+                        codes::E_INVALID,
                         format!(
                             "reply_to message {parent_id} does not involve session {}",
                             args.from_session_id
@@ -240,9 +240,12 @@ pub struct PeerStatus {
 
 pub fn peer_status(session_id: i64, store: &Mutex<Store>) -> Result<PeerStatus, IpcError> {
     let s = lock(store)?;
-    let row = s
-        .get_session_by_id(session_id)?
-        .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("session {} not found", session_id)))?;
+    let row = s.get_session_by_id(session_id)?.ok_or_else(|| {
+        IpcError::new(
+            codes::E_NOTFOUND,
+            format!("session {} not found", session_id),
+        )
+    })?;
     Ok(PeerStatus {
         session_id: row.id,
         host_alias: row.host_alias,

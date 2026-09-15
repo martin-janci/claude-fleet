@@ -5,7 +5,7 @@
 //! interpolated value is shell-quoted.
 
 use crate::commands::repo::{repo_err, repo_script, run_in_repo, session_target};
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::Store;
@@ -42,7 +42,7 @@ pub async fn repo_checkout(
     }
     if is_dirty(&so.stdout) {
         return Err(IpcError::new(
-            "E_DIRTY",
+            codes::E_DIRTY,
             "worktree has uncommitted changes — the agent may have work in progress",
         ));
     }
@@ -76,7 +76,7 @@ pub async fn repo_checkout_commit(
     }
     if is_dirty(&so.stdout) {
         return Err(IpcError::new(
-            "E_DIRTY",
+            codes::E_DIRTY,
             "worktree has uncommitted changes — the agent may have work in progress",
         ));
     }
@@ -223,7 +223,7 @@ pub async fn repo_commit_create(
 ) -> Result<(), IpcError> {
     if args.message.trim().is_empty() {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "commit message must not be empty",
         ));
     }

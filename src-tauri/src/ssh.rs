@@ -20,7 +20,7 @@
 //! self-closed). Concurrent first-connects are serialised by ssh via the
 //! ControlPath.
 
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use dashmap::DashMap;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -310,7 +310,10 @@ impl SshClient {
     ) -> Result<(), IpcError> {
         self.inner.seen.insert(host.to_string(), ());
         let file = std::fs::File::open(local_path).map_err(|e| {
-            IpcError::new("E_UPLOAD", format!("open {}: {e}", local_path.display()))
+            IpcError::new(
+                codes::E_UPLOAD,
+                format!("open {}: {e}", local_path.display()),
+            )
         })?;
         let mut cmd = tokio::process::Command::new("ssh");
         for opt in self.mux_opts(host, timeout) {
@@ -326,7 +329,7 @@ impl SshClient {
             .await?;
         if !out.status.success() {
             return Err(IpcError::new(
-                "E_UPLOAD",
+                codes::E_UPLOAD,
                 format!(
                     "upload to {host} failed: {}",
                     String::from_utf8_lossy(&out.stderr).trim()
@@ -422,7 +425,7 @@ impl SshClient {
                 kill_and_reap(child).await;
                 stdout_task.abort();
                 stderr_task.abort();
-                Err(IpcError::new("E_CANCELLED", format!("ssh {host} cancelled")))
+                Err(IpcError::new(codes::E_CANCELLED, format!("ssh {host} cancelled")))
             }
             _ = tokio::time::sleep(wall_clock) => {
                 kill_and_reap(child).await;
@@ -859,7 +862,7 @@ impl<T: SshExec + ?Sized> SshExec for Arc<T> {
 pub(crate) fn home_from_output(host: &str, out: &Output) -> Result<String, IpcError> {
     if !out.status.success() {
         return Err(IpcError::new(
-            "E_SSH",
+            codes::E_SSH,
             format!(
                 "couldn't read $HOME on {host}: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
@@ -869,7 +872,7 @@ pub(crate) fn home_from_output(host: &str, out: &Output) -> Result<String, IpcEr
     let home = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if home.is_empty() {
         return Err(IpcError::new(
-            "E_SSH",
+            codes::E_SSH,
             format!("remote $HOME on {host} is empty"),
         ));
     }
@@ -880,7 +883,7 @@ pub(crate) fn home_from_output(host: &str, out: &Output) -> Result<String, IpcEr
 /// wall clock. `reset` records whether the ControlMaster was torn down.
 pub(crate) fn wall_clock_error(host: &str, wall_clock: Duration, reset: bool) -> IpcError {
     IpcError::new(
-        "E_SSH_TIMEOUT",
+        codes::E_SSH_TIMEOUT,
         format!(
             "ssh {host}: command exceeded {}s wall clock{}",
             wall_clock.as_secs(),
@@ -990,7 +993,7 @@ impl LocalExec {
                 kill_and_reap(child).await;
                 stdout_task.abort();
                 stderr_task.abort();
-                Err(IpcError::new("E_CANCELLED", format!("ssh {host} cancelled")))
+                Err(IpcError::new(codes::E_CANCELLED, format!("ssh {host} cancelled")))
             }
             _ = tokio::time::sleep(wall_clock) => {
                 kill_and_reap(child).await;
@@ -1074,7 +1077,10 @@ impl SshExec for LocalExec {
         _timeout: Duration,
     ) -> Result<(), IpcError> {
         let file = std::fs::File::open(local_path).map_err(|e| {
-            IpcError::new("E_UPLOAD", format!("open {}: {e}", local_path.display()))
+            IpcError::new(
+                codes::E_UPLOAD,
+                format!("open {}: {e}", local_path.display()),
+            )
         })?;
         let remote_cmd = format!("cat > {}", crate::shell::quote(remote_path));
         let mut cmd = self.command(&[remote_cmd.as_str()]);
@@ -1084,7 +1090,7 @@ impl SshExec for LocalExec {
             .await?;
         if !out.status.success() {
             return Err(IpcError::new(
-                "E_UPLOAD",
+                codes::E_UPLOAD,
                 format!(
                     "upload to {host} failed: {}",
                     String::from_utf8_lossy(&out.stderr).trim()

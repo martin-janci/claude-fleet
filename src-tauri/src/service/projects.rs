@@ -1,5 +1,5 @@
 use crate::ipc_error::lock;
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::projects::path_identity::{canonical, canonical_str};
 use crate::projects::{
     git_common_dir, list_worktrees, scan_projects, DiscoveredProject, DiscoveredWorktree, Layout,
@@ -214,7 +214,7 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
         Ok::<_, IpcError>((discovered, root_canon, canon_of, fp_keys))
     })
     .await
-    .map_err(|e| IpcError::new("E_IO", format!("project scan task failed: {e}")))??;
+    .map_err(|e| IpcError::new(codes::E_IO, format!("project scan task failed: {e}")))??;
 
     // 3. Fan-out: `git worktree list` + `git rev-parse --git-common-dir` per
     //    discovered project, off-lock and in parallel. Both are async

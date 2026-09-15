@@ -3,6 +3,7 @@
 //! the `list_sessions` / `refresh_sessions` / `reconcile_now` entry points.
 
 use super::*;
+use crate::ipc_error::codes;
 use crate::ipc_error::lock;
 
 /// Number of pane lines captured per work session for the reconcile intel
@@ -73,7 +74,7 @@ impl HostShell for RealHostShell {
         let out = run_host_script(&self.ssh, host, script, self.timeout).await?;
         if !out.status.success() {
             return Err(IpcError::new(
-                "E_SHELL",
+                codes::E_SHELL,
                 String::from_utf8_lossy(&out.stderr).trim().to_string(),
             ));
         }
@@ -90,7 +91,7 @@ pub(crate) struct NoHostShell;
 #[async_trait::async_trait]
 impl HostShell for NoHostShell {
     async fn run_script(&self, _host: &str, _script: &str) -> Result<String, IpcError> {
-        Err(IpcError::new("E_SHELL", "no shell in this test"))
+        Err(IpcError::new(codes::E_SHELL, "no shell in this test"))
     }
 }
 
@@ -110,9 +111,9 @@ pub(crate) async fn run_host_script(
             .args(["-lc", script])
             .output();
         match tokio::time::timeout(timeout, child).await {
-            Ok(res) => res.map_err(|e| IpcError::new("E_SHELL", format!("spawn bash: {e}"))),
+            Ok(res) => res.map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}"))),
             Err(_) => Err(IpcError::new(
-                "E_TIMEOUT",
+                codes::E_TIMEOUT,
                 format!("local script exceeded {}s", timeout.as_secs()),
             )),
         }
@@ -870,7 +871,7 @@ pub(super) async fn probe_with_timeout(
             );
             return HostProbe {
                 host,
-                result: Err(IpcError::new("E_TIMEOUT", "host probe timed out")),
+                result: Err(IpcError::new(codes::E_TIMEOUT, "host probe timed out")),
                 agent_rows: Vec::new(),
                 agent_mtimes: None,
                 intel: PaneIntelMap::new(),
@@ -1076,7 +1077,7 @@ pub(super) async fn reconcile_one_host_with(
             .list_hosts()?
             .into_iter()
             .find(|h| h.alias == alias)
-            .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("host {alias} not found")))?;
+            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("host {alias} not found")))?;
         let paths = HostPaths::for_host(&s, alias);
         (host, paths)
     };

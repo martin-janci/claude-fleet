@@ -10,7 +10,7 @@
 //! nonce, and branches on whether the marker says READY or FAILED.
 
 use crate::ipc_error::lock;
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::{SessionRow, Store};
@@ -148,7 +148,7 @@ pub async fn safe_kill_session(
             .get_session(&args.tmux_name, &args.host_alias)?
             .ok_or_else(|| {
                 IpcError::new(
-                    "E_NOTFOUND",
+                    codes::E_NOTFOUND,
                     format!(
                         "session {} not found on {}",
                         args.tmux_name, args.host_alias
@@ -157,13 +157,13 @@ pub async fn safe_kill_session(
             })?;
         if row.status != "running" {
             return Err(IpcError::new(
-                "E_NOT_ALIVE",
+                codes::E_NOT_ALIVE,
                 format!("session {} is not running", args.tmux_name),
             ));
         }
         if row.safe_kill_state.as_deref() == Some("requested") {
             return Err(IpcError::new(
-                "E_SAFE_KILL_IN_PROGRESS",
+                codes::E_SAFE_KILL_IN_PROGRESS,
                 "a safe-kill request is already in flight for this session",
             ));
         }
@@ -198,8 +198,12 @@ pub async fn safe_kill_session(
     }
 
     let s = lock(store)?;
-    s.get_session_by_id(session_id)?
-        .ok_or_else(|| IpcError::new("E_NOTFOUND", "session vanished after safe-kill request"))
+    s.get_session_by_id(session_id)?.ok_or_else(|| {
+        IpcError::new(
+            codes::E_NOTFOUND,
+            "session vanished after safe-kill request",
+        )
+    })
 }
 
 /// Inspect a worktree-backed session so the UI can decide whether to even
@@ -219,7 +223,7 @@ pub async fn inspect_safe_kill(
             .get_session(&args.tmux_name, &args.host_alias)?
             .ok_or_else(|| {
                 IpcError::new(
-                    "E_NOTFOUND",
+                    codes::E_NOTFOUND,
                     format!(
                         "session {} not found on {}",
                         args.tmux_name, args.host_alias
@@ -361,7 +365,7 @@ pub async fn discard_kill_session(
             .get_session(&args.tmux_name, &args.host_alias)?
             .ok_or_else(|| {
                 IpcError::new(
-                    "E_NOTFOUND",
+                    codes::E_NOTFOUND,
                     format!(
                         "session {} not found on {}",
                         args.tmux_name, args.host_alias
@@ -390,7 +394,7 @@ pub async fn discard_kill_session(
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             return Err(IpcError::new(
-                "E_WORKTREE_REMOVE",
+                codes::E_WORKTREE_REMOVE,
                 format!("git worktree remove failed: {}", stderr.trim()),
             ));
         }
@@ -709,7 +713,7 @@ async fn run_shell(
             .args(["-lc", script])
             .output()
             .await
-            .map_err(|e| IpcError::new("E_SHELL", format!("spawn bash: {e}")))
+            .map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}")))
     } else {
         ssh.run(
             host_alias,

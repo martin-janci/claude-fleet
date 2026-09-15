@@ -1652,7 +1652,7 @@ mod tests {
             name: &str,
         ) -> Result<(), IpcError> {
             if self.kill_fails {
-                return Err(IpcError::new("E_TMUX", "can't find session"));
+                return Err(IpcError::new(codes::E_TMUX, "can't find session"));
             }
             {
                 let s = store.lock().unwrap();

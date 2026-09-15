@@ -1,6 +1,7 @@
 //! Dispatched tasks and their state transitions.
 
 use super::*;
+use crate::ipc_error::codes;
 
 impl Store {
     /// Create a task in state `queued`. Returns the row. Emits `task_updated`.
@@ -24,9 +25,9 @@ impl Store {
             ],
         )?;
         let id = self.conn.last_insert_rowid();
-        let row = self
-            .fetch_task(id)?
-            .ok_or_else(|| crate::ipc_error::IpcError::new("E_DB", "task vanished after insert"))?;
+        let row = self.fetch_task(id)?.ok_or_else(|| {
+            crate::ipc_error::IpcError::new(codes::E_INTERNAL, "task vanished after insert")
+        })?;
         self.bus.task_updated(&row);
         Ok(row)
     }
@@ -153,7 +154,7 @@ impl Store {
     ) -> Result<(Option<TaskRow>, bool), crate::ipc_error::IpcError> {
         if !TASK_TERMINAL_STATES.contains(&state) {
             return Err(crate::ipc_error::IpcError::new(
-                "E_INVALID",
+                codes::E_INVALID,
                 format!("{state} is not a terminal task state"),
             ));
         }

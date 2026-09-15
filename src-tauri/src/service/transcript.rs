@@ -16,7 +16,7 @@
 //! TUI chrome that `capture_session` returns).
 
 use crate::ipc_error::lock;
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::{SessionRow, Store};
@@ -463,7 +463,7 @@ pub fn resolve_args(
 ) -> Result<TranscriptArgs, IpcError> {
     let claude_session_id = row.claude_session_id.clone().ok_or_else(|| {
         IpcError::new(
-            "E_INVALID_STATE",
+            codes::E_INVALID_STATE,
             format!(
                 "session {} has no claude_session_id yet (not reconciled, or not a Claude session)",
                 row.id
@@ -537,7 +537,7 @@ async fn read_tail(
         let stderr = String::from_utf8_lossy(&out.stderr);
         if stderr.contains(NO_TRANSCRIPT) {
             return Err(IpcError::new(
-                "E_NO_TRANSCRIPT",
+                codes::E_NO_TRANSCRIPT,
                 format!(
                     "no transcript for claude session {} on {}: {}",
                     args.claude_session_id,
@@ -547,7 +547,7 @@ async fn read_tail(
             ));
         }
         return Err(IpcError::new(
-            "E_SHELL",
+            codes::E_SHELL,
             format!("transcript read failed: {}", stderr.trim()),
         ));
     }
@@ -600,8 +600,8 @@ async fn run_shell(
             .output();
         tokio::time::timeout(READ_WALL_CLOCK, child)
             .await
-            .map_err(|_| IpcError::new("E_SHELL", "transcript read timed out"))?
-            .map_err(|e| IpcError::new("E_SHELL", format!("spawn bash: {e}")))
+            .map_err(|_| IpcError::new(codes::E_SHELL, "transcript read timed out"))?
+            .map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}")))
     } else {
         ssh.run_bounded(
             host_alias,

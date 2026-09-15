@@ -1,6 +1,7 @@
 //! MCP tools: fleet health, usage, hosts, accounts and provisioning.
 
 use super::*;
+use crate::ipc_error::codes;
 use crate::ipc_error::lock;
 
 #[tool_router(router = fleet_router, vis = "pub(super)")]
@@ -160,7 +161,7 @@ impl FleetTools {
                 .is_some_and(|t| !t.is_empty());
             if !has_master {
                 return Err(to_mcp_err(IpcError::new(
-                    "E_PROVISION",
+                    codes::E_PROVISION,
                     "control API has no token yet",
                 )));
             }

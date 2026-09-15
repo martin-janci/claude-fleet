@@ -1,6 +1,7 @@
 //! MCP tools: kill, restart, rename, review, repair, move and the host clipboard.
 
 use super::*;
+use crate::ipc_error::codes;
 use crate::ipc_error::lock;
 
 #[tool_router(router = lifecycle_router, vis = "pub(super)")]
@@ -335,7 +336,7 @@ impl FleetTools {
                 .map(|r| r.id)
                 .ok_or_else(|| {
                     to_mcp_err(IpcError::new(
-                        "E_NOTFOUND",
+                        codes::E_NOTFOUND,
                         format!("session {name} on {host_alias} not found"),
                     ))
                 })?

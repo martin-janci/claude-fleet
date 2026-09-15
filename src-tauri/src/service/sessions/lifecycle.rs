@@ -2,6 +2,7 @@
 //! friendly name, restart, recreate, and dismissing ghosts.
 
 use super::*;
+use crate::ipc_error::codes;
 use crate::ipc_error::lock;
 use crate::service::repair::{render_git_script_expecting, BranchSource, Step, MIRROR_REFUSED};
 use crate::ssh::SshExec;
@@ -282,10 +283,10 @@ pub(super) async fn create_worktree_local(
         .args(["-lc", &script])
         .output()
         .await
-        .map_err(|e| IpcError::new("E_GIT_SETUP", format!("bash: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_GIT_SETUP, format!("bash: {e}")))?;
     if !out.status.success() {
         return Err(IpcError::new(
-            "E_GIT_SETUP",
+            codes::E_GIT_SETUP,
             String::from_utf8_lossy(&out.stderr).trim().to_string(),
         ));
     }
@@ -316,7 +317,7 @@ pub async fn new_session(
         crate::validate::git_ref(name)?;
         if name == "main" || name == "master" {
             return Err(IpcError::new(
-                "E_INVALID",
+                codes::E_INVALID,
                 "worktree name must not be 'main' or 'master'",
             ));
         }
@@ -504,7 +505,7 @@ pub(super) async fn new_session_inner(
                 .await?;
             if !out.status.success() {
                 return Err(IpcError::new(
-                    "E_GIT_SETUP",
+                    codes::E_GIT_SETUP,
                     String::from_utf8_lossy(&out.stderr).trim().to_string(),
                 ));
             }
@@ -626,7 +627,7 @@ pub(super) async fn new_session_inner(
         .find(|r| r.tmux_name == args.name)
         .ok_or_else(|| {
             IpcError::new(
-                "E_INTERNAL",
+                codes::E_INTERNAL,
                 format!(
                     "session {} on {} vanished after creation",
                     args.name, args.host_alias
@@ -664,7 +665,7 @@ pub(super) async fn new_session_inner(
         s.set_session_kind(row.id, "shell", None)?;
         return s
             .get_session(&args.name, &args.host_alias)?
-            .ok_or_else(|| IpcError::new("E_INTERNAL", "session vanished after kind tag"));
+            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "session vanished after kind tag"));
     }
     // Persist the minted Claude session id. Soft-fail: the session is live; a
     // failed write just means a future recreate falls back to `cl --continue`.
@@ -841,7 +842,10 @@ pub async fn kill_session(
         s.get_session(&args.name, &args.host_alias)?
             .map(|r| (r.id, r.kind, r.claude_session_id, r.claude_status))
             .ok_or_else(|| {
-                IpcError::new("E_NOTFOUND", format!("session {} not found", args.name))
+                IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("session {} not found", args.name),
+                )
             })?
     };
     if args.name.starts_with("bg:") {
@@ -921,7 +925,7 @@ pub async fn rename_session(
     s.get_session(&args.new_name, &args.host_alias)?
         .ok_or_else(|| {
             IpcError::new(
-                "E_NOTFOUND",
+                codes::E_NOTFOUND,
                 format!(
                     "renamed session {} on {} did not appear in list",
                     args.new_name, args.host_alias
@@ -961,7 +965,7 @@ pub fn set_session_friendly_name(
     s.set_friendly_name(&args.host_alias, &args.tmux_name, value)?
         .ok_or_else(|| {
             IpcError::new(
-                "E_NOTFOUND",
+                codes::E_NOTFOUND,
                 format!(
                     "session {} not found on {}",
                     args.tmux_name, args.host_alias
@@ -1041,7 +1045,7 @@ pub async fn restart_session(
     let s = lock(store)?;
     s.get_session(&args.name, &args.host_alias)?.ok_or_else(|| {
         IpcError::new(
-            "E_NOTFOUND",
+            codes::E_NOTFOUND,
             format!(
                 "restarted session {} on {} did not appear in list",
                 args.name, args.host_alias
@@ -1099,7 +1103,7 @@ pub async fn recreate_session(
         let s = lock(store)?;
         let sess = s
             .get_session_by_id(args.session_id)?
-            .ok_or_else(|| IpcError::new("E_NOTFOUND", "session not found"))?;
+            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?;
         // Refuse to nuke-and-rebuild ourselves unless forced.
         guard_not_controller(
             s.get_controller()?.as_ref(),
@@ -1109,10 +1113,10 @@ pub async fn recreate_session(
         )?;
         let host = s
             .get_host_row(&sess.host_alias)?
-            .ok_or_else(|| IpcError::new("E_NOTFOUND", "host not found"))?;
+            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "host not found"))?;
         if !host.reachable {
             return Err(IpcError::new(
-                "E_HOST_OFFLINE",
+                codes::E_HOST_OFFLINE,
                 format!("host {} is not reachable", host.alias),
             ));
         }
@@ -1154,7 +1158,7 @@ pub async fn recreate_session(
         let s = lock(store)?;
         let row = s
             .restore_session(sess.id)?
-            .ok_or_else(|| IpcError::new("E_INTERNAL", "session vanished after restore"))?;
+            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "session vanished after restore"))?;
         // Task G: record the recreate on the (preserved) row. Best-effort.
         if let Err(e) = s.insert_session_event(sess.id, "recreated", None) {
             tracing::warn!(
@@ -1180,10 +1184,10 @@ pub fn dismiss_ghost_session(
     let s = lock(store)?;
     let sess = s
         .get_session_by_id(args.session_id)?
-        .ok_or_else(|| IpcError::new("E_NOTFOUND", "session not found"))?;
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?;
     if sess.status != "ghost" {
         return Err(IpcError::new(
-            "E_INVALID_STATE",
+            codes::E_INVALID_STATE,
             format!(
                 "session {} is not a ghost (status={})",
                 sess.id, sess.status

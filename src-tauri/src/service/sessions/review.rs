@@ -1,6 +1,7 @@
 //! Spawning a review session for an existing session.
 
 use super::*;
+use crate::ipc_error::codes;
 use crate::ipc_error::lock;
 
 #[derive(Deserialize)]
@@ -26,7 +27,7 @@ pub async fn spawn_review(
         let s = lock(store)?;
         let source = s
             .get_session_by_id(args.source_session_id)?
-            .ok_or_else(|| IpcError::new("E_NOTFOUND", "source session not found"))?;
+            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "source session not found"))?;
         let cwd_src = cwd_source_for_session(&s, &source)?;
         (source, cwd_src)
     };
@@ -73,7 +74,9 @@ pub async fn spawn_review(
             .list_sessions_for_host(&source.host_alias)?
             .into_iter()
             .find(|r| r.tmux_name == review_name)
-            .ok_or_else(|| IpcError::new("E_INTERNAL", "review session vanished after spawn"))?;
+            .ok_or_else(|| {
+                IpcError::new(codes::E_INTERNAL, "review session vanished after spawn")
+            })?;
         s.set_session_kind(row.id, "review", Some(source.id))?;
         let _ = s.set_claude_session_id(row.id, &claude_id);
         let _ = s.set_started_at(row.id, now_unix());
@@ -106,5 +109,5 @@ pub async fn spawn_review(
     // 6. Return the tagged review row.
     let s = lock(store)?;
     s.get_session_by_id(review_id)?
-        .ok_or_else(|| IpcError::new("E_INTERNAL", "review row missing after tag"))
+        .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "review row missing after tag"))
 }

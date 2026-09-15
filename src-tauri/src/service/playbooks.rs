@@ -13,7 +13,7 @@
 //! playbooks default OFF so an upgrade changes nothing until the operator
 //! opts in. The planner is pure; the executor is injectable for tests.
 
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::service::settings;
 use crate::shell::quote;
 use crate::ssh::SshClient;
@@ -196,7 +196,7 @@ impl PlaybookExec for RealPlaybookExec {
         .await?;
         if !out.status.success() {
             return Err(IpcError::new(
-                "E_TMUX",
+                codes::E_TMUX,
                 String::from_utf8_lossy(&out.stderr).trim().to_string(),
             ));
         }
@@ -499,7 +499,7 @@ mod tests {
         async fn press_enter(&self, _h: &str, _t: &str) -> Result<PressEnterOutcome, IpcError> {
             self.enters.fetch_add(1, Ordering::SeqCst);
             if self.fail {
-                Err(IpcError::new("E_TMUX", "boom"))
+                Err(IpcError::new(codes::E_TMUX, "boom"))
             } else if self.attached {
                 Ok(PressEnterOutcome::SkippedAttached)
             } else {

@@ -1,4 +1,4 @@
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use async_trait::async_trait;
 use serde::Serialize;
@@ -145,7 +145,7 @@ impl TmuxExec for LocalTmux {
             .args(["capture-pane", "-t", name, "-p"])
             .output()
             .await
-            .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
+            .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn tmux failed: {e}")))?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
@@ -159,7 +159,7 @@ impl TmuxExec for LocalTmux {
             .args(["capture-pane", "-t", name, "-S", &start, "-p"])
             .output()
             .await
-            .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
+            .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn tmux failed: {e}")))?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
@@ -249,7 +249,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
         if is_no_server_running(&combined) {
             return Ok(Vec::new());
         }
-        Err(IpcError::new("E_TMUX", combined.trim()))
+        Err(IpcError::new(codes::E_TMUX, combined.trim()))
     }
 
     async fn new_session(
@@ -276,7 +276,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             Ok(())
         } else {
             Err(IpcError::new(
-                "E_TMUX",
+                codes::E_TMUX,
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
             ))
         }
@@ -289,7 +289,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             Ok(())
         } else {
             Err(IpcError::new(
-                "E_TMUX",
+                codes::E_TMUX,
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
             ))
         }
@@ -299,13 +299,13 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
         let trimmed = new.trim();
         if trimmed.is_empty() {
             return Err(IpcError::new(
-                "E_TMUX",
+                codes::E_TMUX,
                 "new session name must not be empty",
             ));
         }
         if trimmed.contains(|c: char| c.is_whitespace() || c == '.' || c == ':') {
             return Err(IpcError::new(
-                "E_TMUX",
+                codes::E_TMUX,
                 "tmux session name must not contain whitespace, `.`, or `:`",
             ));
         }
@@ -318,7 +318,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             Ok(())
         } else {
             Err(IpcError::new(
-                "E_TMUX",
+                codes::E_TMUX,
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
             ))
         }
@@ -335,7 +335,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             Ok(())
         } else {
             Err(IpcError::new(
-                "E_TMUX",
+                codes::E_TMUX,
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
             ))
         }
@@ -353,7 +353,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             Ok(())
         } else {
             Err(IpcError::new(
-                "E_TMUX",
+                codes::E_TMUX,
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
             ))
         }
@@ -451,13 +451,17 @@ pub async fn list_local_sessions() -> Result<Vec<TmuxSession>, IpcError> {
             if is_no_server_running(&stderr) {
                 Ok(Vec::new())
             } else {
-                Err(IpcError::new("E_TMUX", stderr.trim()))
+                Err(IpcError::new(codes::E_TMUX, stderr.trim()))
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Err(IpcError::new("E_TMUX", "tmux binary not found on PATH"))
-        }
-        Err(e) => Err(IpcError::new("E_TMUX", format!("spawn tmux failed: {e}"))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(IpcError::new(
+            codes::E_TMUX,
+            "tmux binary not found on PATH",
+        )),
+        Err(e) => Err(IpcError::new(
+            codes::E_TMUX,
+            format!("spawn tmux failed: {e}"),
+        )),
     }
 }
 
@@ -518,7 +522,7 @@ fn parse_sessions_checked(input: &str) -> Result<Vec<TmuxSession>, IpcError> {
     }
     let sample: String = first.chars().take(80).collect();
     Err(IpcError::new(
-        "E_TMUX",
+        codes::E_TMUX,
         format!("unparseable tmux list-sessions output: {sample:?}"),
     ))
 }
@@ -594,12 +598,12 @@ pub async fn new_session(
     let output = cmd
         .output()
         .await
-        .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn tmux failed: {e}")))?;
     if output.status.success() {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(IpcError::new("E_TMUX", stderr.trim()))
+        Err(IpcError::new(codes::E_TMUX, stderr.trim()))
     }
 }
 
@@ -610,13 +614,13 @@ pub async fn rename_session(old: &str, new: &str) -> Result<(), IpcError> {
     let trimmed = new.trim();
     if trimmed.is_empty() {
         return Err(IpcError::new(
-            "E_TMUX",
+            codes::E_TMUX,
             "new session name must not be empty",
         ));
     }
     if trimmed.contains(|c: char| c.is_whitespace() || c == '.' || c == ':') {
         return Err(IpcError::new(
-            "E_TMUX",
+            codes::E_TMUX,
             "tmux session name must not contain whitespace, `.`, or `:`",
         ));
     }
@@ -627,12 +631,12 @@ pub async fn rename_session(old: &str, new: &str) -> Result<(), IpcError> {
         .args(["rename-session", "-t", old, trimmed])
         .output()
         .await
-        .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn tmux failed: {e}")))?;
     if output.status.success() {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(IpcError::new("E_TMUX", stderr.trim()))
+        Err(IpcError::new(codes::E_TMUX, stderr.trim()))
     }
 }
 
@@ -645,12 +649,12 @@ pub async fn restart_session(name: &str, pane_cmd: &str) -> Result<(), IpcError>
         .args(["respawn-pane", "-k", "-t", &format!("{name}:"), pane_cmd])
         .output()
         .await
-        .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn tmux failed: {e}")))?;
     if output.status.success() {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(IpcError::new("E_TMUX", stderr.trim()))
+        Err(IpcError::new(codes::E_TMUX, stderr.trim()))
     }
 }
 
@@ -684,12 +688,12 @@ pub async fn respawn_pane_in(
         ])
         .output()
         .await
-        .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn tmux failed: {e}")))?;
     if output.status.success() {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(IpcError::new("E_TMUX", stderr.trim()))
+        Err(IpcError::new(codes::E_TMUX, stderr.trim()))
     }
 }
 
@@ -698,12 +702,12 @@ pub async fn kill_session(name: &str) -> Result<(), IpcError> {
         .args(["kill-session", "-t", name])
         .output()
         .await
-        .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn tmux failed: {e}")))?;
     if output.status.success() {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(IpcError::new("E_TMUX", stderr.trim()))
+        Err(IpcError::new(codes::E_TMUX, stderr.trim()))
     }
 }
 

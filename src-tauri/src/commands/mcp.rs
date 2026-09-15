@@ -11,7 +11,7 @@
 
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::lock;
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::mcp::{self, McpGuards, McpRuntime};
 use crate::ssh::SshClient;
 use crate::store::Store;
@@ -201,7 +201,7 @@ fn configured_port(store: &Mutex<Store>) -> Result<u16, IpcError> {
         .is_some_and(|t| !t.is_empty());
     if !has_master {
         return Err(IpcError::new(
-            "E_PROVISION",
+            codes::E_PROVISION,
             "enable the control API first (no token yet)",
         ));
     }
@@ -269,7 +269,7 @@ pub fn parse_mode(mode: &str) -> Result<&'static str, IpcError> {
         "full" => Ok("full"),
         "readonly" => Ok("readonly"),
         other => Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("token mode must be 'full' or 'readonly', got {other:?}"),
         )),
     }
@@ -287,7 +287,7 @@ pub fn set_host_token_mode(
     s.set_host_token_mode(&host_alias, mode)?;
     s.get_host_token(&host_alias)?
         .map(HostTokenInfo::from)
-        .ok_or_else(|| IpcError::new("E_NOTFOUND", "host token vanished"))
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "host token vanished"))
 }
 
 /// Mint a fresh token for one host and re-provision it (the new token is
@@ -314,7 +314,7 @@ pub async fn rotate_host_token(
     let s = lock(&store)?;
     s.get_host_token(&host_alias)?
         .map(HostTokenInfo::from)
-        .ok_or_else(|| IpcError::new("E_NOTFOUND", "host token vanished"))
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "host token vanished"))
 }
 
 // ---------------------------------------------------------------------------
@@ -440,7 +440,7 @@ pub(crate) fn merge_hook_into_settings_json(
         // `merge_mcp_entry` for ~/.claude.json.
         serde_json::from_str(existing).map_err(|e| {
             IpcError::new(
-                "E_PROVISION",
+                codes::E_PROVISION,
                 format!("~/.claude/settings.json is not valid JSON, refusing to overwrite it: {e}"),
             )
         })?
@@ -448,7 +448,7 @@ pub(crate) fn merge_hook_into_settings_json(
 
     if !settings.is_object() {
         return Err(IpcError::new(
-            "E_PARSE",
+            codes::E_PARSE,
             "settings.json root is not a JSON object",
         ));
     }
@@ -486,7 +486,7 @@ pub(crate) fn merge_hook_into_settings_json(
         .entry("hooks")
         .or_insert(serde_json::json!({}))
         .as_object_mut()
-        .ok_or_else(|| IpcError::new("E_PARSE", "hooks is not an object"))?;
+        .ok_or_else(|| IpcError::new(codes::E_PARSE, "hooks is not an object"))?;
 
     for (event, matcher) in FLEET_HOOK_EVENTS {
         let mut arr = strip_fleet(hooks.get(*event).unwrap_or(&serde_json::json!([])));
@@ -497,7 +497,8 @@ pub(crate) fn merge_hook_into_settings_json(
         hooks.insert((*event).to_string(), arr);
     }
 
-    serde_json::to_string_pretty(&settings).map_err(|e| IpcError::new("E_SERIALIZE", e.to_string()))
+    serde_json::to_string_pretty(&settings)
+        .map_err(|e| IpcError::new(codes::E_SERIALIZE, e.to_string()))
 }
 
 /// Install (or update) the fleet hook in the local `~/.claude/settings.json`.
@@ -517,7 +518,7 @@ pub fn install_fleet_hook(
 ) -> Result<String, IpcError> {
     if host_alias != "local" {
         return Err(IpcError::new(
-            "E_UNSUPPORTED",
+            codes::E_UNSUPPORTED,
             "install_fleet_hook only supports the local host; use Provision hosts for remote ones",
         ));
     }
@@ -534,7 +535,7 @@ pub fn install_fleet_hook(
         let rt = lock(&runtime)?;
         if !rt.is_running() {
             return Err(IpcError::new(
-                "E_NOT_RUNNING",
+                codes::E_NOT_RUNNING,
                 "MCP server is not running — enable it in Settings > MCP first",
             ));
         }
@@ -559,7 +560,7 @@ fn local_hook_token(store: &Mutex<Store>) -> Result<String, IpcError> {
         .is_some_and(|t| !t.is_empty());
     if !has_master {
         return Err(IpcError::new(
-            "E_NO_TOKEN",
+            codes::E_NO_TOKEN,
             "MCP token not configured — enable the MCP server first",
         ));
     }
@@ -577,7 +578,7 @@ fn local_hook_token(store: &Mutex<Store>) -> Result<String, IpcError> {
 fn local_settings_path() -> Result<std::path::PathBuf, IpcError> {
     Ok(directories::BaseDirs::new()
         .map(|b| b.home_dir().to_path_buf())
-        .ok_or_else(|| IpcError::new("E_HOME", "cannot determine home directory"))?
+        .ok_or_else(|| IpcError::new(codes::E_HOME, "cannot determine home directory"))?
         .join(".claude")
         .join("settings.json"))
 }
@@ -604,7 +605,7 @@ pub(crate) fn install_hook_at(
 ) -> Result<HookInstall, IpcError> {
     let existing = if settings_path.exists() {
         std::fs::read_to_string(settings_path)
-            .map_err(|e| IpcError::new("E_IO", format!("read settings.json: {e}")))?
+            .map_err(|e| IpcError::new(codes::E_IO, format!("read settings.json: {e}")))?
     } else {
         String::new()
     };
@@ -616,17 +617,18 @@ pub(crate) fn install_hook_at(
 
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| IpcError::new("E_IO", format!("create .claude dir: {e}")))?;
+            .map_err(|e| IpcError::new(codes::E_IO, format!("create .claude dir: {e}")))?;
     }
     // Back up the previous file before touching it (it may carry the user's
     // permissions/env), then write the merged file 0600 from creation.
     if !existing.trim().is_empty() {
         let bak = settings_path.with_extension("json.fleet-bak");
-        crate::service::provision::write_private_file(&bak, &existing)
-            .map_err(|e| IpcError::new("E_IO", format!("write settings.json.fleet-bak: {e}")))?;
+        crate::service::provision::write_private_file(&bak, &existing).map_err(|e| {
+            IpcError::new(codes::E_IO, format!("write settings.json.fleet-bak: {e}"))
+        })?;
     }
     crate::service::provision::write_private_file(settings_path, &merged)
-        .map_err(|e| IpcError::new("E_IO", format!("write settings.json: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_IO, format!("write settings.json: {e}")))?;
     Ok(HookInstall::Written)
 }
 

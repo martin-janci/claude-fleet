@@ -6,7 +6,7 @@
 //! (`shell::quote`); frontend paths/refs/hashes are additionally validated.
 
 use crate::ipc_error::lock;
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::Store;
@@ -31,9 +31,9 @@ pub const NO_WORKTREE_SENTINEL: &str = "__CF_NO_WORKTREE__";
 /// Resolve a session id to its `(host_alias, tmux_name)`, validating both.
 pub fn session_target(store: &Mutex<Store>, session_id: i64) -> Result<(String, String), IpcError> {
     let s = lock(store)?;
-    let sess = s
-        .get_session_by_id(session_id)?
-        .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("session {session_id} not found")))?;
+    let sess = s.get_session_by_id(session_id)?.ok_or_else(|| {
+        IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found"))
+    })?;
     crate::validate::host_alias(&sess.host_alias)?;
     crate::validate::tmux_name_addressable(&sess.tmux_name)?;
     Ok((sess.host_alias, sess.tmux_name))
@@ -64,7 +64,7 @@ pub async fn run_in_repo(
             .args(["-lc", script])
             .output()
             .await
-            .map_err(|e| IpcError::new("E_REPO", format!("spawn bash: {e}")))
+            .map_err(|e| IpcError::new(codes::E_REPO, format!("spawn bash: {e}")))
     } else {
         ssh.run(
             host,
@@ -79,7 +79,7 @@ pub async fn run_in_repo(
 pub fn repo_err(out: &std::process::Output) -> IpcError {
     let stderr = String::from_utf8_lossy(&out.stderr);
     if stderr.contains(NO_WORKTREE_SENTINEL) {
-        return IpcError::new("E_NO_WORKTREE", "worktree directory no longer exists");
+        return IpcError::new(codes::E_NO_WORKTREE, "worktree directory no longer exists");
     }
     let msg = if stderr.trim().is_empty() {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
@@ -87,7 +87,7 @@ pub fn repo_err(out: &std::process::Output) -> IpcError {
         stderr.trim().to_string()
     };
     IpcError::new(
-        "E_REPO",
+        codes::E_REPO,
         if msg.is_empty() {
             "git command failed".to_string()
         } else {

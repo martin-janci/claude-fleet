@@ -4,7 +4,7 @@
 
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::lock;
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::service::bg_sessions::{self, DismissAgentArgs, NewBgSessionArgs, PurgeProjectArgs};
 use crate::service::repair::{self, RepairReport};
 use crate::service::safe_kill::{
@@ -299,7 +299,7 @@ pub async fn session_conversation(
         let s = lock(&store)?;
         s.get_session_by_id(args.session_id)?.ok_or_else(|| {
             IpcError::new(
-                "E_NOTFOUND",
+                codes::E_NOTFOUND,
                 format!("session {} not found", args.session_id),
             )
         })?

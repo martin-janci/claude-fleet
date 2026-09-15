@@ -29,7 +29,7 @@
 //! per model through the `usage.prices_json` setting) when each delta lands.
 
 use crate::ipc_error::lock;
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::service::settings;
 use crate::shell::quote;
 use crate::ssh::{SshClient, SshExec};
@@ -140,7 +140,7 @@ pub const MAX_PRICE_PER_MTOK: f64 = 10_000.0;
 pub fn parse_price_overrides(raw: &str) -> Result<BTreeMap<String, Price>, IpcError> {
     let bad = |msg: String| {
         IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("{}: {msg}", settings::USAGE_PRICES_JSON),
         )
     };
@@ -588,8 +588,8 @@ async fn run_script(
             .output();
         tokio::time::timeout(LOCAL_WALL_CLOCK, child)
             .await
-            .map_err(|_| IpcError::new("E_SSH_TIMEOUT", "usage collection timed out"))?
-            .map_err(|e| IpcError::new("E_SHELL", format!("spawn bash: {e}")))
+            .map_err(|_| IpcError::new(codes::E_SSH_TIMEOUT, "usage collection timed out"))?
+            .map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}")))
     } else {
         exec.run(host, &["bash", "-lc", &quote(script)], CONNECT_TIMEOUT)
             .await
@@ -623,7 +623,7 @@ pub async fn collect_host(
     let stdout = String::from_utf8_lossy(&out.stdout);
     if !out.status.success() && stdout.trim().is_empty() {
         return Err(IpcError::new(
-            "E_SHELL",
+            codes::E_SHELL,
             format!(
                 "usage collection on {host} failed: {}",
                 String::from_utf8_lossy(&out.stderr).trim()

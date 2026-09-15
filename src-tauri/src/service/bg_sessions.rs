@@ -2,7 +2,7 @@
 
 use crate::claude_cli;
 use crate::ipc_error::lock;
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::ssh::SshClient;
 use crate::store::Store;
 use crate::validate;
@@ -31,7 +31,7 @@ impl NewBgSessionArgs {
         validate::not_option_like("session name", &self.name)?;
         if self.name.chars().any(|c| c.is_control()) {
             return Err(IpcError::new(
-                "E_INVALID",
+                codes::E_INVALID,
                 "session name must not contain control characters",
             ));
         }
@@ -72,7 +72,7 @@ impl PurgeProjectArgs {
     pub fn validate(&self) -> Result<(), IpcError> {
         if self.host_aliases.is_empty() {
             return Err(IpcError::new(
-                "E_INVALID",
+                codes::E_INVALID,
                 "host_aliases must name at least one host",
             ));
         }
@@ -82,11 +82,14 @@ impl PurgeProjectArgs {
         validate::not_option_like("project_path", &self.project_path)?;
         // A relative path would resolve against the remote $HOME.
         if !self.project_path.starts_with('/') {
-            return Err(IpcError::new("E_INVALID", "project_path must be absolute"));
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "project_path must be absolute",
+            ));
         }
         if self.project_path.chars().any(|c| c.is_control()) {
             return Err(IpcError::new(
-                "E_INVALID",
+                codes::E_INVALID,
                 "project_path must not contain control characters",
             ));
         }
@@ -273,15 +276,18 @@ pub fn dismiss_agent_session(args: DismissAgentArgs, store: &Mutex<Store>) -> Re
     let s = lock(store)?;
     let sess = s
         .get_session_by_id(args.session_id)?
-        .ok_or_else(|| IpcError::new("E_NOTFOUND", "session not found"))?;
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?;
     if sess.kind != "bg" {
         return Err(IpcError::new(
-            "E_INVALID_STATE",
+            codes::E_INVALID_STATE,
             "only background agents can be removed from the list",
         ));
     }
     if sess.claude_status.as_deref() == Some("working") {
-        return Err(IpcError::new("E_INVALID_STATE", "stop the agent first"));
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            "stop the agent first",
+        ));
     }
     let Some(cid) = sess
         .claude_session_id
@@ -289,7 +295,7 @@ pub fn dismiss_agent_session(args: DismissAgentArgs, store: &Mutex<Store>) -> Re
         .filter(|c| !c.trim().is_empty())
     else {
         return Err(IpcError::new(
-            "E_INVALID_STATE",
+            codes::E_INVALID_STATE,
             "background agent has no Claude session id",
         ));
     };
@@ -314,11 +320,11 @@ pub fn resolve_peek_target(
     if let Some(id) = session_id {
         let row = s
             .get_session_by_id(id)?
-            .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("session {id} not found")))?;
+            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("session {id} not found")))?;
         return match row.claude_session_id {
             Some(cid) => Ok((row.host_alias, cid)),
             None => Err(IpcError::new(
-                "E_INVALID_STATE",
+                codes::E_INVALID_STATE,
                 "this session has no Claude session id yet — nothing to peek",
             )),
         };
@@ -336,13 +342,13 @@ pub fn resolve_peek_target(
             match s.get_session_by_claude_id(cid)? {
                 Some(row) => Ok((row.host_alias, cid.to_string())),
                 None => Err(IpcError::new(
-                    "E_INVALID",
+                    codes::E_INVALID,
                     "pass host_alias with claude_session_id (the agent is not tracked yet)",
                 )),
             }
         }
         _ => Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "pass session_id, or claude_session_id (+ host_alias)",
         )),
     }
@@ -384,7 +390,10 @@ where
         let s = lock(store)?;
         for host in args.host_aliases.iter().filter(|h| h.as_str() != "local") {
             if s.get_host_row(host)?.is_none() {
-                return Err(IpcError::new("E_NOTFOUND", format!("unknown host: {host}")));
+                return Err(IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("unknown host: {host}"),
+                ));
             }
         }
     }
@@ -794,7 +803,10 @@ mod tests {
                 calls.lock().unwrap().push(host.clone());
                 async move {
                     if host == "beta" {
-                        Err(IpcError::new("E_CLAUDE_CLI", "claude CLI failed on beta"))
+                        Err(IpcError::new(
+                            codes::E_CLAUDE_CLI,
+                            "claude CLI failed on beta",
+                        ))
                     } else {
                         Ok(report_for(&host, &path))
                     }

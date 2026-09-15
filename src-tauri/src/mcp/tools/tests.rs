@@ -1,4 +1,5 @@
 use super::*;
+use crate::ipc_error::codes;
 
 fn text_of(c: &Content) -> &str {
     c.as_text().expect("text content").text.as_str()
@@ -898,7 +899,7 @@ fn mcp_err_carries_the_code_in_data() {
     assert!(e.data.as_ref().unwrap()["details"].is_null());
 
     let d = serde_json::json!({ "candidates": [1, 2] });
-    let e = to_mcp_err(IpcError::new("E_AMBIGUOUS", "two match").with_details(d.clone()));
+    let e = to_mcp_err(IpcError::new(codes::E_AMBIGUOUS, "two match").with_details(d.clone()));
     assert_eq!(e.data.as_ref().unwrap()["code"], "E_AMBIGUOUS");
     assert_eq!(e.data.as_ref().unwrap()["details"], d);
 }

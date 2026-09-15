@@ -17,7 +17,7 @@
 //! wins over both and surfaces as `E_CANCELLED`. `remote_home` runs
 //! `printenv HOME` through the log like the real client and caches per host.
 
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::ssh::{home_from_output, wall_clock_error, SshClient, SshExec, UPLOAD_WALL_CLOCK};
 use std::collections::HashMap;
 use std::os::unix::process::ExitStatusExt;
@@ -341,7 +341,7 @@ impl FakeSsh {
                 };
                 tokio::select! {
                     biased;
-                    _ = cancelled => Err(IpcError::new("E_CANCELLED", format!("ssh {host} cancelled"))),
+                    _ = cancelled => Err(IpcError::new(codes::E_CANCELLED, format!("ssh {host} cancelled"))),
                     _ = tokio::time::sleep(wall_clock) => Err(wall_clock_error(host, wall_clock, false)),
                     _ = tokio::time::sleep(for_) => Ok(Output {
                         status: ExitStatus::from_raw(0),
@@ -437,7 +437,10 @@ impl SshExec for FakeSsh {
         _timeout: Duration,
     ) -> Result<(), IpcError> {
         let bytes = std::fs::read(local_path).map_err(|e| {
-            IpcError::new("E_UPLOAD", format!("open {}: {e}", local_path.display()))
+            IpcError::new(
+                codes::E_UPLOAD,
+                format!("open {}: {e}", local_path.display()),
+            )
         })?;
         let remote_cmd = format!("cat > {}", crate::shell::quote(remote_path));
         let out = self
@@ -453,7 +456,7 @@ impl SshExec for FakeSsh {
             .await?;
         if !out.status.success() {
             return Err(IpcError::new(
-                "E_UPLOAD",
+                codes::E_UPLOAD,
                 format!(
                     "upload to {host} failed: {}",
                     String::from_utf8_lossy(&out.stderr).trim()

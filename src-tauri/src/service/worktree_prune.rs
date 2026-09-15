@@ -50,7 +50,7 @@
 //! Local rows are never touched here: the local project refresh owns them.
 
 use crate::ipc_error::lock;
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::projects::Layout;
 use crate::service::projects::{expand_home, layout, project_base_for, LOCAL_HOST};
 use crate::shell::quote;
@@ -338,7 +338,7 @@ pub async fn prune_host(
         .await?;
     if !out.status.success() {
         return Err(IpcError::new(
-            "E_SSH",
+            codes::E_SSH,
             format!(
                 "worktree probe on {host} exited {:?}; nothing pruned",
                 out.status.code()
@@ -348,7 +348,7 @@ pub async fn prune_host(
     let stdout = String::from_utf8_lossy(&out.stdout);
     let Some(probe) = parse_probe(&stdout, plan.roots.len(), plan.rows.len()) else {
         return Err(IpcError::new(
-            "E_PARSE",
+            codes::E_PARSE,
             format!("worktree probe on {host} was incomplete; nothing pruned"),
         ));
     };

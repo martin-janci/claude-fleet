@@ -2,6 +2,7 @@
 //! related sessions, and the controller self-target guard.
 
 use super::*;
+use crate::ipc_error::codes;
 use crate::ipc_error::lock;
 
 #[derive(Deserialize)]
@@ -35,18 +36,21 @@ pub fn resolve_session_target(
     if let Some(id) = session_id {
         return s
             .get_session_by_id(id)?
-            .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("session {id} not found")));
+            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("session {id} not found")));
     }
     match (host_alias, tmux_name) {
         (Some(host), Some(name)) if !host.trim().is_empty() && !name.trim().is_empty() => {
             crate::validate::host_alias(host)?;
             crate::validate::tmux_name_lookup(name)?;
             s.get_session(name, host)?.ok_or_else(|| {
-                IpcError::new("E_NOTFOUND", format!("session {name} not found on {host}"))
+                IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("session {name} not found on {host}"),
+                )
             })
         }
         _ => Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "pass session_id, or both host_alias and tmux_name",
         )),
     }
@@ -74,7 +78,7 @@ pub fn find_session_by_tmux_name(s: &Store, tmux_name: &str) -> Result<SessionRo
     let matches = if running.is_empty() { all } else { running };
     match matches.len() {
         0 => Err(IpcError::new(
-            "E_NOTFOUND",
+            codes::E_NOTFOUND,
             format!("no session named {tmux_name} on any host"),
         )),
         1 => Ok(matches.into_iter().next().expect("one match")),
@@ -84,7 +88,7 @@ pub fn find_session_by_tmux_name(s: &Store, tmux_name: &str) -> Result<SessionRo
                 .map(|r| serde_json::json!({ "session_id": r.id, "host_alias": r.host_alias }))
                 .collect();
             Err(IpcError::new(
-                "E_AMBIGUOUS",
+                codes::E_AMBIGUOUS,
                 format!(
                     "{} sessions are named {tmux_name}; pass session_id or host_alias",
                     matches.len()
@@ -113,7 +117,7 @@ pub fn guard_not_controller(
     if let Some((c_host, c_name)) = controller {
         if c_host == host && c_name == name {
             return Err(IpcError::new(
-                "E_SELF_TARGET",
+                codes::E_SELF_TARGET,
                 format!(
                     "{name} on {host} is the registered fleet controller; \
                      pass force=true to target it anyway"

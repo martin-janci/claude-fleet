@@ -3,7 +3,7 @@
 //! (`wl-copy`/`xclip`/`xsel`/`pbcopy` for set, the `*-paste`/`-o` siblings for
 //! get), so a single tool surface works on Wayland, X11, and macOS hosts.
 
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use serde::Deserialize;
@@ -50,7 +50,7 @@ pub async fn set_clipboard(args: SetClipboardArgs, ssh: &Arc<SshClient>) -> Resu
     crate::validate::host_alias(&args.host_alias)?;
     if args.content.len() > MAX_CLIPBOARD_BYTES {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!(
                 "clipboard content {} bytes exceeds cap of {MAX_CLIPBOARD_BYTES} bytes",
                 args.content.len()
@@ -75,7 +75,7 @@ async fn run_bash(
             .args(["-lc", script])
             .output()
             .await
-            .map_err(|e| IpcError::new("E_CLIPBOARD", format!("spawn bash: {e}")))
+            .map_err(|e| IpcError::new(codes::E_CLIPBOARD, format!("spawn bash: {e}")))
     } else {
         // Quote the whole script so it survives the ssh argv-join + remote
         // login-shell re-tokenisation (same pattern as `worktree_add_script`).
@@ -90,14 +90,17 @@ fn clipboard_err(stderr: &[u8]) -> IpcError {
     // map it to a typed code without parsing free text from each clipboard CLI.
     if msg.contains("NO_CLIPBOARD_TOOL") {
         IpcError::new(
-            "E_CLIPBOARD_UNAVAILABLE",
+            codes::E_CLIPBOARD_UNAVAILABLE,
             "no clipboard tool found on host (install wl-clipboard, xclip, or xsel; \
              macOS has pbcopy/pbpaste built in)",
         )
     } else if msg.is_empty() {
-        IpcError::new("E_CLIPBOARD", "clipboard command failed with no stderr")
+        IpcError::new(
+            codes::E_CLIPBOARD,
+            "clipboard command failed with no stderr",
+        )
     } else {
-        IpcError::new("E_CLIPBOARD", msg)
+        IpcError::new(codes::E_CLIPBOARD, msg)
     }
 }
 

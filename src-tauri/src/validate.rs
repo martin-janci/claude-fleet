@@ -5,7 +5,7 @@
 //! calls bypass any UI-side checks. Every alias / name / path component is
 //! validated here before it reaches `ssh`, `git`, `tmux`, or a path string.
 
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 
 /// Validate an SSH host alias (or `~/.ssh/config` alias).
 ///
@@ -17,14 +17,17 @@ use crate::ipc_error::IpcError;
 /// as belt-and-suspenders.)
 pub fn host_alias(alias: &str) -> Result<(), IpcError> {
     if alias.is_empty() {
-        return Err(IpcError::new("E_INVALID", "host alias must not be empty"));
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "host alias must not be empty",
+        ));
     }
     if alias.len() > 255 {
-        return Err(IpcError::new("E_INVALID", "host alias is too long"));
+        return Err(IpcError::new(codes::E_INVALID, "host alias is too long"));
     }
     if alias.starts_with('-') {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "host alias must not start with '-'",
         ));
     }
@@ -33,7 +36,7 @@ pub fn host_alias(alias: &str) -> Result<(), IpcError> {
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "host alias may contain only letters, digits, '.', '_' and '-'",
         ));
     }
@@ -47,31 +50,31 @@ pub fn host_alias(alias: &str) -> Result<(), IpcError> {
 pub fn path_component(label: &str, value: &str) -> Result<(), IpcError> {
     if value.is_empty() {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("{label} must not be empty"),
         ));
     }
     if value == "." || value == ".." {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("{label} must not be '.' or '..'"),
         ));
     }
     if value.contains('/') || value.contains('\\') {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("{label} must not contain a path separator"),
         ));
     }
     if value.starts_with('-') {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("{label} must not start with '-'"),
         ));
     }
     if value.chars().any(|c| c.is_control()) {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("{label} must not contain control characters"),
         ));
     }
@@ -83,17 +86,23 @@ pub fn path_component(label: &str, value: &str) -> Result<(), IpcError> {
 /// `git` option, and whitespace / control characters / `..` are rejected.
 pub fn git_ref(value: &str) -> Result<(), IpcError> {
     if value.is_empty() {
-        return Err(IpcError::new("E_INVALID", "branch must not be empty"));
+        return Err(IpcError::new(codes::E_INVALID, "branch must not be empty"));
     }
     if value.starts_with('-') {
-        return Err(IpcError::new("E_INVALID", "branch must not start with '-'"));
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "branch must not start with '-'",
+        ));
     }
     if value.contains("..") {
-        return Err(IpcError::new("E_INVALID", "branch must not contain '..'"));
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "branch must not contain '..'",
+        ));
     }
     if value.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "branch must not contain whitespace or control characters",
         ));
     }
@@ -107,7 +116,7 @@ pub fn git_ref(value: &str) -> Result<(), IpcError> {
 pub fn commit_hash(value: &str) -> Result<(), IpcError> {
     if value.len() < 4 || value.len() > 40 {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "commit hash must be 4–40 characters",
         ));
     }
@@ -116,7 +125,7 @@ pub fn commit_hash(value: &str) -> Result<(), IpcError> {
         .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
     {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "commit hash must be lowercase hexadecimal",
         ));
     }
@@ -140,7 +149,7 @@ pub fn claude_session_id(value: &str) -> Result<(), IpcError> {
         Ok(())
     } else {
         Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "claude session id must be a lowercase UUID",
         ))
     }
@@ -153,26 +162,29 @@ pub fn claude_session_id(value: &str) -> Result<(), IpcError> {
 /// control characters. A plain `/` separator is allowed (paths have subdirs).
 pub fn repo_rel_path(value: &str) -> Result<(), IpcError> {
     if value.is_empty() {
-        return Err(IpcError::new("E_INVALID", "file path must not be empty"));
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "file path must not be empty",
+        ));
     }
     if value.len() > 4096 {
-        return Err(IpcError::new("E_INVALID", "file path is too long"));
+        return Err(IpcError::new(codes::E_INVALID, "file path is too long"));
     }
     if value.starts_with('/') || value.starts_with('\\') {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "file path must be relative to the worktree",
         ));
     }
     if value.starts_with('-') {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "file path must not start with '-'",
         ));
     }
     if value.chars().any(|c| c.is_control()) {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "file path must not contain control characters",
         ));
     }
@@ -180,7 +192,7 @@ pub fn repo_rel_path(value: &str) -> Result<(), IpcError> {
     // `../x`, `x/..` all escape the worktree.
     if value.split(['/', '\\']).any(|component| component == "..") {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "file path must not contain a '..' component",
         ));
     }
@@ -199,11 +211,14 @@ pub fn repo_rel_path(value: &str) -> Result<(), IpcError> {
 /// the MCP API reach here with padding, and they get a clear `E_INVALID`.
 pub fn tmux_name(value: &str) -> Result<(), IpcError> {
     if value.is_empty() {
-        return Err(IpcError::new("E_INVALID", "session name must not be empty"));
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "session name must not be empty",
+        ));
     }
     if value.starts_with('-') {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "session name must not start with '-'",
         ));
     }
@@ -212,7 +227,7 @@ pub fn tmux_name(value: &str) -> Result<(), IpcError> {
         .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '.' | ':'))
     {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "session name must not contain whitespace, control characters, '.' or ':'",
         ));
     }
@@ -228,11 +243,14 @@ pub fn tmux_name(value: &str) -> Result<(), IpcError> {
 /// a malformed/hostile caller.
 pub fn tmux_name_lookup(value: &str) -> Result<(), IpcError> {
     if value.is_empty() {
-        return Err(IpcError::new("E_INVALID", "session name must not be empty"));
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "session name must not be empty",
+        ));
     }
     if value.starts_with('-') {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "session name must not start with '-'",
         ));
     }
@@ -241,7 +259,7 @@ pub fn tmux_name_lookup(value: &str) -> Result<(), IpcError> {
         .any(|c| c.is_whitespace() || c.is_control() || c == '.')
     {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "session name must not contain whitespace, control characters, or '.'",
         ));
     }
@@ -259,7 +277,7 @@ pub fn tmux_name_lookup(value: &str) -> Result<(), IpcError> {
 pub fn tmux_name_addressable(value: &str) -> Result<(), IpcError> {
     if value.starts_with("bg:") {
         return Err(IpcError::new(
-            "E_BG_SESSION",
+            codes::E_BG_SESSION,
             "this session runs outside tmux; use session_transcript to read it",
         ));
     }
@@ -274,13 +292,13 @@ pub fn tmux_name_addressable(value: &str) -> Result<(), IpcError> {
 pub fn friendly_name(value: &str) -> Result<(), IpcError> {
     if value.chars().count() > 80 {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "friendly name must be 80 characters or fewer",
         ));
     }
     if value.chars().any(|c| c.is_control()) {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "friendly name must not contain control characters",
         ));
     }
@@ -293,7 +311,7 @@ pub fn friendly_name(value: &str) -> Result<(), IpcError> {
 pub fn not_blank(label: &str, value: &str) -> Result<(), IpcError> {
     if value.trim().is_empty() {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("{label} must not be empty"),
         ));
     }
@@ -309,7 +327,7 @@ pub fn not_option_like(label: &str, value: &str) -> Result<(), IpcError> {
     not_blank(label, value)?;
     if value.starts_with('-') {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("{label} must not start with '-'"),
         ));
     }
@@ -332,31 +350,31 @@ pub fn not_option_like(label: &str, value: &str) -> Result<(), IpcError> {
 pub fn remote_abs_path(label: &str, value: &str) -> Result<(), IpcError> {
     if value.is_empty() {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("{label} must not be empty"),
         ));
     }
     if value.len() > 4096 {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("{label} must be 4096 bytes or fewer"),
         ));
     }
     if !value.starts_with('/') {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("{label} must be an absolute path"),
         ));
     }
     if value.chars().any(|c| c.is_control()) {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("{label} must not contain control characters"),
         ));
     }
     if value.split('/').any(|component| component == "..") {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("{label} must not contain a '..' component"),
         ));
     }
@@ -372,7 +390,9 @@ pub fn remote_worktree_path(label: &str, value: &str) -> Result<(), IpcError> {
     let name = std::path::Path::new(value)
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| IpcError::new("E_INVALID", format!("{label} has no final component")))?;
+        .ok_or_else(|| {
+            IpcError::new(codes::E_INVALID, format!("{label} has no final component"))
+        })?;
     path_component("worktree name", name)
 }
 

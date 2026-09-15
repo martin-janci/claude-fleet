@@ -5,7 +5,7 @@
 //! through `use super::*`, exactly as in the single file.
 
 use crate::cancel::{CancelGuard, CancellationRegistry};
-use crate::ipc_error::{codes, IpcError};
+use crate::ipc_error::IpcError;
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::{HostReconcile, HostRow, ProjectRow, ReconcileSession, SessionRow, Store};

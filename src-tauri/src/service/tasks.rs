@@ -15,7 +15,7 @@
 //! read one row, unlock, sleep — never holding the mutex across the sleep.
 
 use crate::ipc_error::lock;
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::ssh::SshClient;
 use crate::store::{SessionRow, Store, TaskRow, IDLE_STATUSES, TASK_TERMINAL_STATES};
 use std::sync::{Arc, Mutex};
@@ -136,9 +136,9 @@ impl WaitCond {
             "idle" => Ok(WaitCond::Idle),
             "turn_gt" => turn
                 .map(WaitCond::TurnGt)
-                .ok_or_else(|| IpcError::new("E_INVALID", "until=turn_gt requires `turn`")),
+                .ok_or_else(|| IpcError::new(codes::E_INVALID, "until=turn_gt requires `turn`")),
             other => Err(IpcError::new(
-                "E_INVALID",
+                codes::E_INVALID,
                 format!("until must be \"idle\" or \"turn_gt\", got {other:?}"),
             )),
         }
@@ -187,7 +187,7 @@ pub async fn wait_for_session_with(
         let row = {
             let s = lock(store)?;
             s.get_session_by_id(session_id)?.ok_or_else(|| {
-                IpcError::new("E_NOTFOUND", format!("session {session_id} not found"))
+                IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found"))
             })?
         };
         if session_satisfies(&row, cond) {
@@ -227,9 +227,9 @@ pub async fn wait_for_task_with(
     loop {
         let row = {
             let s = lock(store)?;
-            let row = s
-                .get_task(task_id)?
-                .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("task {task_id} not found")))?;
+            let row = s.get_task(task_id)?.ok_or_else(|| {
+                IpcError::new(codes::E_NOTFOUND, format!("task {task_id} not found"))
+            })?;
             // A dead worker / expired TTL ends the wait with `failed`.
             match sweep_one(&s, &row, now_unix(), task_max_age_secs(&s))? {
                 Some(failed) => failed,
@@ -263,7 +263,10 @@ pub fn create_task(
     prompt: &str,
 ) -> Result<TaskRow, IpcError> {
     if prompt.trim().is_empty() {
-        return Err(IpcError::new("E_VALIDATE", "task prompt must be non-empty"));
+        return Err(IpcError::new(
+            codes::E_VALIDATE,
+            "task prompt must be non-empty",
+        ));
     }
     let nonce = make_nonce();
     let task = s.insert_task(requester_session_id, worker_session_id, prompt, &nonce)?;
@@ -282,7 +285,7 @@ pub fn create_task(
 pub fn start_task(s: &Store, task: &TaskRow) -> Result<TaskRow, IpcError> {
     let row = s
         .mark_task_running(task.id)?
-        .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("task {} vanished", task.id)))?;
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("task {} vanished", task.id)))?;
     if let Some(w) = row.worker_session_id {
         let _ = s.insert_session_event(w, "task_started", Some(&format!("task={}", row.id)));
     }
@@ -306,10 +309,10 @@ pub fn fail_task(s: &Store, task_id: i64, error: &str) -> Result<Option<TaskRow>
 pub fn cancel_task(s: &Store, task_id: i64, reason: &str) -> Result<TaskRow, IpcError> {
     let (row, changed) = s.finish_task(task_id, "cancelled", None, Some(reason))?;
     let row =
-        row.ok_or_else(|| IpcError::new("E_NOTFOUND", format!("task {task_id} not found")))?;
+        row.ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("task {task_id} not found")))?;
     if !changed {
         return Err(IpcError::new(
-            "E_TASK_TERMINAL",
+            codes::E_TASK_TERMINAL,
             format!("task {task_id} is already {}", row.state),
         ));
     }
@@ -404,7 +407,7 @@ pub fn list_tasks_for(
     if let Some(st) = state {
         if !crate::store::TASK_STATES.contains(&st) {
             return Err(IpcError::new(
-                "E_INVALID",
+                codes::E_INVALID,
                 format!(
                     "state must be one of {}",
                     crate::store::TASK_STATES.join(" | ")

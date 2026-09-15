@@ -4,7 +4,7 @@
 //! passed.
 
 use crate::ipc_error::lock;
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::{SshClient, SshExec};
 use crate::store::{Store, WorktreeRow};
@@ -253,10 +253,10 @@ pub async fn list_host_worktrees_with(
         // connect error on stderr, not an `Err` — surface it as a transport
         // failure distinct from the checkout itself being broken.
         return Err(if out.status.code() == Some(255) {
-            IpcError::new("E_SSH", format!("ssh to {host} failed: {stderr}"))
+            IpcError::new(codes::E_SSH, format!("ssh to {host} failed: {stderr}"))
         } else {
             IpcError::new(
-                "E_GIT_SETUP",
+                codes::E_GIT_SETUP,
                 format!("couldn't list worktrees of {owner}/{repo} on {host}: {stderr}"),
             )
         });
@@ -272,7 +272,7 @@ pub async fn list_host_worktrees_with(
     }
     let Some((canonical_root, porcelain)) = split_scan_output(&stdout) else {
         return Err(IpcError::new(
-            "E_GIT_SETUP",
+            codes::E_GIT_SETUP,
             format!(
                 "couldn't parse the worktree scan of {owner}/{repo} on {host}: missing root line"
             ),
@@ -281,7 +281,7 @@ pub async fn list_host_worktrees_with(
     let found = rows_from_porcelain(&canonical_root, porcelain);
     if found.is_empty() {
         return Err(IpcError::new(
-            "E_GIT_SETUP",
+            codes::E_GIT_SETUP,
             format!("worktree scan of {owner}/{repo} on {host} produced no worktrees"),
         ));
     }
@@ -346,7 +346,7 @@ pub async fn delete_worktree(
         let s = lock(store)?;
         let wt = s.get_worktree_row(args.worktree_id)?.ok_or_else(|| {
             IpcError::new(
-                "E_NOTFOUND",
+                codes::E_NOTFOUND,
                 format!("worktree {} not found", args.worktree_id),
             )
         })?;
@@ -355,7 +355,7 @@ pub async fn delete_worktree(
         // aim at the wrong filesystem. Its ExitWorktree hook removes it.
         if wt.host_alias != crate::service::projects::LOCAL_HOST {
             return Err(IpcError::new(
-                "E_INVALID",
+                codes::E_INVALID,
                 format!(
                     "worktree {} is a checkout on host {}; remove it there (ExitWorktree)",
                     wt.id, wt.host_alias
@@ -371,14 +371,14 @@ pub async fn delete_worktree(
                     .collect::<Vec<_>>()
                     .join(", ");
                 return Err(IpcError::new(
-                    "E_WORKTREE_BUSY",
+                    codes::E_WORKTREE_BUSY,
                     format!("worktree is in use by session(s): {who}"),
                 ));
             }
         }
         let proj_base = s.project_base_path(wt.project_id)?.ok_or_else(|| {
             IpcError::new(
-                "E_NOTFOUND",
+                codes::E_NOTFOUND,
                 format!("project {} for worktree has no base path", wt.project_id),
             )
         })?;
@@ -406,7 +406,7 @@ pub async fn delete_worktree(
             .args(["-lc", &cmd])
             .output()
             .await
-            .map_err(|e| IpcError::new("E_SHELL", format!("spawn bash: {e}")))?
+            .map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}")))?
     } else {
         ssh.run(
             &host_alias,
@@ -417,7 +417,7 @@ pub async fn delete_worktree(
     };
     if !out.status.success() {
         return Err(IpcError::new(
-            "E_GIT",
+            codes::E_GIT,
             String::from_utf8_lossy(&out.stderr).trim().to_string(),
         ));
     }
