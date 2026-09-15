@@ -84,6 +84,7 @@ impl Store {
     /// under `keep_source`: both rows would then report the same spend.
     /// A missing source or `target == source` is a no-op. `usage_daily` is
     /// untouched (that spend was already bucketed).
+    #[cfg(test)]
     pub fn carry_usage_totals(
         &self,
         target_id: i64,

@@ -369,12 +369,6 @@ export interface NewSessionArgs {
   friendly_name?: string | null;
 }
 
-export async function newSession(args: NewSessionArgs): Promise<Result<SessionRow>> {
-  const r = await invokeCmd<SessionRow>('new_session', { args });
-  if (r.ok) acceptCommandRow(r.value);
-  return r;
-}
-
 export async function newSessionAbortable(
   args: NewSessionArgs,
   signal?: AbortSignal,
@@ -504,10 +498,6 @@ function acceptCommandRow(row: SessionRow | null | undefined): void {
   if (!row) return;
   tombstones.delete(row.id);
   mergeSession(row);
-}
-
-export async function relatedSessions(sessionId: number): Promise<Result<SessionRow[]>> {
-  return invokeCmd<SessionRow[]>('related_sessions', { args: { session_id: sessionId } });
 }
 
 export async function sendPrompt(

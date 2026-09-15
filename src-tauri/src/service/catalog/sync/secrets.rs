@@ -74,14 +74,6 @@ impl SecretPlan {
     pub fn inner(&self) -> &RenderPlan {
         &self.0
     }
-
-    /// Reserved: the owned counterpart of `inner()`, for a caller that
-    /// consumes the plan rather than reading it by reference. Nothing does
-    /// that yet — every writer reads through `inner()`.
-    #[allow(dead_code)]
-    pub fn into_inner(self) -> RenderPlan {
-        self.0
-    }
 }
 
 impl From<RenderPlan> for SecretPlan {

@@ -375,28 +375,6 @@ pub(crate) fn hook_entry(port: u16, token: &str) -> serde_json::Value {
     })
 }
 
-/// Build the hook entry array for one event type.
-fn build_hook_block(port: u16, token: &str, matcher: &str) -> serde_json::Value {
-    serde_json::json!([{
-        "matcher": matcher,
-        "hooks": [hook_entry(port, token)]
-    }])
-}
-
-/// Build the full settings fragment (for tests / docs; the real install
-/// merges into the existing file).
-#[allow(dead_code)]
-pub fn build_hook_config(port: u16, token: &str) -> String {
-    let v = serde_json::json!({
-        "hooks": {
-            "Stop": build_hook_block(port, token, ""),
-            "UserPromptSubmit": build_hook_block(port, token, ""),
-            "PostToolUse": build_hook_block(port, token, WORKTREE_TOOL_MATCHER)
-        }
-    });
-    serde_json::to_string_pretty(&v).unwrap()
-}
-
 /// Matcher of fleet's PostToolUse hook (Claude Code matchers are regexes):
 /// `EnterWorktree` registers a worktree row for the calling host,
 /// `ExitWorktree` with `action: "remove"` drops it. The `WorktreeCreate` /
@@ -790,28 +768,6 @@ mod tests {
         for (event, _) in expect {
             assert_eq!(v2["hooks"][event].as_array().unwrap().len(), 1, "{event}");
         }
-    }
-
-    #[test]
-    fn build_hook_config_produces_valid_json() {
-        let cfg = build_hook_config(4180, "abc");
-        let v: serde_json::Value = serde_json::from_str(&cfg).unwrap();
-        assert!(v["hooks"]["Stop"].is_array());
-        assert!(v["hooks"]["UserPromptSubmit"].is_array());
-        assert!(v["hooks"]["PostToolUse"].is_array());
-        assert_eq!(v["hooks"]["UserPromptSubmit"][0]["matcher"], "");
-        assert_eq!(
-            v["hooks"]["UserPromptSubmit"][0]["hooks"][0]["url"],
-            "http://127.0.0.1:4180/hook"
-        );
-        let h = &v["hooks"]["Stop"][0]["hooks"][0];
-        assert_eq!(h["type"], "http");
-        assert!(h["url"].as_str().unwrap().contains("4180"));
-        assert_eq!(h["headers"]["Authorization"], "Bearer abc");
-        assert_eq!(
-            v["hooks"]["PostToolUse"][0]["matcher"],
-            WORKTREE_TOOL_MATCHER
-        );
     }
 
     #[test]

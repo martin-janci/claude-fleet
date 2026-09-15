@@ -2,12 +2,9 @@
 // registered via `tauri::Manager::manage()` because `rusqlite::Connection`
 // is not Send+Sync. Commands access it via `State<'_, Mutex<Store>>`.
 
-// Store is a coherent data-access API; several methods (e.g. `with_transaction`,
-// `get_account_by_uuid`, `delete_session`) are currently exercised only by
-// `#[cfg(test)]` code, so they read as dead in a non-test build.
-#![allow(dead_code)]
-
-use crate::events::{EventBus, NoopEventBus, RowChange};
+#[cfg(test)]
+use crate::events::NoopEventBus;
+use crate::events::{EventBus, RowChange};
 use rusqlite::{Connection, OptionalExtension, Result};
 use std::sync::Arc;
 
@@ -32,10 +29,6 @@ pub struct Store {
 }
 
 impl Store {
-    pub fn open(path: &std::path::Path) -> Result<Self> {
-        Self::open_with_bus(path, Arc::new(NoopEventBus))
-    }
-
     pub fn open_with_bus(path: &std::path::Path, bus: Arc<dyn EventBus>) -> Result<Self> {
         let conn = Connection::open(path)?;
         let store = Self { conn, bus };
@@ -121,19 +114,6 @@ impl Store {
         &self.conn
     }
 
-    /// Run `f` under the implicit lock and return its result.
-    ///
-    /// The helper exists for documentation: at call sites,
-    /// `let data = { let s = store.lock().unwrap(); s.with_snapshot(|s| s.list_hosts()) };`
-    /// makes it visible that the lock is held only for the duration of the closure
-    /// — and downstream readers can see the I/O happens after the lock drops.
-    pub fn with_snapshot<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&Store) -> R,
-    {
-        f(self)
-    }
-
     /// Run `f` inside a single `conn.transaction()`. Used by reconcile paths
     /// that batch many upserts/deletes after a fan-out of off-lock probes —
     /// one fsync per batch instead of one per row.
@@ -188,17 +168,6 @@ mod tests {
             s.get_controller().unwrap(),
             Some(("mefistos".to_string(), "ctrl".to_string()))
         );
-    }
-
-    #[test]
-    fn with_snapshot_returns_owned_data_for_off_lock_use() {
-        let store = Store::open_in_memory().expect("in-memory store");
-        store
-            .insert_host("alpha", Some("alpha-ssh"))
-            .expect("insert");
-        let hosts = store.with_snapshot(|s| s.list_hosts().expect("list"));
-        assert_eq!(hosts.len(), 1);
-        assert_eq!(hosts[0].alias, "alpha");
     }
 
     #[test]

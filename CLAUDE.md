@@ -6,7 +6,7 @@ Orientation for Claude Code working in this repository.
 
 `claude-fleet` — a Tauri 2 desktop app (Rust backend + Svelte 5 frontend) for
 managing long-lived Claude Code sessions running in tmux across multiple
-machines over SSH. ~16,400 LOC Rust, ~12,900 LOC frontend.
+machines over SSH. ~93,000 LOC Rust, ~27,000 LOC frontend.
 
 ## Build & test
 
