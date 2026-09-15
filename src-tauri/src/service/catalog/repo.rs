@@ -111,8 +111,7 @@ pub struct RepoStatus {
     pub has_upstream: bool,
 }
 
-/// Used by author.rs (Task 2): repo status for the toolbar / `status()`.
-#[allow(dead_code)]
+/// Backs `author::repo_status` (the toolbar's dirty / ahead / behind badge).
 pub fn git_status(root: &Path) -> Result<RepoStatus, IpcError> {
     let head_sha = head(root)?;
     let porcelain = git(root, &["status", "--porcelain"])?;
@@ -146,8 +145,6 @@ pub fn git_status(root: &Path) -> Result<RepoStatus, IpcError> {
 /// builds, `git()` isolates every invocation from the host's global/system
 /// config (see its doc comment) so this is deterministic regardless of the
 /// machine running the tests.
-/// Used by author.rs (Task 2) as well as `commit` below.
-#[allow(dead_code)]
 pub fn has_identity(root: &Path) -> bool {
     git(root, &["config", "user.email"]).is_ok()
 }
@@ -157,8 +154,6 @@ pub fn has_identity(root: &Path) -> bool {
 /// validates any path that originates from the frontend before it reaches
 /// this function); the `--` before them still defuses flag injection (a
 /// path that happens to start with `-`) regardless.
-/// Used by author.rs (Task 2).
-#[allow(dead_code)]
 pub fn stage_paths(root: &Path, rel_paths: &[String]) -> Result<(), IpcError> {
     if rel_paths.is_empty() {
         git(root, &["add", "-A"]).map(|_| ())
@@ -173,8 +168,6 @@ pub fn stage_paths(root: &Path, rel_paths: &[String]) -> Result<(), IpcError> {
 /// a synthetic identity when the repo has none configured locally. Returns
 /// the new HEAD. `E_CATALOG_GIT` ("nothing to commit") when the working tree
 /// has no changes at all.
-/// Used by author.rs (Task 2).
-#[allow(dead_code)]
 pub fn commit(root: &Path, message: &str) -> Result<String, IpcError> {
     let porcelain = git(root, &["status", "--porcelain"])?;
     if porcelain.trim().is_empty() {
@@ -196,8 +189,6 @@ pub fn commit(root: &Path, message: &str) -> Result<String, IpcError> {
 
 /// `git push`; requires an existing upstream (git surfaces its own stderr
 /// through the shared `git()` helper on failure).
-/// Used by author.rs (Task 2).
-#[allow(dead_code)]
 pub fn push(root: &Path) -> Result<(), IpcError> {
     git(root, &["push"]).map(|_| ())
 }
@@ -221,9 +212,10 @@ fn body_file(kind: Kind) -> &'static str {
 /// A `Resource.rel_path` is safe to join onto an asset dir and write only
 /// when it starts with `resources/`, stays within `[A-Za-z0-9._/-]`, and has
 /// no empty or `..` segment (which would otherwise let it escape the asset
-/// directory or the `resources/` subtree). Defence in depth: `author.rs`
-/// (Task 2) validates resource paths coming from the frontend too.
-fn valid_resource_rel_path(rel_path: &str) -> bool {
+/// directory or the `resources/` subtree). Shared with `author.rs`, which
+/// applies the same rule to resource paths arriving from the frontend
+/// before anything is read or written.
+pub(crate) fn valid_resource_rel_path(rel_path: &str) -> bool {
     rel_path.starts_with("resources/")
         && rel_path
             .chars()
@@ -462,8 +454,6 @@ fn prune_dir(current: &Path, root_dir: &Path, keep: &HashSet<&str>) -> std::io::
 
 /// Repo-relative directory (folder kinds) or file path (single-file kinds)
 /// for an asset: `"skills/<name>"` or `"hooks/<name>.yaml"`.
-/// Used by author.rs (Task 2).
-#[allow(dead_code)]
 pub fn asset_rel_dir(kind: Kind, name: &str) -> String {
     if kind.is_folder() {
         format!("{}/{name}", kind.dir())
@@ -475,8 +465,6 @@ pub fn asset_rel_dir(kind: Kind, name: &str) -> String {
 /// Deletes an asset's folder (folder kinds) or file (single-file kinds),
 /// returning the repo-relative paths removed. `E_ASSET_NOT_FOUND` when the
 /// asset does not exist on disk.
-/// Used by author.rs (Task 2).
-#[allow(dead_code)]
 pub fn remove_asset(root: &Path, kind: Kind, name: &str) -> Result<Vec<String>, IpcError> {
     let not_found = || {
         IpcError::new(

@@ -162,6 +162,10 @@ pub mod codes {
     pub const E_ASSET_EXISTS: &str = "E_ASSET_EXISTS";
     /// Asset catalog: no asset of that kind and name is in the catalog.
     pub const E_ASSET_NOT_FOUND: &str = "E_ASSET_NOT_FOUND";
+    /// Asset catalog: an authoring save was refused because the asset has
+    /// lint errors. `details` carries the whole `LintReport` (errors and
+    /// warnings); nothing was written to the repo.
+    pub const E_LINT: &str = "E_LINT";
     /// Asset catalog: a host scan failed or returned unusable output. The
     /// scan fails closed — a partial snapshot is never treated as empty.
     pub const E_SCAN: &str = "E_SCAN";
