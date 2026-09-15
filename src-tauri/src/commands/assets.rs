@@ -5,18 +5,63 @@ use crate::cancel::CancellationRegistry;
 use crate::ipc_error::{codes, IpcError};
 use crate::service::catalog::{
     self,
+    author::{
+        self, AddResourceArgs, AssetRef, CommitPendingArgs, CreateArgs, LintAll, LintReport,
+        RemoveResourceArgs, UpdateArgs, WriteResult,
+    },
+    author_session::{self, SpawnAuthorArgs},
     import::ImportReport,
     inventory,
-    model::Kind,
+    model::{is_valid_name, Asset, Kind},
+    repo::RepoStatus,
     sync::{
         self, plan::SyncPlan, secrets::is_valid_secret_name, ApplyArgs, PlanArgs, SyncRunSummary,
     },
     AssetDetail, AssetListing, ConfigureArgs, ImportArgs,
 };
 use crate::ssh::SshClient;
-use crate::store::{AssetInventoryRow, CatalogConfigRow, SecretRow, Store};
+use crate::store::{AssetInventoryRow, CatalogConfigRow, SecretRow, SessionRow, Store};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tauri::State;
+
+fn invalid_name(name: &str) -> IpcError {
+    IpcError::new(codes::E_INVALID, format!("invalid asset name '{name}'"))
+}
+
+fn check_name(name: &str) -> Result<(), IpcError> {
+    if is_valid_name(name) {
+        Ok(())
+    } else {
+        Err(invalid_name(name))
+    }
+}
+
+fn check_resource_path(rel_path: &str) -> Result<(), IpcError> {
+    if catalog::repo::valid_resource_rel_path(rel_path) {
+        Ok(())
+    } else {
+        Err(IpcError::new(
+            codes::E_INVALID,
+            format!("invalid resource path: {rel_path}"),
+        ))
+    }
+}
+
+/// `local_path` must be an absolute path to an existing regular file
+/// (`symlink_metadata`, so a symlink is rejected rather than followed).
+fn check_local_path(local_path: &str) -> Result<(), IpcError> {
+    let p = Path::new(local_path);
+    let is_regular_file = std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file());
+    if p.is_absolute() && is_regular_file {
+        Ok(())
+    } else {
+        Err(IpcError::new(
+            codes::E_INVALID,
+            format!("{local_path} is not an absolute path to an existing regular file"),
+        ))
+    }
+}
 
 #[derive(serde::Deserialize)]
 pub struct SetSecretArgs {
@@ -176,4 +221,116 @@ pub fn catalog_delete_secret(
 ) -> Result<bool, IpcError> {
     let s = store.lock().map_err(|_| IpcError::lock())?;
     Ok(s.delete_secret(&args.name, args.host_alias.as_deref())?)
+}
+
+// ------------------------------------------------------------- authoring
+
+#[tauri::command]
+pub fn catalog_create_asset(
+    args: CreateArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<WriteResult, IpcError> {
+    check_name(&args.name)?;
+    if let Some(from) = args.duplicate_from.as_deref() {
+        check_name(from)?;
+    }
+    author::create(args, &store)
+}
+
+#[tauri::command]
+pub fn catalog_update_asset(
+    args: UpdateArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<WriteResult, IpcError> {
+    check_name(&args.asset.header.name)?;
+    for r in &args.asset.resources {
+        check_resource_path(&r.rel_path)?;
+    }
+    author::update(args, &store)
+}
+
+#[tauri::command]
+pub fn catalog_delete_asset(
+    args: AssetRef,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<String, IpcError> {
+    check_name(&args.name)?;
+    author::delete_asset(args, &store)
+}
+
+#[tauri::command]
+pub fn catalog_add_resource(
+    args: AddResourceArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<WriteResult, IpcError> {
+    check_name(&args.name)?;
+    check_local_path(&args.local_path)?;
+    if let Some(rel_path) = args.rel_path.as_deref() {
+        check_resource_path(rel_path)?;
+    }
+    author::add_resource(args, &store)
+}
+
+#[tauri::command]
+pub fn catalog_remove_resource(
+    args: RemoveResourceArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<WriteResult, IpcError> {
+    check_name(&args.name)?;
+    check_resource_path(&args.rel_path)?;
+    author::remove_resource(args, &store)
+}
+
+#[tauri::command]
+pub fn catalog_lint_asset(
+    args: AssetRef,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<LintReport, IpcError> {
+    check_name(&args.name)?;
+    author::lint_asset(args, &store)
+}
+
+#[tauri::command]
+pub fn catalog_lint_all(store: State<'_, Arc<Mutex<Store>>>) -> Result<LintAll, IpcError> {
+    author::lint_everything(&store)
+}
+
+#[tauri::command]
+pub fn catalog_commit_pending(
+    args: CommitPendingArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<String, IpcError> {
+    author::commit_pending(args, &store)
+}
+
+#[tauri::command]
+pub fn catalog_push(store: State<'_, Arc<Mutex<Store>>>) -> Result<RepoStatus, IpcError> {
+    author::push(&store)
+}
+
+#[tauri::command]
+pub fn catalog_repo_status(store: State<'_, Arc<Mutex<Store>>>) -> Result<RepoStatus, IpcError> {
+    author::repo_status(&store)
+}
+
+#[tauri::command]
+pub fn catalog_template(
+    args: AssetRef,
+    _store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Asset, IpcError> {
+    check_name(&args.name)?;
+    Ok(author::template(args.kind, &args.name))
+}
+
+#[tauri::command]
+pub async fn catalog_spawn_author_session(
+    args: SpawnAuthorArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+    reg: State<'_, Arc<CancellationRegistry>>,
+) -> Result<SessionRow, IpcError> {
+    if let Some(name) = args.name.as_deref() {
+        check_name(name)?;
+    }
+    author_session::spawn_author_session(args, &store, &ssh, &reg).await
 }

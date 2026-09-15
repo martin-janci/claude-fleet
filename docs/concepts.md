@@ -47,6 +47,8 @@ rejected. The format and implementation are specified in
 `docs/superpowers/specs/2026-09-14-asset-catalog-design.md` and
 `docs/superpowers/specs/2026-09-14-asset-sync-design.md`.
 
+The **Assets** tab provides a graphical editor for authoring: create assets from templates, edit them in a form with a text editor for the body, lint before saving (errors block save, warnings do not), and every save auto-commits with a `catalog: create|update|delete <kind>/<name>` message; push to the upstream is explicit. **Open in session** hands an asset to an interactive fleet session whose working directory is the catalog repo; that session, like any other, edits the repo directly and commits with `catalog:` messages, which the app picks up on its next catalog load.
+
 ## The terminal
 
 The in-app terminal is a hand-rolled ANSI screen-buffer renderer (`src/lib/ansi.ts` + `TerminalView.svelte`), not xterm.js. xterm.js was tried first but its renderer silently no-ops after the first write in the Tauri 2 + macOS WKWebView environment, producing a blank terminal. The custom renderer covers the escape-sequence surface area that tmux and Claude's TUI actually emit — SGR colors, cursor positioning, clear-screen/line, basic scrolling — and renders into a plain DOM node where repaint is reliable. The trade-off is fewer features: no mouse tracking, no application keypad, no scrollback beyond the visible window. Only one PTY is attached at a time.

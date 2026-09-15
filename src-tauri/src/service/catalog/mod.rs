@@ -3,6 +3,8 @@
 //! what each host actually has installed.
 //! Spec: docs/superpowers/specs/2026-09-14-asset-catalog-design.md
 
+pub mod author;
+pub mod author_session;
 pub mod harness;
 pub mod import;
 pub mod inventory;
@@ -15,7 +17,7 @@ pub mod sync;
 // saying `catalog::E_CATALOG_GIT`.
 pub use crate::ipc_error::codes::{
     E_ASSET_EXISTS, E_ASSET_NOT_FOUND, E_ASSET_UNSUPPORTED, E_CATALOG_GIT,
-    E_CATALOG_NOT_CONFIGURED, E_CATALOG_PARSE,
+    E_CATALOG_NOT_CONFIGURED, E_CATALOG_PARSE, E_LINT,
 };
 
 /// The loaded catalog, process-wide. `None` until `load` succeeds. Both the
@@ -63,7 +65,7 @@ pub fn config(store: &Mutex<Store>) -> Result<Option<CatalogConfigRow>, IpcError
     Ok(lock(store)?.get_catalog_config()?)
 }
 
-fn require_config(store: &Mutex<Store>) -> Result<CatalogConfigRow, IpcError> {
+pub(crate) fn require_config(store: &Mutex<Store>) -> Result<CatalogConfigRow, IpcError> {
     config(store)?
         .ok_or_else(|| IpcError::new(E_CATALOG_NOT_CONFIGURED, "configure the catalog repo first"))
 }

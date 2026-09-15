@@ -17,7 +17,7 @@
   import { loadTasks, applyTaskEvents } from './lib/tasks';
   import { loadAccountUsage, applyAccountUsageEvents, accountUsage } from './lib/account_usage_store';
   import { footerUsage } from './lib/usage_glance';
-  import { mergeInventoryRow, clearInventoryFor, loadAssets, syncProgress } from './lib/assets';
+  import { mergeInventoryRow, clearInventoryFor, loadAssets, syncProgress, repoStatus } from './lib/assets';
   import { subscribeToRowEvents } from './lib/events';
   import Toasts from './lib/Toasts.svelte';
   import QuickSwitcher from './lib/QuickSwitcher.svelte';
@@ -177,7 +177,7 @@
       onAccountUsageEvents: applyAccountUsageEvents,
       onAssetInventoryUpdated: mergeInventoryRow,
       onAssetInventoryCleared: (p) => clearInventoryFor(p.host_alias, p.harness),
-      onCatalogLoaded: () => { void loadAssets(); },
+      onCatalogLoaded: () => { void loadAssets(); void repoStatus(); },
       onSyncProgress: (p) => syncProgress.set(p),
     });
     // Tasks are secondary to the session list: load after the row
@@ -642,7 +642,7 @@
       {/if}
       {#if assetsMode}
         <div class="view-slot overlay" data-testid="assets-overlay">
-          <AssetsPanel />
+          <AssetsPanel visible={assetsMode} />
         </div>
       {/if}
     </div>
