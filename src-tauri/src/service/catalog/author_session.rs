@@ -34,11 +34,12 @@ pub struct SpawnAuthorArgs {
     pub call_id: Option<u64>,
 }
 
-/// The target asset `kind`/`name`, when both are present and `name` is
-/// non-empty; `None` means "create a new asset".
+/// The target asset `kind`/`name`, when both are present; `None` means
+/// "create a new asset". A blank `name` is rejected upstream as `E_INVALID`
+/// (both `spawn_author_session` and the command call `is_valid_name`), so
+/// callers never reach here with a blank-but-`Some` name.
 fn target_of(kind: Option<Kind>, name: Option<&str>) -> Option<(Kind, &str)> {
-    let name = name.map(str::trim).filter(|n| !n.is_empty())?;
-    kind.map(|k| (k, name))
+    kind.zip(name)
 }
 
 /// PURE: the tmux session name and the sidebar friendly name for delegating
@@ -48,7 +49,11 @@ fn target_of(kind: Option<Kind>, name: Option<&str>) -> Option<(Kind, &str)> {
 pub fn session_name_for(kind: Option<Kind>, name: Option<&str>) -> (String, String) {
     match target_of(kind, name) {
         Some((k, n)) => (
-            format!("catalog-{}-{n}", k.as_str()),
+            // tmux session names are conventionally kebab-case; `Kind::as_str()`
+            // uses snake_case for a couple of kinds (`mcp_server`,
+            // `plugin_ref`), so kebab-case it here. The friendly name keeps
+            // `as_str()` as-is.
+            format!("catalog-{}-{n}", k.as_str().replace('_', "-")),
             format!("author {}/{n}", k.as_str()),
         ),
         None => {
@@ -363,11 +368,14 @@ mod tests {
     }
 
     #[test]
-    fn session_name_for_treats_a_blank_name_as_new() {
-        let (tmux, _) = session_name_for(Some(Kind::Skill), Some("   "));
-        assert!(tmux.starts_with("catalog-new-"), "{tmux}");
-        let (tmux, _) = session_name_for(None, Some("named"));
-        assert!(tmux.starts_with("catalog-new-"), "{tmux}");
+    fn session_name_for_kebab_cases_the_kind_for_tmux_but_not_the_friendly_name() {
+        let (tmux, friendly) = session_name_for(Some(Kind::McpServer), Some("claude-fleet"));
+        assert_eq!(tmux, "catalog-mcp-server-claude-fleet");
+        assert_eq!(friendly, "author mcp_server/claude-fleet");
+
+        let (tmux, friendly) = session_name_for(Some(Kind::PluginRef), Some("superpowers"));
+        assert_eq!(tmux, "catalog-plugin-ref-superpowers");
+        assert_eq!(friendly, "author plugin_ref/superpowers");
     }
 
     // -------------------------------------------------- project adoption
