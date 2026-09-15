@@ -162,7 +162,18 @@ pub(crate) fn attach_argv(
             crate::tmux::exact_session(session_name),
         ];
     }
-    let mut argv: Vec<String> = vec!["ssh".into(), "-tt".into()];
+    let mut argv: Vec<String> = vec![
+        "ssh".into(),
+        "-tt".into(),
+        // `-tt` allocates a tty, which turns ON ssh's own `~` escape
+        // character. A `~` typed as the first character of a line (or in a
+        // pasted line) is then swallowed by the LOCAL ssh client instead of
+        // reaching tmux: `~.` kills the attach outright, `~?` prints ssh's
+        // help into the pane, `~B`/`~R`/`~#` do worse. Local attaches have no
+        // ssh in the way, so this is the only place the two differ.
+        "-o".into(),
+        "EscapeChar=none".into(),
+    ];
     argv.extend(mux_opts.iter().cloned());
     argv.extend([
         // `--` ends ssh option parsing so a host alias can never be
@@ -530,10 +541,25 @@ mod tests {
     #[test]
     fn remote_attach_reuses_mux_opts_and_ends_option_parsing_before_the_host() {
         let argv = attach_argv("hetzner", "dev-foo", &mux());
-        assert_eq!(&argv[..2], ["ssh", "-tt"]);
-        assert_eq!(&argv[2..8], mux().as_slice());
-        assert_eq!(&argv[8..12], ["--", "hetzner", "bash", "-lc"]);
-        assert_eq!(argv.len(), 13);
+        assert_eq!(&argv[..4], ["ssh", "-tt", "-o", "EscapeChar=none"]);
+        assert_eq!(&argv[4..10], mux().as_slice());
+        assert_eq!(&argv[10..14], ["--", "hetzner", "bash", "-lc"]);
+        assert_eq!(argv.len(), 15);
+    }
+
+    #[test]
+    fn remote_attach_disables_the_ssh_escape_character() {
+        // With a tty (`-tt`) ssh enables its `~` escape: a `~` typed first on
+        // a line is eaten by the LOCAL ssh client, and `~.` tears the attach
+        // down. The pane must see both characters instead.
+        let argv = attach_argv("hetzner", "dev-foo", &[]);
+        let esc = argv.iter().position(|a| a == "EscapeChar=none").unwrap();
+        assert_eq!(argv[esc - 1], "-o");
+        assert!(esc < argv.iter().position(|a| a == "--").unwrap());
+        // Local attaches run tmux directly — no ssh, nothing to disable.
+        assert!(!attach_argv("local", "dev-foo", &[])
+            .iter()
+            .any(|a| a.contains("EscapeChar")));
     }
 
     #[test]
