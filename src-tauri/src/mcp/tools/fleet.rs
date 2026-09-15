@@ -1,7 +1,6 @@
 //! MCP tools: fleet health, usage, hosts, accounts and provisioning.
 
 use super::*;
-use crate::ipc_error::codes;
 use crate::ipc_error::lock;
 
 #[tool_router(router = fleet_router, vis = "pub(super)")]
@@ -155,20 +154,7 @@ impl FleetTools {
         audit("provision_hosts", &format!("rotate={}", p.rotate));
         let port = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            let has_master = s
-                .get_setting(crate::mcp::SETTING_TOKEN)
-                .map_err(|e| to_mcp_err(IpcError::from(e)))?
-                .is_some_and(|t| !t.is_empty());
-            if !has_master {
-                return Err(to_mcp_err(IpcError::new(
-                    codes::E_PROVISION,
-                    "control API has no token yet",
-                )));
-            }
-            s.get_setting(crate::mcp::SETTING_PORT)
-                .map_err(|e| to_mcp_err(IpcError::from(e)))?
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(crate::mcp::DEFAULT_PORT)
+            crate::mcp::settings::configured_port(&s).map_err(to_mcp_err)?
         };
         let res = crate::service::provision::provision_hosts(
             &self.store,

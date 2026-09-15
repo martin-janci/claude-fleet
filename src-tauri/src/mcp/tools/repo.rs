@@ -1,6 +1,7 @@
 //! MCP tools: projects, worktrees and read-only repo browsing.
 
 use super::*;
+use crate::service::{repo, repo_read};
 
 #[tool_router(router = repo_router, vis = "pub(super)")]
 impl FleetTools {
@@ -87,8 +88,8 @@ impl FleetTools {
         Parameters(p): Parameters<SessionIdParams>,
     ) -> Result<CallToolResult, McpError> {
         audit("repo_changes", &format!("session_id={}", p.session_id));
-        let v = crate::commands::files::repo_changes_impl(
-            crate::commands::files::SessionIdArgs {
+        let v = repo_read::repo_changes(
+            repo::SessionIdArgs {
                 session_id: p.session_id,
             },
             &self.store,
@@ -106,8 +107,8 @@ impl FleetTools {
         Parameters(p): Parameters<SessionIdParams>,
     ) -> Result<CallToolResult, McpError> {
         audit("repo_tree", &format!("session_id={}", p.session_id));
-        let v = crate::commands::files::repo_tree_impl(
-            crate::commands::files::SessionIdArgs {
+        let v = repo_read::repo_tree(
+            repo::SessionIdArgs {
                 session_id: p.session_id,
             },
             &self.store,
@@ -128,8 +129,8 @@ impl FleetTools {
             "repo_file",
             &format!("session_id={} path={}", p.session_id, p.path),
         );
-        let v = crate::commands::files::repo_file_impl(
-            crate::commands::files::RepoFileArgs {
+        let v = repo_read::repo_file(
+            repo_read::RepoFileArgs {
                 session_id: p.session_id,
                 path: p.path,
             },
@@ -151,8 +152,8 @@ impl FleetTools {
             "repo_diff",
             &format!("session_id={} path={}", p.session_id, p.path),
         );
-        let v = crate::commands::files::repo_diff_impl(
-            crate::commands::files::RepoFileArgs {
+        let v = repo_read::repo_diff(
+            repo_read::RepoFileArgs {
                 session_id: p.session_id,
                 path: p.path,
             },
@@ -173,8 +174,8 @@ impl FleetTools {
         Parameters(p): Parameters<RepoLogParams>,
     ) -> Result<CallToolResult, McpError> {
         audit("repo_log", &format!("session_id={}", p.session_id));
-        let v = crate::commands::history::repo_log_impl(
-            crate::commands::history::RepoLogArgs {
+        let v = repo_read::repo_log(
+            repo_read::RepoLogArgs {
                 session_id: p.session_id,
                 all: p.all.unwrap_or(true),
                 limit: p.limit.unwrap_or(REPO_LOG_DEFAULT_LIMIT),
@@ -195,8 +196,8 @@ impl FleetTools {
         Parameters(p): Parameters<SessionIdParams>,
     ) -> Result<CallToolResult, McpError> {
         audit("repo_branches", &format!("session_id={}", p.session_id));
-        let v = crate::commands::history::repo_branches_impl(
-            crate::commands::files::SessionIdArgs {
+        let v = repo_read::repo_branches(
+            repo::SessionIdArgs {
                 session_id: p.session_id,
             },
             &self.store,
@@ -217,8 +218,8 @@ impl FleetTools {
             "repo_commit",
             &format!("session_id={} hash={}", p.session_id, p.hash),
         );
-        let v = crate::commands::history::repo_commit_impl(
-            crate::commands::history::RepoCommitArgs {
+        let v = repo_read::repo_commit(
+            repo_read::RepoCommitArgs {
                 session_id: p.session_id,
                 hash: p.hash,
             },
@@ -243,8 +244,8 @@ impl FleetTools {
                 p.session_id, p.hash, p.path
             ),
         );
-        let v = crate::commands::history::repo_commit_diff_impl(
-            crate::commands::history::RepoCommitDiffArgs {
+        let v = repo_read::repo_commit_diff(
+            repo_read::RepoCommitDiffArgs {
                 session_id: p.session_id,
                 hash: p.hash,
                 path: p.path,

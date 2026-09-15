@@ -188,7 +188,7 @@ fn apply_prompt_submit_hook(
 }
 
 /// Reasons on which `SessionEnd` means the process is gone. Mirrors
-/// `commands::mcp::SESSION_END_MATCHER`; `clear` / `resume` continue under a
+/// `hooks_install::SESSION_END_MATCHER`; `clear` / `resume` continue under a
 /// new session id and must not stop the row.
 const SESSION_END_REASONS: &[&str] = &["logout", "prompt_input_exit", "other"];
 

@@ -383,7 +383,7 @@ pub async fn capture_session_output(
     ssh: &Arc<SshClient>,
     scrollback_lines: Option<u32>,
 ) -> Result<String, IpcError> {
-    let (host, name) = crate::commands::repo::session_target(store, session_id)?;
+    let (host, name) = crate::service::repo::session_target(store, session_id)?;
     let tmux = exec_for(&host, ssh);
     match scrollback_lines {
         Some(n) => tmux.capture_pane_scrollback(&name, n).await,
