@@ -1,16 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { MIN_COLS, MIN_ROWS, fitCells } from './terminal_size';
+// The backend's own source, inlined by the bundler.
+import ptySource from '../../src-tauri/src/pty.rs?raw';
 
 describe('terminal minimum size', () => {
   it('matches the clamp in pty.rs', () => {
     // The backend clamps every pty_open/pty_resize to its own floor. If the
     // two drift apart, tmux draws for a grid the Screen does not have.
-    // vitest runs from the project root.
-    const rs = readFileSync(resolve(process.cwd(), 'src-tauri/src/pty.rs'), 'utf8');
-    const cols = rs.match(/const MIN_COLS: u16 = (\d+);/);
-    const rows = rs.match(/const MIN_ROWS: u16 = (\d+);/);
+    const cols = ptySource.match(/const MIN_COLS: u16 = (\d+);/);
+    const rows = ptySource.match(/const MIN_ROWS: u16 = (\d+);/);
     expect(cols).not.toBeNull();
     expect(rows).not.toBeNull();
     expect(Number(cols![1])).toBe(MIN_COLS);
