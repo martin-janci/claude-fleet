@@ -667,6 +667,23 @@ pub fn registry_take(id: &str) -> Option<SyncPlan> {
     Some(plan)
 }
 
+/// Put a plan the caller took with `registry_take` back under the SAME id,
+/// for a `sync_apply` that refused to run rather than one that ran: a plan
+/// rejected for missing secrets must still be there when the user sets the
+/// secret (or decides to force), addressed by the id they already hold.
+///
+/// The TTL restarts from now, exactly as if the plan had just been computed
+/// — the clock measures how long the host snapshot has gone unchecked, and
+/// a refused apply did not touch the host.
+#[allow(dead_code)]
+pub fn registry_put_existing(id: &str, mut plan: SyncPlan) {
+    plan.id = id.to_string();
+    let now = Instant::now();
+    let mut map = plans();
+    map.retain(|_, (expires_at, _)| *expires_at > now);
+    map.insert(id.to_string(), (now + PLAN_TTL, plan));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

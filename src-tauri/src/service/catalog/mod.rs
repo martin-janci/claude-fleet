@@ -152,9 +152,18 @@ pub struct AssetListing {
     pub problems: Vec<Problem>,
 }
 
+/// Which hosts hold this catalog asset, and in what state. `unmanaged` and
+/// `orphan` rows are excluded by name: neither describes a catalog asset
+/// (they are what `AssetListing::unmanaged` lists instead), and an orphan
+/// shares a `(kind, name)` with nothing in the catalog anyway.
 fn host_states(rows: &[AssetInventoryRow], kind: Kind, name: &str) -> Vec<HostState> {
     rows.iter()
-        .filter(|r| r.kind == kind.as_str() && r.name == name && r.state != "unmanaged")
+        .filter(|r| {
+            r.kind == kind.as_str()
+                && r.name == name
+                && r.state != "unmanaged"
+                && r.state != "orphan"
+        })
         .map(|r| HostState {
             host_alias: r.host_alias.clone(),
             harness: r.harness.clone(),

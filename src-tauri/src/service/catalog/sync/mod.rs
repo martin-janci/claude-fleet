@@ -244,6 +244,20 @@ fn missing_secret_names(plan: &SyncPlan) -> BTreeSet<String> {
     names
 }
 
+/// Emit one `sync:progress`. Best-effort: a poisoned store mutex must not
+/// abort a run whose host writes have already landed, and a progress event
+/// nobody sees costs the caller nothing.
+fn emit_progress(store: &Mutex<Store>, p: &SyncProgress) {
+    match store.lock() {
+        Ok(s) => s.bus_sync_progress(p),
+        Err(_) => tracing::warn!(
+            host = %p.host_alias,
+            harness = %p.harness,
+            "store mutex poisoned; sync progress not emitted"
+        ),
+    }
+}
+
 fn cancelled_result(host: &HostPlan) -> HostSyncResult {
     HostSyncResult {
         host_alias: host.host_alias.clone(),
@@ -302,24 +316,23 @@ async fn rescan_after_apply(
 
 /// Apply the plan parked under `args.plan_id`, host by host.
 ///
-/// The plan is *taken* from the registry, so a plan is applied at most once;
-/// an unknown or expired id is `E_SYNC_PLAN_STALE` and the caller must
-/// re-plan. Actions blocked on an unresolved `${NAME}` refuse the whole run
+/// The plan is taken from the registry, so a plan is *applied* at most
+/// once; an unknown or expired id is `E_SYNC_PLAN_STALE` and the caller
+/// must re-plan. Actions blocked on an unresolved `${NAME}` refuse the whole run
 /// with `E_SECRET_MISSING` (listing the names, never a value) unless
-/// `force_partial` says to apply the rest anyway. The plan is taken before
-/// that check, so recovering from `E_SECRET_MISSING` — set the secret, or
-/// decide to force — means computing a fresh plan; deliberately, since a
-/// plan the user has stepped away from to go and set a secret is exactly
-/// the plan whose host snapshot is most likely to have gone stale.
+/// `force_partial` says to apply the rest anyway. That refusal is not an
+/// application: the plan goes back into the registry under the same id, so
+/// the caller can set the secret and apply the very same plan again.
 ///
 /// Per (host, harness) pair, in plan order: emit `sync:progress`, apply,
 /// then re-scan and rewrite that pair's inventory rows so the asset matrix
 /// follows along. `done` counts pairs already finished, so the event
-/// announces the pair about to be applied (`0/n` first, never `n/n` —
-/// completion is the returned summary). Cancelling stops between pairs —
-/// every pair not reached is reported `skipped` / `cancelled` — and the run
-/// is recorded in `sync_runs` either way, so a cancelled sync still leaves a
-/// history entry saying how far it got.
+/// announces the pair about to be applied (`0/n` first); one terminal
+/// `n/n` naming no pair follows a run that completed. Cancelling stops
+/// between pairs — every pair not reached is reported `skipped` /
+/// `cancelled`, and no terminal event is emitted — and the run is recorded
+/// in `sync_runs` either way, so a cancelled sync still leaves a history
+/// entry saying how far it got.
 // Reachable only from tests until Task 8 wires the command layer.
 #[allow(dead_code)]
 pub async fn apply_sync(
@@ -327,6 +340,32 @@ pub async fn apply_sync(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
     reg: &Arc<CancellationRegistry>,
+) -> Result<SyncRunSummary, IpcError> {
+    // Mint and bind first, exactly like `add_project`: `bind` REPLACES
+    // whatever sits under the id, so the token a run is cancelled through
+    // is always the one this call made. `CancelGuard` releases the slot on
+    // every exit path, early returns and panics included.
+    let (cancel_id, token) = match args.call_id {
+        Some(id) => {
+            let token = CancellationToken::new();
+            reg.bind(id, token.clone());
+            (id, token)
+        }
+        None => reg.register_anonymous(),
+    };
+    let _guard = CancelGuard::new(Arc::clone(reg), cancel_id);
+    apply_sync_with(args, store, ssh, token).await
+}
+
+/// [`apply_sync`] with the cancellation token supplied directly, so a test
+/// can prove what an already-cancelled run does without racing the
+/// registry.
+#[allow(dead_code)]
+pub async fn apply_sync_with(
+    args: ApplyArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    token: CancellationToken,
 ) -> Result<SyncRunSummary, IpcError> {
     let computed = plan::registry_take(&args.plan_id).ok_or_else(|| {
         IpcError::new(
@@ -338,25 +377,20 @@ pub async fn apply_sync(
     if !args.force_partial {
         let missing = missing_secret_names(&computed);
         if !missing.is_empty() {
+            // Refusing is not applying: the plan goes straight back into
+            // the registry under the id the caller already holds, so
+            // setting the secret (or deciding to force) is a second
+            // `sync_apply` with the same id rather than a re-plan.
+            let names = missing.into_iter().collect::<Vec<_>>().join(", ");
+            plan::registry_put_existing(&args.plan_id, computed);
             return Err(IpcError::new(
                 codes::E_SECRET_MISSING,
                 format!(
-                    "no value for {}; set them or re-apply with force_partial",
-                    missing.into_iter().collect::<Vec<_>>().join(", ")
+                    "no value for {names}; set them (catalog_set_secret) or apply again with force_partial"
                 ),
             ));
         }
     }
-
-    let (cancel_id, token) = match args.call_id {
-        Some(id) => {
-            let token = CancellationToken::new();
-            reg.bind(id, token.clone());
-            (id, token)
-        }
-        None => reg.register_anonymous(),
-    };
-    let _guard = CancelGuard::new(Arc::clone(reg), cancel_id);
 
     // Only the post-apply re-scan needs the catalog. A catalog unloaded
     // mid-flight must not abort a sync that is already under way — the
@@ -372,16 +406,16 @@ pub async fn apply_sync(
             results.push(cancelled_result(host));
             continue;
         }
-        {
-            let s = store.lock().map_err(|_| IpcError::lock())?;
-            s.bus_sync_progress(&SyncProgress {
+        emit_progress(
+            store,
+            &SyncProgress {
                 plan_id: computed.id.clone(),
                 host_alias: host.host_alias.clone(),
                 harness: host.harness.clone(),
                 done,
                 total,
-            });
-        }
+            },
+        );
         let Some(harness) = harnesses.iter().find(|h| h.id() == host.harness) else {
             results.push(HostSyncResult {
                 host_alias: host.host_alias.clone(),
@@ -406,6 +440,22 @@ pub async fn apply_sync(
         }
     }
 
+    // One terminal event so a progress bar can reach 100%. It names no
+    // pair (both strings empty) because no pair is about to be applied —
+    // and a cancelled run never gets one, since it never completed.
+    if !token.is_cancelled() {
+        emit_progress(
+            store,
+            &SyncProgress {
+                plan_id: computed.id.clone(),
+                host_alias: String::new(),
+                harness: String::new(),
+                done: total,
+                total,
+            },
+        );
+    }
+
     let finished_at = super::now_secs();
     let summary = SyncRunSummary {
         plan_id: computed.id.clone(),
@@ -413,11 +463,19 @@ pub async fn apply_sync(
         finished_at,
         hosts: results,
     };
-    let json = serde_json::to_string(&summary)
-        .map_err(|e| IpcError::new(codes::E_SERIALIZE, format!("sync summary: {e}")))?;
-    {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
-        s.record_sync_run(started_at, finished_at, &json)?;
+    // The history entry is best-effort: the host writes have already
+    // landed, so losing the `sync_runs` row must not turn a completed sync
+    // into an error and throw the summary away with it.
+    match serde_json::to_string(&summary) {
+        Ok(json) => match store.lock() {
+            Ok(s) => {
+                if let Err(e) = s.record_sync_run(started_at, finished_at, &json) {
+                    tracing::warn!(error = %e, "could not record the sync run");
+                }
+            }
+            Err(_) => tracing::warn!("store mutex poisoned; the sync run was not recorded"),
+        },
+        Err(e) => tracing::warn!(error = %e, "could not serialise the sync summary"),
     }
     tracing::info!(
         plan_id = %summary.plan_id,
@@ -489,6 +547,32 @@ mod tests {
             ),
             ("skills/s/body.md", body.to_string()),
         ]
+    }
+
+    /// A `planned` host plan carrying one `Create`. Deliberately not a
+    /// `skipped_plan`: `apply_host` returns `skipped` for those all by
+    /// itself, which would hide whether the cancellation branch ran.
+    fn plan_with_one_create(host: &str, harness: &str) -> HostPlan {
+        let mut hp = skipped_plan(host, harness, "");
+        hp.status = "planned".into();
+        hp.detail = None;
+        hp.actions.push(plan::Action {
+            kind: "skill".into(),
+            name: "s".into(),
+            op: ActionOp::Create,
+            reason: None,
+            files: vec!["~/.claude/skills/s/SKILL.md".into()],
+            merges: Vec::new(),
+            backup: false,
+            secrets: Vec::new(),
+            missing_secrets: Vec::new(),
+            plan: None,
+            expected: Default::default(),
+            secret_files: Default::default(),
+            remove_entry: None,
+            plugin: None,
+        });
+        hp
     }
 
     fn store_with_local(bus: Arc<RecordingEventBus>) -> Mutex<Store> {
@@ -608,9 +692,9 @@ mod tests {
         assert_eq!(err.code, crate::ipc_error::codes::E_SECRET_MISSING);
         assert!(err.message.contains("MISSING_SECRET"), "{}", err.message);
 
-        // With `force_partial` the rest of the plan is applied and the
-        // blocked actions are reported as such.
-        let plan = plan_sync(PlanArgs::default(), &store, &ssh).await.unwrap();
+        // Refusing did not consume the plan: the SAME id still applies,
+        // with `force_partial`, and the blocked actions are reported as
+        // such.
         let summary = apply_sync(
             ApplyArgs {
                 plan_id: plan.id.clone(),
@@ -622,7 +706,7 @@ mod tests {
             &reg,
         )
         .await
-        .unwrap();
+        .expect("the refused plan is still in the registry under its id");
         assert!(summary
             .hosts
             .iter()
@@ -679,7 +763,11 @@ mod tests {
         let events = bus.take();
         assert!(
             events.iter().any(|e| e == "sync:progress:local:claude:0/2"),
-            "{events:?}"
+            "the first pair announces itself at 0/2: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| e == "sync:progress:::2/2"),
+            "a completed run ends at 2/2, naming no pair: {events:?}"
         );
 
         // The run is in `sync_runs` and round-trips through `last_sync`.
@@ -698,5 +786,69 @@ mod tests {
         );
         let again = plan_sync(PlanArgs::default(), &store, &ssh).await.unwrap();
         assert_eq!(again.counts.get("noop"), Some(&2), "{:?}", again.counts);
+    }
+
+    /// A sync cancelled before it starts touches nothing: every pair is
+    /// reported `skipped` / `cancelled`, no progress is emitted (there is
+    /// no pair about to be applied, and the run never completes), and the
+    /// run is still recorded so the history says how far it got.
+    #[tokio::test]
+    async fn apply_sync_skips_every_pair_when_the_token_is_already_cancelled() {
+        let bus = Arc::new(RecordingEventBus::new());
+        let store = store_with_local(bus.clone());
+        let ssh = Arc::new(SshClient::new());
+
+        let id = plan::registry_put(SyncPlan::new(vec![
+            plan_with_one_create("local", "claude"),
+            plan_with_one_create("local", "codex"),
+        ]));
+        // Cancelled up front. The token goes in directly rather than
+        // through `reg.bind`: `apply_sync` mints and binds its OWN token
+        // (`bind` replaces), so a pre-bound one would simply be dropped —
+        // hence the `_with` seam.
+        let token = CancellationToken::new();
+        token.cancel();
+        bus.take();
+
+        let summary = apply_sync_with(
+            ApplyArgs {
+                plan_id: id.clone(),
+                force_partial: false,
+                call_id: None,
+            },
+            &store,
+            &ssh,
+            token,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.hosts.len(), 2);
+        assert!(
+            summary
+                .hosts
+                .iter()
+                .all(|h| h.status == "skipped" && h.detail.as_deref() == Some("cancelled")),
+            "{:?}",
+            summary.hosts
+        );
+        assert!(
+            summary
+                .hosts
+                .iter()
+                .flat_map(|h| &h.actions)
+                .all(|a| { a.outcome == "skipped" && a.detail.as_deref() == Some("cancelled") }),
+            "{:?}",
+            summary.hosts
+        );
+        let events = bus.take();
+        assert!(
+            !events.iter().any(|e| e.starts_with("sync:progress")),
+            "a cancelled run announces nothing: {events:?}"
+        );
+        let last = last_sync(&store)
+            .unwrap()
+            .expect("the run is in the history");
+        assert_eq!(last.plan_id, id);
     }
 }

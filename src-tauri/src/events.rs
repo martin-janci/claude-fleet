@@ -56,7 +56,10 @@ pub struct CatalogSummary {
 }
 
 /// Progress of one in-flight sync apply (migration 031 / sub-project 2):
-/// `done`/`total` items applied so far for one (host, harness) pair.
+/// (host, harness) pairs finished / total pairs in the plan;
+/// `host_alias`/`harness` name the pair about to be applied. A run that
+/// completes ends with one terminal event at `done == total` whose
+/// `host_alias`/`harness` are empty — no pair is about to be applied.
 #[derive(Serialize, Clone, Debug)]
 pub struct SyncProgress {
     pub plan_id: String,
