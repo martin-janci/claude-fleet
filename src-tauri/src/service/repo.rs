@@ -68,20 +68,13 @@ pub async fn run_in_repo(
     host: &str,
     script: &str,
 ) -> Result<std::process::Output, IpcError> {
-    if host == "local" {
-        tokio::process::Command::new("bash")
-            .args(["-lc", script])
-            .output()
-            .await
-            .map_err(|e| IpcError::new(codes::E_REPO, format!("spawn bash: {e}")))
-    } else {
-        ssh.run(
-            host,
-            &["bash", "-lc", &quote(script)],
-            Duration::from_secs(REPO_TIMEOUT_SECS),
-        )
-        .await
-    }
+    crate::ssh::run_shell(
+        ssh.as_ref(),
+        host,
+        script,
+        Duration::from_secs(REPO_TIMEOUT_SECS),
+    )
+    .await
 }
 
 /// Turn a failed `Output` into an `E_REPO` error carrying stderr (or stdout).

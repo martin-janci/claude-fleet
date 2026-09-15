@@ -632,6 +632,64 @@ where
     buf
 }
 
+/// Run `script` through `bash -lc` on `host`: a local spawn for `"local"`,
+/// otherwise one ssh hop with the script quoted for the remote login shell.
+/// Bounded the way [`SshExec::run`] is — `timeout` is the connect budget and
+/// the wall clock derives from it. The local spawn is killed at the wall
+/// clock and reports `E_TIMEOUT`; a failed spawn is `E_SHELL`. Every value
+/// interpolated into `script` must already be quoted by the caller.
+pub async fn run_shell(
+    exec: &dyn SshExec,
+    host: &str,
+    script: &str,
+    timeout: Duration,
+) -> Result<Output, IpcError> {
+    if host == "local" {
+        return run_local_shell(script, SshClient::default_wall_clock(timeout)).await;
+    }
+    exec.run(
+        host,
+        &["bash", "-lc", &crate::shell::quote(script)],
+        timeout,
+    )
+    .await
+}
+
+/// [`run_shell`] with an explicit wall clock, for scripts that legitimately
+/// outlive a reasonable connect budget (see [`SshExec::run_bounded`]).
+pub async fn run_shell_bounded(
+    exec: &dyn SshExec,
+    host: &str,
+    script: &str,
+    connect_timeout: Duration,
+    wall_clock: Duration,
+) -> Result<Output, IpcError> {
+    if host == "local" {
+        return run_local_shell(script, wall_clock).await;
+    }
+    exec.run_bounded(
+        host,
+        &["bash", "-lc", &crate::shell::quote(script)],
+        connect_timeout,
+        wall_clock,
+    )
+    .await
+}
+
+async fn run_local_shell(script: &str, wall_clock: Duration) -> Result<Output, IpcError> {
+    let child = tokio::process::Command::new("bash")
+        .args(["-lc", script])
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(wall_clock, child).await {
+        Ok(res) => res.map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}"))),
+        Err(_) => Err(IpcError::new(
+            codes::E_TIMEOUT,
+            format!("local script exceeded {}s", wall_clock.as_secs()),
+        )),
+    }
+}
+
 /// The transport the service layer talks to a host through. `SshClient` is
 /// the production implementation (ControlMaster-multiplexed `ssh`);
 /// tests use `LocalExec` (the same argv through a local `bash -c`) and a

@@ -65,8 +65,6 @@ pub mod codes {
     pub const E_PTY: &str = "E_PTY";
     /// The PTY was closed under the caller.
     pub const E_PTY_CLOSED: &str = "E_PTY_CLOSED";
-    /// Spawning a local process failed.
-    pub const E_SPAWN: &str = "E_SPAWN";
     /// A local `bash` helper failed to spawn.
     pub const E_SHELL: &str = "E_SHELL";
     /// A `git` command failed.

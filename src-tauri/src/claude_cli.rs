@@ -268,57 +268,26 @@ async fn run_claude_script(
     timeout: Duration,
 ) -> Result<String, IpcError> {
     validate::host_alias(host_alias)?;
-    if host_alias == "local" {
-        let output = tokio::time::timeout(
-            timeout,
-            tokio::process::Command::new("bash")
-                .args(["-lc", script])
-                .output(),
-        )
-        .await
-        .map_err(|_| {
-            IpcError::new(
-                codes::E_TIMEOUT,
-                format!("claude CLI timed out after {:.0}s", timeout.as_secs_f64()),
-            )
-        })?
-        .map_err(|e| IpcError::new(codes::E_SPAWN, format!("spawn bash: {e}")))?;
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(IpcError::new(
-                codes::E_CLAUDE_CLI,
-                format!(
-                    "claude CLI failed (exit {}): {}",
-                    output.status.code().unwrap_or(-1),
-                    stderr.trim()
-                ),
-            ))
-        }
-    } else {
-        // Remote: wrap the script in `bash -lc '<script>'` so the remote
-        // login env (PATH, etc.) is sourced — mirrors the RemoteTmux pattern.
-        // The outer `quote()` ensures the whole script crosses the SSH boundary
-        // as a single shell word.
-        let quoted_script = quote(script);
-        let output = ssh
-            .run(host_alias, &["bash", "-lc", &quoted_script], timeout)
-            .await?;
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(IpcError::new(
-                codes::E_CLAUDE_CLI,
-                format!(
-                    "claude CLI failed on {host_alias} (exit {}): {}",
-                    output.status.code().unwrap_or(-1),
-                    stderr.trim()
-                ),
-            ))
-        }
+    // `bash -lc` on both sides so the login env (PATH, etc.) is sourced —
+    // mirrors the RemoteTmux pattern.
+    let output = crate::ssh::run_shell(ssh.as_ref(), host_alias, script, timeout).await?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let on_host = if host_alias == "local" {
+        String::new()
+    } else {
+        format!(" on {host_alias}")
+    };
+    Err(IpcError::new(
+        codes::E_CLAUDE_CLI,
+        format!(
+            "claude CLI failed{on_host} (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            stderr.trim()
+        ),
+    ))
 }
 
 #[cfg(test)]

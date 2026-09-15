@@ -708,20 +708,13 @@ async fn run_shell(
     host_alias: &str,
     script: &str,
 ) -> Result<std::process::Output, IpcError> {
-    if host_alias == "local" {
-        tokio::process::Command::new("bash")
-            .args(["-lc", script])
-            .output()
-            .await
-            .map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}")))
-    } else {
-        ssh.run(
-            host_alias,
-            &["bash", "-lc", &quote(script)],
-            std::time::Duration::from_secs(30),
-        )
-        .await
-    }
+    crate::ssh::run_shell(
+        ssh.as_ref(),
+        host_alias,
+        script,
+        std::time::Duration::from_secs(30),
+    )
+    .await
 }
 
 fn exec_for(host: &str, ssh: &Arc<SshClient>) -> Box<dyn crate::tmux::TmuxExec> {

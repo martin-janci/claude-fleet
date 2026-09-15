@@ -401,20 +401,13 @@ pub async fn delete_worktree(
         quote(&project_base_path),
         quote(&worktree_path)
     );
-    let out = if host_alias == "local" {
-        tokio::process::Command::new("bash")
-            .args(["-lc", &cmd])
-            .output()
-            .await
-            .map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}")))?
-    } else {
-        ssh.run(
-            &host_alias,
-            &["bash", "-lc", &quote(&cmd)],
-            std::time::Duration::from_secs(30),
-        )
-        .await?
-    };
+    let out = crate::ssh::run_shell(
+        ssh.as_ref(),
+        &host_alias,
+        &cmd,
+        std::time::Duration::from_secs(30),
+    )
+    .await?;
     if !out.status.success() {
         return Err(IpcError::new(
             codes::E_GIT,

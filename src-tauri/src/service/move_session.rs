@@ -676,21 +676,7 @@ async fn sh(
     script: &str,
     timeout: Duration,
 ) -> Result<std::process::Output, IpcError> {
-    if host == LOCAL {
-        let child = tokio::process::Command::new("bash")
-            .args(["-lc", script])
-            .output();
-        let wall = crate::ssh::SshClient::default_wall_clock(timeout);
-        return match tokio::time::timeout(wall, child).await {
-            Ok(res) => res.map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}"))),
-            Err(_) => Err(IpcError::new(
-                codes::E_TIMEOUT,
-                format!("local script exceeded {}s", wall.as_secs()),
-            )),
-        };
-    }
-    ssh.run(host, &["bash", "-lc", &quote(script)], timeout)
-        .await
+    crate::ssh::run_shell(ssh, host, script, timeout).await
 }
 
 fn stderr_of(out: &std::process::Output) -> String {
