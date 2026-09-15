@@ -102,20 +102,18 @@ impl Store {
     /// Every known secret name (migration 031): global rows (`host_alias:
     /// None`) first, then per-host overrides. Never carries the value.
     pub fn list_secrets(&self) -> Result<Vec<SecretRow>, rusqlite::Error> {
-        let mut out = Vec::new();
         let mut stmt = self
             .conn
             .prepare_cached("SELECT name, updated_at FROM catalog_secrets ORDER BY name")?;
-        let rows = stmt.query_map([], |row| {
-            Ok(SecretRow {
-                name: row.get(0)?,
-                host_alias: None,
-                updated_at: row.get(1)?,
-            })
-        })?;
-        for r in rows {
-            out.push(r?);
-        }
+        let mut out = stmt
+            .query_map([], |row| {
+                Ok(SecretRow {
+                    name: row.get(0)?,
+                    host_alias: None,
+                    updated_at: row.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut stmt = self.conn.prepare_cached(
             "SELECT host_alias, name, updated_at FROM catalog_secrets_host ORDER BY host_alias, name",
         )?;
@@ -126,9 +124,7 @@ impl Store {
                 updated_at: row.get(2)?,
             })
         })?;
-        for r in rows {
-            out.push(r?);
-        }
+        out.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
         Ok(out)
     }
 
@@ -138,27 +134,20 @@ impl Store {
         &self,
         host_alias: &str,
     ) -> Result<std::collections::BTreeMap<String, String>, rusqlite::Error> {
-        let mut out = std::collections::BTreeMap::new();
+        let pair = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(String, String)> {
+            Ok((row.get(0)?, row.get(1)?))
+        };
         let mut stmt = self
             .conn
             .prepare_cached("SELECT name, value FROM catalog_secrets")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        for r in rows {
-            let (name, value) = r?;
-            out.insert(name, value);
-        }
+        let mut out = stmt
+            .query_map([], pair)?
+            .collect::<rusqlite::Result<std::collections::BTreeMap<_, _>>>()?;
         let mut stmt = self
             .conn
             .prepare_cached("SELECT name, value FROM catalog_secrets_host WHERE host_alias = ?1")?;
-        let rows = stmt.query_map(rusqlite::params![host_alias], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        for r in rows {
-            let (name, value) = r?;
-            out.insert(name, value);
-        }
+        let rows = stmt.query_map(rusqlite::params![host_alias], pair)?;
+        out.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
         Ok(out)
     }
 

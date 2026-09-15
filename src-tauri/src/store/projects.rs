@@ -59,14 +59,11 @@ impl Store {
         base_path: &str,
         adopted: bool,
     ) -> Result<i64, rusqlite::Error> {
-        self.conn.execute(
-            "INSERT INTO projects (owner, repo, base_path, adopted) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(owner, repo) DO UPDATE SET base_path=excluded.base_path, adopted=excluded.adopted",
-            rusqlite::params![owner, repo, base_path, adopted as i64],
-        )?;
         let id: i64 = self.conn.query_row(
-            "SELECT id FROM projects WHERE owner=?1 AND repo=?2",
-            rusqlite::params![owner, repo],
+            "INSERT INTO projects (owner, repo, base_path, adopted) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(owner, repo) DO UPDATE SET base_path=excluded.base_path, adopted=excluded.adopted
+             RETURNING id",
+            rusqlite::params![owner, repo, base_path, adopted as i64],
             |row| row.get(0),
         )?;
         if let Some(row) = self.get_project(id)? {
@@ -180,17 +177,14 @@ impl Store {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        self.conn.execute(
+        let id: i64 = self.conn.query_row(
             "INSERT INTO worktrees (project_id, host_alias, name, path, branch, updated_at_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(project_id, host_alias, name)
              DO UPDATE SET path=excluded.path, branch=excluded.branch,
-                           updated_at_ms=excluded.updated_at_ms",
+                           updated_at_ms=excluded.updated_at_ms
+             RETURNING id",
             rusqlite::params![project_id, host_alias, name, path, branch, now_ms],
-        )?;
-        let id: i64 = self.conn.query_row(
-            "SELECT id FROM worktrees WHERE project_id=?1 AND host_alias=?2 AND name=?3",
-            rusqlite::params![project_id, host_alias, name],
             |row| row.get(0),
         )?;
         if host_alias == crate::service::projects::LOCAL_HOST {
@@ -700,7 +694,6 @@ impl Store {
         host_alias: &str,
         wt_path: &str,
     ) -> Result<Option<String>, rusqlite::Error> {
-        use rusqlite::OptionalExtension;
         self.conn
             .query_row(
                 "SELECT parent_fp FROM worktree_parent_fingerprints

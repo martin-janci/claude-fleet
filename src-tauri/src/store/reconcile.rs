@@ -396,10 +396,7 @@ impl Store {
                 for (pid, ts) in project_touch {
                     Self::touch_project_last_session_at_in_tx(tx, pid, ts, &mut out)?;
                 }
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
+                let now = now_unix();
                 Self::ghost_and_clean_sessions_in_tx(
                     tx,
                     spec.alias,

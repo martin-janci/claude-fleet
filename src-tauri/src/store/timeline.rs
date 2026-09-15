@@ -19,10 +19,7 @@ impl Store {
         kind: &str,
         detail: Option<&str>,
     ) -> Result<(), crate::ipc_error::IpcError> {
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let at = now_unix();
         self.conn.execute(
             "INSERT INTO session_events (session_id, at, kind, detail) \
                  VALUES (?1, ?2, ?3, ?4)",
@@ -58,11 +55,7 @@ impl Store {
                 detail: row.get(4)?,
             })
         })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Insert one inter-session message (migration 015). `sent_at` is stamped
@@ -76,10 +69,7 @@ impl Store {
         kind: &str,
         reply_to: Option<i64>,
     ) -> Result<i64, crate::ipc_error::IpcError> {
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let at = now_unix();
         self.conn.execute(
             "INSERT INTO session_messages \
                    (from_session_id, to_session_id, body, kind, sent_at, reply_to) \
@@ -124,11 +114,7 @@ impl Store {
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params![to_session_id, limit], map_message_row)?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Mark a set of inbox messages as read. Only rows whose `to_session_id`
@@ -142,10 +128,7 @@ impl Store {
         if ids.is_empty() {
             return Ok(0);
         }
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let at = now_unix();
         let sql = format!(
             "UPDATE session_messages SET read_at = ?1 \
              WHERE to_session_id = ?2 AND read_at IS NULL AND id IN ({phs})",

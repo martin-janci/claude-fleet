@@ -34,11 +34,7 @@ impl Store {
                 mode: row.get(3)?,
             })
         })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// The token row for one host, if it has been provisioned.
@@ -59,10 +55,7 @@ impl Store {
         host_alias: &str,
         token: &str,
     ) -> Result<(), crate::ipc_error::IpcError> {
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let at = now_unix();
         self.conn.execute(
             "INSERT INTO host_tokens (host_alias, token, created_at, mode) \
                  VALUES (?1, ?2, ?3, 'full') \

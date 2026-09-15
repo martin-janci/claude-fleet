@@ -73,11 +73,7 @@ impl Store {
             rusqlite::params![requester_session_id, state, host, limit],
             map_task_row,
         )?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Every `queued` / `running` task (oldest first), for the liveness sweep.
@@ -87,11 +83,7 @@ impl Store {
                  ORDER BY created_at ASC, id ASC"
         ))?;
         let rows = stmt.query_map([], map_task_row)?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Remember the worker's Claude conversation id for a task.
@@ -119,11 +111,7 @@ impl Store {
                  ORDER BY created_at ASC, id ASC"
         ))?;
         let rows = stmt.query_map(rusqlite::params![worker_session_id], map_task_row)?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// `queued → running`; stamps `started_at`. A no-op (returns the current
