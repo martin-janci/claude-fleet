@@ -241,27 +241,34 @@ pub(crate) fn append_capped(buf: &mut Vec<u8>, chunk: &[u8], cap: usize) {
     }
 }
 
-/// Split drained bytes into the part that can be decoded now and the length
-/// of that part. Returns `(text, consumed)` where `consumed <= raw.len()`;
-/// the caller pushes `raw[consumed..]` back to the front of the buffer.
+/// How many bytes at the very END of `raw` are an INCOMPLETE multi-byte UTF-8
+/// sequence (0-3) — a chunk boundary that fell mid-codepoint. The drain holds
+/// those back so the codepoint reassembles on the next read instead of being
+/// lossily replaced with U+FFFD.
 ///
-/// - Valid UTF-8: the whole buffer.
-/// - Ends in an INCOMPLETE multi-byte sequence (a chunk boundary fell
-///   mid-codepoint): the valid prefix only, so the tail completes on the
-///   next drain instead of being lossily replaced with U+FFFD.
-/// - A genuine invalid byte mid-stream: lossy-decode the whole buffer (there
-///   is nothing to wait for).
-pub(crate) fn split_decodable(raw: &[u8]) -> (String, usize) {
-    let valid_end = match std::str::from_utf8(raw) {
-        Ok(_) => raw.len(),
-        // `error_len() == None` means "unexpected end of input" — incomplete.
-        Err(e) if e.error_len().is_none() => e.valid_up_to(),
-        Err(_) => raw.len(),
-    };
-    (
-        String::from_utf8_lossy(&raw[..valid_end]).into_owned(),
-        valid_end,
-    )
+/// It scans back at most 3 bytes for a lead byte and compares the length that
+/// lead announces with the bytes that actually follow it. Deliberately
+/// independent of anything earlier in the buffer: `from_utf8`'s FIRST error
+/// wins, so one genuinely invalid byte in front used to drag the trailing
+/// partial codepoint into the lossy decode with it — one 🦀 came out as three
+/// U+FFFD. Everything before the suffix is decoded lossily; only the suffix
+/// waits.
+pub(crate) fn incomplete_suffix_len(raw: &[u8]) -> usize {
+    for back in 1..=raw.len().min(3) {
+        let need = match raw[raw.len() - back] {
+            0xC2..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF4 => 4,
+            // A continuation byte: its lead may still be within reach.
+            0x80..=0xBF => continue,
+            // ASCII, or an invalid lead (0xC0/0xC1, 0xF5..=0xFF): nothing
+            // that a later read could complete.
+            _ => return 0,
+        };
+        // `back` bytes are present (the lead plus what follows it).
+        return if need > back { back } else { 0 };
+    }
+    0
 }
 
 // ---- Command handlers ----
@@ -391,11 +398,14 @@ pub fn pty_drain(state: State<'_, Mutex<PtyState>>) -> Result<PtyDrainResult, Ip
 }
 
 /// Transport-agnostic body of `pty_drain`. Swaps the accumulated bytes out
-/// under the locks, then decodes AFTER releasing them — the UTF-8 decode is
-/// the bulk of the work and shouldn't block the reader thread (which needs
-/// the buffer lock to append). An incomplete trailing multi-byte sequence is
-/// pushed back to the FRONT of the buffer (it is chronologically before
-/// anything the reader appended since the swap).
+/// under the buffer lock, leaving an incomplete trailing multi-byte sequence
+/// BEHIND in that same buffer (it is chronologically before anything the
+/// reader appends next), and decodes AFTER releasing the lock — the UTF-8
+/// decode is the bulk of the work and shouldn't block the reader thread.
+///
+/// One lock acquisition, one buffer: the earlier shape re-locked to push the
+/// tail back, which a concurrent `install()` could turn into "the old
+/// session's bytes land in front of the new session's first output".
 fn drain_from(state: &Mutex<PtyState>) -> Result<PtyDrainResult, IpcError> {
     let raw: Vec<u8> = {
         let s = state
@@ -405,28 +415,13 @@ fn drain_from(state: &Mutex<PtyState>) -> Result<PtyDrainResult, IpcError> {
             .buffer
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "pty buffer poisoned"))?;
-        if buf.is_empty() {
-            return Ok(PtyDrainResult {
-                data: String::new(),
-                bytes: 0,
-            });
-        }
-        std::mem::take(&mut *buf)
+        let keep = buf.len() - incomplete_suffix_len(&buf);
+        let tail = buf.split_off(keep);
+        std::mem::replace(&mut *buf, tail)
     };
-    let (data, valid_end) = split_decodable(&raw);
-    if valid_end < raw.len() {
-        let s = state
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
-        let mut buf = s
-            .buffer
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "pty buffer poisoned"))?;
-        buf.splice(0..0, raw[valid_end..].iter().copied());
-    }
     Ok(PtyDrainResult {
-        data,
-        bytes: valid_end,
+        bytes: raw.len(),
+        data: String::from_utf8_lossy(&raw).into_owned(),
     })
 }
 
@@ -686,29 +681,33 @@ mod tests {
     }
 
     #[test]
-    fn split_decodable_takes_everything_when_valid() {
-        let (s, n) = split_decodable("héllo 🦀".as_bytes());
-        assert_eq!(s, "héllo 🦀");
-        assert_eq!(n, "héllo 🦀".len());
-        assert_eq!(split_decodable(b""), (String::new(), 0));
+    fn nothing_is_held_back_from_complete_input() {
+        assert_eq!(incomplete_suffix_len(b""), 0);
+        assert_eq!(incomplete_suffix_len("héllo 🦀".as_bytes()), 0);
+        // A genuinely invalid byte is not an incomplete sequence: there is
+        // nothing to wait for, so it is decoded (lossily) right away.
+        assert_eq!(incomplete_suffix_len(b"a\xffb"), 0);
+        assert_eq!(incomplete_suffix_len(b"a\xff"), 0);
+        // Orphan continuation bytes with no lead in reach.
+        assert_eq!(incomplete_suffix_len(b"x\x80\x80\x80"), 0);
     }
 
     #[test]
-    fn split_decodable_holds_back_an_incomplete_trailing_codepoint() {
-        let crab = "🦀".as_bytes(); // 4 bytes
-        let mut raw = b"ok ".to_vec();
+    fn an_incomplete_trailing_codepoint_is_held_back_whole() {
+        let crab = "🦀".as_bytes(); // 4 bytes: F0 9F A6 80
+        for cut in 1..4 {
+            let mut raw = b"ok ".to_vec();
+            raw.extend_from_slice(&crab[..cut]);
+            assert_eq!(incomplete_suffix_len(&raw), cut, "cut after {cut} bytes");
+        }
+        // 2- and 3-byte sequences too.
+        assert_eq!(incomplete_suffix_len("é".as_bytes()), 0);
+        assert_eq!(incomplete_suffix_len(&"é".as_bytes()[..1]), 1);
+        assert_eq!(incomplete_suffix_len(&"中".as_bytes()[..2]), 2);
+        // An invalid byte BEFORE the partial tail changes nothing.
+        let mut raw = b"a\xffb ".to_vec();
         raw.extend_from_slice(&crab[..2]);
-        let (s, n) = split_decodable(&raw);
-        assert_eq!(s, "ok ");
-        assert_eq!(n, 3, "the partial codepoint must not be consumed");
-    }
-
-    #[test]
-    fn split_decodable_lossy_decodes_a_genuinely_invalid_byte() {
-        let raw = b"a\xffb";
-        let (s, n) = split_decodable(raw);
-        assert_eq!(s, "a\u{FFFD}b");
-        assert_eq!(n, raw.len());
+        assert_eq!(incomplete_suffix_len(&raw), 2);
     }
 
     #[test]
@@ -738,6 +737,52 @@ mod tests {
         // Empty buffer drains to nothing.
         let third = drain_from(&state).unwrap();
         assert_eq!((third.data.as_str(), third.bytes), ("", 0));
+    }
+
+    #[test]
+    fn an_invalid_byte_does_not_make_a_split_codepoint_lossy() {
+        // An invalid byte EARLIER in the buffer must not drag the trailing
+        // partial codepoint through the lossy decode with it: it would turn
+        // one 🦀 into three U+FFFD (one here, two on the next drain).
+        let state = Mutex::new(PtyState::new());
+        let crab = "🦀".as_bytes();
+        {
+            let s = state.lock().unwrap();
+            let mut b = s.buffer.lock().unwrap();
+            b.extend_from_slice(b"a\xffb ");
+            b.extend_from_slice(&crab[..2]);
+        }
+        let first = drain_from(&state).unwrap();
+        assert_eq!((first.data.as_str(), first.bytes), ("a\u{FFFD}b ", 4));
+        {
+            let s = state.lock().unwrap();
+            let mut b = s.buffer.lock().unwrap();
+            b.extend_from_slice(&crab[2..]);
+            b.extend_from_slice(b"z");
+        }
+        let second = drain_from(&state).unwrap();
+        assert_eq!(second.data, "🦀z");
+    }
+
+    #[test]
+    fn a_held_back_tail_stays_in_the_buffer_it_came_from() {
+        // The split happens under the SAME lock as the take, so a re-open
+        // swapping in a fresh buffer between two drains can never move the
+        // old session's partial codepoint in front of the new session's
+        // first bytes.
+        let state = Mutex::new(PtyState::new());
+        let crab = "🦀".as_bytes();
+        let old = Arc::clone(&state.lock().unwrap().buffer);
+        old.lock().unwrap().extend_from_slice(&crab[..2]);
+        let first = drain_from(&state).unwrap();
+        assert_eq!((first.data.as_str(), first.bytes), ("", 0));
+        assert_eq!(&old.lock().unwrap()[..], &crab[..2], "tail stays put");
+
+        let fresh: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(b"banner".to_vec()));
+        state.lock().unwrap().buffer = Arc::clone(&fresh);
+        let second = drain_from(&state).unwrap();
+        assert_eq!(second.data, "banner", "no stale bytes in front");
+        assert_eq!(&old.lock().unwrap()[..], &crab[..2]);
     }
 
     #[test]
