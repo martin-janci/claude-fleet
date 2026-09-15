@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store';
+import { createRowStore } from './row_store';
 import { invokeCmd, invokeCmdAbortable, type Result } from './result';
 import { readPref, writePref } from './prefs';
 
@@ -133,7 +134,19 @@ export function formatCostMicros(micros: number | null | undefined): string {
   return `$${Math.round(usd).toLocaleString('en-US')}`;
 }
 
-export const sessions = writable<SessionRow[]>([]);
+const rows = createRowStore<SessionRow, number>({
+  key: (s) => s.id,
+  // Both the optimistic `removeSession()` and the `session:killed` event
+  // delete a row; a `session:updated` still in flight for that id would
+  // otherwise re-insert the dead row ("ghost session").
+  tombstoneMs: 5000,
+  // Monotonic guard: don't let a staler payload (e.g. a command return value
+  // that raced a newer `session:updated` event) clobber a fresher row. Equal
+  // timestamps still apply — they may carry a status change.
+  isStale: (incoming, current) => incoming.last_activity_at < current.last_activity_at,
+});
+export const sessions = rows.store;
+export const resetTombstonesForTests = rows.resetTombstonesForTests;
 
 /** True once the first successful `list_sessions` has populated the store.
  *  Consumers that react to *transitions* (Attention.svelte) treat everything
@@ -406,59 +419,12 @@ export function findSession(arr: SessionRow[], ident: SessionIdentity): SessionR
   return arr.find((s) => s.host_alias === ident.host_alias && s.tmux_name === ident.tmux_name);
 }
 
-// Recently-removed session ids. Both the optimistic `removeSession()` and the
-// `session:killed` event delete a row; without a tombstone, a `session:updated`
-// event still in flight for that id would re-insert the dead row ("ghost
-// session"). Entries expire so a genuinely new id is never blocked.
-const tombstones = new Map<number, number>();
-const TOMBSTONE_MS = 5000;
-
-/** Test hook: forget every tombstone so one test's kill can't shadow the
- *  next test's merge of the same id. Not for production code. */
-export function resetTombstonesForTests(): void {
-  tombstones.clear();
-}
-
-function isTombstoned(id: number): boolean {
-  const t = tombstones.get(id);
-  if (t === undefined) return false;
-  if (Date.now() - t > TOMBSTONE_MS) {
-    tombstones.delete(id);
-    return false;
-  }
-  return true;
-}
-
-/** Pure merge step shared by the single-row and batched paths. Returns the
- *  input array untouched when the row is tombstoned or stale. */
-function mergeInto(arr: SessionRow[], row: SessionRow): SessionRow[] {
-  if (!row) return arr;
-  if (isTombstoned(row.id)) return arr;
-  const i = arr.findIndex((s) => s.id === row.id);
-  if (i === -1) return [...arr, row];
-  // Monotonic guard: don't let a staler payload (e.g. a command return
-  // value that raced a newer `session:updated` event) clobber a fresher
-  // row. Equal timestamps still apply — they may carry a status change.
-  if (row.last_activity_at < arr[i].last_activity_at) return arr;
-  const next = arr.slice();
-  next[i] = row;
-  return next;
-}
-
-function removeFrom(arr: SessionRow[], id: number): SessionRow[] {
-  tombstones.set(id, Date.now());
-  const next = arr.filter((s) => s.id !== id);
-  return next.length === arr.length ? arr : next;
-}
-
 export function mergeSession(row: SessionRow): void {
-  if (!row) return;
-  if (isTombstoned(row.id)) return;
-  sessions.update((arr) => mergeInto(arr, row));
+  rows.merge(row);
 }
 
 export function removeSession(id: number): void {
-  sessions.update((arr) => removeFrom(arr, id));
+  rows.remove(id);
 }
 
 /** One backend row event, as delivered by `events.ts`. */
@@ -476,7 +442,7 @@ export function applySessionEvents(events: readonly SessionEvent[]): void {
   sessions.update((arr) => {
     let next = arr;
     for (const ev of events) {
-      next = ev.type === 'killed' ? removeFrom(next, ev.id) : mergeInto(next, ev.row);
+      next = ev.type === 'killed' ? rows.removeFrom(next, ev.id) : rows.mergeInto(next, ev.row);
     }
     return next;
   });
@@ -486,9 +452,7 @@ export function applySessionEvents(events: readonly SessionEvent[]): void {
  *  event, a command result is the authoritative response to a request the
  *  user just made, so it clears any tombstone for that id before merging. */
 function acceptCommandRow(row: SessionRow | null | undefined): void {
-  if (!row) return;
-  tombstones.delete(row.id);
-  mergeSession(row);
+  rows.accept(row);
 }
 
 export async function sendPrompt(

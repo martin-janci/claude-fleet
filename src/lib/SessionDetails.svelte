@@ -11,8 +11,6 @@
   import { formatCostMicros, formatTokens, sessionUsageTokens } from './sessions';
   import {
     killSession,
-    renameSession,
-    setFriendlyName,
     restartSession,
     repairSession,
     recreateSession,
@@ -26,6 +24,7 @@
   import { hosts, hostByAlias } from './hosts';
   import { accountByUuid, accountEmailTier, type AccountRow } from './accounts';
   import { timeAgo } from './session_status';
+  import { applySessionRename, renameKeyHandler } from './session_rename';
   import PromptComposer from './PromptComposer.svelte';
   import ReviewDialog from './ReviewDialog.svelte';
   import Modal from './Modal.svelte';
@@ -131,32 +130,11 @@
 
   async function commitRename() {
     if (!renaming || committingRename) return;
-    const next = renameValue.trim();
     committingRename = true;
     try {
-      if (renaming === 'label') {
-        if (next === (session.friendly_name ?? '').trim()) {
-          renaming = null;
-          return;
-        }
-        const r = await setFriendlyName(session.host_alias, session.tmux_name, next);
-        if (!r.ok) {
-          pushError(r.error, 'Label update failed');
-          return;
-        }
-        renaming = null;
-        return;
-      }
-      if (!next || next === session.tmux_name) {
-        renaming = null;
-        return;
-      }
-      const r = await renameSession(session.host_alias, session.tmux_name, next);
-      if (!r.ok) {
-        pushError(r.error, 'Rename failed');
-        return;
-      }
-      selectSession(r.value, { follow: true });
+      const outcome = await applySessionRename(session, renaming, renameValue);
+      if (outcome.kind === 'error') return;
+      if (outcome.kind === 'ok' && outcome.row) selectSession(outcome.row, { follow: true });
       renaming = null;
     } finally {
       committingRename = false;
@@ -167,15 +145,7 @@
     renaming = null;
   }
 
-  function onRenameKey(e: KeyboardEvent) {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      void commitRename();
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      cancelRename();
-    }
-  }
+  const onRenameKey = renameKeyHandler(() => void commitRename(), cancelRename);
 
   // Inactive bg agent: drop the row. The backend emits `session:removed`,
   // which removes it from the store (and clears the selection).

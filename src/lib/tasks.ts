@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store';
+import { createRowStore } from './row_store';
 import { invokeCmd, type Result } from './result';
 
 /** The task state machine (migration 020): queued → running → done | failed | cancelled. */
@@ -21,7 +21,12 @@ export interface TaskRow {
   finished_at: number | null;
 }
 
-export const tasks = writable<TaskRow[]>([]);
+const rows = createRowStore<TaskRow, number>({
+  key: (t) => t.id,
+  // Newest-first ordering is preserved by sorting on (created_at, id) descending.
+  normalize: (arr) => arr.sort((a, b) => b.created_at - a.created_at || b.id - a.id),
+});
+export const tasks = rows.store;
 
 export function isTerminal(state: TaskState): boolean {
   return state === 'done' || state === 'failed' || state === 'cancelled';
@@ -42,20 +47,8 @@ export async function cancelTask(taskId: number): Promise<Result<TaskRow>> {
   return r;
 }
 
-/** Pure merge step: replace the row with the same id, or append. Newest-first
- *  ordering is preserved by sorting on (created_at, id) descending. */
-function mergeInto(arr: TaskRow[], row: TaskRow): TaskRow[] {
-  if (!row) return arr;
-  const i = arr.findIndex((t) => t.id === row.id);
-  const next = i === -1 ? [...arr, row] : arr.slice();
-  if (i !== -1) next[i] = row;
-  next.sort((a, b) => b.created_at - a.created_at || b.id - a.id);
-  return next;
-}
-
 export function mergeTask(row: TaskRow): void {
-  if (!row) return;
-  tasks.update((arr) => mergeInto(arr, row));
+  rows.merge(row);
 }
 
 /** One backend task event, as delivered by `events.ts`. Tasks are never
@@ -67,7 +60,7 @@ export function applyTaskEvents(events: readonly TaskEvent[]): void {
   if (events.length === 0) return;
   tasks.update((arr) => {
     let next = arr;
-    for (const ev of events) next = mergeInto(next, ev.row);
+    for (const ev of events) next = rows.mergeInto(next, ev.row);
     return next;
   });
 }

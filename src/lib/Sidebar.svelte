@@ -5,8 +5,6 @@
     sessions,
     loadSessions,
     killSession,
-    renameSession,
-    setFriendlyName,
     recreateSession,
     purgeProject,
     showBgAgents,
@@ -17,7 +15,8 @@
   import { describePurge, purgeHostsForProject } from './purge';
   import { type ProjectRow } from './projects';
   import { selectedSession, selectSession } from './selection';
-  import { forgetSessionUi, migrateSessionUi } from './session_ui';
+  import { forgetSessionUi } from './session_ui';
+  import { applySessionRename, renameKeyHandler } from './session_rename';
   import { readPref, writePref } from './prefs';
   import { theme, cycleTheme } from './theme';
   import NewSessionDialog from './NewSessionDialog.svelte';
@@ -496,50 +495,24 @@
 
   async function commitRename() {
     if (committingRename || !renaming) return;
-    const next = renameValue.trim();
-    if (renaming.mode === 'label') {
-      // Empty is meaningful here: it clears the label.
-      if (next === renaming.original.trim()) {
-        cancelRename();
-        return;
-      }
-      committingRename = true;
-      try {
-        const r = await setFriendlyName(renaming.host_alias, renaming.tmux_name, next);
-        if (!r.ok) {
-          renameError = r.error.message;
-          pushError(r.error, 'Label update failed');
-          return;
-        }
-        cancelRename();
-      } finally {
-        committingRename = false;
-      }
-      return;
-    }
-    if (!next || next === renaming.tmux_name) {
-      cancelRename();
-      return;
-    }
+    // Target the exact row that was double-clicked — host + old name from
+    // the pinned identity, never a lookup by name alone.
+    const target = renaming;
     committingRename = true;
     try {
-      // Target the exact row that was double-clicked — host + old name from
-      // the pinned identity, never a lookup by name alone.
-      const target = renaming;
-      const { host_alias: hostAlias, tmux_name: oldName } = target;
-      const r = await renameSession(hostAlias, oldName, next);
-      if (!r.ok) {
-        renameError = r.error.message;
-        pushError(r.error, 'Rename failed');
+      const outcome = await applySessionRename(
+        { ...target, friendly_name: target.mode === 'label' ? target.original : null },
+        target.mode,
+        renameValue,
+      );
+      if (outcome.kind === 'error') {
+        renameError = outcome.error.message;
         return;
       }
-      // Persisted UI state (pane widths, collapsed) is keyed by tmux name;
-      // bring it along to the new name so the user's layout sticks.
-      migrateSessionUi(r.value.host_alias, oldName, r.value.tmux_name);
       // If the renamed session was the selected one, follow the rename.
       const cur = $selectedSession;
-      if (cur && sameSession(cur, target)) {
-        selectSession(r.value, { follow: true });
+      if (outcome.kind === 'ok' && outcome.row && cur && sameSession(cur, target)) {
+        selectSession(outcome.row, { follow: true });
       }
       cancelRename();
     } finally {
@@ -547,15 +520,7 @@
     }
   }
 
-  function onRenameKey(e: KeyboardEvent) {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      void commitRename();
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      cancelRename();
-    }
-  }
+  const onRenameKey = renameKeyHandler(() => void commitRename(), cancelRename);
 
   function askKill(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
