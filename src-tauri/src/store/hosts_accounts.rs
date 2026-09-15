@@ -630,12 +630,9 @@ mod tests {
             uuid: "uuid-1".into(),
             email: Some("a@b.com".into()),
             display_name: Some("A".into()),
-            organization_name: None,
-            organization_uuid: None,
             seat_tier: Some("max".into()),
             last_seen_at: Some(1000),
-            nickname: None,
-            has_extra_usage: false,
+            ..Default::default()
         };
         s.upsert_account(&a).unwrap();
         let mut a2 = a.clone();
@@ -655,14 +652,7 @@ mod tests {
         for uuid in ["zzz", "aaa", "mmm"] {
             s.upsert_account(&AccountRow {
                 uuid: uuid.into(),
-                email: None,
-                display_name: None,
-                organization_name: None,
-                organization_uuid: None,
-                seat_tier: None,
-                last_seen_at: None,
-                nickname: None,
-                has_extra_usage: false,
+                ..Default::default()
             })
             .unwrap();
         }
@@ -685,13 +675,7 @@ mod tests {
         s.upsert_account(&AccountRow {
             uuid: "u1".into(),
             email: Some("x@y.com".into()),
-            display_name: None,
-            organization_name: None,
-            organization_uuid: None,
-            seat_tier: None,
-            last_seen_at: None,
-            nickname: None,
-            has_extra_usage: false,
+            ..Default::default()
         })
         .unwrap();
         let got = s.get_account_by_uuid("u1").unwrap().unwrap();
@@ -704,14 +688,7 @@ mod tests {
         s.insert_host("h", Some("h")).unwrap();
         s.upsert_account(&AccountRow {
             uuid: "u1".into(),
-            email: None,
-            display_name: None,
-            organization_name: None,
-            organization_uuid: None,
-            seat_tier: None,
-            last_seen_at: None,
-            nickname: None,
-            has_extra_usage: false,
+            ..Default::default()
         })
         .unwrap();
         s.set_host_account("h", Some("u1")).unwrap();
@@ -817,13 +794,8 @@ mod tests {
         AccountRow {
             uuid: uuid.into(),
             email: Some("a@b.com".into()),
-            display_name: None,
-            organization_name: None,
-            organization_uuid: None,
-            seat_tier: None,
             last_seen_at,
-            nickname: None,
-            has_extra_usage: false,
+            ..Default::default()
         }
     }
 

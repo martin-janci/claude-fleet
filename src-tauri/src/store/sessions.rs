@@ -1086,18 +1086,7 @@ mod tests {
         store
             .upsert_session("work-a", "alpha", None, None, 1, 1, "running", None)
             .unwrap();
-        store
-            .apply_host_reconcile(HostReconcile {
-                alias: "alpha",
-                reachable: true,
-                claude_version: None,
-                tmux_version: None,
-                last_pinged_at: 1,
-                probe_started_at: 0,
-                sessions: &[],
-                keep: &[],
-            })
-            .unwrap(); // ghosts work-a
+        store.apply_host_reconcile(empty_probe("alpha", 1)).unwrap(); // ghosts work-a
 
         let keep = vec!["bg:live".to_string()];
         store
@@ -1257,14 +1246,7 @@ mod tests {
         // Upsert with an account uuid
         s.upsert_account(&AccountRow {
             uuid: "u1".into(),
-            email: None,
-            display_name: None,
-            organization_name: None,
-            organization_uuid: None,
-            seat_tier: None,
-            last_seen_at: None,
-            nickname: None,
-            has_extra_usage: false,
+            ..Default::default()
         })
         .unwrap();
         s.upsert_session("dev-foo", "h", None, None, 1, 1, "running", Some("u1"))

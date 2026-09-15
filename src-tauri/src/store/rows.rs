@@ -399,7 +399,7 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
     })
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct AccountRow {
     pub uuid: String,
     pub email: Option<String>,
@@ -588,6 +588,7 @@ pub(super) fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow>
 /// `account_uuid`, and `worktree_key` are PRE-RESOLVED by the caller (they
 /// require reads — `find_project_id_for_path` / `get_session_account` /
 /// `worktree_key_for_path` — that must run before the transaction opens).
+#[derive(Default)]
 pub struct ReconcileSession<'a> {
     pub tmux_name: &'a str,
     pub project_id: Option<i64>,
@@ -618,6 +619,7 @@ pub struct ReconcileSession<'a> {
 
 /// All inputs for applying one host's probe result atomically. Consumed by
 /// `Store::apply_host_reconcile`.
+#[derive(Default)]
 pub struct HostReconcile<'a> {
     pub alias: &'a str,
     /// Whether the probe succeeded. `false` ⇒ only the host row's
