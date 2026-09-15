@@ -4,6 +4,7 @@ use crate::ssh::SshClient;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::State;
 
@@ -39,7 +40,53 @@ pub struct PtyState {
     master: Option<Box<dyn MasterPty + Send>>,
     writer: Option<Box<dyn Write + Send>>,
     child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
-    buffer: Arc<Mutex<Vec<u8>>>,
+    shared: Arc<PtyShared>,
+}
+
+/// Everything one open shares with its reader thread. A FRESH one per open:
+/// a reader that is still winding down owns the previous `Arc` and can
+/// neither append to nor flag the PTY that replaced it.
+pub(crate) struct PtyShared {
+    buffer: Mutex<PtyBuffer>,
+    /// Set by the reader thread once the PTY is over (EOF or a read error).
+    /// The `[cf]` lines it also writes into the buffer are display text only;
+    /// THIS is what the frontend acts on, so output that merely contains that
+    /// text can never fake a disconnect.
+    exited: AtomicBool,
+}
+
+/// Un-drained output plus the "we had to throw output away" latch.
+#[derive(Default)]
+pub(crate) struct PtyBuffer {
+    bytes: Vec<u8>,
+    overflowed: bool,
+}
+
+impl PtyShared {
+    pub(crate) fn new() -> Self {
+        Self {
+            buffer: Mutex::new(PtyBuffer::default()),
+            exited: AtomicBool::new(false),
+        }
+    }
+
+    /// Append reader output. `false` means the buffer lock is poisoned and
+    /// the reader should stop.
+    fn append(&self, chunk: &[u8]) -> bool {
+        match self.buffer.lock() {
+            Ok(mut b) => {
+                b.append_capped(chunk, PTY_BUFFER_CAP);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Append a human-readable `[cf]` line for the user to see. Display text
+    /// only — never a signal (see `exited`).
+    fn note(&self, line: &str) {
+        self.append(line.as_bytes());
+    }
 }
 
 impl PtyState {
@@ -48,7 +95,7 @@ impl PtyState {
             master: None,
             writer: None,
             child: None,
-            buffer: Arc::new(Mutex::new(Vec::new())),
+            shared: Arc::new(PtyShared::new()),
         }
     }
 
@@ -66,13 +113,13 @@ impl PtyState {
         master: Box<dyn MasterPty + Send>,
         writer: Box<dyn Write + Send>,
         child: Box<dyn portable_pty::Child + Send + Sync>,
-        buffer: Arc<Mutex<Vec<u8>>>,
+        shared: Arc<PtyShared>,
     ) {
         self.close();
         self.master = Some(master);
         self.writer = Some(writer);
         self.child = Some(child);
-        self.buffer = buffer;
+        self.shared = shared;
     }
 
     pub(crate) fn close(&mut self) {
@@ -107,8 +154,8 @@ impl PtyState {
         // EOF. Clear the buffer so a subsequent open delivers no stale bytes.
         self.writer.take();
         self.master.take();
-        if let Ok(mut b) = self.buffer.lock() {
-            b.clear();
+        if let Ok(mut b) = self.shared.buffer.lock() {
+            *b = PtyBuffer::default();
         }
     }
 }
@@ -229,15 +276,28 @@ pub(crate) fn attach_banner(session_name: &str, host_alias: &str) -> String {
     format!("\x1b[90m[cf] attached to {session_name}@{host_alias} via polling buffer\x1b[0m\r\n")
 }
 
-/// Append `chunk` to the un-drained buffer, dropping the OLDEST bytes so the
-/// buffer never exceeds `cap`. Safety valve: if the frontend has stopped
-/// draining (backgrounded tab, stalled loop) a busy session could grow this
-/// without bound. Losing scrollback is acceptable; OOMing the process is not.
-pub(crate) fn append_capped(buf: &mut Vec<u8>, chunk: &[u8], cap: usize) {
-    buf.extend_from_slice(chunk);
-    if buf.len() > cap {
-        let excess = buf.len() - cap;
-        buf.drain(0..excess);
+impl PtyBuffer {
+    /// Append `chunk`, or — when that would exceed `cap` — drop EVERYTHING
+    /// and latch `overflowed` until the next drain reports it.
+    ///
+    /// Safety valve: if the frontend has stopped draining (backgrounded tab,
+    /// stalled loop) a busy session could grow this without bound. Trimming
+    /// the oldest bytes instead (what this used to do) cuts at an arbitrary
+    /// offset, so the stream resumes mid-escape or mid-codepoint AND loses
+    /// the DECSET modes tmux sends once per attach — alt screen, mouse,
+    /// bracketed paste, scroll region. The screen is unrecoverable from
+    /// there, so say so once and let the frontend re-attach. Dropping while
+    /// latched also drops the O(cap) memmove the trim did on every read.
+    pub(crate) fn append_capped(&mut self, chunk: &[u8], cap: usize) {
+        if self.overflowed {
+            return;
+        }
+        if self.bytes.len() + chunk.len() > cap {
+            self.bytes.clear();
+            self.overflowed = true;
+            return;
+        }
+        self.bytes.extend_from_slice(chunk);
     }
 }
 
@@ -328,17 +388,15 @@ pub fn pty_open(
     // loops on `read`) — handing the new reader its own buffer means stale
     // bytes from the old session can never bleed into the new screen. The
     // old buffer is orphaned and freed once that thread observes EOF.
-    let buffer_for_thread: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let shared = Arc::new(PtyShared::new());
     {
         let mut s = state
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
-        s.install(pair.master, writer, child, Arc::clone(&buffer_for_thread));
+        s.install(pair.master, writer, child, Arc::clone(&shared));
     }
 
-    if let Ok(mut b) = buffer_for_thread.lock() {
-        b.extend_from_slice(attach_banner(&args.session_name, &args.host_alias).as_bytes());
-    }
+    shared.note(&attach_banner(&args.session_name, &args.host_alias));
 
     // Reader thread: append bytes directly to the buffer the JS side drains.
     // No Tauri events involved — pure shared-state pattern.
@@ -348,37 +406,28 @@ pub fn pty_open(
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
-                    if let Ok(mut b) = buffer_for_thread.lock() {
-                        b.extend_from_slice(
-                            format!(
-                                "\r\n\x1b[33m[cf] PTY EOF after {total} bytes (tmux attach exited)\x1b[0m\r\n"
-                            )
-                            .as_bytes(),
-                        );
-                    }
+                    shared.note(&format!(
+                        "\r\n\x1b[33m[cf] PTY EOF after {total} bytes (tmux attach exited)\x1b[0m\r\n"
+                    ));
                     break;
                 }
                 Ok(n) => {
                     total += n;
-                    if let Ok(mut b) = buffer_for_thread.lock() {
-                        append_capped(&mut b, &buf[..n], PTY_BUFFER_CAP);
-                    } else {
+                    if !shared.append(&buf[..n]) {
                         break;
                     }
                 }
                 Err(e) => {
-                    if let Ok(mut b) = buffer_for_thread.lock() {
-                        b.extend_from_slice(
-                            format!(
-                                "\r\n\x1b[31m[cf] reader error after {total} bytes: {e}\x1b[0m\r\n"
-                            )
-                            .as_bytes(),
-                        );
-                    }
+                    shared.note(&format!(
+                        "\r\n\x1b[31m[cf] reader error after {total} bytes: {e}\x1b[0m\r\n"
+                    ));
                     break;
                 }
             }
         }
+        // Out of band, AFTER the display line: the frontend reacts to this,
+        // never to text it happened to find in the session's own output.
+        shared.exited.store(true, Ordering::Release);
     });
 
     Ok(())
@@ -390,6 +439,15 @@ pub struct PtyDrainResult {
     pub data: String,
     /// How many raw bytes were drained.
     pub bytes: usize,
+    /// The PTY is gone (the reader saw EOF or a read error). Sticky, and
+    /// only reported once every remaining byte has been handed over — so it
+    /// can arrive with `bytes == 0`.
+    pub eof: bool,
+    /// Output was dropped: the un-drained buffer hit its cap. Reported once,
+    /// then cleared. The screen cannot be repaired from the stream (the lost
+    /// bytes include mode switches tmux sends only once), so the frontend
+    /// must re-attach.
+    pub overflowed: bool,
 }
 
 #[tauri::command]
@@ -407,21 +465,36 @@ pub fn pty_drain(state: State<'_, Mutex<PtyState>>) -> Result<PtyDrainResult, Ip
 /// tail back, which a concurrent `install()` could turn into "the old
 /// session's bytes land in front of the new session's first output".
 fn drain_from(state: &Mutex<PtyState>) -> Result<PtyDrainResult, IpcError> {
-    let raw: Vec<u8> = {
+    let (raw, overflowed, eof) = {
         let s = state
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "pty mutex poisoned"))?;
+        let exited = s.shared.exited.load(Ordering::Acquire);
         let mut buf = s
+            .shared
             .buffer
             .lock()
             .map_err(|_| IpcError::new("E_LOCK", "pty buffer poisoned"))?;
-        let keep = buf.len() - incomplete_suffix_len(&buf);
-        let tail = buf.split_off(keep);
-        std::mem::replace(&mut *buf, tail)
+        let overflowed = std::mem::take(&mut buf.overflowed);
+        // Once the reader is done nothing can complete a partial codepoint,
+        // so hand the bytes over as they are.
+        let keep = if exited {
+            buf.bytes.len()
+        } else {
+            buf.bytes.len() - incomplete_suffix_len(&buf.bytes)
+        };
+        let tail = buf.bytes.split_off(keep);
+        let raw = std::mem::replace(&mut buf.bytes, tail);
+        // EOF only after the last byte has been delivered, so the `[cf]`
+        // line is on screen before the frontend reacts to it.
+        let eof = exited && raw.is_empty();
+        (raw, overflowed, eof)
     };
     Ok(PtyDrainResult {
         bytes: raw.len(),
         data: String::from_utf8_lossy(&raw).into_owned(),
+        eof,
+        overflowed,
     })
 }
 
@@ -668,16 +741,84 @@ mod tests {
 
     // ---- output buffering / decoding ----
 
+    /// The shared output state of the (only) open, for tests that feed bytes
+    /// in the way the reader thread does.
+    fn shared_of(state: &Mutex<PtyState>) -> Arc<PtyShared> {
+        Arc::clone(&state.lock().unwrap().shared)
+    }
+
     #[test]
-    fn append_capped_drops_the_oldest_bytes() {
-        let mut buf = Vec::new();
-        append_capped(&mut buf, b"abcdef", 8);
-        assert_eq!(buf, b"abcdef");
-        append_capped(&mut buf, b"ghij", 8);
-        assert_eq!(buf, b"cdefghij");
-        // A single chunk larger than the cap keeps only its tail.
-        append_capped(&mut buf, b"0123456789AB", 8);
-        assert_eq!(buf, b"456789AB");
+    fn an_overflow_drops_everything_and_latches_until_the_next_drain() {
+        let mut buf = PtyBuffer::default();
+        buf.append_capped(b"abcdef", 8);
+        assert_eq!(buf.bytes, b"abcdef");
+        assert!(!buf.overflowed);
+        // Trimming the oldest bytes would cut mid-escape / mid-codepoint and
+        // lose mode switches tmux never resends: drop the lot instead.
+        buf.append_capped(b"ghij", 8);
+        assert!(buf.bytes.is_empty(), "no partial data survives");
+        assert!(buf.overflowed);
+        // Still overflowed: nothing accumulates until a drain reports it.
+        buf.append_capped(b"kl", 8);
+        assert!(buf.bytes.is_empty());
+        // A single chunk larger than the cap overflows the same way.
+        let mut buf = PtyBuffer::default();
+        buf.append_capped(b"0123456789AB", 8);
+        assert!(buf.bytes.is_empty());
+        assert!(buf.overflowed);
+    }
+
+    #[test]
+    fn drain_reports_an_overflow_once_then_accumulates_again() {
+        let state = Mutex::new(PtyState::new());
+        let shared = shared_of(&state);
+        shared.append(&vec![b'x'; PTY_BUFFER_CAP + 1]);
+        let first = drain_from(&state).unwrap();
+        assert!(first.overflowed);
+        assert_eq!((first.data.as_str(), first.bytes), ("", 0));
+        shared.append(b"fresh");
+        let second = drain_from(&state).unwrap();
+        assert!(!second.overflowed, "reported once");
+        assert_eq!(second.data, "fresh", "accumulation resumes after a drain");
+    }
+
+    #[test]
+    fn drain_reports_eof_out_of_band_after_the_last_bytes() {
+        let state = Mutex::new(PtyState::new());
+        let shared = shared_of(&state);
+        // The marker TEXT in ordinary session output means nothing: grepping
+        // this repo inside an attached pane must not look like a disconnect.
+        shared.note("[cf] PTY EOF after 0 bytes (tmux attach exited)");
+        let first = drain_from(&state).unwrap();
+        assert!(first.data.contains("[cf] PTY EOF"));
+        assert!(!first.eof, "output text is not a signal");
+
+        // The reader flags the real thing after writing its display line.
+        shared.note("bye");
+        shared.exited.store(true, Ordering::Release);
+        let second = drain_from(&state).unwrap();
+        assert_eq!(second.data, "bye");
+        assert!(!second.eof, "remaining bytes are delivered first");
+        let third = drain_from(&state).unwrap();
+        assert_eq!((third.data.as_str(), third.bytes), ("", 0));
+        assert!(third.eof, "reported with zero new bytes");
+        assert!(drain_from(&state).unwrap().eof, "sticky");
+    }
+
+    #[test]
+    fn a_dead_readers_eof_never_flags_the_pty_that_replaced_it() {
+        let state = Mutex::new(PtyState::new());
+        let old = shared_of(&state);
+        old.exited.store(true, Ordering::Release);
+        assert!(drain_from(&state).unwrap().eof);
+        // A re-open installs a fresh shared state; the old reader thread
+        // keeps writing to (and flagging) the Arc nobody drains any more.
+        state.lock().unwrap().shared = Arc::new(PtyShared::new());
+        old.note("stale");
+        old.exited.store(true, Ordering::Release);
+        let after = drain_from(&state).unwrap();
+        assert!(!after.eof);
+        assert_eq!(after.data, "");
     }
 
     #[test]
@@ -717,9 +858,9 @@ mod tests {
         // First chunk ends mid-codepoint.
         {
             let s = state.lock().unwrap();
-            let mut b = s.buffer.lock().unwrap();
-            b.extend_from_slice(b"x");
-            b.extend_from_slice(&crab[..3]);
+            let mut b = s.shared.buffer.lock().unwrap();
+            b.bytes.extend_from_slice(b"x");
+            b.bytes.extend_from_slice(&crab[..3]);
         }
         let first = drain_from(&state).unwrap();
         assert_eq!((first.data.as_str(), first.bytes), ("x", 1));
@@ -727,10 +868,10 @@ mod tests {
         // front so the codepoint reassembles in order.
         {
             let s = state.lock().unwrap();
-            let mut b = s.buffer.lock().unwrap();
-            assert_eq!(&b[..], &crab[..3]);
-            b.extend_from_slice(&crab[3..]);
-            b.extend_from_slice(b"y");
+            let mut b = s.shared.buffer.lock().unwrap();
+            assert_eq!(&b.bytes[..], &crab[..3]);
+            b.bytes.extend_from_slice(&crab[3..]);
+            b.bytes.extend_from_slice(b"y");
         }
         let second = drain_from(&state).unwrap();
         assert_eq!((second.data.as_str(), second.bytes), ("🦀y", 5));
@@ -748,17 +889,17 @@ mod tests {
         let crab = "🦀".as_bytes();
         {
             let s = state.lock().unwrap();
-            let mut b = s.buffer.lock().unwrap();
-            b.extend_from_slice(b"a\xffb ");
-            b.extend_from_slice(&crab[..2]);
+            let mut b = s.shared.buffer.lock().unwrap();
+            b.bytes.extend_from_slice(b"a\xffb ");
+            b.bytes.extend_from_slice(&crab[..2]);
         }
         let first = drain_from(&state).unwrap();
         assert_eq!((first.data.as_str(), first.bytes), ("a\u{FFFD}b ", 4));
         {
             let s = state.lock().unwrap();
-            let mut b = s.buffer.lock().unwrap();
-            b.extend_from_slice(&crab[2..]);
-            b.extend_from_slice(b"z");
+            let mut b = s.shared.buffer.lock().unwrap();
+            b.bytes.extend_from_slice(&crab[2..]);
+            b.bytes.extend_from_slice(b"z");
         }
         let second = drain_from(&state).unwrap();
         assert_eq!(second.data, "🦀z");
@@ -772,17 +913,22 @@ mod tests {
         // first bytes.
         let state = Mutex::new(PtyState::new());
         let crab = "🦀".as_bytes();
-        let old = Arc::clone(&state.lock().unwrap().buffer);
-        old.lock().unwrap().extend_from_slice(&crab[..2]);
+        let old = shared_of(&state);
+        old.append(&crab[..2]);
         let first = drain_from(&state).unwrap();
         assert_eq!((first.data.as_str(), first.bytes), ("", 0));
-        assert_eq!(&old.lock().unwrap()[..], &crab[..2], "tail stays put");
+        assert_eq!(
+            &old.buffer.lock().unwrap().bytes[..],
+            &crab[..2],
+            "tail stays put"
+        );
 
-        let fresh: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(b"banner".to_vec()));
-        state.lock().unwrap().buffer = Arc::clone(&fresh);
+        let fresh = Arc::new(PtyShared::new());
+        fresh.note("banner");
+        state.lock().unwrap().shared = Arc::clone(&fresh);
         let second = drain_from(&state).unwrap();
         assert_eq!(second.data, "banner", "no stale bytes in front");
-        assert_eq!(&old.lock().unwrap()[..], &crab[..2]);
+        assert_eq!(&old.buffer.lock().unwrap().bytes[..], &crab[..2]);
     }
 
     #[test]
@@ -857,8 +1003,9 @@ mod tests {
         };
         let _guard1 = KillOnDrop(pid1);
         let state = Mutex::new(PtyState::new());
-        let buf1 = Arc::new(Mutex::new(b"stale".to_vec()));
-        state.lock().unwrap().install(m1, w1, c1, Arc::clone(&buf1));
+        let sh1 = Arc::new(PtyShared::new());
+        sh1.note("stale");
+        state.lock().unwrap().install(m1, w1, c1, Arc::clone(&sh1));
         assert!(state.lock().unwrap().is_open());
         assert!(alive(pid1));
         // A live attachment accepts writes and resizes.
@@ -870,13 +1017,13 @@ mod tests {
             return;
         };
         let _guard2 = KillOnDrop(pid2);
-        let buf2 = Arc::new(Mutex::new(Vec::new()));
-        state.lock().unwrap().install(m2, w2, c2, Arc::clone(&buf2));
+        let sh2 = Arc::new(PtyShared::new());
+        state.lock().unwrap().install(m2, w2, c2, Arc::clone(&sh2));
         // Single-PTY invariant: the first child is gone (killed + reaped) and
         // its buffer was cleared; the second is live with its own buffer.
         assert!(!alive(pid1), "first attachment must be killed on re-open");
         assert!(alive(pid2));
-        assert!(buf1.lock().unwrap().is_empty());
+        assert!(sh1.buffer.lock().unwrap().bytes.is_empty());
         assert!(state.lock().unwrap().is_open());
 
         state.lock().unwrap().close();
