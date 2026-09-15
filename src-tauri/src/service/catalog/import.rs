@@ -7,6 +7,7 @@ use super::model::{
 };
 use super::repo::{asset_path, write_asset};
 use super::E_ASSET_EXISTS;
+use crate::ipc_error::codes::E_INVALID;
 use crate::ipc_error::IpcError;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -791,7 +792,12 @@ pub fn import_claude(
         }
         if !dry_run {
             if let Err(e) = write_asset(repo_root, &a, false) {
-                if e.code == E_ASSET_EXISTS {
+                // A per-asset write fault (name already taken, or — e.g. a
+                // resource filename with a space or non-ASCII character —
+                // an invalid resource path) is this asset's problem, not a
+                // reason to abort the rest of the run; anything else (I/O,
+                // serialization, ...) is unexpected and still propagates.
+                if e.code == E_ASSET_EXISTS || e.code == E_INVALID {
                     report.problems.push(Problem {
                         path: format!("{}/{}", kind.dir(), a.header.name),
                         message: e.message,
@@ -1336,6 +1342,67 @@ mod tests {
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].header.name, "plugin-superpowers-chrome-chrome");
+    }
+
+    /// A resource whose on-disk filename `write_asset` rejects (a space, per
+    /// `valid_resource_rel_path`) must become a per-asset problem, not abort
+    /// the whole import — the other assets in the same run still land.
+    #[test]
+    fn write_asset_invalid_resource_name_becomes_a_problem_not_an_abort() {
+        let base = std::env::temp_dir().join(format!("fleet-import-badres-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let claude_dir = base.join("home/.claude");
+        let w = |rel: &str, c: &str| {
+            let p = base.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, c).unwrap();
+        };
+        w(
+            "home/.claude/skills/good/SKILL.md",
+            "---\nname: good\ndescription: A perfectly ordinary skill.\n---\n# Body\n",
+        );
+        w(
+            "home/.claude/skills/bad/SKILL.md",
+            "---\nname: bad\ndescription: Has a resource filename write_asset rejects.\n---\n# Body\n",
+        );
+        w("home/.claude/skills/bad/notes (draft).txt", "notes\n");
+        w(
+            "home/.claude/agents/pm-qa.md",
+            "---\nname: pm-qa\ndescription: An ordinary agent.\ntools: Read\n---\nYou are QA.\n",
+        );
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        let src = ImportSources {
+            claude_dir,
+            claude_json: base.join("home/.claude.json"),
+        };
+
+        let rep = import_claude(&src, &repo, "local", None, false).unwrap();
+
+        // The offending asset is reported, not created.
+        assert!(
+            !rep.created.iter().any(|(_, n)| n == "bad"),
+            "{:?}",
+            rep.created
+        );
+        let problem = rep
+            .problems
+            .iter()
+            .find(|p| p.path == "skills/bad")
+            .unwrap_or_else(|| panic!("bad skill reported as a problem: {:?}", rep.problems));
+        assert!(
+            problem.message.contains("invalid resource path"),
+            "{:?}",
+            problem
+        );
+        // The rest of the run completed: the other assets were created.
+        assert!(rep.created.contains(&("skill".into(), "good".into())));
+        assert!(rep.created.contains(&("agent".into(), "pm-qa".into())));
+        let cat = load_dir(&repo).unwrap();
+        assert!(cat.find(Kind::Skill, "good").is_some());
+        assert!(cat.find(Kind::Agent, "pm-qa").is_some());
+        assert!(cat.find(Kind::Skill, "bad").is_none());
     }
 
     #[test]
