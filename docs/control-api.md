@@ -91,6 +91,13 @@ claude mcp add --transport http claude-fleet http://127.0.0.1:4180/mcp \
 Then, inside a Claude Code session, `/mcp` lists the connected server and its
 tools.
 
+The server speaks MCP **2025-11-25** over **stateless streamable HTTP**: every
+`POST /mcp` is a self-contained JSON-RPC exchange, no `Mcp-Session-Id` is
+issued or required, and `GET /mcp` is not served (`405`). An app restart, a
+port or token change, or a reverse-tunnel bounce therefore needs no reconnect
+on the client side — the next call simply works. Responses are SSE-framed so a
+long poll keeps receiving a keep-alive every 15 s.
+
 ## Tools
 
 The authoritative per-tool documentation — description and parameter list for
@@ -148,6 +155,24 @@ A typical loop: `list_sessions` to see state → `new_session` to spawn one →
 for the raw screen).
 
 ### Status vocabulary
+
+### Errors and limits
+
+A tool that fails in fleet's service layer answers with a **tool result**
+carrying `isError: true` (what the MCP spec prescribes for tool-execution
+failures, so the model sees it as the tool's output and can correct the call),
+not a JSON-RPC error. The text block is the documented `E_CODE: message` line;
+`structuredContent` carries `{ code, message, details }` (for example the
+candidate rows of `E_AMBIGUOUS` or the `confirm_nonce` of
+`E_CONFIRM_REQUIRED`). JSON-RPC errors are reserved for protocol failures:
+an unknown tool name or arguments that do not match the schema.
+
+Every call runs under a wall clock: 60 s for reads and single round trips,
+300 s for session lifecycle, provisioning and host probes, 660 s for the
+self-bounded long polls (`wait_for_session`, `wait_for_task`, `run_prompt`,
+whose own `timeout_s` maxes at 600). On elapse the result is
+`E_TIMEOUT: <tool> exceeded its <n> s limit; the call may have partially
+completed` with `structuredContent { code: "E_TIMEOUT", tool, limit_secs }`.
 
 Session rows carry `claude_status` (one of `working`, `blocked`, `completed`,
 `failed`, `stopped`, `idle`, or null when unknown) and `stuck_kind` (one of
@@ -328,3 +353,7 @@ After enabling the API and connecting a client:
   from Settings, or **Regenerate** and update the client.
 - **Client cannot connect at all** — confirm the indicator shows **running**
   and the client URL ends in `/mcp`.
+- **`E_TIMEOUT` from a lifecycle tool** — the host answered too slowly for
+  the call's wall clock (see *Errors and limits*). Check the host with
+  `probe_host`, then `list_sessions { force: true }`: a `new_session` that
+  timed out may still have created the tmux session.
