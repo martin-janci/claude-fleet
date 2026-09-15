@@ -857,12 +857,14 @@ export class Screen {
         // A private `?...r` is XTRESTORE (restore DEC private modes), NOT
         // DECSTBM — ignore it so we don't clobber the scroll region.
         if (isPrivate) return;
-        const top = p0 ? p0 - 1 : 0;
-        const bottom = p1 ? p1 - 1 : this.rows - 1;
-        // Valid only if both margins are in range and top is strictly above
-        // bottom; otherwise xterm ignores the request and leaves the region
-        // unchanged.
-        if (top >= 0 && bottom < this.rows && top < bottom) {
+        // Margins past the last row are clamped to it, as tmux 3.6a and xterm
+        // do: tmux sends `CSI 1;<its client rows> r` on every redraw, and a
+        // Screen briefly shorter than that must still get the full region
+        // back instead of keeping a stale partial one. The request is ignored
+        // (region unchanged) only when top is not strictly above bottom.
+        const top = Math.min(p0 ? p0 - 1 : 0, this.rows - 1);
+        const bottom = Math.min(p1 ? p1 - 1 : this.rows - 1, this.rows - 1);
+        if (top < bottom) {
           this.scrollTop = top;
           this.scrollBottom = bottom;
           // DECSTBM homes the cursor (origin mode off → screen home).

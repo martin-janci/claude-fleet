@@ -1557,3 +1557,33 @@ describe('ansi.Screen — line operations fill with the current background (N1)'
     expect(bgs(s, 0)).toEqual([COLOR_DEFAULT]);
   });
 });
+
+describe('ansi.Screen — DECSTBM clamps an oversize bottom margin (U1)', () => {
+  it('an oversize bottom is clamped to the last row and homes the cursor, as tmux 3.6a does', () => {
+    // Reference: `\e[1;5r\e[5;5Hab\e[2;99rZ` in a 20x12 tmux 3.6a pane puts
+    // Z at row 0 and leaves the scroll region at rows 1..11.
+    const s = new Screen(12, 20);
+    s.write('\x1b[1;5r\x1b[5;5Hab\x1b[2;99rZ');
+    expect(rowText(s, 0).trim()).toBe('Z');
+    expect(rowText(s, 4).trimEnd()).toBe('    ab');
+    expect([s.scrollTop, s.scrollBottom]).toEqual([1, 11]);
+  });
+
+  it('a full-region reset sized for a taller client unsticks an earlier partial region', () => {
+    const s = new Screen(10, 20);
+    s.write('\x1b[1;5r\x1b[1;38r');
+    expect([s.scrollTop, s.scrollBottom]).toEqual([0, 9]);
+    s.write('\x1b[10;1Hbottom\n');
+    expect(rowText(s, 8).trim()).toBe('bottom');
+    expect(rowText(s, 9).trim()).toBe('');
+  });
+
+  it('a top margin at or past the last row is still ignored', () => {
+    const s = new Screen(6, 10);
+    s.write('\x1b[2;4r\x1b[3;3H\x1b[99;99r');
+    expect([s.scrollTop, s.scrollBottom]).toEqual([1, 3]);
+    expect([s.cursorRow, s.cursorCol]).toEqual([2, 2]);
+    s.write('\x1b[6;99r');
+    expect([s.scrollTop, s.scrollBottom]).toEqual([1, 3]);
+  });
+});
