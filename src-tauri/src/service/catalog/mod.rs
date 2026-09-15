@@ -8,6 +8,7 @@ pub mod import;
 pub mod inventory;
 pub mod model;
 pub mod repo;
+pub mod sync;
 
 // The catalog's `IpcError::code` values live with every other code in
 // `ipc_error::codes`; re-exported here so the catalog modules can keep
