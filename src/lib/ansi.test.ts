@@ -1257,3 +1257,72 @@ describe('ansi.Screen — CHT / CBT / REP / DECSCUSR / BCE (FE-5)', () => {
     expect(s.cursorRow).toBeLessThan(3);
   });
 });
+
+describe('ansi.Screen — private-marker CSI is never run as its public form (F13)', () => {
+  // A leading parameter byte in 0x3C-0x3F ('<' '=' '>' '?') marks a private
+  // sequence (ECMA-48 5.4). tmux 3.6a ignores every one of these; before the
+  // fix '<' was not recognised, so kitty's `CSI < u` restored the cursor and
+  // an echoed SGR mouse report (`CSI < b;x;y M`) deleted lines.
+  function seeded(): Screen {
+    const s = new Screen(6, 10);
+    s.write('r0\r\nr1\r\nr2\r\nr3\r\nr4');
+    s.write('\x1b[1;1H\x1b7\x1b[4;6H');
+    return s;
+  }
+
+  it('CSI < u / < 1 u / > 1 u / = 1;1 u leave the cursor where it is', () => {
+    for (const seq of ['\x1b[<u', '\x1b[<1u', '\x1b[>1u', '\x1b[=1;1u']) {
+      const s = seeded();
+      s.write(seq);
+      expect([seq, s.cursorRow, s.cursorCol]).toEqual([seq, 3, 5]);
+    }
+  });
+
+  it('CSI < s does not overwrite the saved cursor', () => {
+    const s = seeded();
+    s.write('\x1b[<s\x1b8');
+    expect([s.cursorRow, s.cursorCol]).toEqual([0, 0]);
+  });
+
+  it('CSI < 1;4 m is not applied as SGR', () => {
+    const s = seeded();
+    s.write('\x1b[<1;4m');
+    expect(s.curAttrs).toBe(0);
+  });
+
+  it('CSI < … M / L / P (an echoed SGR mouse report shape) do not edit lines or chars', () => {
+    const s = seeded();
+    s.write('\x1b[2;1H\x1b[<0;10;5M\x1b[<5L\x1b[<5P\x1b[<3@\x1b[<2X\x1b[<1S\x1b[<1T');
+    expect([0, 1, 2, 3, 4].map((r) => rowText(s, r).trim())).toEqual(['r0', 'r1', 'r2', 'r3', 'r4']);
+  });
+
+  it('a marker byte that is not first (CSI 1 > u, CSI 1 < u, CSI 4;>1 m) drops the sequence', () => {
+    for (const seq of ['\x1b[1>u', '\x1b[1<u']) {
+      const s = seeded();
+      s.write(seq);
+      expect([seq, s.cursorRow, s.cursorCol]).toEqual([seq, 3, 5]);
+    }
+    const s = seeded();
+    s.write('\x1b[4;>1m');
+    expect(s.curAttrs).toBe(0);
+  });
+
+  it('private forms of the cursor-motion finals do not move the cursor', () => {
+    for (const seq of ['\x1b[>2A', '\x1b[?2B', '\x1b[<2C', '\x1b[=2D', '\x1b[>1E', '\x1b[?1F', '\x1b[>1G', '\x1b[<1;1H', '\x1b[?1;1f', '\x1b[=5d']) {
+      const s = seeded();
+      s.write(seq);
+      expect([seq, s.cursorRow, s.cursorCol]).toEqual([seq, 3, 5]);
+    }
+  });
+
+  it('non-? private J / K do not erase; DECSED / DECSEL (? J / ? K) still erase', () => {
+    const s = seeded();
+    s.write('\x1b[1;1H\x1b[>K\x1b[<2J\x1b[=K');
+    expect(rowText(s, 0).trim()).toBe('r0');
+    expect(rowText(s, 1).trim()).toBe('r1');
+    s.write('\x1b[1;1H\x1b[?K');
+    expect(rowText(s, 0).trim()).toBe('');
+    s.write('\x1b[?2J');
+    expect(rowText(s, 1).trim()).toBe('');
+  });
+});

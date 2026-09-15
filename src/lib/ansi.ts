@@ -743,16 +743,26 @@ export class Screen {
   }
 
   private applyCsi(body: string, final: string): void {
-    // Strip a leading '?' / '>' / '=' / '!' private marker. Remember which
-    // one: `?` selects DEC private modes and DECXCPR, `>` selects secondary
-    // DA / xterm resource requests; the rest we only need to not misparse.
+    // Strip a leading private marker: any ECMA-48 private parameter byte
+    // 0x3C-0x3F ('<' '=' '>' '?') or '!'. Remember which one: `?` selects DEC
+    // private modes and DECXCPR, `>` selects secondary DA / xterm resource
+    // requests; the rest (kitty's `<u`, an echoed `<b;x;yM` mouse report) we
+    // only need to not misparse.
     let isPrivate = false;
     let marker = '';
-    if (body.length > 0 && (body[0] === '?' || body[0] === '>' || body[0] === '!' || body[0] === '=')) {
+    const c0 = body.charCodeAt(0);
+    if ((c0 >= 0x3c && c0 <= 0x3f) || c0 === 0x21) {
       isPrivate = true;
       marker = body[0];
       body = body.slice(1);
     }
+    // A private byte anywhere else (`CSI 1 > u`) is malformed. tmux drops the
+    // whole sequence; so do we — parseInt would read `1>` as 1 and run it.
+    if (/[<=>?]/.test(body)) return;
+    // The cursor-motion and erase finals have no private meaning we model, so
+    // a private form must not move or erase — except `? J` / `? K` (DECSED /
+    // DECSEL, selective erase), which we approximate as plain ED / EL.
+    if (isPrivate && 'ABCDEFGHfdJK'.includes(final) && !(marker === '?' && (final === 'J' || final === 'K'))) return;
     // Intermediates (0x20–0x2f, e.g. the SP in DECSCUSR `CSI 2 SP q`) sit
     // between the params and the final byte; parseInt stops at them.
     const params = body.length === 0 ? [] : body.split(';').map((x) => (x === '' ? 0 : parseInt(x, 10) || 0));
