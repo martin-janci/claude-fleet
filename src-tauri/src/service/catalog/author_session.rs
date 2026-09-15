@@ -190,7 +190,27 @@ pub async fn ensure_catalog_project(
         ssh.as_ref(),
         reg,
     )
-    .await?;
+    .await
+    .map_err(|e| {
+        // `add_project` reports `E_EXISTS` here when the catalog repo's
+        // `origin` names a GitHub repo that is already a fleet project at
+        // some OTHER path (`refuse_existing_project`) — its stock message
+        // ("owner/repo is already a fleet project") reads as if the catalog
+        // repo itself were the duplicate, which is backwards and leaves no
+        // hint of what to do about it. Replace it with the actual situation
+        // and the fix.
+        if e.code == codes::E_EXISTS {
+            return IpcError::new(
+                codes::E_EXISTS,
+                format!(
+                    "catalog repo {repo_path} is not a fleet project and its origin is \
+                     already adopted as a project at another path; add the catalog \
+                     folder as a project first"
+                ),
+            );
+        }
+        e
+    })?;
     Ok(tree.project.id)
 }
 
@@ -433,6 +453,48 @@ mod tests {
                 .unwrap();
             assert_eq!(first, second);
             assert_eq!(store.lock().unwrap().list_projects().unwrap().len(), 1);
+        });
+    }
+
+    #[test]
+    fn ensure_catalog_project_explains_an_origin_already_adopted_elsewhere() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let root = init_repo("adopt-origin-conflict");
+            git(
+                &root,
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/acme/widget.git",
+                ],
+            );
+            let store = Mutex::new(Store::open_in_memory().unwrap());
+            // `acme/widget` is already a fleet project at a different path,
+            // so `add_project` refuses to adopt this checkout as a second
+            // row for the same origin (`E_EXISTS`).
+            store
+                .lock()
+                .unwrap()
+                .upsert_project("acme", "widget", "/somewhere/else")
+                .unwrap();
+            let ssh = Arc::new(SshClient::new());
+            let reg = CancellationRegistry::new();
+            let repo_path = root.to_string_lossy().into_owned();
+
+            let err = ensure_catalog_project(&store, &ssh, &reg, &repo_path)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, codes::E_EXISTS);
+            assert_eq!(
+                err.message,
+                format!(
+                    "catalog repo {repo_path} is not a fleet project and its origin is \
+                     already adopted as a project at another path; add the catalog \
+                     folder as a project first"
+                )
+            );
         });
     }
 }
