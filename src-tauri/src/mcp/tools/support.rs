@@ -837,6 +837,11 @@ pub(super) const LIFECYCLE_TOOLS: &[&str] = &[
     "delete_worktree",
     "import_assets",
     "scan_assets",
+    // Sync: plan_sync scans every selected host; apply_sync runs per-host
+    // scripts (each bounded at 300 s) — a fleet-wide apply over many hosts may
+    // hit this cap over MCP; pass host_alias to apply one host per call.
+    "plan_sync",
+    "apply_sync",
     "refresh_projects",
     "session_transcript",
     "usage_report",
@@ -867,6 +872,7 @@ pub(super) const QUICK_TOOLS: &[&str] = &[
     "related_sessions",
     "remove_host",
     "rename_session",
+    "set_secret",
     "repo_branches",
     "repo_changes",
     "repo_commit",
