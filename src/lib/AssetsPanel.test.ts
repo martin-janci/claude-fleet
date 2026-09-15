@@ -13,7 +13,11 @@ const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
 
 function byCmd(map: Record<string, unknown>) {
   invoke.mockImplementation(async (cmd: string) => {
-    if (cmd in map) return map[cmd];
+    if (cmd in map) {
+      const v = map[cmd];
+      if (v instanceof Error || (v && typeof v === 'object' && 'code' in v)) throw v;
+      return v;
+    }
     throw { code: 'E_TEST', message: `unexpected ${cmd}` };
   });
 }
@@ -119,12 +123,13 @@ describe('AssetsPanel', () => {
     expect(screen.getByTestId('asset-detail-title').textContent).toContain('worktree');
   });
 
-  it('import completion reloads the catalog without pulling', async () => {
+  it('import completion reloads the catalog without pulling and refreshes repo status', async () => {
     byCmd({
       catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
       catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
       catalog_list_assets: listing, assets_inventory: [],
       catalog_import_host: { created: [['skill', 'new']], problems: [], flagged_secrets: [], dry_run: true },
+      catalog_repo_status: { head: 'h', dirty: 1, ahead: 0, behind: 0, has_upstream: true },
     });
     render(AssetsPanel);
     expect(await screen.findByText('Import from host')).toBeTruthy();
@@ -137,6 +142,10 @@ describe('AssetsPanel', () => {
 
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_load', { args: { pull: false } }));
     expect(invoke).not.toHaveBeenCalledWith('catalog_load', { args: { pull: true } });
+    // Import leaves a dirty tree — the status strip (and the "Commit
+    // pending" button it gates) must refresh so it shows up without a
+    // remount.
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_repo_status', undefined));
   });
 
   it('scan button calls assets_scan_hosts and refreshes', async () => {
@@ -369,6 +378,25 @@ describe('AssetsPanel authoring', () => {
     await fireEvent.click(await screen.findByTestId('assets-push'));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_push', undefined));
     await waitFor(() => expect(screen.getByTestId('assets-repo-status').textContent).not.toContain('↑3'));
+  });
+
+  it('a push failure renders the git stderr from error.details alongside the message', async () => {
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: listing, assets_inventory: [],
+      catalog_repo_status: { head: 'h', dirty: 0, ahead: 3, behind: 0, has_upstream: true },
+      catalog_push: {
+        code: 'E_CATALOG_GIT',
+        message: 'git push: failed',
+        details: { stderr: 'fatal: could not read Username for \'https://github.com\': terminal prompts disabled' },
+      },
+    });
+    render(AssetsPanel, { visible: true });
+    await fireEvent.click(await screen.findByTestId('assets-push'));
+
+    const err = await screen.findByText(/git push: failed/);
+    expect(err.textContent).toContain('terminal prompts disabled');
   });
 
   it('Lint all opens the dialog and selecting a finding selects the asset', async () => {

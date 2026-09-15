@@ -6,6 +6,7 @@
     TOOLS, TIERS, EVENTS, KIND_FIELDS,
     type EditableAsset, type LintReport, type WriteResult,
   } from './assets';
+  import ConfirmDialog from './ConfirmDialog.svelte';
 
   // Header/body/kind-field edits are staged locally and only committed by
   // Save (`updateAsset`). Resource add/remove are separate backend
@@ -52,7 +53,23 @@
     });
   });
 
-  const changed = $derived(JSON.stringify(draft) !== JSON.stringify(initial));
+  // Compares everything except the resources' base64 `bytes` payloads: those
+  // can be multi-MB, and `changed` is a `$derived` that re-stringifies on
+  // every reactive update (including each keystroke in the body textarea).
+  // A projection of `[rel_path, bytes.length]` still catches an add/remove/
+  // replace (refreshResources() swaps the whole array in on a resource op)
+  // without paying to serialize the payload itself.
+  function nonResourceProjection(a: EditableAsset): Omit<EditableAsset, 'resources'> {
+    const { resources: _resources, ...rest } = a;
+    return rest;
+  }
+  function resourceProjection(a: EditableAsset): [string, number][] {
+    return (a.resources ?? []).map((r) => [r.rel_path, r.bytes.length]);
+  }
+  const changed = $derived(
+    JSON.stringify(nonResourceProjection(draft)) !== JSON.stringify(nonResourceProjection(initial)) ||
+    JSON.stringify(resourceProjection(draft)) !== JSON.stringify(resourceProjection(initial)),
+  );
 
   const NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
   // Kept deliberately minimal per spec: required description and the name
@@ -114,6 +131,14 @@
   }
   function setActionField(name: 'type' | 'command' | 'url', value: string) {
     const action = { ...((draft.action as Record<string, unknown> | undefined) ?? {}) };
+    // Switching `type` away from a transport drops the sibling field that
+    // belongs only to the other transport (`command` for `http`, `url` for
+    // `command`) — otherwise the stale key rides along into the saved YAML
+    // and both get rendered into the host's hook config.
+    if (name === 'type') {
+      if (value === 'command') delete action.url;
+      else if (value === 'http') delete action.command;
+    }
     action[name] = value;
     draft.action = action;
   }
@@ -152,8 +177,11 @@
     const r = await getAsset(draft.kind, draft.name);
     if (!r.ok) return;
     const fresh = r.value.asset.resources ?? [];
-    draft.resources = fresh;
-    initial.resources = fresh;
+    // `draft` and `initial` must not alias the same array/objects — nothing
+    // mutates a resource in place today, but assigning the same reference to
+    // both is a trap for the next person who does.
+    draft.resources = fresh.map((res) => ({ ...res }));
+    initial.resources = fresh.map((res) => ({ ...res }));
   }
 
   async function addResourceFile() {
@@ -176,6 +204,17 @@
     await refreshResources();
   }
 
+  // Resource removal commits immediately on the backend (see the note atop
+  // the component), independent of Save/Cancel — so a mis-click is not
+  // reversible the way an unsaved header edit is. Gate it behind
+  // ConfirmDialog: the Remove button only stages `resourceToRemove`; the
+  // backend call happens in `confirmRemoveResource`.
+  let resourceToRemove = $state<string | null>(null);
+
+  function requestRemoveResource(relPath: string) {
+    resourceToRemove = relPath;
+  }
+
   async function removeResourceRow(relPath: string) {
     resourceError = null;
     resourceBusy = relPath;
@@ -186,6 +225,13 @@
       return;
     }
     await refreshResources();
+  }
+
+  async function confirmRemoveResource() {
+    if (resourceToRemove === null) return;
+    const relPath = resourceToRemove;
+    await removeResourceRow(relPath);
+    resourceToRemove = null;
   }
 
   // ── Save / Cancel ────────────────────────────────────────────────────
@@ -381,7 +427,7 @@
         <span class="size">{resourceSize(r.bytes)} bytes</span>
         <button
           type="button"
-          onclick={() => removeResourceRow(r.rel_path)}
+          onclick={() => requestRemoveResource(r.rel_path)}
           disabled={resourceBusy === r.rel_path}
           data-testid={`editor-resource-remove-${r.rel_path}`}
         >Remove</button>
@@ -409,6 +455,20 @@
     <button type="button" class="primary" onclick={save} disabled={!canSave} data-testid="editor-save">{saving ? 'Saving…' : 'Save'}</button>
   </div>
 </div>
+
+{#if resourceToRemove !== null}
+  <ConfirmDialog
+    title="Remove resource?"
+    confirmLabel="Remove"
+    danger
+    busy={resourceBusy === resourceToRemove}
+    onconfirm={confirmRemoveResource}
+    oncancel={() => (resourceToRemove = null)}
+    confirmTestId="editor-resource-remove-confirm"
+  >
+    This removes <code>{resourceToRemove}</code> from the asset and commits the removal immediately, independent of Save.
+  </ConfirmDialog>
+{/if}
 
 <style>
   .editor { display: flex; flex-direction: column; gap: 10px; font-size: 13px; }

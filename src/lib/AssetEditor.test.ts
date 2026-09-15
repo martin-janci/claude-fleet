@@ -163,7 +163,7 @@ describe('AssetEditor', () => {
     expect(asset.allowed_tools).toEqual(expect.arrayContaining(['bash', 'read', 'grep']));
   });
 
-  it('removing a resource calls removeResource then re-fetches the asset', async () => {
+  it('removing a resource asks for confirmation, then calls removeResource and re-fetches the asset', async () => {
     const asset = skillAsset({ resources: [{ rel_path: 'resources/run.sh', bytes: btoa('hello') }] });
     byCmd({
       catalog_lint_asset: { errors: [], warnings: [] },
@@ -175,6 +175,13 @@ describe('AssetEditor', () => {
 
     expect(screen.getByTestId('editor-resource-resources/run.sh').textContent).toContain('5 bytes');
     await fireEvent.click(screen.getByTestId('editor-resource-remove-resources/run.sh'));
+
+    // Clicking Remove opens a confirmation dialog and does NOT call the
+    // backend until it is confirmed.
+    expect(await screen.findByTestId('confirm-dialog')).toBeTruthy();
+    expect(invoke).not.toHaveBeenCalledWith('catalog_remove_resource', expect.anything());
+
+    await fireEvent.click(screen.getByTestId('editor-resource-remove-confirm'));
 
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_remove_resource', { args: { kind: 'skill', name: 'worktree', rel_path: 'resources/run.sh' } }));
     await waitFor(() => expect(screen.queryByTestId('editor-resource-resources/run.sh')).toBeNull());
@@ -236,5 +243,54 @@ describe('AssetEditor', () => {
     expect((screen.getByTestId('editor-field-marketplace-repo') as HTMLInputElement).value).toBe('obra/sp');
     expect(screen.getByTestId('editor-field-harness')).toBeTruthy();
     expect(screen.getByTestId('editor-field-plugin')).toBeTruthy();
+  });
+
+  it('switching a hook action type drops the sibling field before save', async () => {
+    byCmd({
+      catalog_lint_asset: { errors: [], warnings: [] },
+      catalog_update_asset: { commit: 'sha-hook', lint: { errors: [], warnings: [] } },
+    });
+    render(AssetEditor, { asset: hookAsset(), onsaved: () => {}, oncancel: () => {} });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_lint_asset', { args: { kind: 'hook', name: 'on-stop' } }));
+
+    // Starts as { type: 'command', command: 'echo hook' }. Switch to http
+    // and fill in a url — the stale `command` must not ride along.
+    await fireEvent.change(screen.getByTestId('editor-field-action-type'), { target: { value: 'http' } });
+    await fireEvent.input(screen.getByTestId('editor-field-action-url'), { target: { value: 'https://example.com/hook' } });
+    await fireEvent.click(screen.getByTestId('editor-save'));
+
+    const call = await vi.waitUntil(() => invoke.mock.calls.find((c) => c[0] === 'catalog_update_asset'));
+    const asset = (call![1] as { args: { asset: EditableAsset } }).args.asset;
+    expect(asset.action).toEqual({ type: 'http', url: 'https://example.com/hook' });
+    expect((asset.action as Record<string, unknown>).command).toBeUndefined();
+  });
+
+  it('saving a skill with a resource sends resources verbatim (rel_path + bytes)', async () => {
+    const resource = { rel_path: 'resources/run.sh', bytes: btoa('hello') };
+    byCmd({
+      catalog_lint_asset: { errors: [], warnings: [] },
+      catalog_update_asset: { commit: 'sha-res', lint: { errors: [], warnings: [] } },
+    });
+    render(AssetEditor, { asset: skillAsset({ resources: [resource] }), onsaved: () => {}, oncancel: () => {} });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_lint_asset', { args: { kind: 'skill', name: 'worktree' } }));
+
+    await fireEvent.input(screen.getByTestId('editor-version'), { target: { value: '2' } });
+    await fireEvent.click(screen.getByTestId('editor-save'));
+
+    const call = await vi.waitUntil(() => invoke.mock.calls.find((c) => c[0] === 'catalog_update_asset'));
+    const asset = (call![1] as { args: { asset: EditableAsset } }).args.asset;
+    expect(asset.resources).toEqual([resource]);
+  });
+
+  it('editing a field then reverting it to the original value re-disables Save', async () => {
+    byCmd({ catalog_lint_asset: { errors: [], warnings: [] } });
+    render(AssetEditor, { asset: skillAsset(), onsaved: () => {}, oncancel: () => {} });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_lint_asset', { args: { kind: 'skill', name: 'worktree' } }));
+
+    expect(screen.getByTestId('editor-save')).toBeDisabled();
+    await fireEvent.input(screen.getByTestId('editor-version'), { target: { value: '2' } });
+    expect(screen.getByTestId('editor-save')).not.toBeDisabled();
+    await fireEvent.input(screen.getByTestId('editor-version'), { target: { value: '1' } });
+    expect(screen.getByTestId('editor-save')).toBeDisabled();
   });
 });

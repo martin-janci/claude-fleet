@@ -126,12 +126,26 @@
     void afterWrite();
   }
 
+  // `E_CATALOG_GIT` from the shared `git()` helper (repo.rs) carries git's
+  // own stderr in `error.details.stderr`, but the fixed message
+  // (`git <args>: failed`) says nothing about *why* — no upstream, an auth
+  // failure, non-fast-forward, all look identical without it. Append it,
+  // truncated to a sane length in case git dumped something huge.
+  const MAX_GIT_STDERR = 500;
+  function withGitStderr(err: { message: string; details?: unknown }): string {
+    const details = err.details as { stderr?: unknown } | undefined;
+    const stderr = typeof details?.stderr === 'string' ? details.stderr.trim() : '';
+    if (!stderr) return err.message;
+    const truncated = stderr.length > MAX_GIT_STDERR ? `${stderr.slice(0, MAX_GIT_STDERR)}…` : stderr;
+    return `${err.message}: ${truncated}`;
+  }
+
   async function submitCommit(message: string) {
     showCommitPrompt = false;
     busy = 'commit'; error = null;
     const r = await commitPending(message);
     busy = '';
-    if (!r.ok) { error = r.error.message; return; }
+    if (!r.ok) { error = withGitStderr(r.error); return; }
     await afterWrite();
   }
 
@@ -139,7 +153,7 @@
     busy = 'push'; error = null;
     const r = await pushCatalog();
     busy = '';
-    if (!r.ok) { error = r.error.message; return; }
+    if (!r.ok) { error = withGitStderr(r.error); return; }
     await refresh();
   }
 
@@ -261,7 +275,7 @@
     </div>
   {/if}
   {#if showImport}
-    <ImportDialog onclose={() => (showImport = false)} ondone={() => { showImport = false; reload(false); }} />
+    <ImportDialog onclose={() => (showImport = false)} ondone={() => { showImport = false; reload(false); void repoStatus(); }} />
   {/if}
   {#if syncPlan}
     <SyncPlanDialog
