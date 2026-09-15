@@ -106,6 +106,26 @@ impl Manifest {
             .map(|(key, entry)| (key.as_str(), entry))
             .collect()
     }
+
+    /// Remove every `assets` key `split_key` cannot parse (e.g. a key from
+    /// a future/foreign schema, or plain corruption) and return the removed
+    /// keys, sorted. `orphans` skips these rather than reporting them, so
+    /// without this they persist in the manifest forever; called right
+    /// before the manifest is rewritten to the host. Deliberately not used
+    /// by `from_snapshot`'s lenient parse, which must stay tolerant of
+    /// anything it cannot make sense of.
+    pub fn drop_unparseable(&mut self) -> Vec<String> {
+        let dropped: Vec<String> = self
+            .assets
+            .keys()
+            .filter(|key| Self::split_key(key).is_none())
+            .cloned()
+            .collect();
+        for key in &dropped {
+            self.assets.remove(key);
+        }
+        dropped
+    }
 }
 
 #[cfg(test)]
@@ -235,6 +255,29 @@ mod tests {
             entry.merges[0].value_hash,
             value_hash(&json!({"token": "${SECRET}"}))
         );
+    }
+
+    #[test]
+    fn drop_unparseable_removes_keys_split_key_cannot_parse() {
+        let mut m = Manifest::default();
+        m.assets
+            .insert("skill/a".to_string(), ManifestEntry::default());
+        m.assets
+            .insert("bogus/b".to_string(), ManifestEntry::default());
+        m.assets
+            .insert("no-slash".to_string(), ManifestEntry::default());
+        let dropped = m.drop_unparseable();
+        assert_eq!(dropped, vec!["bogus/b".to_string(), "no-slash".to_string()]);
+        assert_eq!(m.assets.keys().collect::<Vec<_>>(), vec!["skill/a"]);
+    }
+
+    #[test]
+    fn drop_unparseable_is_a_noop_when_everything_parses() {
+        let mut m = Manifest::default();
+        m.assets
+            .insert("skill/a".to_string(), ManifestEntry::default());
+        assert!(m.drop_unparseable().is_empty());
+        assert_eq!(m.assets.len(), 1);
     }
 
     #[test]

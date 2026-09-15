@@ -909,7 +909,13 @@ mod tests {
         // so never surfaced here; it now fails *closed* (`E_SCAN`) per the
         // asset-catalog hardening review, which is what actually exposed
         // this pre-existing hazard. Save and restore the real value so this
-        // test's mutation cannot leak into any other test.
+        // test's mutation cannot leak into any other test. Restoring is not
+        // enough on its own: the catalog end-to-end tests run real child
+        // processes against a temp `$HOME` in parallel, so this test also
+        // takes the same process-wide lock they do for the mutation window.
+        let _lock = crate::service::catalog::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let original_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", "/Users/test");
         assert_eq!(
