@@ -1049,14 +1049,14 @@ describe('Sidebar triage (W2 Track D)', () => {
     expect(badge.getAttribute('title')).toContain('no price for local-llm-7b');
   });
 
-  it('"N stuck" counter reports the count and toggles a stuck-only filter', async () => {
+  it('the "Needs you" pill reports the count and toggles the triage filter', async () => {
     const stuck = { ...sessionFor(1, 'dev-stuck'), stuck_kind: 'oom' as const };
     const fine = sessionFor(2, 'dev-fine');
     mockBackend(fakeProjects, [stuck, fine]);
     render(Sidebar);
     await tick(); await tick();
-    const pill = screen.getByTestId('stuck-filter');
-    expect(pill).toHaveTextContent('1 stuck');
+    const pill = screen.getByTestId('needs-you-filter');
+    expect(pill).toHaveTextContent('Needs you (1)');
     expect(screen.getAllByTestId('sess-row')).toHaveLength(2);
     await fireEvent.click(pill);
     await tick();
@@ -1070,17 +1070,17 @@ describe('Sidebar triage (W2 Track D)', () => {
     expect(screen.getAllByTestId('sess-row')).toHaveLength(2);
   });
 
-  it('"N stuck" counter ignores a stuck_kind on an external (Outside fleet) row', async () => {
+  it('the "Needs you" pill ignores a stuck_kind on an external (Outside fleet) row', async () => {
     const stuck = { ...sessionFor(1, 'dev-stuck'), stuck_kind: 'oom' as const };
     const externalStuck = { ...sessionFor(null, 'claude-desktop-session'), kind: 'external', stuck_kind: 'oom' as const };
     mockBackend(fakeProjects, [stuck, externalStuck]);
     render(Sidebar);
     await tick(); await tick();
-    const pill = screen.getByTestId('stuck-filter');
-    expect(pill).toHaveTextContent('1 stuck');
+    const pill = screen.getByTestId('needs-you-filter');
+    expect(pill).toHaveTextContent('Needs you (1)');
   });
 
-  it('"needs attention" filter keeps stuck, safe-kill, ghost and failed rows', async () => {
+  it('the "Needs you" queue keeps stuck, safe-kill, ghost and failed rows', async () => {
     const stuck = { ...sessionFor(1, 'dev-stuck'), stuck_kind: 'auth_menu' as const };
     const sk = { ...sessionFor(1, 'dev-sk'), safe_kill_state: 'failed' };
     const ghost = { ...sessionFor(2, 'dev-ghost'), status: 'ghost', lost_at: 5 };
@@ -1089,8 +1089,8 @@ describe('Sidebar triage (W2 Track D)', () => {
     mockBackend(fakeProjects, [stuck, sk, ghost, failed, fine]);
     render(Sidebar);
     await tick(); await tick();
-    const pill = screen.getByTestId('attention-filter');
-    expect(pill).toHaveTextContent('needs attention (4)');
+    const pill = screen.getByTestId('needs-you-filter');
+    expect(pill).toHaveTextContent('Needs you (4)');
     await fireEvent.click(pill);
     await tick();
     const names = screen.getAllByTestId('sess-row').map((r) => r.textContent ?? '');
