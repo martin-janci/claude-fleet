@@ -954,3 +954,32 @@ describe('ConversationPanel drafts and focus', () => {
     expect(document.activeElement).toBe(screen.getByTestId('conv-composer-input'));
   });
 });
+
+describe('ConversationPanel new-item count', () => {
+  it('counts items that land while scrolled up and clears on Latest', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const scroller = screen.getByTestId('conv-scroller');
+    Object.defineProperty(scroller, 'scrollHeight', { value: 2000, configurable: true });
+    Object.defineProperty(scroller, 'clientHeight', { value: 500, configurable: true });
+    scroller.scrollTop = 100;
+    await fireEvent.scroll(scroller);
+    expect(screen.getByTestId('conv-latest').textContent).toContain('Latest');
+
+    const grown = conv();
+    grown.turns.push({ prompt: 'more', at: null, ended_at: null, items: [{ kind: 'text', text: 'x' }] });
+    mockedConv.mockReturnValue(ok(grown));
+    vi.advanceTimersByTime(CONVERSATION_POLL_MS);
+    await settle();
+    expect(screen.getByTestId('conv-latest').textContent).toContain('2 new');
+
+    await fireEvent.click(screen.getByTestId('conv-latest'));
+    expect(screen.queryByTestId('conv-latest')).toBeNull();
+    // back at the bottom, the next growth is seen live: no count accrues
+    scroller.scrollTop = 100;
+    await fireEvent.scroll(scroller);
+    expect(screen.getByTestId('conv-latest').textContent).toContain('Latest');
+  });
+});

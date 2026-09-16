@@ -21,6 +21,8 @@ import {
   isQuietStatus,
   shouldFetchTranscript,
   turnDuration,
+  countItems,
+  newItemCount,
   spinnerLabel,
   indicatorFor,
   QUIET_POLL_MS,
@@ -282,5 +284,18 @@ describe('turnDuration', () => {
     expect(turnDuration('2026-09-13T10:00:00Z', null)).toBeNull();
     expect(turnDuration(null, '2026-09-13T10:00:00Z')).toBeNull();
     expect(turnDuration('garbage', '2026-09-13T10:00:00Z')).toBeNull();
+  });
+});
+
+describe('countItems / newItemCount', () => {
+  it('counts prompts and items; growth is new, trimming is not', () => {
+    const a = conv();
+    expect(countItems(null)).toBe(0);
+    expect(countItems(a)).toBe(a.turns.reduce((n, t) => n + (t.prompt !== null ? 1 : 0) + t.items.length, 0));
+    const base = countItems(a);
+    const b = conv({ turns: [...a.turns, { prompt: 'more', at: null, ended_at: null, items: [{ kind: 'text', text: 'x' }] }] });
+    expect(newItemCount(a, b)).toBe(2);
+    expect(newItemCount(b, a)).toBe(0);
+    expect(newItemCount(null, a)).toBe(base);
   });
 });

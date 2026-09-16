@@ -281,3 +281,15 @@ export function rememberDraft(sessionId: number, text: string): void {
   if (text.length === 0) composerDrafts.delete(sessionId);
   else composerDrafts.set(sessionId, text);
 }
+
+/** Prompts plus reply items, for "N new" while the user is scrolled up. */
+export function countItems(conv: Conversation | null): number {
+  if (!conv) return 0;
+  return conv.turns.reduce((n, t) => n + (t.prompt !== null ? 1 : 0) + t.items.length, 0);
+}
+
+/** How many items a poll added. Never negative: a re-read that trimmed
+ *  older turns is not "new" content. */
+export function newItemCount(prev: Conversation | null, next: Conversation): number {
+  return Math.max(0, countItems(next) - countItems(prev));
+}
