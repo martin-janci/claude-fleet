@@ -249,7 +249,13 @@ Frontend:
 ## Out of scope
 
 - Timeline events for bg / external rows (Conversation covers the need).
-- Markdown rendering, loading older turns, sending prompts from the tab.
+- Loading older turns.
+- ~~Markdown rendering, sending prompts from the tab.~~ Both landed later:
+  reply text renders as markdown, and a tmux-backed session gets a composer
+  under the thread (`send_prompt`, the same path as the Send-prompt dialog;
+  Enter sends, Shift+Enter breaks a line). The sent prompt shows as a pending
+  turn until a poll brings back a transcript carrying it. bg / external rows
+  stay read-only, with a note saying why.
 - The tmux-session cwd fallback in `find_for_session` can, in principle,
   bind a tmux row to an interactive session running elsewhere in the same
   directory; unchanged here.

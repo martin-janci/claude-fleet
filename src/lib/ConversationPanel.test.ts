@@ -6,11 +6,16 @@ vi.mock('./conversation', async () => {
   const actual = await vi.importActual<typeof import('./conversation')>('./conversation');
   return { ...actual, sessionConversation: vi.fn() };
 });
+vi.mock('./sessions', async () => {
+  const actual = await vi.importActual<typeof import('./sessions')>('./sessions');
+  return { ...actual, sendPrompt: vi.fn() };
+});
 import { sessionConversation, CONVERSATION_POLL_MS, type Conversation } from './conversation';
 import ConversationPanel from './ConversationPanel.svelte';
-import type { SessionRow } from './sessions';
+import { sendPrompt, type SessionRow } from './sessions';
 
 const mockedConv = sessionConversation as unknown as ReturnType<typeof vi.fn>;
+const mockedSend = sendPrompt as unknown as ReturnType<typeof vi.fn>;
 
 function session(over: Partial<SessionRow> = {}): SessionRow {
   return {
@@ -56,6 +61,7 @@ function setVisibility(state: 'visible' | 'hidden') {
 
 beforeEach(() => {
   mockedConv.mockReset();
+  mockedSend.mockReset();
   setVisibility('visible');
 });
 
@@ -436,5 +442,135 @@ describe('ConversationPanel', () => {
     expect(scroller.scrollTop).toBe(2000);
     await fireEvent.scroll(scroller);
     expect(screen.queryByTestId('conv-latest')).toBeNull();
+  });
+});
+
+async function settle() {
+  await tick();
+  await Promise.resolve();
+  await tick();
+}
+
+describe('ConversationPanel composer', () => {
+  it('sends the typed prompt to the session on Enter, clears the box, shows it as a pending turn and refetches at once', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(ConversationPanel, { session: session({ host_alias: 'trn', tmux_name: 'dev-x' }), visible: true });
+    await settle();
+    expect(mockedConv).toHaveBeenCalledTimes(1);
+
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'run the tests' } });
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+
+    expect(mockedSend).toHaveBeenCalledWith('trn', 'dev-x', 'run the tests');
+    expect(box.value).toBe('');
+    expect(screen.getByTestId('conv-pending').textContent).toContain('run the tests');
+    expect(mockedConv).toHaveBeenCalledTimes(2);
+  });
+
+  it('the Send button sends too, and a blank prompt never sends', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    const button = screen.getByTestId('conv-composer-send') as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    await fireEvent.input(box, { target: { value: '   ' } });
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    expect(mockedSend).not.toHaveBeenCalled();
+    await fireEvent.input(box, { target: { value: 'hello' } });
+    expect(button.disabled).toBe(false);
+    await fireEvent.click(button);
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'hello');
+  });
+
+  it('Shift+Enter does not send', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'line one' } });
+    await fireEvent.keyDown(box, { key: 'Enter', shiftKey: true });
+    expect(mockedSend).not.toHaveBeenCalled();
+    expect(box.value).toBe('line one');
+  });
+
+  it('a failed send shows the error and keeps the text', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: false, error: { code: 'E_TMUX', message: "can't find session" } });
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'hello' } });
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    expect(screen.getByTestId('conv-composer-error').textContent).toContain("can't find session");
+    expect(box.value).toBe('hello');
+    expect(screen.queryByTestId('conv-pending')).toBeNull();
+  });
+
+  it('the pending turn disappears once the transcript carries the prompt', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'hello' } });
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    expect(screen.getByTestId('conv-pending')).toBeTruthy();
+
+    // the transcript has not caught up yet: pending stays
+    vi.advanceTimersByTime(CONVERSATION_POLL_MS);
+    await settle();
+    expect(screen.getByTestId('conv-pending')).toBeTruthy();
+
+    const caughtUp = conv();
+    caughtUp.turns.push({ prompt: 'hello', at: '2026-09-13T10:01:00.000Z', items: [{ kind: 'text', text: 'hi' }] });
+    mockedConv.mockReturnValue(ok(caughtUp));
+    vi.advanceTimersByTime(CONVERSATION_POLL_MS);
+    await settle();
+    expect(screen.queryByTestId('conv-pending')).toBeNull();
+    expect(screen.getAllByTestId('conv-prompt')).toHaveLength(2);
+  });
+
+  it('bg and external rows get a read-only note instead of a composer', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    const { unmount } = render(ConversationPanel, { session: session({ kind: 'bg', tmux_name: 'bg:abc' }), visible: true });
+    await settle();
+    expect(screen.queryByTestId('conv-composer-input')).toBeNull();
+    expect(screen.getByTestId('conv-readonly').textContent).toMatch(/no terminal/i);
+    unmount();
+    render(ConversationPanel, { session: session({ kind: 'external' }), visible: true });
+    await settle();
+    expect(screen.queryByTestId('conv-composer-input')).toBeNull();
+  });
+
+  it('names the session state next to Send while Claude is working or stuck', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    const { unmount } = render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+    await settle();
+    expect(screen.getByTestId('conv-composer-status').textContent).toMatch(/working/i);
+    unmount();
+    const second = render(ConversationPanel, { session: session({ claude_status: 'blocked', stuck_kind: 'auth_menu' }), visible: true });
+    await settle();
+    expect(screen.getByTestId('conv-composer-status').textContent).toMatch(/stuck/i);
+    second.unmount();
+    render(ConversationPanel, { session: session({ claude_status: 'idle' }), visible: true });
+    await settle();
+    expect(screen.queryByTestId('conv-composer-status')).toBeNull();
+  });
+
+  it('the composer is there even before any transcript exists', async () => {
+    mockedConv.mockReturnValue(err('E_NO_TRANSCRIPT'));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    expect(screen.getByTestId('conv-empty').textContent).toBe('No conversation yet');
+    expect(screen.getByTestId('conv-composer-input')).toBeTruthy();
   });
 });
