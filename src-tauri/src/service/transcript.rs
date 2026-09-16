@@ -200,9 +200,12 @@ pub enum ConvItem {
     Text {
         text: String,
     },
-    /// The tool one-liner, without the `[tool_use] ` prefix.
+    /// The tool one-liner, without the `[tool_use] ` prefix. `error` is set
+    /// when the matching `tool_result` came back with `is_error: true`.
     Tool {
         summary: String,
+        #[serde(default)]
+        error: bool,
     },
 }
 
@@ -254,6 +257,10 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
     }
     let mut turns: Vec<ConvTurn> = Vec::new();
     let mut current: Option<ConvTurn> = None;
+    // tool_use id → index of its item in `current`, so a later tool_result
+    // carrying `is_error` can flag the line. Results always land inside the
+    // turn that issued the call, so the map resets with the turn.
+    let mut tool_items: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for line in jsonl.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -270,8 +277,26 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
         };
         match kind {
             "user" => {
+                if let Some(serde_json::Value::Array(blocks)) = content {
+                    for b in blocks
+                        .iter()
+                        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+                        .filter(|b| b.get("is_error").and_then(|e| e.as_bool()) == Some(true))
+                    {
+                        let idx = b
+                            .get("tool_use_id")
+                            .and_then(|i| i.as_str())
+                            .and_then(|i| tool_items.get(i).copied());
+                        if let (Some(idx), Some(turn)) = (idx, current.as_mut()) {
+                            if let Some(ConvItem::Tool { error, .. }) = turn.items.get_mut(idx) {
+                                *error = true;
+                            }
+                        }
+                    }
+                }
                 if let Some(prompt) = prompt_text(content) {
                     push(&mut turns, current.take());
+                    tool_items.clear();
                     current = Some(ConvTurn {
                         // An image-only prompt still opens a turn, unquoted.
                         prompt: (!prompt.is_empty()).then_some(prompt),
@@ -298,9 +323,15 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                                     }
                                 }
                             }
-                            Some("tool_use") => turn.items.push(ConvItem::Tool {
-                                summary: tool_summary(b),
-                            }),
+                            Some("tool_use") => {
+                                if let Some(id) = b.get("id").and_then(|i| i.as_str()) {
+                                    tool_items.insert(id.to_string(), turn.items.len());
+                                }
+                                turn.items.push(ConvItem::Tool {
+                                    summary: tool_summary(b),
+                                    error: false,
+                                });
+                            }
                             _ => {}
                         }
                     }
@@ -326,7 +357,7 @@ pub fn parse_turns(jsonl: &str) -> Vec<String> {
                 .iter()
                 .map(|i| match i {
                     ConvItem::Text { text } => text.clone(),
-                    ConvItem::Tool { summary } => format!("{TOOL_USE_PREFIX}{summary}"),
+                    ConvItem::Tool { summary, .. } => format!("{TOOL_USE_PREFIX}{summary}"),
                 })
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -339,7 +370,7 @@ pub fn parse_turns(jsonl: &str) -> Vec<String> {
 fn item_chars(item: &ConvItem) -> usize {
     match item {
         ConvItem::Text { text } => text.chars().count(),
-        ConvItem::Tool { summary } => summary.chars().count(),
+        ConvItem::Tool { summary, .. } => summary.chars().count(),
     }
 }
 
@@ -855,6 +886,47 @@ mod tests {
     }
 
     #[test]
+    fn parse_conversation_flags_a_tool_whose_result_was_an_error() {
+        let jsonl = [
+            line(serde_json::json!({"type":"user","message":{"content":"go"}})),
+            line(serde_json::json!({"type":"assistant","message":{"content":[
+                {"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}},
+                {"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"a.rs"}}]}})),
+            line(serde_json::json!({"type":"user","message":{"content":[
+                {"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"exit 101"},
+                {"type":"tool_result","tool_use_id":"t2","content":"ok"}]}})),
+            line(serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"One failed."}]}})),
+        ]
+        .join("\n");
+        let turns = parse_conversation(&jsonl);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].items,
+            vec![
+                ConvItem::Tool {
+                    summary: "Bash(command=cargo test)".into(),
+                    error: true
+                },
+                ConvItem::Tool {
+                    summary: "Read(file_path=a.rs)".into(),
+                    error: false
+                },
+                ConvItem::Text {
+                    text: "One failed.".into()
+                },
+            ]
+        );
+        // the plain-text projection (MCP) is unchanged by the flag
+        assert_eq!(
+            parse_turns(&jsonl),
+            vec![
+                "[tool_use] Bash(command=cargo test)\n[tool_use] Read(file_path=a.rs)\nOne failed."
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn parse_conversation_keeps_prompts_text_and_tool_lines() {
         let jsonl = [
             line(serde_json::json!({"type":"user","timestamp":"2026-09-13T10:00:00Z","message":{"role":"user","content":"first"}})),
@@ -878,7 +950,8 @@ mod tests {
                     text: "Let me look.".into()
                 },
                 ConvItem::Tool {
-                    summary: "Bash(command=ls -la)".into()
+                    summary: "Bash(command=ls -la)".into(),
+                    error: false
                 },
             ]
         );
@@ -947,6 +1020,7 @@ mod tests {
                     ConvItem::Text { text: "hi".into() },
                     ConvItem::Tool {
                         summary: "Bash(command=ls)".into(),
+                        error: false,
                     },
                 ],
             }],
@@ -955,7 +1029,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&c).unwrap(),
             serde_json::json!({"turns":[{"prompt":null,"at":"2026-09-13T10:00:00Z","items":[
-                {"kind":"text","text":"hi"},{"kind":"tool","summary":"Bash(command=ls)"}]}],
+                {"kind":"text","text":"hi"},{"kind":"tool","summary":"Bash(command=ls)","error":false}]}],
                 "truncated":false})
         );
     }
@@ -971,6 +1045,7 @@ mod tests {
                 },
                 ConvItem::Tool {
                     summary: "b".repeat(10),
+                    error: false,
                 },
             ],
         };
@@ -982,7 +1057,8 @@ mod tests {
         assert_eq!(
             c.turns[0].items,
             vec![ConvItem::Tool {
-                summary: "b".repeat(10)
+                summary: "b".repeat(10),
+                error: false
             }]
         );
         // Exactly at budget: nothing dropped.
@@ -1042,6 +1118,7 @@ mod tests {
             items: vec![
                 ConvItem::Tool {
                     summary: "Bash(command=ls)".into(),
+                    error: false,
                 },
                 ConvItem::Text {
                     text: "the reply!".into(),
