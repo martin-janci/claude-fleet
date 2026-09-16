@@ -56,8 +56,11 @@
   let loading = $state(false);
   let scroller: HTMLDivElement | undefined = $state();
   let nowMs = $state(Date.now());
-  // Turn indexes whose long prompt the user expanded.
-  let expanded = $state<Set<number>>(new Set());
+  // Turns whose long prompt the user expanded, keyed by the turn's identity
+  // (its timestamp, else its index) so a window that grows or slides does
+  // not move the expansion to a different turn.
+  let expanded = $state<Set<string>>(new Set());
+  const turnKey = (turn: { at: string | null }, i: number) => turn.at ?? `#${i}`;
   // False once the user scrolls away from the bottom; drives "↓ Latest".
   let atBottom = $state(true);
   // Items that landed while the user was scrolled up; shown on the button.
@@ -94,13 +97,13 @@
   let seq = 0;
   // Fetches still pending, per session id. A poll tick never starts a read
   // while one is in flight for the same session (a remote read can take up
-  // to its 20 s wall clock); a manual Retry or a session switch still does.
+  // to its 30 s wall clock); a manual Retry or a session switch still does.
   const inFlight = new Map<number, number>();
   // Keyed on the id, not the row object: a store patch hands a new object
   // for the same session, which must neither reset nor refetch.
   const sessionId = $derived(session.id);
 
-  async function load(opts: { poll?: boolean } = {}) {
+  async function load(opts: { poll?: boolean; older?: boolean } = {}) {
     const id = session.id;
     if (!session.claude_session_id) return;
     if (opts.poll && (inFlight.get(id) ?? 0) > 0) return;
@@ -126,7 +129,8 @@
       errorCode = null;
       errorMsg = null;
       if (!sameConversation(conv, r.value)) {
-        if (!pinned) unseen += newItemCount(conv, r.value);
+        // Older turns prepended by Load older are history, not news.
+        if (!pinned && !opts.older) unseen += newItemCount(conv, r.value);
         conv = r.value;
         if (pending && transcriptCarries(conv, pending)) pending = null;
         if (pinned) {
@@ -158,6 +162,7 @@
       sendError = null;
       pending = null;
       probe = null;
+      probeSeq++;
       sentTurnSeq = null;
       idleSeenSinceSend = false;
       void load();
@@ -200,14 +205,17 @@
   $effect(() => {
     const turn = session.turn_seq;
     untrack(() => {
-      if (lastFetchTurnSeq !== null && turn !== lastFetchTurnSeq && session.claude_session_id) void load();
+      if (visible && lastFetchTurnSeq !== null && turn !== lastFetchTurnSeq && session.claude_session_id) void load();
     });
   });
 
-  // A row event with a changed status is newer than any probe.
+  // A row event with a changed status is newer than any probe. Keyed on the
+  // two values, not the row object: every store patch hands a new object.
+  const rowStatus = $derived(session.claude_status);
+  const rowStuck = $derived(session.stuck_kind);
   $effect(() => {
-    void session.claude_status;
-    void session.stuck_kind;
+    void rowStatus;
+    void rowStuck;
     untrack(() => (probe = null));
   });
 
@@ -227,21 +235,34 @@
     }),
   );
 
+  // One probe in flight at a time (a wedged host must not stack ssh
+  // processes every 2 s), and a slow one never overwrites a newer result.
+  let probing = false;
+  let probeSeq = 0;
   async function probeNow() {
+    if (probing) return;
+    probing = true;
     const id = session.id;
-    const r = await sessionActivity(id);
-    if (session.id !== id) return;
+    const mine = ++probeSeq;
+    let r: Awaited<ReturnType<typeof sessionActivity>>;
+    try {
+      r = await sessionActivity(id);
+    } finally {
+      probing = false;
+    }
+    if (session.id !== id || mine !== probeSeq) return;
     if (!r.ok) return;
     probe = r.value;
     if (sentTurnSeq !== null && isQuietStatus(r.value.claude_status)) idleSeenSinceSend = true;
   }
 
-  // Probe the pane every couple of seconds while something is live. Depends
-  // on `visible` and whether the indicator is showing, not on the probe
-  // itself, so a fresh probe never restarts the interval.
+  // Probe the pane every couple of seconds while something is live: once at
+  // once, then on the interval. `probeLive` is a boolean derived, so a fresh
+  // probe (which yields a new `indicator` object) never restarts the timer.
+  const probeLive = $derived(visible && indicator !== null);
   $effect(() => {
-    const live = visible && indicator !== null;
-    if (!live) return;
+    if (!probeLive) return;
+    if (document.visibilityState === 'visible') void untrack(probeNow);
     const t = setInterval(() => {
       if (document.visibilityState === 'visible') void untrack(probeNow);
     }, ACTIVITY_POLL_MS);
@@ -316,14 +337,26 @@
     if (sending) return;
     sending = true;
     sendError = null;
+    const id = session.id;
     const r = await sendPrompt(session.host_alias, session.tmux_name, text);
     sending = false;
+    // The selection moved while the send was on the wire: the prompt landed
+    // in the old session; none of its state belongs to the new one.
+    if (session.id !== id) return;
     if (!r.ok) {
       sendError = r.error.message;
       return;
     }
     if (text === '') return;
     draft = '';
+    // A slash command is handled by the REPL itself: it is not recorded as a
+    // prompt (and /clear even moves to a new session id), so no pending
+    // turn, and nothing to wait for beyond a fresh read.
+    if (text.startsWith('/')) {
+      box?.focus();
+      void load();
+      return;
+    }
     sentTurnSeq = session.turn_seq;
     idleSeenSinceSend = false;
     pending = {
@@ -341,7 +374,9 @@
   }
 
   function onComposerKey(e: KeyboardEvent) {
-    if (e.isComposing) return;
+    // WebKit fires the composition-confirming Enter with isComposing false
+    // and keyCode 229; treat it as composition too.
+    if (e.isComposing || e.keyCode === 229) return;
     if (slashOpen) {
       const highlighted = slashMatches[slashIndex] ?? slashMatches[0];
       if (e.key === 'ArrowDown') {
@@ -385,7 +420,7 @@
     turnsWanted = (turnsWanted ?? CONV_TURNS_STEP) + CONV_TURNS_STEP;
     const before = scroller ? scroller.scrollHeight - scroller.scrollTop : 0;
     try {
-      await load();
+      await load({ older: true });
     } finally {
       loadingOlder = false;
     }
@@ -406,10 +441,10 @@
     if (atBottom) unseen = 0;
   }
 
-  function togglePrompt(i: number) {
+  function togglePrompt(key: string) {
     const next = new Set(expanded);
-    if (next.has(i)) next.delete(i);
-    else next.add(i);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
     expanded = next;
   }
 </script>
@@ -455,10 +490,10 @@
                       >
                     {/if}
                   </div>
-                  <div class="prompt-text" class:clamped={long && !expanded.has(i)}>{turn.prompt}</div>
+                  <div class="prompt-text" class:clamped={long && !expanded.has(turnKey(turn, i))}>{turn.prompt}</div>
                   {#if long}
-                    <button type="button" class="linkish" data-testid="conv-prompt-toggle" onclick={() => togglePrompt(i)}
-                      >{expanded.has(i) ? 'Show less' : 'Show more'}</button
+                    <button type="button" class="linkish" data-testid="conv-prompt-toggle" onclick={() => togglePrompt(turnKey(turn, i))}
+                      >{expanded.has(turnKey(turn, i)) ? 'Show less' : 'Show more'}</button
                     >
                   {/if}
                 </div>

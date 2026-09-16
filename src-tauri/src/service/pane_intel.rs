@@ -317,11 +317,11 @@ fn find_any_pct(line: &str) -> Option<f64> {
 /// whitespace. Returns None if the tail isn't numeric.
 fn parse_trailing_number(s: &str) -> Option<f64> {
     let trimmed = s.trim_end();
-    let start = trimmed
-        .rfind(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    let num = &trimmed[start..];
+    // Slice by the length of the non-numeric prefix, never by `rfind + 1`:
+    // that is a byte index and lands inside a multibyte char such as `≈`
+    // or `—` right before the digits, which panics.
+    let prefix = trimmed.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    let num = &trimmed[prefix.len()..];
     if num.is_empty() {
         return None;
     }
@@ -665,6 +665,18 @@ pub fn analyze(pane_tail: &str) -> PaneIntel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_pct_survives_a_multibyte_char_before_the_digits() {
+        // `≈`, `—` and `·` are 2–3 bytes; `rfind + 1` used to slice mid-char
+        assert_eq!(parse_context_pct("≈42% used"), Some(42.0));
+        assert_eq!(parse_context_pct("context —95% used"), Some(95.0));
+        assert_eq!(
+            parse_context_pct("Context left until auto-compact: ·12%"),
+            Some(88.0)
+        );
+        assert_eq!(analyze("≈42% used").context_pct, Some(42.0));
+    }
 
     #[test]
     fn spinner_line_picks_the_verb_line_and_drops_the_glyph() {
