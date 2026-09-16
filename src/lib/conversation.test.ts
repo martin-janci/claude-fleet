@@ -190,7 +190,7 @@ describe('transcriptCarries', () => {
 
 describe('composerStatus', () => {
   it('names a stuck session first, then a working one, else nothing', () => {
-    expect(composerStatus({ claude_status: 'working', stuck_kind: 'auth_menu' })).toMatch(/stuck \(auth_menu\)/);
+    expect(composerStatus({ claude_status: 'working', stuck_kind: 'auth_menu' })).toMatch(/stuck \(auth menu\)/);
     expect(composerStatus({ claude_status: 'working', stuck_kind: null })).toMatch(/working/);
     expect(composerStatus({ claude_status: 'idle', stuck_kind: null })).toBeNull();
     expect(composerStatus({ claude_status: null, stuck_kind: null })).toBeNull();

@@ -1,6 +1,7 @@
 import { timeAgo } from './session_status';
 import { invokeCmd, type Result } from './result';
 import type { ClaudeStatus, StuckKind } from './sessions';
+import { stuckKindLabel } from './attention';
 
 export type ConvItem = { kind: 'text'; text: string } | { kind: 'tool'; summary: string; error?: boolean };
 
@@ -25,6 +26,10 @@ export const PIN_THRESHOLD_PX = 40;
 
 /** Default turn window the backend serves; "Load older" grows it by this. */
 export const CONV_TURNS_STEP = 10;
+/** The backend clamps a requested window here (`transcript::CONV_MAX_TURNS`). */
+export const CONV_MAX_TURNS = 100;
+/** How long an on-demand pane probe outranks the row's own status. */
+export const PROBE_TTL_MS = 10_000;
 
 export function sessionConversation(sessionId: number, turns?: number): Promise<Result<Conversation>> {
   const args: { session_id: number; turns?: number } = { session_id: sessionId };
@@ -128,7 +133,7 @@ export function transcriptCarries(conv: Conversation, pending: PendingPrompt): b
  *  ready to take a prompt. A stuck session may never read what is typed; a
  *  working one queues it until the turn ends. */
 export function composerStatus(s: { claude_status: string | null; stuck_kind: string | null }): string | null {
-  if (s.stuck_kind) return `Session is stuck (${s.stuck_kind}). The prompt may not be read until that is cleared.`;
+  if (s.stuck_kind) return `Session is stuck (${stuckKindLabel(s.stuck_kind as StuckKind) || s.stuck_kind}). The prompt may not be read until that is cleared.`;
   if (s.claude_status === 'working') return 'Claude is working. The prompt is queued until the current turn ends.';
   return null;
 }

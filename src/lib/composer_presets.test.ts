@@ -8,6 +8,7 @@ import {
   addPreset,
   updatePreset,
   removePreset,
+  PRESETS_PREF,
 } from './composer_presets';
 import { DEFAULT_REVIEW_PROMPT } from './sessions';
 
@@ -45,5 +46,14 @@ describe('composer presets', () => {
     expect(list[0]).toEqual(DEFAULT_PRESETS[1]);
     resetComposerPresets();
     expect(get(composerPresets)).toEqual(DEFAULT_PRESETS);
+  });
+
+  it('persists only a list the user changed, so untouched installs follow new defaults', () => {
+    resetComposerPresets();
+    expect(localStorage.getItem('cf:pref:' + PRESETS_PREF)).toBeNull();
+    addPreset();
+    expect(localStorage.getItem('cf:pref:' + PRESETS_PREF)).not.toBeNull();
+    resetComposerPresets();
+    expect(localStorage.getItem('cf:pref:' + PRESETS_PREF)).toBeNull();
   });
 });

@@ -3,7 +3,7 @@
  * the prompt box. Per-app prefs (localStorage), editable in Settings.
  */
 import { writable } from 'svelte/store';
-import { readPref, writePref } from './prefs';
+import { readPref, writePref, clearPref } from './prefs';
 import { DEFAULT_REVIEW_PROMPT } from './sessions';
 
 export interface ComposerPreset {
@@ -32,10 +32,17 @@ export function isPresetArray(v: unknown): v is ComposerPreset[] {
   );
 }
 
+export const PRESETS_PREF = 'composer-presets';
+
 export const composerPresets = writable<ComposerPreset[]>(
-  readPref('composer-presets', DEFAULT_PRESETS, isPresetArray),
+  readPref(PRESETS_PREF, DEFAULT_PRESETS, isPresetArray),
 );
-composerPresets.subscribe((v) => writePref('composer-presets', v));
+// Persist only a list the user changed. A stored copy of the defaults would
+// pin them forever: a later release could never improve a built-in chip.
+composerPresets.subscribe((v) => {
+  if (JSON.stringify(v) === JSON.stringify(DEFAULT_PRESETS)) clearPref(PRESETS_PREF);
+  else writePref(PRESETS_PREF, v);
+});
 
 export function resetComposerPresets(): void {
   composerPresets.set(DEFAULT_PRESETS.map((p) => ({ ...p })));

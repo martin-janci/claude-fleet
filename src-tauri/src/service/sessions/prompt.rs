@@ -32,6 +32,12 @@ pub(super) fn default_submit() -> bool {
     true
 }
 
+/// PURE: whether a sent body counts as a prompt worth recording (anything
+/// but whitespace).
+pub fn is_prompt(body: &str) -> bool {
+    !body.trim().is_empty()
+}
+
 #[derive(Deserialize)]
 pub struct SendPromptArgs {
     pub host_alias: String,
@@ -77,11 +83,16 @@ pub(super) async fn send_prompt_inner(
     }
     // Task G: record the prompt on the session's timeline (detail truncated to
     // ~120 chars). Append-only + best-effort: never fail the send on this.
-    record_session_event(store, host_alias, tmux_name, "prompt_sent", {
-        let truncated: String = prompt.chars().take(120).collect();
-        Some(truncated)
-    });
-    record_prompt_outcome(store, host_alias, tmux_name, prompt);
+    // A bare Enter (empty body: the Conversation tab's "Press Enter" chip
+    // for a stuck session) is a key press, not a prompt: nothing to record,
+    // and it must not blank the row's last_prompt.
+    if is_prompt(prompt) {
+        record_session_event(store, host_alias, tmux_name, "prompt_sent", {
+            let truncated: String = prompt.chars().take(120).collect();
+            Some(truncated)
+        });
+        record_prompt_outcome(store, host_alias, tmux_name, prompt);
+    }
     Ok(())
 }
 
@@ -388,5 +399,18 @@ pub async fn capture_session_output(
     match scrollback_lines {
         Some(n) => tmux.capture_pane_scrollback(&name, n).await,
         None => tmux.capture_pane(&name).await,
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    #[test]
+    fn a_bare_enter_is_not_a_prompt() {
+        assert!(!is_prompt(""));
+        assert!(!is_prompt("  \n"));
+        assert!(is_prompt("/clear"));
+        assert!(is_prompt("fix it"));
     }
 }

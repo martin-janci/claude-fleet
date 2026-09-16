@@ -622,7 +622,7 @@ pub fn spinner_line(pane_tail: &str) -> Option<String> {
             Some(c) if !c.is_alphanumeric() && !c.is_whitespace() => c,
             _ => continue,
         };
-        if matches!(glyph, '❯' | '>' | '⏺' | '⎿' | '⏸' | '⏵' | '│' | '─') {
+        if matches!(glyph, '❯' | '>' | '⏺' | '⎿' | '⏸' | '⏵' | '│' | '─' | '●') {
             continue;
         }
         let rest = chars.as_str().trim_start();
@@ -631,9 +631,40 @@ pub fn spinner_line(pane_tail: &str) -> Option<String> {
         if !starts_upper || !word.ends_with('…') {
             continue;
         }
+        // The REPL's spinner always carries its elapsed time in parentheses
+        // (`(3s · …)`); assistant prose ending in an ellipsis and a custom
+        // statusLine (`⚡ Opus… 42% ctx`) do not.
+        if !rest.contains('(') || !has_elapsed(rest) {
+            continue;
+        }
         return Some(rest.chars().take(ACTIVITY_MAX).collect());
     }
     None
+}
+
+/// `12s` / `3m 5s`-style elapsed marker: digits directly followed by `s`
+/// and then a non-letter (or the end).
+fn has_elapsed(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_digit() {
+            let mut j = i;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j < b.len()
+                && b[j] == b's'
+                && b.get(j + 1).is_none_or(|c| !c.is_ascii_alphanumeric())
+            {
+                return true;
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    false
 }
 
 pub fn analyze(pane_tail: &str) -> PaneIntel {
@@ -699,6 +730,15 @@ mod tests {
         assert_eq!(
             spinner_line("❯ \n  ⏸ manual mode on · ? for shortcuts"),
             None
+        );
+        // assistant prose ending in an ellipsis, and a custom statusLine
+        assert_eq!(spinner_line("● Investigating… let me check"), None);
+        assert_eq!(spinner_line("⚡ Opus… 42% ctx"), None);
+        assert_eq!(spinner_line("✶ Cooking… nothing timed"), None);
+        // a statusLine below the real spinner does not shadow it
+        assert_eq!(
+            spinner_line("✶ Cooking… (3s · esc to interrupt)\n❯ \n⚡ Opus… 42% ctx").as_deref(),
+            Some("Cooking… (3s · esc to interrupt)")
         );
         assert_eq!(spinner_line("⏺ Explore(bg sessions)\n  ⎿  Done (41 tool uses)\n❯ 1. Yes\nEnter to select · Esc to cancel"), None);
         assert_eq!(spinner_line(""), None);

@@ -33,6 +33,8 @@
     rememberDraft,
     newItemCount,
     CONV_TURNS_STEP,
+    CONV_MAX_TURNS,
+    PROBE_TTL_MS,
     isQuietStatus,
     shouldFetchTranscript,
     CONVERSATION_POLL_MS,
@@ -90,6 +92,18 @@
   // own send: until the row's turn counter moves past it, or a probe reports
   // the session idle, the session is treated as working.
   let probe = $state<ActivityProbe | null>(null);
+  // A probe outranks the row only while fresh: once the loop stops (the
+  // indicator went away) a stale reading must not shadow a row that keeps
+  // saying "working"; after the TTL the row wins again and, if it still
+  // says so, the loop restarts and takes a new reading.
+  let probeFresh = $state(false);
+  let probeTimer: ReturnType<typeof setTimeout> | undefined;
+  function setProbe(next: ActivityProbe | null) {
+    probe = next;
+    clearTimeout(probeTimer);
+    probeFresh = next !== null;
+    if (next !== null) probeTimer = setTimeout(() => (probeFresh = false), PROBE_TTL_MS);
+  }
   let sentTurnSeq = $state<number | null>(null);
   let idleSeenSinceSend = $state(false);
   let lastFetchAt = 0;
@@ -109,8 +123,7 @@
     if (opts.poll && (inFlight.get(id) ?? 0) > 0) return;
     const mine = ++seq;
     loading = conv === null;
-    lastFetchAt = Date.now();
-    lastFetchTurnSeq = session.turn_seq;
+    const fetchedTurnSeq = session.turn_seq;
     const pinned = scroller ? isPinned(scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight) : true;
     inFlight.set(id, (inFlight.get(id) ?? 0) + 1);
     let r: Awaited<ReturnType<typeof sessionConversation>>;
@@ -126,6 +139,10 @@
     if (mine !== seq || session.id !== id) return;
     loading = false;
     if (r.ok) {
+      // Stamped on success only: a failed read on a quiet session is retried
+      // at the normal cadence, not after the quiet one.
+      lastFetchAt = Date.now();
+      lastFetchTurnSeq = fetchedTurnSeq;
       errorCode = null;
       errorMsg = null;
       if (!sameConversation(conv, r.value)) {
@@ -161,7 +178,7 @@
       draftFor = session.id;
       sendError = null;
       pending = null;
-      probe = null;
+      setProbe(null);
       probeSeq++;
       sentTurnSeq = null;
       idleSeenSinceSend = false;
@@ -205,7 +222,7 @@
   $effect(() => {
     const turn = session.turn_seq;
     untrack(() => {
-      if (visible && lastFetchTurnSeq !== null && turn !== lastFetchTurnSeq && session.claude_session_id) void load();
+      if (visible && lastFetchTurnSeq !== null && turn !== lastFetchTurnSeq && session.claude_session_id) void load({ poll: true });
     });
   });
 
@@ -216,20 +233,22 @@
   $effect(() => {
     void rowStatus;
     void rowStuck;
-    untrack(() => (probe = null));
+    untrack(() => setProbe(null));
   });
+  $effect(() => () => clearTimeout(probeTimer));
 
-  const liveStatus = $derived(probe?.claude_status ?? session.claude_status);
-  const liveStuck = $derived(probe?.stuck_kind ?? session.stuck_kind);
-  const liveActivity = $derived(probe?.current_activity ?? session.current_activity);
+  const liveProbe = $derived(probeFresh ? probe : null);
+  const liveStatus = $derived(liveProbe?.claude_status ?? session.claude_status);
+  const liveStuck = $derived(liveProbe?.stuck_kind ?? session.stuck_kind);
+  const liveActivity = $derived(liveProbe?.current_activity ?? session.current_activity);
   const optimistic = $derived(sentTurnSeq !== null && session.turn_seq === sentTurnSeq && !idleSeenSinceSend);
   const indicator = $derived(
     indicatorFor({
       status: liveStatus,
       stuckKind: liveStuck,
-      waitingFor: probe?.waiting_for ?? null,
+      waitingFor: liveProbe?.waiting_for ?? null,
       activity: liveActivity,
-      spinner: probe?.spinner ?? null,
+      spinner: liveProbe?.spinner ?? null,
       pending: pending !== null,
       optimistic,
     }),
@@ -252,14 +271,15 @@
     }
     if (session.id !== id || mine !== probeSeq) return;
     if (!r.ok) return;
-    probe = r.value;
+    setProbe(r.value);
     if (sentTurnSeq !== null && isQuietStatus(r.value.claude_status)) idleSeenSinceSend = true;
   }
 
   // Probe the pane every couple of seconds while something is live: once at
   // once, then on the interval. `probeLive` is a boolean derived, so a fresh
   // probe (which yields a new `indicator` object) never restarts the timer.
-  const probeLive = $derived(visible && indicator !== null);
+  // bg / external rows have no pane: the backend would reject every probe.
+  const probeLive = $derived(visible && !hasNoPane(session) && indicator !== null);
   $effect(() => {
     if (!probeLive) return;
     if (document.visibilityState === 'visible') void untrack(probeNow);
@@ -328,12 +348,12 @@
   async function send() {
     const text = draft.trim();
     if (!text || sending) return;
-    await sendText(text);
+    await sendText(text, { fromDraft: true });
   }
 
   /** Send `text` as-is. Empty text is a bare Enter (the press_enter chip):
    *  it lands in the REPL but is not a prompt, so nothing is shown pending. */
-  async function sendText(text: string) {
+  async function sendText(text: string, opts: { fromDraft?: boolean } = {}) {
     if (sending) return;
     sending = true;
     sendError = null;
@@ -348,7 +368,9 @@
       return;
     }
     if (text === '') return;
-    draft = '';
+    // Only the box's own text is spent by a send; a chip sent with
+    // Shift+click leaves whatever the user was typing.
+    if (opts.fromDraft) draft = '';
     // A slash command is handled by the REPL itself: it is not recorded as a
     // prompt (and /clear even moves to a new session id), so no pending
     // turn, and nothing to wait for beyond a fresh read.
@@ -441,6 +463,20 @@
     if (atBottom) unseen = 0;
   }
 
+  /** Open a tool group when it becomes the running turn's last group; never
+   *  close one, and never re-open one the user closed while it stays the
+   *  running group, so manual toggles survive transcript refreshes. */
+  function autoOpen(node: HTMLDetailsElement, on: boolean) {
+    if (on) node.open = true;
+    let prev = on;
+    return {
+      update(next: boolean) {
+        if (next && !prev) node.open = true;
+        prev = next;
+      },
+    };
+  }
+
   function togglePrompt(key: string) {
     const next = new Set(expanded);
     if (next.has(key)) next.delete(key);
@@ -466,10 +502,11 @@
         {/if}
         {#if conv?.truncated}
           <p class="muted truncated">
-            Older turns not shown ·
-            <button type="button" class="linkish" data-testid="conv-load-older" disabled={loadingOlder} onclick={() => void loadOlder()}
-              >{loadingOlder ? 'Loading…' : 'Load older'}</button
-            >
+            Older turns not shown{#if (turnsWanted ?? CONV_TURNS_STEP) < CONV_MAX_TURNS}
+              ·
+              <button type="button" class="linkish" data-testid="conv-load-older" disabled={loadingOlder} onclick={() => void loadOlder()}
+                >{loadingOlder ? 'Loading…' : 'Load older'}</button
+              >{/if}
           </p>
         {/if}
         {#if conv}
@@ -505,7 +542,7 @@
                   {:else if g.tools.length === 1}
                     <div class="tool" class:err={g.tools[0].error} data-testid="conv-tool" data-error={g.tools[0].error || undefined} title={g.tools[0].error ? `Failed: ${g.tools[0].summary}` : g.tools[0].summary}>{g.tools[0].summary}</div>
                   {:else}
-                    <details class="tools" class:has-err={g.tools.some((t) => t.error)} open={running && j === groups.length - 1} data-testid="conv-tools">
+                    <details class="tools" class:has-err={g.tools.some((t) => t.error)} use:autoOpen={running && j === groups.length - 1} data-testid="conv-tools">
                       <summary>{toolGroupLabel(g.tools)}</summary>
                       {#each g.tools as line, k (k)}
                         <div class="tool" class:err={line.error} data-testid="conv-tool" data-error={line.error || undefined} title={line.error ? `Failed: ${line.summary}` : line.summary}>{line.summary}</div>
