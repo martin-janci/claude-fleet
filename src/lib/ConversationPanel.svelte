@@ -400,12 +400,12 @@
                   {#if g.kind === 'text'}
                     <div class="text" data-testid="conv-text"><Markdown source={g.text} /></div>
                   {:else if g.tools.length === 1}
-                    <div class="tool" data-testid="conv-tool" title={g.tools[0]}>{g.tools[0]}</div>
+                    <div class="tool" class:err={g.tools[0].error} data-testid="conv-tool" data-error={g.tools[0].error || undefined} title={g.tools[0].error ? `Failed: ${g.tools[0].summary}` : g.tools[0].summary}>{g.tools[0].summary}</div>
                   {:else}
-                    <details class="tools" data-testid="conv-tools">
+                    <details class="tools" class:has-err={g.tools.some((t) => t.error)} data-testid="conv-tools">
                       <summary>{toolGroupLabel(g.tools)}</summary>
-                      {#each g.tools as summary, k (k)}
-                        <div class="tool" data-testid="conv-tool" title={summary}>{summary}</div>
+                      {#each g.tools as line, k (k)}
+                        <div class="tool" class:err={line.error} data-testid="conv-tool" data-error={line.error || undefined} title={line.error ? `Failed: ${line.summary}` : line.summary}>{line.summary}</div>
                       {/each}
                     </details>
                   {/if}
@@ -857,6 +857,16 @@
     position: absolute;
     left: 0;
     opacity: 0.6;
+  }
+  .tool.err {
+    color: #e64a4a;
+  }
+  .tool.err::before {
+    content: '✗';
+    opacity: 1;
+  }
+  .tools.has-err summary {
+    color: #e64a4a;
   }
   .tools {
     margin: 0.3rem 0 0.5rem;

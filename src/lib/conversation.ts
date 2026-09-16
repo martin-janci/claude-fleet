@@ -2,7 +2,7 @@ import { timeAgo } from './session_status';
 import { invokeCmd, type Result } from './result';
 import type { ClaudeStatus, StuckKind } from './sessions';
 
-export type ConvItem = { kind: 'text'; text: string } | { kind: 'tool'; summary: string };
+export type ConvItem = { kind: 'text'; text: string } | { kind: 'tool'; summary: string; error?: boolean };
 
 export interface ConvTurn {
   prompt: string | null;
@@ -51,8 +51,14 @@ export function relativeTime(iso: string, nowMs: number): string {
   return timeAgo(new Date(iso).getTime() / 1000, nowMs);
 }
 
+/** One tool call line; `error` when its result came back as an error. */
+export interface ToolLine {
+  summary: string;
+  error: boolean;
+}
+
 /** A reply item after folding: prose, or a run of consecutive tool calls. */
-export type ConvGroup = { kind: 'text'; text: string } | { kind: 'tools'; tools: string[] };
+export type ConvGroup = { kind: 'text'; text: string } | { kind: 'tools'; tools: ToolLine[] };
 
 /** Fold consecutive tool one-liners into one group; text items stay apart. */
 export function groupItems(items: ConvItem[]): ConvGroup[] {
@@ -62,9 +68,10 @@ export function groupItems(items: ConvItem[]): ConvGroup[] {
       out.push({ kind: 'text', text: item.text });
       continue;
     }
+    const line: ToolLine = { summary: item.summary, error: item.error === true };
     const last = out[out.length - 1];
-    if (last?.kind === 'tools') last.tools.push(item.summary);
-    else out.push({ kind: 'tools', tools: [item.summary] });
+    if (last?.kind === 'tools') last.tools.push(line);
+    else out.push({ kind: 'tools', tools: [line] });
   }
   return out;
 }
@@ -75,12 +82,15 @@ export function toolName(summary: string): string {
   return paren > 0 ? summary.slice(0, paren) : summary;
 }
 
-/** `"7 tool calls · Bash, Read, Edit +2"` for a folded group. */
-export function toolGroupLabel(tools: string[]): string {
-  const names = [...new Set(tools.map(toolName))];
+/** `"7 tool calls · Bash, Read, Edit +2"` for a folded group, with
+ *  `" · 1 failed"` appended when any call errored. */
+export function toolGroupLabel(tools: ToolLine[]): string {
+  const names = [...new Set(tools.map((t) => toolName(t.summary)))];
   const shown = names.slice(0, 3).join(', ');
   const more = names.length > 3 ? ` +${names.length - 3}` : '';
-  return `${tools.length} tool calls · ${shown}${more}`;
+  const failed = tools.filter((t) => t.error).length;
+  const suffix = failed > 0 ? ` · ${failed} failed` : '';
+  return `${tools.length} tool calls · ${shown}${more}${suffix}`;
 }
 
 /** Prompts longer than this are clamped behind "Show more". */

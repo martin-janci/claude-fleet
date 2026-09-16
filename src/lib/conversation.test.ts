@@ -127,11 +127,12 @@ describe('relativeTime', () => {
 describe('groupItems', () => {
   it('keeps text items apart and folds consecutive tool calls together', () => {
     const t = (text: string) => ({ kind: 'text' as const, text });
-    const u = (summary: string) => ({ kind: 'tool' as const, summary });
-    expect(groupItems([u('Read(a)'), u('Bash(ls)'), t('x'), u('Edit(b)'), t('y'), t('z')])).toEqual([
-      { kind: 'tools', tools: ['Read(a)', 'Bash(ls)'] },
+    const u = (summary: string, error?: boolean) => ({ kind: 'tool' as const, summary, error });
+    const l = (summary: string, error = false) => ({ summary, error });
+    expect(groupItems([u('Read(a)'), u('Bash(ls)', true), t('x'), u('Edit(b)'), t('y'), t('z')])).toEqual([
+      { kind: 'tools', tools: [l('Read(a)'), l('Bash(ls)', true)] },
       { kind: 'text', text: 'x' },
-      { kind: 'tools', tools: ['Edit(b)'] },
+      { kind: 'tools', tools: [l('Edit(b)')] },
       { kind: 'text', text: 'y' },
       { kind: 'text', text: 'z' },
     ]);
@@ -146,9 +147,11 @@ describe('toolName / toolGroupLabel', () => {
     expect(toolName('NoParens')).toBe('NoParens');
   });
 
-  it('counts calls and lists up to three distinct names in order', () => {
-    expect(toolGroupLabel(['Read(a)', 'Read(b)', 'Bash(x)'])).toBe('3 tool calls · Read, Bash');
-    expect(toolGroupLabel(['A()', 'B()', 'C()', 'D()', 'A()'])).toBe('5 tool calls · A, B, C +1');
+  it('counts calls and lists up to three distinct names in order, plus how many failed', () => {
+    const l = (summary: string, error = false) => ({ summary, error });
+    expect(toolGroupLabel([l('Read(a)'), l('Read(b)'), l('Bash(x)')])).toBe('3 tool calls · Read, Bash');
+    expect(toolGroupLabel([l('A()'), l('B()'), l('C()'), l('D()'), l('A()')])).toBe('5 tool calls · A, B, C +1');
+    expect(toolGroupLabel([l('Bash(x)', true), l('Bash(y)'), l('Read(z)', true)])).toBe('3 tool calls · Bash, Read · 2 failed');
   });
 });
 

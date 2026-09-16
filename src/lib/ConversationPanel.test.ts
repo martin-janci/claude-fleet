@@ -815,3 +815,33 @@ describe('ConversationPanel live indicator', () => {
     expect(mockedConv).toHaveBeenCalledTimes(3);
   });
 });
+
+describe('ConversationPanel tool outcomes', () => {
+  it('marks a failed tool line and counts failures in a folded group', async () => {
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            { prompt: 'p', at: null, items: [{ kind: 'tool', summary: 'Bash(cargo test)', error: true }] },
+            {
+              prompt: 'q',
+              at: null,
+              items: [
+                { kind: 'tool', summary: 'Read(a)' },
+                { kind: 'tool', summary: 'Bash(b)', error: true },
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const tools = screen.getAllByTestId('conv-tool');
+    expect(tools[0].getAttribute('data-error')).toBe('true');
+    expect(tools[0].getAttribute('title')).toContain('Failed');
+    expect(tools[1].getAttribute('data-error')).toBeNull();
+    expect(tools[2].getAttribute('data-error')).toBe('true');
+    expect(screen.getByTestId('conv-tools').querySelector('summary')?.textContent).toContain('1 failed');
+  });
+});
