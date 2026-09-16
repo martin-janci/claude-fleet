@@ -14,6 +14,7 @@ import { sessionConversation, sessionActivity, CONVERSATION_POLL_MS, ACTIVITY_PO
 import ConversationPanel from './ConversationPanel.svelte';
 import { sendPrompt, type SessionRow } from './sessions';
 import { composerPresets, resetComposerPresets } from './composer_presets';
+import { composerDrafts } from './conversation';
 
 const mockedConv = sessionConversation as unknown as ReturnType<typeof vi.fn>;
 const mockedSend = sendPrompt as unknown as ReturnType<typeof vi.fn>;
@@ -67,6 +68,7 @@ beforeEach(() => {
   mockedSend.mockReset();
   mockedAct.mockReset();
   mockedAct.mockResolvedValue({ ok: false, error: { code: 'E_INVALID_STATE', message: 'no pane' } });
+  composerDrafts.clear();
   resetComposerPresets();
   setVisibility('visible');
 });
@@ -900,5 +902,55 @@ describe('ConversationPanel turn duration and open tool group', () => {
     expect(groups[0].open).toBe(false);
     expect(groups[1].open).toBe(false);
     expect(groups[2].open).toBe(true);
+  });
+});
+
+describe('ConversationPanel drafts and focus', () => {
+  it('keeps an unsent draft per session across unmount and session switches', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    const first = render(ConversationPanel, { session: session({ id: 1 }), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'half typed' } });
+    first.unmount();
+
+    const second = render(ConversationPanel, { session: session({ id: 2 }), visible: true });
+    await settle();
+    expect((screen.getByTestId('conv-composer-input') as HTMLTextAreaElement).value).toBe('');
+    // a switch must never copy the old text into the new session's slot
+    await fireEvent.input(screen.getByTestId('conv-composer-input'), { target: { value: 'for two' } });
+    await second.rerender({ session: session({ id: 3 }), visible: true });
+    await settle();
+    expect(composerDrafts.get(1)).toBe('half typed');
+    expect(composerDrafts.get(2)).toBe('for two');
+    expect(composerDrafts.has(3)).toBe(false);
+    expect((screen.getByTestId('conv-composer-input') as HTMLTextAreaElement).value).toBe('');
+    await second.rerender({ session: session({ id: 1 }), visible: true });
+    await settle();
+    expect((screen.getByTestId('conv-composer-input') as HTMLTextAreaElement).value).toBe('half typed');
+  });
+
+  it('sending forgets the stored draft', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(ConversationPanel, { session: session({ id: 7 }), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'go' } });
+    expect(composerDrafts.get(7)).toBe('go');
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    expect(composerDrafts.has(7)).toBe(false);
+  });
+
+  it('focuses the composer when shown for a promptable session, not when hidden', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    const hidden = render(ConversationPanel, { session: session(), visible: false });
+    await settle();
+    expect(document.activeElement).not.toBe(screen.getByTestId('conv-composer-input'));
+    hidden.unmount();
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    expect(document.activeElement).toBe(screen.getByTestId('conv-composer-input'));
   });
 });

@@ -269,3 +269,15 @@ export function turnDuration(at: string | null, endedAt: string | null): string 
   const hours = Math.floor(mins / 60);
   return `${hours}h ${mins % 60}m`;
 }
+
+/**
+ * Unsent composer text per session id, kept for the life of the app. The
+ * panel unmounts on every tab switch, so without this a half-typed prompt
+ * would vanish when the user glances at Files or the terminal.
+ */
+export const composerDrafts = new Map<number, string>();
+
+export function rememberDraft(sessionId: number, text: string): void {
+  if (text.length === 0) composerDrafts.delete(sessionId);
+  else composerDrafts.set(sessionId, text);
+}
