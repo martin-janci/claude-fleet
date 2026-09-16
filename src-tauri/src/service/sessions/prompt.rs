@@ -88,7 +88,13 @@ pub(super) async fn send_prompt_inner(
     // and it must not blank the row's last_prompt.
     if is_prompt(prompt) {
         record_session_event(store, host_alias, tmux_name, "prompt_sent", {
-            let truncated: String = prompt.chars().take(120).collect();
+            // What was DELIVERED keeps the untrusted marker; what fleet records
+            // does not (D8 / Q2). The marker line alone is ~77 chars, so without
+            // this the 120-char detail is almost entirely marker.
+            let truncated: String = crate::mcp::guard::strip_marker(prompt)
+                .chars()
+                .take(120)
+                .collect();
             Some(truncated)
         });
         record_prompt_outcome(store, host_alias, tmux_name, prompt);
@@ -128,6 +134,11 @@ pub(super) fn record_prompt_outcome(
     tmux_name: &str,
     prompt: &str,
 ) {
+    // An MCP-delivered prompt arrives with the untrusted marker as its first
+    // line. The session was shown it; `last_prompt` and the derived label must
+    // not be it (D8 / Q2). Stripped once here, so both the Tauri and the MCP
+    // path are covered and `mcp/tools.rs` needs no change.
+    let prompt = crate::mcp::guard::strip_marker(prompt);
     let Ok(s) = store.lock() else {
         tracing::error!(
             host = %host_alias,
