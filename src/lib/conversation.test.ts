@@ -15,6 +15,9 @@ import {
   isLongPrompt,
   transcriptCarries,
   composerStatus,
+  matchSlashCommands,
+  completeSlashCommand,
+  SLASH_COMMANDS,
   PROMPT_CLAMP_LINES,
   PIN_THRESHOLD_PX,
   type Conversation,
@@ -173,5 +176,41 @@ describe('composerStatus', () => {
     expect(composerStatus({ claude_status: 'working', stuck_kind: null })).toMatch(/working/);
     expect(composerStatus({ claude_status: 'idle', stuck_kind: null })).toBeNull();
     expect(composerStatus({ claude_status: null, stuck_kind: null })).toBeNull();
+  });
+});
+
+describe('matchSlashCommands', () => {
+  it('is empty unless the draft is a single slash token', () => {
+    expect(matchSlashCommands('')).toEqual([]);
+    expect(matchSlashCommands('fix it')).toEqual([]);
+    expect(matchSlashCommands('/clear now')).toEqual([]);
+    expect(matchSlashCommands('/clear\n')).toEqual([]);
+    expect(matchSlashCommands(' /clear')).toEqual([]);
+  });
+
+  it('a bare slash lists every command; a prefix narrows it, case-insensitively', () => {
+    expect(matchSlashCommands('/')).toEqual(SLASH_COMMANDS);
+    const names = matchSlashCommands('/co').map((c) => c.name);
+    expect(names).toContain('compact');
+    expect(names).toContain('cost');
+    expect(names).not.toContain('clear');
+    expect(matchSlashCommands('/CLE').map((c) => c.name)).toEqual(['clear']);
+    expect(matchSlashCommands('/zzz')).toEqual([]);
+  });
+
+  it('every catalog entry has a name, a description and a unique name', () => {
+    const names = SLASH_COMMANDS.map((c) => c.name);
+    expect(new Set(names).size).toBe(names.length);
+    for (const c of SLASH_COMMANDS) {
+      expect(c.name).toMatch(/^[a-z][a-z0-9-]*$/);
+      expect(c.description.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('completeSlashCommand', () => {
+  it('yields the command, with a trailing space only when it takes arguments', () => {
+    expect(completeSlashCommand({ name: 'clear', description: '' })).toBe('/clear');
+    expect(completeSlashCommand({ name: 'model', description: '', args: true })).toBe('/model ');
   });
 });

@@ -10,6 +10,7 @@
   // they stay read-only.
   import { untrack, tick } from 'svelte';
   import { sendPrompt, hasNoPane, type SessionRow } from './sessions';
+  import { hintAnchor } from './hints';
   import {
     sessionConversation,
     sameConversation,
@@ -21,9 +22,12 @@
     isLongPrompt,
     composerStatus,
     transcriptCarries,
+    matchSlashCommands,
+    completeSlashCommand,
     CONVERSATION_POLL_MS,
     type Conversation,
     type PendingPrompt,
+    type SlashCommand,
   } from './conversation';
   import Markdown from './MarkdownView.svelte';
 
@@ -46,6 +50,10 @@
   let sendError = $state<string | null>(null);
   let pending = $state<PendingPrompt | null>(null);
   let box: HTMLTextAreaElement | undefined = $state();
+  // Slash-command menu: highlighted row, and the draft the user dismissed
+  // the menu for (Escape) so it stays hidden until the text changes.
+  let slashIndex = $state(0);
+  let slashDismissedFor = $state<string | null>(null);
   let seq = 0;
   // Fetches still pending, per session id. A poll tick never starts a read
   // while one is in flight for the same session (a remote read can take up
@@ -141,6 +149,18 @@
   const canPrompt = $derived(!hasNoPane(session));
   const canSend = $derived(draft.trim().length > 0 && !sending);
   const statusNote = $derived(composerStatus(session));
+  const slashMatches = $derived(slashDismissedFor === draft ? [] : matchSlashCommands(draft));
+  const slashOpen = $derived(slashMatches.length > 0);
+  // Keep the highlight inside the list as the prefix narrows it.
+  $effect(() => {
+    if (slashIndex >= slashMatches.length) slashIndex = 0;
+  });
+
+  function acceptSlash(c: SlashCommand) {
+    draft = completeSlashCommand(c);
+    slashDismissedFor = draft;
+    box?.focus();
+  }
 
   async function send() {
     const text = draft.trim();
@@ -169,7 +189,37 @@
   }
 
   function onComposerKey(e: KeyboardEvent) {
-    if (e.key !== 'Enter' || e.shiftKey || e.altKey || e.isComposing) return;
+    if (e.isComposing) return;
+    if (slashOpen) {
+      const highlighted = slashMatches[slashIndex] ?? slashMatches[0];
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        slashIndex = (slashIndex + 1) % slashMatches.length;
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        slashIndex = (slashIndex - 1 + slashMatches.length) % slashMatches.length;
+        return;
+      }
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        acceptSlash(highlighted);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        slashDismissedFor = draft;
+        return;
+      }
+      // Enter on a partial name completes it; on the exact name it sends.
+      if (e.key === 'Enter' && !e.shiftKey && !e.altKey && draft !== `/${highlighted.name}`) {
+        e.preventDefault();
+        acceptSlash(highlighted);
+        return;
+      }
+    }
+    if (e.key !== 'Enter' || e.shiftKey || e.altKey) return;
     e.preventDefault();
     void send();
   }
@@ -274,11 +324,27 @@
     <form
       class="composer"
       data-testid="conv-composer"
+      use:hintAnchor={{ id: 'conversation-composer', when: canPrompt }}
       onsubmit={(e) => {
         e.preventDefault();
         void send();
       }}
     >
+      {#if slashOpen}
+        <ul class="slash-menu" role="listbox" aria-label="Claude Code commands" data-testid="conv-slash-menu">
+          {#each slashMatches as c, i (c.name)}
+            <li role="option" aria-selected={i === slashIndex} class:active={i === slashIndex} data-testid="conv-slash-item">
+              <!-- keyboard handling lives on the textarea (arrows / Tab / Enter);
+                   the button only takes the mouse, and mousedown is swallowed
+                   so the textarea keeps focus -->
+              <button type="button" tabindex="-1" onmousedown={(e) => e.preventDefault()} onclick={() => acceptSlash(c)}>
+                <span class="slash-name">/{c.name}</span>
+                <span class="slash-desc">{c.description}</span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
       {#if sendError}
         <div class="composer-error" data-testid="conv-composer-error">{sendError}</div>
       {/if}
@@ -375,6 +441,47 @@
   .composer button:disabled {
     opacity: 0.45;
     cursor: default;
+  }
+  .slash-menu {
+    list-style: none;
+    max-width: 80ch;
+    max-height: 14rem;
+    overflow: auto;
+    margin: 0 auto 0.4rem;
+    padding: 0.25rem 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    font-size: 0.8rem;
+  }
+  .slash-menu li.active,
+  .slash-menu li:hover {
+    background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+  }
+  .slash-menu button {
+    display: flex;
+    width: 100%;
+    gap: 0.75rem;
+    align-items: baseline;
+    padding: 0.3rem 0.65rem;
+    border: none;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .slash-name {
+    flex: 0 0 9ch;
+    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    color: var(--accent);
+  }
+  .slash-desc {
+    flex: 1 1 auto;
+    color: var(--fg-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .composer-error,
   .composer-status {
