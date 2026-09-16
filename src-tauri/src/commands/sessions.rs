@@ -282,6 +282,10 @@ pub fn session_history(
 #[derive(serde::Deserialize)]
 pub struct SessionConversationArgs {
     pub session_id: i64,
+    /// Most-recent turns to return; omitted = the default window. Clamped
+    /// (see `transcript::conv_limits`).
+    #[serde(default)]
+    pub turns: Option<usize>,
 }
 
 /// The session's recent conversation — prompts, assistant text and one line
@@ -306,12 +310,8 @@ pub async fn session_conversation(
     };
     // `resolve_args` takes (and releases) the lock itself; nothing holds it
     // across the fetch.
-    let targs = transcript::resolve_args(
-        &store,
-        &row,
-        transcript::CONV_TURNS,
-        transcript::CONV_MAX_CHARS,
-    )?;
+    let (turns, max_chars) = transcript::conv_limits(args.turns);
+    let targs = transcript::resolve_args(&store, &row, turns, max_chars)?;
     transcript::fetch_conversation(targs, &ssh).await
 }
 
