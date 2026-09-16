@@ -21,6 +21,7 @@
     groupItems,
     toolGroupLabel,
     isLongPrompt,
+    turnDuration,
     composerStatus,
     transcriptCarries,
     matchSlashCommands,
@@ -375,6 +376,10 @@
         {/if}
         {#if conv}
           {#each conv.turns as turn, i (i)}
+            {@const isLast = i === conv.turns.length - 1}
+            {@const running = isLast && indicator?.kind === 'working'}
+            {@const groups = groupItems(turn.items)}
+            {@const duration = running ? null : turnDuration(turn.at, turn.ended_at)}
             <section class="turn">
               {#if turn.prompt !== null}
                 {@const long = isLongPrompt(turn.prompt)}
@@ -396,13 +401,13 @@
                 </div>
               {/if}
               <div class="reply">
-                {#each groupItems(turn.items) as g, j (j)}
+                {#each groups as g, j (j)}
                   {#if g.kind === 'text'}
                     <div class="text" data-testid="conv-text"><Markdown source={g.text} /></div>
                   {:else if g.tools.length === 1}
                     <div class="tool" class:err={g.tools[0].error} data-testid="conv-tool" data-error={g.tools[0].error || undefined} title={g.tools[0].error ? `Failed: ${g.tools[0].summary}` : g.tools[0].summary}>{g.tools[0].summary}</div>
                   {:else}
-                    <details class="tools" class:has-err={g.tools.some((t) => t.error)} data-testid="conv-tools">
+                    <details class="tools" class:has-err={g.tools.some((t) => t.error)} open={running && j === groups.length - 1} data-testid="conv-tools">
                       <summary>{toolGroupLabel(g.tools)}</summary>
                       {#each g.tools as line, k (k)}
                         <div class="tool" class:err={line.error} data-testid="conv-tool" data-error={line.error || undefined} title={line.error ? `Failed: ${line.summary}` : line.summary}>{line.summary}</div>
@@ -410,6 +415,9 @@
                     </details>
                   {/if}
                 {/each}
+                {#if duration}
+                  <div class="duration" data-testid="conv-duration" title="From the prompt to the reply's last entry">{duration}</div>
+                {/if}
               </div>
             </section>
           {/each}
@@ -857,6 +865,11 @@
     position: absolute;
     left: 0;
     opacity: 0.6;
+  }
+  .duration {
+    margin-top: 0.3rem;
+    color: var(--fg-muted);
+    font-size: 0.7rem;
   }
   .tool.err {
     color: #e64a4a;

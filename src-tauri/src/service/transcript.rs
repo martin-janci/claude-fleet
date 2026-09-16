@@ -191,6 +191,9 @@ pub struct ConvTurn {
     pub prompt: Option<String>,
     /// ISO timestamp of the prompt entry (else of the first assistant entry).
     pub at: Option<String>,
+    /// ISO timestamp of the turn's latest assistant entry: with `at`, how
+    /// long the reply took so far. `None` for a turn with no assistant entry.
+    pub ended_at: Option<String>,
     pub items: Vec<ConvItem>,
 }
 
@@ -301,6 +304,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                         // An image-only prompt still opens a turn, unquoted.
                         prompt: (!prompt.is_empty()).then_some(prompt),
                         at: at(),
+                        ended_at: None,
                         items: Vec::new(),
                     });
                 }
@@ -310,8 +314,12 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                     let turn = current.get_or_insert_with(|| ConvTurn {
                         prompt: None,
                         at: at(),
+                        ended_at: None,
                         items: Vec::new(),
                     });
+                    if let Some(ts) = at() {
+                        turn.ended_at = Some(ts);
+                    }
                     for b in blocks {
                         match b.get("type").and_then(|t| t.as_str()) {
                             Some("text") => {
@@ -886,6 +894,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_conversation_records_when_the_reply_last_advanced() {
+        let jsonl = [
+            line(serde_json::json!({"type":"user","timestamp":"2026-09-13T10:00:00Z","message":{"content":"go"}})),
+            line(serde_json::json!({"type":"assistant","timestamp":"2026-09-13T10:00:05Z","message":{"content":[{"type":"text","text":"a"}]}})),
+            line(serde_json::json!({"type":"assistant","timestamp":"2026-09-13T10:02:19Z","message":{"content":[{"type":"text","text":"b"}]}})),
+            line(serde_json::json!({"type":"user","timestamp":"2026-09-13T10:03:00Z","message":{"content":"again"}})),
+        ]
+        .join("\n");
+        let turns = parse_conversation(&jsonl);
+        assert_eq!(turns[0].at.as_deref(), Some("2026-09-13T10:00:00Z"));
+        assert_eq!(turns[0].ended_at.as_deref(), Some("2026-09-13T10:02:19Z"));
+        // a prompt with no reply yet has no end
+        assert_eq!(turns[1].ended_at, None);
+    }
+
+    #[test]
     fn parse_conversation_flags_a_tool_whose_result_was_an_error() {
         let jsonl = [
             line(serde_json::json!({"type":"user","message":{"content":"go"}})),
@@ -976,6 +1000,7 @@ mod tests {
         let t = |p: &str, n: usize| ConvTurn {
             prompt: Some(p.into()),
             at: None,
+            ended_at: None,
             items: vec![ConvItem::Text {
                 text: "x".repeat(n),
             }],
@@ -1016,6 +1041,7 @@ mod tests {
             turns: vec![ConvTurn {
                 prompt: None,
                 at: Some("2026-09-13T10:00:00Z".into()),
+                ended_at: None,
                 items: vec![
                     ConvItem::Text { text: "hi".into() },
                     ConvItem::Tool {
@@ -1028,7 +1054,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(&c).unwrap(),
-            serde_json::json!({"turns":[{"prompt":null,"at":"2026-09-13T10:00:00Z","items":[
+            serde_json::json!({"turns":[{"prompt":null,"at":"2026-09-13T10:00:00Z","ended_at":null,"items":[
                 {"kind":"text","text":"hi"},{"kind":"tool","summary":"Bash(command=ls)","error":false}]}],
                 "truncated":false})
         );
@@ -1039,6 +1065,7 @@ mod tests {
         let turn = ConvTurn {
             prompt: Some("p".repeat(10)),
             at: None,
+            ended_at: None,
             items: vec![
                 ConvItem::Text {
                     text: "a".repeat(10),
@@ -1088,6 +1115,7 @@ mod tests {
         let turn = ConvTurn {
             prompt: Some("q".into()),
             at: None,
+            ended_at: None,
             items: vec![ConvItem::Text {
                 text: format!("{}END", "x".repeat(100)),
             }],
@@ -1108,6 +1136,7 @@ mod tests {
         let older = ConvTurn {
             prompt: Some("old".into()),
             at: None,
+            ended_at: None,
             items: vec![ConvItem::Text {
                 text: "earlier".into(),
             }],
@@ -1115,6 +1144,7 @@ mod tests {
         let turn = ConvTurn {
             prompt: Some(format!("HEAD{}", "p".repeat(70_000))),
             at: None,
+            ended_at: None,
             items: vec![
                 ConvItem::Tool {
                     summary: "Bash(command=ls)".into(),
@@ -1145,6 +1175,7 @@ mod tests {
         let both = ConvTurn {
             prompt: Some(format!("HEAD{}", "p".repeat(100))),
             at: None,
+            ended_at: None,
             items: vec![ConvItem::Text {
                 text: format!("{}END", "x".repeat(100)),
             }],
@@ -1162,6 +1193,7 @@ mod tests {
         let tiny = ConvTurn {
             prompt: Some("long prompt".into()),
             at: None,
+            ended_at: None,
             items: vec![ConvItem::Text { text: "abc".into() }],
         };
         let c = trim_conversation(vec![tiny], 10, 1);

@@ -40,6 +40,7 @@ function conv(over: Partial<Conversation> = {}): Conversation {
       {
         prompt: 'fix the bug',
         at: '2026-09-13T10:00:00.000Z',
+        ended_at: null,
         items: [
           { kind: 'text', text: 'looking into it' },
           { kind: 'tool', summary: 'Bash(command=ls -la)' },
@@ -166,14 +167,14 @@ describe('ConversationPanel', () => {
     const { rerender } = render(ConversationPanel, { session: session({ id: 1 }), visible: true });
     await tick();
 
-    mockedConv.mockReturnValueOnce(ok(conv({ turns: [{ prompt: 'second session prompt', at: null, items: [{ kind: 'text', text: 'hi' }] }] })));
+    mockedConv.mockReturnValueOnce(ok(conv({ turns: [{ prompt: 'second session prompt', at: null, ended_at: null, items: [{ kind: 'text', text: 'hi' }] }] })));
     await rerender({ session: session({ id: 2 }), visible: true });
     await tick();
     await Promise.resolve();
     await tick();
 
     // Now let the stale first-session promise resolve; its content must never appear.
-    resolveFirst(ok(conv({ turns: [{ prompt: 'STALE first session prompt', at: null, items: [] }] })) as unknown as { ok: true; value: Conversation });
+    resolveFirst(ok(conv({ turns: [{ prompt: 'STALE first session prompt', at: null, ended_at: null, items: [] }] })) as unknown as { ok: true; value: Conversation });
     await Promise.resolve();
     await tick();
 
@@ -206,6 +207,7 @@ describe('ConversationPanel', () => {
         {
           prompt: 'fix the bug',
           at: start.toISOString(),
+          ended_at: null,
           items: [{ kind: 'text', text: 'looking into it' }],
         },
       ],
@@ -276,7 +278,7 @@ describe('ConversationPanel', () => {
     await tick();
     expect(mockedConv).toHaveBeenCalledTimes(3);
 
-    mockedConv.mockReturnValueOnce(ok(conv({ turns: [{ prompt: 'after retry', at: null, items: [] }] })));
+    mockedConv.mockReturnValueOnce(ok(conv({ turns: [{ prompt: 'after retry', at: null, ended_at: null, items: [] }] })));
     await fireEvent.click(screen.getByTestId('conv-retry'));
     await Promise.resolve();
     await tick();
@@ -301,8 +303,8 @@ describe('ConversationPanel', () => {
       ok(
         conv({
           turns: [
-            { prompt: null, at: '2026-09-13T10:00:00.000Z', items: [{ kind: 'text', text: 'resumed reply' }] },
-            { prompt: 'next ask', at: null, items: [{ kind: 'text', text: 'ok' }] },
+            { prompt: null, at: '2026-09-13T10:00:00.000Z', ended_at: null, items: [{ kind: 'text', text: 'resumed reply' }] },
+            { prompt: 'next ask', at: null, ended_at: null, items: [{ kind: 'text', text: 'ok' }] },
           ],
         }),
       ),
@@ -360,7 +362,7 @@ describe('ConversationPanel', () => {
   });
   it('renders reply text as markdown', async () => {
     mockedConv.mockReturnValue(
-      ok(conv({ turns: [{ prompt: 'q', at: null, items: [{ kind: 'text', text: '## Done\n\n- **one**\n- two' }] }] })),
+      ok(conv({ turns: [{ prompt: 'q', at: null, ended_at: null, items: [{ kind: 'text', text: '## Done\n\n- **one**\n- two' }] }] })),
     );
     const { container } = render(ConversationPanel, { session: session(), visible: true });
     await tick();
@@ -381,6 +383,7 @@ describe('ConversationPanel', () => {
             {
               prompt: 'q',
               at: null,
+              ended_at: null,
               items: [
                 { kind: 'tool', summary: 'Read(file_path=a)' },
                 { kind: 'tool', summary: 'Bash(command=ls)' },
@@ -409,7 +412,7 @@ describe('ConversationPanel', () => {
 
   it('clamps a long prompt with Show more / Show less', async () => {
     const long = Array.from({ length: 12 }, (_, k) => `line ${k}`).join('\n');
-    mockedConv.mockReturnValue(ok(conv({ turns: [{ prompt: long, at: null, items: [{ kind: 'text', text: 'ok' }] }] })));
+    mockedConv.mockReturnValue(ok(conv({ turns: [{ prompt: long, at: null, ended_at: null, items: [{ kind: 'text', text: 'ok' }] }] })));
     render(ConversationPanel, { session: session(), visible: true });
     await tick();
     await Promise.resolve();
@@ -536,7 +539,7 @@ describe('ConversationPanel composer', () => {
     expect(screen.getByTestId('conv-pending')).toBeTruthy();
 
     const caughtUp = conv();
-    caughtUp.turns.push({ prompt: 'hello', at: '2026-09-13T10:01:00.000Z', items: [{ kind: 'text', text: 'hi' }] });
+    caughtUp.turns.push({ prompt: 'hello', at: '2026-09-13T10:01:00.000Z', ended_at: null, items: [{ kind: 'text', text: 'hi' }] });
     mockedConv.mockReturnValue(ok(caughtUp));
     vi.advanceTimersByTime(CONVERSATION_POLL_MS);
     await settle();
@@ -784,7 +787,7 @@ describe('ConversationPanel live indicator', () => {
 
     // transcript carries the prompt: pending clears, the session is still working
     const caughtUp = conv();
-    caughtUp.turns.push({ prompt: 'hello', at: '2026-09-13T10:01:00.000Z', items: [] });
+    caughtUp.turns.push({ prompt: 'hello', at: '2026-09-13T10:01:00.000Z', ended_at: null, items: [] });
     mockedConv.mockReturnValue(ok(caughtUp));
     vi.advanceTimersByTime(CONVERSATION_POLL_MS);
     await settle();
@@ -822,10 +825,11 @@ describe('ConversationPanel tool outcomes', () => {
       ok(
         conv({
           turns: [
-            { prompt: 'p', at: null, items: [{ kind: 'tool', summary: 'Bash(cargo test)', error: true }] },
+            { prompt: 'p', at: null, ended_at: null, items: [{ kind: 'tool', summary: 'Bash(cargo test)', error: true }] },
             {
               prompt: 'q',
               at: null,
+              ended_at: null,
               items: [
                 { kind: 'tool', summary: 'Read(a)' },
                 { kind: 'tool', summary: 'Bash(b)', error: true },
@@ -843,5 +847,58 @@ describe('ConversationPanel tool outcomes', () => {
     expect(tools[1].getAttribute('data-error')).toBeNull();
     expect(tools[2].getAttribute('data-error')).toBe('true');
     expect(screen.getByTestId('conv-tools').querySelector('summary')?.textContent).toContain('1 failed');
+  });
+});
+
+describe('ConversationPanel turn duration and open tool group', () => {
+  it('shows how long a finished turn took, not for the turn still running', async () => {
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            { prompt: 'a', at: '2026-09-13T10:00:00Z', ended_at: '2026-09-13T10:02:14Z', items: [{ kind: 'text', text: 'done' }] },
+            { prompt: 'b', at: '2026-09-13T10:05:00Z', ended_at: '2026-09-13T10:05:30Z', items: [{ kind: 'text', text: 'still going' }] },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+    await settle();
+    const durations = screen.getAllByTestId('conv-duration');
+    expect(durations).toHaveLength(1);
+    expect(durations[0].textContent).toContain('2m 14s');
+  });
+
+  it('shows the duration on the last turn once the session is quiet', async () => {
+    mockedConv.mockReturnValue(
+      ok(conv({ turns: [{ prompt: 'a', at: '2026-09-13T10:00:00Z', ended_at: '2026-09-13T10:00:35Z', items: [{ kind: 'text', text: 'x' }] }] })),
+    );
+    render(ConversationPanel, { session: session({ claude_status: 'idle' }), visible: true });
+    await settle();
+    expect(screen.getByTestId('conv-duration').textContent).toContain('35s');
+  });
+
+  it("keeps the running turn's last tool group open, earlier groups folded", async () => {
+    const tools = (n: string) => [
+      { kind: 'tool' as const, summary: `${n}1()` },
+      { kind: 'tool' as const, summary: `${n}2()` },
+    ];
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            { prompt: 'a', at: null, ended_at: null, items: tools('A') },
+            { prompt: 'b', at: null, ended_at: null, items: [...tools('B'), { kind: 'text', text: 't' }, ...tools('C')] },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+    await settle();
+    const groups = screen.getAllByTestId('conv-tools') as HTMLDetailsElement[];
+    expect(groups).toHaveLength(3);
+    expect(groups[0].open).toBe(false);
+    expect(groups[1].open).toBe(false);
+    expect(groups[2].open).toBe(true);
   });
 });

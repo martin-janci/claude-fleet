@@ -20,6 +20,7 @@ import {
   SLASH_COMMANDS,
   isQuietStatus,
   shouldFetchTranscript,
+  turnDuration,
   spinnerLabel,
   indicatorFor,
   QUIET_POLL_MS,
@@ -39,6 +40,7 @@ function conv(over: Partial<Conversation> = {}): Conversation {
       {
         prompt: 'fix the bug',
         at: '2026-09-13T10:00:00Z',
+        ended_at: null,
         items: [{ kind: 'text', text: 'looking into it' }],
       },
     ],
@@ -166,15 +168,15 @@ describe('isLongPrompt', () => {
 describe('transcriptCarries', () => {
   it('is false until the transcript has more turns with the text than at send time', () => {
     const pending = { prompt: 'continue', at: '2026-09-13T10:00:00.000Z', seen: 1 };
-    const c = conv({ turns: [{ prompt: 'continue', at: null, items: [] }] });
+    const c = conv({ turns: [{ prompt: 'continue', at: null, ended_at: null, items: [] }] });
     expect(transcriptCarries(c, pending)).toBe(false);
-    c.turns.push({ prompt: 'continue', at: null, items: [] });
+    c.turns.push({ prompt: 'continue', at: null, ended_at: null, items: [] });
     expect(transcriptCarries(c, pending)).toBe(true);
   });
 
   it('ignores turns with a different prompt', () => {
     const pending = { prompt: 'run tests', at: '2026-09-13T10:00:00.000Z', seen: 0 };
-    expect(transcriptCarries(conv({ turns: [{ prompt: 'fix the bug', at: null, items: [] }] }), pending)).toBe(false);
+    expect(transcriptCarries(conv({ turns: [{ prompt: 'fix the bug', at: null, ended_at: null, items: [] }] }), pending)).toBe(false);
   });
 });
 
@@ -268,5 +270,17 @@ describe('indicatorFor', () => {
     expect(indicatorFor({ ...base, status: 'idle', pending: true })).toEqual({ kind: 'sent' });
     expect(indicatorFor({ ...base, status: 'idle', optimistic: true })).toEqual({ kind: 'working', label: 'Working…' });
     expect(indicatorFor({ ...base, status: 'idle' })).toBeNull();
+  });
+});
+
+describe('turnDuration', () => {
+  it('formats seconds, minutes and hours; null when an end is missing or under a second', () => {
+    expect(turnDuration('2026-09-13T10:00:00Z', '2026-09-13T10:00:35Z')).toBe('35s');
+    expect(turnDuration('2026-09-13T10:00:00Z', '2026-09-13T10:02:14Z')).toBe('2m 14s');
+    expect(turnDuration('2026-09-13T10:00:00Z', '2026-09-13T11:05:00Z')).toBe('1h 5m');
+    expect(turnDuration('2026-09-13T10:00:00Z', '2026-09-13T10:00:00.400Z')).toBeNull();
+    expect(turnDuration('2026-09-13T10:00:00Z', null)).toBeNull();
+    expect(turnDuration(null, '2026-09-13T10:00:00Z')).toBeNull();
+    expect(turnDuration('garbage', '2026-09-13T10:00:00Z')).toBeNull();
   });
 });

@@ -7,6 +7,8 @@ export type ConvItem = { kind: 'text'; text: string } | { kind: 'tool'; summary:
 export interface ConvTurn {
   prompt: string | null;
   at: string | null;
+  /** When the reply last advanced; null for a prompt with no reply yet. */
+  ended_at: string | null;
   items: ConvItem[];
 }
 
@@ -252,4 +254,18 @@ export function indicatorFor(a: {
   if (a.pending) return { kind: 'sent' };
   if (a.optimistic) return { kind: 'working', label: 'Working…' };
   return null;
+}
+
+/** `2m 14s` / `35s` between a turn's prompt and its latest reply entry;
+ *  null when either end is missing, unparsable, or under a second. */
+export function turnDuration(at: string | null, endedAt: string | null): string | null {
+  if (!at || !endedAt) return null;
+  const ms = new Date(endedAt).getTime() - new Date(at).getTime();
+  if (!Number.isFinite(ms) || ms < 1000) return null;
+  const secs = Math.round(ms / 1000);
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ${secs % 60}s`;
+  const hours = Math.floor(mins / 60);
+  return `${hours}h ${mins % 60}m`;
 }
