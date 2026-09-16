@@ -1015,3 +1015,33 @@ describe('ConversationPanel load older', () => {
     expect(screen.queryByTestId('conv-load-older')).toBeNull();
   });
 });
+
+describe('ConversationPanel context meter', () => {
+  it('shows the context meter and suggests Compact from the warn threshold', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    const { rerender } = render(ConversationPanel, { session: session({ context_pct: 42 }), visible: true });
+    await settle();
+    const meter = screen.getByTestId('conv-ctx');
+    expect(meter.textContent).toContain('42%');
+    expect(meter.getAttribute('data-level')).toBe('ok');
+    const compact = screen.getAllByTestId('conv-chip').find((c) => c.textContent?.trim() === 'Compact')!;
+    expect(compact.getAttribute('data-suggested')).toBeNull();
+
+    await rerender({ session: session({ context_pct: 83 }), visible: true });
+    await settle();
+    expect(screen.getByTestId('conv-ctx').getAttribute('data-level')).toBe('warn');
+    const suggested = screen.getAllByTestId('conv-chip').find((c) => c.textContent?.trim() === 'Compact')!;
+    expect(suggested.getAttribute('data-suggested')).toBe('true');
+    expect(suggested.getAttribute('title')).toContain('83%');
+    // other chips are never suggested
+    const clear = screen.getAllByTestId('conv-chip').find((c) => c.textContent?.trim() === 'Clear')!;
+    expect(clear.getAttribute('data-suggested')).toBeNull();
+  });
+
+  it('no meter when the context usage is unknown', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session({ context_pct: null }), visible: true });
+    await settle();
+    expect(screen.queryByTestId('conv-ctx')).toBeNull();
+  });
+});
