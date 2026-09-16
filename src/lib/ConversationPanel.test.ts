@@ -1,6 +1,7 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
+import { get } from 'svelte/store';
 
 vi.mock('./conversation', async () => {
   const actual = await vi.importActual<typeof import('./conversation')>('./conversation');
@@ -15,6 +16,7 @@ import ConversationPanel from './ConversationPanel.svelte';
 import { sendPrompt, type SessionRow } from './sessions';
 import { composerPresets, resetComposerPresets } from './composer_presets';
 import { composerDrafts } from './conversation';
+import { openPathRequest } from './app_views';
 
 const mockedConv = sessionConversation as unknown as ReturnType<typeof vi.fn>;
 const mockedSend = sendPrompt as unknown as ReturnType<typeof vi.fn>;
@@ -1297,5 +1299,20 @@ describe('ConversationPanel prompt recall', () => {
     await settle();
     expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'second');
     expect(box.value).toBe('');
+  });
+});
+
+describe('ConversationPanel file paths', () => {
+  it('a path in reply text is a button that asks Files to open it for this session', async () => {
+    openPathRequest.set(null);
+    mockedConv.mockReturnValue(
+      ok(conv({ turns: [{ prompt: 'q', at: null, ended_at: null, items: [{ kind: 'text', text: 'Edited `src/lib/foo.ts:42` and docs/x.md, see https://a.b/c.ts' }] }] })),
+    );
+    render(ConversationPanel, { session: session({ id: 9 }), visible: true });
+    await settle();
+    const paths = screen.getAllByTestId('md-path');
+    expect(paths.map((p) => p.textContent)).toEqual(['src/lib/foo.ts:42', 'docs/x.md']);
+    await fireEvent.click(paths[0]);
+    expect(get(openPathRequest)).toEqual({ sessionId: 9, path: 'src/lib/foo.ts', line: 42 });
   });
 });
