@@ -1,16 +1,16 @@
-//! Async wrappers around the `claude` CLI for background sessions and log peeking.
+//! Async wrappers around the `claude` CLI for background sessions.
 //!
 //! IMPORTANT: `claude` is invoked via `bash -lc` even locally so the user's
 //! PATH (which includes ~/.local/bin where claude lives) is honoured.
 
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::validate;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Timeout for `claude logs` and `claude project purge` (fast local operations).
+/// Timeout for `claude stop` and `claude project purge` (fast local operations).
 const CLAUDE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Timeout for `claude --bg` (involves Anthropic API handshake + session setup).
@@ -42,7 +42,7 @@ pub fn parse_session_id_from_bg_output(output: &str) -> Option<String> {
         }
     }
     // Last resort: a bare UUID anywhere in the output.
-    static UUID_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+    static UUID_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(
             r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
         )
@@ -56,10 +56,10 @@ pub fn parse_session_id_from_bg_output(output: &str) -> Option<String> {
 // Every `claude` invocation is assembled here from validated parts. Positional
 // arguments are preceded by `--` wherever the CLI accepts it (the top-level
 // `[prompt]` and `project purge [path]`), so a value that starts with `-` can
-// never be parsed as an option. `claude logs <id>` / `claude stop <id>` reject
-// `--` with "unknown option" (verified against Claude Code 2.1.x), so those
-// two rely on `validate::claude_session_id` — a strict lowercase-UUID shape —
-// instead. Pure functions so the argv shape is unit-testable.
+// never be parsed as an option. `claude stop <id>` rejects `--` with "unknown
+// option" (verified against Claude Code 2.1.x), so it relies on a strict shape
+// check instead: `claude_agents::is_job_id` (lowercase-hex short job id).
+// Pure functions so the argv shape is unit-testable.
 
 /// `claude --bg --name <name> -- <prompt>`.
 ///
@@ -76,16 +76,18 @@ pub fn bg_script(name: &str, prompt: &str) -> Result<String, IpcError> {
     ))
 }
 
-/// `claude logs <session_id>` (no `--`: the subcommand rejects it).
-pub fn logs_script(session_id: &str) -> Result<String, IpcError> {
-    validate::claude_session_id(session_id)?;
-    Ok(format!("claude logs {}", quote(session_id)))
-}
-
-/// `claude stop <session_id>` (no `--`: the subcommand rejects it).
-pub fn stop_script(session_id: &str) -> Result<String, IpcError> {
-    validate::claude_session_id(session_id)?;
-    Ok(format!("claude stop {}", quote(session_id)))
+/// `claude stop <job_id>` — the short background job id (`44366faf`) that
+/// `claude agents --json` reports, not the full session UUID. No `--`: the
+/// subcommand rejects it, so the id is held to [`is_job_id`]'s lowercase-hex
+/// shape (it must start with a hex digit, so it can never look like an
+/// option) before it is quoted.
+///
+/// [`is_job_id`]: crate::claude_agents::is_job_id
+pub fn stop_script(job_id: &str) -> Result<String, IpcError> {
+    if !crate::claude_agents::is_job_id(job_id) {
+        return Err(IpcError::new(codes::E_INVALID, "invalid background job id"));
+    }
+    Ok(format!("claude stop {}", quote(job_id)))
 }
 
 /// Marker prefixing every machine-readable line the purge script prints, so a
@@ -122,7 +124,7 @@ pub fn purge_script(project_path: &str) -> Result<String, IpcError> {
     // have no business in a project path.
     if project_path.chars().any(|c| c.is_control()) {
         return Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "project_path must not contain control characters",
         ));
     }
@@ -196,7 +198,7 @@ pub fn parse_purge_output(
     }
     if report.purged.is_empty() && report.not_found.is_empty() {
         return Err(IpcError::new(
-            "E_CLAUDE_CLI",
+            codes::E_CLAUDE_CLI,
             format!("claude project purge on {host_alias} reported no result"),
         ));
     }
@@ -216,46 +218,25 @@ pub async fn claude_bg(
     Ok(parse_session_id_from_bg_output(&output))
 }
 
-/// `claude logs <id>` only knows about background *jobs*. For an interactive
-/// session (which has a resumable `claude_session_id` but no background job),
-/// it fails with "No job matching '<id>'…". Detect that so `claude_logs` can
-/// degrade to a friendly message instead of surfacing it as an error.
+/// `claude stop <id>` only knows about running background *jobs*; for a job
+/// that already exited it fails with "No job matching '<id>'…". Detect that
+/// so `claude_stop` can treat it as nothing-left-to-stop.
 fn is_no_running_job(stderr: &str) -> bool {
     stderr.contains("No job matching")
 }
 
-/// Message shown when peeking a session that isn't a background job.
-const NO_BG_LOGS_MSG: &str =
-    "No background logs — this is an interactive session. Resume it by opening the session.";
-
-/// Run `claude logs <session_id>` on `host_alias`. Interactive sessions have a
-/// resumable id but no background job, so a "No job matching" failure is
-/// reported as an informational message rather than an error.
-pub async fn claude_logs(
-    ssh: &Arc<SshClient>,
-    host_alias: &str,
-    session_id: &str,
-) -> Result<String, IpcError> {
-    let script = logs_script(session_id)?;
-    match run_claude_script(ssh, host_alias, &script, CLAUDE_TIMEOUT).await {
-        Ok(out) => Ok(out),
-        Err(e) if is_no_running_job(&e.message) => Ok(NO_BG_LOGS_MSG.to_string()),
-        Err(e) => Err(e),
-    }
-}
-
-/// Run `claude stop <session_id>` on `host_alias` to stop a background
-/// (`claude --bg`) session. Idempotent: a "no job matching" response — the
-/// session already exited or was stopped elsewhere — is success, so callers
-/// can use this to clear a stale fleet row without racing the agent's own
-/// exit. Returns `true` when a live job was actually stopped, `false` when
-/// there was nothing left to stop.
+/// Run `claude stop <job_id>` on `host_alias` to stop a background
+/// (`claude --bg`) job, addressed by its short job id (see [`stop_script`]).
+/// Idempotent: a "no job matching" response — the job already exited or was
+/// stopped elsewhere — is success, so callers can use this to clear a stale
+/// fleet row without racing the agent's own exit. Returns `true` when a live
+/// job was actually stopped, `false` when there was nothing left to stop.
 pub async fn claude_stop(
     ssh: &Arc<SshClient>,
     host_alias: &str,
-    session_id: &str,
+    job_id: &str,
 ) -> Result<bool, IpcError> {
-    let script = stop_script(session_id)?;
+    let script = stop_script(job_id)?;
     match run_claude_script(ssh, host_alias, &script, CLAUDE_TIMEOUT).await {
         Ok(_) => Ok(true),
         Err(e) if is_no_running_job(&e.message) => Ok(false),
@@ -287,57 +268,26 @@ async fn run_claude_script(
     timeout: Duration,
 ) -> Result<String, IpcError> {
     validate::host_alias(host_alias)?;
-    if host_alias == "local" {
-        let output = tokio::time::timeout(
-            timeout,
-            tokio::process::Command::new("bash")
-                .args(["-lc", script])
-                .output(),
-        )
-        .await
-        .map_err(|_| {
-            IpcError::new(
-                "E_TIMEOUT",
-                format!("claude CLI timed out after {:.0}s", timeout.as_secs_f64()),
-            )
-        })?
-        .map_err(|e| IpcError::new("E_SPAWN", format!("spawn bash: {e}")))?;
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(IpcError::new(
-                "E_CLAUDE_CLI",
-                format!(
-                    "claude CLI failed (exit {}): {}",
-                    output.status.code().unwrap_or(-1),
-                    stderr.trim()
-                ),
-            ))
-        }
-    } else {
-        // Remote: wrap the script in `bash -lc '<script>'` so the remote
-        // login env (PATH, etc.) is sourced — mirrors the RemoteTmux pattern.
-        // The outer `quote()` ensures the whole script crosses the SSH boundary
-        // as a single shell word.
-        let quoted_script = quote(script);
-        let output = ssh
-            .run(host_alias, &["bash", "-lc", &quoted_script], timeout)
-            .await?;
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(IpcError::new(
-                "E_CLAUDE_CLI",
-                format!(
-                    "claude CLI failed on {host_alias} (exit {}): {}",
-                    output.status.code().unwrap_or(-1),
-                    stderr.trim()
-                ),
-            ))
-        }
+    // `bash -lc` on both sides so the login env (PATH, etc.) is sourced —
+    // mirrors the RemoteTmux pattern.
+    let output = crate::ssh::run_shell(ssh.as_ref(), host_alias, script, timeout).await?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let on_host = if host_alias == "local" {
+        String::new()
+    } else {
+        format!(" on {host_alias}")
+    };
+    Err(IpcError::new(
+        codes::E_CLAUDE_CLI,
+        format!(
+            "claude CLI failed{on_host} (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            stderr.trim()
+        ),
+    ))
 }
 
 #[cfg(test)]
@@ -406,8 +356,6 @@ mod tests {
 
     // ─── script builders ─────────────────────────────────────────────────
 
-    const UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
-
     #[test]
     fn bg_script_places_end_of_options_before_prompt() {
         let s = bg_script("review-1", "Summarise the diff").unwrap();
@@ -448,20 +396,15 @@ mod tests {
     }
 
     #[test]
-    fn logs_and_stop_scripts_require_uuid_and_skip_double_dash() {
-        assert_eq!(logs_script(UUID).unwrap(), format!("claude logs '{UUID}'"));
-        assert_eq!(stop_script(UUID).unwrap(), format!("claude stop '{UUID}'"));
-        // `claude logs -- <id>` is rejected by the CLI, so no `--` here…
-        assert!(!logs_script(UUID).unwrap().contains(" -- "));
-        // …and an option-shaped or non-UUID id is refused up front instead.
+    fn stop_script_takes_the_short_job_id_without_double_dash() {
+        let s = stop_script("44366faf").unwrap();
+        assert!(s.starts_with("claude stop "), "{s}");
+        assert!(s.contains("44366faf"), "{s}");
+        assert!(!s.contains(" -- "), "{s}");
+        // A shell-hostile or option-shaped value is refused before quoting.
         for bad in [
-            "--foo",
-            "-h",
-            "abc-123",
-            "",
-            "550E8400-E29B-41D4-A716-446655440000",
+            "'; rm", "--foo", "-h", "", "4436", "44366FAF", "job 1234", "-0abcdef", "--------",
         ] {
-            assert_eq!(logs_script(bad).unwrap_err().code, "E_INVALID", "{bad:?}");
             assert_eq!(stop_script(bad).unwrap_err().code, "E_INVALID", "{bad:?}");
         }
     }

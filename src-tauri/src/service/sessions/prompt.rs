@@ -2,6 +2,8 @@
 //! outcome and timeline events, and capturing pane output.
 
 use super::*;
+use crate::ipc_error::codes;
+use crate::ipc_error::lock;
 
 /// Build the tmux invocations that together send a prompt to a session:
 ///   1. send-keys -t <name> -l <body>   (literal, no key-name translation;
@@ -28,6 +30,12 @@ pub fn build_send_commands(tmux_name: &str, prompt: &str, submit: bool) -> Vec<S
 
 pub(super) fn default_submit() -> bool {
     true
+}
+
+/// PURE: whether a sent body counts as a prompt worth recording (anything
+/// but whitespace).
+pub fn is_prompt(body: &str) -> bool {
+    !body.trim().is_empty()
 }
 
 #[derive(Deserialize)]
@@ -58,7 +66,7 @@ pub(super) async fn send_prompt_inner(
             .args(["-c", &script])
             .output()
             .await
-            .map_err(|e| IpcError::new("E_TMUX", format!("spawn bash: {e}")))?
+            .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn bash: {e}")))?
     } else {
         ssh.run(
             host_alias,
@@ -69,23 +77,28 @@ pub(super) async fn send_prompt_inner(
     };
     if !out.status.success() {
         return Err(IpcError::new(
-            "E_TMUX",
+            codes::E_TMUX,
             String::from_utf8_lossy(&out.stderr).trim().to_string(),
         ));
     }
     // Task G: record the prompt on the session's timeline (detail truncated to
     // ~120 chars). Append-only + best-effort: never fail the send on this.
-    record_session_event(store, host_alias, tmux_name, "prompt_sent", {
-        // What was DELIVERED keeps the untrusted marker; what fleet records
-        // does not (D8 / Q2). The marker line alone is ~77 chars, so without
-        // this the 120-char detail is almost entirely marker.
-        let truncated: String = crate::mcp::guard::strip_marker(prompt)
-            .chars()
-            .take(120)
-            .collect();
-        Some(truncated)
-    });
-    record_prompt_outcome(store, host_alias, tmux_name, prompt);
+    // A bare Enter (empty body: the Conversation tab's "Press Enter" chip
+    // for a stuck session) is a key press, not a prompt: nothing to record,
+    // and it must not blank the row's last_prompt.
+    if is_prompt(prompt) {
+        record_session_event(store, host_alias, tmux_name, "prompt_sent", {
+            // What was DELIVERED keeps the untrusted marker; what fleet records
+            // does not (D8 / Q2). The marker line alone is ~77 chars, so without
+            // this the 120-char detail is almost entirely marker.
+            let truncated: String = crate::mcp::guard::strip_marker(prompt)
+                .chars()
+                .take(120)
+                .collect();
+            Some(truncated)
+        });
+        record_prompt_outcome(store, host_alias, tmux_name, prompt);
+    }
     Ok(())
 }
 
@@ -327,7 +340,7 @@ pub async fn broadcast_prompt(
     // Snapshot sessions + resolve the controller while holding the guard, then
     // drop it before any `.await` (never hold the mutex across await).
     let (sessions, controller) = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let sessions = s.list_all_sessions().map_err(|e| {
             IpcError::new(codes::E_SQLITE, format!("list sessions for broadcast: {e}"))
         })?;
@@ -392,10 +405,23 @@ pub async fn capture_session_output(
     ssh: &Arc<SshClient>,
     scrollback_lines: Option<u32>,
 ) -> Result<String, IpcError> {
-    let (host, name) = crate::commands::repo::session_target(store, session_id)?;
+    let (host, name) = crate::service::repo::session_target(store, session_id)?;
     let tmux = exec_for(&host, ssh);
     match scrollback_lines {
         Some(n) => tmux.capture_pane_scrollback(&name, n).await,
         None => tmux.capture_pane(&name).await,
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    #[test]
+    fn a_bare_enter_is_not_a_prompt() {
+        assert!(!is_prompt(""));
+        assert!(!is_prompt("  \n"));
+        assert!(is_prompt("/clear"));
+        assert!(is_prompt("fix it"));
     }
 }

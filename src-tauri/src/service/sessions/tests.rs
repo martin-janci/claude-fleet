@@ -1,4 +1,6 @@
 use super::*;
+use crate::ipc_error::codes;
+use crate::service::repair::MIRROR_REFUSED;
 use crate::store::Store;
 
 #[test]
@@ -24,16 +26,109 @@ fn known_agent_status_keeps_vocabulary_and_drops_the_rest() {
     assert_eq!(known_agent_status("dev", None), None);
 }
 
+fn job_agent(session_id: &str, job_id: Option<&str>) -> crate::claude_agents::ClaudeAgentRow {
+    crate::claude_agents::ClaudeAgentRow {
+        session_id: Some(session_id.into()),
+        name: Some("n".into()),
+        status: Some("working".into()),
+        cwd: Some("/w".into()),
+        kind: crate::claude_agents::AgentKind::Background,
+        job_id: job_id.map(Into::into),
+        started_at: None,
+    }
+}
+
 #[test]
-fn bg_claude_session_id_prefers_row_id_falls_back_to_name() {
-    // Stored claude_session_id wins…
+fn bg_stop_target_refuses_an_external_row() {
+    // Even when the agent is listed with a job id: fleet never stops a
+    // session that runs outside it.
+    let agents = vec![job_agent("sid-1", Some("44366faf"))];
+    let err = bg_stop_target("external", &agents, "sid-1").unwrap_err();
+    assert_eq!(err.code, "E_INVALID_STATE");
     assert_eq!(
-        bg_claude_session_id("bg:aaa-111", Some("bbb-222")),
-        "bbb-222"
+        err.message,
+        "this Claude session runs outside fleet; close it where it runs"
     );
-    // …a missing or blank one falls back to the uuid in the tmux_name.
-    assert_eq!(bg_claude_session_id("bg:aaa-111", None), "aaa-111");
-    assert_eq!(bg_claude_session_id("bg:aaa-111", Some("  ")), "aaa-111");
+}
+
+#[test]
+fn bg_stop_target_absent_agent_is_already_gone() {
+    let agents = vec![job_agent("other", Some("44366faf"))];
+    assert_eq!(bg_stop_target("bg", &agents, "sid-1").unwrap(), None);
+    assert_eq!(bg_stop_target("bg", &[], "sid-1").unwrap(), None);
+}
+
+#[test]
+fn bg_stop_target_returns_the_listed_job_id() {
+    let agents = vec![
+        job_agent("other", Some("aaaaaaaa")),
+        job_agent("sid-1", Some("44366faf")),
+    ];
+    assert_eq!(
+        bg_stop_target("bg", &agents, "sid-1").unwrap().as_deref(),
+        Some("44366faf")
+    );
+}
+
+#[test]
+fn bg_stop_target_present_without_job_id_suggests_remove_from_list() {
+    let agents = vec![job_agent("sid-1", None)];
+    let err = bg_stop_target("bg", &agents, "sid-1").unwrap_err();
+    assert_eq!(err.code, "E_INVALID_STATE");
+    assert!(err.message.contains("Remove from list"), "{}", err.message);
+}
+
+#[test]
+fn bg_kill_action_stopped_bg_row_is_dismissed_without_claude_stop() {
+    // An inactive agent (dead daemon): even when it is still listed with a
+    // job id, `claude stop` is skipped and the row is removed from the list.
+    let agents = vec![job_agent("sid-1", Some("44366faf"))];
+    assert_eq!(
+        bg_kill_action("bg", Some("stopped"), &agents, "sid-1").unwrap(),
+        BgKillAction::Dismiss
+    );
+    assert_eq!(
+        bg_kill_action("bg", Some("stopped"), &[], "sid-1").unwrap(),
+        BgKillAction::Dismiss
+    );
+}
+
+#[test]
+fn bg_kill_action_live_bg_row_with_job_is_stopped() {
+    let agents = vec![job_agent("sid-1", Some("44366faf"))];
+    for status in [Some("working"), Some("blocked"), Some("idle"), None] {
+        assert_eq!(
+            bg_kill_action("bg", status, &agents, "sid-1").unwrap(),
+            BgKillAction::Stop("44366faf".into()),
+            "{status:?}"
+        );
+    }
+}
+
+#[test]
+fn bg_kill_action_live_bg_row_absent_from_listing_does_nothing() {
+    assert_eq!(
+        bg_kill_action("bg", Some("blocked"), &[], "sid-1").unwrap(),
+        BgKillAction::Nothing
+    );
+}
+
+#[test]
+fn bg_kill_action_refuses_external_rows_whatever_their_status() {
+    let agents = vec![job_agent("sid-1", Some("44366faf"))];
+    for status in [Some("stopped"), Some("working"), None] {
+        let err = bg_kill_action("external", status, &agents, "sid-1").unwrap_err();
+        assert_eq!(err.code, "E_INVALID_STATE");
+        assert_eq!(err.message, EXTERNAL_STOP_REFUSED);
+    }
+}
+
+#[test]
+fn bg_kill_needs_agent_listing_only_for_live_bg_rows() {
+    assert!(bg_kill_needs_listing("bg", Some("blocked")));
+    assert!(bg_kill_needs_listing("bg", None));
+    assert!(!bg_kill_needs_listing("bg", Some("stopped")));
+    assert!(!bg_kill_needs_listing("external", Some("working")));
 }
 
 /// Build a `SessionRow` with sensible defaults for selector tests.
@@ -229,7 +324,24 @@ fn agent(
         name: name.map(Into::into),
         status: Some("working".into()),
         cwd: cwd.map(Into::into),
+        kind: crate::claude_agents::AgentKind::Background,
+        job_id: None,
+        started_at: None,
     }
+}
+
+#[test]
+fn inactive_rule() {
+    let now = 1_000_000;
+    let old = now - AGENT_INACTIVE_SECS - 1;
+    assert!(agent_is_inactive(Some("blocked"), Some(old), now));
+    assert!(agent_is_inactive(None, Some(old), now));
+    assert!(!agent_is_inactive(Some("working"), Some(old), now));
+    assert!(!agent_is_inactive(Some("blocked"), Some(now - 10), now));
+    assert!(
+        !agent_is_inactive(Some("blocked"), None, now),
+        "unknown time = active"
+    );
 }
 
 #[test]
@@ -266,18 +378,30 @@ fn unmatched_bg_agents_skips_agents_without_session_id() {
         name: Some("ghosty".into()),
         status: None,
         cwd: None,
+        kind: crate::claude_agents::AgentKind::Background,
+        job_id: None,
+        started_at: None,
     }];
     assert!(unmatched_bg_agents(&[], &agents, true).is_empty());
 }
 
 #[test]
-fn reconcile_bg_agents_upserts_bg_session_row() {
+fn reconcile_agent_rows_upserts_bg_session_row() {
     // Feed agent rows + an EMPTY tmux list → expect a `bg` SessionRow.
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("local").unwrap();
     let agents = vec![agent("bg-uuid-1", Some("my-bg-job"), Some("/tmp/proj"))];
 
-    reconcile_bg_agents(&s, "local", &[], &[], &agents).unwrap();
+    reconcile_agent_rows(
+        &s,
+        "local",
+        &[],
+        &[],
+        &agents,
+        Some(&no_mtimes()),
+        now_unix(),
+    )
+    .unwrap();
 
     let rows = s.list_sessions_for_host("local").unwrap();
     let bg = rows
@@ -291,14 +415,23 @@ fn reconcile_bg_agents_upserts_bg_session_row() {
 }
 
 #[test]
-fn reconcile_bg_agents_prunes_vanished_agents_two_phase() {
+fn reconcile_agent_rows_prunes_vanished_agents_two_phase() {
     // A bg agent that disappears from `claude agents --json` is ghosted on
     // the next reconcile pass and hard-deleted (events included) on the one
     // after — so dead bg rows cannot accumulate.
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("local").unwrap();
     let agents = vec![agent("bg-uuid-1", Some("my-bg-job"), Some("/tmp/proj"))];
-    reconcile_bg_agents(&s, "local", &[], &[], &agents).unwrap();
+    reconcile_agent_rows(
+        &s,
+        "local",
+        &[],
+        &[],
+        &agents,
+        Some(&no_mtimes()),
+        now_unix(),
+    )
+    .unwrap();
     let id = s
         .get_session("bg:bg-uuid-1", "local")
         .unwrap()
@@ -306,7 +439,7 @@ fn reconcile_bg_agents_prunes_vanished_agents_two_phase() {
         .id;
 
     // Pass 2: agent gone (empty listing) → ghosted, still present.
-    reconcile_bg_agents(&s, "local", &[], &[], &[]).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &[], Some(&no_mtimes()), now_unix()).unwrap();
     let row = s
         .get_session("bg:bg-uuid-1", "local")
         .unwrap()
@@ -315,7 +448,7 @@ fn reconcile_bg_agents_prunes_vanished_agents_two_phase() {
     assert!(row.lost_at.is_some());
 
     // Pass 3: still gone → hard-deleted.
-    reconcile_bg_agents(&s, "local", &[], &[], &[]).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &[], Some(&no_mtimes()), now_unix()).unwrap();
     assert!(
         s.get_session("bg:bg-uuid-1", "local").unwrap().is_none(),
         "dead bg row must be reaped on the second missing pass"
@@ -324,15 +457,33 @@ fn reconcile_bg_agents_prunes_vanished_agents_two_phase() {
 }
 
 #[test]
-fn reconcile_bg_agents_resurrects_ghost_when_agent_returns() {
+fn reconcile_agent_rows_resurrects_ghost_when_agent_returns() {
     // A single missing pass (e.g. a transiently failed `claude agents`
     // probe, which comes back as an empty list) must not lose the row.
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("local").unwrap();
     let agents = vec![agent("bg-uuid-1", Some("my-bg-job"), Some("/tmp/proj"))];
-    reconcile_bg_agents(&s, "local", &[], &[], &agents).unwrap();
-    reconcile_bg_agents(&s, "local", &[], &[], &[]).unwrap(); // ghosts it
-    reconcile_bg_agents(&s, "local", &[], &[], &agents).unwrap(); // returns
+    reconcile_agent_rows(
+        &s,
+        "local",
+        &[],
+        &[],
+        &agents,
+        Some(&no_mtimes()),
+        now_unix(),
+    )
+    .unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &[], Some(&no_mtimes()), now_unix()).unwrap(); // ghosts it
+    reconcile_agent_rows(
+        &s,
+        "local",
+        &[],
+        &[],
+        &agents,
+        Some(&no_mtimes()),
+        now_unix(),
+    )
+    .unwrap(); // returns
 
     let row = s
         .get_session("bg:bg-uuid-1", "local")
@@ -342,25 +493,42 @@ fn reconcile_bg_agents_resurrects_ghost_when_agent_returns() {
     assert_eq!(row.lost_at, None);
 
     // And it is NOT deleted on the next pass with the agent still live.
-    reconcile_bg_agents(&s, "local", &[], &[], &agents).unwrap();
+    reconcile_agent_rows(
+        &s,
+        "local",
+        &[],
+        &[],
+        &agents,
+        Some(&no_mtimes()),
+        now_unix(),
+    )
+    .unwrap();
     assert!(s.get_session("bg:bg-uuid-1", "local").unwrap().is_some());
 }
 
 #[test]
-fn reconcile_bg_agents_cleanup_spares_other_hosts_and_tmux_rows() {
+fn reconcile_agent_rows_cleanup_spares_other_hosts_and_tmux_rows() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("local").unwrap();
     s.upsert_host("remote").unwrap();
     // A bg row on ANOTHER host and a normal tmux row on this host.
-    s.upsert_bg_session("remote", "bg:other", None, "other", Some("working"), 1)
-        .unwrap();
+    s.upsert_bg_session(
+        "remote",
+        "bg:other",
+        None,
+        "other",
+        Some("working"),
+        1,
+        "bg",
+    )
+    .unwrap();
     s.upsert_session("work-a", "local", None, None, 1, 1, "running", None)
         .unwrap();
 
     // Two empty-agent passes on `local` — enough to ghost + delete any
     // bg row this cleanup wrongly considered.
-    reconcile_bg_agents(&s, "local", &[], &[], &[]).unwrap();
-    reconcile_bg_agents(&s, "local", &[], &[], &[]).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &[], Some(&no_mtimes()), now_unix()).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &[], Some(&no_mtimes()), now_unix()).unwrap();
 
     let work = s.get_session("work-a", "local").unwrap().expect("tmux row");
     assert_eq!(work.status, "running", "tmux rows are not the bg pruner's");
@@ -369,6 +537,455 @@ fn reconcile_bg_agents_cleanup_spares_other_hosts_and_tmux_rows() {
         .unwrap()
         .expect("other host's bg row");
     assert_eq!(other.status, "running");
+}
+
+fn no_mtimes() -> std::collections::HashMap<String, i64> {
+    std::collections::HashMap::new()
+}
+
+const INTERACTIVE_ID: &str = "5f0c7a2e-1b9d-4c33-9a57-0d6f2b1e8c41";
+const BG_ID: &str = "0b8e2f41-9d3c-4a7e-b1f0-6c5d4e3a2b19";
+
+/// One `claude agents --json` row, parsed the way reconcile receives it.
+fn agent_json(
+    kind: &str,
+    session_id: &str,
+    status_fields: &str,
+    started_at_ms: Option<i64>,
+) -> crate::claude_agents::ClaudeAgentRow {
+    let started = started_at_ms
+        .map(|ms| format!(r#","startedAt":{ms}"#))
+        .unwrap_or_default();
+    let json = format!(
+        r#"[{{"id":"d89375a1","cwd":"/tmp/nowhere","kind":"{kind}","sessionId":"{session_id}","name":"n-{kind}"{started},{status_fields}}}]"#
+    );
+    let mut rows = crate::claude_agents::parse_claude_agents_json(&json);
+    assert_eq!(rows.len(), 1, "fixture must parse: {json}");
+    rows.remove(0)
+}
+
+fn local_store() -> Store {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    s
+}
+
+#[test]
+fn interactive_agents_land_as_external_and_background_as_bg() {
+    let s = local_store();
+    let now = 2_000_000_000;
+    let agents = vec![
+        agent_json("interactive", INTERACTIVE_ID, r#""status":"busy""#, None),
+        agent_json("background", BG_ID, r#""state":"working""#, None),
+    ];
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), now).unwrap();
+
+    let ext = s
+        .get_session(&format!("bg:{INTERACTIVE_ID}"), "local")
+        .unwrap()
+        .expect("interactive agent row");
+    assert_eq!(ext.kind, "external");
+    assert_eq!(ext.claude_session_id.as_deref(), Some(INTERACTIVE_ID));
+    assert_eq!(ext.status, "running");
+    let bg = s
+        .get_session(&format!("bg:{BG_ID}"), "local")
+        .unwrap()
+        .expect("background agent row");
+    assert_eq!(bg.kind, "bg");
+    assert_eq!(bg.claude_status.as_deref(), Some("working"));
+}
+
+#[test]
+fn misfiled_bg_row_flips_to_external() {
+    // Rows stored by the old reconcile as `bg` flip on the first new pass.
+    let s = local_store();
+    let tmux_name = format!("bg:{INTERACTIVE_ID}");
+    s.upsert_bg_session(
+        "local",
+        &tmux_name,
+        None,
+        INTERACTIVE_ID,
+        Some("idle"),
+        1,
+        "bg",
+    )
+    .unwrap();
+    let agents = vec![agent_json(
+        "interactive",
+        INTERACTIVE_ID,
+        r#""status":"idle""#,
+        None,
+    )];
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), 100).unwrap();
+    assert_eq!(
+        s.get_session(&tmux_name, "local").unwrap().unwrap().kind,
+        "external"
+    );
+}
+
+#[test]
+fn idle_background_agent_is_stored_stopped() {
+    let s = local_store();
+    let now = 2_000_000_000;
+    let agents = vec![agent_json(
+        "background",
+        BG_ID,
+        r#""state":"blocked""#,
+        None,
+    )];
+    let mtimes = std::collections::HashMap::from([(BG_ID.to_string(), now - 2 * 86_400)]);
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&mtimes), now).unwrap();
+    let row = s
+        .get_session(&format!("bg:{BG_ID}"), "local")
+        .unwrap()
+        .expect("row");
+    assert_eq!(row.kind, "bg");
+    assert_eq!(row.claude_status.as_deref(), Some("stopped"));
+
+    // A recent transcript keeps the CLI's status.
+    let s = local_store();
+    let fresh = std::collections::HashMap::from([(BG_ID.to_string(), now - 60)]);
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&fresh), now).unwrap();
+    let row = s
+        .get_session(&format!("bg:{BG_ID}"), "local")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.claude_status.as_deref(), Some("blocked"));
+}
+
+#[test]
+fn idle_interactive_agent_is_never_stopped() {
+    // The inactive rule is for bg agents only; external rows keep the CLI's
+    // status (they leave the list when their process ends).
+    let s = local_store();
+    let now = 2_000_000_000;
+    let agents = vec![agent_json(
+        "interactive",
+        INTERACTIVE_ID,
+        r#""status":"idle""#,
+        Some((now - 5 * 86_400) * 1000),
+    )];
+    let mtimes = std::collections::HashMap::from([(INTERACTIVE_ID.to_string(), now - 5 * 86_400)]);
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&mtimes), now).unwrap();
+    let row = s
+        .get_session(&format!("bg:{INTERACTIVE_ID}"), "local")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.kind, "external");
+    assert_eq!(row.claude_status.as_deref(), Some("idle"));
+}
+
+#[test]
+fn working_background_agent_is_never_stopped() {
+    let s = local_store();
+    let now = 2_000_000_000;
+    let agents = vec![agent_json(
+        "background",
+        BG_ID,
+        r#""state":"working""#,
+        Some((now - 10 * 86_400) * 1000),
+    )];
+    let mtimes = std::collections::HashMap::from([(BG_ID.to_string(), now - 10 * 86_400)]);
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&mtimes), now).unwrap();
+    let row = s
+        .get_session(&format!("bg:{BG_ID}"), "local")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.claude_status.as_deref(), Some("working"));
+}
+
+#[test]
+fn started_at_stands_in_when_no_transcript() {
+    let s = local_store();
+    let now = 2_000_000_000;
+    let agents = vec![agent_json(
+        "background",
+        BG_ID,
+        r#""state":"blocked""#,
+        Some((now - 2 * 86_400) * 1000),
+    )];
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), now).unwrap();
+    let row = s
+        .get_session(&format!("bg:{BG_ID}"), "local")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.claude_status.as_deref(), Some("stopped"));
+
+    // Neither a transcript nor a start time: never guessed dead.
+    let s = local_store();
+    let agents = vec![agent_json(
+        "background",
+        BG_ID,
+        r#""state":"blocked""#,
+        None,
+    )];
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), now).unwrap();
+    let row = s
+        .get_session(&format!("bg:{BG_ID}"), "local")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.claude_status.as_deref(), Some("blocked"));
+}
+
+#[test]
+fn transcript_mtime_wins_over_started_at() {
+    // Started long ago but the transcript moved recently → active.
+    let s = local_store();
+    let now = 2_000_000_000;
+    let agents = vec![agent_json(
+        "background",
+        BG_ID,
+        r#""state":"blocked""#,
+        Some((now - 30 * 86_400) * 1000),
+    )];
+    let mtimes = std::collections::HashMap::from([(BG_ID.to_string(), now - 3_600)]);
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&mtimes), now).unwrap();
+    let row = s
+        .get_session(&format!("bg:{BG_ID}"), "local")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.claude_status.as_deref(), Some("blocked"));
+}
+
+#[test]
+fn dismissed_agent_is_skipped_until_newer_activity() {
+    let s = local_store();
+    let tmux_name = format!("bg:{BG_ID}");
+    let agents = vec![agent_json(
+        "background",
+        BG_ID,
+        r#""state":"blocked""#,
+        None,
+    )];
+    s.dismiss_agent("local", BG_ID, 100).unwrap();
+
+    // Activity older than the dismissal → skipped, no row, dismissal kept.
+    let old = std::collections::HashMap::from([(BG_ID.to_string(), 90)]);
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&old), 200).unwrap();
+    assert!(s.get_session(&tmux_name, "local").unwrap().is_none());
+    assert_eq!(s.dismissed_agents("local").unwrap().get(BG_ID), Some(&100));
+
+    // Activity exactly at the dismissal → still dismissed.
+    let same = std::collections::HashMap::from([(BG_ID.to_string(), 100)]);
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&same), 200).unwrap();
+    assert!(s.get_session(&tmux_name, "local").unwrap().is_none());
+    assert!(s.dismissed_agents("local").unwrap().contains_key(BG_ID));
+
+    // Newer activity → row reappears and the dismissal is cleared.
+    let newer = std::collections::HashMap::from([(BG_ID.to_string(), 150)]);
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&newer), 200).unwrap();
+    let row = s
+        .get_session(&tmux_name, "local")
+        .unwrap()
+        .expect("reappears after newer activity");
+    assert_eq!(row.kind, "bg");
+    assert!(s.dismissed_agents("local").unwrap().is_empty());
+}
+
+#[test]
+fn dismissed_agent_without_known_time_stays_dismissed() {
+    let s = local_store();
+    let agents = vec![agent_json(
+        "background",
+        BG_ID,
+        r#""state":"blocked""#,
+        None,
+    )];
+    s.dismiss_agent("local", BG_ID, 100).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), 200).unwrap();
+    assert!(s
+        .get_session(&format!("bg:{BG_ID}"), "local")
+        .unwrap()
+        .is_none());
+    assert!(s.dismissed_agents("local").unwrap().contains_key(BG_ID));
+}
+
+#[test]
+fn dismissal_on_another_host_does_not_hide_the_agent() {
+    let s = local_store();
+    s.upsert_host("remote").unwrap();
+    s.dismiss_agent("remote", BG_ID, 100).unwrap();
+    let agents = vec![agent_json(
+        "background",
+        BG_ID,
+        r#""state":"blocked""#,
+        None,
+    )];
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), 200).unwrap();
+    assert!(s
+        .get_session(&format!("bg:{BG_ID}"), "local")
+        .unwrap()
+        .is_some());
+}
+
+/// Executor returning fixed agents and recording every `transcript_mtimes`
+/// call, for the probe's "one host call only when a bg agent exists" rule.
+struct AgentsTmux {
+    agents: Vec<crate::claude_agents::ClaudeAgentRow>,
+    mtime_calls: Arc<Mutex<Vec<Vec<String>>>>,
+    /// Simulate a failed mtime call (spawn error / non-zero exit / timeout).
+    mtimes_fail: bool,
+}
+
+#[async_trait::async_trait]
+impl TmuxExec for AgentsTmux {
+    async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+        Ok(Vec::new())
+    }
+    async fn new_session(&self, _n: &str, _c: &std::path::Path, _p: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn kill_session(&self, _n: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn rename_session(&self, _o: &str, _n: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn restart_session(&self, _n: &str, _p: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn capture_pane(&self, _n: &str) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
+        self.agents.clone()
+    }
+    async fn transcript_mtimes(
+        &self,
+        ids: &[String],
+    ) -> Option<std::collections::HashMap<String, i64>> {
+        self.mtime_calls.lock().unwrap().push(ids.to_vec());
+        if self.mtimes_fail {
+            return None;
+        }
+        Some(ids.iter().map(|id| (id.clone(), 42)).collect())
+    }
+}
+
+fn host_row(alias: &str) -> HostRow {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host(alias).unwrap();
+    s.list_hosts()
+        .unwrap()
+        .into_iter()
+        .find(|h| h.alias == alias)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn probe_reads_transcript_mtimes_for_background_agents_only() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let tmux = AgentsTmux {
+        agents: vec![
+            agent_json("interactive", INTERACTIVE_ID, r#""status":"busy""#, None),
+            agent_json("background", BG_ID, r#""state":"blocked""#, None),
+        ],
+        mtime_calls: Arc::clone(&calls),
+        mtimes_fail: false,
+    };
+    let probe = probe_with_timeout(
+        host_row("h"),
+        Box::new(tmux),
+        std::time::Duration::from_secs(5),
+        None,
+    )
+    .await;
+    assert_eq!(*calls.lock().unwrap(), vec![vec![BG_ID.to_string()]]);
+    let mtimes = probe.agent_mtimes.expect("successful mtime call");
+    assert_eq!(mtimes.get(BG_ID), Some(&42));
+    assert_eq!(mtimes.len(), 1);
+
+    // Only interactive agents → no extra host call at all.
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let tmux = AgentsTmux {
+        agents: vec![agent_json(
+            "interactive",
+            INTERACTIVE_ID,
+            r#""status":"busy""#,
+            None,
+        )],
+        mtime_calls: Arc::clone(&calls),
+        mtimes_fail: false,
+    };
+    let probe = probe_with_timeout(
+        host_row("h"),
+        Box::new(tmux),
+        std::time::Duration::from_secs(5),
+        None,
+    )
+    .await;
+    assert!(calls.lock().unwrap().is_empty());
+    assert_eq!(probe.agent_mtimes, Some(std::collections::HashMap::new()));
+}
+
+#[tokio::test]
+async fn probe_reports_a_failed_mtime_call_as_none() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let tmux = AgentsTmux {
+        agents: vec![agent_json(
+            "background",
+            BG_ID,
+            r#""state":"blocked""#,
+            None,
+        )],
+        mtime_calls: Arc::clone(&calls),
+        mtimes_fail: true,
+    };
+    let probe = probe_with_timeout(
+        host_row("h"),
+        Box::new(tmux),
+        std::time::Duration::from_secs(5),
+        None,
+    )
+    .await;
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(probe.agent_mtimes, None);
+}
+
+#[test]
+fn failed_mtime_call_keeps_an_old_blocked_bg_agent_blocked() {
+    // Spec §2: a failed transcript probe leaves agents active. With the
+    // mtimes unknown, a long-lived blocked agent's old `started_at` must not
+    // flip it to `stopped` for this pass.
+    let s = local_store();
+    let now = 2_000_000_000;
+    let agents = vec![agent_json(
+        "background",
+        BG_ID,
+        r#""state":"blocked""#,
+        Some((now - 5 * 86_400) * 1000),
+    )];
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, None, now).unwrap();
+    let row = s
+        .get_session(&format!("bg:{BG_ID}"), "local")
+        .unwrap()
+        .expect("row");
+    assert_eq!(row.claude_status.as_deref(), Some("blocked"));
+}
+
+#[test]
+fn failed_mtime_call_keeps_dismissals_in_force() {
+    // The agent started after the dismissal, which on a good pass would
+    // revive it; with the mtimes unknown the dismissal stands.
+    let s = local_store();
+    let tmux_name = format!("bg:{BG_ID}");
+    let agents = vec![agent_json(
+        "background",
+        BG_ID,
+        r#""state":"blocked""#,
+        Some(150 * 1000),
+    )];
+    s.dismiss_agent("local", BG_ID, 100).unwrap();
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, None, 200).unwrap();
+    assert!(s.get_session(&tmux_name, "local").unwrap().is_none());
+    assert_eq!(s.dismissed_agents("local").unwrap().get(BG_ID), Some(&100));
+
+    // A good pass with the same evidence revives it (control).
+    reconcile_agent_rows(&s, "local", &[], &[], &agents, Some(&no_mtimes()), 200).unwrap();
+    assert!(s.get_session(&tmux_name, "local").unwrap().is_some());
 }
 
 #[test]
@@ -468,6 +1085,8 @@ fn upsert_session_preserves_account_uuid_when_passed_existing_value() {
         organization_uuid: None,
         seat_tier: None,
         last_seen_at: None,
+        nickname: None,
+        has_extra_usage: false,
     })
     .unwrap();
     // First reconcile captures host's account
@@ -482,6 +1101,8 @@ fn upsert_session_preserves_account_uuid_when_passed_existing_value() {
         organization_uuid: None,
         seat_tier: None,
         last_seen_at: None,
+        nickname: None,
+        has_extra_usage: false,
     })
     .unwrap();
     // Second reconcile: caller reads existing account before upsert
@@ -821,6 +1442,228 @@ async fn fleet_reconcile_completes_when_one_host_never_answers() {
 }
 
 #[tokio::test]
+async fn reconcile_links_the_local_account_when_it_becomes_known() {
+    // The bug: `local` is auto-created by `reconcile_sessions_with`'s
+    // `Store::upsert_host("local")` with no probe attached, so a fleet that
+    // has been reconciling for a long time (the `local` row exists,
+    // `reachable`, freshly `last_pinged_at`) can still have never once
+    // discovered which Claude account is logged in locally — the account
+    // only ever got linked through the separate, manually-triggered
+    // `service::hosts::probe_host` ("Re-probe" in Settings). This test
+    // drives the REAL automatic path (`reconcile_sessions_with`, exactly
+    // what the background tick and app startup call) with a temp
+    // `$HOME`-like directory standing in for `~/.claude.json`, and asserts
+    // the account ends up linked without anything else being asked to
+    // probe it.
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".claude.json"),
+        r#"{"oauthAccount":{"accountUuid":"796436ed-fd1f-436d-bc15-ad1a81f78a71","emailAddress":"mj.janci@gmail.com","seatTier":null}}"#,
+    )
+    .unwrap();
+    let deps = ReconcileDeps::fake_with_local_home(
+        |_alias| {
+            Box::new(ScriptedTmux {
+                sessions: Vec::new(),
+                delay: std::time::Duration::from_millis(0),
+                hang: false,
+                probes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            })
+        },
+        std::time::Duration::from_secs(5),
+        dir.path().to_path_buf(),
+    );
+
+    // Note: `local` does not exist in the store yet — `reconcile_sessions_with`
+    // creates it via `upsert_host`, exactly as it does on every real pass.
+    reconcile_sessions_with(&store, &deps)
+        .await
+        .expect("reconcile completes");
+
+    let s = store.lock().unwrap();
+    let local = s
+        .list_hosts()
+        .unwrap()
+        .into_iter()
+        .find(|h| h.alias == "local")
+        .expect("local host row exists after reconcile");
+    assert_eq!(
+        local.account_uuid.as_deref(),
+        Some("796436ed-fd1f-436d-bc15-ad1a81f78a71"),
+        "reconcile must link the logged-in local account automatically, \
+         without requiring a manual Re-probe click"
+    );
+    let accounts = s.list_accounts().unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].email.as_deref(), Some("mj.janci@gmail.com"));
+}
+
+/// `ScriptedTmux` plus a scripted `read_oauth_account` answer, standing in
+/// for a REMOTE host whose `~/.claude.json` is read over ssh every pass.
+struct AccountTmux {
+    inner: ScriptedTmux,
+    account: Option<crate::service::hosts::OauthAccount>,
+}
+
+#[async_trait::async_trait]
+impl TmuxExec for AccountTmux {
+    async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+        self.inner.list_sessions().await
+    }
+    async fn new_session(&self, _n: &str, _c: &std::path::Path, _p: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn kill_session(&self, _n: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn rename_session(&self, _o: &str, _n: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn restart_session(&self, _n: &str, _p: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn capture_pane(&self, _n: &str) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
+        vec![]
+    }
+    async fn read_oauth_account(&self) -> Option<crate::service::hosts::OauthAccount> {
+        self.account.clone()
+    }
+}
+
+fn oauth_account(uuid: &str, email: &str) -> crate::service::hosts::OauthAccount {
+    crate::service::hosts::OauthAccount {
+        uuid: Some(uuid.to_string()),
+        email: Some(email.to_string()),
+        ..Default::default()
+    }
+}
+
+/// Deps whose remote host `h` lists `sessions` and reports `account`;
+/// `local` (and any other alias) lists nothing and reports no account.
+fn remote_account_deps(
+    sessions: Vec<crate::tmux::TmuxSession>,
+    account: Option<crate::service::hosts::OauthAccount>,
+) -> Arc<ReconcileDeps> {
+    ReconcileDeps::fake(
+        move |alias| {
+            let is_h = alias == "h";
+            Box::new(AccountTmux {
+                inner: ScriptedTmux {
+                    sessions: if is_h { sessions.clone() } else { Vec::new() },
+                    delay: std::time::Duration::from_millis(0),
+                    hang: false,
+                    probes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                },
+                account: if is_h { account.clone() } else { None },
+            })
+        },
+        std::time::Duration::from_secs(5),
+    )
+}
+
+fn host_account(store: &Mutex<Store>, alias: &str) -> Option<String> {
+    store
+        .lock()
+        .unwrap()
+        .list_hosts()
+        .unwrap()
+        .into_iter()
+        .find(|h| h.alias == alias)
+        .expect("host row exists")
+        .account_uuid
+}
+
+#[tokio::test]
+async fn reconcile_relinks_a_remote_host_after_an_account_switch() {
+    // The bug: a remote host's account was captured ONCE by `add_host` and
+    // then only ever refreshed by the manual "Re-probe" click. The user
+    // ran `claude /login` as someone else on the host and the Hosts view
+    // kept showing the account they had left. Every pass now re-reads the
+    // host's `~/.claude.json` over ssh (`TmuxExec::read_oauth_account`)
+    // and relinks on a different uuid.
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("h").unwrap();
+
+    // Pass 1: logged in as acc-1, one session running.
+    let deps = remote_account_deps(
+        vec![tmux_session("old")],
+        Some(oauth_account("acc-1", "one@x.com")),
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert_eq!(host_account(&store, "h").as_deref(), Some("acc-1"));
+
+    // Pass 2: the user re-logged in as acc-2; a second session appeared.
+    let deps = remote_account_deps(
+        vec![tmux_session("old"), tmux_session("fresh")],
+        Some(oauth_account("acc-2", "two@x.com")),
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+
+    assert_eq!(
+        host_account(&store, "h").as_deref(),
+        Some("acc-2"),
+        "a different uuid in the host's ~/.claude.json must relink it without a Re-probe"
+    );
+    let s = store.lock().unwrap();
+    let accounts = s.list_accounts().unwrap();
+    assert!(
+        accounts
+            .iter()
+            .any(|a| a.uuid == "acc-2" && a.email.as_deref() == Some("two@x.com")),
+        "the new account row is upserted from the probe"
+    );
+    // Session attribution: the pre-existing session keeps the account it
+    // was started under (preservation invariant); the session first seen
+    // in the SAME pass as the switch is attributed to the NEW account, not
+    // the link snapshotted before the probe.
+    assert_eq!(
+        s.get_session_account("h", "old").unwrap().as_deref(),
+        Some("acc-1")
+    );
+    assert_eq!(
+        s.get_session_account("h", "fresh").unwrap().as_deref(),
+        Some("acc-2")
+    );
+}
+
+#[tokio::test]
+async fn reconcile_keeps_the_remote_link_when_the_account_read_yields_nothing() {
+    // A failed read (ssh hiccup, mid-rewrite ~/.claude.json) or a logout
+    // must not flap the link off — same rule as `sync_local_account`.
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("h").unwrap();
+    let deps = remote_account_deps(Vec::new(), Some(oauth_account("acc-1", "one@x.com")));
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert_eq!(host_account(&store, "h").as_deref(), Some("acc-1"));
+
+    let deps = remote_account_deps(vec![tmux_session("fresh")], None);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+
+    assert_eq!(
+        host_account(&store, "h").as_deref(),
+        Some("acc-1"),
+        "no readable account ⇒ the stored link is left untouched"
+    );
+    // ...and sessions found meanwhile still attribute to that stored link.
+    assert_eq!(
+        store
+            .lock()
+            .unwrap()
+            .get_session_account("h", "fresh")
+            .unwrap()
+            .as_deref(),
+        Some("acc-1")
+    );
+}
+
+#[tokio::test]
 async fn concurrent_list_sessions_share_one_reconcile_pass() {
     // BE-2: two callers racing into `list_sessions` (UI focus + MCP tool,
     // say) must cause ONE fleet probe; the loser is served the stored
@@ -942,7 +1785,9 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         host: host.clone(),
         result: Ok(Vec::new()),
         agent_rows: Vec::new(),
+        agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
+        account: None,
         pr_info: PrInfoMap::new(),
         started_at: now_unix(),
     };
@@ -986,7 +1831,9 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         host,
         result: Ok(Vec::new()),
         agent_rows: Vec::new(),
+        agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
+        account: None,
         pr_info: PrInfoMap::new(),
         started_at: now_unix() + 5,
     };
@@ -1038,6 +1885,8 @@ fn upsert_session_captures_new_account_for_fresh_row() {
         organization_uuid: None,
         seat_tier: None,
         last_seen_at: None,
+        nickname: None,
+        has_extra_usage: false,
     })
     .unwrap();
     // Brand new session — no existing row
@@ -1556,7 +2405,9 @@ fn reconcile_linking(
             path: PathBuf::from(cwd),
         }]),
         agent_rows: Vec::new(),
+        agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
+        account: None,
         pr_info: PrInfoMap::new(),
         started_at: now_unix(),
     };
@@ -1778,6 +2629,9 @@ fn reconcile_writes_claude_session_id_when_name_matches() {
         name: Some("my-session".into()),
         status: Some("working".into()),
         cwd: None,
+        kind: crate::claude_agents::AgentKind::Background,
+        job_id: None,
+        started_at: None,
     }];
     let hit = crate::claude_agents::find_by_name(&agent_rows, "my-session");
     assert_eq!(hit.unwrap().session_id.as_deref(), Some("abc123"));
@@ -2383,4 +3237,352 @@ async fn reconcile_survives_a_failing_pr_probe_shell() {
     let a = s.get_session("dev-a", "local").unwrap().unwrap();
     assert_eq!(a.status, "running");
     assert_eq!(a.pr_url, None);
+}
+
+// ── ensure_remote_project: mirroring an existing worktree ─────────────────
+
+#[test]
+fn ensure_remote_project_script_clones_only_without_a_worktree() {
+    let script = ensure_remote_project_script(
+        "/home/u/projects/github.com/o/r",
+        "git@github.com:o/r.git",
+        None,
+    );
+    assert!(script.starts_with("set -e\n"), "{script}");
+    assert!(
+        script.contains(
+            "if [ ! -d '/home/u/projects/github.com/o/r'/.git ]; then mkdir -p \"$(dirname -- '/home/u/projects/github.com/o/r')\" && git clone 'git@github.com:o/r.git' '/home/u/projects/github.com/o/r'; fi"
+        ),
+        "guarded clone: {script}"
+    );
+    assert!(!script.contains("worktree add"), "{script}");
+}
+
+#[test]
+fn ensure_remote_project_script_main_is_the_clone_itself() {
+    let main_wt = RemoteWorktree {
+        name: "main",
+        branch: None,
+        path: "/r",
+    };
+    let script = ensure_remote_project_script("/r", "git@github.com:o/r.git", Some(&main_wt));
+    assert!(!script.contains("worktree add"), "{script}");
+    let main_wt_named = RemoteWorktree {
+        name: "main",
+        branch: Some("main"),
+        path: "/r",
+    };
+    assert_eq!(mirrored_branch(Some(&main_wt_named)), None);
+    assert_eq!(mirrored_branch(None), None);
+    let wt = RemoteWorktree {
+        name: "wt",
+        branch: None,
+        path: "/r/.claude/worktrees/wt",
+    };
+    assert_eq!(mirrored_branch(Some(&wt)), Some("wt"));
+    let wt_branch = RemoteWorktree {
+        name: "wt",
+        branch: Some("feature/x"),
+        path: "/r/.claude/worktrees/wt",
+    };
+    assert_eq!(mirrored_branch(Some(&wt_branch)), Some("feature/x"));
+}
+
+#[test]
+fn ensure_remote_project_script_mirrors_the_worktree_from_origin() {
+    let wt = RemoteWorktree {
+        name: "nifty-swanson",
+        branch: Some("feature/elated-shtern"),
+        path: "/re po/.claude/worktrees/nifty-swanson",
+    };
+    let script = ensure_remote_project_script("/re po", "git@github.com:o/r.git", Some(&wt));
+    // Guarded on the worktree directory, quoted.
+    assert!(
+        script.contains("if [ ! -d '/re po/.claude/worktrees/nifty-swanson' ]; then\n"),
+        "{script}"
+    );
+    // The repair module's Mirror add, not a naive `git worktree add <path> <branch>`.
+    assert!(script.contains("b='feature/elated-shtern'\n"), "{script}");
+    assert!(
+        script.contains("show-ref --verify --quiet \"refs/heads/$b\""),
+        "local branch first: {script}"
+    );
+    assert!(
+        script.contains("ls-remote --exit-code --heads -- origin \"refs/heads/$b\""),
+        "asks origin: {script}"
+    );
+    assert!(
+        script.contains("fetch -- origin \"+refs/heads/$b:refs/remotes/origin/$b\""),
+        "fetches before checkout: {script}"
+    );
+    assert!(
+        script.contains(
+            "worktree add --track -b \"$b\" -- '/re po/.claude/worktrees/nifty-swanson' \"origin/$b\""
+        ),
+        "tracks origin: {script}"
+    );
+    assert!(
+        script.contains(MIRROR_REFUSED),
+        "refuses when origin lacks it: {script}"
+    );
+    assert!(
+        !script.contains(" -b \"$b\" -- '/re po/.claude/worktrees/nifty-swanson' \"$start\""),
+        "never forks a new branch from the base: {script}"
+    );
+    // The name is the branch when the row has none.
+    let wt_by_name = RemoteWorktree {
+        name: "wt",
+        branch: None,
+        path: "/r/.claude/worktrees/wt",
+    };
+    let by_name = ensure_remote_project_script("/r", "u", Some(&wt_by_name));
+    assert!(by_name.contains("b='wt'\n"), "{by_name}");
+}
+
+#[test]
+fn git_setup_error_explains_a_branch_that_is_not_on_origin() {
+    let e = git_setup_error(
+        "mefistos",
+        "o",
+        "r",
+        Some("feature/x"),
+        "",
+        &format!("repair: branch feature/x {MIRROR_REFUSED}\n"),
+    );
+    assert_eq!(e.code, codes::E_GIT_SETUP);
+    assert_eq!(
+        e.message,
+        "branch feature/x is not on origin; push it from the source machine, or start a new worktree on mefistos"
+    );
+    // Any other failure keeps git's stderr (stdout when stderr is empty).
+    let raw = git_setup_error(
+        "mefistos",
+        "o",
+        "r",
+        Some("feature/x"),
+        "",
+        "fatal: invalid reference: feature/x\n",
+    );
+    assert_eq!(raw.code, codes::E_GIT_SETUP);
+    assert_eq!(
+        raw.message,
+        "couldn't ensure o/r on mefistos: fatal: invalid reference: feature/x"
+    );
+    let out = git_setup_error("h", "o", "r", None, "only stdout\n", "  ");
+    assert_eq!(out.message, "couldn't ensure o/r on h: only stdout");
+    // The marker without a mirrored branch (no worktree) is not rewritten.
+    let no_wt = git_setup_error("h", "o", "r", None, "", MIRROR_REFUSED);
+    assert!(
+        no_wt.message.starts_with("couldn't ensure o/r on h: "),
+        "{}",
+        no_wt.message
+    );
+}
+
+#[tokio::test]
+async fn ensure_remote_project_maps_a_refused_mirror_to_a_push_hint() {
+    use crate::ssh_fake::{FakeSsh, Match, Reply};
+    let fake = FakeSsh::new();
+    fake.on_host(
+        "mefistos",
+        Match::script_contains("worktree add"),
+        Reply::fail(
+            1,
+            &format!("repair: branch feature/elated-shtern {MIRROR_REFUSED}\n"),
+        ),
+    );
+    let wt = RemoteWorktree {
+        name: "nifty-swanson",
+        branch: Some("feature/elated-shtern"),
+        path: "/home/u/projects/github.com/FrantisekSefcik/sales-twins-app/.claude/worktrees/nifty-swanson",
+    };
+    let err = ensure_remote_project(
+        &fake,
+        "mefistos",
+        "FrantisekSefcik",
+        "sales-twins-app",
+        "/home/u/projects/github.com/FrantisekSefcik/sales-twins-app",
+        Some(&wt),
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("refused mirror must fail");
+    assert_eq!(err.code, codes::E_GIT_SETUP);
+    assert_eq!(
+        err.message,
+        "branch feature/elated-shtern is not on origin; push it from the source machine, or start a new worktree on mefistos"
+    );
+    // One `bash -lc '<script>'` call carrying the origin-aware add.
+    let calls = fake.calls_for("mefistos");
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    let script = calls[0].script().expect("bash -lc script");
+    assert!(
+        script.contains("ls-remote --exit-code --heads -- origin"),
+        "{script}"
+    );
+    assert!(
+        script.contains("git clone 'git@github.com:FrantisekSefcik/sales-twins-app.git'"),
+        "{script}"
+    );
+}
+
+#[tokio::test]
+async fn ensure_remote_project_keeps_other_git_failures_verbatim() {
+    use crate::ssh_fake::{FakeSsh, Match, Reply};
+    let fake = FakeSsh::new();
+    fake.on_host(
+        "mefistos",
+        Match::Any,
+        Reply::fail(128, "fatal: could not read from remote repository\n"),
+    );
+    let wt = RemoteWorktree {
+        name: "wt",
+        branch: Some("feature/x"),
+        path: "/home/u/projects/github.com/o/r/.claude/worktrees/wt",
+    };
+    let err = ensure_remote_project(
+        &fake,
+        "mefistos",
+        "o",
+        "r",
+        "/home/u/projects/github.com/o/r",
+        Some(&wt),
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("git failure");
+    assert_eq!(err.code, codes::E_GIT_SETUP);
+    assert_eq!(
+        err.message,
+        "couldn't ensure o/r on mefistos: fatal: could not read from remote repository"
+    );
+    // And success is silent.
+    let ok = FakeSsh::new();
+    ensure_remote_project(
+        &ok,
+        "mefistos",
+        "o",
+        "r",
+        "/home/u/projects/github.com/o/r",
+        Some(&wt),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("default reply is exit 0");
+}
+
+/// Runs the real mirror script against local git repos: a bare `origin`, a
+/// `source` clone that pushes one branch and keeps another local-only, and a
+/// `remote` clone standing in for the other host.
+#[tokio::test]
+async fn ensure_remote_project_script_mirrors_pushed_branches_and_refuses_unpushed_ones() {
+    use std::process::Command;
+    fn git(args: &[&str]) {
+        let out = Command::new("git").args(args).output().expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let base = std::env::temp_dir().join(format!(
+        "cf-mirror-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&base).expect("create base");
+    let origin = base.join("origin.git");
+    let source = base.join("source");
+    let remote = base.join("remote");
+    let (origin_s, source_s, remote_s) = (
+        origin.to_str().unwrap(),
+        source.to_str().unwrap(),
+        remote.to_str().unwrap(),
+    );
+    git(&["init", "--bare", "-b", "main", origin_s]);
+    git(&["init", "-b", "main", source_s]);
+    git(&["-C", source_s, "config", "user.email", "t@t"]);
+    git(&["-C", source_s, "config", "user.name", "T"]);
+    std::fs::write(source.join("README.md"), "hello").unwrap();
+    git(&["-C", source_s, "add", "."]);
+    git(&["-C", source_s, "commit", "-m", "init"]);
+    git(&["-C", source_s, "remote", "add", "origin", origin_s]);
+    git(&["-C", source_s, "push", "-u", "origin", "main"]);
+    // The "remote host" clones before either feature branch exists, so its
+    // `origin/*` refs are stale — exactly the case the fetch is for.
+    git(&["clone", origin_s, remote_s]);
+    git(&["-C", source_s, "checkout", "-b", "feature/pushed"]);
+    std::fs::write(source.join("pushed.txt"), "p").unwrap();
+    git(&["-C", source_s, "add", "."]);
+    git(&["-C", source_s, "commit", "-m", "pushed"]);
+    git(&["-C", source_s, "push", "-u", "origin", "feature/pushed"]);
+    git(&["-C", source_s, "checkout", "-b", "feature/local-only"]);
+
+    let run = |name: &str, branch: &str| {
+        let path = format!("{remote_s}/.claude/worktrees/{name}");
+        let wt = RemoteWorktree {
+            name,
+            branch: Some(branch),
+            path: &path,
+        };
+        let script = ensure_remote_project_script(remote_s, origin_s, Some(&wt));
+        Command::new("bash")
+            .args(["-lc", &script])
+            .output()
+            .expect("bash")
+    };
+    // Pushed: fetched fresh and checked out tracking origin.
+    let out = run("wt-pushed", "feature/pushed");
+    assert!(
+        out.status.success(),
+        "mirror of a pushed branch: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("outcome=branch_remote"));
+    let wt = remote.join(".claude/worktrees/wt-pushed");
+    assert!(
+        wt.join("pushed.txt").is_file(),
+        "checked out at the pushed commit"
+    );
+    let head = Command::new("git")
+        .args([
+            "-C",
+            wt.to_str().unwrap(),
+            "rev-parse",
+            "--abbrev-ref",
+            "HEAD",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&head.stdout).trim(),
+        "feature/pushed"
+    );
+    // Idempotent: the directory exists, nothing runs.
+    let again = run("wt-pushed", "feature/pushed");
+    assert!(
+        again.status.success(),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&again.stdout).contains("outcome="));
+    // Never pushed: refused with the marker, no directory, no branch.
+    let out = run("wt-local", "feature/local-only");
+    assert!(!out.status.success(), "unpushed branch must be refused");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(MIRROR_REFUSED), "{stderr}");
+    assert!(!remote.join(".claude/worktrees/wt-local").exists());
+    let branches = Command::new("git")
+        .args(["-C", remote_s, "branch", "--list", "feature/local-only"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&branches.stdout).trim(), "");
+    assert_eq!(
+        git_setup_error("h", "o", "r", Some("feature/local-only"), "", &stderr).message,
+        "branch feature/local-only is not on origin; push it from the source machine, or start a new worktree on h"
+    );
+    std::fs::remove_dir_all(&base).ok();
 }

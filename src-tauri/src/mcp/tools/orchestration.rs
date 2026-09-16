@@ -1,6 +1,7 @@
 //! MCP tools: bounded waits, transcripts, run_prompt and tasks.
 
 use super::*;
+use crate::ipc_error::lock;
 
 #[tool_router(router = orchestration_router, vis = "pub(super)")]
 impl FleetTools {
@@ -207,10 +208,7 @@ impl FleetTools {
         };
         // Create the task row and link the worker to its requester.
         let task = {
-            let s = self
-                .store
-                .lock()
-                .map_err(|_| to_mcp_err(IpcError::lock()))?;
+            let s = lock(&self.store).map_err(to_mcp_err)?;
             let task = tasks::create_task(&s, p.requester_session_id, Some(worker.id), &p.prompt)
                 .map_err(to_mcp_err)?;
             if p.requester_session_id.is_some() {
@@ -237,10 +235,7 @@ impl FleetTools {
             }
         }
         let started = {
-            let s = self
-                .store
-                .lock()
-                .map_err(|_| to_mcp_err(IpcError::lock()))?;
+            let s = lock(&self.store).map_err(to_mcp_err)?;
             tasks::start_task(&s, &task).map_err(to_mcp_err)?
         };
         ok_json(&started)
@@ -267,10 +262,7 @@ impl FleetTools {
             .await
             .map_err(to_mcp_err)?;
         let row = {
-            let s = self
-                .store
-                .lock()
-                .map_err(|_| to_mcp_err(IpcError::lock()))?;
+            let s = lock(&self.store).map_err(to_mcp_err)?;
             tasks::mark_task_result(&s, out.row)
         };
         ok_json(&serde_json::json!({
@@ -304,10 +296,7 @@ impl FleetTools {
         )
         .map_err(to_mcp_err)?;
         let rows: Vec<crate::store::TaskRow> = {
-            let s = self
-                .store
-                .lock()
-                .map_err(|_| to_mcp_err(IpcError::lock()))?;
+            let s = lock(&self.store).map_err(to_mcp_err)?;
             rows.into_iter()
                 .map(|t| tasks::mark_task_result(&s, t))
                 .collect()
@@ -333,10 +322,7 @@ impl FleetTools {
             &format!("task_id={} worker={:?}", task.id, task.worker_session_id),
             &caller,
         )?;
-        let s = self
-            .store
-            .lock()
-            .map_err(|_| to_mcp_err(IpcError::lock()))?;
+        let s = lock(&self.store).map_err(to_mcp_err)?;
         let row = tasks::cancel_task(&s, task.id, &format!("cancelled by {}", caller.label()))
             .map_err(to_mcp_err)?;
         ok_json(&row)
@@ -367,10 +353,7 @@ impl FleetTools {
             "the session to tag",
         )?;
         let tags = normalize_tags(p.tags)?;
-        let s = self
-            .store
-            .lock()
-            .map_err(|_| to_mcp_err(IpcError::lock()))?;
+        let s = lock(&self.store).map_err(to_mcp_err)?;
         let updated = s
             .set_session_tags(row.id, &tags)
             .map_err(|e| to_mcp_err(IpcError::from(e)))?

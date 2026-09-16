@@ -13,7 +13,7 @@
 //! playbooks default OFF so an upgrade changes nothing until the operator
 //! opts in. The planner is pure; the executor is injectable for tests.
 
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::service::settings;
 use crate::shell::quote;
 use crate::ssh::SshClient;
@@ -69,7 +69,7 @@ pub struct Planned {
 /// Pure: decide which rows get which playbook this tick.
 ///
 /// A row qualifies when it is a live tmux session (`status == running`, not a
-/// `bg` sentinel) with a `stuck_kind` AND a `stuck_since` stamp that is newer
+/// pane-less `bg` / `external` sentinel) with a `stuck_kind` AND a `stuck_since` stamp that is newer
 /// than its `last_playbook_at`. Keystroke actions never target the registered
 /// controller session (it would be steering itself); notify still applies.
 pub fn plan(
@@ -80,7 +80,7 @@ pub fn plan(
 ) -> Vec<Planned> {
     let mut out = Vec::new();
     for r in rows {
-        if r.status != "running" || r.kind == "bg" {
+        if r.status != "running" || crate::store::has_no_pane(&r.kind) {
             continue;
         }
         let (Some(kind), Some(since)) = (r.stuck_kind.as_deref(), r.stuck_since) else {
@@ -196,7 +196,7 @@ impl PlaybookExec for RealPlaybookExec {
         .await?;
         if !out.status.success() {
             return Err(IpcError::new(
-                "E_TMUX",
+                codes::E_TMUX,
                 String::from_utf8_lossy(&out.stderr).trim().to_string(),
             ));
         }
@@ -405,6 +405,13 @@ mod tests {
     }
 
     #[test]
+    fn plan_never_targets_external_rows() {
+        let mut ext = row(1, "bg:x", Some("press_enter"), Some(1), None);
+        ext.kind = "external".into();
+        assert!(plan(&[ext], &ALL_ON, None, 10).is_empty());
+    }
+
+    #[test]
     fn plan_requires_stuck_since_and_live_tmux_row() {
         let mut ghost = row(1, "g", Some("press_enter"), Some(1), None);
         ghost.status = "ghost".into();
@@ -492,7 +499,7 @@ mod tests {
         async fn press_enter(&self, _h: &str, _t: &str) -> Result<PressEnterOutcome, IpcError> {
             self.enters.fetch_add(1, Ordering::SeqCst);
             if self.fail {
-                Err(IpcError::new("E_TMUX", "boom"))
+                Err(IpcError::new(codes::E_TMUX, "boom"))
             } else if self.attached {
                 Ok(PressEnterOutcome::SkippedAttached)
             } else {

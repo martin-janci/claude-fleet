@@ -2,10 +2,12 @@
 //!
 //! Called from `mcp::hooks::handle_hook` after token auth passes.
 
+use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::mcp::hooks::HookPayload;
 use crate::mcp::Caller;
 use crate::projects::path_identity::{canonical, canonical_str, is_within};
+use crate::service::pane_intel::{ClaudeStatus, StuckKind};
 use crate::service::projects::LOCAL_HOST;
 use crate::service::sessions::HostPaths;
 use crate::ssh::SshClient;
@@ -26,6 +28,9 @@ pub fn apply_hook(
     match payload.hook_event_name.as_deref() {
         Some("Stop") => apply_stop_hook(store, ssh, payload, caller),
         Some("UserPromptSubmit") => apply_prompt_submit_hook(store, payload, caller),
+        Some("SessionEnd") => apply_session_end_hook(store, payload, caller),
+        Some("StopFailure") => apply_stop_failure_hook(store, payload, caller),
+        Some("Notification") => apply_notification_hook(store, payload, caller),
         // `EnterWorktree` is the real tool (the installed matcher).
         // `WorktreeCreate` is a hook EVENT that replaces git worktree
         // creation, not a tool — no PostToolUse ever carries it; it is still
@@ -127,7 +132,7 @@ fn apply_stop_hook(
     // Snapshot whether a safe-kill / open task is in flight BEFORE we update
     // status; the follow-ups (pane capture + SSH) run off the hook handler.
     let (safe_kill_in_flight, task_worker) = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let Some(before) = host_checked_row(&s, &session_id, caller)? else {
             return Ok(());
         };
@@ -173,7 +178,7 @@ fn apply_prompt_submit_hook(
         Some(id) => id.clone(),
         None => return Ok(()),
     };
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     if host_checked_row(&s, &session_id, caller)?.is_none() {
         return Ok(());
     }
@@ -182,42 +187,131 @@ fn apply_prompt_submit_hook(
     Ok(())
 }
 
+/// Reasons on which `SessionEnd` means the process is gone. Mirrors
+/// `hooks_install::SESSION_END_MATCHER`; `clear` / `resume` continue under a
+/// new session id and must not stop the row.
+const SESSION_END_REASONS: &[&str] = &["logout", "prompt_input_exit", "other"];
+
+/// The SessionEnd hook: the Claude process exited. Marks the row `stopped`
+/// and records `session_end` with the reason. Defensive against the
+/// matcher: an unlisted reason is a no-op.
+fn apply_session_end_hook(
+    store: &Arc<Mutex<Store>>,
+    payload: &HookPayload,
+    caller: &Caller,
+) -> Result<(), IpcError> {
+    let (Some(session_id), Some(reason)) = (&payload.session_id, payload.reason.as_deref()) else {
+        return Ok(());
+    };
+    if !SESSION_END_REASONS.contains(&reason) {
+        return Ok(());
+    }
+    let s = lock(store)?;
+    if host_checked_row(&s, session_id, caller)?.is_none() {
+        return Ok(());
+    }
+    remember_transcript_path(&s, payload, session_id);
+    if let Some(row) = s.record_session_end_hook(session_id)? {
+        best_effort_event(&s, row.id, "session_end", Some(reason));
+    }
+    Ok(())
+}
+
+/// The StopFailure hook: the turn ended in an API error (rate limit, auth,
+/// overloaded, …). Ends the turn exactly like `Stop` — waiters return and
+/// read the error from the transcript — and records `stop_failure` with
+/// the error type (and detail when present).
+fn apply_stop_failure_hook(
+    store: &Arc<Mutex<Store>>,
+    payload: &HookPayload,
+    caller: &Caller,
+) -> Result<(), IpcError> {
+    let Some(session_id) = &payload.session_id else {
+        return Ok(());
+    };
+    let s = lock(store)?;
+    if host_checked_row(&s, session_id, caller)?.is_none() {
+        return Ok(());
+    }
+    remember_transcript_path(&s, payload, session_id);
+    if let Some(row) = s.record_stop_failure_hook(session_id)? {
+        let error = payload.error.as_deref().unwrap_or("unknown");
+        let detail = match payload.error_details.as_deref() {
+            Some(d) if !d.trim().is_empty() => format!("{error}: {}", d.trim()),
+            _ => error.to_string(),
+        };
+        best_effort_event(&s, row.id, "stop_failure", Some(&detail));
+    }
+    Ok(())
+}
+
+/// What a `Notification` type means for the row: the mapped status and
+/// `Some(Some(kind))` to set / `Some(None)` to clear / `None` to leave the
+/// stuck fields alone. `None` overall = not a type fleet acts on (the
+/// installed matcher never sends one, but a hand-posted body might).
+pub(crate) fn notification_effect(
+    notification_type: &str,
+) -> Option<(ClaudeStatus, Option<Option<StuckKind>>)> {
+    Some(match notification_type {
+        "permission_prompt" | "elicitation_dialog" | "elicitation_url_dialog" => {
+            (ClaudeStatus::Blocked, None)
+        }
+        // Claude Code waits for Enter after a long sleep: the existing
+        // press_enter playbook resolves it.
+        "quota_auto_resume_stale" => (ClaudeStatus::Blocked, Some(Some(StuckKind::PressEnter))),
+        "quota_auto_resume_disabled" => (ClaudeStatus::Blocked, None),
+        "quota_auto_resume_fired" => (ClaudeStatus::Working, Some(None)),
+        _ => return None,
+    })
+}
+
+/// The Notification hook: Claude is waiting on a human (or just stopped
+/// waiting). Applies [`notification_effect`] and records `notification`
+/// with the type. `message` / `title` are never stored.
+fn apply_notification_hook(
+    store: &Arc<Mutex<Store>>,
+    payload: &HookPayload,
+    caller: &Caller,
+) -> Result<(), IpcError> {
+    let (Some(session_id), Some(kind)) =
+        (&payload.session_id, payload.notification_type.as_deref())
+    else {
+        return Ok(());
+    };
+    let Some((status, stuck)) = notification_effect(kind) else {
+        return Ok(());
+    };
+    let s = lock(store)?;
+    if host_checked_row(&s, session_id, caller)?.is_none() {
+        return Ok(());
+    }
+    remember_transcript_path(&s, payload, session_id);
+    if let Some(row) = s.record_notification_hook(session_id, status, stuck)? {
+        best_effort_event(&s, row.id, "notification", Some(kind));
+    }
+    Ok(())
+}
+
+/// Timeline writes never fail the hook that produced them.
+fn best_effort_event(s: &Store, session_id: i64, kind: &str, detail: Option<&str>) {
+    if let Err(e) = s.insert_session_event(session_id, kind, detail) {
+        tracing::warn!(session_id, kind, error = %e, "[hook] session_event insert failed");
+    }
+}
+
 /// Validate a `worktree_path` from a hook body before it becomes a row:
 /// absolute, no `..` component, no control characters, and its basename a
 /// safe path component. The hook body is network input signed only by a
 /// host token, so it gets the same scrutiny as a frontend value.
+///
+/// Delegates the rule itself to [`crate::validate::remote_worktree_path`] —
+/// the same check a worktree row's stored `path` gets on the session-lifecycle
+/// side (`service::sessions`) — and only re-maps the error code: a hook
+/// handler answers 400 with `E_VALIDATE`, not the frontend-facing `E_INVALID`
+/// `validate.rs` uses everywhere else.
 pub fn validate_worktree_path(path: &str) -> Result<(), IpcError> {
-    if path.is_empty() || path.len() > 4096 {
-        return Err(IpcError::new(
-            codes::E_VALIDATE,
-            "worktree_path must be a non-empty path under 4096 bytes",
-        ));
-    }
-    if !path.starts_with('/') {
-        return Err(IpcError::new(
-            codes::E_VALIDATE,
-            "worktree_path must be absolute",
-        ));
-    }
-    if path.chars().any(|c| c.is_control()) {
-        return Err(IpcError::new(
-            codes::E_VALIDATE,
-            "worktree_path must not contain control characters",
-        ));
-    }
-    if path.split('/').any(|c| c == "..") {
-        return Err(IpcError::new(
-            codes::E_VALIDATE,
-            "worktree_path must not contain a '..' component",
-        ));
-    }
-    let name = std::path::Path::new(path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| IpcError::new(codes::E_VALIDATE, "worktree_path has no final component"))?;
-    crate::validate::path_component("worktree name", name)
-        .map_err(|e| IpcError::new(codes::E_VALIDATE, e.message))?;
-    Ok(())
+    crate::validate::remote_worktree_path("worktree_path", path)
+        .map_err(|e| IpcError::new(codes::E_VALIDATE, e.message))
 }
 
 /// The worktree path + branch an `EnterWorktree` call reported. Claude
@@ -281,8 +375,8 @@ fn apply_worktree_exit_hook(
     } else {
         path
     };
-    let s = store.lock().map_err(|_| IpcError::lock())?;
-    s.delete_worktrees_at(host, &path).map_err(IpcError::from)?;
+    let s = lock(store)?;
+    s.delete_worktrees_at(host, &path)?;
     Ok(())
 }
 
@@ -322,8 +416,8 @@ fn apply_worktree_hook(
 
     let host = caller_host(caller);
     if host != LOCAL_HOST {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
-        let projects = s.list_projects().map_err(IpcError::from)?;
+        let s = lock(store)?;
+        let projects = s.list_projects()?;
         let paths = HostPaths::for_host(&s, host);
         let Some(project_id) = crate::service::sessions::find_project_id_for_path(
             &projects,
@@ -341,8 +435,7 @@ fn apply_worktree_hook(
             .and_then(|n| n.to_str())
             .unwrap_or("unnamed")
             .to_string();
-        s.upsert_worktree_on(host, project_id, &name, &path, branch)
-            .map_err(IpcError::from)?;
+        s.upsert_worktree_on(host, project_id, &name, &path, branch)?;
         return Ok(());
     }
 
@@ -356,8 +449,8 @@ fn apply_worktree_hook(
         .unwrap_or("unnamed")
         .to_string();
     let projects = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
-        s.list_projects().map_err(IpcError::from)?
+        let s = lock(store)?;
+        s.list_projects()?
     };
     let Some(project_id) = find_project_id_for_path(&projects, &path) else {
         return Err(IpcError::new(
@@ -365,9 +458,8 @@ fn apply_worktree_hook(
             format!("worktree_path {path} is not under any known project base"),
         ));
     };
-    let s = store.lock().map_err(|_| IpcError::lock())?;
-    s.upsert_worktree(project_id, &name, &path, branch)
-        .map_err(IpcError::from)?;
+    let s = lock(store)?;
+    s.upsert_worktree(project_id, &name, &path, branch)?;
     Ok(())
 }
 
@@ -415,6 +507,7 @@ mod tests {
             tool_response: None,
             cwd: None,
             transcript_path: None,
+            ..Default::default()
         }
     }
 
@@ -611,6 +704,7 @@ mod tests {
             tool_response: None,
             cwd: None,
             transcript_path: None,
+            ..Default::default()
         };
         assert!(apply_hook(&store, &make_ssh(), &payload, &Caller::master()).is_ok());
     }
@@ -628,26 +722,23 @@ mod tests {
             tool_response: Some(response),
             cwd: None,
             transcript_path: None,
+            ..Default::default()
         }
     }
 
+    // The rule itself (empty / too long / relative / `..` / control chars /
+    // bad basename / valid) is tested once, on `crate::validate::remote_worktree_path`,
+    // in `validate.rs`. What's specific to this wrapper — and so worth testing
+    // here — is that a rejection surfaces as `E_VALIDATE` (a hook handler's
+    // 400) rather than the `E_INVALID` `validate.rs` uses everywhere else.
     #[test]
-    fn validate_worktree_path_accepts_absolute_clean_paths() {
+    fn validate_worktree_path_accepts_a_clean_path() {
         assert!(validate_worktree_path("/home/u/proj/.worktrees/feat").is_ok());
-        assert!(validate_worktree_path("/home/u/proj/.worktrees/feat-x.y_z").is_ok());
     }
 
     #[test]
-    fn validate_worktree_path_rejects_relative_traversal_and_control() {
-        for bad in [
-            "",
-            "relative/path",
-            "~/proj/.worktrees/feat",
-            "/home/u/proj/../../etc",
-            "/home/u/proj/.worktrees/..",
-            "/home/u/proj/.worktrees/bad\nname",
-            "/home/u/proj/.worktrees/-rf",
-        ] {
+    fn validate_worktree_path_maps_the_shared_rule_s_rejection_to_e_validate() {
+        for bad in ["", "relative/path", "/home/u/proj/.worktrees/bad\nname"] {
             let err = validate_worktree_path(bad).expect_err(bad);
             assert_eq!(err.code, "E_VALIDATE", "{bad}");
         }
@@ -724,6 +815,7 @@ mod tests {
             tool_response: path.map(|p| serde_json::json!({ "worktreePath": p })),
             cwd: None,
             transcript_path: None,
+            ..Default::default()
         }
     }
 
@@ -1003,6 +1095,7 @@ mod tests {
                 repo: "r".into(),
                 base_path: "/home/u/proj".into(),
                 last_session_at: None,
+                adopted: false,
             },
             ProjectRow {
                 id: 2,
@@ -1010,6 +1103,7 @@ mod tests {
                 repo: "r2".into(),
                 base_path: "/home/u/proj/sub".into(),
                 last_session_at: None,
+                adopted: false,
             },
         ];
         assert_eq!(
@@ -1031,6 +1125,7 @@ mod tests {
             repo: "r".into(),
             base_path: "/home/u/proj".into(),
             last_session_at: None,
+            adopted: false,
         }];
         // "/home/u/project/..." must NOT match "/home/u/proj"
         assert_eq!(
@@ -1042,5 +1137,169 @@ mod tests {
             find_project_id_for_path(&projects, "/home/u/proj/.worktrees/feat"),
             Some(1)
         );
+    }
+
+    // ---- SessionEnd / StopFailure / Notification ----
+
+    fn hooked(store: &Arc<Mutex<Store>>) -> i64 {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("sess", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_claude_session_id(id, "uuid-1").unwrap();
+        id
+    }
+
+    fn events(store: &Arc<Mutex<Store>>, id: i64) -> Vec<(String, Option<String>)> {
+        store
+            .lock()
+            .unwrap()
+            .list_session_events(id, 50)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.kind, e.detail))
+            .collect()
+    }
+
+    fn status_of(store: &Arc<Mutex<Store>>, id: i64) -> SessionRow {
+        store
+            .lock()
+            .unwrap()
+            .get_session_by_id(id)
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn session_end_marks_stopped_and_records_the_reason() {
+        let store = make_store();
+        let id = hooked(&store);
+        let mut p = make_payload("SessionEnd", "uuid-1");
+        p.reason = Some("prompt_input_exit".into());
+        apply_hook(&store, &make_ssh(), &p, &Caller::master()).unwrap();
+        let row = status_of(&store, id);
+        assert_eq!(row.claude_status.as_deref(), Some("stopped"));
+        assert!(events(&store, id).contains(&(
+            "session_end".to_string(),
+            Some("prompt_input_exit".to_string())
+        )));
+    }
+
+    #[test]
+    fn session_end_clear_and_resume_are_noops() {
+        let store = make_store();
+        let id = hooked(&store);
+        for reason in ["clear", "resume"] {
+            let mut p = make_payload("SessionEnd", "uuid-1");
+            p.reason = Some(reason.into());
+            apply_hook(&store, &make_ssh(), &p, &Caller::master()).unwrap();
+            let row = status_of(&store, id);
+            assert_ne!(row.claude_status.as_deref(), Some("stopped"), "{reason}");
+        }
+        assert!(events(&store, id).is_empty());
+    }
+
+    #[test]
+    fn stop_failure_ends_the_turn_and_records_the_error() {
+        let store = make_store();
+        let id = hooked(&store);
+        let mut p = make_payload("StopFailure", "uuid-1");
+        p.error = Some("rate_limit".into());
+        p.error_details = Some("429 Too Many Requests".into());
+        apply_hook(&store, &make_ssh(), &p, &Caller::master()).unwrap();
+        let row = status_of(&store, id);
+        assert_eq!(row.claude_status.as_deref(), Some("idle"));
+        assert_eq!(row.turn_seq, 1);
+        assert!(row.last_stop_at.is_some());
+        assert!(events(&store, id).contains(&(
+            "stop_failure".to_string(),
+            Some("rate_limit: 429 Too Many Requests".to_string())
+        )));
+    }
+
+    #[test]
+    fn notification_effect_maps_the_installed_types() {
+        use crate::service::pane_intel::{ClaudeStatus, StuckKind};
+        assert_eq!(
+            notification_effect("permission_prompt"),
+            Some((ClaudeStatus::Blocked, None))
+        );
+        assert_eq!(
+            notification_effect("elicitation_dialog"),
+            Some((ClaudeStatus::Blocked, None))
+        );
+        assert_eq!(
+            notification_effect("elicitation_url_dialog"),
+            Some((ClaudeStatus::Blocked, None))
+        );
+        assert_eq!(
+            notification_effect("quota_auto_resume_stale"),
+            Some((ClaudeStatus::Blocked, Some(Some(StuckKind::PressEnter))))
+        );
+        assert_eq!(
+            notification_effect("quota_auto_resume_disabled"),
+            Some((ClaudeStatus::Blocked, None))
+        );
+        assert_eq!(
+            notification_effect("quota_auto_resume_fired"),
+            Some((ClaudeStatus::Working, Some(None)))
+        );
+        assert_eq!(notification_effect("idle_prompt"), None);
+        assert_eq!(notification_effect("agent_needs_input"), None);
+    }
+
+    #[test]
+    fn notification_hook_blocks_then_resumes() {
+        let store = make_store();
+        let id = hooked(&store);
+        let mut p = make_payload("Notification", "uuid-1");
+        p.notification_type = Some("quota_auto_resume_stale".into());
+        apply_hook(&store, &make_ssh(), &p, &Caller::master()).unwrap();
+        let row = status_of(&store, id);
+        assert_eq!(row.claude_status.as_deref(), Some("blocked"));
+        assert_eq!(row.stuck_kind.as_deref(), Some("press_enter"));
+
+        p.notification_type = Some("quota_auto_resume_fired".into());
+        apply_hook(&store, &make_ssh(), &p, &Caller::master()).unwrap();
+        let row = status_of(&store, id);
+        assert_eq!(row.claude_status.as_deref(), Some("working"));
+        assert!(row.stuck_kind.is_none());
+
+        // An unmapped type (hand-posted; the matcher never sends it) is a no-op.
+        p.notification_type = Some("idle_prompt".into());
+        apply_hook(&store, &make_ssh(), &p, &Caller::master()).unwrap();
+        let row = status_of(&store, id);
+        assert_eq!(row.claude_status.as_deref(), Some("working"));
+        let ev = events(&store, id);
+        assert_eq!(
+            ev.iter().filter(|(k, _)| k == "notification").count(),
+            2,
+            "{ev:?}"
+        );
+    }
+
+    #[test]
+    fn new_events_respect_the_caller_host_binding() {
+        let store = make_store();
+        hooked(&store);
+        let other = Caller {
+            host_alias: Some("hostb".into()),
+            mode: crate::mcp::TokenMode::Full,
+        };
+        for (event, field) in [
+            ("SessionEnd", "reason"),
+            ("StopFailure", "error"),
+            ("Notification", "notification_type"),
+        ] {
+            let mut p = make_payload(event, "uuid-1");
+            match field {
+                "reason" => p.reason = Some("other".into()),
+                "error" => p.error = Some("unknown".into()),
+                _ => p.notification_type = Some("permission_prompt".into()),
+            }
+            let e = apply_hook(&store, &make_ssh(), &p, &other).unwrap_err();
+            assert_eq!(e.code, "E_FORBIDDEN", "{event}");
+        }
     }
 }

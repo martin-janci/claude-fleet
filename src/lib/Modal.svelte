@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy, type Snippet } from 'svelte';
+  import { onMount, onDestroy, tick, type Snippet } from 'svelte';
 
   // The one modal primitive. Built on the native <dialog> element opened with
   // showModal(), which gives us for free what the old div-backdrop copies
@@ -43,16 +43,7 @@
   onMount(() => {
     if (!dialog) return;
     restoreTo = document.activeElement;
-    if (typeof dialog.showModal === 'function') {
-      try {
-        dialog.showModal();
-      } catch {
-        // Already open (HMR / double-mount) — fall through to the attribute.
-        dialog.setAttribute('open', '');
-      }
-    } else {
-      dialog.setAttribute('open', '');
-    }
+    openDialog(dialog);
     // Initial focus: an explicit [data-autofocus] wins, else the first
     // focusable control, else the dialog itself so Escape still reaches it.
     const target =
@@ -86,10 +77,28 @@
   }
 
   // A native close that did slip through (some engines close on a second
-  // Escape without user activation) still ends up telling the parent.
-  function onNativeClose() {
+  // Escape without user activation) still ends up telling the parent. If the
+  // parent keeps us mounted anyway (it declined, e.g. while a request is in
+  // flight), reopen: a closed <dialog> that stays mounted is invisible and
+  // unreachable, and anything it renders next would never be seen.
+  async function onNativeClose() {
     if (tearingDown) return;
     onclose?.();
+    await tick();
+    if (tearingDown || !dialog || dialog.open) return;
+    openDialog(dialog);
+  }
+
+  function openDialog(d: HTMLDialogElement) {
+    if (typeof d.showModal === 'function') {
+      try {
+        d.showModal();
+        return;
+      } catch {
+        // Already open (HMR / double-mount) — fall through to the attribute.
+      }
+    }
+    d.setAttribute('open', '');
   }
 
   // Clicks on the ::backdrop are delivered to the <dialog> element itself.

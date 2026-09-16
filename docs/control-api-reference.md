@@ -13,6 +13,12 @@ Register a new SSH host. Probes it first; only persists the host if it is reacha
 
 Parameters: `alias`, `ssh_alias`
 
+### `apply_sync`
+
+Apply a plan from plan_sync on hosts: writes files with compare-and-swap, backs up overwritten files, merges config (files end up mode 0600), installs plugins, writes the managed manifest, then re-scans. Master token only; requires confirmation. Returns per-host results; restart_required marks hosts whose Claude must be restarted.
+
+Parameters: `confirm_nonce`, `force_partial`, `plan_id`
+
 ### `broadcast_prompt`
 
 Send the same prompt to every matching work session (excludes the controller). Returns per-session results. Rate-limited per caller (default one call per 30 s; E_RATE_LIMITED with retry_after_secs). Marked as untrusted unless raw=true (master token only). May return E_CONFIRM_REQUIRED when desktop confirmation is on.
@@ -69,6 +75,12 @@ Hide or show a host. Hidden hosts are skipped during reconcile. Returns the upda
 
 Parameters: `alias`, `hidden`
 
+### `import_assets`
+
+Import a host's Claude config (~/.claude skills, agents, hooks, ~/.claude.json MCP servers, installed plugins) into the catalog repo working tree as IR assets. Never overwrites; collisions are reported. Only host_alias `local` is supported. Returns the import report as JSON.
+
+Parameters: `dry_run`, `host_alias`
+
 ### `inbox`
 
 Read a session's inbox — messages sent TO session_id, newest-first. Slim rows by default (metadata, reply_to, 80-char body preview); pass summary=false for full bodies. Task results arrive here as kind=task_result. mark_read (default true) flips returned unread rows to read — pass false to peek without consuming. A per-host token may only read inboxes of sessions on its own host (E_FORBIDDEN).
@@ -77,13 +89,17 @@ Parameters: `limit`, `mark_read`, `session_id`, `summary`, `unread_only`
 
 ### `kill_session`
 
-Kill a session on a host: a tmux session by name, or a background agent row (name `bg:<uuid>`) via `claude stop` — the latter is idempotent, so it also clears a stale row whose process already died. Use when the session's work is disposable or already pushed and you want it gone NOW; prefer safe_kill_session when the worktree may hold unpushed work. Returns the killed session's id. Address the session with session_id OR host_alias + name. May return E_CONFIRM_REQUIRED when desktop confirmation is on.
+Kill a session on a host: a tmux session by name, or a background agent row (name `bg:<uuid>`, kind `bg`) via `claude stop`. An inactive background agent (claude_status `stopped`) is removed from the list instead, without `claude stop`. Rows of kind `external` (interactive Claude sessions running outside fleet) are refused with E_INVALID_STATE — close them where they run. Use when the session's work is disposable or already pushed and you want it gone NOW; prefer safe_kill_session when the worktree may hold unpushed work. Returns the killed session's id. Address the session with session_id OR host_alias + name. May return E_CONFIRM_REQUIRED when desktop confirmation is on.
 
 Parameters: `confirm_nonce`, `force`, `host_alias`, `name`, `session_id`
 
 ### `list_accounts`
 
 List the cached Claude accounts seen across hosts. Returns JSON.
+
+### `list_assets`
+
+List the asset catalog (skills, agents, hooks, MCP servers, plugin refs) with each asset's per-host drift state from the last scan, plus unmanaged assets found on hosts and catalog parse problems. Requires catalog_configure + catalog_load in the app. Returns JSON.
 
 ### `list_hosts`
 
@@ -121,7 +137,7 @@ Parameters: `confirm_nonce`, `keep_source`, `session_id`, `target_host_alias`
 
 ### `new_bg_session`
 
-Launch a supervised headless (background) Claude session on a host with an initial prompt. Returns JSON with the new claude_session_id AND the fleet row (`session`, registered by an immediate reconcile; the key is absent if the agent was not matched yet — it appears on the next tick) so the next call can be peek_session { session_id }. The prompt becomes the row's default friendly name and last_prompt.
+Launch a supervised headless (background) Claude session on a host with an initial prompt. Returns JSON with the new claude_session_id AND the fleet row (`session`, registered by an immediate reconcile; the key is absent if the agent was not matched yet — it appears on the next tick) so the next call can be session_transcript { session_id }. The prompt becomes the row's default friendly name and last_prompt.
 
 Parameters: `host_alias`, `name`, `prompt`
 
@@ -139,7 +155,7 @@ Parameters: `base_branch`, `host_alias`, `name`, `new_worktree`, `project_id`, `
 
 ### `peek_session`
 
-Peek at a session's background Claude logs. Address it with session_id (from list_sessions) OR claude_session_id (the id new_bg_session returned; add host_alias while the fleet row does not exist yet). Returns an informational message for interactive sessions with no background job.
+Deprecated: use session_transcript. Returns the session's last assistant turn from its transcript. Address it with session_id OR claude_session_id (+ host_alias while the fleet row does not exist yet).
 
 Parameters: `claude_session_id`, `host_alias`, `session_id`
 
@@ -148,6 +164,12 @@ Parameters: `claude_session_id`, `host_alias`, `session_id`
 What is a peer session doing? Returns claude_status, current_activity, stuck_kind, context_pct (plus host/name/status) for one session. Cheap pre-check before send_message or broadcast_prompt.
 
 Parameters: `session_id`
+
+### `plan_sync`
+
+Compute a sync plan: scan the selected hosts, compare every catalog asset with what is installed, and return per-host actions (create | update | overwrite | adopt | remove | plugin_install | noop | blocked) plus a plan_id valid for 10 minutes. Inventory states now include orphan (in the host's fleet manifest, no longer in the catalog). Nothing is written. Pass the plan_id to apply_sync.
+
+Parameters: `host_alias`, `kind`, `name`
 
 ### `probe_host`
 
@@ -267,6 +289,12 @@ Ask a running Claude session to safely persist its work (commit + push), then ar
 
 Parameters: `host_alias`, `session_id`, `tmux_name`
 
+### `scan_assets`
+
+Scan hosts for installed skills/agents/hooks/MCP servers/plugins and recompute each catalog asset's state (in_sync | drifted | missing | unmanaged | unsupported | orphan). Read-only on hosts. Returns per-host results as JSON.
+
+Parameters: `host_alias`
+
 ### `send_message`
 
 Send a peer-to-peer message from one session to another. The message is persisted to the recipient's inbox (read with `inbox`); set `deliver: true` to ALSO type the message into the recipient's tmux pane with a `[msg #id from name@host]:` header. The inbox row is the source of truth — it lands even if the pane delivery fails. Returns JSON with the new message id and the delivery outcome. Pass reply_to (an inbox message id) to thread an answer. A per-host token must send from a session on its own host (E_FORBIDDEN). The body is prefixed with an untrusted-content marker line unless raw=true (master token only).
@@ -302,6 +330,12 @@ Parameters: `confirm_nonce`, `content`, `host_alias`
 Set the session's friendly display name (shown when the user toggles friendly names on). Called once per task by the in-session agent — short (3–6 words). Empty string clears. Returns the updated row. Address the session with session_id OR host_alias + tmux_name.
 
 Parameters: `friendly_name`, `host_alias`, `session_id`, `tmux_name`
+
+### `set_secret`
+
+Store a value for a ${NAME} placeholder used by the catalog (global, or a per-host override with host_alias). Master token only. The value is never returned or logged.
+
+Parameters: `host_alias`, `name`, `value`
 
 ### `set_session_tags`
 
@@ -348,6 +382,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::diagnostics::open_log_folder`
 - `commands::projects::list_projects`
 - `commands::projects::refresh_projects`
+- `commands::projects::add_project`
+- `commands::projects::list_github_repos`
 - `commands::sessions::list_sessions`
 - `commands::sessions::related_sessions`
 - `commands::sessions::new_session`
@@ -356,19 +392,22 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::inspect_safe_kill`
 - `commands::sessions::discard_kill_session`
 - `commands::worktrees::list_worktrees`
+- `commands::worktrees::list_host_worktrees`
 - `commands::worktrees::delete_worktree`
 - `commands::sessions::repair_session`
 - `commands::sessions::rename_session`
 - `commands::sessions::set_session_friendly_name`
 - `commands::sessions::session_history`
+- `commands::sessions::session_conversation`
+- `commands::sessions::session_activity`
 - `commands::sessions::restart_session`
 - `commands::sessions::send_prompt`
 - `commands::sessions::spawn_review`
 - `commands::sessions::recreate_session`
 - `commands::move_session::move_session`
 - `commands::sessions::dismiss_ghost_session`
+- `commands::sessions::dismiss_agent_session`
 - `commands::sessions::new_bg_session`
-- `commands::sessions::peek_session`
 - `commands::sessions::purge_project`
 - `commands::sessions::get_fleet_settings`
 - `commands::sessions::set_fleet_setting`
@@ -401,6 +440,9 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hosts::probe_ssh_alias`
 - `commands::hosts::remove_host`
 - `commands::hosts::hide_host`
+- `commands::hosts::set_account_nickname`
+- `commands::account_usage::list_account_usage`
+- `commands::account_usage::refresh_account_usage`
 - `commands::mcp::mcp_status`
 - `commands::mcp::mcp_configure`
 - `commands::mcp::install_fleet_hook`
@@ -412,6 +454,32 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mcp::mcp_pending_confirms`
 - `commands::onboarding::check_local_prereqs`
 - `commands::onboarding::tunnel_status`
+- `commands::assets::catalog_config`
+- `commands::assets::catalog_configure`
+- `commands::assets::catalog_load`
+- `commands::assets::catalog_list_assets`
+- `commands::assets::catalog_get_asset`
+- `commands::assets::catalog_import_host`
+- `commands::assets::assets_scan_hosts`
+- `commands::assets::assets_inventory`
+- `commands::assets::catalog_plan_sync`
+- `commands::assets::catalog_apply_sync`
+- `commands::assets::catalog_last_sync`
+- `commands::assets::catalog_list_secrets`
+- `commands::assets::catalog_set_secret`
+- `commands::assets::catalog_delete_secret`
+- `commands::assets::catalog_create_asset`
+- `commands::assets::catalog_update_asset`
+- `commands::assets::catalog_delete_asset`
+- `commands::assets::catalog_add_resource`
+- `commands::assets::catalog_remove_resource`
+- `commands::assets::catalog_lint_asset`
+- `commands::assets::catalog_lint_all`
+- `commands::assets::catalog_commit_pending`
+- `commands::assets::catalog_push`
+- `commands::assets::catalog_repo_status`
+- `commands::assets::catalog_template`
+- `commands::assets::catalog_spawn_author_session`
 - `pty::pty_open`
 - `pty::pty_write`
 - `pty::pty_resize`

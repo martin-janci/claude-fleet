@@ -1,18 +1,23 @@
 <script lang="ts">
-  import { onMount, onDestroy, untrack } from 'svelte';
+  import { onMount, onDestroy, tick, untrack } from 'svelte';
   import Pane from './lib/Pane.svelte';
   import Resizer from './lib/Resizer.svelte';
   import { healthCheck, type Health } from './lib/ipc';
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
   import TerminalView from './lib/TerminalView.svelte';
-  import BgSessionPanel from './lib/BgSessionPanel.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
-  import { loadProjects, bootstrapProjects, applyProjectEvents } from './lib/projects';
-  import { loadSessions, bootstrapSessions, applySessionEvents, sessions } from './lib/sessions';
-  import { bootstrapHosts, applyHostEvents, hosts } from './lib/hosts';
-  import { bootstrapAccounts, applyAccountEvents } from './lib/accounts';
+  import HostsView from './lib/HostsView.svelte';
+  import ConversationPanel from './lib/ConversationPanel.svelte';
+  import AssetsPanel from './lib/AssetsPanel.svelte';
+  import { loadProjects, applyProjectEvents } from './lib/projects';
+  import { loadSessions, applySessionEvents, sessions, hasNoPane } from './lib/sessions';
+  import { loadHosts, applyHostEvents, hosts, hostFilter } from './lib/hosts';
+  import { loadAccounts, applyAccountEvents, accounts } from './lib/accounts';
   import { loadTasks, applyTaskEvents } from './lib/tasks';
+  import { loadAccountUsage, applyAccountUsageEvents, accountUsage } from './lib/account_usage_store';
+  import { footerUsage } from './lib/usage_glance';
+  import { mergeInventoryRow, clearInventoryFor, loadAssets, syncProgress, repoStatus } from './lib/assets';
   import { subscribeToRowEvents } from './lib/events';
   import Toasts from './lib/Toasts.svelte';
   import QuickSwitcher from './lib/QuickSwitcher.svelte';
@@ -21,7 +26,17 @@
   import { push, pushError } from './lib/toasts';
   import type { Result } from './lib/result';
   import type { UnlistenFn } from '@tauri-apps/api/event';
-  import { selectedSession, restoreLastSession, selectSession } from './lib/selection';
+  import { selectedSession, restoreLastSession, selectSession, onSessionOpened } from './lib/selection';
+  import {
+    appChord,
+    hostsChordLabel,
+    hostsViewOpen,
+    hostsViewRequest,
+    openPathRequest,
+    requestNewSessionOnHost,
+    settingsOpen,
+  } from './lib/app_views';
+  import { detectMac, isEditable } from './lib/terminal_keys';
   import { loadSessionUi, saveSessionUi, DEFAULT_UI } from './lib/session_ui';
   import { readPref, writePref } from './lib/prefs';
   import WelcomeDialog from './lib/WelcomeDialog.svelte';
@@ -128,10 +143,10 @@
       push({ kind: 'error', code: 'E_IPC', message: `Health check failed: ${String(e)}` });
     }
     const [pr, sr, hr, ar] = await Promise.all([
-      bootstrapProjects(),
-      bootstrapSessions(),
-      bootstrapHosts(),
-      bootstrapAccounts(),
+      loadProjects(),
+      loadSessions(),
+      loadHosts(),
+      loadAccounts(),
     ]);
     const failures = [
       reportBootstrap('projects', pr),
@@ -148,7 +163,7 @@
     if (sr.ok) restoreLastSession();
     // First-run welcome: only when never shown AND the fleet is empty.
     const visibleHostCount = get(hosts).filter((h) => !h.hidden).length;
-    const workSessionCount = get(sessions).filter((s) => s.kind !== 'bg').length;
+    const workSessionCount = get(sessions).filter((s) => !hasNoPane(s)).length;
     if (!get(onboardingWelcomed) && visibleHostCount === 0 && workSessionCount === 0) {
       showWelcome = true;
     }
@@ -160,11 +175,19 @@
       onAccountEvents: applyAccountEvents,
       onProjectEvents: applyProjectEvents,
       onTaskEvents: applyTaskEvents,
+      onAccountUsageEvents: applyAccountUsageEvents,
+      onAssetInventoryUpdated: mergeInventoryRow,
+      onAssetInventoryCleared: (p) => clearInventoryFor(p.host_alias, p.harness),
+      onCatalogLoaded: () => { void loadAssets(); void repoStatus(); },
+      onSyncProgress: (p) => syncProgress.set(p),
     });
     // Tasks are secondary to the session list: load after the row
     // subscription is live so no `task:updated` is missed, and never block
     // startup on it (a failure only leaves the Tasks panel empty).
     void loadTasks();
+    // Account usage: same reasoning — not on the critical bootstrap path,
+    // loaded after the subscription so no `account_usage:updated` is missed.
+    void loadAccountUsage();
   });
 
   // Catch-up net for missed Tauri events (e.g. sleep/wake, dropped events).
@@ -184,11 +207,21 @@
   onMount(() => {
     window.addEventListener('focus', onFocus);
     window.addEventListener('keydown', onKeydown);
+    // Capture phase: the app chords must beat the terminal's own keydown
+    // handler (same approach as the quick switcher).
+    window.addEventListener('keydown', onChordKeydown, true);
   });
+
+  // Opening a session from anywhere (sidebar, quick switcher, a Hosts-view
+  // session row, a fresh create) means "go to it": leave the Hosts view so
+  // the terminal shows that session.
+  const unsubOpened = onSessionOpened(() => closeHosts());
 
   onDestroy(() => {
     window.removeEventListener('focus', onFocus);
     window.removeEventListener('keydown', onKeydown);
+    window.removeEventListener('keydown', onChordKeydown, true);
+    unsubOpened();
     unlistenEvents?.();
   });
 
@@ -210,24 +243,206 @@
   // viewer. The Files tab needs a selected session (the worktree to browse);
   // deselecting one drops back to the terminal automatically.
   let filesMode = $state(false);
+  // Primitive projections of the selection: `$selectedSession` changes
+  // identity on every `session:updated`, but these only change (and re-run
+  // the effects below) when the fact they carry does.
+  const selId = $derived($selectedSession?.id ?? null);
+  const selNoPane = $derived(!!$selectedSession && hasNoPane($selectedSession));
+  const selHasClaudeId = $derived(!!$selectedSession?.claude_session_id);
   $effect(() => {
-    if (!$selectedSession || $selectedSession.kind === 'bg') filesMode = false;
+    if (selId === null || selNoPane) filesMode = false;
   });
+
+  // Conversation mode shows the transcript-backed Conversation panel (spec
+  // §6). For a tmux row it reuses the Files overlay, so the PTY stays mounted
+  // underneath; Files, Hosts and Conversation are mutually exclusive. Unlike
+  // Files/Hosts it keeps the center (Details) pane — it is a view of the
+  // session, like the terminal. A row with no pane (bg / external) has no
+  // terminal to show, so selecting one opens Conversation by default, and
+  // moving from such a row to a tmux row drops back to the terminal.
+  let conversationMode = $state(false);
+  let prevNoPane = false;
+  $effect(() => {
+    void selId;
+    const noPane = selNoPane;
+    const hasId = selHasClaudeId;
+    untrack(() => {
+      if (noPane) {
+        conversationMode = true;
+        filesMode = false;
+      } else if (prevNoPane) {
+        conversationMode = false;
+      }
+      if (!noPane && !hasId) conversationMode = false;
+    });
+    prevNoPane = noPane;
+  });
+
+  // Hosts mode reuses the Files-mode mechanism: the center pane collapses and
+  // an opaque overlay covers the terminal, which stays mounted so its PTY
+  // survives the round trip. Hosts is fleet-scoped, so unlike Files it never
+  // needs a selected session. Files and Hosts are mutually exclusive.
+  const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
+  const hostsChord = hostsChordLabel(isMac);
+  let hostsMode = $state(false);
+  let hostsPreselect = $state<string | null>(null);
+  // Assets mode shows the asset catalog. Like Hosts it is fleet-scoped (no
+  // selected session needed) and renders as an opaque overlay over the
+  // terminal, which stays mounted so its PTY survives the round trip.
+  let assetsMode = $state(false);
+  // Bumped to remount the view when a request names a host while it is open.
+  let hostsViewKey = $state(0);
+  /** Last host shown in the Hosts view, for this app session only. */
+  let lastViewedHost: string | null = null;
+  /** What had focus when Hosts opened (normally the terminal). */
+  let hostsReturnFocus: HTMLElement | null = null;
+  $effect(() => {
+    hostsViewOpen.set(hostsMode);
+  });
+
+  function openHosts(host: string | null = null) {
+    const preselect = host ?? $selectedSession?.host_alias ?? lastViewedHost ?? null;
+    if (hostsMode) {
+      // Already open: only a request naming a host changes anything.
+      if (host !== null) {
+        hostsPreselect = host;
+        hostsViewKey++;
+      }
+      return;
+    }
+    const active = document.activeElement;
+    hostsReturnFocus = active instanceof HTMLElement && active !== document.body ? active : null;
+    hostsPreselect = preselect;
+    filesMode = false;
+    assetsMode = false;
+    // A no-pane row has nothing but the Conversation under the Hosts overlay,
+    // so it stays the view to return to; a tmux row returns to the terminal.
+    if (!selNoPane) conversationMode = false;
+    hostsMode = true;
+  }
+
+  function closeHosts(restoreFocus = true) {
+    if (!hostsMode) return;
+    hostsMode = false;
+    const el = hostsReturnFocus;
+    hostsReturnFocus = null;
+    if (restoreFocus && el) {
+      void tick().then(() => {
+        if (el.isConnected) el.focus();
+      });
+    }
+  }
+
+  function toggleHosts() {
+    if (hostsMode) closeHosts();
+    else openHosts();
+  }
+
+  // Requests from outside App (quick switcher, Settings, onboarding card).
+  $effect(() => {
+    const req = $hostsViewRequest;
+    if (!req) return;
+    hostsViewRequest.set(null);
+    untrack(() => openHosts(req.host));
+  });
+
+  // A path clicked in the Conversation tab: show Files for that session
+  // (FilesPanel picks the path up and clears the request).
+  $effect(() => {
+    const req = $openPathRequest;
+    if (!req) return;
+    untrack(() => {
+      // A pane-less row (bg / external) has no Files tab to hand this to.
+      if ($selectedSession?.id === req.sessionId && !selNoPane) showFiles();
+      else openPathRequest.set(null);
+    });
+  });
+
   function showTerminal() {
     filesMode = false;
+    conversationMode = false;
+    assetsMode = false;
+    closeHosts();
   }
   function showFiles() {
-    if ($selectedSession) filesMode = true;
+    if (!$selectedSession) return;
+    closeHosts(false);
+    conversationMode = false;
+    assetsMode = false;
+    filesMode = true;
   }
+  function showConversation() {
+    if (!$selectedSession?.claude_session_id) return;
+    closeHosts(false);
+    filesMode = false;
+    assetsMode = false;
+    conversationMode = true;
+  }
+  function showAssets() {
+    closeHosts(false);
+    filesMode = false;
+    assetsMode = true;
+  }
+  const NO_PANE_TITLE = 'Runs outside tmux — no terminal';
+
+  // Footer usage segment: whether to look at usage, not the numbers. A coarse
+  // clock is enough for "3m" ages and staleness.
+  let nowSec = $state(Math.floor(Date.now() / 1000));
+  $effect(() => {
+    const t = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 30_000);
+    return () => clearInterval(t);
+  });
+  const usageFooter = $derived(footerUsage($hosts, $accounts, $accountUsage, nowSec));
+
+  function onHostsFilterSidebar(alias: string) {
+    sidebarCollapsed = false;
+    hostFilter.set(alias);
+  }
+  function onHostsNewSession(alias: string) {
+    sidebarCollapsed = false;
+    requestNewSessionOnHost(alias);
+  }
+
+  function onChordKeydown(e: KeyboardEvent) {
+    const chord = appChord(e, isMac);
+    if (!chord) return;
+    // Another modal owns the keyboard while open; don't open a view (or a
+    // second dialog) underneath it.
+    if ((e.target as Element | null)?.closest?.('dialog')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (chord === 'hosts') toggleHosts();
+    else settingsOpen.set(true);
+  }
+
   function onKeydown(e: KeyboardEvent) {
+    if (e.key !== 'Escape') return;
+    const target = e.target as HTMLElement | null;
     // Esc leaves files mode (the terminal is covered while it's open, so Esc
     // can't be meant for the terminal here) — but not while the user is
     // typing in a field such as the file filter, where Esc belongs to that
     // input and exiting the whole panel would be surprising.
-    if (e.key === 'Escape' && filesMode) {
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    if (filesMode) {
+      if (isEditable(target)) return;
       filesMode = false;
+      return;
+    }
+    // Assets is an overlay with no Esc handling of its own; the same rule as
+    // Files applies (not while typing in the catalog's filter field).
+    if (assetsMode) {
+      if (isEditable(target) || target?.closest?.('dialog')) return;
+      assetsMode = false;
+      return;
+    }
+    // Inside the Hosts view, HostsView owns Esc (back to the list, clear the
+    // filter, close from the list). This catches only an Esc with focus lost
+    // to the page or left on the right column's chrome; a dialog, an input
+    // or the sidebar keep their own Esc.
+    if (hostsMode && !e.defaultPrevented) {
+      if (isEditable(target) || target?.closest?.('dialog')) return;
+      if (target?.closest?.('[data-testid="hosts-view"]')) return;
+      const onPage = !target || target === document.body || target === document.documentElement;
+      if (onPage || target.closest('[data-testid="pane-terminal"]')) closeHosts();
     }
   }
 
@@ -240,8 +455,9 @@
     const sbResizer = sidebarCollapsed ? '0px' : '4px';
     // In files mode the center pane collapses to zero — the file viewer
     // takes the whole region right of the sidebar.
-    const center = filesMode ? '0px' : centerCollapsed ? '20px' : `${centerPx}px`;
-    const centerResizer = filesMode || centerCollapsed ? '0px' : '4px';
+    const wide = filesMode || hostsMode || assetsMode;
+    const center = wide ? '0px' : centerCollapsed ? '20px' : `${centerPx}px`;
+    const centerResizer = wide || centerCollapsed ? '0px' : '4px';
     return `${sb} ${sbResizer} ${center} ${centerResizer} 1fr`;
   });
 </script>
@@ -301,8 +517,8 @@
     <Resizer id="sidebar" onresize={onResizeSidebar} />
   {/if}
 
-  {#if filesMode}
-    <!-- Center collapsed to 0 in files mode — two empty grid cells. -->
+  {#if filesMode || hostsMode}
+    <!-- Center collapsed to 0 in files/hosts mode — two empty grid cells. -->
     <div></div>
     <div></div>
   {:else if centerCollapsed}
@@ -336,9 +552,11 @@
     <div class="view-tabs" role="tablist">
       <button
         class="view-tab"
-        class:active={!filesMode}
+        class:active={!filesMode && !hostsMode && !conversationMode && !assetsMode}
         role="tab"
-        aria-selected={!filesMode}
+        aria-selected={!filesMode && !hostsMode && !conversationMode && !assetsMode}
+        disabled={selNoPane}
+        title={selNoPane ? NO_PANE_TITLE : undefined}
         onclick={showTerminal}
         data-testid="tab-terminal">Terminal</button
       >
@@ -347,25 +565,57 @@
         class:active={filesMode}
         role="tab"
         aria-selected={filesMode}
-        disabled={!$selectedSession || $selectedSession.kind === 'bg'}
+        disabled={!$selectedSession || selNoPane}
         title={!$selectedSession
           ? 'Select a session first'
-          : $selectedSession.kind === 'bg'
-            ? 'Not available for background sessions'
+          : selNoPane
+            ? NO_PANE_TITLE
             : 'Browse the session worktree'}
         onclick={showFiles}
         data-testid="tab-files">Files</button
       >
+      <button
+        class="view-tab"
+        class:active={conversationMode && !hostsMode && !assetsMode}
+        role="tab"
+        aria-selected={conversationMode && !hostsMode && !assetsMode}
+        disabled={!selHasClaudeId}
+        title={!selHasClaudeId ? 'No Claude session id yet' : 'Claude conversation from the transcript'}
+        onclick={showConversation}
+        data-testid="tab-conversation">Conversation</button
+      >
+      <!-- Fleet-scoped like Hosts: never disabled, no selected session needed. -->
+      <button
+        class="view-tab"
+        class:active={assetsMode && !hostsMode}
+        role="tab"
+        aria-selected={assetsMode && !hostsMode}
+        title="The asset catalog and its per-host drift state"
+        onclick={showAssets}
+        data-testid="tab-assets">Assets</button
+      >
+      <!-- Fleet-scoped, so set apart on the right and never disabled. -->
+      <button
+        class="view-tab hosts-tab"
+        class:active={hostsMode}
+        role="tab"
+        aria-selected={hostsMode}
+        aria-keyshortcuts={isMac ? 'Meta+I' : 'Control+Shift+H'}
+        title="Every host, grouped by Claude account ({hostsChord})"
+        onclick={toggleHosts}
+        data-testid="tab-hosts">Hosts <kbd>{hostsChord}</kbd></button
+      >
     </div>
     <div class="right-body">
-      {#if $selectedSession?.kind === 'bg'}
-        <!-- Background sessions have no PTY. We intentionally do NOT mount
-             TerminalView here so pty_open is never attempted (it would error
-             with "no tmux"). The tradeoff: selecting a bg session unmounts the
-             terminal, so returning to a normal session reconnects its PTY.
-             Acceptable — bg agents run unattended and are rarely interleaved. -->
+      {#if $selectedSession && selNoPane}
+        <!-- Rows with no pane (bg agents, external Claude sessions) have no
+             PTY. We intentionally do NOT mount TerminalView here so pty_open
+             is never attempted (it would error with "no tmux"). The tradeoff:
+             selecting such a row unmounts the terminal, so returning to a
+             normal session reconnects its PTY. The Conversation is the only
+             view these rows have. -->
         <div class="view-slot">
-          <BgSessionPanel session={$selectedSession} />
+          <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode} />
         </div>
       {:else}
         <!-- TerminalView stays mounted underneath so the PTY and its ANSI
@@ -379,6 +629,29 @@
             <FilesPanel session={$selectedSession} />
           </div>
         {/if}
+        {#if conversationMode && $selectedSession}
+          <div class="view-slot overlay">
+            <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode} onOpenTerminal={showTerminal} />
+          </div>
+        {/if}
+      {/if}
+      {#if hostsMode}
+        <div class="view-slot overlay" data-testid="hosts-overlay">
+          {#key hostsViewKey}
+            <HostsView
+              preselect={hostsPreselect}
+              onClose={() => closeHosts()}
+              onFilterSidebar={onHostsFilterSidebar}
+              onNewSession={onHostsNewSession}
+              onSelectionChange={(alias) => (lastViewedHost = alias)}
+            />
+          {/key}
+        </div>
+      {/if}
+      {#if assetsMode}
+        <div class="view-slot overlay" data-testid="assets-overlay">
+          <AssetsPanel visible={assetsMode} />
+        </div>
       {/if}
     </div>
   </div>
@@ -393,6 +666,17 @@
     <span>v{health.version} · db: {health.db_ready ? 'ok' : 'fail'} · schema {health.schema_version}</span>
   {:else}
     <span class="muted">connecting…</span>
+  {/if}
+  {#if usageFooter}
+    <button
+      type="button"
+      class="usage-seg tone-{usageFooter.tone}"
+      data-testid="footer-usage"
+      data-state={usageFooter.state}
+      aria-label={usageFooter.ariaLabel}
+      title={usageFooter.ariaLabel}
+      onclick={() => openHosts(usageFooter.host)}>{usageFooter.text}</button
+    >
   {/if}
 </footer>
 
@@ -411,8 +695,28 @@
     border-top: 1px solid var(--border);
     font-size: 0.75rem;
     color: var(--fg-muted);
+    display: flex;
+    align-items: center;
+    gap: 1rem;
   }
   .status .err { color: #e64a4a; }
+  .usage-seg {
+    margin-left: auto;
+    background: transparent;
+    border: none;
+    padding: 0 0.3rem;
+    font: inherit;
+    font-variant-numeric: tabular-nums;
+    color: var(--fg);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .usage-seg:hover { text-decoration: underline; }
+  .usage-seg.tone-muted { color: var(--fg-muted); }
+  .usage-seg.tone-warn { color: var(--usage-warn); }
+  .usage-seg.tone-alarm { color: var(--usage-crit); }
 
   /* Collapsed-pane strip: a thin always-visible vertical button. Same
      visual language for both sidebar and center collapse so the user
@@ -501,6 +805,25 @@
     padding-bottom: calc(0.25rem + 1px);
   }
   .view-tab:disabled { opacity: 0.4; cursor: not-allowed; }
+  .hosts-tab {
+    margin-left: auto;
+    position: relative;
+  }
+  /* A thin rule sets the fleet-scoped tab apart from the session tabs. */
+  .hosts-tab::before {
+    content: '';
+    position: absolute;
+    left: -0.5rem;
+    top: 0.3rem;
+    bottom: 0.3rem;
+    border-left: 1px solid var(--border);
+  }
+  .hosts-tab kbd {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.65rem;
+    color: var(--fg-muted);
+    margin-left: 0.25rem;
+  }
 
   .right-body {
     position: relative;

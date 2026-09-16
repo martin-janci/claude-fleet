@@ -28,7 +28,8 @@
 //! Cost is an ESTIMATE: tokens priced with [`BUILTIN_PRICES`] (overridable
 //! per model through the `usage.prices_json` setting) when each delta lands.
 
-use crate::ipc_error::IpcError;
+use crate::ipc_error::lock;
+use crate::ipc_error::{codes, IpcError};
 use crate::service::settings;
 use crate::shell::quote;
 use crate::ssh::{SshClient, SshExec};
@@ -139,7 +140,7 @@ pub const MAX_PRICE_PER_MTOK: f64 = 10_000.0;
 pub fn parse_price_overrides(raw: &str) -> Result<BTreeMap<String, Price>, IpcError> {
     let bad = |msg: String| {
         IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             format!("{}: {msg}", settings::USAGE_PRICES_JSON),
         )
     };
@@ -587,8 +588,8 @@ async fn run_script(
             .output();
         tokio::time::timeout(LOCAL_WALL_CLOCK, child)
             .await
-            .map_err(|_| IpcError::new("E_SSH_TIMEOUT", "usage collection timed out"))?
-            .map_err(|e| IpcError::new("E_SHELL", format!("spawn bash: {e}")))
+            .map_err(|_| IpcError::new(codes::E_SSH_TIMEOUT, "usage collection timed out"))?
+            .map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}")))
     } else {
         exec.run(host, &["bash", "-lc", &quote(script)], CONNECT_TIMEOUT)
             .await
@@ -608,9 +609,7 @@ pub async fn collect_host(
 ) -> Result<usize, IpcError> {
     crate::validate::host_alias(host)?;
     let cursors: Vec<UsageCursor> = {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = lock(store)?;
         s.list_usage_cursors(host)?
     }
     .into_iter()
@@ -624,7 +623,7 @@ pub async fn collect_host(
     let stdout = String::from_utf8_lossy(&out.stdout);
     if !out.status.success() && stdout.trim().is_empty() {
         return Err(IpcError::new(
-            "E_SHELL",
+            codes::E_SHELL,
             format!(
                 "usage collection on {host} failed: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
@@ -632,9 +631,7 @@ pub async fn collect_host(
         ));
     }
     let results = parse_batch_output(&stdout);
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = lock(store)?;
     let mut changed = 0;
     for c in &cursors {
         if let Some(FileOutcome::Read(read)) = results.get(&c.session_id) {
@@ -715,8 +712,8 @@ pub fn spawn_collect(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) {
 /// `usage.interval_secs` have elapsed since the last pass. `None` when
 /// skipped.
 pub async fn maybe_collect(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Option<usize> {
-    static LAST: once_cell::sync::Lazy<Mutex<Option<std::time::Instant>>> =
-        once_cell::sync::Lazy::new(|| Mutex::new(None));
+    static LAST: std::sync::LazyLock<Mutex<Option<std::time::Instant>>> =
+        std::sync::LazyLock::new(|| Mutex::new(None));
     let _flight = begin_flight()?;
     let (enabled, interval) = {
         let s = store.lock().ok()?;

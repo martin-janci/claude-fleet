@@ -10,7 +10,7 @@
   import { hintAnchor } from './hints';
   import { toIpcError } from './result';
   import { push, pushError } from './toasts';
-  import { repairSession } from './sessions';
+  import { repairSession, hasNoPane } from './sessions';
   import { keyToBytes, detectMac } from './terminal_keys';
   import { createDrainLoop } from './terminal_drain';
   import { createTerminalClipboard, pathsToPasteText } from './terminal_clipboard';
@@ -30,6 +30,9 @@
   //   - Keyboard input is forwarded as raw bytes via the xterm key table in
   //     `./terminal_keys.ts` (arrows/Home/End/Ins/Del/F-keys with modifiers,
   //     Ctrl chords, Alt/Option as an ESC prefix).
+  //   - Selection follows text-input conventions (`./terminal_mouse.ts` +
+  //     `./terminal_selection.ts`): drag, double-click word, triple-click
+  //     line, Shift+click extend; typing drops the highlight.
   // For our use case (tmux + claude TUI legibly visible in-app) these
   // limits are acceptable.
   // ─────────────────────────────────────────────────────────────────────
@@ -69,6 +72,15 @@
   let selAnchor: CellPos | null = $state(null);
   let selFocus: CellPos | null = $state(null);
   let openError: string | null = $state(null);
+  /** Keyboard focus is on the grid. Drives the cursor's look: a solid block
+   *  when focused, a hollow outline when not — so it is always clear where
+   *  typing will land, as with a text input's caret. */
+  let focused = $state(false);
+  /** Bumped on every keystroke / paste that reaches the PTY. The cursor
+   *  element is keyed on it so its blink animation restarts from the visible
+   *  phase — a caret that stays solid while you type and only blinks when
+   *  idle, as in a text input. */
+  let blinkEpoch = $state(0);
   /** Context-menu position (client px) or null when hidden. */
   let ctxMenu: { x: number; y: number } | null = $state(null);
   let ptyOpen = false;
@@ -148,6 +160,14 @@
 
   async function ctxPaste() {
     closeCtxMenu();
+    await paste();
+  }
+
+  /** Paste from the native clipboard. Input replaces the selection in a text
+   *  input; here it simply drops the highlight and restarts the caret blink. */
+  async function paste() {
+    clearSelection();
+    blinkEpoch++;
     await pasteFromClipboard();
   }
 
@@ -180,7 +200,7 @@
       });
       if (remote.length > 0) sendPaste(pathsToPasteText(remote));
     } catch (e) {
-      openError = `Upload failed: ${describeError(e)}`;
+      openError = `Upload failed: ${toIpcError(e).message}`;
     } finally {
       uploading = false;
     }
@@ -291,7 +311,7 @@
     // those are Repair workspace only; we say so instead. A healthy session
     // costs one probe; orphans and background rows have nothing to check. An
     // offline host is left to the attach error.
-    if (sess.project_id != null && sess.kind !== 'bg') {
+    if (sess.project_id != null && !hasNoPane(sess)) {
       const rep = await repairSession(sess.id);
       if (rep.ok) {
         const v = rep.value;
@@ -324,7 +344,7 @@
       currentHost = sess.host_alias;
       ptyOpen = true;
     } catch (e) {
-      openError = `PTY error: ${describeError(e)}`;
+      openError = `PTY error: ${toIpcError(e).message}`;
       opening = false;
       return;
     }
@@ -520,7 +540,7 @@
     // Plain Ctrl+V is intentionally NOT intercepted so ^V reaches the app.
     if ((cmdChord || ctrlShiftChord) && k === 'v') {
       e.preventDefault();
-      void pasteFromClipboard();
+      void paste();
       return;
     }
     // Copy the selection. Cmd+C with no selection falls through to the
@@ -535,8 +555,8 @@
       }
       return;
     }
-    // Cmd+A → select the whole viewport.
-    if (cmdChord && k === 'a') {
+    // Cmd+A (Ctrl+Shift+A elsewhere) → select the whole viewport.
+    if ((cmdChord || ctrlShiftChord) && k === 'a') {
       e.preventDefault();
       selAnchor = { row: 0, col: 0 };
       selFocus = { row: lastRows - 1, col: lastCols - 1 };
@@ -546,6 +566,10 @@
     if (bytes === null) return;
     e.preventDefault();
     writePty(bytes);
+    // Typing into a text input collapses its selection; the highlight would
+    // otherwise sit on stale cells while the screen redraws under it.
+    clearSelection();
+    blinkEpoch++;
     // The keystroke will produce output (echo / TUI redraw); pull the drain
     // loop back to full rate so it doesn't sit on a backed-off delay.
     bumpDrain();
@@ -556,14 +580,9 @@
   function onCompositionEnd(e: CompositionEvent) {
     if (!ptyOpen || !e.data) return;
     writePty(e.data);
+    clearSelection();
+    blinkEpoch++;
     bumpDrain();
-  }
-
-  function describeError(e: unknown): string {
-    if (e && typeof e === 'object' && 'message' in e) {
-      return String((e as { message: unknown }).message);
-    }
-    return String(e);
   }
 
   onDestroy(() => {
@@ -632,15 +651,31 @@
   // Cursor overlay position. Touch renderVersion so it tracks every drain.
   // Null when hidden (?25l) or before font metrics are measured. The grid has
   // 4px padding; cells run cellWidth × cellHeight from there.
-  const cursor = $derived.by<{ left: number; top: number; w: number; h: number } | null>(() => {
+  //
+  // Shape and blink follow the app's DECSCUSR request (`CSI Ps SP q`):
+  // 0/1 blinking block (the default), 2 steady block, 3/4 underline, 5/6
+  // bar — so a bar-caret app (a shell with `cursor-shape`, an editor in
+  // insert mode) looks the same here as in a real terminal. A cursor parked
+  // past the last column (deferred wrap) is drawn on the last column, as
+  // xterm does; a cursor on a wide glyph covers both of its cells.
+  const cursor = $derived.by<{
+    left: number; top: number; w: number; h: number;
+    shape: 'block' | 'underline' | 'bar'; blink: boolean;
+  } | null>(() => {
     void renderVersion;
     if (!screen || !screen.cursorVisible) return null;
     if (cellWidth <= 0 || cellHeight <= 0) return null;
+    const col = Math.min(screen.cursorCol, screen.cols - 1);
+    const row = screen.cells[screen.cursorRow];
+    const wide = row !== undefined && row[col]?.ch !== '' && row[col + 1]?.ch === '';
+    const st = screen.cursorStyle;
     return {
-      left: 4 + screen.cursorCol * cellWidth,
+      left: 4 + col * cellWidth,
       top: 4 + screen.cursorRow * cellHeight,
-      w: cellWidth,
+      w: wide ? 2 * cellWidth : cellWidth,
       h: cellHeight,
+      shape: st >= 5 ? 'bar' : st >= 3 ? 'underline' : 'block',
+      blink: st === 0 || st === 1 || st === 3 || st === 5,
     };
   });
 
@@ -725,6 +760,8 @@
       onwheel={onWheel}
       onmousedown={onMousedown}
       oncontextmenu={onContextMenu}
+      onfocus={() => (focused = true)}
+      onblur={() => (focused = false)}
       data-testid="terminal-host"
     >
       <!-- Hidden 1ch×1lh probe used once to measure font metrics. We can't
@@ -734,7 +771,7 @@
       {#each visibleRows as row (row.key)}
         <div class="row">
           {#each row.runs as run, i (i)}
-            <span style={runStyle(run)}>{run.text}</span>
+            <span class:wide={run.wide} style={runStyle(run)}>{run.text}</span>
           {/each}
         </div>
       {/each}
@@ -743,15 +780,22 @@
           class="selection"
           style="left:{r.left}px; top:{r.top}px; width:{r.width}px; height:{r.height}px"
           aria-hidden="true"
+          data-testid="terminal-selection"
         ></div>
       {/each}
       {#if cursor}
-        <div
-          class="cursor"
-          style="left:{cursor.left}px; top:{cursor.top}px; width:{cursor.w}px; height:{cursor.h}px"
-          aria-hidden="true"
-          data-testid="terminal-cursor"
-        ></div>
+        <!-- Keyed on blinkEpoch: each keystroke recreates the element, which
+             restarts the blink animation at its visible phase. -->
+        {#key blinkEpoch}
+          <div
+            class="cursor {cursor.shape}"
+            class:blink={cursor.blink && focused}
+            class:unfocused={!focused}
+            style="left:{cursor.left}px; top:{cursor.top}px; width:{cursor.w}px; height:{cursor.h}px"
+            aria-hidden="true"
+            data-testid="terminal-cursor"
+          ></div>
+        {/key}
       {/if}
       {#if dragOver || uploading}
         <div class="drop-overlay" data-testid="terminal-drop-overlay">
@@ -912,21 +956,54 @@
     /* span color comes from inline style applied per run. */
     display: inline;
   }
+  /* A wide (2-column) glyph. Emoji and CJK come from a fallback font whose
+     advance is not two Menlo cells, so pin the box to exactly 2ch — the
+     column grid, the selection overlay and mouse→cell mapping all assume
+     every column is one cell wide. `ch` resolves against the grid's own
+     font, not the fallback. */
+  .row span.wide {
+    display: inline-block;
+    width: 2ch;
+    overflow: hidden;
+    text-align: center;
+    vertical-align: top;
+  }
   .selection {
     position: absolute;
     background: rgba(120, 170, 255, 0.35);
     pointer-events: none;
     z-index: 1;
   }
-  /* Block cursor overlay. Translucent so the glyph under it stays readable;
-     blinks like a standard terminal cursor. Position/size are set inline from
-     the measured cell metrics. Hidden automatically when the app sends ?25l. */
+  /* Cursor overlay. Translucent so the glyph under it stays readable.
+     Position/size are set inline from the measured cell metrics; hidden
+     automatically when the app sends ?25l. Shape classes follow DECSCUSR:
+     block (default), underline, bar. `blink` is applied only while the grid
+     has focus and the app asked for a blinking style; `unfocused` swaps the
+     fill for a hollow outline, the standard "input is elsewhere" cue. */
   .cursor {
     position: absolute;
     background: #e8e8e8;
     opacity: 0.55;
     pointer-events: none;
     z-index: 1;
+    box-sizing: border-box;
+  }
+  .cursor.underline {
+    background: none;
+    border-bottom: 2px solid #e8e8e8;
+    opacity: 0.9;
+  }
+  .cursor.bar {
+    background: none;
+    border-left: 2px solid #e8e8e8;
+    opacity: 0.9;
+  }
+  .cursor.unfocused {
+    background: none;
+    border: 1px solid #e8e8e8;
+    opacity: 0.6;
+  }
+  .cursor.blink {
     animation: cf-cursor-blink 1.1s steps(1, end) infinite;
   }
   @keyframes cf-cursor-blink {

@@ -1,11 +1,16 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import { sessions, type SessionRow, type SafeKillInspection } from './sessions';
+  import {
+    sessions,
+    hasNoPane,
+    isInactiveAgent,
+    dismissAgentSession,
+    type SessionRow,
+    type SafeKillInspection,
+  } from './sessions';
   import { formatCostMicros, formatTokens, sessionUsageTokens } from './sessions';
   import {
     killSession,
-    renameSession,
-    setFriendlyName,
     restartSession,
     repairSession,
     recreateSession,
@@ -17,7 +22,9 @@
   import { projectById } from './projects';
   import { selectSession, clearSelection } from './selection';
   import { hosts, hostByAlias } from './hosts';
-  import { accountByUuid, type AccountRow } from './accounts';
+  import { accountByUuid, accountEmailTier, type AccountRow } from './accounts';
+  import { timeAgo } from './session_status';
+  import { applySessionRename, renameKeyHandler } from './session_rename';
   import PromptComposer from './PromptComposer.svelte';
   import ReviewDialog from './ReviewDialog.svelte';
   import Modal from './Modal.svelte';
@@ -32,6 +39,7 @@
     claudeStatusColor,
     claudeStatusLabel,
     contextColor,
+    contextTint,
     contextLevel,
     formatElapsed,
     sessionStart,
@@ -52,12 +60,6 @@
   const accountRow = $derived(
     hostRow?.account_uuid ? ($accountByUuid.get(hostRow.account_uuid) ?? null) : null,
   );
-  function accountText(a: AccountRow | null): string {
-    if (!a) return '—';
-    const email = a.email ?? a.uuid;
-    return a.seat_tier ? `${email} (${a.seat_tier})` : email;
-  }
-
   function accountForRow(s: SessionRow): AccountRow | null {
     if (!s.account_uuid) return null;
     return $accountByUuid.get(s.account_uuid) ?? null;
@@ -77,14 +79,11 @@
   // Local-only for v0.2 (Phase 4 will branch on host_alias for remote attach).
   const attachCommand = $derived(`tmux attach -t ${session.tmux_name}`);
 
+  // Past a month the relative form stops being useful; show the date.
   function formatRelative(unix: number): string {
     const ageSec = Math.floor(Date.now() / 1000) - unix;
-    if (ageSec < 60) return 'just now';
-    if (ageSec < 3600) return `${Math.floor(ageSec / 60)}m ago`;
-    if (ageSec < 86400) return `${Math.floor(ageSec / 3600)}h ago`;
-    const days = Math.floor(ageSec / 86400);
-    if (days < 30) return `${days}d ago`;
-    return new Date(unix * 1000).toISOString().slice(0, 10);
+    if (ageSec >= 30 * 86400) return new Date(unix * 1000).toISOString().slice(0, 10);
+    return timeAgo(unix);
   }
 
   let copied = $state(false);
@@ -131,32 +130,11 @@
 
   async function commitRename() {
     if (!renaming || committingRename) return;
-    const next = renameValue.trim();
     committingRename = true;
     try {
-      if (renaming === 'label') {
-        if (next === (session.friendly_name ?? '').trim()) {
-          renaming = null;
-          return;
-        }
-        const r = await setFriendlyName(session.host_alias, session.tmux_name, next);
-        if (!r.ok) {
-          pushError(r.error, 'Label update failed');
-          return;
-        }
-        renaming = null;
-        return;
-      }
-      if (!next || next === session.tmux_name) {
-        renaming = null;
-        return;
-      }
-      const r = await renameSession(session.host_alias, session.tmux_name, next);
-      if (!r.ok) {
-        pushError(r.error, 'Rename failed');
-        return;
-      }
-      selectSession(r.value);
+      const outcome = await applySessionRename(session, renaming, renameValue);
+      if (outcome.kind === 'error') return;
+      if (outcome.kind === 'ok' && outcome.row) selectSession(outcome.row, { follow: true });
       renaming = null;
     } finally {
       committingRename = false;
@@ -167,14 +145,13 @@
     renaming = null;
   }
 
-  function onRenameKey(e: KeyboardEvent) {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      void commitRename();
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      cancelRename();
-    }
+  const onRenameKey = renameKeyHandler(() => void commitRename(), cancelRename);
+
+  // Inactive bg agent: drop the row. The backend emits `session:removed`,
+  // which removes it from the store (and clears the selection).
+  async function onRemoveFromList() {
+    const r = await dismissAgentSession(session.id);
+    if (!r.ok) pushError(r.error, 'Remove failed');
   }
 
   async function onRestart() {
@@ -210,7 +187,7 @@
       // the selection effect would not fire on its own).
       selectSession(null);
       await tick();
-      selectSession(session);
+      selectSession(session, { follow: true });
     }
   }
 
@@ -387,7 +364,7 @@
     // panel shows the selected session, so force a re-attach.
     selectSession(null);
     await tick();
-    selectSession(r.value);
+    selectSession(r.value, { follow: true });
   }
 </script>
 
@@ -439,7 +416,7 @@
           class="chip"
           data-testid="details-context"
           data-level={ctxLevel}
-          style="color: {contextColor(ctxLevel)}; border-color: {contextColor(ctxLevel)}55;"
+          style="color: {contextColor(ctxLevel)}; border-color: {contextTint(ctxLevel)};"
           title="Context window used"
         >ctx {Math.round(session.context_pct)}%</span>
       {/if}
@@ -451,7 +428,7 @@
     <dd data-testid="session-host">{session.host_alias}</dd>
 
     <dt>Account</dt>
-    <dd data-testid="session-account">{accountText(accountRow)}</dd>
+    <dd data-testid="session-account">{accountEmailTier(accountRow)}</dd>
 
     <dt>Project</dt>
     <dd>
@@ -531,7 +508,7 @@
               onclick={() => selectSession(r)}
             >
               <span class="host-badge">[{r.host_alias}]</span>
-              <span class="account">{accountText(accountForRow(r))}</span>
+              <span class="account">{accountEmailTier(accountForRow(r))}</span>
               <span class="status-dot status-{r.status}" title={r.status}></span>
               <span class="sess-name">{r.tmux_name}</span>
               <span class="age">{formatRelative(r.last_activity_at)}</span>
@@ -554,7 +531,7 @@
               onclick={() => selectSession(r)}
             >
               <span class="host-badge">[{r.host_alias}]</span>
-              <span class="account">{accountText(accountForRow(r))}</span>
+              <span class="account">{accountEmailTier(accountForRow(r))}</span>
               <span class="status-dot status-{r.status}" title={r.status}></span>
               <span class="sess-name">{r.tmux_name}</span>
               <span class="age">{formatRelative(r.last_activity_at)}</span>
@@ -572,66 +549,86 @@
     refreshKey={`${session.turn_seq}|${session.status}|${session.claude_status}|${session.stuck_kind}|${session.last_prompt}|${session.safe_kill_state}`}
   />
 
-  <section class="block">
-    <h3>Attach from another terminal</h3>
-    <div class="cmd-row">
-      <code class="cmd" data-testid="attach-command">{attachCommand}</code>
-      <button class="copy" onclick={onCopy} data-testid="copy-attach">
-        {copied ? '✓ copied' : 'copy'}
-      </button>
-    </div>
-  </section>
+  {#if !hasNoPane(session)}
+    <section class="block">
+      <h3>Attach from another terminal</h3>
+      <div class="cmd-row">
+        <code class="cmd" data-testid="attach-command">{attachCommand}</code>
+        <button class="copy" onclick={onCopy} data-testid="copy-attach">
+          {copied ? '✓ copied' : 'copy'}
+        </button>
+      </div>
+    </section>
+  {/if}
 
   <section class="block actions">
     <button class="ghost" onclick={beginLabelEdit} data-testid="label-from-details">
       🏷 Edit label
     </button>
-    <button class="ghost" onclick={beginRename} data-testid="rename-from-details">
-      ✎ Rename tmux session
-    </button>
-    <button class="ghost" onclick={onRestart} data-testid="restart-from-details">
-      ↻ Restart
-    </button>
-    {#if session.kind !== 'bg' && session.project_id !== null}
-      <button
-        class="ghost"
-        onclick={onRepair}
-        disabled={repairing}
-        title="Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it"
-        data-testid="repair-from-details"
-      >
-        🩹 Repair workspace
+    <!-- An external row runs outside fleet: the label (local fleet metadata)
+         is the only thing fleet can change about it. -->
+    {#if session.kind !== 'external'}
+      <button class="ghost" onclick={beginRename} data-testid="rename-from-details">
+        ✎ Rename tmux session
       </button>
-    {/if}
-    {#if session.kind !== 'shell'}
-      <button class="ghost" onclick={openComposer} data-testid="send-prompt-from-details">
-        → Send prompt
+      <button class="ghost" onclick={onRestart} data-testid="restart-from-details">
+        ↻ Restart
       </button>
-    {/if}
-    <button class="ghost" onclick={() => (reviewOpen = true)} data-testid="open-review">
-      🔍 Review
-    </button>
-    <button class="ghost" onclick={askRecreate} data-testid="recreate-from-details">
-      ♻ Recreate
-    </button>
-    {#if canMove}
-      <button
-        class="ghost"
-        onclick={openMove}
-        title="Continue this conversation on another host: same branch, same Claude session"
-        data-testid="move-from-details"
-      >
-        ⇄ Move to host…
+      {#if !hasNoPane(session) && session.project_id !== null}
+        <button
+          class="ghost"
+          onclick={onRepair}
+          disabled={repairing}
+          title="Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it"
+          data-testid="repair-from-details"
+        >
+          🩹 Repair workspace
+        </button>
+      {/if}
+      {#if session.kind !== 'shell'}
+        <button class="ghost" onclick={openComposer} data-testid="send-prompt-from-details">
+          → Send prompt
+        </button>
+      {/if}
+      <button class="ghost" onclick={() => (reviewOpen = true)} data-testid="open-review">
+        🔍 Review
       </button>
-    {/if}
-    {#if session.kind !== 'shell' && session.status === 'running' && session.safe_kill_state !== 'requested'}
-      <button class="ghost" onclick={askSafeKill} data-testid="safe-kill-from-details">
-        ⏏ Safe remove
+      <button class="ghost" onclick={askRecreate} data-testid="recreate-from-details">
+        ♻ Recreate
       </button>
+      {#if canMove}
+        <button
+          class="ghost"
+          onclick={openMove}
+          title="Continue this conversation on another host: same branch, same Claude session"
+          data-testid="move-from-details"
+        >
+          ⇄ Move to host…
+        </button>
+      {/if}
+      {#if isInactiveAgent(session)}
+        <button
+          class="ghost"
+          onclick={onRemoveFromList}
+          title="Hide this inactive agent until it becomes active again"
+          data-testid="remove-from-list-details"
+        >
+          Remove from list
+        </button>
+      {/if}
+      <!-- An inactive agent's daemon is gone: Remove from list (above) is its
+           only removal action. -->
+      {#if !isInactiveAgent(session)}
+        {#if session.kind !== 'shell' && session.status === 'running' && session.safe_kill_state !== 'requested'}
+          <button class="ghost" onclick={askSafeKill} data-testid="safe-kill-from-details">
+            ⏏ Safe remove
+          </button>
+        {/if}
+        <button class="danger" onclick={askKill} data-testid="kill-from-details">
+          Kill session
+        </button>
+      {/if}
     {/if}
-    <button class="danger" onclick={askKill} data-testid="kill-from-details">
-      Kill session
-    </button>
   </section>
 
   {#if session.safe_kill_state === 'requested'}

@@ -6,7 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { sessions, loadSessions, killSession, renameSession, restartSession, repairSession, newSessionAbortable, newBgSession, peekSession, purgeProject, showBgAgents, resetTombstonesForTests } from './sessions';
+import { sessions, loadSessions, killSession, renameSession, restartSession, repairSession, newSessionAbortable, newBgSession, dismissAgentSession, hasNoPane, isInactiveAgent, purgeProject, showBgAgents, resetTombstonesForTests } from './sessions';
 import { formatCostMicros, formatTokens, sessionUsageTokens } from './sessions';
 
 beforeEach(() => {
@@ -174,15 +174,34 @@ describe('newBgSession', () => {
   });
 });
 
-describe('peekSession', () => {
-  it('calls peek_session with correct args and returns log output', async () => {
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce('log output here');
-    const r = await peekSession('local', 'sess-id-456');
+describe('hasNoPane', () => {
+  it('is true for bg and external, false for anything else', () => {
+    expect(hasNoPane({ kind: 'bg' })).toBe(true);
+    expect(hasNoPane({ kind: 'external' })).toBe(true);
+    expect(hasNoPane({ kind: 'work' })).toBe(false);
+    expect(hasNoPane({ kind: 'review' })).toBe(false);
+    expect(hasNoPane({ kind: 'shell' })).toBe(false);
+  });
+});
+
+describe('isInactiveAgent', () => {
+  it('is true only for a bg row with claude_status stopped', () => {
+    expect(isInactiveAgent({ kind: 'bg', claude_status: 'stopped' })).toBe(true);
+    expect(isInactiveAgent({ kind: 'bg', claude_status: 'working' })).toBe(false);
+    expect(isInactiveAgent({ kind: 'bg', claude_status: null })).toBe(false);
+    expect(isInactiveAgent({ kind: 'external', claude_status: 'stopped' })).toBe(false);
+    expect(isInactiveAgent({ kind: 'work', claude_status: 'stopped' })).toBe(false);
+  });
+});
+
+describe('dismissAgentSession', () => {
+  it('calls dismiss_agent_session with the session id and returns null', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    const r = await dismissAgentSession(7);
     expect(r.ok).toBe(true);
-    if (r.ok) expect(r.value).toBe('log output here');
     expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
-      'peek_session',
-      { args: { host_alias: 'local', claude_session_id: 'sess-id-456' } },
+      'dismiss_agent_session',
+      { args: { session_id: 7 } },
     ]);
   });
 });

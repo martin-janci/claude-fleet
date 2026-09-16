@@ -26,11 +26,11 @@
 //! safety net, not a licence to log secrets: never pass a token to a log
 //! macro on purpose.
 
-use once_cell::sync::Lazy;
 use regex::Regex;
 use std::borrow::Cow;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use tracing_subscriber::fmt::MakeWriter;
 
 /// Log file names are `<prefix>.<YYYY-MM-DD-HH>.<suffix>`, e.g.
@@ -157,10 +157,10 @@ pub fn tail_lines(dir: &Path, n: usize) -> Vec<String> {
 /// `Bearer` plus a candidate value (group 3). Whether the value is masked is
 /// decided by [`is_token_shaped`], so prose such as "Bearer authentication"
 /// survives.
-static BEARER_RE: Lazy<Regex> = Lazy::new(|| {
+static BEARER_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(bearer)(\s+)([A-Za-z0-9\-._~+/]{8,}=*)").expect("bearer regex")
 });
-static QUERY_TOKEN_RE: Lazy<Regex> = Lazy::new(|| {
+static QUERY_TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)([?&](?:access_)?token=)[^&\s"'#]+"#).expect("query token regex")
 });
 /// Runs of 64 or more hex digits. The regex crate has no lookaround, so the
@@ -171,8 +171,8 @@ static QUERY_TOKEN_RE: Lazy<Regex> = Lazy::new(|| {
 /// text edge) on both sides. Unlike a `\b` rule this masks a token glued to
 /// letters or `_` (`tok_<64 hex>`), and still leaves longer hex runs (a
 /// SHA-512 digest) alone.
-static HEX_RUN_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"[0-9A-Fa-f]{64,}").expect("hex run regex"));
+static HEX_RUN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[0-9A-Fa-f]{64,}").expect("hex run regex"));
 
 /// Placeholder that replaces masked material.
 pub const REDACTED: &str = "[REDACTED]";

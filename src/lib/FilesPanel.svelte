@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import type { SessionRow } from './sessions';
   import {
     repoChanges,
@@ -10,6 +11,7 @@
   import { repoLog, repoCommit, repoBranches, repoCheckout, repoCheckoutCommit, repoCreateBranch, repoDeleteBranch, repoStage, repoUnstage, repoCommitCreate, type Commit, type CommitDetail, type Branch } from './history';
   import type { Result } from './result';
   import { readPref, writePref } from './prefs';
+  import { openPathRequest } from './app_views';
   import FileList from './FileList.svelte';
   import FileViewer from './FileViewer.svelte';
   import Resizer from './Resizer.svelte';
@@ -33,6 +35,9 @@
   // When set, the body shows a calm placeholder instead of raw git errors.
   let worktreeGone = $state(false);
   let selectedPath = $state<string | null>(null);
+  // Line to show for a path opened from the Conversation tab; cleared as
+  // soon as the user picks another file.
+  let focusLine = $state<number | null>(null);
   let treeLoaded = false;
   // Bumped on Refresh — invalidates FileViewer's content/diff caches.
   let reloadKey = $state(0);
@@ -71,12 +76,28 @@
     tree = null;
     treeLoaded = false;
     selectedPath = null;
+    focusLine = null;
     commits = [];
     historyLoaded = false;
     openCommit = null;
     branches = [];
     worktreeGone = false;
     void loadChanges();
+  });
+
+  // A path requested from the Conversation tab: show it in the tree view.
+  // Declared after the session reset above so it runs later in the same
+  // flush and the reset cannot clear the selection again.
+  $effect(() => {
+    const req = $openPathRequest;
+    if (!req || req.sessionId !== session.id) return;
+    openPathRequest.set(null);
+    untrack(() => {
+      mode = 'tree';
+      if (!treeLoaded) void loadTree();
+      selectedPath = req.path;
+      focusLine = req.line;
+    });
   });
 
   // Route a failed repo call: a deleted worktree switches the panel to its
@@ -147,11 +168,11 @@
     const sid = session.id;
     const r = await repoCommit(sid, hash);
     if (sid !== session.id) return;
-    if (r.ok) { openCommit = r.value; selectedPath = r.value.files[0]?.path ?? null; }
+    if (r.ok) { openCommit = r.value; selectedPath = r.value.files[0]?.path ?? null; focusLine = null; }
     else applyFailure(r);
   }
 
-  function backToGraph(): void { openCommit = null; selectedPath = null; }
+  function backToGraph(): void { openCommit = null; selectedPath = null; focusLine = null; }
 
   async function loadBranches(): Promise<void> {
     const sid = session.id;
@@ -233,6 +254,7 @@
 
   function onMode(m: typeof mode): void {
     mode = m;
+    focusLine = null;
     error = null;
     worktreeGone = false;
     openCommit = null;
@@ -251,6 +273,7 @@
 
   function onSelect(path: string): void {
     selectedPath = path;
+    focusLine = null;
   }
 
   function onResize(delta: number): void {
@@ -344,7 +367,7 @@
       </div>
       <Resizer id="files-list" onresize={onResize} />
       <div class="viewer-col">
-        <FileViewer {session} path={selectedPath} status={selectedStatus} {reloadKey} commit={openCommit?.hash ?? null} />
+        <FileViewer {session} path={selectedPath} status={selectedStatus} {reloadKey} commit={openCommit?.hash ?? null} {focusLine} />
       </div>
     </div>
   {/if}

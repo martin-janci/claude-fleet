@@ -103,6 +103,34 @@ describe('Modal (via ConfirmDialog)', () => {
     expect(document.activeElement).toBe(opener);
   });
 
+  it('a native close the parent declines (stays mounted) reopens the dialog', async () => {
+    const oncancel = vi.fn(); // declines: never unmounts
+    render(ConfirmDialog, { props: { title: 'T', message: 'm', onconfirm: () => {}, oncancel } });
+    await tick();
+    const dlg = screen.getByRole('dialog') as HTMLDialogElement;
+    dlg.removeAttribute('open'); // what the engine's native close does
+    dlg.dispatchEvent(new Event('close'));
+    await tick();
+    await tick();
+    expect(oncancel).toHaveBeenCalledTimes(1);
+    expect(dlg.hasAttribute('open')).toBe(true);
+  });
+
+  it('a native close the parent accepts unmounts without reopening', async () => {
+    let r: ReturnType<typeof render> | null = null;
+    const oncancel = vi.fn(() => r?.unmount());
+    r = render(ConfirmDialog, { props: { title: 'T', message: 'm', onconfirm: () => {}, oncancel } });
+    await tick();
+    const dlg = screen.getByRole('dialog') as HTMLDialogElement;
+    dlg.removeAttribute('open');
+    dlg.dispatchEvent(new Event('close'));
+    await tick();
+    await tick();
+    expect(oncancel).toHaveBeenCalledTimes(1);
+    expect(dlg.isConnected).toBe(false);
+    expect(dlg.hasAttribute('open')).toBe(false);
+  });
+
   it('does not call onclose again while tearing down (native close during unmount)', async () => {
     const oncancel = vi.fn();
     const r = render(ConfirmDialog, { props: { title: 'T', message: 'm', onconfirm: () => {}, oncancel } });

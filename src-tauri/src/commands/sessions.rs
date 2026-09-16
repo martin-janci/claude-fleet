@@ -3,8 +3,9 @@
 //! references.
 
 use crate::cancel::CancellationRegistry;
-use crate::ipc_error::IpcError;
-use crate::service::bg_sessions::{self, NewBgSessionArgs, PeekSessionArgs, PurgeProjectArgs};
+use crate::ipc_error::lock;
+use crate::ipc_error::{codes, IpcError};
+use crate::service::bg_sessions::{self, DismissAgentArgs, NewBgSessionArgs, PurgeProjectArgs};
 use crate::service::repair::{self, RepairReport};
 use crate::service::safe_kill::{
     self, DiscardKillSessionArgs, InspectSafeKillArgs, SafeKillInspection, SafeKillSessionArgs,
@@ -158,6 +159,16 @@ pub fn dismiss_ghost_session(
     sessions::dismiss_ghost_session(args, &store)
 }
 
+/// Remove an inactive background agent (`kind='bg'`, not working) from the
+/// list. Frontend-only; logic lives in `service::bg_sessions`.
+#[tauri::command]
+pub fn dismiss_agent_session(
+    args: DismissAgentArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<(), IpcError> {
+    bg_sessions::dismiss_agent_session(args, &store)
+}
+
 /// Make the session's directory a healthy git worktree on its branch and its
 /// tmux session run there (creating tmux when it is gone). A no-op on a
 /// healthy session. Logic lives in `service::repair`.
@@ -192,15 +203,6 @@ pub async fn new_bg_session(
     bg_sessions::new_bg_session_tracked(args, &store, &ssh).await
 }
 
-/// Fetch recent log output from a background Claude session without opening a PTY.
-#[tauri::command]
-pub async fn peek_session(
-    args: PeekSessionArgs,
-    ssh: State<'_, Arc<SshClient>>,
-) -> Result<String, IpcError> {
-    bg_sessions::peek_session(args, &ssh).await
-}
-
 /// Delete all Claude Code state for a project and remove it from the fleet database.
 #[tauri::command]
 pub async fn purge_project(
@@ -223,7 +225,7 @@ pub async fn purge_project(
 pub fn get_fleet_settings(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(&store)?;
     Ok(crate::service::settings::read_all(&s))
 }
 
@@ -236,7 +238,7 @@ pub fn set_fleet_setting(
     value: String,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(&store)?;
     crate::service::settings::set(&s, &key, &value)?;
     Ok(crate::service::settings::read_all(&s))
 }
@@ -271,8 +273,65 @@ pub fn session_history(
     args: SessionHistoryArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<crate::store::SessionEvent>, IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(&store)?;
     s.list_session_events(args.session_id, history_limit(args.limit))
+}
+
+// ── Conversation (structured transcript) ────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct SessionConversationArgs {
+    pub session_id: i64,
+    /// Most-recent turns to return; omitted = the default window. Clamped
+    /// (see `transcript::conv_limits`).
+    #[serde(default)]
+    pub turns: Option<usize>,
+}
+
+/// The session's recent conversation — prompts, assistant text and one line
+/// per tool call — read from its Claude Code transcript. Rendered by the
+/// details pane's Conversation tab. Errors: `E_NOTFOUND`, `E_INVALID_STATE`
+/// (no `claude_session_id` yet), `E_NO_TRANSCRIPT`, transport codes.
+#[tauri::command]
+pub async fn session_conversation(
+    args: SessionConversationArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<crate::service::transcript::Conversation, IpcError> {
+    use crate::service::transcript;
+    let row = {
+        let s = lock(&store)?;
+        s.get_session_by_id(args.session_id)?.ok_or_else(|| {
+            IpcError::new(
+                codes::E_NOTFOUND,
+                format!("session {} not found", args.session_id),
+            )
+        })?
+    };
+    // `resolve_args` takes (and releases) the lock itself; nothing holds it
+    // across the fetch.
+    let (turns, max_chars) = transcript::conv_limits(args.turns);
+    let targs = transcript::resolve_args(&store, &row, turns, max_chars)?;
+    transcript::fetch_conversation(targs, &ssh).await
+}
+
+// ── Activity probe (live indicator) ─────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct SessionActivityArgs {
+    pub session_id: i64,
+}
+
+/// What the session's pane shows right now (status, spinner, stuck / dialog
+/// state), read on demand for the Conversation tab's live indicator. Errors:
+/// `E_NOTFOUND`, `E_INVALID_STATE` (runs outside tmux), transport codes.
+#[tauri::command]
+pub async fn session_activity(
+    args: SessionActivityArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<sessions::ActivityProbe, IpcError> {
+    sessions::session_activity(&store, &ssh, args.session_id).await
 }
 
 #[cfg(test)]

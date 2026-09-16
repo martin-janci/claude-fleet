@@ -41,6 +41,7 @@
 //! A healthy workspace costs exactly one probe and no writes.
 //! Spec: `docs/specs/2026-09-11-session-worktree-repair.md`.
 
+use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::{SshClient, SshExec};
@@ -62,6 +63,10 @@ pub const UNREGISTER_REFUSED: &str = "reappeared or parent missing; not removing
 /// stderr marker of the apply script's fingerprint re-check right before the
 /// re-add: the parent changed after the stale entry was removed.
 pub const ADD_REFUSED: &str = "parent changed since the check; not re-adding";
+/// stderr marker of a [`BranchSource::Mirror`] add: the branch exists neither
+/// on the host nor on origin (it was never pushed), so there is nothing to
+/// mirror. The caller turns it into a "push it first" error.
+pub const MIRROR_REFUSED: &str = "is not on origin; nothing to mirror";
 
 /// `"dev:inode"` → `(dev, inode)`; `None` for anything else.
 pub fn parse_fp(s: &str) -> Option<(u64, u64)> {
@@ -500,6 +505,15 @@ pub enum BranchSource {
     /// branch from `base` (local, then `origin/<base>`), then `default`, then
     /// `HEAD`. Any other ls-remote / fetch error aborts the repair.
     FetchOrBase { base: String, default: String },
+    /// Mirror an EXISTING worktree onto another host, where nothing was
+    /// probed: decided at run time. `refs/heads/<branch>` if the host has it;
+    /// else ask origin (`git ls-remote --exit-code`), fetch the branch and
+    /// track it. When origin does not have it either, refuse with
+    /// [`MIRROR_REFUSED`] on stderr — never fork a new branch of that name
+    /// from the base, which would silently impersonate the user's work that
+    /// only exists on the originating machine. Any other ls-remote / fetch
+    /// error aborts.
+    Mirror,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -543,6 +557,9 @@ impl Step {
                 }
                 BranchSource::FetchOrBase { base, .. } => format!(
                     "git worktree add -- {path} (origin/{branch} if origin has it, else a new branch {branch} from {base})"
+                ),
+                BranchSource::Mirror => format!(
+                    "git worktree add -- {path} {branch} (local, else fetched from origin/{branch}; refused when origin lacks it)"
                 ),
             },
             Step::AdoptPath { path } => format!("adopt existing checkout at {path}"),
@@ -1248,6 +1265,40 @@ pub fn render_git_script_expecting(
                              esac\n"
                         ));
                     }
+                    BranchSource::Mirror => {
+                        // Local first (an earlier mirror, or the user's own
+                        // checkout of the branch); else a fresh fetch so a
+                        // stale `origin/<b>` from an old clone is refreshed
+                        // before it is checked out. Nowhere: refuse.
+                        s.push_str(&format!(
+                            "b={bq}\n\
+                             if git -C {rq} show-ref --verify --quiet \"refs/heads/$b\"; then\n\
+                             \x20 git -C {rq} worktree add -- {pq} \"$b\" 1>&2\n\
+                             \x20 echo outcome=branch_local\n\
+                             else\n\
+                             \x20 if git -C {rq} remote get-url origin >/dev/null 2>&1; then\n\
+                             \x20   lr=0; git -C {rq} ls-remote --exit-code --heads -- origin \"refs/heads/$b\" >/dev/null 2>&1 || lr=$?\n\
+                             \x20 else\n\
+                             \x20   lr=2\n\
+                             \x20 fi\n\
+                             \x20 case \"$lr\" in\n\
+                             \x20 0)\n\
+                             \x20   if ! git -C {rq} fetch -- origin \"+refs/heads/$b:refs/remotes/origin/$b\" 1>&2; then\n\
+                             \x20     echo \"repair: fetching origin/$b failed; not mirroring the branch\" >&2; exit 1\n\
+                             \x20   fi\n\
+                             \x20   git -C {rq} worktree add --track -b \"$b\" -- {pq} \"origin/$b\" 1>&2\n\
+                             \x20   echo outcome=branch_remote\n\
+                             \x20   ;;\n\
+                             \x20 2)\n\
+                             \x20   echo \"repair: branch $b {MIRROR_REFUSED}\" >&2; exit 1\n\
+                             \x20   ;;\n\
+                             \x20 *)\n\
+                             \x20   echo \"repair: cannot confirm whether origin has $b (git ls-remote exit $lr); not mirroring it\" >&2; exit 1\n\
+                             \x20   ;;\n\
+                             \x20 esac\n\
+                             fi\n"
+                        ));
+                    }
                 }
             }
             Step::AdoptPath { .. } | Step::TmuxCreate { .. } | Step::TmuxRespawn { .. } => {}
@@ -1602,7 +1653,10 @@ fn adoption_conflict(
         adopt_key.to_string()
     };
     for o in &sessions {
-        if Some(o.id) == spec.session_id || o.kind == "bg" || o.project_id != Some(pid) {
+        if Some(o.id) == spec.session_id
+            || crate::store::has_no_pane(&o.kind)
+            || o.project_id != Some(pid)
+        {
             continue;
         }
         // A key equal to ours is our own workspace group (reviews, twins).
@@ -1658,7 +1712,7 @@ pub async fn ensure_workspace_with(
     // it is released (the filesystem can hang on a dead NFS mount, and a hung
     // call must never hold the store mutex).
     let snap = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         auto_snapshot(&s, spec, &probe)
     };
     let ctx = AutoContext {
@@ -1713,7 +1767,7 @@ pub async fn ensure_workspace_with(
         // Read the rows under the store lock; canonicalize only after it is
         // released (a dead NFS path must never hold the store mutex).
         let snap = {
-            let s = store.lock().map_err(|_| IpcError::lock())?;
+            let s = lock(store)?;
             adoption_snapshot(&s, spec)?
         };
         let conflict = adoption_conflict(spec, w, &adopt_key, snap, local_canon);
@@ -1881,7 +1935,7 @@ pub async fn ensure_workspace_with(
 
     // ── record: rows + timeline (one lock, no awaits) ───────────────────
     {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         if let (Some(w), Some(pid)) = (&spec.worktree, spec.project_id) {
             let branch = final_branch.clone().unwrap_or_else(|| w.branch.clone());
             let existing = s
@@ -2039,7 +2093,7 @@ fn auto_context_from(
     };
     let mapped = sessions.iter().any(|o| {
         Some(o.id) != spec.session_id
-            && o.kind != "bg"
+            && !crate::store::has_no_pane(&o.kind)
             && o.project_id == Some(pid)
             && (o.worktree_key.as_deref() == Some(w.name.as_str())
                 || o.worktree_id
@@ -2087,7 +2141,7 @@ pub fn require_no_explicit(report: RepairReport) -> Result<RepairReport, IpcErro
 /// may start with `~/`, which is expanded against the remote `$HOME` here. The
 /// local `worktrees.path` column is a local path and is never used for a
 /// remote host.
-async fn resolve_remote_paths(
+pub(crate) async fn resolve_remote_paths(
     ssh: &dyn SshExec,
     host: &str,
     root: &str,
@@ -2204,14 +2258,14 @@ pub async fn spec_for_session(
     session_id: i64,
 ) -> Result<(WorkspaceSpec, Vec<i64>), IpcError> {
     let seed = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let row = s
             .get_session_by_id(session_id)?
             .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?;
-        if row.kind == "bg" {
+        if crate::store::has_no_pane(&row.kind) {
             return Err(IpcError::new(
                 codes::E_BG_SESSION,
-                "background sessions have no worktree or tmux pane to repair",
+                "sessions outside tmux have no worktree or tmux pane to repair",
             ));
         }
         seed_for_session(&s, &row)?
@@ -2316,11 +2370,20 @@ fn spec_for_new_session(
         Some(wid) => s.get_worktree_row(wid)?,
         None => None,
     };
+    // The row's own host scan recorded its real path when the row's host
+    // matches the target host — trust it (`path_is_guess: false`) rather
+    // than letting `run_probe`'s guess resolver re-point the cwd to whichever
+    // of `.worktrees/`/`.claude/worktrees/` happens to exist, which would
+    // silently override a checkout registered somewhere else entirely. A
+    // foreign-host row (which `new_session`'s `reject_foreign_worktree`
+    // should already have refused before this runs) or a vanished one falls
+    // back to the guess, as before.
+    let same_host = wt.as_ref().is_some_and(|r| r.host_alias == w.host_alias);
     let worktree = wt.filter(|r| r.name != "main").map(|r| WorktreeSpec {
         branch: r.branch.clone().unwrap_or_else(|| r.name.clone()),
         name: r.name,
         path: w.cwd.to_string(),
-        path_is_guess: !is_local,
+        path_is_guess: !same_host,
         row_is_local: is_local,
     });
     // Same validation as `spec_for_session`: these values reach git.
@@ -2361,7 +2424,7 @@ pub async fn ensure_for_new_session(
         None
     } else {
         let (owner, repo, root, layout) = {
-            let s = store.lock().map_err(|_| IpcError::lock())?;
+            let s = lock(store)?;
             let (owner, repo) = crate::service::sessions::fetch_owner_repo(&s, w.project_id)?;
             (
                 owner,
@@ -2377,7 +2440,7 @@ pub async fn ensure_for_new_session(
         )
     };
     let spec = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         spec_for_new_session(&s, &w, remote_root)?
     };
     let exec = HostExec::new(w.host_alias, ssh);
@@ -2405,7 +2468,7 @@ pub async fn repair_session(
     ssh: &Arc<SshClient>,
 ) -> Result<RepairReport, IpcError> {
     {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let row = s
             .get_session_by_id(session_id)?
             .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?;
@@ -3058,6 +3121,58 @@ mod tests {
             "{script}"
         );
         assert!(script.contains("echo outcome=branch_local"));
+    }
+
+    #[test]
+    fn git_script_mirror_variant_fetches_or_refuses_never_forks() {
+        let step = Step::AddWorktree {
+            path: "/re po/w".into(),
+            branch: "feature/x".into(),
+            from: BranchSource::Mirror,
+        };
+        let s = render_git_script("/re po", std::slice::from_ref(&step));
+        assert!(s.contains("b='feature/x'\n"), "{s}");
+        // Local branch first.
+        assert!(
+            s.contains("if git -C '/re po' show-ref --verify --quiet \"refs/heads/$b\"; then"),
+            "{s}"
+        );
+        assert!(
+            s.contains("git -C '/re po' worktree add -- '/re po/w' \"$b\" 1>&2\n  echo outcome=branch_local"),
+            "{s}"
+        );
+        // Else origin: ls-remote, fetch, track.
+        assert!(
+            s.contains("ls-remote --exit-code --heads -- origin \"refs/heads/$b\""),
+            "{s}"
+        );
+        assert!(
+            s.contains("fetch -- origin \"+refs/heads/$b:refs/remotes/origin/$b\""),
+            "{s}"
+        );
+        assert!(
+            s.contains("worktree add --track -b \"$b\" -- '/re po/w' \"origin/$b\" 1>&2\n    echo outcome=branch_remote"),
+            "{s}"
+        );
+        // Nowhere: refused with the marker; no fork from a base.
+        assert!(
+            s.contains(&format!(
+                "echo \"repair: branch $b {MIRROR_REFUSED}\" >&2; exit 1"
+            )),
+            "{s}"
+        );
+        assert!(!s.contains("basebr="), "{s}");
+        assert!(!s.contains("branch_from_base"), "{s}");
+        assert!(
+            s.contains("not mirroring it"),
+            "unknown ls-remote exit aborts: {s}"
+        );
+        let d = step.describe();
+        assert!(
+            d.contains("feature/x") && d.contains("origin/feature/x"),
+            "{d}"
+        );
+        assert!(d.contains("refused"), "{d}");
     }
 
     #[test]
@@ -3834,9 +3949,12 @@ mod tests {
         let orphan = s
             .upsert_session("orphan", "local", None, None, 1, 1, "running", None)
             .unwrap();
-        s.upsert_bg_session("local", "bg:abc", None, "abc", None, 1)
+        s.upsert_bg_session("local", "bg:abc", None, "abc", None, 1, "bg")
             .unwrap();
         let bg = s.get_session("bg:abc", "local").unwrap().unwrap().id;
+        s.upsert_bg_session("local", "bg:ext", None, "ext", None, 1, "external")
+            .unwrap();
+        let ext = s.get_session("bg:ext", "local").unwrap().unwrap().id;
         let pa = s.upsert_project("o", "a", "/a").unwrap();
         let pb = s.upsert_project("o", "b", "/b").unwrap();
         let wid_b = s
@@ -3865,6 +3983,10 @@ mod tests {
         );
         assert_eq!(
             spec_for_session(&store, &ssh, bg).await.unwrap_err().code,
+            codes::E_BG_SESSION
+        );
+        assert_eq!(
+            spec_for_session(&store, &ssh, ext).await.unwrap_err().code,
             codes::E_BG_SESSION
         );
         assert_eq!(
@@ -3933,6 +4055,92 @@ mod tests {
         let wt = spec.worktree.unwrap();
         assert!(wt.path_is_guess && !wt.row_is_local);
         assert_eq!(wt.path, w_remote.cwd);
+    }
+
+    #[test]
+    fn spec_for_new_session_trusts_the_scanned_path_for_a_same_host_row() {
+        // A row the HOST'S OWN scan recorded (`upsert_worktree_on`, as
+        // `service::worktrees::list_host_worktrees` does) must be trusted —
+        // `path_is_guess: false` — so `run_probe`'s guess resolver never gets
+        // a chance to re-point the cwd to a `.worktrees/`/`.claude/worktrees/`
+        // guess and silently override a checkout registered elsewhere.
+        let s = Store::open_in_memory().unwrap();
+        let pid = s.upsert_project("o", "r", "/repo").unwrap();
+        let wid = s
+            .upsert_worktree_on(
+                "mefistos",
+                pid,
+                "feat",
+                "/home/me/projects/github.com/o/r/.worktrees/feat",
+                Some("feat-branch"),
+            )
+            .unwrap();
+        let w = NewSessionWorkspace {
+            host_alias: "mefistos",
+            project_id: pid,
+            worktree_id: Some(wid),
+            tmux_name: "dev-x",
+            pane_cmd: "cl",
+            cwd: "/home/me/projects/github.com/o/r/.worktrees/feat",
+            base_branch: None,
+        };
+        let spec =
+            spec_for_new_session(&s, &w, Some("/home/me/projects/github.com/o/r".into())).unwrap();
+        let wt = spec.worktree.unwrap();
+        assert!(
+            !wt.path_is_guess,
+            "a row scanned on the target host itself must be trusted, not guessed"
+        );
+    }
+
+    #[test]
+    fn spec_for_new_session_still_guesses_for_a_foreign_host_row_or_a_vanished_one() {
+        let s = Store::open_in_memory().unwrap();
+        let pid = s.upsert_project("o", "r", "/repo").unwrap();
+        // Row recorded on a DIFFERENT host than the session's target — the
+        // situation `new_session`'s `reject_foreign_worktree` should already
+        // refuse before this runs, but the guess fallback still has to be
+        // safe on its own.
+        let wid = s
+            .upsert_worktree_on(
+                "otherhost",
+                pid,
+                "feat",
+                "/home/other/.worktrees/feat",
+                Some("feat-branch"),
+            )
+            .unwrap();
+        let w = NewSessionWorkspace {
+            host_alias: "mefistos",
+            project_id: pid,
+            worktree_id: Some(wid),
+            tmux_name: "dev-x",
+            pane_cmd: "cl",
+            cwd: "/home/me/projects/github.com/o/r/.claude/worktrees/feat",
+            base_branch: None,
+        };
+        let spec =
+            spec_for_new_session(&s, &w, Some("/home/me/projects/github.com/o/r".into())).unwrap();
+        let wt = spec.worktree.unwrap();
+        assert!(
+            wt.path_is_guess,
+            "a row from a different host must still fall back to the guess resolver"
+        );
+
+        // A worktree_id that no longer resolves to any row: no `WorktreeSpec`
+        // is built at all (unchanged by this fix) — nothing to trust or guess.
+        let w_missing = NewSessionWorkspace {
+            worktree_id: Some(wid + 1_000_000),
+            ..w
+        };
+        assert!(spec_for_new_session(
+            &s,
+            &w_missing,
+            Some("/home/me/projects/github.com/o/r".into())
+        )
+        .unwrap()
+        .worktree
+        .is_none());
     }
 
     #[tokio::test]
@@ -4582,6 +4790,50 @@ mod tests {
         assert_eq!(
             adoption_conflict(&spec, w, adopt, None, |p: &str| p.to_string()),
             None
+        );
+    }
+
+    /// Pane-less rows (bg agents, sessions outside fleet) never own a
+    /// checkout, so neither guard counts them even when a key matches.
+    #[test]
+    fn workspace_guards_ignore_pane_less_rows() {
+        let (store, sid, pid) = seeded_store("/repo/.claude/worktrees/feat");
+        {
+            let s = store.lock().unwrap();
+            for (name, kind) in [("bg:u-bg", "bg"), ("bg:u-ext", "external")] {
+                let id = s
+                    .upsert_bg_session("local", name, Some(pid), &name[3..], None, 1, kind)
+                    .unwrap();
+                // Both keys: our workspace's and the adopt target's.
+                s.set_worktree_key(id, Some(if kind == "bg" { "feat" } else { "other" }))
+                    .unwrap();
+            }
+            for (name, kind) in [("bg:u-bg2", "bg"), ("bg:u-ext2", "external")] {
+                let id = s
+                    .upsert_bg_session("local", name, Some(pid), &name[3..], None, 1, kind)
+                    .unwrap();
+                s.set_worktree_key(id, Some(if kind == "bg" { "other" } else { "feat" }))
+                    .unwrap();
+            }
+        }
+        let spec = spec_with_ids(sid, pid);
+        let w = spec.worktree.as_ref().unwrap();
+        let snap = || {
+            let s = store.lock().unwrap();
+            adoption_snapshot(&s, &spec).unwrap()
+        };
+        assert_eq!(
+            adoption_conflict(&spec, w, "/repo/.worktrees/other", snap(), |p: &str| p
+                .to_string()),
+            None
+        );
+        let auto = || {
+            let s = store.lock().unwrap();
+            auto_snapshot(&s, &spec, &Probe::default())
+        };
+        assert_eq!(
+            auto_context_from(&spec, auto(), |p: &str| p.to_string()).other_sessions_mapped,
+            Some(false)
         );
     }
 

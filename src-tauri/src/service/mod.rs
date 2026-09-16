@@ -8,12 +8,17 @@
 //! `&Arc<CancellationRegistry>`) rather than `tauri::State`, so they carry no
 //! dependency on the Tauri runtime and are directly unit-testable.
 
+pub mod account_usage;
+pub mod account_usage_poll;
+pub mod add_project;
 pub mod bg_sessions;
+pub mod catalog;
 pub mod clipboard;
 pub mod diagnostics;
 pub mod gc;
 pub mod health;
 pub mod hooks;
+pub mod hooks_install;
 pub mod hosts;
 pub mod messages;
 pub mod move_session;
@@ -28,6 +33,9 @@ pub mod provision;
 mod reconcile_tests;
 pub mod repair;
 pub mod repair_tick;
+pub mod repo;
+pub mod repo_mutate;
+pub mod repo_read;
 pub mod safe_kill;
 pub mod sessions;
 pub mod settings;

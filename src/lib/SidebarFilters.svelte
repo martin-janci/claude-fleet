@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { sessions, showBgAgents, showFriendlyNames } from './sessions';
+  import { sessions, showBgAgents, showFriendlyNames, showRowDetails } from './sessions';
   import { hosts, hostFilter } from './hosts';
   import { hintAnchor } from './hints';
-  import { accounts, type AccountRow } from './accounts';
+  import { accountByUuid } from './accounts';
   import { attentionIdleMinutes } from './notify';
   import Attention from './Attention.svelte';
   import { RECENCY_VALUES, type Recency } from './session_status';
@@ -51,14 +51,9 @@
     clearSelected: () => void;
   } = $props();
 
-  // Lookup map for tooltips + components that resolve a host's account.
-  const accountByUuid = $derived(
-    new Map<string, AccountRow>($accounts.map((a) => [a.uuid, a])),
-  );
-
   function accountLabel(host: { account_uuid: string | null }): string {
     if (!host.account_uuid) return '';
-    const acc = accountByUuid.get(host.account_uuid);
+    const acc = $accountByUuid.get(host.account_uuid);
     if (!acc) return `\n${host.account_uuid}`;
     const email = acc.email ?? acc.uuid;
     return acc.seat_tier ? `\n${email} (${acc.seat_tier})` : `\n${email}`;
@@ -200,6 +195,16 @@
       onclick={() => showFriendlyNames.update((v) => !v)}
     >
       🏷 friendly {$showFriendlyNames ? 'on' : 'off'}
+    </button>
+    <button
+      class="pill"
+      class:active={$showRowDetails}
+      data-testid="toggle-row-details"
+      aria-pressed={$showRowDetails}
+      title={$showRowDetails ? 'Hide the details line under each session' : 'Show host, worktree, elapsed and badges under each session'}
+      onclick={() => showRowDetails.update((v) => !v)}
+    >
+      ≡ details {$showRowDetails ? 'on' : 'off'}
     </button>
   </nav>
 

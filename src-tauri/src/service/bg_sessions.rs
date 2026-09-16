@@ -1,7 +1,8 @@
 //! Service functions for Claude CLI background-session operations.
 
 use crate::claude_cli;
-use crate::ipc_error::IpcError;
+use crate::ipc_error::lock;
+use crate::ipc_error::{codes, IpcError};
 use crate::ssh::SshClient;
 use crate::store::Store;
 use crate::validate;
@@ -17,10 +18,14 @@ pub use crate::claude_cli::PurgeReport;
 // `-` would be read as a flag). `claude_cli` re-checks the same rules when it
 // builds the script, so DevTools / MCP callers cannot bypass them.
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "NewBgSessionParams")]
 pub struct NewBgSessionArgs {
+    /// Host alias to launch the background session on.
     pub host_alias: String,
+    /// Display name for the session (also its tmux/agent name).
     pub name: String,
+    /// Initial prompt for the headless Claude session.
     pub prompt: String,
 }
 
@@ -30,7 +35,7 @@ impl NewBgSessionArgs {
         validate::not_option_like("session name", &self.name)?;
         if self.name.chars().any(|c| c.is_control()) {
             return Err(IpcError::new(
-                "E_INVALID",
+                codes::E_INVALID,
                 "session name must not contain control characters",
             ));
         }
@@ -59,20 +64,6 @@ pub struct NewBgSessionResult {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct PeekSessionArgs {
-    pub host_alias: String,
-    pub claude_session_id: String,
-}
-
-impl PeekSessionArgs {
-    pub fn validate(&self) -> Result<(), IpcError> {
-        validate::host_alias(&self.host_alias)?;
-        validate::claude_session_id(&self.claude_session_id)?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Deserialize)]
 pub struct PurgeProjectArgs {
     /// Every host whose Claude state must go. The fleet row is deleted only
     /// after all of them succeed.
@@ -85,7 +76,7 @@ impl PurgeProjectArgs {
     pub fn validate(&self) -> Result<(), IpcError> {
         if self.host_aliases.is_empty() {
             return Err(IpcError::new(
-                "E_INVALID",
+                codes::E_INVALID,
                 "host_aliases must name at least one host",
             ));
         }
@@ -95,11 +86,14 @@ impl PurgeProjectArgs {
         validate::not_option_like("project_path", &self.project_path)?;
         // A relative path would resolve against the remote $HOME.
         if !self.project_path.starts_with('/') {
-            return Err(IpcError::new("E_INVALID", "project_path must be absolute"));
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "project_path must be absolute",
+            ));
         }
         if self.project_path.chars().any(|c| c.is_control()) {
             return Err(IpcError::new(
-                "E_INVALID",
+                codes::E_INVALID,
                 "project_path must not contain control characters",
             ));
         }
@@ -151,8 +145,20 @@ pub async fn new_bg_session_tracked(
     ssh: &Arc<SshClient>,
 ) -> Result<NewBgSessionResult, IpcError> {
     let host_alias = args.host_alias.clone();
+    let name = args.name.clone();
     let prompt = args.prompt.clone();
+    // Recorded before `claude --bg` runs so the by-name fallback can tell
+    // this launch apart from an older agent listed under the same name.
+    let launch_started = now_unix();
     let mut res = new_bg_session(args, ssh).await?;
+    if res.claude_session_id.is_none() {
+        // `claude --bg` output did not carry the id; the agent is listed
+        // under the `--name` we launched it with once it registers.
+        res.claude_session_id = find_launched_id(ssh, &host_alias, &name, launch_started).await;
+        if res.claude_session_id.is_some() {
+            res.warning = None;
+        }
+    }
     let Some(ref claude_id) = res.claude_session_id else {
         return Ok(res);
     };
@@ -168,6 +174,73 @@ pub async fn new_bg_session_tracked(
     Ok(res)
 }
 
+/// How many times `new_bg_session_tracked` lists `claude agents` looking for
+/// a just-launched agent by name, and the pause between tries.
+const LAUNCH_LOOKUP_TRIES: usize = 3;
+const LAUNCH_LOOKUP_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Current wall-clock time in unix seconds (0 if the clock is before 1970).
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Clock-skew slack (seconds) between fleet's clock and the host's when
+/// matching a just-launched agent's `startedAt` against the launch time.
+const LAUNCH_SKEW_SECS: i64 = 60;
+
+/// The Claude session id of a just-launched agent: the id parsed from the
+/// `claude --bg` output when there is one, else the `session_id` of the
+/// newest agent listed under `name` that started no earlier than
+/// `launch_started - LAUNCH_SKEW_SECS`, else `None`.
+///
+/// Dead agents stay listed by `claude agents`, so a reused name can match an
+/// older run; only agents that started around this launch count, and agents
+/// without a `startedAt` are ignored by the name lookup. Pure so the
+/// precedence is testable.
+fn pick_launched_id(
+    parsed: Option<String>,
+    agents: &[crate::claude_agents::ClaudeAgentRow],
+    name: &str,
+    launch_started: i64,
+) -> Option<String> {
+    parsed.or_else(|| {
+        agents
+            .iter()
+            .filter(|a| a.name.as_deref() == Some(name))
+            .filter_map(|a| a.started_at.map(|t| (t, a)))
+            .filter(|(t, _)| *t >= launch_started - LAUNCH_SKEW_SECS)
+            .filter(|(_, a)| a.session_id.is_some())
+            .max_by_key(|(t, _)| *t)
+            .and_then(|(_, a)| a.session_id.clone())
+    })
+}
+
+/// Poll `claude agents` on `host_alias` (up to [`LAUNCH_LOOKUP_TRIES`] times,
+/// [`LAUNCH_LOOKUP_DELAY`] apart) for the agent launched as `name` at
+/// `launch_started` (unix seconds). Touches no store, so nothing is held
+/// across the sleeps.
+async fn find_launched_id(
+    ssh: &Arc<SshClient>,
+    host_alias: &str,
+    name: &str,
+    launch_started: i64,
+) -> Option<String> {
+    let tmux = crate::service::sessions::exec_for(host_alias, ssh);
+    for attempt in 0..LAUNCH_LOOKUP_TRIES {
+        if attempt > 0 {
+            tokio::time::sleep(LAUNCH_LOOKUP_DELAY).await;
+        }
+        let agents = tmux.list_claude_agents().await;
+        if let Some(id) = pick_launched_id(None, &agents, name, launch_started) {
+            return Some(id);
+        }
+    }
+    None
+}
+
 /// Find the bg row for `claude_id` and record the launch prompt on it.
 /// Returns the refreshed row, or `None` when reconcile has not surfaced the
 /// agent yet.
@@ -178,10 +251,7 @@ fn stamp_bg_row(
 ) -> Option<crate::store::SessionRow> {
     let s = store.lock().ok()?;
     let row = s.get_session_by_claude_id(claude_id).ok().flatten()?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now = now_unix();
     let _ = s.set_started_at(row.id, now);
     let _ = s.set_last_prompt(row.id, prompt);
     if row.friendly_name.is_none() {
@@ -195,6 +265,47 @@ fn stamp_bg_row(
         Some(&prompt.chars().take(120).collect::<String>()),
     );
     s.get_session_by_id(row.id).ok().flatten()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DismissAgentArgs {
+    pub session_id: i64,
+}
+
+/// Remove an inactive background agent from the list (spec §3): records the
+/// dismissal and deletes its `bg:<id>` row (`session:removed`). Only a
+/// `kind='bg'` row that is not `working` qualifies — an `external` row leaves
+/// the list when its process ends, and a working agent must be stopped first.
+pub fn dismiss_agent_session(args: DismissAgentArgs, store: &Mutex<Store>) -> Result<(), IpcError> {
+    let s = lock(store)?;
+    let sess = s
+        .get_session_by_id(args.session_id)?
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?;
+    if sess.kind != "bg" {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            "only background agents can be removed from the list",
+        ));
+    }
+    if sess.claude_status.as_deref() == Some("working") {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            "stop the agent first",
+        ));
+    }
+    let Some(cid) = sess
+        .claude_session_id
+        .as_deref()
+        .filter(|c| !c.trim().is_empty())
+    else {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            "background agent has no Claude session id",
+        ));
+    };
+    let now = now_unix();
+    s.dismiss_agent(&sess.host_alias, cid, now)?;
+    Ok(())
 }
 
 /// Resolve a `peek_session` target (MCP-7) from any of: a fleet `session_id`,
@@ -213,11 +324,11 @@ pub fn resolve_peek_target(
     if let Some(id) = session_id {
         let row = s
             .get_session_by_id(id)?
-            .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("session {id} not found")))?;
+            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("session {id} not found")))?;
         return match row.claude_session_id {
             Some(cid) => Ok((row.host_alias, cid)),
             None => Err(IpcError::new(
-                "E_INVALID_STATE",
+                codes::E_INVALID_STATE,
                 "this session has no Claude session id yet — nothing to peek",
             )),
         };
@@ -235,21 +346,16 @@ pub fn resolve_peek_target(
             match s.get_session_by_claude_id(cid)? {
                 Some(row) => Ok((row.host_alias, cid.to_string())),
                 None => Err(IpcError::new(
-                    "E_INVALID",
+                    codes::E_INVALID,
                     "pass host_alias with claude_session_id (the agent is not tracked yet)",
                 )),
             }
         }
         _ => Err(IpcError::new(
-            "E_INVALID",
+            codes::E_INVALID,
             "pass session_id, or claude_session_id (+ host_alias)",
         )),
     }
-}
-
-pub async fn peek_session(args: PeekSessionArgs, ssh: &Arc<SshClient>) -> Result<String, IpcError> {
-    args.validate()?;
-    claude_cli::claude_logs(ssh, &args.host_alias, &args.claude_session_id).await
 }
 
 /// Purge Claude Code state for a project on every host in `host_aliases`,
@@ -285,10 +391,13 @@ where
     // Syntax is not enough: only registered hosts may be reached over ssh.
     // `local` never goes through ssh and has no guaranteed hosts row.
     {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         for host in args.host_aliases.iter().filter(|h| h.as_str() != "local") {
-            if s.get_host_row(host).map_err(IpcError::from)?.is_none() {
-                return Err(IpcError::new("E_NOTFOUND", format!("unknown host: {host}")));
+            if s.get_host_row(host)?.is_none() {
+                return Err(IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("unknown host: {host}"),
+                ));
             }
         }
     }
@@ -298,7 +407,7 @@ where
     }
     // Fingerprint keys are resolved before the lock (filesystem access).
     let fp_keys = Store::fingerprint_keys_of_project(store, args.project_id);
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     s.delete_project(args.project_id, &fp_keys)?;
     Ok(reports)
 }
@@ -340,7 +449,7 @@ mod tests {
         {
             let s = store.lock().unwrap();
             s.upsert_host("local").unwrap();
-            s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 5)
+            s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 5, "bg")
                 .unwrap();
         }
         let row = stamp_bg_row(&store, "u1", "Review the auth PR, carefully!").expect("row");
@@ -371,6 +480,7 @@ mod tests {
                     UUID,
                     Some("working"),
                     5,
+                    "bg",
                 )
                 .unwrap();
             let plain = s
@@ -425,6 +535,140 @@ mod tests {
         );
     }
 
+    /// A listed background agent launched at `started_at` (unix seconds).
+    fn agent(
+        session_id: &str,
+        name: &str,
+        started_at: Option<i64>,
+    ) -> crate::claude_agents::ClaudeAgentRow {
+        crate::claude_agents::ClaudeAgentRow {
+            session_id: Some(session_id.into()),
+            name: Some(name.into()),
+            status: Some("working".into()),
+            cwd: None,
+            kind: crate::claude_agents::AgentKind::Background,
+            job_id: Some("44366faf".into()),
+            started_at,
+        }
+    }
+
+    const LAUNCH: i64 = 1_800_000_000;
+
+    #[test]
+    fn pick_launched_id_prefers_the_parsed_id() {
+        let agents = vec![agent("listed", "review-auth", Some(LAUNCH))];
+        assert_eq!(
+            pick_launched_id(Some("parsed".into()), &agents, "review-auth", LAUNCH).as_deref(),
+            Some("parsed")
+        );
+    }
+
+    #[test]
+    fn pick_launched_id_falls_back_to_the_agent_with_that_name() {
+        let agents = vec![
+            agent("other", "something-else", Some(LAUNCH + 1)),
+            agent("listed", "review-auth", Some(LAUNCH + 1)),
+        ];
+        assert_eq!(
+            pick_launched_id(None, &agents, "review-auth", LAUNCH).as_deref(),
+            Some("listed")
+        );
+    }
+
+    #[test]
+    fn pick_launched_id_none_when_neither_is_known() {
+        let agents = vec![agent("other", "something-else", Some(LAUNCH))];
+        assert_eq!(pick_launched_id(None, &agents, "review-auth", LAUNCH), None);
+        assert_eq!(pick_launched_id(None, &[], "review-auth", LAUNCH), None);
+    }
+
+    #[test]
+    fn pick_launched_id_ignores_an_older_agent_with_the_same_name() {
+        // A dead agent from an earlier launch stays listed under the reused
+        // name; it started well before this launch, so it is not ours.
+        let agents = vec![agent("stale", "review-auth", Some(LAUNCH - 3_600))];
+        assert_eq!(pick_launched_id(None, &agents, "review-auth", LAUNCH), None);
+        // Just inside the 60 s clock-skew window still counts.
+        let agents = vec![agent("skewed", "review-auth", Some(LAUNCH - 60))];
+        assert_eq!(
+            pick_launched_id(None, &agents, "review-auth", LAUNCH).as_deref(),
+            Some("skewed")
+        );
+    }
+
+    #[test]
+    fn pick_launched_id_newest_of_two_recent_same_name_agents_wins() {
+        let agents = vec![
+            agent("stale", "review-auth", Some(LAUNCH - 7_200)),
+            agent("newer", "review-auth", Some(LAUNCH + 5)),
+            agent("older", "review-auth", Some(LAUNCH - 10)),
+        ];
+        assert_eq!(
+            pick_launched_id(None, &agents, "review-auth", LAUNCH).as_deref(),
+            Some("newer")
+        );
+    }
+
+    #[test]
+    fn pick_launched_id_ignores_a_same_name_agent_without_started_at() {
+        let agents = vec![agent("unknown", "review-auth", None)];
+        assert_eq!(pick_launched_id(None, &agents, "review-auth", LAUNCH), None);
+    }
+
+    fn seed_agent_row(store: &Mutex<Store>, cid: &str, status: &str, kind: &str) -> i64 {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_bg_session(
+            "local",
+            &format!("bg:{cid}"),
+            None,
+            cid,
+            Some(status),
+            5,
+            kind,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn dismiss_agent_session_refuses_an_external_row() {
+        let store = make_store();
+        let id = seed_agent_row(&store, "ext-1", "idle", "external");
+        let err = dismiss_agent_session(DismissAgentArgs { session_id: id }, &store).unwrap_err();
+        assert_eq!(err.code, "E_INVALID_STATE");
+        let s = store.lock().unwrap();
+        assert!(s.get_session_by_id(id).unwrap().is_some());
+        assert!(s.dismissed_agents("local").unwrap().is_empty());
+    }
+
+    #[test]
+    fn dismiss_agent_session_refuses_a_working_bg_agent() {
+        let store = make_store();
+        let id = seed_agent_row(&store, "bg-1", "working", "bg");
+        let err = dismiss_agent_session(DismissAgentArgs { session_id: id }, &store).unwrap_err();
+        assert_eq!(err.code, "E_INVALID_STATE");
+        let s = store.lock().unwrap();
+        assert!(s.get_session_by_id(id).unwrap().is_some());
+        assert!(s.dismissed_agents("local").unwrap().is_empty());
+    }
+
+    #[test]
+    fn dismiss_agent_session_removes_a_stopped_bg_agent() {
+        let store = make_store();
+        let id = seed_agent_row(&store, "bg-2", "stopped", "bg");
+        dismiss_agent_session(DismissAgentArgs { session_id: id }, &store).unwrap();
+        let s = store.lock().unwrap();
+        assert!(s.get_session_by_id(id).unwrap().is_none());
+        assert!(s.dismissed_agents("local").unwrap().contains_key("bg-2"));
+    }
+
+    #[test]
+    fn dismiss_agent_session_unknown_id_is_not_found() {
+        let store = make_store();
+        let err = dismiss_agent_session(DismissAgentArgs { session_id: 4242 }, &store).unwrap_err();
+        assert_eq!(err.code, "E_NOTFOUND");
+    }
+
     #[test]
     fn bg_session_result_warns_when_id_missing() {
         let res = bg_session_result(None);
@@ -437,15 +681,6 @@ mod tests {
         let res = bg_session_result(Some("abc-123".into()));
         assert_eq!(res.claude_session_id.as_deref(), Some("abc-123"));
         assert!(res.warning.is_none());
-    }
-
-    #[test]
-    fn peek_session_args_validates_missing_session_id() {
-        let args = PeekSessionArgs {
-            host_alias: "local".into(),
-            claude_session_id: "".into(),
-        };
-        assert!(args.validate().is_err());
     }
 
     const UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
@@ -490,27 +725,6 @@ mod tests {
             host_alias: "-oProxyCommand=id".into(),
             name: "ok".into(),
             ..ctrl_name
-        };
-        assert_eq!(bad_host.validate().unwrap_err().code, "E_INVALID");
-    }
-
-    #[test]
-    fn peek_session_args_requires_uuid_id_and_valid_host() {
-        let ok = PeekSessionArgs {
-            host_alias: "local".into(),
-            claude_session_id: UUID.into(),
-        };
-        assert!(ok.validate().is_ok());
-        for bad in ["--foo", "-h", "abc-123", "'; rm -rf / #"] {
-            let args = PeekSessionArgs {
-                host_alias: "local".into(),
-                claude_session_id: bad.into(),
-            };
-            assert_eq!(args.validate().unwrap_err().code, "E_INVALID", "{bad:?}");
-        }
-        let bad_host = PeekSessionArgs {
-            host_alias: "-tt".into(),
-            claude_session_id: UUID.into(),
         };
         assert_eq!(bad_host.validate().unwrap_err().code, "E_INVALID");
     }
@@ -593,7 +807,10 @@ mod tests {
                 calls.lock().unwrap().push(host.clone());
                 async move {
                     if host == "beta" {
-                        Err(IpcError::new("E_CLAUDE_CLI", "claude CLI failed on beta"))
+                        Err(IpcError::new(
+                            codes::E_CLAUDE_CLI,
+                            "claude CLI failed on beta",
+                        ))
                     } else {
                         Ok(report_for(&host, &path))
                     }

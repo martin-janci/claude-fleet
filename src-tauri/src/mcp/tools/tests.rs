@@ -1,4 +1,5 @@
 use super::*;
+use crate::ipc_error::codes;
 
 fn text_of(c: &Content) -> &str {
     c.as_text().expect("text content").text.as_str()
@@ -218,7 +219,14 @@ fn marker_is_applied_unless_master_asks_for_raw() {
 #[test]
 fn fleet_admin_tools_are_master_only() {
     let full = host_caller("mefistos", TokenMode::Full);
-    for t in ["provision_hosts", "add_host", "remove_host", "hide_host"] {
+    for t in [
+        "provision_hosts",
+        "add_host",
+        "remove_host",
+        "hide_host",
+        "apply_sync",
+        "set_secret",
+    ] {
         let err = enforce_admin(&full, t).expect_err(t);
         assert!(
             err.message.starts_with("E_FORBIDDEN"),
@@ -300,6 +308,43 @@ fn audit_row_falls_back_to_the_controller_session() {
     assert!(events
         .iter()
         .any(|e| e.kind == "mcp_call" && e.detail.as_deref() == Some("list_hosts by master")));
+}
+
+/// SEC: `set_secret`'s `value` argument must never reach the persisted
+/// audit trail — not the plain value, not even its length. `persist_audit`
+/// is exactly what `ServerHandler::call_tool` calls with the RAW request
+/// arguments (before the tool body ever redacts anything for its own
+/// tracing call), so this exercises the actual path a secret value would
+/// otherwise leak through into `session_events` (readable via
+/// `session_history`).
+#[test]
+fn set_secret_value_never_reaches_the_persisted_audit_trail() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("ctl", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("local", "ctl").unwrap();
+        id
+    };
+    let args = serde_json::json!({
+        "name": "FOO",
+        "value": "hunter2-unique",
+        "host_alias": "mefistos"
+    });
+    persist_audit(&store, "set_secret", args.as_object(), &Caller::master());
+    let s = store.lock().unwrap();
+    let events = s.list_session_events(id, 10).unwrap();
+    let row = events
+        .iter()
+        .find(|e| e.kind == "mcp_call")
+        .expect("mcp_call event");
+    let detail = row.detail.as_deref().unwrap();
+    assert!(!detail.contains("hunter2"), "{detail}");
+    assert!(!detail.contains("value"), "{detail}");
+    assert_eq!(detail, "set_secret by master: host_alias=mefistos name=FOO");
 }
 
 #[test]
@@ -410,6 +455,57 @@ fn control_skill_quotes_status_vocabulary() {
     }
 }
 
+#[test]
+fn kill_session_description_covers_external_and_inactive_agent_rows() {
+    let tools = FleetTools::tool_router_for_doc().list_all();
+    let desc = tools
+        .iter()
+        .find(|t| t.name == "kill_session")
+        .and_then(|t| t.description.clone())
+        .expect("kill_session description");
+    assert!(
+        desc.contains("`external`") && desc.contains("refused"),
+        "must say external rows are refused: {desc}"
+    );
+    assert!(
+        desc.contains("removed from the list"),
+        "must say inactive bg rows are removed from the list: {desc}"
+    );
+    assert!(
+        !desc.contains("clears a stale row"),
+        "stale wording must be gone: {desc}"
+    );
+}
+
+const CONTROL_API_GUIDE: &str = include_str!("../../../../docs/control-api.md");
+
+#[test]
+fn docs_track_background_runs_with_session_transcript_not_peek_session() {
+    for (name, text) in [
+        ("SKILL.md", CONTROL_SKILL),
+        ("docs/control-api.md", CONTROL_API_GUIDE),
+    ] {
+        assert!(
+            !text.contains("Track\n  with `peek_session`")
+                && !text.contains("Track with `peek_session`")
+                && !text.contains("next call can be `peek_session"),
+            "{name} still points at peek_session for tracking bg runs"
+        );
+        assert!(
+            text.contains("`peek_session` is deprecated"),
+            "{name} must note that peek_session is deprecated"
+        );
+        assert!(
+            text.contains("`kind: external`"),
+            "{name} must explain kind: external rows"
+        );
+    }
+    assert!(
+        CONTROL_SKILL.contains("so the very next call can be `session_transcript"),
+        "SKILL.md must point bg runs at session_transcript"
+    );
+}
+
 // ---- handler-level gates (review of #50) ----
 
 fn test_tools(store: Store) -> FleetTools {
@@ -476,7 +572,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
     forbidden(
         t.new_bg_session(
             Extension(a.clone()),
-            Parameters(NewBgSessionParams {
+            Parameters(crate::service::bg_sessions::NewBgSessionArgs {
                 host_alias: "hostb".into(),
                 name: "x".into(),
                 prompt: "p".into(),
@@ -488,9 +584,10 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
     forbidden(
         t.spawn_review(
             Extension(a.clone()),
-            Parameters(SpawnReviewParams {
+            Parameters(sessions::SpawnReviewArgs {
                 source_session_id: on_b,
                 prompt: "review".into(),
+                call_id: None,
             }),
         )
         .await
@@ -767,8 +864,9 @@ fn capture_default_cap_matches_docs() {
 /// `FleetTools::tool_router()`, which both `new()` and the doc generator use.
 /// A block left out of the sum would silently drop its tools from the server
 /// and the reference, so the served count must match the `#[tool(`
-/// attributes in the router files. 57 is the count before the split; bump
-/// it when adding a tool.
+/// attributes in the router files. 57 was the count before the split, 60
+/// with the asset-catalog block, 63 with plan_sync/apply_sync/set_secret;
+/// bump it when adding a tool.
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -778,6 +876,7 @@ fn router_sum_serves_every_tool() {
         include_str!("messaging.rs"),
         include_str!("orchestration.rs"),
         include_str!("repo.rs"),
+        include_str!("assets.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -787,6 +886,149 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 57);
+    assert_eq!(served, 63);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
+}
+
+// ---- tool errors become is_error results (spec §3) ----
+
+#[test]
+fn mcp_err_carries_the_code_in_data() {
+    let e = mcp_err("E_NOTFOUND", "no such session", None);
+    assert_eq!(e.message, "E_NOTFOUND: no such session");
+    assert_eq!(e.data.as_ref().unwrap()["code"], "E_NOTFOUND");
+    assert!(e.data.as_ref().unwrap()["details"].is_null());
+
+    let d = serde_json::json!({ "candidates": [1, 2] });
+    let e = to_mcp_err(IpcError::new(codes::E_AMBIGUOUS, "two match").with_details(d.clone()));
+    assert_eq!(e.data.as_ref().unwrap()["code"], "E_AMBIGUOUS");
+    assert_eq!(e.data.as_ref().unwrap()["details"], d);
+}
+
+#[test]
+fn tool_error_result_turns_coded_errors_into_is_error_results() {
+    let e = mcp_err("E_FORBIDDEN", "readonly token", None);
+    let r = tool_error_result(e).expect("coded error is a tool result");
+    assert_eq!(r.is_error, Some(true));
+    assert_eq!(text_of(&r.content[0]), "E_FORBIDDEN: readonly token");
+    let sc = r.structured_content.unwrap();
+    assert_eq!(sc["code"], "E_FORBIDDEN");
+    assert_eq!(sc["message"], "readonly token");
+    assert!(sc["details"].is_null());
+
+    // Details ride along structured and are not duplicated into `message`.
+    let d = serde_json::json!({ "candidates": [7] });
+    let r = tool_error_result(mcp_err("E_AMBIGUOUS", "two match", Some(d.clone()))).unwrap();
+    let sc = r.structured_content.unwrap();
+    assert_eq!(sc["message"], "two match");
+    assert_eq!(sc["details"], d);
+    assert!(text_of(&r.content[0]).starts_with("E_AMBIGUOUS: two match"));
+}
+
+#[test]
+fn tool_error_result_keeps_protocol_errors_as_errors() {
+    // rmcp's own "tool not found" / bad-arguments errors carry no code and
+    // must stay JSON-RPC errors.
+    let e = McpError::invalid_params("tool not found", None);
+    let err = tool_error_result(e).expect_err("protocol error passes through");
+    assert_eq!(err.message, "tool not found");
+}
+
+// ---- per-tool wall clock (spec §4) ----
+
+#[test]
+fn every_router_tool_is_explicitly_classified() {
+    // A new tool must be placed in a class on purpose; the 60 s default is
+    // for the wire, not a way to skip the decision.
+    let listed: Vec<String> = FleetTools::tool_router_for_doc()
+        .list_all()
+        .into_iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    assert!(!listed.is_empty());
+    for name in &listed {
+        assert!(
+            LONG_POLL_TOOLS.contains(&name.as_str())
+                || LIFECYCLE_TOOLS.contains(&name.as_str())
+                || QUICK_TOOLS.contains(&name.as_str()),
+            "tool {name} is not classified in support.rs"
+        );
+    }
+    for name in LONG_POLL_TOOLS
+        .iter()
+        .chain(LIFECYCLE_TOOLS)
+        .chain(QUICK_TOOLS)
+    {
+        assert!(
+            listed.iter().any(|l| l == name),
+            "{name} is classified but not served"
+        );
+    }
+}
+
+#[test]
+fn tool_deadline_uses_the_documented_caps() {
+    use std::time::Duration;
+    assert_eq!(tool_deadline("wait_for_session"), Duration::from_secs(660));
+    assert_eq!(tool_deadline("run_prompt"), Duration::from_secs(660));
+    assert_eq!(tool_deadline("new_session"), Duration::from_secs(300));
+    assert_eq!(tool_deadline("provision_hosts"), Duration::from_secs(300));
+    assert_eq!(tool_deadline("list_sessions"), Duration::from_secs(60));
+    assert_eq!(tool_deadline("not_a_tool"), Duration::from_secs(60));
+}
+
+#[test]
+fn timeout_result_is_a_coded_is_error_result() {
+    let r = timeout_result("new_session", std::time::Duration::from_secs(300));
+    assert_eq!(r.is_error, Some(true));
+    assert_eq!(
+        text_of(&r.content[0]),
+        "E_TIMEOUT: new_session exceeded its 300 s limit; the call may have partially completed"
+    );
+    let sc = r.structured_content.unwrap();
+    assert_eq!(sc["code"], "E_TIMEOUT");
+    assert_eq!(sc["tool"], "new_session");
+    assert_eq!(sc["limit_secs"], 300);
+}
+
+#[tokio::test]
+async fn bounded_turns_a_hung_call_into_the_timeout_result() {
+    let hung = std::future::pending::<Result<CallToolResult, McpError>>();
+    let r = bounded("list_hosts", std::time::Duration::from_millis(10), hung)
+        .await
+        .expect("timeout is a result, not an error");
+    assert_eq!(r.is_error, Some(true));
+    assert!(text_of(&r.content[0]).starts_with("E_TIMEOUT: list_hosts"));
+
+    let quick = async { Ok(CallToolResult::success(vec![Content::text("ok")])) };
+    let r = bounded("list_hosts", std::time::Duration::from_secs(5), quick)
+        .await
+        .unwrap();
+    assert_ne!(r.is_error, Some(true));
+    assert_eq!(text_of(&r.content[0]), "ok");
+}
+
+/// The tool schemas are the published contract an MCP client sees: every
+/// parameter of every tool must carry a description. Set
+/// `FLEET_TOOL_SCHEMA_DUMP=<path>` to also write the full `list_tools`
+/// output (sorted by name, pretty JSON) so a refactor of the parameter
+/// structs can be diffed before/after.
+#[test]
+fn every_tool_parameter_is_documented() {
+    let mut tools = FleetTools::tool_router_for_doc().list_all();
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+    for t in &tools {
+        let props = t.input_schema.get("properties").and_then(|v| v.as_object());
+        for (name, schema) in props.into_iter().flatten() {
+            assert!(
+                schema.get("description").is_some(),
+                "{}.{name} has no description in its JSON schema",
+                t.name
+            );
+        }
+    }
+    if let Ok(path) = std::env::var("FLEET_TOOL_SCHEMA_DUMP") {
+        let json = serde_json::to_string_pretty(&tools).expect("serialise tools");
+        std::fs::write(&path, json).expect("write schema dump");
+    }
 }

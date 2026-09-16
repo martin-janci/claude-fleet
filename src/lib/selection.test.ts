@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
-import { selectedSession, selectSession, restoreLastSession, clearSelection } from './selection';
+import { selectedSession, selectSession, restoreLastSession, clearSelection, onSessionOpened } from './selection';
 import {
   sessions,
   mergeSession,
@@ -178,5 +178,26 @@ describe('selectedSession is derived from the sessions store', () => {
     selectSession(fresh);
     expect(get(sessions).map((s) => s.id)).toEqual([42]);
     expect(get(selectedSession)?.id).toBe(42);
+  });
+});
+
+describe('onSessionOpened', () => {
+  it('fires for a deliberate open, not for a follow re-sync, a deselect or restore-on-launch', () => {
+    const opened: string[] = [];
+    const off = onSessionOpened((s) => opened.push(s.tmux_name));
+    try {
+      selectSession(makeSession({ id: 1, tmux_name: 'dev-a' }));
+      selectSession(makeSession({ id: 1, tmux_name: 'dev-a2' }), { follow: true });
+      selectSession(null);
+      sessions.set([makeSession({ id: 2, tmux_name: 'dev-b' })]);
+      localStorage.setItem('cf:pref:session.last', JSON.stringify({ host_alias: 'mefistos', tmux_name: 'dev-b' }));
+      restoreLastSession();
+      expect(get(selectedSession)?.tmux_name).toBe('dev-b');
+      expect(opened).toEqual(['dev-a']);
+    } finally {
+      off();
+    }
+    selectSession(makeSession({ id: 3, tmux_name: 'dev-c' }));
+    expect(opened).toEqual(['dev-a']);
   });
 });

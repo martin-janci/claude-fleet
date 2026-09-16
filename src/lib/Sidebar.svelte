@@ -5,29 +5,36 @@
     sessions,
     loadSessions,
     killSession,
-    renameSession,
-    setFriendlyName,
     recreateSession,
-    peekSession,
     purgeProject,
     showBgAgents,
     sameSession,
+    hasNoPane,
     type SessionRow,
   } from './sessions';
   import { describePurge, purgeHostsForProject } from './purge';
   import { type ProjectRow } from './projects';
   import { selectedSession, selectSession } from './selection';
-  import { forgetSessionUi, migrateSessionUi } from './session_ui';
+  import { forgetSessionUi } from './session_ui';
+  import { applySessionRename, renameKeyHandler } from './session_rename';
   import { readPref, writePref } from './prefs';
   import { theme, cycleTheme } from './theme';
   import NewSessionDialog from './NewSessionDialog.svelte';
+  import AddProjectDialog from './AddProjectDialog.svelte';
   import SettingsDialog from './SettingsDialog.svelte';
   import OnboardingCard from './OnboardingCard.svelte';
   import { hostFilter } from './hosts';
   import { onboardingDismissed } from './onboarding';
+  import {
+    hostsViewOpen,
+    newSessionHostRequest,
+    requestHostsView,
+    settingsOpen,
+  } from './app_views';
   import { hintAnchor } from './hints';
   import {
     buildSessionsByProject,
+    buildOutsideFleet,
     buildRelatedCountById,
     sessionVisible,
     sortProjectsBySeverity,
@@ -35,6 +42,7 @@
   } from './sidebar_index';
   import {
     attentionReason,
+    stuckSnapshot,
     worstSeverityByProject,
   } from './attention';
   import { attentionIdleMinutes } from './notify';
@@ -48,7 +56,6 @@
   import NewBgSessionDialog from './NewBgSessionDialog.svelte';
   import { isRecency, matchesRecency, type Recency } from './session_status';
 
-  let showSettings = $state(false);
   let showTasks = $state(false);
 
   // Optional collapse handler injected by the parent (App.svelte). When
@@ -64,6 +71,15 @@
   let recency: Recency = $state(readPref('recency', 'all' as Recency, isRecency));
   $effect(() => {
     writePref('recency', recency);
+  });
+  const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
+  // "Outside fleet" (interactive Claude sessions running entirely outside
+  // tmux) is collapsed by default — most users never need it — and its
+  // open/closed state persists across restarts like the other section
+  // toggles in this file.
+  let outsideOpen = $state(readPref('outside-fleet-open', false, isBool));
+  $effect(() => {
+    writePref('outside-fleet-open', outsideOpen);
   });
   let search = $state('');
   // `filtered` re-derives the whole project tree on its dependencies; debounce
@@ -145,6 +161,8 @@
   const selectedRows = $derived($sessions.filter((s) => selectedIds.has(s.id)));
 
   function toggleSelected(sess: SessionRow) {
+    // Outside-fleet rows are read-only: bulk kill / send would only fail.
+    if (sess.kind === 'external') return;
     const next = new Set(selectedIds);
     if (next.has(sess.id)) next.delete(sess.id);
     else next.add(sess.id);
@@ -253,7 +271,10 @@
   const hostVisibleSessions = $derived(
     $sessions.filter((s) => sessionVisible(s, $hostFilter, $showBgAgents)),
   );
-  const stuckCount = $derived(hostVisibleSessions.filter((s) => s.stuck_kind !== null).length);
+  // Via stuckSnapshot (not a raw `stuck_kind !== null` filter) so an
+  // `external` row — read-only, excluded from every attention signal per
+  // spec §5 — never inflates the "N stuck" pill.
+  const stuckCount = $derived(stuckSnapshot(hostVisibleSessions).size);
   const attentionCount = $derived.by(() => {
     const opts = attentionOpts;
     return hostVisibleSessions.filter((s) => attentionReason(s, opts) !== null).length;
@@ -307,11 +328,21 @@
   }
 
   // Sessions whose tmux working directory didn't map to any known project.
+  // `external` rows never land here — they have their own read-only
+  // "Outside fleet" section below.
   const orphanSessions = $derived(
     $sessions.filter(
-      (s) => s.project_id === null && sessionVisible(s, $hostFilter, $showBgAgents, rowPredicate),
+      (s) =>
+        s.project_id === null &&
+        s.kind !== 'external' &&
+        sessionVisible(s, $hostFilter, $showBgAgents, rowPredicate),
     ),
   );
+
+  // Interactive Claude sessions running entirely outside fleet (Claude
+  // Desktop, a bare terminal). Read-only; the host filter applies but the
+  // bg-agent toggle does not.
+  const outsideFleet = $derived(buildOutsideFleet($sessions, $hostFilter));
 
   // Picker for the footer "+ New session" — shows ALL projects regardless
   // of the recency filter or search query. The filter is for the live-
@@ -327,15 +358,64 @@
 
   let dialogProject: ProjectTreeRow | null = $state(null);
   let showProjectPicker = $state(false);
+  let showAddProject = $state(false);
+  /** Host to preselect in NewSessionDialog: where Add project put the project. */
+  let dialogHost: string | undefined = $state(undefined);
 
-  // Onboarding card actions — open the same flows as existing UI.
-  const openAddHost = () => { showSettings = true; };
-  const openNewSession = () => { showProjectPicker = true; };
+  /** Host the open project picker preselects (the Hosts view's `n`). */
+  let pickerHost: string | undefined = $state(undefined);
+
+  // Onboarding card actions — open the same flows as existing UI. Hosts are
+  // managed in the Hosts view, not Settings.
+  const openAddHost = () => requestHostsView();
+  const openNewSession = () => {
+    pickerHost = undefined;
+    showProjectPicker = true;
+  };
+
+  function toggleProjectPicker() {
+    pickerHost = undefined;
+    showProjectPicker = !showProjectPicker;
+  }
+
+  // "New session on <host>" from the Hosts view: the same project picker,
+  // then NewSessionDialog with that host preselected.
+  $effect(() => {
+    const host = $newSessionHostRequest;
+    if (host === null) return;
+    newSessionHostRequest.set(null);
+    pickerHost = host;
+    showProjectPicker = true;
+    // Keyboard flow from the Hosts view: land on the first project.
+    void tick().then(() => {
+      const first =
+        sidebarEl?.querySelector<HTMLElement>('.picker .picker-item:not(.add-project)') ??
+        sidebarEl?.querySelector<HTMLElement>('.picker .picker-item');
+      first?.focus();
+    });
+  });
 
   function openNew(p: ProjectTreeRow, e?: Event) {
     e?.stopPropagation();
+    // A row's own `+` has no host intent; the picker may carry one.
+    dialogHost = e ? undefined : pickerHost;
+    pickerHost = undefined;
     dialogProject = p;
     showProjectPicker = false;
+  }
+
+  function openAddProject() {
+    pickerHost = undefined;
+    showProjectPicker = false;
+    showAddProject = true;
+  }
+
+  // The user added a project in order to start a session in it: go straight
+  // to NewSessionDialog on the new row (already merged into `projects`).
+  function onProjectAdded(row: ProjectTreeRow, host: string) {
+    showAddProject = false;
+    dialogHost = host;
+    dialogProject = row;
   }
 
   function onCreated(s: SessionRow) {
@@ -370,7 +450,9 @@
       cancelRename();
     }
     const cur = $selectedSession;
-    if (cur && cur.id === sess.id) {
+    // While the Hosts view covers the terminal, clicking the open session
+    // means "go to it", not "deselect".
+    if (cur && cur.id === sess.id && !$hostsViewOpen) {
       selectSession(null);
     } else {
       selectSession(sess);
@@ -413,50 +495,24 @@
 
   async function commitRename() {
     if (committingRename || !renaming) return;
-    const next = renameValue.trim();
-    if (renaming.mode === 'label') {
-      // Empty is meaningful here: it clears the label.
-      if (next === renaming.original.trim()) {
-        cancelRename();
-        return;
-      }
-      committingRename = true;
-      try {
-        const r = await setFriendlyName(renaming.host_alias, renaming.tmux_name, next);
-        if (!r.ok) {
-          renameError = r.error.message;
-          pushError(r.error, 'Label update failed');
-          return;
-        }
-        cancelRename();
-      } finally {
-        committingRename = false;
-      }
-      return;
-    }
-    if (!next || next === renaming.tmux_name) {
-      cancelRename();
-      return;
-    }
+    // Target the exact row that was double-clicked — host + old name from
+    // the pinned identity, never a lookup by name alone.
+    const target = renaming;
     committingRename = true;
     try {
-      // Target the exact row that was double-clicked — host + old name from
-      // the pinned identity, never a lookup by name alone.
-      const target = renaming;
-      const { host_alias: hostAlias, tmux_name: oldName } = target;
-      const r = await renameSession(hostAlias, oldName, next);
-      if (!r.ok) {
-        renameError = r.error.message;
-        pushError(r.error, 'Rename failed');
+      const outcome = await applySessionRename(
+        { ...target, friendly_name: target.mode === 'label' ? target.original : null },
+        target.mode,
+        renameValue,
+      );
+      if (outcome.kind === 'error') {
+        renameError = outcome.error.message;
         return;
       }
-      // Persisted UI state (pane widths, collapsed) is keyed by tmux name;
-      // bring it along to the new name so the user's layout sticks.
-      migrateSessionUi(r.value.host_alias, oldName, r.value.tmux_name);
       // If the renamed session was the selected one, follow the rename.
       const cur = $selectedSession;
-      if (cur && sameSession(cur, target)) {
-        selectSession(r.value);
+      if (outcome.kind === 'ok' && outcome.row && cur && sameSession(cur, target)) {
+        selectSession(outcome.row, { follow: true });
       }
       cancelRename();
     } finally {
@@ -464,15 +520,7 @@
     }
   }
 
-  function onRenameKey(e: KeyboardEvent) {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      void commitRename();
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      cancelRename();
-    }
-  }
+  const onRenameKey = renameKeyHandler(() => void commitRename(), cancelRename);
 
   function askKill(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
@@ -529,30 +577,8 @@
     if (cur && sameSession(cur, sess)) {
       selectSession(null);
       await tick();
-      selectSession(r.value);
+      selectSession(r.value, { follow: true });
     }
-  }
-
-  // Per-session peek panel state: row id → log text | "loading" | null
-  let peekState = $state<Record<number, string | "loading" | null>>({});
-
-  async function doPeek(sess: SessionRow) {
-    if (!sess.claude_session_id) return;
-    peekState[sess.id] = "loading";
-    try {
-      const result = await peekSession(sess.host_alias, sess.claude_session_id);
-      if (result.ok) {
-        peekState[sess.id] = result.value || "(no output yet)";
-      } else {
-        peekState[sess.id] = "Error: " + result.error.message;
-      }
-    } catch (e: unknown) {
-      peekState[sess.id] = "Error: " + (e instanceof Error ? e.message : String(e));
-    }
-  }
-
-  function closePeek(sessId: number) {
-    peekState[sessId] = null;
   }
 
   // --- New BG Session modal ---
@@ -593,7 +619,7 @@
 </script>
 
 <div class="sidebar" data-testid="sidebar-tree" bind:this={sidebarEl}>
-  {#snippet sessionRow(sess: SessionRow)}
+  {#snippet sessionRow(sess: SessionRow, readOnly = false)}
     <SessionRowItem
       {sess}
       {selectMode}
@@ -605,7 +631,7 @@
       {renameError}
       relatedCount={relatedCountFor(sess)}
       {nowSec}
-      peek={peekState[sess.id]}
+      {readOnly}
       {onSelectSession}
       {onKeySession}
       {toggleSelected}
@@ -615,8 +641,6 @@
       {commitRename}
       {askRecreate}
       {askKill}
-      {doPeek}
-      {closePeek}
     />
   {/snippet}
 
@@ -630,9 +654,9 @@
     {onRefresh}
     {onCollapse}
     {showTasks}
-    {showSettings}
+    showSettings={$settingsOpen}
     onOpenTasks={() => (showTasks = true)}
-    onOpenSettings={() => (showSettings = true)}
+    onOpenSettings={() => settingsOpen.set(true)}
     {stuckCount}
     {attentionCount}
     {selectMode}
@@ -710,13 +734,32 @@
         {/each}
       </div>
     {/if}
+
+    {#if outsideFleet.length > 0}
+      <div class="orphan-section" data-testid="outside-fleet-section">
+        <button
+          class="section-header section-toggle"
+          data-testid="outside-fleet"
+          aria-expanded={outsideOpen}
+          onclick={() => (outsideOpen = !outsideOpen)}
+        >
+          <span class="caret" class:collapsed={!outsideOpen}>▾</span>
+          Outside fleet ({outsideFleet.length})
+        </button>
+        {#if outsideOpen}
+          {#each outsideFleet as sess (sess.id)}
+            {@render sessionRow(sess, true)}
+          {/each}
+        {/if}
+      </div>
+    {/if}
   </div>
 
   <footer class="sidebar-footer" data-testid="sidebar-chrome-bottom">
     <div class="footer-row">
       <button
         class="new-btn"
-        onclick={() => (showProjectPicker = !showProjectPicker)}
+        onclick={toggleProjectPicker}
         data-testid="new-session-footer"
       >
         + New session
@@ -726,7 +769,7 @@
         title="Launch a supervised Claude background session"
         onclick={() => (showBgModal = true)}
         data-testid="new-bg-session-btn"
-        use:hintAnchor={{ id: 'bg-session', when: $sessions.some((s) => s.kind !== 'bg') && !$sessions.some((s) => s.kind === 'bg') }}
+        use:hintAnchor={{ id: 'bg-session', when: $sessions.some((s) => !hasNoPane(s)) && !$sessions.some((s) => s.kind === 'bg') }}
       >⚡</button>
     </div>
     <button
@@ -739,6 +782,9 @@
     </button>
     {#if showProjectPicker}
       <div class="picker" role="listbox" aria-label="Pick project for new session">
+        <button class="picker-item add-project" onclick={openAddProject} data-testid="add-project-row">
+          ＋ Add project…
+        </button>
         {#each allProjectsSorted as row (row.project.id)}
           <button class="picker-item" onclick={() => openNew(row)}>
             {#if collidingRepos.has(row.project.repo)}<span class="owner"
@@ -747,7 +793,7 @@
           </button>
         {/each}
         {#if allProjectsSorted.length === 0}
-          <p class="empty pad">No projects. Refresh first.</p>
+          <p class="empty pad">No projects yet. Add one, or refresh.</p>
         {/if}
       </div>
     {/if}
@@ -760,8 +806,12 @@
   if (e.key === 'Escape' && showProjectPicker) showProjectPicker = false;
 }} />
 
+{#if showAddProject}
+  <AddProjectDialog onCreated={onProjectAdded} onCancel={() => (showAddProject = false)} />
+{/if}
+
 {#if dialogProject}
-  <NewSessionDialog project={dialogProject} onCreate={onCreated} {onCancel} />
+  <NewSessionDialog project={dialogProject} initialHost={dialogHost} onCreate={onCreated} {onCancel} />
 {/if}
 
 {#if pendingKill}
@@ -812,8 +862,8 @@
   </ConfirmDialog>
 {/if}
 
-{#if showSettings}
-  <SettingsDialog onClose={() => (showSettings = false)} />
+{#if $settingsOpen}
+  <SettingsDialog onClose={() => settingsOpen.set(false)} />
 {/if}
 
 {#if showTasks}
@@ -949,6 +999,25 @@
     color: var(--fg-muted);
     padding: 0 0 0.2rem 0.4rem;
   }
+  .section-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    width: 100%;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .section-toggle .caret {
+    color: var(--fg-muted);
+    font-size: 0.65rem;
+    width: 0.7rem;
+    text-align: center;
+    transition: transform 0.1s ease;
+    display: inline-block;
+  }
+  .section-toggle .caret.collapsed { transform: rotate(-90deg); }
 
   .sidebar-footer {
     flex: 0 0 auto;
@@ -1026,4 +1095,5 @@
     cursor: pointer;
   }
   .picker-item:hover { background: var(--bg-pane); }
+  .picker-item.add-project { color: var(--accent); border-bottom: 1px solid var(--border); }
 </style>

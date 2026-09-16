@@ -1,6 +1,7 @@
 //! MCP tools: fleet health, usage, hosts, accounts and provisioning.
 
 use super::*;
+use crate::ipc_error::lock;
 
 #[tool_router(router = fleet_router, vis = "pub(super)")]
 impl FleetTools {
@@ -47,10 +48,7 @@ impl FleetTools {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let report = {
-            let s = self
-                .store
-                .lock()
-                .map_err(|_| mcp_err("E_LOCK", "store mutex poisoned", None))?;
+            let s = lock(&self.store).map_err(to_mcp_err)?;
             usage::report(&s, host.as_deref(), p.since_secs, now).map_err(to_mcp_err)?
         };
         ok_json(&report)
@@ -83,16 +81,12 @@ impl FleetTools {
         persists the host if it is reachable. Returns the host row as JSON.")]
     pub(super) async fn add_host(
         &self,
-        Parameters(p): Parameters<AddHostParams>,
+        Parameters(args): Parameters<hosts::AddHostArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "add_host",
-            &format!("alias={} ssh_alias={}", p.alias, p.ssh_alias),
+            &format!("alias={} ssh_alias={}", args.alias, args.ssh_alias),
         );
-        let args = hosts::AddHostArgs {
-            alias: p.alias,
-            ssh_alias: p.ssh_alias,
-        };
         let row = hosts::add_host(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -103,10 +97,9 @@ impl FleetTools {
         versions. Returns the updated host row as JSON.")]
     pub(super) async fn probe_host(
         &self,
-        Parameters(p): Parameters<HostAliasParams>,
+        Parameters(args): Parameters<hosts::HostAliasArgs>,
     ) -> Result<CallToolResult, McpError> {
-        audit("probe_host", &format!("alias={}", p.alias));
-        let args = hosts::HostAliasArgs { alias: p.alias };
+        audit("probe_host", &format!("alias={}", args.alias));
         let row = hosts::probe_host(args, &self.store, &self.ssh, &self.reg)
             .await
             .map_err(to_mcp_err)?;
@@ -117,10 +110,9 @@ impl FleetTools {
         Returns the removed host row as JSON.")]
     pub(super) async fn remove_host(
         &self,
-        Parameters(p): Parameters<HostAliasParams>,
+        Parameters(args): Parameters<hosts::HostAliasArgs>,
     ) -> Result<CallToolResult, McpError> {
-        audit("remove_host", &format!("alias={}", p.alias));
-        let args = hosts::HostAliasArgs { alias: p.alias };
+        audit("remove_host", &format!("alias={}", args.alias));
         ok_json(&hosts::remove_host(args, &self.store).map_err(to_mcp_err)?)
     }
 
@@ -128,16 +120,12 @@ impl FleetTools {
         reconcile. Returns the updated host row as JSON.")]
     pub(super) async fn hide_host(
         &self,
-        Parameters(p): Parameters<HideHostParams>,
+        Parameters(args): Parameters<hosts::HideHostArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "hide_host",
-            &format!("alias={} hidden={}", p.alias, p.hidden),
+            &format!("alias={} hidden={}", args.alias, args.hidden),
         );
-        let args = hosts::HideHostArgs {
-            alias: p.alias,
-            hidden: p.hidden,
-        };
         ok_json(&hosts::hide_host(args, &self.store).map_err(to_mcp_err)?)
     }
 
@@ -155,24 +143,8 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit("provision_hosts", &format!("rotate={}", p.rotate));
         let port = {
-            let s = self
-                .store
-                .lock()
-                .map_err(|_| to_mcp_err(IpcError::new("E_LOCK", "store mutex poisoned")))?;
-            let has_master = s
-                .get_setting(crate::mcp::SETTING_TOKEN)
-                .map_err(|e| to_mcp_err(IpcError::from(e)))?
-                .is_some_and(|t| !t.is_empty());
-            if !has_master {
-                return Err(to_mcp_err(IpcError::new(
-                    "E_PROVISION",
-                    "control API has no token yet",
-                )));
-            }
-            s.get_setting(crate::mcp::SETTING_PORT)
-                .map_err(|e| to_mcp_err(IpcError::from(e)))?
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(crate::mcp::DEFAULT_PORT)
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            crate::mcp::settings::configured_port(&s).map_err(to_mcp_err)?
         };
         let res = crate::service::provision::provision_hosts(
             &self.store,

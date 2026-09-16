@@ -1,4 +1,4 @@
-/* Rules shared by SettingsDialog, HostsTable and McpSettings, which all render
+/* Rules shared by SettingsDialog and McpSettings, which both render
    inside the settings dialog. Namespaced under the dialog root so they never
    reach other components' same-named classes (Sidebar and others define their
    own .err / .status). Single-class selectors keep the specificity of the
@@ -108,4 +108,35 @@
 .settings-dialog .status-neutral {
   background: rgba(127, 127, 127, 0.15);
   color: var(--fg-muted);
+}
+
+/* Conversation composer presets */
+.settings-dialog .preset-row {
+  display: flex;
+  gap: 0.4rem;
+  align-items: flex-start;
+  margin: 0.3rem 0;
+}
+.settings-dialog .preset-label {
+  flex: 0 0 9rem;
+}
+.settings-dialog .preset-text {
+  flex: 1 1 auto;
+  min-height: 1.9rem;
+  resize: vertical;
+  font: inherit;
+  font-size: 0.8rem;
+}
+.settings-dialog .preset-label,
+.settings-dialog .preset-text {
+  padding: 0.3rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+}
+.settings-dialog .preset-actions {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.4rem;
 }

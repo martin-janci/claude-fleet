@@ -1,15 +1,8 @@
 import { derived, get, writable, type Readable } from 'svelte/store';
 import { readPref, writePref } from './prefs';
-import type { ProjectTreeRow } from './projects';
 import { findSession, mergeSession, sessions, type SessionRow } from './sessions';
 
-// Two mutually-exclusive selection slots drive the center pane:
-//   - selectedProject: the user clicked a project row in the sidebar.
-//   - selectedSession: the user clicked a session row in the sidebar.
-// Setting one clears the other so the center pane always has a single
-// unambiguous focus.
-
-export const selectedProject = writable<ProjectTreeRow | null>(null);
+// The selected session drives the center pane.
 
 /**
  * Identity of the selected session. Only the *reference* is stored here; the
@@ -70,12 +63,20 @@ const isSessionIdentOrNull = (v: unknown): v is SessionIdent | null =>
     typeof (v as SessionIdent).host_alias === 'string' &&
     typeof (v as SessionIdent).tmux_name === 'string');
 
-export function selectProject(p: ProjectTreeRow | null): void {
-  selectedProject.set(p);
-  if (p !== null) selectedRef.set(null);
+// Listeners told each time a session is deliberately OPENED (a sidebar
+// click, the quick switcher, a Hosts-view jump, a fresh create) — App leaves
+// the Hosts view on it. Re-syncs that merely follow the same session (a
+// rename, a recreate, restore-on-launch) pass `{ follow: true }` and stay
+// silent, so they never yank the user out of a view.
+const openedListeners = new Set<(s: SessionRow) => void>();
+
+/** Subscribe to deliberate session opens; returns the unsubscribe. */
+export function onSessionOpened(fn: (s: SessionRow) => void): () => void {
+  openedListeners.add(fn);
+  return () => openedListeners.delete(fn);
 }
 
-export function selectSession(s: SessionRow | null): void {
+export function selectSession(s: SessionRow | null, opts: { follow?: boolean } = {}): void {
   if (s === null) {
     selectedRef.set(null);
     return;
@@ -86,11 +87,11 @@ export function selectSession(s: SessionRow | null): void {
   // already in the store wins and a just-killed one stays dead.
   if (!findSession(get(sessions), s)) mergeSession(s);
   selectedRef.set({ id: s.id, host_alias: s.host_alias, tmux_name: s.tmux_name });
-  selectedProject.set(null);
   writePref<SessionIdent>(LAST_SESSION_KEY, {
     host_alias: s.host_alias,
     tmux_name: s.tmux_name,
   });
+  if (!opts.follow) for (const fn of openedListeners) fn(s);
 }
 
 /**
@@ -105,13 +106,12 @@ export function restoreLastSession(): void {
     (s) => s.host_alias === ident.host_alias && s.tmux_name === ident.tmux_name,
   );
   if (match && match.status !== 'ghost') {
-    selectSession(match);
+    selectSession(match, { follow: true });
   } else {
     writePref<SessionIdent | null>(LAST_SESSION_KEY, null);
   }
 }
 
 export function clearSelection(): void {
-  selectedProject.set(null);
   selectedRef.set(null);
 }

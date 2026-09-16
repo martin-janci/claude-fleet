@@ -20,7 +20,7 @@
 //! self-closed). Concurrent first-connects are serialised by ssh via the
 //! ControlPath.
 
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use dashmap::DashMap;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -214,6 +214,55 @@ impl SshClient {
         self.run_child(host, cmd, wall_clock, None, "E_SSH").await
     }
 
+    /// `run_bounded` with stdout and stderr each capped at `max_output`
+    /// bytes. Output past the cap is read and discarded (so the child never
+    /// blocks on a full pipe) rather than buffered, so a compromised host or
+    /// a noisy login profile cannot stream unbounded data into the app for
+    /// the whole wall clock.
+    pub async fn run_bounded_capped(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+        max_output: usize,
+    ) -> Result<Output, IpcError> {
+        self.inner.seen.insert(host.to_string(), ());
+        let mut cmd = tokio::process::Command::new("ssh");
+        for opt in self.mux_opts(host, connect_timeout) {
+            cmd.arg(opt);
+        }
+        cmd.arg("--").arg(host).args(args);
+        self.run_child_capped(host, cmd, wall_clock, None, "E_SSH", Some(max_output))
+            .await
+    }
+
+    /// `run_bounded` raced against a `CancellationToken`, for a long-running
+    /// script that must keep an independent connect timeout / wall-clock
+    /// pair (see `run_bounded`'s doc comment) while still being abortable —
+    /// `run_cancellable` cannot be reused here because it derives its wall
+    /// clock as `3 × connect_timeout`, which would silently reintroduce the
+    /// coupled-timeout bug `run_bounded` exists to avoid. Same kill/reap
+    /// semantics as `run_cancellable`: `E_CANCELLED` when `token` fires
+    /// first, `E_SSH_TIMEOUT` when `wall_clock` elapses first.
+    pub async fn run_bounded_cancellable(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+        token: CancellationToken,
+    ) -> Result<Output, IpcError> {
+        self.inner.seen.insert(host.to_string(), ());
+        let mut cmd = tokio::process::Command::new("ssh");
+        for opt in self.mux_opts(host, connect_timeout) {
+            cmd.arg(opt);
+        }
+        cmd.arg("--").arg(host).args(args);
+        self.run_child(host, cmd, wall_clock, Some(token), "E_SSH")
+            .await
+    }
+
     /// Same as `run` but races the SSH child against a `CancellationToken`.
     /// When the token fires before the command finishes, the child is sent
     /// SIGKILL via `start_kill` and explicitly `wait`ed so the OS reaps the
@@ -261,7 +310,10 @@ impl SshClient {
     ) -> Result<(), IpcError> {
         self.inner.seen.insert(host.to_string(), ());
         let file = std::fs::File::open(local_path).map_err(|e| {
-            IpcError::new("E_UPLOAD", format!("open {}: {e}", local_path.display()))
+            IpcError::new(
+                codes::E_UPLOAD,
+                format!("open {}: {e}", local_path.display()),
+            )
         })?;
         let mut cmd = tokio::process::Command::new("ssh");
         for opt in self.mux_opts(host, timeout) {
@@ -277,7 +329,7 @@ impl SshClient {
             .await?;
         if !out.status.success() {
             return Err(IpcError::new(
-                "E_UPLOAD",
+                codes::E_UPLOAD,
                 format!(
                     "upload to {host} failed: {}",
                     String::from_utf8_lossy(&out.stderr).trim()
@@ -311,10 +363,25 @@ impl SshClient {
     pub(crate) async fn run_child(
         &self,
         host: &str,
+        cmd: tokio::process::Command,
+        wall_clock: Duration,
+        token: Option<CancellationToken>,
+        spawn_code: &str,
+    ) -> Result<Output, IpcError> {
+        self.run_child_capped(host, cmd, wall_clock, token, spawn_code, None)
+            .await
+    }
+
+    /// `run_child` with an optional per-stream byte cap (see
+    /// `run_bounded_capped`). `None` keeps the uncapped behaviour.
+    pub(crate) async fn run_child_capped(
+        &self,
+        host: &str,
         mut cmd: tokio::process::Command,
         wall_clock: Duration,
         token: Option<CancellationToken>,
         spawn_code: &str,
+        max_output: Option<usize>,
     ) -> Result<Output, IpcError> {
         let in_flight = InFlight::enter(&self.inner, host);
         let mut child = cmd
@@ -331,20 +398,8 @@ impl SshClient {
         // full pipe.
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
-        let stdout_task = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut s) = stdout {
-                let _ = tokio::io::AsyncReadExt::read_to_end(&mut s, &mut buf).await;
-            }
-            buf
-        });
-        let stderr_task = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut s) = stderr {
-                let _ = tokio::io::AsyncReadExt::read_to_end(&mut s, &mut buf).await;
-            }
-            buf
-        });
+        let stdout_task = tokio::spawn(read_capped(stdout, max_output));
+        let stderr_task = tokio::spawn(read_capped(stderr, max_output));
 
         // Without a token this arm never fires; `select!` still needs a
         // future, so use a pending one.
@@ -370,7 +425,7 @@ impl SshClient {
                 kill_and_reap(child).await;
                 stdout_task.abort();
                 stderr_task.abort();
-                Err(IpcError::new("E_CANCELLED", format!("ssh {host} cancelled")))
+                Err(IpcError::new(codes::E_CANCELLED, format!("ssh {host} cancelled")))
             }
             _ = tokio::time::sleep(wall_clock) => {
                 kill_and_reap(child).await;
@@ -546,6 +601,95 @@ impl Default for SshClient {
     }
 }
 
+/// Drain `stream` to EOF, keeping at most `cap` bytes (all of them for
+/// `None`). Bytes past the cap are read and dropped so the child keeps
+/// running instead of blocking on a full pipe.
+async fn read_capped<R>(stream: Option<R>, cap: Option<usize>) -> Vec<u8>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut buf = Vec::new();
+    let Some(mut s) = stream else {
+        return buf;
+    };
+    match cap {
+        None => {
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut s, &mut buf).await;
+        }
+        Some(cap) => {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match tokio::io::AsyncReadExt::read(&mut s, &mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let room = cap.saturating_sub(buf.len());
+                        buf.extend_from_slice(&chunk[..n.min(room)]);
+                    }
+                }
+            }
+        }
+    }
+    buf
+}
+
+/// Run `script` through `bash -lc` on `host`: a local spawn for `"local"`,
+/// otherwise one ssh hop with the script quoted for the remote login shell.
+/// Bounded the way [`SshExec::run`] is — `timeout` is the connect budget and
+/// the wall clock derives from it. The local spawn is killed at the wall
+/// clock and reports `E_TIMEOUT`; a failed spawn is `E_SHELL`. Every value
+/// interpolated into `script` must already be quoted by the caller.
+pub async fn run_shell(
+    exec: &dyn SshExec,
+    host: &str,
+    script: &str,
+    timeout: Duration,
+) -> Result<Output, IpcError> {
+    if host == "local" {
+        return run_local_shell(script, SshClient::default_wall_clock(timeout)).await;
+    }
+    exec.run(
+        host,
+        &["bash", "-lc", &crate::shell::quote(script)],
+        timeout,
+    )
+    .await
+}
+
+/// [`run_shell`] with an explicit wall clock, for scripts that legitimately
+/// outlive a reasonable connect budget (see [`SshExec::run_bounded`]).
+pub async fn run_shell_bounded(
+    exec: &dyn SshExec,
+    host: &str,
+    script: &str,
+    connect_timeout: Duration,
+    wall_clock: Duration,
+) -> Result<Output, IpcError> {
+    if host == "local" {
+        return run_local_shell(script, wall_clock).await;
+    }
+    exec.run_bounded(
+        host,
+        &["bash", "-lc", &crate::shell::quote(script)],
+        connect_timeout,
+        wall_clock,
+    )
+    .await
+}
+
+async fn run_local_shell(script: &str, wall_clock: Duration) -> Result<Output, IpcError> {
+    let child = tokio::process::Command::new("bash")
+        .args(["-lc", script])
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(wall_clock, child).await {
+        Ok(res) => res.map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}"))),
+        Err(_) => Err(IpcError::new(
+            codes::E_TIMEOUT,
+            format!("local script exceeded {}s", wall_clock.as_secs()),
+        )),
+    }
+}
+
 /// The transport the service layer talks to a host through. `SshClient` is
 /// the production implementation (ControlMaster-multiplexed `ssh`);
 /// tests use `LocalExec` (the same argv through a local `bash -c`) and a
@@ -568,11 +712,54 @@ impl Default for SshClient {
 pub trait SshExec: Send + Sync {
     async fn run(&self, host: &str, args: &[&str], timeout: Duration) -> Result<Output, IpcError>;
 
+    /// Like `run`, but with the wall-clock bound given explicitly instead of
+    /// derived as `3 × connect_timeout`. Use this when a command legitimately
+    /// runs far longer than a reasonable connect budget (a large `git
+    /// clone`…) but a hung or unreachable host must still fail fast on the
+    /// connect step: pass a short `connect_timeout` and the real deadline as
+    /// `wall_clock`.
+    async fn run_bounded(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+    ) -> Result<Output, IpcError>;
+
+    /// `run_bounded` with stdout and stderr each capped at `max_output`
+    /// bytes. The default truncates after the fact (fine for the test
+    /// transports); `SshClient` overrides it to bound memory while reading.
+    async fn run_bounded_capped(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+        max_output: usize,
+    ) -> Result<Output, IpcError> {
+        let mut out = self
+            .run_bounded(host, args, connect_timeout, wall_clock)
+            .await?;
+        out.stdout.truncate(max_output);
+        out.stderr.truncate(max_output);
+        Ok(out)
+    }
+
     async fn run_cancellable(
         &self,
         host: &str,
         args: &[&str],
         timeout: Duration,
+        token: CancellationToken,
+    ) -> Result<Output, IpcError>;
+
+    /// See the inherent `SshClient::run_bounded_cancellable`.
+    async fn run_bounded_cancellable(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
         token: CancellationToken,
     ) -> Result<Output, IpcError>;
 
@@ -595,6 +782,28 @@ impl SshExec for SshClient {
         SshClient::run(self, host, args, timeout).await
     }
 
+    async fn run_bounded(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+    ) -> Result<Output, IpcError> {
+        SshClient::run_bounded(self, host, args, connect_timeout, wall_clock).await
+    }
+
+    async fn run_bounded_capped(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+        max_output: usize,
+    ) -> Result<Output, IpcError> {
+        SshClient::run_bounded_capped(self, host, args, connect_timeout, wall_clock, max_output)
+            .await
+    }
+
     async fn run_cancellable(
         &self,
         host: &str,
@@ -603,6 +812,18 @@ impl SshExec for SshClient {
         token: CancellationToken,
     ) -> Result<Output, IpcError> {
         SshClient::run_cancellable(self, host, args, timeout, token).await
+    }
+
+    async fn run_bounded_cancellable(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+        token: CancellationToken,
+    ) -> Result<Output, IpcError> {
+        SshClient::run_bounded_cancellable(self, host, args, connect_timeout, wall_clock, token)
+            .await
     }
 
     async fn upload_file(
@@ -629,6 +850,31 @@ impl<T: SshExec + ?Sized> SshExec for Arc<T> {
         (**self).run(host, args, timeout).await
     }
 
+    async fn run_bounded(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+    ) -> Result<Output, IpcError> {
+        (**self)
+            .run_bounded(host, args, connect_timeout, wall_clock)
+            .await
+    }
+
+    async fn run_bounded_capped(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+        max_output: usize,
+    ) -> Result<Output, IpcError> {
+        (**self)
+            .run_bounded_capped(host, args, connect_timeout, wall_clock, max_output)
+            .await
+    }
+
     async fn run_cancellable(
         &self,
         host: &str,
@@ -637,6 +883,19 @@ impl<T: SshExec + ?Sized> SshExec for Arc<T> {
         token: CancellationToken,
     ) -> Result<Output, IpcError> {
         (**self).run_cancellable(host, args, timeout, token).await
+    }
+
+    async fn run_bounded_cancellable(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+        token: CancellationToken,
+    ) -> Result<Output, IpcError> {
+        (**self)
+            .run_bounded_cancellable(host, args, connect_timeout, wall_clock, token)
+            .await
     }
 
     async fn upload_file(
@@ -661,7 +920,7 @@ impl<T: SshExec + ?Sized> SshExec for Arc<T> {
 pub(crate) fn home_from_output(host: &str, out: &Output) -> Result<String, IpcError> {
     if !out.status.success() {
         return Err(IpcError::new(
-            "E_SSH",
+            codes::E_SSH,
             format!(
                 "couldn't read $HOME on {host}: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
@@ -671,7 +930,7 @@ pub(crate) fn home_from_output(host: &str, out: &Output) -> Result<String, IpcEr
     let home = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if home.is_empty() {
         return Err(IpcError::new(
-            "E_SSH",
+            codes::E_SSH,
             format!("remote $HOME on {host} is empty"),
         ));
     }
@@ -682,7 +941,7 @@ pub(crate) fn home_from_output(host: &str, out: &Output) -> Result<String, IpcEr
 /// wall clock. `reset` records whether the ControlMaster was torn down.
 pub(crate) fn wall_clock_error(host: &str, wall_clock: Duration, reset: bool) -> IpcError {
     IpcError::new(
-        "E_SSH_TIMEOUT",
+        codes::E_SSH_TIMEOUT,
         format!(
             "ssh {host}: command exceeded {}s wall clock{}",
             wall_clock.as_secs(),
@@ -792,7 +1051,7 @@ impl LocalExec {
                 kill_and_reap(child).await;
                 stdout_task.abort();
                 stderr_task.abort();
-                Err(IpcError::new("E_CANCELLED", format!("ssh {host} cancelled")))
+                Err(IpcError::new(codes::E_CANCELLED, format!("ssh {host} cancelled")))
             }
             _ = tokio::time::sleep(wall_clock) => {
                 kill_and_reap(child).await;
@@ -826,6 +1085,17 @@ impl SshExec for LocalExec {
         .await
     }
 
+    async fn run_bounded(
+        &self,
+        host: &str,
+        args: &[&str],
+        _connect_timeout: Duration,
+        wall_clock: Duration,
+    ) -> Result<Output, IpcError> {
+        let cmd = self.command(args);
+        self.bounded(host, cmd, wall_clock, None, "E_SSH").await
+    }
+
     async fn run_cancellable(
         &self,
         host: &str,
@@ -844,6 +1114,19 @@ impl SshExec for LocalExec {
         .await
     }
 
+    async fn run_bounded_cancellable(
+        &self,
+        host: &str,
+        args: &[&str],
+        _connect_timeout: Duration,
+        wall_clock: Duration,
+        token: CancellationToken,
+    ) -> Result<Output, IpcError> {
+        let cmd = self.command(args);
+        self.bounded(host, cmd, wall_clock, Some(token), "E_SSH")
+            .await
+    }
+
     async fn upload_file(
         &self,
         host: &str,
@@ -852,7 +1135,10 @@ impl SshExec for LocalExec {
         _timeout: Duration,
     ) -> Result<(), IpcError> {
         let file = std::fs::File::open(local_path).map_err(|e| {
-            IpcError::new("E_UPLOAD", format!("open {}: {e}", local_path.display()))
+            IpcError::new(
+                codes::E_UPLOAD,
+                format!("open {}: {e}", local_path.display()),
+            )
         })?;
         let remote_cmd = format!("cat > {}", crate::shell::quote(remote_path));
         let mut cmd = self.command(&[remote_cmd.as_str()]);
@@ -862,7 +1148,7 @@ impl SshExec for LocalExec {
             .await?;
         if !out.status.success() {
             return Err(IpcError::new(
-                "E_UPLOAD",
+                codes::E_UPLOAD,
                 format!(
                     "upload to {host} failed: {}",
                     String::from_utf8_lossy(&out.stderr).trim()
@@ -1099,6 +1385,56 @@ mod tests {
         assert_eq!(out.status.code(), Some(3));
         assert_eq!(out.stdout, b"hello");
         assert_eq!(out.stderr, b"err");
+    }
+
+    #[tokio::test]
+    async fn run_child_capped_keeps_at_most_the_cap_and_still_drains() {
+        if !have_sh() {
+            eprintln!("skipping: no sh on this box");
+            return;
+        }
+        let c = SshClient::new();
+        // ~1 MB on each stream; the child must still exit 0 (not block on a
+        // full pipe) and only the cap is kept.
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args([
+            "-c",
+            "i=0; while [ $i -lt 20000 ]; do echo 0123456789012345678901234567890123456789012345678; echo e012345678901234567890123456789012345678901234567 >&2; i=$((i+1)); done",
+        ]);
+        let out = c
+            .run_child_capped(
+                "fleet-test-nonexistent-host",
+                cmd,
+                Duration::from_secs(60),
+                None,
+                "E_SSH",
+                Some(1000),
+            )
+            .await
+            .expect("completes");
+        assert!(out.status.success());
+        assert_eq!(out.stdout.len(), 1000);
+        assert_eq!(out.stderr.len(), 1000);
+        assert!(out.stdout.starts_with(b"0123456789"));
+
+        // `None` keeps everything.
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args([
+            "-c",
+            "i=0; while [ $i -lt 100 ]; do echo 123456789; i=$((i+1)); done",
+        ]);
+        let out = c
+            .run_child_capped(
+                "fleet-test-nonexistent-host",
+                cmd,
+                Duration::from_secs(60),
+                None,
+                "E_SSH",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.stdout.len(), 1000);
     }
 
     #[tokio::test]

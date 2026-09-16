@@ -82,17 +82,27 @@ export function contextLevel(pct: number | null): ContextLevel | null {
   return 'ok';
 }
 
+/** A CSS colour for the context meter. warn/crit use the theme tokens shared
+ *  with the usage bars (`--usage-warn` / `--usage-crit` in app.css), so they
+ *  keep their contrast in both themes. Being `var(...)`, the result cannot be
+ *  suffixed with hex alpha — use `contextTint` for a translucent border. */
 export function contextColor(level: ContextLevel | null): string {
   switch (level) {
     case 'crit':
-      return '#e64a4a';
+      return 'var(--usage-crit)';
     case 'warn':
-      return '#d29b4a';
+      return 'var(--usage-warn)';
     case 'ok':
       return '#50c86e';
     default:
       return 'transparent';
   }
+}
+
+/** `contextColor` at one-third opacity, for the meter's border. */
+export function contextTint(level: ContextLevel | null): string {
+  if (level === null) return 'transparent';
+  return `color-mix(in srgb, ${contextColor(level)} 33%, transparent)`;
 }
 
 // ── needs attention ──
@@ -104,13 +114,14 @@ export interface AttentionOptions {
   now: number;
 }
 
-export const DEFAULT_ATTENTION_IDLE_MINUTES = 30;
-
 export type AttentionReason = 'stuck' | 'safe_kill' | 'ghost' | 'failed' | 'idle';
 
 /** Why a row needs the operator, or null when it does not. Checked in
  *  priority order so the strongest reason wins. */
 export function attentionReason(s: SessionRow, opts: AttentionOptions): AttentionReason | null {
+  // A Claude session running outside fleet entirely is read-only and cannot
+  // be acted on from here — it never needs the operator's attention via us.
+  if (s.kind === 'external') return null;
   if (s.stuck_kind) return 'stuck';
   if (s.safe_kill_state === 'failed' || s.safe_kill_state === 'requested') return 'safe_kill';
   if (s.status === 'ghost' || s.lost_at !== null) return 'ghost';
@@ -127,8 +138,11 @@ export function needsAttention(s: SessionRow, opts: AttentionOptions): boolean {
 
 // ── severity (for sorting projects by worst child) ──
 
-/** Higher = worse. stuck > blocked > lost > failed > working > idle > rest. */
+/** Higher = worse. stuck > blocked > lost > failed > working > idle > rest.
+ *  An `external` row always sits in the lowest ("rest") bucket — it is
+ *  read-only and never worth floating a project to the top for. */
 export function severity(s: SessionRow): number {
+  if (s.kind === 'external') return 0;
   if (s.stuck_kind) return 6;
   if (s.claude_status === 'blocked') return 5;
   if (s.status === 'ghost' || s.lost_at !== null) return 4;
@@ -152,21 +166,24 @@ export function worstSeverityByProject(sessions: readonly SessionRow[]): Map<num
 
 // ── stuck transitions ──
 
-/** session.id → stuck_kind for every currently-stuck row. */
+/** session.id → stuck_kind for every currently-stuck row. `external` rows
+ *  are read-only and excluded even if the backend ever set a stuck_kind on
+ *  one. */
 export function stuckSnapshot(sessions: readonly SessionRow[]): Map<number, StuckKind> {
   const m = new Map<number, StuckKind>();
-  for (const s of sessions) if (s.stuck_kind) m.set(s.id, s.stuck_kind);
+  for (const s of sessions) if (s.kind !== 'external' && s.stuck_kind) m.set(s.id, s.stuck_kind);
   return m;
 }
 
 /** Rows that became stuck (or changed stuck kind) since `prev`. Clearing is
- *  not a transition worth announcing. */
+ *  not a transition worth announcing. `external` rows never announce. */
 export function newlyStuck(
   prev: ReadonlyMap<number, StuckKind>,
   sessions: readonly SessionRow[],
 ): SessionRow[] {
   const out: SessionRow[] = [];
   for (const s of sessions) {
+    if (s.kind === 'external') continue;
     if (!s.stuck_kind) continue;
     if (prev.get(s.id) !== s.stuck_kind) out.push(s);
   }

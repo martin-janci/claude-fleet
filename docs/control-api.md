@@ -40,15 +40,15 @@ host — `register_self`, `send_message` (`from_session_id`) and `inbox` refuse
 sessions on any other host with `E_FORBIDDEN`, so a token lifted from one
 machine cannot impersonate another.
 
-Each host's token has a **mode**, shown in the **Token** column of
-**Settings → Hosts**:
+Each host's token has a **mode**, shown and changed under **Integration** in
+the host's detail in the **Hosts** view (⌘I):
 
 - `full` (default) — whole-fleet **session** control: every tool except the
   fleet-admin set. Cross-host `send_prompt`, `kill_session`, `new_session`
   etc. remain allowed by design.
 - `readonly` — only tools that observe the fleet (`list_*`, `capture_session`,
-  `session_history`, `inbox`, `peer_status`, `peek_session`, `repo_*`,
-  `get_clipboard`, `wait_for_session`, `session_transcript`,
+  `session_history`, `inbox`, `peer_status`, `session_transcript`,
+  `peek_session` (deprecated), `repo_*`, `get_clipboard`, `wait_for_session`,
   `wait_for_task`, `list_tasks`, …). Anything that sends, kills, deletes,
   provisions, dispatches, writes the clipboard, or writes a session row
   (including `set_friendly_name`, so an agent on a `readonly` host cannot
@@ -91,6 +91,13 @@ claude mcp add --transport http claude-fleet http://127.0.0.1:4180/mcp \
 Then, inside a Claude Code session, `/mcp` lists the connected server and its
 tools.
 
+The server speaks MCP **2025-11-25** over **stateless streamable HTTP**: every
+`POST /mcp` is a self-contained JSON-RPC exchange, no `Mcp-Session-Id` is
+issued or required, and `GET /mcp` is not served (`405`). An app restart, a
+port or token change, or a reverse-tunnel bounce therefore needs no reconnect
+on the client side — the next call simply works. Responses are SSE-framed so a
+long poll keeps receiving a keep-alive every 15 s.
+
 ## Tools
 
 The authoritative per-tool documentation — description and parameter list for
@@ -114,8 +121,12 @@ Index by area (names only; see the reference for details):
   `new_shell_session`, `new_bg_session`, `spawn_review`, `rename_session`,
   `set_friendly_name`, `register_self`, `whoami`.
 - **Steering & observing** — `send_prompt`, `broadcast_prompt`,
-  `capture_session`, `peek_session`, `peer_status`, `session_history`,
-  `send_message`, `inbox`.
+  `capture_session`, `session_transcript` (the conversation of any session,
+  including pane-less `bg:<uuid>` rows — track background runs with it),
+  `peek_session` (`peek_session` is deprecated: use `session_transcript`),
+  `peer_status`, `session_history`, `send_message`, `inbox`. Rows with
+  `kind: external` are interactive Claude sessions running outside tmux:
+  fleet can read them (`session_transcript`) but not control them.
 - **Lifecycle & recovery** — `restart_session`, `recreate_session`,
   `repair_session` (explicit repair, same as the Repair workspace button:
   may unregister this worktree's stale entry, adopt a moved checkout,
@@ -129,6 +140,21 @@ Index by area (names only; see the reference for details):
   `repo_file`, `repo_diff`, `repo_log`, `repo_branches`, `repo_commit`,
   `repo_commit_diff`.
 - **Host clipboard** — `get_clipboard`, `set_clipboard`.
+- **Asset catalog** — `list_assets` (catalog assets with per-host drift
+  state, unmanaged assets and parse problems), `scan_assets` (re-scan hosts,
+  read-only on the hosts, and recompute asset states), `import_assets`
+  (import the controller's `~/.claude` into the catalog working tree;
+  `dry_run` supported), `plan_sync` (compute a fleet-wide sync plan with
+  per-host actions; mutating classification to update inventory), `apply_sync`
+  (apply a `plan_sync` plan; master token only, behind desktop confirmation
+  when `mcp.confirm_destructive` is enabled, and needs a `confirm_nonce` for
+  ANY apply — not only one whose plan includes an overwrite or remove —
+  while the setting is on), `set_secret` (store a `${NAME}`
+  placeholder value; master token only; the value is never returned, logged, or
+  audited). Authoring (create, edit, delete assets) is desktop-only via the
+  Assets tab, which auto-commits every save; no MCP tools. Sessions may edit
+  the catalog repo directly and commit with `catalog:` prefixed messages,
+  which the app picks up on its next catalog load.
 - **Orchestration** — `wait_for_session`, `session_transcript`, `run_prompt`,
   `dispatch_task`, `wait_for_task`, `list_tasks`, `cancel_task`,
   `set_session_tags`.
@@ -139,6 +165,24 @@ A typical loop: `list_sessions` to see state → `new_session` to spawn one →
 for the raw screen).
 
 ### Status vocabulary
+
+### Errors and limits
+
+A tool that fails in fleet's service layer answers with a **tool result**
+carrying `isError: true` (what the MCP spec prescribes for tool-execution
+failures, so the model sees it as the tool's output and can correct the call),
+not a JSON-RPC error. The text block is the documented `E_CODE: message` line;
+`structuredContent` carries `{ code, message, details }` (for example the
+candidate rows of `E_AMBIGUOUS` or the `confirm_nonce` of
+`E_CONFIRM_REQUIRED`). JSON-RPC errors are reserved for protocol failures:
+an unknown tool name or arguments that do not match the schema.
+
+Every call runs under a wall clock: 60 s for reads and single round trips,
+300 s for session lifecycle, provisioning and host probes, 660 s for the
+self-bounded long polls (`wait_for_session`, `wait_for_task`, `run_prompt`,
+whose own `timeout_s` maxes at 600). On elapse the result is
+`E_TIMEOUT: <tool> exceeded its <n> s limit; the call may have partially
+completed` with `structuredContent { code: "E_TIMEOUT", tool, limit_secs }`.
 
 Session rows carry `claude_status` (one of `working`, `blocked`, `completed`,
 `failed`, `stopped`, `idle`, or null when unknown) and `stuck_kind` (one of
@@ -162,8 +206,12 @@ most `max_chars` characters (default 8000, max 64000).
 and `last_stop_at`. Two Claude Code hooks maintain them: `Stop` marks the
 session `idle`, bumps `turn_seq` and stamps `last_stop_at`; `UserPromptSubmit`
 marks it `working`, so "idle because never started" and "idle after a turn"
-are distinguishable from "busy". A hook-stamped status that is newer than a
-reconcile pass's pane observation is never overwritten by the pane heuristic.
+are distinguishable from "busy". A turn that ends in an API error fires
+`StopFailure` instead of `Stop`; fleet ends the turn the same way (idle,
+`turn_seq` bump) and records a `stop_failure` timeline event with the error
+type, so `run_prompt` / `wait_for_session` return and `session_history` shows
+why. A hook-stamped status that is newer than a reconcile pass's pane
+observation is never overwritten by the pane heuristic.
 `send_prompt` returns `{ delivered, session_id, turn_seq_before }`;
 `wait_for_session { session_id, until: "idle" | "turn_gt", turn?, timeout_s? }`
 is a bounded long-poll (500 ms polls, default 120 s, max 600 s) returning
@@ -225,7 +273,7 @@ session's labels (up to 16 of 1–32 chars from `[A-Za-z0-9_.:-]`) and
    }
    ```
 4. **`~/.tmux.conf` clipboard passthrough** — ensures `set -g set-clipboard on` is present (appended if missing, file created if absent) so OSC 52 clipboard writes from inside tmux reach the host clipboard.
-5. **Hooks in `~/.claude/settings.json`** — merges fleet's `Stop`, `UserPromptSubmit` and `PostToolUse(EnterWorktree)` hooks as Claude Code `type: "http"` hooks, leaving the user's own hooks alone. Each entry POSTs the hook payload to `http://127.0.0.1:<port>/hook` with `"headers": { "Authorization": "Bearer <host-token>" }` and a 5 s timeout — the token never appears in a process argv. On a remote host the URL's `127.0.0.1:<port>` is the reverse tunnel's loopback end (step 6). Any older fleet entry for the same port (including the pre-0.3 `curl … /hook?token=` command form) is replaced, so re-running upgrades in place; the file is written `0600`. Required for `safe_kill_session` to finalize, for real-time `idle` / `working` status, `turn_seq` and task completion on every host that runs Claude Code. **Settings → Install Hook (local)** performs only this step for the `local` host, using the `local` host token. **Hosts provisioned before the `UserPromptSubmit` hook existed must be re-provisioned** (no rotate needed) to get the busy signal; until then their status only flips to `working` on the next reconcile pass.
+5. **Hooks in `~/.claude/settings.json`** — merges fleet's `Stop`, `UserPromptSubmit`, `PostToolUse(EnterWorktree|ExitWorktree)`, `SessionEnd(logout|prompt_input_exit|other)`, `StopFailure` and `Notification(permission_prompt|elicitation_dialog|elicitation_url_dialog|quota_auto_resume_stale|quota_auto_resume_disabled|quota_auto_resume_fired)` hooks as Claude Code `type: "http"` hooks, leaving the user's own hooks alone. Each entry POSTs the hook payload to `http://127.0.0.1:<port>/hook` with `"headers": { "Authorization": "Bearer <host-token>" }` and a 5 s timeout — the token never appears in a process argv. On a remote host the URL's `127.0.0.1:<port>` is the reverse tunnel's loopback end (step 6). Any older fleet entry for the same port (including the pre-0.3 `curl … /hook?token=` command form) is replaced, so re-running upgrades in place; the file is written `0600`. Required for `safe_kill_session` to finalize, for real-time `idle` / `working` status, `turn_seq` and task completion on every host that runs Claude Code. **Settings → Install Hook (local)** performs only this step for the `local` host, using the `local` host token. **Hosts provisioned before the `UserPromptSubmit` hook existed must be re-provisioned** (no rotate needed) to get the busy signal; until then their status only flips to `working` on the next reconcile pass. **Hosts provisioned before the `SessionEnd` / `StopFailure` / `Notification` hooks existed must be re-provisioned** to get `stopped`, API-error turn completion and hook-driven `blocked` (see *Hook contract*).
 6. **Reverse SSH tunnel** (remote hosts only) — starts an `ssh -R` tunnel so the remote host's `127.0.0.1:<port>` is forwarded to the central machine's MCP server. The server stays bound to `127.0.0.1` on the central machine; remote hosts reach it only through this authenticated tunnel.
 
 **After provisioning, each host must restart Claude** to load the MCP server (skill files and CLAUDE.md are picked up live, but the MCP server entry requires a restart).
@@ -253,6 +301,37 @@ Per-host failures do not abort provisioning of other hosts.
 - If `~/.claude.json` is missing or empty the file is created from scratch; if it exists and is not valid JSON provisioning fails for that host (before any write).
 - Re-running `provision_hosts` is safe: the skill is overwritten in place and the `claude-fleet` entry is replaced while all other `mcpServers` keys are preserved.
 - Disabling the control API tears down all reverse tunnels. Re-enabling it re-establishes them automatically for already-provisioned remote hosts.
+
+## Hook contract
+
+Claude Code on each host POSTs its hook events to `http://127.0.0.1:<port>/hook`
+(the reverse tunnel's loopback end on a remote host) as `type: "http"` hooks with
+`Authorization: Bearer <host-token>` and a 5 s timeout. The body is Claude Code's
+hook input JSON; fleet reads only the fields below and ignores the rest. Answers:
+`204` applied (or a no-op for an unknown session), `400` a body that fails
+validation (`E_VALIDATE` / `E_INVALID`, e.g. a worktree path outside a project),
+`403` a host token reporting about another host's session, `401` no valid token,
+`500` a store failure. A non-2xx answer is a non-blocking error on the Claude side:
+the session continues.
+
+| Event | Matcher | Fields read | Effect on the session row | Timeline |
+|---|---|---|---|---|
+| `UserPromptSubmit` | all | `session_id`, `transcript_path` | `claude_status = working`, `idle_since` cleared | — |
+| `Stop` | all | `session_id`, `transcript_path`, `cwd` | `idle`, `turn_seq + 1`, `last_stop_at`; triggers safe-kill and task-marker checks | — |
+| `StopFailure` | all | `session_id`, `error`, `error_details` | same as `Stop` | `stop_failure` — `<error>[: <details>]` |
+| `SessionEnd` | `logout\|prompt_input_exit\|other` | `session_id`, `reason` | `stopped`, `idle_since` started, stuck cleared | `session_end` — reason |
+| `Notification` | `permission_prompt\|elicitation_dialog\|elicitation_url_dialog` | `session_id`, `notification_type` | `blocked` | `notification` — type |
+| `Notification` | `quota_auto_resume_stale` | same | `blocked`, `stuck_kind = press_enter` | `notification` — type |
+| `Notification` | `quota_auto_resume_disabled` | same | `blocked` | `notification` — type |
+| `Notification` | `quota_auto_resume_fired` | same | `working`, stuck cleared | `notification` — type |
+| `PostToolUse` | `EnterWorktree\|ExitWorktree` | `tool_name`, `tool_input`, `tool_response` | worktree row registered / removed | — |
+
+Every hook write stamps `last_hook_at`; a reconcile pass that started before that
+stamp never overwrites the hook's status with its pane heuristic. `SessionEnd`
+with reason `clear` or `resume` is not installed (the process continues under a
+new session id). `SessionStart` is not used: Claude Code accepts only `command` /
+`mcp_tool` hooks there. Fleet never writes `allowedHttpHookUrls` — defining it
+at user level would block every other http hook on the host.
 
 ## Security
 
@@ -319,3 +398,7 @@ After enabling the API and connecting a client:
   from Settings, or **Regenerate** and update the client.
 - **Client cannot connect at all** — confirm the indicator shows **running**
   and the client URL ends in `/mcp`.
+- **`E_TIMEOUT` from a lifecycle tool** — the host answered too slowly for
+  the call's wall clock (see *Errors and limits*). Check the host with
+  `probe_host`, then `list_sessions { force: true }`: a `new_session` that
+  timed out may still have created the tmux session.

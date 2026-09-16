@@ -27,22 +27,23 @@ export function matchesRecency(p: ProjectTreeRow, r: Recency): boolean {
   return ageSec >= 0 && ageSec <= window;
 }
 
-export function timeAgo(unixSecs: number): string {
-  const diffMs = Date.now() - unixSecs * 1000;
-  const diffMins = Math.floor(diffMs / 60_000);
-  if (diffMins < 1) return 'just now';
-  if (diffMins < 60) return `${diffMins}m ago`;
-  const diffHours = Math.floor(diffMins / 60);
-  if (diffHours < 24) return `${diffHours}h ago`;
-  const diffDays = Math.floor(diffHours / 24);
-  return `${diffDays}d ago`;
+/** "just now" / "5m ago" / "3h ago" / "2d ago" for a unix-seconds timestamp.
+ *  `nowMs` is injectable so callers with a shared clock (and tests) stay
+ *  deterministic. */
+export function timeAgo(unixSecs: number, nowMs: number = Date.now()): string {
+  const ageSec = Math.floor((nowMs - unixSecs * 1000) / 1000);
+  if (ageSec < 60) return 'just now';
+  if (ageSec < 3600) return `${Math.floor(ageSec / 60)}m ago`;
+  if (ageSec < 86400) return `${Math.floor(ageSec / 3600)}h ago`;
+  return `${Math.floor(ageSec / 86400)}d ago`;
 }
 
-/** Secondary row text: elapsed since start + the last prompt's first line. */
-export function rowMeta(sess: SessionRow, nowSec: number): string {
-  const parts: string[] = [];
-  if (sess.started_at !== null) parts.push(formatElapsed(sessionStart(sess), nowSec));
-  const preview = promptPreview(sess.last_prompt, 48);
-  if (preview) parts.push(preview);
-  return parts.join(' · ');
+/** Elapsed since the session started ("3h 5m"), or '' before it started. */
+export function rowElapsed(sess: SessionRow, nowSec: number): string {
+  return sess.started_at !== null ? formatElapsed(sessionStart(sess), nowSec) : '';
+}
+
+/** First line of the last prompt, truncated for the row; '' when none. */
+export function rowPrompt(sess: SessionRow): string {
+  return promptPreview(sess.last_prompt, 48);
 }

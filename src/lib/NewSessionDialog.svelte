@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
-  import type { ProjectTreeRow, WorktreeRow } from './projects';
+  import { listHostWorktrees, type ProjectTreeRow, type WorktreeRow } from './projects';
   import { newSessionAbortable, sessions, type SessionRow } from './sessions';
   import { hosts } from './hosts';
   import { readPref, writePref } from './prefs';
@@ -8,6 +8,8 @@
   import { generateName, nameWords, tmuxNameSuffix } from './names';
   import Modal from './Modal.svelte';
   import PickerList from './PickerList.svelte';
+  import HostChips from './HostChips.svelte';
+  import { refreshAccountUsage } from './account_usage_store';
   import type { PickerItem } from './PickerList.svelte';
   import {
     fleetSettings,
@@ -24,13 +26,32 @@
     onCreate,
     onCancel,
     initialName,
+    initialHost,
+    clock = () => Math.floor(Date.now() / 1000),
+    locale,
+    timeZone,
   }: {
     project: ProjectTreeRow;
     onCreate: (s: SessionRow) => void;
     onCancel: () => void;
     /** Pre-fill the friendly name (the quick switcher's query). */
     initialName?: string;
+    /** Preselect this host (e.g. where Add project just put the project);
+     *  wins over the remembered choices while it is pickable. */
+    initialHost?: string;
+    /** Unix seconds for the host chips' usage wording; injectable for tests. */
+    clock?: () => number;
+    locale?: string;
+    timeZone?: string;
   } = $props();
+
+  // One coarse clock for the chips' "resets 15:10" / "2 min ago" wording.
+  const readClock = () => clock();
+  let now = $state(readClock());
+  $effect(() => {
+    const t = setInterval(() => (now = readClock()), 30_000);
+    return () => clearInterval(t);
+  });
 
   // The project is fixed for the dialog's lifetime (the parent remounts for
   // a different one), so these snapshots are intentional.
@@ -46,21 +67,32 @@
   const isString = (v: unknown): v is string => typeof v === 'string';
   interface ProjectMemory {
     host: string;
-    worktree: number | 'new';
+    /** Legacy (pre host-scoped picker): the local host's choice. */
+    worktree?: number | 'new';
+    /** Per host: worktree row id or 'new'. */
+    worktrees?: Record<string, number | 'new'>;
     kind: 'work' | 'shell';
   }
+  const isChoice = (v: unknown): v is number | 'new' => v === 'new' || typeof v === 'number';
   const isMemory = (v: unknown): v is ProjectMemory =>
     typeof v === 'object' &&
     v !== null &&
     typeof (v as ProjectMemory).host === 'string' &&
-    ((v as ProjectMemory).worktree === 'new' || typeof (v as ProjectMemory).worktree === 'number') &&
+    ((v as ProjectMemory).worktree === undefined || isChoice((v as ProjectMemory).worktree)) &&
+    ((v as ProjectMemory).worktrees == null ||
+      (typeof (v as ProjectMemory).worktrees === 'object' &&
+        Object.values((v as ProjectMemory).worktrees!).every(isChoice))) &&
     ((v as ProjectMemory).kind === 'work' || (v as ProjectMemory).kind === 'shell');
   const memoryKey = `newsession.project.${projectId}`;
   const memory = readPref<ProjectMemory | null>(memoryKey, null, (v): v is ProjectMemory | null => v === null || isMemory(v));
+  /** The remembered choice for `host` (legacy flat value counts for local). */
+  function rememberedFor(host: string): number | 'new' | undefined {
+    return memory?.worktrees?.[host] ?? (host === 'local' ? memory?.worktree : undefined);
+  }
 
   // A remembered host is only honoured while it is still pickable (visible,
   // and reachable unless it is `local`) — otherwise fall back to the global
-  // last-host, then `local`. Mirrors the chip `disabled` rule below.
+  // last-host, then `local`. Mirrors the chip `disabled` rule in HostChips.
   function usableHost(alias: string | null | undefined): alias is string {
     return (
       !!alias &&
@@ -68,7 +100,9 @@
     );
   }
   let chosenHost = $state<string>(
-    untrack(() => [memory?.host, readPref('last-host', '', isString)].find(usableHost) ?? 'local'),
+    untrack(
+      () => [initialHost, memory?.host, readPref('last-host', '', isString)].find(usableHost) ?? 'local',
+    ),
   );
   $effect(() => {
     writePref('last-host', chosenHost);
@@ -95,7 +129,7 @@
   // all of them so "blue sirius" is never offered twice.
   const takenSlugs = $derived.by(() => {
     const set = new Set<string>();
-    for (const w of project.worktrees) set.add(w.name.toLowerCase());
+    for (const w of hostWorktrees.rows) set.add(w.name.toLowerCase());
     for (const s of $sessions) {
       if (s.project_id !== project.project.id) continue;
       const suffix = tmuxNameSuffix(s.tmux_name, owner, repo);
@@ -126,16 +160,124 @@
   }
 
   // ── Worktree choice ──────────────────────────────────────────────────
+  // The rows on offer are the CHOSEN HOST's: local answers from the project
+  // tree synchronously; a remote host is scanned over SSH (`hostWorktrees`).
+  type HostWorktreesState = {
+    status: 'loading' | 'ready' | 'error';
+    rows: WorktreeRow[];
+    cloned: boolean;
+    error?: string;
+  };
+  let hostWorktrees = $state<HostWorktreesState>(
+    untrack(() => ({ status: 'ready', rows: project.worktrees, cloned: true })),
+  );
+  // A slow scan of the previous host must not land after a newer one.
+  let scanSeq = 0;
+  $effect(() => {
+    const host = chosenHost;
+    if (host === 'local') {
+      // Only the local branch needs the live project tree; reading it here
+      // instead of above the branch keeps this effect from tracking (and
+      // being re-run by) the project's LOCAL worktrees while a REMOTE host
+      // is what's actually selected. The backend only ever emits
+      // `worktree:updated` / `worktree:removed` for local rows
+      // (src-tauri/src/store/projects.rs:185), which is also what keeps a
+      // remote scan's own upserts from feeding back into this effect.
+      scanSeq++;
+      hostWorktrees = { status: 'ready', rows: project.worktrees, cloned: true };
+      return () => {
+        scanSeq++;
+      };
+    }
+    const seq = ++scanSeq;
+    hostWorktrees = { status: 'loading', rows: [], cloned: true };
+    // Never leave the previous host's row selected (and submittable) while
+    // this scan is in flight, or if it errors, or never lands: force
+    // new-worktree mode; the repair effect below corrects it once real rows
+    // arrive. Only when a row is actually selected — if the user was
+    // already mid-new-worktree (typed a branch name, a base branch) that
+    // in-progress input must survive the host switch, not get discarded.
+    // `untrack` because `onPickNew` reads `nameDirty`/`takenSlugs`
+    // ($sessions) reactively, and this effect (which fires an SSH call)
+    // must not re-run just because a session changed.
+    untrack(() => {
+      if (chosenWorktreeId !== null) onPickNew();
+    });
+    void listHostWorktrees(host, projectId).then((r) => {
+      if (seq !== scanSeq) return;
+      if (!r.ok) {
+        hostWorktrees = { status: 'error', rows: [], cloned: true, error: r.error.message };
+        return;
+      }
+      if (!r.value || r.value.host_alias !== host) {
+        // Shouldn't happen — the backend echoes the request's host_alias —
+        // but never silently adopt a reply that isn't for the host this
+        // scan was for; show an error instead of getting stuck on
+        // "Scanning…" forever.
+        hostWorktrees = {
+          status: 'error',
+          rows: [],
+          cloned: true,
+          error: `list_host_worktrees replied unexpectedly for ${host}`,
+        };
+        return;
+      }
+      hostWorktrees = {
+        status: 'ready',
+        rows: r.value.worktrees ?? [],
+        cloned: r.value.cloned ?? true,
+      };
+    });
+    // A dialog closed (or switched to another host) mid-scan must not let a
+    // late reply land: bump the sequence so its `seq !== scanSeq` check fails.
+    return () => {
+      scanSeq++;
+    };
+  });
+
   function initialWorktree(): number | null {
-    if (memory?.worktree === 'new') return null;
-    if (typeof memory?.worktree === 'number' && project.worktrees.some((w) => w.id === memory.worktree)) {
-      return memory.worktree;
+    // A remembered (or default) REMOTE host's rows aren't known synchronously
+    // — only `project.worktrees` (local) is available before the first scan
+    // resolves. Start it in new-worktree mode rather than risk carrying over
+    // a local row id that would be foreign (and rejected) on that host; the
+    // scan-then-repair effects below correct this the moment real rows land.
+    if (chosenHost !== 'local') return null;
+    const remembered = rememberedFor(chosenHost);
+    if (remembered === 'new') return null;
+    if (typeof remembered === 'number' && project.worktrees.some((w) => w.id === remembered)) {
+      return remembered;
     }
     return project.worktrees[0]?.id ?? null;
   }
   let chosenWorktreeId = $state<number | null>(untrack(initialWorktree));
   let inNewMode = $derived(chosenWorktreeId === null);
-  let chosenWorktree = $derived(project.worktrees.find((w) => w.id === chosenWorktreeId) ?? null);
+  let chosenWorktree = $derived(hostWorktrees.rows.find((w) => w.id === chosenWorktreeId) ?? null);
+
+  // When the host's rows arrive (or change) — including landing on an
+  // error, whose rows are always `[]` — keep the selection valid: the
+  // remembered row for that host, else its `main`, else "+ new worktree".
+  // Only skip this while a scan is actually in flight (`loading`); the
+  // scan effect above already forces new-worktree mode for that window.
+  $effect(() => {
+    if (hostWorktrees.status === 'loading') return;
+    const rows = hostWorktrees.rows;
+    const current = untrack(() => chosenWorktreeId);
+    if (current !== null && rows.some((w) => w.id === current)) return;
+    const remembered = rememberedFor(untrack(() => chosenHost));
+    const pick =
+      (typeof remembered === 'number' && rows.find((w) => w.id === remembered)) ||
+      rows.find((w) => w.name === 'main') ||
+      (remembered === 'new' ? null : rows[0]) ||
+      null;
+    // `untrack`: `onPickWorktree`/`onPickNew` read `nameDirty`/`takenSlugs`
+    // ($sessions) reactively, and this effect must not re-run (regenerating
+    // the branch name under the user's cursor) just because a session event
+    // fired.
+    untrack(() => {
+      if (pick) onPickWorktree(pick.id);
+      else if (current !== null || !newWorktreeName) onPickNew();
+    });
+  });
 
   let newWorktreeName = $state<string>('');
   // Base branch to fork the new worktree from. Empty = the repo's default
@@ -156,7 +298,7 @@
 
   // Initial fill (untracked: reads stores once, on open).
   untrack(() => {
-    const wt = project.worktrees.find((w) => w.id === chosenWorktreeId) ?? null;
+    const wt = hostWorktrees.rows.find((w) => w.id === chosenWorktreeId) ?? null;
     if (initialName?.trim()) {
       friendlyName = initialName.trim();
       nameDirty = true;
@@ -207,7 +349,11 @@
   // the configured layout. New worktrees land in whichever of `.worktrees` /
   // `.claude/worktrees` the repo already uses.
   const worktreeDir = $derived(
-    project.worktrees.some((w) => w.path.includes('/.claude/worktrees/')) ? '.claude/worktrees' : '.worktrees',
+    (hostWorktrees.rows.length ? hostWorktrees.rows : project.worktrees).some((w) =>
+      w.path.includes('/.claude/worktrees/'),
+    )
+      ? '.claude/worktrees'
+      : '.worktrees',
   );
   const projectsLayout = $derived(settingLayout($fleetSettings));
   const remoteRoot = $derived(
@@ -216,6 +362,13 @@
   onMount(() => {
     // The remote preview needs the backend's per-host roots; best effort.
     void loadFleetSettings();
+    // "The New-session dialog opening" is a usage fetch trigger. The backend
+    // keeps the 5-minute floor; a refused or failed refresh just leaves the
+    // last-known snapshot, so nothing is surfaced here.
+    const uuids = new Set(
+      $hosts.filter((h) => !h.hidden && h.account_uuid).map((h) => h.account_uuid as string),
+    );
+    for (const uuid of uuids) void refreshAccountUsage(uuid);
   });
   const pathPreview = $derived.by(() => {
     const root =
@@ -226,11 +379,14 @@
     }
     const wt = chosenWorktree;
     if (!wt || wt.name === 'main') return root;
-    return chosenHost === 'local' ? wt.path : `${root}/.claude/worktrees/${wt.name}`;
+    // The row's own path is authoritative for local AND remote — deriving
+    // one from `root` would hardcode the wrong layout for a repo that uses
+    // `.worktrees/` instead of `.claude/worktrees/`.
+    return wt.path;
   });
 
   const worktreeItems: PickerItem[] = $derived([
-    ...project.worktrees.map((wt) => ({
+    ...(hostWorktrees.status === 'ready' && hostWorktrees.cloned ? hostWorktrees.rows : []).map((wt) => ({
       key: String(wt.id),
       label: wt.name,
       description: wt.branch && wt.branch !== wt.name ? wt.branch : undefined,
@@ -239,6 +395,12 @@
     })),
     { key: 'new', label: '+ new worktree', description: 'fresh branch from the base branch', testid: 'new-worktree-chip' },
   ]);
+  const worktreeStatus = $derived.by((): string | null => {
+    if (hostWorktrees.status === 'loading') return `Scanning ${chosenHost}…`;
+    if (hostWorktrees.status === 'error') return `Couldn't list worktrees on ${chosenHost}: ${hostWorktrees.error}`;
+    if (!hostWorktrees.cloned) return `Not cloned on ${chosenHost} yet — it is cloned on the first session.`;
+    return null;
+  });
 
   let busy = $state(false);
   let error: string | null = $state(null);
@@ -263,7 +425,7 @@
     baseBranch = '';
     slugDirty = false;
     nameOverride = null;
-    const wt = project.worktrees.find((w) => w.id === id) ?? null;
+    const wt = hostWorktrees.rows.find((w) => w.id === id) ?? null;
     if (!nameDirty) friendlyName = defaultFriendly(wt);
   }
 
@@ -317,11 +479,21 @@
     nameOverride = value;
   }
 
-  function remember() {
+  /** Persist the host/worktree that were actually SUBMITTED (the caller
+   *  snapshots these before the async create, since the host chips stay
+   *  clickable while `busy`). Folds a legacy flat `worktree` value into the
+   *  per-host map under `local` so it survives past the first create under
+   *  the new shape instead of evaporating. */
+  function remember(host: string, worktreeId: number | null) {
+    const prev = readPref<ProjectMemory | null>(memoryKey, null, (v): v is ProjectMemory | null => v === null || isMemory(v));
     writePref<ProjectMemory>(memoryKey, {
-      host: chosenHost,
-      worktree: chosenWorktreeId === null ? 'new' : chosenWorktreeId,
+      host,
       kind: chosenKind,
+      worktrees: {
+        ...(prev?.worktree !== undefined ? { local: prev.worktree } : {}),
+        ...(prev?.worktrees ?? {}),
+        [host]: worktreeId === null ? 'new' : worktreeId,
+      },
     });
   }
 
@@ -337,14 +509,21 @@
       error = 'Worktree name required';
       return;
     }
+    // Snapshot what is actually being submitted: the host chips (and, in
+    // principle, the worktree picker) stay interactive while `busy`, so
+    // `chosenHost`/`chosenWorktreeId` could change under us before the
+    // request resolves. Remember what was submitted, not whatever is
+    // current when the response lands.
+    const submittedHost = chosenHost;
+    const submittedWorktreeId = inNewMode ? null : chosenWorktreeId;
     busy = true;
     error = null;
     createController = new AbortController();
     const r = await newSessionAbortable(
       {
-        host_alias: chosenHost,
+        host_alias: submittedHost,
         project_id: project.project.id,
-        worktree_id: inNewMode ? null : chosenWorktreeId,
+        worktree_id: submittedWorktreeId,
         // An empty tmux name is legal: the backend mints one with the same
         // generator (see `fill_session_name`).
         name: name.trim(),
@@ -365,7 +544,7 @@
       }
       return;
     }
-    remember();
+    remember(submittedHost, submittedWorktreeId);
     onCreate(r.value);
   }
 
@@ -400,7 +579,7 @@
   }
 </script>
 
-<Modal label="New session" onclose={onCancel} width="420px">
+<Modal label="New session" onclose={onCancel} width="520px">
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="dialog" onkeydown={onKeydown}>
   <h3>New session — {owner}/{repo}</h3>
@@ -457,24 +636,23 @@
       />
     {/if}
 
-    <label for="host-picker">Host</label>
-    <div class="host-row" id="host-picker" role="group">
-      {#each $hosts.filter((h) => !h.hidden) as h (h.alias)}
-        <button
-          class="host-pick"
-          class:active={chosenHost === h.alias}
-          disabled={!h.reachable && h.alias !== 'local'}
-          onclick={() => {
-            chosenHost = h.alias;
-            nameOverride = null;
-          }}
-        >
-          {h.alias}
-        </button>
-      {/each}
-    </div>
+    <HostChips
+      active={chosenHost}
+      labelId="new-session-host-label"
+      showUsage
+      {now}
+      {locale}
+      {timeZone}
+      onpick={(alias) => {
+        chosenHost = alias;
+        nameOverride = null;
+      }}
+    />
 
     <label for="wt-picker">Worktree</label>
+    {#if worktreeStatus}
+      <p class="wt-status" data-testid="wt-status" class:err={hostWorktrees.status === 'error'}>{worktreeStatus}</p>
+    {/if}
     <PickerList
       items={worktreeItems}
       activeKey={inNewMode ? 'new' : String(chosenWorktreeId)}
@@ -581,25 +759,6 @@
     cursor: pointer;
   }
   .dice:hover { border-color: var(--accent); }
-  .host-row {
-    display: flex;
-    gap: 0.3rem;
-    flex-wrap: wrap;
-    max-height: 5.2rem;
-    overflow-y: auto;
-  }
-  .host-pick {
-    font-size: 0.75rem;
-    padding: 0.2rem 0.6rem;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--fg-muted);
-    border-radius: 999px;
-    cursor: pointer;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
-  .host-pick.active { color: var(--fg); border-color: var(--accent); }
-  .host-pick:disabled { opacity: 0.4; cursor: not-allowed; }
   .kind-row { display: flex; gap: 0.3rem; }
   .kind-pick {
     font-size: 0.75rem;
@@ -622,6 +781,8 @@
   .preview .k { text-transform: uppercase; font-size: 0.65rem; margin-right: 0.3rem; }
   .preview code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
+  .wt-status { font-size: 0.72rem; color: var(--fg-muted); margin: 0 0 0.2rem; }
+  .wt-status.err { color: #e64a4a; }
   .actions {
     display: flex;
     gap: 0.4rem;

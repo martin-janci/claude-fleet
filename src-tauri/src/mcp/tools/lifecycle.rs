@@ -1,13 +1,17 @@
 //! MCP tools: kill, restart, rename, review, repair, move and the host clipboard.
 
 use super::*;
+use crate::ipc_error::codes;
+use crate::ipc_error::lock;
 
 #[tool_router(router = lifecycle_router, vis = "pub(super)")]
 impl FleetTools {
     #[tool(description = "Kill a session on a host: a tmux session by name, or \
-        a background agent row (name `bg:<uuid>`) via `claude stop` — the \
-        latter is idempotent, so it also clears a stale row whose process \
-        already died. Use when the session's work is disposable or already \
+        a background agent row (name `bg:<uuid>`, kind `bg`) via `claude stop`. \
+        An inactive background agent (claude_status `stopped`) is removed from \
+        the list instead, without `claude stop`. Rows of kind `external` \
+        (interactive Claude sessions running outside fleet) are refused with \
+        E_INVALID_STATE — close them where they run. Use when the session's work is disposable or already \
         pushed and you want it gone NOW; prefer safe_kill_session when the \
         worktree may hold unpushed work. Returns the killed session's id. \
         Address the session with session_id OR host_alias + name. May return \
@@ -192,25 +196,20 @@ impl FleetTools {
     pub(super) async fn spawn_review(
         &self,
         Extension(caller): Extension<Caller>,
-        Parameters(p): Parameters<SpawnReviewParams>,
+        Parameters(args): Parameters<sessions::SpawnReviewArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "spawn_review",
-            &format!("source_session_id={}", p.source_session_id),
+            &format!("source_session_id={}", args.source_session_id),
         );
         // The review session is created on the source session's host.
         self.resolve_target_row(
             &caller,
-            Some(p.source_session_id),
+            Some(args.source_session_id),
             None,
             None,
             "the session to review",
         )?;
-        let args = sessions::SpawnReviewArgs {
-            source_session_id: p.source_session_id,
-            prompt: p.prompt,
-            call_id: None,
-        };
         let row = sessions::spawn_review(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -222,17 +221,12 @@ impl FleetTools {
         xsel, pbpaste in order. E_CLIPBOARD_UNAVAILABLE if none is installed.")]
     pub(super) async fn get_clipboard(
         &self,
-        Parameters(p): Parameters<HostClipboardParams>,
+        Parameters(args): Parameters<crate::service::clipboard::GetClipboardArgs>,
     ) -> Result<CallToolResult, McpError> {
-        audit("get_clipboard", &format!("host={}", p.host_alias));
-        let text = crate::service::clipboard::get_clipboard(
-            crate::service::clipboard::GetClipboardArgs {
-                host_alias: p.host_alias,
-            },
-            &self.ssh,
-        )
-        .await
-        .map_err(to_mcp_err)?;
+        audit("get_clipboard", &format!("host={}", args.host_alias));
+        let text = crate::service::clipboard::get_clipboard(args, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
         // Empty clipboard would yield an empty text block, which the Anthropic
         // API rejects (see EMPTY_RESULT_PLACEHOLDER) — `ok_json` substitutes
         // safely for "" but only after JSON-encoding; say it explicitly.
@@ -326,16 +320,13 @@ impl FleetTools {
             &caller,
         )?;
         let id = {
-            let s = self
-                .store
-                .lock()
-                .map_err(|_| to_mcp_err(IpcError::lock()))?;
+            let s = lock(&self.store).map_err(to_mcp_err)?;
             s.get_session(&name, &host_alias)
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?
                 .map(|r| r.id)
                 .ok_or_else(|| {
                     to_mcp_err(IpcError::new(
-                        "E_NOTFOUND",
+                        codes::E_NOTFOUND,
                         format!("session {name} on {host_alias} not found"),
                     ))
                 })?

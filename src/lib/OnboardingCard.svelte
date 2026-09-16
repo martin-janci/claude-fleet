@@ -1,8 +1,8 @@
 <script lang="ts">
   import { hosts } from './hosts';
   import { projects, refreshProjects } from './projects';
-  import { sessions } from './sessions';
-  import { mcpStatus, mcpConfigure, mcpClientConfig, provisionHosts, type McpStatus } from './mcp';
+  import { sessions, hasNoPane } from './sessions';
+  import { mcpStatus, mcpConfigure, mcpClientConfig, maskToken, provisionHosts, type McpStatus } from './mcp';
   import { copyText } from './clipboard';
   import {
     deriveSteps,
@@ -42,7 +42,7 @@
   });
 
   const visibleHosts = $derived($hosts.filter((h) => !h.hidden));
-  const workSessions = $derived($sessions.filter((s) => s.kind !== 'bg'));
+  const workSessions = $derived($sessions.filter((s) => !hasNoPane(s)));
 
   const steps = $derived(
     deriveSteps({
@@ -98,10 +98,6 @@
     } finally {
       busy = null;
     }
-  }
-
-  function maskToken(t: string): string {
-    return t.length > 4 ? '••••••••••••' + t.slice(-4) : '••••';
   }
 
   function dismiss() {

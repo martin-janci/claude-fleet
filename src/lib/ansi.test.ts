@@ -910,10 +910,32 @@ describe('ansi.Screen — code points and wide glyphs (FE-5)', () => {
     expect(s.selectionText({ row: 0, col: 0 }, { row: 0, col: 5 })).toBe('a😀b');
   });
 
-  it('rowToRuns concatenates a wide head and its placeholder into one run', () => {
+  it('rowToRuns emits a wide glyph as its own 2-cell run and drops the placeholder', () => {
+    const s = new Screen(1, 5);
+    s.write('a中x');
+    const runs = rowToRuns(s.cells[0]);
+    expect(runs.map((r) => [r.text, r.wide ?? false])).toEqual([
+      ['a', false],
+      ['中', true],
+      ['x ', false],
+    ]);
+  });
+
+  it('rowToRuns keeps a styled wide glyph out of its neighbours\' run even when the style matches', () => {
+    const s = new Screen(1, 6);
+    s.write('\x1b[31m😀😀\x1b[0m');
+    const runs = rowToRuns(s.cells[0]);
+    expect(runs.map((r) => r.text)).toEqual(['😀', '😀', '  ']);
+    expect(runs[0].wide).toBe(true);
+    expect(runs[1].wide).toBe(true);
+    expect(runs[0].fg).toBe(1);
+  });
+
+  it('rowToRuns renders an orphan placeholder as a blank so later columns stay put', () => {
     const s = new Screen(1, 4);
-    s.write('中x');
-    expect(rowToRuns(s.cells[0]).map((r) => r.text)).toEqual(['中x ']);
+    s.write('abcd');
+    s.cells[0][0].ch = ''; // corrupt on purpose: nothing can be its head
+    expect(rowToRuns(s.cells[0]).map((r) => r.text)).toEqual([' bcd']);
   });
 
   it('DEL and C1 controls are dropped, not printed', () => {

@@ -31,6 +31,16 @@ export function writePref<T>(key: string, value: T): void {
   }
 }
 
+/** Forget a pref so the next read falls back to its default. */
+export function clearPref(key: string): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.removeItem(PREFIX + key);
+  } catch {
+    /* ignore */
+  }
+}
+
 // ─── Terminal prefs ──────────────────────────────────────────────────────
 
 const isBool = (v: unknown): v is boolean => typeof v === 'boolean';

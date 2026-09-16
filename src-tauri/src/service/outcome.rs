@@ -270,8 +270,8 @@ impl PrProbeCache {
 
 /// The shared cache used by production reconcile.
 pub fn pr_probe_cache() -> Arc<PrProbeCache> {
-    static CACHE: once_cell::sync::Lazy<Arc<PrProbeCache>> =
-        once_cell::sync::Lazy::new(|| Arc::new(PrProbeCache::new(PR_PROBE_TTL)));
+    static CACHE: std::sync::LazyLock<Arc<PrProbeCache>> =
+        std::sync::LazyLock::new(|| Arc::new(PrProbeCache::new(PR_PROBE_TTL)));
     Arc::clone(&CACHE)
 }
 

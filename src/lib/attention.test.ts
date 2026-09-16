@@ -5,6 +5,8 @@ import {
   claudeStatusColor,
   claudeStatusLabel,
   contextLevel,
+  contextColor,
+  contextTint,
   displayName,
   formatElapsed,
   isClaudeStatus,
@@ -97,6 +99,17 @@ describe('contextLevel', () => {
   });
 });
 
+describe('contextColor', () => {
+  it('uses the shared usage theme tokens for warn and crit', () => {
+    expect(contextColor('crit')).toBe('var(--usage-crit)');
+    expect(contextColor('warn')).toBe('var(--usage-warn)');
+    expect(contextColor('ok')).toBe('#50c86e');
+    expect(contextColor(null)).toBe('transparent');
+    expect(contextTint('crit')).toBe('color-mix(in srgb, var(--usage-crit) 33%, transparent)');
+    expect(contextTint(null)).toBe('transparent');
+  });
+});
+
 describe('attentionReason', () => {
   const opts = { idleSecs: 1800, now: 10_000 };
 
@@ -132,6 +145,13 @@ describe('attentionReason', () => {
     // No idle stamp ⇒ not idle.
     expect(attentionReason(row({ claude_status: 'idle' }), opts)).toBeNull();
   });
+
+  it('never flags an external row, however alarming its fields', () => {
+    expect(attentionReason(row({ kind: 'external', stuck_kind: 'oom' }), opts)).toBeNull();
+    expect(attentionReason(row({ kind: 'external', claude_status: 'blocked' }), opts)).toBeNull();
+    expect(attentionReason(row({ kind: 'external', claude_status: 'failed' }), opts)).toBeNull();
+    expect(attentionReason(row({ kind: 'external', status: 'ghost' }), opts)).toBeNull();
+  });
 });
 
 describe('severity', () => {
@@ -146,6 +166,13 @@ describe('severity', () => {
       row(),
     ].map(severity);
     for (let i = 1; i < order.length; i++) expect(order[i - 1]).toBeGreaterThan(order[i]);
+  });
+
+  it('external rows sit in the lowest bucket regardless of status', () => {
+    const rest = severity(row());
+    expect(severity(row({ kind: 'external', claude_status: 'blocked' }))).toBe(rest);
+    expect(severity(row({ kind: 'external', stuck_kind: 'oom' }))).toBe(rest);
+    expect(severity(row({ kind: 'external', claude_status: 'failed' }))).toBe(rest);
   });
 
   it('worstSeverityByProject takes the max per project and skips orphans', () => {
@@ -175,6 +202,12 @@ describe('stuck transitions', () => {
     ];
     const fresh = newlyStuck(prev, next);
     expect(fresh.map((r) => r.stuck_kind)).toEqual(['auth_menu', 'reconnect']);
+  });
+
+  it('ignores external rows in the stuck map and in new-stuck detection', () => {
+    const ext = row({ kind: 'external', stuck_kind: 'oom' });
+    expect(stuckSnapshot([ext]).size).toBe(0);
+    expect(newlyStuck(new Map(), [ext])).toEqual([]);
   });
 
   it('stuckMessage uses the friendly name when asked and available', () => {

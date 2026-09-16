@@ -1340,24 +1340,43 @@ export interface Run {
   fg: number;
   bg: number;
   attrs: number;
+  /** A single wide (2-column) glyph. The renderer gives it exactly two
+   *  cells of width so the DOM column grid matches the buffer — a fallback
+   *  font's natural emoji/CJK advance is not a multiple of the cell. */
+  wide?: true;
 }
 
 /** Group a row's cells into adjacent runs sharing fg/bg/attrs. Trailing
  *  default-styled blanks are kept so the column grid stays aligned in the
- *  rendered output (we depend on monospace + non-breaking spaces). */
+ *  rendered output (we depend on monospace + non-breaking spaces).
+ *
+ *  A wide glyph (head cell followed by its `''` trailing placeholder) is
+ *  emitted as its own `wide` run and the placeholder is skipped, so the
+ *  renderer can pin it to two cells. A placeholder with no head — never
+ *  produced by `Screen`, but cheap to tolerate — renders as a blank so the
+ *  columns after it don't shift. */
 export function rowToRuns(row: Cell[]): Run[] {
   const runs: Run[] = [];
   let cur: Run | null = null;
-  for (const cell of row) {
+  for (let i = 0; i < row.length; i++) {
+    const cell = row[i];
+    const isHead = cell.ch !== '' && i + 1 < row.length && row[i + 1].ch === '';
+    if (isHead) {
+      runs.push({ text: cell.ch, fg: cell.fg, bg: cell.bg, attrs: cell.attrs, wide: true });
+      cur = null;
+      i++; // skip the trailing placeholder
+      continue;
+    }
+    const ch = cell.ch === '' ? ' ' : cell.ch;
     if (
       cur !== null &&
       cur.fg === cell.fg &&
       cur.bg === cell.bg &&
       cur.attrs === cell.attrs
     ) {
-      cur.text += cell.ch;
+      cur.text += ch;
     } else {
-      cur = { text: cell.ch, fg: cell.fg, bg: cell.bg, attrs: cell.attrs };
+      cur = { text: ch, fg: cell.fg, bg: cell.bg, attrs: cell.attrs };
       runs.push(cur);
     }
   }
