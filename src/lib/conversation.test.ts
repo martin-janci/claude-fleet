@@ -13,6 +13,8 @@ import {
   toolName,
   toolGroupLabel,
   isLongPrompt,
+  transcriptCarries,
+  composerStatus,
   PROMPT_CLAMP_LINES,
   PIN_THRESHOLD_PX,
   type Conversation,
@@ -147,5 +149,29 @@ describe('isLongPrompt', () => {
     expect(isLongPrompt('short')).toBe(false);
     expect(isLongPrompt(Array.from({ length: PROMPT_CLAMP_LINES + 1 }, () => 'l').join('\n'))).toBe(true);
     expect(isLongPrompt('x'.repeat(601))).toBe(true);
+  });
+});
+
+describe('transcriptCarries', () => {
+  it('is false until the transcript has more turns with the text than at send time', () => {
+    const pending = { prompt: 'continue', at: '2026-09-13T10:00:00.000Z', seen: 1 };
+    const c = conv({ turns: [{ prompt: 'continue', at: null, items: [] }] });
+    expect(transcriptCarries(c, pending)).toBe(false);
+    c.turns.push({ prompt: 'continue', at: null, items: [] });
+    expect(transcriptCarries(c, pending)).toBe(true);
+  });
+
+  it('ignores turns with a different prompt', () => {
+    const pending = { prompt: 'run tests', at: '2026-09-13T10:00:00.000Z', seen: 0 };
+    expect(transcriptCarries(conv({ turns: [{ prompt: 'fix the bug', at: null, items: [] }] }), pending)).toBe(false);
+  });
+});
+
+describe('composerStatus', () => {
+  it('names a stuck session first, then a working one, else nothing', () => {
+    expect(composerStatus({ claude_status: 'working', stuck_kind: 'auth_menu' })).toMatch(/stuck \(auth_menu\)/);
+    expect(composerStatus({ claude_status: 'working', stuck_kind: null })).toMatch(/working/);
+    expect(composerStatus({ claude_status: 'idle', stuck_kind: null })).toBeNull();
+    expect(composerStatus({ claude_status: null, stuck_kind: null })).toBeNull();
   });
 });

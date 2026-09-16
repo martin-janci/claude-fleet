@@ -2,8 +2,14 @@
   // Conversation tab: transcript view backed by `session_conversation`
   // (spec §6). Reuses the Files-overlay mechanism at the call site, so a
   // tmux session's PTY stays mounted underneath while this is shown.
+  //
+  // A tmux-backed session also gets a composer at the bottom: the prompt
+  // goes through the same `send_prompt` as the Send-prompt dialog (tmux
+  // send-keys into the REPL), so anything typed here is what the terminal
+  // would have received. bg / external rows have no REPL to type into, so
+  // they stay read-only.
   import { untrack, tick } from 'svelte';
-  import type { SessionRow } from './sessions';
+  import { sendPrompt, hasNoPane, type SessionRow } from './sessions';
   import {
     sessionConversation,
     sameConversation,
@@ -13,8 +19,11 @@
     groupItems,
     toolGroupLabel,
     isLongPrompt,
+    composerStatus,
+    transcriptCarries,
     CONVERSATION_POLL_MS,
     type Conversation,
+    type PendingPrompt,
   } from './conversation';
   import Markdown from './MarkdownView.svelte';
 
@@ -30,6 +39,13 @@
   let expanded = $state<Set<number>>(new Set());
   // False once the user scrolls away from the bottom; drives "↓ Latest".
   let atBottom = $state(true);
+  // Composer state. `pending` is the prompt just sent, rendered as its own
+  // turn until a poll brings back a transcript that carries it.
+  let draft = $state('');
+  let sending = $state(false);
+  let sendError = $state<string | null>(null);
+  let pending = $state<PendingPrompt | null>(null);
+  let box: HTMLTextAreaElement | undefined = $state();
   let seq = 0;
   // Fetches still pending, per session id. A poll tick never starts a read
   // while one is in flight for the same session (a remote read can take up
@@ -64,6 +80,7 @@
       errorMsg = null;
       if (!sameConversation(conv, r.value)) {
         conv = r.value;
+        if (pending && transcriptCarries(conv, pending)) pending = null;
         if (pinned) {
           await tick();
           scrollToBottom();
@@ -85,6 +102,9 @@
       errorMsg = null;
       expanded = new Set();
       atBottom = true;
+      draft = '';
+      sendError = null;
+      pending = null;
       void load();
     });
   });
@@ -118,6 +138,41 @@
   });
 
   const empty = $derived(emptyStateText(errorCode, !!session.claude_session_id));
+  const canPrompt = $derived(!hasNoPane(session));
+  const canSend = $derived(draft.trim().length > 0 && !sending);
+  const statusNote = $derived(composerStatus(session));
+
+  async function send() {
+    const text = draft.trim();
+    if (!text || sending) return;
+    sending = true;
+    sendError = null;
+    const r = await sendPrompt(session.host_alias, session.tmux_name, text);
+    sending = false;
+    if (!r.ok) {
+      sendError = r.error.message;
+      return;
+    }
+    draft = '';
+    pending = {
+      prompt: text,
+      at: new Date().toISOString(),
+      // how many turns already carried this exact text, so a repeat of an
+      // earlier prompt is not mistaken for the transcript catching up
+      seen: conv?.turns.filter((t) => t.prompt === text).length ?? 0,
+    };
+    await tick();
+    scrollToBottom();
+    box?.focus();
+    // Refetch now rather than up to a poll interval later.
+    void load();
+  }
+
+  function onComposerKey(e: KeyboardEvent) {
+    if (e.key !== 'Enter' || e.shiftKey || e.altKey || e.isComposing) return;
+    e.preventDefault();
+    void send();
+  }
 
   function scrollToBottom() {
     if (!scroller) return;
@@ -138,14 +193,15 @@
 </script>
 
 <div class="conversation-panel" data-testid="conversation-panel">
-  {#if empty}
+  <div class="thread-area">
+  {#if empty && !pending}
     <p class="muted" data-testid="conv-empty">{empty}</p>
   {:else if loading}
     <p class="muted">Loading…</p>
   {:else}
     <div class="scroller" data-testid="conv-scroller" bind:this={scroller} onscroll={onScroll}>
       <div class="thread">
-        {#if errorMsg}
+        {#if errorMsg && !empty}
           <div class="error-row">
             <span class="err" data-testid="conv-error">{errorMsg}</span>
             <button type="button" data-testid="conv-retry" onclick={() => void load()}>Retry</button>
@@ -195,11 +251,55 @@
             </section>
           {/each}
         {/if}
+        {#if pending}
+          <section class="turn pending" data-testid="conv-pending">
+            <div class="prompt">
+              <div class="prompt-head">
+                <span class="who">You</span>
+                <time datetime={pending.at}>{relativeTime(pending.at, nowMs)}</time>
+              </div>
+              <div class="prompt-text">{pending.prompt}</div>
+            </div>
+            <div class="reply waiting">Sent. Waiting for the transcript…</div>
+          </section>
+        {/if}
       </div>
     </div>
     {#if !atBottom}
       <button type="button" class="latest" data-testid="conv-latest" onclick={scrollToBottom}>↓ Latest</button>
     {/if}
+  {/if}
+  </div>
+  {#if canPrompt}
+    <form
+      class="composer"
+      data-testid="conv-composer"
+      onsubmit={(e) => {
+        e.preventDefault();
+        void send();
+      }}
+    >
+      {#if sendError}
+        <div class="composer-error" data-testid="conv-composer-error">{sendError}</div>
+      {/if}
+      <div class="composer-row">
+        <textarea
+          data-testid="conv-composer-input"
+          bind:this={box}
+          bind:value={draft}
+          onkeydown={onComposerKey}
+          rows="2"
+          placeholder="Send a prompt to this session (Enter to send, Shift+Enter for a new line)"
+          disabled={sending}
+        ></textarea>
+        <button type="submit" data-testid="conv-composer-send" disabled={!canSend}>{sending ? 'Sending…' : 'Send'}</button>
+      </div>
+      {#if statusNote}
+        <div class="composer-status" data-testid="conv-composer-status">{statusNote}</div>
+      {/if}
+    </form>
+  {:else}
+    <p class="muted readonly" data-testid="conv-readonly">Read-only: this agent runs outside tmux, so there is no terminal to prompt.</p>
   {/if}
 </div>
 
@@ -212,10 +312,87 @@
     min-height: 0;
     background: var(--bg);
   }
+  .thread-area {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
   .scroller {
     flex: 1 1 auto;
     min-height: 0;
     overflow: auto;
+  }
+  .readonly {
+    flex: 0 0 auto;
+    border-top: 1px solid var(--border);
+    margin: 0;
+    padding: 0.5rem 1.1rem;
+  }
+  .composer {
+    flex: 0 0 auto;
+    border-top: 1px solid var(--border);
+    background: var(--bg-pane);
+    padding: 0.55rem 1.1rem 0.6rem;
+  }
+  .composer-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 0.5rem;
+    max-width: 80ch;
+    margin: 0 auto;
+  }
+  .composer textarea {
+    flex: 1 1 auto;
+    min-height: 2.6rem;
+    max-height: 12rem;
+    resize: vertical;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+    font: inherit;
+    font-size: 0.85rem;
+    line-height: 1.45;
+  }
+  .composer textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .composer button {
+    flex: 0 0 auto;
+    padding: 0.45rem 0.9rem;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    background: var(--accent);
+    color: var(--bg);
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .composer button:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+  .composer-error,
+  .composer-status {
+    max-width: 80ch;
+    margin: 0 auto 0.35rem;
+    font-size: 0.75rem;
+  }
+  .composer-error {
+    color: #e64a4a;
+  }
+  .composer-status {
+    margin: 0.35rem auto 0;
+    color: var(--fg-muted);
+  }
+  .waiting {
+    color: var(--fg-muted);
+    font-style: italic;
+    font-size: 0.8rem;
   }
   .thread {
     max-width: 80ch;

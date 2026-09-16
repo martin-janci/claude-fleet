@@ -89,3 +89,28 @@ const PROMPT_CLAMP_CHARS = 600;
 export function isLongPrompt(prompt: string): boolean {
   return prompt.length > PROMPT_CLAMP_CHARS || prompt.split('\n').length > PROMPT_CLAMP_LINES;
 }
+
+/** A prompt sent from the composer, shown as its own turn until the
+ *  transcript carries it. `seen` is how many turns already had this exact
+ *  text when it was sent, so re-sending an earlier prompt ("continue") is
+ *  not mistaken for the transcript having caught up. */
+export interface PendingPrompt {
+  prompt: string;
+  at: string;
+  seen: number;
+}
+
+/** True once a fetched conversation has more turns with the pending text
+ *  than there were when it was sent. */
+export function transcriptCarries(conv: Conversation, pending: PendingPrompt): boolean {
+  return conv.turns.filter((t) => t.prompt === pending.prompt).length > pending.seen;
+}
+
+/** The note under the composer's Send button, or null when the session is
+ *  ready to take a prompt. A stuck session may never read what is typed; a
+ *  working one queues it until the turn ends. */
+export function composerStatus(s: { claude_status: string | null; stuck_kind: string | null }): string | null {
+  if (s.stuck_kind) return `Session is stuck (${s.stuck_kind}). The prompt may not be read until that is cleared.`;
+  if (s.claude_status === 'working') return 'Claude is working. The prompt is queued until the current turn ends.';
+  return null;
+}
