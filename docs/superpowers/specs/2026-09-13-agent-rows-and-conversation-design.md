@@ -256,6 +256,16 @@ Frontend:
   Enter sends, Shift+Enter breaks a line). The sent prompt shows as a pending
   turn until a poll brings back a transcript carrying it. bg / external rows
   stay read-only, with a note saying why.
+- Live indicator (later still): under the last turn the tab shows a pulsing
+  "Working…" row with the REPL's spinner text, "Sent, waiting for Claude…"
+  after a composer send, or an amber "Claude is waiting for you in the
+  terminal" banner with an Open terminal button when the pane shows a
+  dialog. Source: the row's `claude_status` (row events) laid under an
+  on-demand `session_activity` probe (one `capture-pane` of the tail run
+  through `pane_intel::analyze`, polled every 2 s only while something is
+  live). A quiet session (idle / completed / stopped / failed) re-reads the
+  transcript only every 15 s or when its `turn_seq` moves, instead of the
+  5 s cadence.
 - The tmux-session cwd fallback in `find_for_session` can, in principle,
   bind a tmux row to an interactive session running elsewhere in the same
   directory; unchanged here.
