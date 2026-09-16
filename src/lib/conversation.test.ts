@@ -23,6 +23,7 @@ import {
   turnDuration,
   countItems,
   newItemCount,
+  promptHistory,
   spinnerLabel,
   indicatorFor,
   QUIET_POLL_MS,
@@ -303,5 +304,22 @@ describe('countItems / newItemCount', () => {
     expect(newItemCount(a, b)).toBe(2);
     expect(newItemCount(b, a)).toBe(0);
     expect(newItemCount(null, a)).toBe(base);
+  });
+});
+
+describe('promptHistory', () => {
+  it('lists prompts oldest first, skips slash commands and adjacent repeats, appends the pending one', () => {
+    const c = conv({
+      turns: [
+        { prompt: 'first', at: null, ended_at: null, items: [] },
+        { prompt: '/clear', at: null, ended_at: null, items: [] },
+        { prompt: 'again', at: null, ended_at: null, items: [] },
+        { prompt: 'again', at: null, ended_at: null, items: [] },
+        { prompt: null, at: null, ended_at: null, items: [{ kind: 'text', text: 'x' }] },
+      ],
+    });
+    expect(promptHistory(c, null)).toEqual(['first', 'again']);
+    expect(promptHistory(c, { prompt: 'newest', at: '', seen: 0 })).toEqual(['first', 'again', 'newest']);
+    expect(promptHistory(null, null)).toEqual([]);
   });
 });

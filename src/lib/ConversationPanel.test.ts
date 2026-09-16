@@ -1244,3 +1244,58 @@ describe('ConversationPanel second review-round fixes', () => {
     expect(screen.getByTestId('conv-indicator')).toBeTruthy();
   });
 });
+
+describe('ConversationPanel prompt recall', () => {
+  async function mountWithHistory() {
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            { prompt: 'first', at: null, ended_at: null, items: [] },
+            { prompt: 'second', at: null, ended_at: null, items: [] },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    return screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+  }
+
+  it('ArrowUp in an empty box walks earlier prompts newest first; ArrowDown walks back and restores the box', async () => {
+    const box = await mountWithHistory();
+    await fireEvent.keyDown(box, { key: 'ArrowUp' });
+    expect(box.value).toBe('second');
+    await fireEvent.keyDown(box, { key: 'ArrowUp' });
+    expect(box.value).toBe('first');
+    await fireEvent.keyDown(box, { key: 'ArrowUp' });
+    expect(box.value).toBe('first');
+    await fireEvent.keyDown(box, { key: 'ArrowDown' });
+    expect(box.value).toBe('second');
+    await fireEvent.keyDown(box, { key: 'ArrowDown' });
+    expect(box.value).toBe('');
+  });
+
+  it('a typed draft is never replaced, and editing a recalled prompt ends the walk', async () => {
+    const box = await mountWithHistory();
+    await fireEvent.input(box, { target: { value: 'typing' } });
+    await fireEvent.keyDown(box, { key: 'ArrowUp' });
+    expect(box.value).toBe('typing');
+    await fireEvent.input(box, { target: { value: '' } });
+    await fireEvent.keyDown(box, { key: 'ArrowUp' });
+    expect(box.value).toBe('second');
+    await fireEvent.input(box, { target: { value: 'second edited' } });
+    await fireEvent.keyDown(box, { key: 'ArrowUp' });
+    expect(box.value).toBe('second edited');
+  });
+
+  it('Enter sends the recalled prompt', async () => {
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    const box = await mountWithHistory();
+    await fireEvent.keyDown(box, { key: 'ArrowUp' });
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'second');
+    expect(box.value).toBe('');
+  });
+});
