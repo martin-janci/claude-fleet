@@ -18,6 +18,11 @@ import {
   matchSlashCommands,
   completeSlashCommand,
   SLASH_COMMANDS,
+  isQuietStatus,
+  shouldFetchTranscript,
+  spinnerLabel,
+  indicatorFor,
+  QUIET_POLL_MS,
   PROMPT_CLAMP_LINES,
   PIN_THRESHOLD_PX,
   type Conversation,
@@ -212,5 +217,53 @@ describe('completeSlashCommand', () => {
   it('yields the command, with a trailing space only when it takes arguments', () => {
     expect(completeSlashCommand({ name: 'clear', description: '' })).toBe('/clear');
     expect(completeSlashCommand({ name: 'model', description: '', args: true })).toBe('/model ');
+  });
+});
+
+describe('isQuietStatus / shouldFetchTranscript', () => {
+  it('idle-like statuses are quiet; null and working are not', () => {
+    expect(isQuietStatus('idle')).toBe(true);
+    expect(isQuietStatus('completed')).toBe(true);
+    expect(isQuietStatus('stopped')).toBe(true);
+    expect(isQuietStatus('failed')).toBe(true);
+    expect(isQuietStatus('working')).toBe(false);
+    expect(isQuietStatus('blocked')).toBe(false);
+    expect(isQuietStatus(null)).toBe(false);
+  });
+
+  it('a quiet session is re-read only on a turn change or after the quiet cadence', () => {
+    expect(shouldFetchTranscript({ quiet: false, sinceLastFetchMs: 0, turnSeqChanged: false })).toBe(true);
+    expect(shouldFetchTranscript({ quiet: true, sinceLastFetchMs: 5_000, turnSeqChanged: false })).toBe(false);
+    expect(shouldFetchTranscript({ quiet: true, sinceLastFetchMs: 5_000, turnSeqChanged: true })).toBe(true);
+    expect(shouldFetchTranscript({ quiet: true, sinceLastFetchMs: QUIET_POLL_MS, turnSeqChanged: false })).toBe(true);
+  });
+});
+
+describe('spinnerLabel', () => {
+  it('drops the interrupt hint and the parentheses, keeps the rest', () => {
+    expect(spinnerLabel('Cooking… (3s · esc to interrupt)')).toBe('Cooking… 3s');
+    expect(spinnerLabel('Channelling… (running Stop hooks… 3/4 · 15s · ↓ 306 tokens)')).toBe(
+      'Channelling… running Stop hooks… 3/4 · 15s · ↓ 306 tokens',
+    );
+    expect(spinnerLabel('Thinking…')).toBe('Thinking…');
+  });
+});
+
+describe('indicatorFor', () => {
+  const base = { status: null, stuckKind: null, waitingFor: null, activity: null, spinner: null, pending: false, optimistic: false } as const;
+  it('working shows the spinner label, else a generic Working', () => {
+    expect(indicatorFor({ ...base, status: 'working', spinner: 'Cooking… (3s · esc to interrupt)' })).toEqual({ kind: 'working', label: 'Cooking… 3s' });
+    expect(indicatorFor({ ...base, status: 'working' })).toEqual({ kind: 'working', label: 'Working…' });
+  });
+  it('blocked carries the pane detail and what it waits for', () => {
+    expect(indicatorFor({ ...base, status: 'blocked', activity: 'Do you want to proceed?', waitingFor: 'permission' })).toEqual({
+      kind: 'blocked', detail: 'Do you want to proceed?', waiting: 'permission',
+    });
+  });
+  it('a stuck session shows nothing; pending shows sent; optimistic shows working; idle shows nothing', () => {
+    expect(indicatorFor({ ...base, status: 'blocked', stuckKind: 'auth_menu' })).toBeNull();
+    expect(indicatorFor({ ...base, status: 'idle', pending: true })).toEqual({ kind: 'sent' });
+    expect(indicatorFor({ ...base, status: 'idle', optimistic: true })).toEqual({ kind: 'working', label: 'Working…' });
+    expect(indicatorFor({ ...base, status: 'idle' })).toBeNull();
   });
 });

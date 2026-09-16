@@ -1,5 +1,6 @@
 import { timeAgo } from './session_status';
 import { invokeCmd, type Result } from './result';
+import type { ClaudeStatus, StuckKind } from './sessions';
 
 export type ConvItem = { kind: 'text'; text: string } | { kind: 'tool'; summary: string };
 
@@ -168,4 +169,77 @@ export function matchSlashCommands(draft: string): SlashCommand[] {
 /** The draft text that accepting a menu item yields. */
 export function completeSlashCommand(c: SlashCommand): string {
   return c.args ? `/${c.name} ` : `/${c.name}`;
+}
+
+// ─── Live indicator ──────────────────────────────────────────────────────────
+
+/** `session_activity`: what the pane shows right now, same vocabularies as
+ *  the session row so it can be laid over it. */
+export interface ActivityProbe {
+  claude_status: ClaudeStatus | null;
+  current_activity: string | null;
+  stuck_kind: StuckKind | null;
+  waiting_for: 'permission' | 'input' | null;
+  spinner: string | null;
+}
+
+export function sessionActivity(sessionId: number): Promise<Result<ActivityProbe>> {
+  return invokeCmd<ActivityProbe>('session_activity', { args: { session_id: sessionId } });
+}
+
+/** Probe cadence while the indicator is live (working / sent / blocked). */
+export const ACTIVITY_POLL_MS = 2_000;
+/** Transcript re-read cadence for a quiet session (nothing is changing). */
+export const QUIET_POLL_MS = 15_000;
+
+/** Statuses under which the transcript cannot be growing. `null` (not yet
+ *  classified) is NOT quiet: an unknown session keeps the 5 s cadence. */
+export function isQuietStatus(s: ClaudeStatus | null): boolean {
+  return s === 'idle' || s === 'completed' || s === 'stopped' || s === 'failed';
+}
+
+/** Whether a poll tick should re-read the transcript. A quiet session is
+ *  read only when its turn counter moved or the quiet cadence elapsed. */
+export function shouldFetchTranscript(a: { quiet: boolean; sinceLastFetchMs: number; turnSeqChanged: boolean }): boolean {
+  return !a.quiet || a.turnSeqChanged || a.sinceLastFetchMs >= QUIET_POLL_MS;
+}
+
+/** `Cooking… (3s · ↓ 306 tokens · esc to interrupt)` → `Cooking… 3s · ↓ 306 tokens`. */
+export function spinnerLabel(spinner: string): string {
+  const parts = spinner
+    .replace(/[()]/g, ' ')
+    .split('·')
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0 && !/esc to interrupt/i.test(p));
+  return parts.join(' · ').replace(/\s+/g, ' ').trim();
+}
+
+export type Indicator =
+  | { kind: 'working'; label: string }
+  | { kind: 'sent' }
+  | { kind: 'blocked'; detail: string | null; waiting: 'permission' | 'input' | null }
+  | null;
+
+/**
+ * What to show under the last turn. A stuck session yields nothing here
+ * (the composer's status note and the Press Enter chip cover it). `pending`
+ * is a prompt sent from the composer the transcript has not carried yet;
+ * `optimistic` is the window after our own send in which no probe has yet
+ * reported the session idle and its turn counter has not moved.
+ */
+export function indicatorFor(a: {
+  status: ClaudeStatus | null;
+  stuckKind: StuckKind | null;
+  waitingFor: 'permission' | 'input' | null;
+  activity: string | null;
+  spinner: string | null;
+  pending: boolean;
+  optimistic: boolean;
+}): Indicator {
+  if (a.stuckKind) return null;
+  if (a.status === 'blocked') return { kind: 'blocked', detail: a.activity, waiting: a.waitingFor };
+  if (a.status === 'working') return { kind: 'working', label: a.spinner ? spinnerLabel(a.spinner) : 'Working…' };
+  if (a.pending) return { kind: 'sent' };
+  if (a.optimistic) return { kind: 'working', label: 'Working…' };
+  return null;
 }

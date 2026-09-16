@@ -25,14 +25,24 @@
     transcriptCarries,
     matchSlashCommands,
     completeSlashCommand,
+    sessionActivity,
+    indicatorFor,
+    isQuietStatus,
+    shouldFetchTranscript,
     CONVERSATION_POLL_MS,
+    ACTIVITY_POLL_MS,
     type Conversation,
     type PendingPrompt,
     type SlashCommand,
+    type ActivityProbe,
   } from './conversation';
   import Markdown from './MarkdownView.svelte';
 
-  let { session, visible }: { session: SessionRow; visible: boolean } = $props();
+  let {
+    session,
+    visible,
+    onOpenTerminal,
+  }: { session: SessionRow; visible: boolean; onOpenTerminal?: () => void } = $props();
 
   let conv = $state<Conversation | null>(null);
   let errorCode = $state<string | null>(null);
@@ -55,6 +65,16 @@
   // the menu for (Escape) so it stays hidden until the text changes.
   let slashIndex = $state(0);
   let slashDismissedFor = $state<string | null>(null);
+  // Live indicator. `probe` is the latest on-demand pane read, laid over the
+  // row's (tick-fresh) status while it is newer than the row; it is dropped
+  // as soon as a row event carries a newer state. `sentTurnSeq` marks our
+  // own send: until the row's turn counter moves past it, or a probe reports
+  // the session idle, the session is treated as working.
+  let probe = $state<ActivityProbe | null>(null);
+  let sentTurnSeq = $state<number | null>(null);
+  let idleSeenSinceSend = $state(false);
+  let lastFetchAt = 0;
+  let lastFetchTurnSeq = $state<number | null>(null);
   let seq = 0;
   // Fetches still pending, per session id. A poll tick never starts a read
   // while one is in flight for the same session (a remote read can take up
@@ -70,6 +90,8 @@
     if (opts.poll && (inFlight.get(id) ?? 0) > 0) return;
     const mine = ++seq;
     loading = conv === null;
+    lastFetchAt = Date.now();
+    lastFetchTurnSeq = session.turn_seq;
     const pinned = scroller ? isPinned(scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight) : true;
     inFlight.set(id, (inFlight.get(id) ?? 0) + 1);
     let r: Awaited<ReturnType<typeof sessionConversation>>;
@@ -114,6 +136,9 @@
       draft = '';
       sendError = null;
       pending = null;
+      probe = null;
+      sentTurnSeq = null;
+      idleSeenSinceSend = false;
       void load();
     });
   });
@@ -132,8 +157,73 @@
       void untrack(() => load({ poll: true }));
     }
     const t = setInterval(() => {
-      if (document.visibilityState === 'visible') void untrack(() => load({ poll: true }));
+      if (document.visibilityState !== 'visible') return;
+      untrack(() => {
+        const quiet = isQuietStatus(liveStatus) && !pending && !optimistic;
+        if (
+          shouldFetchTranscript({
+            quiet,
+            sinceLastFetchMs: Date.now() - lastFetchAt,
+            turnSeqChanged: session.turn_seq !== lastFetchTurnSeq,
+          })
+        ) {
+          void load({ poll: true });
+        }
+      });
     }, CONVERSATION_POLL_MS);
+    return () => clearInterval(t);
+  });
+
+  // A Stop hook bumps the row's turn counter (row event): the transcript has
+  // a finished turn to show, so read it now rather than on the next tick.
+  $effect(() => {
+    const turn = session.turn_seq;
+    untrack(() => {
+      if (lastFetchTurnSeq !== null && turn !== lastFetchTurnSeq && session.claude_session_id) void load();
+    });
+  });
+
+  // A row event with a changed status is newer than any probe.
+  $effect(() => {
+    void session.claude_status;
+    void session.stuck_kind;
+    untrack(() => (probe = null));
+  });
+
+  const liveStatus = $derived(probe?.claude_status ?? session.claude_status);
+  const liveStuck = $derived(probe?.stuck_kind ?? session.stuck_kind);
+  const liveActivity = $derived(probe?.current_activity ?? session.current_activity);
+  const optimistic = $derived(sentTurnSeq !== null && session.turn_seq === sentTurnSeq && !idleSeenSinceSend);
+  const indicator = $derived(
+    indicatorFor({
+      status: liveStatus,
+      stuckKind: liveStuck,
+      waitingFor: probe?.waiting_for ?? null,
+      activity: liveActivity,
+      spinner: probe?.spinner ?? null,
+      pending: pending !== null,
+      optimistic,
+    }),
+  );
+
+  async function probeNow() {
+    const id = session.id;
+    const r = await sessionActivity(id);
+    if (session.id !== id) return;
+    if (!r.ok) return;
+    probe = r.value;
+    if (sentTurnSeq !== null && isQuietStatus(r.value.claude_status)) idleSeenSinceSend = true;
+  }
+
+  // Probe the pane every couple of seconds while something is live. Depends
+  // on `visible` and whether the indicator is showing, not on the probe
+  // itself, so a fresh probe never restarts the interval.
+  $effect(() => {
+    const live = visible && indicator !== null;
+    if (!live) return;
+    const t = setInterval(() => {
+      if (document.visibilityState === 'visible') void untrack(probeNow);
+    }, ACTIVITY_POLL_MS);
     return () => clearInterval(t);
   });
 
@@ -149,7 +239,7 @@
   const empty = $derived(emptyStateText(errorCode, !!session.claude_session_id));
   const canPrompt = $derived(!hasNoPane(session));
   const canSend = $derived(draft.trim().length > 0 && !sending);
-  const statusNote = $derived(composerStatus(session));
+  const statusNote = $derived(composerStatus({ claude_status: liveStatus, stuck_kind: liveStuck }));
   const slashMatches = $derived(slashDismissedFor === draft ? [] : matchSlashCommands(draft));
   const slashOpen = $derived(slashMatches.length > 0);
   // Keep the highlight inside the list as the prefix narrows it.
@@ -195,6 +285,8 @@
     }
     if (text === '') return;
     draft = '';
+    sentTurnSeq = session.turn_seq;
+    idleSeenSinceSend = false;
     pending = {
       prompt: text,
       at: new Date().toISOString(),
@@ -331,8 +423,23 @@
               </div>
               <div class="prompt-text">{pending.prompt}</div>
             </div>
-            <div class="reply waiting">Sent. Waiting for the transcript…</div>
           </section>
+        {/if}
+        {#if indicator?.kind === 'blocked'}
+          <div class="blocked" data-testid="conv-blocked" role="status">
+            <div class="blocked-text">
+              <strong>Claude is waiting for you in the terminal{indicator.waiting === 'permission' ? ' (permission)' : indicator.waiting === 'input' ? ' (input)' : ''}.</strong>
+              {#if indicator.detail}<div class="blocked-detail">{indicator.detail}</div>{/if}
+            </div>
+            {#if onOpenTerminal}
+              <button type="button" class="blocked-btn" data-testid="conv-open-terminal" onclick={onOpenTerminal}>Open terminal</button>
+            {/if}
+          </div>
+        {:else if indicator}
+          <div class="indicator" data-testid="conv-indicator" data-kind={indicator.kind} role="status">
+            <span class="pulse" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="indicator-label">{indicator.kind === 'sent' ? 'Sent, waiting for Claude…' : indicator.label}</span>
+          </div>
         {/if}
       </div>
     </div>
@@ -370,7 +477,7 @@
         <div class="composer-error" data-testid="conv-composer-error">{sendError}</div>
       {/if}
       <div class="chips" data-testid="conv-chips">
-        {#if session.stuck_kind === 'press_enter'}
+        {#if liveStuck === 'press_enter'}
           <button
             type="button"
             class="chip stuck"
@@ -569,10 +676,88 @@
     margin: 0.35rem auto 0;
     color: var(--fg-muted);
   }
-  .waiting {
+  .indicator {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0 0.6rem;
     color: var(--fg-muted);
-    font-style: italic;
     font-size: 0.8rem;
+  }
+  .indicator[data-kind='sent'] {
+    font-style: italic;
+  }
+  .pulse {
+    display: inline-flex;
+    gap: 3px;
+  }
+  .pulse i {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: conv-pulse 1.2s ease-in-out infinite;
+  }
+  .pulse i:nth-child(2) {
+    animation-delay: 0.2s;
+  }
+  .pulse i:nth-child(3) {
+    animation-delay: 0.4s;
+  }
+  @keyframes conv-pulse {
+    0%,
+    80%,
+    100% {
+      opacity: 0.25;
+      transform: scale(0.8);
+    }
+    40% {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .pulse i {
+      animation: none;
+      opacity: 0.7;
+    }
+  }
+  .blocked {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin: 0.35rem 0 0.6rem;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid #e6a23c;
+    border-left-width: 3px;
+    border-radius: 6px;
+    background: color-mix(in srgb, #e6a23c 10%, var(--bg-pane));
+    font-size: 0.8rem;
+  }
+  .blocked-text {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .blocked-detail {
+    margin-top: 0.2rem;
+    color: var(--fg-muted);
+    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-size: 0.74rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .blocked-btn {
+    flex: 0 0 auto;
+    padding: 0.3rem 0.7rem;
+    border: 1px solid #e6a23c;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--fg);
+    font-size: 0.78rem;
+    cursor: pointer;
+  }
+  .blocked-btn:hover {
+    background: color-mix(in srgb, #e6a23c 20%, var(--bg-pane));
   }
   .thread {
     max-width: 80ch;

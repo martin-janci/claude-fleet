@@ -315,6 +315,25 @@ pub async fn session_conversation(
     transcript::fetch_conversation(targs, &ssh).await
 }
 
+// ── Activity probe (live indicator) ─────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct SessionActivityArgs {
+    pub session_id: i64,
+}
+
+/// What the session's pane shows right now (status, spinner, stuck / dialog
+/// state), read on demand for the Conversation tab's live indicator. Errors:
+/// `E_NOTFOUND`, `E_INVALID_STATE` (runs outside tmux), transport codes.
+#[tauri::command]
+pub async fn session_activity(
+    args: SessionActivityArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<sessions::ActivityProbe, IpcError> {
+    sessions::session_activity(&store, &ssh, args.session_id).await
+}
+
 #[cfg(test)]
 mod history_tests {
     use super::*;

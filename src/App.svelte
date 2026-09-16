@@ -618,7 +618,7 @@
         {/if}
         {#if conversationMode && $selectedSession}
           <div class="view-slot overlay">
-            <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode} />
+            <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode} onOpenTerminal={showTerminal} />
           </div>
         {/if}
       {/if}

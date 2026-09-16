@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
+mod activity;
 mod lifecycle;
 mod paths;
 mod prompt;
@@ -31,6 +32,7 @@ mod lifecycle_tests;
 #[cfg(test)]
 mod tests;
 
+pub use self::activity::*;
 pub use self::lifecycle::*;
 // `paths` has no `pub` item — its widest is `pub(crate)` — so the re-export
 // is `pub(crate)` too (a `pub` glob would re-export nothing).

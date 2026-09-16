@@ -607,6 +607,35 @@ fn derive_status(
 }
 
 /// Analyze a captured pane tail into the reconcile signals.
+/// The live spinner line of a working REPL, without its leading glyph:
+/// `✶ Cooking… (3s · esc to interrupt)` → `Cooking… (3s · esc to interrupt)`.
+/// The spinner is the one line that starts with a decoration glyph followed
+/// by a capitalised verb ending in an ellipsis; the mode footer, `❯` prompt
+/// lines and `⏺` tool lines never match. Scanned bottom-up so the newest
+/// spinner wins. `None` when the pane shows no spinner.
+pub fn spinner_line(pane_tail: &str) -> Option<String> {
+    let stripped = strip_ansi(pane_tail);
+    for raw in stripped.lines().rev() {
+        let line = raw.trim();
+        let mut chars = line.chars();
+        let glyph = match chars.next() {
+            Some(c) if !c.is_alphanumeric() && !c.is_whitespace() => c,
+            _ => continue,
+        };
+        if matches!(glyph, '❯' | '>' | '⏺' | '⎿' | '⏸' | '⏵' | '│' | '─') {
+            continue;
+        }
+        let rest = chars.as_str().trim_start();
+        let word = rest.split_whitespace().next().unwrap_or("");
+        let starts_upper = word.chars().next().is_some_and(char::is_uppercase);
+        if !starts_upper || !word.ends_with('…') {
+            continue;
+        }
+        return Some(rest.chars().take(ACTIVITY_MAX).collect());
+    }
+    None
+}
+
 pub fn analyze(pane_tail: &str) -> PaneIntel {
     let stripped = strip_ansi(pane_tail);
     let stuck = detect_stuck(&stripped);
@@ -636,6 +665,37 @@ pub fn analyze(pane_tail: &str) -> PaneIntel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spinner_line_picks_the_verb_line_and_drops_the_glyph() {
+        let tail = "⏺ Bash(cargo test)\n  ⎿ Running…\n✶ Cooking… (3s · esc to interrupt)\n";
+        assert_eq!(
+            spinner_line(tail).as_deref(),
+            Some("Cooking… (3s · esc to interrupt)")
+        );
+        // newer layout: the interrupt hint moved to the footer, the spinner
+        // carries hook progress and tokens; the footer itself never matches
+        let tail = "● pong\n✢ Channelling… (running Stop hooks… 3/4 · 15s · ↓ 306 tokens)\n  ❯ /clear\n────\n❯ Press up to edit queued messages\n────\n  ⏸ manual mode on · esc to interrupt · ← 4 agents";
+        assert_eq!(
+            spinner_line(tail).as_deref(),
+            Some("Channelling… (running Stop hooks… 3/4 · 15s · ↓ 306 tokens)")
+        );
+    }
+
+    #[test]
+    fn spinner_line_is_none_for_an_idle_or_blocked_pane() {
+        assert_eq!(
+            spinner_line("❯ \n  ⏸ manual mode on · ? for shortcuts"),
+            None
+        );
+        assert_eq!(spinner_line("⏺ Explore(bg sessions)\n  ⎿  Done (41 tool uses)\n❯ 1. Yes\nEnter to select · Esc to cancel"), None);
+        assert_eq!(spinner_line(""), None);
+        // ANSI colour around the glyph is stripped first
+        assert_eq!(
+            spinner_line("\x1b[35m✻\x1b[0m Thinking… (1s)").as_deref(),
+            Some("Thinking… (1s)")
+        );
+    }
 
     #[test]
     fn strip_ansi_removes_color_codes() {
