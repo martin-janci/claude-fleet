@@ -8,7 +8,8 @@
   // send-keys into the REPL), so anything typed here is what the terminal
   // would have received. bg / external rows have no REPL to type into, so
   // they stay read-only.
-  import { untrack, tick } from 'svelte';
+  import { untrack, tick, setContext } from 'svelte';
+  import { requestOpenPath, OPEN_PATH_CONTEXT, type OpenPathFn } from './app_views';
   import { sendPrompt, hasNoPane, type SessionRow } from './sessions';
   import { hintAnchor } from './hints';
   import { composerPresets, type ComposerPreset } from './composer_presets';
@@ -122,6 +123,9 @@
   // Keyed on the id, not the row object: a store patch hands a new object
   // for the same session, which must neither reset nor refetch.
   const sessionId = $derived(session.id);
+
+  // Paths in reply text open in the Files tab (MarkdownInline reads this).
+  setContext<OpenPathFn>(OPEN_PATH_CONTEXT, (path, line) => requestOpenPath(sessionId, path, line));
 
   async function load(opts: { poll?: boolean; older?: boolean } = {}) {
     const id = session.id;

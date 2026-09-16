@@ -35,6 +35,27 @@ export function requestNewSessionOnHost(host: string): void {
   newSessionHostRequest.set(host);
 }
 
+/**
+ * "Open this file in the Files tab": a path clicked in the Conversation tab.
+ * App switches to Files for the session; FilesPanel selects the path and
+ * clears the request.
+ */
+export interface OpenPathRequest {
+  sessionId: number;
+  path: string;
+  line: number | null;
+}
+
+export const openPathRequest = writable<OpenPathRequest | null>(null);
+
+export function requestOpenPath(sessionId: number, path: string, line: number | null = null): void {
+  openPathRequest.set({ sessionId, path, line });
+}
+
+/** Context key under which a markdown host offers a path-open callback. */
+export const OPEN_PATH_CONTEXT = 'md-open-path';
+export type OpenPathFn = (path: string, line: number | null) => void;
+
 export type AppChord = 'hosts' | 'settings';
 
 /**

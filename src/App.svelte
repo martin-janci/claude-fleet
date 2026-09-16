@@ -32,6 +32,7 @@
     hostsChordLabel,
     hostsViewOpen,
     hostsViewRequest,
+    openPathRequest,
     requestNewSessionOnHost,
     settingsOpen,
   } from './lib/app_views';
@@ -343,6 +344,17 @@
     if (!req) return;
     hostsViewRequest.set(null);
     untrack(() => openHosts(req.host));
+  });
+
+  // A path clicked in the Conversation tab: show Files for that session
+  // (FilesPanel picks the path up and clears the request).
+  $effect(() => {
+    const req = $openPathRequest;
+    if (!req) return;
+    untrack(() => {
+      if ($selectedSession?.id === req.sessionId) showFiles();
+      else openPathRequest.set(null);
+    });
   });
 
   function showTerminal() {

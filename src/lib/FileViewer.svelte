@@ -17,6 +17,7 @@
     status,
     reloadKey,
     commit = null,
+    focusLine = null,
   }: {
     session: SessionRow;
     path: string | null;
@@ -25,6 +26,9 @@
     reloadKey: number;
     /** When set, show this file's diff *within* the commit, not the worktree. */
     commit?: string | null;
+    /** 1-based line to show and highlight in the File view (a path clicked
+     *  in the Conversation tab); null for none. */
+    focusLine?: number | null;
   } = $props();
 
   type View = 'diff' | 'file';
@@ -71,6 +75,21 @@
       lastPath = path;
       view = commit ? 'diff' : canDiff ? 'diff' : 'file';
     }
+  });
+
+  // A requested line lives in the File view; once the content is in, bring
+  // the row into view. Keyed on the line and the loaded file, so a later
+  // manual scroll is never undone by an unrelated re-render.
+  let fileEl: HTMLDivElement | undefined = $state();
+  $effect(() => {
+    if (focusLine !== null && path) view = 'file';
+  });
+  $effect(() => {
+    const line = focusLine;
+    const loaded = file;
+    if (line === null || !loaded || !fileEl) return;
+    const row = fileEl.children[line - 1] as HTMLElement | undefined;
+    row?.scrollIntoView?.({ block: 'center' });
   });
 
   // Load whatever the current (path, view) needs. Re-runs on reloadKey too,
@@ -189,9 +208,9 @@
           {#if file.truncated}
             <p class="hint">File truncated (over 512 KiB).</p>
           {/if}
-          <div class="file">
+          <div class="file" bind:this={fileEl}>
             {#each hlLines as toks, i}
-              <div class="frow">
+              <div class="frow" class:focus={focusLine === i + 1} data-testid={focusLine === i + 1 ? 'file-focus-row' : undefined}>
                 <span class="fno">{i + 1}</span><span class="ftext"
                   >{#each toks as t}{#if t.cls === 'txt'}{t.text}{:else}<span class={t.cls}>{t.text}</span>{/if}{:else}&nbsp;{/each}</span
                 >
@@ -283,6 +302,10 @@
   .frow {
     display: flex;
     align-items: baseline;
+  }
+  .frow.focus {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    box-shadow: inset 3px 0 0 var(--accent);
   }
   .fno {
     flex: 0 0 auto;
