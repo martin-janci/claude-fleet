@@ -5,7 +5,72 @@
 //! calls bypass any UI-side checks. Every alias / name / path component is
 //! validated here before it reaches `ssh`, `git`, `tmux`, or a path string.
 
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
+
+// ---------------------------------------------------------------------------
+// Shared sub-checks. Each public validator below is a composition of these;
+// the `label` is the noun the error message names ("host alias", "branch",
+// "file path", …) so every call site keeps its exact wording.
+// ---------------------------------------------------------------------------
+
+fn invalid(message: impl Into<String>) -> IpcError {
+    IpcError::new(codes::E_INVALID, message)
+}
+
+/// `{label} must not be empty` — byte-empty, not trimmed (see [`not_blank`]
+/// for the whitespace-only variant).
+fn non_empty(label: &str, value: &str) -> Result<(), IpcError> {
+    if value.is_empty() {
+        return Err(invalid(format!("{label} must not be empty")));
+    }
+    Ok(())
+}
+
+/// `{label} must not start with '-'` — a leading `-` would be parsed as an
+/// option by `ssh`, `git`, `tmux -t`, `claude`, …
+fn no_leading_dash(label: &str, value: &str) -> Result<(), IpcError> {
+    if value.starts_with('-') {
+        return Err(invalid(format!("{label} must not start with '-'")));
+    }
+    Ok(())
+}
+
+/// `{label} must not contain control characters`.
+fn no_control(label: &str, value: &str) -> Result<(), IpcError> {
+    if value.chars().any(|c| c.is_control()) {
+        return Err(invalid(format!(
+            "{label} must not contain control characters"
+        )));
+    }
+    Ok(())
+}
+
+/// `{label} must not contain a '..' component` — `..` as a whole path
+/// component on any of `seps` (`a/../b`, `../x`, `x/..` all escape the
+/// intended tree). A `..` that is merely a substring of a name is fine.
+fn no_dotdot_component(label: &str, value: &str, seps: &[char]) -> Result<(), IpcError> {
+    if value.split(seps).any(|component| component == "..") {
+        return Err(invalid(format!(
+            "{label} must not contain a '..' component"
+        )));
+    }
+    Ok(())
+}
+
+/// Byte-length cap with a caller-supplied message (the three call sites each
+/// have their own historical wording).
+fn max_len(value: &str, max: usize, message: &str) -> Result<(), IpcError> {
+    if value.len() > max {
+        return Err(invalid(message));
+    }
+    Ok(())
+}
+
+/// Lowercase hexadecimal digit — what git object names and canonical UUIDs
+/// are made of.
+fn is_lower_hex(c: char) -> bool {
+    c.is_ascii_digit() || matches!(c, 'a'..='f')
+}
 
 /// Validate an SSH host alias (or `~/.ssh/config` alias).
 ///
@@ -16,24 +81,14 @@ use crate::ipc_error::IpcError;
 /// length. (`run`/`run_cancellable` additionally pass `--` before the host
 /// as belt-and-suspenders.)
 pub fn host_alias(alias: &str) -> Result<(), IpcError> {
-    if alias.is_empty() {
-        return Err(IpcError::new("E_INVALID", "host alias must not be empty"));
-    }
-    if alias.len() > 255 {
-        return Err(IpcError::new("E_INVALID", "host alias is too long"));
-    }
-    if alias.starts_with('-') {
-        return Err(IpcError::new(
-            "E_INVALID",
-            "host alias must not start with '-'",
-        ));
-    }
+    non_empty("host alias", alias)?;
+    max_len(alias, 255, "host alias is too long")?;
+    no_leading_dash("host alias", alias)?;
     if !alias
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     {
-        return Err(IpcError::new(
-            "E_INVALID",
+        return Err(invalid(
             "host alias may contain only letters, digits, '.', '_' and '-'",
         ));
     }
@@ -45,55 +100,30 @@ pub fn host_alias(alias: &str) -> Result<(), IpcError> {
 /// leading `-`, and control characters, so a crafted value cannot traverse
 /// out of the intended directory or be mistaken for a command option.
 pub fn path_component(label: &str, value: &str) -> Result<(), IpcError> {
-    if value.is_empty() {
-        return Err(IpcError::new(
-            "E_INVALID",
-            format!("{label} must not be empty"),
-        ));
-    }
+    non_empty(label, value)?;
     if value == "." || value == ".." {
-        return Err(IpcError::new(
-            "E_INVALID",
-            format!("{label} must not be '.' or '..'"),
-        ));
+        return Err(invalid(format!("{label} must not be '.' or '..'")));
     }
     if value.contains('/') || value.contains('\\') {
-        return Err(IpcError::new(
-            "E_INVALID",
-            format!("{label} must not contain a path separator"),
-        ));
+        return Err(invalid(format!(
+            "{label} must not contain a path separator"
+        )));
     }
-    if value.starts_with('-') {
-        return Err(IpcError::new(
-            "E_INVALID",
-            format!("{label} must not start with '-'"),
-        ));
-    }
-    if value.chars().any(|c| c.is_control()) {
-        return Err(IpcError::new(
-            "E_INVALID",
-            format!("{label} must not contain control characters"),
-        ));
-    }
-    Ok(())
+    no_leading_dash(label, value)?;
+    no_control(label, value)
 }
 
 /// Validate a git ref (branch) name. Branches legitimately contain `/`
 /// (`feature/x`), so that is allowed — but a leading `-` would be read as a
 /// `git` option, and whitespace / control characters / `..` are rejected.
 pub fn git_ref(value: &str) -> Result<(), IpcError> {
-    if value.is_empty() {
-        return Err(IpcError::new("E_INVALID", "branch must not be empty"));
-    }
-    if value.starts_with('-') {
-        return Err(IpcError::new("E_INVALID", "branch must not start with '-'"));
-    }
+    non_empty("branch", value)?;
+    no_leading_dash("branch", value)?;
     if value.contains("..") {
-        return Err(IpcError::new("E_INVALID", "branch must not contain '..'"));
+        return Err(invalid("branch must not contain '..'"));
     }
     if value.chars().any(|c| c.is_control() || c.is_whitespace()) {
-        return Err(IpcError::new(
-            "E_INVALID",
+        return Err(invalid(
             "branch must not contain whitespace or control characters",
         ));
     }
@@ -106,19 +136,10 @@ pub fn git_ref(value: &str) -> Result<(), IpcError> {
 /// value cannot be read as an option or inject shell/git syntax.
 pub fn commit_hash(value: &str) -> Result<(), IpcError> {
     if value.len() < 4 || value.len() > 40 {
-        return Err(IpcError::new(
-            "E_INVALID",
-            "commit hash must be 4–40 characters",
-        ));
+        return Err(invalid("commit hash must be 4–40 characters"));
     }
-    if !value
-        .chars()
-        .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
-    {
-        return Err(IpcError::new(
-            "E_INVALID",
-            "commit hash must be lowercase hexadecimal",
-        ));
+    if !value.chars().all(is_lower_hex) {
+        return Err(invalid("commit hash must be lowercase hexadecimal"));
     }
     Ok(())
 }
@@ -131,18 +152,14 @@ pub fn claude_session_id(value: &str) -> Result<(), IpcError> {
     let groups = [8usize, 4, 4, 4, 12];
     let parts: Vec<&str> = value.split('-').collect();
     let shape_ok = parts.len() == groups.len()
-        && parts.iter().zip(groups).all(|(p, n)| {
-            p.len() == n
-                && p.chars()
-                    .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
-        });
+        && parts
+            .iter()
+            .zip(groups)
+            .all(|(p, n)| p.len() == n && p.chars().all(is_lower_hex));
     if shape_ok {
         Ok(())
     } else {
-        Err(IpcError::new(
-            "E_INVALID",
-            "claude session id must be a lowercase UUID",
-        ))
+        Err(invalid("claude session id must be a lowercase UUID"))
     }
 }
 
@@ -152,37 +169,31 @@ pub fn claude_session_id(value: &str) -> Result<(), IpcError> {
 /// reject empty, absolute paths, a leading `-`, any `..` path component, and
 /// control characters. A plain `/` separator is allowed (paths have subdirs).
 pub fn repo_rel_path(value: &str) -> Result<(), IpcError> {
-    if value.is_empty() {
-        return Err(IpcError::new("E_INVALID", "file path must not be empty"));
-    }
-    if value.len() > 4096 {
-        return Err(IpcError::new("E_INVALID", "file path is too long"));
-    }
+    non_empty("file path", value)?;
+    max_len(value, 4096, "file path is too long")?;
     if value.starts_with('/') || value.starts_with('\\') {
-        return Err(IpcError::new(
-            "E_INVALID",
-            "file path must be relative to the worktree",
-        ));
+        return Err(invalid("file path must be relative to the worktree"));
     }
-    if value.starts_with('-') {
-        return Err(IpcError::new(
-            "E_INVALID",
-            "file path must not start with '-'",
-        ));
-    }
-    if value.chars().any(|c| c.is_control()) {
-        return Err(IpcError::new(
-            "E_INVALID",
-            "file path must not contain control characters",
-        ));
-    }
+    no_leading_dash("file path", value)?;
+    no_control("file path", value)?;
     // Reject `..` as a whole component on either separator — `a/../b`,
     // `../x`, `x/..` all escape the worktree.
-    if value.split(['/', '\\']).any(|component| component == "..") {
-        return Err(IpcError::new(
-            "E_INVALID",
-            "file path must not contain a '..' component",
-        ));
+    no_dotdot_component("file path", value, &['/', '\\'])
+}
+
+/// Shared body of [`tmux_name`] / [`tmux_name_lookup`]: the two differ only
+/// in whether `:` is allowed (and, correspondingly, in the message).
+fn tmux_name_with(value: &str, allow_colon: bool) -> Result<(), IpcError> {
+    non_empty("session name", value)?;
+    no_leading_dash("session name", value)?;
+    let bad =
+        |c: char| c.is_whitespace() || c.is_control() || c == '.' || (!allow_colon && c == ':');
+    if value.chars().any(bad) {
+        return Err(invalid(if allow_colon {
+            "session name must not contain whitespace, control characters, or '.'"
+        } else {
+            "session name must not contain whitespace, control characters, '.' or ':'"
+        }));
     }
     Ok(())
 }
@@ -198,69 +209,33 @@ pub fn repo_rel_path(value: &str) -> Result<(), IpcError> {
 /// commands could not find. The UI trims before calling in; only DevTools /
 /// the MCP API reach here with padding, and they get a clear `E_INVALID`.
 pub fn tmux_name(value: &str) -> Result<(), IpcError> {
-    if value.is_empty() {
-        return Err(IpcError::new("E_INVALID", "session name must not be empty"));
-    }
-    if value.starts_with('-') {
-        return Err(IpcError::new(
-            "E_INVALID",
-            "session name must not start with '-'",
-        ));
-    }
-    if value
-        .chars()
-        .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '.' | ':'))
-    {
-        return Err(IpcError::new(
-            "E_INVALID",
-            "session name must not contain whitespace, control characters, '.' or ':'",
-        ));
-    }
-    Ok(())
+    tmux_name_with(value, false)
 }
 
 /// Validate a tmux session name used as a **lookup key**, not a creation
 /// value. Mirrors `tmux_name` but additionally allows `:` so synthetic
-/// `bg:<uuid>` rows (background `claude --bg` agents that have no tmux pane —
-/// see `Store::upsert_bg_session`) can be addressed. Still rejects whitespace,
+/// `bg:<uuid>` rows (background agents and external interactive sessions
+/// that have no tmux pane — see `Store::upsert_bg_session`) can be addressed. Still rejects whitespace,
 /// control characters, `.`, and a leading `-` — none of those appear in any
 /// row claude-fleet actually inserts, so a value containing them can only be
 /// a malformed/hostile caller.
 pub fn tmux_name_lookup(value: &str) -> Result<(), IpcError> {
-    if value.is_empty() {
-        return Err(IpcError::new("E_INVALID", "session name must not be empty"));
-    }
-    if value.starts_with('-') {
-        return Err(IpcError::new(
-            "E_INVALID",
-            "session name must not start with '-'",
-        ));
-    }
-    if value
-        .chars()
-        .any(|c| c.is_whitespace() || c.is_control() || c == '.')
-    {
-        return Err(IpcError::new(
-            "E_INVALID",
-            "session name must not contain whitespace, control characters, or '.'",
-        ));
-    }
-    Ok(())
+    tmux_name_with(value, true)
 }
 
 /// Validate a tmux session name for operations that need a real tmux pane
 /// (send-keys, capture, restart, rename, safe-kill…). Synthetic `bg:<uuid>`
-/// rows (background `claude --bg` agents — see `Store::upsert_bg_session`)
-/// have no pane, so targeting one is rejected with a dedicated
-/// `E_BG_SESSION` code and a pointer to the tools that DO work on them,
-/// instead of the generic (and misleading) `tmux_name` character-set error.
+/// rows (background agents and external interactive sessions — see
+/// `Store::upsert_bg_session`) have no pane, so targeting one is rejected
+/// with a dedicated `E_BG_SESSION` code and a pointer to the tool that works
+/// for both kinds, instead of the generic (and misleading) `tmux_name`
+/// character-set error.
 /// Everything else defers to `tmux_name`.
 pub fn tmux_name_addressable(value: &str) -> Result<(), IpcError> {
     if value.starts_with("bg:") {
         return Err(IpcError::new(
-            "E_BG_SESSION",
-            "this is a background (claude --bg) session with no tmux pane — \
-             use peek_session for its logs or kill_session to stop it",
+            codes::E_BG_SESSION,
+            "this session runs outside tmux; use session_transcript to read it",
         ));
     }
     tmux_name(value)
@@ -273,47 +248,62 @@ pub fn tmux_name_addressable(value: &str) -> Result<(), IpcError> {
 /// only is allowed and means "clear" at the service layer.
 pub fn friendly_name(value: &str) -> Result<(), IpcError> {
     if value.chars().count() > 80 {
-        return Err(IpcError::new(
-            "E_INVALID",
-            "friendly name must be 80 characters or fewer",
-        ));
+        return Err(invalid("friendly name must be 80 characters or fewer"));
     }
-    if value.chars().any(|c| c.is_control()) {
-        return Err(IpcError::new(
-            "E_INVALID",
-            "friendly name must not contain control characters",
-        ));
-    }
-    Ok(())
+    no_control("friendly name", value)
 }
 
 /// Validate that a free-form value (a `claude` prompt) is not empty or
 /// whitespace-only. Use this alone for a positional that the call site places
 /// after `--`: such a value may legitimately begin with `-` (a markdown list).
 pub fn not_blank(label: &str, value: &str) -> Result<(), IpcError> {
-    if value.trim().is_empty() {
-        return Err(IpcError::new(
-            "E_INVALID",
-            format!("{label} must not be empty"),
-        ));
-    }
-    Ok(())
+    non_empty(label, value.trim())
 }
 
 /// Validate a value handed to a CLI as an option *value* or a positional the
-/// CLI cannot take after `--` (`claude --name <x>`, `claude logs <id>`,
-/// a project path). It may contain anything a shell quote can carry — spaces,
+/// CLI cannot take after `--` (`claude --bg --name <x>`, a project path).
+/// It may contain anything a shell quote can carry — spaces,
 /// unicode — but it must be non-blank and must not begin with `-`, since an
 /// option parser would read `--foo` as a flag.
 pub fn not_option_like(label: &str, value: &str) -> Result<(), IpcError> {
     not_blank(label, value)?;
-    if value.starts_with('-') {
-        return Err(IpcError::new(
-            "E_INVALID",
-            format!("{label} must not start with '-'"),
-        ));
+    no_leading_dash(label, value)
+}
+
+/// Validate an absolute path on a remote host. This is the canonical rule for
+/// a worktree checkout path — a worktree row's stored `path` as recorded by
+/// the per-host scan (`service::worktrees::list_host_worktrees`) and
+/// interpolated into a remote `git worktree add <path> …` target, or a
+/// `worktree_path` reported by a hook body
+/// (`service::hooks::validate_worktree_path`, which wraps
+/// [`remote_worktree_path`] below to get `E_VALIDATE` instead of `E_INVALID`
+/// for its 400 response). Shell-quoting (`quote`) stops command injection
+/// but not `..` traversal escaping the intended tree, so that is rejected
+/// here, along with a relative path, an oversized value, and control
+/// characters. No existing validator fits: `path_component` checks a single
+/// directory-name component, and `repo_rel_path` requires a *relative*
+/// path — the opposite of what's needed here.
+pub fn remote_abs_path(label: &str, value: &str) -> Result<(), IpcError> {
+    non_empty(label, value)?;
+    max_len(value, 4096, &format!("{label} must be 4096 bytes or fewer"))?;
+    if !value.starts_with('/') {
+        return Err(invalid(format!("{label} must be an absolute path")));
     }
-    Ok(())
+    no_control(label, value)?;
+    no_dotdot_component(label, value, &['/'])
+}
+
+/// [`remote_abs_path`] plus a `path_component` check on the path's basename —
+/// the rule `service::hooks::validate_worktree_path` needs for a worktree
+/// checkout path reported over the wire, where the final component also has
+/// to be safe to use as a directory name (no leading `-`, no separator).
+pub fn remote_worktree_path(label: &str, value: &str) -> Result<(), IpcError> {
+    remote_abs_path(label, value)?;
+    let name = std::path::Path::new(value)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| invalid(format!("{label} has no final component")))?;
+    path_component("worktree name", name)
 }
 
 #[cfg(test)]
@@ -470,6 +460,13 @@ mod tests {
         let err = tmux_name_addressable("bg:550e8400-e29b-41d4-a716-446655440000")
             .expect_err("bg rows have no tmux pane");
         assert_eq!(err.code, "E_BG_SESSION");
+        // Kind-neutral: a `bg:` row may be a background agent OR an external
+        // interactive session, which kill_session refuses — so the message
+        // must not point at kill_session.
+        assert_eq!(
+            err.message,
+            "this session runs outside tmux; use session_transcript to read it"
+        );
         // Plain names behave exactly like `tmux_name`.
         assert!(tmux_name_addressable("dev-foo").is_ok());
         assert!(tmux_name_addressable("has:colon").is_err()); // non-bg colon still E_INVALID
@@ -494,5 +491,76 @@ mod tests {
         assert!(friendly_name("line one\nline two").is_err()); // \n is control
         assert!(friendly_name("with\ttab").is_err());
         assert!(friendly_name("bell\x07").is_err());
+    }
+
+    #[test]
+    fn remote_abs_path_accepts_normal_absolute_paths() {
+        for ok in [
+            "/home/u/projects/github.com/o/r",
+            "/home/u/projects/github.com/o/r/.worktrees/feat",
+            "/",
+        ] {
+            assert!(
+                remote_abs_path("worktree path", ok).is_ok(),
+                "{ok} should be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_abs_path_rejects_empty() {
+        let err = remote_abs_path("worktree path", "").unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+    }
+
+    #[test]
+    fn remote_abs_path_rejects_too_long() {
+        let value = format!("/{}", "a".repeat(4096));
+        let err = remote_abs_path("worktree path", &value).unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+    }
+
+    #[test]
+    fn remote_abs_path_rejects_relative() {
+        let err = remote_abs_path("worktree path", "relative/path").unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+    }
+
+    #[test]
+    fn remote_abs_path_rejects_dotdot_component() {
+        for bad in ["/a/../etc", "/a/b/.."] {
+            let err = remote_abs_path("worktree path", bad).unwrap_err();
+            assert_eq!(err.code, "E_INVALID", "{bad}");
+        }
+    }
+
+    #[test]
+    fn remote_abs_path_rejects_control_chars() {
+        let err = remote_abs_path("worktree path", "/a\nb").unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+    }
+
+    #[test]
+    fn remote_worktree_path_accepts_absolute_clean_paths() {
+        assert!(remote_worktree_path("worktree_path", "/home/u/proj/.worktrees/feat").is_ok());
+        assert!(
+            remote_worktree_path("worktree_path", "/home/u/proj/.worktrees/feat-x.y_z").is_ok()
+        );
+    }
+
+    #[test]
+    fn remote_worktree_path_rejects_relative_traversal_control_and_bad_basename() {
+        for bad in [
+            "",
+            "relative/path",
+            "~/proj/.worktrees/feat",
+            "/home/u/proj/../../etc",
+            "/home/u/proj/.worktrees/..",
+            "/home/u/proj/.worktrees/bad\nname",
+            "/home/u/proj/.worktrees/-rf",
+        ] {
+            let err = remote_worktree_path("worktree_path", bad).expect_err(bad);
+            assert_eq!(err.code, "E_INVALID", "{bad}");
+        }
     }
 }

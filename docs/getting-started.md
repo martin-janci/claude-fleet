@@ -25,7 +25,7 @@ The app drives the `claude` CLI and `tmux`, so both must be on your local `PATH`
 
 Once releases are published (see [RELEASING.md](RELEASING.md)), you will be able to download a build from the [releases page](https://github.com/martin-janci/claude-fleet/releases) instead: `.dmg` or `.app.tar.gz` on macOS, `.AppImage` or `.deb` on Linux. Those builds are not code-signed:
 
-- **macOS:** Gatekeeper blocks the first launch. Right-click the app and choose **Open**, or clear the quarantine flag with `xattr -d com.apple.quarantine /Applications/claude-fleet.app`.
+- **macOS:** Gatekeeper blocks the first launch, reporting the app as *"damaged"*. Drag it to `/Applications`, then clear the quarantine flag with `xattr -dr com.apple.quarantine /Applications/claude-fleet.app`. Full instructions — and why right-click → **Open** doesn't help here — are in the README's [Installing a release build](../README.md#installing-a-release-build) section.
 - **Linux:** mark the AppImage executable (`chmod +x`) before running it, or install the `.deb` with `sudo apt install ./claude-fleet_*.deb`.
 
 ### 2. Add one host
@@ -126,6 +126,7 @@ Once you have at least one session running:
 
 - **Attach** — click a session row to open the live terminal view and watch the session in real time.
 - **Quick switcher (⌘K / ⌘P on macOS, Ctrl+Shift+K / Ctrl+Shift+P on Linux and Windows)** — works even while the terminal has focus; plain Ctrl+K and Ctrl+P still go to the terminal (readline kill-line / previous history). Type any part of a session's name, project, host, branch or status; recently opened sessions come first. **Enter** attaches and reveals the session in the sidebar (its project is expanded and the row scrolled into view), **Ctrl/⌘+Enter** opens the new-session dialog with what you typed as the name, and the "New session in <project>" rows start one for that project.
+- **Copy and select in the terminal** — selection works like a text field: drag to select, double-click a word (paths and flags count as one word), triple-click a line, Shift+click to extend, ⌘A / Ctrl+Shift+A for the whole screen. Copy with ⌘C (Ctrl+Shift+C on Linux and Windows), paste with ⌘V (Ctrl+Shift+V) or the right-click menu; **Copy on select** in Settings copies as soon as you release the mouse. Typing drops the highlight. The cursor is a solid block while the terminal has keyboard focus and a hollow outline when it does not.
 - **Send a prompt** — type in the prompt bar to send text to the active session. To send the same prompt to several sessions at once, use the broadcast feature.
 - **Background sessions (⚡)** — sessions marked with ⚡ run without an attached terminal. They continue working while you watch other sessions.
 - **Files, diffs, commit graph, branches** — the sidebar panels give you a read-only view of the repository state on the host where the session is running.

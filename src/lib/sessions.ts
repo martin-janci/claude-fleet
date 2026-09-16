@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store';
+import { createRowStore } from './row_store';
 import { invokeCmd, invokeCmdAbortable, type Result } from './result';
 import { readPref, writePref } from './prefs';
 
@@ -133,7 +134,19 @@ export function formatCostMicros(micros: number | null | undefined): string {
   return `$${Math.round(usd).toLocaleString('en-US')}`;
 }
 
-export const sessions = writable<SessionRow[]>([]);
+const rows = createRowStore<SessionRow, number>({
+  key: (s) => s.id,
+  // Both the optimistic `removeSession()` and the `session:killed` event
+  // delete a row; a `session:updated` still in flight for that id would
+  // otherwise re-insert the dead row ("ghost session").
+  tombstoneMs: 5000,
+  // Monotonic guard: don't let a staler payload (e.g. a command return value
+  // that raced a newer `session:updated` event) clobber a fresher row. Equal
+  // timestamps still apply — they may carry a status change.
+  isStale: (incoming, current) => incoming.last_activity_at < current.last_activity_at,
+});
+export const sessions = rows.store;
+export const resetTombstonesForTests = rows.resetTombstonesForTests;
 
 /** True once the first successful `list_sessions` has populated the store.
  *  Consumers that react to *transitions* (Attention.svelte) treat everything
@@ -155,6 +168,11 @@ export const showFriendlyNames = writable<boolean>(
   readPref('show-friendly-names', true, isBool),
 );
 showFriendlyNames.subscribe((v) => writePref('show-friendly-names', v));
+
+// Sidebar density toggle — when true, session rows show their second
+// (details) line: host, tmux name / worktree, elapsed, badges, last prompt.
+export const showRowDetails = writable<boolean>(readPref('rows.details', true, isBool));
+showRowDetails.subscribe((v) => writePref('rows.details', v));
 
 // `force: true` (the sidebar Refresh button) makes the backend run a fleet
 // reconcile pass now; the default returns stored rows while the last pass is
@@ -364,27 +382,12 @@ export interface NewSessionArgs {
   friendly_name?: string | null;
 }
 
-export async function newSession(args: NewSessionArgs): Promise<Result<SessionRow>> {
-  const r = await invokeCmd<SessionRow>('new_session', { args });
-  if (r.ok) acceptCommandRow(r.value);
-  return r;
-}
-
 export async function newSessionAbortable(
   args: NewSessionArgs,
   signal?: AbortSignal,
 ): Promise<Result<SessionRow>> {
   const r = await invokeCmdAbortable<SessionRow>('new_session', { args }, signal);
   if (r.ok) acceptCommandRow(r.value);
-  return r;
-}
-
-export async function bootstrapSessions(): Promise<Result<SessionRow[]>> {
-  const r = await invokeCmd<SessionRow[]>('list_sessions');
-  if (r.ok) {
-    sessions.set(r.value);
-    sessionsLoaded.set(true);
-  }
   return r;
 }
 
@@ -416,59 +419,12 @@ export function findSession(arr: SessionRow[], ident: SessionIdentity): SessionR
   return arr.find((s) => s.host_alias === ident.host_alias && s.tmux_name === ident.tmux_name);
 }
 
-// Recently-removed session ids. Both the optimistic `removeSession()` and the
-// `session:killed` event delete a row; without a tombstone, a `session:updated`
-// event still in flight for that id would re-insert the dead row ("ghost
-// session"). Entries expire so a genuinely new id is never blocked.
-const tombstones = new Map<number, number>();
-const TOMBSTONE_MS = 5000;
-
-/** Test hook: forget every tombstone so one test's kill can't shadow the
- *  next test's merge of the same id. Not for production code. */
-export function resetTombstonesForTests(): void {
-  tombstones.clear();
-}
-
-function isTombstoned(id: number): boolean {
-  const t = tombstones.get(id);
-  if (t === undefined) return false;
-  if (Date.now() - t > TOMBSTONE_MS) {
-    tombstones.delete(id);
-    return false;
-  }
-  return true;
-}
-
-/** Pure merge step shared by the single-row and batched paths. Returns the
- *  input array untouched when the row is tombstoned or stale. */
-function mergeInto(arr: SessionRow[], row: SessionRow): SessionRow[] {
-  if (!row) return arr;
-  if (isTombstoned(row.id)) return arr;
-  const i = arr.findIndex((s) => s.id === row.id);
-  if (i === -1) return [...arr, row];
-  // Monotonic guard: don't let a staler payload (e.g. a command return
-  // value that raced a newer `session:updated` event) clobber a fresher
-  // row. Equal timestamps still apply — they may carry a status change.
-  if (row.last_activity_at < arr[i].last_activity_at) return arr;
-  const next = arr.slice();
-  next[i] = row;
-  return next;
-}
-
-function removeFrom(arr: SessionRow[], id: number): SessionRow[] {
-  tombstones.set(id, Date.now());
-  const next = arr.filter((s) => s.id !== id);
-  return next.length === arr.length ? arr : next;
-}
-
 export function mergeSession(row: SessionRow): void {
-  if (!row) return;
-  if (isTombstoned(row.id)) return;
-  sessions.update((arr) => mergeInto(arr, row));
+  rows.merge(row);
 }
 
 export function removeSession(id: number): void {
-  sessions.update((arr) => removeFrom(arr, id));
+  rows.remove(id);
 }
 
 /** One backend row event, as delivered by `events.ts`. */
@@ -486,7 +442,7 @@ export function applySessionEvents(events: readonly SessionEvent[]): void {
   sessions.update((arr) => {
     let next = arr;
     for (const ev of events) {
-      next = ev.type === 'killed' ? removeFrom(next, ev.id) : mergeInto(next, ev.row);
+      next = ev.type === 'killed' ? rows.removeFrom(next, ev.id) : rows.mergeInto(next, ev.row);
     }
     return next;
   });
@@ -496,13 +452,7 @@ export function applySessionEvents(events: readonly SessionEvent[]): void {
  *  event, a command result is the authoritative response to a request the
  *  user just made, so it clears any tombstone for that id before merging. */
 function acceptCommandRow(row: SessionRow | null | undefined): void {
-  if (!row) return;
-  tombstones.delete(row.id);
-  mergeSession(row);
-}
-
-export async function relatedSessions(sessionId: number): Promise<Result<SessionRow[]>> {
-  return invokeCmd<SessionRow[]>('related_sessions', { args: { session_id: sessionId } });
+  rows.accept(row);
 }
 
 export async function sendPrompt(
@@ -576,13 +526,29 @@ export async function newBgSession(
   return r;
 }
 
-/** Fetch recent log output from a background Claude session (no PTY). */
-export async function peekSession(
-  hostAlias: string,
-  claudeSessionId: string,
-): Promise<Result<string>> {
-  return invokeCmd<string>('peek_session', {
-    args: { host_alias: hostAlias, claude_session_id: claudeSessionId },
+/** True for a row with no attached tmux pane: a supervised background agent
+ *  (`bg`) or an interactive Claude session running outside fleet entirely
+ *  (`external`, e.g. Claude Desktop). Every "no PTY" check in the app should
+ *  go through this instead of comparing `kind` directly. */
+export function hasNoPane(s: Pick<SessionRow, 'kind'>): boolean {
+  return s.kind === 'bg' || s.kind === 'external';
+}
+
+/** True for a background agent whose CLI process is gone (backend marks it
+ *  `claude_status: 'stopped'` once its transcript has been quiet past
+ *  `AGENT_INACTIVE_SECS`). Never true for `external` rows — those leave the
+ *  list on their own when the process ends. */
+export function isInactiveAgent(s: Pick<SessionRow, 'kind' | 'claude_status'>): boolean {
+  return s.kind === 'bg' && s.claude_status === 'stopped';
+}
+
+/** Remove a `bg` agent row from the list without touching the underlying
+ *  process (it does not use fleet). Refused by the backend for `external`
+ *  rows and for a row still `working`. The row itself is removed by the
+ *  `session:removed` event the backend emits, not by this call. */
+export async function dismissAgentSession(sessionId: number): Promise<Result<null>> {
+  return invokeCmd<null>('dismiss_agent_session', {
+    args: { session_id: sessionId },
   });
 }
 

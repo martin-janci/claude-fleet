@@ -693,7 +693,7 @@ async fn bg_agents_surface_prune_and_filter_unknown_statuses() {
 
 #[tokio::test]
 async fn bg_agent_with_unknown_status_is_not_stored_verbatim() {
-    // bg rows (`reconcile_bg_agents` → `upsert_bg_session`) run the agent
+    // bg rows (`reconcile_agent_rows` → `upsert_bg_session`) run the agent
     // status through `known_agent_status` like tmux rows, so an
     // out-of-vocabulary value never lands in `claude_status` and never
     // reaches the MCP/UI contract.

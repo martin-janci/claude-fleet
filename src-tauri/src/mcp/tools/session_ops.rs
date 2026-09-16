@@ -1,6 +1,7 @@
 //! MCP tools: listing, spawning, inspecting and addressing sessions.
 
 use super::*;
+use crate::ipc_error::lock;
 
 #[tool_router(router = session_ops_router, vis = "pub(super)")]
 impl FleetTools {
@@ -40,10 +41,7 @@ impl FleetTools {
         }
         .map_err(to_mcp_err)?;
         let controller = {
-            let s = self
-                .store
-                .lock()
-                .map_err(|_| McpError::internal_error("E_LOCK: store mutex poisoned", None))?;
+            let s = lock(&self.store).map_err(to_mcp_err)?;
             s.get_controller()
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?
         };
@@ -102,12 +100,12 @@ impl FleetTools {
         sharing the same project and worktree. Returns JSON.")]
     pub(super) async fn related_sessions(
         &self,
-        Parameters(p): Parameters<RelatedSessionsParams>,
+        Parameters(args): Parameters<sessions::RelatedSessionsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        audit("related_sessions", &format!("session_id={}", p.session_id));
-        let args = sessions::RelatedSessionsArgs {
-            session_id: p.session_id,
-        };
+        audit(
+            "related_sessions",
+            &format!("session_id={}", args.session_id),
+        );
         ok_json(&sessions::related_sessions(args, &self.store).map_err(to_mcp_err)?)
     }
 
@@ -136,10 +134,7 @@ impl FleetTools {
             "the session to register",
         )?;
         {
-            let s = self
-                .store
-                .lock()
-                .map_err(|_| McpError::internal_error("E_LOCK: store mutex poisoned", None))?;
+            let s = lock(&self.store).map_err(to_mcp_err)?;
             s.set_controller(&host_alias, &tmux_name)
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?;
         }
@@ -159,10 +154,7 @@ impl FleetTools {
         Parameters(p): Parameters<WhoamiParams>,
     ) -> Result<CallToolResult, McpError> {
         audit("whoami", &format!("tmux={}", p.tmux_name));
-        let s = self
-            .store
-            .lock()
-            .map_err(|_| to_mcp_err(IpcError::lock()))?;
+        let s = lock(&self.store).map_err(to_mcp_err)?;
         let row = sessions::find_session_by_tmux_name(&s, &p.tmux_name).map_err(to_mcp_err)?;
         let controller = s
             .get_controller()
@@ -289,11 +281,7 @@ impl FleetTools {
     }
 
     #[tool(
-        description = "Peek at a session's background Claude logs. Address it \
-        with session_id (from list_sessions) OR claude_session_id (the id \
-        new_bg_session returned; add host_alias while the fleet row does not \
-        exist yet). Returns an informational message for interactive sessions \
-        with no background job."
+        description = "Deprecated: use session_transcript. Returns the session's last assistant turn from its transcript. Address it with session_id OR claude_session_id (+ host_alias while the fleet row does not exist yet)."
     )]
     pub(super) async fn peek_session(
         &self,
@@ -307,19 +295,27 @@ impl FleetTools {
             ),
         );
         let resolved = {
-            let s = self
-                .store
-                .lock()
-                .map_err(|_| to_mcp_err(IpcError::lock()))?;
+            let s = lock(&self.store).map_err(to_mcp_err)?;
             crate::service::bg_sessions::resolve_peek_target(
                 &s,
                 p.session_id,
                 p.host_alias.as_deref(),
                 p.claude_session_id.as_deref(),
             )
+            .and_then(|(host_alias, claude_id)| {
+                // The fleet row, when there is one, supplies the pane, cwd and
+                // stored transcript path that locate the file precisely.
+                let row = match p.session_id {
+                    Some(id) => s.get_session_by_id(id)?,
+                    None => s
+                        .get_session_by_claude_id(&claude_id)?
+                        .filter(|r| r.host_alias == host_alias),
+                };
+                Ok((host_alias, claude_id, row))
+            })
         };
-        let (host_alias, claude_id) = match resolved {
-            Ok(pair) => pair,
+        let (host_alias, claude_id, row) = match resolved {
+            Ok(target) => target,
             // A tracked interactive session with no Claude id is not an
             // error for the caller — say so instead of failing.
             Err(e) if e.code == "E_INVALID_STATE" => {
@@ -329,16 +325,26 @@ impl FleetTools {
             }
             Err(e) => return Err(to_mcp_err(e)),
         };
-        let logs = crate::service::bg_sessions::peek_session(
-            crate::service::bg_sessions::PeekSessionArgs {
-                host_alias,
-                claude_session_id: claude_id,
-            },
-            &self.ssh,
-        )
-        .await
-        .map_err(to_mcp_err)?;
-        ok_json(&logs)
+        let text = match row {
+            Some(row) => self.transcript_for(&row, None, None).await?,
+            // Untracked (a new_bg_session id before reconcile): the read
+            // script finds the file by session id alone.
+            None => crate::service::transcript::fetch_transcript(
+                crate::service::transcript::TranscriptArgs {
+                    host_alias,
+                    tmux_name: None,
+                    transcript_path: None,
+                    cwd: None,
+                    claude_session_id: claude_id,
+                    turns: 1,
+                    max_chars: crate::service::transcript::DEFAULT_MAX_CHARS,
+                },
+                &self.ssh,
+            )
+            .await
+            .map_err(to_mcp_err)?,
+        };
+        ok_json(&text)
     }
 
     #[tool(description = "Recreate a session: kill its tmux session and rebuild \
@@ -348,19 +354,15 @@ impl FleetTools {
         running or ghost sessions. Returns the session row as JSON.")]
     pub(super) async fn recreate_session(
         &self,
-        Parameters(p): Parameters<RecreateSessionParams>,
+        Parameters(args): Parameters<sessions::RecreateSessionArgs>,
     ) -> Result<CallToolResult, McpError> {
-        audit("recreate_session", &format!("session_id={}", p.session_id));
-        let row = sessions::recreate_session(
-            sessions::RecreateSessionArgs {
-                session_id: p.session_id,
-                force: p.force,
-            },
-            &self.store,
-            &self.ssh,
-        )
-        .await
-        .map_err(to_mcp_err)?;
+        audit(
+            "recreate_session",
+            &format!("session_id={}", args.session_id),
+        );
+        let row = sessions::recreate_session(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
         ok_json(&row)
     }
 
@@ -370,20 +372,12 @@ impl FleetTools {
         ghost.")]
     pub(super) async fn dismiss_ghost_session(
         &self,
-        Parameters(p): Parameters<SessionIdParams>,
+        Parameters(args): Parameters<sessions::DismissGhostSessionArgs>,
     ) -> Result<CallToolResult, McpError> {
-        audit(
-            "dismiss_ghost_session",
-            &format!("session_id={}", p.session_id),
-        );
-        sessions::dismiss_ghost_session(
-            sessions::DismissGhostSessionArgs {
-                session_id: p.session_id,
-            },
-            &self.store,
-        )
-        .map_err(to_mcp_err)?;
-        ok_json(&serde_json::json!({ "dismissed": p.session_id }))
+        let session_id = args.session_id;
+        audit("dismiss_ghost_session", &format!("session_id={session_id}"));
+        sessions::dismiss_ghost_session(args, &self.store).map_err(to_mcp_err)?;
+        ok_json(&serde_json::json!({ "dismissed": session_id }))
     }
 
     #[tool(description = "Launch a supervised headless (background) Claude \
@@ -391,29 +385,21 @@ impl FleetTools {
         claude_session_id AND the fleet row (`session`, registered by an \
         immediate reconcile; the key is absent if the agent was not matched \
         yet — it appears on the next tick) so the next call can be \
-        peek_session { session_id }. The prompt becomes the row's default \
+        session_transcript { session_id }. The prompt becomes the row's default \
         friendly name and last_prompt.")]
     pub(super) async fn new_bg_session(
         &self,
         Extension(caller): Extension<Caller>,
-        Parameters(p): Parameters<NewBgSessionParams>,
+        Parameters(args): Parameters<crate::service::bg_sessions::NewBgSessionArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "new_bg_session",
-            &format!("host={} name={}", p.host_alias, p.name),
+            &format!("host={} name={}", args.host_alias, args.name),
         );
-        require_host(&caller, &p.host_alias, "the new background session")?;
-        let res = crate::service::bg_sessions::new_bg_session_tracked(
-            crate::service::bg_sessions::NewBgSessionArgs {
-                host_alias: p.host_alias,
-                name: p.name,
-                prompt: p.prompt,
-            },
-            &self.store,
-            &self.ssh,
-        )
-        .await
-        .map_err(to_mcp_err)?;
+        require_host(&caller, &args.host_alias, "the new background session")?;
+        let res = crate::service::bg_sessions::new_bg_session_tracked(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
         ok_json(&res)
     }
 

@@ -1,4 +1,5 @@
 import { writable, derived } from 'svelte/store';
+import { createRowStore } from './row_store';
 import { invokeCmd, type Result } from './result';
 import { readPref, writePref } from './prefs';
 
@@ -21,7 +22,16 @@ export interface SshHost {
   port: number | null;
 }
 
-export const hosts = writable<HostRow[]>([]);
+const rows = createRowStore<HostRow, string>({
+  key: (h) => h.alias,
+  // `removeHost()` (optimistic) and the `host:removed` event both delete a
+  // row; a `host:probed` event still in flight for that alias would otherwise
+  // re-insert the dead host. Entries expire so re-adding a host with the
+  // same alias isn't blocked for long.
+  tombstoneMs: 5000,
+});
+export const hosts = rows.store;
+export const resetTombstonesForTests = rows.resetTombstonesForTests;
 
 /** O(1) alias -> host lookup, derived once per `hosts` change. Consumers
  *  that previously did a linear `$hosts.find` should read this instead. */
@@ -53,8 +63,7 @@ export async function addHost(
   if (r.ok) {
     // An explicit re-add overrides any lingering tombstone from a recent
     // removeHost() of the same alias.
-    hostTombstones.delete(alias);
-    mergeHost(r.value);
+    rows.accept(r.value);
   }
   return r;
 }
@@ -63,8 +72,7 @@ export async function probeHost(alias: string): Promise<Result<HostRow>> {
   const r = await invokeCmd<HostRow>('probe_host', { args: { alias } });
   // A command result is authoritative — clear any stale tombstone first.
   if (r.ok) {
-    hostTombstones.delete(alias);
-    mergeHost(r.value);
+    rows.accept(r.value);
   }
   return r;
 }
@@ -81,63 +89,13 @@ export async function hideHost(
 ): Promise<Result<HostRow>> {
   const r = await invokeCmd<HostRow>('hide_host', { args: { alias, hidden } });
   if (r.ok) {
-    hostTombstones.delete(alias);
-    mergeHost(r.value);
+    rows.accept(r.value);
   }
   return r;
 }
 
-export async function bootstrapHosts(): Promise<Result<HostRow[]>> {
-  const r = await invokeCmd<HostRow[]>('list_hosts');
-  if (r.ok) hosts.set(r.value);
-  return r;
-}
-
-// Recently-removed host aliases. `removeHost()` (optimistic) and the
-// `host:removed` event both delete a row; a `host:probed` event still in
-// flight for that alias would otherwise re-insert the dead host. Entries
-// expire so re-adding a host with the same alias isn't blocked for long.
-const hostTombstones = new Map<string, number>();
-const HOST_TOMBSTONE_MS = 5000;
-
-/** Test hook: forget every tombstone (see `resetTombstonesForTests` in
- *  sessions.ts). Not for production code. */
-export function resetTombstonesForTests(): void {
-  hostTombstones.clear();
-}
-
-function isHostTombstoned(alias: string): boolean {
-  const t = hostTombstones.get(alias);
-  if (t === undefined) return false;
-  if (Date.now() - t > HOST_TOMBSTONE_MS) {
-    hostTombstones.delete(alias);
-    return false;
-  }
-  return true;
-}
-
-function mergeInto(arr: HostRow[], row: HostRow): HostRow[] {
-  if (isHostTombstoned(row.alias)) return arr;
-  const i = arr.findIndex((h) => h.alias === row.alias);
-  if (i === -1) return [...arr, row];
-  const next = arr.slice();
-  next[i] = row;
-  return next;
-}
-
-function removeFrom(arr: HostRow[], alias: string): HostRow[] {
-  hostTombstones.set(alias, Date.now());
-  const next = arr.filter((h) => h.alias !== alias);
-  return next.length === arr.length ? arr : next;
-}
-
-export function mergeHost(row: HostRow): void {
-  if (isHostTombstoned(row.alias)) return;
-  hosts.update((arr) => mergeInto(arr, row));
-}
-
-export function removeHost(alias: string): void {
-  hosts.update((arr) => removeFrom(arr, alias));
+function removeHost(alias: string): void {
+  rows.remove(alias);
 }
 
 /** One backend host event, as delivered by `events.ts`. */
@@ -152,7 +110,7 @@ export function applyHostEvents(events: readonly HostEvent[]): void {
   hosts.update((arr) => {
     let next = arr;
     for (const ev of events) {
-      next = ev.type === 'removed' ? removeFrom(next, ev.alias) : mergeInto(next, ev.row);
+      next = ev.type === 'removed' ? rows.removeFrom(next, ev.alias) : rows.mergeInto(next, ev.row);
     }
     return next;
   });

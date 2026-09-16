@@ -5,7 +5,7 @@
 //! through `use super::*`, exactly as in the single file.
 
 use crate::cancel::{CancelGuard, CancellationRegistry};
-use crate::ipc_error::{codes, IpcError};
+use crate::ipc_error::IpcError;
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::{HostReconcile, HostRow, ProjectRow, ReconcileSession, SessionRow, Store};
@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
+mod activity;
 mod lifecycle;
 mod paths;
 mod prompt;
@@ -27,8 +28,11 @@ mod fill_session_name_tests;
 #[cfg(test)]
 mod ghost_tests;
 #[cfg(test)]
+mod lifecycle_tests;
+#[cfg(test)]
 mod tests;
 
+pub use self::activity::*;
 pub use self::lifecycle::*;
 // `paths` has no `pub` item — its widest is `pub(crate)` — so the re-export
 // is `pub(crate)` too (a `pub` glob would re-export nothing).

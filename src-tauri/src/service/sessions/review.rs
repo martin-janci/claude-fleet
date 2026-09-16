@@ -1,16 +1,25 @@
 //! Spawning a review session for an existing session.
 
 use super::*;
+use crate::ipc_error::codes;
+use crate::ipc_error::lock;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "SpawnReviewParams")]
 pub struct SpawnReviewArgs {
+    /// Id of the session whose work should be reviewed.
     pub source_session_id: i64,
+    /// The review prompt to seed the new review session with.
     pub prompt: String,
     // Reserved for future cancellation wiring. The frontend's
     // invokeCmdAbortable injects a call_id; v1 spawn_review doesn't register a
     // CancellationToken under it (the spawn is short — tmux create + reconcile
     // + ~1.5s seed delay), so an abort is currently a no-op on the backend.
+    // Skipped on both sides so the MCP schema (which takes this struct
+    // directly) never exposes it; a missing `Option` deserialises to `None`.
     #[allow(dead_code)]
+    #[serde(skip)]
+    #[schemars(skip)]
     pub call_id: Option<u64>,
 }
 
@@ -22,12 +31,10 @@ pub async fn spawn_review(
     // 1. Snapshot source + capture cwd-resolution inputs under a brief lock.
     //    For remote hosts the cwd is finalized off-lock via `ssh.remote_home`.
     let (source, cwd_src) = {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = lock(store)?;
         let source = s
             .get_session_by_id(args.source_session_id)?
-            .ok_or_else(|| IpcError::new("E_NOTFOUND", "source session not found"))?;
+            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "source session not found"))?;
         let cwd_src = cwd_source_for_session(&s, &source)?;
         (source, cwd_src)
     };
@@ -69,14 +76,14 @@ pub async fn spawn_review(
 
     // 4. Tag as review + capture id.
     let review_id = {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = lock(store)?;
         let row = s
             .list_sessions_for_host(&source.host_alias)?
             .into_iter()
             .find(|r| r.tmux_name == review_name)
-            .ok_or_else(|| IpcError::new("E_INTERNAL", "review session vanished after spawn"))?;
+            .ok_or_else(|| {
+                IpcError::new(codes::E_INTERNAL, "review session vanished after spawn")
+            })?;
         s.set_session_kind(row.id, "review", Some(source.id))?;
         let _ = s.set_claude_session_id(row.id, &claude_id);
         let _ = s.set_started_at(row.id, now_unix());
@@ -107,9 +114,7 @@ pub async fn spawn_review(
     }
 
     // 6. Return the tagged review row.
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = lock(store)?;
     s.get_session_by_id(review_id)?
-        .ok_or_else(|| IpcError::new("E_INTERNAL", "review row missing after tag"))
+        .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "review row missing after tag"))
 }

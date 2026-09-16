@@ -1,4 +1,4 @@
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use async_trait::async_trait;
 use serde::Serialize;
@@ -43,6 +43,69 @@ pub trait TmuxExec: Send + Sync {
     /// Returns an empty vec if claude CLI is not installed or the command fails —
     /// the fleet treats missing Claude agent data as degraded-gracefully.
     async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow>;
+    /// `sessionId → transcript mtime (unix s)` for the given ids; ids that are not
+    /// valid Claude session ids are skipped. `Some(map)` when the call succeeded
+    /// (possibly empty: no transcript found, or no valid id to ask about);
+    /// `None` on any failure (spawn error, non-zero exit, timeout), so callers
+    /// can tell "unknown" apart from "no transcript".
+    async fn transcript_mtimes(
+        &self,
+        ids: &[String],
+    ) -> Option<std::collections::HashMap<String, i64>> {
+        let _ = ids;
+        Some(std::collections::HashMap::new())
+    }
+    /// The Claude account this host is currently logged into, read from its
+    /// `~/.claude.json` `oauthAccount`. `None` means "could not tell" (ssh
+    /// failure, file missing/unparseable, logged out, or an executor that
+    /// does not implement it) — reconcile then leaves the host's stored
+    /// account link untouched; it never clears it. Only `Some` with a uuid
+    /// can relink a host (see `service::hosts::sync_host_account`).
+    ///
+    /// The default is `None`: `LocalTmux` keeps it, because `local` is
+    /// synced by `service::hosts::sync_local_account` (an injectable-home
+    /// file read, exercised by its own tests) — implementing it here too
+    /// would probe `local` twice per pass. `RemoteTmux` overrides it.
+    async fn read_oauth_account(&self) -> Option<crate::service::hosts::OauthAccount> {
+        None
+    }
+}
+
+/// Shell script printing `<sessionId>\t<mtime>` for the first
+/// `$HOME/.claude/projects/*/<sessionId>.jsonl` found per id. `date -r <file>
+/// +%s` behaves the same on GNU and BSD. Every id is validated as a Claude
+/// session id and shell-quoted; `None` when no id survives validation.
+pub fn transcript_mtimes_script(ids: &[String]) -> Option<String> {
+    let valid: Vec<String> = ids
+        .iter()
+        .filter(|id| crate::validate::claude_session_id(id).is_ok())
+        .map(|id| quote(id))
+        .collect();
+    if valid.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "for id in {}; do for f in \"$HOME\"/.claude/projects/*/\"$id\".jsonl; do \
+         if [ -f \"$f\" ]; then printf '%s\\t%s\\n' \"$id\" \"$(date -r \"$f\" +%s)\"; break; fi; \
+         done; done",
+        valid.join(" ")
+    ))
+}
+
+/// Parse [`transcript_mtimes_script`] output. Lines that are not exactly
+/// `<valid session id>\t<i64>` (login-shell noise, a failed `date`) are
+/// ignored.
+pub fn parse_mtimes(stdout: &str) -> std::collections::HashMap<String, i64> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let (id, mtime) = line.split_once('\t')?;
+            if mtime.contains('\t') || crate::validate::claude_session_id(id).is_err() {
+                return None;
+            }
+            Some((id.to_string(), mtime.trim().parse::<i64>().ok()?))
+        })
+        .collect()
 }
 
 pub struct LocalTmux;
@@ -82,7 +145,7 @@ impl TmuxExec for LocalTmux {
             .args(["capture-pane", "-t", name, "-p"])
             .output()
             .await
-            .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
+            .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn tmux failed: {e}")))?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
@@ -92,11 +155,18 @@ impl TmuxExec for LocalTmux {
     }
     async fn capture_pane_scrollback(&self, name: &str, lines: u32) -> Result<String, IpcError> {
         let start = scrollback_start(lines);
-        let output = tokio::process::Command::new("tmux")
-            .args(["capture-pane", "-t", name, "-S", &start, "-p"])
-            .output()
-            .await
-            .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
+        // Bounded like the remote path (30 s): the Conversation tab's probe
+        // polls this every 2 s, and a wedged local tmux server must not
+        // hang it.
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            tokio::process::Command::new("tmux")
+                .args(["capture-pane", "-t", name, "-S", &start, "-p"])
+                .output(),
+        )
+        .await
+        .map_err(|_| IpcError::new(codes::E_TIMEOUT, "tmux capture-pane timed out"))?
+        .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn tmux failed: {e}")))?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
@@ -114,6 +184,23 @@ impl TmuxExec for LocalTmux {
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
             .unwrap_or_else(|| "[]".to_string());
         crate::claude_agents::parse_claude_agents_json(&json)
+    }
+    async fn transcript_mtimes(
+        &self,
+        ids: &[String],
+    ) -> Option<std::collections::HashMap<String, i64>> {
+        let Some(script) = transcript_mtimes_script(ids) else {
+            return Some(std::collections::HashMap::new());
+        };
+        // No login shell: the script needs only `$HOME`, which is inherited.
+        match tokio::process::Command::new("bash")
+            .args(["-c", &script])
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => Some(parse_mtimes(&String::from_utf8_lossy(&o.stdout))),
+            _ => None,
+        }
     }
 }
 
@@ -169,7 +256,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
         if is_no_server_running(&combined) {
             return Ok(Vec::new());
         }
-        Err(IpcError::new("E_TMUX", combined.trim()))
+        Err(IpcError::new(codes::E_TMUX, combined.trim()))
     }
 
     async fn new_session(
@@ -196,7 +283,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             Ok(())
         } else {
             Err(IpcError::new(
-                "E_TMUX",
+                codes::E_TMUX,
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
             ))
         }
@@ -209,7 +296,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             Ok(())
         } else {
             Err(IpcError::new(
-                "E_TMUX",
+                codes::E_TMUX,
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
             ))
         }
@@ -219,13 +306,13 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
         let trimmed = new.trim();
         if trimmed.is_empty() {
             return Err(IpcError::new(
-                "E_TMUX",
+                codes::E_TMUX,
                 "new session name must not be empty",
             ));
         }
         if trimmed.contains(|c: char| c.is_whitespace() || c == '.' || c == ':') {
             return Err(IpcError::new(
-                "E_TMUX",
+                codes::E_TMUX,
                 "tmux session name must not contain whitespace, `.`, or `:`",
             ));
         }
@@ -238,7 +325,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             Ok(())
         } else {
             Err(IpcError::new(
-                "E_TMUX",
+                codes::E_TMUX,
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
             ))
         }
@@ -255,7 +342,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             Ok(())
         } else {
             Err(IpcError::new(
-                "E_TMUX",
+                codes::E_TMUX,
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
             ))
         }
@@ -273,7 +360,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             Ok(())
         } else {
             Err(IpcError::new(
-                "E_TMUX",
+                codes::E_TMUX,
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
             ))
         }
@@ -313,6 +400,32 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             .unwrap_or_else(|| "[]".to_string());
         crate::claude_agents::parse_claude_agents_json(&json)
     }
+    async fn transcript_mtimes(
+        &self,
+        ids: &[String],
+    ) -> Option<std::collections::HashMap<String, i64>> {
+        let Some(script) = transcript_mtimes_script(ids) else {
+            return Some(std::collections::HashMap::new());
+        };
+        // `remote_bash` bounds the call (its timeout surfaces as `Err`); an
+        // unreachable host is ssh exiting 255 — both are failures, not "no
+        // transcript".
+        match self.remote_bash(&script).await {
+            Ok(o) if o.status.success() => Some(parse_mtimes(&String::from_utf8_lossy(&o.stdout))),
+            _ => None,
+        }
+    }
+    async fn read_oauth_account(&self) -> Option<crate::service::hosts::OauthAccount> {
+        // Same script section `add_host`'s probe runs, on its own. The
+        // script itself never fails (`|| true`), so a non-zero exit is ssh
+        // (unreachable / timeout) — "could not tell", not "logged out".
+        let output = self
+            .remote_bash(crate::service::hosts::OAUTH_ACCOUNT_SCRIPT)
+            .await
+            .ok()
+            .filter(|o| o.status.success())?;
+        crate::service::hosts::parse_oauth_account(&String::from_utf8_lossy(&output.stdout))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -345,13 +458,17 @@ pub async fn list_local_sessions() -> Result<Vec<TmuxSession>, IpcError> {
             if is_no_server_running(&stderr) {
                 Ok(Vec::new())
             } else {
-                Err(IpcError::new("E_TMUX", stderr.trim()))
+                Err(IpcError::new(codes::E_TMUX, stderr.trim()))
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Err(IpcError::new("E_TMUX", "tmux binary not found on PATH"))
-        }
-        Err(e) => Err(IpcError::new("E_TMUX", format!("spawn tmux failed: {e}"))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(IpcError::new(
+            codes::E_TMUX,
+            "tmux binary not found on PATH",
+        )),
+        Err(e) => Err(IpcError::new(
+            codes::E_TMUX,
+            format!("spawn tmux failed: {e}"),
+        )),
     }
 }
 
@@ -412,7 +529,7 @@ fn parse_sessions_checked(input: &str) -> Result<Vec<TmuxSession>, IpcError> {
     }
     let sample: String = first.chars().take(80).collect();
     Err(IpcError::new(
-        "E_TMUX",
+        codes::E_TMUX,
         format!("unparseable tmux list-sessions output: {sample:?}"),
     ))
 }
@@ -488,12 +605,12 @@ pub async fn new_session(
     let output = cmd
         .output()
         .await
-        .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn tmux failed: {e}")))?;
     if output.status.success() {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(IpcError::new("E_TMUX", stderr.trim()))
+        Err(IpcError::new(codes::E_TMUX, stderr.trim()))
     }
 }
 
@@ -504,13 +621,13 @@ pub async fn rename_session(old: &str, new: &str) -> Result<(), IpcError> {
     let trimmed = new.trim();
     if trimmed.is_empty() {
         return Err(IpcError::new(
-            "E_TMUX",
+            codes::E_TMUX,
             "new session name must not be empty",
         ));
     }
     if trimmed.contains(|c: char| c.is_whitespace() || c == '.' || c == ':') {
         return Err(IpcError::new(
-            "E_TMUX",
+            codes::E_TMUX,
             "tmux session name must not contain whitespace, `.`, or `:`",
         ));
     }
@@ -521,12 +638,12 @@ pub async fn rename_session(old: &str, new: &str) -> Result<(), IpcError> {
         .args(["rename-session", "-t", old, trimmed])
         .output()
         .await
-        .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn tmux failed: {e}")))?;
     if output.status.success() {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(IpcError::new("E_TMUX", stderr.trim()))
+        Err(IpcError::new(codes::E_TMUX, stderr.trim()))
     }
 }
 
@@ -539,12 +656,12 @@ pub async fn restart_session(name: &str, pane_cmd: &str) -> Result<(), IpcError>
         .args(["respawn-pane", "-k", "-t", &format!("{name}:"), pane_cmd])
         .output()
         .await
-        .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn tmux failed: {e}")))?;
     if output.status.success() {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(IpcError::new("E_TMUX", stderr.trim()))
+        Err(IpcError::new(codes::E_TMUX, stderr.trim()))
     }
 }
 
@@ -578,12 +695,12 @@ pub async fn respawn_pane_in(
         ])
         .output()
         .await
-        .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn tmux failed: {e}")))?;
     if output.status.success() {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(IpcError::new("E_TMUX", stderr.trim()))
+        Err(IpcError::new(codes::E_TMUX, stderr.trim()))
     }
 }
 
@@ -592,12 +709,12 @@ pub async fn kill_session(name: &str) -> Result<(), IpcError> {
         .args(["kill-session", "-t", name])
         .output()
         .await
-        .map_err(|e| IpcError::new("E_TMUX", format!("spawn tmux failed: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn tmux failed: {e}")))?;
     if output.status.success() {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(IpcError::new("E_TMUX", stderr.trim()))
+        Err(IpcError::new(codes::E_TMUX, stderr.trim()))
     }
 }
 
@@ -774,5 +891,159 @@ mod tests {
         let cmd = pane_command_for(None);
         assert!(cmd.contains("cl --continue || cl;"), "got: {cmd}");
         assert!(!cmd.contains("--session-id"), "got: {cmd}");
+    }
+
+    #[test]
+    fn mtimes_script_quotes_ids_and_skips_invalid() {
+        let ids = vec![
+            "44366faf-ae97-426a-91cd-beaf3c74f1d7".to_string(),
+            "'; rm -rf / #".to_string(),
+        ];
+        let s = crate::tmux::transcript_mtimes_script(&ids).unwrap();
+        assert!(s.contains("'44366faf-ae97-426a-91cd-beaf3c74f1d7'"));
+        assert!(!s.contains("rm -rf"));
+        assert!(s.contains("date -r"));
+        assert!(crate::tmux::transcript_mtimes_script(&["bad".into()]).is_none());
+    }
+
+    #[test]
+    fn mtimes_script_runs_against_a_real_projects_tree() {
+        // The script itself, through `bash -c` with a throwaway $HOME: finds a
+        // transcript in any project dir and skips ids with no transcript.
+        let home = tempfile::tempdir().unwrap();
+        let proj = home.path().join(".claude/projects/-Users-u-proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let found = "44366faf-ae97-426a-91cd-beaf3c74f1d7";
+        let missing = "0b8e2f41-9d3c-4a7e-b1f0-6c5d4e3a2b19";
+        std::fs::write(proj.join(format!("{found}.jsonl")), "{}\n").unwrap();
+        let script = transcript_mtimes_script(&[found.to_string(), missing.to_string()]).unwrap();
+        let out = std::process::Command::new("bash")
+            .args(["-c", &script])
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let m = parse_mtimes(&String::from_utf8_lossy(&out.stdout));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert_eq!(m.len(), 1, "{m:?}");
+        assert!(
+            (now - m[found]).abs() < 120,
+            "mtime {} vs now {now}",
+            m[found]
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_read_oauth_account_parses_json_and_is_none_when_it_cannot_tell() {
+        use crate::ssh_fake::{FakeSsh, Match, Reply};
+        let tmux = |fake: &FakeSsh| RemoteTmux {
+            client: fake.clone(),
+            host: "h".to_string(),
+        };
+
+        // Logged in: the compact JSON `jq -c .oauthAccount` prints.
+        let fake = FakeSsh::new();
+        fake.on(
+            Match::script_contains(".claude.json"),
+            Reply::ok(r#"{"accountUuid":"acc-2","emailAddress":"new@x.com","seatTier":null}"#),
+        );
+        let acc = tmux(&fake)
+            .read_oauth_account()
+            .await
+            .expect("a logged-in host yields its account");
+        assert_eq!(acc.uuid.as_deref(), Some("acc-2"));
+        assert_eq!(acc.email.as_deref(), Some("new@x.com"));
+
+        // Logged out / no file: the script prints nothing (or `null`) and
+        // still exits 0 — no account, never an error.
+        for stdout in ["", "\n", "null\n", "{}\n"] {
+            let fake = FakeSsh::new();
+            fake.on(Match::Any, Reply::ok(stdout));
+            assert!(
+                tmux(&fake).read_oauth_account().await.is_none(),
+                "stdout {stdout:?} must not yield an account"
+            );
+        }
+
+        // Unreachable host (ssh exit 255) → None.
+        let fake = FakeSsh::new();
+        fake.unreachable("h");
+        assert!(tmux(&fake).read_oauth_account().await.is_none());
+
+        // Spawn error → None.
+        let fake = FakeSsh::new();
+        fake.on(
+            Match::Any,
+            Reply::SpawnError {
+                message: "no ssh".into(),
+            },
+        );
+        assert!(tmux(&fake).read_oauth_account().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn remote_transcript_mtimes_is_none_on_failure_and_some_on_success() {
+        use crate::ssh_fake::{FakeSsh, Match, Reply};
+        let id = "44366faf-ae97-426a-91cd-beaf3c74f1d7".to_string();
+        let ids = std::slice::from_ref(&id);
+        let tmux = |fake: &FakeSsh| RemoteTmux {
+            client: fake.clone(),
+            host: "h".to_string(),
+        };
+
+        // Non-zero exit → None (not "no transcript").
+        let fake = FakeSsh::new();
+        fake.on(Match::script_contains("date -r"), Reply::fail(1, "boom"));
+        assert_eq!(tmux(&fake).transcript_mtimes(ids).await, None);
+
+        // Unreachable host (ssh exit 255) → None.
+        let fake = FakeSsh::new();
+        fake.unreachable("h");
+        assert_eq!(tmux(&fake).transcript_mtimes(ids).await, None);
+
+        // Spawn error → None.
+        let fake = FakeSsh::new();
+        fake.on(
+            Match::Any,
+            Reply::SpawnError {
+                message: "no ssh".into(),
+            },
+        );
+        assert_eq!(tmux(&fake).transcript_mtimes(ids).await, None);
+
+        // Success: a map, possibly empty.
+        let fake = FakeSsh::new();
+        fake.on(
+            Match::script_contains("date -r"),
+            Reply::ok(&format!("{id}\t1779999999\n")),
+        );
+        let got = tmux(&fake).transcript_mtimes(ids).await;
+        assert_eq!(got.and_then(|m| m.get(&id).copied()), Some(1_779_999_999));
+        let fake = FakeSsh::new();
+        fake.on(Match::script_contains("date -r"), Reply::ok(""));
+        assert_eq!(
+            tmux(&fake).transcript_mtimes(ids).await,
+            Some(std::collections::HashMap::new())
+        );
+
+        // No valid id: nothing to ask, not a failure.
+        let fake = FakeSsh::new();
+        assert_eq!(
+            tmux(&fake).transcript_mtimes(&["bad".into()]).await,
+            Some(std::collections::HashMap::new())
+        );
+        assert!(fake.calls().is_empty());
+    }
+
+    #[test]
+    fn parse_mtimes_reads_tab_lines_and_ignores_noise() {
+        let m = crate::tmux::parse_mtimes(
+            "motd\n44366faf-ae97-426a-91cd-beaf3c74f1d7\t1779999999\nx\tnotanumber\n",
+        );
+        assert_eq!(m.len(), 1);
+        assert_eq!(m["44366faf-ae97-426a-91cd-beaf3c74f1d7"], 1_779_999_999);
     }
 }

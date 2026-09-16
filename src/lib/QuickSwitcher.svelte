@@ -7,12 +7,14 @@
   // the name. The chord is taken even while the terminal has focus (VS Code
   // does the same for its quick open), so the switcher is reachable from the
   // state the user is in 90% of the time.
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import Modal from './Modal.svelte';
   import PickerList, { optionId } from './PickerList.svelte';
   import type { PickerItem } from './PickerList.svelte';
   import { sessions } from './sessions';
   import { projects } from './projects';
+  import { hosts } from './hosts';
+  import { requestHostsView } from './app_views';
   import { selectedSession, selectSession } from './selection';
   import { requestNewSession } from './new_session_request';
   import { push } from './toasts';
@@ -49,7 +51,7 @@
   });
   onDestroy(unsubSelected);
 
-  const entries = $derived(buildEntries($sessions, $projects));
+  const entries = $derived(buildEntries($sessions, $projects, $hosts));
   const ranked: SwitcherEntry[] = $derived(rankEntries(entries, query, $recentSessions));
   const items: PickerItem[] = $derived(
     ranked.map((e) => ({
@@ -57,8 +59,8 @@
       label: e.label,
       description: e.description,
       meta: e.meta,
-      group: e.kind === 'session' ? 'Sessions' : 'Projects',
-      testid: e.kind === 'session' ? 'switcher-session' : 'switcher-project',
+      group: e.kind === 'session' ? 'Sessions' : e.kind === 'host' ? 'Hosts' : 'Projects',
+      testid: `switcher-${e.kind}`,
     })),
   );
 
@@ -121,6 +123,12 @@
     } else if (e.kind === 'project' && e.project) {
       requestNewSession({ project: e.project });
       hide();
+    } else if (e.kind === 'host' && e.host) {
+      const alias = e.host.alias;
+      hide();
+      // After the switcher has unmounted and handed focus back, so the Hosts
+      // view remembers the right element to restore on close.
+      void tick().then(() => requestHostsView(alias));
     }
   }
 
@@ -163,7 +171,7 @@
       aria-activedescendant={activeKey !== null ? optionId(LIST_ID, activeKey) : undefined}
       bind:value={query}
       onkeydown={onInputKeydown}
-      placeholder="Jump to a session… (name, project, host, branch, status)"
+      placeholder="Jump to a session or host… (name, project, host, branch, status)"
       autocomplete="off"
       spellcheck="false"
     />

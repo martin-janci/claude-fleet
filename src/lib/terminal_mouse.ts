@@ -3,7 +3,7 @@
 // stay in the component; this controller reads and writes them through
 // `MouseHost` and owns only the in-progress gesture state.
 import { encodeMouse, type Screen } from './ansi';
-import type { CellPos } from './terminal_selection';
+import { expandSelection, modeForClickCount, type CellPos, type SelectMode } from './terminal_selection';
 import { copyOnSelect } from './prefs';
 import { get } from 'svelte/store';
 
@@ -31,6 +31,11 @@ const DRAG_PX = 4;
 export function createMouseController(host: MouseHost) {
   /** True while a drag-select is in progress (between mousedown and mouseup). */
   let selecting = false;
+  /** Granularity of the drag in progress (click count: cell / word / line)
+   *  and the raw cell it started from. The component's selAnchor/selFocus
+   *  hold the *expanded* endpoints, so the raw anchor is kept here. */
+  let selectMode: SelectMode = 'cell';
+  let selectAnchor: CellPos | null = null;
 
   // ─── Mouse forwarding state ───────────────────────────────────────────
   /** Which button (0/1/2, encoded as cb) is currently pressed. Null = none. */
@@ -72,6 +77,58 @@ export function createMouseController(host: MouseHost) {
     return { row: row - 1, col: col - 1 };
   }
 
+  /** Set the component's selection endpoints for the gesture in progress:
+   *  the raw anchor + this focus, expanded to the gesture's granularity. */
+  function applySelection(focus: CellPos) {
+    const screen = host.screen();
+    if (!selectAnchor || !screen) return;
+    const { start, end } = expandSelection(selectMode, selectAnchor, focus, screen.cells, host.lastCols());
+    host.setSelAnchor(start);
+    host.setSelFocus(end);
+  }
+
+  /** Start a local (non-forwarded) selection gesture from `rawAnchor` with
+   *  the pointer at `cell`, tracking the drag on window-level listeners so
+   *  it keeps following the pointer outside the grid. On release a
+   *  non-empty selection is copied when the pref says so; a plain
+   *  single-click that moved nowhere clears any selection instead. */
+  function beginLocalSelection(e: MouseEvent, mode: SelectMode, rawAnchor: CellPos, cell: CellPos) {
+    // Tear down any prior in-progress drag before starting a new one, so a
+    // missed mouseup can't leave a stale handler that wipes this selection.
+    removeWindowListeners?.();
+    (e.currentTarget as HTMLElement | null)?.focus();
+    selecting = true;
+    selectMode = mode;
+    selectAnchor = rawAnchor;
+    applySelection(cell);
+    const handleMove = (ev: MouseEvent) => {
+      if (!selecting) return;
+      applySelection(cellFromEvent(ev));
+    };
+    const handleUp = () => {
+      if (!selecting) return;
+      selecting = false;
+      removeWindowListeners?.();
+      const selAnchor = host.selAnchor();
+      const selFocus = host.selFocus();
+      const nonEmpty =
+        selAnchor && selFocus &&
+        (mode !== 'cell' || selAnchor.row !== selFocus.row || selAnchor.col !== selFocus.col);
+      if (nonEmpty) {
+        if (get(copyOnSelect)) void host.copySelection();
+      } else {
+        host.clearSelection();
+      }
+    };
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', handleUp);
+    removeWindowListeners = () => {
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseup', handleUp);
+      removeWindowListeners = null;
+    };
+  }
+
   function onWheel(e: WheelEvent) {
     if (e.altKey) return;
     const screen = host.screen();
@@ -106,54 +163,28 @@ export function createMouseController(host: MouseHost) {
     if (!host.ptyOpen() || !screen) return;
     // Right-click is reserved for our context menu (handled by onContextMenu).
     if (e.button === 2) return;
-    // Left-button only for selection; other buttons fall through to app forwarding.
-    if (e.button === 0 && !screen.mouseEnabled && !e.altKey) {
-      // Plain shell: begin a local drag-selection.
-      e.preventDefault();
-      // Tear down any prior in-progress drag before starting a new one, so a
-      // missed mouseup can't leave a stale handler that wipes this selection.
-      removeWindowListeners?.();
-      (e.currentTarget as HTMLElement | null)?.focus();
+    // Left button, no Option: a local selection gesture. Click count picks
+    // the granularity (double = word, triple = line) and Shift+click extends
+    // the existing selection from its anchor — the text-input conventions.
+    if (e.button === 0 && !e.altKey) {
+      const mode = modeForClickCount(e.detail);
       const cell = cellFromEvent(e);
-      host.setSelAnchor(cell);
-      host.setSelFocus(cell);
-      selecting = true;
-      const handleMove = (ev: MouseEvent) => {
-        if (!selecting) return;
-        host.setSelFocus(cellFromEvent(ev));
-      };
-      const handleUp = () => {
-        if (!selecting) return;
-        selecting = false;
-        removeWindowListeners?.();
-        // Only copy a real drag-selection; a plain click clears any selection.
-        const selAnchor = host.selAnchor();
-        const selFocus = host.selFocus();
-        if (
-          selAnchor && selFocus &&
-          (selAnchor.row !== selFocus.row || selAnchor.col !== selFocus.col)
-        ) {
-          if (get(copyOnSelect)) void host.copySelection();
-        } else {
-          host.clearSelection();
-        }
-      };
-      window.addEventListener('mousemove', handleMove);
-      window.addEventListener('mouseup', handleUp);
-      removeWindowListeners = () => {
-        window.removeEventListener('mousemove', handleMove);
-        window.removeEventListener('mouseup', handleUp);
-        removeWindowListeners = null;
-      };
-      return;
-    }
-    // Mouse reporting ON, left button, no Option → defer: a drag becomes a local
-    // selection, a click (no movement) forwards to the app.
-    if (e.button === 0 && screen.mouseEnabled && !e.altKey) {
+      const prevAnchor = host.selAnchor();
+      const extend = e.shiftKey && mode === 'cell' && prevAnchor !== null;
+      if (!screen.mouseEnabled || mode !== 'cell' || extend) {
+        // Plain shell, a multi-click, or a Shift-extend: select locally now.
+        // (A multi-click is never forwarded even with mouse reporting on —
+        // tmux's own word/line selection would land in *its* buffer, not the
+        // clipboard the user is about to paste from.)
+        e.preventDefault();
+        beginLocalSelection(e, mode, extend ? prevAnchor! : cell, cell);
+        return;
+      }
+      // Mouse reporting ON, single click → defer: a drag becomes a local
+      // selection, a click (no movement) forwards to the app.
       e.preventDefault();
       removeWindowListeners?.(); // drop any stale in-progress drag first
       (e.currentTarget as HTMLElement | null)?.focus();
-      const cell = cellFromEvent(e);
       pendingPress = { cell, startX: e.clientX, startY: e.clientY };
       host.clearSelection();
       const handleMove = (ev: MouseEvent) => {
@@ -164,9 +195,10 @@ export function createMouseController(host: MouseHost) {
         if (moved && !selecting) {
           // Promote to a local selection.
           selecting = true;
-          host.setSelAnchor(pendingPress.cell);
+          selectMode = 'cell';
+          selectAnchor = pendingPress.cell;
         }
-        if (selecting) host.setSelFocus(cellFromEvent(ev));
+        if (selecting) applySelection(cellFromEvent(ev));
       };
       const handleUp = (ev: MouseEvent) => {
         removeWindowListeners?.();
@@ -256,6 +288,7 @@ export function createMouseController(host: MouseHost) {
   /** Reset any in-progress drag state (on a session switch). */
   function reset() {
     selecting = false;
+    selectAnchor = null;
     pendingPress = null;
   }
 

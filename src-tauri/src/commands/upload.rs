@@ -144,7 +144,7 @@ pub async fn upload_to_session(
 
     // Resolve the staging dir (absolute, so the returned paths are pasteable).
     let home = if is_local {
-        std::env::var("HOME").map_err(|_| IpcError::new("E_UPLOAD", "HOME not set"))?
+        std::env::var("HOME").map_err(|_| IpcError::new(codes::E_UPLOAD, "HOME not set"))?
     } else {
         ssh.remote_home(&args.host_alias).await?
     };
@@ -154,11 +154,11 @@ pub async fn upload_to_session(
 
     if is_local {
         std::fs::create_dir_all(&dir)
-            .map_err(|e| IpcError::new("E_UPLOAD", format!("mkdir {dir}: {e}")))?;
+            .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("mkdir {dir}: {e}")))?;
         for (src, name) in args.local_paths.iter().zip(&names) {
             let dest = format!("{dir}/{name}");
             std::fs::copy(src, &dest)
-                .map_err(|e| IpcError::new("E_UPLOAD", format!("copy {src}: {e}")))?;
+                .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("copy {src}: {e}")))?;
             remote_paths.push(dest);
         }
     } else {
@@ -167,7 +167,7 @@ pub async fn upload_to_session(
             .await?;
         if !mkdir.status.success() {
             return Err(IpcError::new(
-                "E_UPLOAD",
+                codes::E_UPLOAD,
                 format!(
                     "mkdir on {} failed: {}",
                     args.host_alias,

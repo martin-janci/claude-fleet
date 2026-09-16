@@ -1,6 +1,7 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tick } from 'svelte';
+import { get } from 'svelte/store';
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -9,7 +10,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import SettingsDialog from './SettingsDialog.svelte';
 import { hosts } from './hosts';
-import { accounts as accountsStore } from './accounts';
+import { composerPresets, resetComposerPresets, DEFAULT_PRESETS } from './composer_presets';
 
 const sample = [
   { alias: 'local', ssh_alias: null, reachable: true, claude_version: '2.1.145', tmux_version: '3.5a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
@@ -61,54 +62,52 @@ beforeEach(() => {
 });
 
 describe('SettingsDialog', () => {
-  it('renders one row per host', async () => {
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick();
-    const table = await screen.findByTestId('hosts-table');
-    expect(table.textContent).toContain('local');
-    expect(table.textContent).toContain('mefistos');
-  });
-
-  it('local row hides the Remove + Hide buttons', async () => {
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick();
-    const rows = document.querySelectorAll('.hosts-table tbody tr');
-    const localRow = Array.from(rows).find((r) => r.textContent?.includes('local'));
-    expect(localRow?.querySelector('button[aria-label="Remove"]')).toBeNull();
-  });
-
-  it('clicking Re-probe invokes probe_host', async () => {
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick();
-    const rows = document.querySelectorAll('.hosts-table tbody tr');
-    const mefRow = Array.from(rows).find((r) => r.textContent?.includes('mefistos'))!;
-    const probeBtn = mefRow.querySelector('button[aria-label="Re-probe"]') as HTMLButtonElement;
-    await fireEvent.click(probeBtn);
-    await tick();
-    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.some((c) => c[0] === 'probe_host')).toBe(true);
-  });
-
-  it('clicking + Add host opens the AddHostPicker', async () => {
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick();
-    await fireEvent.click(screen.getByTestId('settings-add-host'));
-    await tick(); await tick();
-    expect(screen.getByRole('dialog', { name: 'Add SSH host' })).toBeInTheDocument();
-  });
-
-  it('Account column shows email (seatTier) when account is known', async () => {
+  it('no longer renders the hosts table; one line summarises the hosts instead', async () => {
     hosts.set([
-      { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: 'u1', provisioned: false },
-    ]);
-    accountsStore.set([
-      { uuid: 'u1', email: 'm.janci@32bit.sk', display_name: 'Martin', organization_name: '32bit', organization_uuid: 'org-1', seat_tier: 'max', last_seen_at: 1 },
+      ...sample,
+      { alias: 'nas', ssh_alias: 'nas', reachable: false, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
     ]);
     render(SettingsDialog, { props: { onClose: () => {} } });
     await tick();
-    const cells = await screen.findAllByTestId('account-cell');
-    const mefRow = cells[0];  // single row in this test
-    expect(mefRow.textContent).toContain('m.janci@32bit.sk');
-    expect(mefRow.textContent).toContain('max');
+    expect(screen.queryByTestId('hosts-table')).toBeNull();
+    expect(document.querySelector('.hosts-table')).toBeNull();
+    expect(screen.queryByTestId('settings-add-host')).toBeNull();
+    const line = screen.getByTestId('settings-hosts-line');
+    expect(line.textContent).toContain('Hosts');
+    expect(screen.getByTestId('settings-hosts-summary').textContent).toBe('3 configured · 1 offline');
+    expect(screen.getByTestId('settings-open-hosts').textContent).toMatch(/^Open Hosts (⌘I|Ctrl\+Shift\+H)$/);
+  });
+
+  it('Open Hosts closes Settings and requests the Hosts view', async () => {
+    const { hostsViewRequest } = await import('./app_views');
+    hostsViewRequest.set(null);
+    const onClose = vi.fn();
+    render(SettingsDialog, { props: { onClose } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('settings-open-hosts'));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(get(hostsViewRequest)).toEqual({ host: null }));
+    hostsViewRequest.set(null);
+  });
+
+  it('provisioning refreshes the host-token cache the Hosts view reads', async () => {
+    const { hostTokens: tokenCache } = await import('./host_actions');
+    tokenCache.set(new Map());
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    const routed = inv.getMockImplementation() as (cmd: string, ...rest: unknown[]) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, ...rest: unknown[]) => {
+      if (cmd === 'mcp_status') return { ...mcpStatusObj, enabled: true, running: true };
+      if (cmd === 'provision_hosts') return [];
+      return routed(cmd, ...rest);
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick(); await tick();
+    expect(inv.mock.calls.some((c) => c[0] === 'list_host_tokens')).toBe(false);
+    const provision = (await screen.findByTestId('provision-hosts')) as HTMLButtonElement;
+    await waitFor(() => expect(provision).not.toBeDisabled());
+    await fireEvent.click(provision);
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'list_host_tokens')).toBe(true));
+    await waitFor(() => expect(get(tokenCache).get('mefistos')?.mode).toBe('full'));
   });
 
   it('renders the Control API section and toggling enable calls mcp_configure', async () => {
@@ -138,48 +137,6 @@ describe('SettingsDialog', () => {
     );
     expect(call).toBeDefined();
     expect((call![1] as { args: { confirm_destructive: boolean } }).args.confirm_destructive).toBe(true);
-  });
-
-  it('Token column shows the mode for provisioned hosts and "none" otherwise', async () => {
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick(); await tick();
-    const cells = await screen.findAllByTestId('token-cell');
-    const byRow = (alias: string) =>
-      Array.from(document.querySelectorAll('.hosts-table tbody tr'))
-        .find((r) => r.textContent?.includes(alias))!
-        .querySelector('[data-testid="token-cell"]')!;
-    expect(cells.length).toBe(2);
-    expect(byRow('local').textContent).toContain('none');
-    const mefSelect = byRow('mefistos').querySelector('select') as HTMLSelectElement;
-    expect(mefSelect.value).toBe('full');
-    // Changing the mode invokes set_host_token_mode with the new value.
-    await fireEvent.change(mefSelect, { target: { value: 'readonly' } });
-    await tick();
-    const call = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.find(
-      (c) => c[0] === 'set_host_token_mode',
-    );
-    expect(call).toBeDefined();
-    expect((call![1] as { hostAlias: string; mode: string }).mode).toBe('readonly');
-    // Rotate invokes rotate_host_token for that host only.
-    const rotate = byRow('mefistos').querySelector('button[aria-label="Rotate token"]') as HTMLButtonElement;
-    await fireEvent.click(rotate);
-    await tick();
-    const rot = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.find(
-      (c) => c[0] === 'rotate_host_token',
-    );
-    expect((rot![1] as { hostAlias: string }).hostAlias).toBe('mefistos');
-  });
-
-  it('Account column shows — when host has no account', async () => {
-    hosts.set([
-      { alias: 'noaccount', ssh_alias: 'noaccount', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
-    ]);
-    accountsStore.set([]);
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick();
-    const cells = await screen.findAllByTestId('account-cell');
-    const noRow = cells[0];
-    expect(noRow.textContent?.trim()).toBe('—');
   });
 });
 
@@ -495,5 +452,32 @@ describe('SettingsDialog projects (W5 G3)', () => {
     expect(screen.getByTestId('projects-preview-local')).toHaveTextContent('/srv/env/<repo>');
     // remote hosts never see the env var
     expect(screen.getByTestId('projects-preview-mefistos')).toHaveTextContent('~/projects/<repo>');
+  });
+
+  it('lists the composer presets and edits them in place', async () => {
+    resetComposerPresets();
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick();
+    const section = screen.getByTestId('composer-section');
+    expect(section.textContent).toContain('Conversation composer');
+    const labels = screen.getAllByTestId('preset-label') as HTMLInputElement[];
+    expect(labels).toHaveLength(DEFAULT_PRESETS.length);
+    expect(labels[0].value).toBe(DEFAULT_PRESETS[0].label);
+
+    await fireEvent.input(labels[0], { target: { value: 'Wipe' } });
+    expect(get(composerPresets)[0].label).toBe('Wipe');
+    const texts = screen.getAllByTestId('preset-text') as HTMLTextAreaElement[];
+    await fireEvent.input(texts[0], { target: { value: '/clear now' } });
+    expect(get(composerPresets)[0].text).toBe('/clear now');
+
+    await fireEvent.click(screen.getByTestId('preset-add'));
+    expect(get(composerPresets)).toHaveLength(DEFAULT_PRESETS.length + 1);
+    expect(screen.getAllByTestId('preset-label')).toHaveLength(DEFAULT_PRESETS.length + 1);
+
+    await fireEvent.click(screen.getAllByTestId('preset-remove')[0]);
+    expect(get(composerPresets)[0].label).toBe(DEFAULT_PRESETS[1].label);
+
+    await fireEvent.click(screen.getByTestId('preset-reset'));
+    expect(get(composerPresets)).toEqual(DEFAULT_PRESETS);
   });
 });

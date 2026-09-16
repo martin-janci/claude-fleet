@@ -6,6 +6,8 @@ import {
   claudeStatusColor,
   claudeStatusLabel,
   contextLevel,
+  contextColor,
+  contextTint,
   countNeedsYou,
   displayName,
   formatElapsed,
@@ -103,6 +105,17 @@ describe('contextLevel', () => {
   });
 });
 
+describe('contextColor', () => {
+  it('uses the shared usage theme tokens for warn and crit', () => {
+    expect(contextColor('crit')).toBe('var(--usage-crit)');
+    expect(contextColor('warn')).toBe('var(--usage-warn)');
+    expect(contextColor('ok')).toBe('#50c86e');
+    expect(contextColor(null)).toBe('transparent');
+    expect(contextTint('crit')).toBe('color-mix(in srgb, var(--usage-crit) 33%, transparent)');
+    expect(contextTint(null)).toBe('transparent');
+  });
+});
+
 describe('severity', () => {
   // Derived from TRIAGE_BUCKETS, so this order is P13's, not the old one:
   // a session waiting on the user now outranks a stuck one.
@@ -118,6 +131,18 @@ describe('severity', () => {
     for (let i = 1; i < order.length; i++) expect(order[i - 1]).toBeGreaterThan(order[i]);
     // A row with no signals at all ranks with the idle ones, not below them.
     expect(severity(row())).toBe(severity(row({ claude_status: 'idle' })));
+  });
+
+  it('external rows sit below everything, even a signal-less row, regardless of status', () => {
+    const quiet = severity(row());
+    for (const s of [
+      row({ kind: 'external', claude_status: 'blocked' }),
+      row({ kind: 'external', stuck_kind: 'oom' }),
+      row({ kind: 'external', claude_status: 'failed' }),
+    ]) {
+      expect(severity(s)).toBe(0);
+      expect(severity(s)).toBeLessThan(quiet);
+    }
   });
 
   it('worstSeverityByProject takes the max per project and skips orphans', () => {
@@ -147,6 +172,12 @@ describe('stuck transitions', () => {
     ];
     const fresh = newlyStuck(prev, next);
     expect(fresh.map((r) => r.stuck_kind)).toEqual(['auth_menu', 'reconnect']);
+  });
+
+  it('ignores external rows in the stuck map and in new-stuck detection', () => {
+    const ext = row({ kind: 'external', stuck_kind: 'oom' });
+    expect(stuckSnapshot([ext]).size).toBe(0);
+    expect(newlyStuck(new Map(), [ext])).toEqual([]);
   });
 
   it('stuckMessage uses the friendly name when asked and available', () => {
@@ -185,7 +216,6 @@ describe('outcome display', () => {
     expect(ciStatusLabel(null)).toBe('');
   });
 });
-
 
 describe('triage rank', () => {
   const opts = { idleSecs: 1800, now: 10_000 };
@@ -272,5 +302,19 @@ describe('triage rank', () => {
     const freshStuck = row({ stuck_kind: 'oom', stuck_since: 10_000 });
     expect(rank(freshStuck, opts).score).toBeGreaterThan(rank(ancientWorking, opts).score);
     expect(rank(ancientWorking, opts).ageSecs).toBeLessThan(1_000_000);
+  });
+
+  it('never puts an external row in a needs-you bucket, however alarming its fields', () => {
+    for (const s of [
+      row({ kind: 'external', stuck_kind: 'oom' }),
+      row({ kind: 'external', claude_status: 'blocked' }),
+      row({ kind: 'external', claude_status: 'failed' }),
+      row({ kind: 'external', status: 'ghost' }),
+    ]) {
+      expect(needsYou(s, opts)).toBe(false);
+      expect(classify(s, opts)).toBe('idle');
+    }
+    expect(classify(row({ kind: 'external', claude_status: 'working' }), opts)).toBe('working');
+    expect(countNeedsYou([row({ kind: 'external', stuck_kind: 'oom' }), row({ stuck_kind: 'oom' })], opts)).toBe(1);
   });
 });

@@ -14,6 +14,7 @@ mod mcp;
 mod no_eprintln_tests;
 mod projects;
 mod pty;
+mod repo_url;
 mod service;
 mod shell;
 mod ssh;
@@ -32,19 +33,11 @@ use bootstrap::env::{
 };
 use bootstrap::mcp::maybe_start_mcp;
 use bootstrap::singleton::kill_other_instances;
+use commands::cancel::cancel_command;
 use pty::PtyState;
-use service::tick::spawn_reconcile_tick;
+use service::tick::{spawn_account_usage_tick, spawn_reconcile_tick};
 use std::sync::Mutex;
 use store::Store;
-
-#[tauri::command]
-async fn cancel_command(
-    call_id: u64,
-    reg: tauri::State<'_, std::sync::Arc<cancel::CancellationRegistry>>,
-) -> Result<(), crate::ipc_error::IpcError> {
-    reg.cancel(call_id);
-    Ok(())
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -104,11 +97,18 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             use tauri::Manager;
             let handle = app.handle().clone();
             let bus: std::sync::Arc<dyn crate::events::EventBus> =
                 std::sync::Arc::new(crate::events::AppHandleEventBus::new(handle));
+            // Kept alongside the clone moved into `Store` below: the account
+            // usage poller and its commands emit `account_usage:updated`
+            // straight through the bus, not through a `Store` row mutation
+            // (usage isn't a `Store` row), so they need their own handle to
+            // it as managed state.
+            let bus_for_usage = std::sync::Arc::clone(&bus);
             // The data dir was resolved once, before logging started; IPC
             // handlers read it from managed state instead of re-resolving.
             app.manage(commands::diagnostics::AppDataDir(data_dir.clone()));
@@ -165,6 +165,13 @@ pub fn run() {
             }
             app.manage(std::sync::Arc::clone(&store));
             app.manage(Mutex::new(mcp::McpRuntime::default()));
+            app.manage(std::sync::Arc::clone(&bus_for_usage));
+            // Task 4: one in-memory usage cache for the app's lifetime,
+            // shared by the background poller (below) and the
+            // `list_account_usage` / `refresh_account_usage` commands.
+            let usage_cache =
+                std::sync::Arc::new(Mutex::new(crate::service::account_usage::UsageCache::new()));
+            app.manage(std::sync::Arc::clone(&usage_cache));
             // Start the MCP control API if the user has enabled it (off by
             // default). Reuses the same Store / SshClient / registry as the UI.
             maybe_start_mcp(
@@ -187,6 +194,17 @@ pub fn run() {
                 std::sync::Arc::clone(&store),
                 std::sync::Arc::clone(&ssh_client_for_setup),
             );
+            // Task 4: independent 60s account-usage poll loop. Deliberately
+            // separate from the reconcile tick above (which `reconcile
+            // .interval_secs=0` can disable entirely) so usage keeps polling
+            // on its own cadence; `service::account_usage`'s 5-minute floor
+            // still caps real requests to one per account.
+            spawn_account_usage_tick(
+                std::sync::Arc::clone(&store),
+                std::sync::Arc::clone(&ssh_client_for_setup),
+                std::sync::Arc::clone(&usage_cache),
+                bus_for_usage,
+            );
             Ok(())
         })
         .manage(Mutex::new(PtyState::new()))
@@ -208,6 +226,8 @@ pub fn run() {
             commands::diagnostics::open_log_folder,
             commands::projects::list_projects,
             commands::projects::refresh_projects,
+            commands::projects::add_project,
+            commands::projects::list_github_repos,
             commands::sessions::list_sessions,
             commands::sessions::related_sessions,
             commands::sessions::new_session,
@@ -216,19 +236,22 @@ pub fn run() {
             commands::sessions::inspect_safe_kill,
             commands::sessions::discard_kill_session,
             commands::worktrees::list_worktrees,
+            commands::worktrees::list_host_worktrees,
             commands::worktrees::delete_worktree,
             commands::sessions::repair_session,
             commands::sessions::rename_session,
             commands::sessions::set_session_friendly_name,
             commands::sessions::session_history,
+            commands::sessions::session_conversation,
+            commands::sessions::session_activity,
             commands::sessions::restart_session,
             commands::sessions::send_prompt,
             commands::sessions::spawn_review,
             commands::sessions::recreate_session,
             commands::move_session::move_session,
             commands::sessions::dismiss_ghost_session,
+            commands::sessions::dismiss_agent_session,
             commands::sessions::new_bg_session,
-            commands::sessions::peek_session,
             commands::sessions::purge_project,
             commands::sessions::get_fleet_settings,
             commands::sessions::set_fleet_setting,
@@ -261,6 +284,9 @@ pub fn run() {
             commands::hosts::probe_ssh_alias,
             commands::hosts::remove_host,
             commands::hosts::hide_host,
+            commands::hosts::set_account_nickname,
+            commands::account_usage::list_account_usage,
+            commands::account_usage::refresh_account_usage,
             commands::mcp::mcp_status,
             commands::mcp::mcp_configure,
             commands::mcp::install_fleet_hook,
@@ -272,6 +298,32 @@ pub fn run() {
             commands::mcp::mcp_pending_confirms,
             commands::onboarding::check_local_prereqs,
             commands::onboarding::tunnel_status,
+            commands::assets::catalog_config,
+            commands::assets::catalog_configure,
+            commands::assets::catalog_load,
+            commands::assets::catalog_list_assets,
+            commands::assets::catalog_get_asset,
+            commands::assets::catalog_import_host,
+            commands::assets::assets_scan_hosts,
+            commands::assets::assets_inventory,
+            commands::assets::catalog_plan_sync,
+            commands::assets::catalog_apply_sync,
+            commands::assets::catalog_last_sync,
+            commands::assets::catalog_list_secrets,
+            commands::assets::catalog_set_secret,
+            commands::assets::catalog_delete_secret,
+            commands::assets::catalog_create_asset,
+            commands::assets::catalog_update_asset,
+            commands::assets::catalog_delete_asset,
+            commands::assets::catalog_add_resource,
+            commands::assets::catalog_remove_resource,
+            commands::assets::catalog_lint_asset,
+            commands::assets::catalog_lint_all,
+            commands::assets::catalog_commit_pending,
+            commands::assets::catalog_push,
+            commands::assets::catalog_repo_status,
+            commands::assets::catalog_template,
+            commands::assets::catalog_spawn_author_session,
             pty::pty_open,
             pty::pty_write,
             pty::pty_resize,

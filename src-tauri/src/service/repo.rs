@@ -1,14 +1,18 @@
-//! Shared plumbing for the git-backed Files/History/Branches commands.
+//! Shared plumbing for the git-backed repo services (`repo_read`,
+//! `repo_mutate`) and their Tauri / MCP callers.
 //!
-//! Every command resolves the session's worktree live: ask tmux for the
+//! Every operation resolves the session's worktree live: ask tmux for the
 //! session pane's cwd, then `git rev-parse --show-toplevel`. This is
 //! host-correct for remote sessions. Every interpolated value is shell-quoted
-//! (`shell::quote`); frontend paths/refs/hashes are additionally validated.
+//! (`shell::quote`); caller-supplied paths/refs/hashes are additionally
+//! validated.
 
-use crate::ipc_error::IpcError;
+use crate::ipc_error::lock;
+use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::Store;
+use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -27,14 +31,22 @@ pub const MAX_TREE_ENTRIES: usize = 20_000;
 /// frontend can show a clean "worktree gone" state instead of a raw git error.
 pub const NO_WORKTREE_SENTINEL: &str = "__CF_NO_WORKTREE__";
 
+// The one-field argument struct shared by every per-session repo call.
+// (A `//` comment, not `///`: a struct-level doc would become the schema's
+// top-level `description` once this is served as an MCP tool parameter.)
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "SessionIdParams")]
+pub struct SessionIdArgs {
+    /// Fleet session id (from list_sessions).
+    pub session_id: i64,
+}
+
 /// Resolve a session id to its `(host_alias, tmux_name)`, validating both.
 pub fn session_target(store: &Mutex<Store>, session_id: i64) -> Result<(String, String), IpcError> {
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
-    let sess = s
-        .get_session_by_id(session_id)?
-        .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("session {session_id} not found")))?;
+    let s = lock(store)?;
+    let sess = s.get_session_by_id(session_id)?.ok_or_else(|| {
+        IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found"))
+    })?;
     crate::validate::host_alias(&sess.host_alias)?;
     crate::validate::tmux_name_addressable(&sess.tmux_name)?;
     Ok((sess.host_alias, sess.tmux_name))
@@ -60,27 +72,20 @@ pub async fn run_in_repo(
     host: &str,
     script: &str,
 ) -> Result<std::process::Output, IpcError> {
-    if host == "local" {
-        tokio::process::Command::new("bash")
-            .args(["-lc", script])
-            .output()
-            .await
-            .map_err(|e| IpcError::new("E_REPO", format!("spawn bash: {e}")))
-    } else {
-        ssh.run(
-            host,
-            &["bash", "-lc", &quote(script)],
-            Duration::from_secs(REPO_TIMEOUT_SECS),
-        )
-        .await
-    }
+    crate::ssh::run_shell(
+        ssh.as_ref(),
+        host,
+        script,
+        Duration::from_secs(REPO_TIMEOUT_SECS),
+    )
+    .await
 }
 
 /// Turn a failed `Output` into an `E_REPO` error carrying stderr (or stdout).
 pub fn repo_err(out: &std::process::Output) -> IpcError {
     let stderr = String::from_utf8_lossy(&out.stderr);
     if stderr.contains(NO_WORKTREE_SENTINEL) {
-        return IpcError::new("E_NO_WORKTREE", "worktree directory no longer exists");
+        return IpcError::new(codes::E_NO_WORKTREE, "worktree directory no longer exists");
     }
     let msg = if stderr.trim().is_empty() {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
@@ -88,13 +93,52 @@ pub fn repo_err(out: &std::process::Output) -> IpcError {
         stderr.trim().to_string()
     };
     IpcError::new(
-        "E_REPO",
+        codes::E_REPO,
         if msg.is_empty() {
             "git command failed".to_string()
         } else {
             msg
         },
     )
+}
+
+/// Run `body` in the session's worktree root (`$root`) and fail with
+/// `repo_err` unless the command exits 0. This is `repo_script` +
+/// `run_in_repo` + the success check that every git call otherwise repeats;
+/// callers that must inspect a non-zero exit themselves use the pieces.
+pub async fn run_git(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    tmux_name: &str,
+    body: &str,
+) -> Result<std::process::Output, IpcError> {
+    let out = run_in_repo(ssh, host, &repo_script(tmux_name, body)).await?;
+    if !out.status.success() {
+        return Err(repo_err(&out));
+    }
+    Ok(out)
+}
+
+/// True when `git status --porcelain` output indicates a dirty worktree.
+fn is_dirty(porcelain: &[u8]) -> bool {
+    !String::from_utf8_lossy(porcelain).trim().is_empty()
+}
+
+/// Refuse (`E_DIRTY`) when the session's worktree has uncommitted changes —
+/// the agent may be mid-edit. Guards every checkout.
+pub async fn ensure_clean(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    tmux_name: &str,
+) -> Result<(), IpcError> {
+    let so = run_git(ssh, host, tmux_name, "git -C \"$root\" status --porcelain").await?;
+    if is_dirty(&so.stdout) {
+        return Err(IpcError::new(
+            codes::E_DIRTY,
+            "worktree has uncommitted changes — the agent may have work in progress",
+        ));
+    }
+    Ok(())
 }
 
 /// Post-process raw diff bytes into a `(diff, binary, truncated)` triple,
@@ -169,6 +213,14 @@ mod tests {
         let e = repo_err(&out);
         assert_eq!(e.code, "E_REPO");
         assert!(e.message.contains("not a git repository"));
+    }
+
+    #[test]
+    fn is_dirty_detects_changes() {
+        assert!(!is_dirty(b""));
+        assert!(!is_dirty(b"   \n"));
+        assert!(is_dirty(b" M src/x.rs\n"));
+        assert!(is_dirty(b"?? new.txt\n"));
     }
 
     #[test]

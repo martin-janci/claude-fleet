@@ -178,6 +178,11 @@ async fn reconcile_pass_updates_reachable_hosts_and_keeps_unreachable_ones() {
         "alpha",
         Match::script_contains("tmux capture-pane"),
         Reply::ok("Some tool output\n❯ \n"),
+    )
+    .on_host(
+        "alpha",
+        Match::script_contains(".claude.json"),
+        Reply::ok(r#"{"accountUuid":"acc-alpha","emailAddress":"alpha@x.com"}"#),
     );
     fake.unreachable("beta");
     fake.hanging("gamma");
@@ -200,6 +205,17 @@ async fn reconcile_pass_updates_reachable_hosts_and_keeps_unreachable_ones() {
     assert!(reachable("alpha"), "alpha answered → reachable");
     assert!(!reachable("beta"), "beta refused → unreachable");
     assert!(!reachable("gamma"), "gamma hung → unreachable");
+    // alpha's account link comes from THIS pass's `~/.claude.json` read,
+    // not from a one-off `add_host` probe or a manual Re-probe.
+    assert_eq!(
+        hosts
+            .iter()
+            .find(|h| h.alias == "alpha")
+            .unwrap()
+            .account_uuid
+            .as_deref(),
+        Some("acc-alpha")
+    );
 
     // alpha: the live session is new, the stale row is ghosted.
     let live = s.get_session("alpha-live", "alpha").unwrap().expect("row");
@@ -219,8 +235,9 @@ async fn reconcile_pass_updates_reachable_hosts_and_keeps_unreachable_ones() {
         assert!(row.lost_at.is_none());
     }
 
-    // What actually crossed the wire for alpha: list → agents → one pane
-    // capture per live session, each as a single quoted `bash -lc` word.
+    // What actually crossed the wire for alpha: list → agents → the
+    // `~/.claude.json` account read → one pane capture per live session,
+    // each as a single quoted `bash -lc` word.
     let scripts: Vec<String> = fake
         .calls_for("alpha")
         .iter()
@@ -235,11 +252,13 @@ async fn reconcile_pass_updates_reachable_hosts_and_keeps_unreachable_ones() {
         vec![
             LIST_SCRIPT.to_string(),
             "claude agents --json 2>/dev/null || echo '[]'".to_string(),
+            crate::service::hosts::OAUTH_ACCOUNT_SCRIPT.to_string(),
             "tmux capture-pane -t 'alpha-live' -S '-8' -p".to_string(),
         ]
     );
     // beta and gamma: the list and the (unconditional) agents probe, and
-    // nothing more — a failed list skips the per-session pane captures.
+    // nothing more — a failed list skips the account read and the
+    // per-session pane captures.
     for host in ["beta", "gamma"] {
         let scripts: Vec<String> = fake
             .calls_for(host)

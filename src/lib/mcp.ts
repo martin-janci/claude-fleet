@@ -135,3 +135,8 @@ export function mcpClientConfig(status: McpStatus): string {
     2,
   );
 }
+
+/** Show only the last four characters of a bearer token. */
+export function maskToken(t: string): string {
+  return t.length > 4 ? '••••••••••••' + t.slice(-4) : '••••';
+}

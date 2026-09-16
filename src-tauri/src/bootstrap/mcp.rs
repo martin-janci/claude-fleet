@@ -17,38 +17,28 @@ pub(crate) fn maybe_start_mcp(
     guards: &mcp::McpGuards,
 ) {
     use tauri::Manager;
-    let (enabled, port, token) = {
+    let (port, token) = {
         let Ok(s) = store.lock() else {
             return;
         };
-        let enabled = s
-            .get_setting(mcp::SETTING_ENABLED)
-            .ok()
-            .flatten()
-            .as_deref()
-            == Some("true");
-        let port = s
-            .get_setting(mcp::SETTING_PORT)
-            .ok()
-            .flatten()
-            .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(mcp::DEFAULT_PORT);
-        let token = s.get_setting(mcp::SETTING_TOKEN).ok().flatten();
-        (enabled, port, token)
-    };
-    if !enabled {
-        tracing::info!("control API disabled (mcp.enabled is not true)");
-        return;
-    }
-    // Ensure a token exists before the listener binds — never a tokenless API.
-    let token = match token {
-        Some(t) if !t.is_empty() => t,
-        _ => {
-            let fresh = mcp::generate_token();
-            if let Ok(s) = store.lock() {
-                let _ = s.set_setting(mcp::SETTING_TOKEN, &fresh);
+        let cfg = match mcp::settings::McpSettings::read(&s) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!("control API: cannot read settings: {e}");
+                return;
             }
-            fresh
+        };
+        if !cfg.enabled {
+            tracing::info!("control API disabled (mcp.enabled is not true)");
+            return;
+        }
+        // Ensure a token exists before the listener binds — never a tokenless API.
+        match mcp::settings::ensure_master_token(&s) {
+            Ok(token) => (cfg.port, token),
+            Err(e) => {
+                tracing::warn!("control API: cannot mint a master token: {e}");
+                return;
+            }
         }
     };
     let result = tauri::async_runtime::block_on(async {

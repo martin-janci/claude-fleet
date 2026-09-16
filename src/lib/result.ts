@@ -28,7 +28,7 @@ function nextCallId(): number {
 /**
  * Like `invokeCmd`, but takes an optional `AbortSignal` for cancellation. The
  * helper mints a monotonic frontend `call_id`, injects it into the command's
- * `args`, and on abort fires a `cancel_command(call_id)` IPC fire-and-forget.
+ * `args`, and on abort fires a `cancel_command` IPC (payload `{ callId }`) fire-and-forget.
  * The backend's command handler is expected to register the token under the
  * same `call_id` in the `CancellationRegistry`.
  *
@@ -53,8 +53,12 @@ export async function invokeCmdAbortable<T>(
   let onAbort: (() => void) | undefined;
   if (signal) {
     onAbort = () => {
-      // Fire-and-forget: cancel_command takes call_id as a top-level Tauri param.
-      void invokeCmd('cancel_command', { call_id }).catch(() => undefined);
+      // Fire-and-forget. `cancel_command` takes `call_id: u64` as a bare
+      // TOP-LEVEL Tauri parameter, and tauri-macros camelCases top-level
+      // argument names by default, so the key on the wire must be `callId`.
+      // (A snake_case `call_id` fails to deserialize and the cancel silently
+      // does nothing.) Fields INSIDE an `args` struct stay snake_case (serde).
+      void invokeCmd('cancel_command', { callId: call_id }).catch(() => undefined);
     };
     signal.addEventListener('abort', onAbort, { once: true });
   }

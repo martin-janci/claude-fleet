@@ -17,9 +17,12 @@ name: release
 # CODE SIGNING IS INTENTIONALLY ABSENT. There is no Apple Developer ID
 # (and no Windows certificate) for this project yet, so nothing here is
 # signed or notarized. Consequences:
-#   - macOS Gatekeeper refuses the .app/.dmg on first launch. Users must
-#     right-click the app and choose "Open", or clear the quarantine flag:
-#       xattr -d com.apple.quarantine /Applications/claude-fleet.app
+#   - macOS Gatekeeper refuses the .app/.dmg on first launch, reporting it as
+#     "damaged". Users must clear the quarantine flag after copying it to
+#     /Applications (right-click -> Open does not reliably work for an
+#     unsigned app):
+#       xattr -dr com.apple.quarantine /Applications/claude-fleet.app
+#     The user-facing instructions live in the README.
 #   - The Linux AppImage/.deb are unsigned; that is normal for those formats.
 # When a Developer ID exists, add APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD
 # / APPLE_SIGNING_IDENTITY / APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID secrets

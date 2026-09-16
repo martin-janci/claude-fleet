@@ -6,15 +6,15 @@ import { tick } from 'svelte';
 // the new "hide projects without sessions" behavior.
 const fakeProjects = [
   {
-    project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: Math.floor(Date.now() / 1000) - 60 },
+    project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: Math.floor(Date.now() / 1000) - 60, adopted: false },
     worktrees: [{ id: 11, project_id: 1, host_alias: 'local', name: 'main', path: '/r/cf', branch: 'main' }],
   },
   {
-    project: { id: 2, owner: 'papayapos', repo: 'pos-frontend', base_path: '/r/pf', last_session_at: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 14 },
+    project: { id: 2, owner: 'papayapos', repo: 'pos-frontend', base_path: '/r/pf', last_session_at: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 14, adopted: false },
     worktrees: [{ id: 21, project_id: 2, host_alias: 'local', name: 'main', path: '/r/pf', branch: 'main' }],
   },
   {
-    project: { id: 3, owner: 'martin-janci', repo: 'phone-manager', base_path: '/r/pm', last_session_at: null },
+    project: { id: 3, owner: 'martin-janci', repo: 'phone-manager', base_path: '/r/pm', last_session_at: null, adopted: false },
     worktrees: [{ id: 31, project_id: 3, host_alias: 'local', name: 'main', path: '/r/pm', branch: 'main' }],
   },
 ];
@@ -48,20 +48,24 @@ function sessionFor(projectId: number | null, name = `dev-${projectId ?? 'orphan
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
 }));
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  open: vi.fn(),
+}));
 
 // Wrap the memoised index builders in call-through spies so the scale test
 // below can assert they run once per render, not once per row.
 vi.mock('./sidebar_index', { spy: true });
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
+import { open as mockedOpen } from '@tauri-apps/plugin-dialog';
 import { buildSessionsByProject, buildRelatedCountById } from './sidebar_index';
 import { get } from 'svelte/store';
 import Sidebar from './Sidebar.svelte';
-import { projects, bootstrapProjects } from './projects';
-import { sessions, bootstrapSessions, showBgAgents, resetTombstonesForTests, type SessionRow } from './sessions';
+import { projects, loadProjects } from './projects';
+import { sessions, loadSessions, showBgAgents, showRowDetails, resetTombstonesForTests, type SessionRow } from './sessions';
 import { selectedSession, selectSession } from './selection';
-import { hosts, bootstrapHosts, hostFilter, resetTombstonesForTests as resetHostTombstones } from './hosts';
-import { accounts, bootstrapAccounts } from './accounts';
+import { hosts, loadHosts, hostFilter, resetTombstonesForTests as resetHostTombstones } from './hosts';
+import { accounts, loadAccounts } from './accounts';
 import { onboardingDismissed } from './onboarding';
 import { toasts, clearToasts } from './toasts';
 
@@ -79,6 +83,7 @@ function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof session
     // patch even though these tests only assert that the IPC was invoked.
     const id = args?.args?.id ?? 0;
     if (cmd === 'kill_session') return id;
+    if (cmd === 'dismiss_agent_session') return null;
     if (cmd === 'set_session_friendly_name') {
       const a = (args?.args ?? {}) as { tmux_name?: string; friendly_name?: string };
       const found = sess.find((s) => s.tmux_name === a.tmux_name) ?? sess[0];
@@ -110,6 +115,7 @@ beforeEach(() => {
   accounts.set([]);
   hostFilter.set('all');
   showBgAgents.set(true);
+  showRowDetails.set(true);
   selectSession(null);
   // Suppress the OnboardingCard so tests don't need stubs for its IPC calls
   // (check_local_prereqs, tunnel_status, mcp_status).
@@ -153,7 +159,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     // Even if a project has multiple worktrees, the sidebar must not show them.
     const multi = [
       {
-        project: { id: 1, owner: 'o', repo: 'r', base_path: '/x', last_session_at: 0 },
+        project: { id: 1, owner: 'o', repo: 'r', base_path: '/x', last_session_at: 0, adopted: false },
         worktrees: [
           { id: 11, project_id: 1, host_alias: 'local', name: 'main', path: '/x', branch: 'main' },
           { id: 12, project_id: 1, host_alias: 'local', name: 'feature-x', path: '/x/.worktrees/feature-x', branch: 'feature-x' },
@@ -225,6 +231,27 @@ describe('Sidebar (sessions-grouped view)', () => {
     } finally {
       Element.prototype.scrollIntoView = orig;
     }
+  });
+
+  it('selecting a session on a host hidden by the host filter widens the filter to all', async () => {
+    // The persisted host filter outlives the New-session dialog: a session
+    // created (and auto-selected) on another host used to vanish from the
+    // tree with no feedback, so the user kept creating it again.
+    const shown = sessionFor(1, 'dev-local');
+    const created = { ...sessionFor(1, 'dev-new'), host_alias: 'mefistos' };
+    mockBackend(fakeProjects, [shown, created]);
+    hostFilter.set('local');
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryAllByTestId('sess-row')).toHaveLength(1);
+
+    // Select from outside the tree, as onCreated / the quick switcher do.
+    selectSession(created);
+    await tick(); await tick(); await Promise.resolve();
+    expect(get(hostFilter)).toBe('all');
+    const ids = screen.queryAllByTestId('sess-row').map((r) => r.getAttribute('data-session-id'));
+    expect(ids).toContain(String(created.id));
+    expect(ids).toContain(String(shown.id));
   });
 
   it('clicking a session row selects it in the store', async () => {
@@ -491,7 +518,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     const colliding = [
       ...fakeProjects,
       {
-        project: { id: 4, owner: 'otherperson', repo: 'claude-fleet', base_path: '/x/cf', last_session_at: null },
+        project: { id: 4, owner: 'otherperson', repo: 'claude-fleet', base_path: '/x/cf', last_session_at: null, adopted: false },
         worktrees: [{ id: 41, project_id: 4, host_alias: 'local', name: 'main', path: '/x/cf', branch: 'main' }],
       },
     ];
@@ -536,6 +563,104 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(listbox.textContent).toContain('claude-fleet');
     expect(listbox.textContent).toContain('pos-frontend');
     expect(listbox.textContent).toContain('phone-manager');
+  });
+
+  it('the project picker offers Add project, which opens the dialog', async () => {
+    mockBackend(fakeProjects, [sessionFor(1)]);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('new-session-footer'));
+    await tick();
+    const addRow = screen.getByTestId('add-project-row');
+    // Pinned first, above the projects.
+    expect(screen.getByRole('listbox').firstElementChild).toBe(addRow);
+    await fireEvent.click(addRow);
+    await tick();
+    expect(screen.getByTestId('add-project-dialog')).toBeInTheDocument();
+    // The popover closes behind the dialog.
+    expect(screen.queryByTestId('add-project-row')).toBeNull();
+  });
+
+  it('Add project is reachable with no projects at all', async () => {
+    mockBackend([], []);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('new-session-footer'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('add-project-row'));
+    await tick();
+    expect(screen.getByTestId('add-project-dialog')).toBeInTheDocument();
+  });
+
+  it('after a successful add, NewSessionDialog opens on the returned project', async () => {
+    const added = {
+      project: { id: 42, owner: 'newowner', repo: 'fresh-repo', base_path: '/r/fresh', last_session_at: null, adopted: false },
+      worktrees: [],
+    };
+    mockBackend(fakeProjects, []);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (cmd: string, args?: unknown) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: unknown) =>
+      cmd === 'add_project' ? added : base(cmd, args),
+    );
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('new-session-footer'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('add-project-row'));
+    await tick();
+    await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'newowner/fresh-repo' } });
+    await fireEvent.click(screen.getByTestId('add-create'));
+    await vi.waitFor(() => expect(screen.queryByTestId('add-project-dialog')).toBeNull());
+    expect(screen.getByRole('heading', { name: /New session/ }).textContent).toContain('newowner/fresh-repo');
+    expect(get(projects).some((p) => p.project.id === 42)).toBe(true);
+  });
+
+  it('adopting a folder while a remote host is chosen opens NewSessionDialog on local', async () => {
+    const added = {
+      project: { id: 43, owner: 'me', repo: 'thing', base_path: '/Users/me/code/thing', last_session_at: null, adopted: true },
+      worktrees: [],
+    };
+    mockBackend(fakeProjects, []);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (cmd: string, args?: unknown) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: unknown) =>
+      cmd === 'add_project' ? added : base(cmd, args),
+    );
+    (mockedOpen as ReturnType<typeof vi.fn>).mockResolvedValue('/Users/me/code/thing');
+    hosts.set([
+      { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
+      { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
+    ]);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('new-session-footer'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('add-project-row'));
+    await tick();
+    const chipFor = (alias: string) =>
+      Array.from(document.querySelectorAll<HTMLButtonElement>('.host-pick')).find((b) => (b as HTMLElement).dataset.alias === alias)!;
+    await fireEvent.click(chipFor('mefistos'));
+    await fireEvent.click(screen.getByTestId('add-mode-folder'));
+    await fireEvent.click(screen.getByTestId('choose-folder'));
+    await vi.waitFor(() => expect((screen.getByTestId('add-create') as HTMLButtonElement).disabled).toBe(false));
+    await fireEvent.click(screen.getByTestId('add-create'));
+    await vi.waitFor(() => expect(screen.queryByTestId('add-project-dialog')).toBeNull());
+    expect(screen.getByRole('heading', { name: /New session/ }).textContent).toContain('me/thing');
+    expect(document.querySelector('.host-pick.active')?.getAttribute('data-alias')).toBe('local');
+  });
+
+  it('a native <dialog> close on NewSessionDialog still closes it (Modal reopen only when the parent declines)', async () => {
+    mockBackend(fakeProjects, []);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('new-session-footer'));
+    await tick();
+    await fireEvent.click(screen.getByText('claude-fleet'));
+    await tick();
+    const dlg = screen.getByRole('dialog', { name: 'New session' }) as HTMLDialogElement;
+    dlg.removeAttribute('open');
+    dlg.dispatchEvent(new Event('close'));
+    await tick(); await tick();
+    expect(screen.queryByRole('dialog', { name: 'New session' })).toBeNull();
   });
 
   it('exposes a "1d" recency pill (replaces older "today")', async () => {
@@ -605,7 +730,7 @@ describe('Sidebar (sessions-grouped view)', () => {
       ];
       return null;
     });
-    await Promise.all([bootstrapProjects(), bootstrapSessions(), bootstrapHosts(), bootstrapAccounts()]);
+    await Promise.all([loadProjects(), loadSessions(), loadHosts(), loadAccounts()]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
     const hostsBar = document.querySelector('.hosts');
@@ -627,7 +752,7 @@ describe('Sidebar (sessions-grouped view)', () => {
       ];
       return null;
     });
-    await Promise.all([bootstrapProjects(), bootstrapSessions(), bootstrapHosts(), bootstrapAccounts()]);
+    await Promise.all([loadProjects(), loadSessions(), loadHosts(), loadAccounts()]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
     expect(screen.queryAllByTestId('sess-row')).toHaveLength(2);
@@ -639,7 +764,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(screen.queryAllByTestId('sess-row')).toHaveLength(1);
   });
 
-  it('shows host badge before each session name', async () => {
+  it('shows the host in the details line of each session', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
       if (cmd === 'list_projects') return fakeProjects;
       if (cmd === 'list_sessions') return [sessionFor(1, 'dev-foo')];
@@ -648,12 +773,13 @@ describe('Sidebar (sessions-grouped view)', () => {
       ];
       return null;
     });
-    await Promise.all([bootstrapProjects(), bootstrapSessions(), bootstrapHosts(), bootstrapAccounts()]);
+    await Promise.all([loadProjects(), loadSessions(), loadHosts(), loadAccounts()]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
     const badges = screen.queryAllByTestId('host-badge');
     expect(badges).toHaveLength(1);
-    expect(badges[0].textContent).toBe('[local]');
+    expect(badges[0].textContent).toBe('local');
+    expect(badges[0].closest('[data-testid="sess-details"]')).not.toBeNull();
   });
 
   it('host pill tooltip includes account info when present', async () => {
@@ -685,7 +811,7 @@ describe('Sidebar (sessions-grouped view)', () => {
       ];
       return null;
     });
-    await Promise.all([bootstrapProjects(), bootstrapSessions(), bootstrapHosts(), bootstrapAccounts()]);
+    await Promise.all([loadProjects(), loadSessions(), loadHosts(), loadAccounts()]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
     const pills = document.querySelectorAll('.hosts .pill');
@@ -714,7 +840,7 @@ describe('Sidebar (sessions-grouped view)', () => {
       if (cmd === 'list_accounts') return [];
       return null;
     });
-    await Promise.all([bootstrapProjects(), bootstrapSessions(), bootstrapHosts(), bootstrapAccounts()]);
+    await Promise.all([loadProjects(), loadSessions(), loadHosts(), loadAccounts()]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
     const pills = document.querySelectorAll('.hosts .pill');
@@ -731,7 +857,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     const b = sessionFor(1, 'dev-b');
     b.worktree_key = 'main';
     mockBackend(fakeProjects, [a, b]);
-    await Promise.all([bootstrapProjects(), bootstrapSessions(), bootstrapHosts(), bootstrapAccounts()]);
+    await Promise.all([loadProjects(), loadSessions(), loadHosts(), loadAccounts()]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
     const badges = screen.queryAllByTestId('related-badge');
@@ -743,7 +869,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     const solo = sessionFor(1, 'dev-solo');
     solo.worktree_key = 'main';
     mockBackend(fakeProjects, [solo]);
-    await Promise.all([bootstrapProjects(), bootstrapSessions(), bootstrapHosts(), bootstrapAccounts()]);
+    await Promise.all([loadProjects(), loadSessions(), loadHosts(), loadAccounts()]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
     expect(screen.queryAllByTestId('related-badge')).toHaveLength(0);
@@ -755,7 +881,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     const b = sessionFor(1, 'dev-b');
     b.worktree_key = 'feature-x';
     mockBackend(fakeProjects, [a, b]);
-    await Promise.all([bootstrapProjects(), bootstrapSessions(), bootstrapHosts(), bootstrapAccounts()]);
+    await Promise.all([loadProjects(), loadSessions(), loadHosts(), loadAccounts()]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
     expect(screen.queryAllByTestId('related-badge')).toHaveLength(0);
@@ -794,7 +920,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     const projs: typeof fakeProjects = [];
     for (let p = 1; p <= 25; p++) {
       projs.push({
-        project: { id: p, owner: 'o', repo: `r${p}`, base_path: `/r/${p}`, last_session_at: Date.now() / 1000 },
+        project: { id: p, owner: 'o', repo: `r${p}`, base_path: `/r/${p}`, last_session_at: Date.now() / 1000, adopted: false },
         worktrees: [{ id: p * 10, project_id: p, host_alias: 'local', name: 'main', path: `/r/${p}`, branch: 'main' }],
       });
       for (let i = 0; i < 20; i++) {
@@ -944,6 +1070,16 @@ describe('Sidebar triage (W2 Track D)', () => {
     expect(screen.getAllByTestId('sess-row')).toHaveLength(2);
   });
 
+  it('the "Needs you" pill ignores a stuck_kind on an external (Outside fleet) row', async () => {
+    const stuck = { ...sessionFor(1, 'dev-stuck'), stuck_kind: 'oom' as const };
+    const externalStuck = { ...sessionFor(null, 'claude-desktop-session'), kind: 'external', stuck_kind: 'oom' as const };
+    mockBackend(fakeProjects, [stuck, externalStuck]);
+    render(Sidebar);
+    await tick(); await tick();
+    const pill = screen.getByTestId('needs-you-filter');
+    expect(pill).toHaveTextContent('Needs you (1)');
+  });
+
   it('the "Needs you" queue keeps stuck, safe-kill, ghost and failed rows', async () => {
     const stuck = { ...sessionFor(1, 'dev-stuck'), stuck_kind: 'auth_menu' as const };
     const sk = { ...sessionFor(1, 'dev-sk'), safe_kill_state: 'failed' };
@@ -957,14 +1093,9 @@ describe('Sidebar triage (W2 Track D)', () => {
     expect(pill).toHaveTextContent('Needs you (4)');
     await fireEvent.click(pill);
     await tick();
-    const rows = screen.getAllByTestId('sess-row');
-    const names = rows.map((r) => r.textContent ?? '');
+    const names = screen.getAllByTestId('sess-row').map((r) => r.textContent ?? '');
     expect(names.some((n) => n.includes('dev-fine'))).toBe(false);
-    expect(rows).toHaveLength(4);
-    // Each surviving row exposes its bucket, which CSS-free tests can assert.
-    expect(rows.map((r) => r.getAttribute('data-bucket')).sort()).toEqual([
-      'failed', 'lifecycle', 'lifecycle', 'stuck',
-    ]);
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(4);
   });
 
   it('orders projects by their worst child status', async () => {
@@ -1029,6 +1160,8 @@ describe('Sidebar triage (W2 Track D)', () => {
     const row = screen.getByTestId('sess-row');
     expect(row.querySelector('.sess-name')).toHaveTextContent('Fix login');
     expect(screen.getByTestId('sess-tmux-name')).toHaveTextContent('dev-martin-janci-claude-fleet--fix-login');
+    expect(row.querySelector('.sess-line1 .sess-name')).toHaveTextContent('Fix login');
+    expect(screen.getByTestId('sess-tmux-name').closest('[data-testid="sess-details"]')).not.toBeNull();
   });
 
   it('shows elapsed time, last prompt and a CI badge as secondary row text', async () => {
@@ -1044,9 +1177,242 @@ describe('Sidebar triage (W2 Track D)', () => {
     render(Sidebar);
     await tick(); await tick();
     const meta = screen.getByTestId('sess-meta');
-    expect(meta).toHaveTextContent('3h 5m');
+    expect(screen.getByTestId('sess-details')).toHaveTextContent('3h 5m');
     expect(meta).toHaveTextContent('Implement the triage filter');
     expect(meta).not.toHaveTextContent('second line');
     expect(screen.getByTestId('ci-badge')).toHaveTextContent('CI');
+  });
+
+  it('line 1 holds the name and one status chip; line 2 holds host, worktree, elapsed and prompt', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const s = {
+      ...sessionFor(1, 'dev-martin-janci-claude-fleet--fix-login'),
+      worktree_key: 'fix-login',
+      claude_status: 'working' as const,
+      started_at: now - 3600,
+      last_prompt: 'Implement the triage filter',
+      context_pct: 62,
+    };
+    mockBackend(fakeProjects, [s]);
+    render(Sidebar);
+    await tick(); await tick();
+    const row = screen.getByTestId('sess-row');
+    const line1 = row.querySelector('.sess-line1')!;
+    expect(line1.querySelector('.sess-name')).toHaveTextContent('dev-martin-janci-claude-fleet--fix-login');
+    expect(line1.querySelector('[data-testid="claude-chip"]')).toHaveTextContent('working');
+    const details = screen.getByTestId('sess-details');
+    expect(details.querySelector('[data-testid="host-badge"]')).toHaveTextContent('local');
+    // The tmux name already ends in "--fix-login" — showing the worktree
+    // key again would just repeat the tail of the name already on line 1.
+    expect(screen.queryByTestId('sess-tmux-name')).toBeNull();
+    expect(details).toHaveTextContent('1h');
+    expect(details.querySelector('[data-testid="context-badge"]')).not.toBeNull();
+    expect(screen.getByTestId('sess-meta')).toHaveTextContent('Implement the triage filter');
+    expect(line1.querySelector('[data-testid="host-badge"]')).toBeNull();
+  });
+
+  it('shows the worktree key on line 2 when the tmux name does not end in it', async () => {
+    const s = { ...sessionFor(1, 'dev-a'), worktree_key: 'fix-login' };
+    mockBackend(fakeProjects, [s]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByTestId('sess-tmux-name')).toHaveTextContent('fix-login');
+  });
+
+  it('the details pill hides the second row line and persists', async () => {
+    mockBackend(fakeProjects, [{ ...sessionFor(1, 'dev-a'), started_at: Math.floor(Date.now() / 1000) - 60 }]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByTestId('sess-details')).toBeInTheDocument();
+    const pill = screen.getByTestId('toggle-row-details');
+    expect(pill).toHaveAttribute('aria-pressed', 'true');
+    await fireEvent.click(pill);
+    await tick();
+    expect(screen.queryByTestId('sess-details')).toBeNull();
+    expect(pill).toHaveAttribute('aria-pressed', 'false');
+    expect(JSON.parse(localStorage.getItem('cf:pref:rows.details')!)).toBe(false);
+    // Clicking again re-shows it — only the hide direction is exercised above.
+    await fireEvent.click(pill);
+    await tick();
+    expect(screen.getByTestId('sess-details')).toBeInTheDocument();
+    expect(pill).toHaveAttribute('aria-pressed', 'true');
+    expect(JSON.parse(localStorage.getItem('cf:pref:rows.details')!)).toBe(true);
+  });
+
+  it('shows the details line by default with no stored pref', async () => {
+    expect(localStorage.getItem('cf:pref:rows.details')).toBeNull();
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a')]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByTestId('sess-details')).toBeInTheDocument();
+    expect(screen.getByTestId('toggle-row-details')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('a ghost row stays one line with an unbracketed host badge', async () => {
+    const ghost = { ...sessionFor(2, 'dev-ghost'), status: 'ghost', lost_at: 5 };
+    mockBackend(fakeProjects, [ghost]);
+    render(Sidebar);
+    await tick(); await tick();
+    const row = screen.getByTestId('sess-row');
+    expect(row.querySelector('.sess-lines')).toBeNull();
+    expect(row.querySelector('.sess-details')).toBeNull();
+    const badge = screen.getByTestId('host-badge');
+    expect(badge.textContent).toBe('local');
+  });
+
+  it('the rename editor hides the details line', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-foo')]);
+    render(Sidebar);
+    await tick(); await tick();
+    const row = await screen.findByTestId('sess-row');
+    expect(screen.getByTestId('sess-details')).toBeInTheDocument();
+    const btn = row.querySelector('[data-testid="rename-tmux"]') as HTMLButtonElement;
+    await fireEvent.click(btn);
+    await screen.findByTestId('rename-input');
+    expect(screen.queryByTestId('sess-details')).toBeNull();
+  });
+});
+
+describe('Outside fleet group', () => {
+  it('groups external rows under a collapsed header that toggles and persists', async () => {
+    const ext = { ...sessionFor(null, 'claude-desktop-session'), kind: 'external' };
+    mockBackend(fakeProjects, [ext]);
+    render(Sidebar);
+    await tick(); await tick();
+
+    const header = screen.getByTestId('outside-fleet');
+    expect(header).toHaveTextContent('Outside fleet (1)');
+    expect(header).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText('claude-desktop-session')).toBeNull();
+
+    await fireEvent.click(header);
+    await tick();
+    expect(header).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('claude-desktop-session')).toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem('cf:pref:outside-fleet-open')!)).toBe(true);
+
+    await fireEvent.click(header);
+    await tick();
+    expect(header).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText('claude-desktop-session')).toBeNull();
+    expect(JSON.parse(localStorage.getItem('cf:pref:outside-fleet-open')!)).toBe(false);
+  });
+
+  it('renders external rows read-only: no label/rename/recreate/kill actions', async () => {
+    const ext = { ...sessionFor(null, 'claude-desktop-session'), kind: 'external' };
+    mockBackend(fakeProjects, [ext]);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('outside-fleet'));
+    await tick();
+    const row = screen.getByText('claude-desktop-session').closest('[data-testid="sess-row"]') as HTMLElement;
+    expect(row.querySelector('[data-testid="edit-label"]')).toBeNull();
+    expect(row.querySelector('[data-testid="rename-tmux"]')).toBeNull();
+    expect(row.querySelector('[data-testid="recreate-live"]')).toBeNull();
+    expect(row.querySelector('.row-actions')).toBeNull();
+
+    // Double-click is the label-edit trigger on a normal row; a read-only
+    // row must not enter rename mode either.
+    await fireEvent.dblClick(row);
+    await tick();
+    expect(screen.queryByTestId('label-input')).toBeNull();
+  });
+
+  it('no session row anywhere shows a peek-session button', async () => {
+    mockBackend(fakeProjects, [{ ...sessionFor(1, 'dev-a'), claude_session_id: 'sess-1' }]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('peek-session')).toBeNull();
+  });
+
+  it('an inactive bg agent shows an inactive chip and a working remove-from-list action', async () => {
+    const bg = { ...sessionFor(1, 'bg:abc'), kind: 'bg', claude_status: 'stopped' as const };
+    mockBackend(fakeProjects, [bg]);
+    render(Sidebar);
+    await tick(); await tick();
+
+    const chip = screen.getByTestId('inactive-chip');
+    expect(chip).toHaveTextContent('inactive');
+    expect(screen.queryByTestId('claude-chip')).toBeNull();
+
+    const removeBtn = screen.getByTestId('remove-from-list');
+    await fireEvent.click(removeBtn);
+    await tick(); await tick();
+    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'dismiss_agent_session');
+    expect(calls).toHaveLength(1);
+    expect(calls[0][1]).toEqual({ args: { session_id: bg.id } });
+  });
+
+  it('an inactive bg agent row offers no Kill action', async () => {
+    const bg = { ...sessionFor(1, 'bg:abc'), kind: 'bg', claude_status: 'stopped' as const };
+    mockBackend(fakeProjects, [bg]);
+    render(Sidebar);
+    await tick(); await tick();
+    const row = screen.getByTestId('remove-from-list').closest('[data-testid="sess-row"]') as HTMLElement;
+    expect(row.querySelector('[aria-label="Kill"]')).toBeNull();
+  });
+
+  it('a live bg agent row keeps its Kill action', async () => {
+    const bg = { ...sessionFor(1, 'bg:live'), kind: 'bg', claude_status: 'working' as const };
+    mockBackend(fakeProjects, [bg]);
+    render(Sidebar);
+    await tick(); await tick();
+    const row = screen.getByTestId('sess-row');
+    expect(row.querySelector('[aria-label="Kill"]')).not.toBeNull();
+  });
+
+  it('a ghosted external row stays read-only: no Recreate / Dismiss', async () => {
+    const ext = { ...sessionFor(null, 'claude-desktop-ghost'), kind: 'external', status: 'ghost', lost_at: 1 };
+    mockBackend(fakeProjects, [ext]);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('outside-fleet'));
+    await tick();
+    const section = screen.getByTestId('outside-fleet-section');
+    expect(section.querySelectorAll('[data-testid="sess-row"]')).toHaveLength(1);
+    expect(section.querySelector('[data-testid="ghost-recreate"]')).toBeNull();
+    expect(section.querySelector('[data-testid="ghost-dismiss"]')).toBeNull();
+    expect(section.querySelector('.row-actions')).toBeNull();
+  });
+
+  it('Outside fleet rows cannot be bulk-selected (modifier click or select mode)', async () => {
+    const ext = { ...sessionFor(null, 'claude-desktop-session'), kind: 'external' };
+    const work = sessionFor(1, 'dev-a');
+    mockBackend(fakeProjects, [ext, work]);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('outside-fleet'));
+    await tick();
+    const extRow = screen.getByText('claude-desktop-session').closest('[data-testid="sess-row"]') as HTMLElement;
+    await fireEvent.click(extRow, { shiftKey: true });
+    await tick();
+    expect(screen.queryByTestId('bulk-bar')).toBeNull();
+
+    await fireEvent.click(screen.getByTestId('select-mode'));
+    await tick();
+    expect(extRow.querySelector('[data-testid="select-box"]')).toBeNull();
+    await fireEvent.click(extRow);
+    await tick();
+    expect(screen.queryByTestId('bulk-bar')).toBeNull();
+    // A fleet row in the same mode still selects.
+    const workRow = screen.getByText('dev-a').closest('[data-testid="sess-row"]') as HTMLElement;
+    await fireEvent.click(workRow.querySelector('[data-testid="select-box"]') as HTMLElement);
+    await tick();
+    expect(screen.getByTestId('bulk-bar')).toHaveTextContent('1 selected');
+  });
+
+  it('the bg-session hint needs a session with a tmux pane, not just a non-bg row', async () => {
+    const { anchorEl } = await import('./hints');
+    const ext = { ...sessionFor(null, 'claude-desktop-session'), kind: 'external' };
+    mockBackend(fakeProjects, [ext]);
+    const first = render(Sidebar);
+    await tick(); await tick();
+    expect(anchorEl('bg-session')).toBeUndefined();
+    first.unmount();
+
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a')]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(anchorEl('bg-session')).toBeDefined();
   });
 });

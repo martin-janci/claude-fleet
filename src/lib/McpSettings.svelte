@@ -8,7 +8,8 @@
     provisionHosts,
     type McpStatus,
     type HostProvisionResult,
-  } from './mcp';
+    maskToken,
+} from './mcp';
 
   let { onProvisioned }: { onProvisioned: () => Promise<void> } = $props();
 
@@ -62,10 +63,6 @@
     } else if (!r.ok) {
       mcpError = r.error.message;
     }
-  }
-
-  function maskToken(t: string): string {
-    return t.length > 4 ? '••••••••••••' + t.slice(-4) : '••••';
   }
 
   // --- Install fleet hook ---

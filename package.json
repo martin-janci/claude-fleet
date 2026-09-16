@@ -1,6 +1,6 @@
 {
   "name": "claude-fleet",
-  "version": "0.2.10",
+  "version": "0.2.19",
   "description": "",
   "type": "module",
   "packageManager": "pnpm@10.34.5",
@@ -20,6 +20,7 @@
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-clipboard-manager": "^2.3.2",
+    "@tauri-apps/plugin-dialog": "^2",
     "@tauri-apps/plugin-opener": "^2"
   },
   "devDependencies": {

@@ -114,6 +114,32 @@ describe('subscribeToRowEvents', () => {
     expect(seen).toEqual([[5, 'running'], [5, 'done']]);
   });
 
+  it('delivers account_usage:updated to onAccountUsageEvents as one batch', async () => {
+    const seen: Array<[string, string]> = [];
+    await subscribeToRowEvents({
+      onAccountUsageEvents: (rows) => {
+        for (const r of rows) seen.push([r.account_uuid, r.status]);
+      },
+    });
+    const snap = {
+      account_uuid: 'acct-1',
+      usage: null,
+      subscription: null,
+      fetched_at: null,
+      source_host: null,
+      status: 'never_fetched',
+      detail: null,
+      next_try_at: 0,
+    };
+    fire('account_usage:updated', snap);
+    fire('account_usage:updated', { ...snap, status: 'ok', fetched_at: 100 });
+    await flush();
+    expect(seen).toEqual([
+      ['acct-1', 'never_fetched'],
+      ['acct-1', 'ok'],
+    ]);
+  });
+
   it('returns unsubscribe that detaches all listeners', async () => {
     const seen: number[] = [];
     const unlisten = await subscribeToRowEvents({
@@ -150,6 +176,31 @@ describe('subscribeToRowEvents → store integration', () => {
     fire('session:killed', { id: 7 });
     await flush();
     expect(get(sessions)).toEqual([]);
+  });
+
+  it('fires asset inventory and catalog handlers', async () => {
+    const seen: string[] = [];
+    await subscribeToRowEvents({
+      onAssetInventoryUpdated: (row) => seen.push(`upd:${row.host_alias}:${row.name}`),
+      onAssetInventoryCleared: (p) => seen.push(`clr:${p.host_alias}:${p.harness}`),
+      onCatalogLoaded: (s) => seen.push(`cat:${s.head}`),
+    });
+    fire('asset_inventory:cleared', { host_alias: 'local', harness: 'claude' });
+    fire('asset_inventory:updated', { host_alias: 'local', harness: 'claude', kind: 'skill', name: 's', state: 'in_sync', catalog_hash: null, host_hash: null, scanned_at: 1, managed: true });
+    fire('catalog:loaded', { head: 'h', loaded_at: 1, asset_count: 0, problem_count: 0 });
+    await flush();
+    expect(seen).toEqual(['clr:local:claude', 'upd:local:s', 'cat:h']);
+  });
+
+  it('fires onSyncProgress for sync:progress events, including the terminal one', async () => {
+    const seen: string[] = [];
+    await subscribeToRowEvents({
+      onSyncProgress: (p) => seen.push(`${p.plan_id}:${p.done}/${p.total}:${p.host_alias}/${p.harness}`),
+    });
+    fire('sync:progress', { plan_id: 'p1', host_alias: 'local', harness: 'claude', done: 0, total: 2 });
+    fire('sync:progress', { plan_id: 'p1', host_alias: '', harness: '', done: 2, total: 2 });
+    await flush();
+    expect(seen).toEqual(['p1:0/2:local/claude', 'p1:2/2:/']);
   });
 });
 

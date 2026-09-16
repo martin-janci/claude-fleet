@@ -1,16 +1,18 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { hosts } from './hosts';
   import { mcpStatus } from './mcp';
   import { onboardingDismissed, onboardingWelcomed } from './onboarding';
   import { hintsEnabled, resetHints } from './hints';
+  import { composerPresets, resetComposerPresets, addPreset, updatePreset, removePreset } from './composer_presets';
   import { copyOnSelect } from './prefs';
   import { collectDiagnostics, copyDiagnostics, openLogFolder } from './diagnostics';
   import { pushError } from './toasts';
-  import AddHostPicker from './AddHostPicker.svelte';
   import Modal from './Modal.svelte';
-  import HostsTable from './HostsTable.svelte';
   import McpSettings from './McpSettings.svelte';
+  import { loadHostTokens } from './host_actions';
+  import { hostsChordLabel, requestHostsView } from './app_views';
+  import { detectMac } from './terminal_keys';
   import { copyText } from './clipboard';
   import './settings_dialog.css';
   import {
@@ -49,21 +51,29 @@
 
   let { onClose }: { onClose: () => void } = $props();
 
-  let showAddPicker = $state(false);
-  // The Hosts table owns the per-host tokens and the Control API section its
-  // status; both load from this onMount, in the same order as before.
-  let hostsTable = $state<ReturnType<typeof HostsTable>>();
+  // Hosts live in the Hosts view; Settings keeps fleet-wide configuration and
+  // a one-line summary that opens the view.
   let mcpSettings = $state<ReturnType<typeof McpSettings>>();
+  const hostsChord = hostsChordLabel(
+    detectMac(typeof navigator === 'undefined' ? undefined : navigator),
+  );
+  const offlineCount = $derived($hosts.filter((h) => !h.reachable).length);
+
+  async function openHosts() {
+    onClose();
+    // After the dialog has unmounted and restored focus, so the Hosts view
+    // remembers the right element to hand focus back to.
+    await tick();
+    requestHostsView();
+  }
 
   onMount(async () => {
     const r = await mcpStatus();
+    // Optional call: Svelte nulls a `bind:this` ref on teardown, so closing
+    // Settings while mcpStatus() is in flight leaves it unset — and a throw
+    // here would also skip resetProjectDrafts() below.
     mcpSettings?.applyStatus(r);
-    // Independent fetches, in parallel: a failed token fetch must not hide
-    // the automation section's state and vice versa. The optional call is
-    // deliberate: Svelte nulls a `bind:this` ref on teardown, so closing
-    // Settings while the mcpStatus() above is in flight leaves it unset —
-    // and a throw here would also skip resetProjectDrafts() below.
-    const [fs] = await Promise.all([loadFleetSettings(), hostsTable?.loadHostTokens()]);
+    const fs = await loadFleetSettings();
     if (!fs.ok) automationError = fs.error.message;
     resetProjectDrafts();
   });
@@ -241,16 +251,23 @@
 
 </script>
 
-<!-- Escape + backdrop are handled by Modal (native <dialog>). When the
-     AddHostPicker is stacked on top, Escape reaches only that topmost dialog. -->
-<Modal label="Settings" onclose={onClose} width="600px">
+<!-- Escape + backdrop are handled by Modal (native <dialog>). -->
+<Modal label="Settings" onclose={onClose} width="min(640px, 92vw)">
   <div class="dialog settings-dialog">
     <header>
       <h3>Settings</h3>
       <button class="close" onclick={onClose} aria-label="Close">×</button>
     </header>
 
-    <HostsTable bind:this={hostsTable} onAddHost={() => (showAddPicker = true)} />
+    <section class="block hosts-line" data-testid="settings-hosts-line">
+      <h4>Hosts</h4>
+      <span class="hosts-summary" data-testid="settings-hosts-summary"
+        >{$hosts.length} configured · {offlineCount} offline</span
+      >
+      <button class="hook-btn" onclick={openHosts} data-testid="settings-open-hosts"
+        >Open Hosts <kbd>{hostsChord}</kbd></button
+      >
+    </section>
 
     <section class="block" data-testid="projects-section">
       <div class="section-header">
@@ -393,6 +410,41 @@
           onchange={onIdleMinutesChange}
           data-testid="attention-idle-minutes" />
         <span class="hook-desc">minutes before an idle work session counts as "needs attention" (0 = never)</span>
+      </div>
+    </section>
+
+    <section class="block" data-testid="composer-section">
+      <h4>Conversation composer</h4>
+      <div class="hook-section">
+        <p class="hook-desc">
+          Quick-action chips above the prompt box in the Conversation tab. A
+          click fills the box; Shift+click sends at once. Chips with an empty
+          label or text are not shown.
+        </p>
+        {#each $composerPresets as p, i (i)}
+          <div class="preset-row">
+            <input
+              class="preset-label"
+              data-testid="preset-label"
+              placeholder="Label"
+              value={p.label}
+              oninput={(e) => updatePreset(i, { label: e.currentTarget.value })}
+            />
+            <textarea
+              class="preset-text"
+              data-testid="preset-text"
+              rows="1"
+              placeholder="Prompt or /command"
+              value={p.text}
+              oninput={(e) => updatePreset(i, { text: e.currentTarget.value })}
+            ></textarea>
+            <button class="hook-btn" data-testid="preset-remove" title="Remove" onclick={() => removePreset(i)}>×</button>
+          </div>
+        {/each}
+        <div class="preset-actions">
+          <button class="hook-btn" data-testid="preset-add" onclick={addPreset}>Add chip</button>
+          <button class="hook-btn" data-testid="preset-reset" onclick={resetComposerPresets}>Reset to defaults</button>
+        </div>
       </div>
     </section>
 
@@ -566,12 +618,10 @@
       {#if limitsError}<p class="err" role="alert" data-testid="limits-error">{limitsError}</p>{/if}
     </section>
 
-    <!-- onProvisioned is optional-chained for the same reason: a slow
-         multi-host provision can outlive the dialog, and the awaiting side
-         needs a promise back either way. -->
-    <McpSettings
-      bind:this={mcpSettings}
-      onProvisioned={() => hostsTable?.loadHostTokens() ?? Promise.resolve()} />
+    <!-- Provisioning mints host tokens: refresh the shared token cache the
+         Hosts view reads (host_actions.ts). Module-level, so it is safe even
+         when a slow multi-host provision outlives this dialog. -->
+    <McpSettings bind:this={mcpSettings} onProvisioned={loadHostTokens} />
 
     <section class="block" data-testid="diagnostics-section">
       <div class="section-header">
@@ -605,10 +655,6 @@
   </div>
 </Modal>
 
-{#if showAddPicker}
-  <AddHostPicker onClose={() => (showAddPicker = false)} />
-{/if}
-
 <style>
   .dialog {
     display: flex;
@@ -628,6 +674,25 @@
   .close:hover { color: var(--fg); }
 
   .log-path code { word-break: break-all; }
+
+  .hosts-line {
+    display: flex;
+    align-items: baseline;
+    gap: 0.8rem;
+  }
+  .hosts-line h4 {
+    margin: 0;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--fg-muted);
+  }
+  .hosts-summary { flex: 1; font-size: 0.8rem; color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+  .hosts-line kbd {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.7rem;
+    color: var(--fg-muted);
+  }
 
   .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
 

@@ -1,7 +1,8 @@
 //! `FakeSsh`: a scripted, recording `SshExec` for tests (OPS-8 / W4 F6).
 //!
-//! Every `run` / `run_cancellable` / `upload_file` call is appended to a call
-//! log — `(host, argv, stdin)` in order — and answered from the matching
+//! Every `run` / `run_cancellable` / `run_bounded` / `upload_file` call is
+//! appended to a call log — `(host, argv, stdin)` in order — and answered
+//! from the matching
 //! `Reply`. Rules are `(host filter, matcher, reply)`; the most recently
 //! added matching rule wins, so a test can install a broad default first and
 //! narrow it later. A command no rule matches gets the `default` reply
@@ -16,7 +17,7 @@
 //! wins over both and surfaces as `E_CANCELLED`. `remote_home` runs
 //! `printenv HOME` through the log like the real client and caches per host.
 
-use crate::ipc_error::IpcError;
+use crate::ipc_error::{codes, IpcError};
 use crate::ssh::{home_from_output, wall_clock_error, SshClient, SshExec, UPLOAD_WALL_CLOCK};
 use std::collections::HashMap;
 use std::os::unix::process::ExitStatusExt;
@@ -340,7 +341,7 @@ impl FakeSsh {
                 };
                 tokio::select! {
                     biased;
-                    _ = cancelled => Err(IpcError::new("E_CANCELLED", format!("ssh {host} cancelled"))),
+                    _ = cancelled => Err(IpcError::new(codes::E_CANCELLED, format!("ssh {host} cancelled"))),
                     _ = tokio::time::sleep(wall_clock) => Err(wall_clock_error(host, wall_clock, false)),
                     _ = tokio::time::sleep(for_) => Ok(Output {
                         status: ExitStatus::from_raw(0),
@@ -367,6 +368,27 @@ impl SshExec for FakeSsh {
         .await
     }
 
+    async fn run_bounded(
+        &self,
+        host: &str,
+        args: &[&str],
+        _connect_timeout: Duration,
+        wall_clock: Duration,
+    ) -> Result<Output, IpcError> {
+        // `set_wall_clock` still overrides, exactly like `run`; the caller's
+        // `connect_timeout` plays no role for a fake — there is nothing to
+        // time a connect against.
+        self.execute(
+            host,
+            args,
+            None,
+            self.wall_clock_or(wall_clock),
+            None,
+            "E_SSH",
+        )
+        .await
+    }
+
     async fn run_cancellable(
         &self,
         host: &str,
@@ -385,6 +407,28 @@ impl SshExec for FakeSsh {
         .await
     }
 
+    async fn run_bounded_cancellable(
+        &self,
+        host: &str,
+        args: &[&str],
+        _connect_timeout: Duration,
+        wall_clock: Duration,
+        token: CancellationToken,
+    ) -> Result<Output, IpcError> {
+        // Same convention as `run_bounded`: the fake has nothing to time a
+        // connect against, so only `wall_clock` (and `set_wall_clock`'s
+        // override) and `token` matter here.
+        self.execute(
+            host,
+            args,
+            None,
+            self.wall_clock_or(wall_clock),
+            Some(token),
+            "E_SSH",
+        )
+        .await
+    }
+
     async fn upload_file(
         &self,
         host: &str,
@@ -393,7 +437,10 @@ impl SshExec for FakeSsh {
         _timeout: Duration,
     ) -> Result<(), IpcError> {
         let bytes = std::fs::read(local_path).map_err(|e| {
-            IpcError::new("E_UPLOAD", format!("open {}: {e}", local_path.display()))
+            IpcError::new(
+                codes::E_UPLOAD,
+                format!("open {}: {e}", local_path.display()),
+            )
         })?;
         let remote_cmd = format!("cat > {}", crate::shell::quote(remote_path));
         let out = self
@@ -409,7 +456,7 @@ impl SshExec for FakeSsh {
             .await?;
         if !out.status.success() {
             return Err(IpcError::new(
-                "E_UPLOAD",
+                codes::E_UPLOAD,
                 format!(
                     "upload to {host} failed: {}",
                     String::from_utf8_lossy(&out.stderr).trim()

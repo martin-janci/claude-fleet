@@ -1,4 +1,5 @@
-use crate::ipc_error::IpcError;
+use crate::ipc_error::lock;
+use crate::ipc_error::{codes, IpcError};
 use crate::projects::path_identity::{canonical, canonical_str};
 use crate::projects::{
     git_common_dir, list_worktrees, scan_projects, DiscoveredProject, DiscoveredWorktree, Layout,
@@ -10,7 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ProjectTreeRow {
     pub project: ProjectRow,
     pub worktrees: Vec<WorktreeRow>,
@@ -134,7 +135,7 @@ pub fn resolved_bases(s: &Store) -> BTreeMap<String, String> {
 }
 
 pub fn list_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow>, IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     s.list_projects_joined()
 }
 
@@ -174,7 +175,7 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
     // 1. Resolve the scan root + layout and snapshot the current project list
     //    under a brief lock.
     let (base, layout, snapshot) = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         (
             local_projects_root(&s),
             layout(&s),
@@ -213,7 +214,7 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
         Ok::<_, IpcError>((discovered, root_canon, canon_of, fp_keys))
     })
     .await
-    .map_err(|e| IpcError::new("E_IO", format!("project scan task failed: {e}")))??;
+    .map_err(|e| IpcError::new(codes::E_IO, format!("project scan task failed: {e}")))??;
 
     // 3. Fan-out: `git worktree list` + `git rev-parse --git-common-dir` per
     //    discovered project, off-lock and in parallel. Both are async
@@ -241,7 +242,7 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
 
     // 4. Apply all writes under a single brief lock.
     {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let canon = |p: &str| canon_of.get(p).cloned().unwrap_or_else(|| p.to_string());
         let mut fresh_ids = HashSet::new();
         // Canonical checkout path -> the fresh project that owns it.
@@ -310,9 +311,17 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
         // sessions through prefix linking. Rows with sessions are kept. The
         // root is checked in both spellings, so canonicalizing a symlinked
         // root does not make every old logical row look "outside".
+        //
+        // An ADOPTED row (`service::add_project`'s `folder` source) is
+        // exempt: the whole point of adopting a folder is registering a
+        // checkout that lives OUTSIDE the projects root, so "not rediscovered
+        // by the scan" and "outside the root" are its normal shape, not
+        // evidence of staleness. Without this, the very next refresh (the
+        // Settings save path, the onboarding card, or the `refresh_projects`
+        // MCP tool) would delete it before a session ever got to reference it.
         for p in &snapshot {
             let row = &p.project;
-            if fresh_ids.contains(&row.id) || removed.contains(&row.id) {
+            if fresh_ids.contains(&row.id) || removed.contains(&row.id) || row.adopted {
                 continue;
             }
             let inside = strip_root(&row.base_path, &root_raw).is_some()
@@ -330,7 +339,7 @@ pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow
     }
 
     // 5. Return the fresh list under one final brief lock.
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     s.list_projects_joined()
 }
 
@@ -482,6 +491,69 @@ mod tests {
             "a project with sessions is never dropped"
         );
         assert!(ids.contains(&inside), "rows under the root are left alone");
+    }
+
+    /// `service::add_project`'s `clone` and `new` sources on a REMOTE host
+    /// register `base_path` as the LOCAL path the project would occupy — under
+    /// the projects root, but with nothing on this machine's disk. The local
+    /// scan can never rediscover it, so the refresh sweep must treat "under the
+    /// root and missing on disk" as normal, not stale. If this fails, remotely
+    /// added projects vanish from the sidebar on the next refresh.
+    #[tokio::test]
+    async fn a_remotely_added_project_survives_refresh_though_absent_locally() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let id = {
+            let s = store.lock().unwrap();
+            let map = serde_json::json!({ "local": tmp.path().to_string_lossy() }).to_string();
+            settings::set(&s, settings::PROJECTS_BASE_PATH, &map).unwrap();
+            // Exactly what add_project registers for a clone on another host:
+            // <local root>/<owner>/<repo>, never created locally.
+            let base = tmp.path().join("acme").join("widget");
+            assert!(
+                !base.exists(),
+                "the local checkout must not exist for this test"
+            );
+            s.upsert_project("acme", "widget", &base.to_string_lossy())
+                .unwrap()
+        };
+        let rows = refresh_projects(&store).await.unwrap();
+        assert!(
+            rows.iter().any(|r| r.project.id == id),
+            "a project added on a remote host must survive a local refresh"
+        );
+    }
+
+    /// The Task 3 CRITICAL fix: an adopted row (`service::add_project`'s
+    /// `folder` source) is outside-root and unrediscovered by construction —
+    /// that must never be read as staleness. A plain (non-adopted) row in the
+    /// same shape is still dropped, so the fix does not weaken the existing
+    /// sweep.
+    #[tokio::test]
+    async fn refresh_projects_keeps_an_adopted_row_outside_the_root_but_drops_a_plain_one() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let (adopted, plain) = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            let map = serde_json::json!({ "local": tmp.path().to_string_lossy() }).to_string();
+            settings::set(&s, settings::PROJECTS_BASE_PATH, &map).unwrap();
+            let adopted = s
+                .upsert_adopted_project("acme", "widget", "/elsewhere/acme/widget")
+                .unwrap();
+            let plain = s.upsert_project("o", "old", "/elsewhere/o/old").unwrap();
+            (adopted, plain)
+        };
+        let rows = refresh_projects(&store).await.unwrap();
+        let ids: Vec<i64> = rows.iter().map(|r| r.project.id).collect();
+        assert!(
+            ids.contains(&adopted),
+            "an adopted row outside the root survives a refresh"
+        );
+        assert!(
+            !ids.contains(&plain),
+            "a non-adopted stale row outside the root is still dropped"
+        );
     }
 
     #[tokio::test]

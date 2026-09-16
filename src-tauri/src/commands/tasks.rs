@@ -2,6 +2,7 @@
 //! lives in `service::tasks`; these only adapt `tauri::State`. The desktop
 //! is the master caller, so no per-host scoping applies here.
 
+use crate::ipc_error::lock;
 use crate::ipc_error::IpcError;
 use crate::service::tasks;
 use crate::store::{Store, TaskRow};
@@ -29,6 +30,6 @@ pub fn list_tasks(
 /// finished). The worker session is left running.
 #[tauri::command]
 pub fn cancel_task(task_id: i64, store: State<'_, Arc<Mutex<Store>>>) -> Result<TaskRow, IpcError> {
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(&store)?;
     tasks::cancel_task(&s, task_id, "cancelled from the desktop")
 }

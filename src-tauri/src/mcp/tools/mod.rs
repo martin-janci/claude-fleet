@@ -5,9 +5,12 @@
 //! Every tool calls into the transport-agnostic `service` layer — the exact
 //! same code path the Tauri IPC commands use; neither path is privileged.
 //!
-//! Tool arguments are MCP-specific structs (deriving `JsonSchema` so the AI
-//! sees a typed schema). They deliberately omit the `call_id` cancellation
-//! field the frontend uses — MCP tool calls run to completion.
+//! Tool arguments derive `JsonSchema` so the AI sees a typed schema. Where a
+//! tool's parameters are exactly a `service::*Args` struct it takes that
+//! struct directly; the MCP-specific structs in `params` cover the rest
+//! (optional `session_id` OR host+name addressing, `confirm_nonce` gates,
+//! MCP-side defaults). The frontend's `call_id` cancellation field is never
+//! exposed — MCP tool calls run to completion.
 
 use super::auth::{Caller, TokenMode};
 use super::guard::{self, ConfirmState};
@@ -16,7 +19,7 @@ use crate::cancel::CancellationRegistry;
 use crate::ipc_error::{codes, IpcError};
 use crate::service::pane_intel::{ClaudeStatus, StuckKind};
 use crate::service::{
-    health, hosts, projects, safe_kill, sessions, tasks, transcript, usage, worktrees,
+    catalog, health, hosts, projects, safe_kill, sessions, tasks, transcript, usage, worktrees,
 };
 use crate::ssh::SshClient;
 use crate::store::Store;
@@ -33,6 +36,7 @@ use rmcp::{
 };
 use std::sync::{Arc, Mutex};
 
+mod assets;
 mod fleet;
 mod lifecycle;
 mod messaging;
@@ -116,6 +120,7 @@ impl FleetTools {
             + Self::messaging_router()
             + Self::orchestration_router()
             + Self::repo_router()
+            + Self::assets_router()
     }
 }
 
@@ -131,16 +136,30 @@ impl ServerHandler for FleetTools {
     ) -> Result<CallToolResult, McpError> {
         // Fail closed: a request that somehow bypassed the auth middleware
         // has no caller and gets nothing.
-        let caller = caller_from_context(&context)
-            .ok_or_else(|| mcp_err("E_FORBIDDEN", "request carries no caller identity", None))?;
+        let caller = match caller_from_context(&context) {
+            Some(c) => c,
+            None => {
+                return tool_error_result(mcp_err(
+                    "E_FORBIDDEN",
+                    "request carries no caller identity",
+                    None,
+                ))
+            }
+        };
         let tool = request.name.to_string();
         // Audit first so refused calls are on the timeline too.
         persist_audit(&self.store, &tool, request.arguments.as_ref(), &caller);
-        enforce_mode(&caller, &tool)?;
-        enforce_admin(&caller, &tool)?;
+        if let Err(e) = enforce_mode(&caller, &tool).and_then(|()| enforce_admin(&caller, &tool)) {
+            return tool_error_result(e);
+        }
         context.extensions.insert(caller);
         let tcc = ToolCallContext::new(self, request, context);
-        self.tool_router.call(tcc).await
+        // Tool-execution failures travel as `is_error` results; only rmcp's
+        // own protocol errors (unknown tool, bad arguments) stay JSON-RPC.
+        match bounded(&tool, tool_deadline(&tool), self.tool_router.call(tcc)).await {
+            Ok(result) => Ok(result),
+            Err(e) => tool_error_result(e),
+        }
     }
 
     async fn list_tools(
@@ -162,7 +181,9 @@ impl ServerHandler for FleetTools {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
-            .with_protocol_version(ProtocolVersion::V_2024_11_05)
+            // 2025-11-25; rmcp negotiates down for a client that asks for an
+            // older known revision.
+            .with_protocol_version(ProtocolVersion::LATEST)
             .with_instructions(server_instructions())
     }
 }

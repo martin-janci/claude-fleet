@@ -6,7 +6,6 @@ use std::fmt;
 /// never rename one without grepping both. New sites should pick a code from
 /// here rather than inventing a near-duplicate (`E_DB` / `E_REPO` for a
 /// rusqlite failure were consolidated onto `E_SQLITE`).
-#[allow(dead_code)]
 pub mod codes {
     /// A `std::sync::Mutex` guard (store, MCP runtime, …) was poisoned.
     pub const E_LOCK: &str = "E_LOCK";
@@ -20,8 +19,21 @@ pub mod codes {
     pub const E_VALIDATE: &str = "E_VALIDATE";
     /// The addressed host / session / project / worktree row does not exist.
     pub const E_NOTFOUND: &str = "E_NOTFOUND";
+    /// A name-only session lookup matched rows on several hosts; the
+    /// candidates ride along in `details` so the caller can pick a host.
+    pub const E_AMBIGUOUS: &str = "E_AMBIGUOUS";
+    /// The thing being created already exists (a project's owner/repo, a
+    /// checkout already at the destination path…) — the inverse of
+    /// `E_NOTFOUND`.
+    pub const E_EXISTS: &str = "E_EXISTS";
+    /// The `gh` CLI failed: not installed, unauthenticated, or exited
+    /// non-zero, or its JSON output could not be parsed.
+    pub const E_GH: &str = "E_GH";
     /// The target exists but is in the wrong state for the operation.
     pub const E_INVALID_STATE: &str = "E_INVALID_STATE";
+    /// The task is already in a terminal state (`done` / `failed` /
+    /// `cancelled`), so the requested transition is refused.
+    pub const E_TASK_TERMINAL: &str = "E_TASK_TERMINAL";
     /// An invariant the code relies on was violated (row vanished mid-op…).
     pub const E_INTERNAL: &str = "E_INTERNAL";
     /// The operation was cancelled via the cancellation registry.
@@ -53,8 +65,6 @@ pub mod codes {
     pub const E_PTY: &str = "E_PTY";
     /// The PTY was closed under the caller.
     pub const E_PTY_CLOSED: &str = "E_PTY_CLOSED";
-    /// Spawning a local process failed.
-    pub const E_SPAWN: &str = "E_SPAWN";
     /// A local `bash` helper failed to spawn.
     pub const E_SHELL: &str = "E_SHELL";
     /// A `git` command failed.
@@ -138,10 +148,40 @@ pub mod codes {
     /// The call needs a desktop confirmation first (`mcp.confirm_destructive`);
     /// retry with the `confirm_nonce` from `details` once approved.
     pub const E_CONFIRM_REQUIRED: &str = "E_CONFIRM_REQUIRED";
+    /// Asset catalog: no catalog repo is configured, or it is configured but
+    /// not loaded yet (`catalog_configure` / `catalog_load` first).
+    pub const E_CATALOG_NOT_CONFIGURED: &str = "E_CATALOG_NOT_CONFIGURED";
+    /// Asset catalog: a git operation on the catalog repo (clone, pull,
+    /// `rev-parse HEAD`) failed. Distinct from `E_GIT`, which covers a
+    /// session's worktree.
+    pub const E_CATALOG_GIT: &str = "E_CATALOG_GIT";
+    /// Asset catalog: an asset file in the repo could not be parsed into the
+    /// IR (bad front-matter, unknown kind, duplicate name).
+    pub const E_CATALOG_PARSE: &str = "E_CATALOG_PARSE";
+    /// Asset catalog: the harness cannot express this asset kind.
+    pub const E_ASSET_UNSUPPORTED: &str = "E_ASSET_UNSUPPORTED";
+    /// Asset catalog: the import would overwrite an asset already in the
+    /// repo. The importer never overwrites.
+    pub const E_ASSET_EXISTS: &str = "E_ASSET_EXISTS";
+    /// Asset catalog: no asset of that kind and name is in the catalog.
+    pub const E_ASSET_NOT_FOUND: &str = "E_ASSET_NOT_FOUND";
+    /// Asset catalog: an authoring save was refused because the asset has
+    /// lint errors. `details` carries the whole `LintReport` (errors and
+    /// warnings); nothing was written to the repo.
+    pub const E_LINT: &str = "E_LINT";
+    /// Asset catalog: a host scan failed or returned unusable output. The
+    /// scan fails closed — a partial snapshot is never treated as empty.
+    pub const E_SCAN: &str = "E_SCAN";
+    /// Asset sync: the plan id handed to `sync_apply` is unknown or has
+    /// expired out of the in-process plan registry. Re-plan and apply again.
+    pub const E_SYNC_PLAN_STALE: &str = "E_SYNC_PLAN_STALE";
+    /// Asset sync: the plan contains actions blocked on `${NAME}` secrets
+    /// with no value. The message lists the NAMES only, never a value. Set
+    /// them (`catalog_set_secret`) or re-apply with `force_partial`.
+    pub const E_SECRET_MISSING: &str = "E_SECRET_MISSING";
 }
 
 #[derive(Debug, Serialize)]
-#[allow(dead_code)]
 pub struct IpcError {
     pub code: String,
     pub message: String,
@@ -149,7 +189,6 @@ pub struct IpcError {
     pub details: Option<serde_json::Value>,
 }
 
-#[allow(dead_code)]
 impl IpcError {
     pub fn new(code: &str, message: impl Into<String>) -> Self {
         Self {
@@ -169,6 +208,13 @@ impl IpcError {
     pub fn lock() -> Self {
         Self::new(codes::E_LOCK, "store mutex poisoned")
     }
+}
+
+/// Lock an app-level mutex (the `Store` first of all), mapping a poisoned
+/// lock to `E_LOCK`. `let s = lock(store)?;` is the one idiom every
+/// service / command / MCP tool uses; MCP sites chain `.map_err(to_mcp_err)`.
+pub fn lock<T>(m: &std::sync::Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, IpcError> {
+    m.lock().map_err(|_| IpcError::lock())
 }
 
 impl fmt::Display for IpcError {

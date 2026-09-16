@@ -6,7 +6,7 @@
 //! the request extensions and this handler reads it from there. Hooks are
 //! installed as Claude Code `type: "http"` hooks carrying
 //! `Authorization: Bearer <per-host token>` (see
-//! `commands::mcp::merge_hook_into_settings_json`), so the token never
+//! `service::hooks_install::merge_hook_into_settings_json`), so the token never
 //! appears in a process argv. The legacy `?token=` query form written by
 //! older installs is still accepted by the middleware until every host is
 //! re-provisioned.
@@ -33,7 +33,7 @@ pub struct HookState {
 /// Claude Code versions may add fields and we should ignore them gracefully.
 // Some fields are deserialized from the hook payload but not yet read.
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct HookPayload {
     pub session_id: Option<String>,
     pub hook_event_name: Option<String>,
@@ -45,6 +45,19 @@ pub struct HookPayload {
     /// in every hook body; fleet stores it (after validation) and prefers it
     /// over any path derived from the cwd.
     pub transcript_path: Option<String>,
+    /// `SessionEnd`: why the session ended (`logout`, `prompt_input_exit`,
+    /// `other`, `clear`, `resume`).
+    pub reason: Option<String>,
+    /// `Notification`: which type fired (see `NOTIFICATION_MATCHER`).
+    pub notification_type: Option<String>,
+    /// `Notification`: human text. Read for nothing; never stored.
+    pub message: Option<String>,
+    /// `Notification`: optional title. Never stored.
+    pub title: Option<String>,
+    /// `StopFailure`: the API error type (`rate_limit`, `overloaded`, …).
+    pub error: Option<String>,
+    /// `StopFailure`: free-text detail, when Claude Code has one.
+    pub error_details: Option<String>,
 }
 
 /// Axum handler for `POST /hook`. Auth has already happened in the
@@ -90,6 +103,30 @@ pub async fn handle_hook(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_end_stop_failure_and_notification_fields_deserialize() {
+        let p: HookPayload = serde_json::from_str(
+            r#"{"session_id":"s","hook_event_name":"SessionEnd","reason":"logout","unknown":1}"#,
+        )
+        .unwrap();
+        assert_eq!(p.reason.as_deref(), Some("logout"));
+        let p: HookPayload = serde_json::from_str(
+            r#"{"session_id":"s","hook_event_name":"StopFailure","error":"rate_limit","error_details":"429","last_assistant_message":"API Error"}"#,
+        )
+        .unwrap();
+        assert_eq!(p.error.as_deref(), Some("rate_limit"));
+        assert_eq!(p.error_details.as_deref(), Some("429"));
+        let p: HookPayload = serde_json::from_str(
+            r#"{"session_id":"s","hook_event_name":"Notification","notification_type":"permission_prompt","message":"Claude needs your permission","title":"Permission needed"}"#,
+        )
+        .unwrap();
+        assert_eq!(p.notification_type.as_deref(), Some("permission_prompt"));
+        assert_eq!(p.message.as_deref(), Some("Claude needs your permission"));
+        assert_eq!(p.title.as_deref(), Some("Permission needed"));
+        let d = HookPayload::default();
+        assert!(d.session_id.is_none() && d.reason.is_none());
+    }
 
     #[test]
     fn stop_hook_deserializes() {

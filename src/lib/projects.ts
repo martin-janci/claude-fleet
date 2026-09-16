@@ -1,5 +1,5 @@
 import { writable, derived } from 'svelte/store';
-import { invokeCmd, type Result } from './result';
+import { invokeCmd, invokeCmdAbortable, type IpcError, type Result } from './result';
 
 export interface ProjectRow {
   id: number;
@@ -7,6 +7,9 @@ export interface ProjectRow {
   repo: string;
   base_path: string;
   last_session_at: number | null;
+  /** Registered by adopting an existing checkout already on disk (possibly
+   * outside the projects root) rather than by the scan or a clone. */
+  adopted: boolean;
 }
 
 export interface WorktreeRow {
@@ -39,12 +42,6 @@ export async function loadProjects(): Promise<Result<ProjectTreeRow[]>> {
 
 export async function refreshProjects(): Promise<Result<ProjectTreeRow[]>> {
   const r = await invokeCmd<ProjectTreeRow[]>('refresh_projects');
-  if (r.ok) projects.set(r.value);
-  return r;
-}
-
-export async function bootstrapProjects(): Promise<Result<ProjectTreeRow[]>> {
-  const r = await invokeCmd<ProjectTreeRow[]>('list_projects');
   if (r.ok) projects.set(r.value);
   return r;
 }
@@ -94,15 +91,7 @@ function removeWorktreeRow(arr: ProjectTreeRow[], id: number): ProjectTreeRow[] 
   });
 }
 
-export function mergeProjectFromEvent(row: ProjectRow): void {
-  projects.update((arr) => mergeProjectRow(arr, row));
-}
-
-export function mergeWorktree(row: WorktreeRow): void {
-  projects.update((arr) => mergeWorktreeRow(arr, row));
-}
-
-export function removeWorktree(id: number): void {
+function removeWorktree(id: number): void {
   projects.update((arr) => removeWorktreeRow(arr, id));
 }
 
@@ -127,26 +116,6 @@ export function applyProjectEvents(events: readonly ProjectEvent[]): void {
   });
 }
 
-export interface WorktreeOccupant {
-  host_alias: string;
-  tmux_name: string;
-}
-
-export interface WorktreeOccupancy {
-  worktree: WorktreeRow;
-  occupants: WorktreeOccupant[];
-}
-
-/** List every worktree fleet knows about, each tagged with the alive Claude
- *  sessions currently using it. Pass `projectId` to scope to one project. */
-export async function listWorktreeOccupancy(
-  projectId: number | null = null,
-): Promise<Result<WorktreeOccupancy[]>> {
-  return invokeCmd<WorktreeOccupancy[]>('list_worktrees', {
-    args: { project_id: projectId },
-  });
-}
-
 /** Delete a git worktree on its host and drop the fleet row. The backend
  *  refuses (`E_WORKTREE_BUSY`) when an alive session uses it unless `force`. */
 export async function deleteWorktree(
@@ -158,4 +127,83 @@ export async function deleteWorktree(
   });
   if (r.ok) removeWorktree(worktreeId);
   return r;
+}
+
+/** `list_host_worktrees` result: one project's worktrees as they exist on
+ *  one host. `cloned: false` means the repo is not checked out there yet. */
+export interface HostWorktrees {
+  host_alias: string;
+  project_id: number;
+  cloned: boolean;
+  worktrees: WorktreeRow[];
+}
+
+/** The worktrees of `projectId` on `hostAlias`. `local` answers from the
+ *  DB; a remote host is scanned over SSH (one short call) and cached. */
+export async function listHostWorktrees(
+  hostAlias: string,
+  projectId: number,
+): Promise<Result<HostWorktrees>> {
+  return invokeCmd<HostWorktrees>('list_host_worktrees', {
+    args: { host_alias: hostAlias, project_id: projectId },
+  });
+}
+
+/** Wire shape of `service::add_project::AddProjectArgs::source`
+ *  (`#[serde(tag = "kind", rename_all = "snake_case")]`). */
+export type AddProjectSource =
+  | { kind: 'clone'; url: string }
+  | { kind: 'folder'; path: string }
+  | { kind: 'new'; owner: string; repo: string; create_remote: boolean; confirm?: string };
+
+/** Wire shape of `service::add_project::GithubRepo`. */
+export interface GithubRepo {
+  name_with_owner: string;
+  description: string | null;
+  is_private: boolean;
+  updated_at: string | null;
+}
+
+/**
+ * Add a project fleet does not know about yet: clone a GitHub repo, adopt an
+ * existing checkout, or create a new one. Cancellable via `signal` — see
+ * `invokeCmdAbortable` and `AddProjectArgs::call_id`. Merges the returned
+ * row into the `projects` store on success via `mergeProject`, so the
+ * sidebar shows the new project without a refetch.
+ */
+export async function addProject(
+  hostAlias: string,
+  source: AddProjectSource,
+  signal?: AbortSignal,
+): Promise<Result<ProjectTreeRow>> {
+  const r = await invokeCmdAbortable<ProjectTreeRow>(
+    'add_project',
+    { args: { host_alias: hostAlias, source } },
+    signal,
+  );
+  if (r.ok) mergeProject(r.value);
+  return r;
+}
+
+/** The repositories `gh` can see on `hostAlias`, for the Add-project
+ *  dialog's browse mode. Read-only. */
+export async function listGithubRepos(hostAlias: string): Promise<Result<GithubRepo[]>> {
+  return invokeCmd<GithubRepo[]>('list_github_repos', { args: { host_alias: hostAlias } });
+}
+
+const CONFIRM_TOKEN_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * The `create_remote` confirmation token carried in an `E_CONFIRM_REQUIRED`
+ * error's `details.confirm` field (see `service::add_project::ConfirmTokens`),
+ * for the Add-project dialog's two-step confirmation flow. `null` when the
+ * error is not `E_CONFIRM_REQUIRED`, has no `details`, or the token is not a
+ * well-formed 64-character hex string.
+ */
+export function confirmTokenOf(error: IpcError): string | null {
+  if (error.code !== 'E_CONFIRM_REQUIRED') return null;
+  const details = error.details;
+  if (!details || typeof details !== 'object') return null;
+  const confirm = (details as { confirm?: unknown }).confirm;
+  return typeof confirm === 'string' && CONFIRM_TOKEN_RE.test(confirm) ? confirm : null;
 }

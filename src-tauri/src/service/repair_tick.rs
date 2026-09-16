@@ -25,8 +25,9 @@
 //! [`MAX_REPAIRS_PER_TICK`] repairs per tick, and the whole run is detached
 //! from the reconcile loop so a slow `git worktree add` never delays a pass.
 //! Never touched: the registered controller, a session with a safe-kill in
-//! flight, review sessions (they share their source's worktree), `bg`
-//! sessions, ghosts / lost rows, and sessions on unreachable or hidden hosts.
+//! flight, review sessions (they share their source's worktree), pane-less
+//! (`bg` / `external`) sessions, ghosts / lost rows, and sessions on
+//! unreachable or hidden hosts.
 //!
 //! **Record + backoff.** Every attempt leaves exactly one
 //! `workspace_repaired` / `workspace_repair_failed` event (the repair writes
@@ -231,31 +232,17 @@ pub async fn check_missing(
         return Ok(DirCheck::default());
     }
     let script = dir_check_script(targets);
-    let out = if host == "local" {
-        let child = tokio::process::Command::new("bash")
-            .args(["-lc", &script])
-            .kill_on_drop(true)
-            .output();
-        tokio::time::timeout(DIR_CHECK_TIMEOUT, child)
-            .await
-            .map_err(|_| IpcError::new(codes::E_TIMEOUT, "local directory check timed out"))?
-            .map_err(|e| IpcError::new(codes::E_SHELL, format!("spawn bash: {e}")))?
-    } else {
-        let out = ssh
-            .run(host, &["bash", "-lc", &quote(&script)], DIR_CHECK_TIMEOUT)
-            .await?;
-        // `SshExec` contract: an unreachable host is exit 255, not `Err`.
-        if out.status.code() == Some(255) {
-            return Err(IpcError::new(
-                codes::E_SSH,
-                format!(
-                    "ssh {host} failed: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ),
-            ));
-        }
-        out
-    };
+    let out = crate::ssh::run_shell(ssh, host, &script, DIR_CHECK_TIMEOUT).await?;
+    // `SshExec` contract: an unreachable host is exit 255, not `Err`.
+    if host != "local" && out.status.code() == Some(255) {
+        return Err(IpcError::new(
+            codes::E_SSH,
+            format!(
+                "ssh {host} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        ));
+    }
     if !out.status.success() {
         return Err(IpcError::new(
             codes::E_SHELL,
@@ -277,7 +264,7 @@ pub fn eligible<'a>(
 ) -> Vec<&'a SessionRow> {
     rows.iter()
         .filter(|r| r.status == "running")
-        .filter(|r| !matches!(r.kind.as_str(), "bg" | "review"))
+        .filter(|r| !crate::store::has_no_pane(&r.kind) && r.kind != "review")
         .filter(|r| r.safe_kill_state.is_none())
         .filter(|r| {
             !controller
@@ -568,8 +555,8 @@ impl Drop for InFlight {
 /// start one run in the background and return `true`. Cheap when disabled
 /// (one settings read). Detached so repairs never delay the reconcile loop.
 pub fn maybe_run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> bool {
-    static LAST: once_cell::sync::Lazy<Mutex<Option<std::time::Instant>>> =
-        once_cell::sync::Lazy::new(|| Mutex::new(None));
+    static LAST: std::sync::LazyLock<Mutex<Option<std::time::Instant>>> =
+        std::sync::LazyLock::new(|| Mutex::new(None));
     static RUNNING: AtomicBool = AtomicBool::new(false);
     let cfg = {
         let Ok(s) = store.lock() else {
@@ -784,6 +771,24 @@ mod tests {
             ids.push(id);
         }
         (Arc::new(Mutex::new(s)), ids)
+    }
+
+    #[test]
+    fn eligible_skips_pane_less_rows() {
+        let (store, ids) = seed(&[("local", "a"), ("local", "b"), ("local", "c")]);
+        let s = store.lock().unwrap();
+        let c = s.conn_ref();
+        c.execute("UPDATE sessions SET kind='bg' WHERE id=?1", [ids[0]])
+            .unwrap();
+        c.execute("UPDATE sessions SET kind='external' WHERE id=?1", [ids[1]])
+            .unwrap();
+        let rows = s.list_all_sessions().unwrap();
+        let usable = HashSet::from(["local".to_string()]);
+        let got: Vec<i64> = eligible(&rows, None, &usable)
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(got, vec![ids[2]]);
     }
 
     fn events(store: &Mutex<Store>, id: i64, kind: &str) -> usize {

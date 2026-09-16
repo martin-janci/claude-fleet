@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { get } from 'svelte/store';
-import { toasts, push, dismiss, clearToasts, pushError, pushResultError, INFO_TIMEOUT_MS } from './toasts';
+import { toasts, push, dismiss, clearToasts, pushError, pushResultError, runToastAction, INFO_TIMEOUT_MS, ACTION_TIMEOUT_MS } from './toasts';
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -80,5 +80,20 @@ describe('toasts store', () => {
     const id = pushResultError({ ok: false, error: { code: 'E_DB', message: 'locked' } });
     expect(id).not.toBeNull();
     expect(get(toasts)[0].code).toBe('E_DB');
+  });
+
+  it('an action toast stays up longer, and running its action dismisses it once', () => {
+    const run = vi.fn();
+    const id = push({ message: 'mefistos hidden', action: { label: 'Undo', run } });
+    vi.advanceTimersByTime(INFO_TIMEOUT_MS + 1);
+    expect(get(toasts)).toHaveLength(1);
+    runToastAction(id);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(get(toasts)).toHaveLength(0);
+    runToastAction(id);
+    expect(run).toHaveBeenCalledTimes(1);
+    push({ message: 'later', action: { label: 'Undo', run } });
+    vi.advanceTimersByTime(ACTION_TIMEOUT_MS + 1);
+    expect(get(toasts)).toHaveLength(0);
   });
 });

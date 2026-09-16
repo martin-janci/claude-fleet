@@ -82,17 +82,27 @@ export function contextLevel(pct: number | null): ContextLevel | null {
   return 'ok';
 }
 
+/** A CSS colour for the context meter. warn/crit use the theme tokens shared
+ *  with the usage bars (`--usage-warn` / `--usage-crit` in app.css), so they
+ *  keep their contrast in both themes. Being `var(...)`, the result cannot be
+ *  suffixed with hex alpha — use `contextTint` for a translucent border. */
 export function contextColor(level: ContextLevel | null): string {
   switch (level) {
     case 'crit':
-      return '#e64a4a';
+      return 'var(--usage-crit)';
     case 'warn':
-      return '#d29b4a';
+      return 'var(--usage-warn)';
     case 'ok':
       return '#50c86e';
     default:
       return 'transparent';
   }
+}
+
+/** `contextColor` at one-third opacity, for the meter's border. */
+export function contextTint(level: ContextLevel | null): string {
+  if (level === null) return 'transparent';
+  return `color-mix(in srgb, ${contextColor(level)} 33%, transparent)`;
 }
 
 // ── triage ranking (P13) ──
@@ -185,8 +195,12 @@ function isIdleLong(s: SessionRow, opts: AttentionOptions): boolean {
   return opts.now - s.idle_since >= opts.idleSecs;
 }
 
-/** The single classifier: the order of these checks IS the bucket order. */
+/** The single classifier: the order of these checks IS the bucket order.
+ *  A Claude session running outside fleet entirely (`external`) is read-only
+ *  and cannot be acted on from here, so it never lands in a needs-you bucket:
+ *  it is `working` or `idle`, whatever its fields say. */
 export function classify(s: SessionRow, opts: AttentionOptions): TriageBucket {
+  if (s.kind === 'external') return s.claude_status === 'working' ? 'working' : 'idle';
   if (isWaiting(s)) return 'waiting';
   if (s.stuck_kind) return 'stuck';
   if (s.claude_status === 'failed') return 'failed';
@@ -247,8 +261,11 @@ export function byTriage(rows: readonly SessionRow[], opts: AttentionOptions): S
 
 /** Higher = worse, derived from the triage buckets so the project tree and the
  *  Needs-you queue can never disagree. Classified with the idle rule off, which
- *  keeps severity a pure function of the row with no clock to inject. */
+ *  keeps severity a pure function of the row with no clock to inject. An
+ *  `external` row always sits at the bottom: read-only, never worth floating
+ *  a project to the top for. */
 export function severity(s: SessionRow): number {
+  if (s.kind === 'external') return 0;
   return TRIAGE_BUCKETS.length - TRIAGE_BUCKETS.indexOf(classify(s, { idleSecs: 0, now: 0 }));
 }
 
@@ -265,21 +282,24 @@ export function worstSeverityByProject(sessions: readonly SessionRow[]): Map<num
 
 // ── stuck transitions ──
 
-/** session.id → stuck_kind for every currently-stuck row. */
+/** session.id → stuck_kind for every currently-stuck row. `external` rows
+ *  are read-only and excluded even if the backend ever set a stuck_kind on
+ *  one. */
 export function stuckSnapshot(sessions: readonly SessionRow[]): Map<number, StuckKind> {
   const m = new Map<number, StuckKind>();
-  for (const s of sessions) if (s.stuck_kind) m.set(s.id, s.stuck_kind);
+  for (const s of sessions) if (s.kind !== 'external' && s.stuck_kind) m.set(s.id, s.stuck_kind);
   return m;
 }
 
 /** Rows that became stuck (or changed stuck kind) since `prev`. Clearing is
- *  not a transition worth announcing. */
+ *  not a transition worth announcing. `external` rows never announce. */
 export function newlyStuck(
   prev: ReadonlyMap<number, StuckKind>,
   sessions: readonly SessionRow[],
 ): SessionRow[] {
   const out: SessionRow[] = [];
   for (const s of sessions) {
+    if (s.kind === 'external') continue;
     if (!s.stuck_kind) continue;
     if (prev.get(s.id) !== s.stuck_kind) out.push(s);
   }

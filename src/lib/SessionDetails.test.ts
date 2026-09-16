@@ -58,7 +58,7 @@ describe('SessionDetails', () => {
       { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: 'u1', provisioned: false },
     ]);
     accounts.set([
-      { uuid: 'u1', email: 'm.janci@32bit.sk', display_name: 'M', organization_name: null, organization_uuid: null, seat_tier: 'max', last_seen_at: 1 },
+      { uuid: 'u1', email: 'm.janci@32bit.sk', display_name: 'M', organization_name: null, organization_uuid: null, seat_tier: 'max', last_seen_at: 1, nickname: null, has_extra_usage: false },
     ]);
     render(SessionDetails, { props: { session: sampleSession } });
     await tick();
@@ -448,5 +448,117 @@ describe('SessionDetails label editing and timeline', () => {
     inv().mockImplementation(async (cmd: string) => (cmd === 'session_history' ? [] : undefined));
     render(SessionDetails, { props: { session: sampleSession } });
     expect((await screen.findByTestId('timeline-empty')).textContent).toContain('No events recorded');
+  });
+});
+
+describe('SessionDetails Remove from list (inactive bg agents)', () => {
+  const inv = () => mockedInvoke as ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    inv().mockReset();
+    inv().mockImplementation(async () => undefined);
+  });
+
+  it('shows Remove from list for a stopped bg row and calls dismiss_agent_session', async () => {
+    const row = { ...sampleSession, id: 9, kind: 'bg', tmux_name: 'bg:c9', claude_status: 'stopped' as const };
+    render(SessionDetails, { props: { session: row } });
+    await tick();
+    const btn = await screen.findByTestId('remove-from-list-details');
+    expect(btn.textContent).toContain('Remove from list');
+    inv().mockResolvedValueOnce(null);
+    await fireEvent.click(btn);
+    await tick();
+    expect(inv().mock.calls).toContainEqual(['dismiss_agent_session', { args: { session_id: 9 } }]);
+  });
+
+  it('surfaces a failed removal as an error toast', async () => {
+    const { toasts, clearToasts } = await import('./toasts');
+    const { get } = await import('svelte/store');
+    clearToasts();
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'dismiss_agent_session') throw { code: 'E_INVALID_STATE', message: 'still working' };
+      return undefined;
+    });
+    const row = { ...sampleSession, id: 9, kind: 'bg', tmux_name: 'bg:c9', claude_status: 'stopped' as const };
+    render(SessionDetails, { props: { session: row } });
+    await fireEvent.click(await screen.findByTestId('remove-from-list-details'));
+    await tick();
+    await tick();
+    const err = get(toasts).find((t) => t.kind === 'error');
+    expect(err?.message).toContain('still working');
+  });
+
+  it('hides it for a live bg row, an external row and a tmux row', async () => {
+    for (const row of [
+      { ...sampleSession, id: 10, kind: 'bg', tmux_name: 'bg:c10', claude_status: 'working' as const },
+      { ...sampleSession, id: 11, kind: 'external', tmux_name: 'bg:c11', claude_status: 'stopped' as const },
+      { ...sampleSession, id: 12, claude_status: 'stopped' as const },
+    ]) {
+      const { unmount } = render(SessionDetails, { props: { session: row } });
+      await tick();
+      expect(screen.queryByTestId('remove-from-list-details')).toBeNull();
+      unmount();
+    }
+  });
+});
+
+describe('SessionDetails actions for pane-less rows (external read-only, inactive agents)', () => {
+  const ACTION_IDS = [
+    'rename-from-details',
+    'restart-from-details',
+    'repair-from-details',
+    'send-prompt-from-details',
+    'open-review',
+    'recreate-from-details',
+    'move-from-details',
+    'remove-from-list-details',
+    'safe-kill-from-details',
+    'kill-from-details',
+  ];
+
+  it('an external row shows no action except Edit label, and no tmux attach command', async () => {
+    const ext = {
+      ...sampleSession,
+      id: 21,
+      kind: 'external',
+      tmux_name: 'bg:ext-1',
+      project_id: 1,
+      worktree_id: 10,
+      claude_session_id: 'ext-1',
+      claude_status: 'working' as const,
+    };
+    render(SessionDetails, { props: { session: ext } });
+    await tick();
+    expect(screen.getByTestId('label-from-details')).toBeTruthy();
+    for (const id of ACTION_IDS) {
+      expect(screen.queryByTestId(id), id).toBeNull();
+    }
+    expect(screen.queryByTestId('attach-command')).toBeNull();
+    expect(screen.queryByTestId('copy-attach')).toBeNull();
+  });
+
+  it('a bg row does not offer a tmux attach command', async () => {
+    const bg = { ...sampleSession, id: 22, kind: 'bg', tmux_name: 'bg:c22', claude_status: 'working' as const };
+    render(SessionDetails, { props: { session: bg } });
+    await tick();
+    expect(screen.queryByTestId('attach-command')).toBeNull();
+    // A live agent keeps its stop path.
+    expect(screen.getByTestId('kill-from-details')).toBeTruthy();
+  });
+
+  it('an inactive bg agent offers Remove from list as its only removal action', async () => {
+    const bg = { ...sampleSession, id: 23, kind: 'bg', tmux_name: 'bg:c23', claude_status: 'stopped' as const };
+    render(SessionDetails, { props: { session: bg } });
+    await tick();
+    expect(screen.getByTestId('remove-from-list-details')).toBeTruthy();
+    expect(screen.queryByTestId('kill-from-details')).toBeNull();
+    expect(screen.queryByTestId('safe-kill-from-details')).toBeNull();
+  });
+
+  it('a tmux row still shows its attach command and Kill', async () => {
+    render(SessionDetails, { props: { session: sampleSession } });
+    await tick();
+    expect(screen.getByTestId('attach-command').textContent).toBe('tmux attach -t dev-foo');
+    expect(screen.getByTestId('kill-from-details')).toBeTruthy();
   });
 });

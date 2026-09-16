@@ -34,12 +34,30 @@ export function buildSessionsByProject(
 ): Map<number, SessionRow[]> {
   const m = new Map<number, SessionRow[]>();
   for (const s of sessions) {
+    if (s.kind === 'external') continue;
     if (s.project_id == null) continue;
     if (!sessionVisible(s, hostFilter, showBgAgents, predicate)) continue;
     if (!m.has(s.project_id)) m.set(s.project_id, []);
     m.get(s.project_id)!.push(s);
   }
   return m;
+}
+
+/** Interactive Claude sessions running entirely outside fleet (Claude
+ *  Desktop, a bare terminal), for the read-only "Outside fleet" group. The
+ *  host filter applies (a hidden host's rows stay hidden); `showBgAgents`
+ *  does not — that toggle only governs supervised `bg` agents. Sorted by
+ *  `created_at` descending (set once, when fleet first saw the session —
+ *  `last_activity_at` is rewritten on every reconcile pass), ties by id
+ *  descending. */
+export function buildOutsideFleet(
+  sessions: readonly SessionRow[],
+  hostFilter: string,
+): SessionRow[] {
+  return sessions
+    .filter((s) => s.kind === 'external' && (hostFilter === 'all' || s.host_alias === hostFilter))
+    .slice()
+    .sort((a, b) => b.created_at - a.created_at || b.id - a.id);
 }
 
 /** session.id → count of OTHER sessions sharing the same (project, worktree_key). */

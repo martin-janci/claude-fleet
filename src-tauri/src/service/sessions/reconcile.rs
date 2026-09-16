@@ -3,6 +3,8 @@
 //! the `list_sessions` / `refresh_sessions` / `reconcile_now` entry points.
 
 use super::*;
+use crate::ipc_error::codes;
+use crate::ipc_error::lock;
 
 /// Number of pane lines captured per work session for the reconcile intel
 /// probe. Eight lines covers the REPL footer (status bar / context %) plus the
@@ -72,7 +74,7 @@ impl HostShell for RealHostShell {
         let out = run_host_script(&self.ssh, host, script, self.timeout).await?;
         if !out.status.success() {
             return Err(IpcError::new(
-                "E_SHELL",
+                codes::E_SHELL,
                 String::from_utf8_lossy(&out.stderr).trim().to_string(),
             ));
         }
@@ -89,7 +91,7 @@ pub(crate) struct NoHostShell;
 #[async_trait::async_trait]
 impl HostShell for NoHostShell {
     async fn run_script(&self, _host: &str, _script: &str) -> Result<String, IpcError> {
-        Err(IpcError::new("E_SHELL", "no shell in this test"))
+        Err(IpcError::new(codes::E_SHELL, "no shell in this test"))
     }
 }
 
@@ -104,21 +106,7 @@ pub(crate) async fn run_host_script(
     timeout: std::time::Duration,
 ) -> Result<std::process::Output, IpcError> {
     crate::validate::host_alias(host)?;
-    if host == "local" {
-        let child = tokio::process::Command::new("bash")
-            .args(["-lc", script])
-            .output();
-        match tokio::time::timeout(timeout, child).await {
-            Ok(res) => res.map_err(|e| IpcError::new("E_SHELL", format!("spawn bash: {e}"))),
-            Err(_) => Err(IpcError::new(
-                "E_TIMEOUT",
-                format!("local script exceeded {}s", timeout.as_secs()),
-            )),
-        }
-    } else {
-        ssh.run(host, &["bash", "-lc", &quote(script)], timeout)
-            .await
-    }
+    crate::ssh::run_shell(ssh.as_ref(), host, script, timeout).await
 }
 
 /// Wall clock for one host's PR probe script (one `gh pr view` per due
@@ -138,12 +126,25 @@ pub(super) struct HostProbe {
     pub(super) host: HostRow,
     pub(super) result: Result<Vec<crate::tmux::TmuxSession>, IpcError>,
     pub(super) agent_rows: Vec<crate::claude_agents::ClaudeAgentRow>,
+    /// `sessionId → transcript mtime (unix s)` for this pass's `Background`
+    /// agents (one extra host call, only when there is at least one; no bg
+    /// agent ⇒ `Some` empty map). `None` when that call failed (spawn error,
+    /// non-zero exit, timeout) or the whole probe timed out: the mtimes are
+    /// unknown, so `reconcile_agent_rows` applies neither the inactive rule
+    /// nor dismissal revival that pass — every agent counts as active.
+    pub(super) agent_mtimes: Option<std::collections::HashMap<String, i64>>,
     pub(super) intel: PaneIntelMap,
     /// `tmux_name → gh pr view` result for the sessions probed THIS pass
     /// (PROD-5). A name absent from the map was not probed (cache still
     /// fresh, host has no `gh`, or the probe failed) and keeps its stored
     /// `pr_url` / `ci_status`.
     pub(super) pr_info: PrInfoMap,
+    /// The Claude account the host is logged into per this pass's read of
+    /// its `~/.claude.json` (`TmuxExec::read_oauth_account`). `None` when
+    /// the read failed or the executor cannot tell — the stored link is then
+    /// left untouched, never cleared. `local` always carries `None` here
+    /// (it is synced by `service::hosts::sync_local_account` instead).
+    pub(super) account: Option<crate::service::hosts::OauthAccount>,
     /// Unix-epoch second the probe STARTED. Forwarded as
     /// `HostReconcile::probe_started_at` so the writer never ghosts a row that
     /// a newer probe (e.g. `new_session`'s own reconcile) stamped after this
@@ -163,6 +164,16 @@ pub(crate) struct ReconcileDeps {
     /// Per-session probe throttle; production shares one process-wide cache,
     /// tests get a fresh one per deps.
     pub(super) pr_cache: Arc<crate::service::outcome::PrProbeCache>,
+    /// Home directory `reconcile_sessions_with` reads every pass to keep
+    /// `local`'s linked Claude account in sync (see
+    /// `service::hosts::sync_local_account` — it links a new/changed
+    /// account, refreshes an unchanged one's fields, and otherwise leaves
+    /// the existing link untouched). `None` in ordinary test deps
+    /// (`fake`/`fake_with_shell`) so the huge majority of reconcile tests
+    /// never read a REAL `~/.claude.json` — only `fake_with_local_home` sets
+    /// it, for tests that specifically exercise this behaviour. `real()`
+    /// always sets it to the process's actual `$HOME`.
+    pub(super) local_home: Option<std::path::PathBuf>,
 }
 
 /// `host alias → tmux executor` factory used by `ReconcileDeps`.
@@ -180,6 +191,7 @@ impl ReconcileDeps {
             probe_timeout: HOST_PROBE_TIMEOUT,
             shell,
             pr_cache: crate::service::outcome::pr_probe_cache(),
+            local_home: Some(crate::service::hosts::local_home_dir()),
         })
     }
 
@@ -206,7 +218,23 @@ impl ReconcileDeps {
             pr_cache: Arc::new(crate::service::outcome::PrProbeCache::new(
                 crate::service::outcome::PR_PROBE_TTL,
             )),
+            local_home: None,
         })
+    }
+
+    /// Like `fake`, but with `local_home` set so a test can exercise the
+    /// `local`-account-linking step (see `ReconcileDeps::local_home`).
+    #[cfg(test)]
+    pub(crate) fn fake_with_local_home(
+        exec: impl Fn(&str) -> Box<dyn TmuxExec> + Send + Sync + 'static,
+        probe_timeout: std::time::Duration,
+        local_home: std::path::PathBuf,
+    ) -> Arc<Self> {
+        let deps = Self::fake(exec, probe_timeout);
+        // Freshly constructed above — refcount is 1, so `get_mut` succeeds.
+        let mut deps = deps;
+        Arc::get_mut(&mut deps).expect("fresh Arc").local_home = Some(local_home);
+        deps
     }
 }
 
@@ -292,8 +320,7 @@ impl ReconcileGate {
 
 /// The process-wide gate every production entry point shares.
 pub fn reconcile_gate() -> &'static ReconcileGate {
-    static GATE: once_cell::sync::Lazy<ReconcileGate> =
-        once_cell::sync::Lazy::new(ReconcileGate::new);
+    static GATE: std::sync::LazyLock<ReconcileGate> = std::sync::LazyLock::new(ReconcileGate::new);
     &GATE
 }
 
@@ -349,6 +376,28 @@ pub(super) fn reconcile_write_one_host(
     let intel = &probe.intel;
     match &probe.result {
         Ok(live) => {
+            // Relink the host to the account it is logged into NOW, before
+            // the sessions below are attributed: a session first seen in the
+            // same pass as the account switch must carry the new account,
+            // not the one snapshotted into `host` before the probe. `None`
+            // (read failed / logged out / `local`) leaves the link alone.
+            // Best-effort: a failure here must not cost the host its
+            // session reconcile — fall back to the snapshotted link.
+            let host_account = match crate::service::hosts::sync_host_account(
+                s,
+                &host.alias,
+                probe.account.as_ref(),
+            ) {
+                Ok(uuid) => uuid,
+                Err(e) => {
+                    tracing::warn!(
+                        host = %host.alias,
+                        error = %e.message,
+                        "[reconcile] host account sync failed; keeping the stored link"
+                    );
+                    host.account_uuid.clone()
+                }
+            };
             let mut keep: Vec<String> = Vec::with_capacity(live.len());
             let mut sessions: Vec<ReconcileSession> = Vec::with_capacity(live.len());
             // ── Task G: reconcile transition-detection (event timeline) ──
@@ -371,7 +420,7 @@ pub(super) fn reconcile_write_one_host(
                 // current account for newly-discovered sessions.
                 let account_uuid = s
                     .get_session_account(&host.alias, &sess.name)?
-                    .or_else(|| host.account_uuid.clone());
+                    .or_else(|| host_account.clone());
                 let worktree_key = worktree_key_for_host(&sess.path.to_string_lossy(), &paths);
                 // Match the running Claude agent by name (sessions launched
                 // with `--name <tmux_name>`) or, for older sessions without a
@@ -465,14 +514,24 @@ pub(super) fn reconcile_write_one_host(
                     }
                 }
             }
-            // SECOND pass: background (`claude --bg`) agents that matched NO tmux
-            // session are never in `keep` and would otherwise be invisible.
-            // Surface each as a synthetic `kind='bg'` SessionRow so it appears in
-            // `list_sessions`. These rows are exempt from the tmux-keyed ghost
-            // cleanup (`ghost_and_clean_sessions_in_tx`) — instead they are
-            // pruned inside `reconcile_bg_agents` against the current
-            // `claude agents --json` result, so dead agents can't accumulate.
-            reconcile_bg_agents(s, &host.alias, live, projects, agent_rows)?;
+            // SECOND pass: `claude agents` rows that matched NO tmux session
+            // are never in `keep` and would otherwise be invisible. Surface
+            // each as a synthetic pane-less SessionRow (`kind='external'` for
+            // interactive sessions, `kind='bg'` for background jobs) so it
+            // appears in `list_sessions`. These rows are exempt from the
+            // tmux-keyed ghost cleanup (`Store::ghost_and_clean`) —
+            // instead they are pruned inside `reconcile_agent_rows` against
+            // the current `claude agents --json` result, so dead agents can't
+            // accumulate.
+            reconcile_agent_rows(
+                s,
+                &host.alias,
+                live,
+                projects,
+                agent_rows,
+                probe.agent_mtimes.as_ref(),
+                now_unix(),
+            )?;
             // Task H: stamp freshness on every session this pass observed live,
             // so a proactive (background) reconcile keeps `last_reconciled_at`
             // current and the UI can dim rows whose host has gone quiet. It is
@@ -538,44 +597,113 @@ pub(super) fn unmatched_bg_agents<'a>(
         .collect()
 }
 
-/// Upsert a synthetic `kind='bg'` SessionRow for every background agent that has
-/// no tmux session (the reconcile "second pass"), then prune the host's bg rows
-/// whose agent is NOT in the current `claude agents --json` result. The prune is
-/// two-phase (ghost this pass, hard-delete next pass) via
-/// `ghost_and_clean_bg_sessions`, so a transiently-failed agents probe — which
-/// comes back as an empty list — only ghosts rows for one cycle instead of
-/// deleting them. Per-agent write failures are logged and skipped so one bad
-/// row can't abort the others.
-pub(super) fn reconcile_bg_agents(
+/// Seconds without transcript activity after which a non-working background
+/// agent is shown as `stopped` (spec §2).
+pub(super) const AGENT_INACTIVE_SECS: i64 = 86_400;
+
+/// A background agent is inactive when its status is not `working` and its
+/// last known activity is at least [`AGENT_INACTIVE_SECS`] old. An unknown
+/// activity time means active — never guess an agent dead.
+pub(super) fn agent_is_inactive(
+    status: Option<&str>,
+    last_activity: Option<i64>,
+    now: i64,
+) -> bool {
+    status != Some("working") && last_activity.is_some_and(|t| now - t >= AGENT_INACTIVE_SECS)
+}
+
+/// Upsert a synthetic pane-less SessionRow for every `claude agents` row that
+/// has no tmux session (the reconcile "second pass"): `kind='external'` for an
+/// interactive session running outside fleet, `kind='bg'` for a background
+/// job. A bg agent idle for [`AGENT_INACTIVE_SECS`] (transcript mtime from
+/// `mtimes`, else `started_at`) is stored as `stopped`. An agent the user
+/// dismissed is skipped until it shows activity newer than the dismissal,
+/// which clears the dismissal. `mtimes` is `None` when the transcript probe
+/// failed: the mtimes are unknown (an empty map would read as "no
+/// transcript" and let an old `started_at` retire a live agent), so that
+/// pass skips the inactive rule entirely and keeps every dismissal in
+/// force. Then prune the host's pane-less rows whose
+/// agent is NOT in this pass. The prune is two-phase (ghost this pass,
+/// hard-delete next pass) via `ghost_and_clean_bg_sessions`, so a
+/// transiently-failed agents probe — which comes back as an empty list — only
+/// ghosts rows for one cycle instead of deleting them. Per-agent write
+/// failures are logged and skipped so one bad row can't abort the others.
+pub(super) fn reconcile_agent_rows(
     s: &Store,
     host_alias: &str,
     live: &[crate::tmux::TmuxSession],
     projects: &[ProjectRow],
     agents: &[crate::claude_agents::ClaudeAgentRow],
+    mtimes: Option<&std::collections::HashMap<String, i64>>,
+    now: i64,
 ) -> Result<(), IpcError> {
     let mut keep: Vec<String> = Vec::new();
     let paths = HostPaths::for_host(s, host_alias);
+    let dismissed = match s.dismissed_agents(host_alias) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(
+                host = %host_alias,
+                error = %e,
+                "[reconcile] reading dismissed agents failed"
+            );
+            Default::default()
+        }
+    };
     for agent in unmatched_bg_agents(live, agents, host_alias == "local") {
         let Some(session_id) = agent.session_id.as_deref() else {
             continue;
         };
+        let last_activity = mtimes
+            .and_then(|m| m.get(session_id).copied())
+            .or(agent.started_at);
+        if let Some(&at) = dismissed.get(session_id) {
+            match last_activity {
+                // Revive only on known evidence: with the mtimes unknown the
+                // dismissal stays in force.
+                Some(t) if mtimes.is_some() && t > at => {
+                    if let Err(e) = s.clear_agent_dismissal(host_alias, session_id) {
+                        tracing::warn!(
+                            host = %host_alias,
+                            claude_session_id = %session_id,
+                            error = %e,
+                            "[reconcile] clearing agent dismissal failed"
+                        );
+                    }
+                }
+                // Still dismissed. Not in `keep`, so a leftover row (if any)
+                // is pruned below.
+                _ => continue,
+            }
+        }
         let tmux_name = format!("bg:{session_id}");
         // Keep the sentinel even if the upsert below fails — ghosting an
         // existing row over a transient write error would be wrong.
         keep.push(tmux_name.clone());
+        let kind = match agent.kind {
+            crate::claude_agents::AgentKind::Interactive => "external",
+            crate::claude_agents::AgentKind::Background => "bg",
+        };
         let project_id = agent.cwd.as_deref().and_then(|cwd| {
             find_project_id_for_path(projects, host_alias, std::path::Path::new(cwd), &paths)
         });
         // Same vocabulary filter as tmux rows: an unknown value is logged and
         // dropped (the upsert's COALESCE then keeps the prior status).
-        let status = known_agent_status(&tmux_name, agent.status.as_deref());
+        let mut status = known_agent_status(&tmux_name, agent.status.as_deref());
+        if kind == "bg"
+            && mtimes.is_some()
+            && agent_is_inactive(status.as_deref(), last_activity, now)
+        {
+            status = Some("stopped".to_string());
+        }
         if let Err(e) = s.upsert_bg_session(
             host_alias,
             &tmux_name,
             project_id,
             session_id,
             status.as_deref(),
-            now_unix(),
+            now,
+            kind,
         ) {
             tracing::warn!(
                 host = %host_alias,
@@ -585,7 +713,7 @@ pub(super) fn reconcile_bg_agents(
             );
         }
     }
-    if let Err(e) = s.ghost_and_clean_bg_sessions(host_alias, &keep, now_unix()) {
+    if let Err(e) = s.ghost_and_clean_bg_sessions(host_alias, &keep, now) {
         tracing::warn!(host = %host_alias, error = %e, "[reconcile] bg cleanup failed");
     }
     Ok(())
@@ -681,20 +809,44 @@ pub(super) async fn probe_with_timeout(
     let probe = async {
         let tmux_result = tmux.list_sessions().await;
         let agent_rows = tmux.list_claude_agents().await;
+        // Which account the host is logged into NOW — so a `claude /login`
+        // as someone else on a remote host relinks it within one pass
+        // instead of waiting for a manual Re-probe. Skipped when the list
+        // failed: the host is about to be marked unreachable and the read
+        // would only be one more round trip into a dead ssh.
+        let account = if tmux_result.is_ok() {
+            tmux.read_oauth_account().await
+        } else {
+            None
+        };
+        // Transcript mtimes feed the inactive-bg-agent rule; one host call,
+        // only when this pass saw a background agent.
+        let bg_ids: Vec<String> = agent_rows
+            .iter()
+            .filter(|a| a.kind == crate::claude_agents::AgentKind::Background)
+            .filter_map(|a| a.session_id.clone())
+            .collect();
+        let agent_mtimes = if bg_ids.is_empty() {
+            Some(std::collections::HashMap::new())
+        } else {
+            tmux.transcript_mtimes(&bg_ids).await
+        };
         // One pane-tail read per live session, parsed into reconcile intel.
         let intel = match &tmux_result {
             Ok(live) => capture_pane_intel(tmux.as_ref(), live).await,
             Err(_) => PaneIntelMap::new(),
         };
-        (tmux_result, agent_rows, intel)
+        (tmux_result, agent_rows, agent_mtimes, intel, account)
     };
     let mut probe = match tokio::time::timeout(timeout, probe).await {
-        Ok((result, agent_rows, intel)) => HostProbe {
+        Ok((result, agent_rows, agent_mtimes, intel, account)) => HostProbe {
             host,
             result,
             agent_rows,
+            agent_mtimes,
             intel,
             pr_info: PrInfoMap::new(),
+            account,
             started_at,
         },
         Err(_elapsed) => {
@@ -705,10 +857,12 @@ pub(super) async fn probe_with_timeout(
             );
             return HostProbe {
                 host,
-                result: Err(IpcError::new("E_TIMEOUT", "host probe timed out")),
+                result: Err(IpcError::new(codes::E_TIMEOUT, "host probe timed out")),
                 agent_rows: Vec::new(),
+                agent_mtimes: None,
                 intel: PaneIntelMap::new(),
                 pr_info: PrInfoMap::new(),
+                account: None,
                 started_at,
             };
         }
@@ -742,9 +896,30 @@ pub(crate) async fn reconcile_sessions_with(
     store: &Mutex<Store>,
     deps: &Arc<ReconcileDeps>,
 ) -> Result<(), IpcError> {
+    // 0. Ensure the `local` row exists (idempotent; step 1 does this again
+    //    but `sync_local_account` needs the row to already be there — on the
+    //    very first pass of a fresh install there is no `local` row yet, and
+    //    `set_host_account` is a no-op UPDATE against a row that doesn't
+    //    exist).
+    {
+        let s = lock(store)?;
+        s.upsert_host("local")?;
+    }
+    // Sync the local Claude account every pass — not just once — so an
+    // account switch (logout + login as someone else) is picked up, not just
+    // a first-time link (see `ReconcileDeps::local_home` and
+    // `service::hosts::sync_local_account`: `local`'s account has no other
+    // automatic discovery path). Best-effort: a probe hiccup here must not
+    // abort session reconcile.
+    if let Some(home) = deps.local_home.clone() {
+        if let Err(e) = crate::service::hosts::sync_local_account(store, home).await {
+            tracing::warn!(error = %e.message, "[reconcile] local account probe failed");
+        }
+    }
+
     // 1. Snapshot under lock (brief). Ensure local host exists first.
     let hosts = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         s.upsert_host("local")?;
         s.list_hosts()?
             .into_iter()
@@ -795,11 +970,11 @@ pub(crate) async fn reconcile_sessions_with(
     //    The project list is identical for every host — fetch it once here
     //    rather than re-querying inside `find_project_id_for_path` per session.
     let projects = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         s.list_projects()?
     };
     for probe in &probed {
-        let mut s = store.lock().map_err(|_| IpcError::lock())?;
+        let mut s = lock(store)?;
         // Per-host isolation: one host's DB write failure (e.g. an FK
         // violation on a stale account_uuid) must NOT abort reconcile for
         // every other host. apply_host_reconcile is transactional, so a
@@ -872,7 +1047,7 @@ pub(super) async fn list_sessions_with(
         // rather than queue a second fleet-wide probe behind it.
         run_full_reconcile(store, deps, gate).await?;
     }
-    let s = store.lock().map_err(|_| IpcError::lock())?;
+    let s = lock(store)?;
     s.list_all_sessions().map_err(IpcError::from)
 }
 
@@ -883,12 +1058,12 @@ pub(super) async fn reconcile_one_host_with(
 ) -> Result<(), IpcError> {
     // 1. Snapshot the host under lock (brief).
     let (host, paths) = {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         let host = s
             .list_hosts()?
             .into_iter()
             .find(|h| h.alias == alias)
-            .ok_or_else(|| IpcError::new("E_NOTFOUND", format!("host {alias} not found")))?;
+            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("host {alias} not found")))?;
         let paths = HostPaths::for_host(&s, alias);
         (host, paths)
     };
@@ -898,7 +1073,7 @@ pub(super) async fn reconcile_one_host_with(
 
     // 3. Apply writes under one brief lock, via the SAME per-host write path
     //    as the multi-host reconcile (single transaction + emit-after-commit).
-    let mut s = store.lock().map_err(|_| IpcError::lock())?;
+    let mut s = lock(store)?;
     let projects = s.list_projects()?;
     reconcile_write_one_host(&mut s, &probe, &projects)
 }

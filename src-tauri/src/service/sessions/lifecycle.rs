@@ -2,6 +2,10 @@
 //! friendly name, restart, recreate, and dismissing ghosts.
 
 use super::*;
+use crate::ipc_error::codes;
+use crate::ipc_error::lock;
+use crate::service::repair::{render_git_script_expecting, BranchSource, Step, MIRROR_REFUSED};
+use crate::ssh::SshExec;
 
 #[derive(Deserialize)]
 pub struct NewSessionArgs {
@@ -30,12 +34,45 @@ pub struct NewSessionArgs {
     pub friendly_name: Option<String>,
 }
 
+/// An existing worktree to make sure is present on a remote host, ahead of
+/// `ensure_remote_project`. `path` is the worktree's absolute path ON THE
+/// HOST, as recorded by the host scan (`service::worktrees::list_host_worktrees`)
+/// or the local scan mirrored into the `worktrees` table — NOT re-derived
+/// from `name`, since a checkout can live under `.worktrees/`, under
+/// `.claude/worktrees/`, or anywhere else git has it registered. The script
+/// checks and (if missing) creates exactly this directory.
+pub(super) struct RemoteWorktree<'a> {
+    pub name: &'a str,
+    pub branch: Option<&'a str>,
+    pub path: &'a str,
+}
+
+/// A worktree row names a checkout on ONE host. Using another host's row
+/// would make `ensure_remote_project` add a worktree for a branch that may
+/// exist only on the originating machine (`fatal: invalid reference`), so
+/// refuse it here with an actionable message instead.
+pub(super) fn reject_foreign_worktree(
+    target_host: &str,
+    row_host: &str,
+    name: &str,
+) -> Result<(), IpcError> {
+    if target_host == row_host {
+        return Ok(());
+    }
+    Err(IpcError::new(
+        codes::E_INVALID,
+        format!(
+            "worktree {name} is a checkout on {row_host}; pick one that exists on {target_host} or start a new worktree"
+        ),
+    ))
+}
+
 /// Ensure the remote host has the project cloned at `<project_root>` and,
-/// optionally, has a worktree at `<project_root>/.claude/worktrees/<wt>`
-/// checked out to `<branch>`. Idempotent: if the directory + .git is already
-/// there, the clone step is skipped; same for worktree-add. Auto-clones via
-/// SSH (`git@github.com:<owner>/<repo>.git`), assuming the remote has SSH
-/// github access (the common case for dev machines).
+/// optionally, has a worktree checked out to `<branch>` at its own recorded
+/// path (see [`RemoteWorktree`]). Idempotent: if the directory + .git is
+/// already there, the clone step is skipped; same for worktree-add.
+/// Auto-clones via SSH (`git@github.com:<owner>/<repo>.git`), assuming the
+/// remote has SSH github access (the common case for dev machines).
 ///
 /// The `token` parameter allows the caller to cancel the (potentially long-
 /// running) `git clone` step. On cancellation the child is killed and
@@ -43,14 +80,16 @@ pub struct NewSessionArgs {
 /// on cancel — that's a follow-up task.
 ///
 /// Returns Ok(()) on success. Failure surfaces stderr in the IpcError so the
-/// user can diagnose (missing SSH key, private-repo auth, etc.).
+/// user can diagnose (missing SSH key, private-repo auth, etc.) — except a
+/// worktree whose branch was never pushed, which gets an actionable
+/// `E_GIT_SETUP` ("push it first") instead of git's `invalid reference`.
 pub(super) async fn ensure_remote_project(
-    ssh: &Arc<SshClient>,
+    ssh: &dyn SshExec,
     host: &str,
     owner: &str,
     repo: &str,
     project_root: &str,
-    worktree: Option<(&str, Option<&str>)>, // (name, branch)
+    worktree: Option<&RemoteWorktree<'_>>,
     token: CancellationToken,
 ) -> Result<(), IpcError> {
     // Validate every component that gets interpolated into a remote path or
@@ -59,37 +98,15 @@ pub(super) async fn ensure_remote_project(
     // quoted argument that escapes the projects directory.
     crate::validate::path_component("owner", owner)?;
     crate::validate::path_component("repo", repo)?;
-    if let Some((wt_name, branch)) = worktree {
-        crate::validate::path_component("worktree name", wt_name)?;
-        if let Some(b) = branch {
+    if let Some(wt) = worktree {
+        crate::validate::path_component("worktree name", wt.name)?;
+        if let Some(b) = wt.branch {
             crate::validate::git_ref(b)?;
         }
+        crate::validate::remote_abs_path("worktree path", wt.path)?;
     }
     let clone_url = format!("git@github.com:{owner}/{repo}.git");
-    // Build a single bash script that:
-    //   1. clones the repo if .git is missing
-    //   2. creates the worktree if requested and not yet present
-    // Both steps are guarded so a re-run on an already-set-up host is a no-op.
-    let mut script = String::new();
-    script.push_str(&format!(
-        "if [ ! -d {root}/.git ]; then mkdir -p $(dirname {root}) && git clone {url} {root}; fi",
-        root = quote(project_root),
-        url = quote(&clone_url),
-    ));
-    if let Some((wt_name, branch)) = worktree {
-        if wt_name != "main" {
-            let wt_rel = format!(".claude/worktrees/{wt_name}");
-            let wt_abs = format!("{project_root}/{wt_rel}");
-            let branch = branch.unwrap_or(wt_name);
-            script.push_str(&format!(
-                " && if [ ! -d {abs} ]; then cd {root} && git worktree add {rel} {br}; fi",
-                abs = quote(&wt_abs),
-                root = quote(project_root),
-                rel = quote(&wt_rel),
-                br = quote(branch),
-            ));
-        }
-    }
+    let script = ensure_remote_project_script(project_root, &clone_url, worktree);
     // Wrap in bash -lc so $PATH (git on Homebrew/Linuxbrew) is sourced. Use
     // the same single-quote-the-whole-script trick as RemoteTmux::remote_bash
     // to avoid the ssh argv-joining bug.
@@ -111,19 +128,107 @@ pub(super) async fn ensure_remote_project(
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stdout = String::from_utf8_lossy(&out.stdout);
-        return Err(IpcError::new(
-            "E_GIT_SETUP",
-            format!(
-                "couldn't ensure {owner}/{repo} on {host}: {}",
-                if stderr.trim().is_empty() {
-                    stdout.trim().to_string()
-                } else {
-                    stderr.trim().to_string()
-                }
-            ),
+        return Err(git_setup_error(
+            host,
+            owner,
+            repo,
+            mirrored_branch(worktree),
+            &stdout,
+            &stderr,
         ));
     }
     Ok(())
+}
+
+/// The branch `ensure_remote_project` mirrors for `worktree`: the row's
+/// branch, else the worktree name; `None` for no worktree / the main checkout
+/// (which is the clone itself, never a `worktree add`).
+pub(super) fn mirrored_branch<'a>(worktree: Option<&RemoteWorktree<'a>>) -> Option<&'a str> {
+    match worktree {
+        Some(wt) if wt.name != "main" => Some(wt.branch.unwrap_or(wt.name)),
+        _ => None,
+    }
+}
+
+/// The bash script `ensure_remote_project` runs (via `bash -lc`):
+///   1. clones the repo if `<root>/.git` is missing;
+///   2. creates `<root>/.claude/worktrees/<name>` if requested and absent,
+///      with the branch resolved at run time by the repair module's
+///      [`BranchSource::Mirror`] add — the host's own `refs/heads/<branch>`,
+///      else fetched fresh from origin and tracked, else refused with
+///      [`MIRROR_REFUSED`] (the branch only exists on the source machine).
+///
+/// Both steps are guarded so a re-run on an already-set-up host is a no-op.
+/// Pure, so tests pin its shape without a host.
+pub(super) fn ensure_remote_project_script(
+    project_root: &str,
+    clone_url: &str,
+    worktree: Option<&RemoteWorktree<'_>>,
+) -> String {
+    let root = quote(project_root);
+    let mut script = format!(
+        "set -e\n\
+         if [ ! -d {root}/.git ]; then mkdir -p \"$(dirname -- {root})\" && git clone {url} {root}; fi\n",
+        url = quote(clone_url),
+    );
+    if let Some(wt) = worktree {
+        if let Some(branch) = mirrored_branch(worktree) {
+            // The path the host scan recorded, never a derived
+            // `.claude/worktrees/<name>`: a checkout under `.worktrees/` or
+            // anywhere else git has it registered must be found, not
+            // duplicated.
+            let wt_abs = wt.path.to_string();
+            let add = render_git_script_expecting(
+                project_root,
+                &[Step::AddWorktree {
+                    path: wt_abs.clone(),
+                    branch: branch.to_string(),
+                    from: BranchSource::Mirror,
+                }],
+                None,
+            );
+            script.push_str(&format!(
+                "if [ ! -d {abs} ]; then\n{add}fi\n",
+                abs = quote(&wt_abs),
+            ));
+        }
+    }
+    script
+}
+
+/// The `E_GIT_SETUP` for a failed `ensure_remote_project` script. A mirror
+/// the script refused because `branch` is on neither the host nor origin
+/// says what to do (push it, or start a new worktree there) instead of
+/// surfacing git's raw stderr; everything else keeps stderr (stdout when
+/// stderr is empty) so the user can diagnose it.
+pub(super) fn git_setup_error(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    branch: Option<&str>,
+    stdout: &str,
+    stderr: &str,
+) -> IpcError {
+    if let Some(b) = branch.filter(|_| stderr.contains(MIRROR_REFUSED)) {
+        return IpcError::new(
+            codes::E_GIT_SETUP,
+            format!(
+                "branch {b} is not on origin; push it from the source machine, \
+                 or start a new worktree on {host}"
+            ),
+        );
+    }
+    IpcError::new(
+        codes::E_GIT_SETUP,
+        format!(
+            "couldn't ensure {owner}/{repo} on {host}: {}",
+            if stderr.trim().is_empty() {
+                stdout.trim()
+            } else {
+                stderr.trim()
+            }
+        ),
+    )
 }
 
 /// Build a bash script (run via `bash -lc`) that creates a new worktree for a
@@ -178,10 +283,10 @@ pub(super) async fn create_worktree_local(
         .args(["-lc", &script])
         .output()
         .await
-        .map_err(|e| IpcError::new("E_GIT_SETUP", format!("bash: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_GIT_SETUP, format!("bash: {e}")))?;
     if !out.status.success() {
         return Err(IpcError::new(
-            "E_GIT_SETUP",
+            codes::E_GIT_SETUP,
             String::from_utf8_lossy(&out.stderr).trim().to_string(),
         ));
     }
@@ -200,7 +305,7 @@ pub async fn new_session(
     // caller that doesn't care): mint it here so every caller shares the
     // same convention and the same collision policy.
     if args.name.trim().is_empty() {
-        let s = store.lock().map_err(|_| IpcError::lock())?;
+        let s = lock(store)?;
         args.name = fill_session_name(&s, &args)?;
     }
     crate::validate::tmux_name(&args.name)?;
@@ -212,7 +317,7 @@ pub async fn new_session(
         crate::validate::git_ref(name)?;
         if name == "main" || name == "master" {
             return Err(IpcError::new(
-                "E_INVALID",
+                codes::E_INVALID,
                 "worktree name must not be 'main' or 'master'",
             ));
         }
@@ -264,7 +369,7 @@ pub(crate) fn fill_session_name(s: &Store, args: &NewSessionArgs) -> Result<Stri
     {
         Some(n.to_string())
     } else if let Some(wid) = args.worktree_id {
-        let (name, _) = fetch_worktree(s, wid)?;
+        let (name, _, _, _) = fetch_worktree(s, wid)?;
         (name != "main").then_some(name)
     } else {
         None
@@ -332,9 +437,7 @@ pub(super) async fn new_session_inner(
         if let Some(ref name) = args.new_worktree {
             // NEW WORKTREE: create branch + worktree, return the new dir.
             let base_path = {
-                let s = store
-                    .lock()
-                    .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+                let s = lock(store)?;
                 let mut stmt = s
                     .conn_ref()
                     .prepare("SELECT base_path FROM projects WHERE id=?1")?;
@@ -346,15 +449,16 @@ pub(super) async fn new_session_inner(
                 create_worktree_local(&base_path, name, args.base_branch.as_deref()).await?,
             )
         } else {
-            let s = store
-                .lock()
-                .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+            let s = lock(store)?;
             if let Some(wid) = args.worktree_id {
-                let mut stmt = s
-                    .conn_ref()
-                    .prepare("SELECT path FROM worktrees WHERE id=?1")?;
-                let row: String = stmt.query_row(rusqlite::params![wid], |r| r.get(0))?;
-                PathBuf::from(row)
+                // A worktree row names a checkout on ONE host — refuse a
+                // remote host's row here just as the remote arm below refuses
+                // a foreign one, so a mismatched `host_alias: "local"` call
+                // can't turn into a pane cwd that doesn't exist on this
+                // machine.
+                let (name, _, row_host, path) = fetch_worktree(&s, wid)?;
+                reject_foreign_worktree(&args.host_alias, &row_host, &name)?;
+                PathBuf::from(path)
             } else {
                 let mut stmt = s
                     .conn_ref()
@@ -369,18 +473,16 @@ pub(super) async fn new_session_inner(
         if let Some(ref name) = args.new_worktree {
             // NEW WORKTREE on remote: ensure clone exists, then create worktree.
             let (owner, repo) = {
-                let s = store
-                    .lock()
-                    .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+                let s = lock(store)?;
                 fetch_owner_repo(&s, args.project_id)?
             };
             let home = ssh.remote_home(&args.host_alias).await?;
             let (project_root, _) = {
-                let s = store.lock().map_err(|_| IpcError::lock())?;
+                let s = lock(store)?;
                 remote_project_path_for(&s, &args.host_alias, &home, &owner, &repo, None)
             };
             ensure_remote_project(
-                ssh,
+                &**ssh,
                 &args.host_alias,
                 &owner,
                 &repo,
@@ -403,40 +505,56 @@ pub(super) async fn new_session_inner(
                 .await?;
             if !out.status.success() {
                 return Err(IpcError::new(
-                    "E_GIT_SETUP",
+                    codes::E_GIT_SETUP,
                     String::from_utf8_lossy(&out.stderr).trim().to_string(),
                 ));
             }
             PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string())
         } else {
             let (owner, repo, wt_info) = {
-                let s = store
-                    .lock()
-                    .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+                let s = lock(store)?;
                 let (owner, repo) = fetch_owner_repo(&s, args.project_id)?;
                 let wt = if let Some(wid) = args.worktree_id {
-                    Some(fetch_worktree(&s, wid)?)
+                    // (name, branch, host_alias, path) — the row names a
+                    // checkout on ONE host; refuse it before it's used to
+                    // derive anything for a different target host.
+                    let (name, branch, row_host, path) = fetch_worktree(&s, wid)?;
+                    reject_foreign_worktree(&args.host_alias, &row_host, &name)?;
+                    Some((name, branch, path))
                 } else {
                     None
                 };
                 (owner, repo, wt)
             };
             let home = ssh.remote_home(&args.host_alias).await?;
-            let wt_name_str = wt_info.as_ref().map(|(name, _)| name.as_str());
-            let (project_root, cwd) = {
-                let s = store.lock().map_err(|_| IpcError::lock())?;
-                remote_project_path_for(&s, &args.host_alias, &home, &owner, &repo, wt_name_str)
+            // `remote_project_path_for`'s project root does not depend on the
+            // worktree name (only its discarded second return value, the
+            // `.claude/worktrees/<name>` cwd guess, does) — pass `None`.
+            let (project_root, _) = {
+                let s = lock(store)?;
+                remote_project_path_for(&s, &args.host_alias, &home, &owner, &repo, None)
             };
-            let worktree_for_clone = wt_info
-                .as_ref()
-                .map(|(name, branch)| (name.as_str(), branch.as_deref()));
+            // The pane's cwd: for an existing non-main worktree, the row's
+            // own scanned path (it may live under `.worktrees/` or anywhere
+            // else git has it registered) — NOT the `.claude/worktrees/<name>`
+            // guess `remote_project_path_for` makes. For `main` / no worktree,
+            // the project root.
+            let cwd = match &wt_info {
+                Some((name, _, path)) if name != "main" => path.clone(),
+                _ => project_root.clone(),
+            };
+            let worktree_for_clone = wt_info.as_ref().map(|(name, branch, path)| RemoteWorktree {
+                name,
+                branch: branch.as_deref(),
+                path,
+            });
             ensure_remote_project(
-                ssh,
+                &**ssh,
                 &args.host_alias,
                 &owner,
                 &repo,
                 &project_root,
-                worktree_for_clone,
+                worktree_for_clone.as_ref(),
                 token,
             )
             .await?;
@@ -502,16 +620,14 @@ pub(super) async fn new_session_inner(
             Some(crate::service::repair::event_detail(rep)),
         );
     }
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = lock(store)?;
     let row = s
         .list_sessions_for_host(&args.host_alias)?
         .into_iter()
         .find(|r| r.tmux_name == args.name)
         .ok_or_else(|| {
             IpcError::new(
-                "E_INTERNAL",
+                codes::E_INTERNAL,
                 format!(
                     "session {} on {} vanished after creation",
                     args.name, args.host_alias
@@ -549,7 +665,7 @@ pub(super) async fn new_session_inner(
         s.set_session_kind(row.id, "shell", None)?;
         return s
             .get_session(&args.name, &args.host_alias)?
-            .ok_or_else(|| IpcError::new("E_INTERNAL", "session vanished after kind tag"));
+            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "session vanished after kind tag"));
     }
     // Persist the minted Claude session id. Soft-fail: the session is live; a
     // failed write just means a future recreate falls back to `cl --continue`.
@@ -602,7 +718,7 @@ pub(super) fn derive_friendly_name(
     let branch = if let Some(name) = args.new_worktree.as_deref() {
         name.to_string()
     } else if let Some(wid) = row_worktree_id.or(args.worktree_id) {
-        let (name, branch) = fetch_worktree(s, wid)?;
+        let (name, branch, _, _) = fetch_worktree(s, wid)?;
         branch.unwrap_or(name)
     } else {
         args.name.clone()
@@ -624,14 +740,84 @@ pub struct KillSessionArgs {
     pub force: bool,
 }
 
-/// Claude session id to `claude stop` for a synthetic `bg:<uuid>` row: the
-/// row's stored `claude_session_id` when present, else the uuid embedded in
-/// the tmux_name itself. Pure so the fallback order is unit-testable.
-pub(super) fn bg_claude_session_id(tmux_name: &str, row_claude_id: Option<&str>) -> String {
-    match row_claude_id {
-        Some(id) if !id.trim().is_empty() => id.to_string(),
-        _ => tmux_name.trim_start_matches("bg:").to_string(),
+/// Message for any attempt to stop an `external` row (an interactive Claude
+/// session fleet merely observes).
+pub(super) const EXTERNAL_STOP_REFUSED: &str =
+    "this Claude session runs outside fleet; close it where it runs";
+
+/// Decide what `kill_session` does for a pane-less `bg:<id>` row, given a
+/// fresh `claude agents` listing for its host. Pure so every branch is
+/// unit-testable without ssh:
+///
+/// - `external` rows are never stopped by fleet → `E_INVALID_STATE`;
+/// - the agent is absent from the listing → `Ok(None)`: already gone, the
+///   caller skips `claude stop` and reconcile prunes the row;
+/// - the agent is listed with a valid job id → `Ok(Some(job_id))`;
+/// - the agent is listed without one → `E_INVALID_STATE`, pointing the user
+///   at Remove from list (there is nothing `claude stop` can address).
+pub(super) fn bg_stop_target(
+    kind: &str,
+    agents: &[crate::claude_agents::ClaudeAgentRow],
+    claude_session_id: &str,
+) -> Result<Option<String>, IpcError> {
+    if kind == "external" {
+        return Err(IpcError::new(codes::E_INVALID_STATE, EXTERNAL_STOP_REFUSED));
     }
+    let Some(agent) = crate::claude_agents::find_by_session_id(agents, claude_session_id) else {
+        return Ok(None);
+    };
+    match &agent.job_id {
+        Some(job) => Ok(Some(job.clone())),
+        None => Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            "this background agent has no job id to stop; use Remove from list",
+        )),
+    }
+}
+
+/// What `kill_session` does with a pane-less `bg:<id>` row.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum BgKillAction {
+    /// An inactive agent (stored `claude_status = stopped`, its daemon is
+    /// gone): skip `claude stop` and remove the row from the list.
+    Dismiss,
+    /// A live agent: `claude stop <job_id>`.
+    Stop(String),
+    /// A live row whose agent is no longer listed: already gone.
+    Nothing,
+}
+
+/// Whether deciding a kill needs a fresh `claude agents` listing: only a live
+/// (non-`stopped`) `bg` row does. External rows are refused and inactive
+/// agents are dismissed without touching the host.
+pub(super) fn bg_kill_needs_listing(kind: &str, claude_status: Option<&str>) -> bool {
+    kind == "bg" && claude_status != Some("stopped")
+}
+
+/// Decide the kill of a pane-less row from its `kind`, stored
+/// `claude_status` and (for live rows) the host's `claude agents` listing.
+/// Pure so every branch is unit-testable without ssh:
+///
+/// - `external` → refused (`E_INVALID_STATE`), whatever its status;
+/// - `bg` + `stopped` → [`BgKillAction::Dismiss`] (a dead daemon cannot
+///   answer `claude stop`, and the listed agent would be re-imported);
+/// - otherwise the [`bg_stop_target`] decision: `Stop(job)` or `Nothing`.
+pub(super) fn bg_kill_action(
+    kind: &str,
+    claude_status: Option<&str>,
+    agents: &[crate::claude_agents::ClaudeAgentRow],
+    claude_session_id: &str,
+) -> Result<BgKillAction, IpcError> {
+    if kind == "external" {
+        return Err(IpcError::new(codes::E_INVALID_STATE, EXTERNAL_STOP_REFUSED));
+    }
+    if claude_status == Some("stopped") {
+        return Ok(BgKillAction::Dismiss);
+    }
+    Ok(match bg_stop_target(kind, agents, claude_session_id)? {
+        Some(job) => BgKillAction::Stop(job),
+        None => BgKillAction::Nothing,
+    })
 }
 
 pub async fn kill_session(
@@ -645,10 +831,8 @@ pub async fn kill_session(
     crate::validate::tmux_name_lookup(&args.name)?;
     // Look up id BEFORE killing so we can return it after. Read the controller
     // under the same lock and refuse to nuke ourselves unless forced.
-    let (id, claude_sid) = {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let (id, kind, claude_sid, claude_status) = {
+        let s = lock(store)?;
         guard_not_controller(
             s.get_controller()?.as_ref(),
             &args.host_alias,
@@ -656,18 +840,47 @@ pub async fn kill_session(
             args.force,
         )?;
         s.get_session(&args.name, &args.host_alias)?
-            .map(|r| (r.id, r.claude_session_id))
+            .map(|r| (r.id, r.kind, r.claude_session_id, r.claude_status))
             .ok_or_else(|| {
-                IpcError::new("E_NOTFOUND", format!("session {} not found", args.name))
+                IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("session {} not found", args.name),
+                )
             })?
     };
     if args.name.starts_with("bg:") {
-        // Background (`claude --bg`) agent — there is no tmux pane to kill.
-        // `claude stop` is idempotent (an already-dead job is not an error),
-        // so this also clears a stale row whose process died un-noticed: the
-        // reconcile below sees the agent gone and prunes the row.
-        let sid = bg_claude_session_id(&args.name, claude_sid.as_deref());
-        crate::claude_cli::claude_stop(ssh, &args.host_alias, &sid).await?;
+        // A pane-less agent row — there is no tmux pane to kill. An
+        // `external` row (an interactive session outside fleet) is refused
+        // before any ssh / CLI call; an inactive `bg` agent is removed from
+        // the list without `claude stop` (its daemon is gone).
+        let sid = claude_sid
+            .filter(|c| !c.trim().is_empty())
+            .unwrap_or_else(|| args.name.trim_start_matches("bg:").to_string());
+        let status = claude_status.as_deref();
+        let agents = if bg_kill_needs_listing(&kind, status) {
+            exec_for(&args.host_alias, ssh).list_claude_agents().await
+        } else {
+            Vec::new()
+        };
+        match bg_kill_action(&kind, status, &agents, &sid)? {
+            BgKillAction::Dismiss => {
+                let s = lock(store)?;
+                if let Err(e) = s.insert_session_event(id, "killed", None) {
+                    tracing::warn!(session_id = id, error = %e, "[event] insert killed failed");
+                }
+                // Records the dismissal and deletes the row, so there is
+                // nothing left for a reconcile pass to prune.
+                s.dismiss_agent(&args.host_alias, &sid, now_unix())?;
+                return Ok(id);
+            }
+            // `claude stop` is idempotent, so a job that exits in between is
+            // not an error.
+            BgKillAction::Stop(job) => {
+                crate::claude_cli::claude_stop(ssh, &args.host_alias, &job).await?;
+            }
+            // No longer listed: already gone; the reconcile below prunes it.
+            BgKillAction::Nothing => {}
+        }
         if let Ok(s) = store.lock() {
             if let Err(e) = s.insert_session_event(id, "killed", None) {
                 tracing::warn!(session_id = id, error = %e, "[event] insert killed failed");
@@ -706,15 +919,13 @@ pub async fn rename_session(
     let tmux = exec_for(&args.host_alias, ssh);
     tmux.rename_session(&args.old_name, &args.new_name).await?;
     reconcile_one_host(store, ssh, &args.host_alias).await?;
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = lock(store)?;
     // `new_name` is validated verbatim (no padding), so look it up as-is —
     // consistent with kill_session / restart_session.
     s.get_session(&args.new_name, &args.host_alias)?
         .ok_or_else(|| {
             IpcError::new(
-                "E_NOTFOUND",
+                codes::E_NOTFOUND,
                 format!(
                     "renamed session {} on {} did not appear in list",
                     args.new_name, args.host_alias
@@ -750,13 +961,11 @@ pub fn set_session_friendly_name(
     } else {
         Some(trimmed)
     };
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = lock(store)?;
     s.set_friendly_name(&args.host_alias, &args.tmux_name, value)?
         .ok_or_else(|| {
             IpcError::new(
-                "E_NOTFOUND",
+                codes::E_NOTFOUND,
                 format!(
                     "session {} not found on {}",
                     args.tmux_name, args.host_alias
@@ -786,9 +995,7 @@ pub async fn restart_session(
     // the controller under the same lock and refuse to restart ourselves
     // unless forced.
     let (kind, claude_id, session_id) = {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = lock(store)?;
         guard_not_controller(
             s.get_controller()?.as_ref(),
             &args.host_alias,
@@ -835,12 +1042,10 @@ pub async fn restart_session(
         None => tmux.restart_session(&args.name, &pane_cmd).await?,
     }
     reconcile_one_host(store, ssh, &args.host_alias).await?;
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = lock(store)?;
     s.get_session(&args.name, &args.host_alias)?.ok_or_else(|| {
         IpcError::new(
-            "E_NOTFOUND",
+            codes::E_NOTFOUND,
             format!(
                 "restarted session {} on {} did not appear in list",
                 args.name, args.host_alias
@@ -877,10 +1082,12 @@ pub(crate) fn recreate_pane_command(kind: &str, claude_session_id: Option<&str>)
     crate::tmux::pane_command_for(id)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "RecreateSessionParams")]
 pub struct RecreateSessionArgs {
+    /// Fleet session id (from list_sessions).
     pub session_id: i64,
-    /// Override the controller self-target guard.
+    /// Recreate even if this is the registered fleet controller. Default false.
     #[serde(default)]
     pub force: bool,
 }
@@ -895,12 +1102,10 @@ pub async fn recreate_session(
     // hosts the cwd is finalized off-lock (needs `ssh.remote_home`), because the
     // local DB path is meaningless on the other machine.
     let (sess, cwd_src, pane_cmd) = {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = lock(store)?;
         let sess = s
             .get_session_by_id(args.session_id)?
-            .ok_or_else(|| IpcError::new("E_NOTFOUND", "session not found"))?;
+            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?;
         // Refuse to nuke-and-rebuild ourselves unless forced.
         guard_not_controller(
             s.get_controller()?.as_ref(),
@@ -910,10 +1115,10 @@ pub async fn recreate_session(
         )?;
         let host = s
             .get_host_row(&sess.host_alias)?
-            .ok_or_else(|| IpcError::new("E_NOTFOUND", "host not found"))?;
+            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "host not found"))?;
         if !host.reachable {
             return Err(IpcError::new(
-                "E_HOST_OFFLINE",
+                codes::E_HOST_OFFLINE,
                 format!("host {} is not reachable", host.alias),
             ));
         }
@@ -952,12 +1157,10 @@ pub async fn recreate_session(
 
     // Mark the row live again and return it.
     let row = {
-        let s = store
-            .lock()
-            .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+        let s = lock(store)?;
         let row = s
             .restore_session(sess.id)?
-            .ok_or_else(|| IpcError::new("E_INTERNAL", "session vanished after restore"))?;
+            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "session vanished after restore"))?;
         // Task G: record the recreate on the (preserved) row. Best-effort.
         if let Err(e) = s.insert_session_event(sess.id, "recreated", None) {
             tracing::warn!(
@@ -971,8 +1174,10 @@ pub async fn recreate_session(
     Ok(row)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "SessionIdParams")]
 pub struct DismissGhostSessionArgs {
+    /// Fleet session id (from list_sessions).
     pub session_id: i64,
 }
 
@@ -980,15 +1185,13 @@ pub fn dismiss_ghost_session(
     args: DismissGhostSessionArgs,
     store: &Mutex<Store>,
 ) -> Result<(), IpcError> {
-    let s = store
-        .lock()
-        .map_err(|_| IpcError::new("E_LOCK", "store mutex poisoned"))?;
+    let s = lock(store)?;
     let sess = s
         .get_session_by_id(args.session_id)?
-        .ok_or_else(|| IpcError::new("E_NOTFOUND", "session not found"))?;
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?;
     if sess.status != "ghost" {
         return Err(IpcError::new(
-            "E_INVALID_STATE",
+            codes::E_INVALID_STATE,
             format!(
                 "session {} is not a ghost (status={})",
                 sess.id, sess.status

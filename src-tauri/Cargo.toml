@@ -1,6 +1,6 @@
 [package]
 name = "claude-fleet"
-version = "0.2.10"
+version = "0.2.19"
 description = "Desktop app for managing Claude Code sessions across hosts"
 authors = ["martin-janci"]
 edition = "2021"
@@ -30,6 +30,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
 sysinfo = "0.33"
 serde = { version = "1", features = ["derive"] }
@@ -38,7 +39,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 directories = "5"
 portable-pty = "0.9"
 regex = "1"
-once_cell = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 dashmap = "6"
@@ -55,10 +55,21 @@ rmcp = { version = "1", features = [
 axum = "0.8"
 rand = "0.10"
 uuid = { version = "1", features = ["v4"] }
-dirs = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std", "registry", "tracing-log", "smallvec"] }
 tracing-appender = "0.2"
+
+# `run_local_script` (service/add_project.rs) signals a script's whole process
+# group (`kill(-pgid, ..)`). Already in the tree transitively; no new crate.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Asset catalog (docs/superpowers/specs/2026-09-14-asset-catalog-design.md)
+serde_yaml = "0.9"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3"

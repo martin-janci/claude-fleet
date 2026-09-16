@@ -4,6 +4,8 @@ import type { HostRow, HostEvent } from './hosts';
 import type { AccountRow } from './accounts';
 import type { ProjectRow, WorktreeRow, ProjectEvent } from './projects';
 import type { TaskRow, TaskEvent } from './tasks';
+import type { AccountUsageSnapshot } from './account_usage_store';
+import type { AssetInventoryRow, CatalogSummary, SyncProgress } from './assets';
 
 /**
  * How long a flush waits for more events after the first one arrives. Tauri
@@ -38,6 +40,13 @@ export type RowEventHandlers = {
   onWorktreeUpdated?: (row: WorktreeRow) => void;
   /** @deprecated See `onSessionCreated`. */
   onWorktreeRemoved?: (payload: { id: number }) => void;
+  // ── asset catalog (per-event: a scan writes tens of rows, not the
+  //    hundreds a reconcile tick produces, and the assets store patches in
+  //    place, so these need no batched twin) ──
+  onAssetInventoryUpdated?: (row: AssetInventoryRow) => void;
+  onAssetInventoryCleared?: (payload: { host_alias: string; harness: string }) => void;
+  onCatalogLoaded?: (summary: CatalogSummary) => void;
+  onSyncProgress?: (p: SyncProgress) => void;
   // ── batched handlers (one call per flush per store, events in order) ──
   // Prefer these for store wiring: the backend's reconcile tick emits one
   // `session:updated` per session, and delivering each one straight into
@@ -49,6 +58,8 @@ export type RowEventHandlers = {
   onAccountEvents?: (rows: AccountRow[]) => void;
   onProjectEvents?: (events: ProjectEvent[]) => void;
   onTaskEvents?: (events: TaskEvent[]) => void;
+  /** Task 4: one call per flush with every `account_usage:updated` row. */
+  onAccountUsageEvents?: (rows: AccountUsageSnapshot[]) => void;
 };
 
 type Queued =
@@ -60,7 +71,12 @@ type Queued =
   | { name: 'project:updated'; payload: ProjectRow }
   | { name: 'worktree:updated'; payload: WorktreeRow }
   | { name: 'worktree:removed'; payload: { id: number } }
-  | { name: 'task:updated'; payload: TaskRow };
+  | { name: 'task:updated'; payload: TaskRow }
+  | { name: 'account_usage:updated'; payload: AccountUsageSnapshot }
+  | { name: 'asset_inventory:updated'; payload: AssetInventoryRow }
+  | { name: 'asset_inventory:cleared'; payload: { host_alias: string; harness: string } }
+  | { name: 'catalog:loaded'; payload: CatalogSummary }
+  | { name: 'sync:progress'; payload: SyncProgress };
 
 /**
  * Subscribe to every row-change event from the backend. Returns a single
@@ -94,6 +110,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     const accountRows: AccountRow[] = [];
     const projectEvents: ProjectEvent[] = [];
     const taskEvents: TaskEvent[] = [];
+    const accountUsageEvents: AccountUsageSnapshot[] = [];
     for (const ev of batch) {
       switch (ev.name) {
         case 'session:created':
@@ -139,6 +156,21 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
         case 'task:updated':
           taskEvents.push({ type: 'updated', row: ev.payload });
           break;
+        case 'account_usage:updated':
+          accountUsageEvents.push(ev.payload);
+          break;
+        case 'asset_inventory:updated':
+          handlers.onAssetInventoryUpdated?.(ev.payload);
+          break;
+        case 'asset_inventory:cleared':
+          handlers.onAssetInventoryCleared?.(ev.payload);
+          break;
+        case 'catalog:loaded':
+          handlers.onCatalogLoaded?.(ev.payload);
+          break;
+        case 'sync:progress':
+          handlers.onSyncProgress?.(ev.payload);
+          break;
       }
     }
     if (sessionEvents.length > 0) handlers.onSessionEvents?.(sessionEvents);
@@ -146,6 +178,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     if (accountRows.length > 0) handlers.onAccountEvents?.(accountRows);
     if (projectEvents.length > 0) handlers.onProjectEvents?.(projectEvents);
     if (taskEvents.length > 0) handlers.onTaskEvents?.(taskEvents);
+    if (accountUsageEvents.length > 0) handlers.onAccountUsageEvents?.(accountUsageEvents);
   };
 
   const enqueue = (ev: Queued) => {
@@ -174,6 +207,11 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
       handlers.onProjectEvents
     ),
     task: !!handlers.onTaskEvents,
+    accountUsage: !!handlers.onAccountUsageEvents,
+    assetInventoryUpdated: !!handlers.onAssetInventoryUpdated,
+    assetInventoryCleared: !!handlers.onAssetInventoryCleared,
+    catalogLoaded: !!handlers.onCatalogLoaded,
+    syncProgress: !!handlers.onSyncProgress,
   };
 
   const sub = <N extends Queued['name']>(
@@ -199,6 +237,11 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub('worktree:updated', wanted.project),
     sub('worktree:removed', wanted.project),
     sub('task:updated', wanted.task),
+    sub('account_usage:updated', wanted.accountUsage),
+    sub('asset_inventory:updated', wanted.assetInventoryUpdated),
+    sub('asset_inventory:cleared', wanted.assetInventoryCleared),
+    sub('catalog:loaded', wanted.catalogLoaded),
+    sub('sync:progress', wanted.syncProgress),
   ]);
   return () => {
     disposed = true;
