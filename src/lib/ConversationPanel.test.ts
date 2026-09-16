@@ -574,3 +574,83 @@ describe('ConversationPanel composer', () => {
     expect(screen.getByTestId('conv-composer-input')).toBeTruthy();
   });
 });
+
+describe('ConversationPanel slash commands', () => {
+  async function mountWithDraft(text: string) {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: text } });
+    return box;
+  }
+
+  it('typing a slash opens the command list, a prefix narrows it, plain text closes it', async () => {
+    const box = await mountWithDraft('/');
+    expect(screen.getByTestId('conv-slash-menu')).toBeTruthy();
+    expect(screen.getAllByTestId('conv-slash-item').length).toBeGreaterThan(5);
+    await fireEvent.input(box, { target: { value: '/cle' } });
+    const items = screen.getAllByTestId('conv-slash-item');
+    expect(items).toHaveLength(1);
+    expect(items[0].textContent).toContain('/clear');
+    await fireEvent.input(box, { target: { value: 'hello' } });
+    expect(screen.queryByTestId('conv-slash-menu')).toBeNull();
+  });
+
+  it('Enter on a partial name completes it instead of sending; Enter again sends', async () => {
+    const box = await mountWithDraft('/cle');
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    expect(mockedSend).not.toHaveBeenCalled();
+    expect(box.value).toBe('/clear');
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/clear');
+  });
+
+  it('Enter on an exact name sends it straight away', async () => {
+    const box = await mountWithDraft('/clear');
+    expect(screen.getByTestId('conv-slash-menu')).toBeTruthy();
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/clear');
+  });
+
+  it('arrows move the highlight and Tab accepts the highlighted command', async () => {
+    const box = await mountWithDraft('/co');
+    const items = screen.getAllByTestId('conv-slash-item');
+    expect(items.length).toBeGreaterThan(1);
+    expect(items[0].getAttribute('aria-selected')).toBe('true');
+    await fireEvent.keyDown(box, { key: 'ArrowDown' });
+    const after = screen.getAllByTestId('conv-slash-item');
+    expect(after[0].getAttribute('aria-selected')).toBe('false');
+    expect(after[1].getAttribute('aria-selected')).toBe('true');
+    const wanted = after[1].textContent ?? '';
+    await fireEvent.keyDown(box, { key: 'Tab' });
+    expect(wanted).toContain(box.value.trim());
+    expect(mockedSend).not.toHaveBeenCalled();
+  });
+
+  it('a command that takes arguments completes with a trailing space and the menu closes', async () => {
+    const box = await mountWithDraft('/mod');
+    await fireEvent.keyDown(box, { key: 'Tab' });
+    expect(box.value).toBe('/model ');
+    expect(screen.queryByTestId('conv-slash-menu')).toBeNull();
+  });
+
+  it('clicking an item accepts it', async () => {
+    const box = await mountWithDraft('/cle');
+    await fireEvent.click(screen.getAllByTestId('conv-slash-item')[0].querySelector('button')!);
+    expect(box.value).toBe('/clear');
+  });
+
+  it('Escape hides the menu until the draft changes', async () => {
+    const box = await mountWithDraft('/cle');
+    await fireEvent.keyDown(box, { key: 'Escape' });
+    expect(screen.queryByTestId('conv-slash-menu')).toBeNull();
+    // Enter now sends the literal draft rather than completing
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/cle');
+  });
+});

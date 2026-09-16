@@ -114,3 +114,58 @@ export function composerStatus(s: { claude_status: string | null; stuck_kind: st
   if (s.claude_status === 'working') return 'Claude is working. The prompt is queued until the current turn ends.';
   return null;
 }
+
+/** A Claude Code built-in slash command offered by the composer's menu. */
+export interface SlashCommand {
+  name: string;
+  description: string;
+  /** Completes with a trailing space so the user can type the argument. */
+  args?: boolean;
+}
+
+/**
+ * Claude Code's built-in commands (the REPL runs them when the line is sent
+ * exactly as typed, verified against v2.1 through tmux send-keys). Kept
+ * short and stable: this is a hint list, not a spec of the CLI.
+ */
+export const SLASH_COMMANDS: readonly SlashCommand[] = [
+  { name: 'clear', description: 'Clear the conversation and start fresh' },
+  { name: 'compact', description: 'Summarise the context to free space (optional focus text)', args: true },
+  { name: 'context', description: 'Show what is using the context window' },
+  { name: 'cost', description: 'Show token usage and cost for this session' },
+  { name: 'usage', description: 'Show plan usage and rate limits' },
+  { name: 'status', description: 'Show version, model, account and working directory' },
+  { name: 'model', description: 'Switch the model', args: true },
+  { name: 'effort', description: 'Set the reasoning effort level', args: true },
+  { name: 'rc', description: 'Remote Control: drive this session from claude.ai' },
+  { name: 'resume', description: 'Resume an earlier conversation' },
+  { name: 'rewind', description: 'Rewind the conversation and files to a checkpoint' },
+  { name: 'review', description: 'Review the current changes' },
+  { name: 'memory', description: 'Edit the memory files loaded into context' },
+  { name: 'config', description: 'Open settings' },
+  { name: 'permissions', description: 'Manage tool permissions' },
+  { name: 'mcp', description: 'Manage MCP servers' },
+  { name: 'agents', description: 'Manage subagent definitions' },
+  { name: 'hooks', description: 'Manage hooks' },
+  { name: 'doctor', description: 'Check the installation' },
+  { name: 'init', description: 'Write a CLAUDE.md for this project' },
+  { name: 'export', description: 'Export the conversation to a file' },
+  { name: 'help', description: 'List commands and shortcuts' },
+  { name: 'exit', description: 'Quit Claude Code (the tmux session stays)' },
+];
+
+/**
+ * Commands whose name starts with the draft's slash token. Empty unless the
+ * whole draft is one token that begins with `/` (no spaces or newlines): once
+ * an argument or a second line is being typed, the menu gets out of the way.
+ */
+export function matchSlashCommands(draft: string): SlashCommand[] {
+  if (!draft.startsWith('/') || /\s/.test(draft)) return [];
+  const prefix = draft.slice(1).toLowerCase();
+  return SLASH_COMMANDS.filter((c) => c.name.startsWith(prefix));
+}
+
+/** The draft text that accepting a menu item yields. */
+export function completeSlashCommand(c: SlashCommand): string {
+  return c.args ? `/${c.name} ` : `/${c.name}`;
+}
