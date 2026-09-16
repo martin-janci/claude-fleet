@@ -30,6 +30,7 @@
     indicatorFor,
     composerDrafts,
     rememberDraft,
+    newItemCount,
     isQuietStatus,
     shouldFetchTranscript,
     CONVERSATION_POLL_MS,
@@ -57,6 +58,8 @@
   let expanded = $state<Set<number>>(new Set());
   // False once the user scrolls away from the bottom; drives "↓ Latest".
   let atBottom = $state(true);
+  // Items that landed while the user was scrolled up; shown on the button.
+  let unseen = $state(0);
   // Composer state. `pending` is the prompt just sent, rendered as its own
   // turn until a poll brings back a transcript that carries it.
   let draft = $state('');
@@ -117,6 +120,7 @@
       errorCode = null;
       errorMsg = null;
       if (!sameConversation(conv, r.value)) {
+        if (!pinned) unseen += newItemCount(conv, r.value);
         conv = r.value;
         if (pending && transcriptCarries(conv, pending)) pending = null;
         if (pinned) {
@@ -140,6 +144,7 @@
       errorMsg = null;
       expanded = new Set();
       atBottom = true;
+      unseen = 0;
       draft = composerDrafts.get(session.id) ?? '';
       draftFor = session.id;
       sendError = null;
@@ -362,10 +367,13 @@
     if (!scroller) return;
     scroller.scrollTop = scroller.scrollHeight;
     atBottom = true;
+    unseen = 0;
   }
 
   function onScroll() {
-    if (scroller) atBottom = isPinned(scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight);
+    if (!scroller) return;
+    atBottom = isPinned(scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight);
+    if (atBottom) unseen = 0;
   }
 
   function togglePrompt(i: number) {
@@ -472,7 +480,9 @@
       </div>
     </div>
     {#if !atBottom}
-      <button type="button" class="latest" data-testid="conv-latest" onclick={scrollToBottom}>↓ Latest</button>
+      <button type="button" class="latest" class:fresh={unseen > 0} data-testid="conv-latest" aria-live="polite" onclick={scrollToBottom}
+        >↓ {unseen > 0 ? `${unseen} new` : 'Latest'}</button
+      >
     {/if}
   {/if}
   </div>
@@ -948,5 +958,10 @@
   }
   .latest:hover {
     border-color: var(--accent);
+  }
+  .latest.fresh {
+    border-color: var(--accent);
+    color: var(--accent);
+    font-weight: 600;
   }
 </style>
