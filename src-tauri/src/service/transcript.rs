@@ -576,7 +576,15 @@ fn transcript_read_script(args: &TranscriptArgs) -> Result<String, IpcError> {
 
 /// `session_conversation`'s read: a fixed [`CONV_READ_BYTES`] tail.
 fn conversation_read_script(args: &TranscriptArgs) -> Result<String, IpcError> {
-    tail_script(args, CONV_READ_BYTES)
+    tail_script(args, conv_read_bytes(args.turns))
+}
+
+/// PURE: bytes of tail to read for a `turns` window. The default window
+/// reads [`CONV_READ_BYTES`]; a wider one ("Load older") scales with it,
+/// capped at [`MAX_READ_BYTES`].
+pub fn conv_read_bytes(turns: usize) -> usize {
+    (CONV_READ_BYTES.saturating_mul(turns.max(1)) / CONV_TURNS)
+        .clamp(CONV_READ_BYTES, MAX_READ_BYTES)
 }
 
 /// Run a read `script` built for `args`. Errors: `E_NO_TRANSCRIPT` (file
@@ -635,11 +643,17 @@ pub async fn fetch_conversation(
 ) -> Result<Conversation, IpcError> {
     let script = conversation_read_script(&args)?;
     let text = read_tail(&args, &script, ssh).await?;
-    Ok(trim_conversation(
+    // The Conversation tab may ask for a wider window than the MCP text
+    // tool's cap; its own ceiling applies here.
+    let mut conv = trim_conversation(
         parse_conversation(&text),
         args.turns.max(1),
-        args.max_chars.clamp(1, MAX_MAX_CHARS),
-    ))
+        args.max_chars.clamp(1, CONV_MAX_CHARS_CEILING),
+    );
+    // A tail that filled the byte budget started mid-file: older history
+    // exists even when the parsed turns fit the window.
+    conv.truncated |= text.len() >= conv_read_bytes(args.turns);
+    Ok(conv)
 }
 
 /// Run a bash script on `host_alias` (local or via ssh), bounded by
@@ -907,6 +921,14 @@ mod tests {
         assert!(!s.contains('\n'));
         let none = serde_json::json!({"type":"tool_use","name":"Skill","input":{"other":1}});
         assert_eq!(summarize_tool_use(&none), "[tool_use] Skill({\"other\":1})");
+    }
+
+    #[test]
+    fn conv_read_bytes_scales_with_the_window_and_caps() {
+        assert_eq!(conv_read_bytes(CONV_TURNS), CONV_READ_BYTES);
+        assert_eq!(conv_read_bytes(0), CONV_READ_BYTES);
+        assert_eq!(conv_read_bytes(20), CONV_READ_BYTES * 2);
+        assert_eq!(conv_read_bytes(CONV_MAX_TURNS), MAX_READ_BYTES);
     }
 
     #[test]

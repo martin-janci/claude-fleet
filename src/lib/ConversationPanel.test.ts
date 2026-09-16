@@ -10,7 +10,7 @@ vi.mock('./sessions', async () => {
   const actual = await vi.importActual<typeof import('./sessions')>('./sessions');
   return { ...actual, sendPrompt: vi.fn() };
 });
-import { sessionConversation, sessionActivity, CONVERSATION_POLL_MS, ACTIVITY_POLL_MS, QUIET_POLL_MS, type Conversation, type ActivityProbe } from './conversation';
+import { sessionConversation, sessionActivity, CONVERSATION_POLL_MS, ACTIVITY_POLL_MS, QUIET_POLL_MS, PROBE_TTL_MS, CONV_MAX_TURNS, type Conversation, type ActivityProbe } from './conversation';
 import ConversationPanel from './ConversationPanel.svelte';
 import { sendPrompt, type SessionRow } from './sessions';
 import { composerPresets, resetComposerPresets } from './composer_presets';
@@ -731,13 +731,15 @@ describe('ConversationPanel live indicator', () => {
     mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'working', spinner: 'Cooking… (3s · esc to interrupt)' }) });
     render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
     await settle();
+    // the indicator goes live with one probe at once, then on the interval
     const ind = screen.getByTestId('conv-indicator');
     expect(ind.getAttribute('data-kind')).toBe('working');
-    expect(ind.textContent).toContain('Working…');
+    expect(mockedAct).toHaveBeenCalledTimes(1);
+    expect(mockedAct).toHaveBeenCalledWith(1);
+    expect(ind.textContent).toContain('Cooking… 3s');
     vi.advanceTimersByTime(ACTIVITY_POLL_MS);
     await settle();
-    expect(mockedAct).toHaveBeenCalledWith(1);
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Cooking… 3s');
+    expect(mockedAct).toHaveBeenCalledTimes(2);
   });
 
   it('an idle row shows no indicator and does not probe', async () => {
@@ -778,7 +780,8 @@ describe('ConversationPanel live indicator', () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     mockedConv.mockReturnValue(ok(conv()));
     mockedSend.mockResolvedValue({ ok: true, value: undefined });
-    mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'working' }) });
+    // the pane has not classified yet: the send shows as "sent"
+    mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: null }) });
     render(ConversationPanel, { session: session({ claude_status: 'idle' }), visible: true });
     await settle();
     const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
@@ -1043,5 +1046,201 @@ describe('ConversationPanel context meter', () => {
     render(ConversationPanel, { session: session({ context_pct: null }), visible: true });
     await settle();
     expect(screen.queryByTestId('conv-ctx')).toBeNull();
+  });
+});
+
+describe('ConversationPanel review-round fixes', () => {
+  it('a slash command sends but leaves no pending turn and no optimistic working state', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(ConversationPanel, { session: session({ claude_status: 'idle' }), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: '/status' } });
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/status');
+    expect(box.value).toBe('');
+    expect(screen.queryByTestId('conv-pending')).toBeNull();
+    expect(screen.queryByTestId('conv-indicator')).toBeNull();
+  });
+
+  it('a send that resolves after a session switch touches nothing in the new session', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    let resolveSend: (v: { ok: true; value: undefined }) => void = () => {};
+    mockedSend.mockReturnValue(new Promise((res) => (resolveSend = res)));
+    const { rerender } = render(ConversationPanel, { session: session({ id: 1 }), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'for one' } });
+    await fireEvent.keyDown(box, { key: 'Enter' });
+    await rerender({ session: session({ id: 2 }), visible: true });
+    await settle();
+    await fireEvent.input(screen.getByTestId('conv-composer-input'), { target: { value: 'typing in two' } });
+    resolveSend({ ok: true, value: undefined });
+    await settle();
+    expect((screen.getByTestId('conv-composer-input') as HTMLTextAreaElement).value).toBe('typing in two');
+    expect(composerDrafts.get(2)).toBe('typing in two');
+    expect(screen.queryByTestId('conv-pending')).toBeNull();
+    expect(screen.queryByTestId('conv-indicator')).toBeNull();
+  });
+
+  it('Load older never inflates the new-item count', async () => {
+    mockedConv.mockReturnValue(ok(conv({ truncated: true })));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const scroller = screen.getByTestId('conv-scroller');
+    Object.defineProperty(scroller, 'scrollHeight', { value: 2000, configurable: true });
+    Object.defineProperty(scroller, 'clientHeight', { value: 500, configurable: true });
+    scroller.scrollTop = 0;
+    await fireEvent.scroll(scroller);
+    const older = conv({ truncated: true });
+    older.turns.unshift({ prompt: 'old', at: '2026-09-13T09:00:00Z', ended_at: null, items: [{ kind: 'text', text: 'past' }] });
+    mockedConv.mockReturnValue(ok(older));
+    await fireEvent.click(screen.getByTestId('conv-load-older'));
+    await settle();
+    expect(screen.getByTestId('conv-latest').textContent).toContain('Latest');
+  });
+
+  it('never stacks probes: a slow probe blocks the next tick, and the indicator goes live with one probe at once', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedAct.mockReturnValue(new Promise(() => {}));
+    render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+    await settle();
+    expect(mockedAct).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(ACTIVITY_POLL_MS * 3);
+    await settle();
+    expect(mockedAct).toHaveBeenCalledTimes(1);
+  });
+
+  it('a row patch that leaves the status unchanged keeps the live probe', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedAct.mockResolvedValue({ ok: true, value: { claude_status: 'working', current_activity: null, stuck_kind: null, waiting_for: null, spinner: 'Cooking… (3s)' } });
+    const { rerender } = render(ConversationPanel, { session: session({ claude_status: 'working', turn_seq: 1 }), visible: true });
+    await settle();
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('Cooking… 3s');
+    await rerender({ session: session({ claude_status: 'working', turn_seq: 1, context_pct: 55 }), visible: true });
+    await settle();
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('Cooking… 3s');
+    await rerender({ session: session({ claude_status: 'idle', turn_seq: 1, context_pct: 55 }), visible: true });
+    await settle();
+    expect(screen.queryByTestId('conv-indicator')).toBeNull();
+  });
+
+  it('the WebKit composition Enter (keyCode 229) does not send', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: '日本' } });
+    await fireEvent.keyDown(box, { key: 'Enter', keyCode: 229 });
+    expect(mockedSend).not.toHaveBeenCalled();
+  });
+});
+
+describe('ConversationPanel second review-round fixes', () => {
+  it('Shift+click on a chip leaves the typed draft alone', async () => {
+    composerPresets.set([{ label: 'Continue', text: 'Continue where you left off.' }]);
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'my long prompt' } });
+    await fireEvent.click(screen.getByTestId('conv-chip'), { shiftKey: true });
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', 'Continue where you left off.');
+    expect(box.value).toBe('my long prompt');
+  });
+
+  it('a stale probe expires: the row wins again after the TTL and a new probe is taken', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedAct.mockResolvedValue({ ok: true, value: { claude_status: 'idle', current_activity: null, stuck_kind: null, waiting_for: null, spinner: null } });
+    render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+    await settle();
+    // the immediate probe said idle: indicator gone, loop stopped
+    expect(screen.queryByTestId('conv-indicator')).toBeNull();
+    const calls = mockedAct.mock.calls.length;
+    vi.advanceTimersByTime(ACTIVITY_POLL_MS * 2);
+    await settle();
+    expect(mockedAct.mock.calls.length).toBe(calls);
+    // after the TTL the row's "working" shows again and the loop resumes
+    mockedAct.mockResolvedValue({ ok: true, value: { claude_status: 'working', current_activity: null, stuck_kind: null, waiting_for: null, spinner: 'Cooking… (9s)' } });
+    vi.advanceTimersByTime(PROBE_TTL_MS);
+    await settle();
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('Cooking… 9s');
+    expect(mockedAct.mock.calls.length).toBeGreaterThan(calls);
+  });
+
+  it('a manually closed running group stays closed on refresh; a manually opened finished group stays open', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const tools = (n: string, k: number) => Array.from({ length: k }, (_, i) => ({ kind: 'tool' as const, summary: `${n}${i}()` }));
+    const base = conv({
+      turns: [
+        { prompt: 'a', at: '2026-09-13T10:00:00Z', ended_at: null, items: tools('A', 2) },
+        { prompt: 'b', at: '2026-09-13T10:05:00Z', ended_at: null, items: tools('B', 2) },
+      ],
+    });
+    mockedConv.mockReturnValue(ok(base));
+    render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+    await settle();
+    let groups = screen.getAllByTestId('conv-tools') as HTMLDetailsElement[];
+    expect(groups[1].open).toBe(true);
+    groups[0].open = true; // user opens the finished one
+    groups[1].open = false; // user closes the running one
+    const grown = conv({ turns: [base.turns[0], { ...base.turns[1], items: tools('B', 3) }] });
+    mockedConv.mockReturnValue(ok(grown));
+    vi.advanceTimersByTime(CONVERSATION_POLL_MS);
+    await settle();
+    groups = screen.getAllByTestId('conv-tools') as HTMLDetailsElement[];
+    expect(groups[0].open).toBe(true);
+    expect(groups[1].open).toBe(false);
+  });
+
+  it('Load older disappears once the window reached the backend cap', async () => {
+    mockedConv.mockReturnValue(ok(conv({ truncated: true })));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    for (let i = 0; i < CONV_MAX_TURNS / 10 - 1; i++) {
+      await fireEvent.click(screen.getByTestId('conv-load-older'));
+      await settle();
+    }
+    expect(mockedConv).toHaveBeenLastCalledWith(1, CONV_MAX_TURNS);
+    expect(screen.queryByTestId('conv-load-older')).toBeNull();
+    expect(screen.getByText(/Older turns not shown/)).toBeTruthy();
+  });
+
+  it('a failed read on a quiet session is retried at the normal cadence', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    mockedConv.mockReturnValueOnce(ok(conv()));
+    render(ConversationPanel, { session: session({ claude_status: 'idle' }), visible: true });
+    await settle();
+    expect(mockedConv).toHaveBeenCalledTimes(1);
+    // the quiet-cadence read at 15 s fails
+    mockedConv.mockReturnValueOnce(err('E_SSH', 'hiccup'));
+    vi.advanceTimersByTime(QUIET_POLL_MS);
+    await settle();
+    expect(mockedConv).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId('conv-error').textContent).toContain('hiccup');
+    // the failure did not restart the quiet clock: the very next tick retries
+    mockedConv.mockReturnValue(ok(conv()));
+    vi.advanceTimersByTime(CONVERSATION_POLL_MS);
+    await settle();
+    expect(mockedConv).toHaveBeenCalledTimes(3);
+    expect(screen.queryByTestId('conv-error')).toBeNull();
+  });
+
+  it('bg rows never probe the pane', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session({ kind: 'bg', tmux_name: 'bg:abc', claude_status: 'working' }), visible: true });
+    await settle();
+    vi.advanceTimersByTime(ACTIVITY_POLL_MS * 2);
+    await settle();
+    expect(mockedAct).not.toHaveBeenCalled();
+    expect(screen.getByTestId('conv-indicator')).toBeTruthy();
   });
 });

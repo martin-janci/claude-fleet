@@ -33,6 +33,8 @@
     rememberDraft,
     newItemCount,
     CONV_TURNS_STEP,
+    CONV_MAX_TURNS,
+    PROBE_TTL_MS,
     isQuietStatus,
     shouldFetchTranscript,
     CONVERSATION_POLL_MS,
@@ -56,8 +58,11 @@
   let loading = $state(false);
   let scroller: HTMLDivElement | undefined = $state();
   let nowMs = $state(Date.now());
-  // Turn indexes whose long prompt the user expanded.
-  let expanded = $state<Set<number>>(new Set());
+  // Turns whose long prompt the user expanded, keyed by the turn's identity
+  // (its timestamp, else its index) so a window that grows or slides does
+  // not move the expansion to a different turn.
+  let expanded = $state<Set<string>>(new Set());
+  const turnKey = (turn: { at: string | null }, i: number) => turn.at ?? `#${i}`;
   // False once the user scrolls away from the bottom; drives "↓ Latest".
   let atBottom = $state(true);
   // Items that landed while the user was scrolled up; shown on the button.
@@ -87,6 +92,18 @@
   // own send: until the row's turn counter moves past it, or a probe reports
   // the session idle, the session is treated as working.
   let probe = $state<ActivityProbe | null>(null);
+  // A probe outranks the row only while fresh: once the loop stops (the
+  // indicator went away) a stale reading must not shadow a row that keeps
+  // saying "working"; after the TTL the row wins again and, if it still
+  // says so, the loop restarts and takes a new reading.
+  let probeFresh = $state(false);
+  let probeTimer: ReturnType<typeof setTimeout> | undefined;
+  function setProbe(next: ActivityProbe | null) {
+    probe = next;
+    clearTimeout(probeTimer);
+    probeFresh = next !== null;
+    if (next !== null) probeTimer = setTimeout(() => (probeFresh = false), PROBE_TTL_MS);
+  }
   let sentTurnSeq = $state<number | null>(null);
   let idleSeenSinceSend = $state(false);
   let lastFetchAt = 0;
@@ -94,20 +111,19 @@
   let seq = 0;
   // Fetches still pending, per session id. A poll tick never starts a read
   // while one is in flight for the same session (a remote read can take up
-  // to its 20 s wall clock); a manual Retry or a session switch still does.
+  // to its 30 s wall clock); a manual Retry or a session switch still does.
   const inFlight = new Map<number, number>();
   // Keyed on the id, not the row object: a store patch hands a new object
   // for the same session, which must neither reset nor refetch.
   const sessionId = $derived(session.id);
 
-  async function load(opts: { poll?: boolean } = {}) {
+  async function load(opts: { poll?: boolean; older?: boolean } = {}) {
     const id = session.id;
     if (!session.claude_session_id) return;
     if (opts.poll && (inFlight.get(id) ?? 0) > 0) return;
     const mine = ++seq;
     loading = conv === null;
-    lastFetchAt = Date.now();
-    lastFetchTurnSeq = session.turn_seq;
+    const fetchedTurnSeq = session.turn_seq;
     const pinned = scroller ? isPinned(scroller.scrollTop, scroller.clientHeight, scroller.scrollHeight) : true;
     inFlight.set(id, (inFlight.get(id) ?? 0) + 1);
     let r: Awaited<ReturnType<typeof sessionConversation>>;
@@ -123,10 +139,15 @@
     if (mine !== seq || session.id !== id) return;
     loading = false;
     if (r.ok) {
+      // Stamped on success only: a failed read on a quiet session is retried
+      // at the normal cadence, not after the quiet one.
+      lastFetchAt = Date.now();
+      lastFetchTurnSeq = fetchedTurnSeq;
       errorCode = null;
       errorMsg = null;
       if (!sameConversation(conv, r.value)) {
-        if (!pinned) unseen += newItemCount(conv, r.value);
+        // Older turns prepended by Load older are history, not news.
+        if (!pinned && !opts.older) unseen += newItemCount(conv, r.value);
         conv = r.value;
         if (pending && transcriptCarries(conv, pending)) pending = null;
         if (pinned) {
@@ -157,7 +178,8 @@
       draftFor = session.id;
       sendError = null;
       pending = null;
-      probe = null;
+      setProbe(null);
+      probeSeq++;
       sentTurnSeq = null;
       idleSeenSinceSend = false;
       void load();
@@ -200,48 +222,67 @@
   $effect(() => {
     const turn = session.turn_seq;
     untrack(() => {
-      if (lastFetchTurnSeq !== null && turn !== lastFetchTurnSeq && session.claude_session_id) void load();
+      if (visible && lastFetchTurnSeq !== null && turn !== lastFetchTurnSeq && session.claude_session_id) void load({ poll: true });
     });
   });
 
-  // A row event with a changed status is newer than any probe.
+  // A row event with a changed status is newer than any probe. Keyed on the
+  // two values, not the row object: every store patch hands a new object.
+  const rowStatus = $derived(session.claude_status);
+  const rowStuck = $derived(session.stuck_kind);
   $effect(() => {
-    void session.claude_status;
-    void session.stuck_kind;
-    untrack(() => (probe = null));
+    void rowStatus;
+    void rowStuck;
+    untrack(() => setProbe(null));
   });
+  $effect(() => () => clearTimeout(probeTimer));
 
-  const liveStatus = $derived(probe?.claude_status ?? session.claude_status);
-  const liveStuck = $derived(probe?.stuck_kind ?? session.stuck_kind);
-  const liveActivity = $derived(probe?.current_activity ?? session.current_activity);
+  const liveProbe = $derived(probeFresh ? probe : null);
+  const liveStatus = $derived(liveProbe?.claude_status ?? session.claude_status);
+  const liveStuck = $derived(liveProbe?.stuck_kind ?? session.stuck_kind);
+  const liveActivity = $derived(liveProbe?.current_activity ?? session.current_activity);
   const optimistic = $derived(sentTurnSeq !== null && session.turn_seq === sentTurnSeq && !idleSeenSinceSend);
   const indicator = $derived(
     indicatorFor({
       status: liveStatus,
       stuckKind: liveStuck,
-      waitingFor: probe?.waiting_for ?? null,
+      waitingFor: liveProbe?.waiting_for ?? null,
       activity: liveActivity,
-      spinner: probe?.spinner ?? null,
+      spinner: liveProbe?.spinner ?? null,
       pending: pending !== null,
       optimistic,
     }),
   );
 
+  // One probe in flight at a time (a wedged host must not stack ssh
+  // processes every 2 s), and a slow one never overwrites a newer result.
+  let probing = false;
+  let probeSeq = 0;
   async function probeNow() {
+    if (probing) return;
+    probing = true;
     const id = session.id;
-    const r = await sessionActivity(id);
-    if (session.id !== id) return;
+    const mine = ++probeSeq;
+    let r: Awaited<ReturnType<typeof sessionActivity>>;
+    try {
+      r = await sessionActivity(id);
+    } finally {
+      probing = false;
+    }
+    if (session.id !== id || mine !== probeSeq) return;
     if (!r.ok) return;
-    probe = r.value;
+    setProbe(r.value);
     if (sentTurnSeq !== null && isQuietStatus(r.value.claude_status)) idleSeenSinceSend = true;
   }
 
-  // Probe the pane every couple of seconds while something is live. Depends
-  // on `visible` and whether the indicator is showing, not on the probe
-  // itself, so a fresh probe never restarts the interval.
+  // Probe the pane every couple of seconds while something is live: once at
+  // once, then on the interval. `probeLive` is a boolean derived, so a fresh
+  // probe (which yields a new `indicator` object) never restarts the timer.
+  // bg / external rows have no pane: the backend would reject every probe.
+  const probeLive = $derived(visible && !hasNoPane(session) && indicator !== null);
   $effect(() => {
-    const live = visible && indicator !== null;
-    if (!live) return;
+    if (!probeLive) return;
+    if (document.visibilityState === 'visible') void untrack(probeNow);
     const t = setInterval(() => {
       if (document.visibilityState === 'visible') void untrack(probeNow);
     }, ACTIVITY_POLL_MS);
@@ -307,23 +348,37 @@
   async function send() {
     const text = draft.trim();
     if (!text || sending) return;
-    await sendText(text);
+    await sendText(text, { fromDraft: true });
   }
 
   /** Send `text` as-is. Empty text is a bare Enter (the press_enter chip):
    *  it lands in the REPL but is not a prompt, so nothing is shown pending. */
-  async function sendText(text: string) {
+  async function sendText(text: string, opts: { fromDraft?: boolean } = {}) {
     if (sending) return;
     sending = true;
     sendError = null;
+    const id = session.id;
     const r = await sendPrompt(session.host_alias, session.tmux_name, text);
     sending = false;
+    // The selection moved while the send was on the wire: the prompt landed
+    // in the old session; none of its state belongs to the new one.
+    if (session.id !== id) return;
     if (!r.ok) {
       sendError = r.error.message;
       return;
     }
     if (text === '') return;
-    draft = '';
+    // Only the box's own text is spent by a send; a chip sent with
+    // Shift+click leaves whatever the user was typing.
+    if (opts.fromDraft) draft = '';
+    // A slash command is handled by the REPL itself: it is not recorded as a
+    // prompt (and /clear even moves to a new session id), so no pending
+    // turn, and nothing to wait for beyond a fresh read.
+    if (text.startsWith('/')) {
+      box?.focus();
+      void load();
+      return;
+    }
     sentTurnSeq = session.turn_seq;
     idleSeenSinceSend = false;
     pending = {
@@ -341,7 +396,9 @@
   }
 
   function onComposerKey(e: KeyboardEvent) {
-    if (e.isComposing) return;
+    // WebKit fires the composition-confirming Enter with isComposing false
+    // and keyCode 229; treat it as composition too.
+    if (e.isComposing || e.keyCode === 229) return;
     if (slashOpen) {
       const highlighted = slashMatches[slashIndex] ?? slashMatches[0];
       if (e.key === 'ArrowDown') {
@@ -385,7 +442,7 @@
     turnsWanted = (turnsWanted ?? CONV_TURNS_STEP) + CONV_TURNS_STEP;
     const before = scroller ? scroller.scrollHeight - scroller.scrollTop : 0;
     try {
-      await load();
+      await load({ older: true });
     } finally {
       loadingOlder = false;
     }
@@ -406,10 +463,24 @@
     if (atBottom) unseen = 0;
   }
 
-  function togglePrompt(i: number) {
+  /** Open a tool group when it becomes the running turn's last group; never
+   *  close one, and never re-open one the user closed while it stays the
+   *  running group, so manual toggles survive transcript refreshes. */
+  function autoOpen(node: HTMLDetailsElement, on: boolean) {
+    if (on) node.open = true;
+    let prev = on;
+    return {
+      update(next: boolean) {
+        if (next && !prev) node.open = true;
+        prev = next;
+      },
+    };
+  }
+
+  function togglePrompt(key: string) {
     const next = new Set(expanded);
-    if (next.has(i)) next.delete(i);
-    else next.add(i);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
     expanded = next;
   }
 </script>
@@ -431,10 +502,11 @@
         {/if}
         {#if conv?.truncated}
           <p class="muted truncated">
-            Older turns not shown ·
-            <button type="button" class="linkish" data-testid="conv-load-older" disabled={loadingOlder} onclick={() => void loadOlder()}
-              >{loadingOlder ? 'Loading…' : 'Load older'}</button
-            >
+            Older turns not shown{#if (turnsWanted ?? CONV_TURNS_STEP) < CONV_MAX_TURNS}
+              ·
+              <button type="button" class="linkish" data-testid="conv-load-older" disabled={loadingOlder} onclick={() => void loadOlder()}
+                >{loadingOlder ? 'Loading…' : 'Load older'}</button
+              >{/if}
           </p>
         {/if}
         {#if conv}
@@ -455,10 +527,10 @@
                       >
                     {/if}
                   </div>
-                  <div class="prompt-text" class:clamped={long && !expanded.has(i)}>{turn.prompt}</div>
+                  <div class="prompt-text" class:clamped={long && !expanded.has(turnKey(turn, i))}>{turn.prompt}</div>
                   {#if long}
-                    <button type="button" class="linkish" data-testid="conv-prompt-toggle" onclick={() => togglePrompt(i)}
-                      >{expanded.has(i) ? 'Show less' : 'Show more'}</button
+                    <button type="button" class="linkish" data-testid="conv-prompt-toggle" onclick={() => togglePrompt(turnKey(turn, i))}
+                      >{expanded.has(turnKey(turn, i)) ? 'Show less' : 'Show more'}</button
                     >
                   {/if}
                 </div>
@@ -470,7 +542,7 @@
                   {:else if g.tools.length === 1}
                     <div class="tool" class:err={g.tools[0].error} data-testid="conv-tool" data-error={g.tools[0].error || undefined} title={g.tools[0].error ? `Failed: ${g.tools[0].summary}` : g.tools[0].summary}>{g.tools[0].summary}</div>
                   {:else}
-                    <details class="tools" class:has-err={g.tools.some((t) => t.error)} open={running && j === groups.length - 1} data-testid="conv-tools">
+                    <details class="tools" class:has-err={g.tools.some((t) => t.error)} use:autoOpen={running && j === groups.length - 1} data-testid="conv-tools">
                       <summary>{toolGroupLabel(g.tools)}</summary>
                       {#each g.tools as line, k (k)}
                         <div class="tool" class:err={line.error} data-testid="conv-tool" data-error={line.error || undefined} title={line.error ? `Failed: ${line.summary}` : line.summary}>{line.summary}</div>
