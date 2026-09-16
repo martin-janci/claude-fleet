@@ -31,6 +31,7 @@
     composerDrafts,
     rememberDraft,
     newItemCount,
+    CONV_TURNS_STEP,
     isQuietStatus,
     shouldFetchTranscript,
     CONVERSATION_POLL_MS,
@@ -60,6 +61,10 @@
   let atBottom = $state(true);
   // Items that landed while the user was scrolled up; shown on the button.
   let unseen = $state(0);
+  // Turn window asked of the backend; undefined = its default. "Load older"
+  // grows it; polls keep using it so loaded history does not vanish.
+  let turnsWanted = $state<number | undefined>(undefined);
+  let loadingOlder = $state(false);
   // Composer state. `pending` is the prompt just sent, rendered as its own
   // turn until a poll brings back a transcript that carries it.
   let draft = $state('');
@@ -106,7 +111,7 @@
     inFlight.set(id, (inFlight.get(id) ?? 0) + 1);
     let r: Awaited<ReturnType<typeof sessionConversation>>;
     try {
-      r = await sessionConversation(id);
+      r = await sessionConversation(id, turnsWanted);
     } finally {
       const left = (inFlight.get(id) ?? 1) - 1;
       if (left > 0) inFlight.set(id, left);
@@ -145,6 +150,8 @@
       expanded = new Set();
       atBottom = true;
       unseen = 0;
+      turnsWanted = undefined;
+      loadingOlder = false;
       draft = composerDrafts.get(session.id) ?? '';
       draftFor = session.id;
       sendError = null;
@@ -363,6 +370,23 @@
     void send();
   }
 
+  /** Ask for another window of turns and keep the view where it is: the
+   *  older turns render above, so the scroll offset is corrected by the
+   *  height they added. */
+  async function loadOlder() {
+    if (loadingOlder) return;
+    loadingOlder = true;
+    turnsWanted = (turnsWanted ?? CONV_TURNS_STEP) + CONV_TURNS_STEP;
+    const before = scroller ? scroller.scrollHeight - scroller.scrollTop : 0;
+    try {
+      await load();
+    } finally {
+      loadingOlder = false;
+    }
+    await tick();
+    if (scroller) scroller.scrollTop = scroller.scrollHeight - before;
+  }
+
   function scrollToBottom() {
     if (!scroller) return;
     scroller.scrollTop = scroller.scrollHeight;
@@ -400,7 +424,12 @@
           </div>
         {/if}
         {#if conv?.truncated}
-          <p class="muted truncated">Older turns not shown</p>
+          <p class="muted truncated">
+            Older turns not shown ·
+            <button type="button" class="linkish" data-testid="conv-load-older" disabled={loadingOlder} onclick={() => void loadOlder()}
+              >{loadingOlder ? 'Loading…' : 'Load older'}</button
+            >
+          </p>
         {/if}
         {#if conv}
           {#each conv.turns as turn, i (i)}

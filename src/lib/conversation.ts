@@ -23,8 +23,13 @@ export const CONVERSATION_POLL_MS = 5_000;
 /** Scroll is considered "pinned to bottom" within this many px (spec §6). */
 export const PIN_THRESHOLD_PX = 40;
 
-export function sessionConversation(sessionId: number): Promise<Result<Conversation>> {
-  return invokeCmd<Conversation>('session_conversation', { args: { session_id: sessionId } });
+/** Default turn window the backend serves; "Load older" grows it by this. */
+export const CONV_TURNS_STEP = 10;
+
+export function sessionConversation(sessionId: number, turns?: number): Promise<Result<Conversation>> {
+  const args: { session_id: number; turns?: number } = { session_id: sessionId };
+  if (turns !== undefined) args.turns = turns;
+  return invokeCmd<Conversation>('session_conversation', { args });
 }
 
 /** Deep (JSON) equality — used to decide whether a poll result actually changed. */

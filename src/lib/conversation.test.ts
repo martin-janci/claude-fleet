@@ -57,6 +57,12 @@ describe('sessionConversation', () => {
     expect(mockedInvoke).toHaveBeenCalledWith('session_conversation', { args: { session_id: 5 } });
     expect(r.ok).toBe(true);
   });
+
+  it('passes a turn window when one is requested', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue({ turns: [], truncated: false });
+    await sessionConversation(5, 30);
+    expect(mockedInvoke).toHaveBeenCalledWith('session_conversation', { args: { session_id: 5, turns: 30 } });
+  });
 });
 
 describe('sameConversation', () => {

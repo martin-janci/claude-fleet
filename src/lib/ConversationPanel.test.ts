@@ -88,7 +88,7 @@ describe('ConversationPanel', () => {
     expect(screen.getByTestId('conv-prompt').textContent).toContain('fix the bug');
     expect(screen.getByTestId('conv-text').textContent).toContain('looking into it');
     expect(screen.getByTestId('conv-tool').textContent).toContain('Bash(command=ls -la)');
-    expect(screen.getByText('Older turns not shown')).toBeTruthy();
+    expect(screen.getByText(/Older turns not shown/)).toBeTruthy();
   });
 
   it('shows "No conversation yet" for E_NO_TRANSCRIPT', async () => {
@@ -297,7 +297,7 @@ describe('ConversationPanel', () => {
     await rerender({ session: session({ id: 2 }), visible: true });
     await tick();
     expect(mockedConv).toHaveBeenCalledTimes(2);
-    expect(mockedConv).toHaveBeenLastCalledWith(2);
+    expect(mockedConv).toHaveBeenLastCalledWith(2, undefined);
   });
 
   it('does not render an empty quote block for a turn without a prompt', async () => {
@@ -981,5 +981,37 @@ describe('ConversationPanel new-item count', () => {
     scroller.scrollTop = 100;
     await fireEvent.scroll(scroller);
     expect(screen.getByTestId('conv-latest').textContent).toContain('Latest');
+  });
+});
+
+describe('ConversationPanel load older', () => {
+  it('asks for a bigger turn window, keeps using it for polls, and resets on a session switch', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    mockedConv.mockReturnValue(ok(conv({ truncated: true })));
+    const { rerender } = render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    expect(mockedConv).toHaveBeenLastCalledWith(1, undefined);
+
+    await fireEvent.click(screen.getByTestId('conv-load-older'));
+    await settle();
+    expect(mockedConv).toHaveBeenLastCalledWith(1, 20);
+    await fireEvent.click(screen.getByTestId('conv-load-older'));
+    await settle();
+    expect(mockedConv).toHaveBeenLastCalledWith(1, 30);
+
+    vi.advanceTimersByTime(CONVERSATION_POLL_MS);
+    await settle();
+    expect(mockedConv).toHaveBeenLastCalledWith(1, 30);
+
+    await rerender({ session: session({ id: 2 }), visible: true });
+    await settle();
+    expect(mockedConv).toHaveBeenLastCalledWith(2, undefined);
+  });
+
+  it('offers Load older only when the read was truncated', async () => {
+    mockedConv.mockReturnValue(ok(conv({ truncated: false })));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    expect(screen.queryByTestId('conv-load-older')).toBeNull();
   });
 });

@@ -176,6 +176,22 @@ fn one_line(s: &str) -> String {
 
 /// Turns kept by `session_conversation`, and its character budget.
 pub const CONV_TURNS: usize = 10;
+/// Most turns the Conversation tab may ask for with "Load older".
+pub const CONV_MAX_TURNS: usize = 100;
+/// Char budget ceiling when more turns are requested (the read itself is
+/// capped at `MAX_READ_BYTES`).
+pub const CONV_MAX_CHARS_CEILING: usize = 512_000;
+
+/// PURE: the (turns, max_chars) budget for a Conversation read. `None`
+/// means the default window; a request is clamped to `1..=CONV_MAX_TURNS`
+/// and the char budget grows with it so extra turns are not immediately
+/// trimmed away again.
+pub fn conv_limits(turns: Option<usize>) -> (usize, usize) {
+    let turns = turns.unwrap_or(CONV_TURNS).clamp(1, CONV_MAX_TURNS);
+    let chars = (CONV_MAX_CHARS.saturating_mul(turns) / CONV_TURNS)
+        .clamp(CONV_MAX_CHARS, CONV_MAX_CHARS_CEILING);
+    (turns, chars)
+}
 pub const CONV_MAX_CHARS: usize = 64_000;
 /// Bytes of JSONL tail `session_conversation` reads per fetch. Fixed (not
 /// [`read_bytes_for`]`(CONV_MAX_CHARS)`, a 4 MB tail): the Conversation panel
@@ -891,6 +907,17 @@ mod tests {
         assert!(!s.contains('\n'));
         let none = serde_json::json!({"type":"tool_use","name":"Skill","input":{"other":1}});
         assert_eq!(summarize_tool_use(&none), "[tool_use] Skill({\"other\":1})");
+    }
+
+    #[test]
+    fn conv_limits_default_clamp_and_scale() {
+        assert_eq!(conv_limits(None), (CONV_TURNS, CONV_MAX_CHARS));
+        assert_eq!(conv_limits(Some(0)), (1, CONV_MAX_CHARS));
+        assert_eq!(conv_limits(Some(20)), (20, CONV_MAX_CHARS * 2));
+        assert_eq!(
+            conv_limits(Some(10_000)),
+            (CONV_MAX_TURNS, CONV_MAX_CHARS_CEILING)
+        );
     }
 
     #[test]
