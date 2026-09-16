@@ -28,6 +28,8 @@
     completeSlashCommand,
     sessionActivity,
     indicatorFor,
+    composerDrafts,
+    rememberDraft,
     isQuietStatus,
     shouldFetchTranscript,
     CONVERSATION_POLL_MS,
@@ -58,6 +60,10 @@
   // Composer state. `pending` is the prompt just sent, rendered as its own
   // turn until a poll brings back a transcript that carries it.
   let draft = $state('');
+  // The session the current `draft` was loaded for. The remember effect keys
+  // on this, not on the prop, so a session switch can never write the old
+  // text into the new session's slot whatever order the effects run in.
+  let draftFor = $state<number | null>(null);
   let sending = $state(false);
   let sendError = $state<string | null>(null);
   let pending = $state<PendingPrompt | null>(null);
@@ -134,7 +140,8 @@
       errorMsg = null;
       expanded = new Set();
       atBottom = true;
-      draft = '';
+      draft = composerDrafts.get(session.id) ?? '';
+      draftFor = session.id;
       sendError = null;
       pending = null;
       probe = null;
@@ -239,6 +246,19 @@
 
   const empty = $derived(emptyStateText(errorCode, !!session.claude_session_id));
   const canPrompt = $derived(!hasNoPane(session));
+
+  // Keep the unsent text across tab switches (the panel unmounts).
+  $effect(() => {
+    if (draftFor !== null) rememberDraft(draftFor, draft);
+  });
+
+  // Put the cursor in the composer when the tab shows a promptable session,
+  // and again when the selection moves to another one.
+  $effect(() => {
+    void sessionId;
+    if (!visible || !canPrompt) return;
+    void tick().then(() => box?.focus());
+  });
   const canSend = $derived(draft.trim().length > 0 && !sending);
   const statusNote = $derived(composerStatus({ claude_status: liveStatus, stuck_kind: liveStuck }));
   const slashMatches = $derived(slashDismissedFor === draft ? [] : matchSlashCommands(draft));
