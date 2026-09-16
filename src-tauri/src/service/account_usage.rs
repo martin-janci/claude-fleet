@@ -1809,7 +1809,25 @@ curl() { echo HIJACKED; }
             assert!(!stdout.contains(CANARY), "token on stdout: {stdout}");
             assert!(!stderr.contains(CANARY), "token on stderr: {stderr}");
             let vars = self.log("vars").unwrap_or_default();
-            assert!(vars.contains("declare"), "the DEBUG trace ran");
+            assert!(
+                vars.contains("declare"),
+                "the DEBUG trace ran: bash={:?} ({}), jq={:?} python3={:?}, \
+                 vars_len={} vars_head={:?} stdout={stdout}",
+                find_tool("bash"),
+                std::process::Command::new(find_tool("bash").unwrap())
+                    .arg("--version")
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string())
+                    .unwrap_or_else(|e| format!("<{e}>")),
+                find_tool("jq"),
+                find_tool("python3"),
+                vars.len(),
+                vars.chars().take(300).collect::<String>(),
+            );
             self.assert_no_token_on_disk();
             stdout
         }
