@@ -76,6 +76,7 @@
     tree = null;
     treeLoaded = false;
     selectedPath = null;
+    focusLine = null;
     commits = [];
     historyLoaded = false;
     openCommit = null;
@@ -167,11 +168,11 @@
     const sid = session.id;
     const r = await repoCommit(sid, hash);
     if (sid !== session.id) return;
-    if (r.ok) { openCommit = r.value; selectedPath = r.value.files[0]?.path ?? null; }
+    if (r.ok) { openCommit = r.value; selectedPath = r.value.files[0]?.path ?? null; focusLine = null; }
     else applyFailure(r);
   }
 
-  function backToGraph(): void { openCommit = null; selectedPath = null; }
+  function backToGraph(): void { openCommit = null; selectedPath = null; focusLine = null; }
 
   async function loadBranches(): Promise<void> {
     const sid = session.id;
@@ -253,6 +254,7 @@
 
   function onMode(m: typeof mode): void {
     mode = m;
+    focusLine = null;
     error = null;
     worktreeGone = false;
     openCommit = null;

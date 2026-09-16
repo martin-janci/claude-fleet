@@ -352,7 +352,8 @@
     const req = $openPathRequest;
     if (!req) return;
     untrack(() => {
-      if ($selectedSession?.id === req.sessionId) showFiles();
+      // A pane-less row (bg / external) has no Files tab to hand this to.
+      if ($selectedSession?.id === req.sessionId && !selNoPane) showFiles();
       else openPathRequest.set(null);
     });
   });

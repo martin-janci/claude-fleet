@@ -89,10 +89,11 @@
   let slashIndex = $state(0);
   let slashDismissedFor = $state<string | null>(null);
   // Prompt recall: ArrowUp in an empty box walks earlier prompts newest
-  // first, ArrowDown walks back and past the newest restores the stashed
-  // draft. Editing a recalled prompt ends the walk.
+  // first, ArrowDown walks back and past the newest empties the box again.
+  // Editing, a chip or a slash completion ends the walk. Inside a recalled
+  // multi-line prompt the arrows move the caret unless it sits on the first
+  // (ArrowUp) or last (ArrowDown) line, shell style.
   let histIndex = $state<number | null>(null);
-  let histStash = '';
   // Live indicator. `probe` is the latest on-demand pane read, laid over the
   // row's (tick-fresh) status while it is newer than the row; it is dropped
   // as soon as a row event carries a newer state. `sentTurnSeq` marks our
@@ -335,23 +336,29 @@
   const history = $derived(promptHistory(conv, pending));
 
   /** ArrowUp / ArrowDown recall. Returns true when the key was consumed. */
+  function caretOnEdgeLine(dir: -1 | 1): boolean {
+    if (!box) return true;
+    return dir === -1
+      ? box.value.lastIndexOf('\n', box.selectionStart - 1) === -1
+      : box.value.indexOf('\n', box.selectionEnd) === -1;
+  }
+
   function recall(dir: -1 | 1): boolean {
     if (histIndex === null) {
       if (dir === 1 || draft !== '' || history.length === 0) return false;
-      histStash = draft;
       histIndex = history.length - 1;
     } else {
+      if (!caretOnEdgeLine(dir)) return false;
       const next = histIndex + dir;
       if (next < 0) return true;
       if (next >= history.length) {
         histIndex = null;
-        draft = histStash;
+        draft = '';
         return true;
       }
       histIndex = next;
     }
     draft = history[histIndex];
-    slashDismissedFor = draft;
     return true;
   }
 
@@ -373,12 +380,14 @@
     }
     draft = p.text;
     slashDismissedFor = draft;
+    histIndex = null;
     box?.focus();
   }
 
   function acceptSlash(c: SlashCommand) {
     draft = completeSlashCommand(c);
     slashDismissedFor = draft;
+    histIndex = null;
     box?.focus();
   }
 

@@ -4,11 +4,13 @@
   import { getContext } from 'svelte';
   import type { Inline } from './markdown';
   import { openExternal } from './open_external';
-  import { splitPaths, hasPath } from './paths';
+  import { splitPaths } from './paths';
   import { OPEN_PATH_CONTEXT, type OpenPathFn } from './app_views';
   import Self from './MarkdownInline.svelte';
 
-  let { nodes }: { nodes: Inline[] } = $props();
+  // `inLink`: a link's label must stay plain text, or a path-shaped label
+  // would nest a button inside the anchor and one click would do both.
+  let { nodes, inLink = false }: { nodes: Inline[]; inLink?: boolean } = $props();
 
   // A host that can open files (the Conversation tab) sets this; elsewhere
   // paths render as plain text.
@@ -20,21 +22,21 @@
   }
 </script>
 
-{#snippet withPaths(v: string)}{#if openPath && hasPath(v)}{#each splitPaths(v) as piece, k (k)}{#if piece.t === 'path'}<button
+{#snippet withPaths(v: string)}{#if openPath && !inLink}{#each splitPaths(v) as piece, k (k)}{#if piece.t === 'path'}<button
         type="button"
         class="md-path"
         data-testid="md-path"
         title="Open {piece.path} in Files"
         onclick={() => openPath(piece.path, piece.line)}>{piece.v}</button
       >{:else}{piece.v}{/if}{/each}{:else}{v}{/if}{/snippet}
-{#each nodes as n, i (i)}{#if n.t === 'text'}{@render withPaths(n.v)}{:else if n.t === 'code'}<code class="md-code">{@render withPaths(n.v)}</code>{:else if n.t === 'strong'}<strong><Self nodes={n.c} /></strong>{:else if n.t === 'em'}<em><Self nodes={n.c} /></em>{:else if n.t === 'del'}<del><Self nodes={n.c} /></del>{:else if n.t === 'br'}<br />{:else if n.t === 'link'}{#if n.href}<a
+{#each nodes as n, i (i)}{#if n.t === 'text'}{@render withPaths(n.v)}{:else if n.t === 'code'}<code class="md-code">{@render withPaths(n.v)}</code>{:else if n.t === 'strong'}<strong><Self nodes={n.c} {inLink} /></strong>{:else if n.t === 'em'}<em><Self nodes={n.c} {inLink} /></em>{:else if n.t === 'del'}<del><Self nodes={n.c} {inLink} /></del>{:else if n.t === 'br'}<br />{:else if n.t === 'link'}{#if n.href}<a
         class="md-link"
         href={n.href}
         title={n.href}
         rel="noreferrer noopener"
         onclick={(e) => onLinkClick(e, n.href!)}
-        onauxclick={(e) => e.preventDefault()}><Self nodes={n.c} /></a
-      >{:else}<span class="md-link-inert" title="Link target not allowed"><Self nodes={n.c} /></span>{/if}{/if}{/each}
+        onauxclick={(e) => e.preventDefault()}><Self nodes={n.c} inLink={true} /></a
+      >{:else}<span class="md-link-inert" title="Link target not allowed"><Self nodes={n.c} inLink={true} /></span>{/if}{/if}{/each}
 
 <style>
   .md-code {

@@ -1316,3 +1316,51 @@ describe('ConversationPanel file paths', () => {
     expect(get(openPathRequest)).toEqual({ sessionId: 9, path: 'src/lib/foo.ts', line: 42 });
   });
 });
+
+describe('ConversationPanel final review fixes', () => {
+  it('a chip after a recall ends the walk: arrows no longer replace the chip text', async () => {
+    composerPresets.set([{ label: 'Tests', text: 'run the tests' }]);
+    mockedConv.mockReturnValue(ok(conv({ turns: [{ prompt: 'earlier', at: null, ended_at: null, items: [] }] })));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.keyDown(box, { key: 'ArrowUp' });
+    expect(box.value).toBe('earlier');
+    await fireEvent.click(screen.getByTestId('conv-chip'));
+    expect(box.value).toBe('run the tests');
+    await fireEvent.keyDown(box, { key: 'ArrowDown' });
+    expect(box.value).toBe('run the tests');
+    await fireEvent.keyDown(box, { key: 'ArrowUp' });
+    expect(box.value).toBe('run the tests');
+  });
+
+  it('inside a recalled multi-line prompt the arrows move the caret; only the edge lines walk', async () => {
+    mockedConv.mockReturnValue(ok(conv({ turns: [{ prompt: 'one', at: null, ended_at: null, items: [] }, { prompt: 'line a\nline b\nline c', at: null, ended_at: null, items: [] }] })));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    await fireEvent.keyDown(box, { key: 'ArrowUp' });
+    expect(box.value).toBe('line a\nline b\nline c');
+    // caret on the middle line: neither arrow is consumed
+    box.selectionStart = box.selectionEnd = 8;
+    const down = new KeyboardEvent('keydown', { key: 'ArrowDown', cancelable: true, bubbles: true });
+    box.dispatchEvent(down);
+    expect(down.defaultPrevented).toBe(false);
+    expect(box.value).toBe('line a\nline b\nline c');
+    // caret on the first line: ArrowUp walks to the older prompt
+    box.selectionStart = box.selectionEnd = 2;
+    await fireEvent.keyDown(box, { key: 'ArrowUp' });
+    expect(box.value).toBe('one');
+  });
+
+  it('a path-shaped link label stays a plain link, never a nested button', async () => {
+    mockedConv.mockReturnValue(
+      ok(conv({ turns: [{ prompt: 'q', at: null, ended_at: null, items: [{ kind: 'text', text: 'see [src/lib/foo.ts](https://example.com/x) and src/lib/bar.ts' }] }] })),
+    );
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const buttons = screen.getAllByTestId('md-path');
+    expect(buttons.map((b) => b.textContent)).toEqual(['src/lib/bar.ts']);
+    expect(document.querySelector('a.md-link button')).toBeNull();
+  });
+});

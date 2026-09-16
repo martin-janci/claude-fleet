@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { splitPaths, hasPath } from './paths';
+import { splitPaths } from './paths';
 
 describe('splitPaths', () => {
   it('finds repo-relative paths with an optional line, leaving the rest as text', () => {
@@ -28,8 +28,17 @@ describe('splitPaths', () => {
     expect(splitPaths('')).toEqual([]);
   });
 
-  it('hasPath is a cheap pre-check', () => {
-    expect(hasPath('docs/RELEASING.md')).toBe(true);
-    expect(hasPath('nothing here')).toBe(false);
+  it('refuses parent segments and a zero line, which the backend or viewer would reject', () => {
+    expect(splitPaths('see ../foo/bar.ts here')).toEqual([{ t: 'text', v: 'see ../foo/bar.ts here' }]);
+    expect(splitPaths('src/../lib/a.ts')).toEqual([{ t: 'text', v: 'src/../lib/a.ts' }]);
+    expect(splitPaths('foo/bar.ts:0')).toEqual([
+      { t: 'path', v: 'foo/bar.ts', path: 'foo/bar.ts', line: null },
+      { t: 'text', v: ':0' },
+    ]);
+  });
+
+  it('two calls in a row see every path (no regex state carried over)', () => {
+    expect(splitPaths('a/b.ts and c/d.ts').filter((p) => p.t === 'path')).toHaveLength(2);
+    expect(splitPaths('src/lib/a.ts x').filter((p) => p.t === 'path')).toHaveLength(1);
   });
 });

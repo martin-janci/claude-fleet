@@ -10,7 +10,10 @@ export type PathPiece = { t: 'text'; v: string } | { t: 'path'; v: string; path:
 // with an extension, an optional `:line`. Not preceded by a path/URL char
 // (so `https://x/y.ts`, `~/.claude/x.md` and absolute paths are left alone,
 // as none of those is repo-relative) and not followed by one.
-const PATH_RE = /(?<![\w/.:@~-])(?:\.\/)?((?:[\w.@-]+\/)+[\w.@-]+\.[A-Za-z0-9]{1,8})(?::(\d+))?(?![\w/])/g;
+// Segments made only of dots (`..`) are refused, since the backend rejects
+// them; a line must be positive. The regex is only ever used through
+// `matchAll`, which never leaves state behind.
+const PATH_RE = /(?<![\w/.:@~-])(?:\.\/)?((?:(?!\.+\/)[\w.@-]+\/)+[\w.@-]+\.[A-Za-z0-9]{1,8})(?::([1-9]\d*))?(?![\w/])/g;
 
 export function splitPaths(text: string): PathPiece[] {
   const out: PathPiece[] = [];
@@ -23,12 +26,4 @@ export function splitPaths(text: string): PathPiece[] {
   }
   if (last < text.length) out.push({ t: 'text', v: text.slice(last) });
   return out;
-}
-
-/** True when the text holds at least one path (cheap pre-check). */
-export function hasPath(text: string): boolean {
-  PATH_RE.lastIndex = 0;
-  const hit = PATH_RE.test(text);
-  PATH_RE.lastIndex = 0;
-  return hit;
 }
