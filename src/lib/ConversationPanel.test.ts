@@ -13,6 +13,7 @@ vi.mock('./sessions', async () => {
 import { sessionConversation, CONVERSATION_POLL_MS, type Conversation } from './conversation';
 import ConversationPanel from './ConversationPanel.svelte';
 import { sendPrompt, type SessionRow } from './sessions';
+import { composerPresets, resetComposerPresets } from './composer_presets';
 
 const mockedConv = sessionConversation as unknown as ReturnType<typeof vi.fn>;
 const mockedSend = sendPrompt as unknown as ReturnType<typeof vi.fn>;
@@ -62,6 +63,7 @@ function setVisibility(state: 'visible' | 'hidden') {
 beforeEach(() => {
   mockedConv.mockReset();
   mockedSend.mockReset();
+  resetComposerPresets();
   setVisibility('visible');
 });
 
@@ -652,5 +654,60 @@ describe('ConversationPanel slash commands', () => {
     await fireEvent.keyDown(box, { key: 'Enter' });
     await settle();
     expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/cle');
+  });
+});
+
+describe('ConversationPanel quick actions', () => {
+  async function mount(over: Partial<SessionRow> = {}) {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(ConversationPanel, { session: session(over), visible: true });
+    await settle();
+  }
+
+  it('renders one chip per preset; a click fills the box without sending', async () => {
+    composerPresets.set([
+      { label: 'Clear', text: '/clear' },
+      { label: 'Tests', text: 'run the tests' },
+    ]);
+    await mount();
+    const chips = screen.getAllByTestId('conv-chip');
+    expect(chips.map((c) => c.textContent?.trim())).toEqual(['Clear', 'Tests']);
+    await fireEvent.click(chips[1]);
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    expect(box.value).toBe('run the tests');
+    expect(mockedSend).not.toHaveBeenCalled();
+    // a command preset does not pop the slash menu over a box it already filled
+    await fireEvent.click(chips[0]);
+    expect(box.value).toBe('/clear');
+    expect(screen.queryByTestId('conv-slash-menu')).toBeNull();
+  });
+
+  it('Shift+click sends the preset at once', async () => {
+    composerPresets.set([{ label: 'Status', text: '/status' }]);
+    await mount({ host_alias: 'trn', tmux_name: 'dev-x' });
+    await fireEvent.click(screen.getByTestId('conv-chip'), { shiftKey: true });
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('trn', 'dev-x', '/status');
+    expect((screen.getByTestId('conv-composer-input') as HTMLTextAreaElement).value).toBe('');
+  });
+
+  it('a session stuck on press_enter gets a chip that sends a bare Enter', async () => {
+    await mount({ claude_status: 'blocked', stuck_kind: 'press_enter' });
+    await fireEvent.click(screen.getByTestId('conv-chip-enter'));
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '');
+    expect(screen.queryByTestId('conv-pending')).toBeNull();
+  });
+
+  it('no Enter chip otherwise, and no chips at all for a bg row', async () => {
+    await mount();
+    expect(screen.queryByTestId('conv-chip-enter')).toBeNull();
+    expect(screen.getAllByTestId('conv-chip').length).toBeGreaterThan(0);
+  });
+
+  it('a bg row shows no chips', async () => {
+    await mount({ kind: 'bg', tmux_name: 'bg:abc' });
+    expect(screen.queryByTestId('conv-chip')).toBeNull();
   });
 });

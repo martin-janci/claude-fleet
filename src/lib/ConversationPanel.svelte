@@ -11,6 +11,7 @@
   import { untrack, tick } from 'svelte';
   import { sendPrompt, hasNoPane, type SessionRow } from './sessions';
   import { hintAnchor } from './hints';
+  import { composerPresets, type ComposerPreset } from './composer_presets';
   import {
     sessionConversation,
     sameConversation,
@@ -156,6 +157,18 @@
     if (slashIndex >= slashMatches.length) slashIndex = 0;
   });
 
+  /** A chip fills the box (Shift+click sends at once). A filled command does
+   *  not pop the slash menu: the user picked it already. */
+  function usePreset(p: ComposerPreset, sendNow: boolean) {
+    if (sendNow) {
+      void sendText(p.text.trim() || p.text);
+      return;
+    }
+    draft = p.text;
+    slashDismissedFor = draft;
+    box?.focus();
+  }
+
   function acceptSlash(c: SlashCommand) {
     draft = completeSlashCommand(c);
     slashDismissedFor = draft;
@@ -165,6 +178,13 @@
   async function send() {
     const text = draft.trim();
     if (!text || sending) return;
+    await sendText(text);
+  }
+
+  /** Send `text` as-is. Empty text is a bare Enter (the press_enter chip):
+   *  it lands in the REPL but is not a prompt, so nothing is shown pending. */
+  async function sendText(text: string) {
+    if (sending) return;
     sending = true;
     sendError = null;
     const r = await sendPrompt(session.host_alias, session.tmux_name, text);
@@ -173,6 +193,7 @@
       sendError = r.error.message;
       return;
     }
+    if (text === '') return;
     draft = '';
     pending = {
       prompt: text,
@@ -348,6 +369,30 @@
       {#if sendError}
         <div class="composer-error" data-testid="conv-composer-error">{sendError}</div>
       {/if}
+      <div class="chips" data-testid="conv-chips">
+        {#if session.stuck_kind === 'press_enter'}
+          <button
+            type="button"
+            class="chip stuck"
+            data-testid="conv-chip-enter"
+            title="The session is waiting on a key press. Sends a bare Enter."
+            disabled={sending}
+            onclick={() => void sendText('')}>⏎ Press Enter</button
+          >
+        {/if}
+        {#each $composerPresets as p, i (i)}
+          {#if p.label.trim() && p.text.trim()}
+            <button
+              type="button"
+              class="chip"
+              data-testid="conv-chip"
+              title={`${p.text}\n\nClick fills the box; Shift+click sends now.`}
+              disabled={sending}
+              onclick={(e) => usePreset(p, e.shiftKey)}>{p.label}</button
+            >
+          {/if}
+        {/each}
+      </div>
       <div class="composer-row">
         <textarea
           data-testid="conv-composer-input"
@@ -401,6 +446,34 @@
     border-top: 1px solid var(--border);
     background: var(--bg-pane);
     padding: 0.55rem 1.1rem 0.6rem;
+  }
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    max-width: 80ch;
+    margin: 0 auto 0.4rem;
+  }
+  .chip {
+    padding: 0.15rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg);
+    color: var(--fg-muted);
+    font-size: 0.72rem;
+    cursor: pointer;
+  }
+  .chip:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--fg);
+  }
+  .chip:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .chip.stuck {
+    border-color: #e6a23c;
+    color: #e6a23c;
   }
   .composer-row {
     display: flex;
