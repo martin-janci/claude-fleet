@@ -12,6 +12,7 @@
   import { sendPrompt, hasNoPane, type SessionRow } from './sessions';
   import { hintAnchor } from './hints';
   import { composerPresets, type ComposerPreset } from './composer_presets';
+  import { contextLevel, contextColor, contextTint } from './attention';
   import {
     sessionConversation,
     sameConversation,
@@ -273,6 +274,11 @@
   });
   const canSend = $derived(draft.trim().length > 0 && !sending);
   const statusNote = $derived(composerStatus({ claude_status: liveStatus, stuck_kind: liveStuck }));
+  // Context-window meter beside the composer; at warn/crit the Compact chip
+  // is suggested, since that is the one-click remedy.
+  const ctxLevel = $derived(contextLevel(session.context_pct));
+  const suggestCompact = $derived(ctxLevel === 'warn' || ctxLevel === 'crit');
+  const isCompactPreset = (p: ComposerPreset) => /^\/compact\b/.test(p.text.trim());
   const slashMatches = $derived(slashDismissedFor === draft ? [] : matchSlashCommands(draft));
   const slashOpen = $derived(slashMatches.length > 0);
   // Keep the highlight inside the list as the prefix narrows it.
@@ -556,11 +562,16 @@
         {/if}
         {#each $composerPresets as p, i (i)}
           {#if p.label.trim() && p.text.trim()}
+            {@const suggested = suggestCompact && isCompactPreset(p)}
             <button
               type="button"
               class="chip"
+              class:suggest={suggested}
               data-testid="conv-chip"
-              title={`${p.text}\n\nClick fills the box; Shift+click sends now.`}
+              data-suggested={suggested || undefined}
+              title={suggested
+                ? `Context window is ${Math.round(session.context_pct ?? 0)}% used. Compacting frees space.\n\nClick fills the box; Shift+click sends now.`
+                : `${p.text}\n\nClick fills the box; Shift+click sends now.`}
               disabled={sending}
               onclick={(e) => usePreset(p, e.shiftKey)}>{p.label}</button
             >
@@ -579,8 +590,27 @@
         ></textarea>
         <button type="submit" data-testid="conv-composer-send" disabled={!canSend}>{sending ? 'Sending…' : 'Send'}</button>
       </div>
-      {#if statusNote}
-        <div class="composer-status" data-testid="conv-composer-status">{statusNote}</div>
+      {#if statusNote || ctxLevel !== null}
+        <div class="composer-foot">
+          {#if statusNote}
+            <div class="composer-status" data-testid="conv-composer-status">{statusNote}</div>
+          {/if}
+          {#if ctxLevel !== null && session.context_pct !== null}
+            <span
+              class="ctx"
+              data-testid="conv-ctx"
+              data-level={ctxLevel}
+              role="meter"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow={Math.round(session.context_pct)}
+              aria-label="context usage"
+              title="Context window {Math.round(session.context_pct)}% used"
+              style="color: {contextColor(ctxLevel)}; border-color: {contextTint(ctxLevel)};"
+              ><span class="ctx-bar" style="width: {Math.min(100, Math.max(0, session.context_pct))}%; background: {contextColor(ctxLevel)};"></span><span class="ctx-pct">ctx {Math.round(session.context_pct)}%</span></span
+            >
+          {/if}
+        </div>
       {/if}
     </form>
   {:else}
@@ -739,9 +769,46 @@
   .composer-error {
     color: #e64a4a;
   }
-  .composer-status {
+  .composer-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    max-width: 80ch;
     margin: 0.35rem auto 0;
+  }
+  .composer-status {
+    margin: 0;
     color: var(--fg-muted);
+    font-size: 0.75rem;
+  }
+  .ctx {
+    position: relative;
+    display: inline-block;
+    flex: 0 0 auto;
+    margin-left: auto;
+    padding: 0.1rem 0.45rem;
+    border: 1px solid;
+    border-radius: 999px;
+    overflow: hidden;
+    font-size: 0.68rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .ctx-bar {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    opacity: 0.25;
+  }
+  .ctx-pct {
+    position: relative;
+  }
+  .chip.suggest {
+    border-color: var(--usage-warn, #e6a23c);
+    color: var(--fg);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--usage-warn, #e6a23c) 25%, transparent);
   }
   .indicator {
     display: flex;
