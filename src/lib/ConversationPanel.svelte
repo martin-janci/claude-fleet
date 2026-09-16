@@ -32,6 +32,7 @@
     composerDrafts,
     rememberDraft,
     newItemCount,
+    promptHistory,
     CONV_TURNS_STEP,
     CONV_MAX_TURNS,
     PROBE_TTL_MS,
@@ -86,6 +87,11 @@
   // the menu for (Escape) so it stays hidden until the text changes.
   let slashIndex = $state(0);
   let slashDismissedFor = $state<string | null>(null);
+  // Prompt recall: ArrowUp in an empty box walks earlier prompts newest
+  // first, ArrowDown walks back and past the newest restores the stashed
+  // draft. Editing a recalled prompt ends the walk.
+  let histIndex = $state<number | null>(null);
+  let histStash = '';
   // Live indicator. `probe` is the latest on-demand pane read, laid over the
   // row's (tick-fresh) status while it is newer than the row; it is dropped
   // as soon as a row event carries a newer state. `sentTurnSeq` marks our
@@ -176,6 +182,7 @@
       loadingOlder = false;
       draft = composerDrafts.get(session.id) ?? '';
       draftFor = session.id;
+      histIndex = null;
       sendError = null;
       pending = null;
       setProbe(null);
@@ -321,6 +328,32 @@
   const suggestCompact = $derived(ctxLevel === 'warn' || ctxLevel === 'crit');
   const isCompactPreset = (p: ComposerPreset) => /^\/compact\b/.test(p.text.trim());
   const slashMatches = $derived(slashDismissedFor === draft ? [] : matchSlashCommands(draft));
+  const history = $derived(promptHistory(conv, pending));
+
+  /** ArrowUp / ArrowDown recall. Returns true when the key was consumed. */
+  function recall(dir: -1 | 1): boolean {
+    if (histIndex === null) {
+      if (dir === 1 || draft !== '' || history.length === 0) return false;
+      histStash = draft;
+      histIndex = history.length - 1;
+    } else {
+      const next = histIndex + dir;
+      if (next < 0) return true;
+      if (next >= history.length) {
+        histIndex = null;
+        draft = histStash;
+        return true;
+      }
+      histIndex = next;
+    }
+    draft = history[histIndex];
+    slashDismissedFor = draft;
+    return true;
+  }
+
+  function onComposerInput() {
+    histIndex = null;
+  }
   const slashOpen = $derived(slashMatches.length > 0);
   // Keep the highlight inside the list as the prefix narrows it.
   $effect(() => {
@@ -371,6 +404,7 @@
     // Only the box's own text is spent by a send; a chip sent with
     // Shift+click leaves whatever the user was typing.
     if (opts.fromDraft) draft = '';
+    histIndex = null;
     // A slash command is handled by the REPL itself: it is not recorded as a
     // prompt (and /clear even moves to a new session id), so no pending
     // turn, and nothing to wait for beyond a fresh read.
@@ -425,6 +459,14 @@
       if (e.key === 'Enter' && !e.shiftKey && !e.altKey && draft !== `/${highlighted.name}`) {
         e.preventDefault();
         acceptSlash(highlighted);
+        return;
+      }
+    }
+    // Recall only consumes an arrow it acted on; the slash menu's own arrow
+    // handling ran above, and an unconsumed arrow keeps its caret movement.
+    if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) {
+      if (recall(e.key === 'ArrowUp' ? -1 : 1)) {
+        e.preventDefault();
         return;
       }
     }
@@ -655,9 +697,10 @@
           data-testid="conv-composer-input"
           bind:this={box}
           bind:value={draft}
+          oninput={onComposerInput}
           onkeydown={onComposerKey}
           rows="2"
-          placeholder="Send a prompt to this session (Enter to send, Shift+Enter for a new line)"
+          placeholder="Send a prompt to this session (Enter to send, Shift+Enter for a new line, ↑ recalls earlier prompts)"
           disabled={sending}
         ></textarea>
         <button type="submit" data-testid="conv-composer-send" disabled={!canSend}>{sending ? 'Sending…' : 'Send'}</button>

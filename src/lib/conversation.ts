@@ -303,3 +303,20 @@ export function countItems(conv: Conversation | null): number {
 export function newItemCount(prev: Conversation | null, next: Conversation): number {
   return Math.max(0, countItems(next) - countItems(prev));
 }
+
+/**
+ * Prompts to recall with ArrowUp in the composer, oldest first: the
+ * conversation's prompts plus the one just sent (if the transcript has not
+ * carried it yet). Slash commands are skipped, and a prompt repeated back
+ * to back appears once.
+ */
+export function promptHistory(conv: Conversation | null, pending: PendingPrompt | null): string[] {
+  const out: string[] = [];
+  const push = (p: string | null) => {
+    if (!p || p.startsWith('/')) return;
+    if (out[out.length - 1] !== p) out.push(p);
+  };
+  for (const t of conv?.turns ?? []) push(t.prompt);
+  push(pending?.prompt ?? null);
+  return out;
+}
