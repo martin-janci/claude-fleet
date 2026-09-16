@@ -48,4 +48,10 @@ describe('FileViewer focusLine', () => {
     await settle();
     expect(screen.queryByTestId('file-focus-row')).toBeNull();
   });
+
+  it('a focus line never applies inside a commit view', async () => {
+    render(FileViewer, { session, path: 'a.ts', status: 'M', reloadKey: 0, commit: 'abc123', focusLine: 3 });
+    await settle();
+    expect(screen.queryByTestId('file-focus-row')).toBeNull();
+  });
 });

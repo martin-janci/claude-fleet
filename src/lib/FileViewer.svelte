@@ -82,12 +82,12 @@
   // manual scroll is never undone by an unrelated re-render.
   let fileEl: HTMLDivElement | undefined = $state();
   $effect(() => {
-    if (focusLine !== null && path) view = 'file';
+    if (focusLine !== null && path && commit === null) view = 'file';
   });
   $effect(() => {
     const line = focusLine;
     const loaded = file;
-    if (line === null || !loaded || !fileEl) return;
+    if (line === null || commit !== null || !loaded || !fileEl) return;
     const row = fileEl.children[line - 1] as HTMLElement | undefined;
     row?.scrollIntoView?.({ block: 'center' });
   });
@@ -210,7 +210,7 @@
           {/if}
           <div class="file" bind:this={fileEl}>
             {#each hlLines as toks, i}
-              <div class="frow" class:focus={focusLine === i + 1} data-testid={focusLine === i + 1 ? 'file-focus-row' : undefined}>
+              <div class="frow" class:focus={commit === null && focusLine === i + 1} data-testid={commit === null && focusLine === i + 1 ? 'file-focus-row' : undefined}>
                 <span class="fno">{i + 1}</span><span class="ftext"
                   >{#each toks as t}{#if t.cls === 'txt'}{t.text}{:else}<span class={t.cls}>{t.text}</span>{/if}{:else}&nbsp;{/each}</span
                 >
