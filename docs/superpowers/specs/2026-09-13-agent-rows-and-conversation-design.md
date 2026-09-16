@@ -266,6 +266,16 @@ Frontend:
   live). A quiet session (idle / completed / stopped / failed) re-reads the
   transcript only every 15 s or when its `turn_seq` moves, instead of the
   5 s cadence.
+- Ten follow-up iterations (2026-09-16, PRs #115–#124) layered on the
+  above: ✗ on tool calls whose result was an error; turn duration and an
+  open tool group on the running turn; per-session drafts and composer
+  focus; "↓ N new" while scrolled up; Load older (a `turns` argument on
+  `session_conversation`, clamped to 100 with a scaled read); a context
+  meter with Compact suggested from 70 %; two review rounds (multibyte
+  panic in `parse_trailing_number`, probe TTL and guards, slash sends,
+  Load older budget, Press Enter bookkeeping, spinner false positives);
+  ArrowUp prompt recall; file paths in replies opening the Files tab at a
+  line. User-facing summary: `docs/conversation-tab.md`.
 - The tmux-session cwd fallback in `find_for_session` can, in principle,
   bind a tmux row to an interactive session running elsewhere in the same
   directory; unchanged here.

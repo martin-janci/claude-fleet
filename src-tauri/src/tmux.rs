@@ -155,11 +155,18 @@ impl TmuxExec for LocalTmux {
     }
     async fn capture_pane_scrollback(&self, name: &str, lines: u32) -> Result<String, IpcError> {
         let start = scrollback_start(lines);
-        let output = tokio::process::Command::new("tmux")
-            .args(["capture-pane", "-t", name, "-S", &start, "-p"])
-            .output()
-            .await
-            .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn tmux failed: {e}")))?;
+        // Bounded like the remote path (30 s): the Conversation tab's probe
+        // polls this every 2 s, and a wedged local tmux server must not
+        // hang it.
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            tokio::process::Command::new("tmux")
+                .args(["capture-pane", "-t", name, "-S", &start, "-p"])
+                .output(),
+        )
+        .await
+        .map_err(|_| IpcError::new(codes::E_TIMEOUT, "tmux capture-pane timed out"))?
+        .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn tmux failed: {e}")))?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {

@@ -57,7 +57,7 @@ pub async fn session_activity(
             IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found"))
         })?
     };
-    if row.kind == "bg" || row.kind == "external" {
+    if crate::store::has_no_pane(&row.kind) {
         return Err(IpcError::new(
             codes::E_INVALID_STATE,
             "session runs outside tmux; there is no pane to probe",
