@@ -69,7 +69,7 @@ Connect any MCP client to `https://fleet.example.com/mcp` with the master
 token. For Claude Code:
 
 ```bash
-claude mcp add --transport http fleet https://fleet.example.com/mcp \
+claude mcp add --transport http claude-fleet https://fleet.example.com/mcp \
   --header "Authorization: Bearer <token>"
 ```
 
@@ -86,6 +86,12 @@ On a hub with a public URL, provisioning writes `https://<domain>/hook` and
 `https://<domain>/mcp` directly into each host's hook block and MCP entry —
 no reverse SSH tunnel is started, because every host can already reach the
 hub's public address.
+
+Re-running `provision_hosts` (for example after changing the public URL) is
+safe: it replaces only fleet's own hook entries — an `http` hook to
+`<scheme>://<authority>/hook` with a Bearer header and a 5 s timeout — and
+keeps every other hook already in the host's `~/.claude/settings.json`
+untouched. The previous file is saved as `settings.json.fleet-bak` first.
 
 **After provisioning, restart Claude Code on each host** to pick up the new
 MCP server entry (the skill files and hooks are picked up live).
