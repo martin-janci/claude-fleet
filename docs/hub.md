@@ -100,6 +100,15 @@ curl -s https://fleet.example.com/mcp \
 
 A healthy hub answers with `db_ready: true` and the running version.
 
+The image carries a Docker `HEALTHCHECK` that runs `fleet-hub healthcheck`
+every 30 s, so `docker compose ps` shows the hub as `healthy` (or
+`unhealthy`) in its STATUS column. The check sends one unauthenticated
+`GET /mcp` to `127.0.0.1` on `FLEET_HUB_PORT` (default `4180`) and passes on
+any HTTP answer — a `401` means the server is up. It does not open
+`state.db` and does not read the stored `mcp.port`: if you run the hub on
+another port, set it with `FLEET_HUB_PORT`, not only `--port`. Each probe
+shows up in the hub's log as a rejected (`401`) request.
+
 ## Add and provision hosts
 
 Connect any MCP client to `https://fleet.example.com/mcp` with the master

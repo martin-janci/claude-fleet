@@ -39,6 +39,12 @@ enum Cmd {
     },
     /// Print this hub's SSH public key (generated on first use; derived when only the private key exists).
     SshKey,
+    /// Exit 0 when a hub answers HTTP on 127.0.0.1 (for Docker HEALTHCHECK). Does not open the database.
+    Healthcheck {
+        /// Port to probe [env: FLEET_HUB_PORT] [default: 4180]
+        #[arg(long)]
+        port: Option<u16>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -60,6 +66,7 @@ async fn main() -> ExitCode {
         Cmd::Serve { opts } => serve::serve(&opts, &env).await,
         Cmd::Token { cmd, opts } => serve::token(&opts, &env, matches!(cmd, TokenCmd::Regenerate)),
         Cmd::SshKey => serve::ssh_key(),
+        Cmd::Healthcheck { port } => serve::healthcheck(port, &env),
     };
     match result {
         Ok(code) => code,
@@ -99,6 +106,15 @@ mod tests {
             assert_eq!(opts.data_dir, Some("/tmp/x".into()), "{argv:?}");
         }
         Cli::try_parse_from(["fleet-hub", "ssh-key"]).unwrap();
+        Cli::try_parse_from(["fleet-hub", "healthcheck"]).unwrap();
+        let Cmd::Healthcheck { port } =
+            Cli::try_parse_from(["fleet-hub", "healthcheck", "--port", "4190"])
+                .unwrap()
+                .cmd
+        else {
+            panic!("healthcheck --port did not parse");
+        };
+        assert_eq!(port, Some(4190));
         assert!(Cli::try_parse_from(["fleet-hub", "bogus"]).is_err());
     }
 }

@@ -25,5 +25,8 @@ USER fleet
 ENV FLEET_HUB_DATA_DIR=/var/lib/fleet-hub
 VOLUME ["/var/lib/fleet-hub", "/home/fleet/.ssh"]
 EXPOSE 4180
+# Probes 127.0.0.1:$FLEET_HUB_PORT (default 4180) without opening state.db;
+# any HTTP answer, 401 included, counts as healthy.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["fleet-hub", "healthcheck"]
 ENTRYPOINT ["tini", "--", "fleet-hub"]
 CMD ["serve"]

@@ -181,6 +181,52 @@ fn key_action(private_exists: bool, public_exists: bool) -> KeyAction {
     }
 }
 
+/// How long `healthcheck` waits to connect, and then for the status line.
+const HEALTHCHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Send one `GET /mcp` to `addr` and return the response's status line when
+/// it is HTTP/1.x (any status: 401/405 still mean the server is alive).
+fn probe(addr: std::net::SocketAddr, timeout: std::time::Duration) -> Result<String, String> {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let mut conn = std::net::TcpStream::connect_timeout(&addr, timeout)
+        .map_err(|e| format!("connect {addr}: {e}"))?;
+    conn.set_read_timeout(Some(timeout))
+        .and_then(|()| conn.set_write_timeout(Some(timeout)))
+        .map_err(|e| format!("{addr}: {e}"))?;
+    let req = format!("GET /mcp HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    conn.write_all(req.as_bytes())
+        .map_err(|e| format!("send to {addr}: {e}"))?;
+    let mut line = String::new();
+    // Only the status line is needed; bound what a stray peer can make us read.
+    BufReader::new(conn.take(512))
+        .read_line(&mut line)
+        .map_err(|e| format!("read from {addr}: {e}"))?;
+    let status = line.trim_end().to_string();
+    if status.starts_with("HTTP/1.") {
+        Ok(status)
+    } else {
+        Err(format!("{addr} did not answer HTTP: {status:?}"))
+    }
+}
+
+/// `fleet-hub healthcheck`: probe the local listener without opening the
+/// store (it runs next to a live `serve`). Port: flag > `FLEET_HUB_PORT` >
+/// default; the stored `mcp.port` is deliberately not read.
+pub fn healthcheck(port: Option<u16>, env: &HashMap<String, String>) -> Result<ExitCode, String> {
+    let port = match (port, env.get("FLEET_HUB_PORT")) {
+        (Some(p), _) => p,
+        (None, Some(v)) => v
+            .trim()
+            .parse::<u16>()
+            .map_err(|e| format!("FLEET_HUB_PORT '{v}': {e}"))?,
+        (None, None) => mcp::DEFAULT_PORT,
+    };
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let status = probe(addr, HEALTHCHECK_TIMEOUT).map_err(|e| format!("unhealthy: {e}"))?;
+    out::line(&format!("healthy: {status}"));
+    Ok(ExitCode::SUCCESS)
+}
+
 pub fn ssh_key() -> Result<ExitCode, String> {
     let home = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
@@ -562,6 +608,50 @@ mod tests {
         assert_eq!(key_action(false, true), KeyAction::Print);
         assert_eq!(key_action(true, false), KeyAction::Derive);
         assert_eq!(key_action(false, false), KeyAction::Generate);
+    }
+
+    #[test]
+    fn healthcheck_accepts_any_http_status_line() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let n = conn.read(&mut buf).unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            conn.write_all(b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n")
+                .unwrap();
+            req
+        });
+        let status = probe(addr, HEALTHCHECK_TIMEOUT).unwrap();
+        assert_eq!(status, "HTTP/1.1 401 Unauthorized");
+        let req = server.join().unwrap();
+        assert!(req.starts_with("GET /mcp HTTP/1.1\r\n"), "{req}");
+        assert!(
+            req.contains(&format!("Host: 127.0.0.1:{}\r\n", addr.port())),
+            "{req}"
+        );
+    }
+
+    #[test]
+    fn healthcheck_fails_on_a_closed_port_or_a_non_http_answer() {
+        use std::io::Write;
+        let closed = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+        assert!(probe(closed, HEALTHCHECK_TIMEOUT).is_err());
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            conn.write_all(b"SSH-2.0-OpenSSH_9.6\r\n").unwrap();
+        });
+        let err = probe(addr, HEALTHCHECK_TIMEOUT).unwrap_err();
+        assert!(err.contains("SSH-2.0"), "{err}");
+        server.join().unwrap();
     }
 
     #[test]
