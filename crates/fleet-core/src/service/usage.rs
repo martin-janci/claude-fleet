@@ -645,17 +645,38 @@ pub async fn collect_host(
     Ok(changed)
 }
 
+/// The hosts a collection pass visits, from `(alias, reachable)` rows:
+/// every reachable host, plus `local` whatever its probe says — unless this
+/// process is a hub with `hub.local_host` off, where `local` is skipped.
+fn collection_hosts(
+    hosts: impl IntoIterator<Item = (String, bool)>,
+    local_enabled: bool,
+) -> Vec<String> {
+    hosts
+        .into_iter()
+        .filter(|(alias, reachable)| {
+            if alias == "local" {
+                local_enabled
+            } else {
+                *reachable
+            }
+        })
+        .map(|(alias, _)| alias)
+        .collect()
+}
+
 /// One pass over every reachable host (and `local`), sequentially: each
 /// host is one bounded ssh call. Failures are logged and skipped.
 pub async fn collect_all(store: &Mutex<Store>, exec: &dyn SshExec, now: i64) -> usize {
     let (hosts, overrides) = match store.lock() {
         Ok(s) => (
-            s.list_hosts()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|h| h.reachable || h.alias == "local")
-                .map(|h| h.alias)
-                .collect::<Vec<_>>(),
+            collection_hosts(
+                s.list_hosts()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|h| (h.alias, h.reachable)),
+                crate::service::hub::local_host_enabled(),
+            ),
             price_overrides(&s),
         ),
         Err(_) => return 0,
@@ -904,6 +925,32 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     const SID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    #[test]
+    fn collection_hosts_skip_local_only_when_a_hub_disabled_it() {
+        let rows = || {
+            vec![
+                ("local".to_string(), false),
+                ("devbox".to_string(), true),
+                ("down".to_string(), false),
+            ]
+        };
+        assert_eq!(
+            collection_hosts(rows(), true),
+            vec!["local".to_string(), "devbox".to_string()],
+            "the desktop always collects local"
+        );
+        assert_eq!(
+            collection_hosts(rows(), false),
+            vec!["devbox".to_string()],
+            "a hub without a local host skips it"
+        );
+        // Even a copied `local` row still marked reachable is skipped.
+        assert_eq!(
+            collection_hosts(vec![("local".to_string(), true)], false),
+            Vec::<String>::new()
+        );
+    }
 
     fn tokens(i: i64, o: i64, w: i64, r: i64) -> UsageTotals {
         UsageTotals {
