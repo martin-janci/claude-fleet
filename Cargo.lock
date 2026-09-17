@@ -1342,6 +1342,7 @@ dependencies = [
  "base64 0.22.1",
  "dashmap",
  "directories",
+ "futures-util",
  "hex",
  "libc",
  "proptest",

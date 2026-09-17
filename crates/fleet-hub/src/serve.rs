@@ -3,7 +3,7 @@
 
 use crate::config::{resolve, resolve_data_dir, HubOptions, Resolved};
 use crate::out;
-use fleet_core::events::NoopEventBus;
+use fleet_core::events::{BroadcastEventBus, EventBus, NoopEventBus};
 use fleet_core::mcp::{self, settings::ensure_master_token, McpGuards};
 use fleet_core::service::hub::{
     SETTING_ALLOWED_HOSTS, SETTING_ALLOW_PLAINTEXT, SETTING_BIND, SETTING_LOCAL_HOST,
@@ -18,9 +18,23 @@ use std::sync::{Arc, Mutex};
 /// Open (creating when missing) `<data-dir>/state.db`. The data dir is the
 /// only option resolved without the store: everything else reads its stored
 /// `hub.*` values.
+///
+/// [`open_store_with_bus`] with the silent bus — every one-shot subcommand
+/// (`init`, `token`, `ssh-key`, `healthcheck`, `pair`). Only `serve` has
+/// subscribers to fan events out to.
 pub(crate) fn open_store(
     opts: &HubOptions,
     env: &HashMap<String, String>,
+) -> Result<Store, String> {
+    open_store_with_bus(opts, env, Arc::new(NoopEventBus))
+}
+
+/// Open (creating when missing) `<data-dir>/state.db`, publishing row changes
+/// to `bus`.
+pub(crate) fn open_store_with_bus(
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+    bus: Arc<dyn EventBus>,
 ) -> Result<Store, String> {
     let data_dir = resolve_data_dir(opts, env);
     std::fs::create_dir_all(&data_dir)
@@ -44,7 +58,7 @@ pub(crate) fn open_store(
         }
     }
     let db_path = data_dir.join("state.db");
-    let store = Store::open_with_bus(&db_path, Arc::new(NoopEventBus)).map_err(|e| {
+    let store = Store::open_with_bus(&db_path, bus).map_err(|e| {
         format!(
             "failed to open the claude-fleet database at {}: {e}\n\
              If the file is corrupt, deleting it resets all hub state — hosts, projects and sessions are re-discovered.",
@@ -60,8 +74,9 @@ pub(crate) fn open_store(
 fn resolve_with_store(
     opts: &HubOptions,
     env: &HashMap<String, String>,
+    bus: Arc<dyn EventBus>,
 ) -> Result<(Resolved, Arc<Mutex<Store>>), String> {
-    let store = open_store(opts, env)?;
+    let store = open_store_with_bus(opts, env, bus)?;
     let resolved = {
         let settings = |k: &str| store.get_setting(k).ok().flatten();
         resolve(opts, env, &settings)?
@@ -122,7 +137,7 @@ pub fn init(
     env: &HashMap<String, String>,
     regenerate: bool,
 ) -> Result<ExitCode, String> {
-    let (r, store) = resolve_with_store(opts, env)?;
+    let (r, store) = resolve_with_store(opts, env, Arc::new(NoopEventBus))?;
     persist(&store, &r)?;
     let token = {
         let s = store
@@ -396,7 +411,11 @@ fn write_public_key(path: &std::path::Path, text: &[u8]) -> Result<(), String> {
 }
 
 pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<ExitCode, String> {
-    let (r, store) = resolve_with_store(opts, env)?;
+    // The one store in the process that publishes: `serve` is where a paired
+    // client can be listening on `GET /events`. Every other subcommand is a
+    // one-shot with no subscribers and keeps the silent bus.
+    let bus = Arc::new(BroadcastEventBus::default());
+    let (r, store) = resolve_with_store(opts, env, Arc::clone(&bus) as Arc<dyn EventBus>)?;
     match fleet_core::logging::init_in_with(&r.log_dir, true) {
         Ok(dir) => tracing::info!(log_dir = %dir.display(), "file logging on"),
         Err(e) => {
@@ -445,6 +464,11 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         r.port,
         token,
         r.allowed_hosts.clone(),
+        // One fresh subscription per `GET /events` connection.
+        Some({
+            let bus = Arc::clone(&bus);
+            Arc::new(move || bus.subscribe()) as fleet_core::mcp::EventSubscriber
+        }),
     )
     .await?;
     if let Err(e) = fleet_core::service::provision::reestablish_tunnels(&store, &tunnels, &base) {
@@ -467,7 +491,10 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         Arc::clone(&store),
         Arc::clone(&ssh),
         usage_cache,
-        Arc::new(NoopEventBus),
+        // The same bus the store publishes to: `account_usage:updated` is a
+        // tick-borne event, not a store write, and a client following
+        // `/events` wants it like any other.
+        Arc::clone(&bus) as Arc<dyn EventBus>,
     );
 
     wait_for_signal().await?;
@@ -614,7 +641,8 @@ mod tests {
             bind: Some("0.0.0.0".into()),
             ..HubOptions::default()
         };
-        let (r, _store) = resolve_with_store(&opts, &HashMap::new()).unwrap();
+        let (r, _store) =
+            resolve_with_store(&opts, &HashMap::new(), Arc::new(NoopEventBus)).unwrap();
         assert_eq!(r.public_url.as_deref(), Some("https://fleet.example.com"));
     }
 
@@ -659,13 +687,14 @@ mod tests {
             data_dir: Some(dir.path().to_path_buf()),
             ..HubOptions::default()
         };
-        let (back, _s) = resolve_with_store(&opts, &HashMap::new()).unwrap();
+        let (back, _s) =
+            resolve_with_store(&opts, &HashMap::new(), Arc::new(NoopEventBus)).unwrap();
         assert!(back.allow_plaintext);
         assert_eq!(back.bind.to_string(), "0.0.0.0");
         // And `FLEET_HUB_ALLOW_PLAINTEXT=0` turns it off again.
         let off: HashMap<String, String> =
             [("FLEET_HUB_ALLOW_PLAINTEXT".to_string(), "0".to_string())].into();
-        assert!(resolve_with_store(&opts, &off).is_err());
+        assert!(resolve_with_store(&opts, &off, Arc::new(NoopEventBus)).is_err());
     }
 
     #[test]

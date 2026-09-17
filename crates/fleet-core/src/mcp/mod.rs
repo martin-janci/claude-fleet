@@ -8,6 +8,7 @@
 mod auth;
 #[cfg(test)]
 mod doc_gen;
+pub mod events_route;
 pub mod guard;
 pub mod hooks;
 pub mod pairing;
@@ -28,6 +29,7 @@ pub use auth::normalize_allowed_hosts;
 pub use auth::Caller;
 #[cfg(test)]
 pub use auth::TokenMode;
+pub use events_route::{EventSubscriber, EventsState};
 pub use guard::{ConfirmNotify, PendingConfirms, RateLimiter};
 pub use pairing::{pair_url, PairingRequest, PendingPairings};
 pub use tools::FleetTools;
@@ -255,6 +257,7 @@ fn build_app(
     hook_state: hooks::HookState,
     auth_state: AuthState,
     pair_state: pairing::PairState,
+    events_state: EventsState,
 ) -> axum::Router {
     // The MCP streamable-HTTP service is mounted with `route_service` at the
     // exact `/mcp` path — NOT `nest_service("/", …)` under `nest("/mcp", …)`.
@@ -266,6 +269,15 @@ fn build_app(
         .route("/mcp", mcp_service)
         .route("/hook", axum::routing::post(hooks::handle_hook))
         .with_state(hook_state)
+        // `/events` carries its own state, so it is a second router merged in
+        // BEFORE the `authorize` layer — which is what puts the change stream
+        // behind the same bearer token as `/mcp`, unlike `/healthz` and
+        // `/pair` below. See `events_route`.
+        .merge(
+            axum::Router::new()
+                .route("/events", axum::routing::get(events_route::handle_events))
+                .with_state(events_state),
+        )
         .layer(axum::middleware::from_fn_with_state(auth_state, authorize));
     // `/healthz` and `/pair` are registered on a SEPARATE router merged after
     // the layered one: in axum 0.8 `.layer` wraps only the routes added
@@ -361,6 +373,9 @@ pub async fn start(
         port,
         token,
         allowed_hosts,
+        // The desktop streams row changes to its own frontend over Tauri
+        // events, not over HTTP: `/events` there answers 503.
+        None,
     )
     .await
     .map(|(shutdown, _serve)| shutdown)
@@ -381,6 +396,10 @@ pub async fn start_with_handle(
     port: u16,
     token: String,
     allowed_hosts: Vec<String>,
+    // Hands `GET /events` a fresh subscription per connection. `None` on a
+    // server whose store does not publish to a broadcast bus (the desktop),
+    // where `/events` answers 503.
+    events: Option<EventSubscriber>,
 ) -> Result<(CancellationToken, tokio::task::JoinHandle<()>), String> {
     let addr = SocketAddr::from((bind, port));
     let listener = tokio::net::TcpListener::bind(addr)
@@ -435,6 +454,9 @@ pub async fn start_with_handle(
             hook_state,
             auth_state,
             pair_state,
+            // The stream ends itself when the server stops, so an attached
+            // client never holds the graceful drain open.
+            EventsState::new(events).with_shutdown(serve_shutdown.child_token()),
         );
 
         tracing::info!("[mcp] control API listening on http://{addr}/mcp");
@@ -528,6 +550,7 @@ mod tests {
             hook_state,
             auth_state,
             pair_state,
+            EventsState::disabled(),
         );
 
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -873,6 +896,7 @@ mod tests {
                 Arc::new(RateLimiter::new()),
                 "https://fleet.example.com".to_string(),
             ),
+            EventsState::disabled(),
         );
         let listener2 = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -927,6 +951,7 @@ mod tests {
                 Arc::new(RateLimiter::new()),
                 "https://fleet.example.com".to_string(),
             ),
+            EventsState::disabled(),
         );
         let listener3 = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -1029,6 +1054,7 @@ mod tests {
             hook_state,
             auth_state,
             pair_state,
+            EventsState::disabled(),
         );
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -1151,6 +1177,303 @@ mod tests {
         assert!(r.contains("403"), "public Host, empty allowlist:\n{r}");
     }
 
+    /// The desktop embeds the same server but opens its store with the
+    /// frontend's own bus, so there is nothing to stream: `/events` must say
+    /// so in as many words rather than 404 (which reads as "wrong URL") or
+    /// hang on an empty stream.
+    #[tokio::test]
+    async fn events_is_unavailable_without_a_bus() {
+        let addr = serve_real_tools().await;
+        let r = raw_round_trip(addr, &get_events(Some("s3cret"), "")).await;
+        assert!(r.contains("503"), "expected 503 without a bus:\n{r}");
+        assert!(
+            r.contains(events_route::NOT_ENABLED),
+            "expected the documented reason:\n{r}"
+        );
+    }
+
+    /// `GET /events` with the master token and an optional raw query string.
+    fn get_events(auth: Option<&str>, query: &str) -> String {
+        let mut h = format!(
+            "GET /events{query} HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+             Accept: text/event-stream\r\n"
+        );
+        if let Some(a) = auth {
+            h.push_str(&format!("Authorization: Bearer {a}\r\n"));
+        }
+        h.push_str("\r\n");
+        h
+    }
+
+    /// The same app shape as [`serve_real_tools`], with an event source
+    /// wired to `bus` — what `fleet-hub serve` builds.
+    async fn serve_with_events(
+        bus: &Arc<crate::events::BroadcastEventBus>,
+    ) -> std::net::SocketAddr {
+        serve_with_events_every(bus, events_route::KEEPALIVE_INTERVAL).await
+    }
+
+    /// [`serve_with_events`] with a shortened heartbeat.
+    async fn serve_with_events_every(
+        bus: &Arc<crate::events::BroadcastEventBus>,
+        keepalive: std::time::Duration,
+    ) -> std::net::SocketAddr {
+        serve_events_app(bus, keepalive, CancellationToken::new()).await
+    }
+
+    /// [`serve_with_events`], also taking the server's shutdown token.
+    async fn serve_events_app(
+        bus: &Arc<crate::events::BroadcastEventBus>,
+        keepalive: std::time::Duration,
+        stop: CancellationToken,
+    ) -> std::net::SocketAddr {
+        use axum::routing::any;
+        use std::net::Ipv4Addr;
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let hook_state = hooks::HookState {
+            store: Arc::clone(&store),
+            ssh: Arc::new(SshClient::new()),
+        };
+        let auth_state = AuthState {
+            master: Arc::new("s3cret".to_string()),
+            store: Arc::clone(&store),
+            allowed_hosts: Arc::new(vec![]),
+        };
+        let pair_state = pairing::PairState::new(
+            Arc::clone(&store),
+            Arc::new(pairing::PendingPairings::new()),
+            Arc::new(RateLimiter::new()),
+            "https://fleet.example.com".to_string(),
+        );
+        let subscribe: EventSubscriber = {
+            let bus = Arc::clone(bus);
+            Arc::new(move || bus.subscribe())
+        };
+        let app = build_app(
+            any(|| async { "MCP_OK" }),
+            hook_state,
+            auth_state,
+            pair_state,
+            EventsState::enabled(subscribe)
+                .with_keepalive(keepalive)
+                .with_shutdown(stop),
+        );
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        addr
+    }
+
+    /// One open SSE connection, read incrementally: unlike `raw_round_trip`
+    /// the server never closes a stream, so the test reads until it has seen
+    /// what it is waiting for and then drops the socket.
+    struct SseConn {
+        sock: tokio::net::TcpStream,
+        seen: String,
+    }
+
+    impl SseConn {
+        async fn open(addr: std::net::SocketAddr, auth: Option<&str>, query: &str) -> Self {
+            use tokio::io::AsyncWriteExt;
+            let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+            sock.write_all(get_events(auth, query).as_bytes())
+                .await
+                .unwrap();
+            Self {
+                sock,
+                seen: String::new(),
+            }
+        }
+
+        /// Read until `needle` shows up, or fail after 2 s — a hang must fail
+        /// the test, not block the suite.
+        async fn wait_for(&mut self, needle: &str) -> &str {
+            use tokio::io::AsyncReadExt;
+            let deadline = std::time::Duration::from_secs(2);
+            let read = tokio::time::timeout(deadline, async {
+                let mut tmp = [0u8; 4096];
+                while !self.seen.contains(needle) {
+                    match self.sock.read(&mut tmp).await {
+                        Ok(0) => break,
+                        Ok(n) => self.seen.push_str(&String::from_utf8_lossy(&tmp[..n])),
+                        Err(_) => break,
+                    }
+                }
+            })
+            .await;
+            assert!(
+                read.is_ok() && self.seen.contains(needle),
+                "waited for {needle:?}; stream so far:\n{}",
+                self.seen
+            );
+            &self.seen
+        }
+    }
+
+    /// The stream itself: authenticated, `text/event-stream`, a `ready` frame
+    /// first, then one frame per change emitted AFTER the subscription — the
+    /// whole reason a phone can stop polling.
+    #[tokio::test]
+    async fn events_streams_changes_emitted_after_subscribing() {
+        use crate::events::{BroadcastEventBus, EventBus};
+        let bus = Arc::new(BroadcastEventBus::default());
+        let addr = serve_with_events(&bus).await;
+
+        let mut sse = SseConn::open(addr, Some("s3cret"), "").await;
+        let head = sse.wait_for("event: ready").await.to_string();
+        assert!(head.contains("200 OK"), "expected 200:\n{head}");
+        assert!(
+            head.to_ascii_lowercase().contains("text/event-stream"),
+            "expected an SSE content type:\n{head}"
+        );
+        // The ready frame carries the server version and its clock, so a
+        // reconnecting client can tell a restart from a hiccup.
+        assert!(
+            head.contains(crate::app_version::get()) && head.contains("\"now\""),
+            "the ready frame must carry version and now:\n{head}"
+        );
+
+        // Emitted only now, with the subscription already live.
+        bus.session_killed(42);
+        let frame = sse.wait_for("event: session:killed").await.to_string();
+        assert!(
+            frame.contains(r#"data: {"id":42}"#),
+            "the payload must be the frontend's:\n{frame}"
+        );
+
+        // `?kinds=host` drops a session change and passes a host one.
+        let mut filtered = SseConn::open(addr, Some("s3cret"), "?kinds=host").await;
+        filtered.wait_for("event: ready").await;
+        bus.session_killed(43);
+        bus.host_removed("box");
+        let seen = filtered.wait_for("event: host:removed").await.to_string();
+        assert!(
+            !seen.contains("session:killed"),
+            "?kinds=host must drop session events:\n{seen}"
+        );
+        assert!(
+            seen.contains(r#"data: {"alias":"box"}"#),
+            "the host payload:\n{seen}"
+        );
+
+        // A stream is not a public resource: no token, no stream.
+        let unauth = raw_round_trip(addr, &get_events(None, "")).await;
+        assert!(
+            unauth.contains("401"),
+            "expected 401 without a token:\n{unauth}"
+        );
+        // Nor does a token in the URL open one (it would land in proxy logs).
+        let via_query = raw_round_trip(addr, &get_events(None, "?token=s3cret")).await;
+        assert!(
+            via_query.contains("401"),
+            "a query token must not open a stream:\n{via_query}"
+        );
+    }
+
+    /// A subscriber that falls behind the ring is told how much it missed and
+    /// the stream ends — the bus never waits for it. The emits below run
+    /// without an await, so the server task cannot drain between them.
+    #[tokio::test]
+    async fn a_lagging_stream_is_told_and_closed() {
+        use crate::events::{BroadcastEventBus, EventBus};
+        let bus = Arc::new(BroadcastEventBus::new(2));
+        let addr = serve_with_events(&bus).await;
+        let mut sse = SseConn::open(addr, Some("s3cret"), "").await;
+        sse.wait_for("event: ready").await;
+
+        for i in 0..50 {
+            bus.emit(&crate::events::RowChange::SessionKilled(i));
+        }
+        let seen = sse.wait_for("event: lagged").await.to_string();
+        assert!(
+            seen.contains(r#""skipped":"#),
+            "the lagged frame must say how many were missed:\n{seen}"
+        );
+        // …and the stream ENDED rather than streaming on with a hole in it:
+        // the chunked body is terminated (the socket itself stays up — HTTP
+        // keep-alive — so EOF is not the signal to look for).
+        let ended = sse.wait_for("\r\n0\r\n\r\n").await.to_string();
+        assert!(
+            ended.rfind("event: lagged") < ended.rfind("\r\n0\r\n\r\n"),
+            "the lagged frame must be the last one:\n{ended}"
+        );
+    }
+
+    /// An idle stream sends a comment line on the keep-alive interval, which
+    /// is what holds the connection open through a phone's NAT, the reverse
+    /// tunnel and any proxy in between. Production waits
+    /// [`events_route::KEEPALIVE_INTERVAL`]; this asks for 50 ms and watches
+    /// it arrive.
+    #[tokio::test]
+    async fn an_idle_stream_sends_a_heartbeat() {
+        use crate::events::BroadcastEventBus;
+        let bus = Arc::new(BroadcastEventBus::default());
+        let addr = serve_with_events_every(&bus, std::time::Duration::from_millis(50)).await;
+        let mut sse = SseConn::open(addr, Some("s3cret"), "").await;
+        sse.wait_for("event: ready").await;
+        // Nothing is emitted: what arrives next can only be the heartbeat.
+        let seen = sse.wait_for(":\n\n").await.to_string();
+        assert!(
+            !seen.contains("event: session"),
+            "no change was emitted; only a heartbeat may follow:\n{seen}"
+        );
+    }
+
+    /// A stream is an in-flight request that never ends on its own, and
+    /// axum's graceful shutdown waits for in-flight requests: an attached
+    /// client must not hold a stopping hub open for its whole drain timeout.
+    #[tokio::test]
+    async fn a_stream_ends_when_the_server_stops() {
+        use crate::events::BroadcastEventBus;
+        let bus = Arc::new(BroadcastEventBus::default());
+        let stop = CancellationToken::new();
+        let addr =
+            serve_events_app(&bus, events_route::KEEPALIVE_INTERVAL, stop.child_token()).await;
+        let mut sse = SseConn::open(addr, Some("s3cret"), "").await;
+        sse.wait_for("event: ready").await;
+        stop.cancel();
+        // The chunked body is terminated, promptly — no drain timeout.
+        sse.wait_for("\r\n0\r\n\r\n").await;
+    }
+
+    /// Streams are capped per caller like the long-polling tools: the ninth
+    /// concurrent one from the same token is refused, and told when to retry.
+    #[tokio::test]
+    async fn the_ninth_concurrent_stream_from_one_caller_is_refused() {
+        use crate::events::BroadcastEventBus;
+        let bus = Arc::new(BroadcastEventBus::default());
+        let addr = serve_with_events(&bus).await;
+        let mut held = Vec::new();
+        for _ in 0..guard::MAX_LONG_POLLS_PER_CALLER {
+            let mut c = SseConn::open(addr, Some("s3cret"), "").await;
+            c.wait_for("event: ready").await;
+            held.push(c);
+        }
+        let refused = raw_round_trip(addr, &get_events(Some("s3cret"), "")).await;
+        assert!(
+            refused.contains("429"),
+            "expected 429 for the ninth stream:\n{refused}"
+        );
+        assert!(
+            refused.to_ascii_lowercase().contains("retry-after: 1"),
+            "a 429 must say when to come back:\n{refused}"
+        );
+        assert!(
+            refused.contains(events_route::TOO_MANY_STREAMS),
+            "expected the documented reason:\n{refused}"
+        );
+    }
+
     /// The transitional `/hook?token=<master>` form is a desktop/loopback
     /// affordance only: a server with a Host allowlist (a public hub) refuses
     /// it like any request without a bearer header.
@@ -1222,6 +1545,7 @@ mod tests {
             port,
             "tok".into(),
             vec![],
+            None,
         )
         .await
         .expect("bind 127.0.0.2");

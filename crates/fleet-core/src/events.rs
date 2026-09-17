@@ -234,6 +234,85 @@ impl EventBus for NoopEventBus {
     fn emit(&self, _: &RowChange) {}
 }
 
+/// One event as it travels to a remote subscriber: the name and payload a
+/// [`RowChange`] renders to, with the store row already serialized so nothing
+/// downstream needs the row types. Cheap to clone — `Value` is the only
+/// owned field, and a broadcast channel clones once per receiver.
+#[derive(Clone, Debug)]
+pub struct EventMessage {
+    pub name: &'static str,
+    pub payload: serde_json::Value,
+}
+
+impl EventMessage {
+    /// The part of the name before `:` — `session`, `host`, `account_usage`,
+    /// … — which is what the `/events` route's `?kinds=` filter matches on.
+    pub fn kind(&self) -> &str {
+        self.name
+            .split_once(':')
+            .map(|(k, _)| k)
+            .unwrap_or(self.name)
+    }
+}
+
+/// Fans every event out to any number of live subscribers over a
+/// `tokio::sync::broadcast` channel. `fleet-hub serve` opens its store with
+/// this bus and the `GET /events` SSE route subscribes per connection.
+///
+/// Like the desktop's `AppHandleEventBus` (which queues through an mpsc
+/// channel and a drain thread), [`emit`](BroadcastEventBus::emit) never
+/// blocks: `broadcast::Sender::send` writes into the ring buffer and returns
+/// immediately, whether there are no subscribers at all or a slow one that
+/// has fallen behind. A store write therefore never waits on delivery. The
+/// price of that promise is the ring: a subscriber that falls more than
+/// `capacity` events behind loses the oldest ones and is told so
+/// (`RecvError::Lagged`) rather than holding anyone up.
+pub struct BroadcastEventBus {
+    tx: tokio::sync::broadcast::Sender<EventMessage>,
+}
+
+/// Ring size for [`BroadcastEventBus`]. Reconcile holds its emits until the
+/// transaction commits and then flushes them in one burst (one pass every
+/// ~20 s on a hub), so the buffer has to absorb a whole pass over a busy
+/// fleet, not a steady trickle.
+pub const BROADCAST_CAPACITY: usize = 256;
+
+impl BroadcastEventBus {
+    pub fn new(capacity: usize) -> Self {
+        let (tx, _rx) = tokio::sync::broadcast::channel(capacity);
+        Self { tx }
+    }
+
+    /// A receiver that sees every event emitted *after* this call. Nothing is
+    /// replayed: a client that wants the current state lists it once and then
+    /// follows the stream.
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<EventMessage> {
+        self.tx.subscribe()
+    }
+
+    /// Live subscribers. Used by the route's logging, and by tests.
+    pub fn receiver_count(&self) -> usize {
+        self.tx.receiver_count()
+    }
+}
+
+impl Default for BroadcastEventBus {
+    fn default() -> Self {
+        Self::new(BROADCAST_CAPACITY)
+    }
+}
+
+impl EventBus for BroadcastEventBus {
+    fn emit(&self, e: &RowChange) {
+        // `Err` means "no receivers right now", which is the normal state of
+        // a hub nobody has connected a phone to. Not an error, not a log line.
+        let _ = self.tx.send(EventMessage {
+            name: e.name(),
+            payload: e.payload(),
+        });
+    }
+}
+
 /// Records every event in order. Used in unit tests to assert that a Store
 /// mutation produced the expected events.
 /// Crate-private: `events` is a `pub` module now, and exporting a test-only
@@ -395,6 +474,36 @@ mod tests {
             .payload(),
             serde_json::json!({ "host_alias": "box", "harness": "claude" })
         );
+    }
+
+    #[tokio::test]
+    async fn a_subscriber_receives_emitted_row_changes() {
+        let bus = BroadcastEventBus::new(16);
+        let mut rx = bus.subscribe();
+        bus.emit(&RowChange::SessionKilled(42));
+        let msg = rx.recv().await.expect("one message");
+        assert_eq!(msg.name, "session:killed");
+        assert_eq!(msg.payload["id"], 42);
+    }
+
+    #[tokio::test]
+    async fn emitting_without_subscribers_is_not_an_error() {
+        let bus = BroadcastEventBus::new(4);
+        bus.emit(&RowChange::SessionKilled(1)); // must not panic
+    }
+
+    #[tokio::test]
+    async fn a_lagging_subscriber_reports_lag_rather_than_stalling_the_bus() {
+        let bus = BroadcastEventBus::new(2);
+        let mut rx = bus.subscribe();
+        for i in 0..5 {
+            bus.emit(&RowChange::SessionKilled(i));
+        }
+        let err = rx.recv().await.unwrap_err();
+        assert!(matches!(
+            err,
+            tokio::sync::broadcast::error::RecvError::Lagged(_)
+        ));
     }
 
     #[test]
