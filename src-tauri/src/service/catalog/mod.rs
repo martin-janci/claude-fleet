@@ -343,6 +343,31 @@ fn check_layer_axis(cat: &repo::Catalog, name: &str, want: layer::Axis) -> Resul
     }
 }
 
+/// `host_layers`'s primary key is `(host_alias, layer_name)`, so two rows
+/// for the same host can never share a layer name — a duplicate context, or
+/// a context that repeats the role, both hit that constraint. Catching it
+/// here gives the caller a clear `E_INVALID` naming the offending layer
+/// instead of a raw SQLite constraint violation from `Store::set_host_layers`.
+fn check_no_name_collision(role: Option<&str>, contexts: &[&str]) -> Result<(), IpcError> {
+    let mut seen: Vec<&str> = Vec::new();
+    for c in contexts {
+        if Some(*c) == role {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("layer '{c}' is assigned as both the role and a context"),
+            ));
+        }
+        if seen.contains(c) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("layer '{c}' is assigned as a context more than once"),
+            ));
+        }
+        seen.push(c);
+    }
+    Ok(())
+}
+
 /// Replace a host's layer assignment wholesale: one optional role plus
 /// contexts in application order. Edits fleet state only; catalog files are
 /// never written. Returns the host's new assignment.
@@ -352,6 +377,7 @@ pub fn set_host_layers(
     contexts: &[&str],
     store: &Mutex<Store>,
 ) -> Result<Vec<crate::store::HostLayerRow>, IpcError> {
+    check_no_name_collision(role, contexts)?;
     with_catalog(|cat| {
         if let Some(r) = role {
             check_layer_axis(cat, r, layer::Axis::Role)?;
@@ -677,6 +703,46 @@ mod tests {
 
         // "core" is a role layer; naming it as a context must fail too.
         let err = set_host_layers("local", None, &["core"], &store).unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        assert!(err.message.contains("core"), "{}", err.message);
+
+        assert!(store
+            .lock()
+            .unwrap()
+            .get_host_layers("local")
+            .unwrap()
+            .is_empty());
+    }
+
+    /// A carry-forward from my own Task 8 review: `host_layers`'s primary
+    /// key is `(host_alias, layer_name)`, so a context repeated twice would
+    /// otherwise hit that constraint on the second insert and surface as a
+    /// raw SQLite error instead of a clear one.
+    #[test]
+    fn set_host_layers_rejects_a_duplicate_context_name() {
+        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let store = configured_store_with_layers("shl-dup-ctx");
+
+        let err = set_host_layers("local", None, &["extra", "extra"], &store).unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        assert!(err.message.contains("extra"), "{}", err.message);
+
+        assert!(store
+            .lock()
+            .unwrap()
+            .get_host_layers("local")
+            .unwrap()
+            .is_empty());
+    }
+
+    /// Same primary-key collision, the other way round: a context that
+    /// names the same layer as the role.
+    #[test]
+    fn set_host_layers_rejects_a_context_that_repeats_the_role() {
+        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let store = configured_store_with_layers("shl-role-ctx-clash");
+
+        let err = set_host_layers("local", Some("core"), &["core"], &store).unwrap_err();
         assert_eq!(err.code, codes::E_INVALID);
         assert!(err.message.contains("core"), "{}", err.message);
 
