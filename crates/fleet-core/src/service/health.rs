@@ -99,7 +99,7 @@ pub fn health_from_store(s: &Store) -> Health {
     let hosts = s.list_hosts().unwrap_or_default();
     let summary = summarize(&sessions, &hosts);
     Health {
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: crate::app_version::get().to_string(),
         db_ready: schema_version >= 1,
         schema_version,
         hosts_reachable: summary.hosts_reachable,
@@ -135,7 +135,7 @@ pub fn health_check(store: &Mutex<Store>) -> Health {
     match store.lock() {
         Ok(s) => health_from_store(&s),
         Err(_) => Health {
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: crate::app_version::get().to_string(),
             db_ready: false,
             schema_version: 0,
             hosts_reachable: 0,
@@ -425,7 +425,7 @@ mod tests {
         let store = Mutex::new(Store::open_in_memory().expect("in-memory store"));
         let s = store.lock().unwrap();
         let h = health_from_store(&s);
-        assert_eq!(h.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(h.version, crate::app_version::get());
         assert!(h.db_ready);
         assert_eq!(h.schema_version, 31);
         // Empty store → empty roll-up.

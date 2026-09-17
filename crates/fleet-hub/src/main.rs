@@ -49,6 +49,7 @@ enum TokenCmd {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    fleet_core::app_version::set(env!("CARGO_PKG_VERSION"));
     let cli = Cli::parse();
     let env: std::collections::HashMap<String, String> = std::env::vars().collect();
     let result = match cli.cmd {

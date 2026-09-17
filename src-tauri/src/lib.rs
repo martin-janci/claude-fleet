@@ -19,6 +19,9 @@ use std::sync::Mutex;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before anything reports a version: fleet-core's own crate version is not
+    // the app's.
+    fleet_core::app_version::set(env!("CARGO_PKG_VERSION"));
     // File logging first, so the instance reaper and env recovery below are
     // captured too. A failure is non-fatal: the app runs without a log file.
     let data_dir = appdata_dir();

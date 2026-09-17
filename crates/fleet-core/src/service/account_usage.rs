@@ -167,7 +167,7 @@ exit 0
 
 /// The honest User-Agent: `claude-fleet/<version>`. Never Claude Code's.
 pub fn user_agent() -> String {
-    format!("claude-fleet/{}", env!("CARGO_PKG_VERSION"))
+    format!("claude-fleet/{}", crate::app_version::get())
 }
 
 /// Build the usage script for `bash -lc` on a host.

@@ -124,7 +124,7 @@ pub fn collect(
     let _ = writeln!(t);
 
     let _ = writeln!(t, "== App ==");
-    let _ = writeln!(t, "version: {}", env!("CARGO_PKG_VERSION"));
+    let _ = writeln!(t, "version: {}", crate::app_version::get());
     let _ = writeln!(
         t,
         "os: {} {} ({})",
@@ -308,7 +308,7 @@ mod tests {
         // The non-secret facts are all there.
         assert!(b
             .text
-            .contains(&format!("version: {}", env!("CARGO_PKG_VERSION"))));
+            .contains(&format!("version: {}", crate::app_version::get())));
         assert!(b.text.contains("schema_version: "));
         assert!(b.text.contains("master_token: set"));
         assert!(b.text.contains("enabled: true"));
