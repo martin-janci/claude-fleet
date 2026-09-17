@@ -696,9 +696,23 @@ fn layer_rel_path(name: &str) -> String {
 
 /// Write a layer (create or update, whichever the file's current presence
 /// implies), commit and reload, exactly as `create`/`update` do for assets.
+///
+/// Lints first and writes nothing when the layer is invalid (`E_LINT`),
+/// mirroring `update()`'s shape for assets: a layer with a key in both
+/// `members` and `exclude`, or a malformed `<kind>/<name>` key, would
+/// otherwise be committed to disk and then silently dropped by
+/// `LayerSet::from_layers` on the very reload this function triggers.
 pub fn write_layer(layer: &Layer, store: &Mutex<Store>) -> Result<String, IpcError> {
     let root = repo_root(store)?;
     check_name(&layer.name)?;
+    if let Err(e) = layer.validate() {
+        let details = serde_json::to_value(&e)
+            .map_err(|e| IpcError::new(E_SERIALIZE, format!("lint report: {e}")))?;
+        return Err(
+            IpcError::new(E_LINT, "the layer has lint errors and was not saved")
+                .with_details(details),
+        );
+    }
     let rel = layer_rel_path(&layer.name);
     let path = root.join(&rel);
     let verb = if path.exists() { "update" } else { "create" };
@@ -1882,6 +1896,44 @@ mod tests {
         bad.name = "Bad Name".into();
         assert_eq!(write_layer(&bad, &store).unwrap_err().code, E_INVALID);
         assert!(!root.join("layers/Bad Name.yaml").exists());
+    }
+
+    /// A layer that would be silently dropped by `LayerSet::from_layers` on
+    /// reload (Fix 1) must be refused before anything touches the working
+    /// tree or the repo history.
+    #[test]
+    fn write_layer_refuses_a_key_in_both_members_and_exclude() {
+        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = init_repo("layer-write-clash");
+        let store = configured_store(&root);
+        let before = subjects(&root);
+
+        let mut l = layer_template("clashing", Axis::Role);
+        l.members = vec!["skill/x".to_string()];
+        l.exclude = vec!["skill/x".to_string()];
+
+        let err = write_layer(&l, &store).unwrap_err();
+        assert_eq!(err.code, E_LINT);
+        assert!(!root.join("layers/clashing.yaml").exists());
+        assert_eq!(subjects(&root), before);
+        assert!(catalog_layer("clashing").is_none());
+    }
+
+    #[test]
+    fn write_layer_refuses_a_malformed_key() {
+        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = init_repo("layer-write-malformed");
+        let store = configured_store(&root);
+        let before = subjects(&root);
+
+        let mut l = layer_template("malformed", Axis::Role);
+        l.members = vec!["nope/x".to_string()];
+
+        let err = write_layer(&l, &store).unwrap_err();
+        assert_eq!(err.code, E_LINT);
+        assert!(!root.join("layers/malformed.yaml").exists());
+        assert_eq!(subjects(&root), before);
+        assert!(catalog_layer("malformed").is_none());
     }
 
     #[test]
