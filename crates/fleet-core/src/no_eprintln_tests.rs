@@ -31,7 +31,6 @@
 //!   line (`foo(); // eprintln!(…)`): only whole `//` lines are skipped.
 
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 /// The print family, built so this file never contains the names literally.
@@ -175,12 +174,21 @@ fn production_code_does_not_use_eprintln() {
         ("src-tauri/src", manifest.join("../../src-tauri/src")),
         ("crates/fleet-hub/src", manifest.join("../fleet-hub/src")),
     ];
+    // The ONE allowlisted file, by exact path: `crates/fleet-hub/src/out.rs`.
+    // Matching any `out.rs` at any depth would silently exempt a future
+    // `serve/out.rs` or `commands/out.rs` from the guard.
+    let hub_out = manifest.join("../fleet-hub/src").join("out.rs");
+    assert!(
+        hub_out.is_file(),
+        "the allowlisted path moved; the skip below would match nothing: {}",
+        hub_out.display()
+    );
     let mut files = Vec::new();
     for (_, root) in &roots {
         let mut found = Vec::new();
         rs_files(root, &mut found);
         for path in found {
-            if root.ends_with("fleet-hub/src") && path.file_name() == Some(OsStr::new("out.rs")) {
+            if path == hub_out {
                 continue;
             }
             files.push(path);

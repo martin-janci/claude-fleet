@@ -1590,6 +1590,15 @@ mod tests {
             .iter()
             .filter_map(Call::stdin_str)
             .any(|u| u.contains(&rotated)));
+        // The positive half of the public-base test: a LOOPBACK hub has no
+        // address the host can reach, so provisioning must leave a reverse
+        // tunnel running for it.
+        assert_eq!(
+            tunnels.snapshot().get("h"),
+            Some(&true),
+            "a loopback hub tunnels the host it provisioned: {:?}",
+            tunnels.snapshot()
+        );
         tunnels.stop_all();
     }
 
@@ -1614,14 +1623,26 @@ mod tests {
         ));
         let public = HubBase::public("https://fleet.example.com", 4180).unwrap();
         reestablish_tunnels(&store, &tunnels, &public).unwrap();
+        // The supervisor spawns from a task, so let it run before counting.
+        tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(tunnels.snapshot().is_empty(), "no tunnel for a public hub");
+        assert!(
+            spawned.lock().unwrap().is_empty(),
+            "a public hub must spawn no ssh at all: {:?}",
+            spawned.lock().unwrap()
+        );
         reestablish_tunnels(&store, &tunnels, &HubBase::loopback(4180)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(
             tunnels.snapshot().get("mefistos"),
             Some(&true),
             "loopback hub tunnels provisioned hosts"
         );
         assert_eq!(tunnels.snapshot().len(), 1);
+        // And exactly one ssh was spawned, for that host.
+        let argv = spawned.lock().unwrap().clone();
+        assert_eq!(argv.len(), 1, "{argv:?}");
+        assert!(argv[0].contains("mefistos"), "{argv:?}");
         tunnels.stop_all();
     }
 

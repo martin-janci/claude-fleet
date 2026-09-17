@@ -243,15 +243,16 @@ fn build_app(
         .merge(authorized)
 }
 
-/// The rmcp streamable-HTTP service in **stateless** mode: every POST is a
-/// self-contained JSON-RPC exchange served by a fresh `FleetTools` clone, no
-/// `Mcp-Session-Id` is issued or required, and `GET`/`DELETE` are refused
-/// (405). The server never sends server-initiated messages (tools only), so a
-/// session bought nothing and cost a reconnect after every app restart, port
-/// or token change, or tunnel bounce. Responses keep SSE framing
-/// (`json_response` default `false`) so the 15 s keep-alive still flows on
-/// long polls (`wait_for_session`, `run_prompt`) through the reverse tunnel.
 /// The stateless rmcp service behind `/mcp`.
+///
+/// Stateless means every POST is a self-contained JSON-RPC exchange served by
+/// a fresh `FleetTools` clone: no `Mcp-Session-Id` is issued or required, and
+/// `GET`/`DELETE` are refused (405). The server never sends server-initiated
+/// messages (tools only), so a session bought nothing and cost a reconnect
+/// after every app restart, port or token change, or tunnel bounce. Responses
+/// keep SSE framing (`json_response` default `false`) so the 15 s keep-alive
+/// still flows on long polls (`wait_for_session`, `run_prompt`) through the
+/// reverse tunnel.
 ///
 /// rmcp keeps its own DNS-rebinding Host check, separate from fleet's
 /// `authorize` layer, and by default it admits only loopback Hosts. A Host
@@ -283,9 +284,9 @@ pub(crate) fn streamable_service(
 /// Bind the listener and spawn the serve loop. Returns the server's
 /// cancellation token on success; an `Err` carries a human-readable bind
 /// failure (e.g. port in use).
-// The desktop always passes loopback + an empty allowlist; only the hub
-// daemon (a later task) binds a routable address and a non-empty allowlist,
-// and only behind TLS or an explicit `--allow-plaintext`.
+// The desktop always passes loopback + an empty allowlist; only the `fleet-hub`
+// daemon binds a routable address and a non-empty allowlist, and only behind
+// TLS or an explicit `--allow-plaintext` (see `crates/fleet-hub`, `docs/hub.md`).
 #[allow(clippy::too_many_arguments)]
 pub async fn start(
     store: Arc<Mutex<Store>>,

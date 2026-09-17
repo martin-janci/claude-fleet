@@ -25,7 +25,20 @@ fn open_store(opts: &HubOptions, env: &HashMap<String, String>) -> Result<Store,
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700));
+        // Not fatal — the hub still runs on a dir it cannot chmod (a mounted
+        // volume, a dir owned by someone else) — but never silent: the data
+        // dir holds state.db and the master token. Printed through `out.rs`
+        // rather than logged, because every subcommand opens the store and
+        // only `serve` has logging up by this point; on `serve` the same line
+        // reaches the journal as the process's stderr.
+        if let Err(e) = std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700))
+        {
+            out::error(&format!(
+                "could not restrict the data dir {} to 0700: {e}. \
+                 It holds state.db and the master token — check its permissions.",
+                data_dir.display()
+            ));
+        }
     }
     let db_path = data_dir.join("state.db");
     let store = Store::open_with_bus(&db_path, Arc::new(NoopEventBus)).map_err(|e| {

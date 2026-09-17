@@ -127,11 +127,20 @@ impl HubBase {
 
 /// `hub.local_host`: whether this hub's own machine is a fleet host.
 /// Unset -> true (the desktop); the daemon sets it false by default.
+///
+/// `false`, `0`, `no` and `off` all read as off, case- and
+/// whitespace-insensitively; anything else — including a value nobody meant as
+/// a boolean — keeps the default of on, so a typo never silently detaches a
+/// desktop from its own machine. `fleet-hub` itself persists only the
+/// canonical `"true"` / `"false"`; this is for a hand-edited or older state.db.
 pub fn read_local_host(s: &Store) -> bool {
-    !matches!(
-        s.get_setting(SETTING_LOCAL_HOST).ok().flatten().as_deref(),
-        Some("false")
-    )
+    match s.get_setting(SETTING_LOCAL_HOST).ok().flatten() {
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "false" | "0" | "no" | "off"
+        ),
+        None => true,
+    }
 }
 
 /// Set once `hub.local_host` is off: every explicit `local` target is refused.
@@ -257,6 +266,25 @@ mod tests {
         assert!(!read_local_host(&s));
         s.set_setting(SETTING_LOCAL_HOST, "true").unwrap();
         assert!(read_local_host(&s));
+    }
+
+    /// `fleet-hub` persists canonical `"true"` / `"false"`, but a hand-edited
+    /// state.db or an older writer can hold any of the usual spellings. Only
+    /// an unambiguous "off" turns the local host off; everything else keeps
+    /// the safe default of on.
+    #[test]
+    fn local_host_reads_every_falsey_spelling() {
+        let s = Store::open_in_memory().unwrap();
+        for off in [
+            "false", "FALSE", "False", "0", "no", "NO", "off", "Off", " false ",
+        ] {
+            s.set_setting(SETTING_LOCAL_HOST, off).unwrap();
+            assert!(!read_local_host(&s), "{off:?} must read as off");
+        }
+        for on in ["true", "TRUE", "1", "yes", "on", "", "banana"] {
+            s.set_setting(SETTING_LOCAL_HOST, on).unwrap();
+            assert!(read_local_host(&s), "{on:?} must read as on");
+        }
     }
 
     #[test]

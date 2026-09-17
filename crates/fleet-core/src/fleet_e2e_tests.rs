@@ -344,7 +344,7 @@ async fn reconcile_recovers_a_host_once_it_answers_again() {
 /// `TMUX_PANE` are cleared so running the test from inside a tmux session
 /// cannot make it target that outer server.
 #[tokio::test]
-#[ignore = "needs tmux on PATH; run: cargo test -- --ignored tmux_roundtrip --nocapture"]
+#[ignore = "needs tmux on PATH; run: cargo test -p fleet-core -- --ignored tmux_roundtrip --nocapture"]
 async fn tmux_roundtrip() {
     use crate::ssh::LocalExec;
 

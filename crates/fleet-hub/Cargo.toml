@@ -12,7 +12,10 @@ path = "src/main.rs"
 
 [dependencies]
 fleet-core = { path = "../fleet-core" }
-clap = { version = "4", features = ["derive", "env"] }
+# No `env` feature: every FLEET_HUB_* value is resolved by hand in
+# `config::resolve` (flag > env > stored setting > default), which clap's own
+# env support cannot express. The env names appear in `--help` as literal text.
+clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 directories = "5"

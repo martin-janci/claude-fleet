@@ -57,15 +57,16 @@ mod tests {
         let out = std::thread::spawn(|| {
             let jh = spawn(async { "ran" });
             // Block on the join from outside any runtime.
-            futures_lite_block_on(jh)
+            block_on_outside_any_runtime(jh)
         })
         .join()
         .unwrap();
         assert_eq!(out, "ran");
     }
 
-    /// Minimal block_on so the test needs no extra crate.
-    fn futures_lite_block_on<T>(jh: JoinHandle<T>) -> T {
+    /// Minimal block_on so the test needs no extra crate: it builds a
+    /// current-thread runtime just to join the handle.
+    fn block_on_outside_any_runtime<T>(jh: JoinHandle<T>) -> T {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();

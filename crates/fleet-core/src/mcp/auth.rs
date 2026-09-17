@@ -191,6 +191,11 @@ fn origin_allowed(origin: &str, allowed: &[String]) -> bool {
 /// present; a non-browser MCP client legitimately omits `Origin`. Loopback is
 /// always accepted; a hub exposed at a public URL adds that URL's host to
 /// `allowed`. `Err(403)` on anything else.
+///
+/// `allowed` must ALREADY be normalized through [`normalize_allowed_hosts`],
+/// as `mcp::start` does once before handing it to the `AuthState`: the
+/// comparison here is exact, so an un-normalized entry (a scheme, a trailing
+/// slash, mixed case) simply never matches.
 pub fn check_origin(headers: &HeaderMap, allowed: &[String]) -> Result<(), StatusCode> {
     if let Some(origin) = headers.get(header::ORIGIN) {
         if !origin
@@ -215,7 +220,8 @@ pub fn check_origin(headers: &HeaderMap, allowed: &[String]) -> Result<(), Statu
 
 /// Authorize an incoming request and identify its caller. `Err` carries the
 /// status to return: `403` for a cross-origin / DNS-rebinding attempt, `401`
-/// for a missing or unknown bearer token.
+/// for a missing or unknown bearer token. `allowed` must already be normalized
+/// ([`normalize_allowed_hosts`]) — see [`check_origin`].
 pub fn check_request(
     headers: &HeaderMap,
     master_token: &str,

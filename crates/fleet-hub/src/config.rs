@@ -85,16 +85,32 @@ pub fn default_data_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/var/lib/fleet-hub"))
 }
 
+/// Flag > env > setting, with empties dropped — but an EXPLICITLY empty flag
+/// (`--bind ""`) is an error naming `option`, not a silent fall-through to the
+/// env or the stored value. An empty env value or setting still counts as
+/// unset: `persist` writes `""` for "none given".
 fn pick(
+    option: &str,
     flag: Option<String>,
     env: &HashMap<String, String>,
     env_key: &str,
     setting: Option<String>,
-) -> Option<String> {
-    flag.or_else(|| env.get(env_key).cloned())
+) -> Result<Option<String>, String> {
+    if let Some(f) = flag {
+        if f.trim().is_empty() {
+            return Err(format!(
+                "{option} was given an empty value; omit it to fall back to {env_key} \
+                 or the stored setting"
+            ));
+        }
+        return Ok(Some(f.trim().to_string()));
+    }
+    Ok(env
+        .get(env_key)
+        .cloned()
         .or(setting)
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty()))
 }
 
 /// The data dir alone (flag > env > default): it locates the store the other
@@ -115,32 +131,35 @@ pub fn resolve(
     let data_dir = resolve_data_dir(opts, env);
 
     let bind_s = pick(
+        "--bind",
         opts.bind.clone(),
         env,
         "FLEET_HUB_BIND",
         settings(SETTING_BIND),
-    )
+    )?
     .unwrap_or_else(|| DEFAULT_BIND.to_string());
     let bind: IpAddr = bind_s
         .parse()
         .map_err(|e| format!("bind '{bind_s}' is not an IP address: {e}"))?;
 
     let port = match pick(
+        "--port",
         opts.port.map(|p| p.to_string()),
         env,
         "FLEET_HUB_PORT",
         settings(fleet_core::mcp::SETTING_PORT),
-    ) {
+    )? {
         Some(p) => p.parse::<u16>().map_err(|e| format!("port '{p}': {e}"))?,
         None => fleet_core::mcp::DEFAULT_PORT,
     };
 
     let public_url = pick(
+        "--public-url",
         opts.public_url.clone(),
         env,
         "FLEET_HUB_PUBLIC_URL",
         settings(SETTING_PUBLIC_URL),
-    );
+    )?;
     let base = match &public_url {
         Some(u) => HubBase::public(u, port).map_err(|e| format!("public URL: {}", e.message))?,
         None => HubBase::loopback(port),
@@ -169,11 +188,12 @@ pub fn resolve(
     let allowed_hosts = dedup(fleet_core::mcp::normalize_allowed_hosts(&effective_raw));
 
     let local_host = match pick(
+        "--local-host",
         opts.local_host.map(|b| b.to_string()),
         env,
         "FLEET_HUB_LOCAL_HOST",
         settings(SETTING_LOCAL_HOST),
-    ) {
+    )? {
         None => false,
         Some(v) if v == "true" => true,
         Some(v) if v == "false" => false,
@@ -258,6 +278,31 @@ mod tests {
             allow_plaintext: false,
             log_dir: None,
         }
+    }
+
+    #[test]
+    fn an_explicitly_empty_flag_value_is_an_error_naming_the_option() {
+        // `--bind ""` used to be indistinguishable from "not given", so it
+        // silently fell through to the env or the stored setting — the
+        // opposite of what someone clearing a value expects.
+        let mut o = opts();
+        o.bind = Some(String::new());
+        let err = resolve(&o, &env(&[("FLEET_HUB_BIND", "10.0.0.9")]), &|_| None).unwrap_err();
+        assert!(err.contains("--bind"), "{err}");
+
+        let mut o = opts();
+        o.public_url = Some("   ".into());
+        let err = resolve(&o, &env(&[]), &|_| None).unwrap_err();
+        assert!(err.contains("--public-url"), "{err}");
+
+        // An empty ENV value or an empty stored setting still means "unset":
+        // `persist` writes "" for "none given".
+        let r = resolve(&opts(), &env(&[("FLEET_HUB_BIND", "")]), &|_| {
+            Some(String::new())
+        })
+        .unwrap();
+        assert_eq!(r.bind.to_string(), DEFAULT_BIND);
+        assert_eq!(r.public_url, None);
     }
 
     #[test]
