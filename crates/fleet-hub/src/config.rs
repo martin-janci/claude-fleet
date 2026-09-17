@@ -10,33 +10,35 @@ use std::path::PathBuf;
 
 pub const DEFAULT_BIND: &str = "127.0.0.1";
 
-/// Options shared by `init` and `serve`. Env names are spelled out so
+/// Options shared by `init`, `serve` and `token`. Env names are spelled out so
 /// `--help` shows them; the precedence itself is applied in [`resolve`].
+/// Every arg is `global` so `token show --data-dir D` parses as well as
+/// `token --data-dir D show`.
 #[derive(Args, Debug, Clone, Default)]
 pub struct HubOptions {
     /// Data directory holding state.db and logs/ [env: FLEET_HUB_DATA_DIR]
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub data_dir: Option<PathBuf>,
     /// Listen address [env: FLEET_HUB_BIND] [default: 127.0.0.1]
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub bind: Option<String>,
     /// Listen port [env: FLEET_HUB_PORT] [default: 4180]
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub port: Option<u16>,
     /// Public base URL hosts and clients reach this hub at, e.g. https://fleet.example.com [env: FLEET_HUB_PUBLIC_URL]
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub public_url: Option<String>,
     /// Extra Host/Origin values to accept (repeatable) [env: FLEET_HUB_ALLOWED_HOSTS, comma-separated]
-    #[arg(long = "allowed-host")]
+    #[arg(long = "allowed-host", global = true)]
     pub allowed_host: Vec<String>,
     /// Treat this machine as a fleet host too [env: FLEET_HUB_LOCAL_HOST] [default: false]
-    #[arg(long, action = clap::ArgAction::Set)]
+    #[arg(long, action = clap::ArgAction::Set, global = true)]
     pub local_host: Option<bool>,
     /// Permit a non-loopback bind with an http:// public URL (container-internal use only) [env: FLEET_HUB_ALLOW_PLAINTEXT]
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub allow_plaintext: bool,
     /// Log directory [env: FLEET_HUB_LOG_DIR] [default: <data-dir>/logs]
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub log_dir: Option<PathBuf>,
 }
 
@@ -46,7 +48,13 @@ pub struct Resolved {
     pub bind: IpAddr,
     pub port: u16,
     pub public_url: Option<String>,
+    /// The effective Host/Origin allowlist handed to the server: the explicit
+    /// list plus the public URL's host, normalized and de-duplicated.
     pub allowed_hosts: Vec<String>,
+    /// Only the explicitly configured hosts (flag > env > setting), which is
+    /// what `hub.allowed_hosts` stores, so a saved list never pins an old
+    /// public host.
+    pub allowed_hosts_explicit: Vec<String>,
     pub local_host: bool,
     pub log_dir: PathBuf,
 }
@@ -124,10 +132,10 @@ pub fn resolve(
         None => HubBase::loopback(port),
     };
 
-    // An empty env value or setting counts as unset (persist writes "" for
-    // "no extra hosts").
+    // Explicit list: flag > env > setting; an empty env value or setting
+    // counts as unset (persist writes "" for "none given").
     let from_setting = settings(SETTING_ALLOWED_HOSTS);
-    let allowed_raw: Vec<String> = if !opts.allowed_host.is_empty() {
+    let explicit_raw: Vec<String> = if !opts.allowed_host.is_empty() {
         opts.allowed_host.clone()
     } else if let Some(v) = env
         .get("FLEET_HUB_ALLOWED_HOSTS")
@@ -135,12 +143,16 @@ pub fn resolve(
         .or(from_setting.as_ref().filter(|v| !v.trim().is_empty()))
     {
         v.split(',').map(str::to_string).collect()
-    } else if base.public {
-        vec![base.host()]
     } else {
         vec![]
     };
-    let allowed_hosts = fleet_core::mcp::normalize_allowed_hosts(&allowed_raw);
+    let allowed_hosts_explicit = dedup(fleet_core::mcp::normalize_allowed_hosts(&explicit_raw));
+    // Effective list: the explicit hosts plus the public URL's own host.
+    let mut effective_raw = allowed_hosts_explicit.clone();
+    if base.public {
+        effective_raw.push(base.host());
+    }
+    let allowed_hosts = dedup(fleet_core::mcp::normalize_allowed_hosts(&effective_raw));
 
     let local_host = match pick(
         opts.local_host.map(|b| b.to_string()),
@@ -178,9 +190,18 @@ pub fn resolve(
         port,
         public_url: public_url.map(|_| base.url.clone()),
         allowed_hosts,
+        allowed_hosts_explicit,
         local_host,
         log_dir,
     })
+}
+
+/// Drop repeats, keeping the first occurrence's position.
+fn dedup(list: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    list.into_iter()
+        .filter(|h| seen.insert(h.clone()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -216,6 +237,7 @@ mod tests {
         assert_eq!(r.public_url, None);
         assert!(!r.local_host);
         assert_eq!(r.allowed_hosts, Vec::<String>::new());
+        assert_eq!(r.allowed_hosts_explicit, Vec::<String>::new());
         assert_eq!(r.log_dir, r.data_dir.join("logs"));
     }
 
@@ -252,8 +274,59 @@ mod tests {
             r.allowed_hosts,
             vec![
                 "a.example.com".to_string(),
-                "b.example.com:8443".to_string()
+                "b.example.com:8443".to_string(),
+                "fleet.example.com".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn explicit_env_hosts_are_joined_by_the_public_host() {
+        let mut o = opts();
+        o.public_url = Some("https://fleet.example.com".into());
+        let e = env(&[(
+            "FLEET_HUB_ALLOWED_HOSTS",
+            "a.example.com, fleet.example.com",
+        )]);
+        let r = resolve(&o, &e, &|_| None).unwrap();
+        assert_eq!(
+            r.allowed_hosts,
+            vec!["a.example.com".to_string(), "fleet.example.com".to_string()],
+            "both, de-duplicated"
+        );
+        assert_eq!(
+            r.allowed_hosts_explicit,
+            vec!["a.example.com".to_string(), "fleet.example.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn without_an_explicit_list_only_the_public_host_is_effective_and_nothing_is_persisted() {
+        let mut o = opts();
+        o.public_url = Some("https://fleet.example.com".into());
+        let r = resolve(&o, &env(&[]), &|k| {
+            (k == "hub.allowed_hosts").then(String::new)
+        })
+        .unwrap();
+        assert_eq!(r.allowed_hosts_explicit, Vec::<String>::new());
+        assert_eq!(r.allowed_hosts, vec!["fleet.example.com".to_string()]);
+    }
+
+    #[test]
+    fn a_saved_allowlist_does_not_shadow_a_new_public_url() {
+        let settings = |k: &str| (k == "hub.allowed_hosts").then(|| "old.example.com".to_string());
+        let mut o = opts();
+        o.public_url = Some("https://new.example.com".into());
+        let r = resolve(&o, &env(&[]), &settings).unwrap();
+        assert!(
+            r.allowed_hosts.contains(&"old.example.com".to_string()),
+            "{:?}",
+            r.allowed_hosts
+        );
+        assert!(
+            r.allowed_hosts.contains(&"new.example.com".to_string()),
+            "{:?}",
+            r.allowed_hosts
         );
     }
 

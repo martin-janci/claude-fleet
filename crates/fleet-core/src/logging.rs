@@ -323,6 +323,13 @@ pub fn init(data_dir: &Path) -> Result<PathBuf, String> {
 
 /// [`init`] with an explicit log directory (the `fleet-hub --log-dir` case).
 pub fn init_in(log_dir: &Path) -> Result<PathBuf, String> {
+    init_in_with(log_dir, false)
+}
+
+/// [`init_in`], plus `force_stderr`: always add the (redacting) stderr layer,
+/// whatever the build profile and [`STDERR_ENV`]. `fleet-hub serve` passes
+/// `true` so docker / journald see its log; the desktop never does.
+pub fn init_in_with(log_dir: &Path, force_stderr: bool) -> Result<PathBuf, String> {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
@@ -333,8 +340,11 @@ pub fn init_in(log_dir: &Path) -> Result<PathBuf, String> {
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(RedactingMakeWriter(appender))
         .with_target(true);
-    let want_stderr = cfg!(debug_assertions)
-        || std::env::var(STDERR_ENV).is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    let want_stderr = want_stderr_layer(
+        force_stderr,
+        cfg!(debug_assertions),
+        std::env::var(STDERR_ENV).ok().as_deref(),
+    );
     let stderr_layer = want_stderr.then(|| {
         tracing_subscriber::fmt::layer()
             .with_writer(RedactingMakeWriter(std::io::stderr))
@@ -353,6 +363,12 @@ pub fn init_in(log_dir: &Path) -> Result<PathBuf, String> {
         tracing::warn!("RUST_LOG is set but invalid; using the default filter {DEFAULT_FILTER:?}");
     }
     Ok(dir)
+}
+
+/// Whether [`init_in_with`] adds the stderr layer: forced by the caller,
+/// always in a debug build, else when [`STDERR_ENV`] is `1` / `true`.
+fn want_stderr_layer(force: bool, debug_build: bool, env_value: Option<&str>) -> bool {
+    force || debug_build || env_value.is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 /// Fallback when [`init`] failed: a stderr-only subscriber with the same
@@ -377,6 +393,19 @@ pub fn init_stderr_fallback() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stderr_layer_is_forced_or_debug_or_env_opt_in() {
+        // The desktop path (`force = false`) keeps its old rule.
+        assert!(!want_stderr_layer(false, false, None));
+        assert!(!want_stderr_layer(false, false, Some("0")));
+        assert!(want_stderr_layer(false, false, Some("1")));
+        assert!(want_stderr_layer(false, false, Some("TRUE")));
+        assert!(want_stderr_layer(false, true, None));
+        // `fleet-hub serve` forces it in a release build with no env.
+        assert!(want_stderr_layer(true, false, None));
+        assert!(want_stderr_layer(true, false, Some("0")));
+    }
 
     const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 

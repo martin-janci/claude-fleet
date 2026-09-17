@@ -87,6 +87,16 @@ mod tests {
         .unwrap();
         Cli::try_parse_from(["fleet-hub", "token", "show"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "token", "regenerate"]).unwrap();
+        for argv in [
+            ["fleet-hub", "token", "show", "--data-dir", "/tmp/x"],
+            ["fleet-hub", "token", "--data-dir", "/tmp/x", "show"],
+        ] {
+            let Cmd::Token { cmd, opts } = Cli::try_parse_from(argv).unwrap().cmd else {
+                panic!("{argv:?} did not parse as token");
+            };
+            assert!(matches!(cmd, TokenCmd::Show), "{argv:?}");
+            assert_eq!(opts.data_dir, Some("/tmp/x".into()), "{argv:?}");
+        }
         Cli::try_parse_from(["fleet-hub", "ssh-key"]).unwrap();
         assert!(Cli::try_parse_from(["fleet-hub", "bogus"]).is_err());
     }

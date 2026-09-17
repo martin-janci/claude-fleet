@@ -57,7 +57,7 @@ fn persist(store: &Mutex<Store>, r: &Resolved) -> Result<(), String> {
     set(mcp::SETTING_PORT, &r.port.to_string())?;
     set(SETTING_BIND, &r.bind.to_string())?;
     set(SETTING_PUBLIC_URL, r.public_url.as_deref().unwrap_or(""))?;
-    set(SETTING_ALLOWED_HOSTS, &r.allowed_hosts.join(","))?;
+    set(SETTING_ALLOWED_HOSTS, &r.allowed_hosts_explicit.join(","))?;
     set(
         SETTING_LOCAL_HOST,
         if r.local_host { "true" } else { "false" },
@@ -152,7 +152,7 @@ pub fn ssh_key() -> Result<ExitCode, String> {
 
 pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<ExitCode, String> {
     let (r, store) = resolve_with_store(opts, env)?;
-    match fleet_core::logging::init_in(&r.log_dir) {
+    match fleet_core::logging::init_in_with(&r.log_dir, true) {
         Ok(dir) => tracing::info!(log_dir = %dir.display(), "file logging on"),
         Err(e) => {
             fleet_core::logging::init_stderr_fallback();
@@ -253,7 +253,8 @@ mod tests {
             bind: "0.0.0.0".parse().unwrap(),
             port: 4190,
             public_url: Some("https://fleet.example.com".into()),
-            allowed_hosts: vec!["fleet.example.com".into(), "b.example.com:8443".into()],
+            allowed_hosts: vec!["b.example.com:8443".into(), "fleet.example.com".into()],
+            allowed_hosts_explicit: vec!["b.example.com:8443".into()],
             local_host,
             log_dir: "/unused/logs".into(),
         }
@@ -284,7 +285,7 @@ mod tests {
         );
         assert_eq!(
             get(SETTING_ALLOWED_HOSTS).as_deref(),
-            Some("fleet.example.com,b.example.com:8443")
+            Some("b.example.com:8443")
         );
         assert_eq!(get(SETTING_LOCAL_HOST).as_deref(), Some("false"));
         assert!(s.get_host_row("local").unwrap().unwrap().hidden);
