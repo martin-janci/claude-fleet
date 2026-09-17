@@ -318,10 +318,15 @@ fn env_filter() -> (tracing_subscriber::EnvFilter, bool) {
 /// the directory / appender) returns `Err` and leaves any existing
 /// subscriber in place; the app keeps running without a file log.
 pub fn init(data_dir: &Path) -> Result<PathBuf, String> {
+    init_in(&log_dir_in(data_dir))
+}
+
+/// [`init`] with an explicit log directory (the `fleet-hub --log-dir` case).
+pub fn init_in(log_dir: &Path) -> Result<PathBuf, String> {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let dir = log_dir_in(data_dir);
+    let dir = log_dir.to_path_buf();
     std::fs::create_dir_all(&dir).map_err(|e| format!("create log dir {}: {e}", dir.display()))?;
     let appender = build_appender(&dir)?;
 

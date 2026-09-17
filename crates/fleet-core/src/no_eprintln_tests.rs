@@ -1,7 +1,8 @@
 //! Guard (Track H): production code logs through `tracing`, so every line
 //! reaches the redacting file layer in `logging.rs`, never through the print
 //! family (`eprintln!`, `eprint!`, `println!`, `print!`, `dbg!`). Test code
-//! may still print. There is no allowlist: any production print call fails.
+//! may still print. The one allowlisted file is `crates/fleet-hub/src/out.rs`,
+//! the hub CLI's sole stdout/stderr writer; any other production print fails.
 //!
 //! Every `.rs` file under `src/` is scanned, skipping test-only code:
 //! - files declared `#[cfg(test)] mod name;` (e.g. `fleet_e2e_tests.rs`,
@@ -30,6 +31,7 @@
 //!   line (`foo(); // eprintln!(…)`): only whole `//` lines are skipped.
 
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 /// The print family, built so this file never contains the names literally.
@@ -164,12 +166,25 @@ fn scan(text: &str) -> Scan {
 
 #[test]
 fn production_code_does_not_use_eprintln() {
-    // Both crates: the core and the desktop command layer.
+    // All three crates: the core, the desktop command layer and the hub
+    // daemon. The hub's `out.rs` is its one sanctioned printer (CLI output).
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let roots = [manifest.join("src"), manifest.join("../../src-tauri/src")];
+    // (repo-relative label for reports, directory)
+    let roots = [
+        ("crates/fleet-core/src", manifest.join("src")),
+        ("src-tauri/src", manifest.join("../../src-tauri/src")),
+        ("crates/fleet-hub/src", manifest.join("../fleet-hub/src")),
+    ];
     let mut files = Vec::new();
-    for root in &roots {
-        rs_files(root, &mut files);
+    for (_, root) in &roots {
+        let mut found = Vec::new();
+        rs_files(root, &mut found);
+        for path in found {
+            if root.ends_with("fleet-hub/src") && path.file_name() == Some(OsStr::new("out.rs")) {
+                continue;
+            }
+            files.push(path);
+        }
     }
     files.sort();
 
@@ -199,10 +214,15 @@ fn production_code_does_not_use_eprintln() {
         }
         let rel = roots
             .iter()
-            .find_map(|root| file.strip_prefix(root).ok())
-            .expect("under a scanned root")
-            .to_string_lossy()
-            .replace('\\', "/");
+            .find_map(|(label, root)| {
+                let rel = file
+                    .strip_prefix(root)
+                    .ok()?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                Some(format!("{label}/{rel}"))
+            })
+            .expect("under a scanned root");
         if !result.hits.is_empty() {
             offenders.push(format!("{rel}: lines {:?}", result.hits));
         }

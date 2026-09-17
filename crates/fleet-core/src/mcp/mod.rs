@@ -23,6 +23,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
+pub use auth::normalize_allowed_hosts;
 pub use auth::Caller;
 #[cfg(test)]
 pub use auth::TokenMode;
