@@ -445,6 +445,16 @@ pub struct SessionTranscriptParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionConversationParams {
+    /// Fleet session id (from list_sessions / whoami).
+    pub session_id: i64,
+    /// Most-recent turns to return. Defaults to 10, capped at 100; the
+    /// character budget scales with it (see `conv_limits`).
+    #[serde(default)]
+    pub turns: Option<usize>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RunPromptParams {
     /// Fleet session id (from list_sessions / whoami).
     pub session_id: i64,

@@ -62,6 +62,7 @@ pub const READONLY_TOOLS: &[&str] = &[
     // task reads observe state without changing it.
     "wait_for_session",
     "session_transcript",
+    "session_conversation",
     "wait_for_task",
     "list_tasks",
     // Estimated token usage / cost roll-up (Wave 5 G1).
@@ -623,6 +624,7 @@ mod tests {
         for t in [
             "wait_for_session",
             "session_transcript",
+            "session_conversation",
             "wait_for_task",
             "list_tasks",
         ] {

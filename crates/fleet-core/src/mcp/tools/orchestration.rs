@@ -74,6 +74,36 @@ impl FleetTools {
         Ok(CallToolResult::success(vec![text_content(text)]))
     }
 
+    #[tool(
+        description = "Read a session's recent conversation as structured turns: \
+        each turn carries the human prompt, its timestamp, the turn's end \
+        timestamp, and items that are either assistant text or a one-line tool \
+        summary (flagged when that tool call failed). turns defaults to 10 and \
+        is capped at 100; the character budget scales with it. Prefer this over \
+        session_transcript when you want the shape of the exchange rather than \
+        one flat blob. Read-only. Errors: E_INVALID_STATE (no claude_session_id \
+        yet), E_NO_TRANSCRIPT (nothing written yet)."
+    )]
+    pub(super) async fn session_conversation(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<SessionConversationParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "session_conversation",
+            &format!("session_id={} turns={:?}", p.session_id, p.turns),
+        );
+        let row =
+            self.resolve_target_row(&caller, Some(p.session_id), None, None, "the session")?;
+        let (turns, max_chars) = transcript::conv_limits(p.turns);
+        let args =
+            transcript::resolve_args(&self.store, &row, turns, max_chars).map_err(to_mcp_err)?;
+        let conv = transcript::fetch_conversation(args, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&conv)
+    }
+
     #[tool(description = "send_prompt + wait_for_session(turn_gt) + \
         session_transcript in one call: deliver the prompt, wait up to \
         timeout_s (default 120, max 600) for the turn to complete, and return \

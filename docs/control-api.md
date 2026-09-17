@@ -158,9 +158,9 @@ Index by area (names only; see the reference for details):
   Assets tab, which auto-commits every save; no MCP tools. Sessions may edit
   the catalog repo directly and commit with `catalog:` prefixed messages,
   which the app picks up on its next catalog load.
-- **Orchestration** — `wait_for_session`, `session_transcript`, `run_prompt`,
-  `dispatch_task`, `wait_for_task`, `list_tasks`, `cancel_task`,
-  `set_session_tags`.
+- **Orchestration** — `wait_for_session`, `session_transcript`,
+  `session_conversation`, `run_prompt`, `dispatch_task`, `wait_for_task`,
+  `list_tasks`, `cancel_task`, `set_session_tags`.
 - **Paired clients** — `pair_client` (mint a single-use pairing code and the
   URL to show as a QR; master token only), `list_clients` (the paired devices
   and what each one's token may do — the stored token digest is never
@@ -238,7 +238,13 @@ reads the session's Claude Code JSONL transcript
 turn (or every turn after `since_turn`) as plain text: text blocks verbatim,
 one `[tool_use] Name(...)` line per tool call, no thinking. The file is found through the `transcript_path` Claude Code reports in every hook when fleet has one, else under the session's physical cwd (symlinks resolved on the host with `pwd -P`), else by the session id under `~/.claude/projects/*/` (which also covers Claude truncating encoded directory names longer than 200 characters). `E_INVALID_STATE`
 when the row has no `claude_session_id` yet, `E_NO_TRANSCRIPT` when the file
-does not exist. `run_prompt { session_id, prompt, timeout_s?, max_chars?,
+does not exist. `session_conversation { session_id, turns? }` reads the same
+transcript but returns it as structured turns — `{ turns: [{ prompt, at,
+ended_at, items: [{ kind: "text", text } | { kind: "tool", summary, error }] }],
+truncated }` — the same shape the desktop's Conversation tab renders, for a
+client that wants the exchange's structure rather than one flat blob.
+`turns` defaults to 10 and is capped at 100; the character budget scales with
+it. Same errors as `session_transcript`. `run_prompt { session_id, prompt, timeout_s?, max_chars?,
 raw? }` composes the three: deliver, wait for `turn_seq` to grow, return
 `{ turn_seq, status, transcript }`. It refuses (`E_INVALID_STATE`) a session that is not between turns (`claude_status` idle, completed or stopped): mid-turn, the previous turn's `Stop` would satisfy the wait and return the old reply.
 

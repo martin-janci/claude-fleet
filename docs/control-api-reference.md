@@ -325,6 +325,12 @@ Send and SUBMIT a prompt to a running Claude session's REPL (literal text, then 
 
 Parameters: `host_alias`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
 
+### `session_conversation`
+
+Read a session's recent conversation as structured turns: each turn carries the human prompt, its timestamp, the turn's end timestamp, and items that are either assistant text or a one-line tool summary (flagged when that tool call failed). turns defaults to 10 and is capped at 100; the character budget scales with it. Prefer this over session_transcript when you want the shape of the exchange rather than one flat blob. Read-only. Errors: E_INVALID_STATE (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet).
+
+Parameters: `session_id`, `turns`
+
 ### `session_history`
 
 Return the recorded event timeline for a session (status changes, prompts, stuck, kills). Newest-first; pass `limit` to cap (default 50). Returns the events as JSON.

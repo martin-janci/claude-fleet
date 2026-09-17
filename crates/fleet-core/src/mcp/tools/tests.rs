@@ -79,6 +79,7 @@ fn readonly_token_is_refused_mutating_tools_and_allowed_reads() {
     for t in [
         "wait_for_session",
         "session_transcript",
+        "session_conversation",
         "wait_for_task",
         "list_tasks",
     ] {
@@ -172,6 +173,25 @@ fn move_needs_a_caller_allowed_on_both_hosts() {
             "move_session schema lacks {p}"
         );
     }
+}
+
+#[test]
+fn session_conversation_is_registered_readonly_with_documented_params() {
+    let tools = FleetTools::tool_router_for_doc().list_all();
+    let t = tools
+        .iter()
+        .find(|t| t.name == "session_conversation")
+        .expect("session_conversation is registered");
+    for p in ["session_id", "turns"] {
+        let schema = t.input_schema["properties"]
+            .get(p)
+            .unwrap_or_else(|| panic!("session_conversation schema lacks {p}"));
+        assert!(
+            schema.get("description").is_some(),
+            "session_conversation.{p} has no description"
+        );
+    }
+    assert!(guard::is_readonly_tool("session_conversation"));
 }
 
 #[test]
@@ -967,7 +987,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 66);
+    assert_eq!(served, 67);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -1054,6 +1074,12 @@ fn tool_deadline_uses_the_documented_caps() {
     assert_eq!(tool_deadline("run_prompt"), Duration::from_secs(660));
     assert_eq!(tool_deadline("new_session"), Duration::from_secs(300));
     assert_eq!(tool_deadline("provision_hosts"), Duration::from_secs(300));
+    // session_conversation reads over SSH like session_transcript, so it
+    // gets the lifecycle class, not the quick default.
+    assert_eq!(
+        tool_deadline("session_conversation"),
+        Duration::from_secs(300)
+    );
     assert_eq!(tool_deadline("list_sessions"), Duration::from_secs(60));
     assert_eq!(tool_deadline("not_a_tool"), Duration::from_secs(60));
 }

@@ -878,6 +878,7 @@ pub(super) const LIFECYCLE_TOOLS: &[&str] = &[
     "apply_sync",
     "refresh_projects",
     "session_transcript",
+    "session_conversation",
     "usage_report",
     "broadcast_prompt",
 ];
