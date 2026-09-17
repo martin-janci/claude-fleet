@@ -174,13 +174,18 @@ pub(crate) struct ReconcileDeps {
     /// it, for tests that specifically exercise this behaviour. `real()`
     /// always sets it to the process's actual `$HOME`.
     pub(super) local_home: Option<std::path::PathBuf>,
+    /// Whether this hub's own machine is a fleet host. False on a
+    /// `fleet-hub` daemon (`hub.local_host = false`): no `local` row is
+    /// created, an existing one is never probed, and the local Claude
+    /// account is not read.
+    pub(super) local_host: bool,
 }
 
 /// `host alias → tmux executor` factory used by `ReconcileDeps`.
 pub(super) type ExecFactory = Box<dyn Fn(&str) -> Box<dyn TmuxExec> + Send + Sync>;
 
 impl ReconcileDeps {
-    pub(super) fn real(ssh: &Arc<SshClient>) -> Arc<Self> {
+    pub(super) fn real(ssh: &Arc<SshClient>, local_host: bool) -> Arc<Self> {
         let ssh = Arc::clone(ssh);
         let shell = Arc::new(RealHostShell {
             ssh: Arc::clone(&ssh),
@@ -191,7 +196,8 @@ impl ReconcileDeps {
             probe_timeout: HOST_PROBE_TIMEOUT,
             shell,
             pr_cache: crate::service::outcome::pr_probe_cache(),
-            local_home: Some(crate::service::hosts::local_home_dir()),
+            local_home: local_host.then(crate::service::hosts::local_home_dir),
+            local_host,
         })
     }
 
@@ -219,6 +225,7 @@ impl ReconcileDeps {
                 crate::service::outcome::PR_PROBE_TTL,
             )),
             local_home: None,
+            local_host: true,
         })
     }
 
@@ -234,6 +241,20 @@ impl ReconcileDeps {
         // Freshly constructed above — refcount is 1, so `get_mut` succeeds.
         let mut deps = deps;
         Arc::get_mut(&mut deps).expect("fresh Arc").local_home = Some(local_home);
+        deps
+    }
+
+    /// Like `fake`, but `local_host: false` — the hub's own machine is not a
+    /// fleet host (a headless `fleet-hub` daemon): no `local` row is created,
+    /// a pre-existing one is never probed, and the local Claude account is
+    /// not read.
+    #[cfg(test)]
+    pub(crate) fn fake_without_local(
+        exec: impl Fn(&str) -> Box<dyn TmuxExec> + Send + Sync + 'static,
+        probe_timeout: std::time::Duration,
+    ) -> Arc<Self> {
+        let mut deps = Self::fake(exec, probe_timeout);
+        Arc::get_mut(&mut deps).expect("fresh Arc").local_host = false;
         deps
     }
 }
@@ -900,29 +921,39 @@ pub(crate) async fn reconcile_sessions_with(
     //    but `sync_local_account` needs the row to already be there — on the
     //    very first pass of a fresh install there is no `local` row yet, and
     //    `set_host_account` is a no-op UPDATE against a row that doesn't
-    //    exist).
-    {
-        let s = lock(store)?;
-        s.upsert_host("local")?;
-    }
-    // Sync the local Claude account every pass — not just once — so an
-    // account switch (logout + login as someone else) is picked up, not just
-    // a first-time link (see `ReconcileDeps::local_home` and
-    // `service::hosts::sync_local_account`: `local`'s account has no other
-    // automatic discovery path). Best-effort: a probe hiccup here must not
-    // abort session reconcile.
-    if let Some(home) = deps.local_home.clone() {
-        if let Err(e) = crate::service::hosts::sync_local_account(store, home).await {
-            tracing::warn!(error = %e.message, "[reconcile] local account probe failed");
+    //    exist). Skipped entirely when `local_host` is false (a headless
+    //    `fleet-hub` daemon): no row is created and the local Claude account
+    //    is never read, even if a `state.db` copied from a desktop already
+    //    carries a `local` row.
+    if deps.local_host {
+        {
+            let s = lock(store)?;
+            s.upsert_host("local")?;
+        }
+        // Sync the local Claude account every pass — not just once — so an
+        // account switch (logout + login as someone else) is picked up, not
+        // just a first-time link (see `ReconcileDeps::local_home` and
+        // `service::hosts::sync_local_account`: `local`'s account has no
+        // other automatic discovery path). Best-effort: a probe hiccup here
+        // must not abort session reconcile.
+        if let Some(home) = deps.local_home.clone() {
+            if let Err(e) = crate::service::hosts::sync_local_account(store, home).await {
+                tracing::warn!(error = %e.message, "[reconcile] local account probe failed");
+            }
         }
     }
 
-    // 1. Snapshot under lock (brief). Ensure local host exists first.
+    // 1. Snapshot under lock (brief). Ensure local host exists first (unless
+    //    this hub opted local out — see step 0); a pre-existing `local` row
+    //    is filtered out of the snapshot so it is never fanned out to probe.
     let hosts = {
         let s = lock(store)?;
-        s.upsert_host("local")?;
+        if deps.local_host {
+            s.upsert_host("local")?;
+        }
         s.list_hosts()?
             .into_iter()
+            .filter(|h| deps.local_host || h.alias != "local")
             .map(|h| {
                 let paths = HostPaths::for_host(&s, &h.alias);
                 (h, paths)
@@ -1087,7 +1118,7 @@ pub(crate) async fn reconcile_one_host(
     ssh: &Arc<SshClient>,
     alias: &str,
 ) -> Result<(), IpcError> {
-    reconcile_one_host_with(store, &ReconcileDeps::real(ssh), alias).await
+    reconcile_one_host_with(store, &ReconcileDeps::real(ssh, local_host(store)), alias).await
 }
 
 /// List every session in the fleet.
@@ -1105,7 +1136,7 @@ pub async fn list_sessions(
     let window = list_freshness_window(store);
     list_sessions_with(
         store,
-        &ReconcileDeps::real(ssh),
+        &ReconcileDeps::real(ssh, local_host(store)),
         reconcile_gate(),
         window,
         false,
@@ -1123,7 +1154,7 @@ pub async fn refresh_sessions(
     let window = list_freshness_window(store);
     list_sessions_with(
         store,
-        &ReconcileDeps::real(ssh),
+        &ReconcileDeps::real(ssh, local_host(store)),
         reconcile_gate(),
         window,
         true,
@@ -1141,7 +1172,21 @@ pub async fn refresh_sessions(
 /// the freshness window but still honours the shared gate: `Ok(false)` means a
 /// pass was already running and this call did nothing.
 pub async fn reconcile_now(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result<bool, IpcError> {
-    run_full_reconcile(store, &ReconcileDeps::real(ssh), reconcile_gate()).await
+    run_full_reconcile(
+        store,
+        &ReconcileDeps::real(ssh, local_host(store)),
+        reconcile_gate(),
+    )
+    .await
+}
+
+/// `hub.local_host` for this pass; a poisoned lock counts as "true" (the
+/// desktop default) so reconcile keeps its old behaviour on error.
+fn local_host(store: &Mutex<Store>) -> bool {
+    store
+        .lock()
+        .map(|s| crate::service::hub::read_local_host(&s))
+        .unwrap_or(true)
 }
 
 /// Pure interval-guard decision for the background reconcile tick.

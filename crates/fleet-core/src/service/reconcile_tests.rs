@@ -218,6 +218,36 @@ impl Fleet {
     }
 }
 
+impl Fleet {
+    /// Like `new`, but the hub has no `local` host (a `fleet-hub` daemon):
+    /// no `local` row is created and the fake never answers for it.
+    fn new_without_local(hosts: &[&str]) -> Self {
+        let bus = Arc::new(RecordingEventBus::new());
+        let store = Store::open_with_bus_in_memory(bus.clone()).expect("store");
+        for h in hosts {
+            store.upsert_host(h).unwrap();
+        }
+        let fake = FakeSsh::new();
+        let exec_fake = fake.clone();
+        let deps = ReconcileDeps::fake_without_local(
+            move |alias| {
+                Box::new(RemoteTmux {
+                    client: exec_fake.clone(),
+                    host: alias.to_string(),
+                })
+            },
+            Duration::from_secs(5),
+        );
+        bus.take();
+        Self {
+            store: Mutex::new(store),
+            bus,
+            fake,
+            deps,
+        }
+    }
+}
+
 fn ev(kind: &str, detail: Option<&str>) -> (String, Option<String>) {
     (kind.to_string(), detail.map(str::to_string))
 }
@@ -891,4 +921,49 @@ async fn garbage_list_output_with_exit_zero_does_not_ghost_host_rows() {
         "unparseable list output is not evidence the sessions are gone"
     );
     assert!(!f.reachable("delta"), "unparseable output → unreachable");
+}
+
+// ── 5. hub.local_host opt-out ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn reconcile_without_local_host_never_creates_or_probes_local() {
+    let f = Fleet::new_without_local(&["mefistos"]);
+    f.fake.on_host(
+        "mefistos",
+        Match::script(LIST_SCRIPT),
+        Reply::Exit {
+            code: 1,
+            stdout: b"no server running\n".to_vec(),
+            stderr: Vec::new(),
+        },
+    );
+    reconcile_sessions_with(&f.store, &f.deps).await.unwrap();
+    let hosts = f.store.lock().unwrap().list_hosts().unwrap();
+    assert!(
+        hosts.iter().all(|h| h.alias != "local"),
+        "no local row: {hosts:?}"
+    );
+    assert!(
+        f.fake.calls().iter().all(|c| c.host != "local"),
+        "local must never be probed"
+    );
+    assert!(f.reachable("mefistos"));
+}
+
+#[tokio::test]
+async fn reconcile_without_local_host_skips_a_copied_local_row() {
+    // A state.db copied from a desktop carries a `local` row; the daemon
+    // leaves it alone and never probes it.
+    let f = Fleet::new_without_local(&["local", "mefistos"]);
+    f.fake.on_host(
+        "mefistos",
+        Match::script(LIST_SCRIPT),
+        Reply::Exit {
+            code: 1,
+            stdout: b"no server running\n".to_vec(),
+            stderr: Vec::new(),
+        },
+    );
+    reconcile_sessions_with(&f.store, &f.deps).await.unwrap();
+    assert!(f.fake.calls().iter().all(|c| c.host != "local"));
 }
