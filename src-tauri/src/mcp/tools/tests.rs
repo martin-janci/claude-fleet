@@ -235,6 +235,7 @@ fn fleet_admin_tools_are_master_only() {
         "hide_host",
         "apply_sync",
         "set_secret",
+        "set_host_layers",
     ] {
         let err = enforce_admin(&full, t).expect_err(t);
         assert!(

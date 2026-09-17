@@ -107,7 +107,7 @@ List all registered hosts with their reachability, claude/tmux versions, and lin
 
 ### `list_layers`
 
-List the catalog's layer definitions (layers/*.yaml) and each host's role + active contexts. Read-only. Returns JSON.
+List the catalog's layer definitions (layers/*.yaml) and each host's role + active contexts. Read-only. Requires catalog_configure + catalog_load in the app. Returns JSON.
 
 ### `list_projects`
 
@@ -281,7 +281,7 @@ Parameters: `session_id`
 
 ### `resolve_preview`
 
-Compute the effective asset set for one host after its role and contexts are resolved, with provenance: which layer introduced each asset, which layers overrode it, and which layer excluded anything missing. Nothing is written. Returns JSON.
+Compute the effective asset set for one host after its role and contexts are resolved, with provenance: which layer introduced each asset, which layers overrode it, and which layer excluded anything missing. Nothing is written. Requires catalog_configure + catalog_load in the app. Returns JSON.
 
 Parameters: `host_alias`
 
@@ -347,7 +347,7 @@ Parameters: `friendly_name`, `host_alias`, `session_id`, `tmux_name`
 
 ### `set_host_layers`
 
-Replace a host's layer assignment: one optional role plus context layers in application order. Edits fleet state only, never catalog files. Returns the host's new assignment as JSON.
+Replace a host's layer assignment: one optional role plus context layers in application order. Edits fleet state only, never catalog files. Requires catalog_configure + catalog_load in the app. Master token only. Returns the host's new assignment as JSON.
 
 Parameters: `contexts`, `host_alias`, `role`
 

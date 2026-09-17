@@ -310,12 +310,28 @@ pub fn list_layers(store: &Mutex<Store>) -> Result<LayerListing, IpcError> {
     })
 }
 
+/// `host_alias` must be a registered host. Without this check, a typo'd
+/// alias either trips the `host_layers` foreign key (`set_host_layers`) or —
+/// worse — silently resolves to the WHOLE catalog, since `resolve_for_host`
+/// treats "no assignment rows" as "no layering" for backward compatibility
+/// and cannot tell a nonexistent host from an unassigned one.
+fn require_host_exists(store: &Mutex<Store>, host_alias: &str) -> Result<(), IpcError> {
+    match lock(store)?.get_host_row(host_alias)? {
+        Some(_) => Ok(()),
+        None => Err(IpcError::new(
+            codes::E_NOTFOUND,
+            format!("host {host_alias} not found"),
+        )),
+    }
+}
+
 /// Compute the effective asset set for `host_alias`, with provenance.
 /// Nothing is written.
 pub fn resolve_preview(
     host_alias: &str,
     store: &Mutex<Store>,
 ) -> Result<resolve::Resolution, IpcError> {
+    require_host_exists(store, host_alias)?;
     with_catalog(|cat| sync::layers::resolve_for_host(store, cat, host_alias))
 }
 
@@ -377,6 +393,7 @@ pub fn set_host_layers(
     contexts: &[&str],
     store: &Mutex<Store>,
 ) -> Result<Vec<crate::store::HostLayerRow>, IpcError> {
+    require_host_exists(store, host_alias)?;
     check_no_name_collision(role, contexts)?;
     with_catalog(|cat| {
         if let Some(r) = role {
@@ -426,14 +443,18 @@ mod tests {
         root
     }
 
-    /// Like `repo_with_one_skill`, plus a `core` role layer (member: the
-    /// skill) and an `extra` context layer (no members) — enough to
-    /// exercise `set_host_layers`'s axis validation.
+    /// Like `repo_with_one_skill`, plus a `core` role layer (member: `s`
+    /// only — NOT `other`), an `extra` context layer (no members), and a
+    /// second skill `other` that no layer ever names. `other` is what makes
+    /// the happy-path resolve test able to fail: with only one asset in the
+    /// catalog, a resolved count of 1 holds whether layering ran, was
+    /// ignored, or fell back to the whole catalog.
     fn repo_with_layers(tag: &str) -> std::path::PathBuf {
         let root =
             std::env::temp_dir().join(format!("fleet-catalog-svc-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("skills/s")).unwrap();
+        std::fs::create_dir_all(root.join("skills/other")).unwrap();
         std::fs::create_dir_all(root.join("layers")).unwrap();
         std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
         std::fs::write(
@@ -442,6 +463,12 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.join("skills/s/body.md"), "b\n").unwrap();
+        std::fs::write(
+            root.join("skills/other/asset.yaml"),
+            "kind: skill\nname: other\ndescription: d\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("skills/other/body.md"), "b\n").unwrap();
         std::fs::write(
             root.join("layers/core.yaml"),
             "kind: layer\nname: core\naxis: role\nmembers:\n  - skill/s\n",
@@ -659,6 +686,34 @@ mod tests {
         );
     }
 
+    /// A typo'd `host_alias` must fail clearly, not as a raw SQLite
+    /// foreign-key violation: `host_layers.host_alias` references
+    /// `hosts(alias)` with `PRAGMA foreign_keys = ON`.
+    #[test]
+    fn set_host_layers_rejects_an_unknown_host() {
+        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let store = configured_store_with_layers("shl-unknown-host");
+
+        let err = set_host_layers("mefistso", Some("core"), &[], &store).unwrap_err();
+        assert_eq!(err.code, codes::E_NOTFOUND);
+        assert!(err.message.contains("mefistso"), "{}", err.message);
+    }
+
+    /// The mirror problem on the read side: `resolve_for_host` treats "no
+    /// assignment rows" as "no layering" for backward compatibility, so
+    /// without a host-existence check a typo'd host would silently resolve
+    /// to the WHOLE catalog instead of erroring — indistinguishable from an
+    /// unassigned but real host.
+    #[test]
+    fn resolve_preview_rejects_an_unknown_host() {
+        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let store = configured_store_with_layers("rp-unknown-host");
+
+        let err = resolve_preview("mefistso", &store).unwrap_err();
+        assert_eq!(err.code, codes::E_NOTFOUND);
+        assert!(err.message.contains("mefistso"), "{}", err.message);
+    }
+
     /// A carry-forward from Task 4's review: `host_layers`'s primary key is
     /// `(host_alias, layer_name)` with no `axis` column, which is safe only
     /// because `set_host_layers` refuses a name the catalog does not define
@@ -767,7 +822,21 @@ mod tests {
         assert_eq!(listing.hosts.len(), 2);
 
         let resolved = resolve_preview("local", &store).unwrap();
-        assert_eq!(resolved.catalog.assets.len(), 1);
-        assert_eq!(resolved.catalog.assets[0].header.name, "s");
+        // `other` is in the catalog but a member of no layer: its absence
+        // is what distinguishes "layering actually ran" from "layering was
+        // ignored" or "fell back to the whole catalog" — either of those
+        // would leave `other` in the resolved set.
+        let names: Vec<&str> = resolved
+            .catalog
+            .assets
+            .iter()
+            .map(|a| a.header.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["s"]);
+        assert!(
+            !names.contains(&"other"),
+            "'other' is not a member of any assigned layer"
+        );
+        assert_eq!(resolved.provenance["skill/s"].introduced_by, "core");
     }
 }

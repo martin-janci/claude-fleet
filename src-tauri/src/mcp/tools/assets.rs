@@ -164,7 +164,8 @@ impl FleetTools {
     }
 
     #[tool(description = "List the catalog's layer definitions (layers/*.yaml) \
-        and each host's role + active contexts. Read-only. Returns JSON.")]
+        and each host's role + active contexts. Read-only. Requires \
+        catalog_configure + catalog_load in the app. Returns JSON.")]
     pub(super) async fn list_layers(&self) -> Result<CallToolResult, McpError> {
         audit("list_layers", "");
         let out = catalog::list_layers(&self.store).map_err(to_mcp_err)?;
@@ -174,14 +175,38 @@ impl FleetTools {
     #[tool(description = "Compute the effective asset set for one host after \
         its role and contexts are resolved, with provenance: which layer \
         introduced each asset, which layers overrode it, and which layer \
-        excluded anything missing. Nothing is written. Returns JSON.")]
+        excluded anything missing. Nothing is written. Requires \
+        catalog_configure + catalog_load in the app. Returns JSON.")]
     pub(super) async fn resolve_preview(
         &self,
         Parameters(p): Parameters<ResolvePreviewParams>,
     ) -> Result<CallToolResult, McpError> {
         audit("resolve_preview", &format!("host_alias={}", p.host_alias));
-        let out = catalog::resolve_preview(&p.host_alias, &self.store).map_err(to_mcp_err)?;
-        ok_json(&out)
+        let res = catalog::resolve_preview(&p.host_alias, &self.store).map_err(to_mcp_err)?;
+        // Project to a summary shape at the MCP boundary: `Resolution` is a
+        // full `Catalog`, and `Asset`'s serializer emits `body` in full plus
+        // every `Resource`'s base64 `bytes` — sending that uncapped over MCP
+        // blows past token caps on any fleet-sized catalog (see the same
+        // warning on `ok_json_compact` below). `list_assets` already returns
+        // a summary shape for the same reason; this mirrors it. The Tauri
+        // command for the desktop UI keeps the full `Resolution`.
+        let assets: Vec<serde_json::Value> = res
+            .catalog
+            .assets
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "kind": a.kind().as_str(),
+                    "name": a.header.name,
+                    "version": a.header.version,
+                })
+            })
+            .collect();
+        ok_json(&serde_json::json!({
+            "provenance": res.provenance,
+            "excluded": res.excluded,
+            "assets": assets,
+        }))
     }
 
     #[tool(description = "Propose an initial layer split from the last scan, \
@@ -196,11 +221,19 @@ impl FleetTools {
 
     #[tool(description = "Replace a host's layer assignment: one optional role \
         plus context layers in application order. Edits fleet state only, never \
-        catalog files. Returns the host's new assignment as JSON.")]
+        catalog files. Requires catalog_configure + catalog_load in the app. \
+        Master token only. Returns the host's new assignment as JSON.")]
     pub(super) async fn set_host_layers(
         &self,
         Parameters(p): Parameters<SetHostLayersParams>,
     ) -> Result<CallToolResult, McpError> {
+        // Master-only enforcement already happened centrally in
+        // `ServerHandler::call_tool` (`enforce_admin` runs there before the
+        // tool router ever dispatches here) — `set_host_layers` is in
+        // `guard::ADMIN_TOOLS`, so a non-master caller never reaches this
+        // body. A host's layer assignment decides what the next apply_sync
+        // writes to its filesystem, so it is gated the same as apply_sync
+        // and set_secret.
         audit(
             "set_host_layers",
             &format!(

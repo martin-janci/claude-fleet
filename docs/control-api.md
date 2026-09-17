@@ -160,9 +160,12 @@ Index by area (names only; see the reference for details):
   host's effective asset set with provenance, without writing anything),
   `propose_layers` (group the last scan's installed assets by host-set
   signature into a starting layer split, for triage), `set_host_layers`
-  (replace a host's role + ordered contexts; validates every named layer
-  exists in the loaded catalog on the right axis; edits fleet state only,
-  never catalog files).
+  (replace a host's role + ordered contexts; validates the host and every
+  named layer against the loaded catalog on the right axis, and rejects a
+  role/context name collision; edits fleet state only, never catalog
+  files; master token only — a host's layer assignment decides what the
+  next `apply_sync` writes to its filesystem, the same reasoning as
+  `apply_sync` and `set_secret`).
 - **Orchestration** — `wait_for_session`, `session_transcript`, `run_prompt`,
   `dispatch_task`, `wait_for_task`, `list_tasks`, `cancel_task`,
   `set_session_tags`.

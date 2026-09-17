@@ -124,6 +124,11 @@ pub const ADMIN_TOOLS: &[&str] = &[
     // master token keeps a per-host token from setting values another
     // host's assets would pick up.
     "set_secret",
+    // A host's layer assignment decides what the NEXT apply_sync writes to
+    // its filesystem; a per-host token on host A must not be able to
+    // change what host B resolves to, any more than it could call
+    // apply_sync or set_secret against B directly.
+    "set_host_layers",
 ];
 
 pub fn is_admin_tool(name: &str) -> bool {
