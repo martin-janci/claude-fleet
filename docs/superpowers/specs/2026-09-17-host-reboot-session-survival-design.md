@@ -153,14 +153,18 @@ same place and with the same best-effort semantics as the existing
 `read_oauth_account` call. Stored on `HostProbe` as
 `identity: HostIdentity`.
 
-### Schema — migration `032_host_boot_identity.sql`
+### Schema — migration `033_host_boot_identity.sql`
 
 ```sql
 ALTER TABLE hosts    ADD COLUMN boot_id         TEXT;
 ALTER TABLE hosts    ADD COLUMN tmux_server_pid INTEGER;
 ALTER TABLE sessions ADD COLUMN lost_reason     TEXT;
-INSERT OR IGNORE INTO schema_version (version) VALUES (32);
+INSERT OR IGNORE INTO schema_version (version) VALUES (33);
 ```
+
+**Numbering:** `032` was claimed by the asset-layers work
+(`032_asset_layers.sql`, `2026-09-17-asset-layers-and-profiles-design.md`),
+which landed first — this spec renumbers to `033` accordingly.
 
 Register it in the `MIGRATIONS` table in `src-tauri/src/store/schema.rs`.
 
@@ -444,7 +448,7 @@ Two PRs. The split is not cosmetic: the first stops the bleeding and is
 independently valuable, and the second is easier to build once the first has
 been recording boot times for a while.
 
-1. **Safety net** — findings, migration 032, `host_identity`, the mass-loss
+1. **Safety net** — findings, migration 033, `host_identity`, the mass-loss
    branch, the reap exemption, R5 logging. After this, no session is lost to
    a reboot again.
 2. **Recovery** — `restore_host_sessions`, `discover_lost_sessions`, the
