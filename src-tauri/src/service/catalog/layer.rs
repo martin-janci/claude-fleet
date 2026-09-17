@@ -76,6 +76,13 @@ impl Layer {
         Ok(f.layer)
     }
 
+    /// Serialise back to `layers/<name>.yaml` form, `kind: layer` first so
+    /// the file is self-describing for a human reading the repo.
+    pub fn to_yaml(&self) -> String {
+        let body = serde_yaml::to_string(self).unwrap_or_default();
+        format!("kind: layer\n{body}")
+    }
+
     /// Static checks that need no catalog. Membership against real assets is
     /// checked at load (Task 2) and is a warning, not an error.
     pub fn validate(&self) -> Result<(), String> {

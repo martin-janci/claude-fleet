@@ -12,6 +12,7 @@
 // commands in `commands/assets.rs`.
 
 use super::harness::HARNESS_IDS;
+use super::layer::{Axis, Layer};
 use super::model::{
     find_placeholders, is_valid_name, Asset, AssetSpec, Header, HookAction, Kind, Marketplace,
     Problem,
@@ -109,6 +110,26 @@ pub fn template(kind: Kind, name: &str) -> Asset {
             resources: Vec::new(),
         },
     }
+}
+
+/// A blank layer to author from, mirroring `template(kind, name)` for assets.
+pub fn layer_template(name: &str, axis: Axis) -> Layer {
+    Layer {
+        name: name.to_string(),
+        axis,
+        version: "1".to_string(),
+        description: String::new(),
+        extends: None,
+        members: Vec::new(),
+        exclude: Vec::new(),
+        overrides: Default::default(),
+    }
+}
+
+/// The commit message for a layer write, in the same shape the asset paths
+/// use (`catalog: create skill/foo`).
+pub fn layer_commit_message(verb: &str, name: &str) -> String {
+    format!("catalog: {verb} layer/{name}")
 }
 
 // --------------------------------------------------------------------- lint
@@ -665,6 +686,46 @@ pub fn delete_asset(args: AssetRef, store: &Mutex<Store>) -> Result<String, IpcE
     repo::remove_asset(&root, args.kind, &args.name)?;
     let rel = repo::asset_rel_dir(args.kind, &args.name);
     let message = format!("catalog: delete {}/{}", args.kind.as_str(), args.name);
+    commit_and_reload(&root, &[rel], &message, store)
+}
+
+/// Repo-relative path for a layer file: `"layers/<name>.yaml"`.
+fn layer_rel_path(name: &str) -> String {
+    format!("layers/{name}.yaml")
+}
+
+/// Write a layer (create or update, whichever the file's current presence
+/// implies), commit and reload, exactly as `create`/`update` do for assets.
+pub fn write_layer(layer: &Layer, store: &Mutex<Store>) -> Result<String, IpcError> {
+    let root = repo_root(store)?;
+    check_name(&layer.name)?;
+    let rel = layer_rel_path(&layer.name);
+    let path = root.join(&rel);
+    let verb = if path.exists() { "update" } else { "create" };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, layer.to_yaml())?;
+    let message = layer_commit_message(verb, &layer.name);
+    commit_and_reload(&root, &[rel], &message, store)
+}
+
+/// Delete a layer's file, commit the removal and reload. Hosts assigned it
+/// simply stop resolving it, matching how an asset's disappearance is
+/// handled elsewhere.
+pub fn delete_layer(name: &str, store: &Mutex<Store>) -> Result<String, IpcError> {
+    let root = repo_root(store)?;
+    check_name(name)?;
+    let rel = layer_rel_path(name);
+    let path = root.join(&rel);
+    if !path.is_file() {
+        return Err(IpcError::new(
+            E_ASSET_NOT_FOUND,
+            format!("layer {name} not found in the catalog"),
+        ));
+    }
+    std::fs::remove_file(&path)?;
+    let message = layer_commit_message("delete", name);
     commit_and_reload(&root, &[rel], &message, store)
 }
 
@@ -1756,5 +1817,93 @@ mod tests {
         assert_eq!(all.assets.len(), 1);
         assert_eq!(all.errors, 2);
         assert!(all.problems.is_empty());
+    }
+
+    // ------------------------------------------------------------- layers
+
+    fn catalog_layer(name: &str) -> Option<crate::service::catalog::layer::Layer> {
+        CATALOG
+            .read()
+            .unwrap()
+            .as_ref()
+            .and_then(|c| c.layers.get(name).cloned())
+    }
+
+    #[test]
+    fn layer_template_round_trips_through_yaml() {
+        let l = layer_template("workstation", crate::service::catalog::layer::Axis::Role);
+        assert_eq!(l.name, "workstation");
+        assert_eq!(l.axis, crate::service::catalog::layer::Axis::Role);
+        assert!(l.members.is_empty());
+        let back = crate::service::catalog::layer::Layer::from_yaml(&l.to_yaml()).unwrap();
+        assert_eq!(back, l);
+    }
+
+    #[test]
+    fn layer_commit_messages_use_the_layer_key() {
+        assert_eq!(
+            layer_commit_message("create", "workstation"),
+            "catalog: create layer/workstation"
+        );
+        assert_eq!(
+            layer_commit_message("delete", "minimal"),
+            "catalog: delete layer/minimal"
+        );
+    }
+
+    #[test]
+    fn write_layer_creates_then_updates_commit_and_reload() {
+        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = init_repo("layer-write");
+        let store = configured_store(&root);
+
+        let l = layer_template("workstation", Axis::Role);
+        let created = write_layer(&l, &store).unwrap();
+        assert_eq!(created.len(), 40);
+        assert!(root.join("layers/workstation.yaml").is_file());
+        assert_eq!(subjects(&root)[0], "catalog: create layer/workstation");
+        assert_eq!(
+            catalog_layer("workstation").unwrap().name,
+            "workstation".to_string()
+        );
+
+        let mut edited = l;
+        edited.description = "The base workstation role.".into();
+        let updated = write_layer(&edited, &store).unwrap();
+        assert_ne!(updated, created);
+        assert_eq!(subjects(&root)[0], "catalog: update layer/workstation");
+        assert_eq!(
+            catalog_layer("workstation").unwrap().description,
+            "The base workstation role."
+        );
+
+        // An invalid name is rejected before the working tree is touched.
+        let mut bad = layer_template("Bad Name", Axis::Role);
+        bad.name = "Bad Name".into();
+        assert_eq!(write_layer(&bad, &store).unwrap_err().code, E_INVALID);
+        assert!(!root.join("layers/Bad Name.yaml").exists());
+    }
+
+    #[test]
+    fn delete_layer_removes_commits_and_reloads() {
+        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = init_repo("layer-delete");
+        let store = configured_store(&root);
+        write_layer(&layer_template("workstation", Axis::Role), &store).unwrap();
+
+        let deleted = delete_layer("workstation", &store).unwrap();
+        assert_eq!(deleted.len(), 40);
+        assert!(!root.join("layers/workstation.yaml").exists());
+        assert_eq!(subjects(&root)[0], "catalog: delete layer/workstation");
+        assert!(catalog_layer("workstation").is_none());
+
+        assert_eq!(
+            delete_layer("workstation", &store).unwrap_err().code,
+            E_ASSET_NOT_FOUND
+        );
+        assert_eq!(
+            delete_layer("Bad Name", &store).unwrap_err().code,
+            E_INVALID
+        );
     }
 }
