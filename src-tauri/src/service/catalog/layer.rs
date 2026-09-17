@@ -143,10 +143,6 @@ impl LayerSet {
         self.layers.values()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.layers.is_empty()
-    }
-
     /// Flatten `name`'s `extends` chain, ROOT FIRST. Walking here — rather
     /// than inside `resolve` — is what guarantees `resolve` can never loop:
     /// it only ever receives an already-valid chain.

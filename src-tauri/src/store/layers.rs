@@ -33,7 +33,7 @@ impl Store {
                 "SELECT {COLS} FROM host_layers WHERE host_alias=?1 AND active=1 \
                  ORDER BY axis, position, layer_name"
             ))?
-            .query_map(rusqlite::params![host_alias], |r| row_from(r))?
+            .query_map(rusqlite::params![host_alias], row_from)?
             .collect()
     }
 
@@ -42,7 +42,7 @@ impl Store {
             .prepare(&format!(
                 "SELECT {COLS} FROM host_layers ORDER BY host_alias, axis, position, layer_name"
             ))?
-            .query_map([], |r| row_from(r))?
+            .query_map([], row_from)?
             .collect()
     }
 

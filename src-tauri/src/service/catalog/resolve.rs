@@ -179,7 +179,7 @@ pub fn resolve(catalog: &Catalog, role_chain: &[&Layer], contexts: &[&Layer]) ->
 mod tests {
     use super::*;
     use crate::service::catalog::layer::{Layer, LayerSet};
-    use crate::service::catalog::model::{Asset, Kind};
+    use crate::service::catalog::model::Asset;
     use crate::service::catalog::repo::Catalog;
 
     fn skill(name: &str) -> Asset {
@@ -329,9 +329,9 @@ mod tests {
         let mut cat = catalog(&["a"]);
         let role = lay("kind: layer\nname: r\naxis: role\nmembers:\n  - skill/a\n");
         cat.layers = LayerSet::from_layers(vec![role.clone()]).0;
-        assert!(!cat.layers.is_empty());
+        assert_ne!(cat.layers, LayerSet::default());
         let r = resolve(&cat, &[&role], &[]);
-        assert!(r.catalog.layers.is_empty());
+        assert_eq!(r.catalog.layers, LayerSet::default());
     }
 
     #[test]
@@ -342,9 +342,9 @@ mod tests {
         let mut cat = catalog(&["a"]);
         let role = lay("kind: layer\nname: r\naxis: role\nmembers:\n  - skill/a\n");
         cat.layers = LayerSet::from_layers(vec![role]).0;
-        assert!(!cat.layers.is_empty());
+        assert_ne!(cat.layers, LayerSet::default());
         let r = resolve(&cat, &[], &[]);
-        assert!(r.catalog.layers.is_empty());
+        assert_eq!(r.catalog.layers, LayerSet::default());
     }
 
     #[test]
