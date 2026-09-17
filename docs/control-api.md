@@ -21,6 +21,9 @@ The control API is **off by default**. To turn it on:
 3. Note the **URL** (`http://127.0.0.1:<port>/mcp`, default port `4180`) and
    the **token**. Use **Show** / **Hide** / **Copy** to manage the token.
 
+On a `fleet-hub` daemon the API is always on and reachable at the hub's
+public URL; see [`hub.md`](hub.md).
+
 The token shown here is the **master token**: a 256-bit secret generated on
 first use, meant for the desktop and for clients you configure by hand. Every
 request must carry a token as `Authorization: Bearer <token>`. The server
@@ -272,9 +275,13 @@ session's labels (up to 16 of 1–32 chars from `[A-Za-z0-9_.:-]`) and
      "headers": { "Authorization": "Bearer <host-token>" }
    }
    ```
+   The URL is `http://127.0.0.1:<port>` on the desktop (the reverse tunnel's
+   loopback end); on a `fleet-hub` daemon with a public URL configured it is
+   that public URL instead (e.g. `https://fleet.example.com`), since every
+   host can already reach it directly.
 4. **`~/.tmux.conf` clipboard passthrough** — ensures `set -g set-clipboard on` is present (appended if missing, file created if absent) so OSC 52 clipboard writes from inside tmux reach the host clipboard.
-5. **Hooks in `~/.claude/settings.json`** — merges fleet's `Stop`, `UserPromptSubmit`, `PostToolUse(EnterWorktree|ExitWorktree)`, `SessionEnd(logout|prompt_input_exit|other)`, `StopFailure` and `Notification(permission_prompt|elicitation_dialog|elicitation_url_dialog|quota_auto_resume_stale|quota_auto_resume_disabled|quota_auto_resume_fired)` hooks as Claude Code `type: "http"` hooks, leaving the user's own hooks alone. Each entry POSTs the hook payload to `http://127.0.0.1:<port>/hook` with `"headers": { "Authorization": "Bearer <host-token>" }` and a 5 s timeout — the token never appears in a process argv. On a remote host the URL's `127.0.0.1:<port>` is the reverse tunnel's loopback end (step 6). Any older fleet entry for the same port (including the pre-0.3 `curl … /hook?token=` command form) is replaced, so re-running upgrades in place; the file is written `0600`. Required for `safe_kill_session` to finalize, for real-time `idle` / `working` status, `turn_seq` and task completion on every host that runs Claude Code. **Settings → Install Hook (local)** performs only this step for the `local` host, using the `local` host token. **Hosts provisioned before the `UserPromptSubmit` hook existed must be re-provisioned** (no rotate needed) to get the busy signal; until then their status only flips to `working` on the next reconcile pass. **Hosts provisioned before the `SessionEnd` / `StopFailure` / `Notification` hooks existed must be re-provisioned** to get `stopped`, API-error turn completion and hook-driven `blocked` (see *Hook contract*).
-6. **Reverse SSH tunnel** (remote hosts only) — starts an `ssh -R` tunnel so the remote host's `127.0.0.1:<port>` is forwarded to the central machine's MCP server. The server stays bound to `127.0.0.1` on the central machine; remote hosts reach it only through this authenticated tunnel.
+5. **Hooks in `~/.claude/settings.json`** — merges fleet's `Stop`, `UserPromptSubmit`, `PostToolUse(EnterWorktree|ExitWorktree)`, `SessionEnd(logout|prompt_input_exit|other)`, `StopFailure` and `Notification(permission_prompt|elicitation_dialog|elicitation_url_dialog|quota_auto_resume_stale|quota_auto_resume_disabled|quota_auto_resume_fired)` hooks as Claude Code `type: "http"` hooks, leaving the user's own hooks alone. Each entry POSTs the hook payload to `http://127.0.0.1:<port>/hook` with `"headers": { "Authorization": "Bearer <host-token>" }` and a 5 s timeout — the token never appears in a process argv. On a remote host the URL's `127.0.0.1:<port>` is the reverse tunnel's loopback end (step 6); on a `fleet-hub` daemon with a public URL, the URL is that public URL's `/hook` instead (e.g. `https://fleet.example.com/hook`) and no tunnel is used. Any older fleet entry for the same port (including the pre-0.3 `curl … /hook?token=` command form) is replaced, so re-running upgrades in place; the file is written `0600`. Required for `safe_kill_session` to finalize, for real-time `idle` / `working` status, `turn_seq` and task completion on every host that runs Claude Code. **Settings → Install Hook (local)** performs only this step for the `local` host, using the `local` host token. **Hosts provisioned before the `UserPromptSubmit` hook existed must be re-provisioned** (no rotate needed) to get the busy signal; until then their status only flips to `working` on the next reconcile pass. **Hosts provisioned before the `SessionEnd` / `StopFailure` / `Notification` hooks existed must be re-provisioned** to get `stopped`, API-error turn completion and hook-driven `blocked` (see *Hook contract*).
+6. **Reverse SSH tunnel** (remote hosts only, loopback hubs only) — starts an `ssh -R` tunnel so the remote host's `127.0.0.1:<port>` is forwarded to the central machine's MCP server. The server stays bound to `127.0.0.1` on the central machine; remote hosts reach it only through this authenticated tunnel. A `fleet-hub` daemon configured with a public URL skips this step entirely — every host already reaches the hub's public address directly.
 
 **After provisioning, each host must restart Claude** to load the MCP server (skill files and CLAUDE.md are picked up live, but the MCP server entry requires a restart).
 
@@ -335,8 +342,11 @@ at user level would block every other http hook on the host.
 
 ## Security
 
-- **Localhost only.** The listener binds `127.0.0.1`; this is hard-coded, not
-  configurable.
+- **Localhost only (desktop).** The desktop binds `127.0.0.1` and this is
+  not configurable there. A `fleet-hub` daemon binds the configured address
+  and adds its public host to the Host/Origin allowlist; plaintext on a
+  routable bind is refused unless explicitly allowed. See
+  [`hub.md`](hub.md) → *Configuration*.
 - **Bearer token.** Missing, malformed, or wrong tokens get `401`. The token
   guards against other local processes and against a malicious web page's
   `fetch` (which cannot read the token). Tokens are compared in constant time.

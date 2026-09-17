@@ -1,0 +1,15 @@
+[Unit]
+Description=claude-fleet hub daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=fleet
+EnvironmentFile=/etc/fleet-hub.env
+ExecStart=/usr/local/bin/fleet-hub serve
+Restart=on-failure
+StateDirectory=fleet-hub
+Environment=FLEET_HUB_DATA_DIR=/var/lib/fleet-hub
+
+[Install]
+WantedBy=multi-user.target
