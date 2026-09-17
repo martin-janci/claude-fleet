@@ -613,14 +613,16 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// Hosts to ask for `account_uuid`'s usage, in order: reachable hosts on that
-/// account; the sticky host first; `local` last (usually a macOS host whose
-/// token is in the Keychain, which fleet never reads); the rest alphabetical.
+/// Hosts to ask for `account_uuid`'s usage, in order: reachable, visible hosts
+/// on that account; the sticky host first; `local` last (usually a macOS host
+/// whose token is in the Keychain, which fleet never reads); the rest
+/// alphabetical. A hidden host is never polled — on a hub that includes a
+/// `local` row copied from a desktop, which would run `bash` on the hub.
 pub fn source_hosts(account_uuid: &str, hosts: &[HostRow], sticky: Option<&str>) -> Vec<String> {
     let local = crate::service::projects::LOCAL_HOST;
     let mut out: Vec<String> = hosts
         .iter()
-        .filter(|h| h.reachable && h.account_uuid.as_deref() == Some(account_uuid))
+        .filter(|h| h.reachable && !h.hidden && h.account_uuid.as_deref() == Some(account_uuid))
         .map(|h| h.alias.clone())
         .collect();
     out.sort_by(|a, b| {
@@ -2169,6 +2171,23 @@ curl() { echo HIJACKED; }
         );
         assert_eq!(source_hosts("B", &hosts, None), vec!["other"]);
         assert!(source_hosts("C", &hosts, None).is_empty());
+    }
+
+    #[test]
+    fn a_hidden_reachable_host_is_not_a_source() {
+        // A hub hides a `local` row copied from a desktop; polling it would run
+        // `bash` on the hub itself.
+        let mut hidden = host("local", Some("A"), true);
+        hidden.hidden = true;
+        let mut hidden_remote = host("parked", Some("A"), true);
+        hidden_remote.hidden = true;
+        let hosts = vec![hidden, hidden_remote, host("alpha", Some("A"), true)];
+        assert_eq!(source_hosts("A", &hosts, None), vec!["alpha"]);
+        assert_eq!(
+            source_hosts("A", &hosts, Some("parked")),
+            vec!["alpha"],
+            "a hidden sticky host is not tried either"
+        );
     }
 
     // ── clock ──────────────────────────────────────────────────────────────
