@@ -32,7 +32,8 @@ pub fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// `CATALOG` is process-global, so tests that write it must serialise.
+/// `CATALOG` and `HOME` are process-global, so tests that write either must
+/// serialise on this lock.
 #[cfg(test)]
 pub static CATALOG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

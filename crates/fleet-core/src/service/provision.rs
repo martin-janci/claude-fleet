@@ -920,6 +920,16 @@ mod tests {
         // asset-catalog hardening review, which is what actually exposed
         // this pre-existing hazard. Save and restore the real value so this
         // test's mutation cannot leak into any other test.
+        //
+        // Restoring is not enough while it runs: the catalog tests point
+        // `HOME` at a temp dir and scan / write through it, so an unserialised
+        // swap mid-test sends them to `/Users/test` (a failed scan) or makes
+        // this test restore their temp dir — the intermittent
+        // `applies_creates_conflicts_overwrites_removals_and_merges_locally`
+        // failure. Take the lock they already hold around `HOME`.
+        let _lock = crate::service::catalog::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let original_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", "/Users/test");
         assert_eq!(
