@@ -17,6 +17,9 @@ pub struct Catalog {
     pub problems: Vec<Problem>,
     pub head: String,
     pub loaded_at: i64,
+    /// Layer definitions from `layers/*.yaml`. Empty ⇒ no layering, and
+    /// every host resolves to the whole catalog (backward compatibility).
+    pub layers: crate::service::catalog::layer::LayerSet,
 }
 
 impl Catalog {
@@ -391,6 +394,71 @@ pub fn load_dir(root: &Path) -> Result<Catalog, IpcError> {
             }
         }
     }
+
+    // Layers are NOT a Kind: they must never reach compute_host_plan as an
+    // asset. Own directory, own pass.
+    let layer_dir = root.join("layers");
+    if layer_dir.is_dir() {
+        let mut parsed: Vec<crate::service::catalog::layer::Layer> = Vec::new();
+        let mut entries: Vec<PathBuf> = match std::fs::read_dir(&layer_dir) {
+            Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.path())).collect(),
+            Err(e) => {
+                cat.problems.push(Problem {
+                    path: rel(root, &layer_dir),
+                    message: e.to_string(),
+                });
+                Vec::new()
+            }
+        };
+        entries.sort();
+        for p in entries {
+            if p.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                continue;
+            }
+            let stem = p
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            match std::fs::read_to_string(&p)
+                .map_err(|e| e.to_string())
+                .and_then(|t| crate::service::catalog::layer::Layer::from_yaml(&t))
+            {
+                Ok(l) if l.name != stem => cat.problems.push(Problem {
+                    path: rel(root, &p),
+                    message: format!("layer name '{}' does not match file stem '{stem}'", l.name),
+                }),
+                Ok(l) => parsed.push(l),
+                Err(message) => cat.problems.push(Problem {
+                    path: rel(root, &p),
+                    message,
+                }),
+            }
+        }
+        let (set, errors) = crate::service::catalog::layer::LayerSet::from_layers(parsed);
+        for message in errors {
+            cat.problems.push(Problem {
+                path: "layers".to_string(),
+                message,
+            });
+        }
+        // A member naming an unknown asset is a WARNING: the layer still
+        // resolves, matching load_dir's existing tolerance elsewhere.
+        for l in set.iter() {
+            for key in l.members.iter().chain(l.overrides.keys()) {
+                if let Some((kind, name)) = crate::service::catalog::layer::split_key(key) {
+                    if cat.find(kind, &name).is_none() {
+                        cat.problems.push(Problem {
+                            path: format!("layers/{}.yaml", l.name),
+                            message: format!("'{key}' is not in the catalog"),
+                        });
+                    }
+                }
+            }
+        }
+        cat.layers = set;
+    }
+
     Ok(cat)
 }
 
