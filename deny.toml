@@ -1,4 +1,4 @@
-# cargo-deny configuration for the Rust backend in src-tauri/.
+# cargo-deny configuration for the Rust workspace (crates/* and src-tauri).
 #
 # The cargo workspace root is the repository root (Cargo.toml); run `cargo deny check` from there.
 #

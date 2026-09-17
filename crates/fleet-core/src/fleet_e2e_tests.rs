@@ -6,7 +6,7 @@
 //!   `tmux_roundtrip`, which needs `tmux` on PATH:
 //!
 //!   ```text
-//!   cargo test --manifest-path src-tauri/Cargo.toml -- --ignored tmux_roundtrip --nocapture
+//!   cargo test -p fleet-core -- --ignored tmux_roundtrip --nocapture
 //!   ```
 
 use crate::service::sessions::{reconcile_sessions_with, ReconcileDeps};
@@ -335,7 +335,7 @@ async fn reconcile_recovers_a_host_once_it_answers_again() {
 /// that executor. Skipped by default; run with
 ///
 /// ```text
-/// cargo test --manifest-path src-tauri/Cargo.toml -- --ignored tmux_roundtrip --nocapture
+/// cargo test -p fleet-core -- --ignored tmux_roundtrip --nocapture
 /// ```
 ///
 /// The server is private via `TMUX_TMPDIR` (tmux puts its socket under it),

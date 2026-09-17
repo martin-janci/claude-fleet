@@ -46,6 +46,21 @@ jobs:
       - run: cargo deny check
         if: runner.os == 'Linux'
 
+  # The regression guard for the crate split: fleet-hub must build on a box
+  # with none of the Tauri system libraries. If this job fails with a
+  # gtk/webkit/pkg-config error, a Tauri dependency leaked into fleet-core.
+  hub-headless:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: hub-headless
+      - run: cargo build -p fleet-hub --locked
+      - run: cargo test -p fleet-core -p fleet-hub --locked
+
   frontend:
     strategy:
       fail-fast: false

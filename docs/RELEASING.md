@@ -12,7 +12,7 @@ and attaches them to a draft release for the owner to publish.
 
    ```bash
    git checkout main && git pull --ff-only
-   (cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test)
+   cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
    pnpm install --frozen-lockfile && pnpm run check && pnpm run test && pnpm run build
    ```
 
@@ -65,6 +65,13 @@ Publishing fires `docs.yml` (`release: published`), which rebuilds the rustdoc
 site. If a leg fails, fix and re-run the workflow from the same tag; the
 existing draft is reused and its assets replaced.
 
+### Hub image
+
+`.github/workflows/hub-image.yml` also runs on push of any `v*` tag: it
+builds and publishes the `fleet-hub` container image (independently of the
+desktop-bundle legs above and of the draft-release review step). See the
+workflow file for the image name/tag scheme.
+
 ### Signing caveat
 
 **Nothing is code-signed or notarized.** There is no Apple Developer ID for
@@ -98,7 +105,8 @@ https://v2.tauri.app/distribute/sign/macos/ and pass them via `env:` on the
 | `package.json` | `"version"` |
 | `src-tauri/tauri.conf.json` | `"version"` |
 | `src-tauri/Cargo.toml` | `version =` under `[package]` |
-| `src-tauri/Cargo.lock` | via `cargo update -p claude-fleet` (no dependency changes) |
+| `crates/fleet-hub/Cargo.toml` | `version =` under `[package]` |
+| `Cargo.lock` | via `cargo update -p claude-fleet -p fleet-hub` (no dependency changes) |
 | `CHANGELOG.md` | new `## [X.Y.Z] - YYYY-MM-DD` section under the header, bullets from `git log <last-tag>..HEAD` grouped `feat` → Added, `fix` → Fixed, `docs` → Documentation, everything else → Changed; plus a `[X.Y.Z]: …/releases/tag/vX.Y.Z` link reference at the bottom |
 
 Then it commits `chore(release): vX.Y.Z` and creates the annotated tag
@@ -113,9 +121,9 @@ Then it commits `chore(release): vX.Y.Z` and creates the annotated tag
 After a real run, before pushing:
 
 ```bash
-git show --stat HEAD              # exactly 5 files: 3 version files, Cargo.lock, CHANGELOG.md
+git show --stat HEAD              # exactly 6 files: 4 version files, Cargo.lock, CHANGELOG.md
 grep -n '"version"' package.json src-tauri/tauri.conf.json
-grep -n '^version' src-tauri/Cargo.toml
+grep -n '^version' src-tauri/Cargo.toml crates/fleet-hub/Cargo.toml
 git tag -n1 v0.3.0
 ```
 
@@ -136,7 +144,7 @@ do not edit it by hand. After changing any `#[tool(...)]` description or the
 `generate_handler!` command list, regenerate and commit it, or CI fails:
 
 ```bash
-REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_current
+REGEN_DOCS=1 cargo test -p fleet-core reference_is_current
 ```
 
 ## Conventional Commits

@@ -7,7 +7,7 @@ set -euo pipefail
 
 REPO_URL="https://github.com/martin-janci/claude-fleet"
 CRATE="claude-fleet"
-VERSION_FILES=(package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml)
+VERSION_FILES=(package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml crates/fleet-hub/Cargo.toml)
 
 die() { echo "release.sh: $*" >&2; exit 1; }
 
@@ -42,6 +42,7 @@ JS
 # --- 2. Cargo.lock follows Cargo.toml ----------------------------------------
 if [[ -z "${RELEASE_DRY_RUN:-}" ]]; then
   cargo update -p "$CRATE" --offline >/dev/null 2>&1 || cargo update -p "$CRATE"
+  cargo update -p fleet-hub --offline >/dev/null 2>&1 || cargo update -p fleet-hub
   echo "  Cargo.lock"
 fi
 

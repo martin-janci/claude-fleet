@@ -2,10 +2,15 @@
 # Local mirror of .github/workflows/ci.yml. Runs the same steps, in the same
 # order, so a green run here should mean a green run in CI:
 #
-#   rust job:      cargo fmt --check
-#                  cargo clippy --all-targets -- -D warnings
-#                  cargo test
+#   rust job:      cargo fmt --all --check
+#                  cargo clippy --workspace --all-targets -- -D warnings
+#                  cargo test --workspace
 #                  cargo deny check
+#                  cargo build -p fleet-hub --locked   (mirrors the hub-headless CI job)
+#                  On a box without the Tauri system libs (no gtk+-3.0 via
+#                  pkg-config), --rust-only instead runs a headless subset:
+#                  fmt, clippy/test/build scoped to fleet-core + fleet-hub,
+#                  and cargo deny check.
 #   frontend job:  pnpm install --frozen-lockfile
 #                  pnpm run check
 #                  pnpm run test
@@ -94,11 +99,22 @@ run_rust() {
     echo "ci-local: cargo-deny is not installed; run: cargo install cargo-deny --locked" >&2
     exit 1
   fi
+  if ! pkg-config --exists gtk+-3.0 2>/dev/null; then
+    echo "ci-local: no Tauri system libs (gtk+-3.0); running the headless subset only" >&2
+    step cargo fmt --all --check
+    step cargo clippy -p fleet-core -p fleet-hub --all-targets -- -D warnings
+    step cargo test -p fleet-core -p fleet-hub
+    step cargo deny check
+    step cargo build -p fleet-hub --locked
+    return
+  fi
   step cargo fmt --all --check
   step cargo clippy --workspace --all-targets -- -D warnings
   step cargo test --workspace
   # No --config: cargo-deny finds ./deny.toml from the repo root on its own.
   step cargo deny check
+  # Mirrors the hub-headless CI job (no Tauri libs needed).
+  step cargo build -p fleet-hub --locked
 }
 
 # --- frontend job ----------------------------------------------------------
