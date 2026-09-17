@@ -48,8 +48,10 @@ pub(crate) fn maybe_start_mcp(
             std::sync::Arc::clone(reg),
             std::sync::Arc::clone(tunnels),
             guards.clone(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             port,
             token,
+            Vec::new(),
         )
         .await;
         if r.is_ok() {

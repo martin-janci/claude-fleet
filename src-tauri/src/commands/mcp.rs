@@ -136,8 +136,10 @@ pub async fn mcp_configure(
             Arc::clone(&reg),
             Arc::clone(&tunnels),
             guards.inner().clone(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             port,
             token,
+            Vec::new(),
         )
         .await;
         let mut rt = lock(&runtime)?;

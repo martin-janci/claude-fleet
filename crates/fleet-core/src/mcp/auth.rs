@@ -137,27 +137,76 @@ pub fn is_loopback_host(value: &str) -> bool {
 /// True if an `Origin` header value is a loopback `http(s)` origin. Anything
 /// else — a remote origin, the opaque `null` origin, a non-http scheme — is
 /// treated as cross-origin and rejected.
+// Kept as a public, independently-tested special case of `origin_allowed`
+// (empty allowlist) even though production code now calls `check_origin`
+// directly; not currently called outside its own test.
+#[allow(dead_code)]
 pub fn origin_is_loopback(origin: &str) -> bool {
+    origin_allowed(origin, &[])
+}
+
+/// Lower-cased, trimmed allowlist entries (`host` or `host:port`), empties
+/// dropped. Built once at server start from the hub's configuration.
+pub fn normalize_allowed_hosts(list: &[String]) -> Vec<String> {
+    list.iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// The host part of a `Host`-header authority: brackets and port stripped,
+/// lower-cased.
+fn authority_host(value: &str) -> String {
+    let v = value.trim();
+    if let Some(rest) = v.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or("").to_ascii_lowercase();
+    }
+    v.split(':').next().unwrap_or(v).to_ascii_lowercase()
+}
+
+/// True when `value` is loopback or names an allowlisted host, matched as
+/// the full authority (`host:port`) or as the bare host.
+fn host_allowed(value: &str, allowed: &[String]) -> bool {
+    if is_loopback_host(value) {
+        return true;
+    }
+    let full = value.trim().to_ascii_lowercase();
+    let host = authority_host(value);
+    allowed.iter().any(|a| *a == full || *a == host)
+}
+
+/// True when an `Origin` is a loopback `http(s)` origin or one whose
+/// authority is allowlisted.
+fn origin_allowed(origin: &str, allowed: &[String]) -> bool {
     let after_scheme = origin
         .strip_prefix("http://")
         .or_else(|| origin.strip_prefix("https://"));
     match after_scheme {
-        Some(rest) => is_loopback_host(rest.split('/').next().unwrap_or(rest)),
+        Some(rest) => host_allowed(rest.split('/').next().unwrap_or(rest), allowed),
         None => false,
     }
 }
 
 /// Layer 1 — DNS-rebinding defense. An `Origin`/`Host` is validated only when
-/// present; a non-browser MCP client legitimately omits `Origin`. `Err(403)`
-/// on a cross-origin / rebound request.
-pub fn check_origin(headers: &HeaderMap) -> Result<(), StatusCode> {
+/// present; a non-browser MCP client legitimately omits `Origin`. Loopback is
+/// always accepted; a hub exposed at a public URL adds that URL's host to
+/// `allowed`. `Err(403)` on anything else.
+pub fn check_origin(headers: &HeaderMap, allowed: &[String]) -> Result<(), StatusCode> {
     if let Some(origin) = headers.get(header::ORIGIN) {
-        if !origin.to_str().map(origin_is_loopback).unwrap_or(false) {
+        if !origin
+            .to_str()
+            .map(|o| origin_allowed(o, allowed))
+            .unwrap_or(false)
+        {
             return Err(StatusCode::FORBIDDEN);
         }
     }
     if let Some(host) = headers.get(header::HOST) {
-        if !host.to_str().map(is_loopback_host).unwrap_or(false) {
+        if !host
+            .to_str()
+            .map(|h| host_allowed(h, allowed))
+            .unwrap_or(false)
+        {
             return Err(StatusCode::FORBIDDEN);
         }
     }
@@ -171,8 +220,9 @@ pub fn check_request(
     headers: &HeaderMap,
     master_token: &str,
     host_tokens: &[HostTokenRow],
+    allowed: &[String],
 ) -> Result<Caller, StatusCode> {
-    check_origin(headers)?;
+    check_origin(headers, allowed)?;
     let presented =
         bearer_token(headers.get(header::AUTHORIZATION)).ok_or(StatusCode::UNAUTHORIZED)?;
     resolve_token(presented, master_token, host_tokens).ok_or(StatusCode::UNAUTHORIZED)
@@ -322,14 +372,19 @@ mod tests {
             ("host", "127.0.0.1:4180"),
             ("authorization", "Bearer s3cret"),
         ]);
-        assert_eq!(check_request(&h, "s3cret", &[]), Ok(Caller::master()));
+        assert_eq!(check_request(&h, "s3cret", &[], &[]), Ok(Caller::master()));
     }
 
     #[test]
     fn check_request_identifies_host_token_callers() {
         let h = headers(&[("authorization", "Bearer tok-mef")]);
-        let caller =
-            check_request(&h, "s3cret", &[host_row("mefistos", "tok-mef", "readonly")]).unwrap();
+        let caller = check_request(
+            &h,
+            "s3cret",
+            &[host_row("mefistos", "tok-mef", "readonly")],
+            &[],
+        )
+        .unwrap();
         assert_eq!(caller.host_alias.as_deref(), Some("mefistos"));
         assert_eq!(caller.mode, TokenMode::Readonly);
     }
@@ -338,19 +393,19 @@ mod tests {
     fn check_request_allows_non_browser_client_without_origin() {
         // A CLI MCP client sends no Origin — only the token gates it.
         let h = headers(&[("authorization", "Bearer s3cret")]);
-        assert!(check_request(&h, "s3cret", &[]).is_ok());
+        assert!(check_request(&h, "s3cret", &[], &[]).is_ok());
     }
 
     #[test]
     fn check_request_rejects_wrong_token_with_401() {
         let h = headers(&[("host", "127.0.0.1:4180"), ("authorization", "Bearer nope")]);
         assert_eq!(
-            check_request(&h, "s3cret", &[]),
+            check_request(&h, "s3cret", &[], &[]),
             Err(StatusCode::UNAUTHORIZED)
         );
         let none = headers(&[("host", "127.0.0.1:4180")]);
         assert_eq!(
-            check_request(&none, "s3cret", &[]),
+            check_request(&none, "s3cret", &[], &[]),
             Err(StatusCode::UNAUTHORIZED)
         );
     }
@@ -363,14 +418,100 @@ mod tests {
             ("origin", "http://evil.com"),
             ("authorization", "Bearer s3cret"),
         ]);
-        assert_eq!(check_request(&h, "s3cret", &[]), Err(StatusCode::FORBIDDEN));
-        assert_eq!(check_origin(&h), Err(StatusCode::FORBIDDEN));
+        assert_eq!(
+            check_request(&h, "s3cret", &[], &[]),
+            Err(StatusCode::FORBIDDEN)
+        );
+        assert_eq!(check_origin(&h, &[]), Err(StatusCode::FORBIDDEN));
     }
 
     #[test]
     fn check_request_rejects_rebound_host_with_403() {
         // Host header carrying the attacker's domain (rebound to 127.0.0.1).
         let h = headers(&[("host", "evil.com"), ("authorization", "Bearer s3cret")]);
-        assert_eq!(check_request(&h, "s3cret", &[]), Err(StatusCode::FORBIDDEN));
+        assert_eq!(
+            check_request(&h, "s3cret", &[], &[]),
+            Err(StatusCode::FORBIDDEN)
+        );
+    }
+
+    fn allow_headers(host: &str, origin: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(header::HOST, host.parse().unwrap());
+        if let Some(o) = origin {
+            h.insert(header::ORIGIN, o.parse().unwrap());
+        }
+        h.insert(header::AUTHORIZATION, "Bearer s3cret".parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn allowlisted_host_and_origin_pass_others_still_403() {
+        let allowed = normalize_allowed_hosts(&["Fleet.Example.com".into()]);
+        // Bare host and port-qualified authority both match, case-insensitively.
+        assert!(check_request(
+            &allow_headers("fleet.example.com", None),
+            "s3cret",
+            &[],
+            &allowed
+        )
+        .is_ok());
+        assert!(check_request(
+            &allow_headers("FLEET.example.com:443", None),
+            "s3cret",
+            &[],
+            &allowed
+        )
+        .is_ok());
+        assert!(check_request(
+            &allow_headers("fleet.example.com", Some("https://fleet.example.com")),
+            "s3cret",
+            &[],
+            &allowed
+        )
+        .is_ok());
+        // Loopback keeps working with a non-empty list.
+        assert!(check_request(
+            &allow_headers("127.0.0.1:4180", None),
+            "s3cret",
+            &[],
+            &allowed
+        )
+        .is_ok());
+        // Not listed → 403 before the token is looked at.
+        assert_eq!(
+            check_request(
+                &allow_headers("evil.example.com", None),
+                "s3cret",
+                &[],
+                &allowed
+            ),
+            Err(StatusCode::FORBIDDEN)
+        );
+        assert_eq!(
+            check_request(
+                &allow_headers("fleet.example.com", Some("https://evil.example.com")),
+                "s3cret",
+                &[],
+                &allowed
+            ),
+            Err(StatusCode::FORBIDDEN)
+        );
+        // An empty list is today's behaviour: loopback only.
+        assert_eq!(
+            check_request(
+                &allow_headers("fleet.example.com", None),
+                "s3cret",
+                &[],
+                &[]
+            ),
+            Err(StatusCode::FORBIDDEN)
+        );
+    }
+
+    #[test]
+    fn normalize_allowed_hosts_trims_lowercases_and_drops_empties() {
+        let out = normalize_allowed_hosts(&[" A.Example.com ".into(), "".into(), "b:8443".into()]);
+        assert_eq!(out, vec!["a.example.com".to_string(), "b:8443".to_string()]);
     }
 }

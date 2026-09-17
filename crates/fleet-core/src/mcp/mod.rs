@@ -19,7 +19,7 @@ use crate::store::Store;
 use rmcp::transport::streamable_http_server::{
     session::never::NeverSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
@@ -121,6 +121,9 @@ pub fn generate_token() -> String {
 struct AuthState {
     master: Arc<String>,
     store: Arc<Mutex<Store>>,
+    /// Non-loopback `Host`/`Origin` values accepted besides loopback (see
+    /// `auth::check_origin`). Empty on the desktop.
+    allowed_hosts: Arc<Vec<String>>,
 }
 
 /// Pull `token=<v>` out of a raw query string. Tokens are hex, so no
@@ -154,7 +157,12 @@ async fn authorize(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         s.list_host_tokens().unwrap_or_default()
     };
-    let caller = match auth::check_request(request.headers(), &state.master, &host_tokens) {
+    let caller = match auth::check_request(
+        request.headers(),
+        &state.master,
+        &host_tokens,
+        &state.allowed_hosts,
+    ) {
         Ok(c) => c,
         // Header missing/unknown on /hook: try the legacy query form. Only
         // the MASTER token is accepted here — that is the only token the
@@ -220,21 +228,25 @@ pub(crate) fn streamable_service(
     )
 }
 
-/// Bind the listener and spawn the serve loop. Binds `127.0.0.1:<port>` only —
-/// never a routable address. Returns the server's cancellation token on
-/// success; an `Err` carries a human-readable bind failure (e.g. port in use).
+/// Bind the listener and spawn the serve loop. Returns the server's
+/// cancellation token on success; an `Err` carries a human-readable bind
+/// failure (e.g. port in use).
+// The desktop always passes loopback + an empty allowlist; only the hub
+// daemon (a later task) binds a routable address and a non-empty allowlist,
+// and only behind TLS or an explicit `--allow-plaintext`.
+#[allow(clippy::too_many_arguments)]
 pub async fn start(
     store: Arc<Mutex<Store>>,
     ssh: Arc<SshClient>,
     reg: Arc<CancellationRegistry>,
     tunnels: Arc<crate::service::tunnel::TunnelSupervisor>,
     guards: McpGuards,
+    bind: std::net::IpAddr,
     port: u16,
     token: String,
+    allowed_hosts: Vec<String>,
 ) -> Result<CancellationToken, String> {
-    // Localhost only. This is an invariant, not a configurable: a routable
-    // bind would expose fleet control to the network.
-    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let addr = SocketAddr::from((bind, port));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| format!("could not bind {addr}: {e}"))?;
@@ -249,6 +261,7 @@ pub async fn start(
         let auth_state = AuthState {
             master: Arc::new(token),
             store: Arc::clone(&store),
+            allowed_hosts: Arc::new(auth::normalize_allowed_hosts(&allowed_hosts)),
         };
         let tools = FleetTools::new(store, ssh, reg, tunnels, guards);
         let service = streamable_service(tools, serve_shutdown.child_token());
@@ -313,7 +326,8 @@ mod tests {
         };
         let auth_state = AuthState {
             master: Arc::new("s3cret".to_string()),
-            store,
+            store: Arc::clone(&store),
+            allowed_hosts: Arc::new(vec![]),
         };
         let app = build_app(any(|| async { "MCP_OK" }), hook_state, auth_state);
 
@@ -437,6 +451,47 @@ mod tests {
             hook_bad.contains("400"),
             "expected 400 on invalid worktree_path:\n{hook_bad}"
         );
+
+        // A second app with a non-empty allowlist: the allowlisted Host
+        // passes, an unlisted one still gets 403.
+        let hook_state2 = hooks::HookState {
+            store: Arc::clone(&store),
+            ssh: Arc::new(SshClient::new()),
+        };
+        let auth_state2 = AuthState {
+            master: Arc::new("s3cret".to_string()),
+            store,
+            allowed_hosts: Arc::new(vec!["fleet.example.com".to_string()]),
+        };
+        let app2 = build_app(any(|| async { "MCP_OK" }), hook_state2, auth_state2);
+        let listener2 = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr2 = listener2.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener2, app2).await.unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let allowed_post =
+            "POST /mcp HTTP/1.1\r\nHost: fleet.example.com\r\nAccept: application/json, \
+             text/event-stream\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\
+             Authorization: Bearer s3cret\r\nConnection: close\r\n\r\n{}";
+        let allowed_resp = round_trip(addr2, allowed_post).await;
+        assert!(
+            allowed_resp.contains("200 OK"),
+            "expected 200 for allowlisted Host:\n{allowed_resp}"
+        );
+
+        let other_post =
+            "POST /mcp HTTP/1.1\r\nHost: other.example.com\r\nAccept: application/json, \
+             text/event-stream\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\
+             Authorization: Bearer s3cret\r\nConnection: close\r\n\r\n{}";
+        let other_resp = round_trip(addr2, other_post).await;
+        assert!(
+            other_resp.contains("403"),
+            "expected 403 for non-allowlisted Host:\n{other_resp}"
+        );
     }
 
     #[test]
@@ -475,6 +530,7 @@ mod tests {
         let auth_state = AuthState {
             master: Arc::new("s3cret".to_string()),
             store: Arc::clone(&store),
+            allowed_hosts: Arc::new(vec![]),
         };
         let tools = FleetTools::new(
             store,
@@ -581,5 +637,25 @@ mod tests {
             !r.contains(r#""error":{"#),
             "must not be a JSON-RPC error:\n{r}"
         );
+    }
+
+    #[tokio::test]
+    async fn start_binds_the_requested_address() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let guards = McpGuards::new(Arc::new(|_| {}));
+        let shutdown = start(
+            store,
+            Arc::new(SshClient::new()),
+            crate::cancel::CancellationRegistry::new(),
+            Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
+            guards,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            0, // any free port is fine: we only check the bind succeeds
+            "tok".into(),
+            vec![],
+        )
+        .await;
+        assert!(shutdown.is_ok(), "{shutdown:?}");
+        shutdown.unwrap().cancel();
     }
 }
