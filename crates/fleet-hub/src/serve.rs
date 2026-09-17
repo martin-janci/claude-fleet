@@ -1,33 +1,32 @@
 //! The subcommands' bodies: opening the store, starting the same ticks and
 //! server the desktop starts, and stopping them on a signal.
 
-use crate::config::{resolve, HubOptions, Resolved};
+use crate::config::{resolve, resolve_data_dir, HubOptions, Resolved};
 use crate::out;
 use fleet_core::events::NoopEventBus;
 use fleet_core::mcp::{self, settings::ensure_master_token, McpGuards};
 use fleet_core::service::hub::{
     SETTING_ALLOWED_HOSTS, SETTING_BIND, SETTING_LOCAL_HOST, SETTING_PUBLIC_URL,
 };
+use fleet_core::service::projects::LOCAL_HOST;
 use fleet_core::store::Store;
 use std::collections::HashMap;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
-/// Resolve options against the settings in `<data-dir>/state.db` when it
-/// exists (a second `resolve` pass: the first has no store to read).
-fn resolve_with_store(
-    opts: &HubOptions,
-    env: &HashMap<String, String>,
-) -> Result<(Resolved, Arc<Mutex<Store>>), String> {
-    let first = resolve(opts, env, &|_| None)?;
-    std::fs::create_dir_all(&first.data_dir)
-        .map_err(|e| format!("create data dir {}: {e}", first.data_dir.display()))?;
+/// Open (creating when missing) `<data-dir>/state.db`. The data dir is the
+/// only option resolved without the store: everything else reads its stored
+/// `hub.*` values.
+fn open_store(opts: &HubOptions, env: &HashMap<String, String>) -> Result<Store, String> {
+    let data_dir = resolve_data_dir(opts, env);
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|e| format!("create data dir {}: {e}", data_dir.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&first.data_dir, std::fs::Permissions::from_mode(0o700));
+        let _ = std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700));
     }
-    let db_path = first.data_dir.join("state.db");
+    let db_path = data_dir.join("state.db");
     let store = Store::open_with_bus(&db_path, Arc::new(NoopEventBus)).map_err(|e| {
         format!(
             "failed to open the claude-fleet database at {}: {e}\n\
@@ -36,6 +35,16 @@ fn resolve_with_store(
         )
     })?;
     fleet_core::service::provision::set_private_mode(&db_path);
+    Ok(store)
+}
+
+/// Resolve options against the settings in the opened store, so the checks
+/// in `resolve` — the plaintext refusal above all — see the stored values.
+fn resolve_with_store(
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+) -> Result<(Resolved, Arc<Mutex<Store>>), String> {
+    let store = open_store(opts, env)?;
     let resolved = {
         let settings = |k: &str| store.get_setting(k).ok().flatten();
         resolve(opts, env, &settings)?
@@ -63,12 +72,25 @@ fn persist(store: &Mutex<Store>, r: &Resolved) -> Result<(), String> {
         if r.local_host { "true" } else { "false" },
     )?;
     if !r.local_host {
-        // A state.db copied from a desktop carries a `local` row; hide it so
-        // nothing lists or probes it (reconcile skips it regardless).
+        // A state.db copied from a desktop carries a `local` row. Hide it so
+        // nothing lists it, and mark it unreachable so nothing counts or polls
+        // it either (fleet_health, the account-usage tick); reconcile skips
+        // it regardless. `update_host_probe` is the only reachability setter;
+        // the row's versions and last ping are written back unchanged.
         let hosts = s.list_hosts().map_err(|e| format!("list hosts: {e}"))?;
-        if hosts.iter().any(|h| h.alias == "local") {
-            s.set_host_hidden("local", true)
+        if let Some(local) = hosts.iter().find(|h| h.alias == LOCAL_HOST) {
+            s.set_host_hidden(LOCAL_HOST, true)
                 .map_err(|e| format!("hide the local host: {e}"))?;
+            if local.reachable {
+                s.update_host_probe(
+                    LOCAL_HOST,
+                    false,
+                    local.claude_version.as_deref(),
+                    local.tmux_version.as_deref(),
+                    local.last_pinged_at.unwrap_or(0),
+                )
+                .map_err(|e| format!("mark the local host unreachable: {e}"))?;
+            }
         }
     }
     Ok(())
@@ -109,10 +131,9 @@ pub fn token(
     env: &HashMap<String, String>,
     regenerate: bool,
 ) -> Result<ExitCode, String> {
-    let (_r, store) = resolve_with_store(opts, env)?;
-    let s = store
-        .lock()
-        .map_err(|_| "store lock poisoned".to_string())?;
+    // Only the data dir matters here: `token` serves nothing, so the bind /
+    // plaintext checks in `resolve` do not apply.
+    let s = open_store(opts, env)?;
     if regenerate {
         s.set_setting(mcp::SETTING_TOKEN, &mcp::generate_token())
             .map_err(|e| e.to_string())?;
@@ -182,7 +203,9 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         );
     }));
 
-    let shutdown = mcp::start(
+    warn_if_confirm_destructive(&store);
+
+    let (shutdown, serve_task) = mcp::start_with_handle(
         Arc::clone(&store),
         Arc::clone(&ssh),
         Arc::clone(&reg),
@@ -220,9 +243,39 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     wait_for_signal().await?;
     tracing::info!("fleet-hub stopping");
     shutdown.cancel();
+    // Let in-flight requests drain before tearing down what they use.
+    match tokio::time::timeout(DRAIN_TIMEOUT, serve_task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(error = %e, "control API task ended abnormally"),
+        Err(_) => tracing::warn!(
+            timeout_secs = DRAIN_TIMEOUT.as_secs(),
+            "in-flight requests did not drain in time; exiting anyway"
+        ),
+    }
     tunnels.stop_all();
     ssh.shutdown_all();
     Ok(ExitCode::SUCCESS)
+}
+
+/// How long `serve` waits for in-flight requests after a stop signal.
+const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A state.db copied from a desktop can carry `mcp.confirm_destructive=true`;
+/// a hub has no approver, so every destructive tool would be refused. Say so
+/// once at startup (no behaviour change).
+fn warn_if_confirm_destructive(store: &Mutex<Store>) {
+    let on = store
+        .lock()
+        .ok()
+        .and_then(|s| mcp::settings::McpSettings::read(&s).ok())
+        .is_some_and(|m| m.confirm_destructive);
+    if on {
+        tracing::warn!(
+            setting = "mcp.confirm_destructive",
+            "mcp.confirm_destructive is on, but destructive tools cannot be approved on a hub \
+             (no desktop approver): they will be refused with E_CONFIRM_REQUIRED; turn the setting off"
+        );
+    }
 }
 
 async fn wait_for_signal() -> Result<(), String> {
@@ -288,8 +341,66 @@ mod tests {
             Some("b.example.com:8443")
         );
         assert_eq!(get(SETTING_LOCAL_HOST).as_deref(), Some("false"));
-        assert!(s.get_host_row("local").unwrap().unwrap().hidden);
+        let local = s.get_host_row("local").unwrap().unwrap();
+        assert!(local.hidden);
         assert!(!s.get_host_row("devbox").unwrap().unwrap().hidden);
+    }
+
+    #[test]
+    fn persist_marks_a_copied_local_row_unreachable() {
+        let (_dir, store) = store_with_local_row();
+        {
+            // As copied from a desktop: `local` was reachable there.
+            let s = store.lock().unwrap();
+            s.update_host_probe("local", true, Some("2.1.0"), Some("3.4"), 1234)
+                .unwrap();
+            s.update_host_probe("devbox", true, None, None, 1).unwrap();
+        }
+        persist(&store, &resolved(false)).unwrap();
+        let s = store.lock().unwrap();
+        let local = s.get_host_row("local").unwrap().unwrap();
+        assert!(local.hidden);
+        assert!(!local.reachable, "health and usage polling skip it");
+        assert_eq!(local.claude_version.as_deref(), Some("2.1.0"));
+        assert_eq!(local.last_pinged_at, Some(1234));
+        assert!(s.get_host_row("devbox").unwrap().unwrap().reachable);
+    }
+
+    #[test]
+    fn a_routable_bind_flag_is_checked_against_the_stored_public_url() {
+        // `init --public-url https://…` stored the URL; a later
+        // `serve --bind 0.0.0.0` must see it before the plaintext check.
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let s =
+                Store::open_with_bus(&dir.path().join("state.db"), Arc::new(NoopEventBus)).unwrap();
+            s.set_setting(SETTING_PUBLIC_URL, "https://fleet.example.com")
+                .unwrap();
+        }
+        let opts = HubOptions {
+            data_dir: Some(dir.path().to_path_buf()),
+            bind: Some("0.0.0.0".into()),
+            ..HubOptions::default()
+        };
+        let (r, _store) = resolve_with_store(&opts, &HashMap::new()).unwrap();
+        assert_eq!(r.public_url.as_deref(), Some("https://fleet.example.com"));
+    }
+
+    #[test]
+    fn token_ignores_a_stored_plaintext_bind() {
+        // `serve --bind 100.64.0.1 --allow-plaintext` persisted `hub.bind`;
+        // `token show` serves nothing, so it must not demand the flag.
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let s =
+                Store::open_with_bus(&dir.path().join("state.db"), Arc::new(NoopEventBus)).unwrap();
+            s.set_setting(SETTING_BIND, "100.64.0.1").unwrap();
+        }
+        let opts = HubOptions {
+            data_dir: Some(dir.path().to_path_buf()),
+            ..HubOptions::default()
+        };
+        assert!(token(&opts, &HashMap::new(), false).is_ok());
     }
 
     #[test]

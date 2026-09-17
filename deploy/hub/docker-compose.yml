@@ -4,9 +4,9 @@ services:
     restart: unless-stopped
     env_file: fleet-hub.env
     environment:
+      # Reached only by caddy on the compose network; the https:// public URL
+      # in fleet-hub.env (Caddy terminates TLS) permits the routable bind.
       FLEET_HUB_BIND: 0.0.0.0
-      # Plaintext only on the compose network; Caddy terminates TLS.
-      FLEET_HUB_ALLOW_PLAINTEXT: "1"
     volumes:
       - hub-data:/var/lib/fleet-hub
       - ./ssh:/home/fleet/.ssh

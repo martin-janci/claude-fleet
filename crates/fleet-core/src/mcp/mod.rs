@@ -268,6 +268,37 @@ pub async fn start(
     token: String,
     allowed_hosts: Vec<String>,
 ) -> Result<CancellationToken, String> {
+    start_with_handle(
+        store,
+        ssh,
+        reg,
+        tunnels,
+        guards,
+        bind,
+        port,
+        token,
+        allowed_hosts,
+    )
+    .await
+    .map(|(shutdown, _serve)| shutdown)
+}
+
+/// [`start`], also handing back the serve task, which finishes once in-flight
+/// requests have drained after the token is cancelled. `fleet-hub` awaits it
+/// on shutdown; the desktop drops it (dropping a `JoinHandle` detaches the
+/// task, it does not abort it).
+#[allow(clippy::too_many_arguments)]
+pub async fn start_with_handle(
+    store: Arc<Mutex<Store>>,
+    ssh: Arc<SshClient>,
+    reg: Arc<CancellationRegistry>,
+    tunnels: Arc<crate::service::tunnel::TunnelSupervisor>,
+    guards: McpGuards,
+    bind: std::net::IpAddr,
+    port: u16,
+    token: String,
+    allowed_hosts: Vec<String>,
+) -> Result<(CancellationToken, tokio::task::JoinHandle<()>), String> {
     let addr = SocketAddr::from((bind, port));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -278,7 +309,7 @@ pub async fn start(
     // Normalized once and shared: fleet's `authorize` layer and rmcp's own
     // Host check must admit exactly the same hosts.
     let allowed_hosts = auth::normalize_allowed_hosts(&allowed_hosts);
-    crate::rt::spawn(async move {
+    let serve_task = crate::rt::spawn(async move {
         let hook_state = hooks::HookState {
             store: Arc::clone(&store),
             ssh: Arc::clone(&ssh),
@@ -302,7 +333,7 @@ pub async fn start(
         tracing::info!("[mcp] control API stopped");
     });
 
-    Ok(shutdown)
+    Ok((shutdown, serve_task))
 }
 
 #[cfg(test)]

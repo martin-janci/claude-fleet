@@ -34,7 +34,7 @@ pub struct HubOptions {
     /// Treat this machine as a fleet host too [env: FLEET_HUB_LOCAL_HOST] [default: false]
     #[arg(long, action = clap::ArgAction::Set, global = true)]
     pub local_host: Option<bool>,
-    /// Permit a non-loopback bind with an http:// public URL (container-internal use only) [env: FLEET_HUB_ALLOW_PLAINTEXT]
+    /// Permit a non-loopback bind without an https:// public URL (plaintext http: container-internal or a private network only) [env: FLEET_HUB_ALLOW_PLAINTEXT]
     #[arg(long, global = true)]
     pub allow_plaintext: bool,
     /// Log directory [env: FLEET_HUB_LOG_DIR] [default: <data-dir>/logs]
@@ -68,10 +68,14 @@ impl Resolved {
     }
 }
 
-/// Platform default data dir (same app id as the desktop, so a copied
-/// `state.db` lands where the desktop would look for it on that OS).
+/// Platform default data dir under the hub's own app id (`fleet-hub`), never
+/// the desktop's (`claude-fleet`): a bare `fleet-hub init` on a machine that
+/// also runs the desktop must not open and rewrite its live `state.db`.
+/// `~/.local/share/fleet-hub` on Linux,
+/// `~/Library/Application Support/sk.rlt.fleet-hub` on macOS; migrating
+/// copies `state.db` in explicitly.
 pub fn default_data_dir() -> PathBuf {
-    directories::ProjectDirs::from("sk", "rlt", "claude-fleet")
+    directories::ProjectDirs::from("sk", "rlt", "fleet-hub")
         .map(|d| d.data_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("/var/lib/fleet-hub"))
 }
@@ -88,17 +92,22 @@ fn pick(
         .filter(|s| !s.is_empty())
 }
 
+/// The data dir alone (flag > env > default): it locates the store the other
+/// values are then resolved against, so it cannot depend on them.
+pub fn resolve_data_dir(opts: &HubOptions, env: &HashMap<String, String>) -> PathBuf {
+    opts.data_dir
+        .clone()
+        .or_else(|| env.get("FLEET_HUB_DATA_DIR").map(PathBuf::from))
+        .unwrap_or_else(default_data_dir)
+}
+
 /// `settings` reads a `settings` row by key (None when there is no store yet).
 pub fn resolve(
     opts: &HubOptions,
     env: &HashMap<String, String>,
     settings: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Resolved, String> {
-    let data_dir = opts
-        .data_dir
-        .clone()
-        .or_else(|| env.get("FLEET_HUB_DATA_DIR").map(PathBuf::from))
-        .unwrap_or_else(default_data_dir);
+    let data_dir = resolve_data_dir(opts, env);
 
     let bind_s = pick(
         opts.bind.clone(),
@@ -166,12 +175,14 @@ pub fn resolve(
         Some(v) => return Err(format!("local_host must be true or false, got '{v}'")),
     };
 
-    let plaintext_public = base.public && base.url.starts_with("http://");
+    // Only an https:// public URL means TLS sits in front of a routable bind;
+    // an http:// one, or none at all, is plaintext on the wire.
+    let tls_in_front = base.public && base.url.starts_with("https://");
     let allow_plaintext = opts.allow_plaintext
         || env
             .get("FLEET_HUB_ALLOW_PLAINTEXT")
             .is_some_and(|v| v == "1" || v == "true");
-    if !bind.is_loopback() && plaintext_public && !allow_plaintext {
+    if !bind.is_loopback() && !tls_in_front && !allow_plaintext {
         return Err(format!(
             "refusing to serve plaintext http on {bind}: use an https:// public URL, \
              bind to 127.0.0.1 behind a TLS proxy, or pass --allow-plaintext"
@@ -249,12 +260,16 @@ mod tests {
             _ => None,
         };
         let e = env(&[("FLEET_HUB_PORT", "6000"), ("FLEET_HUB_BIND", "10.0.0.2")]);
+        // Routable binds with no https public URL: plaintext must be allowed.
         let mut o = opts();
+        o.allow_plaintext = true;
         o.port = Some(7000);
         let r = resolve(&o, &e, &settings).unwrap();
         assert_eq!(r.port, 7000, "flag wins");
         assert_eq!(r.bind.to_string(), "10.0.0.2", "env beats setting");
-        let r = resolve(&opts(), &env(&[]), &settings).unwrap();
+        let mut o = opts();
+        o.allow_plaintext = true;
+        let r = resolve(&o, &env(&[]), &settings).unwrap();
         assert_eq!(r.port, 5000, "setting beats default");
         assert_eq!(r.bind.to_string(), "10.0.0.1");
     }
@@ -331,6 +346,17 @@ mod tests {
     }
 
     #[test]
+    fn default_data_dir_is_not_the_desktops() {
+        let dir = default_data_dir();
+        let last = dir.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            last != "claude-fleet" && last != "sk.rlt.claude-fleet",
+            "the hub must not open the desktop's state.db by default: {}",
+            dir.display()
+        );
+    }
+
+    #[test]
     fn plaintext_on_a_routable_bind_is_refused_unless_allowed() {
         let mut o = opts();
         o.bind = Some("0.0.0.0".into());
@@ -339,6 +365,16 @@ mod tests {
         assert!(e.contains("--allow-plaintext"), "{e}");
         o.allow_plaintext = true;
         assert!(resolve(&o, &env(&[]), &|_| None).is_ok());
+        // A routable bind with no public URL at all is plaintext too.
+        let mut bare = opts();
+        bare.bind = Some("0.0.0.0".into());
+        let e = resolve(&bare, &env(&[]), &|_| None).unwrap_err();
+        assert!(e.contains("--allow-plaintext"), "{e}");
+        bare.allow_plaintext = true;
+        assert!(resolve(&bare, &env(&[]), &|_| None).is_ok());
+        bare.allow_plaintext = false;
+        let allow_env = env(&[("FLEET_HUB_ALLOW_PLAINTEXT", "1")]);
+        assert!(resolve(&bare, &allow_env, &|_| None).is_ok());
         // https is always fine; loopback is always fine.
         o.allow_plaintext = false;
         o.public_url = Some("https://fleet.example.com".into());
