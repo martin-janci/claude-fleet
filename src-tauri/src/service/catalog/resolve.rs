@@ -45,12 +45,30 @@ fn merge_yaml(base: &mut serde_yaml::Value, over: &serde_yaml::Value) {
 /// Apply one override mapping to an asset by round-tripping its header+spec
 /// through YAML. `body` and `resources` are not part of `to_yaml`, so they
 /// are carried over explicitly.
+///
+/// An override may change an asset's *fields*, never its identity: a
+/// `name`-changing override is rejected (it would let one override key
+/// silently rename an asset out from under its own `<kind>/<name>` key, and
+/// potentially collide with another asset of the same name). The re-parsed
+/// asset is also re-validated with the same `Asset::validate` the loader
+/// uses, so an override cannot smuggle in a value `load_one` would have
+/// rejected at load time.
 fn apply_override(asset: &Asset, over: &serde_yaml::Value) -> Result<Asset, String> {
     let mut value: serde_yaml::Value =
         serde_yaml::from_str(&asset.to_yaml()).map_err(|e| e.to_string())?;
     merge_yaml(&mut value, over);
     let text = serde_yaml::to_string(&value).map_err(|e| e.to_string())?;
     let mut patched = Asset::from_yaml(Some(asset.kind()), &text)?;
+    if patched.header.name != asset.header.name {
+        return Err(format!(
+            "an override may not change an asset's name ('{}' to '{}')",
+            asset.header.name, patched.header.name
+        ));
+    }
+    let problems = patched.validate();
+    if !problems.is_empty() {
+        return Err(problems.join("; "));
+    }
     patched.body = asset.body.clone();
     patched.resources = asset.resources.clone();
     Ok(patched)
@@ -306,11 +324,67 @@ mod tests {
 
     #[test]
     fn layer_set_is_not_carried_into_the_resolved_catalog() {
-        // Guards against a layer ever reaching compute_host_plan.
-        let cat = catalog(&["a"]);
+        // Guards against a layer ever reaching compute_host_plan. The input
+        // catalog must actually carry a layer, or this proves nothing.
+        let mut cat = catalog(&["a"]);
         let role = lay("kind: layer\nname: r\naxis: role\nmembers:\n  - skill/a\n");
+        cat.layers = LayerSet::from_layers(vec![role.clone()]).0;
+        assert!(!cat.layers.is_empty());
         let r = resolve(&cat, &[&role], &[]);
         assert!(r.catalog.layers.is_empty());
-        let _ = LayerSet::default();
+    }
+
+    #[test]
+    fn the_no_layering_fast_path_also_strips_the_layer_set() {
+        // Same guard on the empty-chain path: every existing installation
+        // takes this path, so it must never leak a populated LayerSet
+        // through untouched.
+        let mut cat = catalog(&["a"]);
+        let role = lay("kind: layer\nname: r\naxis: role\nmembers:\n  - skill/a\n");
+        cat.layers = LayerSet::from_layers(vec![role]).0;
+        assert!(!cat.layers.is_empty());
+        let r = resolve(&cat, &[], &[]);
+        assert!(r.catalog.layers.is_empty());
+    }
+
+    #[test]
+    fn an_override_that_changes_the_name_is_refused_and_recorded_as_a_problem() {
+        let cat = catalog(&["a"]);
+        let role = lay("kind: layer\nname: r\naxis: role\nmembers:\n  - skill/a\n\
+             overrides:\n  skill/a:\n    name: b\n");
+        let r = resolve(&cat, &[&role], &[]);
+        // The asset survives unpatched, still named 'a' and still the only
+        // asset in the resolved catalog — the override never took effect.
+        assert_eq!(r.catalog.assets.len(), 1);
+        assert_eq!(r.catalog.assets[0].header.name, "a");
+        assert!(r.provenance["skill/a"].overridden_by.is_empty());
+        assert!(
+            r.catalog
+                .problems
+                .iter()
+                .any(|p| p.message.contains("name")),
+            "{:?}",
+            r.catalog.problems
+        );
+    }
+
+    #[test]
+    fn an_override_producing_an_invalid_asset_is_refused_and_recorded_as_a_problem() {
+        let cat = catalog(&["a"]);
+        let role = lay("kind: layer\nname: r\naxis: role\nmembers:\n  - skill/a\n\
+             overrides:\n  skill/a:\n    description: \"\"\n");
+        let r = resolve(&cat, &[&role], &[]);
+        // `Asset::validate` requires a non-empty description; the override
+        // is refused and the asset keeps its original, valid description.
+        assert_eq!(r.catalog.assets[0].header.description, "d");
+        assert!(r.provenance["skill/a"].overridden_by.is_empty());
+        assert!(
+            r.catalog
+                .problems
+                .iter()
+                .any(|p| p.message.contains("description")),
+            "{:?}",
+            r.catalog.problems
+        );
     }
 }
