@@ -317,6 +317,28 @@ pub fn compute_host_plan(
         if !filter.matches(kind, &name) {
             continue;
         }
+        if kind == Kind::PluginRef {
+            actions.push(Action {
+                kind: kind.as_str().to_string(),
+                name: name.clone(),
+                op: ActionOp::Noop,
+                reason: Some(
+                    "no longer in this host's layers; plugins are not removed automatically"
+                        .to_string(),
+                ),
+                files: Vec::new(),
+                merges: Vec::new(),
+                backup: false,
+                secrets: Vec::new(),
+                missing_secrets: Vec::new(),
+                plan: None,
+                expected: BTreeMap::new(),
+                secret_files: BTreeSet::new(),
+                remove_entry: None,
+                plugin: None,
+            });
+            continue;
+        }
         actions.push(Action {
             kind: kind.as_str().to_string(),
             name,
@@ -1227,6 +1249,32 @@ mod tests {
         );
         assert!(a.remove_entry.is_some());
         assert!(a.plan.is_none());
+    }
+
+    #[test]
+    fn a_dropped_plugin_ref_is_reported_but_never_removed() {
+        // The manifest remembers a plugin the (resolved) catalog no longer
+        // has. Uninstalling is slow and network-bound, so a context switch
+        // must not depend on it: report, never remove.
+        let manifest = manifest_with(&[("plugin_ref/graphify", "h")]);
+        let hp = plan_for(
+            &catalog_of(&[]),
+            &Claude,
+            &host_with(&[]),
+            &manifest,
+            &BTreeMap::new(),
+        );
+        let a = act(&hp, "graphify");
+        assert_eq!(a.op, ActionOp::Noop);
+        assert_eq!(a.kind, "plugin_ref");
+        assert!(
+            a.reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not removed automatically"),
+            "{:?}",
+            a.reason
+        );
     }
 
     #[test]
