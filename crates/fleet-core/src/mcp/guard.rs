@@ -73,6 +73,10 @@ pub const READONLY_TOOLS: &[&str] = &[
     // the controller's catalog repo working tree and is therefore mutating.
     "list_assets",
     "scan_assets",
+    // Paired clients: listing them observes who holds a credential. The
+    // stored digest never leaves the hub (see `ClientSummary`), so this is a
+    // read like any other. Minting and revoking are admin — below.
+    "list_clients",
 ];
 
 pub fn is_readonly_tool(name: &str) -> bool {
@@ -120,6 +124,12 @@ pub const ADMIN_TOOLS: &[&str] = &[
     // master token keeps a per-host token from setting values another
     // host's assets would pick up.
     "set_secret",
+    // Client credentials: minting one hands out fleet access and revoking
+    // one takes it away. A per-host token must not be able to issue itself a
+    // second identity, and a paired phone must not be able to pair another
+    // phone or revoke the operator's own client.
+    "pair_client",
+    "revoke_client",
 ];
 
 pub fn is_admin_tool(name: &str) -> bool {
@@ -138,11 +148,26 @@ pub fn broadcast_interval(raw: Option<String>) -> Duration {
 
 /// One-slot token bucket per key: a call is allowed when at least `interval`
 /// has elapsed since the key's last allowed call. Keys are caller labels
-/// (`master`, `host:<alias>`, `client:<name>`), so one chatty agent cannot
-/// starve another.
+/// (`master`, `host:<alias>`, `client:<name>`) and, since `/pair`, source
+/// addresses (`pair:<ip>`) — so one chatty agent cannot starve another.
+///
+/// The map is BOUNDED: `/pair` is unauthenticated, which made the key space
+/// remote-chosen for the first time, so every call drops entries older than
+/// the longest interval ever passed to [`RateLimiter::check`]. Past that age
+/// an entry can refuse nothing, so dropping it changes no decision; what it
+/// buys is that the map only ever holds the sources seen inside one interval
+/// instead of every source seen since the process started.
 #[derive(Default)]
 pub struct RateLimiter {
-    last: Mutex<HashMap<String, Instant>>,
+    last: Mutex<Buckets>,
+}
+
+#[derive(Default)]
+struct Buckets {
+    entries: HashMap<String, Instant>,
+    /// The largest `interval` any caller has asked for. An entry younger than
+    /// this may still refuse a call, so eviction may not touch it.
+    max_interval: Duration,
 }
 
 impl RateLimiter {
@@ -156,18 +181,36 @@ impl RateLimiter {
         self.check_at(key, Instant::now(), interval)
     }
 
+    /// Entries currently held. Test-only: the map is internal state, but its
+    /// SIZE is a property — see `rate_limiter_evicts_entries_older_than…`.
+    /// (`is_empty` would mean nothing here: an empty limiter refuses nothing.)
+    #[cfg(test)]
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .len()
+    }
+
     pub fn check_at(&self, key: &str, now: Instant, interval: Duration) -> Result<(), Duration> {
-        let mut last = self
+        let mut b = self
             .last
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(prev) = last.get(key) {
+        if let Some(prev) = b.entries.get(key) {
             let elapsed = now.saturating_duration_since(*prev);
             if elapsed < interval {
                 return Err(interval - elapsed);
             }
         }
-        last.insert(key.to_string(), now);
+        b.max_interval = b.max_interval.max(interval);
+        // Evict before inserting, so the fresh entry is never a candidate.
+        let horizon = b.max_interval;
+        b.entries
+            .retain(|_, t| now.saturating_duration_since(*t) < horizon);
+        b.entries.insert(key.to_string(), now);
         Ok(())
     }
 }
@@ -696,6 +739,44 @@ mod tests {
         assert!(rl.check_at("host:a", t0, Duration::ZERO).is_ok());
     }
 
+    /// `/pair` gave the limiter an UNAUTHENTICATED, remote-chosen key space
+    /// (one per source address), so the map must not grow for the life of the
+    /// process: every call drops entries older than the longest interval ever
+    /// passed to `check` — past that age an entry can refuse nothing.
+    #[test]
+    fn rate_limiter_evicts_entries_older_than_the_longest_interval() {
+        let rl = RateLimiter::new();
+        let t0 = Instant::now();
+        let short = Duration::from_secs(6);
+        assert!(rl.check_at("pair:1.2.3.4", t0, short).is_ok());
+        assert_eq!(rl.len(), 1);
+        // 7 s later the first address can no longer be refused, so it goes.
+        assert!(rl
+            .check_at("pair:5.6.7.8", t0 + Duration::from_secs(7), short)
+            .is_ok());
+        assert_eq!(rl.len(), 1, "the stale entry must have been evicted");
+        // The LONGEST interval seen is what bounds eviction — a 30 s bucket
+        // must not be dropped after 7 s just because another key uses 6 s.
+        let long = Duration::from_secs(30);
+        assert!(rl
+            .check_at("master", t0 + Duration::from_secs(7), long)
+            .is_ok());
+        assert!(rl
+            .check_at("pair:9.9.9.9", t0 + Duration::from_secs(20), short)
+            .is_ok());
+        assert_eq!(rl.len(), 3, "nothing is older than 30 s yet");
+        assert!(
+            rl.check_at("master", t0 + Duration::from_secs(20), long)
+                .is_err(),
+            "an entry inside its own interval still refuses"
+        );
+        // Past the longest interval everything but the fresh key is gone.
+        assert!(rl
+            .check_at("pair:0.0.0.1", t0 + Duration::from_secs(60), short)
+            .is_ok());
+        assert_eq!(rl.len(), 1);
+    }
+
     #[test]
     fn confirm_nonce_round_trip_is_single_use_and_tool_bound() {
         let pc = PendingConfirms::new();
@@ -777,10 +858,17 @@ mod tests {
             "hide_host",
             "apply_sync",
             "set_secret",
+            // Client credentials (Task 5): minting or revoking one is fleet
+            // admin, so neither a per-host token nor a paired phone reaches it.
+            "pair_client",
+            "revoke_client",
         ] {
             assert!(is_admin_tool(t), "{t}");
             assert!(!is_readonly_tool(t), "{t}");
         }
+        // Listing them is an ordinary read.
+        assert!(is_readonly_tool("list_clients"));
+        assert!(!is_admin_tool("list_clients"));
         for t in [
             "kill_session",
             "send_prompt",

@@ -375,12 +375,19 @@ pub(super) fn persist_audit(
 /// Describe the origin of a delivered prompt for the untrusted-content marker.
 /// A paired client is named as such: its text is not the controller's, and
 /// the receiving agent should see where it really came from.
+///
+/// The result is always ONE line. Client names are validated at pairing
+/// (`store::validate_client_name`), but this is the last line of defence for
+/// a row that predates that check: a CR/LF here would close the marker early
+/// and place attacker-chosen text above a marked prompt, where the receiving
+/// agent would read it as fleet's own words.
 pub(super) fn marker_origin(caller: &Caller) -> String {
-    match (&caller.host_alias, &caller.client) {
+    let origin = match (&caller.host_alias, &caller.client) {
         (Some(h), _) => format!("an agent on host {h}"),
         (None, Some(c)) => format!("the paired client {}", c.name),
         (None, None) => "the fleet controller".to_string(),
-    }
+    };
+    origin.replace(['\r', '\n'], " ")
 }
 
 /// Prefix `text` with the untrusted-content marker unless the caller is the
@@ -498,6 +505,34 @@ pub(super) struct SessionWithController {
     pub(super) is_controller: bool,
     #[serde(flatten)]
     pub(super) row: crate::store::SessionRow,
+}
+
+/// A paired client as the control API reports it. Built field by field from
+/// [`crate::store::ClientTokenRow`] on purpose: `token_sha256` is the one
+/// column that must never leave the hub, and a `#[serde(skip)]` on the row
+/// would be one derive away from leaking it through some other serializer.
+/// Adding a column to the row therefore cannot silently publish it here.
+#[derive(serde::Serialize)]
+pub(super) struct ClientSummary {
+    pub(super) id: i64,
+    pub(super) name: String,
+    pub(super) mode: String,
+    pub(super) created_at: i64,
+    pub(super) last_seen_at: Option<i64>,
+    pub(super) revoked_at: Option<i64>,
+}
+
+impl From<crate::store::ClientTokenRow> for ClientSummary {
+    fn from(r: crate::store::ClientTokenRow) -> Self {
+        Self {
+            id: r.id,
+            name: r.name,
+            mode: r.mode,
+            created_at: r.created_at,
+            last_seen_at: r.last_seen_at,
+            revoked_at: r.revoked_at,
+        }
+    }
 }
 
 /// Slim row returned by `list_sessions` when `summary: true` (the default).
@@ -860,17 +895,20 @@ pub(super) const QUICK_TOOLS: &[&str] = &[
     "inbox",
     "list_accounts",
     "list_assets",
+    "list_clients",
     "list_hosts",
     "list_projects",
     "list_sessions",
     "list_tasks",
     "list_worktrees",
+    "pair_client",
     "peek_session",
     "peer_status",
     "register_self",
     "related_sessions",
     "remove_host",
     "rename_session",
+    "revoke_client",
     "set_secret",
     "repo_branches",
     "repo_changes",

@@ -22,6 +22,7 @@ mod test_support;
 mod timeline;
 mod usage;
 
+pub use clients::{validate_client_mode, validate_client_name, CLIENT_MODES};
 pub use rows::*;
 
 pub struct Store {

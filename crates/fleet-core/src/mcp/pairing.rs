@@ -52,12 +52,95 @@ const MAX_BODY: usize = 4 * 1024;
 const UNKNOWN_PEER: &str = "unknown";
 
 /// One minted, not-yet-used pairing code.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PairingRequest {
     pub code: String,
     pub name: String,
     pub mode: String,
     pub expires_at: Instant,
+}
+
+/// The code is a credential: a `{:?}` in a log line or an error message must
+/// not spell it out. Everything else about a pairing is safe to print.
+impl std::fmt::Debug for PairingRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PairingRequest")
+            .field("code", &"<redacted>")
+            .field("name", &self.name)
+            .field("mode", &self.mode)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+/// The rate-limit bucket for one `POST /pair` attempt.
+///
+/// The budget is per source address, so the address has to be the real one.
+/// The shipped compose topology puts Caddy in front of the hub, which makes
+/// every request's TCP peer the proxy: one bucket for the whole internet, and
+/// anyone could hold the operator's phone at 429 by guessing codes. So when —
+/// and only when — the peer is a loopback or private address (i.e. plausibly
+/// that front end) the `X-Forwarded-For` chain is believed, and then only its
+/// LAST hop: that is the one the trusted proxy appended itself, while every
+/// earlier hop is whatever the client claimed. From a routable peer the
+/// header is attacker-chosen — honouring it would hand a flooder a fresh
+/// bucket per request — so the peer itself is the key.
+pub(crate) fn limiter_key(
+    peer: Option<std::net::IpAddr>,
+    headers: &axum::http::HeaderMap,
+) -> String {
+    let Some(peer) = peer else {
+        return UNKNOWN_PEER.to_string();
+    };
+    if !is_trusted_front_end(peer) {
+        return peer.to_string();
+    }
+    forwarded_last_hop(headers).unwrap_or_else(|| peer.to_string())
+}
+
+/// The last `X-Forwarded-For` hop, when it parses as an IP address. Several
+/// header instances are read as one chain, so the last value of the last
+/// header wins — that is the hop the nearest proxy appended.
+fn forwarded_last_hop(headers: &axum::http::HeaderMap) -> Option<String> {
+    let last = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .rfind(|h| !h.is_empty())?;
+    // A bracketed IPv6 form (`[::1]:443`) and a `host:port` v4 form both show
+    // up behind some proxies; anything that is not a bare address is refused
+    // rather than guessed at, and the peer is used instead.
+    last.parse::<std::net::IpAddr>()
+        .ok()
+        .map(|ip| ip.to_string())
+}
+
+/// Whether `ip` may be believed when it forwards an address: loopback, or a
+/// private / link-local / unique-local address. That is where the shipped
+/// compose topology puts the reverse proxy. Deliberately NOT a configurable
+/// allowlist: the only thing this decides is which bucket an attempt is
+/// counted against, and a wrong answer costs a shared bucket, not access.
+fn is_trusted_front_end(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    // `::ffff:10.0.0.1` is the same machine as `10.0.0.1`.
+    let ip = match ip {
+        IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(v6)),
+        v4 => v4,
+    };
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            // fc00::/7 (unique local) and fe80::/10 (link local); `is_unique_local`
+            // is still unstable, so the prefixes are spelled out.
+            v6.is_loopback() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+    }
 }
 
 /// What the registry stores per code (the code itself is the map key).
@@ -197,8 +280,10 @@ pub struct PairState {
     /// The hub's public URL, or its loopback base — echoed as `hub`.
     pub base_url: Arc<String>,
     /// Minimum spacing between two attempts from one address.
-    /// [`ATTEMPT_INTERVAL`] in production; tests dial it down.
-    pub attempt_interval: Duration,
+    /// [`ATTEMPT_INTERVAL`] in production; tests dial it down. `pub(crate)`
+    /// so only this crate's tests can weaken the budget — an embedder must
+    /// not be able to switch it off.
+    pub(crate) attempt_interval: Duration,
 }
 
 impl PairState {
@@ -224,6 +309,49 @@ pub struct PairBody {
     pub code: String,
 }
 
+/// The page a camera scan lands on. Deliberately inert: no JavaScript, no
+/// auto-redeem, no secret. The code is in the URL **fragment**, which the
+/// browser never sends, so this page could not redeem it even if it wanted
+/// to — and the claude-fleet client on the device, which does read the
+/// fragment, is what the reader is pointed at. Without it a scan would get a
+/// bare `405 Method Not Allowed` and look broken.
+const PAIR_PAGE: &str = r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>claude-fleet pairing</title>
+<style>
+ :root { color-scheme: light dark }
+ body { margin: 0; padding: 2rem 1.25rem; font: 16px/1.55 system-ui, sans-serif; max-width: 34rem }
+ h1 { font-size: 1.25rem; margin: 0 0 1rem }
+ p { margin: 0 0 1rem }
+ .muted { opacity: .7; font-size: .875rem }
+</style></head><body>
+<h1>claude-fleet pairing</h1>
+<p>This link pairs a device with a claude-fleet hub.</p>
+<p><strong>Open the claude-fleet app on this device</strong> and scan the code
+again from inside it. The app reads the pairing code out of this link and
+exchanges it for a credential of its own.</p>
+<p class="muted">The code is in the part of the address after the
+<code>#</code>, which your browser never sends to the hub, so this page cannot
+pair anything by itself. A pairing code can be used once and expires within
+minutes.</p>
+</body></html>
+"#;
+
+/// `GET /pair` — the static page above. Unauthenticated like the POST, and
+/// for the same reason: whoever scans the QR has no credential yet.
+pub async fn handle_pair_page() -> Response {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        PAIR_PAGE,
+    )
+        .into_response()
+}
+
 /// The one answer every bad code gets: unknown, already used and expired are
 /// indistinguishable, and nothing in the body or the log names the code.
 fn invalid_code() -> Response {
@@ -246,11 +374,13 @@ pub async fn handle_pair(
     axum::extract::State(state): axum::extract::State<PairState>,
     request: axum::extract::Request,
 ) -> Response {
-    let peer = request
-        .extensions()
-        .get::<axum::extract::ConnectInfo<SocketAddr>>()
-        .map(|c| c.0.ip().to_string())
-        .unwrap_or_else(|| UNKNOWN_PEER.to_string());
+    let peer = limiter_key(
+        request
+            .extensions()
+            .get::<axum::extract::ConnectInfo<SocketAddr>>()
+            .map(|c| c.0.ip()),
+        request.headers(),
+    );
     // Spend the attempt budget before parsing anything: a flood of guesses
     // must cost the hub a hash-map probe, not a body read.
     if let Err(left) = state
@@ -291,13 +421,18 @@ pub async fn handle_pair(
     match inserted {
         Ok(row) => {
             tracing::info!(client = %row.name, mode = %row.mode, "[mcp] paired a client");
-            axum::Json(serde_json::json!({
-                "token": token,
-                "name": row.name,
-                "mode": row.mode,
-                "hub": state.base_url.as_str(),
-            }))
-            .into_response()
+            // The ONE response that ever carries the plaintext token. Tell
+            // every cache between here and the phone to keep no copy of it.
+            (
+                [(axum::http::header::CACHE_CONTROL, "no-store")],
+                axum::Json(serde_json::json!({
+                    "token": token,
+                    "name": row.name,
+                    "mode": row.mode,
+                    "hub": state.base_url.as_str(),
+                })),
+            )
+                .into_response()
         }
         Err(e) => {
             // The code is spent either way — mint a new one. The usual cause
@@ -385,6 +520,67 @@ mod tests {
         assert_eq!(p.len(), 2, "the expired code must have been swept");
         assert!(p.consume(&live.code).is_some(), "a live code still works");
         assert_eq!(p.len(), 1, "consuming frees the slot");
+    }
+
+    /// A `PairingRequest` travels through the tool layer and could land in a
+    /// `{:?}` log line or an error message; the code is a credential, so its
+    /// `Debug` shows a placeholder.
+    #[test]
+    fn debug_never_prints_the_code() {
+        let p = PendingPairings::new();
+        let req = p.mint("phone", "full", Duration::from_secs(600));
+        let rendered = format!("{req:?}");
+        assert!(
+            !rendered.contains(&req.code),
+            "the code must not appear in Debug output: {rendered}"
+        );
+        assert!(rendered.contains("phone"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
+
+    /// The attempt budget is keyed on the source address. Behind the shipped
+    /// compose topology the TCP peer is Caddy, so every phone on the internet
+    /// would share one bucket and anyone could hold the operator's phone at
+    /// 429. `X-Forwarded-For` fixes that — but only when the peer really is a
+    /// front end: from a routable peer the header is attacker-chosen and
+    /// would hand a flooder a fresh bucket per request.
+    #[test]
+    fn the_forwarded_key_is_trusted_only_from_a_loopback_or_private_peer() {
+        let hdrs = |v: &str| {
+            let mut h = axum::http::HeaderMap::new();
+            h.insert("x-forwarded-for", v.parse().unwrap());
+            h
+        };
+        let ip = |s: &str| Some(s.parse::<std::net::IpAddr>().unwrap());
+        // Loopback and private peers are the proxy: the LAST hop is the one
+        // it appended itself; earlier hops are the client's own claim.
+        assert_eq!(
+            limiter_key(ip("127.0.0.1"), &hdrs("9.9.9.9, 203.0.113.7")),
+            "203.0.113.7"
+        );
+        assert_eq!(
+            limiter_key(ip("172.18.0.4"), &hdrs("203.0.113.8")),
+            "203.0.113.8"
+        );
+        assert_eq!(limiter_key(ip("::1"), &hdrs("203.0.113.9")), "203.0.113.9");
+        // A routable peer's header is ignored — the peer is the key.
+        assert_eq!(
+            limiter_key(ip("198.51.100.4"), &hdrs("203.0.113.7")),
+            "198.51.100.4"
+        );
+        // Garbage from a trusted peer falls back to the peer, never to a
+        // bucket an attacker chose.
+        assert_eq!(
+            limiter_key(ip("127.0.0.1"), &hdrs("not-an-ip")),
+            "127.0.0.1"
+        );
+        assert_eq!(limiter_key(ip("127.0.0.1"), &hdrs("")), "127.0.0.1");
+        // No header, and no peer at all.
+        assert_eq!(
+            limiter_key(ip("127.0.0.1"), &axum::http::HeaderMap::new()),
+            "127.0.0.1"
+        );
+        assert_eq!(limiter_key(None, &hdrs("203.0.113.7")), UNKNOWN_PEER);
     }
 
     /// Codes are minted per request, so two clients never share one.

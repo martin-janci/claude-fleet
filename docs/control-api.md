@@ -161,6 +161,14 @@ Index by area (names only; see the reference for details):
 - **Orchestration** — `wait_for_session`, `session_transcript`, `run_prompt`,
   `dispatch_task`, `wait_for_task`, `list_tasks`, `cancel_task`,
   `set_session_tags`.
+- **Paired clients** — `pair_client` (mint a single-use pairing code and the
+  URL to show as a QR; master token only), `list_clients` (the paired devices
+  and what each one's token may do — the stored token digest is never
+  returned), `revoke_client` (revoke one by name; master token only). A
+  paired client is never the master, so every tool in this group — like the
+  rest of fleet admin — stays out of a phone's reach. The `fleet-hub pair`,
+  `fleet-hub client list` and `fleet-hub client revoke` commands are thin
+  wrappers around these three.
 
 A typical loop: `list_sessions` to see state → `new_session` to spawn one →
 `run_prompt` to steer it and get the reply back (or `send_prompt` →

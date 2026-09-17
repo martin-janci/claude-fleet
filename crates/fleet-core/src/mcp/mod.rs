@@ -285,7 +285,12 @@ fn build_app(
         .route("/healthz", axum::routing::get(healthz))
         .route(
             "/pair",
-            axum::routing::post(pairing::handle_pair).with_state(pair_state),
+            // GET is the page a camera scan lands on (static, no JavaScript,
+            // no secret — the code lives in the fragment, which the browser
+            // never sends); POST is the exchange itself.
+            axum::routing::get(pairing::handle_pair_page)
+                .post(pairing::handle_pair)
+                .with_state(pair_state),
         )
         .merge(authorized)
 }
@@ -643,8 +648,19 @@ mod tests {
         let paired_token = json_field(&paired, "token");
         assert_eq!(paired_token.len(), 64, "a 256-bit token:\n{paired}");
         assert!(
-            paired_token.chars().all(|c| c.is_ascii_hexdigit()),
-            "lowercase hex token:\n{paired}"
+            paired_token
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "the token must be LOWERCASE hex — the stored digest is, and an \
+             uppercase one would never match:\n{paired}"
+        );
+        // The one response that ever carries the plaintext token must not be
+        // written to a proxy or browser cache.
+        assert!(
+            paired
+                .to_ascii_lowercase()
+                .contains("cache-control: no-store"),
+            "the token response must be no-store:\n{paired}"
         );
         assert_eq!(json_field(&paired, "name"), "kiosk");
         assert_eq!(json_field(&paired, "mode"), "readonly");
@@ -653,6 +669,27 @@ mod tests {
         assert!(
             !paired.contains(&minted.code),
             "the pairing code must not be echoed:\n{paired}"
+        );
+
+        // A camera scan opens `GET /pair`, which must explain what to do
+        // rather than answer 405. No secret is in it: the code lives in the
+        // URL fragment, which a browser never sends.
+        let page = round_trip(
+            addr,
+            "GET /pair HTTP/1.1\r\nHost: phone.invalid\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            page.contains("200 OK"),
+            "expected 200 on GET /pair:\n{page}"
+        );
+        assert!(
+            page.to_ascii_lowercase().contains("text/html"),
+            "GET /pair must answer HTML:\n{page}"
+        );
+        assert!(
+            !page.to_ascii_lowercase().contains("<script"),
+            "the pairing page must carry no JavaScript:\n{page}"
         );
 
         // Used, never-minted and expired are one and the same answer.

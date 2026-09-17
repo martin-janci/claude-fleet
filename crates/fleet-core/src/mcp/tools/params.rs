@@ -645,3 +645,37 @@ pub struct SetSecretParams {
     #[serde(default)]
     pub host_alias: Option<String>,
 }
+
+// --- paired clients (phones, browsers) -------------------------------------
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct PairClientParams {
+    /// Name for the client, shown in `list_clients` and in the
+    /// untrusted-content marker on anything it sends. 1–64 characters, no
+    /// control characters, and not a name a live client already holds.
+    pub name: String,
+    /// What the client's token may do: `full` (drive sessions across the
+    /// fleet) or `readonly` (observe only). Default `full`. Fleet-admin tools
+    /// stay out of reach either way.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Seconds the pairing code stays valid. Default 600, at most 3600. The
+    /// code also dies on first use.
+    #[serde(default)]
+    pub ttl_s: Option<u64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ListClientsParams {
+    /// Also return clients whose token has been revoked (kept for the audit
+    /// trail). Default false — live clients only.
+    #[serde(default)]
+    pub include_revoked: bool,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RevokeClientParams {
+    /// Name of the live client whose token to revoke. Its next request is
+    /// refused; the name becomes free to pair again.
+    pub name: String,
+}
