@@ -203,9 +203,33 @@ mod tests {
 
     #[test]
     fn no_layers_resolves_to_the_whole_catalog() {
-        let cat = catalog(&["a", "b"]);
+        let mut cat = catalog(&["a", "b"]);
+        cat.problems.push(crate::service::catalog::model::Problem {
+            path: "skills/broken/asset.yaml".into(),
+            message: "boom".into(),
+        });
+        cat.head = "deadbeef".into();
+        cat.loaded_at = 12345;
+
         let r = resolve(&cat, &[], &[]);
-        assert_eq!(r.catalog.assets.len(), 2);
+
+        // Not just the count: the exact two assets, unchanged, in order —
+        // this is the pure test of the branch's backward-compat guarantee,
+        // and a `resolve` that returned two different assets of the same
+        // length must fail it.
+        let names: Vec<&str> = r
+            .catalog
+            .assets
+            .iter()
+            .map(|a| a.header.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["a", "b"]);
+        assert_eq!(r.provenance, BTreeMap::new());
+        assert_eq!(r.excluded, BTreeMap::new());
+        // Everything else about the catalog passes through unchanged too.
+        assert_eq!(r.catalog.problems, cat.problems);
+        assert_eq!(r.catalog.head, cat.head);
+        assert_eq!(r.catalog.loaded_at, cat.loaded_at);
     }
 
     #[test]
