@@ -38,6 +38,17 @@ fn check_name(name: &str) -> Result<(), IpcError> {
     }
 }
 
+fn check_layer_name(name: &str) -> Result<(), IpcError> {
+    if is_valid_name(name) {
+        Ok(())
+    } else {
+        Err(IpcError::new(
+            codes::E_INVALID,
+            format!("invalid layer name '{name}'"),
+        ))
+    }
+}
+
 fn check_resource_path(rel_path: &str) -> Result<(), IpcError> {
     if catalog::repo::valid_resource_rel_path(rel_path) {
         Ok(())
@@ -108,6 +119,22 @@ pub struct SetHostLayersArgs {
     pub role: Option<String>,
     #[serde(default)]
     pub contexts: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct LayerTemplateArgs {
+    pub name: String,
+    pub axis: catalog::layer::Axis,
+}
+
+#[derive(serde::Deserialize)]
+pub struct WriteLayerArgs {
+    pub layer: catalog::layer::Layer,
+}
+
+#[derive(serde::Deserialize)]
+pub struct LayerRef {
+    pub name: String,
 }
 
 #[tauri::command]
@@ -185,6 +212,30 @@ pub fn catalog_set_host_layers(
         &args.contexts.iter().map(String::as_str).collect::<Vec<_>>(),
         &store,
     )
+}
+
+#[tauri::command]
+pub fn catalog_layer_template(args: LayerTemplateArgs) -> Result<catalog::layer::Layer, IpcError> {
+    check_layer_name(&args.name)?;
+    Ok(author::layer_template(&args.name, args.axis))
+}
+
+#[tauri::command]
+pub fn catalog_write_layer(
+    args: WriteLayerArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<String, IpcError> {
+    check_layer_name(&args.layer.name)?;
+    author::write_layer(&args.layer, &store)
+}
+
+#[tauri::command]
+pub fn catalog_delete_layer(
+    args: LayerRef,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<String, IpcError> {
+    check_layer_name(&args.name)?;
+    author::delete_layer(&args.name, &store)
 }
 
 #[tauri::command]
