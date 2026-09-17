@@ -179,7 +179,7 @@ Parameters: `alias`
 
 ### `provision_hosts`
 
-Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks, and this fleet's MCP server entry (with a per-host bearer token) into every reachable host's ~/.claude.json (reverse SSH tunnel for remote hosts). rotate=true mints fresh per-host tokens. Returns a per-host status list; each host must restart Claude to load the server.
+Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks, and this fleet's MCP server entry (with a per-host bearer token) into every reachable host's ~/.claude.json (reverse SSH tunnel for remote hosts when the hub is loopback-only; a hub with a public URL is reached directly). rotate=true mints fresh per-host tokens. Returns a per-host status list; each host must restart Claude to load the server.
 
 Parameters: `rotate`
 

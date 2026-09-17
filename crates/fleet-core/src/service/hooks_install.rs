@@ -9,6 +9,7 @@
 //! the remote one (`provision::provision_hook`).
 
 use crate::ipc_error::{codes, lock, IpcError};
+use crate::service::hub::HubBase;
 use crate::store::Store;
 use std::sync::Mutex;
 
@@ -16,19 +17,14 @@ use std::sync::Mutex;
 /// server answers in milliseconds; a down server must not stall a turn.
 const HOOK_TIMEOUT_SECS: u32 = 5;
 
-/// The fleet `/hook` URL for a given port. Identical on every host: on a
-/// remote host `127.0.0.1:<port>` is the reverse tunnel's loopback end.
-pub fn hook_url(port: u16) -> String {
-    format!("http://127.0.0.1:{port}/hook")
-}
-
-/// One Claude Code `type: "http"` hook entry. The bearer token rides in an
-/// `Authorization` header — never in a process argv (SEC-3) — and the
-/// settings file that carries it is written 0600.
-pub fn hook_entry(port: u16, token: &str) -> serde_json::Value {
+/// One Claude Code `type: "http"` hook entry pointing at `hook_url`
+/// (`HubBase::hook_url()`). The bearer token rides in an `Authorization`
+/// header — never in a process argv (SEC-3) — and the settings file that
+/// carries it is written 0600.
+pub fn hook_entry(hook_url: &str, token: &str) -> serde_json::Value {
     serde_json::json!({
         "type": "http",
-        "url": hook_url(port),
+        "url": hook_url,
         "headers": { "Authorization": format!("Bearer {token}") },
         "timeout": HOOK_TIMEOUT_SECS
     })
@@ -75,17 +71,19 @@ pub const FLEET_HOOK_EVENTS: &[(&str, &str)] = &[
 /// UserPromptSubmit + PostToolUse(EnterWorktree|ExitWorktree) http hooks
 /// installed/refreshed.
 ///
-/// Any prior fleet hook entries pointing at the same port URL — the current
-/// `type: "http"` form OR the pre-Track-B `curl … /hook?token=` command form
-/// — are stripped first so re-running stays idempotent and upgrades old
-/// installs in place. Other hooks (e.g. the user's own tsc pre-commit) are
+/// Any prior fleet hook entries are stripped first so re-running stays
+/// idempotent and upgrades old installs in place: an http entry pointing at
+/// `hook_url`, any fleet-shaped http entry (URL ending in `/hook` with a
+/// `Bearer` `Authorization` header — so a base-URL change never leaves a
+/// stale hook behind), and the pre-Track-B `curl … /hook?token=` command
+/// form for `hook_url`. Other hooks (e.g. the user's own tsc pre-commit) are
 /// preserved verbatim.
 ///
 /// Shared by the local `install_fleet_hook` command (via [`install_hook_at`])
 /// and `provision::provision_hook` for remote hosts.
 pub fn merge_hook_into_settings_json(
     existing: &str,
-    port: u16,
+    hook_url: &str,
     token: &str,
 ) -> Result<String, IpcError> {
     let mut settings: serde_json::Value = if existing.trim().is_empty() {
@@ -111,7 +109,7 @@ pub fn merge_hook_into_settings_json(
         ));
     }
 
-    let fleet_prefix = hook_url(port);
+    let fleet_prefix = hook_url.to_string();
 
     let strip_fleet = |arr: &serde_json::Value| -> serde_json::Value {
         let items = arr.as_array().cloned().unwrap_or_default();
@@ -122,10 +120,15 @@ pub fn merge_hook_into_settings_json(
                     let hooks_arr = block.get("hooks").and_then(|h| h.as_array());
                     hooks_arr.is_none_or(|hs| {
                         !hs.iter().any(|h| {
-                            let url_match = h
-                                .get("url")
-                                .and_then(|u| u.as_str())
-                                .is_some_and(|u| u.starts_with(&fleet_prefix));
+                            let url = h.get("url").and_then(|u| u.as_str());
+                            let bearer = h
+                                .get("headers")
+                                .and_then(|hd| hd.get("Authorization"))
+                                .and_then(|a| a.as_str())
+                                .is_some_and(|a| a.starts_with("Bearer "));
+                            let url_match = url.is_some_and(|u| {
+                                u.starts_with(&fleet_prefix) || (bearer && u.ends_with("/hook"))
+                            });
                             let cmd_match = h
                                 .get("command")
                                 .and_then(|c| c.as_str())
@@ -150,7 +153,7 @@ pub fn merge_hook_into_settings_json(
         let mut arr = strip_fleet(hooks.get(*event).unwrap_or(&serde_json::json!([])));
         arr.as_array_mut().unwrap().push(serde_json::json!({
             "matcher": matcher,
-            "hooks": [hook_entry(port, token)]
+            "hooks": [hook_entry(hook_url, token)]
         }));
         hooks.insert((*event).to_string(), arr);
     }
@@ -205,7 +208,7 @@ pub enum HookInstall {
 /// replaced.
 pub fn install_hook_at(
     settings_path: &std::path::Path,
-    port: u16,
+    hook_url: &str,
     token: &str,
 ) -> Result<HookInstall, IpcError> {
     let existing = if settings_path.exists() {
@@ -215,7 +218,7 @@ pub fn install_hook_at(
         String::new()
     };
 
-    let merged = merge_hook_into_settings_json(&existing, port, token)?;
+    let merged = merge_hook_into_settings_json(&existing, hook_url, token)?;
     if merged == existing {
         return Ok(HookInstall::Unchanged);
     }
@@ -242,19 +245,19 @@ pub fn install_hook_at(
 /// enable itself; the Settings button still reports the error verbatim.
 /// Skipped when `~/.claude` does not exist, i.e. Claude Code was never run
 /// on this machine, so fleet does not create a config dir nobody uses.
-pub fn auto_install_local_hook(store: &Mutex<Store>, port: u16) {
+pub fn auto_install_local_hook(store: &Mutex<Store>, base: &HubBase) {
     let result = (|| -> Result<Option<HookInstall>, IpcError> {
         let path = local_settings_path()?;
         if !path.parent().is_some_and(std::path::Path::is_dir) {
             return Ok(None);
         }
         let token = local_hook_token(store)?;
-        install_hook_at(&path, port, &token).map(Some)
+        install_hook_at(&path, &base.hook_url(), &token).map(Some)
     })();
     match result {
         Ok(Some(HookInstall::Written)) => {
             tracing::info!(
-                port,
+                url = %base.hook_url(),
                 "[mcp] installed the fleet hook in local ~/.claude/settings.json"
             );
         }
@@ -279,7 +282,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".claude").join("settings.json");
         assert_eq!(
-            install_hook_at(&path, 4180, "tok").unwrap(),
+            install_hook_at(&path, "http://127.0.0.1:4180/hook", "tok").unwrap(),
             HookInstall::Written
         );
         let first = std::fs::read_to_string(&path).unwrap();
@@ -288,7 +291,7 @@ mod tests {
         assert!(!path.with_extension("json.fleet-bak").exists());
         // Second run: nothing to change, file untouched.
         assert_eq!(
-            install_hook_at(&path, 4180, "tok").unwrap(),
+            install_hook_at(&path, "http://127.0.0.1:4180/hook", "tok").unwrap(),
             HookInstall::Unchanged
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
@@ -302,7 +305,7 @@ mod tests {
         let user = r#"{"permissions":{"allow":["Bash(ls)"]},"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"notify-send done"}]}]}}"#;
         std::fs::write(&path, user).unwrap();
         assert_eq!(
-            install_hook_at(&path, 4180, "tok").unwrap(),
+            install_hook_at(&path, "http://127.0.0.1:4180/hook", "tok").unwrap(),
             HookInstall::Written
         );
         let v: serde_json::Value =
@@ -326,13 +329,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         std::fs::write(&path, "{ not json").unwrap();
-        assert!(install_hook_at(&path, 4180, "tok").is_err());
+        assert!(install_hook_at(&path, "http://127.0.0.1:4180/hook", "tok").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
     }
 
     #[test]
     fn hook_entry_is_an_http_hook_with_bearer_header_and_no_token_in_url() {
-        let e = hook_entry(4180, "tok");
+        let e = hook_entry("http://127.0.0.1:4180/hook", "tok");
         assert_eq!(e["type"], "http");
         assert_eq!(e["url"], "http://127.0.0.1:4180/hook");
         assert_eq!(e["headers"]["Authorization"], "Bearer tok");
@@ -346,7 +349,8 @@ mod tests {
 
     #[test]
     fn hook_block_installs_all_six_events_with_their_matchers() {
-        let merged = merge_hook_into_settings_json("", 4180, "tok").unwrap();
+        let merged =
+            merge_hook_into_settings_json("", "http://127.0.0.1:4180/hook", "tok").unwrap();
         let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
         let expect = [
             ("Stop", ""),
@@ -372,7 +376,8 @@ mod tests {
             "permission_prompt|elicitation_dialog|elicitation_url_dialog|quota_auto_resume_stale|quota_auto_resume_disabled|quota_auto_resume_fired"
         );
         // Re-running is idempotent for the new events too.
-        let again = merge_hook_into_settings_json(&merged, 4180, "tok").unwrap();
+        let again =
+            merge_hook_into_settings_json(&merged, "http://127.0.0.1:4180/hook", "tok").unwrap();
         let v2: serde_json::Value = serde_json::from_str(&again).unwrap();
         for (event, _) in expect {
             assert_eq!(v2["hooks"][event].as_array().unwrap().len(), 1, "{event}");
@@ -381,7 +386,7 @@ mod tests {
 
     #[test]
     fn merge_hook_into_empty_settings() {
-        let out = merge_hook_into_settings_json("", 4180, "tok").unwrap();
+        let out = merge_hook_into_settings_json("", "http://127.0.0.1:4180/hook", "tok").unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         let stop = v["hooks"]["Stop"].as_array().unwrap();
         assert_eq!(stop.len(), 1);
@@ -406,17 +411,19 @@ mod tests {
     fn merge_hook_adds_user_prompt_submit_to_a_pre_track_e_install() {
         // A host provisioned before Track E has only Stop + PostToolUse; a
         // re-provision must add UserPromptSubmit once and keep it idempotent.
-        let pre = merge_hook_into_settings_json("", 4180, "tok").unwrap();
+        let pre = merge_hook_into_settings_json("", "http://127.0.0.1:4180/hook", "tok").unwrap();
         let mut v: serde_json::Value = serde_json::from_str(&pre).unwrap();
         v["hooks"]
             .as_object_mut()
             .unwrap()
             .remove("UserPromptSubmit");
         let stripped = serde_json::to_string_pretty(&v).unwrap();
-        let out = merge_hook_into_settings_json(&stripped, 4180, "tok").unwrap();
+        let out =
+            merge_hook_into_settings_json(&stripped, "http://127.0.0.1:4180/hook", "tok").unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["hooks"]["UserPromptSubmit"].as_array().unwrap().len(), 1);
-        let again = merge_hook_into_settings_json(&out, 4180, "tok").unwrap();
+        let again =
+            merge_hook_into_settings_json(&out, "http://127.0.0.1:4180/hook", "tok").unwrap();
         assert_eq!(out, again);
     }
 
@@ -428,11 +435,12 @@ mod tests {
         let stale = serde_json::json!({
             "hooks": { "PostToolUse": [{
                 "matcher": "WorktreeCreate",
-                "hooks": [hook_entry(4180, "old")]
+                "hooks": [hook_entry("http://127.0.0.1:4180/hook", "old")]
             }] }
         })
         .to_string();
-        let out = merge_hook_into_settings_json(&stale, 4180, "tok").unwrap();
+        let out =
+            merge_hook_into_settings_json(&stale, "http://127.0.0.1:4180/hook", "tok").unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         let ptu = v["hooks"]["PostToolUse"].as_array().unwrap();
         assert_eq!(ptu.len(), 1, "{ptu:?}");
@@ -440,7 +448,7 @@ mod tests {
         assert!(!out.contains("WorktreeCreate"));
         assert_eq!(
             out,
-            merge_hook_into_settings_json(&out, 4180, "tok").unwrap()
+            merge_hook_into_settings_json(&out, "http://127.0.0.1:4180/hook", "tok").unwrap()
         );
     }
 
@@ -455,7 +463,8 @@ mod tests {
           },
           "otherTopLevel": {"keep": true}
         }"#;
-        let out = merge_hook_into_settings_json(existing, 4180, "tok").unwrap();
+        let out =
+            merge_hook_into_settings_json(existing, "http://127.0.0.1:4180/hook", "tok").unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
 
         // User's tsc hook survives.
@@ -474,7 +483,8 @@ mod tests {
 
         // Re-running with same port replaces fleet's entries instead of
         // duplicating them.
-        let out2 = merge_hook_into_settings_json(&out, 4180, "tok2").unwrap();
+        let out2 =
+            merge_hook_into_settings_json(&out, "http://127.0.0.1:4180/hook", "tok2").unwrap();
         let v2: serde_json::Value = serde_json::from_str(&out2).unwrap();
         let ptu2 = v2["hooks"]["PostToolUse"].as_array().unwrap();
         let fleet_count = ptu2
@@ -498,7 +508,8 @@ mod tests {
             .unwrap();
         assert_eq!(fleet_hdr, "Bearer tok2");
         // Byte-for-byte idempotent on a third run with the same token.
-        let out3 = merge_hook_into_settings_json(&out2, 4180, "tok2").unwrap();
+        let out3 =
+            merge_hook_into_settings_json(&out2, "http://127.0.0.1:4180/hook", "tok2").unwrap();
         assert_eq!(out2, out3);
     }
 
@@ -514,7 +525,8 @@ mod tests {
             }]
           }
         }"#;
-        let out = merge_hook_into_settings_json(legacy, 4180, "new").unwrap();
+        let out =
+            merge_hook_into_settings_json(legacy, "http://127.0.0.1:4180/hook", "new").unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         let stop = v["hooks"]["Stop"].as_array().unwrap();
         assert_eq!(stop.len(), 1, "legacy entry must be replaced: {stop:?}");
@@ -527,14 +539,38 @@ mod tests {
         // A corrupted settings.json must never be replaced with `{}` — that
         // would wipe the user's permissions / env / own hooks. The merge
         // errors before any write and names the file.
-        let err = merge_hook_into_settings_json("not json at all", 4180, "tok").unwrap_err();
+        let err =
+            merge_hook_into_settings_json("not json at all", "http://127.0.0.1:4180/hook", "tok")
+                .unwrap_err();
         assert_eq!(err.code, "E_PROVISION");
         assert!(err.message.contains("settings.json"), "{}", err.message);
         // A truncated file is malformed too.
-        let err =
-            merge_hook_into_settings_json(r#"{"hooks": {"Stop": ["#, 4180, "tok").unwrap_err();
+        let err = merge_hook_into_settings_json(
+            r#"{"hooks": {"Stop": ["#,
+            "http://127.0.0.1:4180/hook",
+            "tok",
+        )
+        .unwrap_err();
         assert_eq!(err.code, "E_PROVISION");
         // A non-object root is refused as well (existing E_PARSE path).
-        assert!(merge_hook_into_settings_json("[1,2]", 4180, "tok").is_err());
+        assert!(
+            merge_hook_into_settings_json("[1,2]", "http://127.0.0.1:4180/hook", "tok").is_err()
+        );
+    }
+
+    #[test]
+    fn merge_hook_with_a_public_base_writes_that_url() {
+        let out =
+            merge_hook_into_settings_json("", "https://fleet.example.com/hook", "tok").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v["hooks"]["Stop"][0]["hooks"][0]["url"],
+            "https://fleet.example.com/hook"
+        );
+        // Re-merging under a different base replaces the fleet entries (no duplicates).
+        let out2 =
+            merge_hook_into_settings_json(&out, "http://127.0.0.1:4180/hook", "tok").unwrap();
+        let v2: serde_json::Value = serde_json::from_str(&out2).unwrap();
+        assert_eq!(v2["hooks"]["Stop"].as_array().unwrap().len(), 1);
     }
 }

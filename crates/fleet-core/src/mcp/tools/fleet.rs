@@ -134,7 +134,8 @@ impl FleetTools {
     #[tool(description = "Install fleet skills, the Stop / UserPromptSubmit / \
         EnterWorktree http hooks, and this fleet's MCP server entry (with a per-host bearer \
         token) into every reachable host's ~/.claude.json (reverse SSH tunnel \
-        for remote hosts). rotate=true mints fresh per-host tokens. Returns a \
+        for remote hosts when the hub is loopback-only; a hub with a public URL \
+        is reached directly). rotate=true mints fresh per-host tokens. Returns a \
         per-host status list; each host must restart Claude to load the \
         server.")]
     pub(super) async fn provision_hosts(
@@ -142,15 +143,15 @@ impl FleetTools {
         Parameters(p): Parameters<ProvisionHostsParams>,
     ) -> Result<CallToolResult, McpError> {
         audit("provision_hosts", &format!("rotate={}", p.rotate));
-        let port = {
+        let base = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            crate::mcp::settings::configured_port(&s).map_err(to_mcp_err)?
+            crate::service::hub::HubBase::read(&s).map_err(to_mcp_err)?
         };
         let res = crate::service::provision::provision_hosts(
             &self.store,
             &self.ssh,
             &self.tunnels,
-            port,
+            &base,
             p.rotate,
         )
         .await

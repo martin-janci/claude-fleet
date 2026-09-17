@@ -2,6 +2,7 @@
 
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
+use crate::service::hub::HubBase;
 use crate::service::tunnel::TunnelSupervisor;
 use crate::shell::quote;
 use crate::ssh::SshExec;
@@ -35,25 +36,25 @@ Use the **claude-fleet-control** skill to operate sessions over the fleet MCP se
 If you run inside a fleet tmux session, use the **fleet-friendly-name** skill to
 label this session; it defines when to fire and how to look up your `host_alias`.";
 
-/// Install the skill + merge the MCP entry on one host. `url` is the MCP
+/// Install the skill + merge the MCP entry on one host. `base.mcp_url()` is the MCP
 /// endpoint that host should use; `token` is that host's own bearer token
 /// (see [`resolve_host_token`]). Reads `~/.claude.json`, merges (preserving
 /// siblings), backs it up, writes it back. Parse errors abort BEFORE any
 /// write. Files that carry the token are written with `umask 077` and
 /// `chmod 600` (SEC-2).
 ///
-/// `mcp_port` is also installed as a Stop / PostToolUse(WorktreeCreate)
-/// `type: "http"` hook in `~/.claude/settings.json` so the host's Claude Code
-/// can notify fleet over the reverse tunnel — without this, safe-kill on
-/// remote hosts never finalizes (the marker check is gated on the Stop hook
-/// firing). On a remote host `127.0.0.1:<mcp_port>` IS the tunnel's loopback
-/// end (see `tunnel_argv`), so the same URL works on every host.
+/// `base.hook_url()` is also installed as fleet's `type: "http"` hooks in
+/// `~/.claude/settings.json` so the host's Claude Code can notify fleet —
+/// without this, safe-kill on remote hosts never finalizes (the marker check
+/// is gated on the Stop hook firing). For a loopback hub,
+/// `127.0.0.1:<port>` on a remote host IS the reverse tunnel's loopback end
+/// (see `tunnel_argv`), so the same URL works on every host; a public hub's
+/// URL is reached directly.
 pub async fn provision_one(
     ssh: &dyn SshExec,
     host: &str,
-    url: &str,
+    base: &HubBase,
     token: &str,
-    mcp_port: u16,
 ) -> Result<(), IpcError> {
     // 1. Skills (live-discovered, no restart). Both ship from the repo so
     //    every fleet host gets the same shared copy.
@@ -72,7 +73,7 @@ pub async fn provision_one(
     provision_claude_md(ssh, host).await?;
     // 2. MCP entry: read → merge (preserve siblings) → back up → write.
     let existing = read_host_file(ssh, host, CLAUDE_JSON).await?;
-    let merged = merge_mcp_entry(&existing, url, token)?; // errors before any write
+    let merged = merge_mcp_entry(&existing, &base.mcp_url(), token)?; // errors before any write
     if !existing.trim().is_empty() {
         // The backup carries the previous token too — same mode.
         write_host_file_secret(
@@ -89,26 +90,26 @@ pub async fn provision_one(
     provision_tmux_clipboard(ssh, host).await?;
     // 4. Stop / WorktreeCreate hooks. Required for safe-kill finalization on
     //    any host that runs Claude Code.
-    provision_hook(ssh, host, mcp_port, token).await?;
+    provision_hook(ssh, host, &base.hook_url(), token).await?;
     Ok(())
 }
 
 const SETTINGS_JSON: &str = "~/.claude/settings.json";
 
 /// Merge fleet's Stop + PostToolUse(WorktreeCreate) http hooks into the
-/// host's `~/.claude/settings.json`. Idempotent — re-running replaces fleet
-/// entries pointing at the same `mcp_port` and leaves the user's own hooks
-/// alone. The block carries the host's bearer token, so the file is written
+/// host's `~/.claude/settings.json`. Idempotent — re-running replaces fleet's
+/// entries (whatever base URL they pointed at) and leaves the user's own
+/// hooks alone. The block carries the host's bearer token, so the file is written
 /// 0600.
 pub async fn provision_hook(
     ssh: &dyn SshExec,
     host: &str,
-    mcp_port: u16,
+    hook_url: &str,
     token: &str,
 ) -> Result<(), IpcError> {
     let existing = read_host_file(ssh, host, SETTINGS_JSON).await?;
     // Errors (malformed JSON → E_PROVISION) fire BEFORE any write.
-    let merged = super::hooks_install::merge_hook_into_settings_json(&existing, mcp_port, token)?;
+    let merged = super::hooks_install::merge_hook_into_settings_json(&existing, hook_url, token)?;
     if !existing.trim().is_empty() {
         // The file carries the user's permissions/env/hooks: back it up
         // first, like ~/.claude.json.
@@ -156,22 +157,23 @@ pub fn commit_host_token(
 }
 
 /// Provision ONE host end to end with its own token: resolve/mint → write
-/// files → persist the token → ensure the tunnel (remote) → mark
+/// files → persist the token → ensure the tunnel (remote host, loopback hub) → mark
 /// provisioned. Shared by [`provision_hosts`] and the per-host Rotate action.
 pub async fn provision_host_with_token(
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
     tunnels: &Arc<TunnelSupervisor>,
     host: &str,
-    mcp_port: u16,
+    base: &HubBase,
     rotate: bool,
 ) -> Result<(), IpcError> {
     let (token, minted) = resolve_host_token(store, host, rotate)?;
-    let url = format!("http://127.0.0.1:{mcp_port}/mcp");
-    provision_one(ssh, host, &url, &token, mcp_port).await?;
+    provision_one(ssh, host, base, &token).await?;
     commit_host_token(store, host, &token, minted)?;
-    if host != "local" {
-        tunnels.ensure(host, mcp_port, mcp_port);
+    // A public hub is reached directly; only a loopback hub needs the
+    // reverse tunnel so the host's 127.0.0.1:<port> lands on this machine.
+    if host != "local" && !base.public {
+        tunnels.ensure(host, base.port, base.port);
     }
     if let Ok(s) = store.lock() {
         let _ = s.set_host_provisioned(host, true);
@@ -268,14 +270,15 @@ pub struct HostProvisionResult {
 }
 
 /// Provision every non-hidden host, each with its OWN bearer token (reused
-/// unless `rotate`). `local` gets a direct localhost URL + no tunnel; remote
-/// hosts get the reverse tunnel + a localhost:<mcp_port> URL. Per-host
-/// failures never abort the others.
+/// unless `rotate`). Every host is pointed at `base`; for a loopback hub the
+/// remote hosts also get the reverse tunnel that makes its localhost URL
+/// work there (`local` never needs one, nor does any host of a public hub).
+/// Per-host failures never abort the others.
 pub async fn provision_hosts(
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
     tunnels: &Arc<TunnelSupervisor>,
-    mcp_port: u16,
+    base: &HubBase,
     rotate: bool,
 ) -> Result<Vec<HostProvisionResult>, IpcError> {
     let hosts = {
@@ -295,7 +298,7 @@ pub async fn provision_hosts(
             });
             continue;
         }
-        match provision_host_with_token(store, ssh, tunnels, &h.alias, mcp_port, rotate).await {
+        match provision_host_with_token(store, ssh, tunnels, &h.alias, base, rotate).await {
             Ok(()) => {
                 results.push(HostProvisionResult {
                     host: h.alias,
@@ -314,16 +317,20 @@ pub async fn provision_hosts(
 }
 
 /// Re-establish tunnels for already-provisioned remote hosts (app start / MCP
-/// re-enable). Does NOT re-write config.
+/// re-enable). Does NOT re-write config. A no-op for a public hub, whose
+/// hosts reach it directly.
 pub fn reestablish_tunnels(
     store: &Mutex<Store>,
     tunnels: &Arc<TunnelSupervisor>,
-    mcp_port: u16,
+    base: &HubBase,
 ) -> Result<(), IpcError> {
+    if base.public {
+        return Ok(());
+    }
     let hosts = { lock(store)?.list_hosts()? };
     for h in hosts {
         if h.provisioned && h.alias != "local" && !h.hidden {
-            tunnels.ensure(&h.alias, mcp_port, mcp_port);
+            tunnels.ensure(&h.alias, base.port, base.port);
         }
     }
     Ok(())
@@ -1019,6 +1026,10 @@ mod tests {
     const URL: &str = "http://127.0.0.1:4180/mcp";
     const TOKEN: &str = "tok-s3cret-0123456789abcdef";
     const PORT: u16 = 4180;
+
+    fn base() -> HubBase {
+        HubBase::loopback(PORT)
+    }
     const HOME: &str = "/home/fake";
 
     /// A host with nothing on it yet: every read comes back empty (the
@@ -1061,7 +1072,8 @@ mod tests {
     }
 
     fn expected_settings() -> String {
-        crate::service::hooks_install::merge_hook_into_settings_json("", PORT, TOKEN).unwrap()
+        crate::service::hooks_install::merge_hook_into_settings_json("", &base().hook_url(), TOKEN)
+            .unwrap()
     }
 
     /// The three (or four, first time) steps [`write_host_file_secret`]
@@ -1186,7 +1198,7 @@ mod tests {
     #[tokio::test]
     async fn provision_one_fresh_host_issues_the_exact_sequence() {
         let fake = fresh_host();
-        provision_one(&fake, "h1", URL, TOKEN, PORT).await.unwrap();
+        provision_one(&fake, "h1", &base(), TOKEN).await.unwrap();
         let calls = fake.calls();
         assert!(calls.iter().all(|c| c.host == "h1"));
         let steps: Vec<Step> = calls.iter().map(step_of).collect();
@@ -1231,7 +1243,7 @@ mod tests {
     #[tokio::test]
     async fn provision_one_second_run_is_idempotent_and_non_destructive() {
         let fake = provisioned_host();
-        provision_one(&fake, "h1", URL, TOKEN, PORT).await.unwrap();
+        provision_one(&fake, "h1", &base(), TOKEN).await.unwrap();
         let calls = fake.calls();
         assert_quoting_invariants(&calls);
         let steps: Vec<Step> = calls.iter().map(step_of).collect();
@@ -1366,7 +1378,7 @@ mod tests {
             Match::script(&remote_read_script(SETTINGS_JSON)),
             Reply::ok("{ \"hooks\": [ oops"),
         );
-        let err = provision_one(&fake, "h1", URL, TOKEN, PORT)
+        let err = provision_one(&fake, "h1", &base(), TOKEN)
             .await
             .unwrap_err();
         assert_eq!(err.code, "E_PROVISION");
@@ -1397,7 +1409,7 @@ mod tests {
             Match::script(&remote_read_script(CLAUDE_JSON)),
             Reply::ok("{not json"),
         );
-        let err = provision_one(&fake, "h1", URL, TOKEN, PORT)
+        let err = provision_one(&fake, "h1", &base(), TOKEN)
             .await
             .unwrap_err();
         assert_eq!(err.code, "E_PROVISION");
@@ -1424,7 +1436,7 @@ mod tests {
             Match::script_contains("mkdir -p \"$HOME\"/'.claude/skills/claude-fleet-control'"),
             Reply::fail(1, "mkdir: cannot create directory: Read-only file system"),
         );
-        let err = provision_one(&fake, "h1", URL, TOKEN, PORT)
+        let err = provision_one(&fake, "h1", &base(), TOKEN)
             .await
             .unwrap_err();
         assert_eq!(err.code, "E_PROVISION");
@@ -1469,7 +1481,7 @@ mod tests {
             Reply::ok("not json"),
         );
         let tunnels = quiet_tunnels();
-        let results = provision_hosts(&store, &fake, &tunnels, PORT, false)
+        let results = provision_hosts(&store, &fake, &tunnels, &base(), false)
             .await
             .unwrap();
         let status = |h: &str| {
@@ -1517,7 +1529,7 @@ mod tests {
         store.lock().unwrap().insert_host("h", Some("h")).unwrap();
         let tunnels = quiet_tunnels();
         let fake = fresh_host();
-        provision_host_with_token(&store, &fake, &tunnels, "h", PORT, false)
+        provision_host_with_token(&store, &fake, &tunnels, "h", &base(), false)
             .await
             .unwrap();
         let first = store
@@ -1534,7 +1546,7 @@ mod tests {
             Match::script(&remote_read_script(SETTINGS_JSON)),
             Reply::ok("{broken"),
         );
-        let err = provision_host_with_token(&store, &failing, &tunnels, "h", PORT, true)
+        let err = provision_host_with_token(&store, &failing, &tunnels, "h", &base(), true)
             .await
             .unwrap_err();
         assert_eq!(err.code, "E_PROVISION");
@@ -1549,7 +1561,7 @@ mod tests {
 
         // Rotation that succeeds persists the new token the host received.
         let ok = provisioned_host();
-        provision_host_with_token(&store, &ok, &tunnels, "h", PORT, true)
+        provision_host_with_token(&store, &ok, &tunnels, "h", &base(), true)
             .await
             .unwrap();
         let rotated = store
@@ -1566,5 +1578,65 @@ mod tests {
             .filter_map(Call::stdin_str)
             .any(|u| u.contains(&rotated)));
         tunnels.stop_all();
+    }
+
+    #[tokio::test]
+    async fn reestablish_tunnels_is_a_no_op_for_a_public_base() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("mefistos").unwrap();
+            s.set_host_provisioned("mefistos", true).unwrap();
+        }
+        let spawned = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = Arc::clone(&spawned);
+        let tunnels = Arc::new(TunnelSupervisor::with_spawner(
+            Arc::new(move |argv: Vec<String>| {
+                seen.lock()
+                    .unwrap()
+                    .push(argv.last().cloned().unwrap_or_default());
+                Box::pin(std::future::pending())
+            }),
+            Duration::from_secs(3600),
+        ));
+        let public = HubBase::public("https://fleet.example.com", 4180).unwrap();
+        reestablish_tunnels(&store, &tunnels, &public).unwrap();
+        assert!(tunnels.snapshot().is_empty(), "no tunnel for a public hub");
+        reestablish_tunnels(&store, &tunnels, &HubBase::loopback(4180)).unwrap();
+        assert_eq!(
+            tunnels.snapshot().get("mefistos"),
+            Some(&true),
+            "loopback hub tunnels provisioned hosts"
+        );
+        assert_eq!(tunnels.snapshot().len(), 1);
+        tunnels.stop_all();
+    }
+
+    #[tokio::test]
+    async fn provision_host_with_a_public_base_writes_its_urls_and_starts_no_tunnel() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        store.lock().unwrap().insert_host("h", Some("h")).unwrap();
+        let tunnels = quiet_tunnels();
+        let fake = fresh_host();
+        let public = HubBase::public("https://fleet.example.com", PORT).unwrap();
+        provision_host_with_token(&store, &fake, &tunnels, "h", &public, false)
+            .await
+            .unwrap();
+        assert!(
+            tunnels.snapshot().is_empty(),
+            "a public hub needs no tunnel"
+        );
+        let uploaded = fake
+            .calls()
+            .iter()
+            .filter_map(Call::stdin_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(uploaded.contains("https://fleet.example.com/mcp"));
+        assert!(uploaded.contains("https://fleet.example.com/hook"));
+        assert!(!uploaded.contains("127.0.0.1"), "{uploaded}");
+        let s = store.lock().unwrap();
+        let hosts = s.list_hosts().unwrap();
+        assert!(hosts.iter().find(|h| h.alias == "h").unwrap().provisioned);
     }
 }

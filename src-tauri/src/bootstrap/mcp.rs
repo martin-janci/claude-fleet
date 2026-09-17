@@ -55,9 +55,14 @@ pub(crate) fn maybe_start_mcp(
         )
         .await;
         if r.is_ok() {
-            if let Err(e) =
-                fleet_core::service::provision::reestablish_tunnels(store, tunnels, port)
-            {
+            // The guard is dropped when the first closure returns, before
+            // `reestablish_tunnels` locks the store again.
+            let tunnels_up = fleet_core::ipc_error::lock(store)
+                .and_then(|s| fleet_core::service::hub::HubBase::read(&s))
+                .and_then(|base| {
+                    fleet_core::service::provision::reestablish_tunnels(store, tunnels, &base)
+                });
+            if let Err(e) = tunnels_up {
                 tracing::warn!("control API: reestablish_tunnels failed: {e}");
             }
         }
