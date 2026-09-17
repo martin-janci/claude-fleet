@@ -77,10 +77,16 @@ pub fn propose_from_installed(installed: &[(String, String)]) -> LayerProposal {
         .map(|(i, (hosts, mut members))| {
             members.sort();
             ProposedLayer {
+                // Positional, not derived from `hosts`: host aliases may
+                // themselves contain `-` (e.g. `claude-fleet-oci`), so
+                // joining them with `-` can make two distinct host-sets
+                // collide on the same name. These are starting points the
+                // user renames anyway; `hosts` on the layer already says
+                // which hosts a group covers.
                 name: if i == 0 {
                     "core".to_string()
                 } else {
-                    hosts.join("-")
+                    format!("group-{}", i + 1)
                 },
                 axis: "role".to_string(),
                 hosts,
@@ -92,8 +98,31 @@ pub fn propose_from_installed(installed: &[(String, String)]) -> LayerProposal {
     LayerProposal { layers, singletons }
 }
 
-/// Read the last scan's inventory and propose a split. Read-only: it returns
-/// a proposal and writes nothing, neither to the catalog nor to the DB.
+/// Whether an inventory row's `state` means the asset is actually present on
+/// the host, as opposed to merely known about it.
+///
+/// `Store::list_inventory()` has no `WHERE` clause: it returns the full
+/// catalog x host x harness cross product, including `missing` (the catalog
+/// defines it, the host does not have it) and `unsupported` (the harness
+/// cannot render it there). Counting those as "installed" would make every
+/// host appear to share nearly the whole catalog's key-set, which is the
+/// opposite of what this tool is for.
+///
+/// `unmanaged` counts: it is not optional. The bootstrap scenario this tool
+/// exists for is a fleet with an *empty* catalog and hundreds of assets
+/// already sitting on hosts — in that state every real asset is
+/// `unmanaged`, so excluding it would make `propose_layers` return nothing
+/// precisely when it is needed. `orphan` counts too: the host still has it,
+/// even though the catalog has since dropped it.
+fn is_installed(state: &str) -> bool {
+    matches!(state, "in_sync" | "drifted" | "unmanaged" | "orphan")
+}
+
+/// Read the last scan's inventory and propose a split from what is actually
+/// present on each host (`in_sync`, `drifted`, `unmanaged`, or `orphan` —
+/// see `is_installed`; `missing` and `unsupported` rows are excluded).
+/// Read-only: it returns a proposal and writes nothing, neither to the
+/// catalog nor to the DB.
 pub fn propose_layers(store: &Mutex<Store>) -> Result<LayerProposal, IpcError> {
     let rows = {
         let s = lock(store)?;
@@ -102,7 +131,7 @@ pub fn propose_layers(store: &Mutex<Store>) -> Result<LayerProposal, IpcError> {
     let installed: Vec<(String, String)> = rows
         .iter()
         // One inventory row per harness; count each asset once.
-        .filter(|r| r.harness == "claude")
+        .filter(|r| r.harness == "claude" && is_installed(&r.state))
         .map(|r| (r.host_alias.clone(), format!("{}/{}", r.kind, r.name)))
         .collect();
     Ok(propose_from_installed(&installed))
@@ -177,5 +206,97 @@ mod tests {
     fn an_empty_fleet_proposes_nothing() {
         let p = propose_from_installed(&[]);
         assert!(p.layers.is_empty() && p.singletons.is_empty());
+    }
+
+    /// Two distinct host-set signatures, `{"a-b", "c"}` and `{"a", "b-c"}`,
+    /// that a naive `hosts.join("-")` would both render as `"a-b-c"`. Real
+    /// fleet aliases contain hyphens (e.g. `claude-fleet-oci`), so this is
+    /// not hypothetical. A third, clearly-largest group makes `core`
+    /// deterministic and leaves the ambiguous pair to be named positionally.
+    #[test]
+    fn layer_names_do_not_collide_when_host_aliases_contain_hyphens() {
+        let mut installed = vec![
+            item("m", "skill/core1"),
+            item("n", "skill/core1"),
+            item("m", "skill/core2"),
+            item("n", "skill/core2"),
+            item("m", "skill/core3"),
+            item("n", "skill/core3"),
+        ];
+        installed.push(item("a-b", "skill/x"));
+        installed.push(item("c", "skill/x"));
+        installed.push(item("a", "skill/y"));
+        installed.push(item("b-c", "skill/y"));
+
+        let p = propose_from_installed(&installed);
+        assert_eq!(p.layers.len(), 3);
+
+        let mut names: Vec<&str> = p.layers.iter().map(|l| l.name.as_str()).collect();
+        names.sort();
+        let mut deduped = names.clone();
+        deduped.dedup();
+        assert_eq!(
+            deduped.len(),
+            names.len(),
+            "layer names collided: {names:?}"
+        );
+
+        let core = p.layers.iter().find(|l| l.name == "core").unwrap();
+        assert_eq!(core.hosts, vec!["m".to_string(), "n".to_string()]);
+    }
+
+    /// `propose_layers` must read from a real `Store`, so this uses an
+    /// in-memory one (rather than a pure predicate unit test) to exercise
+    /// the actual `list_inventory` -> filter -> `propose_from_installed`
+    /// pipeline end to end. `asset_inventory` has no foreign key to
+    /// `hosts` (checked: `src-tauri/migrations/030_asset_catalog.sql` has
+    /// no `REFERENCES hosts`, and the existing `replace_host_inventory`
+    /// store tests write rows without an `upsert_host` call), so this test
+    /// follows that existing pattern rather than adding one.
+    #[test]
+    fn propose_layers_only_counts_present_states() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let row = |name: &str, state: &str| crate::store::AssetInventoryRow {
+            host_alias: "h".into(),
+            harness: "claude".into(),
+            kind: "skill".into(),
+            name: name.into(),
+            state: state.into(),
+            catalog_hash: None,
+            host_hash: None,
+            scanned_at: 1,
+            managed: false,
+        };
+        lock(&store)
+            .unwrap()
+            .replace_host_inventory(
+                "h",
+                "claude",
+                &[
+                    row("in-sync", "in_sync"),
+                    row("drifted", "drifted"),
+                    row("missing", "missing"),
+                    row("unmanaged", "unmanaged"),
+                    row("unsupported", "unsupported"),
+                    row("orphan", "orphan"),
+                ],
+            )
+            .unwrap();
+
+        let p = propose_layers(&store).unwrap();
+
+        // Single host: every surviving key is a singleton, never a layer.
+        assert!(p.layers.is_empty());
+        let mut keys: Vec<&str> = p.singletons.iter().map(|s| s.key.as_str()).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "skill/drifted",
+                "skill/in-sync",
+                "skill/orphan",
+                "skill/unmanaged",
+            ]
+        );
     }
 }
