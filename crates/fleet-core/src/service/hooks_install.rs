@@ -30,6 +30,32 @@ pub fn hook_entry(hook_url: &str, token: &str) -> serde_json::Value {
     })
 }
 
+/// True when `h` has the exact shape of a [`hook_entry`]: `type: "http"`, a
+/// `url` of `http(s)://<authority>/hook` with nothing else in the path (every
+/// `HubBase` URL has no path of its own), a `Bearer` `Authorization` header
+/// and fleet's timeout. A user's own http hook at a deeper path, or with a
+/// different timeout, never matches, so it is never stripped.
+fn is_fleet_hook_entry(h: &serde_json::Value) -> bool {
+    let url_is_fleet = h
+        .get("url")
+        .and_then(|u| u.as_str())
+        .and_then(|u| {
+            u.strip_prefix("https://")
+                .or_else(|| u.strip_prefix("http://"))
+        })
+        .and_then(|rest| rest.strip_suffix("/hook"))
+        .is_some_and(|authority| !authority.is_empty() && !authority.contains(['/', '?', '#']));
+    let bearer = h
+        .get("headers")
+        .and_then(|hd| hd.get("Authorization"))
+        .and_then(|a| a.as_str())
+        .is_some_and(|a| a.starts_with("Bearer "));
+    h.get("type").and_then(|t| t.as_str()) == Some("http")
+        && url_is_fleet
+        && bearer
+        && h.get("timeout").and_then(|t| t.as_u64()) == Some(u64::from(HOOK_TIMEOUT_SECS))
+}
+
 /// Matcher of fleet's PostToolUse hook (Claude Code matchers are regexes):
 /// `EnterWorktree` registers a worktree row for the calling host,
 /// `ExitWorktree` with `action: "remove"` drops it. The `WorktreeCreate` /
@@ -72,11 +98,10 @@ pub const FLEET_HOOK_EVENTS: &[(&str, &str)] = &[
 /// installed/refreshed.
 ///
 /// Any prior fleet hook entries are stripped first so re-running stays
-/// idempotent and upgrades old installs in place: an http entry pointing at
-/// `hook_url`, any fleet-shaped http entry (URL ending in `/hook` with a
-/// `Bearer` `Authorization` header — so a base-URL change never leaves a
-/// stale hook behind), and the pre-Track-B `curl … /hook?token=` command
-/// form for `hook_url`. Other hooks (e.g. the user's own tsc pre-commit) are
+/// idempotent and upgrades old installs in place: every entry of fleet's
+/// exact http shape ([`is_fleet_hook_entry`], whatever base URL it points at,
+/// so a base-URL change never leaves a stale hook behind), and the
+/// pre-Track-B `curl … /hook?token=` command form for `hook_url`. Other hooks (e.g. the user's own tsc pre-commit) are
 /// preserved verbatim.
 ///
 /// Shared by the local `install_fleet_hook` command (via [`install_hook_at`])
@@ -120,15 +145,7 @@ pub fn merge_hook_into_settings_json(
                     let hooks_arr = block.get("hooks").and_then(|h| h.as_array());
                     hooks_arr.is_none_or(|hs| {
                         !hs.iter().any(|h| {
-                            let url = h.get("url").and_then(|u| u.as_str());
-                            let bearer = h
-                                .get("headers")
-                                .and_then(|hd| hd.get("Authorization"))
-                                .and_then(|a| a.as_str())
-                                .is_some_and(|a| a.starts_with("Bearer "));
-                            let url_match = url.is_some_and(|u| {
-                                u.starts_with(&fleet_prefix) || (bearer && u.ends_with("/hook"))
-                            });
+                            let url_match = is_fleet_hook_entry(h);
                             let cmd_match = h
                                 .get("command")
                                 .and_then(|c| c.as_str())
@@ -572,5 +589,40 @@ mod tests {
             merge_hook_into_settings_json(&out, "http://127.0.0.1:4180/hook", "tok").unwrap();
         let v2: serde_json::Value = serde_json::from_str(&out2).unwrap();
         assert_eq!(v2["hooks"]["Stop"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn merge_hook_keeps_a_users_bearer_http_hook_at_a_deeper_path() {
+        let user_block = serde_json::json!({
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "http",
+                    "url": "https://ci.example.com/api/v2/hook",
+                    "headers": { "Authorization": "Bearer x" },
+                    "timeout": 5
+                },
+                { "type": "command", "command": "notify-send done" }
+            ]
+        });
+        let existing = serde_json::json!({ "hooks": { "Stop": [user_block.clone()] } }).to_string();
+        for hook_url in [
+            "http://127.0.0.1:4180/hook",
+            "https://fleet.example.com/hook",
+        ] {
+            let out = merge_hook_into_settings_json(&existing, hook_url, "tok").unwrap();
+            let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+            let stop = v["hooks"]["Stop"].as_array().unwrap();
+            assert_eq!(
+                stop.len(),
+                2,
+                "user block kept beside fleet's under {hook_url}: {stop:?}"
+            );
+            assert_eq!(
+                stop[0], user_block,
+                "both user hooks intact under {hook_url}"
+            );
+            assert_eq!(stop[1]["hooks"][0]["url"], hook_url);
+        }
     }
 }
