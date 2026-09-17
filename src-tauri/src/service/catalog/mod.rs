@@ -10,6 +10,7 @@ pub mod import;
 pub mod inventory;
 pub mod layer;
 pub mod model;
+pub mod propose;
 pub mod repo;
 pub mod resolve;
 pub mod sync;
