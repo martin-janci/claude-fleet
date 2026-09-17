@@ -79,7 +79,12 @@ impl Layer {
     /// Static checks that need no catalog. Membership against real assets is
     /// checked at load (Task 2) and is a warning, not an error.
     pub fn validate(&self) -> Result<(), String> {
-        for key in self.members.iter().chain(&self.exclude).chain(self.overrides.keys()) {
+        for key in self
+            .members
+            .iter()
+            .chain(&self.exclude)
+            .chain(self.overrides.keys())
+        {
             if split_key(key).is_none() {
                 return Err(format!("'{key}' is not a valid <kind>/<name> key"));
             }
@@ -210,8 +215,8 @@ mod tests {
     #[test]
     fn validate_rejects_bad_keys_and_self_contradiction() {
         // A key that names no known kind.
-        let bad = Layer::from_yaml("kind: layer\nname: a\naxis: role\nmembers:\n  - nope/x\n")
-            .unwrap();
+        let bad =
+            Layer::from_yaml("kind: layer\nname: a\naxis: role\nmembers:\n  - nope/x\n").unwrap();
         assert!(bad.validate().unwrap_err().contains("nope/x"));
 
         // Same key in members AND exclude of ONE layer is always a mistake.
@@ -219,7 +224,10 @@ mod tests {
             "kind: layer\nname: a\naxis: role\nmembers:\n  - skill/x\nexclude:\n  - skill/x\n",
         )
         .unwrap();
-        assert!(clash.validate().unwrap_err().contains("both members and exclude"));
+        assert!(clash
+            .validate()
+            .unwrap_err()
+            .contains("both members and exclude"));
 
         // An overrides key must also be a valid <kind>/<name>.
         let ov = Layer::from_yaml(
@@ -228,8 +236,8 @@ mod tests {
         .unwrap();
         assert!(ov.validate().is_err());
 
-        let good = Layer::from_yaml("kind: layer\nname: a\naxis: role\nmembers:\n  - skill/x\n")
-            .unwrap();
+        let good =
+            Layer::from_yaml("kind: layer\nname: a\naxis: role\nmembers:\n  - skill/x\n").unwrap();
         assert!(good.validate().is_ok());
     }
 
