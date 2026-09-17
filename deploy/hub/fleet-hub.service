@@ -9,6 +9,7 @@ EnvironmentFile=/etc/fleet-hub.env
 ExecStart=/usr/local/bin/fleet-hub serve
 Restart=on-failure
 StateDirectory=fleet-hub
+StateDirectoryMode=0700
 Environment=FLEET_HUB_DATA_DIR=/var/lib/fleet-hub
 
 [Install]

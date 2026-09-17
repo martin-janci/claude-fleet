@@ -13,7 +13,7 @@ touching it (see *Coexistence with the desktop* below).
 ## Setup with Docker (recommended)
 
 ```bash
-mkdir -p ~/fleet-hub/ssh && cd ~/fleet-hub
+mkdir -p ~/fleet-hub && cd ~/fleet-hub
 curl -O https://raw.githubusercontent.com/martin-janci/claude-fleet/main/deploy/hub/docker-compose.yml
 curl -O https://raw.githubusercontent.com/martin-janci/claude-fleet/main/deploy/hub/Caddyfile
 curl -O https://raw.githubusercontent.com/martin-janci/claude-fleet/main/deploy/hub/fleet-hub.env.example
@@ -22,9 +22,29 @@ cp fleet-hub.env.example fleet-hub.env
 # own domain (both point DNS at this machine; Caddy gets a cert automatically)
 ```
 
+**The image.** The compose file pulls `ghcr.io/martin-janci/fleet-hub:latest`.
+A new ghcr package starts out private, and no `latest` tag exists until the
+first `v*` release tag is pushed (a manual run of the `hub-image.yml`
+workflow publishes only a `sha-<commit>` tag). Until then — or if you cannot
+pull the package — build the image locally from a checkout of the repository
+and point `image:` in `docker-compose.yml` at it:
+
+```bash
+docker build -f crates/fleet-hub/Dockerfile -t fleet-hub:local .
+# docker-compose.yml:  image: fleet-hub:local
+```
+
+The container runs as uid 1000 (its `fleet` user), and `./ssh` is
+bind-mounted as that user's `~/.ssh`, so create the directory owned by uid
+1000 before the first container touches it:
+
+```bash
+mkdir -p ssh && sudo chown -R 1000:1000 ssh && sudo chmod 700 ssh
+```
+
 Mint the master token and the hub's SSH key before starting the daemon
 properly (`docker compose run --rm` runs a one-off container against the
-same named volumes the long-running services will use):
+same named volumes and bind mounts the long-running services will use):
 
 ```bash
 docker compose run --rm fleet-hub init          # prints the master token — save it
@@ -34,20 +54,31 @@ docker compose run --rm fleet-hub ssh-key       # prints the hub's SSH public ke
 Add the printed public key to `~/.ssh/authorized_keys` on every host you want
 the hub to manage. Then create `./ssh/config` (bind-mounted at
 `/home/fleet/.ssh/config` in the container) with one `Host` block per
-machine, the same shape as `~/.ssh/config` for the desktop app:
+machine, the same shape as `~/.ssh/config` for the desktop app. `./ssh` is
+now owned by uid 1000, so write into it with `sudo`:
 
-```
+```bash
+sudo tee ssh/config >/dev/null <<'CONFIG'
 Host devbox
     HostName 10.0.0.12
     User martin
+CONFIG
 ```
 
-The file must be owned by uid 1000 (the container's `fleet` user) and
-readable by it — mode `0600` is the simplest way to guarantee that:
+The hub connects with `BatchMode=yes`, so it cannot answer an unknown-host
+prompt: every host's key must already be in `./ssh/known_hosts`, or the host
+is recorded unreachable. Scan each host at the same `HostName` (and, if its
+block sets one, `Port` — pass it as `-p <port>`) as in `./ssh/config`:
 
 ```bash
-chmod 600 ./ssh/config
-sudo chown 1000:1000 ./ssh/config
+ssh-keyscan -H 10.0.0.12 | sudo tee -a ssh/known_hosts >/dev/null
+# repeat for every host
+```
+
+Both files must be owned by uid 1000 and private to it:
+
+```bash
+sudo chown 1000:1000 ssh/known_hosts ssh/config && sudo chmod 600 ssh/known_hosts ssh/config
 ```
 
 Bring the daemon up and verify it answers:
@@ -105,23 +136,47 @@ cargo build -p fleet-hub --release
 sudo cp target/release/fleet-hub /usr/local/bin/fleet-hub
 ```
 
+Create the `fleet` user and the data directory the unit uses, then
+initialise the hub as that user, against that directory:
+
+```bash
+sudo useradd --system --create-home --shell /usr/sbin/nologin fleet   # if it doesn't exist yet
+sudo install -d -o fleet -g fleet -m 700 /var/lib/fleet-hub
+sudo -u fleet env FLEET_HUB_DATA_DIR=/var/lib/fleet-hub fleet-hub init --public-url https://fleet.example.com
+```
+
 Create `/etc/fleet-hub.env` (same keys as `deploy/hub/fleet-hub.env.example`,
 plus whatever else you want set — see *Configuration* below), then install
 the unit:
 
 ```bash
 sudo cp deploy/hub/fleet-hub.service /etc/systemd/system/
-sudo useradd --system --create-home --shell /usr/sbin/nologin fleet   # if it doesn't exist yet
 sudo systemctl daemon-reload
 sudo systemctl enable --now fleet-hub
 ```
+
+To print the master token again later, use the same user and data dir:
+
+```bash
+sudo -u fleet env FLEET_HUB_DATA_DIR=/var/lib/fleet-hub fleet-hub token show
+```
+
+Every `fleet-hub` subcommand opens `<data-dir>/state.db`, creating it when
+missing: `token show` without the right data dir (or as the wrong user)
+creates a separate, empty database with its own fresh token instead of
+printing the running hub's.
 
 Put it behind your own TLS-terminating proxy (the same role Caddy plays in
 the Docker setup) and set `FLEET_HUB_PUBLIC_URL`. Or skip the public URL
 entirely and bind loopback, reaching it over Tailscale or an SSH tunnel of
 your own: with no public URL configured, the hub behaves exactly like the
 desktop app — it binds `127.0.0.1` and opens a reverse SSH tunnel to every
-provisioned remote host.
+provisioned remote host. If you instead bind a non-loopback address with no
+public URL (for example the machine's Tailscale address,
+`--bind 100.64.0.1`), pass `--allow-plaintext` (or set
+`FLEET_HUB_ALLOW_PLAINTEXT=1`): the hub refuses any non-loopback bind that
+is not fronted by an `https://` public URL unless plaintext is explicitly
+allowed.
 
 ## Configuration
 
@@ -133,7 +188,7 @@ subcommand — `fleet-hub token show --data-dir D` and
 
 | Flag | Env | Setting | Default |
 |---|---|---|---|
-| `--data-dir` | `FLEET_HUB_DATA_DIR` | — | platform data dir: `~/.local/share/claude-fleet` on Linux, `/var/lib/fleet-hub` in the Docker image |
+| `--data-dir` | `FLEET_HUB_DATA_DIR` | — | the hub's own platform data dir: `~/.local/share/fleet-hub` on Linux, `~/Library/Application Support/sk.rlt.fleet-hub` on macOS, `/var/lib/fleet-hub` in the Docker image |
 | `--bind` | `FLEET_HUB_BIND` | `hub.bind` | `127.0.0.1` |
 | `--port` | `FLEET_HUB_PORT` | `mcp.port` | `4180` |
 | `--public-url` | `FLEET_HUB_PUBLIC_URL` | `hub.public_url` | unset (loopback + reverse tunnels) |
@@ -142,12 +197,15 @@ subcommand — `fleet-hub token show --data-dir D` and
 | `--allow-plaintext` | `FLEET_HUB_ALLOW_PLAINTEXT` | — | off |
 | `--log-dir` | `FLEET_HUB_LOG_DIR` | — | `<data-dir>/logs` |
 
-`--allow-plaintext` permits a non-loopback bind with an `http://` public URL
-(container-internal use only, e.g. between `fleet-hub` and `caddy` on the
-compose network — see the compose file). Without it, a routable bind
-(anything but `127.0.0.1`) combined with a plaintext public URL is refused
-at startup: `refusing to serve plaintext http on <bind>: use an https://
-public URL, bind to 127.0.0.1 behind a TLS proxy, or pass --allow-plaintext`.
+`--allow-plaintext` permits a non-loopback bind that is not fronted by an
+`https://` public URL — one with an `http://` public URL or with none at all
+(a private network such as Tailscale, or a container-internal hop). Without
+it, a routable bind (anything but loopback) is refused at startup unless the
+public URL is `https://`: `refusing to serve plaintext http on <bind>: use an
+https:// public URL, bind to 127.0.0.1 behind a TLS proxy, or pass
+--allow-plaintext`. The compose setup does not need it: the hub binds
+`0.0.0.0` on the compose network with the `https://` public URL Caddy
+serves.
 
 `fleet-hub serve` logs to stderr and, once the data dir is writable, also to
 `<log-dir>` (or wherever `--log-dir`/`FLEET_HUB_LOG_DIR` points).
@@ -163,24 +221,32 @@ single-host refresh of `local` returns `E_NOTFOUND`.
 2. Copy its `state.db` into the hub's data dir:
    - macOS source: `~/Library/Application Support/sk.rlt.claude-fleet/state.db`
    - Linux source: `~/.local/share/claude-fleet/state.db`
-3. Run `fleet-hub init --data-dir <hub-data-dir>` and start the hub.
-4. Run `provision_hosts` again — the hub's URLs (and likely its port) differ
+3. Run `fleet-hub init --data-dir <hub-data-dir> --regenerate-token` (plus
+   your `--public-url`), and reconfigure every MCP client with the new
+   token. The desktop's master token must not become the public hub's: it
+   has lived on the desktop machine, in its MCP clients' configs and, on
+   hosts provisioned by older releases, in `curl … /hook?token=` command
+   hooks.
+4. Start the hub.
+5. Run `provision_hosts` again — the hub's URLs (and likely its port) differ
    from the desktop's loopback ones, so every host needs its hook block and
-   `mcpServers` entry rewritten.
+   `mcpServers` entry rewritten. Re-provisioning also removes any old
+   `curl … /hook?token=` command hooks, which carry the desktop's token; a
+   hub with a public URL refuses that `?token=` form outright, so such a
+   host reports no hooks until it is re-provisioned.
 
 The desktop's `state.db` carries a `local` host row for the machine it ran
 on. Since the hub defaults `hub.local_host` to `false`, that copied `local`
-row is hidden automatically on first start — not deleted, just no longer
-listed or probed.
+row is hidden and marked unreachable automatically on first start — not
+deleted, just no longer listed, counted, probed or polled for usage.
 
-> **WARNING:** on macOS, a bare `fleet-hub` with no `--data-dir` uses
-> `~/Library/Application Support/sk.rlt.claude-fleet/` — the **same** data
-> directory the desktop app uses (the hub deliberately shares the desktop's
-> app id so a copied `state.db` lands where the desktop expects it). If you
-> run the hub on a Mac that also runs the desktop app, always pass
-> `--data-dir` (or set `FLEET_HUB_DATA_DIR`) to a directory of its own, or
-> the hub will open and mutate the desktop's live database: enabling the
-> control API and hiding its `local` host out from under it.
+The hub's default data dir is separate from the desktop's on every
+platform, so a hub and a desktop app on the same machine never share a
+database by accident; migration is always an explicit copy of `state.db`,
+as above:
+
+- Linux: `~/.local/share/fleet-hub` (hub) vs `~/.local/share/claude-fleet` (desktop)
+- macOS: `~/Library/Application Support/sk.rlt.fleet-hub` (hub) vs `~/Library/Application Support/sk.rlt.claude-fleet` (desktop)
 
 ## Coexistence with the desktop
 
@@ -212,7 +278,9 @@ at whichever one provisioned it last.
   UI confirmation dialog. A hub has no UI to show that dialog to — leave the
   setting off (its default) on a hub; if it is on, a request needing
   confirmation is refused (`E_CONFIRM_REQUIRED`) with no way to approve it,
-  and the hub logs a warning naming the tool and nonce.
+  and the hub logs a warning naming the tool and nonce. A `state.db` copied
+  from a desktop can carry it switched on; `fleet-hub serve` logs a warning
+  at startup when it is.
 - **Rotating tokens.** `fleet-hub token regenerate` mints a fresh master
   token — reconfigure every client afterward. For host tokens, call
   `provision_hosts { rotate: true }` (from any client), which re-provisions
@@ -230,9 +298,10 @@ at whichever one provisioned it last.
   `Authorization: Bearer <token>` with the exact current token
   (`fleet-hub token show`).
 - **`refusing to serve plaintext http` at startup** — a routable `--bind`
-  paired with an `http://` public URL. Use `https://` in front of a TLS
-  proxy, bind `127.0.0.1`, or pass `--allow-plaintext` for a
-  container-internal plaintext hop.
+  without an `https://` public URL (an `http://` one, or none at all). Use
+  `https://` in front of a TLS proxy, bind `127.0.0.1`, or pass
+  `--allow-plaintext` for a private-network or container-internal
+  plaintext hop.
 - **`could not bind`** — another process already holds the configured
   `--bind`/`--port`. Pick a different port, or find and stop what's using
   it.
@@ -242,6 +311,13 @@ at whichever one provisioned it last.
   as the `fleet` user) is missing or unreadable by uid 1000. In Docker,
   confirm `./ssh/config` is owned by uid 1000 (`sudo chown 1000:1000
   ./ssh/config`) and has the right `Host` alias for the target.
+- **`Host key verification failed` in the hub's log, or a host recorded
+  unreachable right after `add_host`** — the host's key is missing from
+  `./ssh/known_hosts` (bare binary: `~fleet/.ssh/known_hosts`). The hub
+  connects with `BatchMode=yes` and cannot accept a new key interactively:
+  run `ssh-keyscan -H <HostName>` (with `-p <Port>` when the host's block
+  sets one) into that file, then restore its ownership (uid 1000) and mode
+  `0600`.
 - **Hooks never arrive (status stays stale, `safe_kill_session` never
   finalizes)** — the host cannot reach the hub's public URL. From the host
   itself, run `curl -sI https://fleet.example.com/mcp` and confirm it

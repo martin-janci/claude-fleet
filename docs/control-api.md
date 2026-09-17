@@ -106,7 +106,7 @@ long poll keeps receiving a keep-alive every 15 s.
 The authoritative per-tool documentation — description and parameter list for
 every tool, straight from the tool router — is the generated
 [`control-api-reference.md`](control-api-reference.md). It is regenerated with
-`REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_current`
+`REGEN_DOCS=1 cargo test -p fleet-core reference_is_current`
 and CI fails when it is stale. The workflows that tie the tools together
 (steering, recovery, safe-kill, self-identification) live in the
 `claude-fleet-control` skill (`skills/claude-fleet-control/SKILL.md`), which

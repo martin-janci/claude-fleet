@@ -43,7 +43,7 @@ known pre-existing frontend test failures.)
 ## Releasing
 
 Releases are cut manually with `scripts/release.sh <new-version>` — it bumps
-the three version files (+ `Cargo.lock`), prefills a `CHANGELOG.md` section
+the four version files (+ `Cargo.lock`), prefills a `CHANGELOG.md` section
 from the Conventional Commits since the last tag, commits, and creates the
 `vX.Y.Z` tag. Never edit the version fields by hand; run the script from a
 clean `main`. See `docs/RELEASING.md`.

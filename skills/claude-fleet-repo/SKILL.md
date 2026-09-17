@@ -20,13 +20,15 @@ pnpm run check                          # svelte-check / TS
 pnpm run test                           # vitest
 pnpm run build                          # production bundle
 
-# Backend — needs Tauri system libs (dbus, gtk, atk, pkg-config) on Linux.
-# On a headless box the cargo build script will fail; that's an environment
-# gap, not a code error.
-cd src-tauri
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test                              # full suite
+# Backend — a cargo workspace: crates/fleet-core (Tauri-free core),
+# crates/fleet-hub (headless daemon), src-tauri (desktop app). Building
+# src-tauri needs Tauri system libs (dbus, gtk, atk, pkg-config) on Linux;
+# on a headless box its build script fails — an environment gap, not a code
+# error (`-p fleet-core` / `-p fleet-hub` build without them).
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace                  # full suite
+cargo test -p fleet-core <filter>       # iterate on the core quickly
 ```
 
 Mirror this exact sequence to reproduce CI locally — and you'll have to,
@@ -37,10 +39,10 @@ See "Shipping a PR" below.
 
 | Adding… | File(s) | Pattern |
 |---|---|---|
-| A new MCP tool | `src-tauri/src/mcp/tools.rs` — params struct + `#[tool]` method calling into `service::*` | Audit non-secret args; pass bodies / prompts but never log them. Return `ok_json(&result)` or `text_content`. After adding: `REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_current` to refresh `docs/control-api-reference.md`. |
-| A new service function | `src-tauri/src/service/<area>.rs` | Take `&Mutex<Store>` + `&Arc<SshClient>`, never `tauri::State`. Same code path runs from both Tauri IPC and MCP. |
-| A new store helper | `src-tauri/src/store/` | Hold the `Mutex<Store>` guard *briefly*; never across `.await`. Use `unchecked_transaction` for multi-step writes. |
-| A schema change | `src-tauri/migrations/NNN_<topic>.sql` + a `tx.execute_batch(include_str!(…))` arm in `migrate()` + bump `assert_eq!(…schema_version, NNN)` in the relevant tests (currently `17`). | One `.sql` per change. Wrap in a transaction in the migrate arm so an interrupted run rolls back cleanly. End each file with `INSERT OR IGNORE INTO schema_version (version) VALUES (NNN);`. |
+| A new MCP tool | `crates/fleet-core/src/mcp/tools/` — params struct + `#[tool]` method calling into `service::*` | Audit non-secret args; pass bodies / prompts but never log them. Return `ok_json(&result)` or `text_content`. After adding: `REGEN_DOCS=1 cargo test -p fleet-core reference_is_current` to refresh `docs/control-api-reference.md`. |
+| A new service function | `crates/fleet-core/src/service/<area>.rs` | Take `&Mutex<Store>` + `&Arc<SshClient>`, never `tauri::State`. Same code path runs from both Tauri IPC and MCP. |
+| A new store helper | `crates/fleet-core/src/store/` | Hold the `Mutex<Store>` guard *briefly*; never across `.await`. Use `unchecked_transaction` for multi-step writes. |
+| A schema change | `crates/fleet-core/migrations/NNN_<topic>.sql` + a `tx.execute_batch(include_str!(…))` arm in `migrate()` + bump `assert_eq!(…schema_version, NNN)` in the relevant tests (currently `17`). | One `.sql` per change. Wrap in a transaction in the migrate arm so an interrupted run rolls back cleanly. End each file with `INSERT OR IGNORE INTO schema_version (version) VALUES (NNN);`. |
 | A new Tauri IPC command | `src-tauri/src/commands/<area>.rs` thin wrapper → `service::*` | Validate frontend inputs (`crate::validate::*`); never trust paths. Use `IpcError` with an `E_*` code. |
 | Frontend state | `src/lib/<store>.ts` as Svelte 5 runes; patch via `mergeOne`/`removeOne` from row events, plus the optimistic merge from the mutation's return value. | Don't re-fetch on every event; the event bus + optimistic merge is the contract. |
 | A wire type | Mirror Rust struct (`#[derive(Serialize)]`) ↔ TS interface in `src/lib/*.ts`. Field names are **snake_case** on the wire (no serde rename). | Add the TS field as `value | null` for Rust `Option<T>`. |
@@ -54,7 +56,7 @@ See "Shipping a PR" below.
 - **Best-effort writes** (timeline events, intel) should never block the mutation that produced them. Pattern: `let _ = s.insert_session_event(…);` and log/swallow errors.
 - **Terminal is hand-rolled**: `src/lib/ansi.ts` + `TerminalView.svelte`. xterm.js was tried and abandoned (WKWebView repaint bug). Only one PTY is attached at a time — see `pty.rs`.
 - **Test caveats**: after pulling, run `pnpm install --frozen-lockfile` — stale `node_modules` fail `App.test.ts` and `clipboard_native.test.ts` with `Failed to resolve import "@tauri-apps/plugin-clipboard-manager"`. `localStorage` is polyfilled in `vitest.setup.ts` (no known pre-existing failures). The `Sidebar` "without quadratic blow-up" perf test is timing-sensitive and occasionally flakes on a loaded box.
-- **MCP prefix stability**: every `#[tool(...)]` addition/rename/description edit in `src-tauri/src/mcp/tools.rs` invalidates the Claude API tool-definition cache for every connected client. Add tools sparingly; when you must rename or rewrite a description, batch with sibling edits in one release rather than churning across many.
+- **MCP prefix stability**: every `#[tool(...)]` addition/rename/description edit in `crates/fleet-core/src/mcp/tools/` invalidates the Claude API tool-definition cache for every connected client. Add tools sparingly; when you must rename or rewrite a description, batch with sibling edits in one release rather than churning across many.
 
 ## Shipping a PR (current CI billing block)
 
@@ -69,7 +71,7 @@ billing/spending limit on the repo owner's account. Until that's resolved,
 2. Work, commit, then mirror `.github/workflows/ci.yml`:
    ```bash
    # rust job
-   (cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test)
+   cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
    # frontend job
    pnpm install --frozen-lockfile && pnpm run check && pnpm run test && pnpm run build
    ```
@@ -87,7 +89,7 @@ The repo lands work via merge commits (see history: `Merge pull request #N from 
 
 The `claude-fleet-control` and `claude-fleet-repo` skills under `skills/` are
 **baked into the binary** at compile time via `include_str!` in
-`src-tauri/src/service/provision.rs`. A `provision_hosts` call pushes whatever
+`crates/fleet-core/src/service/provision.rs`. A `provision_hosts` call pushes whatever
 was compiled — *not* the latest repo content. Until the user rebuilds the
 app:
 
