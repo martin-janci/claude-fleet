@@ -159,7 +159,8 @@ pub(super) fn enforce_mode(caller: &Caller, tool: &str) -> Result<(), McpError> 
 }
 
 /// Host-binding gate for identity-bearing tools: a per-host caller may only
-/// act as / read sessions on its own host. Master callers pass.
+/// act as / read sessions on its own host. The master token and a paired
+/// client both pass — neither carries a `host_alias`, so they are unbound.
 pub(super) fn require_host(
     caller: &Caller,
     session_host: &str,

@@ -581,6 +581,22 @@ mod tests {
             client_ok.contains("200 OK"),
             "client token must pass on /mcp:\n{client_ok}"
         );
+        // …and the `authorize` middleware's liveness touch actually reached
+        // the store: the "phone" row's `last_seen_at` moved off its initial
+        // `None`.
+        {
+            let s = store.lock().unwrap();
+            let phone = s
+                .list_client_tokens(true)
+                .unwrap()
+                .into_iter()
+                .find(|c| c.name == "phone")
+                .expect("phone client token row");
+            assert!(
+                phone.last_seen_at.is_some(),
+                "authorize() must touch last_seen_at for a client request"
+            );
+        }
         // …a revoked one never does (the store filters it out)…
         let revoked = round_trip(addr, &post("/mcp", Some("revoked-tok"), None, "{}")).await;
         assert!(

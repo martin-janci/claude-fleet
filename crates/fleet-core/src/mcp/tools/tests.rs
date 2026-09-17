@@ -274,6 +274,54 @@ fn fleet_admin_tools_are_master_only() {
     }
 }
 
+// ---- client-token gating (Task 3: prove the gates hold for the new
+// caller kind — a paired client such as a phone) ----
+
+#[test]
+fn a_client_is_refused_every_fleet_admin_tool() {
+    let phone = client_caller("phone", TokenMode::Full);
+    for tool in guard::ADMIN_TOOLS {
+        assert!(
+            enforce_admin(&phone, tool).is_err(),
+            "{tool} must be master-only"
+        );
+    }
+    // …and the master still reaches them.
+    for tool in guard::ADMIN_TOOLS {
+        assert!(enforce_admin(&Caller::master(), tool).is_ok(), "{tool}");
+    }
+}
+
+#[test]
+fn a_readonly_client_is_refused_mutating_tools_but_allowed_reads() {
+    let ro = client_caller("phone", TokenMode::Readonly);
+    assert!(enforce_mode(&ro, "send_prompt").is_err());
+    assert!(enforce_mode(&ro, "list_sessions").is_ok());
+    let full = client_caller("phone", TokenMode::Full);
+    assert!(enforce_mode(&full, "send_prompt").is_ok());
+}
+
+#[test]
+fn a_client_may_drive_sessions_on_any_host() {
+    // require_host only constrains a per-host caller; a client has no
+    // host_alias, so it is never bound to one.
+    let c = client_caller("phone", TokenMode::Full);
+    assert!(require_host(&c, "mefistos", "the session").is_ok());
+    assert!(require_host(&c, "turanga", "the session").is_ok());
+}
+
+#[test]
+fn a_client_cannot_skip_the_untrusted_marker() {
+    // `raw: true` is master-only; a paired client is refused it outright
+    // (E_FORBIDDEN) rather than silently honoured, and its prompt otherwise
+    // always keeps the marker.
+    let c = client_caller("phone", TokenMode::Full);
+    let err = apply_marker("hello".into(), "the paired client phone", &c, true).unwrap_err();
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    let out = apply_marker("hello".into(), "the paired client phone", &c, false).unwrap();
+    assert!(out.contains("claude-fleet"), "marker missing: {out}");
+}
+
 #[test]
 fn audit_row_lands_on_target_session_with_redacted_args() {
     let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));

@@ -72,10 +72,13 @@ pub async fn handle_hook(
     // A paired client (a phone) has no business reporting hook events: hooks
     // are Claude Code's own callbacks, and `service::hooks::caller_host` maps
     // a caller with no host binding to `local`, which would file a phone's
-    // events against the local host's sessions. Refused before the body is
-    // looked at.
+    // events against the local host's sessions. The `Json` extractor above
+    // already deserialized the payload — axum runs it before this handler
+    // body — but it is never used: a misconfigured client polling this
+    // endpoint would otherwise fill the log at `warn`, so this logs at
+    // `debug`, matching the accepted path two lines below.
     if caller.is_client() {
-        tracing::warn!(caller = %caller.label(), "[hook] refused: clients do not report hooks");
+        tracing::debug!(caller = %caller.label(), "[hook] refused: clients do not report hooks");
         return StatusCode::FORBIDDEN;
     }
     // Every hook event lands here (several per turn): debug, not info. Only

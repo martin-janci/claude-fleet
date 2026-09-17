@@ -105,7 +105,9 @@ pub fn needs_confirmation(name: &str) -> bool {
 /// per-host token — even in `full` mode — must not be able to re-provision,
 /// rotate, add or remove other hosts, or it could lock the whole fleet out.
 /// `full` therefore means whole-fleet *session* control (send / kill /
-/// new_session across hosts stay allowed by design), not fleet admin.
+/// new_session across hosts stay allowed by design), not fleet admin. A
+/// paired client token is refused these too, whatever its mode — it is never
+/// the master ([`crate::mcp::Caller::is_master`] is false for a client).
 pub const ADMIN_TOOLS: &[&str] = &[
     "provision_hosts",
     "add_host",
@@ -136,7 +138,8 @@ pub fn broadcast_interval(raw: Option<String>) -> Duration {
 
 /// One-slot token bucket per key: a call is allowed when at least `interval`
 /// has elapsed since the key's last allowed call. Keys are caller labels
-/// (`master`, `host:<alias>`), so one chatty agent cannot starve another.
+/// (`master`, `host:<alias>`, `client:<name>`), so one chatty agent cannot
+/// starve another.
 #[derive(Default)]
 pub struct RateLimiter {
     last: Mutex<HashMap<String, Instant>>,
