@@ -216,16 +216,32 @@ fn build_app(
 /// or token change, or tunnel bounce. Responses keep SSE framing
 /// (`json_response` default `false`) so the 15 s keep-alive still flows on
 /// long polls (`wait_for_session`, `run_prompt`) through the reverse tunnel.
+/// The stateless rmcp service behind `/mcp`.
+///
+/// rmcp keeps its own DNS-rebinding Host check, separate from fleet's
+/// `authorize` layer, and by default it admits only loopback Hosts. A Host
+/// that fleet's allowlist admits must also be on rmcp's list, or rmcp answers
+/// 403 after fleet already let the request through. So rmcp gets the loopback
+/// names followed by the same normalized `allowed_hosts` the `AuthState`
+/// holds. The list is never empty (an empty list would make rmcp allow every
+/// Host). Origin stays unchecked by rmcp: `authorize` enforces it first.
 pub(crate) fn streamable_service(
     tools: FleetTools,
     cancel: CancellationToken,
+    allowed_hosts: &[String],
 ) -> StreamableHttpService<FleetTools, NeverSessionManager> {
+    let rmcp_hosts: Vec<String> = ["localhost", "127.0.0.1", "::1"]
+        .into_iter()
+        .map(str::to_string)
+        .chain(allowed_hosts.iter().cloned())
+        .collect();
     StreamableHttpService::new(
         move || Ok(tools.clone()),
         NeverSessionManager::default().into(),
         StreamableHttpServerConfig::default()
             .with_stateful_mode(false)
-            .with_cancellation_token(cancel),
+            .with_cancellation_token(cancel)
+            .with_allowed_hosts(rmcp_hosts),
     )
 }
 
@@ -254,6 +270,9 @@ pub async fn start(
 
     let shutdown = CancellationToken::new();
     let serve_shutdown = shutdown.clone();
+    // Normalized once and shared: fleet's `authorize` layer and rmcp's own
+    // Host check must admit exactly the same hosts.
+    let allowed_hosts = auth::normalize_allowed_hosts(&allowed_hosts);
     crate::rt::spawn(async move {
         let hook_state = hooks::HookState {
             store: Arc::clone(&store),
@@ -262,10 +281,10 @@ pub async fn start(
         let auth_state = AuthState {
             master: Arc::new(token),
             store: Arc::clone(&store),
-            allowed_hosts: Arc::new(auth::normalize_allowed_hosts(&allowed_hosts)),
+            allowed_hosts: Arc::new(allowed_hosts.clone()),
         };
         let tools = FleetTools::new(store, ssh, reg, tunnels, guards);
-        let service = streamable_service(tools, serve_shutdown.child_token());
+        let service = streamable_service(tools, serve_shutdown.child_token(), &allowed_hosts);
         let app = build_app(axum::routing::any_service(service), hook_state, auth_state);
 
         tracing::info!("[mcp] control API listening on http://{addr}/mcp");
@@ -522,6 +541,11 @@ mod tests {
     /// ephemeral loopback port. Requests authenticate with the master token
     /// `s3cret`.
     async fn serve_real_tools() -> std::net::SocketAddr {
+        serve_real_tools_with(vec![]).await
+    }
+
+    /// [`serve_real_tools`] with a fleet Host/Origin allowlist.
+    async fn serve_real_tools_with(allowed_hosts: Vec<String>) -> std::net::SocketAddr {
         use std::net::Ipv4Addr;
         let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         let hook_state = hooks::HookState {
@@ -531,7 +555,7 @@ mod tests {
         let auth_state = AuthState {
             master: Arc::new("s3cret".to_string()),
             store: Arc::clone(&store),
-            allowed_hosts: Arc::new(vec![]),
+            allowed_hosts: Arc::new(allowed_hosts.clone()),
         };
         let tools = FleetTools::new(
             store,
@@ -540,7 +564,7 @@ mod tests {
             Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
             McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {})),
         );
-        let service = streamable_service(tools, CancellationToken::new());
+        let service = streamable_service(tools, CancellationToken::new(), &allowed_hosts);
         let app = build_app(axum::routing::any_service(service), hook_state, auth_state);
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -575,8 +599,13 @@ mod tests {
 
     /// `POST /mcp` with the master token and the Accept pair rmcp requires.
     fn post_mcp(body: &str) -> String {
+        post_mcp_to("127.0.0.1", body)
+    }
+
+    /// [`post_mcp`] with an explicit `Host` header.
+    fn post_mcp_to(host: &str, body: &str) -> String {
         format!(
-            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: application/json, \
+            "POST /mcp HTTP/1.1\r\nHost: {host}\r\nAccept: application/json, \
              text/event-stream\r\nContent-Type: application/json\r\n\
              Authorization: Bearer s3cret\r\nContent-Length: {}\r\n\
              Connection: close\r\n\r\n{body}",
@@ -619,6 +648,38 @@ mod tests {
                    Authorization: Bearer s3cret\r\nConnection: close\r\n\r\n";
         let r = raw_round_trip(addr, get).await;
         assert!(r.contains("405"), "GET must be 405 in stateless mode:\n{r}");
+    }
+
+    /// rmcp keeps its own DNS-rebinding Host check (loopback only by
+    /// default); the fleet allowlist must reach it, or a public Host that
+    /// passed fleet's `authorize` layer is still refused with 403 by rmcp.
+    #[tokio::test]
+    async fn real_service_accepts_an_allowlisted_public_host() {
+        let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#;
+
+        let addr = serve_real_tools_with(vec!["fleet.example.com".to_string()]).await;
+        let r = raw_round_trip(addr, &post_mcp_to("fleet.example.com", init)).await;
+        assert!(r.contains("200 OK"), "allowlisted public Host:\n{r}");
+        assert!(
+            r.contains(r#""protocolVersion""#),
+            "initialize result:\n{r}"
+        );
+        let r = raw_round_trip(addr, &post_mcp_to("other.example.com", init)).await;
+        assert!(r.contains("403"), "unlisted Host:\n{r}");
+        let r = raw_round_trip(addr, &post_mcp(init)).await;
+        assert!(
+            r.contains("200 OK"),
+            "loopback alongside an allowlist:\n{r}"
+        );
+
+        // An empty fleet allowlist still serves loopback (and only loopback).
+        let addr = serve_real_tools().await;
+        let r = raw_round_trip(addr, &post_mcp(init)).await;
+        assert!(r.contains("200 OK"), "loopback, empty allowlist:\n{r}");
+        let r = raw_round_trip(addr, &post_mcp_to("localhost:1234", init)).await;
+        assert!(r.contains("200 OK"), "localhost, empty allowlist:\n{r}");
+        let r = raw_round_trip(addr, &post_mcp_to("fleet.example.com", init)).await;
+        assert!(r.contains("403"), "public Host, empty allowlist:\n{r}");
     }
 
     /// A tool that fails in the service layer answers with a tool RESULT
