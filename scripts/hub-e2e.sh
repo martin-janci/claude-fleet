@@ -114,6 +114,10 @@ check "ssh-key generates a key" 'grep -q "^ssh-ed25519 " "$ROOT/k1" && [ "$(stat
 sum=$(sha256sum "$FH/.ssh/id_ed25519" | cut -d" " -f1); rm "$FH/.ssh/id_ed25519.pub"
 HOME="$FH" "$BIN" ssh-key >"$ROOT/k2" 2>&1
 check "private key only -> public key derived, private key untouched" 'grep -q "^ssh-ed25519 " "$ROOT/k2" && [ "$(sha256sum "$FH/.ssh/id_ed25519" | cut -d" " -f1)" = "$sum" ]' "$(cat "$ROOT/k2")"
+mv "$FH/.ssh/id_ed25519" "$ROOT/parked"
+HOME="$FH" "$BIN" ssh-key >"$ROOT/k3" 2>"$ROOT/k3.err"
+check "public key without its private half is printed with a warning" 'grep -q "^ssh-ed25519 " "$ROOT/k3" && grep -qi "private key" "$ROOT/k3.err" && ! grep -qi "warning" "$ROOT/k3"' "$(cat "$ROOT/k3" "$ROOT/k3.err")"
+mv "$ROOT/parked" "$FH/.ssh/id_ed25519"
 
 echo
 echo "passed $PASS, failed $FAIL   (logs in $ROOT)"

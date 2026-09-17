@@ -66,7 +66,7 @@ async fn main() -> ExitCode {
         Cmd::Serve { opts } => serve::serve(&opts, &env).await,
         Cmd::Token { cmd, opts } => serve::token(&opts, &env, matches!(cmd, TokenCmd::Regenerate)),
         Cmd::SshKey => serve::ssh_key(),
-        Cmd::Healthcheck { port } => serve::healthcheck(port, &env),
+        Cmd::Healthcheck { port } => serve::healthcheck(port, &env).await,
     };
     match result {
         Ok(code) => code,

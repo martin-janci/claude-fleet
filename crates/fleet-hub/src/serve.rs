@@ -165,23 +165,39 @@ fn existing_db(data_dir: &std::path::Path) -> Result<std::path::PathBuf, String>
 /// What `ssh-key` does, from which halves of `~/.ssh/id_ed25519` exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyAction {
-    /// The public key is there: print it.
+    /// Both halves are there: print the public key.
     Print,
+    /// The public key is there but its private half is NOT: print it, and say
+    /// so. The operator is about to install it in a host's `authorized_keys`,
+    /// where it would authorize a key this hub can no longer prove it holds.
+    PrintOrphaned,
     /// Only the private key: derive the public half from it.
     Derive,
     /// Neither: generate a new key pair.
     Generate,
 }
 
+impl KeyAction {
+    /// True when the public key is already on disk and only gets printed.
+    #[cfg(test)]
+    fn prints(self) -> bool {
+        matches!(self, KeyAction::Print | KeyAction::PrintOrphaned)
+    }
+}
+
 fn key_action(private_exists: bool, public_exists: bool) -> KeyAction {
     match (private_exists, public_exists) {
-        (_, true) => KeyAction::Print,
+        (true, true) => KeyAction::Print,
+        (false, true) => KeyAction::PrintOrphaned,
         (true, false) => KeyAction::Derive,
         (false, false) => KeyAction::Generate,
     }
 }
 
-/// How long `healthcheck` waits to connect, and then for the status line.
+/// The whole `healthcheck` budget: connect, write and read together. Docker's
+/// `HEALTHCHECK --timeout=5s` kills the probe at 5 s, so one deadline for the
+/// whole sequence — not three that each restart — is what keeps the worst case
+/// under it.
 const HEALTHCHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// The body `fleet-core`'s unauthenticated `/healthz` route answers with. A
@@ -194,20 +210,35 @@ const HEALTHZ_MARKER: &str = "fleet-hub ok";
 /// status line AND [`HEALTHZ_MARKER`] in the body. Any other listener that
 /// happens to hold the port (a proxy, a dev server) answers HTTP too, and used
 /// to read as healthy.
-fn probe(addr: std::net::SocketAddr, timeout: std::time::Duration) -> Result<String, String> {
-    use std::io::{Read, Write};
-    let mut conn = std::net::TcpStream::connect_timeout(&addr, timeout)
+///
+/// `timeout` is ONE budget for the whole exchange. Per-operation timeouts
+/// restarted on every read, so a peer that dripped a byte at a time — or
+/// stalled after each of connect, write and read — could hold the probe open
+/// for multiples of the budget and outlive Docker's own `--timeout`.
+async fn probe(addr: std::net::SocketAddr, timeout: std::time::Duration) -> Result<String, String> {
+    match tokio::time::timeout(timeout, probe_exchange(addr)).await {
+        Ok(r) => r,
+        Err(_) => Err(format!(
+            "{addr} did not answer within {:.0?}",
+            timeout.as_secs_f32()
+        )),
+    }
+}
+
+/// The connect-write-read exchange itself; [`probe`] puts the deadline on it.
+async fn probe_exchange(addr: std::net::SocketAddr) -> Result<String, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut conn = tokio::net::TcpStream::connect(addr)
+        .await
         .map_err(|e| format!("connect {addr}: {e}"))?;
-    conn.set_read_timeout(Some(timeout))
-        .and_then(|()| conn.set_write_timeout(Some(timeout)))
-        .map_err(|e| format!("{addr}: {e}"))?;
     let req = format!("GET /healthz HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
     conn.write_all(req.as_bytes())
+        .await
         .map_err(|e| format!("send to {addr}: {e}"))?;
     // Status line plus the short body is all we need; bound what a stray peer
     // can make us read. Bytes already read survive a later read error.
     let mut raw = Vec::new();
-    let read = conn.take(1024).read_to_end(&mut raw);
+    let read = conn.take(1024).read_to_end(&mut raw).await;
     if raw.is_empty() {
         read.map_err(|e| format!("read from {addr}: {e}"))?;
         return Err(format!("{addr} closed without answering"));
@@ -234,7 +265,10 @@ fn probe(addr: std::net::SocketAddr, timeout: std::time::Duration) -> Result<Str
 /// `fleet-hub healthcheck`: probe the local listener without opening the
 /// store (it runs next to a live `serve`). Port: flag > `FLEET_HUB_PORT` >
 /// default; the stored `mcp.port` is deliberately not read.
-pub fn healthcheck(port: Option<u16>, env: &HashMap<String, String>) -> Result<ExitCode, String> {
+pub async fn healthcheck(
+    port: Option<u16>,
+    env: &HashMap<String, String>,
+) -> Result<ExitCode, String> {
     let port = match (port, env.get("FLEET_HUB_PORT")) {
         (Some(p), _) => p,
         (None, Some(v)) => v
@@ -244,7 +278,9 @@ pub fn healthcheck(port: Option<u16>, env: &HashMap<String, String>) -> Result<E
         (None, None) => mcp::DEFAULT_PORT,
     };
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let status = probe(addr, HEALTHCHECK_TIMEOUT).map_err(|e| format!("unhealthy: {e}"))?;
+    let status = probe(addr, HEALTHCHECK_TIMEOUT)
+        .await
+        .map_err(|e| format!("unhealthy: {e}"))?;
     out::line(&format!("healthy: {status}"));
     Ok(ExitCode::SUCCESS)
 }
@@ -261,6 +297,21 @@ pub fn ssh_key() -> Result<ExitCode, String> {
     let private_exists = std::fs::symlink_metadata(&key).is_ok();
     match key_action(private_exists, pubkey.exists()) {
         KeyAction::Print => {}
+        KeyAction::PrintOrphaned => {
+            // Both channels: the log, for a hub whose `serve` has logging up,
+            // and one line on STDERR so an operator running `fleet-hub ssh-key`
+            // interactively sees it. STDERR, not stdout, keeps
+            // `fleet-hub ssh-key | ssh host 'cat >> authorized_keys'` exact.
+            tracing::warn!(
+                private_key = %key.display(),
+                "the private key is missing; the public key below cannot authenticate until it is restored"
+            );
+            out::error(&format!(
+                "warning: the private key {} is missing. The public key below is printed as found, \
+                 but this hub cannot authenticate with it until the private key is restored.",
+                key.display()
+            ));
+        }
         KeyAction::Derive => {
             let o = std::process::Command::new("ssh-keygen")
                 .arg("-y")
@@ -627,9 +678,17 @@ mod tests {
     #[test]
     fn ssh_key_derives_from_a_lone_private_key_and_never_regenerates_it() {
         assert_eq!(key_action(true, true), KeyAction::Print);
-        assert_eq!(key_action(false, true), KeyAction::Print);
         assert_eq!(key_action(true, false), KeyAction::Derive);
         assert_eq!(key_action(false, false), KeyAction::Generate);
+    }
+
+    #[test]
+    fn ssh_key_flags_a_public_key_whose_private_half_is_gone() {
+        // Printing it silently invites the operator to install an authorized
+        // key this hub cannot authenticate with.
+        assert_eq!(key_action(false, true), KeyAction::PrintOrphaned);
+        assert!(KeyAction::PrintOrphaned.prints());
+        assert!(KeyAction::Print.prints());
     }
 
     /// One listener that answers a single request with `reply`, handing back
@@ -649,13 +708,13 @@ mod tests {
         (addr, server)
     }
 
-    #[test]
-    fn healthcheck_probes_healthz_and_accepts_the_liveness_body() {
+    #[tokio::test]
+    async fn healthcheck_probes_healthz_and_accepts_the_liveness_body() {
         let (addr, server) = one_shot(
             b"HTTP/1.1 200 OK\r\ncontent-type: text/plain; charset=utf-8\r\n\
               content-length: 13\r\nconnection: close\r\n\r\nfleet-hub ok\n",
         );
-        let status = probe(addr, HEALTHCHECK_TIMEOUT).unwrap();
+        let status = probe(addr, HEALTHCHECK_TIMEOUT).await.unwrap();
         assert_eq!(status, "HTTP/1.1 200 OK");
         let req = server.join().unwrap();
         assert!(req.starts_with("GET /healthz HTTP/1.1\r\n"), "{req}");
@@ -669,27 +728,77 @@ mod tests {
         );
     }
 
-    #[test]
-    fn healthcheck_rejects_a_200_from_an_unrelated_listener() {
+    #[tokio::test]
+    async fn healthcheck_rejects_a_200_from_an_unrelated_listener() {
         // The old probe passed on any HTTP status line, so any process that
         // happened to hold the port read as a healthy hub.
         let (addr, server) = one_shot(
             b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 5\r\n\
               connection: close\r\n\r\nhello",
         );
-        let err = probe(addr, HEALTHCHECK_TIMEOUT).unwrap_err();
+        let err = probe(addr, HEALTHCHECK_TIMEOUT).await.unwrap_err();
         assert!(err.contains("fleet-hub"), "{err}");
         server.join().unwrap();
     }
 
-    #[test]
-    fn healthcheck_fails_on_a_closed_port_or_a_non_http_answer() {
+    /// Docker's `HEALTHCHECK … --timeout=5s` kills the probe at 5 s, so the
+    /// whole connect-write-read sequence must answer inside ONE budget.
+    #[tokio::test]
+    async fn healthcheck_gives_up_on_a_listener_that_never_answers() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            // Accept and hold: never write, never close.
+            std::thread::sleep(std::time::Duration::from_secs(8));
+            drop(conn);
+        });
+        let started = std::time::Instant::now();
+        let err = probe(addr, HEALTHCHECK_TIMEOUT).await.unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "docker kills the probe at 5 s; this took {elapsed:?} ({err})"
+        );
+        drop(server);
+    }
+
+    /// The three per-operation timeouts each restarted on every read, so a
+    /// peer that dripped one byte at a time held the probe open indefinitely.
+    #[tokio::test]
+    async fn healthcheck_gives_up_within_one_budget_when_the_peer_drips() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            for b in b"HTTP/1.1 200 OK\r\nx: ".iter() {
+                if conn.write_all(&[*b]).is_err() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        });
+        let budget = std::time::Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        assert!(probe(addr, budget).await.is_err());
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < budget * 4,
+            "one budget of {budget:?} must bound the whole probe; took {elapsed:?}"
+        );
+        drop(server);
+    }
+
+    #[tokio::test]
+    async fn healthcheck_fails_on_a_closed_port_or_a_non_http_answer() {
         use std::io::Write;
         let closed = {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             l.local_addr().unwrap()
         };
-        assert!(probe(closed, HEALTHCHECK_TIMEOUT).is_err());
+        assert!(probe(closed, HEALTHCHECK_TIMEOUT).await.is_err());
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -697,7 +806,7 @@ mod tests {
             let (mut conn, _) = listener.accept().unwrap();
             conn.write_all(b"SSH-2.0-OpenSSH_9.6\r\n").unwrap();
         });
-        let err = probe(addr, HEALTHCHECK_TIMEOUT).unwrap_err();
+        let err = probe(addr, HEALTHCHECK_TIMEOUT).await.unwrap_err();
         assert!(err.contains("SSH-2.0"), "{err}");
         server.join().unwrap();
     }
