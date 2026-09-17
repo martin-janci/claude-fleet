@@ -181,6 +181,8 @@ pub async fn plan_sync(
         host_alias: args.host_alias.clone(),
         kind: args.kind,
         name: args.name.clone(),
+        // Set per host below, once its layer assignment is known.
+        layered: false,
     };
     // Only harnesses that can scan a host can be planned for: without a
     // snapshot there is nothing to diff the catalog against.
@@ -212,6 +214,15 @@ pub async fn plan_sync(
                 continue;
             }
         };
+        // Whether this host has ANY layer assignment at all, before
+        // resolving it: a host with no `host_layers` row must plan a dropped
+        // `plugin_ref` exactly as it did before layers existed (`Remove`),
+        // not the "reported, not removed" `Noop` that only makes sense once
+        // a host is actually opting into layered assignment.
+        let layered = {
+            let s = lock(store)?;
+            !s.get_host_layers(&h.alias)?.is_empty()
+        };
         // Resolve the host's layers ONCE per host, before its harnesses are
         // planned. The scan below still uses the FULL catalog: inventory is
         // about the whole catalog's drift, while the PLAN is about what this
@@ -225,6 +236,10 @@ pub async fn plan_sync(
                 continue;
             }
         };
+        let host_filter = PlanFilter {
+            layered,
+            ..filter.clone()
+        };
         for harness in &scanning {
             let harness = *harness;
             match scan_and_persist(store, ssh, &catalog, harness, &h.alias, &secrets).await {
@@ -235,7 +250,7 @@ pub async fn plan_sync(
                     &snap,
                     &manifest,
                     &secrets,
-                    &filter,
+                    &host_filter,
                 )),
                 Err(e) => host_plans.push(skipped_plan(&h.alias, harness.id(), &e.message)),
             }
