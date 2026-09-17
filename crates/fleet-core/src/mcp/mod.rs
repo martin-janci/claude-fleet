@@ -763,6 +763,49 @@ mod tests {
         );
     }
 
+    /// On Linux every 127.0.0.0/8 address is loopback, so binding 127.0.0.2
+    /// discriminates: the server must answer there and NOT on 127.0.0.1,
+    /// which a listener that ignored the address (0.0.0.0) would.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn start_binds_the_requested_address() {
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2));
+        // A port just free on 127.0.0.1, so a refusal there is the server's
+        // doing, not a leftover listener's.
+        let port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let guards = McpGuards::new(Arc::new(|_| {}));
+        let (shutdown, task) = start_with_handle(
+            store,
+            Arc::new(SshClient::new()),
+            crate::cancel::CancellationRegistry::new(),
+            Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
+            guards,
+            ip,
+            port,
+            "tok".into(),
+            vec![],
+        )
+        .await
+        .expect("bind 127.0.0.2");
+        tokio::net::TcpStream::connect((ip, port))
+            .await
+            .expect("the requested address accepts");
+        let other = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).await;
+        assert_eq!(
+            other.map(|_| ()).map_err(|e| e.kind()),
+            Err(std::io::ErrorKind::ConnectionRefused),
+            "127.0.0.1:{port} must not be served"
+        );
+        shutdown.cancel();
+        let _ = task.await;
+    }
+
+    #[cfg(not(target_os = "linux"))]
     #[tokio::test]
     async fn start_binds_the_requested_address() {
         let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));

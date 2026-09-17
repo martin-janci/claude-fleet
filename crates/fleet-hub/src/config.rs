@@ -385,6 +385,104 @@ mod tests {
     }
 
     #[test]
+    fn public_url_flag_beats_env_beats_setting_beats_default() {
+        let settings =
+            |k: &str| (k == "hub.public_url").then(|| "https://s.example.com".to_string());
+        let e = env(&[("FLEET_HUB_PUBLIC_URL", "https://e.example.com")]);
+        let mut o = opts();
+        o.public_url = Some("https://f.example.com".into());
+        let r = resolve(&o, &e, &settings).unwrap();
+        assert_eq!(r.public_url.as_deref(), Some("https://f.example.com"));
+        let r = resolve(&opts(), &e, &settings).unwrap();
+        assert_eq!(r.public_url.as_deref(), Some("https://e.example.com"));
+        let r = resolve(&opts(), &env(&[]), &settings).unwrap();
+        assert_eq!(r.public_url.as_deref(), Some("https://s.example.com"));
+        let r = resolve(&opts(), &env(&[]), &|_| None).unwrap();
+        assert_eq!(r.public_url, None);
+    }
+
+    #[test]
+    fn local_host_flag_beats_env_beats_setting_beats_default() {
+        let stored_true = |k: &str| (k == "hub.local_host").then(|| "true".to_string());
+        let stored_false = |k: &str| (k == "hub.local_host").then(|| "false".to_string());
+        let env_false = env(&[("FLEET_HUB_LOCAL_HOST", "false")]);
+        let env_true = env(&[("FLEET_HUB_LOCAL_HOST", "true")]);
+        let mut flag_true = opts();
+        flag_true.local_host = Some(true);
+        let mut flag_false = opts();
+        flag_false.local_host = Some(false);
+        assert!(
+            resolve(&flag_true, &env_false, &stored_false)
+                .unwrap()
+                .local_host
+        );
+        assert!(
+            !resolve(&flag_false, &env_true, &stored_true)
+                .unwrap()
+                .local_host
+        );
+        assert!(
+            !resolve(&opts(), &env_false, &stored_true)
+                .unwrap()
+                .local_host
+        );
+        assert!(
+            resolve(&opts(), &env_true, &stored_false)
+                .unwrap()
+                .local_host
+        );
+        assert!(
+            resolve(&opts(), &env(&[]), &stored_true)
+                .unwrap()
+                .local_host
+        );
+        assert!(!resolve(&opts(), &env(&[]), &|_| None).unwrap().local_host);
+    }
+
+    #[test]
+    fn allowed_host_flag_beats_env_and_setting() {
+        let settings = |k: &str| (k == "hub.allowed_hosts").then(|| "s.example.com".to_string());
+        let e = env(&[("FLEET_HUB_ALLOWED_HOSTS", "e.example.com")]);
+        let mut o = opts();
+        o.allowed_host = vec!["f.example.com".into(), "g.example.com".into()];
+        let r = resolve(&o, &e, &settings).unwrap();
+        assert_eq!(
+            r.allowed_hosts_explicit,
+            vec!["f.example.com".to_string(), "g.example.com".to_string()]
+        );
+        let r = resolve(&opts(), &e, &settings).unwrap();
+        assert_eq!(r.allowed_hosts_explicit, vec!["e.example.com".to_string()]);
+        let r = resolve(&opts(), &env(&[]), &settings).unwrap();
+        assert_eq!(r.allowed_hosts_explicit, vec!["s.example.com".to_string()]);
+    }
+
+    #[test]
+    fn data_dir_and_log_dir_come_from_env_when_no_flag() {
+        let e = env(&[
+            ("FLEET_HUB_DATA_DIR", "/env/data"),
+            ("FLEET_HUB_LOG_DIR", "/env/logs"),
+        ]);
+        let r = resolve(&opts(), &e, &|_| None).unwrap();
+        assert_eq!(r.data_dir, PathBuf::from("/env/data"));
+        assert_eq!(r.log_dir, PathBuf::from("/env/logs"));
+        // Env data dir alone: logs default beneath it.
+        let e = env(&[("FLEET_HUB_DATA_DIR", "/env/data")]);
+        let r = resolve(&opts(), &e, &|_| None).unwrap();
+        assert_eq!(r.log_dir, PathBuf::from("/env/data/logs"));
+        // Flags still win.
+        let mut o = opts();
+        o.data_dir = Some("/flag/data".into());
+        o.log_dir = Some("/flag/logs".into());
+        let e = env(&[
+            ("FLEET_HUB_DATA_DIR", "/env/data"),
+            ("FLEET_HUB_LOG_DIR", "/env/logs"),
+        ]);
+        let r = resolve(&o, &e, &|_| None).unwrap();
+        assert_eq!(r.data_dir, PathBuf::from("/flag/data"));
+        assert_eq!(r.log_dir, PathBuf::from("/flag/logs"));
+    }
+
+    #[test]
     fn bad_values_are_reported_by_name() {
         let mut o = opts();
         o.bind = Some("not-an-ip".into());
