@@ -18,7 +18,10 @@ use std::sync::{Arc, Mutex};
 /// Open (creating when missing) `<data-dir>/state.db`. The data dir is the
 /// only option resolved without the store: everything else reads its stored
 /// `hub.*` values.
-fn open_store(opts: &HubOptions, env: &HashMap<String, String>) -> Result<Store, String> {
+pub(crate) fn open_store(
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+) -> Result<Store, String> {
     let data_dir = resolve_data_dir(opts, env);
     std::fs::create_dir_all(&data_dir)
         .map_err(|e| format!("create data dir {}: {e}", data_dir.display()))?;
@@ -163,7 +166,7 @@ pub fn token(
 }
 
 /// `<data-dir>/state.db` when it exists; `token` must never create one.
-fn existing_db(data_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+pub(crate) fn existing_db(data_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
     let db = data_dir.join("state.db");
     if db.is_file() {
         Ok(db)
