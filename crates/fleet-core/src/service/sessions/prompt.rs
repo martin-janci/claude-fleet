@@ -56,6 +56,7 @@ pub(super) async fn send_prompt_inner(
     // instead of two.
     let script = build_send_commands(tmux_name, prompt, submit).join(" && ");
     let out = if host_alias == "local" {
+        crate::service::hub::ensure_local_allowed(host_alias)?;
         tokio::process::Command::new("bash")
             .args(["-c", &script])
             .output()

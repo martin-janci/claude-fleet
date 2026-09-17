@@ -45,7 +45,8 @@ pub async fn add_host(
 ) -> Result<HostRow, IpcError> {
     // Reject hostile aliases (e.g. `-oProxyCommand=…`) before they reach ssh.
     crate::validate::host_alias(&args.alias)?;
-    crate::validate::host_alias(&args.ssh_alias)?;
+    // Only ever an argument to `ssh`, never the `local` host itself.
+    crate::validate::host_alias_syntax(&args.ssh_alias)?;
     // Probe first; we don't want to persist a host we can't talk to.
     let (reachable, claude_ver, tmux_ver, account) = probe(ssh, &args.ssh_alias).await?;
     {
@@ -94,7 +95,7 @@ pub async fn probe_ssh_alias(
     ssh: &dyn SshExec,
     reg: &Arc<CancellationRegistry>,
 ) -> Result<ProbePreview, IpcError> {
-    crate::validate::host_alias(&args.ssh_alias)?;
+    crate::validate::host_alias_syntax(&args.ssh_alias)?;
     let (cancel_id, token) = match args.call_id {
         Some(id) => {
             let token = CancellationToken::new();
@@ -144,13 +145,15 @@ pub async fn probe_host(
     // unreachable host updates `reachable=false` instead of returning an
     // error to the UI.
     let (reachable, claude_ver, tmux_ver, account) = if args.alias == "local" {
+        crate::service::hub::ensure_local_allowed(&args.alias)?;
         // probe_local does blocking std::process + fs I/O — keep it off the
         // async runtime worker thread.
         tokio::task::spawn_blocking(probe_local)
             .await
             .unwrap_or_default()
     } else {
-        crate::validate::host_alias(target)?;
+        // `target` is the ssh alias (or a non-local alias): syntax only.
+        crate::validate::host_alias_syntax(target)?;
         // Anonymous token — probe_host is user-triggered re-probe; we give it
         // a token so it can be cancelled if needed, but no frontend call_id.
         // The CancelGuard releases the slot even if the probe panics.

@@ -108,11 +108,20 @@ pub fn parse_mtimes(stdout: &str) -> std::collections::HashMap<String, i64> {
         .collect()
 }
 
+/// tmux (and `claude` / `bash`) on this machine, the `local` host. Every
+/// method refuses first when this is a hub with `hub.local_host=false`: the
+/// fallible ones return `E_NOTFOUND`, the infallible ones their "nothing
+/// known" value, so no construction site can spawn on a disabled `local`.
 pub struct LocalTmux;
+
+fn local_allowed() -> Result<(), IpcError> {
+    crate::service::hub::ensure_local_allowed(crate::service::projects::LOCAL_HOST)
+}
 
 #[async_trait]
 impl TmuxExec for LocalTmux {
     async fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError> {
+        local_allowed()?;
         list_local_sessions().await
     }
     async fn new_session(
@@ -121,15 +130,19 @@ impl TmuxExec for LocalTmux {
         cwd: &std::path::Path,
         pane_cmd: &str,
     ) -> Result<(), IpcError> {
+        local_allowed()?;
         new_session(name, cwd, pane_cmd).await
     }
     async fn kill_session(&self, name: &str) -> Result<(), IpcError> {
+        local_allowed()?;
         kill_session(name).await
     }
     async fn rename_session(&self, old: &str, new: &str) -> Result<(), IpcError> {
+        local_allowed()?;
         rename_session(old, new).await
     }
     async fn restart_session(&self, name: &str, pane_cmd: &str) -> Result<(), IpcError> {
+        local_allowed()?;
         restart_session(name, pane_cmd).await
     }
     async fn respawn_pane_in(
@@ -138,9 +151,11 @@ impl TmuxExec for LocalTmux {
         cwd: &std::path::Path,
         pane_cmd: &str,
     ) -> Result<(), IpcError> {
+        local_allowed()?;
         respawn_pane_in(name, cwd, pane_cmd).await
     }
     async fn capture_pane(&self, name: &str) -> Result<String, IpcError> {
+        local_allowed()?;
         let output = tokio::process::Command::new("tmux")
             .args(["capture-pane", "-t", name, "-p"])
             .output()
@@ -154,6 +169,7 @@ impl TmuxExec for LocalTmux {
         }
     }
     async fn capture_pane_scrollback(&self, name: &str, lines: u32) -> Result<String, IpcError> {
+        local_allowed()?;
         let start = scrollback_start(lines);
         let output = tokio::process::Command::new("tmux")
             .args(["capture-pane", "-t", name, "-S", &start, "-p"])
@@ -167,6 +183,9 @@ impl TmuxExec for LocalTmux {
         }
     }
     async fn list_claude_agents(&self) -> Vec<crate::claude_agents::ClaudeAgentRow> {
+        if local_allowed().is_err() {
+            return Vec::new();
+        }
         let output = tokio::process::Command::new("claude")
             .args(["agents", "--json"])
             .output()
@@ -182,6 +201,7 @@ impl TmuxExec for LocalTmux {
         &self,
         ids: &[String],
     ) -> Option<std::collections::HashMap<String, i64>> {
+        local_allowed().ok()?;
         let Some(script) = transcript_mtimes_script(ids) else {
             return Some(std::collections::HashMap::new());
         };

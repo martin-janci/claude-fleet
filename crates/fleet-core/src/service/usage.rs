@@ -581,6 +581,7 @@ async fn run_script(
     script: &str,
 ) -> Result<std::process::Output, IpcError> {
     if host == "local" {
+        crate::service::hub::ensure_local_allowed(host)?;
         let child = tokio::process::Command::new("bash")
             .arg("-c")
             .arg(script)

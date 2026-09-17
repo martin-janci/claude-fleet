@@ -1328,6 +1328,7 @@ async fn folder_source(
             "adopting a folder works on the local host only; clone it on the remote host instead",
         ));
     }
+    crate::service::hub::ensure_local_allowed(&args.host_alias)?;
     crate::validate::remote_abs_path("folder", path)?;
     // `std::fs` and `git` are blocking; keep them off the async worker. A
     // `Handle` travels into the blocking closure so `git_out` can bound each
@@ -1644,6 +1645,8 @@ async fn run_local_script(
     wall_clock: Duration,
     token: &CancellationToken,
 ) -> Result<std::process::Output, IpcError> {
+    // Every caller runs this for the `local` host.
+    crate::service::hub::ensure_local_allowed(crate::service::projects::LOCAL_HOST)?;
     let mut cmd = tokio::process::Command::new("bash");
     cmd.arg("-lc")
         .arg(script)

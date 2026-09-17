@@ -91,6 +91,7 @@ pub async fn run_host_script_with(
         ));
     }
     let out = if host == "local" {
+        crate::service::hub::ensure_local_allowed(host)?;
         let mut cmd = tokio::process::Command::new("bash");
         cmd.args(["-lc", script]).kill_on_drop(true);
         tokio::select! {

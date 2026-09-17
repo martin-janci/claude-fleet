@@ -637,7 +637,8 @@ where
 /// Bounded the way [`SshExec::run`] is — `timeout` is the connect budget and
 /// the wall clock derives from it. The local spawn is killed at the wall
 /// clock and reports `E_TIMEOUT`; a failed spawn is `E_SHELL`. Every value
-/// interpolated into `script` must already be quoted by the caller.
+/// interpolated into `script` must already be quoted by the caller. `local`
+/// on a hub with `hub.local_host=false` is `E_NOTFOUND`, before any spawn.
 pub async fn run_shell(
     exec: &dyn SshExec,
     host: &str,
@@ -645,6 +646,7 @@ pub async fn run_shell(
     timeout: Duration,
 ) -> Result<Output, IpcError> {
     if host == "local" {
+        crate::service::hub::ensure_local_allowed(host)?;
         return run_local_shell(script, SshClient::default_wall_clock(timeout)).await;
     }
     exec.run(
@@ -665,6 +667,7 @@ pub async fn run_shell_bounded(
     wall_clock: Duration,
 ) -> Result<Output, IpcError> {
     if host == "local" {
+        crate::service::hub::ensure_local_allowed(host)?;
         return run_local_shell(script, wall_clock).await;
     }
     exec.run_bounded(

@@ -192,6 +192,7 @@ pub async fn list_host_worktrees_with(
 ) -> Result<HostWorktrees, IpcError> {
     let host = args.host_alias.as_str();
     let pid = args.project_id;
+    crate::service::hub::ensure_local_allowed(host)?;
     if host == crate::service::projects::LOCAL_HOST {
         let s = lock(store)?;
         let worktrees = s.list_worktrees_for_project(pid)?;

@@ -767,6 +767,7 @@ mod temp_file_tests {
 /// Write the transcript to `path` on `host`.
 async fn put(ssh: &dyn SshExec, host: &str, path: &str, bytes: &[u8]) -> Result<(), IpcError> {
     if host == LOCAL {
+        crate::service::hub::ensure_local_allowed(host)?;
         return tokio::fs::write(path, bytes)
             .await
             .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("write {path}: {e}")));
@@ -1054,6 +1055,9 @@ async fn move_session_steps(
         snapshot(&s, &args)?
     };
     let src = snap.row.host_alias.clone();
+    // The source row is looked up by id, not validated as an alias: a `local`
+    // row on a hub without a local host is refused here, before any step.
+    crate::service::hub::ensure_local_allowed(&src)?;
     let target = args.target_host_alias.clone();
     let id = snap.claude_id.clone();
     let mut warnings: Vec<String> = Vec::new();

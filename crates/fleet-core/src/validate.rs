@@ -80,7 +80,21 @@ fn is_lower_hex(c: char) -> bool {
 /// control characters, and anything outside `[A-Za-z0-9._-]`, and cap the
 /// length. (`run`/`run_cancellable` additionally pass `--` before the host
 /// as belt-and-suspenders.)
+///
+/// On a hub with `hub.local_host=false` the alias `local` is then refused
+/// with `E_NOTFOUND` (see `service::hub::ensure_local_allowed`): every entry
+/// point that names a target host validates it here. For a value that is
+/// only an ssh alias or a settings key, never a fleet target, use
+/// [`host_alias_syntax`].
 pub fn host_alias(alias: &str) -> Result<(), IpcError> {
+    host_alias_syntax(alias)?;
+    crate::service::hub::ensure_local_allowed(alias)
+}
+
+/// The character checks of [`host_alias`] alone, without the `local` guard:
+/// for an `~/.ssh/config` alias handed to `ssh`, or a host key in a settings
+/// map, neither of which runs anything on the `local` host.
+pub fn host_alias_syntax(alias: &str) -> Result<(), IpcError> {
     non_empty("host alias", alias)?;
     max_len(alias, 255, "host alias is too long")?;
     no_leading_dash("host alias", alias)?;

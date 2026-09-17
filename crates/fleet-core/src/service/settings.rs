@@ -239,7 +239,9 @@ pub fn parse_path_map(key: &str, raw: &str) -> Result<BTreeMap<String, String>, 
     })?;
     let mut out = BTreeMap::new();
     for (alias, path) in map {
-        crate::validate::host_alias(&alias)?;
+        // A map key, not a target: a `local` entry must not void the whole
+        // map on a hub with `hub.local_host=false`.
+        crate::validate::host_alias_syntax(&alias)?;
         let path = path.trim();
         validate_base_path(&format!("{key}[{alias}]"), path)?;
         out.insert(alias, path.to_string());

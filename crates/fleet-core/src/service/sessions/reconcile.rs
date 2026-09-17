@@ -1090,12 +1090,7 @@ pub(super) async fn reconcile_one_host_with(
     // `local` is off on this hub (`hub.local_host = false`): refuse before
     // any lookup or probe, even if a `state.db` copied from a desktop still
     // carries a `local` row (the same row the fleet-wide pass never probes).
-    if !deps.local_host && alias == "local" {
-        return Err(IpcError::new(
-            codes::E_NOTFOUND,
-            "host local is disabled on this hub (hub.local_host=false)",
-        ));
-    }
+    crate::service::hub::check_local_allowed(alias, deps.local_host)?;
     // 1. Snapshot the host under lock (brief).
     let (host, paths) = {
         let s = lock(store)?;

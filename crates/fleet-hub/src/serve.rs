@@ -181,6 +181,12 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         }
     }
     persist(&store, &r)?;
+    if !r.local_host {
+        // Before the control API and the ticks start: from here on every
+        // tool or command naming host `local` is refused with E_NOTFOUND
+        // instead of running on this machine.
+        fleet_core::service::hub::disable_local_host();
+    }
     let token = {
         let s = store
             .lock()

@@ -172,6 +172,9 @@ fn dedupe_by_common_dir(mut scanned: Vec<Scanned>) -> Vec<Scanned> {
 }
 
 pub async fn refresh_projects(store: &Mutex<Store>) -> Result<Vec<ProjectTreeRow>, IpcError> {
+    // The scan reads this machine's projects root and runs `git` here: the
+    // `local` host's projects, which a hub without a local host does not have.
+    crate::service::hub::ensure_local_allowed(LOCAL_HOST)?;
     // 1. Resolve the scan root + layout and snapshot the current project list
     //    under a brief lock.
     let (base, layout, snapshot) = {

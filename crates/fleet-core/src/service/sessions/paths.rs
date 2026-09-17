@@ -471,6 +471,7 @@ pub(super) fn cwd_source_for_session(
     row: &crate::store::SessionRow,
 ) -> Result<CwdSource, IpcError> {
     if row.host_alias == "local" {
+        crate::service::hub::ensure_local_allowed(&row.host_alias)?;
         return Ok(CwdSource::Local(resolve_session_cwd(s, row)?));
     }
     let pid = row.project_id.ok_or_else(|| {

@@ -340,6 +340,7 @@ pub fn reestablish_tunnels(
 /// Missing file → `Ok(String::new())` (caller treats as empty config).
 pub async fn read_host_file(ssh: &dyn SshExec, host: &str, path: &str) -> Result<String, IpcError> {
     if host == "local" {
+        crate::service::hub::ensure_local_allowed(host)?;
         let expanded = expand_home_local(path)?;
         return Ok(std::fs::read_to_string(&expanded).unwrap_or_default());
     }
@@ -364,6 +365,7 @@ pub async fn write_host_file(
     content: &str,
 ) -> Result<(), IpcError> {
     if host == "local" {
+        crate::service::hub::ensure_local_allowed(host)?;
         let edir = expand_home_local(dir)?;
         std::fs::create_dir_all(&edir)
             .map_err(|e| IpcError::new(codes::E_PROVISION, format!("mkdir {edir}: {e}")))?;
@@ -398,6 +400,7 @@ pub async fn write_host_file_secret(
 ) -> Result<(), IpcError> {
     let tmp_path = format!("{path}.fleet-tmp");
     if host == "local" {
+        crate::service::hub::ensure_local_allowed(host)?;
         let edir = expand_home_local(dir)?;
         std::fs::create_dir_all(&edir)
             .map_err(|e| IpcError::new(codes::E_PROVISION, format!("mkdir {edir}: {e}")))?;

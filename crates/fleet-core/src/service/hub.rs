@@ -4,6 +4,7 @@
 
 use crate::ipc_error::{codes, IpcError};
 use crate::store::Store;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const SETTING_BIND: &str = "hub.bind";
 pub const SETTING_PUBLIC_URL: &str = "hub.public_url";
@@ -131,6 +132,41 @@ pub fn read_local_host(s: &Store) -> bool {
     )
 }
 
+/// Set once `hub.local_host` is off: every explicit `local` target is refused.
+static LOCAL_HOST_DISABLED: AtomicBool = AtomicBool::new(false);
+
+/// The refusal for a `local` target on a hub without a local host.
+const LOCAL_DISABLED_MESSAGE: &str = "host local is disabled on this hub (hub.local_host=false)";
+
+/// Turn the `local` host off for this process. Called once by `fleet-hub
+/// serve` when `hub.local_host` is false; the desktop never calls it.
+/// Idempotent, and there is no way back: a process that disabled `local`
+/// never runs anything on its own machine as a fleet host.
+pub fn disable_local_host() {
+    LOCAL_HOST_DISABLED.store(true, Ordering::SeqCst);
+}
+
+/// False only after [`disable_local_host`]; always true on the desktop.
+pub fn local_host_enabled() -> bool {
+    !LOCAL_HOST_DISABLED.load(Ordering::SeqCst)
+}
+
+/// Pure guard: `E_NOTFOUND` iff `alias` is `local` and the local host is off.
+pub fn check_local_allowed(alias: &str, local_enabled: bool) -> Result<(), IpcError> {
+    if alias == crate::service::projects::LOCAL_HOST && !local_enabled {
+        return Err(IpcError::new(codes::E_NOTFOUND, LOCAL_DISABLED_MESSAGE));
+    }
+    Ok(())
+}
+
+/// [`check_local_allowed`] against this process's flag. Every entry point
+/// that takes a host alias reaches it through `validate::host_alias`; every
+/// branch that spawns on, or touches files of, the `local` host checks it
+/// again before doing so.
+pub fn ensure_local_allowed(alias: &str) -> Result<(), IpcError> {
+    check_local_allowed(alias, local_host_enabled())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +255,26 @@ mod tests {
         assert!(!read_local_host(&s));
         s.set_setting(SETTING_LOCAL_HOST, "true").unwrap();
         assert!(read_local_host(&s));
+    }
+
+    #[test]
+    fn check_local_allowed_refuses_only_local_when_disabled() {
+        let e = check_local_allowed("local", false).unwrap_err();
+        assert_eq!(e.code, crate::ipc_error::codes::E_NOTFOUND);
+        assert_eq!(
+            e.message,
+            "host local is disabled on this hub (hub.local_host=false)"
+        );
+        assert!(check_local_allowed("local", true).is_ok());
+        assert!(check_local_allowed("mefistos", false).is_ok());
+        assert!(check_local_allowed("mefistos", true).is_ok());
+    }
+
+    #[test]
+    fn local_host_is_enabled_unless_disabled() {
+        // No unit test calls `disable_local_host` (it is process-wide; see
+        // tests/local_host_guard.rs), so the default holds here.
+        assert!(local_host_enabled());
+        assert!(ensure_local_allowed("local").is_ok());
     }
 }

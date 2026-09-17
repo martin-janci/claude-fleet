@@ -248,6 +248,7 @@ pub fn import_host(
             "importing from remote hosts is not supported yet; use local",
         ));
     }
+    crate::service::hub::ensure_local_allowed(&args.host_alias)?;
     let src = import::ImportSources::for_local()?;
     import::import_claude(
         &src,

@@ -371,6 +371,7 @@ fn apply_worktree_exit_hook(
     // Local rows are stored canonically; a removed directory resolves
     // through its nearest existing ancestor.
     let path = if host == LOCAL_HOST {
+        crate::service::hub::ensure_local_allowed(host)?;
         canonical_str(&path)
     } else {
         path
@@ -440,7 +441,9 @@ fn apply_worktree_hook(
     }
 
     // Local: resolve symlinks (off-lock; it is filesystem IO), then validate
-    // the physical form too, since that is what gets stored.
+    // the physical form too, since that is what gets stored. Not on a hub
+    // without a local host: the path would be resolved on the hub itself.
+    crate::service::hub::ensure_local_allowed(host)?;
     let path = canonical_str(&path);
     validate_worktree_path(&path)?;
     let name = Path::new(&path)

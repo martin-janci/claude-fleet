@@ -213,7 +213,9 @@ serves.
 `--local-host` (default `false`, unlike the desktop where it is implicitly
 `true`) controls whether the hub's own machine is itself a managed fleet
 host: with it off, reconcile never creates or probes a `local` host, and a
-single-host refresh of `local` returns `E_NOTFOUND`.
+single-host refresh of `local` returns `E_NOTFOUND`. With it off, any tool
+or command naming host `local` returns `E_NOTFOUND` too, so nothing runs on
+the hub's machine as a fleet host.
 
 ## Migrating from the desktop
 

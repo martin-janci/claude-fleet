@@ -1366,6 +1366,7 @@ impl<'a> HostExec<'a> {
         connect: Duration,
     ) -> Result<ScriptOutput, IpcError> {
         let out = if self.host == "local" {
+            crate::service::hub::ensure_local_allowed(&self.host)?;
             let child = tokio::process::Command::new("bash")
                 .args(["-lc", script])
                 .kill_on_drop(true)
@@ -2262,6 +2263,9 @@ pub async fn spec_for_session(
         let row = s
             .get_session_by_id(session_id)?
             .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?;
+        // A `local` row on a hub without a local host: its paths are on this
+        // machine, so refuse before resolving (and later running) anything.
+        crate::service::hub::ensure_local_allowed(&row.host_alias)?;
         if crate::store::has_no_pane(&row.kind) {
             return Err(IpcError::new(
                 codes::E_BG_SESSION,
@@ -2420,6 +2424,7 @@ pub async fn ensure_for_new_session(
     ssh: &Arc<SshClient>,
     w: NewSessionWorkspace<'_>,
 ) -> Result<RepairReport, IpcError> {
+    crate::service::hub::ensure_local_allowed(w.host_alias)?;
     let remote_root = if w.host_alias == "local" {
         None
     } else {

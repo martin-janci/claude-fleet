@@ -278,6 +278,7 @@ pub(super) async fn create_worktree_local(
     name: &str,
     base: Option<&str>,
 ) -> Result<String, IpcError> {
+    crate::service::hub::ensure_local_allowed(crate::service::projects::LOCAL_HOST)?;
     let script = worktree_add_script(root, name, base);
     let out = tokio::process::Command::new("bash")
         .args(["-lc", &script])
@@ -433,6 +434,7 @@ pub(super) async fn new_session_inner(
     // For REMOTE we can't use the local path — it doesn't exist on the other
     // machine — so we translate to `~/projects/github.com/<owner>/<repo>`
     // (matching proj-clean's convention) and auto-clone if missing.
+    crate::service::hub::ensure_local_allowed(&args.host_alias)?;
     let path: PathBuf = if args.host_alias == "local" {
         if let Some(ref name) = args.new_worktree {
             // NEW WORKTREE: create branch + worktree, return the new dir.
