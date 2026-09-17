@@ -194,6 +194,15 @@ fn usage_report_is_a_read_scoped_to_the_callers_host() {
 }
 
 #[test]
+fn layer_read_tools_are_readonly_and_the_setter_is_not() {
+    use crate::mcp::guard::is_readonly_tool;
+    assert!(is_readonly_tool("list_layers"));
+    assert!(is_readonly_tool("resolve_preview"));
+    assert!(is_readonly_tool("propose_layers"));
+    assert!(!is_readonly_tool("set_host_layers"));
+}
+
+#[test]
 fn marker_is_applied_unless_master_asks_for_raw() {
     let agent = host_caller("mefistos", TokenMode::Full);
     let marked = apply_marker("hi".into(), "an agent on host mefistos", &agent, false).unwrap();
@@ -865,8 +874,9 @@ fn capture_default_cap_matches_docs() {
 /// A block left out of the sum would silently drop its tools from the server
 /// and the reference, so the served count must match the `#[tool(`
 /// attributes in the router files. 57 was the count before the split, 60
-/// with the asset-catalog block, 63 with plan_sync/apply_sync/set_secret;
-/// bump it when adding a tool.
+/// with the asset-catalog block, 63 with plan_sync/apply_sync/set_secret, 67
+/// with list_layers/resolve_preview/propose_layers/set_host_layers; bump it
+/// when adding a tool.
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -886,7 +896,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 63);
+    assert_eq!(served, 67);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 

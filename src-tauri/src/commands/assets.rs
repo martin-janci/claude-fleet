@@ -96,6 +96,20 @@ pub struct ScanArgs {
     pub host_alias: Option<String>,
 }
 
+#[derive(serde::Deserialize)]
+pub struct ResolvePreviewArgs {
+    pub host_alias: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct SetHostLayersArgs {
+    pub host_alias: String,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub contexts: Vec<String>,
+}
+
 #[tauri::command]
 pub fn catalog_config(
     store: State<'_, Arc<Mutex<Store>>>,
@@ -136,6 +150,41 @@ pub fn catalog_get_asset(
         ));
     }
     catalog::get_asset(args.kind, &args.name, &store)
+}
+
+#[tauri::command]
+pub fn catalog_list_layers(
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<catalog::LayerListing, IpcError> {
+    catalog::list_layers(&store)
+}
+
+#[tauri::command]
+pub fn catalog_resolve_preview(
+    args: ResolvePreviewArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<catalog::resolve::Resolution, IpcError> {
+    catalog::resolve_preview(&args.host_alias, &store)
+}
+
+#[tauri::command]
+pub fn catalog_propose_layers(
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<catalog::propose::LayerProposal, IpcError> {
+    catalog::propose::propose_layers(&store)
+}
+
+#[tauri::command]
+pub fn catalog_set_host_layers(
+    args: SetHostLayersArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<crate::store::HostLayerRow>, IpcError> {
+    catalog::set_host_layers(
+        &args.host_alias,
+        args.role.as_deref(),
+        &args.contexts.iter().map(String::as_str).collect::<Vec<_>>(),
+        &store,
+    )
 }
 
 #[tauri::command]

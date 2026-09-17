@@ -162,6 +162,63 @@ impl FleetTools {
         drop(s);
         ok_json(&serde_json::json!({ "ok": true }))
     }
+
+    #[tool(description = "List the catalog's layer definitions (layers/*.yaml) \
+        and each host's role + active contexts. Read-only. Returns JSON.")]
+    pub(super) async fn list_layers(&self) -> Result<CallToolResult, McpError> {
+        audit("list_layers", "");
+        let out = catalog::list_layers(&self.store).map_err(to_mcp_err)?;
+        ok_json(&out)
+    }
+
+    #[tool(description = "Compute the effective asset set for one host after \
+        its role and contexts are resolved, with provenance: which layer \
+        introduced each asset, which layers overrode it, and which layer \
+        excluded anything missing. Nothing is written. Returns JSON.")]
+    pub(super) async fn resolve_preview(
+        &self,
+        Parameters(p): Parameters<ResolvePreviewParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("resolve_preview", &format!("host_alias={}", p.host_alias));
+        let out = catalog::resolve_preview(&p.host_alias, &self.store).map_err(to_mcp_err)?;
+        ok_json(&out)
+    }
+
+    #[tool(description = "Propose an initial layer split from the last scan, \
+        grouping assets by the exact set of hosts they are installed on. The \
+        largest group becomes 'core'; assets on a single host are returned \
+        separately for triage. Read-only: writes nothing. Returns JSON.")]
+    pub(super) async fn propose_layers(&self) -> Result<CallToolResult, McpError> {
+        audit("propose_layers", "");
+        let out = catalog::propose::propose_layers(&self.store).map_err(to_mcp_err)?;
+        ok_json(&out)
+    }
+
+    #[tool(description = "Replace a host's layer assignment: one optional role \
+        plus context layers in application order. Edits fleet state only, never \
+        catalog files. Returns the host's new assignment as JSON.")]
+    pub(super) async fn set_host_layers(
+        &self,
+        Parameters(p): Parameters<SetHostLayersParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "set_host_layers",
+            &format!(
+                "host_alias={} role={:?} contexts={}",
+                p.host_alias,
+                p.role,
+                p.contexts.len()
+            ),
+        );
+        let out = catalog::set_host_layers(
+            &p.host_alias,
+            p.role.as_deref(),
+            &p.contexts.iter().map(String::as_str).collect::<Vec<_>>(),
+            &self.store,
+        )
+        .map_err(to_mcp_err)?;
+        ok_json(&out)
+    }
 }
 
 /// Parse an MCP `kind` filter string into a `Kind`, using the same

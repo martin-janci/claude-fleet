@@ -73,6 +73,12 @@ pub const READONLY_TOOLS: &[&str] = &[
     // the controller's catalog repo working tree and is therefore mutating.
     "list_assets",
     "scan_assets",
+    // Asset catalog layers: `list_layers` reads layer definitions + host
+    // assignments, `resolve_preview` and `propose_layers` compute without
+    // writing anything. `set_host_layers` mutates fleet state and stays out.
+    "list_layers",
+    "resolve_preview",
+    "propose_layers",
 ];
 
 pub fn is_readonly_tool(name: &str) -> bool {
