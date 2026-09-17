@@ -20,6 +20,7 @@
 //! tools) wire these in.
 
 pub mod apply;
+pub mod layers;
 pub mod manifest;
 pub mod plan;
 pub mod secrets;
@@ -211,11 +212,30 @@ pub async fn plan_sync(
                 continue;
             }
         };
+        // Resolve the host's layers ONCE per host, before its harnesses are
+        // planned. The scan below still uses the FULL catalog: inventory is
+        // about the whole catalog's drift, while the PLAN is about what this
+        // host is supposed to have.
+        let resolved = match layers::resolve_for_host(store, &catalog, &h.alias) {
+            Ok(r) => r,
+            Err(e) => {
+                for harness in &scanning {
+                    host_plans.push(skipped_plan(&h.alias, harness.id(), &e.message));
+                }
+                continue;
+            }
+        };
         for harness in &scanning {
             let harness = *harness;
             match scan_and_persist(store, ssh, &catalog, harness, &h.alias, &secrets).await {
                 Ok((snap, manifest)) => host_plans.push(plan::compute_host_plan(
-                    &catalog, harness, &h.alias, &snap, &manifest, &secrets, &filter,
+                    &resolved.catalog,
+                    harness,
+                    &h.alias,
+                    &snap,
+                    &manifest,
+                    &secrets,
+                    &filter,
                 )),
                 Err(e) => host_plans.push(skipped_plan(&h.alias, harness.id(), &e.message)),
             }
