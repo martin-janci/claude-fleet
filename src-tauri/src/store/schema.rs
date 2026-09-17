@@ -213,6 +213,9 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/031_asset_sync.sql"),
         already_applied: Some(asset_inventory_has_managed),
     },
+    // `CREATE TABLE IF NOT EXISTS` + `CREATE UNIQUE INDEX IF NOT EXISTS`,
+    // safe to re-run.
+    Migration::plain(32, include_str!("../../migrations/032_asset_layers.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -1253,7 +1256,7 @@ mod tests {
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 31, "schema_version should be 31 after migration");
+        assert_eq!(v, 32, "schema_version should be 32 after migration");
         // Column exists and defaults to NULL
         store.upsert_host("alpha").unwrap();
         store

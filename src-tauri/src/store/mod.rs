@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 mod catalog;
 mod hosts_accounts;
+mod layers;
 mod projects;
 mod reconcile;
 mod rows;
@@ -21,6 +22,7 @@ mod test_support;
 mod timeline;
 mod usage;
 
+pub use layers::HostLayerRow;
 pub use rows::*;
 
 pub struct Store {
