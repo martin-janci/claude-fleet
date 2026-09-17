@@ -32,6 +32,12 @@ pub(super) fn default_submit() -> bool {
     true
 }
 
+/// PURE: whether a sent body counts as a prompt worth recording (anything
+/// but whitespace).
+pub fn is_prompt(body: &str) -> bool {
+    !body.trim().is_empty()
+}
+
 #[derive(Deserialize)]
 pub struct SendPromptArgs {
     pub host_alias: String,
@@ -78,11 +84,22 @@ pub(super) async fn send_prompt_inner(
     }
     // Task G: record the prompt on the session's timeline (detail truncated to
     // ~120 chars). Append-only + best-effort: never fail the send on this.
-    record_session_event(store, host_alias, tmux_name, "prompt_sent", {
-        let truncated: String = prompt.chars().take(120).collect();
-        Some(truncated)
-    });
-    record_prompt_outcome(store, host_alias, tmux_name, prompt);
+    // A bare Enter (empty body: the Conversation tab's "Press Enter" chip
+    // for a stuck session) is a key press, not a prompt: nothing to record,
+    // and it must not blank the row's last_prompt.
+    if is_prompt(prompt) {
+        record_session_event(store, host_alias, tmux_name, "prompt_sent", {
+            // What was DELIVERED keeps the untrusted marker; what fleet records
+            // does not (D8 / Q2). The marker line alone is ~77 chars, so without
+            // this the 120-char detail is almost entirely marker.
+            let truncated: String = crate::mcp::guard::strip_marker(prompt)
+                .chars()
+                .take(120)
+                .collect();
+            Some(truncated)
+        });
+        record_prompt_outcome(store, host_alias, tmux_name, prompt);
+    }
     Ok(())
 }
 
@@ -118,6 +135,11 @@ pub(super) fn record_prompt_outcome(
     tmux_name: &str,
     prompt: &str,
 ) {
+    // An MCP-delivered prompt arrives with the untrusted marker as its first
+    // line. The session was shown it; `last_prompt` and the derived label must
+    // not be it (D8 / Q2). Stripped once here, so both the Tauri and the MCP
+    // path are covered and `mcp/tools.rs` needs no change.
+    let prompt = crate::mcp::guard::strip_marker(prompt);
     let Ok(s) = store.lock() else {
         tracing::error!(
             host = %host_alias,
@@ -389,5 +411,18 @@ pub async fn capture_session_output(
     match scrollback_lines {
         Some(n) => tmux.capture_pane_scrollback(&name, n).await,
         None => tmux.capture_pane(&name).await,
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    #[test]
+    fn a_bare_enter_is_not_a_prompt() {
+        assert!(!is_prompt(""));
+        assert!(!is_prompt("  \n"));
+        assert!(is_prompt("/clear"));
+        assert!(is_prompt("fix it"));
     }
 }

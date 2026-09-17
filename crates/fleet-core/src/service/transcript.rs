@@ -176,6 +176,22 @@ fn one_line(s: &str) -> String {
 
 /// Turns kept by `session_conversation`, and its character budget.
 pub const CONV_TURNS: usize = 10;
+/// Most turns the Conversation tab may ask for with "Load older".
+pub const CONV_MAX_TURNS: usize = 100;
+/// Char budget ceiling when more turns are requested (the read itself is
+/// capped at `MAX_READ_BYTES`).
+pub const CONV_MAX_CHARS_CEILING: usize = 512_000;
+
+/// PURE: the (turns, max_chars) budget for a Conversation read. `None`
+/// means the default window; a request is clamped to `1..=CONV_MAX_TURNS`
+/// and the char budget grows with it so extra turns are not immediately
+/// trimmed away again.
+pub fn conv_limits(turns: Option<usize>) -> (usize, usize) {
+    let turns = turns.unwrap_or(CONV_TURNS).clamp(1, CONV_MAX_TURNS);
+    let chars = (CONV_MAX_CHARS.saturating_mul(turns) / CONV_TURNS)
+        .clamp(CONV_MAX_CHARS, CONV_MAX_CHARS_CEILING);
+    (turns, chars)
+}
 pub const CONV_MAX_CHARS: usize = 64_000;
 /// Bytes of JSONL tail `session_conversation` reads per fetch. Fixed (not
 /// [`read_bytes_for`]`(CONV_MAX_CHARS)`, a 4 MB tail): the Conversation panel
@@ -191,6 +207,9 @@ pub struct ConvTurn {
     pub prompt: Option<String>,
     /// ISO timestamp of the prompt entry (else of the first assistant entry).
     pub at: Option<String>,
+    /// ISO timestamp of the turn's latest assistant entry: with `at`, how
+    /// long the reply took so far. `None` for a turn with no assistant entry.
+    pub ended_at: Option<String>,
     pub items: Vec<ConvItem>,
 }
 
@@ -200,9 +219,12 @@ pub enum ConvItem {
     Text {
         text: String,
     },
-    /// The tool one-liner, without the `[tool_use] ` prefix.
+    /// The tool one-liner, without the `[tool_use] ` prefix. `error` is set
+    /// when the matching `tool_result` came back with `is_error: true`.
     Tool {
         summary: String,
+        #[serde(default)]
+        error: bool,
     },
 }
 
@@ -254,6 +276,10 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
     }
     let mut turns: Vec<ConvTurn> = Vec::new();
     let mut current: Option<ConvTurn> = None;
+    // tool_use id → index of its item in `current`, so a later tool_result
+    // carrying `is_error` can flag the line. Results always land inside the
+    // turn that issued the call, so the map resets with the turn.
+    let mut tool_items: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for line in jsonl.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -270,12 +296,31 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
         };
         match kind {
             "user" => {
+                if let Some(serde_json::Value::Array(blocks)) = content {
+                    for b in blocks
+                        .iter()
+                        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+                        .filter(|b| b.get("is_error").and_then(|e| e.as_bool()) == Some(true))
+                    {
+                        let idx = b
+                            .get("tool_use_id")
+                            .and_then(|i| i.as_str())
+                            .and_then(|i| tool_items.get(i).copied());
+                        if let (Some(idx), Some(turn)) = (idx, current.as_mut()) {
+                            if let Some(ConvItem::Tool { error, .. }) = turn.items.get_mut(idx) {
+                                *error = true;
+                            }
+                        }
+                    }
+                }
                 if let Some(prompt) = prompt_text(content) {
                     push(&mut turns, current.take());
+                    tool_items.clear();
                     current = Some(ConvTurn {
                         // An image-only prompt still opens a turn, unquoted.
                         prompt: (!prompt.is_empty()).then_some(prompt),
                         at: at(),
+                        ended_at: None,
                         items: Vec::new(),
                     });
                 }
@@ -285,8 +330,12 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                     let turn = current.get_or_insert_with(|| ConvTurn {
                         prompt: None,
                         at: at(),
+                        ended_at: None,
                         items: Vec::new(),
                     });
+                    if let Some(ts) = at() {
+                        turn.ended_at = Some(ts);
+                    }
                     for b in blocks {
                         match b.get("type").and_then(|t| t.as_str()) {
                             Some("text") => {
@@ -298,9 +347,15 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                                     }
                                 }
                             }
-                            Some("tool_use") => turn.items.push(ConvItem::Tool {
-                                summary: tool_summary(b),
-                            }),
+                            Some("tool_use") => {
+                                if let Some(id) = b.get("id").and_then(|i| i.as_str()) {
+                                    tool_items.insert(id.to_string(), turn.items.len());
+                                }
+                                turn.items.push(ConvItem::Tool {
+                                    summary: tool_summary(b),
+                                    error: false,
+                                });
+                            }
                             _ => {}
                         }
                     }
@@ -326,7 +381,7 @@ pub fn parse_turns(jsonl: &str) -> Vec<String> {
                 .iter()
                 .map(|i| match i {
                     ConvItem::Text { text } => text.clone(),
-                    ConvItem::Tool { summary } => format!("{TOOL_USE_PREFIX}{summary}"),
+                    ConvItem::Tool { summary, .. } => format!("{TOOL_USE_PREFIX}{summary}"),
                 })
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -339,7 +394,7 @@ pub fn parse_turns(jsonl: &str) -> Vec<String> {
 fn item_chars(item: &ConvItem) -> usize {
     match item {
         ConvItem::Text { text } => text.chars().count(),
-        ConvItem::Tool { summary } => summary.chars().count(),
+        ConvItem::Tool { summary, .. } => summary.chars().count(),
     }
 }
 
@@ -521,7 +576,15 @@ fn transcript_read_script(args: &TranscriptArgs) -> Result<String, IpcError> {
 
 /// `session_conversation`'s read: a fixed [`CONV_READ_BYTES`] tail.
 fn conversation_read_script(args: &TranscriptArgs) -> Result<String, IpcError> {
-    tail_script(args, CONV_READ_BYTES)
+    tail_script(args, conv_read_bytes(args.turns))
+}
+
+/// PURE: bytes of tail to read for a `turns` window. The default window
+/// reads [`CONV_READ_BYTES`]; a wider one ("Load older") scales with it,
+/// capped at [`MAX_READ_BYTES`].
+pub fn conv_read_bytes(turns: usize) -> usize {
+    (CONV_READ_BYTES.saturating_mul(turns.max(1)) / CONV_TURNS)
+        .clamp(CONV_READ_BYTES, MAX_READ_BYTES)
 }
 
 /// Run a read `script` built for `args`. Errors: `E_NO_TRANSCRIPT` (file
@@ -580,11 +643,17 @@ pub async fn fetch_conversation(
 ) -> Result<Conversation, IpcError> {
     let script = conversation_read_script(&args)?;
     let text = read_tail(&args, &script, ssh).await?;
-    Ok(trim_conversation(
+    // The Conversation tab may ask for a wider window than the MCP text
+    // tool's cap; its own ceiling applies here.
+    let mut conv = trim_conversation(
         parse_conversation(&text),
         args.turns.max(1),
-        args.max_chars.clamp(1, MAX_MAX_CHARS),
-    ))
+        args.max_chars.clamp(1, CONV_MAX_CHARS_CEILING),
+    );
+    // A tail that filled the byte budget started mid-file: older history
+    // exists even when the parsed turns fit the window.
+    conv.truncated |= text.len() >= conv_read_bytes(args.turns);
+    Ok(conv)
 }
 
 /// Run a bash script on `host_alias` (local or via ssh), bounded by
@@ -855,6 +924,82 @@ mod tests {
     }
 
     #[test]
+    fn conv_read_bytes_scales_with_the_window_and_caps() {
+        assert_eq!(conv_read_bytes(CONV_TURNS), CONV_READ_BYTES);
+        assert_eq!(conv_read_bytes(0), CONV_READ_BYTES);
+        assert_eq!(conv_read_bytes(20), CONV_READ_BYTES * 2);
+        assert_eq!(conv_read_bytes(CONV_MAX_TURNS), MAX_READ_BYTES);
+    }
+
+    #[test]
+    fn conv_limits_default_clamp_and_scale() {
+        assert_eq!(conv_limits(None), (CONV_TURNS, CONV_MAX_CHARS));
+        assert_eq!(conv_limits(Some(0)), (1, CONV_MAX_CHARS));
+        assert_eq!(conv_limits(Some(20)), (20, CONV_MAX_CHARS * 2));
+        assert_eq!(
+            conv_limits(Some(10_000)),
+            (CONV_MAX_TURNS, CONV_MAX_CHARS_CEILING)
+        );
+    }
+
+    #[test]
+    fn parse_conversation_records_when_the_reply_last_advanced() {
+        let jsonl = [
+            line(serde_json::json!({"type":"user","timestamp":"2026-09-13T10:00:00Z","message":{"content":"go"}})),
+            line(serde_json::json!({"type":"assistant","timestamp":"2026-09-13T10:00:05Z","message":{"content":[{"type":"text","text":"a"}]}})),
+            line(serde_json::json!({"type":"assistant","timestamp":"2026-09-13T10:02:19Z","message":{"content":[{"type":"text","text":"b"}]}})),
+            line(serde_json::json!({"type":"user","timestamp":"2026-09-13T10:03:00Z","message":{"content":"again"}})),
+        ]
+        .join("\n");
+        let turns = parse_conversation(&jsonl);
+        assert_eq!(turns[0].at.as_deref(), Some("2026-09-13T10:00:00Z"));
+        assert_eq!(turns[0].ended_at.as_deref(), Some("2026-09-13T10:02:19Z"));
+        // a prompt with no reply yet has no end
+        assert_eq!(turns[1].ended_at, None);
+    }
+
+    #[test]
+    fn parse_conversation_flags_a_tool_whose_result_was_an_error() {
+        let jsonl = [
+            line(serde_json::json!({"type":"user","message":{"content":"go"}})),
+            line(serde_json::json!({"type":"assistant","message":{"content":[
+                {"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}},
+                {"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"a.rs"}}]}})),
+            line(serde_json::json!({"type":"user","message":{"content":[
+                {"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"exit 101"},
+                {"type":"tool_result","tool_use_id":"t2","content":"ok"}]}})),
+            line(serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"One failed."}]}})),
+        ]
+        .join("\n");
+        let turns = parse_conversation(&jsonl);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].items,
+            vec![
+                ConvItem::Tool {
+                    summary: "Bash(command=cargo test)".into(),
+                    error: true
+                },
+                ConvItem::Tool {
+                    summary: "Read(file_path=a.rs)".into(),
+                    error: false
+                },
+                ConvItem::Text {
+                    text: "One failed.".into()
+                },
+            ]
+        );
+        // the plain-text projection (MCP) is unchanged by the flag
+        assert_eq!(
+            parse_turns(&jsonl),
+            vec![
+                "[tool_use] Bash(command=cargo test)\n[tool_use] Read(file_path=a.rs)\nOne failed."
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn parse_conversation_keeps_prompts_text_and_tool_lines() {
         let jsonl = [
             line(serde_json::json!({"type":"user","timestamp":"2026-09-13T10:00:00Z","message":{"role":"user","content":"first"}})),
@@ -878,7 +1023,8 @@ mod tests {
                     text: "Let me look.".into()
                 },
                 ConvItem::Tool {
-                    summary: "Bash(command=ls -la)".into()
+                    summary: "Bash(command=ls -la)".into(),
+                    error: false
                 },
             ]
         );
@@ -903,6 +1049,7 @@ mod tests {
         let t = |p: &str, n: usize| ConvTurn {
             prompt: Some(p.into()),
             at: None,
+            ended_at: None,
             items: vec![ConvItem::Text {
                 text: "x".repeat(n),
             }],
@@ -943,10 +1090,12 @@ mod tests {
             turns: vec![ConvTurn {
                 prompt: None,
                 at: Some("2026-09-13T10:00:00Z".into()),
+                ended_at: None,
                 items: vec![
                     ConvItem::Text { text: "hi".into() },
                     ConvItem::Tool {
                         summary: "Bash(command=ls)".into(),
+                        error: false,
                     },
                 ],
             }],
@@ -954,8 +1103,8 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(&c).unwrap(),
-            serde_json::json!({"turns":[{"prompt":null,"at":"2026-09-13T10:00:00Z","items":[
-                {"kind":"text","text":"hi"},{"kind":"tool","summary":"Bash(command=ls)"}]}],
+            serde_json::json!({"turns":[{"prompt":null,"at":"2026-09-13T10:00:00Z","ended_at":null,"items":[
+                {"kind":"text","text":"hi"},{"kind":"tool","summary":"Bash(command=ls)","error":false}]}],
                 "truncated":false})
         );
     }
@@ -965,12 +1114,14 @@ mod tests {
         let turn = ConvTurn {
             prompt: Some("p".repeat(10)),
             at: None,
+            ended_at: None,
             items: vec![
                 ConvItem::Text {
                     text: "a".repeat(10),
                 },
                 ConvItem::Tool {
                     summary: "b".repeat(10),
+                    error: false,
                 },
             ],
         };
@@ -982,7 +1133,8 @@ mod tests {
         assert_eq!(
             c.turns[0].items,
             vec![ConvItem::Tool {
-                summary: "b".repeat(10)
+                summary: "b".repeat(10),
+                error: false
             }]
         );
         // Exactly at budget: nothing dropped.
@@ -1012,6 +1164,7 @@ mod tests {
         let turn = ConvTurn {
             prompt: Some("q".into()),
             at: None,
+            ended_at: None,
             items: vec![ConvItem::Text {
                 text: format!("{}END", "x".repeat(100)),
             }],
@@ -1032,6 +1185,7 @@ mod tests {
         let older = ConvTurn {
             prompt: Some("old".into()),
             at: None,
+            ended_at: None,
             items: vec![ConvItem::Text {
                 text: "earlier".into(),
             }],
@@ -1039,9 +1193,11 @@ mod tests {
         let turn = ConvTurn {
             prompt: Some(format!("HEAD{}", "p".repeat(70_000))),
             at: None,
+            ended_at: None,
             items: vec![
                 ConvItem::Tool {
                     summary: "Bash(command=ls)".into(),
+                    error: false,
                 },
                 ConvItem::Text {
                     text: "the reply!".into(),
@@ -1068,6 +1224,7 @@ mod tests {
         let both = ConvTurn {
             prompt: Some(format!("HEAD{}", "p".repeat(100))),
             at: None,
+            ended_at: None,
             items: vec![ConvItem::Text {
                 text: format!("{}END", "x".repeat(100)),
             }],
@@ -1085,6 +1242,7 @@ mod tests {
         let tiny = ConvTurn {
             prompt: Some("long prompt".into()),
             at: None,
+            ended_at: None,
             items: vec![ConvItem::Text { text: "abc".into() }],
         };
         let c = trim_conversation(vec![tiny], 10, 1);

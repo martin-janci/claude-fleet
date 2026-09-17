@@ -9,7 +9,8 @@ export type HintId =
   | 'bg-session'
   | 'session-actions'
   | 'terminal-header'
-  | 'recency-filter';
+  | 'recency-filter'
+  | 'conversation-composer';
 
 export type Placement = 'top' | 'bottom' | 'left' | 'right';
 
@@ -45,6 +46,11 @@ export const HINTS: HintDef[] = [
     id: 'recency-filter',
     text: 'Narrow the list to recent activity.',
     placement: 'bottom',
+  },
+  {
+    id: 'conversation-composer',
+    text: 'Prompt the session from here. Type / for Claude Code commands; Enter sends, Shift+Enter breaks a line.',
+    placement: 'top',
   },
 ];
 

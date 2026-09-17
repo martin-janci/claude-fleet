@@ -284,6 +284,10 @@ pub fn session_history(
 #[derive(serde::Deserialize)]
 pub struct SessionConversationArgs {
     pub session_id: i64,
+    /// Most-recent turns to return; omitted = the default window. Clamped
+    /// (see `transcript::conv_limits`).
+    #[serde(default)]
+    pub turns: Option<usize>,
 }
 
 /// The session's recent conversation — prompts, assistant text and one line
@@ -308,13 +312,28 @@ pub async fn session_conversation(
     };
     // `resolve_args` takes (and releases) the lock itself; nothing holds it
     // across the fetch.
-    let targs = transcript::resolve_args(
-        &store,
-        &row,
-        transcript::CONV_TURNS,
-        transcript::CONV_MAX_CHARS,
-    )?;
+    let (turns, max_chars) = transcript::conv_limits(args.turns);
+    let targs = transcript::resolve_args(&store, &row, turns, max_chars)?;
     transcript::fetch_conversation(targs, &ssh).await
+}
+
+// ── Activity probe (live indicator) ─────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct SessionActivityArgs {
+    pub session_id: i64,
+}
+
+/// What the session's pane shows right now (status, spinner, stuck / dialog
+/// state), read on demand for the Conversation tab's live indicator. Errors:
+/// `E_NOTFOUND`, `E_INVALID_STATE` (runs outside tmux), transport codes.
+#[tauri::command]
+pub async fn session_activity(
+    args: SessionActivityArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<sessions::ActivityProbe, IpcError> {
+    sessions::session_activity(&store, &ssh, args.session_id).await
 }
 
 #[cfg(test)]

@@ -32,7 +32,8 @@ but not in the catalog are listed as unmanaged and can be imported.
 which assets to create, update, overwrite, adopt, or remove, returning a plan
 valid for 10 minutes. `apply_sync` applies the plan using compare-and-swap on
 every file against the scan-time hash, and creates `.fleet-bak-<time>-<pid>`
-backups before overwriting or removing files. Config merges (JSON for Claude
+backups before overwriting or removing files and keeps the three newest
+backups of each file. Config merges (JSON for Claude
 Code, TOML for Codex) are applied on the controller and written through the
 secure 0600 path; plugins are installed via `claude plugin install` on the
 host. A per-harness managed manifest (`~/.claude/.fleet-assets.json` and

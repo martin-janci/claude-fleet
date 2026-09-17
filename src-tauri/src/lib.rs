@@ -233,6 +233,7 @@ pub fn run() {
             commands::sessions::set_session_friendly_name,
             commands::sessions::session_history,
             commands::sessions::session_conversation,
+            commands::sessions::session_activity,
             commands::sessions::restart_session,
             commands::sessions::send_prompt,
             commands::sessions::spawn_review,

@@ -32,6 +32,7 @@
     hostsChordLabel,
     hostsViewOpen,
     hostsViewRequest,
+    openPathRequest,
     requestNewSessionOnHost,
     settingsOpen,
   } from './lib/app_views';
@@ -345,6 +346,18 @@
     untrack(() => openHosts(req.host));
   });
 
+  // A path clicked in the Conversation tab: show Files for that session
+  // (FilesPanel picks the path up and clears the request).
+  $effect(() => {
+    const req = $openPathRequest;
+    if (!req) return;
+    untrack(() => {
+      // A pane-less row (bg / external) has no Files tab to hand this to.
+      if ($selectedSession?.id === req.sessionId && !selNoPane) showFiles();
+      else openPathRequest.set(null);
+    });
+  });
+
   function showTerminal() {
     filesMode = false;
     conversationMode = false;
@@ -618,7 +631,7 @@
         {/if}
         {#if conversationMode && $selectedSession}
           <div class="view-slot overlay">
-            <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode} />
+            <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode} onOpenTerminal={showTerminal} />
           </div>
         {/if}
       {/if}

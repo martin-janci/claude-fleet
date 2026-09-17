@@ -1810,8 +1810,17 @@ curl() { echo HIJACKED; }
             assert!(out.status.success(), "stdout={stdout} stderr={stderr}");
             assert!(!stdout.contains(CANARY), "token on stdout: {stdout}");
             assert!(!stderr.contains(CANARY), "token on stderr: {stderr}");
+            // `declare -p` prints `declare -x NAME="v"` on bash 4+ but a bare
+            // `NAME=v` on the bash 3.2 that ships with macOS, so match on a
+            // variable the dump always carries rather than on the format.
             let vars = self.log("vars").unwrap_or_default();
-            assert!(vars.contains("declare"), "the DEBUG trace ran");
+            assert!(
+                vars.contains("BASH="),
+                "the DEBUG trace ran: bash={:?}, vars_len={} vars_head={:?} stdout={stdout}",
+                find_tool("bash"),
+                vars.len(),
+                vars.chars().take(300).collect::<String>(),
+            );
             self.assert_no_token_on_disk();
             stdout
         }

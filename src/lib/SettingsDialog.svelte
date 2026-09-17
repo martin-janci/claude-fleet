@@ -4,6 +4,7 @@
   import { mcpStatus } from './mcp';
   import { onboardingDismissed, onboardingWelcomed } from './onboarding';
   import { hintsEnabled, resetHints } from './hints';
+  import { composerPresets, resetComposerPresets, addPreset, updatePreset, removePreset } from './composer_presets';
   import { copyOnSelect } from './prefs';
   import { collectDiagnostics, copyDiagnostics, openLogFolder } from './diagnostics';
   import { pushError } from './toasts';
@@ -409,6 +410,41 @@
           onchange={onIdleMinutesChange}
           data-testid="attention-idle-minutes" />
         <span class="hook-desc">minutes before an idle work session counts as "needs attention" (0 = never)</span>
+      </div>
+    </section>
+
+    <section class="block" data-testid="composer-section">
+      <h4>Conversation composer</h4>
+      <div class="hook-section">
+        <p class="hook-desc">
+          Quick-action chips above the prompt box in the Conversation tab. A
+          click fills the box; Shift+click sends at once. Chips with an empty
+          label or text are not shown.
+        </p>
+        {#each $composerPresets as p, i (i)}
+          <div class="preset-row">
+            <input
+              class="preset-label"
+              data-testid="preset-label"
+              placeholder="Label"
+              value={p.label}
+              oninput={(e) => updatePreset(i, { label: e.currentTarget.value })}
+            />
+            <textarea
+              class="preset-text"
+              data-testid="preset-text"
+              rows="1"
+              placeholder="Prompt or /command"
+              value={p.text}
+              oninput={(e) => updatePreset(i, { text: e.currentTarget.value })}
+            ></textarea>
+            <button class="hook-btn" data-testid="preset-remove" title="Remove" onclick={() => removePreset(i)}>×</button>
+          </div>
+        {/each}
+        <div class="preset-actions">
+          <button class="hook-btn" data-testid="preset-add" onclick={addPreset}>Add chip</button>
+          <button class="hook-btn" data-testid="preset-reset" onclick={resetComposerPresets}>Reset to defaults</button>
+        </div>
       </div>
     </section>
 
