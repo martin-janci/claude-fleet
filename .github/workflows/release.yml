@@ -123,7 +123,7 @@ jobs:
         run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: .
           key: ${{ matrix.os }}-${{ matrix.target || 'native' }}
       - run: pnpm install --frozen-lockfile
       # tauri-action runs `beforeBuildCommand` (pnpm build) from

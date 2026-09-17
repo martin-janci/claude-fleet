@@ -1,7 +1,7 @@
 //! Cancel an in-flight IPC call by its `call_id` (see `cancel.rs`).
 
-use crate::cancel::CancellationRegistry;
-use crate::ipc_error::IpcError;
+use fleet_core::cancel::CancellationRegistry;
+use fleet_core::ipc_error::IpcError;
 use std::sync::Arc;
 use tauri::State;
 

@@ -1,0 +1,23 @@
+services:
+  fleet-hub:
+    image: ghcr.io/martin-janci/fleet-hub:latest
+    restart: unless-stopped
+    env_file: fleet-hub.env
+    environment:
+      # Reached only by caddy on the compose network; the https:// public URL
+      # in fleet-hub.env (Caddy terminates TLS) permits the routable bind.
+      FLEET_HUB_BIND: 0.0.0.0
+    volumes:
+      - hub-data:/var/lib/fleet-hub
+      - ./ssh:/home/fleet/.ssh
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    env_file: fleet-hub.env
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+volumes:
+  hub-data:
+  caddy-data:

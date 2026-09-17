@@ -1,7 +1,7 @@
 //! Start the embedded MCP control API at launch when the user enabled it.
 
-use crate::store::Store;
-use crate::{cancel, mcp, ssh};
+use fleet_core::store::Store;
+use fleet_core::{cancel, mcp, ssh};
 use std::sync::Mutex;
 
 /// Read the MCP control-API settings and, if the user enabled it, start the
@@ -13,7 +13,7 @@ pub(crate) fn maybe_start_mcp(
     store: &std::sync::Arc<Mutex<Store>>,
     ssh: &std::sync::Arc<ssh::SshClient>,
     reg: &std::sync::Arc<cancel::CancellationRegistry>,
-    tunnels: &std::sync::Arc<crate::service::tunnel::TunnelSupervisor>,
+    tunnels: &std::sync::Arc<fleet_core::service::tunnel::TunnelSupervisor>,
     guards: &mcp::McpGuards,
 ) {
     use tauri::Manager;
@@ -48,12 +48,21 @@ pub(crate) fn maybe_start_mcp(
             std::sync::Arc::clone(reg),
             std::sync::Arc::clone(tunnels),
             guards.clone(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             port,
             token,
+            Vec::new(),
         )
         .await;
         if r.is_ok() {
-            if let Err(e) = crate::service::provision::reestablish_tunnels(store, tunnels, port) {
+            // The guard is dropped when the first closure returns, before
+            // `reestablish_tunnels` locks the store again.
+            let tunnels_up = fleet_core::ipc_error::lock(store)
+                .and_then(|s| fleet_core::service::hub::HubBase::read(&s))
+                .and_then(|base| {
+                    fleet_core::service::provision::reestablish_tunnels(store, tunnels, &base)
+                });
+            if let Err(e) = tunnels_up {
                 tracing::warn!("control API: reestablish_tunnels failed: {e}");
             }
         }

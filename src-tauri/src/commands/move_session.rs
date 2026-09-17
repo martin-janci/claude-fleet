@@ -1,10 +1,10 @@
 //! Tauri IPC wrapper for `move_session` (the "Move to host…" action).
 //! Logic lives in `service::move_session`.
 
-use crate::ipc_error::IpcError;
-use crate::service::move_session::{self, MoveReport, MoveSessionArgs};
-use crate::ssh::SshClient;
-use crate::store::Store;
+use fleet_core::ipc_error::IpcError;
+use fleet_core::service::move_session::{self, MoveReport, MoveSessionArgs};
+use fleet_core::ssh::SshClient;
+use fleet_core::store::Store;
 use std::sync::{Arc, Mutex};
 use tauri::State;
 

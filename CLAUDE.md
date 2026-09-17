@@ -8,16 +8,20 @@ Orientation for Claude Code working in this repository.
 managing long-lived Claude Code sessions running in tmux across multiple
 machines over SSH. ~93,000 LOC Rust, ~27,000 LOC frontend.
 
+The Rust side is a workspace: `crates/fleet-core` (Tauri-free service/store/SSH/MCP),
+`crates/fleet-hub` (headless daemon, see `docs/hub.md`), `src-tauri` (the desktop app).
+
 ## Build & test
 
 ```bash
 pnpm install
 pnpm test                       # frontend (Vitest)
 pnpm check                      # Svelte/TS type-check
-cd src-tauri && cargo test      # backend
-cd src-tauri && cargo clippy --all-targets -- -D warnings
-cd src-tauri && cargo fmt --check
-cargo deny --manifest-path src-tauri/Cargo.toml check   # licenses + advisories (cargo install cargo-deny --locked)
+cargo test --workspace          # backend (all crates)
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
+cargo deny check                # licenses + advisories (cargo install cargo-deny --locked)
+cargo build -p fleet-hub --locked   # headless hub (no Tauri libs needed)
 scripts/ci-local.sh             # all of the above in CI order; --rust-only / --frontend-only
 ```
 
@@ -39,7 +43,7 @@ known pre-existing frontend test failures.)
 ## Releasing
 
 Releases are cut manually with `scripts/release.sh <new-version>` — it bumps
-the three version files (+ `Cargo.lock`), prefills a `CHANGELOG.md` section
+the four version files (+ `Cargo.lock`), prefills a `CHANGELOG.md` section
 from the Conventional Commits since the last tag, commits, and creates the
 `vX.Y.Z` tag. Never edit the version fields by hand; run the script from a
 clean `main`. See `docs/RELEASING.md`.
@@ -49,7 +53,7 @@ editing any `#[tool(...)]` description or the `generate_handler!` list,
 regenerate it or CI fails:
 
 ```bash
-REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_current
+REGEN_DOCS=1 cargo test -p fleet-core reference_is_current
 ```
 
 ## Architecture
@@ -59,13 +63,14 @@ REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_curren
   the frontend patches stores in place (`mergeOne`/`removeOne`) instead of
   re-fetching. Mutation wrappers also do an optimistic patch from the command's
   return value.
-- **Backend** (`src-tauri/src/`): thin Tauri command handlers in `commands/`
-  wrap the transport-agnostic logic in `service/`; SSH multiplexing in `ssh.rs`
-  (per-host `ControlMaster`, async `tokio::process`); tmux command construction
-  in `tmux.rs`; the single global PTY in `pty.rs`; SQLite in `store/`
+- **Backend** (`crates/fleet-core/src/`, thin Tauri handlers in
+  `src-tauri/src/commands/`): the handlers wrap the transport-agnostic logic in
+  `service/`; SSH multiplexing in `ssh.rs` (per-host `ControlMaster`, async
+  `tokio::process`); tmux command construction in `tmux.rs`; SQLite in `store/`
   (migrations are registered in the `MIGRATIONS` table there — add a new
   `NNN_<topic>.sql` plus an entry); the event bus in `events.rs`; cancellation
-  registry in `cancel.rs`.
+  registry in `cancel.rs`. The single global PTY (`pty.rs`) stays in
+  `src-tauri`, since it is desktop-only.
 - **Session listing** is cache-first: `service::sessions::list_sessions` serves
   stored rows and only runs a reconcile pass when the last one is stale;
   `refresh_sessions` is the forced path for an explicit user refresh.
@@ -78,13 +83,15 @@ REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_curren
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
   `TerminalView.svelte`), *not* xterm.js — xterm's renderer failed to repaint in
   the WKWebView setup. Only one PTY is attached at a time.
+- **Hub daemon** (`crates/fleet-hub`): the same core headless; `hub.*`
+  settings, `HubBase` in `service/hub.rs`.
 
 ## Conventions
 
 - Backend errors flow as `IpcError` (`ipc_error.rs`) with `E_*` codes; the
   frontend unwraps a `Result` type (`src/lib/result.ts`).
 - Shell-quoting has **one** canonical implementation: `crate::shell::quote`
-  (alias `shq`) in `src-tauri/src/shell.rs`. Every value interpolated into an
+  (alias `shq`) in `crates/fleet-core/src/shell.rs`. Every value interpolated into an
   SSH/bash command string MUST be quoted with it. The former duplicate copies
   (`shell_quote`/`shell_quote_str`/`shell_escape`) were consolidated — do not
   reintroduce them.

@@ -1,13 +1,13 @@
 //! Tauri IPC wrappers for worktree management. Real logic lives in
 //! `service::worktrees`.
 
-use crate::ipc_error::IpcError;
-use crate::service::worktrees::{
+use fleet_core::ipc_error::IpcError;
+use fleet_core::service::worktrees::{
     self, DeleteWorktreeArgs, HostWorktrees, ListHostWorktreesArgs, ListWorktreesArgs,
     WorktreeOccupancy,
 };
-use crate::ssh::SshClient;
-use crate::store::Store;
+use fleet_core::ssh::SshClient;
+use fleet_core::store::Store;
 use std::sync::{Arc, Mutex};
 use tauri::State;
 

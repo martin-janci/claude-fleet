@@ -1,14 +1,14 @@
 //! Tauri commands for the mutating git operations of the Files tab. Thin
 //! wrappers over `service::repo_mutate`.
 
-use crate::ipc_error::IpcError;
-use crate::service::repo::SessionIdArgs;
-use crate::service::repo_mutate::{
+use fleet_core::ipc_error::IpcError;
+use fleet_core::service::repo::SessionIdArgs;
+use fleet_core::service::repo_mutate::{
     self, CheckoutArgs, CheckoutCommitArgs, CommitCreateArgs, CreateBranchArgs, DeleteBranchArgs,
     PushArgs, StageArgs,
 };
-use crate::ssh::SshClient;
-use crate::store::Store;
+use fleet_core::ssh::SshClient;
+use fleet_core::store::Store;
 use std::sync::{Arc, Mutex};
 use tauri::State;
 

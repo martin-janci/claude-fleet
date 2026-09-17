@@ -1,0 +1,3 @@
+# proptest failure-persistence files: a failing case is reproduced from the
+# seed printed in the test output instead of being committed.
+/proptest-regressions/

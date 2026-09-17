@@ -1,0 +1,26 @@
+[Unit]
+Description=claude-fleet hub daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=fleet
+EnvironmentFile=/etc/fleet-hub.env
+ExecStart=/usr/local/bin/fleet-hub serve
+Restart=on-failure
+StateDirectory=fleet-hub
+StateDirectoryMode=0700
+Environment=FLEET_HUB_DATA_DIR=/var/lib/fleet-hub
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# No ProtectHome/DynamicUser: the hub reads ~fleet/.ssh and keeps its SSH ControlMaster sockets in ~fleet/.cache/claude-fleet.
+
+[Install]
+WantedBy=multi-user.target

@@ -5,13 +5,13 @@
 //! `generate_handler!` list in `lib.rs`), so adding, removing or renaming one
 //! needs a `REGEN_DOCS` run; changing a signature or body does not.
 
-use crate::ipc_error::lock;
-use crate::ipc_error::{codes, IpcError};
-use crate::mcp::McpRuntime;
-use crate::service::diagnostics::{self, DiagnosticsBundle, DiagnosticsInputs};
-use crate::service::tunnel::TunnelSupervisor;
-use crate::ssh::SshClient;
-use crate::store::Store;
+use fleet_core::ipc_error::lock;
+use fleet_core::ipc_error::{codes, IpcError};
+use fleet_core::mcp::McpRuntime;
+use fleet_core::service::diagnostics::{self, DiagnosticsBundle, DiagnosticsInputs};
+use fleet_core::service::tunnel::TunnelSupervisor;
+use fleet_core::ssh::SshClient;
+use fleet_core::store::Store;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -80,7 +80,7 @@ pub fn collect_diagnostics(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<DiagnosticsBundle, IpcError> {
     let data_dir = managed_data_dir(&app)?;
-    let log_dir = crate::logging::log_dir_in(&data_dir);
+    let log_dir = fleet_core::logging::log_dir_in(&data_dir);
     let (mcp_running, mcp_bind_error) = {
         let rt = lock(&runtime)?;
         (rt.is_running(), rt.last_error().map(str::to_string))
@@ -108,7 +108,7 @@ pub fn collect_diagnostics(
 #[tauri::command]
 pub fn open_log_folder(app: tauri::AppHandle) -> Result<String, IpcError> {
     use tauri_plugin_opener::OpenerExt;
-    let dir = crate::logging::log_dir_in(&managed_data_dir(&app)?);
+    let dir = fleet_core::logging::log_dir_in(&managed_data_dir(&app)?);
     std::fs::create_dir_all(&dir)?;
     let path = dir.display().to_string();
     app.opener()
@@ -120,6 +120,17 @@ pub fn open_log_folder(app: tauri::AppHandle) -> Result<String, IpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Store::open_in_memory` is a `#[cfg(test)]` helper of `fleet_core`, so
+    /// it is not visible from this crate's tests; open a throwaway file-backed
+    /// store through the public constructor instead.
+    fn open_temp_store(dir: &std::path::Path) -> Store {
+        Store::open_with_bus(
+            &dir.join("state.db"),
+            std::sync::Arc::new(fleet_core::events::NoopEventBus),
+        )
+        .expect("open store")
+    }
 
     #[test]
     fn data_dir_comes_from_managed_state() {
@@ -178,8 +189,8 @@ mod tests {
     #[test]
     fn real_bundle_gets_the_ssh_section_before_its_log_tail() {
         let tmp = tempfile::tempdir().unwrap();
-        let logs = crate::logging::log_dir_in(tmp.path());
-        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let logs = fleet_core::logging::log_dir_in(tmp.path());
+        let store = Mutex::new(open_temp_store(tmp.path()));
         let mut b = diagnostics::collect(
             &store,
             DiagnosticsInputs {
