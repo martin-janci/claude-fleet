@@ -41,9 +41,8 @@ JS
 
 # --- 2. Cargo.lock follows Cargo.toml ----------------------------------------
 if [[ -z "${RELEASE_DRY_RUN:-}" ]]; then
-  cargo update -p "$CRATE" --manifest-path src-tauri/Cargo.toml --offline >/dev/null 2>&1 \
-    || cargo update -p "$CRATE" --manifest-path src-tauri/Cargo.toml
-  echo "  src-tauri/Cargo.lock"
+  cargo update -p "$CRATE" --offline >/dev/null 2>&1 || cargo update -p "$CRATE"
+  echo "  Cargo.lock"
 fi
 
 # --- 3. CHANGELOG.md section, grouped by Conventional Commit type -------------
@@ -92,7 +91,7 @@ if [[ -t 0 ]]; then
   echo; echo "Edit CHANGELOG.md now if the generated section needs polishing, then press Enter."
   read -r _
 fi
-git add "${VERSION_FILES[@]}" src-tauri/Cargo.lock CHANGELOG.md
+git add "${VERSION_FILES[@]}" Cargo.lock CHANGELOG.md
 git commit -q -m "chore(release): v$NEW"
 git tag -a "v$NEW" -m "claude-fleet v$NEW"
 echo

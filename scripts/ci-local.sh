@@ -94,13 +94,11 @@ run_rust() {
     echo "ci-local: cargo-deny is not installed; run: cargo install cargo-deny --locked" >&2
     exit 1
   fi
-  local manifest="src-tauri/Cargo.toml"
-  step cargo fmt --manifest-path "$manifest" --check
-  step cargo clippy --manifest-path "$manifest" --all-targets -- -D warnings
-  step cargo test --manifest-path "$manifest"
-  # No --config: cargo-deny finds ./deny.toml from the repo root on its own,
-  # and the flag's position differs between cargo-deny 0.19 and 0.20.
-  step cargo deny --manifest-path "$manifest" check
+  step cargo fmt --all --check
+  step cargo clippy --workspace --all-targets -- -D warnings
+  step cargo test --workspace
+  # No --config: cargo-deny finds ./deny.toml from the repo root on its own.
+  step cargo deny check
 }
 
 # --- frontend job ----------------------------------------------------------

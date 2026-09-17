@@ -14,10 +14,10 @@ machines over SSH. ~93,000 LOC Rust, ~27,000 LOC frontend.
 pnpm install
 pnpm test                       # frontend (Vitest)
 pnpm check                      # Svelte/TS type-check
-cd src-tauri && cargo test      # backend
-cd src-tauri && cargo clippy --all-targets -- -D warnings
-cd src-tauri && cargo fmt --check
-cargo deny --manifest-path src-tauri/Cargo.toml check   # licenses + advisories (cargo install cargo-deny --locked)
+cargo test --workspace          # backend (all crates)
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
+cargo deny check                # licenses + advisories (cargo install cargo-deny --locked)
 scripts/ci-local.sh             # all of the above in CI order; --rust-only / --frontend-only
 ```
 
