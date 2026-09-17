@@ -1299,7 +1299,7 @@ using its existing helpers (`cat()`, `host_with()`, `manifest_with()`,
         let manifest = manifest_with(&[("plugin_ref/graphify", "h")]);
         let hp = plan_for(
             &catalog_of(&[]),
-            &crate::service::catalog::harness::Claude,
+            &Claude,
             &host_with(&[]),
             &manifest,
             &BTreeMap::new(),
@@ -1315,8 +1315,10 @@ using its existing helpers (`cat()`, `host_with()`, `manifest_with()`,
     }
 ```
 
-> `plan_for` takes `&dyn Harness`, not an enum variant — pass the same harness
-> value the neighbouring tests in this module pass.
+> `plan_for` takes `&dyn Harness`, not an enum variant. The test module already
+> imports the value at `plan.rs:688`
+> (`use crate::service::catalog::harness::claude::Claude;`), so `&Claude` is in
+> scope — do not write a fully-qualified path.
 
 - [ ] **Step 2: Run test to verify it fails**
 
