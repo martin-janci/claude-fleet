@@ -51,6 +51,12 @@ docker compose run --rm fleet-hub init          # prints the master token — sa
 docker compose run --rm fleet-hub ssh-key       # prints the hub's SSH public key
 ```
 
+`ssh-key` prints `~/.ssh/id_ed25519.pub`. When only the private key
+`~/.ssh/id_ed25519` exists (for example one you copied into `./ssh`), it
+derives the public half with `ssh-keygen -y` and saves it next to it; it
+generates a new key only when neither file exists, and never overwrites an
+existing private key.
+
 Add the printed public key to `~/.ssh/authorized_keys` on every host you want
 the hub to manage. Then create `./ssh/config` (bind-mounted at
 `/home/fleet/.ssh/config` in the container) with one `Host` block per
@@ -161,10 +167,11 @@ To print the master token again later, use the same user and data dir:
 sudo -u fleet env FLEET_HUB_DATA_DIR=/var/lib/fleet-hub fleet-hub token show
 ```
 
-Every `fleet-hub` subcommand opens `<data-dir>/state.db`, creating it when
-missing: `token show` without the right data dir (or as the wrong user)
-creates a separate, empty database with its own fresh token instead of
-printing the running hub's.
+`init` and `serve` open `<data-dir>/state.db`, creating it when missing.
+`token show` and `token regenerate` never create one: pointed at the wrong
+data dir (or run as a user who cannot see it) they exit 1 with
+`no hub database at <data-dir>/state.db; run fleet-hub init first (or pass
+--data-dir)` instead of minting a token nothing uses.
 
 Put it behind your own TLS-terminating proxy (the same role Caddy plays in
 the Docker setup) and set `FLEET_HUB_PUBLIC_URL`. Or skip the public URL
@@ -194,7 +201,7 @@ subcommand — `fleet-hub token show --data-dir D` and
 | `--public-url` | `FLEET_HUB_PUBLIC_URL` | `hub.public_url` | unset (loopback + reverse tunnels) |
 | `--allowed-host` (repeatable) | `FLEET_HUB_ALLOWED_HOSTS` (comma-separated) | `hub.allowed_hosts` | none — the public URL's own host is always accepted in addition to this list |
 | `--local-host true\|false` | `FLEET_HUB_LOCAL_HOST` | `hub.local_host` | `false` |
-| `--allow-plaintext` | `FLEET_HUB_ALLOW_PLAINTEXT` | — | off |
+| `--allow-plaintext` | `FLEET_HUB_ALLOW_PLAINTEXT` (`1`/`true` or `0`/`false`) | `hub.allow_plaintext` | off |
 | `--log-dir` | `FLEET_HUB_LOG_DIR` | — | `<data-dir>/logs` |
 
 `--allow-plaintext` permits a non-loopback bind that is not fronted by an
@@ -206,6 +213,14 @@ https:// public URL, bind to 127.0.0.1 behind a TLS proxy, or pass
 --allow-plaintext`. The compose setup does not need it: the hub binds
 `0.0.0.0` on the compose network with the `https://` public URL Caddy
 serves.
+
+Like the other values, the allowance is saved (`hub.allow_plaintext`), so a
+later bare `fleet-hub serve` keeps it. The flag can only turn it on; to turn
+a saved allowance off, set `FLEET_HUB_ALLOW_PLAINTEXT=0` on a run that
+succeeds and so saves it — for example
+`FLEET_HUB_ALLOW_PLAINTEXT=0 fleet-hub init --bind 127.0.0.1` (a run that is
+refused saves nothing). Any other value of `FLEET_HUB_ALLOW_PLAINTEXT` is an
+error.
 
 `fleet-hub serve` logs to stderr and, once the data dir is writable, also to
 `<log-dir>` (or wherever `--log-dir`/`FLEET_HUB_LOG_DIR` points).

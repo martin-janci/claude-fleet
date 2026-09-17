@@ -37,7 +37,7 @@ enum Cmd {
         #[command(flatten)]
         opts: HubOptions,
     },
-    /// Print this hub's SSH public key (generated on first use).
+    /// Print this hub's SSH public key (generated on first use; derived when only the private key exists).
     SshKey,
 }
 

@@ -6,7 +6,8 @@ use crate::out;
 use fleet_core::events::NoopEventBus;
 use fleet_core::mcp::{self, settings::ensure_master_token, McpGuards};
 use fleet_core::service::hub::{
-    SETTING_ALLOWED_HOSTS, SETTING_BIND, SETTING_LOCAL_HOST, SETTING_PUBLIC_URL,
+    SETTING_ALLOWED_HOSTS, SETTING_ALLOW_PLAINTEXT, SETTING_BIND, SETTING_LOCAL_HOST,
+    SETTING_PUBLIC_URL,
 };
 use fleet_core::service::projects::LOCAL_HOST;
 use fleet_core::store::Store;
@@ -71,6 +72,10 @@ fn persist(store: &Mutex<Store>, r: &Resolved) -> Result<(), String> {
         SETTING_LOCAL_HOST,
         if r.local_host { "true" } else { "false" },
     )?;
+    set(
+        SETTING_ALLOW_PLAINTEXT,
+        if r.allow_plaintext { "true" } else { "false" },
+    )?;
     if !r.local_host {
         // A state.db copied from a desktop carries a `local` row. Hide it so
         // nothing lists it, and mark it unreachable so nothing counts or polls
@@ -132,7 +137,9 @@ pub fn token(
     regenerate: bool,
 ) -> Result<ExitCode, String> {
     // Only the data dir matters here: `token` serves nothing, so the bind /
-    // plaintext checks in `resolve` do not apply.
+    // plaintext checks in `resolve` do not apply. It never creates a data dir
+    // or a database: a token minted into a fresh one is not the hub's.
+    existing_db(&resolve_data_dir(opts, env))?;
     let s = open_store(opts, env)?;
     if regenerate {
         s.set_setting(mcp::SETTING_TOKEN, &mcp::generate_token())
@@ -142,6 +149,38 @@ pub fn token(
     Ok(ExitCode::SUCCESS)
 }
 
+/// `<data-dir>/state.db` when it exists; `token` must never create one.
+fn existing_db(data_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let db = data_dir.join("state.db");
+    if db.is_file() {
+        Ok(db)
+    } else {
+        Err(format!(
+            "no hub database at {}; run fleet-hub init first (or pass --data-dir)",
+            db.display()
+        ))
+    }
+}
+
+/// What `ssh-key` does, from which halves of `~/.ssh/id_ed25519` exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyAction {
+    /// The public key is there: print it.
+    Print,
+    /// Only the private key: derive the public half from it.
+    Derive,
+    /// Neither: generate a new key pair.
+    Generate,
+}
+
+fn key_action(private_exists: bool, public_exists: bool) -> KeyAction {
+    match (private_exists, public_exists) {
+        (_, true) => KeyAction::Print,
+        (true, false) => KeyAction::Derive,
+        (false, false) => KeyAction::Generate,
+    }
+}
+
 pub fn ssh_key() -> Result<ExitCode, String> {
     let home = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
@@ -149,26 +188,76 @@ pub fn ssh_key() -> Result<ExitCode, String> {
     let ssh_dir = home.join(".ssh");
     let key = ssh_dir.join("id_ed25519");
     let pubkey = key.with_extension("pub");
-    if !pubkey.exists() {
-        std::fs::create_dir_all(&ssh_dir).map_err(|e| format!("create ~/.ssh: {e}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700));
+    // `symlink_metadata`: even a dangling symlink counts as an existing
+    // private key, so it is never handed to `ssh-keygen` to overwrite.
+    let private_exists = std::fs::symlink_metadata(&key).is_ok();
+    match key_action(private_exists, pubkey.exists()) {
+        KeyAction::Print => {}
+        KeyAction::Derive => {
+            let o = std::process::Command::new("ssh-keygen")
+                .arg("-y")
+                .arg("-f")
+                .arg(&key)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .map_err(|e| format!("run ssh-keygen: {e}"))?;
+            if !o.status.success() {
+                return Err(format!(
+                    "ssh-keygen -y -f {} exited with {}: {}",
+                    key.display(),
+                    o.status,
+                    String::from_utf8_lossy(&o.stderr).trim()
+                ));
+            }
+            write_public_key(&pubkey, &o.stdout)?;
         }
-        let st = std::process::Command::new("ssh-keygen")
-            .args(["-q", "-t", "ed25519", "-N", "", "-C", "fleet-hub", "-f"])
-            .arg(&key)
-            .status()
-            .map_err(|e| format!("run ssh-keygen: {e}"))?;
-        if !st.success() {
-            return Err(format!("ssh-keygen exited with {st}"));
+        KeyAction::Generate => {
+            std::fs::create_dir_all(&ssh_dir).map_err(|e| format!("create ~/.ssh: {e}"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700));
+            }
+            let st = std::process::Command::new("ssh-keygen")
+                .args(["-q", "-t", "ed25519", "-N", "", "-C", "fleet-hub", "-f"])
+                .arg(&key)
+                .status()
+                .map_err(|e| format!("run ssh-keygen: {e}"))?;
+            if !st.success() {
+                return Err(format!("ssh-keygen exited with {st}"));
+            }
         }
     }
     let text =
         std::fs::read_to_string(&pubkey).map_err(|e| format!("read {}: {e}", pubkey.display()))?;
     out::line(text.trim_end());
     Ok(ExitCode::SUCCESS)
+}
+
+/// Write a derived public key as `0644`, refusing to replace a file that
+/// appeared in the meantime.
+fn write_public_key(path: &std::path::Path, text: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o644);
+    }
+    let mut f = o
+        .open(path)
+        .map_err(|e| format!("create {}: {e}", path.display()))?;
+    f.write_all(text)
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        // The umask (0077 under the systemd unit) narrowed the create mode.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))
+            .map_err(|e| format!("chmod {}: {e}", path.display()))?;
+    }
+    Ok(())
 }
 
 pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<ExitCode, String> {
@@ -315,6 +404,7 @@ mod tests {
             allowed_hosts: vec!["b.example.com:8443".into(), "fleet.example.com".into()],
             allowed_hosts_explicit: vec!["b.example.com:8443".into()],
             local_host,
+            allow_plaintext: false,
             log_dir: "/unused/logs".into(),
         }
     }
@@ -347,6 +437,7 @@ mod tests {
             Some("b.example.com:8443")
         );
         assert_eq!(get(SETTING_LOCAL_HOST).as_deref(), Some("false"));
+        assert_eq!(get(SETTING_ALLOW_PLAINTEXT).as_deref(), Some("false"));
         let local = s.get_host_row("local").unwrap().unwrap();
         assert!(local.hidden);
         assert!(!s.get_host_row("devbox").unwrap().unwrap().hidden);
@@ -410,6 +501,70 @@ mod tests {
     }
 
     #[test]
+    fn a_persisted_plaintext_allowance_survives_a_bare_resolve() {
+        // `serve --bind 0.0.0.0 --allow-plaintext` persists; a later bare
+        // `serve` against the same data dir must not be refused.
+        let (dir, store) = store_with_local_row();
+        let mut r = resolved(false);
+        r.public_url = None;
+        r.allowed_hosts = vec![];
+        r.allowed_hosts_explicit = vec![];
+        r.allow_plaintext = true;
+        persist(&store, &r).unwrap();
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .get_setting(SETTING_ALLOW_PLAINTEXT)
+                .unwrap()
+                .as_deref(),
+            Some("true")
+        );
+        let opts = HubOptions {
+            data_dir: Some(dir.path().to_path_buf()),
+            ..HubOptions::default()
+        };
+        let (back, _s) = resolve_with_store(&opts, &HashMap::new()).unwrap();
+        assert!(back.allow_plaintext);
+        assert_eq!(back.bind.to_string(), "0.0.0.0");
+        // And `FLEET_HUB_ALLOW_PLAINTEXT=0` turns it off again.
+        let off: HashMap<String, String> =
+            [("FLEET_HUB_ALLOW_PLAINTEXT".to_string(), "0".to_string())].into();
+        assert!(resolve_with_store(&opts, &off).is_err());
+    }
+
+    #[test]
+    fn token_refuses_a_missing_database_without_creating_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("hub");
+        let err = existing_db(&data_dir).unwrap_err();
+        assert!(
+            err.contains(&data_dir.join("state.db").display().to_string())
+                && err.contains("run fleet-hub init first (or pass --data-dir)"),
+            "{err}"
+        );
+        let opts = HubOptions {
+            data_dir: Some(data_dir.clone()),
+            ..HubOptions::default()
+        };
+        assert!(token(&opts, &HashMap::new(), false).is_err());
+        assert!(token(&opts, &HashMap::new(), true).is_err());
+        assert!(!data_dir.exists(), "token created the data dir");
+        // Once init has run, the path is accepted.
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("state.db"), b"").unwrap();
+        assert_eq!(existing_db(&data_dir).unwrap(), data_dir.join("state.db"));
+    }
+
+    #[test]
+    fn ssh_key_derives_from_a_lone_private_key_and_never_regenerates_it() {
+        assert_eq!(key_action(true, true), KeyAction::Print);
+        assert_eq!(key_action(false, true), KeyAction::Print);
+        assert_eq!(key_action(true, false), KeyAction::Derive);
+        assert_eq!(key_action(false, false), KeyAction::Generate);
+    }
+
+    #[test]
     fn persist_leaves_the_local_row_visible_when_it_is_a_fleet_host() {
         let (_dir, store) = store_with_local_row();
         let mut r = resolved(true);
@@ -432,6 +587,7 @@ mod tests {
         let (_dir, store) = store_with_local_row();
         let mut r = resolved(false);
         r.bind = "127.0.0.1".parse().unwrap();
+        r.allow_plaintext = true;
         persist(&store, &r).unwrap();
         let s = store.lock().unwrap();
         let settings = |k: &str| s.get_setting(k).ok().flatten();

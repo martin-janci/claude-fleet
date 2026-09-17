@@ -2,7 +2,8 @@
 
 use clap::Args;
 use fleet_core::service::hub::{
-    HubBase, SETTING_ALLOWED_HOSTS, SETTING_BIND, SETTING_LOCAL_HOST, SETTING_PUBLIC_URL,
+    HubBase, SETTING_ALLOWED_HOSTS, SETTING_ALLOW_PLAINTEXT, SETTING_BIND, SETTING_LOCAL_HOST,
+    SETTING_PUBLIC_URL,
 };
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -56,6 +57,10 @@ pub struct Resolved {
     /// public host.
     pub allowed_hosts_explicit: Vec<String>,
     pub local_host: bool,
+    /// Whether a non-loopback bind without an https:// public URL is
+    /// permitted (flag > env > `hub.allow_plaintext` > false). Persisted, so
+    /// a later bare `serve` keeps the allowance it was started with.
+    pub allow_plaintext: bool,
     pub log_dir: PathBuf,
 }
 
@@ -178,10 +183,24 @@ pub fn resolve(
     // Only an https:// public URL means TLS sits in front of a routable bind;
     // an http:// one, or none at all, is plaintext on the wire.
     let tls_in_front = base.public && base.url.starts_with("https://");
-    let allow_plaintext = opts.allow_plaintext
-        || env
-            .get("FLEET_HUB_ALLOW_PLAINTEXT")
-            .is_some_and(|v| v == "1" || v == "true");
+    // The flag is a presence flag (it can only turn the allowance on); the
+    // env can say either, so `FLEET_HUB_ALLOW_PLAINTEXT=0` turns off a stored
+    // `hub.allow_plaintext=true`.
+    let allow_plaintext = if opts.allow_plaintext {
+        true
+    } else if let Some(v) = env.get("FLEET_HUB_ALLOW_PLAINTEXT") {
+        match v.trim() {
+            "1" | "true" => true,
+            "0" | "false" => false,
+            other => {
+                return Err(format!(
+                    "FLEET_HUB_ALLOW_PLAINTEXT must be 1, true, 0 or false, got '{other}'"
+                ))
+            }
+        }
+    } else {
+        settings(SETTING_ALLOW_PLAINTEXT).is_some_and(|v| v.trim() == "true")
+    };
     if !bind.is_loopback() && !tls_in_front && !allow_plaintext {
         return Err(format!(
             "refusing to serve plaintext http on {bind}: use an https:// public URL, \
@@ -203,6 +222,7 @@ pub fn resolve(
         allowed_hosts,
         allowed_hosts_explicit,
         local_host,
+        allow_plaintext,
         log_dir,
     })
 }
@@ -382,6 +402,72 @@ mod tests {
         o.bind = Some("127.0.0.1".into());
         o.public_url = Some("http://fleet.example.com".into());
         assert!(resolve(&o, &env(&[]), &|_| None).is_ok());
+    }
+
+    fn routable() -> HubOptions {
+        let mut o = opts();
+        o.bind = Some("0.0.0.0".into());
+        o
+    }
+
+    #[test]
+    fn a_stored_allow_plaintext_permits_a_bare_resolve() {
+        // `serve --bind 0.0.0.0 --allow-plaintext` persisted the bind and
+        // the allowance; a later bare `serve` must not demand the flag again.
+        let settings = |k: &str| match k {
+            "hub.bind" => Some("0.0.0.0".to_string()),
+            "hub.allow_plaintext" => Some("true".to_string()),
+            _ => None,
+        };
+        let r = resolve(&opts(), &env(&[]), &settings).unwrap();
+        assert!(r.allow_plaintext);
+        assert_eq!(r.bind.to_string(), "0.0.0.0");
+        // Stored false (what persist writes when it was off) still refuses.
+        let off = |k: &str| match k {
+            "hub.bind" => Some("0.0.0.0".to_string()),
+            "hub.allow_plaintext" => Some("false".to_string()),
+            _ => None,
+        };
+        assert!(resolve(&opts(), &env(&[]), &off).is_err());
+    }
+
+    #[test]
+    fn allow_plaintext_env_zero_overrides_a_stored_true() {
+        let settings = |k: &str| (k == "hub.allow_plaintext").then(|| "true".to_string());
+        for off in ["0", "false"] {
+            let e = env(&[("FLEET_HUB_ALLOW_PLAINTEXT", off)]);
+            let err = resolve(&routable(), &e, &settings).unwrap_err();
+            assert!(err.contains("refusing to serve plaintext"), "{off}: {err}");
+        }
+        // The flag beats the env's `0`.
+        let mut o = routable();
+        o.allow_plaintext = true;
+        let e = env(&[("FLEET_HUB_ALLOW_PLAINTEXT", "0")]);
+        assert!(resolve(&o, &e, &settings).unwrap().allow_plaintext);
+        // On loopback nothing is refused, and the resolved value is still
+        // the env's, so persisting it turns a stored allowance off.
+        let r = resolve(&opts(), &e, &settings).unwrap();
+        assert!(!r.allow_plaintext);
+    }
+
+    #[test]
+    fn allow_plaintext_env_true_and_default() {
+        for on in ["1", "true"] {
+            let e = env(&[("FLEET_HUB_ALLOW_PLAINTEXT", on)]);
+            assert!(resolve(&routable(), &e, &|_| None).unwrap().allow_plaintext);
+        }
+        assert!(
+            !resolve(&opts(), &env(&[]), &|_| None)
+                .unwrap()
+                .allow_plaintext
+        );
+    }
+
+    #[test]
+    fn allow_plaintext_env_garbage_is_an_error_naming_the_variable() {
+        let e = env(&[("FLEET_HUB_ALLOW_PLAINTEXT", "yes")]);
+        let err = resolve(&opts(), &e, &|_| None).unwrap_err();
+        assert!(err.contains("FLEET_HUB_ALLOW_PLAINTEXT"), "{err}");
     }
 
     #[test]

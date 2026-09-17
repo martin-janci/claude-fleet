@@ -10,6 +10,8 @@ pub const SETTING_BIND: &str = "hub.bind";
 pub const SETTING_PUBLIC_URL: &str = "hub.public_url";
 pub const SETTING_ALLOWED_HOSTS: &str = "hub.allowed_hosts";
 pub const SETTING_LOCAL_HOST: &str = "hub.local_host";
+/// Written by `fleet-hub` only: whether a plaintext routable bind is allowed.
+pub const SETTING_ALLOW_PLAINTEXT: &str = "hub.allow_plaintext";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HubBase {
