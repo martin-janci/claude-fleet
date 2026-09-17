@@ -432,6 +432,9 @@ pub async fn start_with_handle(
     // Host check must admit exactly the same hosts.
     let allowed_hosts = auth::normalize_allowed_hosts(&allowed_hosts);
     let serve_task = crate::rt::spawn(async move {
+        // Taken before `store` is moved into `FleetTools` below: `/events`
+        // re-reads it to notice a client revoked mid-stream.
+        let events_store = Arc::clone(&store);
         let hook_state = hooks::HookState {
             store: Arc::clone(&store),
             ssh: Arc::clone(&ssh),
@@ -456,7 +459,7 @@ pub async fn start_with_handle(
             pair_state,
             // The stream ends itself when the server stops, so an attached
             // client never holds the graceful drain open.
-            EventsState::new(events).with_shutdown(serve_shutdown.child_token()),
+            EventsState::new(events, events_store).with_shutdown(serve_shutdown.child_token()),
         );
 
         tracing::info!("[mcp] control API listening on http://{addr}/mcp");
@@ -1218,18 +1221,27 @@ mod tests {
         bus: &Arc<crate::events::BroadcastEventBus>,
         keepalive: std::time::Duration,
     ) -> std::net::SocketAddr {
-        serve_events_app(bus, keepalive, CancellationToken::new()).await
+        serve_events_app(
+            bus,
+            keepalive,
+            CancellationToken::new(),
+            Arc::new(Mutex::new(Store::open_in_memory().unwrap())),
+        )
+        .await
+        .0
     }
 
-    /// [`serve_with_events`], also taking the server's shutdown token.
+    /// [`serve_with_events`], also taking the server's shutdown token and the
+    /// store the route re-reads, and handing back the route state so a test
+    /// can watch a stream slot free up.
     async fn serve_events_app(
         bus: &Arc<crate::events::BroadcastEventBus>,
         keepalive: std::time::Duration,
         stop: CancellationToken,
-    ) -> std::net::SocketAddr {
+        store: Arc<Mutex<Store>>,
+    ) -> (std::net::SocketAddr, EventsState) {
         use axum::routing::any;
         use std::net::Ipv4Addr;
-        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         let hook_state = hooks::HookState {
             store: Arc::clone(&store),
             ssh: Arc::new(SshClient::new()),
@@ -1249,14 +1261,15 @@ mod tests {
             let bus = Arc::clone(bus);
             Arc::new(move || bus.subscribe())
         };
+        let events_state = EventsState::enabled(subscribe, Arc::clone(&store))
+            .with_keepalive(keepalive)
+            .with_shutdown(stop);
         let app = build_app(
             any(|| async { "MCP_OK" }),
             hook_state,
             auth_state,
             pair_state,
-            EventsState::enabled(subscribe)
-                .with_keepalive(keepalive)
-                .with_shutdown(stop),
+            events_state.clone(),
         );
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -1271,7 +1284,7 @@ mod tests {
             .unwrap();
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        addr
+        (addr, events_state)
     }
 
     /// One open SSE connection, read incrementally: unlike `raw_round_trip`
@@ -1437,13 +1450,62 @@ mod tests {
         use crate::events::BroadcastEventBus;
         let bus = Arc::new(BroadcastEventBus::default());
         let stop = CancellationToken::new();
-        let addr =
-            serve_events_app(&bus, events_route::KEEPALIVE_INTERVAL, stop.child_token()).await;
+        let (addr, _state) = serve_events_app(
+            &bus,
+            events_route::KEEPALIVE_INTERVAL,
+            stop.child_token(),
+            Arc::new(Mutex::new(Store::open_in_memory().unwrap())),
+        )
+        .await;
         let mut sse = SseConn::open(addr, Some("s3cret"), "").await;
         sse.wait_for("event: ready").await;
         stop.cancel();
         // The chunked body is terminated, promptly — no drain timeout.
         sse.wait_for("\r\n0\r\n\r\n").await;
+    }
+
+    /// `authorize` runs once, at connect; a stream then outlives it. So a
+    /// paired client's stream re-checks the store and ends when its row stops
+    /// being live — otherwise a revoked phone would keep receiving the whole
+    /// fleet change feed until it chose to disconnect.
+    #[tokio::test]
+    async fn a_revoked_clients_stream_ends_at_the_next_heartbeat() {
+        use crate::events::BroadcastEventBus;
+        let bus = Arc::new(BroadcastEventBus::default());
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        {
+            let s = store.lock().unwrap();
+            s.insert_client_token("phone", &auth::sha256_hex("client-tok"), "full")
+                .unwrap();
+        }
+        let (addr, state) = serve_events_app(
+            &bus,
+            std::time::Duration::from_millis(50),
+            CancellationToken::new(),
+            Arc::clone(&store),
+        )
+        .await;
+
+        let mut sse = SseConn::open(addr, Some("client-tok"), "").await;
+        sse.wait_for("event: ready").await;
+        assert_eq!(state.active("client:phone"), 1, "the stream holds a slot");
+
+        store.lock().unwrap().revoke_client_token("phone").unwrap();
+
+        // The body ends — within a heartbeat, not when the device feels like
+        // disconnecting.
+        sse.wait_for("\r\n0\r\n\r\n").await;
+        // …and the slot it held comes back.
+        let freed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while state.active("client:phone") != 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            freed.is_ok(),
+            "the permit must be released when the stream ends"
+        );
     }
 
     /// Streams are capped per caller like the long-polling tools: the ninth
@@ -1452,7 +1514,15 @@ mod tests {
     async fn the_ninth_concurrent_stream_from_one_caller_is_refused() {
         use crate::events::BroadcastEventBus;
         let bus = Arc::new(BroadcastEventBus::default());
-        let addr = serve_with_events(&bus).await;
+        // A short heartbeat, so the server writes to a dropped connection
+        // soon enough for the test to observe the slot come back.
+        let (addr, state) = serve_events_app(
+            &bus,
+            std::time::Duration::from_millis(50),
+            CancellationToken::new(),
+            Arc::new(Mutex::new(Store::open_in_memory().unwrap())),
+        )
+        .await;
         let mut held = Vec::new();
         for _ in 0..guard::MAX_LONG_POLLS_PER_CALLER {
             let mut c = SseConn::open(addr, Some("s3cret"), "").await;
@@ -1471,6 +1541,30 @@ mod tests {
         assert!(
             refused.contains(events_route::TOO_MANY_STREAMS),
             "expected the documented reason:\n{refused}"
+        );
+        assert_eq!(state.active("master"), guard::MAX_LONG_POLLS_PER_CALLER);
+
+        // The third leg the cap rests on: axum drops the body when the client
+        // goes away, which drops the permit — so hanging up frees a slot.
+        held.pop();
+        let freed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if state.active("master") < guard::MAX_LONG_POLLS_PER_CALLER {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(freed.is_ok(), "a hung-up stream must release its slot");
+        let again = SseConn::open(addr, Some("s3cret"), "")
+            .await
+            .wait_for("event: ready")
+            .await
+            .to_string();
+        assert!(
+            again.contains("200 OK"),
+            "the freed slot must be usable:\n{again}"
         );
     }
 

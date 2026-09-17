@@ -271,6 +271,22 @@ pub struct BroadcastEventBus {
     tx: tokio::sync::broadcast::Sender<EventMessage>,
 }
 
+/// Every event kind — the part of a [`RowChange::name`] before the `:`, which
+/// is what the `/events` route's `?kinds=` filter matches on.
+/// `event_kinds_cover_every_name` keeps it in step with the variants.
+pub const EVENT_KINDS: [&str; 10] = [
+    "session",
+    "host",
+    "account",
+    "project",
+    "worktree",
+    "task",
+    "account_usage",
+    "asset_inventory",
+    "catalog",
+    "sync",
+];
+
 /// Ring size for [`BroadcastEventBus`]. Reconcile holds its emits until the
 /// transaction commits and then flushes them in one burst (one pass every
 /// ~20 s on a hub), so the buffer has to absorb a whole pass over a busy
@@ -290,7 +306,8 @@ impl BroadcastEventBus {
         self.tx.subscribe()
     }
 
-    /// Live subscribers. Used by the route's logging, and by tests.
+    /// Live subscribers. [`BroadcastEventBus::emit`] reads it to skip the
+    /// work of rendering an event nobody is listening for.
     pub fn receiver_count(&self) -> usize {
         self.tx.receiver_count()
     }
@@ -304,8 +321,18 @@ impl Default for BroadcastEventBus {
 
 impl EventBus for BroadcastEventBus {
     fn emit(&self, e: &RowChange) {
-        // `Err` means "no receivers right now", which is the normal state of
-        // a hub nobody has connected a phone to. Not an error, not a log line.
+        // The usual state of a hub nobody has connected a phone to. Checked
+        // FIRST because `payload()` serializes a whole store row, and a
+        // reconcile pass emits one per session on a busy fleet: without this,
+        // every hub would pay to render a feed no one is reading. A
+        // subscriber that arrives between this check and the `send` below
+        // simply misses this one event, which is the same race `send` already
+        // has and is exactly what "nothing is replayed" means here.
+        if self.receiver_count() == 0 {
+            return;
+        }
+        // `Err` means the last receiver went away in that window. Not an
+        // error, not a log line.
         let _ = self.tx.send(EventMessage {
             name: e.name(),
             payload: e.payload(),
@@ -452,6 +479,28 @@ mod tests {
         }
     }
 
+    /// A new `RowChange` variant whose kind is missing here would be
+    /// unfilterable: `?kinds=<it>` would be logged as unrecognised and drop
+    /// every one of its events.
+    #[test]
+    fn event_kinds_cover_every_name() {
+        for name in FRONTEND_EVENT_NAMES {
+            let kind = name.split_once(':').expect("every name has a kind").0;
+            assert!(
+                EVENT_KINDS.contains(&kind),
+                "EVENT_KINDS is missing {kind} (from {name})"
+            );
+        }
+        for kind in EVENT_KINDS {
+            assert!(
+                FRONTEND_EVENT_NAMES
+                    .iter()
+                    .any(|n| n.starts_with(&format!("{kind}:"))),
+                "EVENT_KINDS lists {kind}, which no event uses"
+            );
+        }
+    }
+
     #[test]
     fn scalar_payloads_keep_their_wire_shape() {
         assert_eq!(
@@ -484,6 +533,26 @@ mod tests {
         let msg = rx.recv().await.expect("one message");
         assert_eq!(msg.name, "session:killed");
         assert_eq!(msg.payload["id"], 42);
+    }
+
+    /// The no-subscriber guard must not cost a live subscriber an event: the
+    /// receiver is taken before the emit, which is the only ordering the
+    /// stream ever uses (the route subscribes before its first frame).
+    #[tokio::test]
+    async fn a_live_subscriber_still_gets_everything_after_the_guard() {
+        let bus = BroadcastEventBus::new(16);
+        assert_eq!(bus.receiver_count(), 0, "nobody is listening yet");
+        let mut rx = bus.subscribe();
+        assert_eq!(bus.receiver_count(), 1);
+        bus.emit(&RowChange::SessionKilled(1));
+        bus.emit(&RowChange::HostRemoved("box".into()));
+        assert_eq!(rx.recv().await.unwrap().name, "session:killed");
+        assert_eq!(rx.recv().await.unwrap().name, "host:removed");
+        // A receiver that goes away takes the count with it, and emitting is
+        // still fine.
+        drop(rx);
+        assert_eq!(bus.receiver_count(), 0);
+        bus.emit(&RowChange::SessionKilled(2));
     }
 
     #[tokio::test]
