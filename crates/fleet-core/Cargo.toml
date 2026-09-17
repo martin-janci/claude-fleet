@@ -1,0 +1,10 @@
+[package]
+name = "fleet-core"
+version = "0.1.0"
+description = "Transport-agnostic core of claude-fleet: service layer, store, SSH, tmux, MCP control API"
+authors = ["martin-janci"]
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }

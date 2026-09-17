@@ -588,6 +588,7 @@ dependencies = [
  "base64 0.22.1",
  "dashmap",
  "directories",
+ "fleet-core",
  "hex",
  "libc",
  "portable-pty",
@@ -1251,6 +1252,13 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+]
+
+[[package]]
+name = "fleet-core"
+version = "0.1.0"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]

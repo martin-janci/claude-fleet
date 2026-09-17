@@ -100,6 +100,14 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             use tauri::Manager;
+            // Core tasks (ticks, MCP server, hook side-jobs) spawn through
+            // `fleet_core::rt`; give it this app's tokio runtime, since this
+            // closure runs outside any runtime context. `block_on` executes
+            // the future ON the Tauri runtime, so `Handle::current()` inside
+            // it is that runtime's handle.
+            tauri::async_runtime::block_on(async {
+                fleet_core::rt::install(tokio::runtime::Handle::current());
+            });
             let handle = app.handle().clone();
             let bus: std::sync::Arc<dyn crate::events::EventBus> =
                 std::sync::Arc::new(crate::events::AppHandleEventBus::new(handle));

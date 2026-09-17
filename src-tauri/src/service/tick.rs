@@ -40,13 +40,7 @@ pub(crate) fn spawn_reconcile_tick(
     };
     tracing::info!("reconcile tick enabled every {}s", period.as_secs());
 
-    // `tauri::async_runtime::spawn`, NOT bare `tokio::spawn`: this runs from the
-    // Tauri `setup` closure on the main thread (inside the macOS
-    // `did_finish_launching` callback), where no tokio runtime is entered. A
-    // bare `tokio::spawn` there panics ("no reactor running"), and because the
-    // callback can't unwind the panic aborts the process. The Tauri runtime
-    // handle works from any context (same reason the MCP server uses it).
-    tauri::async_runtime::spawn(async move {
+    fleet_core::rt::spawn(async move {
         let mut ticker = tokio::time::interval(period);
         // Drop missed ticks rather than firing them back-to-back after a slow
         // pass (the default Burst behaviour would defeat the overlap guard).
@@ -113,10 +107,7 @@ pub(crate) fn spawn_account_usage_tick(
     bus: Arc<dyn EventBus>,
 ) {
     let poller = Arc::new(AccountUsagePoller::new());
-    // See `spawn_reconcile_tick`: this also runs from the Tauri `setup`
-    // closure, before any tokio runtime is entered on this thread, so it
-    // must use `tauri::async_runtime::spawn`, not a bare `tokio::spawn`.
-    tauri::async_runtime::spawn(async move {
+    fleet_core::rt::spawn(async move {
         let mut ticker = tokio::time::interval(USAGE_POLL_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {

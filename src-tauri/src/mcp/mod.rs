@@ -241,7 +241,7 @@ pub async fn start(
 
     let shutdown = CancellationToken::new();
     let serve_shutdown = shutdown.clone();
-    tauri::async_runtime::spawn(async move {
+    fleet_core::rt::spawn(async move {
         let hook_state = hooks::HookState {
             store: Arc::clone(&store),
             ssh: Arc::clone(&ssh),
