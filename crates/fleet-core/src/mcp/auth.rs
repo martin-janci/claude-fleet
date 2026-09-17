@@ -13,9 +13,12 @@
 //!    matched becomes the request's [`Caller`]: a per-host token identifies —
 //!    and scopes the caller to — that host, so a token lifted from one
 //!    machine cannot impersonate another, and a `readonly` host token is
-//!    refused every mutating tool.
+//!    refused every mutating tool. A third kind of token identifies a paired
+//!    *client* (a phone — migration 019): the DB keeps only its SHA-256, and
+//!    it resolves to a caller that is deliberately NEITHER the master NOR a
+//!    host, so the fleet-admin tools stay out of its reach.
 
-use crate::store::HostTokenRow;
+use crate::store::{ClientTokenRow, HostTokenRow};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 
 /// What a token is allowed to do. Unknown mode strings in the DB fall back
@@ -37,38 +40,72 @@ impl TokenMode {
     }
 }
 
+/// The paired client behind a request: the `client_tokens` row that matched.
+/// Only the id and name travel — never the token or its hash.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClientRef {
+    pub id: i64,
+    pub name: String,
+}
+
 /// The authenticated identity behind a request, derived from the bearer
 /// token that matched. Inserted into the request extensions by the auth
 /// middleware so tools and the `/hook` handler can read it.
+///
+/// Exactly one of the three shapes: master (`host_alias` and `client` both
+/// `None`), a host (`host_alias` set), a paired client (`client` set).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Caller {
-    /// `None` for the master token (desktop / local agent use — unrestricted);
-    /// `Some(alias)` for a per-host token, which scopes identity-bearing
-    /// tools (`register_self`, `send_message`, `inbox`) to that host.
+    /// `None` for the master token (desktop / local agent use — unrestricted)
+    /// AND for a paired client; `Some(alias)` for a per-host token, which
+    /// scopes identity-bearing tools (`register_self`, `send_message`,
+    /// `inbox`) to that host.
     pub host_alias: Option<String>,
+    /// `Some(_)` only for a paired client (a phone). A client is never the
+    /// master: [`Caller::is_master`] — the fleet-admin gate — checks this
+    /// field too, so provisioning, `add_host`/`remove_host`, `apply_sync` and
+    /// `set_secret` stay unreachable from a paired device.
+    pub client: Option<ClientRef>,
     pub mode: TokenMode,
 }
 
 impl Caller {
-    /// The master-token caller: no host binding, full mode.
+    /// The master-token caller: no host binding, no client, full mode.
     pub fn master() -> Self {
         Caller {
             host_alias: None,
+            client: None,
             mode: TokenMode::Full,
         }
     }
 
+    /// True only for the master token. A paired client carries no host alias
+    /// either, so the client field must be checked as well — this is the one
+    /// gate that keeps the fleet-admin tools master-only.
     pub fn is_master(&self) -> bool {
-        self.host_alias.is_none()
+        self.host_alias.is_none() && self.client.is_none()
+    }
+
+    /// True for a paired client (a phone), whatever its mode.
+    pub fn is_client(&self) -> bool {
+        self.client.is_some()
     }
 
     /// Short identity label for audit rows and rate-limit buckets.
     pub fn label(&self) -> String {
-        match &self.host_alias {
-            Some(h) => format!("host:{h}"),
-            None => "master".to_string(),
+        match (&self.host_alias, &self.client) {
+            (Some(h), _) => format!("host:{h}"),
+            (None, Some(c)) => format!("client:{}", c.name),
+            (None, None) => "master".to_string(),
         }
     }
+}
+
+/// Lowercase-hex SHA-256 of a token. `client_tokens` stores only this, so a
+/// stolen database hands out no usable bearer token.
+pub fn sha256_hex(s: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(s.as_bytes()))
 }
 
 /// Constant-time byte comparison. Returns `false` immediately on a length
@@ -98,13 +135,18 @@ pub fn bearer_token(header: Option<&HeaderValue>) -> Option<&str> {
 }
 
 /// Map a presented token to its [`Caller`]: the master token → unrestricted;
-/// a per-host token → that host with its stored mode; anything else → `None`.
+/// a per-host token → that host with its stored mode; a paired client's token
+/// (matched against the stored SHA-256) → that client; anything else → `None`.
 /// Every candidate is compared in constant time and the scan never
 /// short-circuits, so timing does not reveal which (if any) token matched.
+///
+/// `client_tokens` must be the *live* rows — `Store::active_client_tokens`,
+/// which drops revoked ones — so a revoked pairing can never resolve.
 pub fn resolve_token(
     presented: &str,
     master: &str,
     host_tokens: &[HostTokenRow],
+    client_tokens: &[ClientTokenRow],
 ) -> Option<Caller> {
     let mut found: Option<Caller> = None;
     if !master.is_empty() && constant_time_eq(presented.as_bytes(), master.as_bytes()) {
@@ -114,6 +156,24 @@ pub fn resolve_token(
         if !row.token.is_empty() && constant_time_eq(presented.as_bytes(), row.token.as_bytes()) {
             found = Some(Caller {
                 host_alias: Some(row.host_alias.clone()),
+                client: None,
+                mode: TokenMode::parse(&row.mode),
+            });
+        }
+    }
+    // Hash once, then compare every stored digest — same no-short-circuit
+    // shape as above.
+    let presented_sha = sha256_hex(presented);
+    for row in client_tokens {
+        if !row.token_sha256.is_empty()
+            && constant_time_eq(presented_sha.as_bytes(), row.token_sha256.as_bytes())
+        {
+            found = Some(Caller {
+                host_alias: None,
+                client: Some(ClientRef {
+                    id: row.id,
+                    name: row.name.clone(),
+                }),
                 mode: TokenMode::parse(&row.mode),
             });
         }
@@ -226,12 +286,14 @@ pub fn check_request(
     headers: &HeaderMap,
     master_token: &str,
     host_tokens: &[HostTokenRow],
+    client_tokens: &[ClientTokenRow],
     allowed: &[String],
 ) -> Result<Caller, StatusCode> {
     check_origin(headers, allowed)?;
     let presented =
         bearer_token(headers.get(header::AUTHORIZATION)).ok_or(StatusCode::UNAUTHORIZED)?;
-    resolve_token(presented, master_token, host_tokens).ok_or(StatusCode::UNAUTHORIZED)
+    resolve_token(presented, master_token, host_tokens, client_tokens)
+        .ok_or(StatusCode::UNAUTHORIZED)
 }
 
 #[cfg(test)]
@@ -245,6 +307,75 @@ mod tests {
             created_at: 0,
             mode: mode.into(),
         }
+    }
+
+    fn client_row(id: i64, name: &str, token: &str, mode: &str) -> ClientTokenRow {
+        ClientTokenRow {
+            id,
+            name: name.into(),
+            token_sha256: sha256_hex(token),
+            mode: mode.into(),
+            created_at: 0,
+            last_seen_at: None,
+            revoked_at: None,
+        }
+    }
+
+    #[test]
+    fn a_client_token_resolves_to_a_client_caller_that_is_not_master() {
+        let rows = vec![client_row(7, "phone", "tok-phone", "full")];
+        let c = resolve_token("tok-phone", "s3cret", &[], &rows).unwrap();
+        assert!(!c.is_master(), "a client must never count as the master");
+        assert!(c.is_client());
+        assert_eq!(c.label(), "client:phone");
+        assert_eq!(c.mode, TokenMode::Full);
+        assert_eq!(c.client.as_ref().unwrap().id, 7);
+        assert!(c.host_alias.is_none());
+    }
+
+    #[test]
+    fn a_readonly_client_keeps_its_mode_and_an_unknown_token_resolves_to_nothing() {
+        let rows = vec![client_row(1, "tablet", "tok-t", "readonly")];
+        assert_eq!(
+            resolve_token("tok-t", "s3cret", &[], &rows).unwrap().mode,
+            TokenMode::Readonly
+        );
+        assert!(resolve_token("nope", "s3cret", &[], &rows).is_none());
+    }
+
+    #[test]
+    fn the_master_and_host_tokens_still_resolve_with_clients_present() {
+        let clients = vec![client_row(1, "phone", "tok-phone", "full")];
+        let hosts = vec![host_row("mefistos", "tok-mef", "full")];
+        assert_eq!(
+            resolve_token("s3cret", "s3cret", &hosts, &clients).unwrap(),
+            Caller::master()
+        );
+        let h = resolve_token("tok-mef", "s3cret", &hosts, &clients).unwrap();
+        assert_eq!(h.host_alias.as_deref(), Some("mefistos"));
+        assert!(!h.is_client());
+    }
+
+    #[test]
+    fn sha256_hex_is_lowercase_hex_of_the_token() {
+        // Known vector: SHA-256 of "abc".
+        assert_eq!(
+            sha256_hex("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn a_client_token_never_authorizes_as_the_master_through_check_request() {
+        let clients = vec![client_row(3, "phone", "tok-phone", "full")];
+        let h = headers(&[
+            ("host", "127.0.0.1:4180"),
+            ("authorization", "Bearer tok-phone"),
+        ]);
+        let c = check_request(&h, "s3cret", &[], &clients, &[]).unwrap();
+        assert!(!c.is_master());
+        assert!(c.is_client());
+        assert_eq!(c.label(), "client:phone");
     }
 
     #[test]
@@ -278,44 +409,70 @@ mod tests {
             host_row("weird", "tok-weird", "not-a-mode"),
         ];
         assert_eq!(
-            resolve_token("master-tok", "master-tok", &hosts),
+            resolve_token("master-tok", "master-tok", &hosts, &[]),
             Some(Caller::master())
         );
         assert_eq!(
-            resolve_token("tok-mef", "master-tok", &hosts),
+            resolve_token("tok-mef", "master-tok", &hosts, &[]),
             Some(Caller {
                 host_alias: Some("mefistos".into()),
+                client: None,
                 mode: TokenMode::Full
             })
         );
         assert_eq!(
-            resolve_token("tok-tur", "master-tok", &hosts),
+            resolve_token("tok-tur", "master-tok", &hosts, &[]),
             Some(Caller {
                 host_alias: Some("turanga".into()),
+                client: None,
                 mode: TokenMode::Readonly
             })
         );
         // Unknown mode strings fail closed to readonly.
         assert_eq!(
-            resolve_token("tok-weird", "master-tok", &hosts)
+            resolve_token("tok-weird", "master-tok", &hosts, &[])
                 .unwrap()
                 .mode,
             TokenMode::Readonly
         );
-        assert_eq!(resolve_token("nope", "master-tok", &hosts), None);
+        assert_eq!(resolve_token("nope", "master-tok", &hosts, &[]), None);
         // An empty configured token never matches an empty presented one.
-        assert_eq!(resolve_token("", "", &[host_row("h", "", "full")]), None);
+        assert_eq!(
+            resolve_token("", "", &[host_row("h", "", "full")], &[]),
+            None
+        );
+        // …nor an empty hash on a client row.
+        assert_eq!(
+            resolve_token(
+                "",
+                "",
+                &[],
+                &[ClientTokenRow {
+                    id: 1,
+                    name: "c".into(),
+                    token_sha256: String::new(),
+                    mode: "full".into(),
+                    created_at: 0,
+                    last_seen_at: None,
+                    revoked_at: None,
+                }]
+            ),
+            None
+        );
     }
 
     #[test]
     fn caller_labels_and_master_flag() {
         assert!(Caller::master().is_master());
         assert_eq!(Caller::master().label(), "master");
+        assert!(!Caller::master().is_client());
         let c = Caller {
             host_alias: Some("mefistos".into()),
+            client: None,
             mode: TokenMode::Full,
         };
         assert!(!c.is_master());
+        assert!(!c.is_client());
         assert_eq!(c.label(), "host:mefistos");
         assert_eq!(TokenMode::parse("full"), TokenMode::Full);
         assert_eq!(TokenMode::parse("readonly"), TokenMode::Readonly);
@@ -378,7 +535,10 @@ mod tests {
             ("host", "127.0.0.1:4180"),
             ("authorization", "Bearer s3cret"),
         ]);
-        assert_eq!(check_request(&h, "s3cret", &[], &[]), Ok(Caller::master()));
+        assert_eq!(
+            check_request(&h, "s3cret", &[], &[], &[]),
+            Ok(Caller::master())
+        );
     }
 
     #[test]
@@ -388,6 +548,7 @@ mod tests {
             &h,
             "s3cret",
             &[host_row("mefistos", "tok-mef", "readonly")],
+            &[],
             &[],
         )
         .unwrap();
@@ -399,19 +560,19 @@ mod tests {
     fn check_request_allows_non_browser_client_without_origin() {
         // A CLI MCP client sends no Origin — only the token gates it.
         let h = headers(&[("authorization", "Bearer s3cret")]);
-        assert!(check_request(&h, "s3cret", &[], &[]).is_ok());
+        assert!(check_request(&h, "s3cret", &[], &[], &[]).is_ok());
     }
 
     #[test]
     fn check_request_rejects_wrong_token_with_401() {
         let h = headers(&[("host", "127.0.0.1:4180"), ("authorization", "Bearer nope")]);
         assert_eq!(
-            check_request(&h, "s3cret", &[], &[]),
+            check_request(&h, "s3cret", &[], &[], &[]),
             Err(StatusCode::UNAUTHORIZED)
         );
         let none = headers(&[("host", "127.0.0.1:4180")]);
         assert_eq!(
-            check_request(&none, "s3cret", &[], &[]),
+            check_request(&none, "s3cret", &[], &[], &[]),
             Err(StatusCode::UNAUTHORIZED)
         );
     }
@@ -425,7 +586,7 @@ mod tests {
             ("authorization", "Bearer s3cret"),
         ]);
         assert_eq!(
-            check_request(&h, "s3cret", &[], &[]),
+            check_request(&h, "s3cret", &[], &[], &[]),
             Err(StatusCode::FORBIDDEN)
         );
         assert_eq!(check_origin(&h, &[]), Err(StatusCode::FORBIDDEN));
@@ -436,7 +597,7 @@ mod tests {
         // Host header carrying the attacker's domain (rebound to 127.0.0.1).
         let h = headers(&[("host", "evil.com"), ("authorization", "Bearer s3cret")]);
         assert_eq!(
-            check_request(&h, "s3cret", &[], &[]),
+            check_request(&h, "s3cret", &[], &[], &[]),
             Err(StatusCode::FORBIDDEN)
         );
     }
@@ -459,12 +620,14 @@ mod tests {
             &allow_headers("fleet.example.com", None),
             "s3cret",
             &[],
+            &[],
             &allowed
         )
         .is_ok());
         assert!(check_request(
             &allow_headers("FLEET.example.com:443", None),
             "s3cret",
+            &[],
             &[],
             &allowed
         )
@@ -473,6 +636,7 @@ mod tests {
             &allow_headers("fleet.example.com", Some("https://fleet.example.com")),
             "s3cret",
             &[],
+            &[],
             &allowed
         )
         .is_ok());
@@ -480,6 +644,7 @@ mod tests {
         assert!(check_request(
             &allow_headers("127.0.0.1:4180", None),
             "s3cret",
+            &[],
             &[],
             &allowed
         )
@@ -490,6 +655,7 @@ mod tests {
                 &allow_headers("evil.example.com", None),
                 "s3cret",
                 &[],
+                &[],
                 &allowed
             ),
             Err(StatusCode::FORBIDDEN)
@@ -498,6 +664,7 @@ mod tests {
             check_request(
                 &allow_headers("fleet.example.com", Some("https://evil.example.com")),
                 "s3cret",
+                &[],
                 &[],
                 &allowed
             ),
@@ -508,6 +675,7 @@ mod tests {
             check_request(
                 &allow_headers("fleet.example.com", None),
                 "s3cret",
+                &[],
                 &[],
                 &[]
             ),

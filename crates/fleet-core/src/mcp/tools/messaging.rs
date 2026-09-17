@@ -204,6 +204,12 @@ impl FleetTools {
                 p.session_id, p.unread_only, p.mark_read, p.summary
             ),
         );
+        // Master skips the lookup; a per-host token is gated to its own host
+        // by `require_host` inside. A paired client also lands here and, like
+        // the master, carries no host binding, so the gate passes — the
+        // lookup only costs it an `E_NOTFOUND` on an unknown session. Reading
+        // any session's inbox is what a paired phone is for; the tools it
+        // must NOT reach are gated by `enforce_admin`, not here.
         if !caller.is_master() {
             self.resolve_target_row(
                 &caller,

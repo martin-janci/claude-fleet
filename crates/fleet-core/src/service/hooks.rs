@@ -566,6 +566,7 @@ mod tests {
         }
         let host_a = Caller {
             host_alias: Some("hosta".into()),
+            client: None,
             mode: crate::mcp::TokenMode::Full,
         };
         let err = apply_hook(
@@ -584,6 +585,7 @@ mod tests {
         // The session's own host token (and the master token) may.
         let host_b = Caller {
             host_alias: Some("hostb".into()),
+            client: None,
             mode: crate::mcp::TokenMode::Readonly,
         };
         apply_hook(
@@ -652,6 +654,7 @@ mod tests {
         };
         let host_a = Caller {
             host_alias: Some("hosta".into()),
+            client: None,
             mode: crate::mcp::TokenMode::Full,
         };
         let err = apply_hook(
@@ -670,6 +673,7 @@ mod tests {
         }
         let host_b = Caller {
             host_alias: Some("hostb".into()),
+            client: None,
             mode: crate::mcp::TokenMode::Readonly,
         };
         apply_hook(
@@ -805,6 +809,7 @@ mod tests {
     fn host_caller(host: &str) -> Caller {
         Caller {
             host_alias: Some(host.into()),
+            client: None,
             mode: crate::mcp::TokenMode::Full,
         }
     }
@@ -1288,6 +1293,7 @@ mod tests {
         hooked(&store);
         let other = Caller {
             host_alias: Some("hostb".into()),
+            client: None,
             mode: crate::mcp::TokenMode::Full,
         };
         for (event, field) in [

@@ -372,17 +372,22 @@ pub(super) fn persist_audit(
 }
 
 /// Describe the origin of a delivered prompt for the untrusted-content marker.
+/// A paired client is named as such: its text is not the controller's, and
+/// the receiving agent should see where it really came from.
 pub(super) fn marker_origin(caller: &Caller) -> String {
-    match &caller.host_alias {
-        Some(h) => format!("an agent on host {h}"),
-        None => "the fleet controller".to_string(),
+    match (&caller.host_alias, &caller.client) {
+        (Some(h), _) => format!("an agent on host {h}"),
+        (None, Some(c)) => format!("the paired client {}", c.name),
+        (None, None) => "the fleet controller".to_string(),
     }
 }
 
 /// Prefix `text` with the untrusted-content marker unless the caller is the
 /// master token AND asked for `raw` delivery. A per-host caller asking for
 /// `raw` is refused outright (`E_FORBIDDEN`) rather than silently marked, so
-/// an agent cannot believe it delivered unmarked text.
+/// an agent cannot believe it delivered unmarked text. A paired client is not
+/// the master ([`Caller::is_master`] checks `client` too), so it is refused
+/// here as well: text typed on a phone always reaches an agent marked.
 pub(super) fn apply_marker(
     text: String,
     from: &str,
@@ -407,7 +412,8 @@ pub(super) fn apply_marker(
 
 /// Fleet-admin gate: `provision_hosts` / `add_host` / `remove_host` /
 /// `hide_host` / `apply_sync` / `set_secret` are master-only, whatever the
-/// host token's mode.
+/// host token's mode — and whatever a paired client's mode, since
+/// [`Caller::is_master`] is false for a client too.
 pub(super) fn enforce_admin(caller: &Caller, tool: &str) -> Result<(), McpError> {
     if guard::is_admin_tool(tool) && !caller.is_master() {
         return Err(mcp_err(

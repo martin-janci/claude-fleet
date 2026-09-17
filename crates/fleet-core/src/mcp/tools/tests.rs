@@ -54,6 +54,19 @@ fn ok_json_compact_is_compact_and_strips_nulls() {
 fn host_caller(alias: &str, mode: TokenMode) -> Caller {
     Caller {
         host_alias: Some(alias.into()),
+        client: None,
+        mode,
+    }
+}
+
+/// A paired client (a phone): no host binding, never the master.
+fn client_caller(name: &str, mode: TokenMode) -> Caller {
+    Caller {
+        host_alias: None,
+        client: Some(crate::mcp::auth::ClientRef {
+            id: 7,
+            name: name.into(),
+        }),
         mode,
     }
 }
@@ -212,13 +225,27 @@ fn marker_is_applied_unless_master_asks_for_raw() {
     assert!(apply_marker("hi".into(), "x", &Caller::master(), false)
         .unwrap()
         .contains("untrusted"));
+    // A paired client is not the master: raw is refused and its text is
+    // attributed to the phone, not to the controller.
+    let phone = client_caller("phone", TokenMode::Full);
+    let err = apply_marker("hi".into(), "x", &phone, true).unwrap_err();
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    assert!(err.message.contains("client:phone"), "{}", err.message);
+    assert!(apply_marker("hi".into(), "x", &phone, false)
+        .unwrap()
+        .contains("untrusted"));
     assert_eq!(marker_origin(&agent), "an agent on host mefistos");
     assert_eq!(marker_origin(&Caller::master()), "the fleet controller");
+    assert_eq!(marker_origin(&phone), "the paired client phone");
 }
 
 #[test]
 fn fleet_admin_tools_are_master_only() {
     let full = host_caller("mefistos", TokenMode::Full);
+    // A full-mode paired client is still not the master — the invariant the
+    // whole client-access feature rests on.
+    let phone = client_caller("phone", TokenMode::Full);
+    assert!(!phone.is_master());
     for t in [
         "provision_hosts",
         "add_host",
@@ -230,6 +257,12 @@ fn fleet_admin_tools_are_master_only() {
         let err = enforce_admin(&full, t).expect_err(t);
         assert!(
             err.message.starts_with("E_FORBIDDEN"),
+            "{t}: {}",
+            err.message
+        );
+        let err = enforce_admin(&phone, t).expect_err(t);
+        assert!(
+            err.message.starts_with("E_FORBIDDEN") && err.message.contains("client:phone"),
             "{t}: {}",
             err.message
         );

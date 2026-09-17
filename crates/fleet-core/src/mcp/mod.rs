@@ -152,17 +152,23 @@ async fn authorize(
 ) -> Result<axum::response::Response, axum::http::StatusCode> {
     use axum::http::StatusCode;
     // Sync lock, released before the next `.await` — never held across one.
-    let host_tokens = {
+    // `active_client_tokens` drops revoked pairings, so a revoked client token
+    // simply stops resolving on the next request.
+    let (host_tokens, client_tokens) = {
         let s = state
             .store
             .lock()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        s.list_host_tokens().unwrap_or_default()
+        (
+            s.list_host_tokens().unwrap_or_default(),
+            s.active_client_tokens().unwrap_or_default(),
+        )
     };
     let caller = match auth::check_request(
         request.headers(),
         &state.master,
         &host_tokens,
+        &client_tokens,
         &state.allowed_hosts,
     ) {
         Ok(c) => c,
@@ -176,8 +182,10 @@ async fn authorize(
         Err(StatusCode::UNAUTHORIZED)
             if request.uri().path() == "/hook" && state.allowed_hosts.is_empty() =>
         {
+            // No host rows and no client rows are passed: only the master
+            // token can satisfy this legacy path.
             query_token(request.uri().query())
-                .and_then(|t| auth::resolve_token(t, &state.master, &[]))
+                .and_then(|t| auth::resolve_token(t, &state.master, &[], &[]))
                 .ok_or_else(|| {
                     tracing::warn!("[mcp] rejected /hook request: no valid token");
                     StatusCode::UNAUTHORIZED
@@ -189,6 +197,20 @@ async fn authorize(
             return Err(status);
         }
     };
+    // Liveness for the pairing UI ("last seen"). Best-effort and rate-limited
+    // in the store (at most one write a minute per client); a second brief
+    // sync lock, again released before the `.await` below.
+    if let Some(client) = caller.client.as_ref() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if let Ok(s) = state.store.lock() {
+            if let Err(e) = s.touch_client_token(client.id, now) {
+                tracing::debug!(error = %e.message, "[mcp] could not touch client token");
+            }
+        }
+    }
     request.extensions_mut().insert(caller);
     Ok(next.run(request).await)
 }
@@ -406,6 +428,11 @@ mod tests {
             let s = store.lock().unwrap();
             s.upsert_host("mefistos").unwrap();
             s.upsert_host_token("mefistos", "host-tok").unwrap();
+            s.insert_client_token("phone", &auth::sha256_hex("client-tok"), "full")
+                .unwrap();
+            s.insert_client_token("old", &auth::sha256_hex("revoked-tok"), "full")
+                .unwrap();
+            s.revoke_client_token("old").unwrap();
         }
         let hook_state = hooks::HookState {
             store: Arc::clone(&store),
@@ -547,6 +574,30 @@ mod tests {
         assert!(
             hook_hq.contains("401"),
             "per-host token must not authorize via query:\n{hook_hq}"
+        );
+        // A paired client's token authorizes /mcp…
+        let client_ok = round_trip(addr, &post("/mcp", Some("client-tok"), None, "{}")).await;
+        assert!(
+            client_ok.contains("200 OK"),
+            "client token must pass on /mcp:\n{client_ok}"
+        );
+        // …a revoked one never does (the store filters it out)…
+        let revoked = round_trip(addr, &post("/mcp", Some("revoked-tok"), None, "{}")).await;
+        assert!(
+            revoked.contains("401"),
+            "a revoked client token must be refused:\n{revoked}"
+        );
+        // …and a client is refused on /hook, in the header form…
+        let hook_client = round_trip(addr, &post("/hook", Some("client-tok"), None, stop)).await;
+        assert!(
+            hook_client.contains("403"),
+            "a client must not report hook events:\n{hook_client}"
+        );
+        // …and in the legacy query form (master-token-only path).
+        let hook_cq = round_trip(addr, &post("/hook?token=client-tok", None, None, stop)).await;
+        assert!(
+            hook_cq.contains("401"),
+            "a client token must not authorize via query:\n{hook_cq}"
         );
         // …and /mcp never accepts a query token.
         let mcp_q = round_trip(addr, &post("/mcp?token=s3cret", None, None, "{}")).await;

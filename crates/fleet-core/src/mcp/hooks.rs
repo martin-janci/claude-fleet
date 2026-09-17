@@ -69,6 +69,15 @@ pub async fn handle_hook(
     Json(payload): Json<HookPayload>,
 ) -> StatusCode {
     use crate::ipc_error::codes;
+    // A paired client (a phone) has no business reporting hook events: hooks
+    // are Claude Code's own callbacks, and `service::hooks::caller_host` maps
+    // a caller with no host binding to `local`, which would file a phone's
+    // events against the local host's sessions. Refused before the body is
+    // looked at.
+    if caller.is_client() {
+        tracing::warn!(caller = %caller.label(), "[hook] refused: clients do not report hooks");
+        return StatusCode::FORBIDDEN;
+    }
     // Every hook event lands here (several per turn): debug, not info. Only
     // identifiers are logged, never the payload body.
     tracing::debug!(
@@ -103,6 +112,33 @@ pub async fn handle_hook(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_client_caller_is_refused_with_403() {
+        use crate::mcp::auth::{ClientRef, TokenMode};
+        let state = HookState {
+            store: Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap())),
+            ssh: Arc::new(SshClient::new()),
+        };
+        let client = Caller {
+            host_alias: None,
+            client: Some(ClientRef {
+                id: 1,
+                name: "phone".into(),
+            }),
+            mode: TokenMode::Full,
+        };
+        let payload = HookPayload {
+            session_id: Some("s1".into()),
+            hook_event_name: Some("Stop".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            handle_hook(State(state), Extension(client), Json(payload)).await,
+            StatusCode::FORBIDDEN,
+            "a paired client must never report hook events"
+        );
+    }
 
     #[test]
     fn session_end_stop_failure_and_notification_fields_deserialize() {
