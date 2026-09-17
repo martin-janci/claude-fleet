@@ -9,6 +9,7 @@ use rusqlite::{Connection, OptionalExtension, Result};
 use std::sync::Arc;
 
 mod catalog;
+mod clients;
 mod hosts_accounts;
 mod projects;
 mod reconcile;
