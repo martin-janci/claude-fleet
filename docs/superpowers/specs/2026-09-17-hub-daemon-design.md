@@ -279,7 +279,8 @@ Provisioning writes `https://fleet.example.com/hook` and
 - Non-loopback bind + `http://` public URL without `--allow-plaintext` →
   refused at startup with the reason.
 - A public URL that fails to parse, or whose scheme is not `http`/`https`,
-  is rejected by `init`/`serve` (`E_VALIDATE` text, exit 2).
+  is rejected by `init`/`serve` (`E_VALIDATE` text, exit 1 — every startup
+  error exits 1; the message says which option was wrong).
 - Store open failure → same actionable message the desktop prints (corrupt
   DB hint), exit 1.
 - SIGTERM during a reconcile pass: the pass finishes (bounded by its own
