@@ -11,6 +11,7 @@ pub mod inventory;
 pub mod layer;
 pub mod model;
 pub mod repo;
+pub mod resolve;
 pub mod sync;
 
 // The catalog's `IpcError::code` values live with every other code in
