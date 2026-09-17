@@ -1087,6 +1087,15 @@ pub(super) async fn reconcile_one_host_with(
     deps: &ReconcileDeps,
     alias: &str,
 ) -> Result<(), IpcError> {
+    // `local` is off on this hub (`hub.local_host = false`): refuse before
+    // any lookup or probe, even if a `state.db` copied from a desktop still
+    // carries a `local` row (the same row the fleet-wide pass never probes).
+    if !deps.local_host && alias == "local" {
+        return Err(IpcError::new(
+            codes::E_NOTFOUND,
+            "host local is disabled on this hub (hub.local_host=false)",
+        ));
+    }
     // 1. Snapshot the host under lock (brief).
     let (host, paths) = {
         let s = lock(store)?;
@@ -1107,6 +1116,18 @@ pub(super) async fn reconcile_one_host_with(
     let mut s = lock(store)?;
     let projects = s.list_projects()?;
     reconcile_write_one_host(&mut s, &probe, &projects)
+}
+
+/// Test access to the private single-host reconcile entry point, so
+/// `reconcile_tests` (outside the `sessions` module) can exercise it exactly
+/// like `run_full_reconcile_for_test`.
+#[cfg(test)]
+pub(crate) async fn reconcile_one_host_with_for_test(
+    store: &Mutex<Store>,
+    deps: &ReconcileDeps,
+    alias: &str,
+) -> Result<(), IpcError> {
+    reconcile_one_host_with(store, deps, alias).await
 }
 
 /// Single-host refresh used after a mutation (`new_session`, `kill`, `rename`,

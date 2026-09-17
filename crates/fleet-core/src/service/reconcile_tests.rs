@@ -21,9 +21,10 @@
 //! are fixed; the tests now guard against regressions.
 
 use crate::events::RecordingEventBus;
+use crate::ipc_error::codes;
 use crate::service::sessions::{
-    dismiss_ghost_session, reconcile_sessions_with, run_full_reconcile_for_test,
-    DismissGhostSessionArgs, ReconcileDeps, ReconcileGate,
+    dismiss_ghost_session, reconcile_one_host_with_for_test, reconcile_sessions_with,
+    run_full_reconcile_for_test, DismissGhostSessionArgs, ReconcileDeps, ReconcileGate,
 };
 use crate::ssh_fake::{FakeSsh, Match, Reply};
 use crate::store::{SessionRow, Store};
@@ -966,4 +967,22 @@ async fn reconcile_without_local_host_skips_a_copied_local_row() {
     );
     reconcile_sessions_with(&f.store, &f.deps).await.unwrap();
     assert!(f.fake.calls().iter().all(|c| c.host != "local"));
+    let hosts = f.store.lock().unwrap().list_hosts().unwrap();
+    assert!(
+        hosts.iter().any(|h| h.alias == "local"),
+        "the copied local row is left alone, not deleted: {hosts:?}"
+    );
+}
+
+#[tokio::test]
+async fn reconcile_one_host_refuses_local_when_hub_local_host_is_off() {
+    // A state.db copied from a desktop carries a `local` row; a single-host
+    // reconcile for it (e.g. after a mutation) must refuse instead of
+    // probing the local machine.
+    let f = Fleet::new_without_local(&["local", "mefistos"]);
+    let err = reconcile_one_host_with_for_test(&f.store, &f.deps, "local")
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, codes::E_NOTFOUND);
+    assert!(f.fake.calls_for("local").is_empty());
 }
