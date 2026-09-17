@@ -8,6 +8,7 @@ pub mod author_session;
 pub mod harness;
 pub mod import;
 pub mod inventory;
+pub mod layer;
 pub mod model;
 pub mod repo;
 pub mod sync;
