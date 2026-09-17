@@ -10,6 +10,7 @@ mod auth;
 mod doc_gen;
 pub mod guard;
 pub mod hooks;
+pub mod pairing;
 pub mod settings;
 mod tools;
 
@@ -28,6 +29,7 @@ pub use auth::Caller;
 #[cfg(test)]
 pub use auth::TokenMode;
 pub use guard::{ConfirmNotify, PendingConfirms, RateLimiter};
+pub use pairing::{pair_url, PairingRequest, PendingPairings};
 pub use tools::FleetTools;
 
 /// `settings` table keys for the control API.
@@ -91,6 +93,13 @@ pub struct McpGuards {
     pub confirms: Arc<PendingConfirms>,
     /// Surfaces a confirmation request to the desktop (`mcp:confirm-required`).
     pub notify: ConfirmNotify,
+    /// Outstanding pairing codes. It lives here because the two halves of a
+    /// pairing sit on opposite sides of the server: the tool that mints a
+    /// code reaches it through `FleetTools`' guards, the unauthenticated
+    /// `/pair` route that redeems it through its own state. One registry,
+    /// one write path. Like the confirmations it outlives a server restart,
+    /// so a code minted before a port change is still good.
+    pub pairings: Arc<PendingPairings>,
 }
 
 impl McpGuards {
@@ -99,6 +108,7 @@ impl McpGuards {
             rate: Arc::new(RateLimiter::new()),
             confirms: Arc::new(PendingConfirms::new()),
             notify,
+            pairings: Arc::new(PendingPairings::new()),
         }
     }
 }
@@ -238,12 +248,13 @@ async fn healthz() -> impl axum::response::IntoResponse {
 }
 
 /// Build the axum app: `/mcp` (rmcp service) and `/hook` behind [`authorize`],
-/// plus the unauthenticated `/healthz` liveness route. Shared by `start` and
-/// the routing test.
+/// plus the unauthenticated `/healthz` liveness and `/pair` exchange routes.
+/// Shared by `start` and the routing test.
 fn build_app(
     mcp_service: axum::routing::MethodRouter<hooks::HookState>,
     hook_state: hooks::HookState,
     auth_state: AuthState,
+    pair_state: pairing::PairState,
 ) -> axum::Router {
     // The MCP streamable-HTTP service is mounted with `route_service` at the
     // exact `/mcp` path — NOT `nest_service("/", …)` under `nest("/mcp", …)`.
@@ -256,12 +267,26 @@ fn build_app(
         .route("/hook", axum::routing::post(hooks::handle_hook))
         .with_state(hook_state)
         .layer(axum::middleware::from_fn_with_state(auth_state, authorize));
-    // `/healthz` is registered on a SEPARATE router merged after the layered
-    // one: in axum 0.8 `.layer` wraps only the routes added before it, so
-    // merging afterwards is what keeps the liveness probe outside `authorize`
-    // while every other route stays behind it.
+    // `/healthz` and `/pair` are registered on a SEPARATE router merged after
+    // the layered one: in axum 0.8 `.layer` wraps only the routes added
+    // before it, so merging afterwards is what keeps these two outside
+    // `authorize` while every other route stays behind it.
+    //
+    // `/pair` is unauthenticated on purpose and it is NOT a second liveness
+    // probe: it is how a client gets its first credential, so it cannot be
+    // made to present one. What stands in for the bearer token is the pairing
+    // code — single-use, minutes-long, minted by a master-token holder at a
+    // terminal, compared in constant time and rate-limited per address (see
+    // [`pairing::handle_pair`]). It is also outside the `Host`/`Origin`
+    // allowlist, like `/healthz`: a phone scanning a QR may well reach the
+    // hub by a name nobody listed, and the code — not the Host header — is
+    // what authorizes the exchange.
     axum::Router::new()
         .route("/healthz", axum::routing::get(healthz))
+        .route(
+            "/pair",
+            axum::routing::post(pairing::handle_pair).with_state(pair_state),
+        )
         .merge(authorized)
 }
 
@@ -359,6 +384,26 @@ pub async fn start_with_handle(
 
     let shutdown = CancellationToken::new();
     let serve_shutdown = shutdown.clone();
+    // Where a freshly paired client is told to come back. The public URL when
+    // one is configured, else this server's own loopback base on the port it
+    // actually bound (not the stored `mcp.port`, which a `--port` flag can
+    // override). A malformed stored URL falls back to loopback rather than
+    // failing the start: an unusable `hub` field is better than no hub.
+    let base_url = {
+        let public = store
+            .lock()
+            .ok()
+            .and_then(|s| s.get_setting(crate::service::hub::SETTING_PUBLIC_URL).ok())
+            .flatten()
+            .filter(|u| !u.trim().is_empty());
+        let loopback = || crate::service::hub::HubBase::loopback(port).url;
+        match public {
+            Some(u) => crate::service::hub::HubBase::public(&u, port)
+                .map(|b| b.url)
+                .unwrap_or_else(|_| loopback()),
+            None => loopback(),
+        }
+    };
     // Normalized once and shared: fleet's `authorize` layer and rmcp's own
     // Host check must admit exactly the same hosts.
     let allowed_hosts = auth::normalize_allowed_hosts(&allowed_hosts);
@@ -372,12 +417,30 @@ pub async fn start_with_handle(
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(allowed_hosts.clone()),
         };
+        let pair_state = pairing::PairState::new(
+            Arc::clone(&store),
+            Arc::clone(&guards.pairings),
+            Arc::clone(&guards.rate),
+            base_url,
+        );
         let tools = FleetTools::new(store, ssh, reg, tunnels, guards);
         let service = streamable_service(tools, serve_shutdown.child_token(), &allowed_hosts);
-        let app = build_app(axum::routing::any_service(service), hook_state, auth_state);
+        let app = build_app(
+            axum::routing::any_service(service),
+            hook_state,
+            auth_state,
+            pair_state,
+        );
 
         tracing::info!("[mcp] control API listening on http://{addr}/mcp");
-        let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
+        // `into_make_service_with_connect_info` is what puts the peer address
+        // in the request extensions, which is what `/pair` keys its
+        // per-address attempt budget on.
+        let serve = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
             serve_shutdown.cancelled().await;
         });
         if let Err(e) = serve.await {
@@ -443,14 +506,36 @@ mod tests {
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(vec![]),
         };
-        let app = build_app(any(|| async { "MCP_OK" }), hook_state, auth_state);
+        // The pairing registry the test mints into and `/pair` redeems from.
+        let pairings = Arc::new(pairing::PendingPairings::new());
+        let mut pair_state = pairing::PairState::new(
+            Arc::clone(&store),
+            Arc::clone(&pairings),
+            Arc::new(RateLimiter::new()),
+            "https://fleet.example.com".to_string(),
+        );
+        // Every request below comes from 127.0.0.1, so the production
+        // one-attempt-per-6s budget would refuse the second one. The budget
+        // gets its own app at the end of this test.
+        pair_state.attempt_interval = std::time::Duration::ZERO;
+        let app = build_app(
+            any(|| async { "MCP_OK" }),
+            hook_state,
+            auth_state,
+            pair_state,
+        );
 
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -521,6 +606,97 @@ mod tests {
         assert!(
             health_post.contains("405"),
             "expected 405 for POST /healthz:\n{health_post}"
+        );
+
+        // ---- `/pair`: the other unauthenticated route ----
+        // Pull `"<key>":"<value>"` out of a raw HTTP response.
+        fn json_field(resp: &str, key: &str) -> String {
+            let needle = format!("\"{key}\":\"");
+            let at = resp
+                .find(&needle)
+                .unwrap_or_else(|| panic!("no {key} in:\n{resp}"))
+                + needle.len();
+            let rest = &resp[at..];
+            rest[..rest.find('"').expect("closing quote")].to_string()
+        }
+        // Everything after the header block.
+        fn body_of(resp: &str) -> &str {
+            resp.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("")
+        }
+        let pair_req = |code: &str, host: &str| {
+            let body = format!("{{\"code\":\"{code}\"}}");
+            format!(
+                "POST /pair HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        };
+
+        // A minted code is redeemed with NO Authorization header and from a
+        // Host nobody allowlisted — a phone that scanned a QR knows neither.
+        let minted = pairings.mint("kiosk", "readonly", std::time::Duration::from_secs(600));
+        let paired = round_trip(addr, &pair_req(&minted.code, "phone.invalid")).await;
+        assert!(
+            paired.contains("200 OK"),
+            "expected 200 on /pair with a minted code:\n{paired}"
+        );
+        let paired_token = json_field(&paired, "token");
+        assert_eq!(paired_token.len(), 64, "a 256-bit token:\n{paired}");
+        assert!(
+            paired_token.chars().all(|c| c.is_ascii_hexdigit()),
+            "lowercase hex token:\n{paired}"
+        );
+        assert_eq!(json_field(&paired, "name"), "kiosk");
+        assert_eq!(json_field(&paired, "mode"), "readonly");
+        assert_eq!(json_field(&paired, "hub"), "https://fleet.example.com");
+        // The code never comes back in the answer.
+        assert!(
+            !paired.contains(&minted.code),
+            "the pairing code must not be echoed:\n{paired}"
+        );
+
+        // Used, never-minted and expired are one and the same answer.
+        let reused = round_trip(addr, &pair_req(&minted.code, "127.0.0.1")).await;
+        let unknown = round_trip(addr, &pair_req("ZZZZZZZZ", "127.0.0.1")).await;
+        let stale = pairings.mint("late", "full", std::time::Duration::from_millis(1));
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let expired = round_trip(addr, &pair_req(&stale.code, "127.0.0.1")).await;
+        for (what, resp) in [
+            ("a used code", &reused),
+            ("an unknown code", &unknown),
+            ("an expired code", &expired),
+        ] {
+            assert!(resp.contains("404"), "expected 404 for {what}:\n{resp}");
+        }
+        assert_eq!(
+            body_of(&reused),
+            r#"{"error":"invalid code"}"#,
+            "the refusal body must carry no detail:\n{reused}"
+        );
+        assert_eq!(
+            body_of(&unknown),
+            body_of(&reused),
+            "an unknown code must be indistinguishable from a used one"
+        );
+        assert_eq!(
+            body_of(&expired),
+            body_of(&reused),
+            "an expired code must be indistinguishable from a used one"
+        );
+
+        // The token `/pair` handed out actually authenticates `/mcp`.
+        let as_client = round_trip(addr, &post("/mcp", Some(&paired_token), None, "{}")).await;
+        assert!(
+            as_client.contains("200 OK"),
+            "the paired token must authorize /mcp:\n{as_client}"
+        );
+        // A garbage body is a 400, not a 500 and not a hint about codes.
+        let junk = "POST /pair HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\
+                    Content-Length: 5\r\nConnection: close\r\n\r\nnope!";
+        let junk_resp = round_trip(addr, junk).await;
+        assert!(
+            junk_resp.contains("400"),
+            "expected 400 for a malformed /pair body:\n{junk_resp}"
         );
 
         // Valid master token reaches the mounted service (proves /mcp routes, no panic).
@@ -647,10 +823,20 @@ mod tests {
         };
         let auth_state2 = AuthState {
             master: Arc::new("s3cret".to_string()),
-            store,
+            store: Arc::clone(&store),
             allowed_hosts: Arc::new(vec!["fleet.example.com".to_string()]),
         };
-        let app2 = build_app(any(|| async { "MCP_OK" }), hook_state2, auth_state2);
+        let app2 = build_app(
+            any(|| async { "MCP_OK" }),
+            hook_state2,
+            auth_state2,
+            pairing::PairState::new(
+                Arc::clone(&store),
+                Arc::new(pairing::PendingPairings::new()),
+                Arc::new(RateLimiter::new()),
+                "https://fleet.example.com".to_string(),
+            ),
+        );
         let listener2 = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .unwrap();
@@ -678,6 +864,68 @@ mod tests {
         assert!(
             other_resp.contains("403"),
             "expected 403 for non-allowlisted Host:\n{other_resp}"
+        );
+
+        // A third app with the PRODUCTION attempt budget: guessing codes is
+        // throttled per address, whether or not the code is any good. Served
+        // with connect-info, which is what makes the peer address available
+        // for the bucket key.
+        let hook_state3 = hooks::HookState {
+            store: Arc::clone(&store),
+            ssh: Arc::new(SshClient::new()),
+        };
+        let auth_state3 = AuthState {
+            master: Arc::new("s3cret".to_string()),
+            store: Arc::clone(&store),
+            allowed_hosts: Arc::new(vec![]),
+        };
+        let limited_pairings = Arc::new(pairing::PendingPairings::new());
+        let app3 = build_app(
+            any(|| async { "MCP_OK" }),
+            hook_state3,
+            auth_state3,
+            pairing::PairState::new(
+                store,
+                Arc::clone(&limited_pairings),
+                Arc::new(RateLimiter::new()),
+                "https://fleet.example.com".to_string(),
+            ),
+        );
+        let listener3 = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr3 = listener3.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener3,
+                app3.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let first = round_trip(addr3, &pair_req("ZZZZZZZZ", "127.0.0.1")).await;
+        assert!(
+            first.contains("404"),
+            "the first guess is answered, not throttled:\n{first}"
+        );
+        // Even a GOOD code is refused inside the window: the budget is spent
+        // before the code is looked at.
+        let good = limited_pairings.mint("phone2", "full", std::time::Duration::from_secs(600));
+        let throttled = round_trip(addr3, &pair_req(&good.code, "127.0.0.1")).await;
+        assert!(
+            throttled.contains("429"),
+            "expected 429 on the second attempt from one address:\n{throttled}"
+        );
+        assert!(
+            throttled.to_ascii_lowercase().contains("retry-after:"),
+            "a 429 must say when to come back:\n{throttled}"
+        );
+        // Throttled means untouched: the code is still good afterwards.
+        assert!(
+            limited_pairings.consume(&good.code).is_some(),
+            "a throttled attempt must not spend the code"
         );
     }
 
@@ -724,21 +972,38 @@ mod tests {
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(allowed_hosts.clone()),
         };
+        let guards = McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {}));
+        let pair_state = pairing::PairState::new(
+            Arc::clone(&store),
+            Arc::clone(&guards.pairings),
+            Arc::clone(&guards.rate),
+            "https://fleet.example.com".to_string(),
+        );
         let tools = FleetTools::new(
             store,
             Arc::new(SshClient::new()),
             crate::cancel::CancellationRegistry::new(),
             Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
-            McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {})),
+            guards,
         );
         let service = streamable_service(tools, CancellationToken::new(), &allowed_hosts);
-        let app = build_app(axum::routing::any_service(service), hook_state, auth_state);
+        let app = build_app(
+            axum::routing::any_service(service),
+            hook_state,
+            auth_state,
+            pair_state,
+        );
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         addr
