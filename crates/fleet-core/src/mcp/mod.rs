@@ -193,8 +193,31 @@ async fn authorize(
     Ok(next.run(request).await)
 }
 
-/// Build the axum app: `/mcp` (rmcp service) and `/hook`, both behind
-/// [`authorize`]. Shared by `start` and the routing test.
+/// The liveness body, exactly as `/healthz` answers it.
+const HEALTHZ_BODY: &str = "fleet-hub ok\n";
+
+/// `GET /healthz` — a liveness probe, deliberately **unauthenticated**.
+///
+/// It is the one route outside the [`authorize`] layer: no bearer token, no
+/// `Host`/`Origin` allowlist. That is safe because it reveals nothing — it
+/// never touches the store and never names a version, a host, a session or
+/// any setting; it answers a fixed string that only means "this process is
+/// accepting HTTP". Container health checks (`fleet-hub healthcheck`, Docker's
+/// `HEALTHCHECK`) can therefore probe it without a credential and without
+/// filling the log with rejected requests.
+async fn healthz() -> impl axum::response::IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        HEALTHZ_BODY,
+    )
+}
+
+/// Build the axum app: `/mcp` (rmcp service) and `/hook` behind [`authorize`],
+/// plus the unauthenticated `/healthz` liveness route. Shared by `start` and
+/// the routing test.
 fn build_app(
     mcp_service: axum::routing::MethodRouter<hooks::HookState>,
     hook_state: hooks::HookState,
@@ -206,11 +229,18 @@ fn build_app(
     // inside the spawned serve task *after* the listener had bound, so
     // `start` returned Ok and the UI showed the server "running" while
     // nothing was actually accepting connections.
-    axum::Router::new()
+    let authorized = axum::Router::new()
         .route("/mcp", mcp_service)
         .route("/hook", axum::routing::post(hooks::handle_hook))
         .with_state(hook_state)
-        .layer(axum::middleware::from_fn_with_state(auth_state, authorize))
+        .layer(axum::middleware::from_fn_with_state(auth_state, authorize));
+    // `/healthz` is registered on a SEPARATE router merged after the layered
+    // one: in axum 0.8 `.layer` wraps only the routes added before it, so
+    // merging afterwards is what keeps the liveness probe outside `authorize`
+    // while every other route stays behind it.
+    axum::Router::new()
+        .route("/healthz", axum::routing::get(healthz))
+        .merge(authorized)
 }
 
 /// The rmcp streamable-HTTP service in **stateless** mode: every POST is a
@@ -431,6 +461,39 @@ mod tests {
             h.push_str(body);
             h
         };
+
+        // `/healthz` is the ONE route outside the auth layer: no bearer token,
+        // and a Host nobody allowlisted still gets the liveness body.
+        let health = round_trip(
+            addr,
+            "GET /healthz HTTP/1.1\r\nHost: evil.example.com\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            health.contains("200 OK"),
+            "expected 200 on /healthz without a token:\n{health}"
+        );
+        assert!(
+            health.ends_with("fleet-hub ok\n"),
+            "expected the exact liveness body:\n{health}"
+        );
+        assert!(
+            health
+                .to_ascii_lowercase()
+                .contains("text/plain; charset=utf-8"),
+            "expected a text/plain content type:\n{health}"
+        );
+        // Nothing about this host, version or store leaks through it.
+        assert!(
+            !health.contains(env!("CARGO_PKG_VERSION")),
+            "the liveness body must reveal no version:\n{health}"
+        );
+        // Only GET: anything else is a 405 from axum's method router.
+        let health_post = round_trip(addr, &post("/healthz", None, None, "{}")).await;
+        assert!(
+            health_post.contains("405"),
+            "expected 405 for POST /healthz:\n{health_post}"
+        );
 
         // Valid master token reaches the mounted service (proves /mcp routes, no panic).
         let ok = round_trip(addr, &post("/mcp", Some("s3cret"), None, "{}")).await;

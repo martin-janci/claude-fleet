@@ -184,29 +184,51 @@ fn key_action(private_exists: bool, public_exists: bool) -> KeyAction {
 /// How long `healthcheck` waits to connect, and then for the status line.
 const HEALTHCHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Send one `GET /mcp` to `addr` and return the response's status line when
-/// it is HTTP/1.x (any status: 401/405 still mean the server is alive).
+/// The body `fleet-core`'s unauthenticated `/healthz` route answers with. A
+/// literal, not an import: `fleet-core` keeps it private, and the string is
+/// the wire contract between the two crates.
+const HEALTHZ_MARKER: &str = "fleet-hub ok";
+
+/// Send one unauthenticated `GET /healthz` to `addr` and return the response's
+/// status line — but only when the answer is really a fleet hub: an HTTP/1.x
+/// status line AND [`HEALTHZ_MARKER`] in the body. Any other listener that
+/// happens to hold the port (a proxy, a dev server) answers HTTP too, and used
+/// to read as healthy.
 fn probe(addr: std::net::SocketAddr, timeout: std::time::Duration) -> Result<String, String> {
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::{Read, Write};
     let mut conn = std::net::TcpStream::connect_timeout(&addr, timeout)
         .map_err(|e| format!("connect {addr}: {e}"))?;
     conn.set_read_timeout(Some(timeout))
         .and_then(|()| conn.set_write_timeout(Some(timeout)))
         .map_err(|e| format!("{addr}: {e}"))?;
-    let req = format!("GET /mcp HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    let req = format!("GET /healthz HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
     conn.write_all(req.as_bytes())
         .map_err(|e| format!("send to {addr}: {e}"))?;
-    let mut line = String::new();
-    // Only the status line is needed; bound what a stray peer can make us read.
-    BufReader::new(conn.take(512))
-        .read_line(&mut line)
-        .map_err(|e| format!("read from {addr}: {e}"))?;
-    let status = line.trim_end().to_string();
-    if status.starts_with("HTTP/1.") {
-        Ok(status)
-    } else {
-        Err(format!("{addr} did not answer HTTP: {status:?}"))
+    // Status line plus the short body is all we need; bound what a stray peer
+    // can make us read. Bytes already read survive a later read error.
+    let mut raw = Vec::new();
+    let read = conn.take(1024).read_to_end(&mut raw);
+    if raw.is_empty() {
+        read.map_err(|e| format!("read from {addr}: {e}"))?;
+        return Err(format!("{addr} closed without answering"));
     }
+    let text = String::from_utf8_lossy(&raw);
+    let status = text
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_string();
+    if !status.starts_with("HTTP/1.") {
+        return Err(format!("{addr} did not answer HTTP: {status:?}"));
+    }
+    if !text.contains(HEALTHZ_MARKER) {
+        return Err(format!(
+            "{addr} answered {status} but not a fleet-hub liveness body: \
+             something else is listening on this port"
+        ));
+    }
+    Ok(status)
 }
 
 /// `fleet-hub healthcheck`: probe the local listener without opening the
@@ -610,8 +632,9 @@ mod tests {
         assert_eq!(key_action(false, false), KeyAction::Generate);
     }
 
-    #[test]
-    fn healthcheck_accepts_any_http_status_line() {
+    /// One listener that answers a single request with `reply`, handing back
+    /// the raw request it saw.
+    fn one_shot(reply: &'static [u8]) -> (std::net::SocketAddr, std::thread::JoinHandle<String>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -620,18 +643,43 @@ mod tests {
             let mut buf = [0u8; 1024];
             let n = conn.read(&mut buf).unwrap();
             let req = String::from_utf8_lossy(&buf[..n]).to_string();
-            conn.write_all(b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n")
-                .unwrap();
+            conn.write_all(reply).unwrap();
             req
         });
+        (addr, server)
+    }
+
+    #[test]
+    fn healthcheck_probes_healthz_and_accepts_the_liveness_body() {
+        let (addr, server) = one_shot(
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/plain; charset=utf-8\r\n\
+              content-length: 13\r\nconnection: close\r\n\r\nfleet-hub ok\n",
+        );
         let status = probe(addr, HEALTHCHECK_TIMEOUT).unwrap();
-        assert_eq!(status, "HTTP/1.1 401 Unauthorized");
+        assert_eq!(status, "HTTP/1.1 200 OK");
         let req = server.join().unwrap();
-        assert!(req.starts_with("GET /mcp HTTP/1.1\r\n"), "{req}");
+        assert!(req.starts_with("GET /healthz HTTP/1.1\r\n"), "{req}");
         assert!(
             req.contains(&format!("Host: 127.0.0.1:{}\r\n", addr.port())),
             "{req}"
         );
+        assert!(
+            !req.to_ascii_lowercase().contains("authorization"),
+            "the probe must carry no credential: {req}"
+        );
+    }
+
+    #[test]
+    fn healthcheck_rejects_a_200_from_an_unrelated_listener() {
+        // The old probe passed on any HTTP status line, so any process that
+        // happened to hold the port read as a healthy hub.
+        let (addr, server) = one_shot(
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 5\r\n\
+              connection: close\r\n\r\nhello",
+        );
+        let err = probe(addr, HEALTHCHECK_TIMEOUT).unwrap_err();
+        assert!(err.contains("fleet-hub"), "{err}");
+        server.join().unwrap();
     }
 
     #[test]

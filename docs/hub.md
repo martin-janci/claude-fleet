@@ -102,12 +102,20 @@ A healthy hub answers with `db_ready: true` and the running version.
 
 The image carries a Docker `HEALTHCHECK` that runs `fleet-hub healthcheck`
 every 30 s, so `docker compose ps` shows the hub as `healthy` (or
-`unhealthy`) in its STATUS column. The check sends one unauthenticated
-`GET /mcp` to `127.0.0.1` on `FLEET_HUB_PORT` (default `4180`) and passes on
-any HTTP answer — a `401` means the server is up. It does not open
-`state.db` and does not read the stored `mcp.port`: if you run the hub on
-another port, set it with `FLEET_HUB_PORT`, not only `--port`. Each probe
-shows up in the hub's log as a rejected (`401`) request.
+`unhealthy`) in its STATUS column. The check sends one `GET /healthz` to
+`127.0.0.1` on `FLEET_HUB_PORT` (default `4180`) and passes only when the
+answer is an HTTP status line with the body `fleet-hub ok` — so an unrelated
+process holding the port no longer reads as a healthy hub.
+
+`/healthz` is the one route that needs no bearer token and no `Host`
+allowlist entry, because it reveals nothing: it never opens `state.db` and
+never names a version, a host, a session or a setting — the fixed body only
+means "this process is accepting HTTP". Every other route stays behind the
+token. Probes therefore leave no rejected-request lines in the log.
+
+The check does not open `state.db` and does not read the stored `mcp.port`:
+if you run the hub on another port, set it with `FLEET_HUB_PORT`, not only
+`--port`.
 
 ## Add and provision hosts
 
