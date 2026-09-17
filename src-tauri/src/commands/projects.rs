@@ -1,12 +1,12 @@
 //! Tauri IPC wrappers for project discovery. Logic lives in `service::projects`;
 //! this file only adapts `tauri::State` to plain references.
 
-use crate::cancel::CancellationRegistry;
-use crate::ipc_error::IpcError;
-use crate::service::add_project::{self, AddProjectArgs, GithubRepo};
-use crate::service::projects::{self, ProjectTreeRow};
-use crate::ssh::SshClient;
-use crate::store::Store;
+use fleet_core::cancel::CancellationRegistry;
+use fleet_core::ipc_error::IpcError;
+use fleet_core::service::add_project::{self, AddProjectArgs, GithubRepo};
+use fleet_core::service::projects::{self, ProjectTreeRow};
+use fleet_core::ssh::SshClient;
+use fleet_core::store::Store;
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use tauri::State;

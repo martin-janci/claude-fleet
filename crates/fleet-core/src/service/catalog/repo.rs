@@ -247,7 +247,7 @@ fn body_file(kind: Kind) -> &'static str {
 /// directory or the `resources/` subtree). Shared with `author.rs`, which
 /// applies the same rule to resource paths arriving from the frontend
 /// before anything is read or written.
-pub(crate) fn valid_resource_rel_path(rel_path: &str) -> bool {
+pub fn valid_resource_rel_path(rel_path: &str) -> bool {
     rel_path.starts_with("resources/")
         && rel_path
             .chars()

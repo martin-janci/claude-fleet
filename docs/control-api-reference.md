@@ -1,5 +1,5 @@
 <!-- GENERATED FILE — do not edit by hand.
-     Regenerate with: REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_current -->
+     Regenerate with: REGEN_DOCS=1 cargo test -p fleet-core reference_is_current -->
 
 # claude-fleet Control API — Tool Reference
 

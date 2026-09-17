@@ -164,9 +164,13 @@ fn scan(text: &str) -> Scan {
 
 #[test]
 fn production_code_does_not_use_eprintln() {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    // Both crates: the core and the desktop command layer.
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let roots = [manifest.join("src"), manifest.join("../../src-tauri/src")];
     let mut files = Vec::new();
-    rs_files(&src, &mut files);
+    for root in &roots {
+        rs_files(root, &mut files);
+    }
     files.sort();
 
     let mut test_only: BTreeSet<PathBuf> = BTreeSet::new();
@@ -193,9 +197,10 @@ fn production_code_does_not_use_eprintln() {
         if test_only.contains(&file) {
             continue;
         }
-        let rel = file
-            .strip_prefix(&src)
-            .expect("under src")
+        let rel = roots
+            .iter()
+            .find_map(|root| file.strip_prefix(root).ok())
+            .expect("under a scanned root")
             .to_string_lossy()
             .replace('\\', "/");
         if !result.hits.is_empty() {

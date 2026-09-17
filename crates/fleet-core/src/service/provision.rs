@@ -11,10 +11,10 @@ use std::time::Duration;
 
 const PROVISION_TIMEOUT: Duration = Duration::from_secs(15);
 
-const FLEET_SKILL: &str = include_str!("../../../skills/claude-fleet-control/SKILL.md");
+const FLEET_SKILL: &str = include_str!("../../../../skills/claude-fleet-control/SKILL.md");
 const SKILL_DIR: &str = "~/.claude/skills/claude-fleet-control";
 const SKILL_PATH: &str = "~/.claude/skills/claude-fleet-control/SKILL.md";
-const FRIENDLY_NAME_SKILL: &str = include_str!("../../../skills/fleet-friendly-name/SKILL.md");
+const FRIENDLY_NAME_SKILL: &str = include_str!("../../../../skills/fleet-friendly-name/SKILL.md");
 const FRIENDLY_NAME_SKILL_DIR: &str = "~/.claude/skills/fleet-friendly-name";
 const FRIENDLY_NAME_SKILL_PATH: &str = "~/.claude/skills/fleet-friendly-name/SKILL.md";
 const CLAUDE_JSON: &str = "~/.claude.json";

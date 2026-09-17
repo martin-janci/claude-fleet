@@ -4279,7 +4279,7 @@ mod tests {
         // recreate + spawn_review use the resolved cwd; restart respawns into it.
         assert!(sessions.contains("Ok(rep) => rep.cwd"));
         assert!(sessions.contains("std::path::Path::new(&rep.cwd)"));
-        let commands = include_str!("../commands/sessions.rs");
+        let commands = include_str!("../../../../src-tauri/src/commands/sessions.rs");
         assert!(commands.contains("repair::repair_session(args.session_id, args.explicit"));
         let tools_src = module_src("src/mcp/tools");
         let tools = tools_src.as_str();

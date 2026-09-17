@@ -1,10 +1,9 @@
-//! Typed Tauri event bus for delta-update store sync.
+//! Typed event bus for delta-update store sync.
 //!
-//! The `Store` calls into an `EventBus` whenever a row is mutated; the production
-//! impl (`AppHandleEventBus`, defined in `lib.rs::setup` per Task 10) forwards
-//! each event to the frontend via `tauri::AppHandle::emit`. Tests use
-//! `NoopEventBus` (silent) or `RecordingEventBus` (captures every emit for
-//! assertion).
+//! The `Store` calls into an `EventBus` whenever a row is mutated; the desktop's
+//! `AppHandleEventBus` lives in `src-tauri/src/app_events.rs` and forwards each
+//! event to the Svelte frontend. Tests use `NoopEventBus` (silent) or
+//! `RecordingEventBus` (captures every emit for assertion).
 //!
 //! Every event is one [`RowChange`] variant. The typed convenience methods on
 //! [`EventBus`] (`session_updated(&row)`, …) are default trait methods that
@@ -235,53 +234,12 @@ impl EventBus for NoopEventBus {
     fn emit(&self, _: &RowChange) {}
 }
 
-/// Production event bus: forwards every event to the Tauri frontend.
-///
-/// Events are serialized immediately (a cheap in-memory operation) and handed
-/// to a dedicated drain thread over an mpsc channel; the thread performs the
-/// actual `AppHandle::emit`. This matters because the `Store` is mutated
-/// while its `Mutex` is held: a bus call must NOT block, or it would stall
-/// every other thread waiting on `store.lock()` for the duration of the
-/// emit. A channel `send` is effectively instant.
-///
-/// Ordering is preserved (single channel, single consumer). Emit errors are
-/// intentionally swallowed — if the webview isn't ready the Store mutation
-/// has already committed and we don't want to roll it back.
-pub struct AppHandleEventBus {
-    // `mpsc::Sender` is `Send` but not `Sync`; the `EventBus` trait requires
-    // `Sync`, so the sender lives behind a `Mutex`. The lock is held only for
-    // the duration of a non-blocking `send`, so contention is negligible.
-    tx: std::sync::Mutex<std::sync::mpsc::Sender<(&'static str, serde_json::Value)>>,
-}
-
-impl AppHandleEventBus {
-    pub fn new(handle: tauri::AppHandle) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel::<(&'static str, serde_json::Value)>();
-        std::thread::spawn(move || {
-            // Lives for the lifetime of the app; exits when the bus (and so
-            // the Sender) is dropped and `recv` returns Err.
-            while let Ok((name, payload)) = rx.recv() {
-                let _ = tauri::Emitter::emit(&handle, name, payload);
-            }
-        });
-        Self {
-            tx: std::sync::Mutex::new(tx),
-        }
-    }
-}
-
-impl EventBus for AppHandleEventBus {
-    fn emit(&self, e: &RowChange) {
-        if let Ok(tx) = self.tx.lock() {
-            let _ = tx.send((e.name(), e.payload()));
-        }
-    }
-}
-
 /// Records every event in order. Used in unit tests to assert that a Store
 /// mutation produced the expected events.
+/// Crate-private: `events` is a `pub` module now, and exporting a test-only
+/// helper would put it in `fleet-core`'s public API.
 #[cfg(test)]
-pub struct RecordingEventBus {
+pub(crate) struct RecordingEventBus {
     pub events: std::sync::Mutex<Vec<String>>,
 }
 
@@ -359,7 +317,7 @@ mod tests {
 
     #[test]
     fn frontend_declares_every_event_name() {
-        let events_ts = include_str!("../../src/lib/events.ts");
+        let events_ts = include_str!("../../../src/lib/events.ts");
         for name in FRONTEND_EVENT_NAMES {
             assert!(
                 events_ts.contains(&format!("'{name}'")),

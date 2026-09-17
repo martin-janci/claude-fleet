@@ -241,7 +241,7 @@ pub async fn start(
 
     let shutdown = CancellationToken::new();
     let serve_shutdown = shutdown.clone();
-    fleet_core::rt::spawn(async move {
+    crate::rt::spawn(async move {
         let hook_state = hooks::HookState {
             store: Arc::clone(&store),
             ssh: Arc::clone(&ssh),

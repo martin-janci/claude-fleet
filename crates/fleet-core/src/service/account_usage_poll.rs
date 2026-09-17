@@ -155,7 +155,7 @@ pub(crate) fn poll_due_accounts(
 /// table — every account fleet has ever seen, not just those currently
 /// attached to a host, unlike the poller's [`distinct_account_uuids`]). Never
 /// fetches: an account with no cache entry reads as `never_fetched`.
-pub(crate) fn list_account_usage(
+pub fn list_account_usage(
     store: &Mutex<Store>,
     cache: &Mutex<UsageCache>,
 ) -> Result<Vec<AccountUsageSnapshot>, IpcError> {
@@ -171,7 +171,7 @@ pub(crate) fn list_account_usage(
 /// the current (unchanged) snapshot — its `next_try_at` tells the caller
 /// when a refresh becomes possible. `E_NOTFOUND` when `account_uuid` is not
 /// a known account.
-pub(crate) async fn refresh_account_usage(
+pub async fn refresh_account_usage(
     account_uuid: &str,
     store: &Mutex<Store>,
     ssh: &dyn SshExec,

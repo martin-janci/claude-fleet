@@ -47,7 +47,8 @@ const ROTATION: tracing_appender::rolling::Rotation = tracing_appender::rolling:
 pub const MAX_LOG_FILES: usize = 72;
 /// Filter used when `RUST_LOG` is unset or unparsable: `info` for this app's
 /// crates, `warn` for every dependency.
-pub const DEFAULT_FILTER: &str = "warn,claude_fleet_lib=info,claude_fleet=info";
+pub const DEFAULT_FILTER: &str =
+    "warn,claude_fleet_lib=info,claude_fleet=info,fleet_core=info,fleet_hub=info";
 /// Set to `1` to also log to stderr in a release build (debug builds always do).
 pub const STDERR_ENV: &str = "CLAUDE_FLEET_LOG_STDERR";
 

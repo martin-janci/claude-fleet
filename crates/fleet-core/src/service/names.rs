@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 
 use rand::{Rng, RngExt};
 
-const WORDS_JSON: &str = include_str!("../../../src/lib/names.json");
+const WORDS_JSON: &str = include_str!("../../../../src/lib/names.json");
 
 pub const SEPARATOR: &str = "-";
 /// Random draws before falling back to a numeric suffix.

@@ -23,7 +23,7 @@ const USAGE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 /// process-wide `service::sessions::ReconcileGate` shared with `list_sessions`
 /// (Tauri command + MCP tool): a tick that fires while ANY caller's pass is
 /// still running is skipped rather than queued.
-pub(crate) fn spawn_reconcile_tick(
+pub fn spawn_reconcile_tick(
     store: std::sync::Arc<Mutex<Store>>,
     ssh: std::sync::Arc<ssh::SshClient>,
 ) {
@@ -40,7 +40,7 @@ pub(crate) fn spawn_reconcile_tick(
     };
     tracing::info!("reconcile tick enabled every {}s", period.as_secs());
 
-    fleet_core::rt::spawn(async move {
+    crate::rt::spawn(async move {
         let mut ticker = tokio::time::interval(period);
         // Drop missed ticks rather than firing them back-to-back after a slow
         // pass (the default Burst behaviour would defeat the overlap guard).
@@ -100,14 +100,14 @@ pub(crate) fn spawn_reconcile_tick(
 /// bounded, de-duplicated fetch per due account and returns immediately — a
 /// slow or hung host can delay neither this loop's next tick nor the
 /// reconcile tick, which does not touch usage at all.
-pub(crate) fn spawn_account_usage_tick(
+pub fn spawn_account_usage_tick(
     store: Arc<Mutex<Store>>,
     ssh: Arc<ssh::SshClient>,
     cache: Arc<Mutex<UsageCache>>,
     bus: Arc<dyn EventBus>,
 ) {
     let poller = Arc::new(AccountUsagePoller::new());
-    fleet_core::rt::spawn(async move {
+    crate::rt::spawn(async move {
         let mut ticker = tokio::time::interval(USAGE_POLL_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {

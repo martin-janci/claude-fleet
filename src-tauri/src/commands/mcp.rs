@@ -9,14 +9,14 @@
 //! confirmation toggle (`confirm_destructive` on `mcp_configure`) and its
 //! answer path (`mcp_confirm`, `mcp_pending_confirms`).
 
-use crate::cancel::CancellationRegistry;
-use crate::ipc_error::lock;
-use crate::ipc_error::{codes, IpcError};
-use crate::mcp::settings::{configured_port, ensure_master_token, McpSettings};
-use crate::mcp::{self, McpGuards, McpRuntime};
-use crate::service::hooks_install;
-use crate::ssh::SshClient;
-use crate::store::Store;
+use fleet_core::cancel::CancellationRegistry;
+use fleet_core::ipc_error::lock;
+use fleet_core::ipc_error::{codes, IpcError};
+use fleet_core::mcp::settings::{configured_port, ensure_master_token, McpSettings};
+use fleet_core::mcp::{self, McpGuards, McpRuntime};
+use fleet_core::service::hooks_install;
+use fleet_core::ssh::SshClient;
+use fleet_core::store::Store;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -91,7 +91,7 @@ pub async fn mcp_configure(
     ssh: State<'_, Arc<SshClient>>,
     reg: State<'_, Arc<CancellationRegistry>>,
     runtime: State<'_, Mutex<McpRuntime>>,
-    tunnels: State<'_, Arc<crate::service::tunnel::TunnelSupervisor>>,
+    tunnels: State<'_, Arc<fleet_core::service::tunnel::TunnelSupervisor>>,
     guards: State<'_, McpGuards>,
 ) -> Result<McpStatus, IpcError> {
     // 1. Persist the requested settings.
@@ -145,7 +145,7 @@ pub async fn mcp_configure(
             Ok(shutdown) => {
                 // Re-establish tunnels for already-provisioned hosts (best-effort).
                 if let Err(e) =
-                    crate::service::provision::reestablish_tunnels(&store, &tunnels, port)
+                    fleet_core::service::provision::reestablish_tunnels(&store, &tunnels, port)
                 {
                     tracing::warn!(error = %e, "[mcp] re-establishing host tunnels failed");
                 }
@@ -172,10 +172,10 @@ pub async fn provision_hosts(
     rotate: Option<bool>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
-    tunnels: State<'_, Arc<crate::service::tunnel::TunnelSupervisor>>,
-) -> Result<Vec<crate::service::provision::HostProvisionResult>, IpcError> {
+    tunnels: State<'_, Arc<fleet_core::service::tunnel::TunnelSupervisor>>,
+) -> Result<Vec<fleet_core::service::provision::HostProvisionResult>, IpcError> {
     let port = configured_port(&*lock(&store)?)?;
-    crate::service::provision::provision_hosts(
+    fleet_core::service::provision::provision_hosts(
         &store,
         &*ssh,
         &tunnels,
@@ -199,8 +199,8 @@ pub struct HostTokenInfo {
     pub created_at: i64,
 }
 
-impl From<crate::store::HostTokenRow> for HostTokenInfo {
-    fn from(r: crate::store::HostTokenRow) -> Self {
+impl From<fleet_core::store::HostTokenRow> for HostTokenInfo {
+    fn from(r: fleet_core::store::HostTokenRow) -> Self {
         Self {
             host_alias: r.host_alias,
             mode: r.mode,
@@ -238,7 +238,7 @@ pub fn set_host_token_mode(
     mode: String,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<HostTokenInfo, IpcError> {
-    crate::validate::host_alias(&host_alias)?;
+    fleet_core::validate::host_alias(&host_alias)?;
     let mode = parse_mode(&mode)?;
     let s = lock(&store)?;
     s.set_host_token_mode(&host_alias, mode)?;
@@ -255,11 +255,11 @@ pub async fn rotate_host_token(
     host_alias: String,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
-    tunnels: State<'_, Arc<crate::service::tunnel::TunnelSupervisor>>,
+    tunnels: State<'_, Arc<fleet_core::service::tunnel::TunnelSupervisor>>,
 ) -> Result<HostTokenInfo, IpcError> {
-    crate::validate::host_alias(&host_alias)?;
+    fleet_core::validate::host_alias(&host_alias)?;
     let port = configured_port(&*lock(&store)?)?;
-    crate::service::provision::provision_host_with_token(
+    fleet_core::service::provision::provision_host_with_token(
         &store,
         &*ssh,
         &tunnels,
@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn host_token_info_never_carries_the_token() {
-        let info = HostTokenInfo::from(crate::store::HostTokenRow {
+        let info = HostTokenInfo::from(fleet_core::store::HostTokenRow {
             host_alias: "mefistos".into(),
             token: "s3cret".into(),
             created_at: 7,

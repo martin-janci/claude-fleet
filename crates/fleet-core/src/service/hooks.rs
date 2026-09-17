@@ -149,7 +149,7 @@ fn apply_stop_hook(
         let store = Arc::clone(store);
         let ssh = Arc::clone(ssh);
         let sid = session_id.clone();
-        fleet_core::rt::spawn(async move {
+        crate::rt::spawn(async move {
             crate::service::safe_kill::handle_stop_marker_check(store, ssh, sid).await;
         });
     }
@@ -157,7 +157,7 @@ fn apply_stop_hook(
         let store = Arc::clone(store);
         let ssh = Arc::clone(ssh);
         let cwd = payload.cwd.clone();
-        fleet_core::rt::spawn(async move {
+        crate::rt::spawn(async move {
             crate::service::tasks::handle_stop_for_worker(store, ssh, worker, cwd).await;
         });
     }

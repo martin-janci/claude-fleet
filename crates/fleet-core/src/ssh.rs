@@ -137,7 +137,7 @@ impl SshClient {
     /// The `-o` flags shared by every multiplexed ssh invocation. With
     /// `ControlMaster=auto` + `ControlPersist`, ssh creates the master on the
     /// first call and reuses/recreates it as needed — no app-side bookkeeping.
-    pub(crate) fn mux_opts(&self, host: &str, timeout: Duration) -> Vec<String> {
+    pub fn mux_opts(&self, host: &str, timeout: Duration) -> Vec<String> {
         let path = self.control_path(host);
         vec![
             "-o".into(),
@@ -454,13 +454,13 @@ impl SshClient {
 
     /// How many times `maybe_reset_master` actually reset a master since
     /// launch, across all hosts.
-    pub(crate) fn master_reset_count(&self) -> usize {
+    pub fn master_reset_count(&self) -> usize {
         self.inner.master_resets.iter().map(|e| *e.value()).sum()
     }
 
     /// Per-host [`Self::master_reset_count`], ordered by host alias. Only
     /// hosts that had at least one reset appear.
-    pub(crate) fn master_reset_counts(&self) -> std::collections::BTreeMap<String, usize> {
+    pub fn master_reset_counts(&self) -> std::collections::BTreeMap<String, usize> {
         self.inner
             .master_resets
             .iter()

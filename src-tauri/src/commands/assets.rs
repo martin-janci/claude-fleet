@@ -1,10 +1,10 @@
 //! Tauri IPC wrappers for the asset catalog. Logic lives in
 //! `service::catalog`; this file only adapts `tauri::State` to plain refs.
 
-use crate::cancel::CancellationRegistry;
-use crate::ipc_error::lock;
-use crate::ipc_error::{codes, IpcError};
-use crate::service::catalog::{
+use fleet_core::cancel::CancellationRegistry;
+use fleet_core::ipc_error::lock;
+use fleet_core::ipc_error::{codes, IpcError};
+use fleet_core::service::catalog::{
     self,
     author::{
         self, AddResourceArgs, AssetRef, CommitPendingArgs, CreateArgs, LintAll, LintReport,
@@ -20,8 +20,8 @@ use crate::service::catalog::{
     },
     AssetDetail, AssetListing, ConfigureArgs, ImportArgs,
 };
-use crate::ssh::SshClient;
-use crate::store::{AssetInventoryRow, CatalogConfigRow, SecretRow, SessionRow, Store};
+use fleet_core::ssh::SshClient;
+use fleet_core::store::{AssetInventoryRow, CatalogConfigRow, SecretRow, SessionRow, Store};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -115,7 +115,7 @@ pub fn catalog_configure(
 pub fn catalog_load(
     args: LoadArgs,
     store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<crate::events::CatalogSummary, IpcError> {
+) -> Result<fleet_core::events::CatalogSummary, IpcError> {
     catalog::load(args.pull, &store)
 }
 
@@ -145,7 +145,7 @@ pub fn catalog_import_host(
 ) -> Result<ImportReport, IpcError> {
     let token = {
         let s = lock(&store)?;
-        s.get_setting(crate::mcp::SETTING_TOKEN)?
+        s.get_setting(fleet_core::mcp::SETTING_TOKEN)?
     };
     catalog::import_host(args, &store, token.as_deref())
 }

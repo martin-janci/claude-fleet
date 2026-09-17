@@ -1,8 +1,8 @@
 //! Tauri IPC wrapper for the health-check command. The logic lives in
 //! `service::health`; this file only adapts `tauri::State` to plain references.
 
-use crate::service::health::{self, Health};
-use crate::store::Store;
+use fleet_core::service::health::{self, Health};
+use fleet_core::store::Store;
 use std::sync::{Arc, Mutex};
 use tauri::State;
 

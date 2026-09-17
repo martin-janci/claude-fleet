@@ -9,9 +9,9 @@
 //! drag-drop event into [`UploadAllowList`] with a short TTL — are accepted.
 //! Anything else is `E_FORBIDDEN` (SEC-9).
 
-use crate::ipc_error::{codes, IpcError};
-use crate::shell::quote;
-use crate::ssh::SshClient;
+use fleet_core::ipc_error::{codes, IpcError};
+use fleet_core::shell::quote;
+use fleet_core::ssh::SshClient;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -114,8 +114,8 @@ pub async fn upload_to_session(
     ssh: State<'_, Arc<SshClient>>,
     allow: State<'_, Arc<UploadAllowList>>,
 ) -> Result<Vec<String>, IpcError> {
-    crate::validate::host_alias(&args.host_alias)?;
-    crate::validate::tmux_name_addressable(&args.session_name)?;
+    fleet_core::validate::host_alias(&args.host_alias)?;
+    fleet_core::validate::tmux_name_addressable(&args.session_name)?;
     if args.local_paths.is_empty() {
         return Ok(vec![]);
     }

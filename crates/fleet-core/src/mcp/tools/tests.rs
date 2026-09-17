@@ -369,7 +369,7 @@ fn ok_json_never_emits_an_empty_text_block() {
 
 // ---- status vocabulary (single source of truth: service::pane_intel) ----
 
-const CONTROL_SKILL: &str = include_str!("../../../../skills/claude-fleet-control/SKILL.md");
+const CONTROL_SKILL: &str = include_str!("../../../../../skills/claude-fleet-control/SKILL.md");
 
 /// Property description of one `list_sessions` parameter, from the live
 /// JSON schema the macro generates out of the field doc comment.
@@ -477,7 +477,7 @@ fn kill_session_description_covers_external_and_inactive_agent_rows() {
     );
 }
 
-const CONTROL_API_GUIDE: &str = include_str!("../../../../docs/control-api.md");
+const CONTROL_API_GUIDE: &str = include_str!("../../../../../docs/control-api.md");
 
 #[test]
 fn docs_track_background_runs_with_session_transcript_not_peek_session() {

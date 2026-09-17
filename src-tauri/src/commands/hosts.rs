@@ -1,15 +1,15 @@
 //! Tauri IPC wrappers for SSH host management. Logic lives in `service::hosts`;
 //! this file only adapts `tauri::State` to plain references.
 
-use crate::cancel::CancellationRegistry;
-use crate::ipc_error::IpcError;
-use crate::service::hosts::{
+use fleet_core::cancel::CancellationRegistry;
+use fleet_core::ipc_error::IpcError;
+use fleet_core::service::hosts::{
     self, AddHostArgs, HideHostArgs, HostAliasArgs, ProbePreview, ProbeSshAliasArgs,
     SetAccountNicknameArgs,
 };
-use crate::ssh::SshClient;
-use crate::ssh_config::SshHost;
-use crate::store::{AccountRow, HostRow, Store};
+use fleet_core::ssh::SshClient;
+use fleet_core::ssh_config::SshHost;
+use fleet_core::store::{AccountRow, HostRow, Store};
 use std::sync::{Arc, Mutex};
 use tauri::State;
 

@@ -1,31 +1,9 @@
+mod app_events;
 mod bootstrap;
-mod cancel;
-mod claude_agents;
-mod claude_cli;
 mod commands;
-mod events;
-#[cfg(test)]
-mod fleet_e2e_tests;
-mod humanize;
-mod ipc_error;
-mod logging;
-mod mcp;
-#[cfg(test)]
-mod no_eprintln_tests;
-mod projects;
 mod pty;
-mod repo_url;
-mod service;
-mod shell;
-mod ssh;
-mod ssh_config;
-#[cfg(test)]
-mod ssh_fake;
-mod store;
-mod tmux;
-mod validate;
 
-pub use events::{AppHandleEventBus, EventBus, NoopEventBus};
+pub use app_events::AppHandleEventBus;
 
 use bootstrap::env::{
     appdata_dir, backfill_locale_for_gui_launch, backfill_path_for_gui_launch, env_looks_complete,
@@ -34,22 +12,22 @@ use bootstrap::env::{
 use bootstrap::mcp::maybe_start_mcp;
 use bootstrap::singleton::kill_other_instances;
 use commands::cancel::cancel_command;
+use fleet_core::service::tick::{spawn_account_usage_tick, spawn_reconcile_tick};
+use fleet_core::store::Store;
 use pty::PtyState;
-use service::tick::{spawn_account_usage_tick, spawn_reconcile_tick};
 use std::sync::Mutex;
-use store::Store;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // File logging first, so the instance reaper and env recovery below are
     // captured too. A failure is non-fatal: the app runs without a log file.
     let data_dir = appdata_dir();
-    let log_dir = match logging::init(&data_dir) {
+    let log_dir = match fleet_core::logging::init(&data_dir) {
         Ok(dir) => Some(dir),
         Err(e) => {
             // `init` failed before installing a subscriber: install the stderr
             // fallback first, or this line would go nowhere.
-            logging::init_stderr_fallback();
+            fleet_core::logging::init_stderr_fallback();
             tracing::error!(error = %e, "[startup] file logging unavailable; logging to stderr only");
             None
         }
@@ -79,12 +57,12 @@ pub fn run() {
     backfill_path_for_gui_launch();
     backfill_locale_for_gui_launch();
 
-    let ssh_client = std::sync::Arc::new(ssh::SshClient::new());
+    let ssh_client = std::sync::Arc::new(fleet_core::ssh::SshClient::new());
     let ssh_client_for_exit = std::sync::Arc::clone(&ssh_client);
     let ssh_client_for_setup = std::sync::Arc::clone(&ssh_client);
-    let reg = cancel::CancellationRegistry::new();
+    let reg = fleet_core::cancel::CancellationRegistry::new();
     let reg_for_setup = std::sync::Arc::clone(&reg);
-    let tunnels = std::sync::Arc::new(crate::service::tunnel::TunnelSupervisor::new());
+    let tunnels = std::sync::Arc::new(fleet_core::service::tunnel::TunnelSupervisor::new());
     let tunnels_for_exit = std::sync::Arc::clone(&tunnels);
     let tunnels_for_setup = std::sync::Arc::clone(&tunnels);
     // SEC-9: the only local paths `upload_to_session` may read are the ones
@@ -109,8 +87,8 @@ pub fn run() {
                 fleet_core::rt::install(tokio::runtime::Handle::current());
             });
             let handle = app.handle().clone();
-            let bus: std::sync::Arc<dyn crate::events::EventBus> =
-                std::sync::Arc::new(crate::events::AppHandleEventBus::new(handle));
+            let bus: std::sync::Arc<dyn fleet_core::events::EventBus> =
+                std::sync::Arc::new(crate::app_events::AppHandleEventBus::new(handle));
             // Kept alongside the clone moved into `Store` below: the account
             // usage poller and its commands emit `account_usage:updated`
             // straight through the bus, not through a `Store` row mutation
@@ -134,7 +112,7 @@ pub fn run() {
             });
             // SEC-11: the DB holds bearer tokens and account metadata in
             // plaintext — keep it owner-only. Best-effort, logged on failure.
-            crate::service::provision::set_private_mode(&db_path);
+            fleet_core::service::provision::set_private_mode(&db_path);
             tracing::info!(
                 version = env!("CARGO_PKG_VERSION"),
                 schema_version = store.schema_version().unwrap_or(0),
@@ -149,7 +127,7 @@ pub fn run() {
             // Destructive-call confirmations reach the desktop as a Tauri
             // event; the frontend answers via `mcp_confirm`.
             let confirm_handle = app.handle().clone();
-            let guards = mcp::McpGuards::new(std::sync::Arc::new(move |req| {
+            let guards = fleet_core::mcp::McpGuards::new(std::sync::Arc::new(move |req| {
                 let _ = tauri::Emitter::emit(&confirm_handle, "mcp:confirm-required", req);
             }));
             app.manage(guards.clone());
@@ -172,13 +150,14 @@ pub fn run() {
                 }
             }
             app.manage(std::sync::Arc::clone(&store));
-            app.manage(Mutex::new(mcp::McpRuntime::default()));
+            app.manage(Mutex::new(fleet_core::mcp::McpRuntime::default()));
             app.manage(std::sync::Arc::clone(&bus_for_usage));
             // Task 4: one in-memory usage cache for the app's lifetime,
             // shared by the background poller (below) and the
             // `list_account_usage` / `refresh_account_usage` commands.
-            let usage_cache =
-                std::sync::Arc::new(Mutex::new(crate::service::account_usage::UsageCache::new()));
+            let usage_cache = std::sync::Arc::new(Mutex::new(
+                fleet_core::service::account_usage::UsageCache::new(),
+            ));
             app.manage(std::sync::Arc::clone(&usage_cache));
             // Start the MCP control API if the user has enabled it (off by
             // default). Reuses the same Store / SshClient / registry as the UI.
@@ -349,7 +328,7 @@ pub fn run() {
                 use tauri::Manager;
                 ssh_client_for_exit.shutdown_all();
                 tunnels_for_exit.stop_all();
-                if let Some(runtime) = window.try_state::<Mutex<mcp::McpRuntime>>() {
+                if let Some(runtime) = window.try_state::<Mutex<fleet_core::mcp::McpRuntime>>() {
                     if let Ok(mut rt) = runtime.lock() {
                         rt.stop();
                     }

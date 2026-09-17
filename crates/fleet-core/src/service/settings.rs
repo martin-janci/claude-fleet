@@ -430,8 +430,8 @@ mod tests {
     /// a new `SPECS` entry ships without its row.
     #[test]
     fn every_spec_has_a_settings_dialog_row() {
-        const TS: &str = include_str!("../../../src/lib/fleet_settings.ts");
-        const DIALOG: &str = include_str!("../../../src/lib/SettingsDialog.svelte");
+        const TS: &str = include_str!("../../../../src/lib/fleet_settings.ts");
+        const DIALOG: &str = include_str!("../../../../src/lib/SettingsDialog.svelte");
         // Comments cannot satisfy the check: a key only mentioned in a
         // `// …`, `/* … */` or `<!-- … -->` does not count as a row.
         let ts = code_only(TS);

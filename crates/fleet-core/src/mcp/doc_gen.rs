@@ -3,7 +3,7 @@
 //! The committed `docs/control-api-reference.md` must equal `render_reference()`;
 //! the `reference_is_current` test enforces it (and so does CI via `cargo test`).
 //! Regenerate after changing any tool with:
-//!   REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_current
+//!   REGEN_DOCS=1 cargo test -p fleet-core reference_is_current
 //!
 //! Entirely `#[cfg(test)]`: it touches no production code path and adds no
 //! public API surface.
@@ -11,7 +11,7 @@
 use crate::mcp::FleetTools;
 
 const HEADER: &str = "<!-- GENERATED FILE — do not edit by hand.\n     \
-Regenerate with: REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_current -->\n";
+Regenerate with: REGEN_DOCS=1 cargo test -p fleet-core reference_is_current -->\n";
 
 /// Render the full reference markdown.
 pub(crate) fn render_reference() -> String {
@@ -55,7 +55,7 @@ See [`control-api.md`](control-api.md) for the narrative guide.\n\n",
 
 /// Extract command identifiers from the `generate_handler![ … ]` block in lib.rs.
 fn tauri_commands() -> Vec<String> {
-    let src = include_str!("../lib.rs");
+    let src = include_str!("../../../../src-tauri/src/lib.rs");
     let start = src
         .find("generate_handler![")
         .expect("generate_handler! macro present in lib.rs");
@@ -75,12 +75,12 @@ mod tests {
     use std::path::PathBuf;
 
     fn doc_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../docs/control-api-reference.md")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/control-api-reference.md")
     }
 
     /// The hand-written narrative guide. Compiled in so the check runs
     /// wherever `cargo test` runs, with no working-directory assumptions.
-    const NARRATIVE_GUIDE: &str = include_str!("../../../docs/control-api.md");
+    const NARRATIVE_GUIDE: &str = include_str!("../../../../docs/control-api.md");
 
     #[test]
     fn narrative_guide_names_every_tool() {
@@ -157,7 +157,7 @@ mod tests {
         assert_eq!(
             actual, expected,
             "\n\ndocs/control-api-reference.md is stale. Regenerate with:\n  \
-REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_current\n"
+REGEN_DOCS=1 cargo test -p fleet-core reference_is_current\n"
         );
     }
 }
