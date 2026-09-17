@@ -174,3 +174,73 @@ fn scanned_worktrees_path_survives_the_mirror_rendering() {
          row's own .worktrees/ path, not a .claude/worktrees/ guess: {script}"
     );
 }
+
+/// Reproduced on a live hub: `new_shell_session` with a project id that does
+/// not exist answered `E_SQLITE: Query returned no rows` — the raw rusqlite
+/// error from a `query_row` that assumed a row. A caller that mistypes an id
+/// gets a proper "not found" instead.
+#[tokio::test]
+async fn an_unknown_project_id_is_not_found_not_a_raw_sqlite_error() {
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let reg = crate::cancel::CancellationRegistry::new();
+    let args = NewSessionArgs {
+        host_alias: "local".into(),
+        project_id: 4242,
+        worktree_id: None,
+        name: "f3unknownproject".into(),
+        call_id: None,
+        new_worktree: None,
+        base_branch: None,
+        kind: Some("shell".into()),
+        start_command: None,
+        friendly_name: None,
+    };
+    let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
+    assert_eq!(err.message, "project 4242 not found");
+}
+
+/// The same for the other two callers of the project lookup: creating a new
+/// worktree (local) and the remote owner/repo path.
+#[tokio::test]
+async fn an_unknown_project_id_is_not_found_for_a_new_worktree_too() {
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let reg = crate::cancel::CancellationRegistry::new();
+    let args = NewSessionArgs {
+        host_alias: "local".into(),
+        project_id: 4242,
+        worktree_id: None,
+        name: "f3unknownproject2".into(),
+        call_id: None,
+        new_worktree: Some("some-branch".into()),
+        base_branch: None,
+        kind: Some("shell".into()),
+        start_command: None,
+        friendly_name: None,
+    };
+    let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
+    assert_eq!(err.message, "project 4242 not found");
+}
+
+/// `fetch_owner_repo` is the shared lookup behind `new_bg_session`,
+/// `spawn_review` and every remote-host path.
+#[test]
+fn fetch_owner_repo_reports_an_unknown_project_as_not_found() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    let err = fetch_owner_repo(&s, 4242).unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
+    assert_eq!(err.message, "project 4242 not found");
+}
+
+/// And the worktree lookup shares the shape: a stale worktree id is a
+/// not-found, not a raw sqlite error.
+#[test]
+fn fetch_worktree_reports_an_unknown_worktree_as_not_found() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    let err = fetch_worktree(&s, 77).unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
+    assert_eq!(err.message, "worktree 77 not found");
+}

@@ -440,12 +440,7 @@ pub(super) async fn new_session_inner(
             // NEW WORKTREE: create branch + worktree, return the new dir.
             let base_path = {
                 let s = lock(store)?;
-                let mut stmt = s
-                    .conn_ref()
-                    .prepare("SELECT base_path FROM projects WHERE id=?1")?;
-                let row: String =
-                    stmt.query_row(rusqlite::params![args.project_id], |r| r.get(0))?;
-                row
+                fetch_base_path(&s, args.project_id)?
             };
             PathBuf::from(
                 create_worktree_local(&base_path, name, args.base_branch.as_deref()).await?,
@@ -462,12 +457,7 @@ pub(super) async fn new_session_inner(
                 reject_foreign_worktree(&args.host_alias, &row_host, &name)?;
                 PathBuf::from(path)
             } else {
-                let mut stmt = s
-                    .conn_ref()
-                    .prepare("SELECT base_path FROM projects WHERE id=?1")?;
-                let row: String =
-                    stmt.query_row(rusqlite::params![args.project_id], |r| r.get(0))?;
-                PathBuf::from(row)
+                PathBuf::from(fetch_base_path(&s, args.project_id)?)
             }
         }
     } else {

@@ -296,6 +296,22 @@ pub(super) fn remote_project_by_layout(
     Some((pid, repo_len))
 }
 
+/// Turn "no such row" into a proper `E_NOTFOUND` naming what was missing.
+/// Every row lookup here is keyed by an id the CALLER supplied, so a missing
+/// row is bad input, not a database fault — surfacing rusqlite's
+/// `QueryReturnedNoRows` as `E_SQLITE: Query returned no rows` told an MCP
+/// caller nothing about the id it mistyped. Any other sqlite error is left
+/// alone.
+fn missing_row(kind: &str, id: i64) -> impl FnOnce(rusqlite::Error) -> IpcError + '_ {
+    move |e| match e {
+        rusqlite::Error::QueryReturnedNoRows => IpcError::new(
+            crate::ipc_error::codes::E_NOTFOUND,
+            format!("{kind} {id} not found"),
+        ),
+        other => IpcError::from(other),
+    }
+}
+
 /// Look up `(owner, repo)` for a given project id.
 pub(crate) fn fetch_owner_repo(s: &Store, project_id: i64) -> Result<(String, String), IpcError> {
     let mut stmt = s
@@ -304,7 +320,16 @@ pub(crate) fn fetch_owner_repo(s: &Store, project_id: i64) -> Result<(String, St
     stmt.query_row(rusqlite::params![project_id], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
     })
-    .map_err(IpcError::from)
+    .map_err(missing_row("project", project_id))
+}
+
+/// The project's checkout path on this machine.
+pub(crate) fn fetch_base_path(s: &Store, project_id: i64) -> Result<String, IpcError> {
+    let mut stmt = s
+        .conn_ref()
+        .prepare("SELECT base_path FROM projects WHERE id=?1")?;
+    stmt.query_row(rusqlite::params![project_id], |r| r.get::<_, String>(0))
+        .map_err(missing_row("project", project_id))
 }
 
 /// `(name, branch, host_alias, path)` of a worktree row. `branch` may be NULL
@@ -329,7 +354,7 @@ pub(super) fn fetch_worktree(
             r.get::<_, String>(3)?,
         ))
     })
-    .map_err(IpcError::from)
+    .map_err(missing_row("worktree", worktree_id))
 }
 
 /// Build the absolute path on the remote host where a project (and optional
