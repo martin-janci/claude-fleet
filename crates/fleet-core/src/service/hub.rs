@@ -31,25 +31,62 @@ impl HubBase {
 
     /// A public base: `http(s)://host[:port]`, nothing after the authority
     /// (a single trailing `/` is tolerated and stripped). Lower-cased.
+    ///
+    /// The value is written into every host's hook block and MCP entry,
+    /// printed by `fleet-hub init` and logged by `serve`, so anything beyond a
+    /// bare authority is refused: userinfo (`user:pass@`), an empty host, a
+    /// port that is not a u16, whitespace, a path, a query or a fragment.
     pub fn public(url: &str, port: u16) -> Result<Self, IpcError> {
-        let trimmed = url.trim().trim_end_matches('/').to_ascii_lowercase();
-        let rest = trimmed
-            .strip_prefix("https://")
-            .or_else(|| trimmed.strip_prefix("http://"))
-            .ok_or_else(|| {
-                IpcError::new(
-                    codes::E_VALIDATE,
-                    "public URL must start with http:// or https://",
-                )
-            })?;
-        if rest.is_empty() || rest.contains('/') || rest.contains('?') || rest.contains('#') {
+        let lowered = url.trim().to_ascii_lowercase();
+        let (scheme, rest) = if let Some(r) = lowered.strip_prefix("https://") {
+            ("https", r)
+        } else if let Some(r) = lowered.strip_prefix("http://") {
+            ("http", r)
+        } else {
             return Err(IpcError::new(
                 codes::E_VALIDATE,
-                "public URL must be scheme://host[:port] with no path or query",
+                "public URL must start with http:// or https://",
             ));
+        };
+        let authority = rest.strip_suffix('/').unwrap_or(rest);
+        let invalid = |why: &str| {
+            IpcError::new(
+                codes::E_VALIDATE,
+                format!("public URL must be scheme://host[:port] with nothing else: {why}"),
+            )
+        };
+        if authority.chars().any(char::is_whitespace) {
+            return Err(invalid("it contains whitespace"));
+        }
+        if authority.contains('@') {
+            return Err(invalid("credentials (user@) are not allowed"));
+        }
+        if authority.contains(['/', '?', '#']) {
+            return Err(invalid("no path, query or fragment"));
+        }
+        let parsed: axum::http::uri::Authority = authority
+            .parse()
+            .map_err(|e| invalid(&format!("'{authority}' is not a host[:port] ({e})")))?;
+        if parsed.host().is_empty() {
+            return Err(invalid("the host is empty"));
+        }
+        // The only acceptable text after the host is `:<digits fitting a u16>`;
+        // do not rely on `Authority` for that (a bare `:` parses).
+        let after_host = parsed
+            .as_str()
+            .strip_prefix(parsed.host())
+            .unwrap_or(authority);
+        let port_ok = match after_host.strip_prefix(':') {
+            None => after_host.is_empty(),
+            Some(p) => {
+                !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u16>().is_ok()
+            }
+        };
+        if !port_ok {
+            return Err(invalid("the port must be a number from 0 to 65535"));
         }
         Ok(Self {
-            url: trimmed,
+            url: format!("{scheme}://{}", parsed.as_str()),
             port,
             public: true,
         })
@@ -118,12 +155,35 @@ mod tests {
         assert!(b.public);
         let with_port = HubBase::public("http://10.0.0.5:8443", 4180).unwrap();
         assert_eq!(with_port.host(), "10.0.0.5:8443");
+        let named_port = HubBase::public("https://fleet.example.com:8443", 4180).unwrap();
+        assert_eq!(named_port.url, "https://fleet.example.com:8443");
+        assert_eq!(named_port.host(), "fleet.example.com:8443");
+        let v6 = HubBase::public("http://[::1]:4180", 4180).unwrap();
+        assert_eq!(v6.url, "http://[::1]:4180");
+        assert_eq!(v6.host(), "[::1]:4180");
         for bad in [
             "ftp://x",
             "fleet.example.com",
             "https://x/mcp",
             "https://x?y=1",
+            "https://x#frag",
+            "https://x/?y=1",
+            "https://x//",
             "",
+            "https://",
+            // userinfo would be written into every host's config and logged
+            "https://user:pass@fleet.example.com",
+            "https://@fleet.example.com",
+            // port must be a u16
+            "https://fleet.example.com:https",
+            "https://fleet.example.com:99999",
+            "https://fleet.example.com:",
+            "https://fleet.example.com:+443",
+            // no whitespace anywhere inside
+            "https://fleet .example.com",
+            "https://fleet.example.com\t:443",
+            // empty host
+            "https://:443",
         ] {
             let e = HubBase::public(bad, 4180).unwrap_err();
             assert_eq!(e.code, crate::ipc_error::codes::E_VALIDATE, "{bad}");

@@ -92,6 +92,9 @@ pub const FLEET_HOOK_EVENTS: &[(&str, &str)] = &[
     ("Notification", NOTIFICATION_MATCHER),
 ];
 
+/// The marker of a pre-Track-B command hook: the token in the hook URL.
+const LEGACY_TOKEN_HOOK: &str = "/hook?token=";
+
 /// Pure merge: given `existing` (current `~/.claude/settings.json` content,
 /// possibly empty), return new pretty-JSON with fleet's Stop +
 /// UserPromptSubmit + PostToolUse(EnterWorktree|ExitWorktree) http hooks
@@ -101,8 +104,8 @@ pub const FLEET_HOOK_EVENTS: &[(&str, &str)] = &[
 /// idempotent and upgrades old installs in place: every entry of fleet's
 /// exact http shape ([`is_fleet_hook_entry`], whatever base URL it points at,
 /// so a base-URL change never leaves a stale hook behind), and the
-/// pre-Track-B `curl … /hook?token=` command form for `hook_url`. Other hooks (e.g. the user's own tsc pre-commit) are
-/// preserved verbatim.
+/// pre-Track-B `curl … /hook?token=` command form under any base. Other
+/// hooks (e.g. the user's own tsc pre-commit) are preserved verbatim.
 ///
 /// Shared by the local `install_fleet_hook` command (via [`install_hook_at`])
 /// and `provision::provision_hook` for remote hosts.
@@ -146,10 +149,14 @@ pub fn merge_hook_into_settings_json(
                     hooks_arr.is_none_or(|hs| {
                         !hs.iter().any(|h| {
                             let url_match = is_fleet_hook_entry(h);
-                            let cmd_match = h
-                                .get("command")
-                                .and_then(|c| c.as_str())
-                                .is_some_and(|c| c.contains(&fleet_prefix));
+                            // A pre-Track-B `curl … /hook?token=` command
+                            // hook carries a master token in argv: strip it
+                            // whatever base it points at, so a base change
+                            // (desktop -> public hub) never leaves one behind.
+                            let cmd_match =
+                                h.get("command").and_then(|c| c.as_str()).is_some_and(|c| {
+                                    c.contains(&fleet_prefix) || c.contains(LEGACY_TOKEN_HOOK)
+                                });
                             url_match || cmd_match
                         })
                     })
@@ -549,6 +556,34 @@ mod tests {
         assert_eq!(stop.len(), 1, "legacy entry must be replaced: {stop:?}");
         assert_eq!(stop[0]["hooks"][0]["type"], "http");
         assert!(!out.contains("token=old"));
+    }
+
+    #[test]
+    fn merge_hook_strips_legacy_token_command_hooks_under_any_base() {
+        // A desktop-era curl hook carries the (old) master token in argv; a
+        // migrated hub's master token must not survive a base change there.
+        let legacy = r#"{
+          "hooks": {
+            "Stop": [
+              {
+                "matcher": "",
+                "hooks": [{"type":"command","command":"curl -s -X POST http://127.0.0.1:4180/hook?token=abc -d @-"}]
+              },
+              {
+                "matcher": "",
+                "hooks": [{"type":"command","command":"notify-send 'turn over'"}]
+              }
+            ]
+          }
+        }"#;
+        let out =
+            merge_hook_into_settings_json(legacy, "https://fleet.example.com/hook", "new").unwrap();
+        assert!(!out.contains("token=abc"), "legacy token hook kept:\n{out}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let stop = v["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 2, "user hook + fleet's: {stop:?}");
+        assert_eq!(stop[0]["hooks"][0]["command"], "notify-send 'turn over'");
+        assert_eq!(stop[1]["hooks"][0]["url"], "https://fleet.example.com/hook");
     }
 
     #[test]

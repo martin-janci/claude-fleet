@@ -142,8 +142,9 @@ fn query_token(query: Option<&str>) -> Option<&str> {
 ///
 /// `/hook` additionally accepts the token as `?token=` — the form the
 /// pre-Track-B `command` hooks used — so a host that has not been
-/// re-provisioned yet keeps reporting until it is. Header form is preferred
-/// and the only form the current hook block writes.
+/// re-provisioned yet keeps reporting until it is — but only on a server with
+/// an empty Host allowlist (the desktop, a loopback hub). Header form is
+/// preferred and the only form the current hook block writes.
 async fn authorize(
     axum::extract::State(state): axum::extract::State<AuthState>,
     mut request: axum::extract::Request,
@@ -169,8 +170,12 @@ async fn authorize(
         // the MASTER token is accepted here — that is the only token the
         // pre-0.3 `curl …?token=` command hooks ever carried, and a per-host
         // token must never travel in a URL. TRANSITIONAL: removed in 0.4;
-        // re-provision every host before then.
-        Err(StatusCode::UNAUTHORIZED) if request.uri().path() == "/hook" => {
+        // re-provision every host before then. Only with an empty Host
+        // allowlist (desktop / loopback hub): a public hub's master token
+        // must never be accepted from a URL that proxies and logs can see.
+        Err(StatusCode::UNAUTHORIZED)
+            if request.uri().path() == "/hook" && state.allowed_hosts.is_empty() =>
+        {
             query_token(request.uri().query())
                 .and_then(|t| auth::resolve_token(t, &state.master, &[]))
                 .ok_or_else(|| {
@@ -680,6 +685,32 @@ mod tests {
         assert!(r.contains("200 OK"), "localhost, empty allowlist:\n{r}");
         let r = raw_round_trip(addr, &post_mcp_to("fleet.example.com", init)).await;
         assert!(r.contains("403"), "public Host, empty allowlist:\n{r}");
+    }
+
+    /// The transitional `/hook?token=<master>` form is a desktop/loopback
+    /// affordance only: a server with a Host allowlist (a public hub) refuses
+    /// it like any request without a bearer header.
+    #[tokio::test]
+    async fn legacy_query_token_is_refused_when_an_allowlist_is_set() {
+        let stop = r#"{"hook_event_name":"Stop","session_id":"no-such"}"#;
+        let hook_q = |host: &str| {
+            format!(
+                "POST /hook?token=s3cret HTTP/1.1\r\nHost: {host}\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{stop}",
+                stop.len()
+            )
+        };
+
+        let loopback = serve_real_tools().await;
+        let r = raw_round_trip(loopback, &hook_q("127.0.0.1")).await;
+        assert!(r.contains("204"), "empty allowlist accepts ?token=:\n{r}");
+
+        let public = serve_real_tools_with(vec!["fleet.example.com".to_string()]).await;
+        let r = raw_round_trip(public, &hook_q("fleet.example.com")).await;
+        assert!(r.contains("401"), "public hub refuses ?token=:\n{r}");
+        let r = raw_round_trip(public, &hook_q("127.0.0.1")).await;
+        assert!(r.contains("401"), "even over loopback:\n{r}");
     }
 
     /// A tool that fails in the service layer answers with a tool RESULT
