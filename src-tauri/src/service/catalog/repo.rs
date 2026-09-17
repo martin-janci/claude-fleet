@@ -456,6 +456,18 @@ pub fn load_dir(root: &Path) -> Result<Catalog, IpcError> {
                 }
             }
         }
+        // `extends` is flattened at load, not by `resolve`, so a cycle (or a
+        // missing/cross-axis parent) is caught here as a Problem instead of
+        // surfacing only when a host that happens to be assigned the bad
+        // layer is planned — or never, if nobody is assigned it.
+        for l in set.iter() {
+            if let Err(message) = set.chain_for(&l.name) {
+                cat.problems.push(Problem {
+                    path: format!("layers/{}.yaml", l.name),
+                    message,
+                });
+            }
+        }
         cat.layers = set;
     }
 
@@ -726,6 +738,44 @@ mod tests {
         assert_eq!(err.code, "E_CATALOG_PARSE");
         write(&root, "catalog.yaml", "schema_version: 99\n");
         assert_eq!(load_dir(&root).unwrap_err().code, "E_CATALOG_PARSE");
+    }
+
+    /// An `extends` cycle must be caught at load (Fix 2), regardless of
+    /// whether any host is assigned the offending layer — otherwise it is
+    /// invisible until (or unless) a host happens to be planned with it.
+    #[test]
+    fn load_dir_reports_an_extends_cycle_as_a_problem_and_does_not_hang() {
+        let root = tmp("layer-cycle");
+        write(&root, "catalog.yaml", "schema_version: 1\nname: test\n");
+        write(
+            &root,
+            "layers/a.yaml",
+            "kind: layer\nname: a\naxis: role\nextends: b\n",
+        );
+        write(
+            &root,
+            "layers/b.yaml",
+            "kind: layer\nname: b\naxis: role\nextends: a\n",
+        );
+
+        let cat = load_dir(&root).unwrap();
+        assert!(
+            cat.problems
+                .iter()
+                .any(|p| p.path == "layers/a.yaml" && p.message.contains("cycle")),
+            "{:?}",
+            cat.problems
+        );
+        assert!(
+            cat.problems
+                .iter()
+                .any(|p| p.path == "layers/b.yaml" && p.message.contains("cycle")),
+            "{:?}",
+            cat.problems
+        );
+        // The layers still load into the set — only the chain is unusable.
+        assert!(cat.layers.get("a").is_some());
+        assert!(cat.layers.get("b").is_some());
     }
 
     #[test]
