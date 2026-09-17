@@ -191,7 +191,7 @@ Parameters: `force`, `session_id`
 
 ### `refresh_projects`
 
-Rescan the local projects directory for new or removed repositories and worktrees. Returns the fresh project list.
+Rescan the local projects directory for new or removed repositories and worktrees. Returns the fresh project list. On a hub with hub.local_host off it returns E_NOTFOUND: that hub has no local projects directory to scan.
 
 ### `register_self`
 
