@@ -27,7 +27,7 @@ fleet-proto = { path = "../fleet-proto" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "net", "io-util", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "net", "io-util", "fs", "signal"] }
 # `handshake` only: the agent brings its own TCP and TLS (below) and hands the
 # stream over, so it needs neither tokio-tungstenite's `connect` nor its
 # rustls feature — the latter would pull a root store crate the lock does not

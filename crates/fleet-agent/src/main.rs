@@ -61,7 +61,7 @@ fn run(args: cli::RunArgs) -> ExitCode {
         Err(e) => return fail(&format!("could not start the runtime: {e}")),
     };
     match runtime.block_on(fleet_agent::conn::run(config)) {
-        Ok(never) => match never {},
+        Ok(()) => ExitCode::SUCCESS,
         Err(why) => fail(&why),
     }
 }

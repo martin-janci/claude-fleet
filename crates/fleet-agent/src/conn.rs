@@ -304,6 +304,20 @@ pub struct Agent {
     seen: Mutex<SeenIds>,
     slots: Arc<Semaphore>,
     home: Option<PathBuf>,
+    /// Set once by [`Agent::stop`]; every child listens for it.
+    stopping: tokio::sync::watch::Sender<bool>,
+    /// How many `exec`s are running or queued, so `stop` knows when the
+    /// last child is gone.
+    running: tokio::sync::watch::Sender<usize>,
+}
+
+/// One `exec` counted in [`Agent::running`] for as long as it lives.
+struct Running(Arc<Agent>);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.running.send_modify(|n| *n = n.saturating_sub(1));
+    }
 }
 
 impl Agent {
@@ -314,7 +328,31 @@ impl Agent {
             seen: Mutex::new(SeenIds::new(exec::SEEN_IDS)),
             slots: Arc::new(Semaphore::new(concurrency.max(1))),
             home,
+            stopping: tokio::sync::watch::Sender::new(false),
+            running: tokio::sync::watch::Sender::new(0),
         })
+    }
+
+    /// Resolves once [`Agent::stop`] has been called.
+    fn stopped(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let mut rx = self.stopping.subscribe();
+        async move {
+            let _ = rx.wait_for(|s| *s).await;
+        }
+    }
+
+    /// Stop: kill every child this agent is running, refuse new ones, and
+    /// return once they are gone.
+    ///
+    /// `fleet-agent run` calls this on SIGTERM. The unit's `KillMode=process`
+    /// has systemd signal only the agent — so the tmux servers it started,
+    /// which `setsid` out of every child's process group, survive a restart
+    /// — which means that without this, a running child would be orphaned
+    /// with nothing left to enforce its timeout.
+    pub async fn stop(&self) {
+        self.stopping.send_replace(true);
+        let mut running = self.running.subscribe();
+        let _ = running.wait_for(|n| *n == 0).await;
     }
 
     /// `false` for an id this agent has already been sent.
@@ -570,6 +608,20 @@ fn handle(
                 refuse_duplicate(&id);
                 return;
             }
+            if *agent.stopping.borrow() {
+                let refused = exec::ExecOutcome {
+                    exit_code: -9,
+                    stdout: Vec::new(),
+                    stderr: b"the agent is stopping".to_vec(),
+                    truncated: false,
+                };
+                let _ = out.send(Out::Frame(result_frame(id, refused, cap_bytes)));
+                return;
+            }
+            // Counted before the task is spawned, so a `stop` that races it
+            // still waits for this child.
+            agent.running.send_modify(|n| *n += 1);
+            let running = Running(Arc::clone(agent));
             let (cancel, cancelled) = oneshot::channel();
             inflight
                 .lock()
@@ -584,15 +636,23 @@ fn handle(
             };
             let (agent, out, inflight) = (Arc::clone(agent), out.clone(), Arc::clone(inflight));
             tokio::spawn(async move {
-                // Resolves on a cancel, or when the handle is dropped because
-                // the connection went.
-                let mut cancelled = cancelled;
+                let _running = running;
+                // Resolves on a cancel, when the handle is dropped because
+                // the connection went, or when the agent is stopping.
+                let stopped = agent.stopped();
+                let cancelled = async move {
+                    tokio::select! {
+                        _ = cancelled => {}
+                        () = stopped => {}
+                    }
+                };
+                tokio::pin!(cancelled);
                 let outcome = tokio::select! {
                     permit = Arc::clone(&agent.slots).acquire_owned() => {
                         let _permit = permit;
-                        exec::execute(request, async move { let _ = cancelled.await; }).await
+                        exec::execute(request, cancelled).await
                     }
-                    _ = &mut cancelled => exec::ExecOutcome {
+                    () = &mut cancelled => exec::ExecOutcome {
                         exit_code: -9,
                         stdout: Vec::new(),
                         stderr: b"cancelled before it started".to_vec(),
@@ -857,8 +917,9 @@ where
     }
 }
 
-/// `fleet-agent run`: serve `config`'s hub until the process is stopped.
-pub async fn run(config: crate::config::Config) -> Result<std::convert::Infallible, String> {
+/// `fleet-agent run`: serve `config`'s hub until SIGTERM or SIGINT, then kill
+/// whatever is still running and return.
+pub async fn run(config: crate::config::Config) -> Result<(), String> {
     let endpoint = Endpoint::parse(&config.hub, config.insecure)?;
     let dialer = Dialer::new(endpoint, config.token, config.ca_file.as_deref())?;
     let agent = Agent::new(
@@ -866,14 +927,46 @@ pub async fn run(config: crate::config::Config) -> Result<std::convert::Infallib
         exec::MAX_CONCURRENT,
     );
     let notifier = Notifier::from_env();
-    Ok(run_with(
-        &dialer,
-        &agent,
-        &notifier,
-        Beats::heartbeat,
-        tokio::time::sleep,
-    )
-    .await)
+    let stop = shutdown_signal()?;
+    tokio::select! {
+        never = run_with(&dialer, &agent, &notifier, Beats::heartbeat, tokio::time::sleep) => match never {},
+        () = stop => {}
+    }
+    tracing::info!("[agent] stopping: killing what is still running");
+    notifier.status("stopping");
+    // Bounded well inside systemd's own 90 s stop timeout.
+    if tokio::time::timeout(Duration::from_secs(10), agent.stop())
+        .await
+        .is_err()
+    {
+        tracing::warn!("[agent] children still running after 10 s; exiting anyway");
+    }
+    Ok(())
+}
+
+/// Resolves on SIGTERM (systemd's stop) or SIGINT (a terminal's Ctrl-C).
+/// Installed before serving starts, so a stop that arrives early is not lost.
+fn shutdown_signal() -> Result<impl std::future::Future<Output = ()>, String> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term =
+            signal(SignalKind::terminate()).map_err(|e| format!("SIGTERM handler: {e}"))?;
+        let mut int =
+            signal(SignalKind::interrupt()).map_err(|e| format!("SIGINT handler: {e}"))?;
+        Ok(async move {
+            tokio::select! {
+                _ = term.recv() => {}
+                _ = int.recv() => {}
+            }
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1457,6 +1550,31 @@ mod tests {
             );
             tokio::task::yield_now().await;
         }
+    }
+
+    /// Stopping the agent — systemd's SIGTERM on `stop` or `restart` — kills
+    /// what it is running. The unit's `KillMode=process` leaves children
+    /// alone (so tmux servers, which `setsid` themselves, survive), so
+    /// nothing else would: a hung child would run, and bill, for ever.
+    #[tokio::test]
+    async fn stopping_the_agent_kills_its_running_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let script = format!("echo $$ > {}; exec sleep 1000", pidfile.display());
+        let agent = Agent::new(None, 4);
+        let mut p = pair_with(Arc::clone(&agent)).await;
+        send(&mut p.hub, &exec("hung", &["bash", "-c", &script], None)).await;
+        let pid = wait_for_pid(&pidfile).await;
+
+        tokio::time::timeout(PATIENCE, agent.stop())
+            .await
+            .expect("stop returns once its children are gone");
+        assert!(!alive(pid), "{pid} outlived the agent's stop");
+
+        // And nothing new starts once it is stopping.
+        send(&mut p.hub, &exec("late", &["true"], None)).await;
+        let (code, _, err, ..) = result_for(&mut p.hub, "late").await;
+        assert_eq!(code, -9, "{}", String::from_utf8_lossy(&err));
     }
 
     // ── reconnecting ───────────────────────────────────────────────────────
