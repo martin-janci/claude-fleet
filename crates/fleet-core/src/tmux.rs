@@ -87,6 +87,16 @@ pub trait TmuxExec: Send + Sync {
     async fn read_oauth_account(&self) -> Option<crate::service::hosts::OauthAccount> {
         None
     }
+    /// This host's boot identity (kernel boot id + tmux server pid), read
+    /// once per reconcile probe. `None` means "could not tell" (ssh failure,
+    /// transport timeout, unparseable output, or an executor that does not
+    /// implement it) — it must NEVER be read as "no tmux server", because a
+    /// later pass treats `Some(HostIdentity { tmux_server_pid: None, .. })`
+    /// as exactly that and marks every session on the host lost. The default
+    /// is `None`; `LocalTmux` and `RemoteTmux` both override it.
+    async fn host_identity(&self) -> Option<HostIdentity> {
+        None
+    }
 }
 
 /// Shell script printing `<sessionId>\t<mtime>` for the first
@@ -124,6 +134,48 @@ pub fn parse_mtimes(stdout: &str) -> std::collections::HashMap<String, i64> {
             Some((id.to_string(), mtime.trim().parse::<i64>().ok()?))
         })
         .collect()
+}
+
+/// A host's boot identity, read once per reconcile probe.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HostIdentity {
+    /// Kernel boot id — `/proc/sys/kernel/random/boot_id` (the HOST's, even
+    /// inside a container), else `sysctl -n kern.boottime` (macOS), else
+    /// `uptime -s`. `None` when none of them produced anything.
+    pub boot_id: Option<String>,
+    /// Pid of the tmux server. `None` ⇒ no tmux server is running.
+    pub tmux_server_pid: Option<i64>,
+}
+
+/// Prints `boot=<id>` and `tmuxpid=<pid or empty>`. Never fails: every
+/// command is guarded, so a non-zero exit means the transport failed.
+pub const HOST_IDENTITY_SCRIPT: &str = "printf 'boot=%s\\n' \"$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || sysctl -n kern.boottime 2>/dev/null || uptime -s 2>/dev/null)\"; printf 'tmuxpid=%s\\n' \"$(tmux display-message -p '#{pid}' 2>/dev/null)\"";
+
+/// Parse [`HOST_IDENTITY_SCRIPT`] output. `None` unless the `tmuxpid=` line is
+/// present and its value is empty or a number — anything else is output we
+/// cannot trust, and an untrusted "no server" would mark every session on
+/// the host lost.
+pub fn parse_host_identity(stdout: &str) -> Option<HostIdentity> {
+    let mut boot_id = None;
+    let mut pid_line: Option<&str> = None;
+    for line in stdout.lines() {
+        if let Some(v) = line.strip_prefix("boot=") {
+            let v = v.trim();
+            if !v.is_empty() {
+                boot_id = Some(v.to_string());
+            }
+        } else if let Some(v) = line.strip_prefix("tmuxpid=") {
+            pid_line = Some(v.trim());
+        }
+    }
+    let tmux_server_pid = match pid_line? {
+        "" => None,
+        v => Some(v.parse::<i64>().ok()?),
+    };
+    Some(HostIdentity {
+        boot_id,
+        tmux_server_pid,
+    })
 }
 
 /// tmux (and `claude` / `bash`) on this machine, the `local` host. Every
@@ -239,6 +291,16 @@ impl TmuxExec for LocalTmux {
             Ok(o) if o.status.success() => Some(parse_mtimes(&String::from_utf8_lossy(&o.stdout))),
             _ => None,
         }
+    }
+    async fn host_identity(&self) -> Option<HostIdentity> {
+        local_allowed().ok()?;
+        let out = tokio::process::Command::new("bash")
+            .args(["-c", HOST_IDENTITY_SCRIPT])
+            .output()
+            .await
+            .ok()
+            .filter(|o| o.status.success())?;
+        parse_host_identity(&String::from_utf8_lossy(&out.stdout))
     }
 }
 
@@ -467,6 +529,14 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             .ok()
             .filter(|o| o.status.success())?;
         crate::service::hosts::parse_oauth_account(&String::from_utf8_lossy(&output.stdout))
+    }
+    async fn host_identity(&self) -> Option<HostIdentity> {
+        let out = self
+            .remote_bash(HOST_IDENTITY_SCRIPT)
+            .await
+            .ok()
+            .filter(|o| o.status.success())?;
+        parse_host_identity(&String::from_utf8_lossy(&out.stdout))
     }
 }
 
@@ -985,6 +1055,48 @@ mod tests {
             "mtime {} vs now {now}",
             m[found]
         );
+    }
+
+    #[test]
+    fn parse_host_identity_reads_both_fields() {
+        let id = parse_host_identity("boot=abc-123\ntmuxpid=4242\n").unwrap();
+        assert_eq!(id.boot_id.as_deref(), Some("abc-123"));
+        assert_eq!(id.tmux_server_pid, Some(4242));
+    }
+
+    #[test]
+    fn an_empty_tmuxpid_means_no_server_not_unknown() {
+        let id = parse_host_identity("boot=abc\ntmuxpid=\n").unwrap();
+        assert_eq!(id.tmux_server_pid, None);
+    }
+
+    #[test]
+    fn unreadable_output_is_unknown_so_it_can_never_mark_a_host_lost() {
+        // No tmuxpid line at all: a login banner, a wrapper, a truncated run.
+        assert_eq!(parse_host_identity("Welcome to Ubuntu\n"), None);
+        assert_eq!(parse_host_identity(""), None);
+        // A pid line that is not a number is garbage, not "no server".
+        assert_eq!(parse_host_identity("boot=a\ntmuxpid=not-a-pid\n"), None);
+    }
+
+    #[test]
+    fn a_missing_boot_id_is_just_unknown_boot() {
+        let id = parse_host_identity("boot=\ntmuxpid=7\n").unwrap();
+        assert_eq!(id.boot_id, None);
+        assert_eq!(id.tmux_server_pid, Some(7));
+    }
+
+    #[tokio::test]
+    async fn the_identity_script_runs_under_local_bash() {
+        // Real bash, real `tmux` if installed: the script must produce a
+        // parseable answer whether or not a tmux server is running here.
+        let out = tokio::process::Command::new("bash")
+            .args(["-c", HOST_IDENTITY_SCRIPT])
+            .output()
+            .await
+            .unwrap();
+        assert!(out.status.success());
+        assert!(parse_host_identity(&String::from_utf8_lossy(&out.stdout)).is_some());
     }
 
     #[tokio::test]
