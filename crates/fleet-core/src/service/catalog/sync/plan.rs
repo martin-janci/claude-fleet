@@ -263,7 +263,10 @@ fn expected_for<'a>(
 ///    entry), or for a *different* pin ⇒ `PluginUpdate` (schedule one
 ///    `claude plugin update`); already recorded for *this* pin ⇒ `Blocked`:
 ///    the CLI landed on another version and there is nothing more to try
-///    automatically.
+///    automatically. That record only lands when the whole host apply is
+///    clean — the manifest write is skipped when *any* action on the host
+///    failed — so an unrelated failure in the same apply means the pin is
+///    not recorded and `plugin_update` is issued again on the next apply.
 /// 4. Every other kind, against the *substituted* plan: `present` when at
 ///    least one planned file exists in the snapshot or at least one merge's
 ///    `json_path` resolves (an `AppendUnique` merge points at a shared
@@ -271,7 +274,11 @@ fn expected_for<'a>(
 ///    in it — same rule as `inventory::compute_states`); `matches` when
 ///    every planned file exists with hash `sha256_hex(bytes)` *and* every
 ///    merge is `merge_satisfied`. Then: not present ⇒ `Create`; present and
-///    matching ⇒ `Noop` if the manifest names it, else `Adopt`; present and
+///    matching ⇒ `Noop` if the manifest names it *at the locations this
+///    render produces*, `Update` if the entry still lists a path or merge
+///    the render has moved away from (a re-pointed `install_as` whose new
+///    identifier already held an identical copy — the old one has to go),
+///    else `Adopt`; present and
 ///    differing ⇒ `Update` when the manifest names it with a *different*
 ///    hash (the catalog moved on), `Overwrite("edited on host")` when the
 ///    manifest names it with the *same* hash (so the difference came from
@@ -463,7 +470,6 @@ fn action_for(
     }
 
     let manifest_entry = manifest.assets.get(&Manifest::key(kind, &name));
-    let in_manifest = manifest_entry.is_some();
 
     // Rule 3.
     if let Some(target) = &plugin {
@@ -524,14 +530,22 @@ fn action_for(
     let (op, reason) = if !present {
         (ActionOp::Create, None)
     } else if matches {
-        (
-            if in_manifest {
-                ActionOp::Noop
-            } else {
-                ActionOp::Adopt
-            },
-            None,
-        )
+        match manifest_entry {
+            // Present, identical and managed — but the entry points at a
+            // location the render no longer produces. `install_as` can
+            // re-point an asset at an identifier that already holds an
+            // identical copy: the content check then passes at the new
+            // location while the old files are still on the host and the
+            // entry still claims them. `Update` (whose `remove_entry`,
+            // rule 8, carries the previous entry) deletes them and
+            // refreshes the entry; a `Noop` would leak them forever.
+            Some(entry) if has_stale_locations(entry, plan) => (
+                ActionOp::Update,
+                Some("installed under a different identifier; the old copy is removed".into()),
+            ),
+            Some(_) => (ActionOp::Noop, None),
+            None => (ActionOp::Adopt, None),
+        }
     } else {
         match manifest_entry {
             Some(entry) if entry.hash == plan.hash() => (
@@ -579,6 +593,29 @@ fn action_for(
         remove_entry,
         ..blank()
     }
+}
+
+/// Does `entry` record a file path or a merge (`file`, `json_path`) that
+/// `plan` no longer produces? Non-empty means the asset moved on the host
+/// and the old copy is still there.
+///
+/// Only this direction is checked: `Manifest::entry_for` records *every*
+/// location the render it was built from produced, so an entry can lag a
+/// render but never lead it.
+fn has_stale_locations(entry: &ManifestEntry, plan: &RenderPlan) -> bool {
+    let files: BTreeSet<&str> = plan.files.iter().map(|f| f.path.as_str()).collect();
+    if entry.files.iter().any(|p| !files.contains(p.as_str())) {
+        return true;
+    }
+    let merges: BTreeSet<(&str, &Vec<String>)> = plan
+        .merges
+        .iter()
+        .map(|m| (m.file.as_str(), &m.json_path))
+        .collect();
+    entry
+        .merges
+        .iter()
+        .any(|m| !merges.contains(&(m.file.as_str(), &m.json_path)))
 }
 
 /// Rule 3's decision, split out to keep `action_for` readable. `plan` is the
@@ -960,6 +997,70 @@ mod tests {
         assert_eq!(act(&hp, "fleet").op, ActionOp::Noop);
         assert_eq!(act(&hp, "sp").op, ActionOp::Noop);
         assert!(act(&hp, "s").plan.is_none(), "a noop writes nothing");
+    }
+
+    #[test]
+    fn a_re_pointed_install_name_updates_instead_of_noop() {
+        const RENAMED: &str = "kind: skill\nname: foo-bar\ndescription: d\ninstall_as: foo_bar\n";
+        const PLAIN: &str = "kind: skill\nname: foo-bar\ndescription: d\n";
+
+        let old_plan = substituted(&Claude, &asset(RENAMED), &secrets_map());
+        let new_plan = substituted(&Claude, &asset(PLAIN), &secrets_map());
+        let old_path = old_plan.files[0].path.clone();
+        let new_path = new_plan.files[0].path.clone();
+        assert_ne!(old_path, new_path);
+        assert!(old_path.ends_with("foo_bar/SKILL.md"), "{old_path}");
+
+        // The host already holds identical content at BOTH identifiers and
+        // the manifest still records the old one; the catalog now renders
+        // to the new one.
+        let mut snap = HostSnapshot::default();
+        satisfy(&mut snap, &old_plan);
+        satisfy(&mut snap, &new_plan);
+        let mut manifest = Manifest {
+            version: 1,
+            ..Default::default()
+        };
+        manifest.assets.insert(
+            "skill/foo-bar".into(),
+            Manifest::entry_for(&old_plan.hash(), &old_plan, 0),
+        );
+
+        let hp = plan_for(
+            &catalog_of(&[PLAIN]),
+            &Claude,
+            &snap,
+            &manifest,
+            &secrets_map(),
+        );
+        let a = act(&hp, "foo-bar");
+        assert_eq!(a.op, ActionOp::Update, "{:?}", a.reason);
+        assert_eq!(
+            a.remove_entry.as_ref().map(|e| e.files.clone()),
+            Some(vec![old_path]),
+            "the old paths ride along so the applier deletes them"
+        );
+
+        // The ordinary in-sync case — the entry records exactly what the
+        // render produces — is still a Noop.
+        let mut manifest = Manifest {
+            version: 1,
+            ..Default::default()
+        };
+        manifest.assets.insert(
+            "skill/foo-bar".into(),
+            Manifest::entry_for(&new_plan.hash(), &new_plan, 0),
+        );
+        let mut snap = HostSnapshot::default();
+        satisfy(&mut snap, &new_plan);
+        let hp = plan_for(
+            &catalog_of(&[PLAIN]),
+            &Claude,
+            &snap,
+            &manifest,
+            &secrets_map(),
+        );
+        assert_eq!(act(&hp, "foo-bar").op, ActionOp::Noop);
     }
 
     #[test]
