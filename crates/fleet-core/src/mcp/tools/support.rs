@@ -380,14 +380,26 @@ pub(super) fn persist_audit(
 /// (`store::validate_client_name`), but this is the last line of defence for
 /// a row that predates that check: a CR/LF here would close the marker early
 /// and place attacker-chosen text above a marked prompt, where the receiving
-/// agent would read it as fleet's own words.
+/// agent would read it as fleet's own words. Every control character goes,
+/// not only CR/LF — and with them `U+2028`, `U+2029` and `U+0085`, which
+/// `char::is_control` does not cover but a renderer or an LLM may well read
+/// as a line break.
 pub(super) fn marker_origin(caller: &Caller) -> String {
     let origin = match (&caller.host_alias, &caller.client) {
         (Some(h), _) => format!("an agent on host {h}"),
         (None, Some(c)) => format!("the paired client {}", c.name),
         (None, None) => "the fleet controller".to_string(),
     };
-    origin.replace(['\r', '\n'], " ")
+    origin
+        .chars()
+        .map(|c| {
+            if crate::store::breaks_a_line(c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// Prefix `text` with the untrusted-content marker unless the caller is the

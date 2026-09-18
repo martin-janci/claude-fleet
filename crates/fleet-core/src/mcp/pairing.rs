@@ -98,22 +98,32 @@ pub(crate) fn limiter_key(
     forwarded_last_hop(headers).unwrap_or_else(|| peer.to_string())
 }
 
-/// The last `X-Forwarded-For` hop, when it parses as an IP address. Several
-/// header instances are read as one chain, so the last value of the last
-/// header wins — that is the hop the nearest proxy appended.
+/// The last `X-Forwarded-For` hop that parses as an IP address. Several
+/// header instances are read as one chain, so the chain is scanned
+/// right-to-left — the rightmost hop is the one the nearest proxy appended,
+/// and everything left of it is whatever the client claimed.
+///
+/// The scan does not stop at the rightmost element: some proxies append a
+/// non-address token of their own (`unknown` is the classic, and a bracketed
+/// `[::1]:443` or a `host:port` form shows up too). Testing only the last
+/// element would then find nothing, fall back to the peer, and put every
+/// client behind that proxy into the proxy's single bucket — exactly the
+/// shared bucket this function exists to avoid. So it keeps walking left
+/// until something parses; only a chain with no parseable hop at all falls
+/// back to the peer.
 fn forwarded_last_hop(headers: &axum::http::HeaderMap) -> Option<String> {
-    let last = headers
+    let chain: Vec<&str> = headers
         .get_all("x-forwarded-for")
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(','))
         .map(str::trim)
-        .rfind(|h| !h.is_empty())?;
-    // A bracketed IPv6 form (`[::1]:443`) and a `host:port` v4 form both show
-    // up behind some proxies; anything that is not a bare address is refused
-    // rather than guessed at, and the peer is used instead.
-    last.parse::<std::net::IpAddr>()
-        .ok()
+        .filter(|h| !h.is_empty())
+        .collect();
+    chain
+        .iter()
+        .rev()
+        .find_map(|h| h.parse::<std::net::IpAddr>().ok())
         .map(|ip| ip.to_string())
 }
 
@@ -581,6 +591,45 @@ mod tests {
             "127.0.0.1"
         );
         assert_eq!(limiter_key(None, &hdrs("203.0.113.7")), UNKNOWN_PEER);
+    }
+
+    /// Some proxies append a token that is not an address — `unknown` is the
+    /// classic, and a `host:port` or bracketed IPv6 form shows up too.
+    /// Testing only the rightmost element would find nothing, fall back to
+    /// the peer, and collapse every client behind that proxy into the proxy's
+    /// own bucket. The scan walks left until something parses.
+    #[test]
+    fn a_non_address_last_hop_does_not_collapse_everyone_into_the_proxy() {
+        let hdrs = |vals: &[&str]| {
+            let mut h = axum::http::HeaderMap::new();
+            for v in vals {
+                h.append("x-forwarded-for", v.parse().unwrap());
+            }
+            h
+        };
+        let ip = |s: &str| Some(s.parse::<std::net::IpAddr>().unwrap());
+        for chain in [
+            "203.0.113.7, unknown",
+            "203.0.113.7, [2001:db8::1]:443",
+            "203.0.113.7, 10.0.0.1:8080",
+            "203.0.113.7, unknown, _hidden",
+        ] {
+            assert_eq!(
+                limiter_key(ip("127.0.0.1"), &hdrs(&[chain])),
+                "203.0.113.7",
+                "{chain:?}"
+            );
+        }
+        // Several header instances are one chain, scanned right-to-left.
+        assert_eq!(
+            limiter_key(ip("127.0.0.1"), &hdrs(&["9.9.9.9", "203.0.113.7, unknown"])),
+            "203.0.113.7"
+        );
+        // Still nothing parseable anywhere: the peer, never a chosen bucket.
+        assert_eq!(
+            limiter_key(ip("127.0.0.1"), &hdrs(&["unknown, _hidden"])),
+            "127.0.0.1"
+        );
     }
 
     /// Codes are minted per request, so two clients never share one.

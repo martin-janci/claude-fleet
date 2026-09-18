@@ -479,6 +479,129 @@ mod tests {
         }
     }
 
+    /// True when `EVENT_KINDS` lists the part of `name` before the `:`.
+    /// A `const fn` so it can be evaluated at COMPILE time; const eval has no
+    /// formatting, so the caller's `const` item is what names the offender in
+    /// the compiler's message.
+    const fn kind_is_listed(name: &str) -> bool {
+        let nb = name.as_bytes();
+        let mut n = 0;
+        while n < nb.len() && nb[n] != b':' {
+            n += 1;
+        }
+        if n == nb.len() {
+            return false; // no `:` at all — not an event name
+        }
+        let mut k = 0;
+        while k < EVENT_KINDS.len() {
+            let kb = EVENT_KINDS[k].as_bytes();
+            if kb.len() == n {
+                let mut i = 0;
+                while i < n && kb[i] == nb[i] {
+                    i += 1;
+                }
+                if i == n {
+                    return true;
+                }
+            }
+            k += 1;
+        }
+        false
+    }
+
+    /// True when `FRONTEND_EVENT_NAMES` contains `name` exactly.
+    const fn name_is_declared(name: &str) -> bool {
+        let nb = name.as_bytes();
+        let mut i = 0;
+        while i < FRONTEND_EVENT_NAMES.len() {
+            let fb = FRONTEND_EVENT_NAMES[i].as_bytes();
+            if fb.len() == nb.len() {
+                let mut j = 0;
+                while j < nb.len() && fb[j] == nb[j] {
+                    j += 1;
+                }
+                if j == nb.len() {
+                    return true;
+                }
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// An event name checked against both lists while the crate compiles.
+    /// A name whose kind is not in [`EVENT_KINDS`] (it would be
+    /// unsubscribable on `/events`) or which `FRONTEND_EVENT_NAMES` does not
+    /// declare fails const evaluation — a compile error, not a test failure.
+    macro_rules! pinned_name {
+        ($name:literal) => {{
+            const N: &str = {
+                assert!(
+                    kind_is_listed($name),
+                    "EVENT_KINDS has no kind for this event name"
+                );
+                assert!(
+                    name_is_declared($name),
+                    "FRONTEND_EVENT_NAMES does not declare this event name"
+                );
+                $name
+            };
+            N
+        }};
+    }
+
+    /// The compile-time pin for `/events` subscribability.
+    ///
+    /// `EVENT_KINDS` used to be cross-checked only against the hardcoded
+    /// `FRONTEND_EVENT_NAMES` fixture, never against `RowChange` itself: a new
+    /// variant added without touching that fixture compiled, passed the suite,
+    /// and was silently unsubscribable (`?kinds=<its kind>` would be logged as
+    /// unrecognised and drop every one of its events).
+    ///
+    /// The `match` below is exhaustive, so **a new variant does not compile**
+    /// until it has an arm here; the arm's name is checked against both lists
+    /// at compile time by `pinned_name!`. Adding a variant therefore forces
+    /// `EVENT_KINDS`, `FRONTEND_EVENT_NAMES` and `RowChange::name` into step
+    /// before anything builds.
+    #[test]
+    fn every_row_change_variant_is_subscribable() {
+        fn pinned(c: &RowChange) -> &'static str {
+            match c {
+                RowChange::SessionCreated(_) => pinned_name!("session:created"),
+                RowChange::SessionUpdated(_) => pinned_name!("session:updated"),
+                RowChange::SessionKilled(_) => pinned_name!("session:killed"),
+                RowChange::HostAdded(_) => pinned_name!("host:added"),
+                RowChange::HostProbed(_) => pinned_name!("host:probed"),
+                RowChange::HostRemoved(_) => pinned_name!("host:removed"),
+                RowChange::AccountUpserted(_) => pinned_name!("account:upserted"),
+                RowChange::ProjectUpdated(_) => pinned_name!("project:updated"),
+                RowChange::WorktreeUpdated(_) => pinned_name!("worktree:updated"),
+                RowChange::WorktreeRemoved(_) => pinned_name!("worktree:removed"),
+                RowChange::TaskUpdated(_) => pinned_name!("task:updated"),
+                RowChange::AccountUsageUpdated(_) => pinned_name!("account_usage:updated"),
+                RowChange::AssetInventoryUpdated(_) => pinned_name!("asset_inventory:updated"),
+                RowChange::AssetInventoryCleared { .. } => pinned_name!("asset_inventory:cleared"),
+                RowChange::CatalogLoaded(_) => pinned_name!("catalog:loaded"),
+                RowChange::SyncProgress(_) => pinned_name!("sync:progress"),
+            }
+        }
+        // And for every variant a test can build without a full store row,
+        // `RowChange::name` really is the name pinned above.
+        for c in [
+            RowChange::SessionKilled(1),
+            RowChange::HostRemoved("h".into()),
+            RowChange::AccountUpserted(AccountRow::default()),
+            RowChange::WorktreeRemoved(1),
+            RowChange::AssetInventoryUpdated(AssetInventoryRow::default()),
+            RowChange::AssetInventoryCleared {
+                host_alias: "h".into(),
+                harness: "claude".into(),
+            },
+        ] {
+            assert_eq!(c.name(), pinned(&c));
+        }
+    }
+
     /// A new `RowChange` variant whose kind is missing here would be
     /// unfilterable: `?kinds=<it>` would be logged as unrecognised and drop
     /// every one of its events.

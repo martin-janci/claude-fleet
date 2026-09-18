@@ -515,6 +515,13 @@ const SUMMARY_MAX_CHARS: usize = 240;
 
 /// One-line, key-sorted `k=v` summary of tool arguments with free-text
 /// values replaced by `<N chars>` and the whole thing capped.
+///
+/// **One line** is a promise, not a description: this summary is persisted as
+/// a `session_events` row and printed in a log line, and the audit row is
+/// written BEFORE a tool validates anything — so an argument that never
+/// reaches a validator still reaches here. Anything that
+/// [`breaks_a_line`](crate::store::breaks_a_line) is therefore replaced with
+/// a space, so an unvalidated `name` cannot forge a second audit line.
 pub fn redact_args(args: Option<&serde_json::Map<String, serde_json::Value>>) -> String {
     let Some(map) = args else {
         return String::new();
@@ -541,7 +548,17 @@ pub fn redact_args(args: Option<&serde_json::Map<String, serde_json::Value>>) ->
         };
         parts.push(format!("{k}={rendered}"));
     }
-    let joined = parts.join(" ");
+    let joined: String = parts
+        .join(" ")
+        .chars()
+        .map(|c| {
+            if crate::store::breaks_a_line(c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
     if joined.chars().count() > SUMMARY_MAX_CHARS {
         let mut s: String = joined.chars().take(SUMMARY_MAX_CHARS).collect();
         s.push('…');
@@ -969,6 +986,26 @@ mod tests {
             let a = serde_json::json!({ k: "xyz" });
             assert_eq!(redact_args(a.as_object()), format!("{k}=<3 chars>"));
         }
+    }
+
+    /// The audit row is written before any tool validates its arguments, so
+    /// an unvalidated value must not be able to end the line and forge a
+    /// second one. Control characters AND the three separators
+    /// `char::is_control` misses become spaces.
+    #[test]
+    fn redact_args_keeps_the_summary_on_one_line() {
+        let args = serde_json::json!({
+            "name": "phone\npair_client by master: name=evil",
+            "host_alias": "a\u{2028}b\u{2029}c\u{0085}d\u{1b}[31me",
+        });
+        let s = redact_args(args.as_object());
+        assert!(!s.contains('\n'), "{s:?}");
+        assert!(
+            !s.chars().any(crate::store::breaks_a_line),
+            "a line-breaking character survived: {s:?}"
+        );
+        assert!(s.contains("name=phone pair_client by master"), "{s:?}");
+        assert!(s.contains("host_alias=a b c d [31me"), "{s:?}");
     }
 
     #[test]

@@ -16,7 +16,7 @@
 
 use crate::config::{resolve_data_dir, HubOptions};
 use crate::out;
-use crate::serve::{existing_db, open_store};
+use crate::serve::existing_db;
 use fleet_core::mcp::settings::McpSettings;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -44,9 +44,16 @@ struct HubConn {
 
 /// Read the master token and port out of the data dir. Never creates a data
 /// dir or a database: a token minted into a fresh one is not this hub's.
+///
+/// The database is opened **read-only and unmigrated**
+/// ([`Store::open_read_only`]). The daemon is running and holds this file; a
+/// CLI built from a newer commit than the running `fleet-hub serve` would
+/// otherwise apply its own migrations to the live database under the daemon,
+/// and nothing here needs more than two `settings` rows.
 fn hub_conn(opts: &HubOptions, env: &HashMap<String, String>) -> Result<HubConn, String> {
-    existing_db(&resolve_data_dir(opts, env))?;
-    let store = open_store(opts, env)?;
+    let db = existing_db(&resolve_data_dir(opts, env))?;
+    let store = fleet_core::store::Store::open_read_only(&db)
+        .map_err(|e| format!("failed to read the hub database at {}: {e}", db.display()))?;
     let cfg = McpSettings::read(&store).map_err(|e| e.message)?;
     let token = cfg
         .token
@@ -122,8 +129,11 @@ pub fn parse_tool_response(raw: &str) -> Result<serde_json::Value, String> {
         .split_once("\r\n\r\n")
         .ok_or("the hub sent a malformed HTTP response")?;
     let status = head.lines().next().unwrap_or_default().trim_end();
-    if !status.contains(" 200") {
-        return Err(match status.split_whitespace().nth(1) {
+    // The status token, not a substring: a `contains(" 200")` matched the
+    // reason phrase and any header that happened to carry " 200" too.
+    let status_code = status.split_whitespace().nth(1);
+    if status_code != Some("200") {
+        return Err(match status_code {
             Some("401") | Some("403") => format!(
                 "the hub refused this token ({status}); the master token in the data dir is not \
                  the one the running hub started with — restart it, or run fleet-hub token show"
@@ -131,16 +141,9 @@ pub fn parse_tool_response(raw: &str) -> Result<serde_json::Value, String> {
             _ => format!("the hub answered {status}"),
         });
     }
-    // An SSE frame carries the envelope on `data:`; a plain body IS the
-    // envelope.
-    let payload = body
-        .lines()
-        .filter_map(|l| l.strip_prefix("data:"))
-        .map(str::trim)
-        .next_back()
-        .unwrap_or_else(|| body.trim());
+    let payload = last_event_payload(body);
     let envelope: serde_json::Value =
-        serde_json::from_str(payload).map_err(|e| format!("the hub sent unreadable JSON: {e}"))?;
+        serde_json::from_str(&payload).map_err(|e| format!("the hub sent unreadable JSON: {e}"))?;
     if let Some(err) = envelope.get("error") {
         let msg = err
             .get("message")
@@ -161,6 +164,39 @@ pub fn parse_tool_response(raw: &str) -> Result<serde_json::Value, String> {
         return Err(text.to_string());
     }
     serde_json::from_str(text).map_err(|e| format!("the tool's result was not JSON: {e}"))
+}
+
+/// The payload of the LAST server-sent event in `body`, or the trimmed body
+/// itself when there is no `data:` line (a `json_response` transport).
+///
+/// This de-chunks properly rather than assuming one event per response and
+/// one line per event, which the earlier "take the last `data:` line" did:
+/// per the SSE grammar a blank line ends an event and an event may spread its
+/// payload over several `data:` lines, which are joined with `\n`. A keep-alive
+/// comment (`: ping`) or a second frame ahead of the answer is therefore
+/// skipped, and a long envelope split across `data:` lines is reassembled
+/// instead of being truncated to its tail.
+fn last_event_payload(body: &str) -> String {
+    let mut events: Vec<String> = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    for line in body.lines() {
+        if line.trim().is_empty() {
+            if !current.is_empty() {
+                events.push(current.join("\n"));
+                current.clear();
+            }
+            continue;
+        }
+        if let Some(data) = line.strip_prefix("data:") {
+            // The spec strips ONE leading space after the colon, no more.
+            current.push(data.strip_prefix(' ').unwrap_or(data));
+        }
+        // Every other field (`event:`, `id:`, a `:` comment) is not payload.
+    }
+    if !current.is_empty() {
+        events.push(current.join("\n"));
+    }
+    events.pop().unwrap_or_else(|| body.trim().to_string())
 }
 
 // --- rendering ---------------------------------------------------------------
@@ -186,6 +222,48 @@ pub fn fmt_time(ts: Option<i64>) -> String {
     let day = fleet_core::service::usage::day_string(ts.div_euclid(86_400));
     let secs = ts.rem_euclid(86_400);
     format!("{day} {:02}:{:02}Z", secs / 3600, (secs % 3600) / 60)
+}
+
+/// Terminal columns `s` occupies, so a table of names in any script lines up.
+///
+/// `chars().count()` is wrong twice over for a client name — a phone is
+/// commonly named in the owner's own script, and emoji are ordinary in a
+/// device name: a CJK ideograph or an emoji takes two columns, and a
+/// combining mark or a zero-width joiner takes none. A full
+/// `unicode-width` table is not worth a dependency here (the only consumer is
+/// one CLI table), so this covers the ranges a name realistically lands in
+/// and falls back to one column, which is what every terminal assumes.
+fn display_width(s: &str) -> usize {
+    s.chars().map(char_width).sum()
+}
+
+fn char_width(c: char) -> usize {
+    let cp = c as u32;
+    let zero_width = matches!(cp,
+        0x0300..=0x036F      // combining diacritics
+        | 0x200B..=0x200F    // zero-width space … RTL mark
+        | 0xFE00..=0xFE0F    // variation selectors (the emoji presentation one)
+        | 0x1AB0..=0x1AFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F // more combining marks
+    ) || c == '\u{2060}';
+    if zero_width {
+        return 0;
+    }
+    let wide = matches!(cp,
+        0x1100..=0x115F      // Hangul Jamo
+        | 0x2E80..=0x303E    // CJK radicals, Kangxi, CJK symbols
+        | 0x3041..=0x33FF    // kana, Hangul compatibility jamo, CJK compat
+        | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xA000..=0xA4CF // CJK, Yi
+        | 0xAC00..=0xD7A3    // Hangul syllables
+        | 0xF900..=0xFAFF | 0xFE10..=0xFE19 | 0xFE30..=0xFE6F
+        | 0xFF00..=0xFF60 | 0xFFE0..=0xFFE6 // fullwidth forms
+        | 0x1F300..=0x1F9FF  // emoji (symbols, pictographs, faces, supplemental)
+        | 0x20000..=0x3FFFD  // CJK extensions B…
+    );
+    if wide {
+        2
+    } else {
+        1
+    }
 }
 
 /// The `client list` table: a header plus one line per row.
@@ -216,18 +294,22 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
     let mut width = header.map(str::len);
     for row in &cells {
         for (w, c) in width.iter_mut().zip(row) {
-            *w = (*w).max(c.chars().count());
+            *w = (*w).max(display_width(c));
         }
     }
     // The last column is not padded, so a line never ends in trailing blanks.
+    // Padding is counted in terminal columns, not `char`s: `{:<w$}` pads to a
+    // char count, which would under-pad a CJK or emoji name (two columns per
+    // char) and misalign every column after it.
     let line = |row: &[String; 5]| {
         let mut s = String::new();
         for (i, (cell, w)) in row.iter().zip(width).enumerate() {
+            s.push_str(cell);
             if i + 1 == row.len() {
-                s.push_str(cell);
-            } else {
-                s.push_str(&format!("{cell:<w$}  ", w = w));
+                break;
             }
+            s.push_str(&" ".repeat(w.saturating_sub(display_width(cell))));
+            s.push_str("  ");
         }
         s
     };
@@ -373,6 +455,55 @@ mod tests {
         assert!(parse_tool_response("HTTP/1.1 200 OK\r\n\r\nnot json").is_err());
     }
 
+    /// The transport frames one JSON-RPC answer per response today, but SSE
+    /// allows a keep-alive comment or a second frame ahead of it, and allows
+    /// one event's payload to span several `data:` lines (joined with `\n`).
+    /// The old "last `data:` line wins" read both cases wrongly — silently.
+    #[test]
+    fn several_sse_frames_and_multi_line_data_are_de_chunked() {
+        let result = |text: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1,"result":{{"content":[{{"type":"text","text":"{text}"}}]}}}}"#
+            )
+        };
+        // A keep-alive comment and an earlier frame before the answer.
+        let raw = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n\
+             : ping\n\nevent: message\ndata: {}\n\nevent: message\ndata: {}\n\n",
+            result(r#"[]"#),
+            result(r#"{\"code\":\"LATER\"}"#)
+        );
+        assert_eq!(
+            parse_tool_response(&raw).expect("a result")["code"],
+            "LATER"
+        );
+
+        // One event whose payload is split over several `data:` lines: the
+        // spec joins them with a newline, which JSON tolerates inside the
+        // envelope. Taking only the last line used to yield unparseable JSON.
+        let envelope = result(r#"{\"code\":\"SPLIT\"}"#);
+        let (head, tail) = envelope.split_at(envelope.len() / 2);
+        let raw = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n\
+             event: message\ndata: {head}\ndata: {tail}\n\n"
+        );
+        let v = parse_tool_response(&raw).expect("a re-assembled result");
+        assert_eq!(v["code"], "SPLIT");
+    }
+
+    /// The status line is read as a token. `contains(" 200")` also matched a
+    /// reason phrase or a header that happened to carry " 200".
+    #[test]
+    fn only_a_200_status_token_counts_as_success() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"[]"}]}}"#;
+        let raw = format!("HTTP/1.1 500 Internal Error 200 OK\r\n\r\n{body}");
+        let e = parse_tool_response(&raw).expect_err("a 500 is not a success");
+        assert!(e.contains("500"), "{e}");
+        // And a real 200 still parses.
+        let ok = format!("HTTP/1.1 200 OK\r\n\r\n{body}");
+        assert_eq!(parse_tool_response(&ok).unwrap(), serde_json::json!([]));
+    }
+
     #[test]
     fn the_qr_renders_as_half_blocks_and_stays_terminal_sized() {
         let url = "http://127.0.0.1:4180/pair#ABCD1234";
@@ -439,5 +570,37 @@ mod tests {
         assert!(!t.contains("token"), "{t}");
         // An empty fleet still says something.
         assert_eq!(client_table(&[]), "no paired clients");
+    }
+
+    /// A phone is commonly named in its owner's own script. Padding by
+    /// `chars().count()` under-pads a CJK or emoji name — two terminal
+    /// columns per character — and every column after it walks left.
+    #[test]
+    fn the_table_lines_up_for_wide_and_zero_width_names() {
+        let row = |name: &str| {
+            serde_json::json!({
+                "id": 1, "name": name, "mode": "full",
+                "created_at": 1_700_000_000,
+                "last_seen_at": serde_json::Value::Null,
+                "revoked_at": serde_json::Value::Null
+            })
+        };
+        let t = client_table(&[row("马丁的手机"), row("phone"), row("e\u{301}mile 📱")]);
+        let lines: Vec<&str> = t.lines().collect();
+        // Every MODE cell starts in the same terminal column.
+        let mode_col =
+            |l: &str| display_width(&l[..l.find("full").or_else(|| l.find("MODE")).unwrap()]);
+        let cols: Vec<usize> = lines.iter().map(|l| mode_col(l)).collect();
+        assert!(
+            cols.windows(2).all(|w| w[0] == w[1]),
+            "MODE starts at columns {cols:?}:\n{t}"
+        );
+
+        // The width helper itself: wide is 2, combining and ZWJ are 0.
+        assert_eq!(display_width("马丁"), 4);
+        assert_eq!(display_width("phone"), 5);
+        assert_eq!(display_width("e\u{301}"), 1);
+        assert_eq!(display_width("📱"), 2);
+        assert_eq!(display_width("👍\u{fe0f}"), 2);
     }
 }

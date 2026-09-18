@@ -180,7 +180,22 @@ pub fn token(
     // Only the data dir matters here: `token` serves nothing, so the bind /
     // plaintext checks in `resolve` do not apply. It never creates a data dir
     // or a database: a token minted into a fresh one is not the hub's.
-    existing_db(&resolve_data_dir(opts, env))?;
+    let db = existing_db(&resolve_data_dir(opts, env))?;
+    // `token show` against a hub that is RUNNING is the common case, and this
+    // binary may be newer than the daemon's: read the stored token read-only
+    // and unmigrated, so printing it cannot reshape the live database. Only
+    // the two paths that must WRITE — `regenerate`, and minting the first
+    // token into a database that has none — open it for real.
+    if !regenerate {
+        if let Some(token) = Store::open_read_only(&db)
+            .ok()
+            .and_then(|s| mcp::settings::McpSettings::read(&s).ok())
+            .and_then(|cfg| cfg.token)
+        {
+            out::line(&token);
+            return Ok(ExitCode::SUCCESS);
+        }
+    }
     let s = open_store(opts, env)?;
     if regenerate {
         s.set_setting(mcp::SETTING_TOKEN, &mcp::generate_token())

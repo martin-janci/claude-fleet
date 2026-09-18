@@ -177,14 +177,17 @@ impl FleetTools {
         &self,
         Parameters(p): Parameters<PairClientParams>,
     ) -> Result<CallToolResult, McpError> {
-        audit(
-            "pair_client",
-            &format!("name={} mode={:?} ttl_s={:?}", p.name, p.mode, p.ttl_s),
-        );
-        let name = p.name.trim().to_string();
-        crate::store::validate_client_name(&name).map_err(to_mcp_err)?;
+        // Validate BEFORE auditing: the name reaches a `tracing` line, and a
+        // refused mint must not be able to put a line break (or an ANSI
+        // escape) into the hub's log through it. The validator also returns
+        // the trimmed form, which is what gets stored.
+        let name = crate::store::validate_client_name(&p.name).map_err(to_mcp_err)?;
         let mode = p.mode.unwrap_or_else(|| "full".to_string());
         crate::store::validate_client_mode(&mode).map_err(to_mcp_err)?;
+        audit(
+            "pair_client",
+            &format!("name={name} mode={mode} ttl_s={:?}", p.ttl_s),
+        );
         let ttl = pair_ttl(p.ttl_s);
         // Both reads under one lock, released before the mint.
         let base = {
@@ -251,10 +254,13 @@ impl FleetTools {
         &self,
         Parameters(p): Parameters<RevokeClientParams>,
     ) -> Result<CallToolResult, McpError> {
-        audit("revoke_client", &format!("name={}", p.name));
+        // A revoke takes any name — even one no client holds — so there is
+        // nothing to validate first. `escape_debug` is what keeps a line
+        // break or an ANSI escape in a bogus name out of the log line.
+        audit("revoke_client", &format!("name={}", p.name.escape_debug()));
         let row = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            s.revoke_client_token(p.name.trim()).map_err(to_mcp_err)?
+            s.revoke_client_token(&p.name).map_err(to_mcp_err)?
         };
         tracing::info!(client = %row.name, "[mcp] revoked a client token");
         ok_json(&ClientSummary::from(row))

@@ -1406,4 +1406,21 @@ fn marker_origin_can_never_be_split_by_a_client_name() {
         "{origin:?}"
     );
     assert_eq!(guard::mark_untrusted("body", &origin).lines().count(), 2);
+
+    // `U+2028`, `U+2029` and `U+0085` are not `char::is_control`, but a
+    // renderer or an LLM may still read them as a line break — so they go too.
+    let sneaky = Caller {
+        host_alias: None,
+        client: Some(crate::mcp::auth::ClientRef {
+            id: 1,
+            name: "evil\u{2028}x\u{2029}y\u{0085}z".into(),
+        }),
+        mode: TokenMode::Full,
+    };
+    let origin = marker_origin(&sneaky);
+    assert_eq!(origin, "the paired client evil x y z", "{origin:?}");
+    assert!(
+        !origin.chars().any(crate::store::breaks_a_line),
+        "{origin:?}"
+    );
 }

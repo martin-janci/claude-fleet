@@ -22,7 +22,9 @@ mod test_support;
 mod timeline;
 mod usage;
 
-pub use clients::{validate_client_mode, validate_client_name, CLIENT_MODES};
+pub use clients::{
+    breaks_a_line, validate_client_mode, validate_client_name, CLIENT_MODES, LINE_SEPARATORS,
+};
 pub use rows::*;
 
 pub struct Store {
@@ -36,6 +38,28 @@ impl Store {
         let store = Self { conn, bus };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// Open an EXISTING database read-only and **without migrating it**.
+    ///
+    /// For a one-shot reader that runs beside a live daemon — `fleet-hub
+    /// pair`, `fleet-hub client …`, `fleet-hub token show` — where
+    /// [`Store::open_with_bus`] would run *this binary's* migrations against
+    /// the database the daemon has open. A CLI newer than the running daemon
+    /// must not reshape the schema under it, so this open cannot: the
+    /// connection is `SQLITE_OPEN_READ_ONLY` and nothing is applied.
+    ///
+    /// Only reads are valid on the result; a write returns SQLite's
+    /// "attempt to write a readonly database".
+    pub fn open_read_only(path: &std::path::Path) -> Result<Self> {
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        Ok(Self {
+            conn,
+            bus: Arc::new(crate::events::NoopEventBus),
+        })
     }
 
     #[cfg(test)]
