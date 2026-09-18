@@ -24,6 +24,11 @@ const PTY_INPUT_QUEUE: usize = 256;
 /// How long `PtyParts::teardown` waits for a killed child before handing it
 /// to a detached reaper thread. SIGKILL is normally instant; a child stuck in
 /// an uninterruptible wait must not stall the caller.
+/// How long teardown waits in line for a killed child before handing it to a
+/// detached thread. Long enough for a SIGKILLed process, short enough that an
+/// async-runtime worker is never meaningfully parked.
+const PTY_REAP_INLINE: Duration = Duration::from_millis(50);
+
 const PTY_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Smallest PTY the renderer is asked to lay out. A `fit()` result below this
@@ -152,7 +157,9 @@ impl PtyState {
             master: self.master.take(),
             input_tx: self.input_tx.take(),
             child: self.child.take(),
-            shared: Arc::clone(&self.shared),
+            // Leave the state genuinely closed: after a detach, a drain must
+            // not see the dead attachment's buffer or its `exited` flag.
+            shared: std::mem::replace(&mut self.shared, Arc::new(PtyShared::new())),
         }
     }
 }
@@ -187,11 +194,17 @@ impl PtyParts {
             match child.process_id() {
                 // Signal directly: spawning `/bin/kill` is a fork+exec+wait
                 // we would otherwise do on the caller's thread.
-                Some(pid) => unsafe {
+                //
+                // SAFETY: `kill` takes no pointers and cannot trap. The pid is
+                // our own child, not yet reaped, so the OS cannot have recycled
+                // it. `pid > 1` keeps a bogus 0 (our whole process group) or 1
+                // (init) out of the call, as `add_project.rs` does.
+                Some(pid) if pid > 1 => unsafe {
                     libc::kill(pid as libc::pid_t, libc::SIGKILL);
                 },
-                // No pid (already exited / unsupported): fall back to SIGHUP.
-                None => {
+                // No pid (already exited / unsupported), or an implausible one:
+                // fall back to SIGHUP.
+                _ => {
                     let _ = child.kill();
                 }
             }
@@ -210,24 +223,40 @@ impl PtyParts {
     }
 }
 
-/// Reap a killed child, bounded by `PTY_REAP_TIMEOUT`. A child that has not
-/// exited by then (uninterruptible wait) is handed to a detached thread so
-/// the caller never waits on it — the alternative is a frozen UI.
+/// Reap a killed child. Teardown runs from Tauri's async runtime, so the
+/// in-line wait is capped at `PTY_REAP_INLINE` (a SIGKILLed child needs only
+/// milliseconds); anything slower is polled on a detached thread, bounded by
+/// `PTY_REAP_TIMEOUT` and then a blocking wait so it cannot linger.
 fn reap(mut child: Box<dyn portable_pty::Child + Send + Sync>) {
-    let deadline = Instant::now() + PTY_REAP_TIMEOUT;
+    // A SIGKILLed child is gone in milliseconds, so wait briefly in line: that
+    // keeps "closed means reaped" true for callers (and tests) without parking
+    // a runtime worker for anything like `PTY_REAP_TIMEOUT`.
+    let inline_deadline = Instant::now() + PTY_REAP_INLINE;
     loop {
         match child.try_wait() {
             Ok(Some(_)) | Err(_) => return,
             Ok(None) => {}
         }
-        if Instant::now() >= deadline {
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-            return;
+        if Instant::now() >= inline_deadline {
+            break;
         }
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::sleep(Duration::from_millis(2));
     }
+    // Still running (uninterruptible wait): finish off-thread so no caller waits.
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + PTY_REAP_TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) => {}
+            }
+            if Instant::now() >= deadline {
+                let _ = child.wait();
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    });
 }
 
 /// Close the current attachment: detach it under the lock, tear it down
@@ -608,7 +637,11 @@ pub struct PtyWriteArgs {
     pub data: String,
 }
 
-#[tauri::command(async)]
+/// Deliberately NOT `(async)`: `write_to` only takes the state lock briefly and
+/// `try_send`s, so it cannot block the caller, and Tauri's sync dispatch keeps
+/// keystrokes in the order they were typed. An async command would hand each
+/// call to a separate runtime task, letting two fast keystrokes race.
+#[tauri::command]
 pub fn pty_write(args: PtyWriteArgs, state: State<'_, Mutex<PtyState>>) -> Result<(), IpcError> {
     write_to(&state, &args.data)
 }
@@ -1157,11 +1190,13 @@ mod tests {
         let (master, writer, child, pid) = spawn_sleeper()?;
         let shared = Arc::new(PtyShared::new());
         let input_tx = spawn_writer(writer, Arc::clone(&shared));
-        state
-            .lock()
-            .unwrap()
-            .install(master, input_tx, child, Arc::clone(&shared))
-            .teardown();
+        // Drop the guard BEFORE tearing down: teardown kills and reaps, which
+        // must never run under the state lock (see the CLAUDE.md convention).
+        let previous = {
+            let mut s = state.lock().unwrap();
+            s.install(master, input_tx, child, Arc::clone(&shared))
+        };
+        previous.teardown();
         Some((pid, shared))
     }
 
