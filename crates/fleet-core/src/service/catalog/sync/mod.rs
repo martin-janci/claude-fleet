@@ -893,6 +893,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn assigning_a_layer_that_drops_an_installed_asset_plans_its_removal() {
+        // The destructive half of layering: a host that fleet already synced
+        // `skill/t` to, and whose new role no longer includes it, must plan
+        // `Remove` — through resolve → Manifest::orphans, not special code.
+        // Without the assignment, `t` is still in the effective catalog and
+        // must NOT be removed.
+        let _lock = super::super::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::write(
+            home.path().join(".claude/.fleet-assets.json"),
+            r#"{"version":1,"updated_at":0,"assets":{"skill/t":
+                {"hash":"h","files":[],"merges":[],"synced_at":0}}}"#,
+        )
+        .unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let files = two_skills_and_a_role_layer();
+        load_catalog(
+            repo_dir.path(),
+            &files
+                .iter()
+                .map(|(a, b)| (*a, b.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        let ssh = Arc::new(SshClient::new());
+
+        let t_op = |plan: &SyncPlan| {
+            plan.hosts
+                .iter()
+                .filter(|h| h.harness == "claude")
+                .flat_map(|h| h.actions.iter())
+                .find(|a| a.name == "t")
+                .map(|a| a.op)
+        };
+
+        let before = plan_sync(PlanArgs::default(), &store, &ssh).await.unwrap();
+        assert_ne!(t_op(&before), Some(ActionOp::Remove));
+
+        store
+            .lock()
+            .unwrap()
+            .set_host_layers("local", Some("core"), &[])
+            .unwrap();
+        let after = plan_sync(PlanArgs::default(), &store, &ssh).await.unwrap();
+        assert_eq!(t_op(&after), Some(ActionOp::Remove));
+    }
+
+    #[tokio::test]
     async fn apply_sync_rejects_an_unknown_plan_id() {
         let store = Mutex::new(Store::open_in_memory().unwrap());
         let ssh = Arc::new(SshClient::new());
