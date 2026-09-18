@@ -600,16 +600,66 @@ fn no_error_and_no_debug_output_ever_carries_the_token() {
 
 // --- the raw HTTP transport --------------------------------------------------
 
-/// The desktop's hub is normally `https://` (`docs/hub.md`), and this build
-/// cannot speak it. That must be a clear refusal, not a hang or a silent
-/// fallback — see `TcpTransport`'s doc comment for the dependency decision
-/// this is waiting on.
+/// A hub address is http or https and nothing else. Anything else must be
+/// refused by name rather than producing a confusing connect error.
+/// (`normalise_base_url` already rejects these when the setting is read; this
+/// is the transport's own guard.)
 #[test]
-fn the_tcp_transport_refuses_https_with_a_reason() {
-    let e = block_on(TcpTransport.post_json("https://fleet.example.com/mcp", "t", "{}".into()))
-        .expect_err("https must be refused");
-    assert!(e.contains("https"), "{e}");
-    assert!(e.to_lowercase().contains("tls"), "{e}");
+fn the_tcp_transport_refuses_a_scheme_that_is_not_a_hub_address() {
+    for url in ["ftp://fleet.example.com/mcp", "file:///etc/passwd"] {
+        let e = match block_on(TcpTransport.post_json(url, "t", "{}".into())) {
+            Err(e) => e,
+            Ok(r) => panic!("{url} should have been refused, got {r:?}"),
+        };
+        assert!(e.contains("not a hub address"), "for {url}: {e}");
+    }
+}
+
+/// The platform trust store must actually yield roots on this machine —
+/// otherwise every `https://` hub fails with an opaque certificate error and
+/// nobody knows why. `TcpTransport` fails closed and says so; this asserts
+/// that the happy path really is happy here.
+#[test]
+fn the_platform_trust_store_yields_roots() {
+    let found = rustls_native_certs::load_native_certs();
+    assert!(
+        !found.certs.is_empty(),
+        "no roots loaded; errors: {:?}",
+        found.errors
+    );
+}
+
+/// Proof that the TLS path actually completes a handshake against a real
+/// server and reads a real response — the closed-port test above only shows
+/// that it fails correctly. Ignored by default because it needs the network;
+/// run with `cargo test -p claude-fleet --lib -- --ignored tls_really`.
+///
+/// It is deliberately NOT pointed at a hub: any https server proves the
+/// handshake, the platform roots and the read loop. The status will be a 4xx
+/// (the host is not an MCP endpoint), which is exactly what we assert — a
+/// parsed status means the whole path worked.
+#[test]
+#[ignore = "needs network"]
+fn tls_really_completes_a_handshake_against_a_real_server() {
+    let r = block_on(TcpTransport.post_json("https://crates.io/", "t", "{}".into()))
+        .expect("a TLS exchange");
+    assert!(
+        r.status >= 200,
+        "expected a parsed HTTP status, got {}",
+        r.status
+    );
+}
+
+/// An https hub that is not listening must come back as an ordinary transport
+/// error — which `HubBackend` maps to `E_HUB_UNREACHABLE` — not a panic and
+/// not a hang. Port 1 on loopback is closed everywhere.
+#[test]
+fn an_https_hub_that_is_not_listening_fails_as_a_transport_error() {
+    let e = match block_on(TcpTransport.post_json("https://127.0.0.1:1/mcp", "t", "{}".into())) {
+        Err(e) => e,
+        Ok(r) => panic!("a closed port should have failed, got {r:?}"),
+    };
+    assert!(e.contains("connect 127.0.0.1:1"), "{e}");
 }
 
 #[test]

@@ -41,10 +41,10 @@ pub struct HubResponse {
 
 /// One HTTP exchange with the hub.
 ///
-/// A trait, not a concrete client, for two reasons: the whole tool mapping is
-/// then testable against recorded responses with no network (which is what
-/// the design calls for), and the TLS decision — see [`TcpTransport`] — can be
-/// made later without touching a line of the mapping.
+/// A trait, not a concrete client, so the whole tool mapping is testable
+/// against recorded responses with no network — which is what the design
+/// calls for, and which is why [`TcpTransport`] could grow TLS without a line
+/// of the mapping changing.
 ///
 /// `bearer` is the client token. An implementation must put it in the
 /// `Authorization` header and must not log it.
@@ -415,20 +415,65 @@ impl HubBackend {
 
 // --- the real transport ------------------------------------------------------
 
-/// The hub over plain HTTP, written by hand onto a `TcpStream` — the same way
-/// `fleet-hub`'s own CLI talks to `/mcp`, and for the same reason: nothing in
-/// the dependency tree can currently do better.
+/// The hub over HTTP or HTTPS, written by hand onto a `TcpStream` — the same
+/// way `fleet-hub`'s own CLI talks to `/mcp`. One request, one response,
+/// `Connection: close`; there is no connection pool because a desktop makes a
+/// handful of calls a second at worst, and no HTTP client crate is in this
+/// workspace's graph to borrow one from.
 ///
-/// **This cannot reach an `https://` hub, which is how `docs/hub.md` says to
-/// run one.** There is no HTTP client in this workspace's graph (`reqwest` is
-/// in `Cargo.lock` but not in `claude-fleet`'s tree, and enabling a TLS
-/// feature pulls in crates the lockfile does not have). `rustls`,
-/// `tokio-rustls` and `ring` *are* already there via `fleet-hub`'s server
-/// side; only a root-certificate store (`webpki-roots` or
-/// `rustls-native-certs`) is missing. Which of those to add is a dependency
-/// decision for the repository owner, so this refuses `https://` with a
-/// message that says so rather than guessing.
+/// `https://` is the case that matters: `docs/hub.md` refuses to serve a
+/// public hub in plaintext, so a real hub is always TLS. `http://` stays for a
+/// loopback or tunnelled hub.
+///
+/// Certificates are verified against the **platform trust store**
+/// (`rustls-native-certs`), not a bundled root set. That is deliberate: a
+/// desktop is exactly the place where a corporate CA or a root the operator
+/// installed themselves has to work, and a bundled set would silently reject
+/// both. (`webpki-roots` would bundle them, and its CDLA-Permissive-2.0
+/// licence is not on `deny.toml`'s allow list.)
 pub struct TcpTransport;
+
+/// The TLS client config, built once. Loading the platform trust store means
+/// reading and parsing every root the machine has; doing that per request
+/// would be wasteful and, on a locked-down box, slow.
+fn tls_connector() -> Result<&'static tokio_rustls::TlsConnector, String> {
+    static CONNECTOR: std::sync::OnceLock<Result<tokio_rustls::TlsConnector, String>> =
+        std::sync::OnceLock::new();
+    CONNECTOR
+        .get_or_init(|| {
+            // Only the `ring` provider is compiled in, so rustls would pick it
+            // anyway; installing it explicitly means a future second provider
+            // cannot silently change which one is used. Same reasoning, and
+            // the same line, as `fleet_hub::tls`.
+            let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+            let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+            let found = rustls_native_certs::load_native_certs();
+            for cert in found.certs {
+                // A single unparseable root is not fatal: the store is a bag
+                // of certificates from the OS and one bad entry must not stop
+                // the app trusting the rest.
+                let _ = roots.add(cert);
+            }
+            if roots.is_empty() {
+                // Failing closed. An empty root store would reject every hub
+                // with an opaque certificate error; saying so once, here, is
+                // the difference between a diagnosable problem and a mystery.
+                return Err(format!(
+                    "no usable certificates in this machine's trust store \
+                     ({} error(s) while reading it); an https:// hub cannot be verified",
+                    found.errors.len()
+                ));
+            }
+            let config = tokio_rustls::rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            Ok(tokio_rustls::TlsConnector::from(std::sync::Arc::new(
+                config,
+            )))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
 
 /// Largest response read from the hub, so a stray listener cannot make the
 /// app buffer without bound. A full `list_sessions` on a large fleet is a few
@@ -447,15 +492,15 @@ impl HubTransport for TcpTransport {
         body: String,
     ) -> Result<HubResponse, String> {
         let parsed = url::Url::parse(url).map_err(|e| format!("{url}: {e}"))?;
-        if parsed.scheme() != "http" {
-            return Err(format!(
-                "this build can only reach an http:// hub, not {}:// — TLS needs a \
-                 certificate-store dependency that has not been chosen yet",
-                parsed.scheme()
-            ));
-        }
+        let tls = match parsed.scheme() {
+            "https" => true,
+            "http" => false,
+            other => return Err(format!("{other}:// is not a hub address")),
+        };
         let host = parsed.host_str().ok_or("no host in the hub URL")?;
-        let port = parsed.port_or_known_default().unwrap_or(80);
+        let port = parsed
+            .port_or_known_default()
+            .unwrap_or(if tls { 443 } else { 80 });
         // `authority` is what the Host header must carry: the port is part of
         // it unless it is the scheme's default, and the hub's allowlist is
         // matched against exactly this string.
@@ -473,20 +518,50 @@ impl HubTransport for TcpTransport {
              Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
-        let raw = tokio::time::timeout(CALL_TIMEOUT, exchange(host, port, &request))
+        let raw = tokio::time::timeout(CALL_TIMEOUT, exchange(host, port, tls, &request))
             .await
             .map_err(|_| format!("no answer within {CALL_TIMEOUT:.0?}"))??;
         split_response(&raw)
     }
 }
 
-/// Write the request and read the whole answer back.
-async fn exchange(host: &str, port: u16, request: &str) -> Result<String, String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut conn = tokio::net::TcpStream::connect((host, port))
+/// Connect (wrapping in TLS when asked), write the request, read the whole
+/// answer back.
+async fn exchange(host: &str, port: u16, tls: bool, request: &str) -> Result<String, String> {
+    let tcp = tokio::net::TcpStream::connect((host, port))
         .await
         .map_err(|e| format!("connect {host}:{port}: {e}"))?;
+    if !tls {
+        return speak(tcp, host, port, request).await;
+    }
+    let connector = tls_connector()?;
+    // The name the certificate is checked against. An IP literal is accepted
+    // by `ServerName` and matched as an IP SAN, which is what a hub reached
+    // at `https://10.0.0.5` needs.
+    let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|e| format!("{host} is not a valid certificate name: {e}"))?;
+    let stream = connector
+        .connect(server_name, tcp)
+        .await
+        // The usual causes are an expired or self-signed certificate and a
+        // name that does not match; rustls says which, and the operator needs
+        // to hear it verbatim.
+        .map_err(|e| format!("TLS handshake with {host}:{port} failed: {e}"))?;
+    speak(stream, host, port, request).await
+}
+
+/// Write `request` and read until the peer closes. Generic over the stream so
+/// the plain and TLS paths share one implementation and cannot drift.
+async fn speak<S>(mut conn: S, host: &str, port: u16, request: &str) -> Result<String, String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     conn.write_all(request.as_bytes())
+        .await
+        .map_err(|e| format!("send to {host}:{port}: {e}"))?;
+    // TLS needs an explicit flush: the record is buffered until one.
+    conn.flush()
         .await
         .map_err(|e| format!("send to {host}:{port}: {e}"))?;
     let mut raw = Vec::new();
