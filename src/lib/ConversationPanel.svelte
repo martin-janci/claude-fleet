@@ -20,6 +20,8 @@
   import ConversationHeader from './ConversationHeader.svelte';
   import ToolLine from './ToolLine.svelte';
   import SubagentBlock from './SubagentBlock.svelte';
+  import CopyButton from './CopyButton.svelte';
+  import { findMatches, turnIndex, rowKey } from './conversation_nav';
   import {
     sessionConversation,
     listConversations,
@@ -230,6 +232,7 @@
     unseen = 0;
     turnsWanted = undefined;
     loadingOlder = false;
+    turnsOpen = false;
   }
 
   /** resetView plus the send and probe state of the current conversation;
@@ -429,6 +432,165 @@
   const thread = $derived(
     conv ? buildThread(conv.turns, events, { blocked: viewing === null && indicator?.kind === 'blocked' }, conv.truncated) : [],
   );
+
+  // ─── Find in conversation / turn index ────────────────────────────────────
+  let root: HTMLDivElement | undefined = $state();
+  let findOpen = $state(false);
+  let findQuery = $state('');
+  let findIndex = $state(0);
+  let findInput: HTMLInputElement | undefined = $state();
+  let turnsOpen = $state(false);
+  let turnsWrap: HTMLDivElement | undefined = $state();
+  let turnsList: HTMLUListElement | undefined = $state();
+  let turnsButton: HTMLButtonElement | undefined = $state();
+
+  const matches = $derived(findOpen ? findMatches(thread, findQuery) : []);
+  const matchKeys = $derived(new Set(matches.map((m) => m.rowKey)));
+  const currentMatch = $derived(matches.length > 0 ? matches[Math.min(findIndex, matches.length - 1)].rowKey : null);
+  const findCount = $derived(
+    matches.length > 0 ? `${Math.min(findIndex, matches.length - 1) + 1} / ${matches.length}` : findQuery.trim() ? '0 / 0' : '',
+  );
+  const turnEntries = $derived(turnIndex(thread));
+
+  function rowEl(key: string): HTMLElement | null {
+    return scroller?.querySelector<HTMLElement>(`[data-row-key="${key}"]`) ?? null;
+  }
+  function scrollToRow(key: string) {
+    const el = rowEl(key);
+    if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center' });
+  }
+
+  async function openFind() {
+    turnsOpen = false;
+    findOpen = true;
+    await tick();
+    findInput?.focus();
+    findInput?.select();
+  }
+  function closeFind() {
+    findOpen = false;
+    findIndex = 0;
+    // Hand focus back to the thread so the shortcut keeps working.
+    scroller?.focus({ preventScroll: true });
+  }
+  function stepFind(dir: 1 | -1) {
+    if (matches.length === 0) return;
+    const cur = Math.min(findIndex, matches.length - 1);
+    findIndex = (cur + dir + matches.length) % matches.length;
+  }
+  function onFindKey(e: KeyboardEvent) {
+    if (e.isComposing || e.keyCode === 229) return;
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      stepFind(e.shiftKey ? -1 : 1);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeFind();
+    }
+  }
+
+  // Cmd/Ctrl+F while focus is inside the panel; the listener sits on the
+  // panel root, so focus elsewhere in the app keeps its own behaviour.
+  $effect(() => {
+    const el = root;
+    if (!el) return;
+    function onKey(e: KeyboardEvent) {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'f') return;
+      e.preventDefault();
+      void openFind();
+    }
+    el.addEventListener('keydown', onKey);
+    return () => el.removeEventListener('keydown', onKey);
+  });
+
+  // Bring the current match on screen whenever it changes.
+  $effect(() => {
+    const key = currentMatch;
+    if (key === null) return;
+    untrack(() => scrollToRow(key));
+  });
+
+  // Paint the query inside the matching rows with the CSS Custom Highlight
+  // API where it exists; elsewhere (jsdom, older engines) the row outline
+  // is the only highlight.
+  const HL_ALL = 'conv-find';
+  const HL_CURRENT = 'conv-find-current';
+  const HL_MAX_RANGES = 2_000;
+  function highlightRegistry(): { set(n: string, h: unknown): void; delete(n: string): void } | null {
+    try {
+      const reg = (globalThis.CSS as unknown as { highlights?: unknown } | undefined)?.highlights;
+      if (!reg || typeof (globalThis as { Highlight?: unknown }).Highlight !== 'function') return null;
+      return reg as { set(n: string, h: unknown): void; delete(n: string): void };
+    } catch {
+      return null;
+    }
+  }
+  function clearHighlights() {
+    const reg = highlightRegistry();
+    if (!reg) return;
+    reg.delete(HL_ALL);
+    reg.delete(HL_CURRENT);
+  }
+  $effect(() => {
+    const q = findQuery.trim().toLowerCase();
+    const keys = matchKeys;
+    const cur = currentMatch;
+    const reg = highlightRegistry();
+    if (!reg || !scroller || keys.size === 0 || q === '') {
+      clearHighlights();
+      return;
+    }
+    try {
+      const all: Range[] = [];
+      const current: Range[] = [];
+      for (const el of Array.from(scroller.querySelectorAll<HTMLElement>('[data-row-key]'))) {
+        const key = el.dataset.rowKey ?? '';
+        if (!keys.has(key)) continue;
+        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+        for (let n = walker.nextNode(); n && all.length < HL_MAX_RANGES; n = walker.nextNode()) {
+          const text = (n.textContent ?? '').toLowerCase();
+          for (let at = text.indexOf(q); at !== -1 && all.length < HL_MAX_RANGES; at = text.indexOf(q, at + q.length)) {
+            const r = document.createRange();
+            r.setStart(n, at);
+            r.setEnd(n, at + q.length);
+            all.push(r);
+            if (key === cur) current.push(r);
+          }
+        }
+      }
+      const H = (globalThis as unknown as { Highlight: new (...r: Range[]) => unknown }).Highlight;
+      reg.set(HL_ALL, new H(...all));
+      reg.set(HL_CURRENT, new H(...current));
+    } catch {
+      clearHighlights();
+    }
+  });
+  $effect(() => () => clearHighlights());
+
+  /** Turn index: jump to a turn and close the list. */
+  function pickTurn(key: string) {
+    turnsOpen = false;
+    scrollToRow(key);
+  }
+  function onTurnsKey(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      turnsOpen = false;
+      turnsButton?.focus();
+    }
+  }
+  $effect(() => {
+    if (turnsOpen) turnsList?.focus();
+  });
+  // Close the list on an outside pointerdown (as ConversationHeader does).
+  $effect(() => {
+    if (!turnsOpen) return;
+    function onDocPointerDown(e: PointerEvent) {
+      if (turnsWrap && e.target instanceof Node && !turnsWrap.contains(e.target)) turnsOpen = false;
+    }
+    document.addEventListener('pointerdown', onDocPointerDown);
+    return () => document.removeEventListener('pointerdown', onDocPointerDown);
+  });
 
   // One probe in flight at a time (a wedged host must not stack ssh
   // processes every 2 s), and a slow one never overwrites a newer result.
@@ -727,7 +889,7 @@
   }
 </script>
 
-<div class="conversation-panel" data-testid="conversation-panel">
+<div class="conversation-panel" data-testid="conversation-panel" bind:this={root}>
   <ConversationHeader {session} {conversations} {viewing} {lastEvent} {newerAvailable} onSelect={select} />
   {#if viewing !== null}
     <div class="viewing" data-testid="conv-viewing-banner">
@@ -746,7 +908,55 @@
   {:else if loading}
     <p class="muted">Loading…</p>
   {:else}
-    <div class="scroller" data-testid="conv-scroller" bind:this={scroller} onscroll={onScroll}>
+    <!-- tabindex -1: a click in the thread focuses it, so Cmd/Ctrl+F finds -->
+    <div class="scroller" data-testid="conv-scroller" tabindex="-1" bind:this={scroller} onscroll={onScroll}>
+      {#if findOpen}
+        <div class="find" data-testid="conv-find">
+          <input
+            type="search"
+            data-testid="conv-find-input"
+            aria-label="Find in conversation"
+            placeholder="Find in conversation"
+            bind:this={findInput}
+            bind:value={findQuery}
+            oninput={() => (findIndex = 0)}
+            onkeydown={onFindKey}
+          />
+          <span class="find-count" data-testid="conv-find-count" aria-live="polite">{findCount}</span>
+          <button type="button" class="tb-btn" data-testid="conv-find-prev" aria-label="Previous match" disabled={matches.length === 0} onclick={() => stepFind(-1)}>↑</button>
+          <button type="button" class="tb-btn" data-testid="conv-find-next" aria-label="Next match" disabled={matches.length === 0} onclick={() => stepFind(1)}>↓</button>
+          <button type="button" class="tb-btn" data-testid="conv-find-close" aria-label="Close find" onclick={closeFind}>×</button>
+        </div>
+      {:else if conv}
+        <div class="toolbar" data-testid="conv-toolbar">
+          <button type="button" class="tb-btn" data-testid="conv-find-button" aria-label="Find in conversation" title="Find (⌘F / Ctrl+F)" onclick={() => void openFind()}>⌕ Find</button>
+          {#if turnEntries.length > 0}
+            <div class="turns-wrap" bind:this={turnsWrap}>
+              <button
+                type="button"
+                class="tb-btn"
+                data-testid="conv-turns-button"
+                aria-haspopup="listbox"
+                aria-expanded={turnsOpen}
+                bind:this={turnsButton}
+                onclick={() => (turnsOpen = !turnsOpen)}>{turnEntries.length} turn{turnEntries.length === 1 ? '' : 's'}</button
+              >
+              {#if turnsOpen}
+                <ul class="turn-index" role="listbox" aria-label="Turns" tabindex="-1" data-testid="conv-turn-index" bind:this={turnsList} onkeydown={onTurnsKey}>
+                  {#each turnEntries as t (t.rowKey)}
+                    <li role="option" aria-selected="false">
+                      <button type="button" data-testid="conv-turn-index-item" onclick={() => pickTurn(t.rowKey)}>
+                        <span class="ti-label">{t.label}</span>
+                        {#if t.at}<time datetime={t.at}>{relativeTime(t.at, nowMs)}</time>{/if}
+                      </button>
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+          {/if}
+        </div>
+      {/if}
       <div class="thread">
         {#if errorMsg && !empty}
           <div class="error-row">
@@ -764,9 +974,17 @@
           </p>
         {/if}
         {#if conv}
-          {#each thread as row (row.kind === 'turn' ? `t${row.index}` : `e${row.event.id}`)}
+          {#each thread as row (rowKey(row))}
+            {@const key = rowKey(row)}
             {#if row.kind === 'event'}
-              <div class="event" data-testid="conv-event" data-tone={row.event.tone}>
+              <div
+                class="event"
+                data-testid="conv-event"
+                data-tone={row.event.tone}
+                data-row-key={key}
+                data-match={matchKeys.has(key) || undefined}
+                data-current-match={currentMatch === key || undefined}
+              >
                 <span class="label">{row.event.label}</span>{#if row.event.detail}<span class="detail">{row.event.detail}</span>{/if}<time datetime={new Date(row.event.at * 1000).toISOString()}>{timeAgo(row.event.at, nowMs)}</time>
               </div>
             {:else}
@@ -776,17 +994,25 @@
             {@const turnRunning = isLast && viewing === null && indicator?.kind === 'working'}
             {@const groups = groupItems(turn.items)}
             {@const duration = turnRunning ? null : turnDuration(turn.at, turn.ended_at)}
-            <section class="turn">
+            <section
+              class="turn"
+              data-row-key={key}
+              data-match={matchKeys.has(key) || undefined}
+              data-current-match={currentMatch === key || undefined}
+            >
               {#if turn.prompt !== null}
                 {@const long = isLongPrompt(turn.prompt)}
                 <div class="prompt" data-testid="conv-prompt">
                   <div class="prompt-head">
                     <span class="who">You</span>
-                    {#if turn.at}
-                      <time datetime={turn.at} title={new Date(turn.at).toLocaleString()}
-                        >{relativeTime(turn.at, nowMs)}</time
-                      >
-                    {/if}
+                    <span class="head-right">
+                      <span class="copy-slot"><CopyButton text={turn.prompt} /></span>
+                      {#if turn.at}
+                        <time datetime={turn.at} title={new Date(turn.at).toLocaleString()}
+                          >{relativeTime(turn.at, nowMs)}</time
+                        >
+                      {/if}
+                    </span>
                   </div>
                   <div class="prompt-text" class:clamped={long && !expanded.has(turnKey(turn, i))}>{turn.prompt}</div>
                   {#if long}
@@ -799,15 +1025,18 @@
               <div class="reply">
                 {#each groups as g, j (j)}
                   {#if g.kind === 'text'}
-                    <div class="text" data-testid="conv-text"><Markdown source={g.text} /></div>
+                    <div class="text" data-testid="conv-text">
+                      <Markdown source={g.text} />
+                      <span class="copy-slot text-copy"><CopyButton text={g.text} /></span>
+                    </div>
                   {:else if g.kind === 'tools' && g.tools.length === 1}
-                    <ToolLine line={g.tools[0]} sessionId={session.id} claudeSessionId={detailCid} {nowMs} />
+                    <ToolLine line={g.tools[0]} sessionId={session.id} claudeSessionId={detailCid} {nowMs} live={turnRunning} />
                   {:else if g.kind === 'tools'}
                     <details class="tools" class:has-err={g.tools.some((t) => t.error)} use:autoOpen={turnRunning && j === groups.length - 1} data-testid="conv-tools">
                       <summary>{toolGroupLabel(g.tools)}</summary>
                       <div class="tools-body">
                         {#each g.tools as line, k (k)}
-                          <ToolLine {line} sessionId={session.id} claudeSessionId={detailCid} {nowMs} />
+                          <ToolLine {line} sessionId={session.id} claudeSessionId={detailCid} {nowMs} live={turnRunning} />
                         {/each}
                       </div>
                     </details>
@@ -833,7 +1062,7 @@
                   {:else if g.kind === 'interrupt'}
                     <div class="interrupt" data-testid="conv-interrupt">Interrupted{g.during_tool ? ' during a tool call' : ''}</div>
                   {:else if g.kind === 'subagent'}
-                    <SubagentBlock item={g} {nowMs} />
+                    <SubagentBlock item={g} {nowMs} live={turnRunning} />
                   {/if}
                 {/each}
                 {#if duration}
@@ -983,6 +1212,146 @@
     flex: 1 1 auto;
     min-height: 0;
     overflow: auto;
+  }
+  .scroller:focus {
+    outline: none;
+  }
+  .toolbar,
+  .find {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.25rem 1.1rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    font-size: 0.74rem;
+  }
+  .toolbar {
+    justify-content: flex-end;
+  }
+  .find input {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 40ch;
+    padding: 0.2rem 0.45rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-pane);
+    color: var(--fg);
+    font: inherit;
+  }
+  .find input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .find-count {
+    min-width: 4.5ch;
+    color: var(--fg-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .tb-btn {
+    padding: 0.1rem 0.45rem;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: none;
+    color: var(--fg-muted);
+    font-size: 0.74rem;
+    cursor: pointer;
+  }
+  .tb-btn:hover:not(:disabled),
+  .tb-btn:focus-visible {
+    border-color: var(--border);
+    color: var(--fg);
+  }
+  .tb-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .turns-wrap {
+    position: relative;
+  }
+  .turn-index {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 0.25rem);
+    z-index: 3;
+    width: min(60ch, 80vw);
+    max-height: 22rem;
+    overflow: auto;
+    margin: 0;
+    padding: 0.25rem 0;
+    list-style: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    box-shadow: 0 4px 14px color-mix(in srgb, var(--fg) 15%, transparent);
+  }
+  .turn-index:focus {
+    outline: none;
+  }
+  .turn-index button {
+    display: flex;
+    width: 100%;
+    align-items: baseline;
+    gap: 0.75rem;
+    padding: 0.3rem 0.65rem;
+    border: none;
+    background: none;
+    color: var(--fg);
+    font: inherit;
+    font-size: 0.78rem;
+    text-align: left;
+    cursor: pointer;
+  }
+  .turn-index button:hover,
+  .turn-index button:focus-visible {
+    outline: none;
+    background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+  }
+  .ti-label {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  [data-match] {
+    outline: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
+    outline-offset: 3px;
+    border-radius: 4px;
+  }
+  [data-current-match] {
+    outline: 2px solid var(--accent);
+  }
+  :global(::highlight(conv-find)) {
+    background-color: color-mix(in srgb, #e6a23c 35%, transparent);
+  }
+  :global(::highlight(conv-find-current)) {
+    background-color: color-mix(in srgb, #e6a23c 75%, transparent);
+    color: var(--bg);
+  }
+  .copy-slot {
+    opacity: 0;
+    transition: opacity 0.1s ease;
+  }
+  .prompt:hover .copy-slot,
+  .prompt:focus-within .copy-slot,
+  .text:hover > .copy-slot,
+  .text:focus-within > .copy-slot {
+    opacity: 1;
+  }
+  .head-right {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.45rem;
+  }
+  .text-copy {
+    position: absolute;
+    top: 0;
+    right: 0;
   }
   .readonly {
     flex: 0 0 auto;
@@ -1294,6 +1663,7 @@
     overflow-wrap: break-word;
   }
   .text {
+    position: relative;
     margin: 0.35rem 0 0.6rem;
   }
   .duration {

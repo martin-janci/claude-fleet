@@ -5,13 +5,31 @@
   import { formatDuration, toolDurationMs, isLongPrompt, PROMPT_CLAMP_LINES, type ConvGroup } from './conversation';
   import Markdown from './MarkdownView.svelte';
 
-  let { item, nowMs }: { item: Extract<ConvGroup, { kind: 'subagent' }>; nowMs: number } = $props();
+  let {
+    item,
+    nowMs,
+    live,
+  }: {
+    item: Extract<ConvGroup, { kind: 'subagent' }>;
+    nowMs: number;
+    /** In the running turn of the current conversation (see ToolLine). */
+    live: boolean;
+  } = $props();
 
   let expanded = $state(false);
 
-  const elapsed = $derived(toolDurationMs(item.at, item.ended_at, item.done ? null : nowMs));
+  const elapsed = $derived(toolDurationMs(item.at, item.ended_at, item.done || !live ? null : nowMs));
+  const noResult = $derived(!item.done && !live);
   const duration = $derived(
-    item.done ? (elapsed === null ? null : formatDuration(elapsed)) : 'running…',
+    item.done
+      ? elapsed === null
+        ? null
+        : formatDuration(elapsed)
+      : !live
+        ? 'no result'
+        : elapsed === null
+          ? 'running'
+          : `running ${formatDuration(elapsed)}`,
   );
   const long = $derived(item.result !== null && isLongPrompt(item.result));
 </script>
@@ -21,7 +39,7 @@
     {#if item.error}<span class="sub-err" title="Subagent failed">✕</span>{/if}
     <span class="sub-type">{item.agent_type ?? 'subagent'}</span>
     {#if item.description}<span class="sep" aria-hidden="true">·</span><span class="sub-desc">{item.description}</span>{/if}
-    {#if duration}<span class="sub-dur">{duration}</span>{/if}
+    {#if duration}<span class="sub-dur" class:muted={noResult}>{duration}</span>{/if}
   </div>
   {#if item.result}
     <div
@@ -73,6 +91,10 @@
     flex: 0 0 auto;
     margin-left: auto;
     font-size: 0.7rem;
+  }
+  .sub-dur.muted {
+    font-style: italic;
+    opacity: 0.7;
   }
   .sub-err {
     flex: 0 0 auto;

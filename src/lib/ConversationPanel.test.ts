@@ -7,6 +7,10 @@ vi.mock('./conversation', async () => {
   const actual = await vi.importActual<typeof import('./conversation')>('./conversation');
   return { ...actual, sessionConversation: vi.fn(), sessionActivity: vi.fn(), listConversations: vi.fn() };
 });
+vi.mock('./clipboard', async () => {
+  const actual = await vi.importActual<typeof import('./clipboard')>('./clipboard');
+  return { ...actual, copyText: vi.fn() };
+});
 vi.mock('./sessions', async () => {
   const actual = await vi.importActual<typeof import('./sessions')>('./sessions');
   return { ...actual, sendPrompt: vi.fn() };
@@ -19,6 +23,7 @@ import { composerDrafts } from './conversation';
 import { openPathRequest } from './app_views';
 import { dispatchTimelineEvents, dispatchConversationsChanged } from './live_events';
 import type { SessionEvent } from './timeline';
+import { copyText } from './clipboard';
 
 const mockedConv = sessionConversation as unknown as ReturnType<typeof vi.fn>;
 const mockedSend = sendPrompt as unknown as ReturnType<typeof vi.fn>;
@@ -1894,5 +1899,210 @@ describe('ConversationPanel detail UX', () => {
     await settle();
     await settle();
     expect(screen.getByTestId('conv-indicator').textContent).toContain('Cooking… 3s');
+  });
+});
+
+describe('ConversationPanel find, copy and turn index', () => {
+  const mockedCopy = copyText as unknown as ReturnType<typeof vi.fn>;
+  let scrolled: Element[];
+  const realScroll = Element.prototype.scrollIntoView;
+
+  beforeEach(() => {
+    scrolled = [];
+    mockedCopy.mockReset();
+    mockedCopy.mockResolvedValue(true);
+    Element.prototype.scrollIntoView = vi.fn(function (this: Element) {
+      scrolled.push(this);
+    });
+  });
+  afterEach(() => {
+    Element.prototype.scrollIntoView = realScroll;
+  });
+
+  function threeTurns() {
+    return conv({
+      turns: [
+        { prompt: 'Fix the parser', at: '2026-09-18T09:00:00Z', ended_at: null, items: [{ kind: 'text', text: 'on it' }] },
+        { prompt: 'and the lexer', at: '2026-09-18T09:05:00Z', ended_at: null, items: [{ kind: 'text', text: 'the PARSER calls it' }] },
+        { prompt: null, at: '2026-09-18T09:06:00Z', ended_at: null, items: [{ kind: 'command', name: '/model', args: 'opus', output: null }] },
+      ],
+    });
+  }
+
+  it('Ctrl+F opens find; typing marks matches; Enter moves to the next; Escape closes', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+
+    // Outside the panel the shortcut is left alone.
+    const outside = new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true });
+    document.body.dispatchEvent(outside);
+    await settle();
+    expect(outside.defaultPrevented).toBe(false);
+    expect(screen.queryByTestId('conv-find')).toBeNull();
+
+    const inside = new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true });
+    screen.getByTestId('conv-scroller').dispatchEvent(inside);
+    await settle();
+    expect(inside.defaultPrevented).toBe(true);
+    expect(screen.getByTestId('conv-find')).toBeTruthy();
+    const input = screen.getByTestId('conv-find-input') as HTMLInputElement;
+    expect(document.activeElement).toBe(input);
+
+    await fireEvent.input(input, { target: { value: 'parser' } });
+    await settle();
+    const marked = Array.from(document.querySelectorAll('[data-match]')).map((el) => el.getAttribute('data-row-key'));
+    expect(marked).toEqual(['t0', 't1']);
+    expect(screen.getByTestId('conv-find-count').textContent).toBe('1 / 2');
+    const current = () => document.querySelector('[data-current-match]');
+    expect(current()?.getAttribute('data-row-key')).toBe('t0');
+    expect(scrolled.at(-1)).toBe(current());
+    expect(Element.prototype.scrollIntoView).toHaveBeenLastCalledWith({ block: 'center' });
+
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await settle();
+    expect(current()?.getAttribute('data-row-key')).toBe('t1');
+    expect(screen.getByTestId('conv-find-count').textContent).toBe('2 / 2');
+    expect(scrolled.at(-1)).toBe(current());
+
+    await fireEvent.keyDown(input, { key: 'Enter', shiftKey: true });
+    await settle();
+    expect(current()?.getAttribute('data-row-key')).toBe('t0');
+
+    await fireEvent.click(screen.getByTestId('conv-find-next'));
+    await settle();
+    expect(current()?.getAttribute('data-row-key')).toBe('t1');
+    await fireEvent.click(screen.getByTestId('conv-find-prev'));
+    await settle();
+    expect(current()?.getAttribute('data-row-key')).toBe('t0');
+
+    await fireEvent.keyDown(input, { key: 'Escape' });
+    await settle();
+    expect(screen.queryByTestId('conv-find')).toBeNull();
+    expect(document.querySelector('[data-match]')).toBeNull();
+    expect(current()).toBeNull();
+    expect(screen.getByTestId('conv-turns-button')).toBeTruthy();
+  });
+
+  it('paints matches with the Custom Highlight API when it exists', async () => {
+    const g = globalThis as unknown as { CSS?: unknown; Highlight?: unknown };
+    const savedCss = g.CSS;
+    const savedHl = g.Highlight;
+    const registry = new Map<string, { ranges: Range[] }>();
+    g.CSS = { highlights: registry };
+    g.Highlight = class {
+      ranges: Range[];
+      constructor(...ranges: Range[]) {
+        this.ranges = ranges;
+      }
+    };
+    try {
+      mockedConv.mockReturnValue(ok(threeTurns()));
+      render(ConversationPanel, { session: session(), visible: true });
+      await settle();
+      await fireEvent.keyDown(screen.getByTestId('conv-scroller'), { key: 'f', ctrlKey: true });
+      await settle();
+      await fireEvent.input(screen.getByTestId('conv-find-input'), { target: { value: 'parser' } });
+      await settle();
+      const all = registry.get('conv-find')!.ranges.map((r) => r.toString().toLowerCase());
+      expect(all).toEqual(['parser', 'parser']);
+      expect(registry.get('conv-find-current')!.ranges).toHaveLength(1);
+      await fireEvent.click(screen.getByTestId('conv-find-close'));
+      await settle();
+      expect(registry.size).toBe(0);
+    } finally {
+      g.CSS = savedCss;
+      g.Highlight = savedHl;
+    }
+  });
+
+  it('the find bar closes with its close button', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    await fireEvent.keyDown(screen.getByTestId('conv-composer-input'), { key: 'f', metaKey: true });
+    await settle();
+    await fireEvent.input(screen.getByTestId('conv-find-input'), { target: { value: 'nothing like this' } });
+    await settle();
+    expect(screen.getByTestId('conv-find-count').textContent).toBe('0 / 0');
+    await fireEvent.click(screen.getByTestId('conv-find-close'));
+    await settle();
+    expect(screen.queryByTestId('conv-find')).toBeNull();
+  });
+
+  it('copy on a prompt calls copyText with the prompt', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const prompt = screen.getAllByTestId('conv-prompt')[1];
+    const btn = prompt.querySelector('[data-testid="conv-copy"]') as HTMLButtonElement;
+    expect(btn.getAttribute('aria-label')).toBe('Copy');
+    await fireEvent.click(btn);
+    await settle();
+    expect(mockedCopy).toHaveBeenCalledWith('and the lexer');
+    expect(btn.textContent).toContain('Copied');
+  });
+
+  it('copy on a text group copies its markdown source', async () => {
+    mockedConv.mockReturnValue(ok(conv({ turns: [{ prompt: 'q', at: null, ended_at: null, items: [{ kind: 'text', text: 'see **this**' }] }] })));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const btn = screen.getByTestId('conv-text').querySelector('[data-testid="conv-copy"]') as HTMLButtonElement;
+    await fireEvent.click(btn);
+    await settle();
+    expect(mockedCopy).toHaveBeenCalledWith('see **this**');
+  });
+
+  it('the turn index lists prompts and jumps', async () => {
+    mockedConv.mockReturnValue(ok(threeTurns()));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const button = screen.getByTestId('conv-turns-button');
+    expect(button.textContent).toContain('3 turns');
+    await fireEvent.click(button);
+    await settle();
+    const items = screen.getAllByTestId('conv-turn-index-item');
+    expect(items.map((i) => i.textContent)).toEqual([
+      expect.stringContaining('Fix the parser'),
+      expect.stringContaining('and the lexer'),
+      expect.stringContaining('/model opus'),
+    ]);
+    scrolled = [];
+    await fireEvent.click(items[1]);
+    await settle();
+    expect(scrolled).toHaveLength(1);
+    expect(scrolled[0].getAttribute('data-row-key')).toBe('t1');
+    expect(screen.queryByTestId('conv-turn-index')).toBeNull();
+
+    // Escape and an outside pointerdown close it too.
+    await fireEvent.click(button);
+    await settle();
+    await fireEvent.keyDown(screen.getByTestId('conv-turn-index'), { key: 'Escape' });
+    await settle();
+    expect(screen.queryByTestId('conv-turn-index')).toBeNull();
+    await fireEvent.click(button);
+    await settle();
+    await fireEvent.pointerDown(document.body);
+    await settle();
+    expect(screen.queryByTestId('conv-turn-index')).toBeNull();
+  });
+
+  it('an unfinished tool call in an earlier turn shows "no result"; the running turn counts up', async () => {
+    const at = new Date(Date.now() - 3_000).toISOString();
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            { prompt: 'a', at, ended_at: null, items: [tool('Bash(sleep)', { id: 't1', name: 'Bash', target: 'sleep', done: false, at })] },
+            { prompt: 'b', at, ended_at: null, items: [tool('Bash(make)', { id: 't2', name: 'Bash', target: 'make', done: false, at })] },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+    await settle();
+    const rows = screen.getAllByTestId('conv-tool');
+    expect(rows[0].textContent).toContain('no result');
+    expect(rows[1].textContent).toMatch(/running \d+s/);
   });
 });

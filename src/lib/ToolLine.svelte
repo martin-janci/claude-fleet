@@ -15,13 +15,24 @@
     type ToolLine,
     type ToolDetail,
   } from './conversation';
+  import CopyButton from './CopyButton.svelte';
 
   let {
     line,
     sessionId,
     claudeSessionId,
     nowMs,
-  }: { line: ToolLine; sessionId: number; claudeSessionId: string | null; nowMs: number } = $props();
+    live,
+  }: {
+    line: ToolLine;
+    sessionId: number;
+    claudeSessionId: string | null;
+    nowMs: number;
+    /** The call belongs to the running turn of the current conversation. An
+     *  unfinished call anywhere else never got its result (the session was
+     *  interrupted or died), so it must not count up forever. */
+    live: boolean;
+  } = $props();
 
   /** Diff lines shown before "N more lines". */
   const DIFF_MAX_LINES = 200;
@@ -61,15 +72,18 @@
 
   const verb = $derived(toolVerb(line.name || toolName(line.summary)));
   const target = $derived(shortTarget(line.target) ?? argsOf(line.summary));
-  const elapsed = $derived(toolDurationMs(line.at, line.ended_at, line.done ? null : nowMs));
+  const elapsed = $derived(toolDurationMs(line.at, line.ended_at, line.done || !live ? null : nowMs));
+  const noResult = $derived(!line.done && !live);
   const duration = $derived(
     line.done
       ? elapsed === null
         ? null
         : formatDuration(elapsed)
-      : elapsed === null
-        ? 'running'
-        : `running ${formatDuration(elapsed)}`,
+      : !live
+        ? 'no result'
+        : elapsed === null
+          ? 'running'
+          : `running ${formatDuration(elapsed)}`,
   );
 
   async function fetchDetail() {
@@ -104,7 +118,7 @@
   <span class="chev" aria-hidden="true"></span>
   <span class="verb">{verb}</span>
   {#if target}<span class="target" title={line.summary}>{target}</span>{/if}
-  {#if duration}<span class="dur">{duration}</span>{/if}
+  {#if duration}<span class="dur" class:muted={noResult}>{duration}</span>{/if}
   {#if line.error}<span class="x" title="Failed">✕</span>{/if}
 {/snippet}
 
@@ -151,7 +165,10 @@
           <pre class="input">{detail.input}</pre>
         {/if}
         {#if detail.result !== null}
-          <pre class="result" data-testid="conv-tool-result" data-error={detail.is_error || undefined}>{shownResult}</pre>
+          <div class="result-wrap">
+            <pre class="result" data-testid="conv-tool-result" data-error={detail.is_error || undefined}>{shownResult}</pre>
+            <div class="copy-slot"><CopyButton text={detail.result} /></div>
+          </div>
           {#if longResult}
             <button type="button" class="linkish" onclick={() => (fullResult = !fullResult)}>{fullResult ? 'Show less' : 'Show all'}</button>
           {/if}
@@ -283,6 +300,24 @@
   }
   .diff .ctx {
     color: var(--fg-muted);
+  }
+  .dur.muted {
+    font-style: italic;
+    opacity: 0.6;
+  }
+  .result-wrap {
+    position: relative;
+  }
+  .copy-slot {
+    position: absolute;
+    top: 0.25rem;
+    right: 0.35rem;
+    opacity: 0;
+    transition: opacity 0.1s ease;
+  }
+  .result-wrap:hover .copy-slot,
+  .result-wrap:focus-within .copy-slot {
+    opacity: 1;
   }
   .result[data-error] {
     color: #e64a4a;

@@ -9,6 +9,13 @@ vi.mock('./conversation', async () => {
 import { toolDetail, type ToolLine as Line, type ToolDetail } from './conversation';
 import ToolLine from './ToolLine.svelte';
 
+vi.mock('./clipboard', async () => {
+  const actual = await vi.importActual<typeof import('./clipboard')>('./clipboard');
+  return { ...actual, copyText: vi.fn() };
+});
+import { copyText } from './clipboard';
+const mockedCopy = copyText as unknown as ReturnType<typeof vi.fn>;
+
 const mockedDetail = toolDetail as unknown as ReturnType<typeof vi.fn>;
 
 const line = (o: Partial<Line> = {}): Line => ({
@@ -41,11 +48,12 @@ async function settle() {
 
 beforeEach(() => {
   mockedDetail.mockReset();
+  mockedCopy.mockReset();
 });
 
 describe('ToolLine', () => {
   it('a finished call shows verb, short target and duration', () => {
-    render(ToolLine, { line: line(), sessionId: 1, claudeSessionId: 'c1', nowMs: 0 });
+    render(ToolLine, { line: line(), sessionId: 1, claudeSessionId: 'c1', nowMs: 0, live: false });
     const row = screen.getByTestId('conv-tool');
     expect(row.textContent).toContain('Run');
     expect(row.textContent).toContain('cargo test');
@@ -55,7 +63,7 @@ describe('ToolLine', () => {
   });
 
   it('a failed call is marked', () => {
-    render(ToolLine, { line: line({ error: true }), sessionId: 1, claudeSessionId: null, nowMs: 0 });
+    render(ToolLine, { line: line({ error: true }), sessionId: 1, claudeSessionId: null, nowMs: 0, live: false });
     const row = screen.getByTestId('conv-tool');
     expect(row.getAttribute('data-error')).toBe('true');
     expect(row.textContent).toContain('✕');
@@ -71,6 +79,7 @@ describe('ToolLine', () => {
       sessionId: 7,
       claudeSessionId: 'c1',
       nowMs: 0,
+      live: false,
     });
     const row = screen.getByTestId('conv-tool');
     await fireEvent.click(row);
@@ -90,7 +99,7 @@ describe('ToolLine', () => {
 
   it('a bash detail shows the command and the result', async () => {
     mockedDetail.mockResolvedValue({ ok: true, value: detail() });
-    render(ToolLine, { line: line(), sessionId: 1, claudeSessionId: null, nowMs: 0 });
+    render(ToolLine, { line: line(), sessionId: 1, claudeSessionId: null, nowMs: 0, live: false });
     await fireEvent.click(screen.getByTestId('conv-tool'));
     await settle();
     expect(mockedDetail).toHaveBeenCalledWith(1, 'toolu_1', undefined);
@@ -101,7 +110,7 @@ describe('ToolLine', () => {
   it('a fetch error shows retry, and retry refetches', async () => {
     mockedDetail.mockResolvedValueOnce({ ok: false, error: { code: 'E_NOT_FOUND', message: 'tool call not found' } });
     mockedDetail.mockResolvedValueOnce({ ok: true, value: detail() });
-    render(ToolLine, { line: line(), sessionId: 1, claudeSessionId: 'c1', nowMs: 0 });
+    render(ToolLine, { line: line(), sessionId: 1, claudeSessionId: 'c1', nowMs: 0, live: false });
     await fireEvent.click(screen.getByTestId('conv-tool'));
     await settle();
     const errBox = screen.getByTestId('conv-tool-detail-error');
@@ -114,7 +123,7 @@ describe('ToolLine', () => {
   });
 
   it('a call without an id is not expandable', () => {
-    render(ToolLine, { line: line({ id: null }), sessionId: 1, claudeSessionId: null, nowMs: 0 });
+    render(ToolLine, { line: line({ id: null }), sessionId: 1, claudeSessionId: null, nowMs: 0, live: false });
     expect(screen.queryByRole('button')).toBeNull();
     const row = screen.getByTestId('conv-tool');
     expect(row.tagName).toBe('DIV');
@@ -127,14 +136,44 @@ describe('ToolLine', () => {
       sessionId: 1,
       claudeSessionId: null,
       nowMs: Date.parse('2026-09-18T09:00:05Z'),
+      live: true,
     });
     expect(screen.getByTestId('conv-tool').textContent).toContain('running 5s');
+  });
+
+  it('an unfinished call outside the live turn shows "no result", not a running timer', () => {
+    render(ToolLine, {
+      line: line({ done: false, ended_at: null }),
+      sessionId: 1,
+      claudeSessionId: null,
+      nowMs: Date.parse('2026-09-18T09:00:05Z'),
+      live: false,
+    });
+    const row = screen.getByTestId('conv-tool');
+    expect(row.textContent).toContain('no result');
+    expect(row.textContent).not.toContain('running');
+    expect(row.querySelector('.dur.muted')).toBeTruthy();
+  });
+
+  it('the result has a copy button that copies the full result and flashes Copied', async () => {
+    mockedCopy.mockResolvedValue(true);
+    const long = Array.from({ length: 30 }, (_, i) => `line ${i}`).join('\n');
+    mockedDetail.mockResolvedValue({ ok: true, value: detail({ result: long }) });
+    render(ToolLine, { line: line(), sessionId: 1, claudeSessionId: null, nowMs: 0, live: false });
+    await fireEvent.click(screen.getByTestId('conv-tool'));
+    await settle();
+    const btn = screen.getByTestId('conv-copy');
+    expect(btn.getAttribute('aria-label')).toBe('Copy');
+    await fireEvent.click(btn);
+    await settle();
+    expect(mockedCopy).toHaveBeenCalledWith(long);
+    expect(screen.getByTestId('conv-copy').textContent).toContain('Copied');
   });
 
   it('a long result is clamped to 20 lines with Show all', async () => {
     const long = Array.from({ length: 30 }, (_, i) => `line ${i}`).join('\n');
     mockedDetail.mockResolvedValue({ ok: true, value: detail({ result: long, is_error: true }) });
-    render(ToolLine, { line: line(), sessionId: 1, claudeSessionId: null, nowMs: 0 });
+    render(ToolLine, { line: line(), sessionId: 1, claudeSessionId: null, nowMs: 0, live: false });
     await fireEvent.click(screen.getByTestId('conv-tool'));
     await settle();
     const result = screen.getByTestId('conv-tool-result');
