@@ -931,6 +931,7 @@ mod tests {
                     probe_started_at: 0,
                     sessions: &[],
                     keep: &[],
+                    lost_ttl_cutoff: None,
                 })
                 .unwrap();
         };

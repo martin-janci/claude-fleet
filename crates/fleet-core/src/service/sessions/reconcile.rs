@@ -514,6 +514,10 @@ pub(super) fn reconcile_write_one_host(
                 probe_started_at: probe.started_at,
                 sessions: &sessions,
                 keep: &keep,
+                // Task 6 wires the real TTL cutoff (from
+                // `settings::SESSIONS_LOST_TTL_SECS`) through this path; for
+                // now Phase 2 keeps today's exemption-free behaviour.
+                lost_ttl_cutoff: None,
             })?;
             // Task G: the write has committed — read each known row back and
             // record a transition only where the STORED value changed.
@@ -586,6 +590,7 @@ pub(super) fn reconcile_write_one_host(
                 probe_started_at: probe.started_at,
                 sessions: &[],
                 keep: &[],
+                lost_ttl_cutoff: None,
             })?;
         }
     }
@@ -742,7 +747,9 @@ pub(super) fn reconcile_agent_rows(
             );
         }
     }
-    if let Err(e) = s.ghost_and_clean_bg_sessions(host_alias, &keep, now) {
+    // Task 6 wires the real TTL cutoff through this path; for now Phase 2
+    // keeps today's exemption-free behaviour here too.
+    if let Err(e) = s.ghost_and_clean_bg_sessions(host_alias, &keep, now, None) {
         tracing::warn!(host = %host_alias, error = %e, "[reconcile] bg cleanup failed");
     }
     Ok(())

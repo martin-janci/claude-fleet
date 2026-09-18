@@ -253,6 +253,18 @@ impl Store {
     /// tick that listed tmux just before `new_session` created it). Such rows
     /// are left alone; the next pass, whose probe starts later, judges them.
     /// `None` disables the guard (the pane-less pruner has no such race).
+    ///
+    /// `lost_ttl_cutoff` (unix secs) guards Phase 2 against reaping a
+    /// resumable mass-loss row too early: a row with `claude_session_id IS
+    /// NOT NULL`, `lost_reason IN ('host_reboot','tmux_server_gone')`, and
+    /// `lost_at >= lost_ttl_cutoff` is exempt from the hard-delete — the
+    /// session can still be resumed, so it survives past the usual one-cycle
+    /// grace until it ages out of the TTL. A `missing` row (a single session
+    /// that dropped out while its neighbours stayed live) is never exempt,
+    /// so it keeps today's one-cycle reap regardless of this cutoff. `None`
+    /// disables the exemption entirely — today's behaviour, byte-identical
+    /// SQL and bindings.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn ghost_and_clean(
         tx: &rusqlite::Transaction,
         host_alias: &str,
@@ -260,6 +272,7 @@ impl Store {
         now: i64,
         kind_filter: &str,
         cutoff: Option<i64>,
+        lost_ttl_cutoff: Option<i64>,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
         let not_in = if keep_names.is_empty() {
@@ -271,11 +284,29 @@ impl Store {
         // ── Phase 2 prep: collect already-ghost IDs BEFORE Phase 1 modifies rows
         // so that sessions newly ghosted in Phase 1 are not immediately deleted.
         let pre_ghost_ids: Vec<i64> = {
+            // `exempt` is textually BEFORE `not_in` so its explicit `?2`
+            // claims that slot before `not_in`'s bare `?`s are numbered by
+            // SQLite (which continues from the highest placeholder used so
+            // far in the text) — the keep names then land at ?3.. . When
+            // `lost_ttl_cutoff` is `None`, `exempt` is empty and `?2` never
+            // appears, so `not_in`'s bare `?`s fall back to ?2.. exactly as
+            // before this feature existed.
+            let exempt = if lost_ttl_cutoff.is_some() {
+                " AND NOT (claude_session_id IS NOT NULL \
+                           AND lost_reason IN ('host_reboot','tmux_server_gone') \
+                           AND lost_at >= ?2)"
+            } else {
+                ""
+            };
             let sql = format!(
                 "SELECT id FROM sessions
-                 WHERE host_alias=?1 AND status='ghost' AND {kind_filter}{not_in}"
+                 WHERE host_alias=?1 AND status='ghost' AND {kind_filter}{exempt}{not_in}"
             );
-            let params = params_then(rusqlite::params![host_alias], keep_names);
+            let head: Vec<&dyn rusqlite::ToSql> = match &lost_ttl_cutoff {
+                Some(c) => vec![&host_alias, c],
+                None => vec![&host_alias],
+            };
+            let params = params_then(&head, keep_names);
             tx.prepare(&sql)?
                 .query_map(params.as_slice(), |r| r.get(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?
@@ -400,6 +431,7 @@ impl Store {
                     now_unix(),
                     KIND_TMUX,
                     Some(ghost_cutoff(spec.probe_started_at)),
+                    spec.lost_ttl_cutoff,
                     &mut out,
                 )?;
             }
@@ -1273,5 +1305,183 @@ mod tests {
         let r = reconcile_one(&mut s, "a", None, None, Some((None, None)));
         assert_eq!(r.pr_url, None);
         assert_eq!(r.ci_status, None);
+    }
+
+    /// 14 days, matching `SESSIONS_LOST_TTL_SECS`'s default — kept as a
+    /// literal here so these tests don't reach into `service::settings`.
+    const TTL_SECS: i64 = 1_209_600;
+
+    /// Seed a row directly as already-ghost (bypassing Phase 1) with the
+    /// given `lost_at` / `lost_reason` / `claude_session_id`, so a single
+    /// `apply_host_reconcile` pass exercises Phase 2's exemption straight
+    /// away.
+    fn seed_ghost_row(
+        store: &Store,
+        host: &str,
+        name: &str,
+        lost_at: i64,
+        lost_reason: &str,
+        claude_session_id: Option<&str>,
+    ) -> i64 {
+        let id = store
+            .upsert_session(name, host, None, None, 1, 1, "running", None)
+            .unwrap();
+        if let Some(uuid) = claude_session_id {
+            store.set_claude_session_id(id, uuid).unwrap();
+        }
+        store
+            .conn
+            .execute(
+                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2 WHERE id=?3",
+                rusqlite::params![lost_at, lost_reason, id],
+            )
+            .unwrap();
+        id
+    }
+
+    #[test]
+    fn a_resumable_mass_loss_row_survives_the_reap() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+        let id = seed_ghost_row(
+            &store,
+            "alpha",
+            "s1",
+            now - 100,
+            "host_reboot",
+            Some("uuid-a"),
+        );
+        for ts in [now, now + 10] {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    lost_ttl_cutoff: Some(cutoff),
+                    keep: &[],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        }
+        assert!(
+            store.get_session_by_id(id).unwrap().is_some(),
+            "a resumable host_reboot row within the TTL must survive the reap"
+        );
+    }
+
+    #[test]
+    fn a_missing_row_is_still_reaped_on_the_next_pass() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+        let id = store
+            .upsert_session("s1", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        store.set_claude_session_id(id, "uuid-a").unwrap();
+        // Pass 1: live and not in keep → ghosted normally with lost_reason='missing'.
+        store
+            .apply_host_reconcile(HostReconcile {
+                lost_ttl_cutoff: Some(cutoff),
+                keep: &[],
+                ..empty_probe("alpha", now)
+            })
+            .unwrap();
+        assert_eq!(
+            store.get_session_by_id(id).unwrap().unwrap().status,
+            "ghost",
+            "pass 1 ghosts the row"
+        );
+        // Pass 2: already ghost before this pass — 'missing' is not exempt,
+        // even with a TTL cutoff set, so the one-cycle grace still applies.
+        store
+            .apply_host_reconcile(HostReconcile {
+                lost_ttl_cutoff: Some(cutoff),
+                keep: &[],
+                ..empty_probe("alpha", now + 10)
+            })
+            .unwrap();
+        assert!(
+            store.get_session_by_id(id).unwrap().is_none(),
+            "a 'missing' row keeps the one-cycle reap even with a TTL cutoff set"
+        );
+    }
+
+    #[test]
+    fn a_mass_loss_row_without_a_claude_id_is_reaped() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+        let id = seed_ghost_row(&store, "alpha", "s1", now - 100, "host_reboot", None);
+        for ts in [now, now + 10] {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    lost_ttl_cutoff: Some(cutoff),
+                    keep: &[],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        }
+        assert!(
+            store.get_session_by_id(id).unwrap().is_none(),
+            "a mass-loss row with no claude_session_id is not resumable and must be reaped"
+        );
+    }
+
+    #[test]
+    fn a_mass_loss_row_older_than_the_ttl_is_reaped() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let cutoff = now - TTL_SECS;
+        let id = seed_ghost_row(
+            &store,
+            "alpha",
+            "s1",
+            cutoff - 1,
+            "host_reboot",
+            Some("uuid-a"),
+        );
+        for ts in [now, now + 10] {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    lost_ttl_cutoff: Some(cutoff),
+                    keep: &[],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        }
+        assert!(
+            store.get_session_by_id(id).unwrap().is_none(),
+            "a mass-loss row whose lost_at is older than the TTL cutoff must be reaped"
+        );
+    }
+
+    #[test]
+    fn with_no_cutoff_nothing_is_exempt() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let now = 2_000_000;
+        let id = seed_ghost_row(
+            &store,
+            "alpha",
+            "s1",
+            now - 100,
+            "host_reboot",
+            Some("uuid-a"),
+        );
+        for ts in [now, now + 10] {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    lost_ttl_cutoff: None,
+                    keep: &[],
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        }
+        assert!(
+            store.get_session_by_id(id).unwrap().is_none(),
+            "a None cutoff means no exemption at all — today's behaviour"
+        );
     }
 }

@@ -174,6 +174,7 @@ impl Store {
         host_alias: &str,
         keep_names: &[String],
         now: i64,
+        lost_ttl_cutoff: Option<i64>,
     ) -> Result<(), rusqlite::Error> {
         let tx = self.conn.unchecked_transaction()?;
         let mut changes: Vec<RowChange> = Vec::new();
@@ -184,6 +185,7 @@ impl Store {
             now,
             KIND_PANE_LESS,
             None,
+            lost_ttl_cutoff,
             &mut changes,
         )?;
         tx.commit()?;
@@ -995,12 +997,14 @@ mod tests {
         let s = store();
         s.upsert_bg_session("local", "bg:e1", None, "e1", Some("idle"), 1, "external")
             .unwrap();
-        s.ghost_and_clean_bg_sessions("local", &[], 10).unwrap();
+        s.ghost_and_clean_bg_sessions("local", &[], 10, None)
+            .unwrap();
         assert_eq!(
             s.get_session("bg:e1", "local").unwrap().unwrap().status,
             "ghost"
         );
-        s.ghost_and_clean_bg_sessions("local", &[], 20).unwrap();
+        s.ghost_and_clean_bg_sessions("local", &[], 20, None)
+            .unwrap();
         assert!(s.get_session("bg:e1", "local").unwrap().is_none());
     }
 
@@ -1217,7 +1221,7 @@ mod tests {
 
         // Pass 1: agent vanished → row is ghosted (soft), not deleted.
         store
-            .ghost_and_clean_bg_sessions("alpha", &[], 200)
+            .ghost_and_clean_bg_sessions("alpha", &[], 200, None)
             .unwrap();
         let row = store.get_session_by_id(id).unwrap().expect("still present");
         assert_eq!(row.status, "ghost");
@@ -1226,7 +1230,7 @@ mod tests {
 
         // Pass 2: still vanished → hard-deleted, events reaped, kill emitted.
         store
-            .ghost_and_clean_bg_sessions("alpha", &[], 300)
+            .ghost_and_clean_bg_sessions("alpha", &[], 300, None)
             .unwrap();
         assert!(store.get_session_by_id(id).unwrap().is_none());
         let orphans: i64 = store
@@ -1260,10 +1264,10 @@ mod tests {
 
         let keep = vec!["bg:live".to_string()];
         store
-            .ghost_and_clean_bg_sessions("alpha", &keep, 200)
+            .ghost_and_clean_bg_sessions("alpha", &keep, 200, None)
             .unwrap();
         store
-            .ghost_and_clean_bg_sessions("alpha", &keep, 300)
+            .ghost_and_clean_bg_sessions("alpha", &keep, 300, None)
             .unwrap();
 
         let rows = store.list_sessions_for_host("alpha").unwrap();
@@ -1284,7 +1288,8 @@ mod tests {
         let id = s
             .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 100, "bg")
             .unwrap();
-        s.ghost_and_clean_bg_sessions("alpha", &[], 200).unwrap();
+        s.ghost_and_clean_bg_sessions("alpha", &[], 200, None)
+            .unwrap();
         assert_eq!(s.get_session_by_id(id).unwrap().unwrap().status, "ghost");
 
         // Agent reappears (e.g. the previous probe transiently failed).
@@ -1309,7 +1314,8 @@ mod tests {
         let id = s
             .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 100, "bg")
             .unwrap();
-        s.ghost_and_clean_bg_sessions("alpha", &[], 200).unwrap();
+        s.ghost_and_clean_bg_sessions("alpha", &[], 200, None)
+            .unwrap();
         assert_eq!(
             lost_reason_of(&s, id),
             Some("missing".to_string()),
@@ -1347,12 +1353,16 @@ mod tests {
             .insert_message(bg, peer, "from the gone bg", "message", None)
             .unwrap();
         // Two passes without the agent: ghost, then hard-delete.
-        store.ghost_and_clean_bg_sessions("alpha", &[], 10).unwrap();
+        store
+            .ghost_and_clean_bg_sessions("alpha", &[], 10, None)
+            .unwrap();
         assert!(
             store.get_session_by_id(bg).unwrap().is_some(),
             "ghosted first"
         );
-        store.ghost_and_clean_bg_sessions("alpha", &[], 20).unwrap();
+        store
+            .ghost_and_clean_bg_sessions("alpha", &[], 20, None)
+            .unwrap();
         assert!(store.get_session_by_id(bg).unwrap().is_none());
         assert!(
             store.list_session_events(bg, 10).unwrap().is_empty(),

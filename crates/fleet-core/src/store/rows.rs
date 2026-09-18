@@ -678,6 +678,12 @@ pub struct HostReconcile<'a> {
     /// tmux_names to keep; rows on this host not in the set are deleted
     /// (only used when `reachable`).
     pub keep: &'a [String],
+    /// Unix-epoch cutoff (see [`Store::ghost_and_clean`]'s `lost_ttl_cutoff`
+    /// doc) below which a resumable mass-loss row (`claude_session_id IS NOT
+    /// NULL`, `lost_reason IN ('host_reboot','tmux_server_gone')`,
+    /// `lost_at >= cutoff`) is spared Phase 2's hard-delete. `None` (the
+    /// default) disables the exemption entirely — today's behaviour.
+    pub lost_ttl_cutoff: Option<i64>,
 }
 
 /// Max `session_events` rows kept per session. Enforced on every
