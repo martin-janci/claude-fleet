@@ -442,10 +442,17 @@ pub fn load_dir(root: &Path) -> Result<Catalog, IpcError> {
                 message,
             });
         }
-        // A member naming an unknown asset is a WARNING: the layer still
-        // resolves, matching load_dir's existing tolerance elsewhere.
+        // A member, exclude or override key naming an unknown asset is a
+        // WARNING: the layer still resolves, matching load_dir's existing
+        // tolerance elsewhere. Exclude is checked too — a typo there would
+        // otherwise silently exclude nothing.
         for l in set.iter() {
-            for key in l.members.iter().chain(l.overrides.keys()) {
+            for key in l
+                .members
+                .iter()
+                .chain(l.exclude.iter())
+                .chain(l.overrides.keys())
+            {
                 if let Some((kind, name)) = crate::service::catalog::layer::split_key(key) {
                     if cat.find(kind, &name).is_none() {
                         cat.problems.push(Problem {
@@ -776,6 +783,88 @@ mod tests {
         // The layers still load into the set — only the chain is unusable.
         assert!(cat.layers.get("a").is_some());
         assert!(cat.layers.get("b").is_some());
+    }
+
+    fn catalog_with_skill_s(label: &str) -> std::path::PathBuf {
+        let root = tmp(label);
+        write(&root, "catalog.yaml", "schema_version: 1\nname: test\n");
+        write(
+            &root,
+            "skills/s/asset.yaml",
+            "kind: skill\nname: s\ndescription: d\n",
+        );
+        write(&root, "skills/s/body.md", "b\n");
+        root
+    }
+
+    fn has_problem(cat: &Catalog, path: &str, needle: &str) -> bool {
+        cat.problems
+            .iter()
+            .any(|p| p.path == path && p.message.contains(needle))
+    }
+
+    #[test]
+    fn load_dir_reports_each_bad_layer_and_keeps_the_good_ones() {
+        let root = catalog_with_skill_s("layer-problems");
+        // File stem and `name` disagree: the loader would otherwise register
+        // a layer under a name no file carries.
+        write(
+            &root,
+            "layers/wrong.yaml",
+            "kind: layer\nname: right\naxis: role\n",
+        );
+        // An unknown member is a warning only — the layer still loads.
+        write(
+            &root,
+            "layers/warn.yaml",
+            "kind: layer\nname: warn\naxis: role\nmembers:\n  - skill/s\n  - skill/ghost\n",
+        );
+        // A key in both members and exclude of one layer is rejected.
+        write(
+            &root,
+            "layers/clash.yaml",
+            "kind: layer\nname: clash\naxis: role\nmembers:\n  - skill/s\nexclude:\n  - skill/s\n",
+        );
+
+        let cat = load_dir(&root).unwrap();
+        assert!(
+            has_problem(&cat, "layers/wrong.yaml", "does not match file stem"),
+            "{:?}",
+            cat.problems
+        );
+        assert!(cat.layers.get("right").is_none());
+        assert!(
+            has_problem(&cat, "layers/warn.yaml", "skill/ghost"),
+            "{:?}",
+            cat.problems
+        );
+        assert!(cat.layers.get("warn").is_some());
+        assert!(
+            has_problem(&cat, "layers", "both members and exclude"),
+            "{:?}",
+            cat.problems
+        );
+        assert!(cat.layers.get("clash").is_none());
+    }
+
+    #[test]
+    fn load_dir_warns_about_an_excluded_key_the_catalog_does_not_have() {
+        // The spec checks members, exclude and overrides alike; a typo'd
+        // exclude would otherwise silently exclude nothing.
+        let root = catalog_with_skill_s("layer-exclude-typo");
+        write(
+            &root,
+            "layers/r.yaml",
+            "kind: layer\nname: r\naxis: role\nexclude:\n  - skill/typo\n",
+        );
+
+        let cat = load_dir(&root).unwrap();
+        assert!(
+            has_problem(&cat, "layers/r.yaml", "skill/typo"),
+            "{:?}",
+            cat.problems
+        );
+        assert!(cat.layers.get("r").is_some());
     }
 
     #[test]
