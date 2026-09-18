@@ -1097,6 +1097,30 @@ Use the existing constructor for a host-bound `Caller` in this test module (grep
 
 Resolver step 3 rule (write it in the resolver doc comment): match when exactly one awaiting row exists on the caller's host **and** either `payload.cwd` is absent, or the row's known cwd (worktree path, else project base path) is absent, or they are equal after `canonical_str`.
 
+**Ambiguous id (observed live on mefistos: two rows share one `claude_session_id`).** Add `Store::sessions_by_claude_id(&self, id: &str) -> Result<Vec<SessionRow>, IpcError>` and make `host_checked_row` use it: exactly one row → as today; more than one → `None` (the id step abstains; only the pane step can resolve such a row). Test:
+
+```rust
+    #[test]
+    fn an_id_shared_by_two_rows_resolves_only_by_pane() {
+        let store = make_store();
+        let a = pane_session(&store, "a", "%3");
+        let b = pane_session(&store, "b", "%4"); // both bound to OLD
+        let host = Caller::for_host("local");
+        apply_hook(&store, &make_ssh(), &make_payload("UserPromptSubmit", OLD), &ctx(&host, None)).unwrap();
+        let s = store.lock().unwrap();
+        for id in [a, b] {
+            assert_ne!(s.get_session_by_id(id).unwrap().unwrap().claude_status.as_deref(), Some("working"));
+        }
+        drop(s);
+        apply_hook(&store, &make_ssh(), &make_payload("UserPromptSubmit", OLD), &ctx(&host, Some("%4"))).unwrap();
+        let s = store.lock().unwrap();
+        assert_eq!(s.get_session_by_id(b).unwrap().unwrap().claude_status.as_deref(), Some("working"));
+        assert_ne!(s.get_session_by_id(a).unwrap().unwrap().claude_status.as_deref(), Some("working"));
+    }
+```
+
+Note the `record_*_hook` store writes key on `claude_session_id` and would update BOTH rows. Give each of `record_stop_hook`, `record_prompt_submit_hook`, `record_session_end_hook`, `record_stop_failure_hook`, `record_notification_hook` a row-id variant (`…_for_row(&self, row_id: i64, …)`, `WHERE id = ?1`) and call those from the handlers with the resolved `row.id`; keep the old names as thin wrappers only if other callers need them (grep first).
+
 - [ ] **Step 5: Run to see them fail**
 
 Run: `cargo test -p fleet-core service::hooks`
@@ -1719,6 +1743,8 @@ Extend the `priors` tuple with the prior `claude_session_id` (`prior.claude_sess
                     }
                 }
 ```
+
+**Never bind one id to two rows.** In the same post-write loop, before the rebind: if another live row on the same host already has `new_id` as its `claude_session_id`, skip the rebind and log at `debug` (the cwd match in `claude_agents::find_for_session` is ambiguous; the hooks' pane binding will settle it). Enforce it in the upsert too: `claude_session_id=CASE WHEN excluded.claude_session_id IS NOT NULL AND EXISTS (SELECT 1 FROM sessions o WHERE o.claude_session_id = excluded.claude_session_id AND o.host_alias = excluded.host_alias AND o.tmux_name != excluded.tmux_name AND o.status != 'ghost') THEN claude_session_id ELSE COALESCE(excluded.claude_session_id, claude_session_id) END` (and gate the `transcript_path` reset on the same condition). Store test: two rows, row `a` bound to A; a pass reporting A for row `b` leaves `b`'s id unchanged.
 
 Test in `service/reconcile_tests.rs` (follow the file's existing harness that feeds fake `claude agents` rows): a row bound to A, a reconcile pass whose agent row reports B for the same name → `list_conversations` has 2 rows, the current is B with `start_source = "unknown"`, A has `end_reason = "replaced"`.
 
