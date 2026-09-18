@@ -1,0 +1,17 @@
+[package]
+name = "fleet-proto"
+version = "0.1.0"
+description = "The JSON frame protocol spoken between a claude-fleet hub and a fleet-agent"
+authors = ["martin-janci"]
+edition = "2021"
+license = "MIT"
+
+# Deliberately tiny. Everything here is on the wire between two processes that
+# must not share anything else: `fleet-agent` depends on this crate and never
+# on `fleet-core`. Keep the dependency list to what encoding a frame needs —
+# all three are already elsewhere in the workspace at these versions, so this
+# crate adds nothing to `cargo deny`'s licence surface.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"

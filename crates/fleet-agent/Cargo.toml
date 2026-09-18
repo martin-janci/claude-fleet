@@ -1,0 +1,19 @@
+[package]
+name = "fleet-agent"
+version = "0.1.0"
+description = "claude-fleet agent: dials its hub over one outbound WebSocket and runs what the hub asks"
+authors = ["martin-janci"]
+edition = "2021"
+license = "MIT"
+
+[[bin]]
+name = "fleet-agent"
+path = "src/main.rs"
+
+# Must never grow a `fleet-core` entry: the agent installs on a host that has
+# no business compiling the hub (nor its Tauri-adjacent tree), which is why the
+# frame types live in `fleet-proto` instead. The rest of the agent's
+# dependencies (tokio, tokio-tungstenite, clap, tracing) arrive with the binary
+# in Task 6 of docs/superpowers/plans/2026-09-18-host-agent.md.
+[dependencies]
+fleet-proto = { path = "../fleet-proto" }

@@ -212,13 +212,23 @@ class FleetRepository(client: HubClient, events: EventStream, scope: CoroutineSc
 **Files:** `iosApp/`, `.github/workflows/ci.yml`, `README.md`, `docs/`
 
 - [ ] **Step 1:** A SwiftUI host embedding the shared UI, plus the Xcode project files, written to be correct by construction and marked explicitly as unbuilt here.
-- [ ] **Step 2:** CI on Linux: `./gradlew :shared:jvmTest :androidApp:assembleDebug` with the Android SDK action.
+- [ ] **Step 2:** CI on Linux: `./gradlew build` (the whole build, so a broken target cannot hide behind two hand-picked task names) with the Android SDK action, provisioning **platform 37 and build-tools 37**. Read raw Gradle output, never output filtered through a wrapper that strips `e:` lines.
+
+- [ ] **Step 2b (added 2026-09-18, a gap Task 3 found):** An **Android instrumentation test for `AndroidSecrets`** — write, read back, clear, and confirm the entry is gone rather than blanked. The design asks for exactly this round trip and no task scheduled it, so `EncryptedSharedPreferences` has never executed. Run it on an emulator in CI. If the emulator proves impractical, say so and leave the test in the repo marked as requiring a device, rather than deleting it.
 - [ ] **Step 3:** `README.md`: what the app is, how to pair (`fleet-hub pair --name phone` on the hub, scan), what it deliberately cannot do, how to build each platform, and that iOS needs a Mac. Copy the design doc into `docs/`.
 - [ ] **Step 4:** Verify everything once more, then commit — `docs: how to build and pair`. Do NOT create the GitHub repository or push; the controller does that.
 
 ---
 
 ## Self-review
+
+> **Amended 2026-09-18, after Task 3.** `Secrets` is a plain interface, not the
+> `expect class` this plan sketched. An `expect class` forces one constructor
+> signature on both actuals, and Android needs a `Context` while iOS needs none;
+> the workaround would be a ContentProvider-installed global context holder, which
+> is hidden global state bought for a keyword. The camera remains an expect/actual
+> pair, so the design's "secure storage and the camera are the only expect/actual
+> pairs" sentence should read "the camera is the only one".
 
 **Spec coverage.** Shared Compose UI → Tasks 5–7. Pairing by scan → Tasks 3 and 6. Fleet list → Task 5. Conversation and prompts → Task 5. Live updates → Task 4. Secure storage → Task 3. The refusal and failure paths → Task 2's error mapping, exercised in Tasks 4–6. iOS configured but unbuilt → Tasks 1 and 8, stated plainly.
 
