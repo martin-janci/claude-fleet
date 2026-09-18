@@ -5,9 +5,10 @@
 //! code only means something inside the process that will redeem it (the
 //! registry is in memory), and revoking through the live server is what makes
 //! the change visible on the very next request. So each command reads the
-//! master token and the port out of the data dir and then calls the hub's own
-//! `/mcp` with them — `pair_client`, `list_clients`, `revoke_client` — instead
-//! of opening a second write path into the store.
+//! master token out of the data dir, resolves the port the daemon listens on
+//! (flag > env > stored setting > default, as `serve` and `healthcheck` do),
+//! and then calls the hub's own `/mcp` — `pair_client`, `list_clients`,
+//! `revoke_client` — instead of opening a second write path into the store.
 //!
 //! The request is written by hand over a `TcpStream`, the way `serve.rs`'s
 //! health probe is: the only endpoint these commands ever talk to is
@@ -42,8 +43,18 @@ struct HubConn {
     token: String,
 }
 
-/// Read the master token and port out of the data dir. Never creates a data
-/// dir or a database: a token minted into a fresh one is not this hub's.
+/// Read the master token out of the data dir and work out which port the
+/// daemon is listening on. Never creates a data dir or a database: a token
+/// minted into a fresh one is not this hub's.
+///
+/// The port follows the same precedence as everywhere else in this binary —
+/// **flag > `FLEET_HUB_PORT` > the stored `mcp.port` > the default** — which
+/// is what makes the `--port` that `docs/hub.md` documents for these three
+/// commands actually work. Reading `mcp.port` alone looked right only because
+/// the stored value usually IS the one `serve` runs with; it is not when the
+/// daemon was started with a flag or an env value that was never persisted
+/// (`healthcheck` resolves its port the same way, minus the store, which it
+/// must not open).
 ///
 /// The database is opened **read-only and unmigrated**
 /// ([`Store::open_read_only`]). The daemon is running and holds this file; a
@@ -58,10 +69,22 @@ fn hub_conn(opts: &HubOptions, env: &HashMap<String, String>) -> Result<HubConn,
     let token = cfg
         .token
         .ok_or("this hub has no master token yet; run fleet-hub init first")?;
+    // `cfg.port` has already applied the default for a missing / unparseable
+    // stored value, so it is the last resort here rather than a fourth level.
+    let port = match crate::config::pick(
+        "--port",
+        opts.port.map(|p| p.to_string()),
+        env,
+        "FLEET_HUB_PORT",
+        None,
+    )? {
+        Some(p) => p.parse::<u16>().map_err(|e| format!("port '{p}': {e}"))?,
+        None => cfg.port,
+    };
     // Loopback, like `healthcheck`: the CLI runs next to the daemon, and the
     // master token must not travel over anything but the loopback interface.
     Ok(HubConn {
-        addr: SocketAddr::from(([127, 0, 0, 1], cfg.port)),
+        addr: SocketAddr::from(([127, 0, 0, 1], port)),
         token,
     })
 }
@@ -394,6 +417,83 @@ pub async fn client_revoke(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A data dir holding a migrated `state.db` with a master token and a
+    /// stored `mcp.port`, the way `fleet-hub init` leaves one. The `TempDir`
+    /// is returned because it must outlive the calls that read it.
+    fn data_dir_with_port(stored: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let store = fleet_core::store::Store::open_with_bus(
+            &dir.path().join("state.db"),
+            std::sync::Arc::new(fleet_core::events::NoopEventBus),
+        )
+        .unwrap();
+        store
+            .set_setting(fleet_core::mcp::SETTING_TOKEN, &"a".repeat(64))
+            .unwrap();
+        store
+            .set_setting(fleet_core::mcp::SETTING_PORT, stored)
+            .unwrap();
+        dir
+    }
+
+    fn opts_for(dir: &tempfile::TempDir, port: Option<u16>) -> HubOptions {
+        HubOptions {
+            data_dir: Some(dir.path().to_path_buf()),
+            port,
+            ..Default::default()
+        }
+    }
+
+    /// `docs/hub.md` tells the operator to point `pair` / `client list` /
+    /// `client revoke` at "the same data dir and port it runs with
+    /// (`--data-dir`, `--port`, or the `FLEET_HUB_*` env)". So the port is
+    /// resolved the way `healthcheck` resolves it — flag > env > the stored
+    /// `mcp.port` > default — and not read out of the store alone, which
+    /// worked only while the stored value happened to be the right one.
+    #[test]
+    fn the_port_flag_and_env_beat_the_stored_setting() {
+        let dir = data_dir_with_port("4180");
+        let no_env = HashMap::new();
+
+        // Nothing given: the stored value, as before.
+        let conn = hub_conn(&opts_for(&dir, None), &no_env).expect("stored port");
+        assert_eq!(conn.addr.port(), 4180);
+        assert_eq!(conn.addr.ip(), std::net::IpAddr::from([127, 0, 0, 1]));
+
+        // The flag wins over a DIFFERENT stored value.
+        let conn = hub_conn(&opts_for(&dir, Some(4999)), &no_env).expect("--port");
+        assert_eq!(conn.addr.port(), 4999, "--port must beat the stored 4180");
+
+        // The env wins over the store, and the flag over the env.
+        let env: HashMap<String, String> =
+            [("FLEET_HUB_PORT".to_string(), "4998".to_string())].into();
+        assert_eq!(
+            hub_conn(&opts_for(&dir, None), &env)
+                .expect("env")
+                .addr
+                .port(),
+            4998
+        );
+        assert_eq!(
+            hub_conn(&opts_for(&dir, Some(4999)), &env)
+                .expect("--port over env")
+                .addr
+                .port(),
+            4999
+        );
+
+        // An unparseable env value is an error, not a silent fallback.
+        let bad: HashMap<String, String> =
+            [("FLEET_HUB_PORT".to_string(), "not-a-port".to_string())].into();
+        // (`expect_err` would need `Debug` on `HubConn`, which carries the
+        // master token — it deliberately has none.)
+        let e = match hub_conn(&opts_for(&dir, None), &bad) {
+            Err(e) => e,
+            Ok(_) => panic!("an unparseable FLEET_HUB_PORT must be refused"),
+        };
+        assert!(e.contains("not-a-port"), "{e}");
+    }
 
     /// One `tools/call` answer as the hub really frames it: SSE, so the JSON
     /// is on a `data:` line rather than being the whole body.

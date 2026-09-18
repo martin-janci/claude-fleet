@@ -159,7 +159,7 @@ pub fn default_data_dir() -> PathBuf {
 /// (`--bind ""`) is an error naming `option`, not a silent fall-through to the
 /// env or the stored value. An empty env value or setting still counts as
 /// unset: `persist` writes `""` for "none given".
-fn pick(
+pub(crate) fn pick(
     option: &str,
     flag: Option<String>,
     env: &HashMap<String, String>,
