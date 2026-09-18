@@ -95,7 +95,7 @@ impl Store {
         emit: fn(&dyn EventBus, &HostRow),
     ) -> Result<(), rusqlite::Error> {
         if let Some(row) = fetch_host(&self.conn, alias)? {
-            emit(self.bus.as_ref(), &row);
+            emit(&self.bus, &row);
         }
         Ok(())
     }

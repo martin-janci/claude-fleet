@@ -272,8 +272,9 @@ impl Store {
         Ok(())
     }
 
-    /// Count one compaction and mark the context stale. `false` when a
-    /// compaction was already recorded within [`COMPACT_DEDUPE_SECS`].
+    /// Count one compaction and, when it is the current conversation, mark
+    /// the context stale. `false` when a compaction was already recorded
+    /// within [`COMPACT_DEDUPE_SECS`].
     pub fn conversation_record_compaction(
         &self,
         session_id: i64,
@@ -286,8 +287,17 @@ impl Store {
                AND (last_compact_at IS NULL OR last_compact_at < ?3 - ?4)",
             rusqlite::params![session_id, claude_session_id, now, COMPACT_DEDUPE_SECS],
         )?;
+        // A late signal for an ended conversation must not stale the size of
+        // the one that replaced it.
         if n > 0 {
-            self.mark_context_stale(session_id)?;
+            let stale = self.conn.execute(
+                "UPDATE sessions SET context_stale = 1 \
+                 WHERE id = ?1 AND claude_session_id = ?2",
+                rusqlite::params![session_id, claude_session_id],
+            )?;
+            if stale > 0 {
+                self.emit_session(session_id)?;
+            }
         }
         Ok(n > 0)
     }
@@ -463,6 +473,32 @@ mod tests {
         assert!(s.conversation_record_compaction(id, A).unwrap());
         assert!(!s.conversation_record_compaction(id, A).unwrap());
         assert_eq!(s.list_conversations(id, 1).unwrap()[0].compactions, 1);
+    }
+
+    #[test]
+    fn late_compaction_of_an_ended_conversation_leaves_the_current_context_fresh() {
+        let (s, _) = store_with_recorder();
+        let id = session(&s);
+        s.rebind_conversation(id, A, StartSource::Fleet, None, None)
+            .unwrap();
+        s.rebind_conversation(id, B, StartSource::Clear, None, None)
+            .unwrap();
+        s.set_context(id, B, 10_000, 200_000, "transcript", None)
+            .unwrap();
+        assert!(s.conversation_record_compaction(id, A).unwrap());
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert!(
+            !row.context.context_stale,
+            "A is not current; B's size stands"
+        );
+        assert!(s.conversation_record_compaction(id, B).unwrap());
+        assert!(
+            s.get_session_by_id(id)
+                .unwrap()
+                .unwrap()
+                .context
+                .context_stale
+        );
     }
 
     #[test]

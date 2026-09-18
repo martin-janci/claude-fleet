@@ -33,13 +33,63 @@ pub use rows::*;
 
 pub struct Store {
     conn: Connection,
-    bus: Arc<dyn EventBus>,
+    bus: StoreBus,
+}
+
+/// The store's handle on its [`EventBus`]. Normally a pass-through; inside
+/// [`Store::atomically`] it holds every emit and releases them only after the
+/// transaction commits (dropped on rollback), so no event announces a write
+/// that never persisted.
+struct StoreBus {
+    inner: Arc<dyn EventBus>,
+    held: std::sync::Mutex<Option<Vec<RowChange>>>,
+}
+
+impl StoreBus {
+    fn new(inner: Arc<dyn EventBus>) -> Self {
+        Self {
+            inner,
+            held: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Start holding emits. Returns false when already holding (nested).
+    fn hold(&self) -> bool {
+        let mut held = self.held.lock().unwrap_or_else(|p| p.into_inner());
+        if held.is_some() {
+            return false;
+        }
+        *held = Some(Vec::new());
+        true
+    }
+
+    /// Stop holding; the held events, in emit order.
+    fn release(&self) -> Vec<RowChange> {
+        self.held
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+            .unwrap_or_default()
+    }
+}
+
+impl EventBus for StoreBus {
+    fn emit(&self, e: &RowChange) {
+        if let Some(held) = self.held.lock().unwrap_or_else(|p| p.into_inner()).as_mut() {
+            held.push(e.clone());
+            return;
+        }
+        self.inner.emit(e);
+    }
 }
 
 impl Store {
     pub fn open_with_bus(path: &std::path::Path, bus: Arc<dyn EventBus>) -> Result<Self> {
         let conn = Connection::open(path)?;
-        let store = Self { conn, bus };
+        let store = Self {
+            conn,
+            bus: StoreBus::new(bus),
+        };
         store.migrate()?;
         Ok(store)
     }
@@ -72,7 +122,7 @@ impl Store {
         )?;
         Ok(Self {
             conn,
-            bus: Arc::new(crate::events::NoopEventBus),
+            bus: StoreBus::new(Arc::new(crate::events::NoopEventBus)),
         })
     }
 
@@ -81,7 +131,7 @@ impl Store {
         let conn = Connection::open_in_memory()?;
         let store = Self {
             conn,
-            bus: Arc::new(NoopEventBus),
+            bus: StoreBus::new(Arc::new(NoopEventBus)),
         };
         store.migrate()?;
         Ok(store)
@@ -90,7 +140,10 @@ impl Store {
     #[cfg(test)]
     pub fn open_with_bus_in_memory(bus: Arc<dyn EventBus>) -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        let store = Self { conn, bus };
+        let store = Self {
+            conn,
+            bus: StoreBus::new(bus),
+        };
         store.migrate()?;
         Ok(store)
     }
@@ -174,17 +227,35 @@ impl Store {
     /// (`insert_message`, `insert_session_event`, …) atomically without
     /// `_in_tx` twins. Must not be nested, and `f` must not call a helper
     /// that opens its own transaction (`BEGIN` inside `BEGIN` errors). Bus
-    /// emission is NOT deferred: `insert_session_event` pushes `session:event`
-    /// as it runs, so keep such writes last in `f`, where only a failed
-    /// commit can still undo them.
+    /// events the helpers emit (`session:event`, …) are held and flushed only
+    /// after COMMIT; a rollback drops them.
     pub fn atomically<F, R>(&self, f: F) -> Result<R, crate::ipc_error::IpcError>
     where
         F: FnOnce(&Store) -> Result<R, crate::ipc_error::IpcError>,
     {
+        /// Stops holding even when `f` panics, so later emits are not
+        /// swallowed; the held events are dropped with the rollback.
+        struct Unhold<'a>(&'a StoreBus);
+        impl Drop for Unhold<'_> {
+            fn drop(&mut self) {
+                self.0.release();
+            }
+        }
         let tx = self.conn.unchecked_transaction()?;
-        let r = f(self)?;
-        tx.commit()?;
-        Ok(r)
+        let unhold = self.bus.hold().then(|| Unhold(&self.bus));
+        let result = f(self).and_then(|r| {
+            tx.commit()?;
+            Ok(r)
+        });
+        if unhold.is_some() {
+            let held = self.bus.release();
+            if result.is_ok() {
+                for e in &held {
+                    self.bus.inner.emit(e);
+                }
+            }
+        }
+        result
     }
 }
 

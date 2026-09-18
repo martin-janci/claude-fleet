@@ -549,6 +549,41 @@ mod tests {
         assert_eq!(s.list_inbox(b, false, 10).unwrap()[0].id, id);
     }
 
+    /// Timeline inserts push `session:event`; inside `atomically` those are
+    /// held until COMMIT, so a rolled-back write announces nothing and a
+    /// committed one announces everything, in order.
+    #[test]
+    fn atomically_emits_only_after_commit() {
+        let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+        let a = seed(&s, "alpha");
+        let b = seed(&s, "beta");
+        let _ = bus.take();
+        s.atomically(|s| {
+            s.insert_session_event(a, "message_sent", Some("half"))?;
+            assert!(bus.names().is_empty(), "held until commit");
+            Err::<(), _>(IpcError::new("E_TEST", "boom"))
+        })
+        .unwrap_err();
+        assert!(bus.take().is_empty(), "a rollback emits nothing");
+
+        s.atomically(|s| {
+            s.insert_session_event(a, "message_sent", None)?;
+            s.insert_session_event(b, "message_received", None)
+        })
+        .unwrap();
+        assert_eq!(
+            bus.take(),
+            vec![
+                format!("session:event:{a}:message_sent"),
+                format!("session:event:{b}:message_received"),
+            ]
+        );
+        // Outside `atomically` emits go straight through again.
+        s.insert_session_event(a, "killed", None).unwrap();
+        assert_eq!(bus.names(), vec!["session:event"]);
+    }
+
     // ---- peer_status ----
 
     #[test]
