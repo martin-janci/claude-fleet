@@ -111,6 +111,19 @@ pub async fn provision_hook(
     let existing = read_host_file(ssh, host, SETTINGS_JSON).await?;
     // Errors (malformed JSON → E_PROVISION) fire BEFORE any write.
     let merged = super::hooks_install::merge_hook_into_settings_json(&existing, hook_url, token)?;
+    // The SessionStart command hook reads its bearer token from this file
+    // (`curl -H @file`) rather than argv or the command string (SEC-3).
+    // Written BEFORE settings.json: a hook installed ahead of its headers
+    // file would post without a token until the next provision.
+    let headers_path = format!("{CLAUDE_DIR}/{}", super::hooks_install::HOOK_HEADERS_FILE);
+    write_host_file_secret(
+        ssh,
+        host,
+        CLAUDE_DIR,
+        &headers_path,
+        &super::hooks_install::hook_headers_content(token),
+    )
+    .await?;
     if !existing.trim().is_empty() {
         // The file carries the user's permissions/env/hooks: back it up
         // first, like ~/.claude.json.
@@ -123,18 +136,7 @@ pub async fn provision_hook(
         )
         .await?;
     }
-    write_host_file_secret(ssh, host, CLAUDE_DIR, SETTINGS_JSON, &merged).await?;
-    // The SessionStart command hook reads its bearer token from this file
-    // (`curl -H @file`) rather than argv or the command string (SEC-3).
-    let headers_path = format!("{CLAUDE_DIR}/{}", super::hooks_install::HOOK_HEADERS_FILE);
-    write_host_file_secret(
-        ssh,
-        host,
-        CLAUDE_DIR,
-        &headers_path,
-        &super::hooks_install::hook_headers_content(token),
-    )
-    .await
+    write_host_file_secret(ssh, host, CLAUDE_DIR, SETTINGS_JSON, &merged).await
 }
 
 /// The token a host should be provisioned with: its existing row unless

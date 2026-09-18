@@ -133,16 +133,47 @@ on app start.
 The master token caller has no host; it resolves by step 2 only.
 
 **Rebind.** When the resolved row's `claude_session_id` differs from
-`payload.session_id` and the event is `SessionStart` or `UserPromptSubmit`, the
-handler runs `rebind_conversation(row, new_id, source, transcript_path, model)`
-(1.3) before applying the event. `UserPromptSubmit` rebinds with
-`source = 'unknown'`, which covers CLIs or hosts where the SessionStart command
-hook is missing. Every other event carrying a non-current id updates only the
-conversation it names and never rebinds (see *Edge cases*: `/clear` mid-turn).
+`payload.session_id` and the event is `SessionStart` (not `compact`) or
+`UserPromptSubmit`, the handler runs `rebind_conversation(row, new_id, source,
+transcript_path, model)` (1.3) before applying the event — subject to the
+eligibility rule below.
+
+**Rebind eligibility.** Every `claude` started in a pane inherits
+`$TMUX_PANE`, a Bash-tool `claude -p` included, so a pane match (step 1) alone
+does not prove the payload's conversation replaced the row's. A row found by
+its pane moves to a new id only when one of these holds:
+
+- (a) the row's `claude_session_id` is NULL;
+- (b) the row is awaiting a rebind within the TTL (`SessionEnd(clear|resume)`
+  just fired for its current conversation);
+- (c) the row's current conversation has ended (`ended_at` set), or its
+  `claude_status` is `stopped`;
+- (d) the event is `SessionStart` with source `clear` or `resume` (only the
+  interactive session emits those; a nested one-shot starts with `startup`).
+
+Otherwise a pane-resolved event carrying a non-current id is the row's own
+earlier conversation when the row has a conversation by that id (it updates
+only that conversation — see *Edge cases*: `/clear` mid-turn), and else a
+foreign `claude` sharing the pane: a no-op with no status, turn, timeline,
+conversation or task effect. Step 3 matches only rows awaiting a rebind, so it
+is always eligible; step 2 matches only the current id.
+
+**UserPromptSubmit rebind source.** The SessionStart command hook is async and
+may land after the first `UserPromptSubmit` (a fleet `/clear` followed quickly
+by `send_prompt`). A `UserPromptSubmit` rebind onto a row awaiting one takes its
+source from the just-closed conversation's `end_reason` (`clear` → `clear`,
+`resume` → `resume`); otherwise `source = 'unknown'`, which covers CLIs or
+hosts where the SessionStart command hook is missing. It keeps `last_prompt` /
+`current_activity` (the turn is starting) while a resetting source still zeroes
+the context.
 
 `SessionStart` with the *current* id (a fleet-created session starting with its
-own `--session-id`) does not rebind; it ensures the conversation is open and
-applies the source's resets (1.3 steps 3–4).
+own `--session-id`, or one that lost the race to its `UserPromptSubmit`) does
+not rebind; it ensures the conversation is open, upgrades a `start_source` of
+`unknown` to its own source, and applies the source's resets (1.3 steps 3–4) —
+unless a turn has already begun on that conversation (`turns > 0` or
+`first_prompt` set, both written only by the conversation's own hooks), in
+which case it resets nothing.
 
 ### 1.3 Conversation model
 
@@ -487,9 +518,8 @@ the timeline after each step. Repeat with two sessions in the same cwd.
 
 ## Rollout
 
-1. Ship phase 1; the hub picks up the new hooks on the next `provision_hosts`
-   (Settings shows hooks as outdated until then). The local host auto-installs
-   on app start as today.
+1. Ship phase 1; the hub picks up the new hooks on the next `provision_hosts`.
+   The local host auto-installs on app start as today.
 2. Phases 2 and 3 are frontend plus the parser; they degrade gracefully when a
    hub is on phase 1 without the parser changes (unknown item kinds render as
    plain text).

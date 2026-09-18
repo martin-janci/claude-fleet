@@ -616,6 +616,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn session_start_command_is_valid_posix_sh() {
         let cmd = session_start_command("http://127.0.0.1:4180/hook");
         // -H @file is curl's header-file syntax: '@' immediately before the

@@ -463,7 +463,7 @@ command POSTs the same JSON body to `/hook` with the bearer header supplied
 via `curl -H @"$HOME/.claude/fleet-hook.headers"` (a single `Authorization:
 Bearer <host-token>` line, mode `0600`, written by the same provisioning /
 local-install code path as `settings.json`) so the token never appears in the
-command string itself, plus `-H "X-Fleet-Pane: $TMUX_PANE"` so `resolve_hook_row`
+command string itself, plus `-H "X-Fleet-Pane: ${TMUX_PANE:-}"` so `resolve_hook_row`
 can match the row by pane directly. Hosts pick up the `SessionStart` /
 `PreCompact` / `PostCompact` entries only once re-provisioned —
 `provision_hosts` refreshes them on its next run; the local host installs them
