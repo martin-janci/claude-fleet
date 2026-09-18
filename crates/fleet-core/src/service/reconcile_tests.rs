@@ -134,7 +134,7 @@ impl Fleet {
     fn pane(&self, host: &str, name: &str, tail: &str) {
         self.fake.on_host(
             host,
-            Match::script_contains(&format!("tmux capture-pane -t '{name}'")),
+            Match::script_contains(&format!("tmux capture-pane -t '={name}:'")),
             Reply::ok(tail),
         );
     }
@@ -399,7 +399,7 @@ async fn failed_pane_capture_preserves_status_and_stuck_flag() {
 
     f.fake.on_host(
         "alpha",
-        Match::script_contains("tmux capture-pane -t 'work'"),
+        Match::script_contains("tmux capture-pane -t '=work:'"),
         Reply::fail(1, "can't find pane: work"),
     );
     next_unix_second().await;

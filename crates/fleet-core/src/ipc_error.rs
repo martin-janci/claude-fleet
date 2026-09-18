@@ -65,6 +65,9 @@ pub mod codes {
     pub const E_PTY: &str = "E_PTY";
     /// The PTY was closed under the caller.
     pub const E_PTY_CLOSED: &str = "E_PTY_CLOSED";
+    /// The PTY is not accepting input: the writer thread's bounded queue is
+    /// full because the attached process stopped reading.
+    pub const E_PTY_BUSY: &str = "E_PTY_BUSY";
     /// A local `bash` helper failed to spawn.
     pub const E_SHELL: &str = "E_SHELL";
     /// A `git` command failed.

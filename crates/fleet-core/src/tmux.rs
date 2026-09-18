@@ -7,6 +7,24 @@ use std::path::PathBuf;
 use crate::ssh::{SshClient, SshExec};
 use std::sync::Arc;
 
+/// tmux target for an EXACT session name. A bare `-t NAME` is a *lookup*:
+/// tmux tries an exact match, then a unique PREFIX, then an fnmatch pattern —
+/// so an operation aimed at a dead `dev-foo` silently lands on
+/// `dev-foo--feat-x`. The `=` prefix disables both fallbacks (verified
+/// against tmux 3.6a: `has-session -t api` succeeds against `api-review`,
+/// `has-session -t '=api'` fails with "can't find session").
+pub fn exact_session(name: &str) -> String {
+    format!("={name}")
+}
+
+/// The same, for commands taking a *pane* target (`capture-pane`,
+/// `respawn-pane`). tmux only accepts `=` in the session part of a pane
+/// target, so the trailing `:` (current window, active pane) is required:
+/// `-t '=NAME'` fails there with "can't find pane" (tmux 3.6a).
+pub fn exact_pane(name: &str) -> String {
+    format!("={name}:")
+}
+
 /// Backend-agnostic tmux operations. Implementations differ only in how
 /// the `tmux` binary is invoked: locally or wrapped in `ssh <host>`.
 #[async_trait]
@@ -157,7 +175,7 @@ impl TmuxExec for LocalTmux {
     async fn capture_pane(&self, name: &str) -> Result<String, IpcError> {
         local_allowed()?;
         let output = tokio::process::Command::new("tmux")
-            .args(["capture-pane", "-t", name, "-p"])
+            .args(["capture-pane", "-t", &exact_pane(name), "-p"])
             .output()
             .await
             .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn tmux failed: {e}")))?;
@@ -177,7 +195,7 @@ impl TmuxExec for LocalTmux {
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(30),
             tokio::process::Command::new("tmux")
-                .args(["capture-pane", "-t", name, "-S", &start, "-p"])
+                .args(["capture-pane", "-t", &exact_pane(name), "-S", &start, "-p"])
                 .output(),
         )
         .await
@@ -310,7 +328,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
     }
 
     async fn kill_session(&self, name: &str) -> Result<(), IpcError> {
-        let script = format!("tmux kill-session -t {}", quote(name));
+        let script = format!("tmux kill-session -t {}", quote(&exact_session(name)));
         let output = self.remote_bash(&script).await?;
         if output.status.success() {
             Ok(())
@@ -339,7 +357,11 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
         if trimmed == old {
             return Ok(());
         }
-        let script = format!("tmux rename-session -t {} {}", quote(old), quote(trimmed));
+        let script = format!(
+            "tmux rename-session -t {} {}",
+            quote(&exact_session(old)),
+            quote(trimmed)
+        );
         let output = self.remote_bash(&script).await?;
         if output.status.success() {
             Ok(())
@@ -353,8 +375,8 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
 
     async fn restart_session(&self, name: &str, pane_cmd: &str) -> Result<(), IpcError> {
         let script = format!(
-            "tmux respawn-pane -k -t {}: {}",
-            quote(name),
+            "tmux respawn-pane -k -t {} {}",
+            quote(&exact_pane(name)),
             quote(pane_cmd)
         );
         let output = self.remote_bash(&script).await?;
@@ -387,7 +409,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
     }
 
     async fn capture_pane(&self, name: &str) -> Result<String, IpcError> {
-        let script = format!("tmux capture-pane -t {} -p", quote(name));
+        let script = format!("tmux capture-pane -t {} -p", quote(&exact_pane(name)));
         let output = self.remote_bash(&script).await?;
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -400,7 +422,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
         let start = scrollback_start(lines);
         let script = format!(
             "tmux capture-pane -t {} -S {} -p",
-            quote(name),
+            quote(&exact_pane(name)),
             quote(&start),
         );
         let output = self.remote_bash(&script).await?;
@@ -665,7 +687,7 @@ pub async fn rename_session(old: &str, new: &str) -> Result<(), IpcError> {
         return Ok(()); // no-op
     }
     let output = tokio::process::Command::new("tmux")
-        .args(["rename-session", "-t", old, trimmed])
+        .args(["rename-session", "-t", &exact_session(old), trimmed])
         .output()
         .await
         .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn tmux failed: {e}")))?;
@@ -683,7 +705,7 @@ pub async fn rename_session(old: &str, new: &str) -> Result<(), IpcError> {
 /// or already dropped to shell.
 pub async fn restart_session(name: &str, pane_cmd: &str) -> Result<(), IpcError> {
     let output = tokio::process::Command::new("tmux")
-        .args(["respawn-pane", "-k", "-t", &format!("{name}:"), pane_cmd])
+        .args(["respawn-pane", "-k", "-t", &exact_pane(name), pane_cmd])
         .output()
         .await
         .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn tmux failed: {e}")))?;
@@ -698,9 +720,9 @@ pub async fn restart_session(name: &str, pane_cmd: &str) -> Result<(), IpcError>
 /// The remote form of [`respawn_pane_in`]: one shell word per argument.
 pub(crate) fn respawn_pane_in_script(name: &str, cwd: &std::path::Path, pane_cmd: &str) -> String {
     format!(
-        "tmux respawn-pane -k -c {} -t {}: {}",
+        "tmux respawn-pane -k -c {} -t {} {}",
         quote(&cwd.to_string_lossy()),
-        quote(name),
+        quote(&exact_pane(name)),
         quote(pane_cmd)
     )
 }
@@ -720,7 +742,7 @@ pub async fn respawn_pane_in(
             "-c",
             &cwd.to_string_lossy(),
             "-t",
-            &format!("{name}:"),
+            &exact_pane(name),
             pane_cmd,
         ])
         .output()
@@ -736,7 +758,7 @@ pub async fn respawn_pane_in(
 
 pub async fn kill_session(name: &str) -> Result<(), IpcError> {
     let output = tokio::process::Command::new("tmux")
-        .args(["kill-session", "-t", name])
+        .args(["kill-session", "-t", &exact_session(name)])
         .output()
         .await
         .map_err(|e| IpcError::new(codes::E_TMUX, format!("spawn tmux failed: {e}")))?;
@@ -924,8 +946,17 @@ mod tests {
         );
         assert_eq!(
             s,
-            "tmux respawn-pane -k -c '/re po/it'\\''s' -t 'dev-x': 'cl; exec $SHELL'"
+            "tmux respawn-pane -k -c '/re po/it'\\''s' -t '=dev-x:' 'cl; exec $SHELL'"
         );
+    }
+
+    #[test]
+    fn exact_targets_carry_the_no_lookup_prefix() {
+        // Verified against tmux 3.6a: a SESSION target takes `=NAME`, a PANE
+        // target needs the trailing `:` — `-t '=NAME'` fails there with
+        // "can't find pane".
+        assert_eq!(exact_session("dev-foo"), "=dev-foo");
+        assert_eq!(exact_pane("dev-foo"), "=dev-foo:");
     }
 
     #[test]

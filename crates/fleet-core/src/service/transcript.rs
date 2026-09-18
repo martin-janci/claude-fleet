@@ -85,6 +85,8 @@ pub fn read_script(
     max_bytes: usize,
 ) -> String {
     let tmux_q = quote(tmux_name.unwrap_or(""));
+    // Exact pane target: a bare name would let tmux prefix-match another session.
+    let tmux_target_q = quote(&crate::tmux::exact_pane(tmux_name.unwrap_or("")));
     let stored_q = quote(stored_path.unwrap_or(""));
     let fallback_q = quote(fallback_dir.unwrap_or(""));
     let id_q = quote(claude_session_id);
@@ -97,7 +99,7 @@ if [ -n "$sp" ] && [ -f "$sp" ]; then f="$sp"; fi
 if [ -z "$f" ]; then
   cwd=''
   if [ -n {tmux_q} ]; then
-    cwd=$(tmux display-message -p -t {tmux_q} '#{{pane_current_path}}' 2>/dev/null)
+    cwd=$(tmux display-message -p -t {tmux_target_q} '#{{pane_current_path}}' 2>/dev/null)
   fi
   if [ -z "$cwd" ]; then cwd={fallback_q}; fi
   if [ -n "$cwd" ]; then
@@ -816,7 +818,7 @@ mod tests {
             "abc",
             1024,
         );
-        assert!(s.contains("tmux display-message -p -t 'dev-x'\\''; rm -rf /'"));
+        assert!(s.contains("tmux display-message -p -t '=dev-x'\\''; rm -rf /:'"));
         assert!(
             s.contains("sp='/h/.claude/projects/it'\\''s/abc.jsonl'"),
             "{s}"

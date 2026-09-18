@@ -399,10 +399,8 @@ pub fn lint(
     }
 
     match &asset.spec {
-        AssetSpec::Agent { tools, .. } => {
-            if tools.is_empty() {
-                report.warn("tools", "no tools are allowed; the agent can only think");
-            }
+        AssetSpec::Agent { tools, .. } if tools.is_empty() => {
+            report.warn("tools", "no tools are allowed; the agent can only think");
         }
         AssetSpec::Hook { action, .. } => {
             if let Some(url) = action.url.as_deref() {

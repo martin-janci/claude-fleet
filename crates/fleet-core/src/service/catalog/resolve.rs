@@ -23,6 +23,9 @@ pub struct Resolution {
     pub provenance: BTreeMap<String, Provenance>,
     /// `<kind>/<name>` → the layer that excluded it, for "why is this gone".
     pub excluded: BTreeMap<String, String>,
+    /// Whether ANY layer applied. False only on the no-layering path, which
+    /// every host without a `host_layers` row takes.
+    pub layered: bool,
 }
 
 /// Deep-merge `over` into `base`: mappings recurse, everything else replaces.
@@ -95,6 +98,7 @@ pub fn resolve(catalog: &Catalog, role_chain: &[&Layer], contexts: &[&Layer]) ->
             },
             provenance: BTreeMap::new(),
             excluded: BTreeMap::new(),
+            layered: false,
         };
     }
 
@@ -172,6 +176,7 @@ pub fn resolve(catalog: &Catalog, role_chain: &[&Layer], contexts: &[&Layer]) ->
         },
         provenance,
         excluded,
+        layered: true,
     }
 }
 
@@ -199,6 +204,23 @@ mod tests {
 
     fn lay(yaml: &str) -> Layer {
         Layer::from_yaml(yaml).unwrap()
+    }
+
+    #[test]
+    fn resolution_reports_whether_any_layer_applied() {
+        let cat = catalog(&["a"]);
+        assert!(!resolve(&cat, &[], &[]).layered);
+        let role = lay("kind: layer\nname: r\naxis: role\nmembers:\n  - skill/a\n");
+        assert!(resolve(&cat, &[&role], &[]).layered);
+        let ctx = lay("kind: layer\nname: c\naxis: context\nmembers:\n  - skill/a\n");
+        assert!(resolve(&cat, &[], &[&ctx]).layered);
+        // A role with no members restricts the host to nothing — provenance
+        // is empty, yet the host IS layered. `layered` must not be inferred
+        // from what survived resolution.
+        let empty = lay("kind: layer\nname: e\naxis: role\n");
+        let r = resolve(&cat, &[&empty], &[]);
+        assert!(r.provenance.is_empty());
+        assert!(r.layered);
     }
 
     #[test]

@@ -1147,7 +1147,8 @@ fn build_send_commands_escapes_embedded_quotes() {
 #[test]
 fn build_send_commands_quotes_session_name_with_dashes() {
     let cmds = build_send_commands("dev-with-dashes", "x", true);
-    assert!(cmds[0].contains("'dev-with-dashes'"));
+    // Quoted AND exact: a bare name would let tmux prefix-match another session.
+    assert!(cmds[0].contains("'=dev-with-dashes:'"), "got: {}", cmds[0]);
 }
 
 #[test]

@@ -214,15 +214,6 @@ pub async fn plan_sync(
                 continue;
             }
         };
-        // Whether this host has ANY layer assignment at all, before
-        // resolving it: a host with no `host_layers` row must plan a dropped
-        // `plugin_ref` exactly as it did before layers existed (`Remove`),
-        // not the "reported, not removed" `Noop` that only makes sense once
-        // a host is actually opting into layered assignment.
-        let layered = {
-            let s = lock(store)?;
-            !s.get_host_layers(&h.alias)?.is_empty()
-        };
         // Resolve the host's layers ONCE per host, before its harnesses are
         // planned. The scan below still uses the FULL catalog: inventory is
         // about the whole catalog's drift, while the PLAN is about what this
@@ -236,8 +227,15 @@ pub async fn plan_sync(
                 continue;
             }
         };
+        // A host with no `host_layers` row must plan a dropped `plugin_ref`
+        // exactly as it did before layers existed (`Remove`), not the
+        // "reported, not removed" `Noop` that only makes sense once a host
+        // opts into layers. `resolved.layered` answers that from the same
+        // read `resolve_for_host` already made — a second read would be a
+        // second failure path, and one that used to abort the whole plan
+        // instead of skipping just this host.
         let host_filter = PlanFilter {
-            layered,
+            layered: resolved.layered,
             ..filter.clone()
         };
         for harness in &scanning {
@@ -841,6 +839,112 @@ mod tests {
             rows.iter().any(|r| r.name == "s" && r.harness == "claude"),
             "{rows:?}"
         );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn plan_sync_removes_a_dropped_plugin_only_on_an_unlayered_host() {
+        // The `layered` flag must reach the planner per host: an unassigned
+        // host keeps the pre-layers `Remove` for a plugin the catalog no
+        // longer has, while a host with an assignment reports it as a `Noop`.
+        let _lock = super::super::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::write(
+            home.path().join(".claude/.fleet-assets.json"),
+            r#"{"version":1,"updated_at":0,"assets":{"plugin_ref/gone":
+                {"hash":"h","files":[],"merges":[],"synced_at":0}}}"#,
+        )
+        .unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let files = two_skills_and_a_role_layer();
+        load_catalog(
+            repo_dir.path(),
+            &files
+                .iter()
+                .map(|(a, b)| (*a, b.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        let ssh = Arc::new(SshClient::new());
+
+        let gone_op = |plan: &SyncPlan| {
+            plan.hosts
+                .iter()
+                .filter(|h| h.harness == "claude")
+                .flat_map(|h| h.actions.iter())
+                .find(|a| a.name == "gone")
+                .map(|a| a.op)
+        };
+
+        let unlayered = plan_sync(PlanArgs::default(), &store, &ssh).await.unwrap();
+        assert_eq!(gone_op(&unlayered), Some(ActionOp::Remove));
+
+        store
+            .lock()
+            .unwrap()
+            .set_host_layers("local", Some("core"), &[])
+            .unwrap();
+        let layered = plan_sync(PlanArgs::default(), &store, &ssh).await.unwrap();
+        assert_eq!(gone_op(&layered), Some(ActionOp::Noop));
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn assigning_a_layer_that_drops_an_installed_asset_plans_its_removal() {
+        // The destructive half of layering: a host that fleet already synced
+        // `skill/t` to, and whose new role no longer includes it, must plan
+        // `Remove` — through resolve → Manifest::orphans, not special code.
+        // Without the assignment, `t` is still in the effective catalog and
+        // must NOT be removed.
+        let _lock = super::super::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::write(
+            home.path().join(".claude/.fleet-assets.json"),
+            r#"{"version":1,"updated_at":0,"assets":{"skill/t":
+                {"hash":"h","files":[],"merges":[],"synced_at":0}}}"#,
+        )
+        .unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let files = two_skills_and_a_role_layer();
+        load_catalog(
+            repo_dir.path(),
+            &files
+                .iter()
+                .map(|(a, b)| (*a, b.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        let ssh = Arc::new(SshClient::new());
+
+        let t_op = |plan: &SyncPlan| {
+            plan.hosts
+                .iter()
+                .filter(|h| h.harness == "claude")
+                .flat_map(|h| h.actions.iter())
+                .find(|a| a.name == "t")
+                .map(|a| a.op)
+        };
+
+        let before = plan_sync(PlanArgs::default(), &store, &ssh).await.unwrap();
+        assert_ne!(t_op(&before), Some(ActionOp::Remove));
+
+        store
+            .lock()
+            .unwrap()
+            .set_host_layers("local", Some("core"), &[])
+            .unwrap();
+        let after = plan_sync(PlanArgs::default(), &store, &ssh).await.unwrap();
+        assert_eq!(t_op(&after), Some(ActionOp::Remove));
     }
 
     #[tokio::test]

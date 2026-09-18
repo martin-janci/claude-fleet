@@ -149,14 +149,17 @@ pub struct RealPlaybookExec {
 
 /// The exact script sent for `press_enter`. Pure so the quoting is testable.
 pub fn press_enter_script(tmux_name: &str) -> String {
-    format!("tmux send-keys -t {} Enter", quote(tmux_name))
+    format!(
+        "tmux send-keys -t {} Enter",
+        quote(&crate::tmux::exact_pane(tmux_name))
+    )
 }
 
 /// Script that prints the number of clients attached to the session.
 pub fn attached_probe_script(tmux_name: &str) -> String {
     format!(
         "tmux display -p -t {} '#{{session_attached}}'",
-        quote(tmux_name)
+        quote(&crate::tmux::exact_pane(tmux_name))
     )
 }
 
@@ -457,7 +460,7 @@ mod tests {
         assert!(pane_is_attached("can't find session: x"));
         assert_eq!(
             attached_probe_script("dev-x"),
-            "tmux display -p -t 'dev-x' '#{session_attached}'"
+            "tmux display -p -t '=dev-x:' '#{session_attached}'"
         );
     }
 
@@ -484,7 +487,7 @@ mod tests {
     fn press_enter_script_quotes_the_session_name() {
         assert_eq!(
             press_enter_script("dev-x's"),
-            "tmux send-keys -t 'dev-x'\\''s' Enter"
+            "tmux send-keys -t '=dev-x'\\''s:' Enter"
         );
     }
 
