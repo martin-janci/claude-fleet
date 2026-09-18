@@ -17,6 +17,7 @@
 
 pub mod contract;
 pub mod events;
+pub mod pairing;
 pub mod remote;
 pub mod routing;
 pub mod startup;
@@ -308,7 +309,7 @@ impl Backend {
 ///   channel (the bearer token is, and it lives in [`token_store`]).
 /// - **Correctness.** The result is concatenated with `/mcp`, so a surviving
 ///   query turned `https://hub/?token=abc` into `https://hub/?token=abc/mcp`.
-fn normalise_base_url(raw: &str) -> Result<String, String> {
+pub(crate) fn normalise_base_url(raw: &str) -> Result<String, String> {
     let mut parsed = url::Url::parse(raw).map_err(|e| e.to_string())?;
     match parsed.scheme() {
         "http" | "https" => {}

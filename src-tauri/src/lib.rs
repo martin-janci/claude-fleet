@@ -178,7 +178,13 @@ pub fn run() {
             // already governs what this process starts below, because a
             // desktop pointed at a hub must not become a second brain
             // reconciling and mutating the same fleet.
-            let backend = Backend::resolve(&store, &OsTokenStore::new(data_dir.clone()));
+            // Managed, not built and dropped: `commands::hub` writes to the
+            // same store when the user pairs or disconnects, and there must
+            // be exactly one implementation of "where the token lives".
+            let tokens: std::sync::Arc<dyn backend::TokenStore> =
+                std::sync::Arc::new(OsTokenStore::new(data_dir.clone()));
+            let backend = Backend::resolve(&store, tokens.as_ref());
+            app.manage(std::sync::Arc::clone(&tokens));
             // Two managed values, one decision. `Backend` is the resolved
             // answer (what this block branches on below); `FleetBackend` is
             // what the commands hold — the same answer plus the `HubBackend`
@@ -306,6 +312,9 @@ pub fn run() {
             commands::mcp::rotate_host_token,
             commands::mcp::mcp_confirm,
             commands::mcp::mcp_pending_confirms,
+            commands::hub::hub_status,
+            commands::hub::hub_pair,
+            commands::hub::hub_disconnect,
             commands::onboarding::check_local_prereqs,
             commands::onboarding::tunnel_status,
             commands::assets::catalog_config,

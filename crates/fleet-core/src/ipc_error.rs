@@ -189,6 +189,17 @@ pub mod codes {
     /// app shows the last snapshot and a banner; it never falls back to
     /// managing the fleet itself, which would make two brains for one fleet.
     pub const E_HUB_UNREACHABLE: &str = "E_HUB_UNREACHABLE";
+    /// Pairing: the hub URL is plain `http://` to a host that is not
+    /// loopback, so the client token this pairing is about to mint — a
+    /// credential for the whole fleet — would cross the network in the clear
+    /// on every call, forever.
+    ///
+    /// Its own code because it is the one pairing failure the user can
+    /// *decide* their way past: the message names the risk and the dialog
+    /// offers to send it anyway (the client half of the hub's own
+    /// `--allow-plaintext`). Every other pairing failure is something to fix,
+    /// not something to accept.
+    pub const E_HUB_PLAINTEXT: &str = "E_HUB_PLAINTEXT";
     /// Remote (hub-client) mode: the command only makes sense against a fleet
     /// this process owns, and no hub tool does it. Three families — things
     /// about *this machine* (the PTY, SSH tunnels, the local prerequisites

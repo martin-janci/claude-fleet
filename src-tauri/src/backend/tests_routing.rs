@@ -694,6 +694,74 @@ fn refresh_asks_whoever_owns_the_fleet_to_reconcile() {
     }
 }
 
+/// The Task 3 deferral, closed. `health_check` used to be exempt because it
+/// returned a bare `Health`; in remote mode it therefore read the local
+/// database, which a hub client never fills, and answered a **zeroed fleet**
+/// — no stuck sessions, no ghosts, nothing in the red. That is the most
+/// reassuring thing this app can say and it was saying it about a fleet it
+/// was not looking at.
+///
+/// Two halves, both asserted: the hub is asked, and the hub's answer is what
+/// comes back even with rows sitting in the local store.
+#[test]
+fn health_is_the_hubs_fleet_not_this_apps_empty_database() {
+    const HEALTH_PAYLOAD: &str = r#"{"version":"9.9.9","db_ready":true,"schema_version":41,
+        "hosts_reachable":3,"hosts_total":4,"sessions_total":12,"by_status":{"working":5},
+        "ghosts":2,"context_red":1,"stuck":3,"usage_by_host":{},"usage_by_day":[]}"#;
+    let fake = Fake::answering(HEALTH_PAYLOAD);
+    let (_dir, st) = store();
+    // A local row that must not be counted: the local store is not this
+    // window's fleet.
+    st.lock().unwrap().upsert_host("trn").unwrap();
+
+    let got = block_on(commands::health::routed::health_check(
+        &remote_backend(&fake),
+        &st,
+    ))
+    .expect("the hub's health");
+
+    let (tool, args) = fake.only_call();
+    assert_eq!(tool, "fleet_health");
+    assert_eq!(args, json!({}));
+    assert_eq!(got.stuck, 3, "a zero here is the bug this test exists for");
+    assert_eq!(got.ghosts, 2);
+    assert_eq!(got.sessions_total, 12);
+    assert_eq!(
+        got.hosts_total, 4,
+        "1 would mean the local store answered: it holds exactly one host"
+    );
+    assert_eq!(got.version, "9.9.9");
+}
+
+/// And when the hub cannot be reached, the footer must be able to say so.
+/// Before this it could not: a bare `Health` had nowhere to put a failure, so
+/// the only thing available to show was a zeroed one.
+#[test]
+fn an_unreachable_hub_makes_health_an_error_rather_than_a_zeroed_fleet() {
+    struct Dead;
+    #[async_trait::async_trait]
+    impl remote::HubTransport for Dead {
+        async fn post_json(
+            &self,
+            _url: &str,
+            _bearer: &str,
+            _body: String,
+        ) -> Result<remote::HubResponse, String> {
+            Err("connect hub.example.com:443: connection refused".into())
+        }
+    }
+    let (_dir, st) = store();
+    let backend = FleetBackend::remote_over(cfg(), Arc::new(Dead));
+    // `Health` has no `Debug` (deliberately: see service::health), so
+    // `expect_err` is not available — match instead.
+    let e = match block_on(commands::health::routed::health_check(&backend, &st)) {
+        Err(e) => e,
+        Ok(_) => panic!("a dead hub must be an error, not a healthy-looking fleet"),
+    };
+    assert_eq!(e.code, codes::E_HUB_UNREACHABLE);
+    assert!(!format!("{e:?}").contains("cl_s3cret-token"), "{e:?}");
+}
+
 // ── 2. standalone mode still runs the local service call ────────────────────
 
 /// The store-backed reads answer from the store. This is the "standalone
@@ -712,6 +780,15 @@ fn standalone_reads_still_come_from_the_local_store() {
 
     let accounts = block_on(commands::hosts::routed::list_accounts(&local, &st)).expect("accounts");
     assert!(accounts.is_empty());
+
+    // Standalone health is still this process's: its own version, its own
+    // database, and the fleet it owns.
+    let health = block_on(commands::health::routed::health_check(&local, &st)).expect("health");
+    assert_eq!(
+        health.hosts_total, 1,
+        "the seeded host must be counted here"
+    );
+    assert_eq!(health.version, fleet_core::app_version::get());
 
     let projects =
         block_on(commands::projects::routed::list_projects(&local, &st)).expect("projects");
@@ -854,11 +931,21 @@ const SAME_IN_BOTH_MODES: &[(&str, &str)] = &[
     ),
     ("mcp_pending_confirms", "the same queue, the same reason"),
     (
-        "health_check",
-        "cannot route: it returns a bare Health, not a Result, so it has \
-         nowhere to put E_HUB_UNREACHABLE, and giving it one would change \
-         what App.svelte can receive. Deferred to Task 5, which owns the \
-         frontend — see commands/health.rs",
+        "hub_status",
+        "reports which fleet THIS window is onto. Asking a hub would be \
+         circular, and Settings needs the answer most when the hub is \
+         unreachable",
+    ),
+    (
+        "hub_pair",
+        "points this process at a hub. It talks to POST /pair — the one \
+         unauthenticated route, and not an MCP tool at all",
+    ),
+    (
+        "hub_disconnect",
+        "forgets this machine's own token and setting. It revokes nothing on \
+         the hub: only an operator can, and a paired client is refused \
+         revoke_client by design",
     ),
     (
         "pty_write",
@@ -973,6 +1060,7 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/history.rs"),
     ),
     ("commands/hosts.rs", include_str!("../commands/hosts.rs")),
+    ("commands/hub.rs", include_str!("../commands/hub.rs")),
     ("commands/mcp.rs", include_str!("../commands/mcp.rs")),
     (
         "commands/move_session.rs",

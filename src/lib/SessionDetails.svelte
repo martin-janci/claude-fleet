@@ -33,6 +33,7 @@
   import Timeline from './Timeline.svelte';
   import { push, pushError } from './toasts';
   import { copyText } from './clipboard';
+  import { hubStatus, hubBlock } from './hub';
   import {
     ciStatusColor,
     ciStatusLabel,
@@ -366,6 +367,11 @@
     await tick();
     selectSession(r.value, { follow: true });
   }
+  // PARITY OR REFUSAL (see backend/routing.rs): the hub's repair tool always
+  // runs the EXPLICIT repair, and this button's automatic pre-attach check has
+  // no counterpart, so the command refuses rather than routing into something
+  // that means something else. Say so on the button.
+  const repairBlocked = $derived(hubBlock('repair_session', $hubStatus));
 </script>
 
 <article class="details" data-testid="session-details">
@@ -578,8 +584,9 @@
         <button
           class="ghost"
           onclick={onRepair}
-          disabled={repairing}
-          title="Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it"
+          disabled={repairing || repairBlocked !== null}
+          title={repairBlocked ??
+            'Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it'}
           data-testid="repair-from-details"
         >
           🩹 Repair workspace

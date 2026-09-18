@@ -7,13 +7,31 @@ vi.mock('@tauri-apps/api/core', () => ({
   }),
 }));
 
+import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import { healthCheck } from './ipc';
 
 describe('ipc.healthCheck', () => {
   it('returns version, db_ready, and schema_version from the backend', async () => {
-    const h = await healthCheck();
-    expect(h.version).toBe('0.1.0');
-    expect(h.db_ready).toBe(true);
-    expect(h.schema_version).toBe(1);
+    const r = await healthCheck();
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.version).toBe('0.1.0');
+    expect(r.value.db_ready).toBe(true);
+    expect(r.value.schema_version).toBe(1);
+  });
+
+  // Now routed to the hub's `fleet_health` tool, so it can fail. Before this
+  // it could not: a bare `Health` had nowhere to put an error, so remote mode
+  // answered from the local database and the footer showed a zeroed fleet.
+  it('carries the backend failure rather than throwing or inventing a fleet', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockRejectedValueOnce({
+      code: 'E_HUB_UNREACHABLE',
+      message: 'https://fleet.example.com did not answer: connection refused',
+    });
+    const r = await healthCheck();
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error.code).toBe('E_HUB_UNREACHABLE');
+    expect(r.error.message).toContain('connection refused');
   });
 });

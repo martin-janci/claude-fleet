@@ -15,6 +15,7 @@
   import { createDrainLoop } from './terminal_drain';
   import { createTerminalClipboard, pathsToPasteText } from './terminal_clipboard';
   import { createMouseController } from './terminal_mouse';
+  import { hubStatus, hubBlock } from './hub';
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -715,7 +716,41 @@
   }
 </script>
 
-{#if $selectedSession}
+{#if $hubStatus.remote}
+  <!-- The spec's named non-goal. The PTY attaches a local `ssh`/`tmux`
+       process; a hub client would need the hub to stream a pane, which is its
+       own design. `pty_open` is guarded on the backend, so mounting the
+       terminal here would put an error toast where a terminal should be —
+       and the honest answer is not "no", it is "from a shell, like this". -->
+  <div class="empty" data-testid="terminal-remote">
+    <svg
+      class="empty-icon"
+      viewBox="0 0 64 64"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="6" y="10" width="52" height="44" rx="5" />
+      <line x1="6" y1="21" x2="58" y2="21" />
+      <circle cx="13" cy="15.5" r="1.2" fill="currentColor" stroke="none" />
+      <circle cx="17.5" cy="15.5" r="1.2" fill="currentColor" stroke="none" />
+      <circle cx="22" cy="15.5" r="1.2" fill="currentColor" stroke="none" />
+      <polyline points="16,32 22,38 16,44" />
+      <line x1="27" y1="44" x2="42" y2="44" />
+    </svg>
+    <p class="empty-msg">The terminal is local-only.</p>
+    <p class="empty-msg remote-why">{hubBlock('terminal', $hubStatus)}</p>
+    {#if $selectedSession}
+      <pre class="attach-line" data-testid="terminal-attach-line">ssh {$selectedSession.host_alias}
+tmux attach -t {$selectedSession.tmux_name}</pre>
+    {:else}
+      <p class="empty-msg">Select a session for the command that attaches it.</p>
+    {/if}
+  </div>
+{:else if $selectedSession}
   <div class="wrap">
     {#if autoReconnecting}
       <div class="reconnect-banner" data-testid="terminal-autoreconnect-banner">
@@ -1053,6 +1088,24 @@
     margin: 0;
     font-size: 0.95rem;
     letter-spacing: 0.01em;
+  }
+  .remote-why {
+    max-width: 44rem;
+    font-size: 0.8rem;
+    opacity: 0.85;
+    text-align: center;
+  }
+  .attach-line {
+    margin: 0;
+    padding: 0.5rem 0.8rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-pane);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8rem;
+    user-select: text;
+    white-space: pre;
+    text-align: left;
   }
   .err {
     flex: 0 0 auto;

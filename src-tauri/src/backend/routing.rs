@@ -29,6 +29,27 @@
 //! machine's keys and changes a fleet the hub also manages, which is the exact
 //! double-brain failure the whole mode exists to prevent. A test enumerates
 //! the handler list and fails on any command that has no verdict.
+//!
+//! # PARITY OR REFUSAL
+//!
+//! **A mutation routes only where the desktop's arguments map one-to-one onto
+//! the tool's parameters**, checked field by field against the source. Where
+//! they do not, the command is local-only. This is a rule, not a backlog.
+//!
+//! `new_session` is why it exists. `NewSessionArgs` carries `kind`,
+//! `start_command` and `friendly_name`; `NewSessionParams` carries none of the
+//! three, and a shell session is a different tool (`new_shell_session`).
+//! Routing it would not have failed — it would have **SUCCEEDED**, created a
+//! session, and silently dropped the label the user typed. A refusal is
+//! visible; a dropped field is not. `repair_session` is the same shape: the
+//! tool always runs the EXPLICIT repair, and the desktop's automatic
+//! pre-attach check has no counterpart, so a routed call would quietly mean
+//! something else.
+//!
+//! So: do not "fix" one of these refusals by wiring a lossy mapping. If the
+//! tool grows the missing parameters, route it then — and check the rest of
+//! the struct again while you are there. The rule is also in `docs/hub.md`
+//! (*Parity or refusal*), because the refusal is user-visible.
 
 use super::remote::{HubBackend, HubTransport};
 use super::{Backend, RemoteConfig};

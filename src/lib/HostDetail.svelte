@@ -18,6 +18,7 @@
   import { hideHostWithUndo, rotateToken, setTokenMode, showHost } from './host_actions';
   import { pushError, push } from './toasts';
   import { removeHostMessage, rotateTokenMessage, type HostAttention } from './hosts_view';
+  import { hubStatus, hubBlock } from './hub';
   import AccountNickname from './AccountNickname.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import UsageBlock from './UsageBlock.svelte';
@@ -70,6 +71,13 @@
   let busy = $state(false);
 
   const isLocal = $derived(host.alias === 'local');
+
+  // Hiding, removing and re-tokening a host are fleet administration, which
+  // the hub refuses to a paired client (`enforce_admin`) and which this app
+  // guards with `E_LOCAL_ONLY` before it even asks. Disabled with the reason
+  // in the tooltip rather than left to fail at the click: the button would
+  // otherwise look like a button that works.
+  const adminBlocked = $derived(hubBlock('remove_host', $hubStatus));
 
   function sessionName(s: SessionRow): string {
     return s.friendly_name?.trim() || s.tmux_name;
@@ -212,7 +220,8 @@
       {#if token}
         <select
           value={token.mode}
-          disabled={busy}
+          disabled={busy || adminBlocked !== null}
+          title={adminBlocked ?? ''}
           aria-label="Token mode"
           data-testid="detail-token-mode"
           onchange={(e) => onTokenMode((e.currentTarget as HTMLSelectElement).value as TokenMode)}
@@ -229,8 +238,13 @@
       <span data-testid="detail-hooks" data-state={hook.state}>{hookHealthLabel(hook, now)}</span>
     </div>
     {#if token}
-      <button type="button" class="action" disabled={busy} data-testid="detail-rotate" onclick={() => (confirm = 'rotate')}
-        >Rotate token…</button
+      <button
+        type="button"
+        class="action"
+        disabled={busy || adminBlocked !== null}
+        title={adminBlocked ?? ''}
+        data-testid="detail-rotate"
+        onclick={() => (confirm = 'rotate')}>Rotate token…</button
       >
     {/if}
   </section>
@@ -242,11 +256,21 @@
       <p class="muted">The local host can't be hidden or removed.</p>
     {:else}
       <div class="actions">
-        <button type="button" class="action" disabled={busy} data-testid="detail-hide" onclick={onHideToggle}
-          >{host.hidden ? 'Show host' : 'Hide host'}</button
+        <button
+          type="button"
+          class="action"
+          disabled={busy || adminBlocked !== null}
+          title={adminBlocked ?? ''}
+          data-testid="detail-hide"
+          onclick={onHideToggle}>{host.hidden ? 'Show host' : 'Hide host'}</button
         >
-        <button type="button" class="action danger" disabled={busy} data-testid="detail-remove" onclick={() => (confirm = 'remove')}
-          >Remove host…</button
+        <button
+          type="button"
+          class="action danger"
+          disabled={busy || adminBlocked !== null}
+          title={adminBlocked ?? ''}
+          data-testid="detail-remove"
+          onclick={() => (confirm = 'remove')}>Remove host…</button
         >
       </div>
     {/if}

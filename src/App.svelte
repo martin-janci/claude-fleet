@@ -43,6 +43,7 @@
   import HintLayer from './lib/HintLayer.svelte';
   import McpConfirmDialog from './lib/McpConfirmDialog.svelte';
   import { onboardingWelcomed, onboardingDismissed } from './lib/onboarding';
+  import { hubStatus, loadHubStatus } from './lib/hub';
   import { get } from 'svelte/store';
 
   const isNumber = (v: unknown): v is number => typeof v === 'number';
@@ -136,11 +137,19 @@
   }
 
   onMount(async () => {
-    try {
-      health = await healthCheck();
-    } catch (e) {
-      healthError = String(e);
-      push({ kind: 'error', code: 'E_IPC', message: `Health check failed: ${String(e)}` });
+    // FIRST, and awaited: the rest of this function branches on it. A hub
+    // client must not poll account usage (the backend refuses it, so it would
+    // be an error toast on every launch for a panel that does not apply), and
+    // the footer names the hub it is a window onto.
+    await loadHubStatus();
+    const hr0 = await healthCheck();
+    if (hr0.ok) {
+      health = hr0.value;
+    } else {
+      // Routed to the hub's `fleet_health` in remote mode, so this is now a
+      // real, reportable failure rather than a silently zeroed fleet.
+      healthError = `${hr0.error.code}: ${hr0.error.message}`;
+      push({ kind: 'error', code: hr0.error.code, message: `Health check failed: ${hr0.error.message}` });
     }
     const [pr, sr, hr, ar] = await Promise.all([
       loadProjects(),
@@ -187,7 +196,12 @@
     void loadTasks();
     // Account usage: same reasoning — not on the critical bootstrap path,
     // loaded after the subscription so no `account_usage:updated` is missed.
-    void loadAccountUsage();
+    //
+    // Not while a hub owns the fleet: this app runs no usage poller then, so
+    // `list_account_usage` is guarded on the backend and answers
+    // `E_LOCAL_ONLY`. Calling it anyway would put an error toast on every
+    // launch about a panel that simply does not apply here.
+    if (!get(hubStatus).remote) void loadAccountUsage();
   });
 
   // Catch-up net for missed Tauri events (e.g. sleep/wake, dropped events).
@@ -659,13 +673,37 @@
 
 <footer class="status">
   {#if healthError}
-    <span class="err">ipc error: {healthError}</span>
+    <span class="err" data-testid="health-error">ipc error: {healthError}</span>
   {:else if bootstrapError}
     <span class="err" data-testid="bootstrap-error">{bootstrapError}</span>
   {:else if health}
+    <!-- In remote mode this is the HUB's version, database and schema, not
+         this app's — `health_check` routes to the hub's `fleet_health`. The
+         badge beside it is what says whose. -->
     <span>v{health.version} · db: {health.db_ready ? 'ok' : 'fail'} · schema {health.schema_version}</span>
   {:else}
     <span class="muted">connecting…</span>
+  {/if}
+  {#if $hubStatus.remote}
+    <!-- The spec's header badge. It lives in the status bar because that is
+         the one strip always on screen, and because the plaintext warning
+         has to sit beside the hub it is about. -->
+    <button
+      type="button"
+      class="hub-badge"
+      data-testid="hub-badge"
+      title="This window is a client of {$hubStatus.url}. Settings → Hub to disconnect."
+      onclick={() => settingsOpen.set(true)}
+      >hub: {$hubStatus.url}{$hubStatus.client_name ? ` (as ${$hubStatus.client_name})` : ''}</button
+    >
+    {#if $hubStatus.warning}
+      <!-- Every launch, not once in a log file: the operator opted in to
+           sending a fleet-wide credential in the clear, and a decision
+           nobody is ever reminded of stops being a decision. -->
+      <span class="err hub-warning" data-testid="hub-warning" title={$hubStatus.warning}
+        >⚠ {$hubStatus.warning}</span
+      >
+    {/if}
   {/if}
   {#if usageFooter}
     <button
@@ -700,6 +738,26 @@
     gap: 1rem;
   }
   .status .err { color: #e64a4a; }
+  .hub-badge {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0 0.4rem;
+    font: inherit;
+    color: var(--fg-muted);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 28rem;
+  }
+  .hub-badge:hover { color: var(--fg); }
+  .hub-warning {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 40vw;
+  }
   .usage-seg {
     margin-left: auto;
     background: transparent;

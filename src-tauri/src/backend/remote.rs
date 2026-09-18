@@ -995,7 +995,7 @@ impl HubTransport for TcpTransport {
 }
 
 /// Connect, write the request, read the whole answer back.
-async fn exchange(at: &Endpoint, request: &str) -> Result<String, String> {
+pub(crate) async fn exchange(at: &Endpoint, request: &str) -> Result<String, String> {
     let conn = connect(at).await?;
     speak(conn, &at.host, at.port, request).await
 }
