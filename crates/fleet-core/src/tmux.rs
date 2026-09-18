@@ -1180,12 +1180,14 @@ mod tests {
 
     #[tokio::test]
     async fn the_identity_script_runs_under_local_bash() {
-        // Real bash, real `tmux` if installed. The script's *shape*
-        // (boot=/tmuxrc=/tmuxout= lines) must hold regardless of whether
-        // tmux is on PATH or a server is running here; the *outer*
-        // classification is only guaranteed trustworthy when tmux itself
-        // resolved (the 127 case is pinned explicitly by
-        // `the_script_is_unknown_when_tmux_is_missing_from_path`).
+        // Real bash, real `tmux` if installed — CI's `ubuntu-24.04` and
+        // `macos-latest` runners have NEITHER tmux nor a server, and a
+        // `command -v tmux` pre-check is not a safe proxy for "the script's
+        // own tmux invocation will succeed": a stale wrapper/shim can
+        // resolve as a command yet still fail with exit 127 when run (this
+        // is not hypothetical — it's exactly how a botched `brew upgrade`
+        // can leave PATH). So the only trustworthy signal is the `tmuxrc=`
+        // the script itself observed, read straight from its own output.
         let out = tokio::process::Command::new("bash")
             .args(["-c", HOST_IDENTITY_SCRIPT])
             .output()
@@ -1199,17 +1201,28 @@ mod tests {
             stdout.lines().any(|l| l.starts_with("tmuxout=")),
             "{stdout}"
         );
-        let tmux_on_path = tokio::process::Command::new("bash")
-            .args(["-c", "command -v tmux"])
-            .output()
-            .await
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if tmux_on_path {
-            assert!(
-                parse_host_identity(&stdout).is_some(),
-                "tmux is on PATH, so its rc/out must classify: {stdout}"
-            );
+        match stdout.lines().find_map(|l| l.strip_prefix("tmuxrc=")) {
+            Some("127") => {
+                // tmux did not resolve (missing binary, or a wrapper that
+                // fails exactly like one) — the parser must never invent a
+                // verdict from that.
+                assert_eq!(parse_host_identity(&stdout), None, "{stdout}");
+            }
+            Some(_) => {
+                // tmux resolved and actually ran a real client against a
+                // real socket — whether that found a live server (a
+                // numeric pid) or a confirmed-dead one ("no server
+                // running", the only other trustworthy shape reachable
+                // here), the parser must produce a verdict, not `None`.
+                // (The other untrustworthy shapes — a protocol mismatch, a
+                // permission error — need a crafted string to trigger and
+                // are covered by their own dedicated parser tests instead.)
+                assert!(
+                    parse_host_identity(&stdout).is_some(),
+                    "tmux ran (rc != 127), so its output must classify: {stdout}"
+                );
+            }
+            None => panic!("script printed no tmuxrc= line: {stdout}"),
         }
     }
 
@@ -1236,6 +1249,18 @@ mod tests {
     #[tokio::test]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     async fn the_boot_id_does_not_depend_on_the_timezone() {
+        // This is a claim about the `boot=` line alone, so read it straight
+        // off the script's stdout instead of routing through
+        // `parse_host_identity`: the parser's outer `None` legitimately
+        // depends on whether tmux is installed (CI's `ubuntu-24.04` and
+        // `macos-latest` runners have neither tmux nor a server), which has
+        // nothing to do with the boot id and must not make this test flaky.
+        fn boot_id(stdout: &str) -> Option<String> {
+            stdout.lines().find_map(|l| {
+                let v = l.strip_prefix("boot=")?.trim();
+                (!v.is_empty()).then(|| v.to_string())
+            })
+        }
         let run = |tz: &'static str| async move {
             let out = tokio::process::Command::new("bash")
                 .args(["-c", HOST_IDENTITY_SCRIPT])
@@ -1243,9 +1268,7 @@ mod tests {
                 .output()
                 .await
                 .unwrap();
-            parse_host_identity(&String::from_utf8_lossy(&out.stdout))
-                .unwrap()
-                .boot_id
+            boot_id(&String::from_utf8_lossy(&out.stdout))
         };
         let utc = run("UTC").await;
         assert!(utc.is_some(), "boot id must be readable on this OS");
