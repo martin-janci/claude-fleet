@@ -32,6 +32,9 @@ exec cat
 EOS
 
 tmux -L "$sock" -f /dev/null new-session -d -s fx -x 80 -y 24 "SOCK=$sock bash $work/content.sh"
+# No status line: it carries the recording machine's hostname and the wall
+# clock, so every regeneration would diff even when no glyph output changed.
+tmux -L "$sock" set -g status off
 tmux -L "$sock" set-hook -g client-attached "run-shell 'tmux -L $sock wait-for -S attached'"
 # A FIFO opened read-write never reaches EOF, so `script` does not forward an
 # end-of-input byte into the pane.

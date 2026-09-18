@@ -997,7 +997,9 @@
   const selRects = $derived.by(() => {
     void renderVersion;
     if (!selAnchor || !selFocus || cellWidth <= 0 || cellHeight <= 0) return [];
-    return selectionRects(selAnchor, selFocus, lastCols, cellWidth, cellHeight, 4);
+    // Pass the live cells: snapping to whole glyphs has to use the grid as it
+    // is now, or a redraw under the selection leaves highlight and copy apart.
+    return selectionRects(selAnchor, selFocus, lastCols, cellWidth, cellHeight, 4, screen?.cells);
   });
 
   function runStyle(run: Run): string {

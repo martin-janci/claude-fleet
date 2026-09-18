@@ -19,7 +19,7 @@
  * cursor exactly as tmux 3.6a joins them (see `Screen.combine`).
  */
 
-import { wcwidth } from './wcwidth';
+import { wcwidth, firstCharWidth } from './wcwidth';
 
 export interface Cell {
   /** One grapheme: a base code point plus whatever tmux joined onto it
@@ -585,6 +585,13 @@ export class Screen {
    *  it keeps with one. Once the row is covered through its last column it
    *  has been repainted whole: the row ends here, unless the deferred wrap
    *  fires on the next glyph (see `wrapped`). */
+  private endCoverage(): void {
+    // Coverage names a row INDEX. Any splice moves other content under that
+    // index, so a later write must not be read as continuing the old row.
+    this.coverRow = -1;
+    this.coverEnd = 0;
+  }
+
   private cover(r: number, from: number, to: number): void {
     if (r === this.coverRow && from <= this.coverEnd) this.coverEnd = Math.max(this.coverEnd, to);
     else if (from === 0) {
@@ -674,6 +681,7 @@ export class Screen {
     this.cells.splice(this.scrollBottom - n + 1, 0, ...blanks);
     this.wrapped.splice(this.scrollTop, n);
     this.wrapped.splice(this.scrollBottom - n + 1, 0, ...new Array<boolean>(n).fill(false));
+    this.endCoverage();
     this.coverRow = -1;
     this.unwrap(this.scrollTop - 1);
     this.markRows(this.scrollTop, this.scrollBottom);
@@ -689,6 +697,7 @@ export class Screen {
     this.cells.splice(this.scrollTop, 0, ...blanks);
     this.wrapped.splice(this.scrollBottom - n + 1, n);
     this.wrapped.splice(this.scrollTop, 0, ...new Array<boolean>(n).fill(false));
+    this.endCoverage();
     this.coverRow = -1;
     this.unwrap(this.scrollTop - 1);
     this.unwrap(this.scrollBottom);
@@ -1245,6 +1254,7 @@ export class Screen {
       this.cells.splice(this.cursorRow, 0, this.blankRow());
       this.wrapped.splice(this.scrollBottom, 1);
       this.wrapped.splice(this.cursorRow, 0, false);
+      this.endCoverage();
     }
     this.coverRow = -1;
     // The row above lost its continuation, and so did the row now at the
@@ -1267,6 +1277,7 @@ export class Screen {
       this.cells.splice(this.scrollBottom, 0, this.blankRow());
       this.wrapped.splice(this.cursorRow, 1);
       this.wrapped.splice(this.scrollBottom, 0, false);
+      this.endCoverage();
     }
     this.coverRow = -1;
     this.unwrap(this.cursorRow - 1);
@@ -1406,10 +1417,13 @@ export class Screen {
         // codes (`58;5;4` is not underline), but not drawn.
         const mode = groups[i + 1]?.[0];
         if (mode === 5 && i + 2 < groups.length) {
-          this.setSgrColor(p, groups[i + 2][0]);
+          const idx = groups[i + 2][0];
+          this.setSgrColor(p, isColorByte(idx) ? idx : COLOR_DEFAULT);
           i += 2;
         } else if (mode === 2 && i + 4 < groups.length) {
-          this.setSgrColor(p, rgb(groups[i + 2][0], groups[i + 3][0], groups[i + 4][0]));
+          const [r, g, b] = [groups[i + 2][0], groups[i + 3][0], groups[i + 4][0]];
+          const ok = isColorByte(r) && isColorByte(g) && isColorByte(b);
+          this.setSgrColor(p, ok ? rgb(r, g, b) : COLOR_DEFAULT);
           i += 4;
         } else {
           // Truncated sequence — abandon the rest of the params rather than
@@ -1445,15 +1459,27 @@ export class Screen {
       return;
     }
     if (p !== 38 && p !== 48 && p !== 58) return;
-    if (g[1] === 5 && g.length >= 3 && g[2] >= 0) {
-      this.setSgrColor(p, g[2]);
+    // tmux ignores a group this long outright (input_csi_dispatch_sgr_colon).
+    if (g.length >= 8) return;
+    if (g[1] === 5 && g.length >= 3) {
+      // A palette index out of range is not "no colour": tmux goes to default.
+      this.setSgrColor(p, isColorByte(g[2]) ? g[2] : COLOR_DEFAULT);
     } else if (g[1] === 2 && g.length >= 5) {
       const k = g.length >= 6 ? 3 : 2;
-      this.setSgrColor(p, rgb(Math.max(0, g[k]), Math.max(0, g[k + 1]), Math.max(0, g[k + 2])));
+      if (isColorByte(g[k]) && isColorByte(g[k + 1]) && isColorByte(g[k + 2])) {
+        this.setSgrColor(p, rgb(g[k], g[k + 1], g[k + 2]));
+      }
     }
   }
 
   /** Store a 38 / 48 colour; a 58 underline colour is accepted and dropped. */
+  // Measured against tmux 3.6a (capture-pane -e, with a colour already set):
+  //   38:2:300:0:0      pen unchanged   (out-of-range RGB: the group is ignored)
+  //   38:2::9:9:9:9:9   pen unchanged   (8+ values: ignored)
+  //   38:5:300 / 38:5:  emits 39        (bad palette index: back to default)
+  //   38;5;300          emits 39        (same for the semicolon forms)
+  //   38;2;300;0;0      emits 39
+
   private setSgrColor(code: number, color: number): void {
     if (code === 38) this.curFg = color;
     else if (code === 48) this.curBg = color;
@@ -1491,7 +1517,15 @@ export class Screen {
       // A wide glyph's trailing `''` cell contributes nothing — the head
       // already carries the whole glyph.
       for (let c = from; c <= to; c++) line += this.cells[r][c].ch;
-      if (r < r1 && this.wrapped[r]) out += line;
+      if (r < r1 && this.wrapped[r]) {
+        // A wide glyph that did not fit wrapped early and left the last column
+        // blank (see `putChar`). That padding is not part of the copied text.
+        const straddled =
+          to === this.cols - 1 &&
+          line.endsWith(' ') &&
+          firstCharWidth(this.cells[r + 1][0].ch) === 2;
+        out += straddled ? line.slice(0, -1) : line;
+      }
       else out += line.replace(/[ \t]+$/, '') + (r < r1 ? '\n' : '');
     }
     return out;
@@ -1677,6 +1711,12 @@ function fitsGridFont(ch: string): boolean {
     return false;
   }
   return true;
+}
+
+/** A colour component or palette index tmux accepts: 0..255. Anything else
+ *  (empty, negative, above 255) means "no colour", not a clamped one. */
+function isColorByte(v: number): boolean {
+  return v >= 0 && v <= 255;
 }
 
 /** Group a row's cells into adjacent runs sharing fg/bg/attrs. Trailing

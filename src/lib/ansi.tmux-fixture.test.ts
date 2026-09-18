@@ -18,7 +18,7 @@ import pane from './__fixtures__/tmux-attach.pane.txt?raw';
 
 const SENTINEL = '@@done@@';
 /** Rows capture-pane covers: the 24-row client minus tmux's status line. */
-const PANE_ROWS = 23;
+const PANE_ROWS = 24; // the recording runs with tmux's status line off
 
 const cut = raw.indexOf(SENTINEL);
 // Everything after the sentinel is detach/teardown noise.

@@ -1483,6 +1483,18 @@ describe('ansi.Screen — RIS (ESC c) resets modes (F15)', () => {
   });
 });
 
+describe('ansi.Screen — copying a soft-wrapped line', () => {
+  it('drops the padding blank left by a wide glyph that wrapped early', () => {
+    const s = new Screen(3, 4);
+    // 'abc' fills columns 0-2; 中 needs two columns, so it wraps and leaves
+    // column 3 blank. That blank is padding, not part of the line.
+    s.write('abc中');
+    expect(rowText(s, 0)).toBe('abc ');
+    expect(s.cells[1][0].ch).toBe('中');
+    expect(s.selectionText({ row: 0, col: 0 }, { row: 1, col: 3 })).toBe('abc中');
+  });
+});
+
 describe('ansi.Screen — SGR hidden / strike / ITU colon forms / underline colour (F16)', () => {
   /** SGR `seq` then print X: the cell's style. */
   function sgrCell(seq: string) {
@@ -1490,6 +1502,24 @@ describe('ansi.Screen — SGR hidden / strike / ITU colon forms / underline colo
     s.write(`\x1b[${seq}mX`);
     return s.cells[0][0];
   }
+
+  it('handles out-of-range and oversized colour groups as tmux 3.6a does', () => {
+    // Measured with `capture-pane -e` after setting red (31):
+    //   38:2:300:0:0      -> still red   (out-of-range RGB: group ignored)
+    //   38:2::9:9:9:9:9   -> still red   (8+ values: group ignored)
+    //   38:5:300, 38:5:   -> emits 39    (bad palette index: back to default)
+    //   38;5;300, 38;2;300;0;0 -> emits 39
+    expect(sgrCell('31;38:2:300:0:0').fg).toBe(1);
+    expect(sgrCell('31;38:2::9:9:9:9:9').fg).toBe(1);
+    expect(sgrCell('31;38:5:300').fg).toBe(COLOR_DEFAULT);
+    expect(sgrCell('31;38:5:').fg).toBe(COLOR_DEFAULT);
+    expect(sgrCell('31;38;5;300').fg).toBe(COLOR_DEFAULT);
+    expect(sgrCell('31;38;2;300;0;0').fg).toBe(COLOR_DEFAULT);
+    // In-range colours are unaffected by the validation.
+    expect(sgrCell('38:2:1:2:3').fg).toBe(rgb(1, 2, 3));
+    expect(sgrCell('38:2::4:5:6').fg).toBe(rgb(4, 5, 6));
+    expect(sgrCell('48:5:21').bg).toBe(21);
+  });
 
   it('8 / 28 set and clear hidden; 9 / 29 set and clear strikethrough', () => {
     expect(sgrCell('8').attrs).toBe(ATTR_HIDDEN);
