@@ -112,8 +112,13 @@ impl Store {
     /// row gets the new id, a transcript path that belongs to it (else NULL),
     /// the model, and `awaiting_rebind_at = NULL`; resetting sources zero the
     /// context and clear `current_activity` / `last_prompt`, resume marks the
-    /// context stale. One transaction; emits `session:updated` and
+    /// context stale. A same-id call upgrades a `start_source` of `unknown`
+    /// to `source` (a SessionStart arriving after the UserPromptSubmit that
+    /// opened the conversation). One transaction; emits `session:updated` and
     /// `session:conversations` after commit.
+    ///
+    /// Opens its own transaction, so it cannot run inside
+    /// `Store::atomically` (SQLite has no nested `BEGIN`).
     pub fn rebind_conversation(
         &self,
         session_id: i64,
@@ -121,6 +126,31 @@ impl Store {
         source: StartSource,
         transcript_path: Option<&str>,
         model: Option<&str>,
+    ) -> Result<Option<SessionRow>, IpcError> {
+        self.rebind_conversation_opts(
+            session_id,
+            claude_session_id,
+            source,
+            transcript_path,
+            model,
+            false,
+        )
+    }
+
+    /// [`Self::rebind_conversation`] for a conversation whose first turn has
+    /// already begun (`turn_started`): the prompt that started it is kept
+    /// (`last_prompt`, `current_activity` untouched), and a same-id call —
+    /// a SessionStart that lost the race to its UserPromptSubmit — resets
+    /// nothing, since the context already belongs to this conversation. A
+    /// new id with a resetting source still zeroes the context.
+    pub fn rebind_conversation_opts(
+        &self,
+        session_id: i64,
+        claude_session_id: &str,
+        source: StartSource,
+        transcript_path: Option<&str>,
+        model: Option<&str>,
+        turn_started: bool,
     ) -> Result<Option<SessionRow>, IpcError> {
         let now = now_unix();
         let tx = self.conn.unchecked_transaction()?;
@@ -155,12 +185,23 @@ impl Store {
                 model
             ],
         )?;
+        if same && !matches!(source, StartSource::Unknown | StartSource::Compact) {
+            tx.execute(
+                "UPDATE conversations SET start_source = ?3 \
+                 WHERE session_id = ?1 AND claude_session_id = ?2 AND start_source = 'unknown'",
+                rusqlite::params![session_id, claude_session_id, source.as_str()],
+            )?;
+        }
         let path_sql = if same {
             "transcript_path = COALESCE(?3, transcript_path)"
         } else {
             "transcript_path = ?3"
         };
-        let reset_sql = if source.resets_context() {
+        let resets = source.resets_context() && !(same && turn_started);
+        let reset_sql = if resets && turn_started {
+            ", context_tokens = 0, context_pct = 0, context_source = 'hook', \
+               context_at = ?5, context_stale = 0"
+        } else if resets {
             ", context_tokens = 0, context_pct = 0, context_source = 'hook', \
                context_at = ?5, context_stale = 0, current_activity = NULL, last_prompt = NULL"
         } else if matches!(
@@ -186,7 +227,7 @@ impl Store {
             &model,
             &now,
         ];
-        let n_params = if source.resets_context() { 5 } else { 4 };
+        let n_params = if resets { 5 } else { 4 };
         tx.execute(&sql, &params[..n_params])?;
         tx.commit()?;
         self.bus.conversations_changed(session_id);
@@ -252,6 +293,19 @@ impl Store {
             rusqlite::params![session_id, now_unix()],
         )?;
         Ok(())
+    }
+
+    /// Whether the session's `awaiting_rebind_at` is within the TTL.
+    pub fn is_awaiting_rebind(&self, session_id: i64) -> Result<bool, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM sessions WHERE id = ?1 AND awaiting_rebind_at >= ?2",
+                rusqlite::params![session_id, now_unix() - AWAITING_REBIND_TTL_SECS],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     /// Live rows on `host_alias` whose `awaiting_rebind_at` is within the

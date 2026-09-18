@@ -167,7 +167,7 @@ fn may_rebind(payload: &HookPayload) -> bool {
 /// Find the row a hook is about (spec §1.2), in order:
 ///
 /// 1. The caller's host + `ctx.pane_id`, when exactly one live row there last
-///    showed that pane.
+///    showed that pane (whether it may move to a new id: [`rebind_eligible`]).
 /// 2. `claude_session_id = payload.session_id`, host-checked
 ///    ([`host_checked_row`]; abstains when two rows share the id).
 /// 3. Rebinding events from host callers only (never the master token):
@@ -178,23 +178,25 @@ fn may_rebind(payload: &HookPayload) -> bool {
 ///    exactly one such row exists, and never when some row already holds
 ///    `payload.session_id`.
 ///
-/// Otherwise `None`: the hook is a no-op.
+/// Otherwise `None`: the hook is a no-op. The step that matched is returned
+/// with the row: a pane match says only which pane sent the hook, not that
+/// the payload's conversation is the row's (see [`rebind_eligible`]).
 fn resolve_hook_row(
     s: &Store,
     payload: &HookPayload,
     ctx: &HookContext,
     may_rebind: bool,
-) -> Result<Option<SessionRow>, IpcError> {
+) -> Result<Option<(SessionRow, ResolvedBy)>, IpcError> {
     if let (Some(host), Some(pane)) = (&ctx.caller.host_alias, &ctx.pane_id) {
         if let Some(row) = s.find_session_by_pane(host, pane)? {
-            return Ok(Some(row));
+            return Ok(Some((row, ResolvedBy::Pane)));
         }
     }
     let Some(id) = payload.session_id.as_deref() else {
         return Ok(None);
     };
     if let Some(row) = host_checked_row(s, id, ctx.caller)? {
-        return Ok(Some(row));
+        return Ok(Some((row, ResolvedBy::Id)));
     }
     let Some(host) = ctx.caller.host_alias.as_deref() else {
         return Ok(None);
@@ -216,10 +218,72 @@ fn resolve_hook_row(
         })
         .collect();
     Ok(if matching.len() == 1 {
-        matching.into_iter().next()
+        matching
+            .into_iter()
+            .next()
+            .map(|r| (r, ResolvedBy::Awaiting))
     } else {
         None
     })
+}
+
+/// Which step of [`resolve_hook_row`] found the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolvedBy {
+    Pane,
+    Id,
+    Awaiting,
+}
+
+/// May a hook that reached `row` through its PANE move it onto a new id?
+/// Any `claude` started in the pane — a Bash-tool `claude -p` included —
+/// inherits `$TMUX_PANE`, so the pane alone does not prove the payload's
+/// conversation replaced the row's. It did when:
+///
+/// (a) the row has no id yet;
+/// (b) the row awaits a rebind (`SessionEnd(clear | resume)` within the TTL);
+/// (c) the row's current conversation has ended, or its Claude is `stopped`;
+/// (d) the event is `SessionStart(clear | resume)` — only the interactive
+///     session in the pane emits those; a nested one-shot starts `startup`.
+fn rebind_eligible(s: &Store, row: &SessionRow, payload: &HookPayload) -> Result<bool, IpcError> {
+    let Some(current) = row.claude_session_id.as_deref() else {
+        return Ok(true);
+    };
+    if s.is_awaiting_rebind(row.id)?
+        || row.claude_status.as_deref() == Some(ClaudeStatus::Stopped.as_str())
+        || s.get_conversation(row.id, current)?
+            .is_some_and(|c| c.ended_at.is_some())
+    {
+        return Ok(true);
+    }
+    Ok(payload.hook_event_name.as_deref() == Some("SessionStart")
+        && matches!(
+            StartSource::from_hook(payload.source.as_deref().unwrap_or("")),
+            StartSource::Clear | StartSource::Resume
+        ))
+}
+
+/// The source of a UserPromptSubmit rebind onto a row awaiting one: the
+/// SessionStart that names it may still be in flight (it is async), so
+/// the just-closed conversation's end reason says how this one began.
+fn prompt_rebind_source(s: &Store, row: &SessionRow) -> Result<StartSource, IpcError> {
+    if !s.is_awaiting_rebind(row.id)? {
+        return Ok(StartSource::Unknown);
+    }
+    let Some(current) = row.claude_session_id.as_deref() else {
+        return Ok(StartSource::Unknown);
+    };
+    Ok(
+        match s
+            .get_conversation(row.id, current)?
+            .and_then(|c| c.end_reason)
+            .as_deref()
+        {
+            Some("clear") => StartSource::Clear,
+            Some("resume") => StartSource::Resume,
+            _ => StartSource::Unknown,
+        },
+    )
 }
 
 /// The row's known cwd on its own host: its worktree path when that
@@ -256,6 +320,14 @@ enum Binding {
 /// move the row onto the payload's conversation (timeline
 /// `conversation_started`). Returns the (possibly rebound) row and how it
 /// relates to the payload's id.
+///
+/// A row found by its pane moves only when [`rebind_eligible`]. Otherwise a
+/// non-current id is the row's own earlier conversation (`Stale`) when the
+/// row has one by that id, and else a foreign `claude` sharing the pane
+/// (a nested `claude -p`): `None`, a no-op that never touches the row.
+///
+/// A UserPromptSubmit rebind takes its source from [`prompt_rebind_source`]
+/// and keeps the prompt that started the turn.
 fn resolve_and_rebind(
     s: &Store,
     payload: &HookPayload,
@@ -266,24 +338,35 @@ fn resolve_and_rebind(
         return Ok(None);
     };
     let rebind_ok = may_rebind(payload);
-    let Some(row) = resolve_hook_row(s, payload, ctx, rebind_ok)? else {
+    let Some((row, by)) = resolve_hook_row(s, payload, ctx, rebind_ok)? else {
         return Ok(None);
     };
     if row.claude_session_id.as_deref() == Some(id) {
         return Ok(Some((row, Binding::Current)));
     }
-    if !rebind_ok {
+    let movable = rebind_ok && (by != ResolvedBy::Pane || rebind_eligible(s, &row, payload)?);
+    if !movable {
+        if by == ResolvedBy::Pane && s.get_conversation(row.id, id)?.is_none() {
+            return Ok(None);
+        }
         return Ok(Some((row, Binding::Stale)));
     }
     crate::validate::claude_session_id(id)
         .map_err(|e| IpcError::new(codes::E_VALIDATE, e.message))?;
+    let prompt = payload.hook_event_name.as_deref() == Some("UserPromptSubmit");
+    let source = if prompt {
+        prompt_rebind_source(s, &row)?
+    } else {
+        source
+    };
     let rebound = s
-        .rebind_conversation(
+        .rebind_conversation_opts(
             row.id,
             id,
             source,
             payload_transcript_path(payload, id),
             hook_token(payload.model.as_deref()),
+            prompt,
         )?
         .unwrap_or(row);
     // The hook now owns this binding: a reconcile pass already in flight
@@ -339,12 +422,20 @@ fn apply_session_start_hook(
         return Ok(());
     }
     if binding == Binding::Current {
-        s.rebind_conversation(
+        // A turn already began on this conversation (its UserPromptSubmit
+        // won the race and rebound the row): turns and first_prompt are
+        // written only by the conversation's own hooks, never at a genuine
+        // start, so either one proves this SessionStart is late.
+        let turn_started = s
+            .get_conversation(row.id, id)?
+            .is_some_and(|c| c.turns > 0 || c.first_prompt.is_some());
+        s.rebind_conversation_opts(
             row.id,
             id,
             source,
             payload_transcript_path(payload, id),
             hook_token(payload.model.as_deref()),
+            turn_started,
         )?;
         best_effort_event_for(
             &s,
@@ -478,9 +569,8 @@ fn apply_stop_hook(
     if safe_kill_in_flight {
         let store = Arc::clone(store);
         let ssh = Arc::clone(ssh);
-        let sid = session_id.clone();
         crate::rt::spawn(async move {
-            crate::service::safe_kill::handle_stop_marker_check(store, ssh, sid).await;
+            crate::service::safe_kill::handle_stop_marker_check(store, ssh, row_id).await;
         });
     }
     if let Some(worker) = task_worker {
@@ -499,9 +589,11 @@ fn apply_stop_hook(
 /// `working` so an idle-looking pane between the submit and the first
 /// spinner frame is not mistaken for "still idle" — and so `wait_for_session
 /// { until: "idle" }` after a `send_prompt` does not return before the turn
-/// even begins. A new id rebinds the row first (source `unknown`: this
-/// covers hosts where the SessionStart hook is missing). The prompt's first
-/// 200 chars become the conversation's `first_prompt` (never logged).
+/// even begins. A new id rebinds the row first (this covers hosts where the
+/// SessionStart hook is missing, and a SessionStart still in flight): source
+/// `clear` / `resume` after the matching SessionEnd, else `unknown`. The
+/// prompt's first 200 chars become the conversation's `first_prompt` (never
+/// logged).
 fn apply_prompt_submit_hook(
     store: &Arc<Mutex<Store>>,
     payload: &HookPayload,
@@ -1881,7 +1973,8 @@ mod tests {
             Some("clear")
         );
         let new = convs.iter().find(|c| c.claude_session_id == NEW).unwrap();
-        assert_eq!(new.start_source, "unknown");
+        // The just-closed conversation's end reason says how this one began.
+        assert_eq!(new.start_source, "clear");
         assert_eq!(
             new.first_prompt.as_deref().map(|p| p.chars().count()),
             Some(200)
@@ -2053,7 +2146,7 @@ mod tests {
         let id = pane_session(&store, "s", "%3");
         let host = host_caller("local");
         let mut p = make_payload("SessionStart", "not a uuid; rm -rf");
-        p.source = Some("startup".into());
+        p.source = Some("clear".into());
         let e = apply_hook(&store, &make_ssh(), &p, &ctx(&host, Some("%3"))).unwrap_err();
         assert_eq!(e.code, "E_VALIDATE");
         assert_eq!(claude_id(&store, id).as_deref(), Some(OLD));
@@ -2261,5 +2354,248 @@ mod tests {
             status_of(&store, a).claude_status.as_deref(),
             Some("working")
         );
+    }
+
+    // ---- Rebind eligibility (nested `claude` in the pane) ----
+
+    const CHILD: &str = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+
+    /// A sweep instant just after now (well inside the task TTL).
+    fn soon() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + 10
+    }
+
+    fn working_parent_with_task(store: &Arc<Mutex<Store>>) -> (i64, i64) {
+        let id = pane_session(store, "s", "%3");
+        let s = store.lock().unwrap();
+        s.set_context(id, OLD, 120_000, 200_000, "transcript", None)
+            .unwrap();
+        s.set_last_prompt(id, "run the tests").unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status='working' WHERE id=?1",
+                [id],
+            )
+            .unwrap();
+        let t = crate::service::tasks::create_task(&s, None, Some(id), "x").unwrap();
+        s.set_task_worker_claude_id(t.id, OLD).unwrap();
+        (id, t.id)
+    }
+
+    #[test]
+    fn a_nested_claude_in_the_pane_never_touches_the_parent_row() {
+        let store = make_store();
+        let (id, task) = working_parent_with_task(&store);
+        let before = status_of(&store, id);
+        let convs_before = store.lock().unwrap().list_conversations(id, 10).unwrap();
+        let events_before = events(&store, id);
+        let host = host_caller("local");
+        let mut start = make_payload("SessionStart", CHILD);
+        start.source = Some("startup".into());
+        let mut prompt = make_payload("UserPromptSubmit", CHILD);
+        prompt.prompt = Some("summarise".into());
+        let mut end = make_payload("SessionEnd", CHILD);
+        end.reason = Some("other".into());
+        for p in [start, prompt, make_payload("Stop", CHILD), end] {
+            apply_hook(&store, &make_ssh(), &p, &ctx(&host, Some("%3"))).unwrap();
+        }
+        let after = status_of(&store, id);
+        assert_eq!(after.claude_session_id.as_deref(), Some(OLD));
+        assert_eq!(after.claude_status.as_deref(), Some("working"));
+        assert_eq!(after.turn_seq, before.turn_seq);
+        assert_eq!(after.context.context_tokens, Some(120_000));
+        assert_eq!(after.last_prompt.as_deref(), Some("run the tests"));
+        let s = store.lock().unwrap();
+        assert_eq!(s.list_conversations(id, 10).unwrap(), convs_before);
+        drop(s);
+        assert_eq!(events(&store, id), events_before);
+        let s = store.lock().unwrap();
+        assert!(crate::service::tasks::sweep_open_tasks(&s, soon())
+            .unwrap()
+            .is_empty());
+        let t = s.get_task(task).unwrap().unwrap();
+        assert!(t.finished_at.is_none());
+        assert_eq!(t.worker_claude_session_id.as_deref(), Some(OLD));
+    }
+
+    #[test]
+    fn a_pane_rebind_needs_an_eligible_row_or_a_clear_or_resume_start() {
+        // (d) SessionStart(clear | resume) from the pane still rebinds.
+        for source in ["clear", "resume"] {
+            let store = make_store();
+            let id = pane_session(&store, "s", "%3");
+            let mut p = make_payload("SessionStart", NEW);
+            p.source = Some(source.into());
+            apply_hook(
+                &store,
+                &make_ssh(),
+                &p,
+                &ctx(&host_caller("local"), Some("%3")),
+            )
+            .unwrap();
+            assert_eq!(claude_id(&store, id).as_deref(), Some(NEW), "{source}");
+        }
+        // (b) UserPromptSubmit after SessionEnd(clear) rebinds by pane.
+        let store = make_store();
+        let id = pane_session(&store, "s", "%3");
+        let host = host_caller("local");
+        let mut end = make_payload("SessionEnd", OLD);
+        end.reason = Some("clear".into());
+        apply_hook(&store, &make_ssh(), &end, &ctx(&host, Some("%3"))).unwrap();
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("UserPromptSubmit", NEW),
+            &ctx(&host, Some("%3")),
+        )
+        .unwrap();
+        assert_eq!(claude_id(&store, id).as_deref(), Some(NEW));
+        // (c) the current conversation ended: a fresh `claude` starts over.
+        let store = make_store();
+        let id = pane_session(&store, "s", "%3");
+        let mut exit = make_payload("SessionEnd", OLD);
+        exit.reason = Some("prompt_input_exit".into());
+        apply_hook(&store, &make_ssh(), &exit, &ctx(&host, Some("%3"))).unwrap();
+        let mut start = make_payload("SessionStart", NEW);
+        start.source = Some("startup".into());
+        apply_hook(&store, &make_ssh(), &start, &ctx(&host, Some("%3"))).unwrap();
+        assert_eq!(claude_id(&store, id).as_deref(), Some(NEW));
+        // (a) a row with no id yet binds.
+        let store = make_store();
+        let id = pane_session(&store, "s", "%3");
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_session_id=NULL WHERE id=?1",
+                [id],
+            )
+            .unwrap();
+        let mut start = make_payload("SessionStart", NEW);
+        start.source = Some("startup".into());
+        apply_hook(&store, &make_ssh(), &start, &ctx(&host, Some("%3"))).unwrap();
+        assert_eq!(claude_id(&store, id).as_deref(), Some(NEW));
+    }
+
+    // ---- SessionStart arriving after the first UserPromptSubmit ----
+
+    #[test]
+    fn a_prompt_rebind_after_session_end_takes_the_source_from_the_end_reason() {
+        for (reason, source) in [("clear", "clear"), ("resume", "resume")] {
+            let store = make_store();
+            let (id, _) = working_parent_with_task(&store);
+            let host = host_caller("local");
+            let mut end = make_payload("SessionEnd", OLD);
+            end.reason = Some(reason.into());
+            apply_hook(&store, &make_ssh(), &end, &ctx(&host, Some("%3"))).unwrap();
+            apply_hook(
+                &store,
+                &make_ssh(),
+                &make_payload("UserPromptSubmit", NEW),
+                &ctx(&host, Some("%3")),
+            )
+            .unwrap();
+            let s = store.lock().unwrap();
+            let new = s.get_conversation(id, NEW).unwrap().unwrap();
+            assert_eq!(new.start_source, source, "{reason}");
+            // The worker's tolerated switch keeps its task.
+            assert!(
+                crate::service::tasks::sweep_open_tasks(&s, soon())
+                    .unwrap()
+                    .is_empty(),
+                "{reason}"
+            );
+            // The prompt just sent survives the rebind.
+            let row = s.get_session_by_id(id).unwrap().unwrap();
+            assert_eq!(
+                row.last_prompt.as_deref(),
+                Some("run the tests"),
+                "{reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_same_id_session_start_upgrades_an_unknown_source() {
+        let store = make_store();
+        let id = pane_session(&store, "s", "%3");
+        let host = host_caller("local");
+        // No SessionEnd first (hook missing): the prompt rebinds as unknown.
+        store.lock().unwrap().mark_awaiting_rebind(id).unwrap();
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("UserPromptSubmit", NEW),
+            &ctx(&host, Some("%3")),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .get_conversation(id, NEW)
+                .unwrap()
+                .unwrap()
+                .start_source,
+            "unknown"
+        );
+        let mut start = make_payload("SessionStart", NEW);
+        start.source = Some("clear".into());
+        apply_hook(&store, &make_ssh(), &start, &ctx(&host, Some("%3"))).unwrap();
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.get_conversation(id, NEW).unwrap().unwrap().start_source,
+            "clear"
+        );
+        // A known source is never overwritten.
+        drop(s);
+        let mut again = make_payload("SessionStart", NEW);
+        again.source = Some("startup".into());
+        apply_hook(&store, &make_ssh(), &again, &ctx(&host, Some("%3"))).unwrap();
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .get_conversation(id, NEW)
+                .unwrap()
+                .unwrap()
+                .start_source,
+            "clear"
+        );
+    }
+
+    #[test]
+    fn a_late_session_start_after_the_turn_began_keeps_context_and_prompt() {
+        let store = make_store();
+        let (id, _) = working_parent_with_task(&store);
+        let host = host_caller("local");
+        let mut end = make_payload("SessionEnd", OLD);
+        end.reason = Some("clear".into());
+        apply_hook(&store, &make_ssh(), &end, &ctx(&host, Some("%3"))).unwrap();
+        let mut prompt = make_payload("UserPromptSubmit", NEW);
+        prompt.prompt = Some("next task".into());
+        apply_hook(&store, &make_ssh(), &prompt, &ctx(&host, Some("%3"))).unwrap();
+        // The turn's own context measurement lands before the late start.
+        store
+            .lock()
+            .unwrap()
+            .set_context(id, NEW, 30_000, 200_000, "transcript", None)
+            .unwrap();
+        let mut start = make_payload("SessionStart", NEW);
+        start.source = Some("clear".into());
+        apply_hook(&store, &make_ssh(), &start, &ctx(&host, Some("%3"))).unwrap();
+        let row = status_of(&store, id);
+        assert_eq!(row.context.context_tokens, Some(30_000));
+        assert_eq!(row.last_prompt.as_deref(), Some("run the tests"));
+        assert_eq!(row.claude_status.as_deref(), Some("working"));
+        let s = store.lock().unwrap();
+        let conv = s.get_conversation(id, NEW).unwrap().unwrap();
+        assert!(conv.current && conv.ended_at.is_none());
+        assert_eq!(conv.start_source, "clear");
     }
 }
