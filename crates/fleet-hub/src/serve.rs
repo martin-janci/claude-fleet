@@ -205,6 +205,37 @@ pub fn token(
     Ok(ExitCode::SUCCESS)
 }
 
+/// `fleet-hub agent-token <host> [--rotate]`: print the token `fleet-agent
+/// install` needs on that host. Only the token goes to stdout, so it can be
+/// piped; everything else is a note on stderr.
+pub fn agent_token(
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+    host: &str,
+    rotate: bool,
+) -> Result<ExitCode, String> {
+    // Like `token`: never create a data dir or a database.
+    existing_db(&resolve_data_dir(opts, env))?;
+    let store = std::sync::Mutex::new(open_store(opts, env)?);
+    let t = fleet_core::service::provision::agent_host_token(&store, host, rotate)
+        .map_err(|e| e.message)?;
+    if t.minted {
+        out::error(&format!(
+            "note: a new token for {host} is saved; an agent still connected on an older one \
+             is cut off within a heartbeat. Install this one on {host}: \
+             fleet-agent install --hub <url> --token-file -"
+        ));
+    }
+    if t.mode != "full" {
+        out::error(&format!(
+            "warning: {host}'s token is {}, and /agent refuses it until its mode is full",
+            t.mode
+        ));
+    }
+    out::line(&t.token);
+    Ok(ExitCode::SUCCESS)
+}
+
 /// `<data-dir>/state.db` when it exists; `token` must never create one.
 pub(crate) fn existing_db(data_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
     let db = data_dir.join("state.db");
@@ -784,6 +815,45 @@ mod tests {
         let off: HashMap<String, String> =
             [("FLEET_HUB_ALLOW_PLAINTEXT".to_string(), "0".to_string())].into();
         assert!(resolve_with_store(&opts, &off, Arc::new(NoopEventBus)).is_err());
+    }
+
+    #[test]
+    fn agent_token_mints_for_an_agent_host_and_refuses_anything_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        {
+            let s = Store::open_with_bus(&db, Arc::new(NoopEventBus)).unwrap();
+            s.insert_host("laptop", Some("laptop")).unwrap();
+            s.set_host_transport("laptop", "agent").unwrap();
+            s.insert_host("mefistos", Some("mefistos")).unwrap();
+        }
+        let opts = HubOptions {
+            data_dir: Some(dir.path().to_path_buf()),
+            ..HubOptions::default()
+        };
+        assert!(agent_token(&opts, &HashMap::new(), "laptop", false).is_ok());
+        let first = Store::open_read_only(&db)
+            .unwrap()
+            .get_host_token("laptop")
+            .unwrap()
+            .expect("minted and saved");
+        assert!(agent_token(&opts, &HashMap::new(), "laptop", true).is_ok());
+        let rotated = Store::open_read_only(&db)
+            .unwrap()
+            .get_host_token("laptop")
+            .unwrap()
+            .unwrap();
+        assert_ne!(rotated.token, first.token);
+
+        let err = agent_token(&opts, &HashMap::new(), "mefistos", false).unwrap_err();
+        assert!(err.contains("not an agent host"), "{err}");
+        assert!(agent_token(&opts, &HashMap::new(), "nobody", false).is_err());
+        let missing = HubOptions {
+            data_dir: Some(dir.path().join("elsewhere")),
+            ..HubOptions::default()
+        };
+        assert!(agent_token(&missing, &HashMap::new(), "laptop", false).is_err());
+        assert!(!dir.path().join("elsewhere").exists());
     }
 
     #[test]

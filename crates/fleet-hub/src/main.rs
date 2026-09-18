@@ -39,6 +39,21 @@ enum Cmd {
         #[command(flatten)]
         opts: HubOptions,
     },
+    /// Print an agent host's token, for `fleet-agent install` on that host (minted on first use).
+    ///
+    /// The only way an agent host's token reaches the host: the hub never
+    /// sends a new token over the agent connection it replaces. `--rotate`
+    /// mints a new one and saves it, which cuts off any agent still connected
+    /// on the old one within a heartbeat.
+    AgentToken {
+        /// The host's fleet alias.
+        host: String,
+        /// Mint a fresh token, revoking the current one.
+        #[arg(long)]
+        rotate: bool,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
     /// Mint a pairing code for a new client device and show it as a QR. Needs a running hub.
     Pair {
         /// Name for the client, as it will appear in `client list` (1-64 characters).
@@ -103,6 +118,7 @@ async fn main() -> ExitCode {
         } => serve::init(&opts, &env, regenerate_token),
         Cmd::Serve { opts } => serve::serve(&opts, &env).await,
         Cmd::Token { cmd, opts } => serve::token(&opts, &env, matches!(cmd, TokenCmd::Regenerate)),
+        Cmd::AgentToken { host, rotate, opts } => serve::agent_token(&opts, &env, &host, rotate),
         Cmd::Pair {
             name,
             mode,
@@ -166,6 +182,16 @@ mod tests {
         Cli::try_parse_from(["fleet-hub", "init", "--tls", "auto"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "token", "show"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "token", "regenerate"]).unwrap();
+        Cli::try_parse_from(["fleet-hub", "agent-token", "laptop"]).unwrap();
+        Cli::try_parse_from([
+            "fleet-hub",
+            "agent-token",
+            "laptop",
+            "--rotate",
+            "--data-dir",
+            "/tmp/x",
+        ])
+        .unwrap();
         for argv in [
             ["fleet-hub", "token", "show", "--data-dir", "/tmp/x"],
             ["fleet-hub", "token", "--data-dir", "/tmp/x", "show"],

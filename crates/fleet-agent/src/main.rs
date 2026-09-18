@@ -49,7 +49,7 @@ fn run(args: cli::RunArgs) -> ExitCode {
         .map(|h| Layout::user(&h).config_path)
         .filter(|p| p.exists())
         .or_else(|| Some(Layout::system().config_path).filter(|p| p.exists()));
-    let config = match cli::run_config(&args, default_config) {
+    let config = match cli::run_config(&args, default_config, &mut std::io::stdin()) {
         Ok(c) => c,
         Err(why) => return fail(&why),
     };
@@ -77,7 +77,7 @@ fn install_cmd(args: cli::InstallArgs) -> Result<(), String> {
         sudo_user: std::env::var("SUDO_USER").ok().filter(|u| !u.is_empty()),
         config_home: config_home(),
     };
-    let plan = cli::install_plan(&args, &env, install::lookup_user)?;
+    let plan = cli::install_plan(&args, &env, install::lookup_user, &mut std::io::stdin())?;
     install::install(&plan, &mut RealSystemctl, &mut std::io::stdout())
 }
 

@@ -35,14 +35,18 @@ pub enum Command {
 pub struct RunArgs {
     /// The config `install` wrote. The way the service runs: the token stays
     /// out of the process list.
-    #[arg(long, conflicts_with_all = ["hub", "token"])]
+    #[arg(long, conflicts_with_all = ["hub", "token", "token_file"])]
     pub config: Option<PathBuf>,
     /// The hub's URL, e.g. https://hub.example.
-    #[arg(long, requires = "token")]
+    #[arg(long, requires = "token_source")]
     pub hub: Option<String>,
-    /// This host's per-host bearer token.
-    #[arg(long, requires = "hub")]
+    /// This host's per-host bearer token. Visible in the process list and
+    /// your shell history: prefer --token-file.
+    #[arg(long, requires = "hub", group = "token_source")]
     pub token: Option<String>,
+    /// A file holding the token, or `-` to read it from stdin.
+    #[arg(long, requires = "hub", group = "token_source")]
+    pub token_file: Option<PathBuf>,
     /// Allow a plain http:// or ws:// hub. For a loopback test only: the
     /// token crosses the network in clear.
     #[arg(long)]
@@ -53,14 +57,20 @@ pub struct RunArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(group = clap::ArgGroup::new("token_source").required(true))]
 pub struct InstallArgs {
     /// The hub's URL, e.g. https://hub.example.
     #[arg(long)]
     pub hub: String,
     /// This host's per-host bearer token (written to the 0600 config, never
-    /// to the unit).
-    #[arg(long)]
-    pub token: String,
+    /// to the unit). Visible in the process list and your shell history:
+    /// prefer --token-file.
+    #[arg(long, group = "token_source")]
+    pub token: Option<String>,
+    /// A file holding the token, or `-` to read it from stdin — e.g.
+    /// `fleet-hub agent-token <host>` on the hub, pasted here.
+    #[arg(long, group = "token_source")]
+    pub token_file: Option<PathBuf>,
     /// A user unit instead of a system one: no root needed, but it stops at
     /// logout unless lingering is enabled (`loginctl enable-linger`).
     #[arg(long)]
@@ -102,21 +112,52 @@ pub struct InstallEnv {
     pub config_home: Option<PathBuf>,
 }
 
+/// The token from `--token`, or read from `--token-file` (`-` for `stdin`),
+/// with the line ending a file or a paste leaves on it removed.
+pub fn read_token(
+    token: Option<&str>,
+    file: Option<&std::path::Path>,
+    stdin: &mut dyn std::io::Read,
+) -> Result<String, String> {
+    let raw = match (token, file) {
+        (Some(t), _) => t.to_string(),
+        (None, Some(path)) if path.as_os_str() == "-" => {
+            let mut text = String::new();
+            stdin
+                .read_to_string(&mut text)
+                .map_err(|e| format!("reading the token from stdin: {e}"))?;
+            text
+        }
+        (None, Some(path)) => std::fs::read_to_string(path)
+            .map_err(|e| format!("reading the token from {}: {e}", path.display()))?,
+        (None, None) => return Err("no token: pass --token-file (or --token)".into()),
+    };
+    let token = raw.trim_end_matches(['\n', '\r']).to_string();
+    if token.is_empty() {
+        return Err("the token is empty".into());
+    }
+    Ok(token)
+}
+
 /// The config `run` will use: from `--config`, from `--hub`/`--token`, or
 /// from `default_config` when neither is given.
-pub fn run_config(args: &RunArgs, default_config: Option<PathBuf>) -> Result<Config, String> {
-    let config = match (&args.hub, &args.token, &args.config) {
-        (Some(hub), Some(token), _) => {
+pub fn run_config(
+    args: &RunArgs,
+    default_config: Option<PathBuf>,
+    stdin: &mut dyn std::io::Read,
+) -> Result<Config, String> {
+    let config = match (&args.hub, &args.config) {
+        (Some(hub), _) => {
             let config = Config {
                 hub: hub.clone(),
-                token: token.clone(),
+                token: read_token(args.token.as_deref(), args.token_file.as_deref(), stdin)?,
                 insecure: args.insecure,
                 ca_file: args.ca_file.clone(),
             };
             config::check_token(&config.token).map_err(|e| e.to_string())?;
             config
         }
-        (_, _, Some(path)) => config::load(path).map_err(|e| e.to_string())?,
+        (_, Some(path)) => config::load(path).map_err(|e| e.to_string())?,
         _ => {
             let path = default_config.ok_or(
                 "no config: pass --config, or --hub and --token, or run `fleet-agent install`",
@@ -136,12 +177,14 @@ pub fn install_plan(
     args: &InstallArgs,
     env: &InstallEnv,
     owner_of: impl Fn(&str) -> Result<(u32, u32), String>,
+    stdin: &mut dyn std::io::Read,
 ) -> Result<Plan, String> {
     Endpoint::parse(&args.hub, args.insecure)?;
-    config::check_token(&args.token).map_err(|e| e.to_string())?;
+    let token = read_token(args.token.as_deref(), args.token_file.as_deref(), stdin)?;
+    config::check_token(&token).map_err(|e| e.to_string())?;
     let config = Config {
         hub: args.hub.clone(),
-        token: args.token.clone(),
+        token,
         insecure: args.insecure,
         ca_file: args.ca_file.clone(),
     };
@@ -223,7 +266,13 @@ mod tests {
     #[test]
     fn install_refuses_a_plain_hub_without_insecure() {
         let a = install_args(&["install", "--hub", "ws://hub.example", "--token", "t"]);
-        let err = install_plan(&a, &env(true, Some("alice")), uid_1000).unwrap_err();
+        let err = install_plan(
+            &a,
+            &env(true, Some("alice")),
+            uid_1000,
+            &mut std::io::empty(),
+        )
+        .unwrap_err();
         assert!(err.contains("--insecure"), "{err}");
 
         let a = install_args(&[
@@ -234,7 +283,13 @@ mod tests {
             "t",
             "--insecure",
         ]);
-        let plan = install_plan(&a, &env(true, Some("alice")), uid_1000).unwrap();
+        let plan = install_plan(
+            &a,
+            &env(true, Some("alice")),
+            uid_1000,
+            &mut std::io::empty(),
+        )
+        .unwrap();
         assert!(
             plan.config.insecure,
             "the flag reaches the config `run` reads"
@@ -244,7 +299,13 @@ mod tests {
     #[test]
     fn a_system_install_runs_as_the_sudo_user_and_gives_them_the_config() {
         let a = install_args(&["install", "--hub", "https://hub.example", "--token", "t"]);
-        let plan = install_plan(&a, &env(true, Some("alice")), uid_1000).unwrap();
+        let plan = install_plan(
+            &a,
+            &env(true, Some("alice")),
+            uid_1000,
+            &mut std::io::empty(),
+        )
+        .unwrap();
         assert_eq!(
             plan.scope,
             Scope::System {
@@ -261,7 +322,7 @@ mod tests {
     #[test]
     fn a_system_install_needs_root() {
         let a = install_args(&["install", "--hub", "https://hub.example", "--token", "t"]);
-        let err = install_plan(&a, &env(false, None), uid_1000).unwrap_err();
+        let err = install_plan(&a, &env(false, None), uid_1000, &mut std::io::empty()).unwrap_err();
         assert!(err.contains("--user"), "it names the alternative: {err}");
     }
 
@@ -270,9 +331,15 @@ mod tests {
     #[test]
     fn a_system_install_will_not_guess_root() {
         let a = install_args(&["install", "--hub", "https://hub.example", "--token", "t"]);
-        let err = install_plan(&a, &env(true, None), uid_1000).unwrap_err();
+        let err = install_plan(&a, &env(true, None), uid_1000, &mut std::io::empty()).unwrap_err();
         assert!(err.contains("--run-as"), "{err}");
-        let err = install_plan(&a, &env(true, Some("root")), uid_1000).unwrap_err();
+        let err = install_plan(
+            &a,
+            &env(true, Some("root")),
+            uid_1000,
+            &mut std::io::empty(),
+        )
+        .unwrap_err();
         assert!(err.contains("--run-as"), "{err}");
 
         let a = install_args(&[
@@ -284,7 +351,7 @@ mod tests {
             "--run-as",
             "bob",
         ]);
-        let plan = install_plan(&a, &env(true, None), uid_1000).unwrap();
+        let plan = install_plan(&a, &env(true, None), uid_1000, &mut std::io::empty()).unwrap();
         assert_eq!(
             plan.scope,
             Scope::System {
@@ -303,7 +370,7 @@ mod tests {
             "t",
             "--user",
         ]);
-        let plan = install_plan(&a, &env(false, None), uid_1000).unwrap();
+        let plan = install_plan(&a, &env(false, None), uid_1000, &mut std::io::empty()).unwrap();
         assert_eq!(plan.scope, Scope::User);
         assert_eq!(
             plan.layout,
@@ -325,7 +392,7 @@ mod tests {
             "/srv/agent.json",
             "--no-start",
         ]);
-        let plan = install_plan(&a, &env(false, None), uid_1000).unwrap();
+        let plan = install_plan(&a, &env(false, None), uid_1000, &mut std::io::empty()).unwrap();
         assert_eq!(plan.layout.config_path, PathBuf::from("/srv/agent.json"));
         assert!(!plan.start);
     }
@@ -340,7 +407,7 @@ mod tests {
             "a b",
             "--user",
         ]);
-        assert!(install_plan(&a, &env(false, None), uid_1000).is_err());
+        assert!(install_plan(&a, &env(false, None), uid_1000, &mut std::io::empty()).is_err());
     }
 
     #[test]
@@ -352,6 +419,7 @@ mod tests {
         let c = run_config(
             &run(&["run", "--hub", "https://h.example", "--token", "t"]),
             None,
+            &mut std::io::empty(),
         )
         .unwrap();
         assert_eq!(
@@ -362,6 +430,7 @@ mod tests {
         let err = run_config(
             &run(&["run", "--hub", "ws://h.example", "--token", "t"]),
             None,
+            &mut std::io::empty(),
         )
         .unwrap_err();
         assert!(err.contains("--insecure"), "{err}");
@@ -369,13 +438,107 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("c.json");
         config::write(&path, &c, None).unwrap();
-        let from_file =
-            run_config(&run(&["run", "--config", path.to_str().unwrap()]), None).unwrap();
+        let from_file = run_config(
+            &run(&["run", "--config", path.to_str().unwrap()]),
+            None,
+            &mut std::io::empty(),
+        )
+        .unwrap();
         assert_eq!(from_file, c);
         // No flags at all: the default config.
-        let from_default = run_config(&run(&["run"]), Some(path)).unwrap();
+        let from_default = run_config(&run(&["run"]), Some(path), &mut std::io::empty()).unwrap();
         assert_eq!(from_default, c);
-        assert!(run_config(&run(&["run"]), None).is_err());
+        assert!(run_config(&run(&["run"]), None, &mut std::io::empty()).is_err());
+    }
+
+    /// The token need not be an argument, where it would sit in the process
+    /// list and the shell history: a file, or stdin.
+    #[test]
+    fn the_token_can_come_from_a_file_or_stdin_instead_of_the_command_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("token");
+        std::fs::write(&file, "from-a-file\n").unwrap();
+        let path = file.to_str().unwrap();
+
+        let a = install_args(&[
+            "install",
+            "--hub",
+            "https://hub.example",
+            "--token-file",
+            path,
+            "--user",
+        ]);
+        let plan = install_plan(&a, &env(false, None), uid_1000, &mut std::io::empty()).unwrap();
+        assert_eq!(
+            plan.config.token, "from-a-file",
+            "the line ending is not the token"
+        );
+
+        let a = install_args(&[
+            "install",
+            "--hub",
+            "https://hub.example",
+            "--token-file",
+            "-",
+            "--user",
+        ]);
+        let plan =
+            install_plan(&a, &env(false, None), uid_1000, &mut &b"from-stdin\r\n"[..]).unwrap();
+        assert_eq!(plan.config.token, "from-stdin");
+
+        let run = match parse(&["run", "--hub", "https://h.example", "--token-file", "-"])
+            .unwrap()
+            .command
+        {
+            Command::Run(a) => a,
+            other => panic!("{other:?}"),
+        };
+        let c = run_config(&run, None, &mut &b"piped\n"[..]).unwrap();
+        assert_eq!(c.token, "piped");
+
+        let a = install_args(&[
+            "install",
+            "--hub",
+            "https://hub.example",
+            "--token-file",
+            "-",
+            "--user",
+        ]);
+        assert!(
+            install_plan(&a, &env(false, None), uid_1000, &mut std::io::empty()).is_err(),
+            "an empty token is refused"
+        );
+        assert!(read_token(
+            None,
+            Some(&dir.path().join("missing")),
+            &mut std::io::empty()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn install_needs_exactly_one_token_source() {
+        assert!(parse(&["install", "--hub", "https://h"]).is_err());
+        assert!(parse(&[
+            "install",
+            "--hub",
+            "https://h",
+            "--token",
+            "t",
+            "--token-file",
+            "-"
+        ])
+        .is_err());
+        assert!(parse(&[
+            "run",
+            "--hub",
+            "https://h",
+            "--token",
+            "t",
+            "--token-file",
+            "-"
+        ])
+        .is_err());
     }
 
     #[test]

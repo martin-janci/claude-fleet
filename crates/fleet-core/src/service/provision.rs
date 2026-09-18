@@ -156,6 +156,69 @@ pub fn commit_host_token(
     s.upsert_host_token(host, token)
 }
 
+/// An agent host's token, for the operator to hand to the host out of band.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentHostToken {
+    pub token: String,
+    /// `full` or `readonly`. A readonly token is refused at `/agent`.
+    pub mode: String,
+    /// Freshly minted by this call (the host had none, or `rotate`).
+    pub minted: bool,
+}
+
+/// The token an agent host's `fleet-agent` must be installed with — what
+/// `fleet-hub agent-token` prints. The existing one unless `rotate` or there
+/// is none, in which case a fresh one is minted and COMMITTED before this
+/// returns: committing is what revokes the old token, and with it any agent
+/// still connected on it. It is the only way an agent host's token reaches
+/// the host — never over the agent connection (see
+/// [`provision_host_with_token`]).
+///
+/// Refused for a host that is not an agent host: an SSH host's token is
+/// written by provisioning, over SSH.
+pub fn agent_host_token(
+    store: &Mutex<Store>,
+    host: &str,
+    rotate: bool,
+) -> Result<AgentHostToken, IpcError> {
+    let s = lock(store)?;
+    let row = s
+        .list_hosts()?
+        .into_iter()
+        .find(|h| h.alias == host)
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("no host named {host}")))?;
+    if row.transport != "agent" {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{host} is not an agent host (transport {}): its token is written by \
+                 provisioning, over SSH",
+                row.transport
+            ),
+        ));
+    }
+    match s.get_host_token(host)? {
+        Some(existing) if !rotate => Ok(AgentHostToken {
+            token: existing.token,
+            mode: existing.mode,
+            minted: false,
+        }),
+        _ => {
+            let token = crate::mcp::generate_token();
+            s.upsert_host_token(host, &token)?;
+            let mode = s
+                .get_host_token(host)?
+                .map(|r| r.mode)
+                .unwrap_or_else(|| "full".into());
+            Ok(AgentHostToken {
+                token,
+                mode,
+                minted: true,
+            })
+        }
+    }
+}
+
 /// Is `host` reached through a `fleet-agent`?
 fn routes_to_agent(store: &Mutex<Store>, host: &str) -> Result<bool, IpcError> {
     let s = lock(store)?;
@@ -1626,6 +1689,75 @@ mod tests {
             .unwrap_err();
         assert_eq!(refused.code, codes::E_AGENT_OFFLINE);
         assert!(agent.sent().is_empty());
+    }
+
+    fn agent_host_store() -> Mutex<Store> {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("laptop", Some("laptop")).unwrap();
+        s.set_host_transport("laptop", "agent").unwrap();
+        s.insert_host("mefistos", Some("mefistos")).unwrap();
+        Mutex::new(s)
+    }
+
+    #[test]
+    fn an_agent_host_token_is_minted_once_then_reused_until_rotated() {
+        let store = agent_host_store();
+        let first = agent_host_token(&store, "laptop", false).unwrap();
+        assert!(first.minted);
+        assert_eq!(first.mode, "full");
+        let stored = store
+            .lock()
+            .unwrap()
+            .get_host_token("laptop")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.token, first.token, "committed before it is shown");
+
+        let again = agent_host_token(&store, "laptop", false).unwrap();
+        assert_eq!(again.token, first.token);
+        assert!(!again.minted);
+
+        let rotated = agent_host_token(&store, "laptop", true).unwrap();
+        assert!(rotated.minted);
+        assert_ne!(rotated.token, first.token);
+        let stored = store
+            .lock()
+            .unwrap()
+            .get_host_token("laptop")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.token, rotated.token, "the rotation is committed");
+    }
+
+    #[test]
+    fn an_agent_host_token_reports_a_readonly_mode() {
+        let store = agent_host_store();
+        agent_host_token(&store, "laptop", false).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .set_host_token_mode("laptop", "readonly")
+            .unwrap();
+        assert_eq!(
+            agent_host_token(&store, "laptop", false).unwrap().mode,
+            "readonly"
+        );
+    }
+
+    #[test]
+    fn only_an_agent_host_is_given_a_token_this_way() {
+        let store = agent_host_store();
+        let err = agent_host_token(&store, "mefistos", false).unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID, "{err:?}");
+        assert!(err.message.contains("not an agent host"), "{}", err.message);
+        assert!(store
+            .lock()
+            .unwrap()
+            .get_host_token("mefistos")
+            .unwrap()
+            .is_none());
+        let err = agent_host_token(&store, "nobody", false).unwrap_err();
+        assert_eq!(err.code, codes::E_NOTFOUND, "{err:?}");
     }
 
     #[tokio::test]
