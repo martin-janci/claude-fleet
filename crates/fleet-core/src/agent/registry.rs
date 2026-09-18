@@ -235,6 +235,14 @@ impl AgentRegistry {
 
     /// How many requests are waiting on this host's connection. Test-only: it
     /// is how a leaked slot (a timed-out or abandoned call) becomes visible.
+    /// Which connection is live for `alias`. Test-only: it is how an
+    /// end-to-end test knows a reconnect has REPLACED the old connection,
+    /// which `connected(alias)` cannot tell it.
+    #[cfg(test)]
+    pub(crate) fn live_conn(&self, alias: &str) -> Option<ConnId> {
+        self.live(alias).map(|c| c.id)
+    }
+
     #[cfg(test)]
     pub(crate) fn pending_len(&self, alias: &str) -> usize {
         self.live(alias).map(|c| c.pending.len()).unwrap_or(0)

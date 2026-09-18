@@ -1371,6 +1371,7 @@ dependencies = [
  "base64 0.22.1",
  "dashmap",
  "directories",
+ "fleet-agent",
  "fleet-proto",
  "futures-util",
  "hex",

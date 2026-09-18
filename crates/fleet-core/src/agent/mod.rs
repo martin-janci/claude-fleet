@@ -17,6 +17,8 @@
 //! without a socket.
 
 #[cfg(test)]
+mod e2e;
+#[cfg(test)]
 pub mod fake;
 pub mod registry;
 pub mod router;

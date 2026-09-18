@@ -74,3 +74,7 @@ proptest = { version = "1", default-features = false, features = ["std"] }
 # `ws` feature already pulls in for the server half, so it adds no package to
 # `Cargo.lock` — keep the two in step when axum moves.
 tokio-tungstenite = "0.29"
+# The REAL agent, for agent::e2e: the hub and a fleet-agent talking over a
+# loopback socket in one process. A dev-dependency only, and in this
+# direction only — fleet-agent never depends on fleet-core.
+fleet-agent = { path = "../fleet-agent" }
