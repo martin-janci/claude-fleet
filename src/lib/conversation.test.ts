@@ -39,6 +39,7 @@ beforeEach(() => {
 function conv(over: Partial<Conversation> = {}): Conversation {
   return {
     truncated: false,
+    context: null,
     turns: [
       {
         prompt: 'fix the bug',

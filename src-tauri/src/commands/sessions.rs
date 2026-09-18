@@ -314,7 +314,17 @@ pub async fn session_conversation(
     // across the fetch.
     let (turns, max_chars) = transcript::conv_limits(args.turns);
     let targs = transcript::resolve_args(&store, &row, turns, max_chars)?;
-    transcript::fetch_conversation(targs, &ssh).await
+    let claude_id = targs.claude_session_id.clone();
+    let conv = transcript::fetch_conversation(targs, &ssh).await?;
+    // Write the context size back so the row's meter is right immediately;
+    // only meaningful for the row's current conversation (no override arg
+    // yet — Task 7).
+    if let Some(v) = &conv.context {
+        if let Ok(s) = lock(&store) {
+            let _ = s.set_context(row.id, &claude_id, v.tokens, v.window, "transcript", None);
+        }
+    }
+    Ok(conv)
 }
 
 // ── Activity probe (live indicator) ─────────────────────────────────────────

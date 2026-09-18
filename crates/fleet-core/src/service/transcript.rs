@@ -233,6 +233,34 @@ pub struct Conversation {
     pub turns: Vec<ConvTurn>,
     /// Older turns or items were dropped to fit the turn / char budget.
     pub truncated: bool,
+    /// Current-conversation context size, from this same read's tail.
+    /// `None` when the tail carried no usage (nothing yet, or a compaction
+    /// with no reply since).
+    pub context: Option<ContextView>,
+}
+
+/// The context size shown in the Conversation payload (spec §1.5), derived
+/// from a [`crate::service::context::ContextUsage`] read at the same time as
+/// the transcript tail.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct ContextView {
+    pub tokens: i64,
+    pub window: i64,
+    pub pct: f64,
+    /// Always `false` here: a value freshly read from the transcript is
+    /// never stale.
+    pub stale: bool,
+}
+
+impl From<&crate::service::context::ContextUsage> for ContextView {
+    fn from(u: &crate::service::context::ContextUsage) -> Self {
+        ContextView {
+            tokens: u.tokens,
+            window: u.window,
+            pct: ((u.tokens as f64) * 100.0 / (u.window.max(1) as f64)).round(),
+            stale: false,
+        }
+    }
 }
 
 /// The prompt text of a human `user` entry, or `None` when the entry is not
@@ -435,7 +463,11 @@ pub fn trim_conversation(
         }
         truncated = true;
     }
-    Conversation { turns, truncated }
+    Conversation {
+        turns,
+        truncated,
+        context: None,
+    }
 }
 
 /// Fit a lone turn holding at most one item into `max_chars`. The reply
@@ -617,6 +649,17 @@ async fn read_tail(
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Read the last `max_bytes` of `args`' transcript (shared with
+/// `service::context`). Errors as [`tail_script`] / [`read_tail`].
+pub(crate) async fn read_tail_bytes(
+    args: &TranscriptArgs,
+    max_bytes: usize,
+    ssh: &Arc<SshClient>,
+) -> Result<String, IpcError> {
+    let script = tail_script(args, max_bytes)?;
+    read_tail(args, &script, ssh).await
+}
+
 /// Fetch and render a transcript as plain text. Errors as [`tail_script`] /
 /// [`read_tail`].
 pub async fn fetch_transcript(
@@ -653,6 +696,9 @@ pub async fn fetch_conversation(
     // A tail that filled the byte budget started mid-file: older history
     // exists even when the parsed turns fit the window.
     conv.truncated |= text.len() >= conv_read_bytes(args.turns);
+    conv.context = crate::service::context::context_from_jsonl(&text)
+        .as_ref()
+        .map(ContextView::from);
     Ok(conv)
 }
 
@@ -1100,13 +1146,25 @@ mod tests {
                 ],
             }],
             truncated: false,
+            context: None,
         };
         assert_eq!(
             serde_json::to_value(&c).unwrap(),
             serde_json::json!({"turns":[{"prompt":null,"at":"2026-09-13T10:00:00Z","ended_at":null,"items":[
                 {"kind":"text","text":"hi"},{"kind":"tool","summary":"Bash(command=ls)","error":false}]}],
-                "truncated":false})
+                "truncated":false,"context":null})
         );
+    }
+
+    #[test]
+    fn conversation_context_view_rounds_pct() {
+        let u = crate::service::context::ContextUsage {
+            tokens: 50_000,
+            window: 200_000,
+            model: None,
+        };
+        let v = ContextView::from(&u);
+        assert_eq!((v.pct, v.stale), (25.0, false));
     }
 
     #[test]

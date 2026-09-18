@@ -98,9 +98,18 @@ impl FleetTools {
         let (turns, max_chars) = transcript::conv_limits(p.turns);
         let args =
             transcript::resolve_args(&self.store, &row, turns, max_chars).map_err(to_mcp_err)?;
+        let claude_id = args.claude_session_id.clone();
         let conv = transcript::fetch_conversation(args, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
+        // Write the context size back so the row's meter is right
+        // immediately; only meaningful for the row's current conversation
+        // (no override arg yet — Task 7).
+        if let Some(v) = &conv.context {
+            if let Ok(s) = lock(&self.store) {
+                let _ = s.set_context(row.id, &claude_id, v.tokens, v.window, "transcript", None);
+            }
+        }
         ok_json(&conv)
     }
 

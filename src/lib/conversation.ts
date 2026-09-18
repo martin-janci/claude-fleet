@@ -13,9 +13,18 @@ export interface ConvTurn {
   items: ConvItem[];
 }
 
+/** Current-conversation context size, read from the same transcript tail. */
+export interface ContextView {
+  tokens: number;
+  window: number;
+  pct: number;
+  stale: boolean;
+}
+
 export interface Conversation {
   turns: ConvTurn[];
   truncated: boolean;
+  context: ContextView | null;
 }
 
 /** Poll cadence for the Conversation tab while it is visible (spec §6). */

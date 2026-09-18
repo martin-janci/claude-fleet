@@ -39,6 +39,7 @@ function session(over: Partial<SessionRow> = {}): SessionRow {
 function conv(over: Partial<Conversation> = {}): Conversation {
   return {
     truncated: false,
+    context: null,
     turns: [
       {
         prompt: 'fix the bug',
