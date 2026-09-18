@@ -53,8 +53,7 @@ use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use fleet_proto::{
-    base64_len, decode_agent_frame_within, encode_hub_frame, AgentFrame, HubFrame, MAX_FRAME_BYTES,
-    MAX_PAYLOAD_BYTES,
+    decode_agent_frame_within, encode_hub_frame, AgentFrame, HubFrame, MAX_FRAME_BYTES,
 };
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
@@ -66,7 +65,7 @@ use tokio::time::Instant;
 
 /// How often the hub pings an idle agent. The agent answers with a `pong`; any
 /// frame at all counts as a sign of life.
-pub const HEARTBEAT: Duration = Duration::from_secs(30);
+pub const HEARTBEAT: Duration = fleet_proto::HEARTBEAT;
 
 /// How many heartbeats in a row may pass with nothing heard from the agent
 /// before its connection is dropped. Two, as the design says: with
@@ -558,22 +557,11 @@ fn answer_budget(frame: &HubFrame) -> Option<(String, usize, Instant)> {
     }
 }
 
-/// What an `exec`'s `result` may cost: both streams at the cap, base64'd, plus
-/// one envelope — or, with no cap, the whole ceiling, because an uncapped
-/// `run` is what reads a 200 MiB transcript back.
+/// What an `exec`'s `result` may cost. The number lives in `fleet-proto`
+/// beside the stream limits the agent truncates to, so the two ends cannot
+/// drift apart: [`fleet_proto::result_budget`].
 fn exec_budget(cap_bytes: Option<u64>) -> usize {
-    match cap_bytes {
-        None => MAX_FRAME_BYTES,
-        Some(cap) => {
-            // Clamped before the arithmetic: `cap_bytes` is a u64 off the
-            // wire in principle, and no cap above the payload limit can buy
-            // more than the ceiling anyway.
-            let per_stream = (cap as usize).min(MAX_PAYLOAD_BYTES);
-            base64_len(per_stream.saturating_mul(2))
-                .saturating_add(MIN_INBOUND_BYTES)
-                .min(MAX_FRAME_BYTES)
-        }
-    }
+    fleet_proto::result_budget(cap_bytes)
 }
 
 /// The request an agent frame answers — `None` for `hello`, which answers

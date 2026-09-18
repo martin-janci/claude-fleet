@@ -72,6 +72,66 @@ pub const fn base64_len(n: usize) -> usize {
     n.div_ceil(3) * 4
 }
 
+/// How often the hub pings an idle agent, and so the unit both ends count
+/// silence in. The hub drops an agent after two beats with nothing heard; the
+/// agent gives up on a hub after a few beats of silence and dials again. The
+/// ping comes from the HUB — an agent answers it and never originates one.
+pub const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How much output one `exec`'s `result` may carry, before base64.
+///
+/// The agent's half of [`result_budget`]: an agent that truncates to these
+/// limits always produces a `result` the hub will decode. `tests/frames.rs`
+/// pins the two together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamLimits {
+    /// The most either stream may carry: the hub's `cap_bytes`, or
+    /// [`MAX_PAYLOAD_BYTES`] when it sent none.
+    pub per_stream: usize,
+    /// The most both streams may carry together. Twice `per_stream` for a
+    /// small cap; one [`MAX_PAYLOAD_BYTES`] once that would overrun the frame
+    /// ceiling, which leaves one envelope around ONE payload — so an agent
+    /// with a full stdout has no room left for stderr.
+    pub combined: usize,
+}
+
+/// What an `exec`'s `result` may cost on the wire: both streams at the cap,
+/// base64'd, plus one envelope — or, with no cap, the whole ceiling, because
+/// an uncapped `run` is what reads a 200 MiB transcript back.
+///
+/// The hub decodes every answer against this (`decode_agent_frame_within`),
+/// so the number lives here, beside [`result_stream_limits`], rather than in
+/// either end.
+pub fn result_budget(cap_bytes: Option<u64>) -> usize {
+    match cap_bytes {
+        None => MAX_FRAME_BYTES,
+        Some(cap) => {
+            // Clamped before the arithmetic: `cap_bytes` is a u64 off the
+            // wire, and no cap above the payload limit can buy more than the
+            // ceiling anyway.
+            let per_stream = usize::try_from(cap)
+                .unwrap_or(usize::MAX)
+                .min(MAX_PAYLOAD_BYTES);
+            base64_len(per_stream.saturating_mul(2))
+                .saturating_add(ENVELOPE_BYTES)
+                .min(MAX_FRAME_BYTES)
+        }
+    }
+}
+
+/// The stream limits whose worst case fits [`result_budget`] for the same
+/// `cap_bytes`.
+pub fn result_stream_limits(cap_bytes: Option<u64>) -> StreamLimits {
+    let per_stream = cap_bytes
+        .map(|cap| usize::try_from(cap).unwrap_or(usize::MAX))
+        .unwrap_or(MAX_PAYLOAD_BYTES)
+        .min(MAX_PAYLOAD_BYTES);
+    StreamLimits {
+        per_stream,
+        combined: per_stream.saturating_mul(2).min(MAX_PAYLOAD_BYTES),
+    }
+}
+
 /// The standard, padded base64 alphabet — the one `base64(1)` on a remote host
 /// already produces, so hub-side code that shells out and agent-side code that
 /// encodes in process agree.

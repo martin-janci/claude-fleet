@@ -382,3 +382,75 @@ fn proto_errors_say_what_went_wrong() {
     let boxed: Box<dyn std::error::Error> = Box::new(too_large);
     assert!(!boxed.to_string().is_empty());
 }
+
+// ── what an `exec`'s answer may cost, shared by both ends ───────────────────
+//
+// The hub decodes a `result` against `result_budget(cap_bytes)`; the agent
+// sizes its streams with `result_stream_limits(cap_bytes)`. They are two
+// halves of one contract, so the test is that the worst answer the agent's
+// limits allow always fits the hub's budget.
+
+use fleet_proto::{result_budget, result_stream_limits, HEARTBEAT};
+
+/// The largest `result` the limits permit for `cap_bytes`, built for real.
+fn worst_result(cap_bytes: Option<u64>) -> AgentFrame {
+    let limits = result_stream_limits(cap_bytes);
+    let stdout = vec![0xffu8; limits.per_stream];
+    let stderr = vec![0xffu8; limits.combined - limits.per_stream];
+    AgentFrame::Result {
+        // A uuid, as `AgentTransport` sends.
+        id: "0b9e6b7e-5a55-4c1e-9d33-3f7a1c2e8f00".into(),
+        exit_code: i32::MIN,
+        stdout_b64: encode_b64(&stdout),
+        stderr_b64: encode_b64(&stderr),
+        truncated: true,
+    }
+}
+
+#[test]
+fn the_worst_answer_the_agent_may_send_fits_the_budget_the_hub_decodes_with() {
+    for cap in [0u64, 1, 2, 3, 4, 1000, 4096, 65_536, 1_000_000] {
+        let frame = worst_result(Some(cap));
+        let budget = result_budget(Some(cap));
+        let text = encode_agent_frame_within(&frame, budget)
+            .unwrap_or_else(|e| panic!("cap {cap}: the agent's worst answer is refused: {e}"));
+        assert!(text.len() <= budget);
+    }
+}
+
+#[test]
+fn each_stream_may_reach_the_cap_the_hub_asked_for() {
+    let limits = result_stream_limits(Some(1000));
+    assert_eq!(limits.per_stream, 1000);
+    assert_eq!(limits.combined, 2000, "both streams, each at the cap");
+}
+
+/// Past half the payload limit the two streams SHARE it: the hub's budget
+/// stops at the frame ceiling, which leaves one envelope around ONE payload.
+/// Checked by arithmetic, because building it would allocate ~0.5 GiB.
+#[test]
+fn large_and_absent_caps_share_one_payload_between_the_streams() {
+    for cap in [None, Some(u64::MAX), Some(MAX_PAYLOAD_BYTES as u64)] {
+        let limits = result_stream_limits(cap);
+        assert_eq!(limits.per_stream, MAX_PAYLOAD_BYTES, "{cap:?}");
+        assert_eq!(limits.combined, MAX_PAYLOAD_BYTES, "{cap:?}");
+        assert_eq!(result_budget(cap), MAX_FRAME_BYTES, "{cap:?}");
+        // base64 of two streams is at most 4 bytes past base64 of their sum,
+        // and the JSON around them is far under the envelope.
+        assert!(base64_len(limits.combined) + 4 + 1024 <= result_budget(cap));
+    }
+}
+
+#[test]
+fn the_budget_follows_the_cap_and_a_hostile_cap_cannot_overflow_it() {
+    assert!(result_budget(Some(1_000_000)) > base64_len(2_000_000));
+    assert!(result_budget(Some(1_000_000)) < MAX_FRAME_BYTES / 10);
+    assert!(result_budget(Some(1024)) < result_budget(Some(1024 * 1024)));
+    assert_eq!(result_budget(Some(u64::MAX)), MAX_FRAME_BYTES);
+    assert_eq!(result_budget(None), MAX_FRAME_BYTES);
+}
+
+#[test]
+fn both_ends_agree_on_the_heartbeat() {
+    assert_eq!(HEARTBEAT, std::time::Duration::from_secs(30));
+}
