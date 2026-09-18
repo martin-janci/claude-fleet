@@ -1,10 +1,12 @@
 mod app_events;
+pub mod backend;
 mod bootstrap;
 mod commands;
 mod pty;
 
 pub use app_events::AppHandleEventBus;
 
+use backend::{Backend, OsTokenStore};
 use bootstrap::env::{
     appdata_dir, backfill_locale_for_gui_launch, backfill_path_for_gui_launch, env_looks_complete,
     import_login_shell_env,
@@ -162,39 +164,61 @@ pub fn run() {
                 fleet_core::service::account_usage::UsageCache::new(),
             ));
             app.manage(std::sync::Arc::clone(&usage_cache));
-            // Start the MCP control API if the user has enabled it (off by
-            // default). Reuses the same Store / SshClient / registry as the UI.
-            maybe_start_mcp(
-                app.handle(),
-                &store,
-                &ssh_client_for_setup,
-                &reg_for_setup,
-                &tunnels_for_setup,
-                &guards,
-            );
-            // Task H: proactive background reconcile tick. A Tauri-runtime
-            // spawned interval drives `service::sessions::reconcile_now` on the same
-            // managed Store/SshClient the commands use, so fleet state stays
-            // fresh without the UI having to poll. Reconcile is Tauri-free
-            // (events flow through the store's EventBus), so the loop needs no
-            // AppHandle. Interval comes from settings (`reconcile.interval_secs`,
-            // default 20; 0 disables). A `try_lock` guard skips a tick if the
-            // previous reconcile is still running so slow passes can't stack.
-            spawn_reconcile_tick(
-                std::sync::Arc::clone(&store),
-                std::sync::Arc::clone(&ssh_client_for_setup),
-            );
-            // Task 4: independent 60s account-usage poll loop. Deliberately
-            // separate from the reconcile tick above (which `reconcile
-            // .interval_secs=0` can disable entirely) so usage keeps polling
-            // on its own cadence; `service::account_usage`'s 5-minute floor
-            // still caps real requests to one per account.
-            spawn_account_usage_tick(
-                std::sync::Arc::clone(&store),
-                std::sync::Arc::clone(&ssh_client_for_setup),
-                std::sync::Arc::clone(&usage_cache),
-                bus_for_usage,
-            );
+            // Standalone, or a window onto a `fleet-hub`? Decided once, here,
+            // from `hub.remote_url` plus the client token kept outside the
+            // database. No command routes through it yet — but the decision
+            // already governs what this process starts below, because a
+            // desktop pointed at a hub must not become a second brain
+            // reconciling and mutating the same fleet.
+            let backend = Backend::resolve(&store, &OsTokenStore::new(data_dir.clone()));
+            app.manage(backend.clone());
+            if let Some(cfg) = backend.remote() {
+                // Deliberately no token in this line.
+                tracing::info!(
+                    hub = %cfg.base_url,
+                    client = %cfg.client_name,
+                    "remote backend: skipping the reconcile tick, the account-usage \
+                     poll and the embedded control API — the hub owns this fleet"
+                );
+            } else {
+                tracing::info!(
+                    "standalone backend: local database and SSH; starting the reconcile \
+                     tick and the account-usage poll"
+                );
+                // Start the MCP control API if the user has enabled it (off by
+                // default). Reuses the same Store / SshClient / registry as the UI.
+                maybe_start_mcp(
+                    app.handle(),
+                    &store,
+                    &ssh_client_for_setup,
+                    &reg_for_setup,
+                    &tunnels_for_setup,
+                    &guards,
+                );
+                // Task H: proactive background reconcile tick. A Tauri-runtime
+                // spawned interval drives `service::sessions::reconcile_now` on the same
+                // managed Store/SshClient the commands use, so fleet state stays
+                // fresh without the UI having to poll. Reconcile is Tauri-free
+                // (events flow through the store's EventBus), so the loop needs no
+                // AppHandle. Interval comes from settings (`reconcile.interval_secs`,
+                // default 20; 0 disables). A `try_lock` guard skips a tick if the
+                // previous reconcile is still running so slow passes can't stack.
+                spawn_reconcile_tick(
+                    std::sync::Arc::clone(&store),
+                    std::sync::Arc::clone(&ssh_client_for_setup),
+                );
+                // Task 4: independent 60s account-usage poll loop. Deliberately
+                // separate from the reconcile tick above (which `reconcile
+                // .interval_secs=0` can disable entirely) so usage keeps polling
+                // on its own cadence; `service::account_usage`'s 5-minute floor
+                // still caps real requests to one per account.
+                spawn_account_usage_tick(
+                    std::sync::Arc::clone(&store),
+                    std::sync::Arc::clone(&ssh_client_for_setup),
+                    std::sync::Arc::clone(&usage_cache),
+                    bus_for_usage,
+                );
+            }
             Ok(())
         })
         .manage(Mutex::new(PtyState::new()))
