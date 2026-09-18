@@ -45,6 +45,54 @@ pub fn read_reconcile_interval_secs(raw: Option<String>) -> i64 {
     .unwrap_or(DEFAULT_RECONCILE_INTERVAL_SECS)
 }
 
+/// Fallback when `sessions.lost_ttl_secs` is unset or unparseable — 14 days,
+/// matching the registry default in `service::settings::SESSIONS_LOST_TTL_SECS`.
+pub(super) const DEFAULT_LOST_TTL_SECS: i64 = 1_209_600;
+
+/// Resolve the mass-loss TTL cutoff from the raw `sessions.lost_ttl_secs`
+/// setting value, the same way `read_reconcile_interval_secs` resolves its
+/// key (`settings::resolve` → parse → fall back to the registry default). A
+/// value `<= 0` DISABLES the exemption entirely (`None`, today's exemption-
+/// free behaviour); otherwise the cutoff is `now - ttl`, passed straight
+/// through to `HostReconcile::lost_ttl_cutoff` / `ghost_and_clean_bg_sessions`.
+pub(super) fn read_lost_ttl_cutoff(raw: Option<String>, now: i64) -> Option<i64> {
+    let ttl = crate::service::settings::resolve(
+        crate::service::settings::SESSIONS_LOST_TTL_SECS,
+        raw.as_deref(),
+    )
+    .parse::<i64>()
+    .unwrap_or(DEFAULT_LOST_TTL_SECS);
+    if ttl <= 0 {
+        None
+    } else {
+        Some(now - ttl)
+    }
+}
+
+/// Why every session on a reachable host should be treated as lost this
+/// pass, or `None` for a normal pass. Each comparison needs BOTH sides
+/// known, so a first probe after upgrade or a failed identity read never
+/// mass-marks a host.
+pub(super) fn mass_loss_verdict(
+    stored: &StoredIdentity,
+    observed: Option<&crate::tmux::HostIdentity>,
+) -> Option<&'static str> {
+    let obs = observed?;
+    if let (Some(s), Some(o)) = (stored.boot_id.as_deref(), obs.boot_id.as_deref()) {
+        if s != o {
+            return Some("host_reboot");
+        }
+    }
+    match (stored.tmux_server_pid, obs.tmux_server_pid) {
+        (Some(_), None) => Some("tmux_server_gone"),
+        (Some(s), Some(o)) if s != o => Some("tmux_server_gone"),
+        // `(None, None)` is deliberately NOT a verdict: a host whose server
+        // was already absent last pass has already been marked, and a host
+        // first seen with no server has no stored evidence of loss.
+        _ => None,
+    }
+}
+
 /// Map of `tmux_name` → analyzed pane intel, gathered off-lock during a host
 /// probe. A name absent from the map (capture failed) leaves the session's
 /// intel fields untouched (COALESCE in the upsert preserves prior values).
@@ -148,10 +196,8 @@ pub(super) struct HostProbe {
     /// This pass's read of the host's boot identity (`TmuxExec::host_identity`),
     /// read under the same `tmux_result.is_ok()` guard as `account`. `None`
     /// when `list_sessions` failed, the whole probe timed out, or the
-    /// executor could not tell (Task 6 consumes this to distinguish "host
-    /// rebooted" from "could not tell").
-    // Not read yet outside tests: the writer (Task 6) is the consumer.
-    #[allow(dead_code)]
+    /// executor could not tell — `reconcile_write_one_host` (`mass_loss_verdict`)
+    /// consumes this to distinguish "host rebooted" from "could not tell".
     pub(super) identity: Option<crate::tmux::HostIdentity>,
     /// Unix-epoch second the probe STARTED. Forwarded as
     /// `HostReconcile::probe_started_at` so the writer never ghosts a row that
@@ -505,19 +551,71 @@ pub(super) fn reconcile_write_one_host(
                     pr_observed: pr.is_some(),
                 });
             }
+            let now = now_unix();
+            // ── Task 6: reboot / vanished-tmux-server safety net ──
+            // Compare this pass's observed boot identity against the LAST
+            // STORED one (read before the write below overwrites it) — a
+            // changed boot id or tmux server pid on an otherwise-reachable
+            // host means every session on it was lost, not merely the ones
+            // absent from `keep` this pass.
+            let stored_identity = s.get_host_identity(&host.alias).unwrap_or_default();
+            let verdict = mass_loss_verdict(&stored_identity, probe.identity.as_ref());
+            if let Some(reason) = verdict {
+                match s.mark_host_sessions_lost(&host.alias, reason, &keep, now) {
+                    Ok(rows) => {
+                        for row in &rows {
+                            if let Err(e) = s.insert_session_event(row.id, "lost", Some(reason)) {
+                                tracing::warn!(
+                                    host = %host.alias,
+                                    session = %row.tmux_name,
+                                    error = %e,
+                                    "[reconcile] lost event insert failed"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => tracing::warn!(
+                        host = %host.alias,
+                        error = %e,
+                        "[reconcile] mark lost failed"
+                    ),
+                }
+            }
+            // Persist the observed identity AFTER computing the verdict
+            // against the previously stored value — writing it first would
+            // make every future comparison compare the identity with
+            // itself and the verdict would never fire again. Never write
+            // when the probe could not tell (`None`): that would erase a
+            // known-good identity on a transient read failure.
+            if let Some(id) = &probe.identity {
+                if let Err(e) =
+                    s.set_host_identity(&host.alias, id.boot_id.as_deref(), id.tmux_server_pid)
+                {
+                    tracing::warn!(
+                        host = %host.alias,
+                        error = %e,
+                        "[reconcile] identity write failed"
+                    );
+                }
+            }
+            let lost_ttl_raw = s
+                .get_setting(crate::service::settings::SESSIONS_LOST_TTL_SECS)
+                .ok()
+                .flatten();
             s.apply_host_reconcile(HostReconcile {
                 alias: &host.alias,
                 reachable: true,
                 claude_version: host.claude_version.as_deref(),
                 tmux_version: host.tmux_version.as_deref(),
-                last_pinged_at: now_unix(),
+                last_pinged_at: now,
                 probe_started_at: probe.started_at,
                 sessions: &sessions,
                 keep: &keep,
-                // Task 6 wires the real TTL cutoff (from
-                // `settings::SESSIONS_LOST_TTL_SECS`) through this path; for
-                // now Phase 2 keeps today's exemption-free behaviour.
-                lost_ttl_cutoff: None,
+                lost_ttl_cutoff: read_lost_ttl_cutoff(lost_ttl_raw, now),
+                // A pass that just mass-marked this host's sessions lost
+                // must not immediately re-ghost (and restart the reap clock
+                // on) those very rows via the routine keep-set prune below.
+                skip_prune: verdict.is_some(),
             })?;
             // Task G: the write has committed — read each known row back and
             // record a transition only where the STORED value changed.
@@ -563,7 +661,7 @@ pub(super) fn reconcile_write_one_host(
                 projects,
                 agent_rows,
                 probe.agent_mtimes.as_ref(),
-                now_unix(),
+                now,
             )?;
             // Task H: stamp freshness on every session this pass observed live,
             // so a proactive (background) reconcile keeps `last_reconciled_at`
@@ -591,6 +689,7 @@ pub(super) fn reconcile_write_one_host(
                 sessions: &[],
                 keep: &[],
                 lost_ttl_cutoff: None,
+                skip_prune: false,
             })?;
         }
     }
@@ -747,9 +846,18 @@ pub(super) fn reconcile_agent_rows(
             );
         }
     }
-    // Task 6 wires the real TTL cutoff through this path; for now Phase 2
-    // keeps today's exemption-free behaviour here too.
-    if let Err(e) = s.ghost_and_clean_bg_sessions(host_alias, &keep, now, None) {
+    // Same TTL cutoff as the tmux-keyed prune in `reconcile_write_one_host`
+    // (a `host_reboot` verdict marks bg rows lost too — only
+    // `tmux_server_gone` is tmux-only — so a resumable bg row deserves the
+    // same exemption). Read fresh here rather than threaded through as a
+    // parameter so this function's signature (and its many direct callers
+    // in tests) is unchanged.
+    let lost_ttl_raw = s
+        .get_setting(crate::service::settings::SESSIONS_LOST_TTL_SECS)
+        .ok()
+        .flatten();
+    let lost_ttl_cutoff = read_lost_ttl_cutoff(lost_ttl_raw, now);
+    if let Err(e) = s.ghost_and_clean_bg_sessions(host_alias, &keep, now, lost_ttl_cutoff) {
         tracing::warn!(host = %host_alias, error = %e, "[reconcile] bg cleanup failed");
     }
     Ok(())

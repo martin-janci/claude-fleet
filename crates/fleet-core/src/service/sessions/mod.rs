@@ -8,7 +8,9 @@ use crate::cancel::{CancelGuard, CancellationRegistry};
 use crate::ipc_error::IpcError;
 use crate::shell::quote;
 use crate::ssh::SshClient;
-use crate::store::{HostReconcile, HostRow, ProjectRow, ReconcileSession, SessionRow, Store};
+use crate::store::{
+    HostReconcile, HostRow, ProjectRow, ReconcileSession, SessionRow, Store, StoredIdentity,
+};
 use crate::tmux::{LocalTmux, RemoteTmux, TmuxExec};
 use serde::Deserialize;
 use std::path::PathBuf;

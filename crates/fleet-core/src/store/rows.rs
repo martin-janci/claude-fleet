@@ -684,6 +684,14 @@ pub struct HostReconcile<'a> {
     /// `lost_at >= cutoff`) is spared Phase 2's hard-delete. `None` (the
     /// default) disables the exemption entirely — today's behaviour.
     pub lost_ttl_cutoff: Option<i64>,
+    /// Skip the tmux-keyed ghost/reap pass entirely this write (Task 6): set
+    /// when this pass already mass-marked the host's sessions lost via
+    /// `Store::mark_host_sessions_lost` (a reboot or a vanished tmux
+    /// server), so the routine `keep`-set ghosting must not immediately
+    /// re-ghost (and start the reap clock on) rows the mass-loss path just
+    /// stamped with their specific `lost_reason`. `false` (the default) is
+    /// today's behaviour — every reachable pass prunes.
+    pub skip_prune: bool,
 }
 
 /// Max `session_events` rows kept per session. Enforced on every

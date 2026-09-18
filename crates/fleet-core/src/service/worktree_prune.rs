@@ -932,6 +932,7 @@ mod tests {
                     sessions: &[],
                     keep: &[],
                     lost_ttl_cutoff: None,
+                    skip_prune: false,
                 })
                 .unwrap();
         };

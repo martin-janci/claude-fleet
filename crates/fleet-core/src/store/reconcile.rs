@@ -433,16 +433,23 @@ impl Store {
                 for (pid, ts) in project_touch {
                     Self::touch_project_last_session_at_in_tx(tx, pid, ts, &mut out)?;
                 }
-                Self::ghost_and_clean(
-                    tx,
-                    spec.alias,
-                    spec.keep,
-                    now_unix(),
-                    KIND_TMUX,
-                    Some(ghost_cutoff(spec.probe_started_at)),
-                    spec.lost_ttl_cutoff,
-                    &mut out,
-                )?;
+                // Task 6: a pass that just mass-marked this host's sessions
+                // lost (reboot / vanished tmux server) skips the routine
+                // ghost/reap pass entirely — it must not immediately re-ghost
+                // (and restart the reap clock on) rows the mass-loss path
+                // just stamped with their own `lost_reason`.
+                if !spec.skip_prune {
+                    Self::ghost_and_clean(
+                        tx,
+                        spec.alias,
+                        spec.keep,
+                        now_unix(),
+                        KIND_TMUX,
+                        Some(ghost_cutoff(spec.probe_started_at)),
+                        spec.lost_ttl_cutoff,
+                        &mut out,
+                    )?;
+                }
             }
             Ok(out)
         })?;

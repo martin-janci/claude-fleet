@@ -547,6 +547,7 @@ mod tests {
             }],
             keep: &[name.to_string()],
             lost_ttl_cutoff: None,
+            skip_prune: false,
         })
         .unwrap();
         s.get_session(name, "local").unwrap().unwrap().id
