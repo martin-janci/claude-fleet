@@ -1,7 +1,9 @@
 # Surviving a host reboot: never lose a session, offer to restore it
 
 **Date:** 2026-09-17
-**Status:** Design — not yet implemented
+**Status:** Design — not yet implemented. Findings F1–F5 re-verified
+2026-09-18 against `origin/main` `1d6bedb`, after the `crates/fleet-core`
+workspace split; paths and line numbers below are current as of that commit.
 **Motivating incident:** turanga powered off 15:15:52, back 15:24:13 on
 2026-09-17. `claude-fleet-trn` is a nerdctl container (`claude-fleet-host`,
 namespace `om-ml`) on that box, so its tmux server died with the host. At
@@ -18,7 +20,7 @@ only half right.
 
 ### F1 — The ghost concept engaged. It expired after one cycle.
 
-`Store::ghost_and_clean` (`src-tauri/src/store/reconcile.rs:255`) is a
+`Store::ghost_and_clean` (`crates/fleet-core/src/store/reconcile.rs:255`) is a
 two-phase ghost-then-reap:
 
 - **Phase 1** sets `status='ghost', lost_at=now` on every row of the host not
@@ -35,21 +37,26 @@ transient probe miss, not for an outage.
 
 ### F2 — "tmux server is gone" is indistinguishable from "zero sessions".
 
-`list_local_sessions` (`src-tauri/src/tmux.rs:442`) maps a `no server
+`list_local_sessions` (`crates/fleet-core/src/tmux.rs:484`) maps a `no server
 running` stderr to `Ok(vec![])` via `is_no_server_running`
-(`src-tauri/src/tmux.rs:479`). An empty `Ok` means:
+(`crates/fleet-core/src/tmux.rs:524`). An empty `Ok` means:
 
 - the host counts as **reachable**, so `reconcile_write_one_host` takes the
   `Ok(live)` branch,
 - `keep` is empty,
 - therefore every tmux-kind row on the host is ghosted, then reaped.
 
+The same holds on the **remote** path, which is the one the turanga
+incident actually took: `RemoteTmux::list_sessions`
+(`crates/fleet-core/src/tmux.rs:287`) also returns `Ok(Vec::new())` when
+`is_no_server_running` matches the ssh output.
+
 The genuinely-unreachable path is already safe: the `Err` branch
-(`src-tauri/src/service/sessions/reconcile.rs:545`) does no upserts and runs
+(`crates/fleet-core/src/service/sessions/reconcile.rs:570`) does no upserts and runs
 no prune, keeping last-known rows. The all-gone case is the dangerous one,
 and it is precisely the case the reboot produces.
 
-Worth recording: `parse_sessions_checked` (`src-tauri/src/tmux.rs:512`)
+Worth recording: `parse_sessions_checked` (`crates/fleet-core/src/tmux.rs:563`)
 *already* refuses garbled `list-sessions` output with `E_TMUX`, and its
 comment gives exactly this reasoning — treating it as zero sessions "would
 ghost, then delete, every row on the host". The legitimate no-server case
@@ -57,8 +64,8 @@ walks straight past that guard.
 
 ### F3 — `recreate_session` already resumes correctly.
 
-`recreate_pane_command` (`src-tauri/src/service/sessions/lifecycle.rs:1076`)
-→ `tmux::pane_command_for` (`src-tauri/src/tmux.rs:548`) emits:
+`recreate_pane_command` (`crates/fleet-core/src/service/sessions/lifecycle.rs:1069`)
+→ `tmux::pane_command_for` (`crates/fleet-core/src/tmux.rs:590`) emits:
 
 ```
 cl --resume '<id>' 2>/dev/null || cl --session-id '<id>' || cl; exec ${SHELL:-/bin/zsh} -l
@@ -78,7 +85,7 @@ trip, and it is the path every other create already uses. Switching to
 
 ### F5 — A tmux name is not always derivable from a cwd.
 
-`fill_session_name` (`src-tauri/src/service/sessions/lifecycle.rs:356`) uses
+`fill_session_name` (`crates/fleet-core/src/service/sessions/lifecycle.rs:356`) uses
 the deterministic `dev-<owner>-<repo>--<worktree>` **only when it is free**.
 A *second* session on the same worktree gets a generated
 `dev-<owner>-<repo>--<adjective>-<noun>` instead. This bounds R4: see
@@ -167,7 +174,7 @@ INSERT OR IGNORE INTO schema_version (version) VALUES (34);
 (`033_asset_layers.sql`, `2026-09-17-asset-layers-and-profiles-design.md`),
 both of which landed first — this spec renumbers to `034` accordingly.
 
-Register it in the `MIGRATIONS` table in `src-tauri/src/store/schema.rs`.
+Register it in the `MIGRATIONS` table in `crates/fleet-core/src/store/schema.rs`.
 
 `sessions.lost_reason` is `NULL` for a live row and otherwise one of:
 
@@ -216,7 +223,7 @@ On a verdict, the host takes a separate branch for that pass:
 3. One `lost` row per session into `session_events`, detail = the verdict.
 4. A host-level `RowChange::HostSessionsLost { host_alias, reason, count }`
    — a struct variant following the existing `AssetInventoryCleared`
-   precedent in `src-tauri/src/events.rs` — so the UI surfaces the reboot as
+   precedent in `crates/fleet-core/src/events.rs` — so the UI surfaces the reboot as
    one thing rather than N independent disappearances.
 5. `ghost_and_clean` is **skipped entirely** for that pass — the whole set is
    lost, there is nothing to prune. This is R2's "in one pass, rather than
@@ -250,7 +257,7 @@ Consequences, deliberately:
 - The TTL cap stops an abandoned host from growing ghosts without bound.
 
 New setting `sessions.lost_ttl_secs`, registered in
-`src-tauri/src/service/settings.rs` `SPECS`, default `1209600` (14 days).
+`crates/fleet-core/src/service/settings.rs` `SPECS`, default `1209600` (14 days).
 The store function takes the resolved TTL as a parameter; it does not read
 settings itself.
 
@@ -265,7 +272,7 @@ a different mechanism and is out of scope.
 restore_host_sessions { host_alias, dry_run?: bool, session_ids?: [i64] }
 ```
 
-Service entry point in `src-tauri/src/service/sessions/` alongside the
+Service entry point in `crates/fleet-core/src/service/sessions/` alongside the
 existing lifecycle calls, with a Tauri command and an MCP tool wrapping it.
 
 **Selection.** Lost rows (`lost_at IS NOT NULL`) on `host_alias`, of tmux
@@ -309,12 +316,12 @@ auto-answer.
 **Authority.** The service holds the `SshClient`, so the Tauri/UI path needs
 no token at all. The MCP tool wraps the same service behind the existing
 `require_host(caller, host_alias, …)` helper
-(`src-tauri/src/mcp/tools/support.rs`): the master token may restore any
+(`crates/fleet-core/src/mcp/tools/support.rs`): the master token may restore any
 host, a per-host token only its own. No operator agent ever needs to hold
 the target host's token, which is the constraint the incident surfaced.
 
 `restore_host_sessions` is a mutating tool: **not** added to
-`READONLY_TOOLS` in `src-tauri/src/mcp/guard.rs`.
+`READONLY_TOOLS` in `crates/fleet-core/src/mcp/guard.rs`.
 
 **UI.** `HostDetail.svelte` gains a "Restore N lost sessions…" action, shown
 only when the host has lost rows with resumable ids. It calls the command
@@ -388,7 +395,7 @@ leaves 8 INFO lines naming each one and why.
 
 ## Testing
 
-**Store-level** (`src-tauri/src/store/`, no host required):
+**Store-level** (`crates/fleet-core/src/store/`, no host required):
 
 - A host that stays reachable while its tmux server vanishes keeps its
   session rows, with `lost_at` set, `lost_reason='tmux_server_gone'`, and
@@ -430,7 +437,7 @@ tools *and* new Tauri commands, so `docs/control-api-reference.md` must be
 regenerated or CI fails:
 
 ```bash
-REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_current
+REGEN_DOCS=1 cargo test -p fleet-core reference_is_current
 ```
 
 ## Out of scope
