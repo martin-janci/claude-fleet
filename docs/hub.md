@@ -156,6 +156,124 @@ untouched. The previous file is saved as `settings.json.fleet-bak` first.
 **After provisioning, restart Claude Code on each host** to pick up the new
 MCP server entry (the skill files and hooks are picked up live).
 
+## Pair a phone
+
+A *client* is a device that drives the fleet without being a fleet host: a
+phone, a tablet, a browser on a laptop that is not provisioned. It gets its
+own token — not the master one — which you can see, name and revoke.
+
+On the hub, with the daemon running:
+
+```bash
+fleet-hub pair --name phone
+```
+
+That prints a QR code, the URL under it, and how long the code is good for:
+
+```
+█▀▀▀▀▀█ ▀▄█▀▄ █▀▀▀▀▀█
+…
+https://fleet.example.com/pair#ABCDEFGH
+
+client:  phone (full)
+expires: in 600 s — the code works once, and a hub restart voids it
+Scan it with the claude-fleet app on the device you are pairing.
+```
+
+Scan it with the device's camera. The page it lands on says what to do and
+nothing else — no JavaScript, no auto-redeem. The app on the device posts the
+code to the hub's `/pair` once and gets a token of its own back.
+
+What travels in that QR is a **pairing code**, not a token: eight characters,
+single-use, and it lives in the URL *fragment*, which a browser never sends —
+so no proxy, access log or scroll-back of your terminal ever holds a
+credential. Codes live in the hub's memory only, so restarting the daemon
+voids every outstanding one. Mint a new one and walk back to the phone.
+
+Two options:
+
+```bash
+fleet-hub pair --name kiosk --mode readonly   # observe only; the default is full
+fleet-hub pair --name phone --ttl 120         # seconds the code stays valid (30–3600)
+```
+
+Pairing needs a **running** hub (`fleet-hub serve`): the code only means
+something inside the process that will redeem it. `fleet-hub pair` reads the
+master token out of the data dir and calls the hub's own `/mcp` on loopback,
+so run it on the hub's machine, as the user the daemon runs as.
+
+## Clients
+
+```bash
+fleet-hub client list
+fleet-hub client list --include-revoked
+fleet-hub client revoke phone
+```
+
+`client list` prints one line per client, newest first:
+
+```
+NAME   MODE      CREATED            LAST SEEN          REVOKED
+phone  full      2026-09-17 09:20Z  2026-09-18 07:41Z  -
+kiosk  readonly  2026-09-17 09:12Z  -                  -
+```
+
+The token itself is never shown again: only its SHA-256 is stored, and the
+plaintext exists in the one `/pair` response that minted it. Lost it? Revoke
+the client and pair again under the same name.
+
+What a client may do:
+
+- **`full`** — whole-fleet *session* control: list, spawn, steer, kill, read
+  transcripts, follow the event stream. The same reach a `full` per-host
+  token has.
+- **`readonly`** — the observing tools only (`list_*`, `capture_session`,
+  `session_transcript`, `session_conversation`, `session_history`, `repo_*`,
+  `wait_for_*`, …). Anything that sends, kills, deletes or writes answers
+  `E_FORBIDDEN`.
+- **Neither mode reaches fleet admin.** `provision_hosts`, `add_host`,
+  `remove_host`, `hide_host`, `apply_sync`, `set_secret`, `pair_client` and
+  `revoke_client` are master-token only, so a paired phone can neither
+  re-provision the fleet nor pair a second device nor revoke your own client.
+- A prompt typed on a phone always reaches an agent **marked** as untrusted
+  input, naming the client it came from. `raw: true` is the master token's
+  alone.
+
+`revoke` takes effect on the client's very next request — the auth layer only
+resolves live rows — and an open event stream ends within one heartbeat
+(15 s). The row is kept, revoked, for the audit trail, and the name becomes
+free to pair again:
+
+```
+revoked phone (paired 2026-09-17 09:12Z); its next request is refused and the name is free again
+```
+
+## Events
+
+A client that has listed what it needs does not have to poll for changes:
+
+```
+GET /events            Authorization: Bearer <token>
+GET /events?kinds=session,host
+```
+
+is a server-sent-event stream of every row change the hub makes — the same
+events the desktop UI repaints from. Each frame is named after the change
+(`session:created`, `session:updated`, `session:killed`, `host:probed`,
+`task:updated`, …) and carries the same JSON payload the desktop receives;
+the stream opens with a `ready` frame naming the kinds it will carry, and
+sends a comment line every 15 s so a phone's NAT, a tunnel or a proxy in
+between keeps the connection open. `?kinds=` filters on the part of the name
+before the `:`. An unrecognised kind (`sessions` for `session`, say) is
+dropped from the filter and logged as a warning by the hub, and it is missing
+from the `ready` frame's `kinds` — which is how you spot the typo instead of
+watching a stream that never says anything.
+
+The stream sits behind the same bearer token as `/mcp` (a change stream names
+sessions, hosts, projects and prompts), and a caller may hold eight of them at
+once. A subscriber that falls far enough behind gets one `lagged` frame and
+the stream closes — reconnect and re-list rather than assume continuity.
+
 ## Bare binary
 
 Prefer running without Docker, or need it as a system service:
@@ -376,6 +494,13 @@ at whichever one provisioned it last.
   for the hub itself, a per-host token for every provisioned host (see
   `control-api.md` → *Per-host tokens*). Every request needs
   `Authorization: Bearer <token>`.
+- **Client tokens.** A paired device holds a third kind of token: named,
+  revocable, `full` or `readonly`, never the master and never fleet admin.
+  Only its SHA-256 is stored. What crosses the room in the QR is a
+  single-use, minutes-long pairing *code* in a URL fragment — not a token —
+  and `POST /pair`, the one unauthenticated route besides `/healthz`, is
+  rate-limited to one attempt per address every six seconds. See *Pair a
+  phone* and *Clients* above.
 - **TLS.** The hub itself speaks plain HTTP; put TLS in front of it. The
   Docker setup does this with Caddy (automatic certificates via its domain,
   `deploy/hub/Caddyfile`); the bare-binary setup needs your own proxy (or a
@@ -411,6 +536,18 @@ at whichever one provisioned it last.
   `https://` in front of a TLS proxy, bind `127.0.0.1`, or pass
   `--allow-plaintext` for a private-network or container-internal
   plaintext hop.
+- **`no hub is answering on 127.0.0.1:<port> — start fleet-hub serve first`**
+  from `pair` / `client list` / `client revoke` — these three drive the
+  *running* hub, not the database. Start the daemon, and point the command at
+  the same data dir and port it runs with (`--data-dir`, `--port`, or the
+  `FLEET_HUB_*` env the unit sets).
+- **The phone says the pairing code is invalid** — a code is single-use, it
+  expires (10 minutes by default), and a hub restart voids every outstanding
+  one. Mint a fresh one with `fleet-hub pair`. A `429` instead means the
+  address has spent its attempt budget: one every six seconds.
+- **`fleet-hub pair` refuses with `E_EXISTS`** — a live client already holds
+  that name. `fleet-hub client revoke <name>` first, or pair under another
+  name; a revoked row does not block the name.
 - **`could not bind`** — another process already holds the configured
   `--bind`/`--port`. Pick a different port, or find and stop what's using
   it.

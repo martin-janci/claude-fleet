@@ -80,6 +80,12 @@ REGEN_DOCS=1 cargo test -p fleet-core reference_is_current
 - **Control API** (`mcp/`): an embedded MCP server (off by default, localhost +
   bearer token) lets an AI assistant drive the fleet. Its tools call the same
   `service/` layer as the Tauri commands. See `docs/control-api.md`.
+- **Client access** (`mcp/pairing.rs`, `mcp/events_route.rs`,
+  `store/clients.rs`): a phone or browser pairs through a single-use code
+  (`pair_client` → `POST /pair`) for a named, revocable client token
+  (`full`/`readonly`) that is never the master and never reaches fleet admin,
+  and follows `GET /events` instead of polling. Hub-only; `fleet-hub
+  pair|client` is the operator's side. See `docs/hub.md` → *Pair a phone*.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
   `TerminalView.svelte`), *not* xterm.js — xterm's renderer failed to repaint in
   the WKWebView setup. Only one PTY is attached at a time.
