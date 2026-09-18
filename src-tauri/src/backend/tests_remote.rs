@@ -790,7 +790,7 @@ fn a_peer_that_half_closes_still_yields_the_response_it_already_sent() {
         "GET / HTTP/1.1\r\n\r\n",
     ))
     .expect("a complete response must survive a missing close_notify");
-    assert_eq!(raw, ONE_RESPONSE);
+    assert_eq!(raw, ONE_RESPONSE.as_bytes());
     // And it still parses, which is the thing the caller actually needs.
     assert_eq!(split_response(&raw).expect("a response").status, 200);
 }
@@ -947,30 +947,73 @@ fn the_transfer_encoding_header_is_matched_case_insensitively_and_in_a_list() {
     }
 }
 
+/// SF-6. The whole-body path decoded UTF-8 BEFORE de-chunking: `speak` ran
+/// `from_utf8_lossy` over the raw bytes, chunk framing and all, so a
+/// character split by a chunk boundary became two replacement characters,
+/// the chunk's byte count stopped matching, and the call died blaming the hub
+/// ("the body is not the UTF-8 it claimed to be") for a client-side ordering
+/// bug. Driven through `speak`, the real caller, because the old test fed
+/// `dechunk` a hand-built `&str` that `speak` could never produce.
+#[test]
+fn a_character_split_across_two_chunks_survives_the_whole_body_path() {
+    let text = "event: message\ndata: {\"friendly_name\":\"Zürich\"}\n\n";
+    let bytes = text.as_bytes();
+    // Cut between the two bytes of "ü".
+    let cut = text.find('ü').expect("the fixture has one") + 1;
+    let (a, b) = bytes.split_at(cut);
+    let mut raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+    for chunk in [a, b] {
+        raw.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+        raw.extend_from_slice(chunk);
+        raw.extend_from_slice(b"\r\n");
+    }
+    raw.extend_from_slice(b"0\r\n\r\n");
+
+    let got = block_on(speak(
+        HalfClosing {
+            body: raw,
+            kind: std::io::ErrorKind::UnexpectedEof,
+        },
+        "hub.example.com",
+        443,
+        "POST /mcp HTTP/1.1\r\n\r\n",
+    ))
+    .expect("the bytes arrived");
+    let r = split_response(&got).expect("a split character is not a malformed body");
+    assert_eq!(r.body, text, "de-chunk the bytes, THEN decode them");
+}
+
 /// A peer that dies mid-chunk leaves what arrived, matching `speak`'s own
 /// tolerance for a half-close. Refusing here would undo that.
 #[test]
 fn a_truncated_chunked_body_yields_what_arrived() {
-    assert_eq!(dechunk("5\r\nhel").expect("partial"), "hel");
+    assert_eq!(dechunk(b"5\r\nhel").expect("partial"), b"hel");
     assert_eq!(
-        dechunk("5\r\nhello\r\n6\r\n wor").expect("partial"),
-        "hello wor"
+        dechunk(b"5\r\nhello\r\n6\r\n wor").expect("partial"),
+        b"hello wor"
     );
 }
 
 #[test]
 fn an_unreadable_chunk_size_is_an_error_not_a_guess() {
-    let e = dechunk("zz\r\nxx").expect_err("zz is not hex");
+    let e = dechunk(b"zz\r\nxx").expect_err("zz is not hex");
     assert!(e.contains("chunk size"), "{e}");
 }
 
-/// A chunk size is a BYTE count. Slicing a `str` at a byte offset inside a
-/// character panics, and these bytes came off a network.
+/// A chunk size is a BYTE count, so a chunk may end inside a character —
+/// that is legal framing, not a malformed body. (This used to assert an
+/// error, which is the SF-6 bug stated as a requirement.) Bytes that are not
+/// UTF-8 at all still cannot panic: they decode lossily at the end.
 #[test]
-fn a_chunk_that_ends_inside_a_character_is_an_error_not_a_panic() {
-    // "ä" is two bytes; claim a chunk of one.
-    let e = dechunk("1\r\nä\r\n0\r\n\r\n").expect_err("that cut a character in half");
-    assert!(e.contains("inside a character"), "{e}");
+fn a_chunk_may_end_inside_a_character_and_invalid_bytes_never_panic() {
+    // "ä" is 0xC3 0xA4: one byte per chunk.
+    let joined = dechunk(b"1\r\n\xC3\r\n1\r\n\xA4\r\n0\r\n\r\n").expect("legal framing");
+    assert_eq!(joined, "ä".as_bytes());
+    let r = split_response(
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n\xFF\r\n0\r\n\r\n",
+    )
+    .expect("a response");
+    assert_eq!(r.body, "\u{FFFD}");
 }
 
 // --- the trust store, loaded off the runtime and never cached as a failure ---

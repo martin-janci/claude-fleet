@@ -1007,15 +1007,20 @@ impl HubTransport for TcpTransport {
     }
 }
 
-/// Connect, write the request, read the whole answer back.
-pub(crate) async fn exchange(at: &Endpoint, request: &str) -> Result<String, String> {
+/// Connect, write the request, read the whole answer back — as bytes, since
+/// the body may be chunked and only [`split_response`] may decode it.
+pub(crate) async fn exchange(at: &Endpoint, request: &str) -> Result<Vec<u8>, String> {
     let conn = connect(at).await?;
     speak(conn, &at.host, at.port, request).await
 }
 
 /// Write `request` and read until the peer closes. Generic over the stream so
 /// the plain and TLS paths share one implementation and cannot drift.
-async fn speak<S>(mut conn: S, host: &str, port: u16, request: &str) -> Result<String, String>
+///
+/// Returns raw bytes, NOT text: decoding here, before [`split_response`]
+/// de-chunks, corrupted any character a chunk boundary split — the same order
+/// the event stream already gets right (de-chunk bytes, then decode).
+async fn speak<S>(mut conn: S, host: &str, port: u16, request: &str) -> Result<Vec<u8>, String>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -1064,7 +1069,7 @@ where
             MAX_RESPONSE / (1024 * 1024)
         ));
     }
-    Ok(String::from_utf8_lossy(&raw).into_owned())
+    Ok(raw)
 }
 
 /// Split a raw HTTP response into its status code and body, undoing
@@ -1077,10 +1082,20 @@ where
 /// split across two chunks the size line lands in the middle of a `data:`
 /// line and the JSON is quietly corrupt. (`fleet-hub/src/pair.rs` still takes
 /// the shortcut; it is the same latent bug, not a different one.)
-pub fn split_response(raw: &str) -> Result<HubResponse, String> {
-    let (head, body) = raw
-        .split_once("\r\n\r\n")
+///
+/// Bytes in, text out, decoded ONCE at the end: a chunk size is a byte count,
+/// and a chunk boundary may fall inside a multi-byte character.
+pub fn split_response(raw: impl AsRef<[u8]>) -> Result<HubResponse, String> {
+    let raw = raw.as_ref();
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
         .ok_or("the hub sent a malformed HTTP response")?;
+    // The head is ASCII by the grammar; a stray byte in it is not worth
+    // failing over.
+    let head = String::from_utf8_lossy(&raw[..split]);
+    let head = head.as_ref();
+    let body = &raw[split + 4..];
     let status_line = head.lines().next().unwrap_or_default();
     // The status token, not a substring: a `contains(" 200")` would match the
     // reason phrase and any header that happened to carry " 200" too.
@@ -1090,9 +1105,9 @@ pub fn split_response(raw: &str) -> Result<HubResponse, String> {
         .and_then(|s| s.parse::<u16>().ok())
         .ok_or_else(|| format!("unreadable status line: {status_line:?}"))?;
     let body = if head_is_chunked(head) {
-        dechunk(body)?
+        String::from_utf8_lossy(&dechunk(body)?).into_owned()
     } else {
-        body.to_string()
+        String::from_utf8_lossy(body).into_owned()
     };
     Ok(HubResponse { status, body })
 }
@@ -1116,14 +1131,20 @@ pub fn head_is_chunked(head: &str) -> bool {
 /// ends the body. A body that stops mid-chunk (the peer closed early) yields
 /// what had arrived rather than an error: [`speak`] already tolerates a
 /// half-closed connection, and failing here would undo that.
-pub fn dechunk(body: &str) -> Result<String, String> {
-    let mut out = String::new();
+///
+/// Over BYTES: a chunk size is a byte count and says nothing about character
+/// boundaries, so a chunk may legitimately end halfway through a character.
+/// The caller decodes the joined result.
+pub fn dechunk(body: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
     let mut rest = body;
     loop {
-        let Some((size_line, after)) = rest.split_once("\r\n") else {
+        let Some(eol) = rest.windows(2).position(|w| w == b"\r\n") else {
             // The body ended mid-header; whatever decoded is what there is.
             return Ok(out);
         };
+        let size_line = String::from_utf8_lossy(&rest[..eol]);
+        let after = &rest[eol + 2..];
         // `;` introduces chunk extensions, which nothing here uses.
         let size_token = size_line.split(';').next().unwrap_or("").trim();
         let size = usize::from_str_radix(size_token, 16)
@@ -1133,22 +1154,14 @@ pub fn dechunk(body: &str) -> Result<String, String> {
         }
         if after.len() < size {
             // Truncated final chunk: take what arrived.
-            out.push_str(after);
+            out.extend_from_slice(after);
             return Ok(out);
         }
-        // A chunk size is a BYTE count, and slicing a `str` at a byte offset
-        // inside a multi-byte character panics. It cannot happen on a
-        // well-formed body, which is exactly why it must be an error rather
-        // than an unwrap: the bytes came off a network.
-        if !after.is_char_boundary(size) {
-            return Err(format!(
-                "chunk of {size} byte(s) ends inside a character; the body is \
-                 not the UTF-8 it claimed to be"
-            ));
-        }
-        out.push_str(&after[..size]);
+        out.extend_from_slice(&after[..size]);
         // Skip the chunk's own trailing CRLF.
-        rest = after[size..].strip_prefix("\r\n").unwrap_or(&after[size..]);
+        rest = after[size..]
+            .strip_prefix(b"\r\n")
+            .unwrap_or(&after[size..]);
     }
 }
 
