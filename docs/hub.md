@@ -203,6 +203,16 @@ no reverse tunnel for it.
    # or a user unit, no root needed:
    fleet-agent install --user --hub https://fleet.example.com --token-file -
    ```
+   **Careful with stdin under `sudo`.** `sudo` reads its password from the
+   terminal, so a token pasted while it is still asking goes to the password
+   prompt, not to `--token-file -`. A pipe into `ssh -tt host sudo
+   fleet-agent install … --token-file -` does the same: with `-tt` the
+   remote side is a terminal, and sudo's prompt reads the token from it. A
+   paste into a terminal is also echoed on screen. When either matters, pass
+   a file instead: on the hub, `fleet-hub agent-token laptop > laptop.token`,
+   copy it to the host over a channel you trust, run
+   `--token-file laptop.token`, then
+   `shred -u laptop.token`.
    `install` writes the config (hub URL and token, mode `0600`, created that
    way) and a systemd unit, then runs `systemctl daemon-reload`, `enable` and
    `restart`, printing what it wrote. It never writes the token into the
