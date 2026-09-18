@@ -181,7 +181,15 @@ no reverse tunnel for it.
    master token:
    `add_host { alias: "laptop", ssh_alias: "laptop", transport: "agent" }`.
    `ssh_alias` is still required. Nothing dials it, but it is recorded and
-   routing matches on it, so the alias itself is a fine value. An agent host
+   routing matches on it, so **use the alias itself** — and in any case give
+   every host a *distinct* `ssh_alias`. Two hosts sharing one is a
+   misconfiguration the routing cannot resolve, and it fails quietly:
+   if an SSH host and an agent host share an `ssh_alias`, a probe aimed at the
+   SSH host runs on the agent's machine and writes that machine's versions onto
+   the SSH host's row; if two *agent* hosts share one, neither routes and both
+   are stamped unreachable even while their agents are connected and answering.
+   Placeholder values like `none` or `unused` are what make this likely.
+   Editing the host row fixes it in both cases. An agent host
    is saved **without** an SSH probe and shows as unreachable until its
    agent connects. An existing SSH host becomes an agent host when it is
    re-added with `transport: "agent"`. Re-adding it with `transport: "ssh"`
