@@ -411,6 +411,53 @@ fn audit_row_falls_back_to_the_controller_session() {
         .any(|e| e.kind == "mcp_call" && e.detail.as_deref() == Some("list_hosts by master")));
 }
 
+/// The audit row is ONE line, caller label included. `redact_args` already
+/// scrubs the argument summary, but the caller's own label was interpolated
+/// raw — and a client's name is the one part of a label that is not this
+/// fleet's own words. `validate_client_name` rejects a line break today, so
+/// this is the last line of defence for a row that predates that check (or
+/// one written straight into the database).
+#[test]
+fn a_client_name_cannot_forge_a_second_audit_line() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("ctl", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("local", "ctl").unwrap();
+        id
+    };
+    let sneaky = Caller {
+        host_alias: None,
+        client: Some(crate::mcp::auth::ClientRef {
+            id: 7,
+            // A CR/LF pair and the three separators `char::is_control` misses.
+            name: "phone\r\nkill_session by master\u{2028}x\u{2029}y\u{0085}z".into(),
+        }),
+        mode: TokenMode::Full,
+    };
+    // Both shapes of the detail string: with a summary and without one.
+    persist_audit(&store, "list_hosts", None, &sneaky);
+    let args = serde_json::json!({ "host_alias": "local" });
+    persist_audit(&store, "list_sessions", args.as_object(), &sneaky);
+    let s = store.lock().unwrap();
+    for row in s
+        .list_session_events(id, 10)
+        .unwrap()
+        .iter()
+        .filter(|e| e.kind == "mcp_call")
+    {
+        let detail = row.detail.as_deref().unwrap();
+        assert!(
+            !detail.chars().any(crate::store::breaks_a_line),
+            "the audit detail must stay on one line: {detail:?}"
+        );
+        assert!(detail.contains("client:phone"), "{detail:?}");
+    }
+}
+
 /// SEC: `set_secret`'s `value` argument must never reach the persisted
 /// audit trail — not the plain value, not even its length. `persist_audit`
 /// is exactly what `ServerHandler::call_tool` calls with the RAW request

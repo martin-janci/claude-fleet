@@ -14,9 +14,10 @@
 //!    and scopes the caller to — that host, so a token lifted from one
 //!    machine cannot impersonate another, and a `readonly` host token is
 //!    refused every mutating tool. A third kind of token identifies a paired
-//!    *client* (a phone — migration 019): the DB keeps only its SHA-256, and
-//!    it resolves to a caller that is deliberately NEITHER the master NOR a
-//!    host, so the fleet-admin tools stay out of its reach.
+//!    *client* (a phone — migration `032_client_tokens.sql`): the DB keeps
+//!    only its SHA-256, and it resolves to a caller that is deliberately
+//!    NEITHER the master NOR a host, so the fleet-admin tools stay out of
+//!    its reach.
 
 use crate::store::{ClientTokenRow, HostTokenRow};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};

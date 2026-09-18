@@ -352,7 +352,14 @@ pub(super) fn find_audit_session(store: &Store, args: Option<&JsonObject>) -> Op
 
 /// Persist an audit row for a tool call into `session_events` (kind
 /// `mcp_call`). Best-effort: every failure is swallowed so it can never block
-/// the call. Free-text arguments are redacted by [`guard::redact_args`].
+/// the call. Free-text arguments are redacted by [`guard::redact_args`], and
+/// the summary it produces is LOSSY by design: prompt and message bodies
+/// never reach the row, only their length.
+///
+/// The whole detail — not just the summary — goes through
+/// [`guard::scrub_line`], because the caller label is interpolated too and a
+/// paired client's name is the one part of it this fleet did not author. A
+/// line break there could otherwise forge a second audit record.
 pub(super) fn persist_audit(
     store: &Mutex<Store>,
     tool: &str,
@@ -369,7 +376,7 @@ pub(super) fn persist_audit(
     } else {
         format!("{tool} by {}: {summary}", caller.label())
     };
-    let _ = s.insert_session_event(session_id, "mcp_call", Some(&detail));
+    let _ = s.insert_session_event(session_id, "mcp_call", Some(&guard::scrub_line(&detail)));
 }
 
 /// Describe the origin of a delivered prompt for the untrusted-content marker.

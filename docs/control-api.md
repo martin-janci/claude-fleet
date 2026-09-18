@@ -140,6 +140,16 @@ in front.
 Nothing token-shaped is logged anywhere on this path: not the presented code,
 not the minted token, not its hash.
 
+The desktop app embeds the **same** router, so it serves `/pair` too, and that
+route is not merely decorative there: `pair_client` is one of the shared tools,
+so a desktop master token can mint a code and redeem it against the desktop's
+own loopback `/pair`, creating a real row in the desktop's `client_tokens`.
+That is not an escalation — minting is master-token-only and the desktop binds
+`127.0.0.1`, so the exchange never leaves the machine — but it is worth saying
+plainly rather than assuming the desktop's `/pair` can only answer `404`. The
+desktop simply has no UI for it; client access is a `fleet-hub` feature, and
+`fleet-hub pair` is how you are meant to reach it.
+
 ### `/events` — the row-change stream
 
 `GET /events` is a server-sent-event stream of every row change the store

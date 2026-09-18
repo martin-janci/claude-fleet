@@ -527,6 +527,25 @@ const REDACT_KEYS: &[&str] = &["prompt", "body", "content", "start_command"];
 const SKIP_KEYS: &[&str] = &["confirm_nonce", "value"];
 const SUMMARY_MAX_CHARS: usize = 240;
 
+/// Replace every character that could end a line downstream — see
+/// [`breaks_a_line`](crate::store::breaks_a_line) — with a space.
+///
+/// The audit trail is a sequence of one-line records, so every value
+/// interpolated into one goes through here: the argument summary below, and
+/// the caller label the persisted record is built from (a paired client's
+/// name is the one part of a label that is not this fleet's own words).
+pub fn scrub_line(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if crate::store::breaks_a_line(c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 /// One-line, key-sorted `k=v` summary of tool arguments with free-text
 /// values replaced by `<N chars>` and the whole thing capped.
 ///
@@ -562,17 +581,7 @@ pub fn redact_args(args: Option<&serde_json::Map<String, serde_json::Value>>) ->
         };
         parts.push(format!("{k}={rendered}"));
     }
-    let joined: String = parts
-        .join(" ")
-        .chars()
-        .map(|c| {
-            if crate::store::breaks_a_line(c) {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect();
+    let joined = scrub_line(&parts.join(" "));
     if joined.chars().count() > SUMMARY_MAX_CHARS {
         let mut s: String = joined.chars().take(SUMMARY_MAX_CHARS).collect();
         s.push('…');

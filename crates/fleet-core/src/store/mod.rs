@@ -51,6 +51,16 @@ impl Store {
     ///
     /// Only reads are valid on the result; a write returns SQLite's
     /// "attempt to write a readonly database".
+    ///
+    /// `SQLITE_OPEN_NO_MUTEX` (SQLite's multi-thread mode: no mutex around
+    /// the connection itself) is safe here ONLY because of what these callers
+    /// are — one-shot CLI subcommands that open the file, read a couple of
+    /// `settings` rows on one thread, and exit. Nothing shares this
+    /// connection between threads. A `Store` opened this way must therefore
+    /// not be handed to the server, the event bus, or anything else that
+    /// would use it concurrently; the long-lived paths go through
+    /// [`Store::open_with_bus`], whose `Store` lives behind a
+    /// `std::sync::Mutex` (see the crate's store conventions).
     pub fn open_read_only(path: &std::path::Path) -> Result<Self> {
         let conn = Connection::open_with_flags(
             path,

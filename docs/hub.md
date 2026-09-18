@@ -199,8 +199,18 @@ fleet-hub pair --name phone --ttl 120         # seconds the code stays valid (30
 
 Pairing needs a **running** hub (`fleet-hub serve`): the code only means
 something inside the process that will redeem it. `fleet-hub pair` reads the
-master token out of the data dir and calls the hub's own `/mcp` on loopback,
-so run it on the hub's machine, as the user the daemon runs as.
+master token out of the data dir, resolves the port the same way `serve` does
+(`--port`, `FLEET_HUB_PORT`, the stored setting, then the default) and calls
+the hub's own `/mcp` on loopback — so run it on the hub's machine, as the user
+the daemon runs as.
+
+**Changing the public URL needs a restart.** The `hub` field in the `/pair`
+response — the base URL the freshly paired device will talk to — is a snapshot
+taken when the server started, while the URL inside the QR is read fresh on
+every mint. So after changing `hub.public_url` (a `--public-url` run, or the
+stored setting) on a *running* hub, a phone can be sent to the new address by
+the QR and then handed the old one to talk to. Restart `fleet-hub serve`
+before pairing anything, and the two agree again.
 
 ## Clients
 
@@ -502,10 +512,26 @@ at whichever one provisioned it last.
   and `POST /pair`, the one unauthenticated route besides `/healthz`, is
   rate-limited to one attempt per address every six seconds. See *Pair a
   phone* and *Clients* above.
-- **TLS.** The hub itself speaks plain HTTP; put TLS in front of it. The
-  Docker setup does this with Caddy (automatic certificates via its domain,
-  `deploy/hub/Caddyfile`); the bare-binary setup needs your own proxy (or a
-  loopback bind reached over Tailscale/SSH, with no public URL at all).
+- **A reverse proxy in front of the hub must APPEND to `X-Forwarded-For`.**
+  That per-address budget keys on the request's TCP peer, except when the peer
+  is a loopback or private address — the compose topology, where the peer is
+  Caddy — in which case it believes the **last** parseable hop in
+  `X-Forwarded-For`, i.e. the address that proxy saw. A proxy that *replaces*
+  the header appends the real client and is correct; one that forwards a
+  client-supplied header verbatim, or sets the header from a client-controlled
+  value, would let a caller choose its own bucket — spend someone else's
+  budget, or dodge its own. Caddy's `reverse_proxy` appends by default
+  (`deploy/hub/Caddyfile` relies on it); if you front the hub with something
+  else, check that it does too.
+- **TLS.** Two ways, and the hub defaults to neither doing it itself: put TLS
+  in front of it, or let it terminate TLS with `--tls cert`. The Docker setup
+  takes the first road with Caddy (automatic certificates via its domain,
+  `deploy/hub/Caddyfile`); the bare-binary setup either needs your own proxy,
+  or runs `--tls cert` with a certificate and key you supply and renew (see
+  *Single binary with its own certificate* above) — or binds loopback and is
+  reached over Tailscale/SSH, with no public URL at all. Whichever you pick,
+  a routable bind serving plaintext is refused unless you pass
+  `--allow-plaintext`.
 - **`state.db` permissions.** Written `0600` on the hub's machine, same as
   the desktop.
 - **`mcp.confirm_destructive`.** This desktop setting gates destructive
