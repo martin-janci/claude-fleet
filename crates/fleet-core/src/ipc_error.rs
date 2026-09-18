@@ -53,6 +53,14 @@ pub mod codes {
     pub const E_SSH: &str = "E_SSH";
     /// The host is known but currently unreachable.
     pub const E_HOST_OFFLINE: &str = "E_HOST_OFFLINE";
+    /// The host uses the `agent` transport and no `fleet-agent` is connected
+    /// for it. Returned *immediately*, never after a timeout, so an agent
+    /// host reports unreachable as fast as a down SSH host does.
+    pub const E_AGENT_OFFLINE: &str = "E_AGENT_OFFLINE";
+    /// A connected agent answered with something the protocol does not allow:
+    /// a frame that does not answer the request, or a body that will not
+    /// decode. Distinct from `E_AGENT_OFFLINE` — the connection is up.
+    pub const E_AGENT_PROTOCOL: &str = "E_AGENT_PROTOCOL";
     /// A host probe (version / reachability check) failed.
     pub const E_PROBE: &str = "E_PROBE";
     /// Host provisioning (bootstrap script) failed.

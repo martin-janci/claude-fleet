@@ -5,6 +5,7 @@
 //! `service/` is the transport-agnostic command logic, `store/` the SQLite
 //! layer, `ssh`/`tmux` the host transport, `mcp/` the control API server.
 
+pub mod agent;
 pub mod app_version;
 pub mod cancel;
 pub mod claude_agents;

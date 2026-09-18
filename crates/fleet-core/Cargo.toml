@@ -18,6 +18,10 @@ tokio-util = { version = "0.7", features = ["rt"] }
 dashmap = "6"
 async-trait = "0.1"
 
+# The hub/agent wire types, shared with the `fleet-agent` binary (which never
+# depends on this crate). See crates/fleet-proto/src/lib.rs.
+fleet-proto = { path = "../fleet-proto" }
+
 # Control API: the app embeds an MCP server (streamable-HTTP transport) on
 # localhost so an AI assistant can drive it. See docs/specs/2026-05-21-control-api-mcp-design.md.
 rmcp = { version = "1", features = [
