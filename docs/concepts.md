@@ -28,6 +28,21 @@ scans hosts read-only for what is actually installed, and shows each asset
 as in sync, drifted, missing or unsupported per host. Assets found on a host
 but not in the catalog are listed as unmanaged and can be imported.
 
+Skills, agents and MCP servers have an optional `install_as` field naming the
+identifier a harness installs them under, when it differs from the catalog
+name (the Claude Code skill/agent directory or `mcpServers.<key>`; the Codex
+skill directory or `mcp_servers.<key>`) — hooks and plugin references derive
+their host key from other fields and cannot set it. Importing a host sets
+`install_as` whenever slugifying its identifier into a kebab-case catalog
+name changes it (`~/.claude/skills/foo_bar` becomes catalog `skill/foo-bar`
+with `install_as: foo_bar`), so the rendered asset keeps installing under the
+original identifier and that host copy reads as in sync rather than
+unmanaged; when the original identifier is not itself a valid install name
+(a space, a slash, a leading dot), the import proceeds under the slug without
+`install_as` and the report lists it as a warning instead. The asset editor
+exposes an "Installs as" field for the kinds that support it, and the detail
+view shows "installs as `<name>`" when one is set.
+
 **Sync** is plan-first: `plan_sync` scans the selected hosts and computes
 which assets to create, update, overwrite, adopt, or remove, returning a plan
 valid for 10 minutes. `apply_sync` applies the plan using compare-and-swap on

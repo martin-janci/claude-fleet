@@ -63,6 +63,13 @@ export interface EditableAsset {
   version: string;
   description: string;
   tags?: string[];
+  /** The identifier a harness installs this asset under, when it differs
+   *  from `name` (skill/agent/mcp_server only — `hook`/`plugin_ref` derive
+   *  their host key from other fields and reject it). Absent/`null` means
+   *  "use `name`"; the backend omits the key on the wire when unset and
+   *  accepts either an absent key or an explicit `null` back (`Option<String>`
+   *  with `#[serde(default, skip_serializing_if = "Option::is_none")]`). */
+  install_as?: string | null;
   body: string;
   resources?: ResourceRef[];
   [key: string]: unknown;
