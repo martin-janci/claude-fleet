@@ -110,6 +110,7 @@ long poll keeps receiving a keep-alive every 15 s.
 | `GET /healthz` | none | Liveness: `fleet-hub ok`. Outside the Host allowlist. |
 | `GET` / `POST /pair` | **none, by design** | The pairing exchange (below). Outside the Host allowlist. |
 | `GET /events` | bearer | The row-change stream (below). |
+| `GET /agent` | bearer (per-host, `full`, agent host) | The WebSocket a `fleet-agent` dials in on (below). |
 
 ### `/pair` — how a client gets its first credential
 
@@ -179,6 +180,43 @@ the next heartbeat.
 - The desktop app has no event source to stream from, so `/events` there
   answers `503 events are not enabled on this server`. The `fleet-hub` daemon
   serves it.
+
+### `/agent` — where a `fleet-agent` dials in
+
+`GET /agent` upgrades to the WebSocket a host's `fleet-agent` keeps open when
+the hub cannot reach that host over SSH. Setup, rotation and the operator
+side are in `hub.md` → *A host that cannot be reached*; this is the contract.
+
+- **Who may connect.** The upgrade sits behind the same bearer check as
+  `/mcp`, and then:
+  - only a **per-host** token may connect; the master and paired clients get
+    `403`;
+  - its mode must be `full` (`403`, with the reason in the body);
+  - its host must be on the `agent` transport (`403`);
+  - at most 2 connections per host and 64 in all (`429`).
+
+  The host alias comes from the token, never from the request.
+- **Staying connected.** A live connection's token is re-checked against the
+  store on every heartbeat and before every call routed to it. Rotating the
+  token, narrowing it to `readonly`, removing the host or moving it back to
+  SSH ends the connection. A second connection for the same host replaces
+  the first.
+- **Frames.** Each frame is one JSON object in a WebSocket text message, one
+  request and one response per `id`. The hub sends `exec`, `upload`, `cancel`
+  and `ping`; the agent sends `hello` (first), `result` and `pong`. The table
+  is in `docs/superpowers/specs/2026-09-18-host-agent-design.md`, and
+  `crates/fleet-proto` is the one definition both sides compile.
+- **Heartbeat.** The hub pings every 30 s and drops a connection that misses
+  two beats in a row.
+- **Size.** One frame is at most about 267 MiB (a 200 MiB transcript after
+  base64). Each answer is decoded against the budget of the requests in
+  flight, which is the full ceiling whenever an uncapped call is among them.
+- **Not enabled.** On the desktop, which routes nothing to agents, `/agent`
+  answers `503`.
+
+Tools see an agent host through the same calls as an SSH host. `agent_status`
+reports which agent hosts are connected. `add_host { transport: "agent" }`
+registers one without an SSH probe.
 
 ## Tools
 
@@ -268,6 +306,19 @@ not a JSON-RPC error. The text block is the documented `E_CODE: message` line;
 candidate rows of `E_AMBIGUOUS` or the `confirm_nonce` of
 `E_CONFIRM_REQUIRED`). JSON-RPC errors are reserved for protocol failures:
 an unknown tool name or arguments that do not match the schema.
+
+Three codes are specific to agent hosts:
+- `E_AGENT_OFFLINE`: no `fleet-agent` is connected for the host. It is
+  returned at once and means what `E_SSH` means for an SSH host.
+- `E_AGENT_PROTOCOL`: the agent answered with something the protocol does
+  not allow.
+- `E_AGENT_REINSTALL`: `provision_hosts { rotate: true }` saved a new token
+  for an agent host and sent it nothing. Install the token on the host out
+  of band (`fleet-hub agent-token <host>`, then
+  `fleet-agent install --token-file -`), then provision again.
+
+A timed-out agent call reports `E_SSH_TIMEOUT`, the same code as SSH, so
+nothing downstream mistakes a timeout for "nothing ran".
 
 Every call runs under a wall clock: 60 s for reads and single round trips,
 300 s for session lifecycle, provisioning and host probes, 660 s for the
