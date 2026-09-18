@@ -302,7 +302,7 @@ pub fn is_transient(e: &IpcError) -> bool {
     codes::is_transport_failure(&e.code)
         || matches!(
             e.code.as_str(),
-            codes::E_HOST_OFFLINE | codes::E_LOCK | codes::E_SHELL
+            codes::E_HOST_OFFLINE | codes::E_TIMEOUT | codes::E_LOCK | codes::E_SHELL
         )
         || (e.code == codes::E_REPAIR_FAILED && e.message.contains(repair::PARTIALLY_APPLIED))
 }

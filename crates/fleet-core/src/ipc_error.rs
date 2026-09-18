@@ -192,17 +192,20 @@ pub mod codes {
     /// not come back from, the host — over SSH or over an agent.
     ///
     /// The single list the service layer branches on, so the two transports
-    /// cannot drift apart: an agent host that times out must report the same
-    /// thing an SSH host that times out reports, and `E_AGENT_OFFLINE` must
-    /// not fall through a branch that `E_SSH` is caught by. Codes about the
-    /// *work* (`E_REPO_MISSING`, `E_TMUX`…) are deliberately absent.
-    pub const TRANSPORT_FAILURES: [&str; 5] = [
-        E_SSH,
-        E_SSH_TIMEOUT,
-        E_TIMEOUT,
-        E_AGENT_OFFLINE,
-        E_AGENT_PROTOCOL,
-    ];
+    /// cannot drift apart: `E_AGENT_OFFLINE` must not fall through a branch
+    /// that `E_SSH` is caught by. Codes about the *work* (`E_REPO_MISSING`,
+    /// `E_TMUX`…) are deliberately absent.
+    ///
+    /// **`E_TIMEOUT` is deliberately absent too.** Both transports report a
+    /// blown wall clock as `E_SSH_TIMEOUT` (`ssh::wall_clock_error`, and the
+    /// agent registry matches it on purpose), so the `E_TIMEOUT`s that reach
+    /// the service layer come from *local* deadlines — `HostExec::run_bash`'s
+    /// local branch, `add_project`'s local script — where "the host is
+    /// unreachable" would be a lie. Branches that mean "the command may have
+    /// been cut off" rather than "the transport failed" list it themselves;
+    /// see [`may_have_run`].
+    pub const TRANSPORT_FAILURES: [&str; 4] =
+        [E_SSH, E_SSH_TIMEOUT, E_AGENT_OFFLINE, E_AGENT_PROTOCOL];
 
     /// Did the transport, rather than the command, fail? See
     /// [`TRANSPORT_FAILURES`].

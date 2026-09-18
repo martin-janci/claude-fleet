@@ -1509,7 +1509,9 @@ fn host_offline(spec: &WorkspaceSpec, e: IpcError) -> IpcError {
 
 /// Apply-time transport failure / timeout: git steps may have run.
 fn apply_interrupted(spec: &WorkspaceSpec, e: IpcError) -> IpcError {
-    if codes::is_transport_failure(&e.code) {
+    // A local deadline (`run_bash`'s local branch) belongs here as well as a
+    // transport failure: either way the git steps may have run.
+    if codes::is_transport_failure(&e.code) || e.code == codes::E_TIMEOUT {
         IpcError::new(
             codes::E_REPAIR_FAILED,
             format!(
@@ -2578,7 +2580,6 @@ mod tests {
         for code in [
             codes::E_SSH,
             codes::E_SSH_TIMEOUT,
-            codes::E_TIMEOUT,
             codes::E_AGENT_OFFLINE,
             codes::E_AGENT_PROTOCOL,
         ] {
@@ -2590,9 +2591,15 @@ mod tests {
                 mapped.message
             );
         }
-        // Not a transport failure: it passes through untouched.
-        let kept = host_offline(&spec, IpcError::new(codes::E_REPO_MISSING, "no repo"));
-        assert_eq!(kept.code, codes::E_REPO_MISSING);
+        // Not transport failures: they pass through untouched. `E_TIMEOUT` is
+        // on this side deliberately — the agent transport reports a blown wall
+        // clock as `E_SSH_TIMEOUT`, like every other `SshExec`, so the only
+        // `E_TIMEOUT` that reaches here is `HostExec::run_bash`'s *local*
+        // branch, which is a slow command and not a host being unreachable.
+        for code in [codes::E_REPO_MISSING, codes::E_TIMEOUT] {
+            let kept = host_offline(&spec, IpcError::new(code, "nope"));
+            assert_eq!(kept.code, code);
+        }
     }
 
     /// The apply-time twin: the same five codes mean the git steps may have

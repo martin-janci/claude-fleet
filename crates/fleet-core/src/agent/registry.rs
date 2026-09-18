@@ -146,13 +146,29 @@ impl AgentRegistry {
         let id = frame_id(&frame).to_string();
         let conn = self.live(alias).ok_or_else(|| offline(alias))?;
         let (tx, rx) = oneshot::channel();
-        // The guard removes the slot however this function leaves — returned,
-        // timed out, or dropped mid-await because a cancellation token won.
+        // Claim the slot, or refuse. A plain `insert` evicted the sitting
+        // tenant, and `PendingGuard::drop` then removed the *replacement's*
+        // slot by id — so both callers were told `E_AGENT_OFFLINE` while the
+        // agent was connected and answering, and the answer that did arrive
+        // was dropped. `AgentTransport` cannot reach this (uuid v4 ids), but
+        // `request` is public and the `/agent` endpoint drives it, so it
+        // fails loudly instead of corrupting the caller that was here first.
+        match conn.pending.entry(id.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(_) => {
+                return Err(IpcError::new(
+                    codes::E_AGENT_PROTOCOL,
+                    format!("request id {id} is already in flight on {alias}"),
+                ));
+            }
+            dashmap::mapref::entry::Entry::Vacant(slot) => {
+                slot.insert(tx);
+            }
+        }
+        // Only now: the guard must not remove a slot this call did not claim.
         let _guard = PendingGuard {
             conn: Arc::clone(&conn),
             id: id.clone(),
         };
-        conn.pending.insert(id, tx);
         if conn.outbound.send(frame).is_err() {
             // The owner dropped the receiver: the socket is already gone.
             return Err(offline(alias));
@@ -166,8 +182,18 @@ impl AgentRegistry {
             Ok(Ok(answer)) => Ok(answer),
             // The sender was dropped: the connection was replaced or closed.
             Ok(Err(_)) => Err(offline(alias)),
+            // `E_SSH_TIMEOUT`, not `E_TIMEOUT`, even though no ssh is
+            // involved: it is the code EVERY `SshExec` returns for a blown
+            // wall clock (`ssh::wall_clock_error`, shared by `SshClient`,
+            // `LocalExec` and `ssh_fake`), and the service layer above the
+            // seam branches on it. A code of its own looked harmless and was
+            // not — `account_usage::classify_run` reads an unrecognised code
+            // as "nothing ran on that host" and re-fires the Anthropic API
+            // request against the next one, the exact double-billing that
+            // classification exists to prevent. The message says agent, so
+            // nothing in the text lies; only the identifier is shared.
             Err(_) => Err(IpcError::new(
-                codes::E_TIMEOUT,
+                codes::E_SSH_TIMEOUT,
                 format!(
                     "agent on {alias} did not answer within {}s",
                     timeout.as_secs_f32()
@@ -420,7 +446,7 @@ mod tests {
             "a frame from the replaced connection is dropped"
         );
         let err = call.await.unwrap().unwrap_err();
-        assert_eq!(err.code, codes::E_TIMEOUT);
+        assert_eq!(err.code, codes::E_SSH_TIMEOUT);
     }
 
     /// Spin until `n` requests are waiting on `alias`'s connection. Yields
@@ -486,6 +512,48 @@ mod tests {
         );
     }
 
+    /// A second request under an id that is already in flight used to evict
+    /// the first one's slot silently: **both** callers were then told
+    /// `E_AGENT_OFFLINE` while the agent was connected and answering, and the
+    /// answer that did arrive was dropped. `AgentTransport` cannot reach this
+    /// (uuid v4 ids) but `AgentRegistry::request` is `pub` and the `/agent`
+    /// endpoint drives it. The duplicate is refused; the original is
+    /// untouched and still gets its answer.
+    #[tokio::test]
+    async fn a_duplicate_request_id_is_refused_and_leaves_the_first_alone() {
+        let reg = AgentRegistry::new();
+        let _agent = FakeAgent::connect(&reg, "laptop", silent());
+
+        let reg2 = Arc::clone(&reg);
+        let first = tokio::spawn(async move {
+            reg2.request("laptop", exec("same"), Duration::from_secs(60))
+                .await
+        });
+        wait_pending(&reg, "laptop", 1).await;
+
+        let dup = reg
+            .request("laptop", exec("same"), Duration::from_secs(60))
+            .await
+            .unwrap_err();
+        assert_eq!(dup.code, codes::E_AGENT_PROTOCOL);
+        assert!(
+            dup.message.contains("same"),
+            "the message names the id: {}",
+            dup.message
+        );
+        assert_eq!(
+            reg.pending_len("laptop"),
+            1,
+            "the refusal must not disturb the slot it collided with"
+        );
+
+        assert!(
+            reg.deliver("laptop", _agent.conn_id, ok_result("same")),
+            "the original request is still waiting and takes the answer"
+        );
+        first.await.unwrap().expect("the first caller is answered");
+    }
+
     // ── bookkeeping ─────────────────────────────────────────────────────────
 
     // `start_paused`: the deadline is the point, and virtual time reaches it
@@ -498,7 +566,7 @@ mod tests {
             .request("laptop", exec("r"), Duration::from_millis(60))
             .await
             .unwrap_err();
-        assert_eq!(err.code, codes::E_TIMEOUT);
+        assert_eq!(err.code, codes::E_SSH_TIMEOUT);
         assert_eq!(
             reg.pending_len("laptop"),
             0,

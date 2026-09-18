@@ -20,7 +20,7 @@ use super::registry::AgentRegistry;
 use crate::ipc_error::{codes, IpcError};
 use crate::ssh::{home_from_output, SshClient, SshExec, UPLOAD_WALL_CLOCK};
 use dashmap::DashMap;
-use fleet_proto::{decode_b64, encode_b64, encode_hub_frame, AgentFrame, HubFrame};
+use fleet_proto::{decode_b64, encode_b64, AgentFrame, HubFrame};
 use std::path::Path;
 use std::process::{ExitStatus, Output};
 use std::sync::Arc;
@@ -103,20 +103,41 @@ impl AgentTransport {
 /// Re-create ssh's remote shell step: the args are one command line, and the
 /// far side re-splits it.
 ///
-/// **`bash -c`, not `bash -lc`.** sshd runs the user's login shell with `-c`
-/// — it does *not* source the login profile — and every caller in this repo
-/// already passes its script as `bash -lc '<quoted>'`, so the login shell it
-/// wants is the inner one. Adding `-l` here would source the profile a second
-/// time, and any output a profile writes would land on the *outer* stdout,
-/// silently prepending to the output of every command whose result the
-/// service layer parses. `-c` leaves the outer shell doing only the job ssh's
-/// does: tokenising.
+/// **`bash -c`, not `bash -lc`, and the decisive reason is in this file's own
+/// crate:** [`LocalExec::command`](crate::ssh::LocalExec) — the repo's
+/// existing model of `SshExec`'s remote-command semantics, the one the
+/// `tmux_roundtrip` integration test drives against a real tmux — builds
+/// `bash -c <args joined>`. This is the same construction, so it is not a
+/// deviation from the codebase's model of ssh; it *is* that model.
+///
+/// The supporting argument: sshd runs the user's login shell with `-c`, which
+/// does *not* source the login profile, and almost every caller in this repo
+/// passes its script as `bash -lc '<quoted>'`, so the login shell it wants is
+/// the inner one. Adding `-l` here would source the profile a second time,
+/// and any output a profile writes would land on the *outer* stdout, silently
+/// prepending to the output of every command whose result the service layer
+/// parses.
+///
+/// The callers that pass a bare argv with no inner shell — `commands/upload.rs`'s
+/// `["mkdir", "-p", …]` and this file's own `["printenv", "HOME"]` — are the
+/// only ones where the two could differ. `printenv HOME` behaves identically
+/// under `-c` and under sshd. `mkdir` is resolved from the *agent daemon's*
+/// `PATH` rather than a PAM login environment, which `-lc` would have
+/// repaired; that is a launch-configuration property of the agent and belongs
+/// in its docs, not a reason to source the profile twice.
 fn shell_argv(args: &[&str]) -> Vec<String> {
     vec!["bash".to_string(), "-c".to_string(), args.join(" ")]
 }
 
 /// Turn the agent's `result` into the `Output` the service layer expects.
 fn output_from(host: &str, frame: AgentFrame, cap: Option<usize>) -> Result<Output, IpcError> {
+    // `truncated` is knowingly dropped: `SshExec` returns a `std::process::
+    // Output` and there is nowhere in it to put the flag. The consequence is
+    // real and belongs in the agent's docs — when the hub sends no
+    // `cap_bytes` (every `run` / `run_bounded`) an agent that truncates at its
+    // *own* ceiling produces output indistinguishable from a quiet command.
+    // The capped path is unaffected: callers that set a cap already detect
+    // truncation by length, as `account_usage` does.
     let AgentFrame::Result {
         exit_code,
         stdout_b64,
@@ -159,7 +180,12 @@ fn exit_status(exit_code: i32) -> ExitStatus {
         // not wrap round to 0 and read as success.
         ExitStatus::from_raw(exit_code.min(255) << 8)
     } else {
-        ExitStatus::from_raw((-exit_code).min(127))
+        // `unsigned_abs`, not `-exit_code`: `exit_code` is decoded straight
+        // from the agent's JSON, and `-i32::MIN` has no `i32` — it panicked in
+        // a debug build (every `cargo test`, `cargo tauri dev` and dev-run
+        // hub) and wrapped in release. Signal numbers are a small positive
+        // range, so clamping the magnitude is the whole of the fix.
+        ExitStatus::from_raw(exit_code.unsigned_abs().min(127) as i32)
     }
 }
 
@@ -169,7 +195,8 @@ fn exit_status(exit_code: i32) -> ExitStatus {
     ExitStatus::from_raw(if exit_code >= 0 { exit_code as u32 } else { 1 })
 }
 
-/// The mode to create an uploaded file with.
+/// The mode to create an uploaded file with: the local file's, with group and
+/// other **write** cleared.
 ///
 /// `SshExec::upload_file` has no mode argument, so this is a choice, and it
 /// makes the agent path *differ* from the SSH path: `cat > path` leaves an
@@ -179,20 +206,28 @@ fn exit_status(exit_code: i32) -> ExitStatus {
 /// `provision::write_host_file_secret` spools the bearer token into a 0600
 /// temp file and relies on the remote tmp file already being 0600, so sending
 /// the local mode reproduces 0600 where a fixed 0644 would publish the token.
-fn local_mode(path: &Path) -> Result<u32, IpcError> {
-    let md = std::fs::metadata(path)
-        .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("stat {}: {e}", path.display())))?;
+///
+/// **The clamp is why it is not a plain mirror.** `commands/upload.rs` uploads
+/// the *user's own* file, and Linux mounts exFAT, NTFS and SMB `0777` by
+/// default — a file dragged straight off one would land world-writable on the
+/// agent host, where SSH's `cat >` under a normal umask gives 0644, and any
+/// other user on that host could rewrite a file the session is about to read.
+/// `& !0o022` is the same thing a umask of 022 does to the SSH path; it never
+/// touches the owner's bits, so 0600 still crosses as 0600. A fleet that
+/// wants group-writable uploads (umask 002) does not get them here; that is
+/// the deliberate trade.
+fn upload_mode(md: &std::fs::Metadata) -> u32 {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        Ok(md.permissions().mode() & 0o777)
+        md.permissions().mode() & 0o777 & !0o022
     }
     #[cfg(not(unix))]
     {
         // No unix mode to mirror; 0600 is the safe default — never wider than
         // what the secret path needs.
         let _ = md;
-        Ok(0o600)
+        0o600
     }
 }
 
@@ -286,6 +321,29 @@ impl SshExec for AgentTransport {
         remote_path: &str,
         _timeout: Duration,
     ) -> Result<(), IpcError> {
+        // One stat, answering both questions, and answering the size one
+        // FIRST. One file is one frame, so a file past the payload limit can
+        // never be sent — and refusing it from its size means the bytes are
+        // never read, never base64'd and never encoded into a throwaway frame
+        // just to be measured. At this limit each of those is a ~200 MiB
+        // allocation the caller would pay to be told "no".
+        let md = std::fs::metadata(local_path).map_err(|e| {
+            IpcError::new(
+                codes::E_UPLOAD,
+                format!("stat {}: {e}", local_path.display()),
+            )
+        })?;
+        if md.len() > fleet_proto::MAX_PAYLOAD_BYTES as u64 {
+            return Err(IpcError::new(
+                codes::E_UPLOAD,
+                format!(
+                    "{} is {} MiB: the agent transport carries at most {} MiB in one frame",
+                    local_path.display(),
+                    md.len() / (1024 * 1024),
+                    fleet_proto::MAX_PAYLOAD_BYTES / (1024 * 1024),
+                ),
+            ));
+        }
         // Read before dispatching: a local failure must never reach the wire.
         let bytes = std::fs::read(local_path).map_err(|e| {
             IpcError::new(
@@ -293,25 +351,12 @@ impl SshExec for AgentTransport {
                 format!("open {}: {e}", local_path.display()),
             )
         })?;
-        let mode = local_mode(local_path)?;
         let frame = HubFrame::Upload {
             id: uuid::Uuid::new_v4().to_string(),
             path: remote_path.to_string(),
-            mode,
+            mode: upload_mode(&md),
             bytes_b64: encode_b64(&bytes),
         };
-        // One file is one frame, so a file past the cap cannot be sent at all.
-        // Failing here names the file and the cap; failing at the socket would
-        // be an opaque disconnect.
-        if let Err(e) = encode_hub_frame(&frame) {
-            return Err(IpcError::new(
-                codes::E_UPLOAD,
-                format!(
-                    "{} is too large for the agent transport ({e})",
-                    local_path.display()
-                ),
-            ));
-        }
         match self
             .registry
             .request(host, frame, UPLOAD_WALL_CLOCK)
@@ -371,6 +416,17 @@ mod tests {
         let reg = AgentRegistry::new();
         let agent = FakeAgent::connect(&reg, "laptop", policy);
         (AgentTransport::new(reg), agent)
+    }
+
+    /// A `result` frame carrying `exit_code` and nothing else.
+    fn result_frame(exit_code: i32) -> AgentFrame {
+        AgentFrame::Result {
+            id: "id".into(),
+            exit_code,
+            stdout_b64: encode_b64(b""),
+            stderr_b64: encode_b64(b""),
+            truncated: false,
+        }
     }
 
     /// Destructure an `exec` frame, failing the test on anything else.
@@ -686,35 +742,121 @@ mod tests {
     }
 
     /// A file too big for one frame must be refused with a message that names
-    /// the cap, not silently truncated and not left to blow up the socket.
+    /// the limit, not silently truncated and not left to blow up the socket.
+    ///
+    /// **And it must be refused from the file's size alone, before the bytes
+    /// are read.** The file here is sparse *and* mode 0000: if the transport
+    /// reached `std::fs::read` first it would fail with a permission error
+    /// instead of the limit, and on the way it would allocate the whole
+    /// oversize file just to throw it away.
     #[tokio::test]
-    async fn upload_file_refuses_a_file_past_the_frame_cap() {
+    async fn upload_file_refuses_an_oversize_file_without_reading_it() {
         let (t, agent) = setup(answer_exit(0));
         let dir = tempfile::tempdir().unwrap();
         let local = dir.path().join("big");
-        // base64 costs 4/3, so 13 MiB of file is over the 16 MiB frame cap.
-        // Sparse (`set_len`, not `write`): the bytes read back as zeros and no
-        // 13 MiB ever reaches the disk, which keeps this test off the machine's
-        // back — other tests in this binary are timing-sensitive.
+        // Sparse (`set_len`, not `write`): the bytes read back as zeros and
+        // nothing of this size reaches the disk, which keeps the test off the
+        // machine's back — other tests in this binary are timing-sensitive.
         std::fs::File::create(&local)
             .unwrap()
-            .set_len(13 * 1024 * 1024)
+            .set_len(fleet_proto::MAX_PAYLOAD_BYTES as u64 + 1)
             .unwrap();
+        set_mode(&local, 0o000);
         let err = t
             .upload_file("laptop", &local, "/tmp/big", Duration::from_secs(5))
             .await
             .unwrap_err();
         assert_eq!(err.code, codes::E_UPLOAD);
         assert!(
-            err.message
-                .contains(&fleet_proto::MAX_FRAME_BYTES.to_string()),
-            "the message names the cap: {}",
+            err.message.contains("200 MiB"),
+            "the message names the payload limit: {}",
             err.message
         );
         assert!(
             agent.sent().is_empty(),
             "nothing oversized reaches the wire"
         );
+        // Undo 0000 so the tempdir can be cleaned up.
+        set_mode(&local, 0o600);
+    }
+
+    /// The limit is not a number somebody picked: it is what the application
+    /// says it moves. `move.max_transcript_mb` defaults to 200 MiB and
+    /// `move_session` checks a transcript's real size against it before the
+    /// copy, so a payload limit below it breaks "Move to host…" for any real
+    /// session on an agent host — which is exactly what 16 MiB did.
+    #[test]
+    fn the_frame_cap_covers_the_transcript_the_fleet_moves() {
+        let transcript =
+            crate::service::move_session::DEFAULT_MAX_TRANSCRIPT_MB as usize * 1024 * 1024;
+        assert!(
+            fleet_proto::MAX_PAYLOAD_BYTES >= transcript,
+            "one frame must carry a default-cap transcript: payload limit {} < {transcript}",
+            fleet_proto::MAX_PAYLOAD_BYTES
+        );
+        // …and the frame cap must leave room for base64 plus the envelope, or
+        // the payload limit is a promise the codec cannot keep.
+        assert!(
+            fleet_proto::MAX_FRAME_BYTES > fleet_proto::base64_len(transcript),
+            "frame cap {} does not fit {} base64 bytes",
+            fleet_proto::MAX_FRAME_BYTES,
+            fleet_proto::base64_len(transcript)
+        );
+    }
+
+    /// A hostile or buggy agent can put any `i32` in `exit_code`; `i32::MIN`
+    /// has no negation, so negating it panicked in a debug build (which is
+    /// every `cargo test`, `cargo tauri dev` and dev-run `fleet-hub`) and
+    /// wrapped in release. It must read as a failure, like any other signal.
+    #[test]
+    fn a_hostile_exit_code_does_not_panic() {
+        for code in [i32::MIN, i32::MIN + 1, -1, -128, i32::MAX] {
+            let out = output_from("laptop", result_frame(code), None).expect("decodes");
+            assert!(!out.status.success(), "{code} must not read as success");
+        }
+    }
+
+    /// The drag-drop upload (`commands/upload.rs`) carries the user's own
+    /// file, and Linux mounts exFAT/NTFS/SMB `0777` by default. Mirroring
+    /// that mode would land the file world-writable on the agent host, where
+    /// SSH's `cat >` under a normal umask gives 0644 — another user on that
+    /// host could rewrite a file the session is about to read.
+    #[tokio::test]
+    async fn an_upload_never_carries_group_or_other_write() {
+        for (local, sent) in [(0o777, 0o755), (0o666, 0o644), (0o664, 0o644)] {
+            let (t, agent) = setup(answer_exit(0));
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("f");
+            std::fs::write(&path, b"x").unwrap();
+            set_mode(&path, local);
+            t.upload_file("laptop", &path, "/tmp/f", Duration::from_secs(5))
+                .await
+                .unwrap();
+            match agent.only_frame() {
+                HubFrame::Upload { mode, .. } => {
+                    assert_eq!(mode, sent, "local {local:o} must upload as {sent:o}")
+                }
+                other => panic!("expected an upload, got {other:?}"),
+            }
+        }
+    }
+
+    /// The owner's own bits are never widened *or* narrowed: the bearer-token
+    /// case depends on 0600 crossing unchanged.
+    #[tokio::test]
+    async fn the_clamp_leaves_a_private_file_private() {
+        let (t, agent) = setup(answer_exit(0));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token");
+        std::fs::write(&path, b"secret").unwrap();
+        set_mode(&path, 0o600);
+        t.upload_file("laptop", &path, "/tmp/token", Duration::from_secs(5))
+            .await
+            .unwrap();
+        match agent.only_frame() {
+            HubFrame::Upload { mode, .. } => assert_eq!(mode, 0o600),
+            other => panic!("expected an upload, got {other:?}"),
+        }
     }
 
     // ── cancellation ────────────────────────────────────────────────────────
@@ -855,7 +997,12 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(err.code, codes::E_TIMEOUT);
+        // The SAME code every other `SshExec` returns for a blown wall clock
+        // (`ssh::wall_clock_error`). A code of its own looked harmless and was
+        // not: `account_usage::classify_run` reads an unrecognised code as
+        // "nothing ran on that host" and re-fires the Anthropic API request
+        // against the next one.
+        assert_eq!(err.code, codes::E_SSH_TIMEOUT);
     }
 
     fn set_mode(path: &std::path::Path, mode: u32) {

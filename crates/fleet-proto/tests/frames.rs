@@ -6,8 +6,9 @@
 //! `lib.rs` without renaming it here is a wire break, and that is the point.
 
 use fleet_proto::{
-    decode_agent_frame, decode_b64, decode_hub_frame, encode_agent_frame, encode_b64,
-    encode_hub_frame, AgentFrame, HubFrame, ProtoError, MAX_FRAME_BYTES,
+    base64_len, decode_agent_frame, decode_b64, decode_hub_frame, decode_hub_frame_within,
+    encode_agent_frame, encode_agent_frame_within, encode_b64, encode_hub_frame,
+    encode_hub_frame_within, AgentFrame, HubFrame, ProtoError, MAX_FRAME_BYTES, MAX_PAYLOAD_BYTES,
 };
 use serde_json::{json, Value};
 
@@ -231,17 +232,23 @@ fn the_two_directions_do_not_cross_decode() {
 
 // --- the size cap -----------------------------------------------------------
 
+/// A small stand-in ceiling. The cap mechanism is what these tests are about,
+/// and driving it at [`MAX_FRAME_BYTES`] — now sized for a 200 MiB transcript
+/// — would allocate a quarter of a gigabyte per test, several at once, for no
+/// extra coverage. `the_public_codec_uses_the_real_cap` pins the number.
+const SMALL_CAP: usize = 4096;
+
 #[test]
 fn a_payload_past_the_cap_is_rejected_on_decode_not_truncated() {
-    let body = "a".repeat(MAX_FRAME_BYTES);
+    let body = "a".repeat(SMALL_CAP);
     let text =
         format!(r#"{{"kind":"upload","id":"1","path":"/tmp/x","mode":384,"bytes_b64":"{body}"}}"#);
-    assert!(text.len() > MAX_FRAME_BYTES);
+    assert!(text.len() > SMALL_CAP);
 
-    match decode_hub_frame(&text) {
+    match decode_hub_frame_within(&text, SMALL_CAP) {
         Err(ProtoError::TooLarge { size, cap }) => {
             assert_eq!(size, text.len());
-            assert_eq!(cap, MAX_FRAME_BYTES);
+            assert_eq!(cap, SMALL_CAP);
         }
         other => panic!("expected TooLarge, got {other:?}"),
     }
@@ -252,12 +259,12 @@ fn a_payload_past_the_cap_is_rejected_on_encode_so_a_peer_never_sees_it() {
     let frame = AgentFrame::Result {
         id: "01J0".into(),
         exit_code: 0,
-        stdout_b64: "A".repeat(MAX_FRAME_BYTES),
+        stdout_b64: "A".repeat(SMALL_CAP),
         stderr_b64: String::new(),
         truncated: false,
     };
-    match encode_agent_frame(&frame) {
-        Err(ProtoError::TooLarge { cap, .. }) => assert_eq!(cap, MAX_FRAME_BYTES),
+    match encode_agent_frame_within(&frame, SMALL_CAP) {
+        Err(ProtoError::TooLarge { cap, .. }) => assert_eq!(cap, SMALL_CAP),
         other => panic!("expected TooLarge, got {:?}", other.map(|t| t.len())),
     }
 }
@@ -276,11 +283,49 @@ fn a_frame_that_just_fits_the_cap_is_accepted() {
         id: "1".into(),
         path: "/tmp/x".into(),
         mode: 0o600,
-        bytes_b64: "A".repeat(MAX_FRAME_BYTES - skeleton.len()),
+        bytes_b64: "A".repeat(SMALL_CAP - skeleton.len()),
     };
-    let text = encode_hub_frame(&frame).expect("a frame at the cap encodes");
-    assert_eq!(text.len(), MAX_FRAME_BYTES);
-    assert_eq!(decode_hub_frame(&text).expect("and decodes"), frame);
+    let text = encode_hub_frame_within(&frame, SMALL_CAP).expect("a frame at the cap encodes");
+    assert_eq!(text.len(), SMALL_CAP);
+    assert_eq!(
+        decode_hub_frame_within(&text, SMALL_CAP).expect("and decodes"),
+        frame
+    );
+}
+
+/// The ceiling the public functions apply, and where it comes from. A 16 MiB
+/// cap admitted ~12 MiB of file, which silently broke `move_session` — whose
+/// own default cap is 200 MiB — in both directions. The number is now derived
+/// from that payload, so this test is the derivation, not a restatement.
+#[test]
+fn the_public_codec_uses_the_real_cap() {
+    assert_eq!(MAX_PAYLOAD_BYTES, 200 * 1024 * 1024);
+    assert!(
+        MAX_FRAME_BYTES > base64_len(MAX_PAYLOAD_BYTES),
+        "the cap must fit a full payload after base64"
+    );
+    assert!(
+        MAX_FRAME_BYTES - base64_len(MAX_PAYLOAD_BYTES) >= 64 * 1024,
+        "…with room for the JSON around it"
+    );
+
+    // The public entry points really do apply it: one byte over is refused.
+    let text = "a".repeat(MAX_FRAME_BYTES + 1);
+    match decode_hub_frame(&text) {
+        Err(ProtoError::TooLarge { cap, .. }) => assert_eq!(cap, MAX_FRAME_BYTES),
+        other => panic!("expected TooLarge, got {other:?}"),
+    }
+}
+
+/// base64 is 4 bytes per 3, rounded up to a 4-byte group — the arithmetic the
+/// transport uses to refuse an oversize file from its size alone, without
+/// reading or encoding it.
+#[test]
+fn base64_len_matches_what_the_encoder_produces() {
+    for n in [0usize, 1, 2, 3, 4, 5, 6, 100, 4095, 4096] {
+        let bytes = vec![0u8; n];
+        assert_eq!(base64_len(n), encode_b64(&bytes).len(), "n={n}");
+    }
 }
 
 // --- base64 fields ----------------------------------------------------------

@@ -28,14 +28,49 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// The largest raw payload one frame carries, before base64.
+///
+/// **Derived, not chosen.** The biggest thing the fleet moves across this
+/// transport is a Claude Code transcript: `service::move_session`'s
+/// `move.max_transcript_mb` setting defaults to 200 MiB, and the move checks
+/// the transcript's real size against it *before* copying — so 200 MiB is the
+/// application's own declared maximum, not a guess about what files are like.
+/// It crosses the transport twice, read back as `Result.stdout_b64` and
+/// written as `Upload.bytes_b64`, so a limit below it breaks "Move to host…"
+/// for any real session on an agent host. fleet-core's
+/// `the_frame_cap_covers_the_transcript_the_fleet_moves` pins the two
+/// together so they cannot drift apart again.
+///
+/// An operator who raises `move.max_transcript_mb` past this gets a clear
+/// `E_UPLOAD` naming the limit, not a silent failure — but the two numbers do
+/// have to move together.
+pub const MAX_PAYLOAD_BYTES: usize = 200 * 1024 * 1024;
+
+/// Room for the JSON around one payload: `kind`, a uuid `id`, a path, a mode,
+/// and the *second* `*_b64` field of a `result` (an agent that fills both
+/// streams to the payload limit is refused — capping stderr is its job).
+/// Generous on purpose; the cap exists to bound memory, not to be exact.
+const ENVELOPE_BYTES: usize = 64 * 1024;
+
 /// Ceiling on one encoded frame, in bytes, in both directions.
 ///
-/// Sized for `upload`, the only frame that carries a file: base64 costs 4/3,
-/// so this admits a payload of roughly 12 MiB — far above the hooks, settings
-/// and MCP entries provisioning writes, and well below anything that would
-/// make a WebSocket peer buffer dangerously. It bounds `exec` output too; the
-/// hub sets the per-call `cap_bytes` under it.
-pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+/// [`MAX_PAYLOAD_BYTES`] after base64 (4/3), plus [`ENVELOPE_BYTES`]. It
+/// bounds `exec` output too; the hub sets the per-call `cap_bytes` under it.
+///
+/// **The memory this admits is real**, and a reader should size it: one frame
+/// at the cap is ~267 MiB of `String` on each side, on top of the raw bytes
+/// the hub already holds. That matches what the SSH path already costs for
+/// the same move (`move_session` reads the whole transcript into memory before
+/// writing it), but it means a peer can make this process allocate that much,
+/// once per frame. Where a caller knows its own answer is small, it should say
+/// so with [`decode_agent_frame_within`] rather than rely on this ceiling.
+pub const MAX_FRAME_BYTES: usize = base64_len(MAX_PAYLOAD_BYTES) + ENVELOPE_BYTES;
+
+/// Length of standard padded base64 for `n` bytes — the 4/3 blow-up every
+/// size check here has to account for.
+pub const fn base64_len(n: usize) -> usize {
+    n.div_ceil(3) * 4
+}
 
 /// The standard, padded base64 alphabet — the one `base64(1)` on a remote host
 /// already produces, so hub-side code that shells out and agent-side code that
@@ -51,12 +86,18 @@ pub enum HubFrame {
     /// the argv itself is one (`["bash", "-lc", <script>]`, as the SSH path
     /// already does), so nothing here needs shell quoting.
     ///
-    /// **For whoever writes `AgentTransport` (Task 3):** this is *not* the
-    /// same shape as `SshExec`'s `args: &[&str]`. Those are space-joined and
-    /// re-tokenised by the remote login shell, which is why callers already
-    /// `shell::quote` a multi-word script. Handing them straight over as
-    /// `argv` would exec the quoting literally. Reproduce today's semantics by
-    /// sending `["bash", "-lc", args.join(" ")]`.
+    /// **This is *not* the same shape as `SshExec`'s `args: &[&str]`.** Those
+    /// are space-joined by ssh and re-tokenised by a shell on the far side,
+    /// which is why callers already `shell::quote` a multi-word script.
+    /// Handing them straight over as `argv` would exec the quoting literally.
+    ///
+    /// `AgentTransport` therefore sends **`["bash", "-c", args.join(" ")]`** —
+    /// `-c`, not `-lc`. That is byte for byte what `fleet-core`'s own
+    /// `LocalExec::command` already does for the same trait, and sshd runs a
+    /// remote command as `$SHELL -c` without sourcing the login profile, so
+    /// the login shell the fleet wants is the *inner* one its callers write.
+    /// An outer `-l` would source the profile a second time and put anything
+    /// it prints in front of output the service layer parses.
     Exec {
         id: String,
         argv: Vec<String>,
@@ -146,44 +187,67 @@ impl std::error::Error for ProtoError {}
 
 /// Encode a hub frame for the wire.
 pub fn encode_hub_frame(frame: &HubFrame) -> Result<String, ProtoError> {
-    encode(frame)
+    encode(frame, MAX_FRAME_BYTES)
 }
 
 /// Encode an agent frame for the wire.
 pub fn encode_agent_frame(frame: &AgentFrame) -> Result<String, ProtoError> {
-    encode(frame)
+    encode(frame, MAX_FRAME_BYTES)
 }
 
 /// Decode a hub frame. An agent frame, an unknown `kind` and junk are all
 /// errors; nothing here panics on hostile input.
 pub fn decode_hub_frame(text: &str) -> Result<HubFrame, ProtoError> {
-    decode(text)
+    decode(text, MAX_FRAME_BYTES)
 }
 
 /// Decode an agent frame. See [`decode_hub_frame`].
 pub fn decode_agent_frame(text: &str) -> Result<AgentFrame, ProtoError> {
-    decode(text)
+    decode(text, MAX_FRAME_BYTES)
 }
 
-fn encode<T: Serialize>(frame: &T) -> Result<String, ProtoError> {
+/// [`encode_hub_frame`] against an explicit ceiling.
+pub fn encode_hub_frame_within(frame: &HubFrame, cap: usize) -> Result<String, ProtoError> {
+    encode(frame, cap)
+}
+
+/// [`encode_agent_frame`] against an explicit ceiling.
+pub fn encode_agent_frame_within(frame: &AgentFrame, cap: usize) -> Result<String, ProtoError> {
+    encode(frame, cap)
+}
+
+/// [`decode_hub_frame`] against an explicit ceiling.
+pub fn decode_hub_frame_within(text: &str, cap: usize) -> Result<HubFrame, ProtoError> {
+    decode(text, cap)
+}
+
+/// [`decode_agent_frame`] against an explicit ceiling.
+///
+/// [`MAX_FRAME_BYTES`] has to admit the largest thing the fleet moves, which
+/// is far larger than the answer to a typical `exec`. A reader that knows its
+/// own budget — the hub's socket loop, once it knows the `cap_bytes` it asked
+/// for — should pass that budget here instead of letting every peer spend the
+/// whole ceiling.
+pub fn decode_agent_frame_within(text: &str, cap: usize) -> Result<AgentFrame, ProtoError> {
+    decode(text, cap)
+}
+
+fn encode<T: Serialize>(frame: &T, cap: usize) -> Result<String, ProtoError> {
     let text = serde_json::to_string(frame).map_err(|e| ProtoError::Malformed(e.to_string()))?;
-    check_size(text.len())?;
+    check_size(text.len(), cap)?;
     Ok(text)
 }
 
-fn decode<T: DeserializeOwned>(text: &str) -> Result<T, ProtoError> {
+fn decode<T: DeserializeOwned>(text: &str, cap: usize) -> Result<T, ProtoError> {
     // Size first: a hostile peer must not get serde to walk 100 MB before the
     // cap is consulted.
-    check_size(text.len())?;
+    check_size(text.len(), cap)?;
     serde_json::from_str(text).map_err(|e| ProtoError::Malformed(e.to_string()))
 }
 
-fn check_size(size: usize) -> Result<(), ProtoError> {
-    if size > MAX_FRAME_BYTES {
-        return Err(ProtoError::TooLarge {
-            size,
-            cap: MAX_FRAME_BYTES,
-        });
+fn check_size(size: usize, cap: usize) -> Result<(), ProtoError> {
+    if size > cap {
+        return Err(ProtoError::TooLarge { size, cap });
     }
     Ok(())
 }
