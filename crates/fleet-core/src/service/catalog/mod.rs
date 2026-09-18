@@ -303,7 +303,15 @@ pub struct LayerListing {
 }
 
 pub fn list_layers(store: &Mutex<Store>) -> Result<LayerListing, IpcError> {
-    let hosts = lock(store)?.list_all_host_layers()?;
+    // Only active rows are part of an assignment — the same rule
+    // `get_host_layers` (and therefore resolution) applies. The store call
+    // stays "all rows" because callers such as `delete_host`'s checks need
+    // exactly that.
+    let hosts: Vec<_> = lock(store)?
+        .list_all_host_layers()?
+        .into_iter()
+        .filter(|r| r.active)
+        .collect();
     with_catalog(|cat| {
         Ok(LayerListing {
             layers: cat.layers.iter().cloned().collect(),
@@ -811,6 +819,34 @@ mod tests {
             .get_host_layers("local")
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn list_layers_reports_only_active_assignments() {
+        // The tool describes "each host's role + active contexts"; an
+        // inactive row is not part of the assignment and must not be shown
+        // as if it were.
+        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let store = configured_store_with_layers("ll-active");
+        set_host_layers("local", Some("core"), &[], &store).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "INSERT INTO host_layers (host_alias, layer_name, axis, position, active) \
+                 VALUES ('local', 'extra', 'context', 0, 0)",
+                [],
+            )
+            .unwrap();
+
+        let listing = list_layers(&store).unwrap();
+        let names: Vec<&str> = listing
+            .hosts
+            .iter()
+            .map(|r| r.layer_name.as_str())
+            .collect();
+        assert_eq!(names, vec!["core"]);
     }
 
     #[test]
