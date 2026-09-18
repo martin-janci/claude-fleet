@@ -21,6 +21,7 @@ pub mod fake;
 pub mod registry;
 pub mod router;
 pub mod transport;
+pub mod ws;
 
 pub use registry::{AgentHello, AgentRegistry, AgentStatus, ConnId};
 pub use router::HostRouter;
