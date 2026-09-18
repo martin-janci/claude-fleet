@@ -243,8 +243,10 @@ enum ResolvedBy {
 /// (a) the row has no id yet;
 /// (b) the row awaits a rebind (`SessionEnd(clear | resume)` within the TTL);
 /// (c) the row's current conversation has ended, or its Claude is `stopped`;
-/// (d) the event is `SessionStart(clear | resume)` — only the interactive
-///     session in the pane emits those; a nested one-shot starts `startup`.
+/// (d) the event is `SessionStart(clear)` — only the interactive session in
+///     the pane emits it. Not `resume`: a nested `claude -p --resume <id>` /
+///     `-c` starts with it too; an interactive `/resume` rebinds via (b),
+///     since its SessionEnd(resume) sets the awaiting mark first.
 fn rebind_eligible(s: &Store, row: &SessionRow, payload: &HookPayload) -> Result<bool, IpcError> {
     let Some(current) = row.claude_session_id.as_deref() else {
         return Ok(true);
@@ -257,10 +259,7 @@ fn rebind_eligible(s: &Store, row: &SessionRow, payload: &HookPayload) -> Result
         return Ok(true);
     }
     Ok(payload.hook_event_name.as_deref() == Some("SessionStart")
-        && matches!(
-            StartSource::from_hook(payload.source.as_deref().unwrap_or("")),
-            StartSource::Clear | StartSource::Resume
-        ))
+        && StartSource::from_hook(payload.source.as_deref().unwrap_or("")) == StartSource::Clear)
 }
 
 /// The source of a UserPromptSubmit rebind onto a row awaiting one: the
@@ -2424,10 +2423,22 @@ mod tests {
 
     #[test]
     fn a_pane_rebind_needs_an_eligible_row_or_a_clear_or_resume_start() {
-        // (d) SessionStart(clear | resume) from the pane still rebinds.
+        // (d) SessionStart(clear) from the pane still rebinds; an
+        // interactive /resume rebinds through (b) after SessionEnd(resume).
         for source in ["clear", "resume"] {
             let store = make_store();
             let id = pane_session(&store, "s", "%3");
+            if source == "resume" {
+                let mut end = make_payload("SessionEnd", OLD);
+                end.reason = Some("resume".into());
+                apply_hook(
+                    &store,
+                    &make_ssh(),
+                    &end,
+                    &ctx(&host_caller("local"), Some("%3")),
+                )
+                .unwrap();
+            }
             let mut p = make_payload("SessionStart", NEW);
             p.source = Some(source.into());
             apply_hook(
@@ -2597,5 +2608,31 @@ mod tests {
         let conv = s.get_conversation(id, NEW).unwrap().unwrap();
         assert!(conv.current && conv.ended_at.is_none());
         assert_eq!(conv.start_source, "clear");
+    }
+
+    #[test]
+    fn a_nested_resume_in_the_pane_never_touches_the_parent_row() {
+        // `claude -p --resume <id>` / `-c` from the parent's Bash tool starts
+        // with source `resume` and an id the parent never had.
+        let store = make_store();
+        let (id, task) = working_parent_with_task(&store);
+        let before = status_of(&store, id);
+        let convs_before = store.lock().unwrap().list_conversations(id, 10).unwrap();
+        let host = host_caller("local");
+        let mut start = make_payload("SessionStart", CHILD);
+        start.source = Some("resume".into());
+        apply_hook(&store, &make_ssh(), &start, &ctx(&host, Some("%3"))).unwrap();
+        let after = status_of(&store, id);
+        assert_eq!(after.claude_session_id.as_deref(), Some(OLD));
+        assert_eq!(after.claude_status, before.claude_status);
+        assert_eq!(after.context.context_tokens, Some(120_000));
+        let s = store.lock().unwrap();
+        assert_eq!(s.list_conversations(id, 10).unwrap(), convs_before);
+        assert!(crate::service::tasks::sweep_open_tasks(&s, soon())
+            .unwrap()
+            .is_empty());
+        let t = s.get_task(task).unwrap().unwrap();
+        assert!(t.finished_at.is_none());
+        assert_eq!(t.worker_claude_session_id.as_deref(), Some(OLD));
     }
 }

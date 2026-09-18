@@ -148,8 +148,10 @@ its pane moves to a new id only when one of these holds:
   just fired for its current conversation);
 - (c) the row's current conversation has ended (`ended_at` set), or its
   `claude_status` is `stopped`;
-- (d) the event is `SessionStart` with source `clear` or `resume` (only the
-  interactive session emits those; a nested one-shot starts with `startup`).
+- (d) the event is `SessionStart` with source `clear` (only the interactive
+  session emits it). Not `resume`: a nested `claude -p --resume <id>` / `-c`
+  starts with it too; an interactive `/resume` rebinds through (b), since its
+  `SessionEnd(resume)` sets the awaiting mark first.
 
 Otherwise a pane-resolved event carrying a non-current id is the row's own
 earlier conversation when the row has a conversation by that id (it updates
