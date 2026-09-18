@@ -80,6 +80,36 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// This conversation's timeline events, oldest first (at most `limit`,
+    /// the newest ones). Events recorded before migration 034 carry no
+    /// conversation id and are not returned.
+    pub fn list_conversation_events(
+        &self,
+        session_id: i64,
+        claude_session_id: &str,
+        limit: i64,
+    ) -> Result<Vec<SessionEvent>, crate::ipc_error::IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, at, kind, detail, claude_session_id FROM (\
+                 SELECT * FROM session_events WHERE session_id = ?1 AND claude_session_id = ?2 \
+                 ORDER BY at DESC, id DESC LIMIT ?3) ORDER BY at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![session_id, claude_session_id, limit],
+            |row| {
+                Ok(SessionEvent {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    at: row.get(2)?,
+                    kind: row.get(3)?,
+                    detail: row.get(4)?,
+                    claude_session_id: row.get(5)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Insert one inter-session message (migration 015). `sent_at` is stamped
     /// here as the current unix epoch. Returns the new row id so the caller
     /// can include it in the pane-delivery header.
@@ -226,6 +256,37 @@ mod tests {
         );
         // The other session's timeline is untouched.
         assert_eq!(s.list_session_events(8, 50).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn list_conversation_events_returns_only_the_requested_conversation_oldest_first() {
+        let s = Store::open_in_memory().expect("open");
+        s.insert_session_event_for(7, Some("conv-a"), "prompt_sent", Some("1"))
+            .unwrap();
+        s.insert_session_event_for(7, Some("conv-b"), "prompt_sent", Some("2"))
+            .unwrap();
+        s.insert_session_event_for(7, Some("conv-a"), "turn_ended", Some("3"))
+            .unwrap();
+        // Pre-migration-034 event: no conversation id, never returned.
+        s.insert_session_event(7, "status_change", Some("no-conv"))
+            .unwrap();
+
+        let a = s.list_conversation_events(7, "conv-a", 50).unwrap();
+        assert_eq!(a.len(), 2, "only conv-a's events, none from conv-b or NULL");
+        assert_eq!(a[0].detail.as_deref(), Some("1"), "oldest first");
+        assert_eq!(a[1].detail.as_deref(), Some("3"));
+        assert!(a
+            .iter()
+            .all(|e| e.claude_session_id.as_deref() == Some("conv-a")));
+
+        // limit keeps the newest rows even though the result is oldest-first.
+        s.insert_session_event_for(7, Some("conv-a"), "turn_ended", Some("4"))
+            .unwrap();
+        let limited = s.list_conversation_events(7, "conv-a", 2).unwrap();
+        assert_eq!(
+            limited.iter().map(|e| e.detail.clone()).collect::<Vec<_>>(),
+            vec![Some("3".to_string()), Some("4".to_string())]
+        );
     }
 
     #[test]

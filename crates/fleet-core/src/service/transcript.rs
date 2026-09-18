@@ -19,7 +19,7 @@ use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::SshClient;
-use crate::store::{SessionRow, Store};
+use crate::store::{SessionEvent, SessionRow, Store};
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
 
@@ -228,6 +228,72 @@ pub enum ConvItem {
         #[serde(default)]
         error: bool,
     },
+    /// A compaction (`system/compact_boundary`). `summary` is the text of
+    /// the following `isCompactSummary` user entry when the read tail has
+    /// it.
+    Compact {
+        trigger: Option<String>,
+        pre_tokens: Option<i64>,
+        summary: Option<String>,
+    },
+    /// A slash command the user ran (`<command-name>` user entry); `output`
+    /// is the following `<local-command-stdout>` / `<local-command-stderr>`.
+    Command {
+        name: String,
+        args: Option<String>,
+        output: Option<String>,
+    },
+    /// `[Request interrupted by user]` (`during_tool`: "… for tool use").
+    Interrupt {
+        during_tool: bool,
+    },
+}
+
+/// Cap on a compaction's carried summary text (chars).
+const COMPACT_SUMMARY_MAX_CHARS: usize = 20_000;
+/// Cap on a slash command's carried output text (chars).
+const COMMAND_OUTPUT_MAX_CHARS: usize = 4_000;
+
+/// Text between `<tag>` and `</tag>`, trimmed; `None` when absent or empty.
+fn tag_text(s: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = s.find(&open)? + open.len();
+    let end = s[start..].find(&close)? + start;
+    let t = s[start..end].trim();
+    (!t.is_empty()).then(|| t.to_string())
+}
+
+/// The plain text of a user entry's content (string body, or its text
+/// blocks joined), without deciding whether it is a prompt.
+fn user_text(content: Option<&serde_json::Value>) -> Option<String> {
+    match content {
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(serde_json::Value::Array(blocks)) => {
+            if blocks
+                .iter()
+                .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+            {
+                return None;
+            }
+            let texts: Vec<&str> = blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect();
+            (!texts.is_empty()).then(|| texts.join("\n"))
+        }
+        _ => None,
+    }
+}
+
+fn cap_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -239,6 +305,10 @@ pub struct Conversation {
     /// `None` when the tail carried no usage (nothing yet, or a compaction
     /// with no reply since).
     pub context: Option<ContextView>,
+    /// This conversation's timeline events, oldest first. Empty wherever a
+    /// `Conversation` is built without a store (e.g. `trim_conversation`
+    /// alone); [`fetch_conversation_for_row`] fills it in.
+    pub events: Vec<SessionEvent>,
 }
 
 /// The context size shown in the Conversation payload (spec §1.5), derived
@@ -325,6 +395,26 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                 .map(String::from)
         };
         match kind {
+            "system" if v.get("subtype").and_then(|s| s.as_str()) == Some("compact_boundary") => {
+                push(&mut turns, current.take());
+                tool_items.clear();
+                let meta = v.get("compactMetadata");
+                current = Some(ConvTurn {
+                    prompt: None,
+                    at: at(),
+                    ended_at: None,
+                    items: vec![ConvItem::Compact {
+                        trigger: meta
+                            .and_then(|m| m.get("trigger"))
+                            .and_then(|t| t.as_str())
+                            .map(String::from),
+                        pre_tokens: meta
+                            .and_then(|m| m.get("preTokens"))
+                            .and_then(|t| t.as_i64()),
+                        summary: None,
+                    }],
+                });
+            }
             "user" => {
                 if let Some(serde_json::Value::Array(blocks)) = content {
                     for b in blocks
@@ -341,6 +431,68 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                                 *error = true;
                             }
                         }
+                    }
+                }
+                if v.get("isMeta").and_then(|b| b.as_bool()) == Some(true) {
+                    continue;
+                }
+                if v.get("isCompactSummary").and_then(|b| b.as_bool()) == Some(true) {
+                    if let (Some(text), Some(turn)) = (user_text(content), current.as_mut()) {
+                        if let Some(ConvItem::Compact { summary, .. }) = turn.items.last_mut() {
+                            if summary.is_none() {
+                                *summary = Some(cap_chars(text.trim(), COMPACT_SUMMARY_MAX_CHARS));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if let Some(text) = user_text(content) {
+                    if let Some(name) = tag_text(&text, "command-name") {
+                        push(&mut turns, current.take());
+                        tool_items.clear();
+                        current = Some(ConvTurn {
+                            prompt: None,
+                            at: at(),
+                            ended_at: None,
+                            items: vec![ConvItem::Command {
+                                name,
+                                args: tag_text(&text, "command-args"),
+                                output: None,
+                            }],
+                        });
+                        continue;
+                    }
+                    if let Some(out) = tag_text(&text, "local-command-stdout")
+                        .or_else(|| tag_text(&text, "local-command-stderr"))
+                    {
+                        if let Some(ConvItem::Command { output, .. }) =
+                            current.as_mut().and_then(|t| {
+                                t.items
+                                    .iter_mut()
+                                    .rev()
+                                    .find(|i| matches!(i, ConvItem::Command { .. }))
+                            })
+                        {
+                            if output.is_none() {
+                                *output = Some(cap_chars(&out, COMMAND_OUTPUT_MAX_CHARS));
+                            }
+                        }
+                        continue;
+                    }
+                    if text
+                        .trim_start()
+                        .starts_with("[Request interrupted by user")
+                    {
+                        let turn = current.get_or_insert_with(|| ConvTurn {
+                            prompt: None,
+                            at: at(),
+                            ended_at: None,
+                            items: Vec::new(),
+                        });
+                        turn.items.push(ConvItem::Interrupt {
+                            during_tool: text.contains("for tool use"),
+                        });
+                        continue;
                     }
                 }
                 if let Some(prompt) = prompt_text(content) {
@@ -412,6 +564,14 @@ pub fn parse_turns(jsonl: &str) -> Vec<String> {
                 .map(|i| match i {
                     ConvItem::Text { text } => text.clone(),
                     ConvItem::Tool { summary, .. } => format!("{TOOL_USE_PREFIX}{summary}"),
+                    ConvItem::Compact { trigger, .. } => {
+                        format!("[compacted] {}", trigger.as_deref().unwrap_or("unknown"))
+                    }
+                    ConvItem::Command { name, args, .. } => match args {
+                        Some(a) => format!("[command] {name} {a}"),
+                        None => format!("[command] {name}"),
+                    },
+                    ConvItem::Interrupt { .. } => "[interrupted]".to_string(),
                 })
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -425,6 +585,13 @@ fn item_chars(item: &ConvItem) -> usize {
     match item {
         ConvItem::Text { text } => text.chars().count(),
         ConvItem::Tool { summary, .. } => summary.chars().count(),
+        ConvItem::Compact { summary, .. } => summary.as_deref().map_or(0, |s| s.chars().count()),
+        ConvItem::Command { name, args, output } => {
+            name.chars().count()
+                + args.as_deref().map_or(0, |s| s.chars().count())
+                + output.as_deref().map_or(0, |s| s.chars().count())
+        }
+        ConvItem::Interrupt { .. } => 0,
     }
 }
 
@@ -469,6 +636,7 @@ pub fn trim_conversation(
         turns,
         truncated,
         context: None,
+        events: Vec::new(),
     }
 }
 
@@ -637,16 +805,23 @@ pub async fn fetch_conversation_for_row(
         None => resolve_args(store, row, turns, max_chars)?,
     };
     let claude_id = args.claude_session_id.clone();
-    let conv = fetch_conversation(args, ssh).await?;
-    if row.claude_session_id.as_deref() == Some(claude_id.as_str()) {
-        if let Some(v) = &conv.context {
-            if let Ok(s) = lock(store) {
+    let mut conv = fetch_conversation(args, ssh).await?;
+    if let Ok(s) = lock(store) {
+        conv.events = s
+            .list_conversation_events(row.id, &claude_id, CONV_EVENTS_LIMIT)
+            .unwrap_or_default();
+        if row.claude_session_id.as_deref() == Some(claude_id.as_str()) {
+            if let Some(v) = &conv.context {
                 let _ = s.set_context(row.id, &claude_id, v.tokens, v.window, "transcript", None);
             }
         }
     }
     Ok(conv)
 }
+
+/// Most timeline events [`fetch_conversation_for_row`] attaches to a
+/// `Conversation`.
+const CONV_EVENTS_LIMIT: i64 = 200;
 
 /// Validate `args` and build the script that prints the last `max_bytes` of
 /// its transcript. Errors: `E_INVALID` (bad id / host / pane name).
@@ -1155,6 +1330,127 @@ mod tests {
         assert!(parse_turns(&jsonl).is_empty());
     }
 
+    fn jl(lines: &[serde_json::Value]) -> String {
+        lines
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    fn user(content: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"type":"user","timestamp":"2026-09-18T10:00:00Z","message":{"content":content}})
+    }
+    fn asst(text: &str) -> serde_json::Value {
+        serde_json::json!({"type":"assistant","timestamp":"2026-09-18T10:00:05Z",
+            "message":{"content":[{"type":"text","text":text}]}})
+    }
+
+    #[test]
+    fn a_compaction_is_its_own_item_with_its_summary_not_a_prompt() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("first")),
+            asst("done"),
+            serde_json::json!({"type":"system","subtype":"compact_boundary","timestamp":"2026-09-18T10:01:00Z",
+                "compactMetadata":{"trigger":"auto","preTokens":180000}}),
+            serde_json::json!({"type":"user","isCompactSummary":true,"timestamp":"2026-09-18T10:01:00Z",
+                "message":{"content":"This session is being continued… Summary: A"}}),
+            user(serde_json::json!("next")),
+        ]));
+        assert_eq!(t.len(), 3);
+        assert_eq!(t[1].prompt, None);
+        assert_eq!(
+            t[1].items,
+            vec![ConvItem::Compact {
+                trigger: Some("auto".into()),
+                pre_tokens: Some(180_000),
+                summary: Some("This session is being continued… Summary: A".into()),
+            }]
+        );
+        assert_eq!(t[2].prompt.as_deref(), Some("next"));
+    }
+
+    #[test]
+    fn a_slash_command_opens_a_turn_and_collects_its_output() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("<command-name>/model</command-name>\n  <command-message>model</command-message>\n  <command-args>opus</command-args>")),
+            user(serde_json::json!("<local-command-stdout>Set model to opus</local-command-stdout>")),
+        ]));
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].prompt, None);
+        assert_eq!(
+            t[0].items,
+            vec![ConvItem::Command {
+                name: "/model".into(),
+                args: Some("opus".into()),
+                output: Some("Set model to opus".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_command_without_args_has_none() {
+        let t = parse_conversation(&jl(&[user(serde_json::json!(
+            "<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"
+        ))]));
+        assert_eq!(
+            t[0].items,
+            vec![ConvItem::Command {
+                name: "/clear".into(),
+                args: None,
+                output: None
+            }]
+        );
+    }
+
+    #[test]
+    fn meta_entries_are_skipped() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("real prompt")),
+            serde_json::json!({"type":"user","isMeta":true,"message":{"content":[{"type":"text","text":"Base directory for this skill: x"}]}}),
+            asst("ok"),
+        ]));
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].prompt.as_deref(), Some("real prompt"));
+        assert_eq!(t[0].items, vec![ConvItem::Text { text: "ok".into() }]);
+    }
+
+    #[test]
+    fn an_interrupt_is_an_item_of_the_current_turn() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            asst("working"),
+            user(
+                serde_json::json!([{"type":"text","text":"[Request interrupted by user for tool use]"}]),
+            ),
+            user(serde_json::json!([{"type":"text","text":"[Request interrupted by user]"}])),
+        ]));
+        assert_eq!(t.len(), 1);
+        assert_eq!(
+            t[0].items,
+            vec![
+                ConvItem::Text {
+                    text: "working".into()
+                },
+                ConvItem::Interrupt { during_tool: true },
+                ConvItem::Interrupt { during_tool: false },
+            ]
+        );
+    }
+
+    #[test]
+    fn plain_text_rendering_names_the_new_items() {
+        let turns = parse_turns(&jl(&[
+            user(serde_json::json!(
+                "<command-name>/model</command-name><command-args>opus</command-args>"
+            )),
+            asst("switched"),
+            serde_json::json!({"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"manual","preTokens":5}}),
+        ]));
+        let all = turns.join("\n");
+        assert!(all.contains("[command] /model opus"));
+        assert!(all.contains("[compacted] manual"));
+    }
+
     #[test]
     fn trim_conversation_drops_oldest_first() {
         let t = |p: &str, n: usize| ConvTurn {
@@ -1212,12 +1508,13 @@ mod tests {
             }],
             truncated: false,
             context: None,
+            events: Vec::new(),
         };
         assert_eq!(
             serde_json::to_value(&c).unwrap(),
             serde_json::json!({"turns":[{"prompt":null,"at":"2026-09-13T10:00:00Z","ended_at":null,"items":[
                 {"kind":"text","text":"hi"},{"kind":"tool","summary":"Bash(command=ls)","error":false}]}],
-                "truncated":false,"context":null})
+                "truncated":false,"context":null,"events":[]})
         );
     }
 
@@ -1571,6 +1868,43 @@ mod tests {
             .unwrap();
         assert_eq!(conv.context.as_ref().map(|c| c.tokens), Some(1_000));
         assert_eq!(ctx(&store), Some(1_000));
+    }
+
+    #[tokio::test]
+    async fn fetch_for_row_attaches_only_the_requested_conversations_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, row, _, _) = two_conversations(dir.path(), 1_000, 2_000);
+        {
+            let s = store.lock().unwrap();
+            s.insert_session_event_for(row.id, Some(CONV_A), "prompt_sent", Some("a1"))
+                .unwrap();
+            s.insert_session_event_for(row.id, Some(CONV_B), "prompt_sent", Some("b1"))
+                .unwrap();
+            s.insert_session_event_for(row.id, Some(CONV_A), "turn_ended", Some("a2"))
+                .unwrap();
+        }
+        let ssh = Arc::new(SshClient::new());
+        let conv = fetch_conversation_for_row(&store, &ssh, &row, Some(CONV_B), 10, 8_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            conv.events
+                .iter()
+                .map(|e| e.detail.clone())
+                .collect::<Vec<_>>(),
+            vec![Some("b1".to_string())]
+        );
+        let conv = fetch_conversation_for_row(&store, &ssh, &row, Some(CONV_A), 10, 8_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            conv.events
+                .iter()
+                .map(|e| e.detail.clone())
+                .collect::<Vec<_>>(),
+            vec![Some("a1".to_string()), Some("a2".to_string())],
+            "oldest first, only this conversation's events"
+        );
     }
 
     fn tail_args(max_chars: usize) -> TranscriptArgs {

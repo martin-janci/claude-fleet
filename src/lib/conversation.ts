@@ -2,8 +2,14 @@ import { timeAgo } from './session_status';
 import { invokeCmd, type Result } from './result';
 import type { ClaudeStatus, StuckKind } from './sessions';
 import { stuckKindLabel } from './attention';
+import type { SessionEvent } from './timeline';
 
-export type ConvItem = { kind: 'text'; text: string } | { kind: 'tool'; summary: string; error?: boolean };
+export type ConvItem =
+  | { kind: 'text'; text: string }
+  | { kind: 'tool'; summary: string; error?: boolean }
+  | { kind: 'compact'; trigger: string | null; pre_tokens: number | null; summary: string | null }
+  | { kind: 'command'; name: string; args: string | null; output: string | null }
+  | { kind: 'interrupt'; during_tool: boolean };
 
 export interface ConvTurn {
   prompt: string | null;
@@ -25,6 +31,8 @@ export interface Conversation {
   turns: ConvTurn[];
   truncated: boolean;
   context: ContextView | null;
+  /** This conversation's timeline events, oldest first. */
+  events: SessionEvent[];
 }
 
 /** Poll cadence for the Conversation tab while it is visible (spec §6). */
@@ -109,10 +117,18 @@ export interface ToolLine {
   error: boolean;
 }
 
-/** A reply item after folding: prose, or a run of consecutive tool calls. */
-export type ConvGroup = { kind: 'text'; text: string } | { kind: 'tools'; tools: ToolLine[] };
+/** A reply item after folding: prose, a run of consecutive tool calls, or one
+ *  of the standalone event kinds (each of which also breaks a tool run). */
+export type ConvGroup =
+  | { kind: 'text'; text: string }
+  | { kind: 'tools'; tools: ToolLine[] }
+  | { kind: 'compact'; trigger: string | null; pre_tokens: number | null; summary: string | null }
+  | { kind: 'command'; name: string; args: string | null; output: string | null }
+  | { kind: 'interrupt'; during_tool: boolean };
 
-/** Fold consecutive tool one-liners into one group; text items stay apart. */
+/** Fold consecutive tool one-liners into one group; text items stay apart;
+ *  compact/command/interrupt items are each their own group and close any
+ *  open tool run. */
 export function groupItems(items: ConvItem[]): ConvGroup[] {
   const out: ConvGroup[] = [];
   for (const item of items) {
@@ -120,10 +136,14 @@ export function groupItems(items: ConvItem[]): ConvGroup[] {
       out.push({ kind: 'text', text: item.text });
       continue;
     }
-    const line: ToolLine = { summary: item.summary, error: item.error === true };
-    const last = out[out.length - 1];
-    if (last?.kind === 'tools') last.tools.push(line);
-    else out.push({ kind: 'tools', tools: [line] });
+    if (item.kind === 'tool') {
+      const line: ToolLine = { summary: item.summary, error: item.error === true };
+      const last = out[out.length - 1];
+      if (last?.kind === 'tools') last.tools.push(line);
+      else out.push({ kind: 'tools', tools: [line] });
+      continue;
+    }
+    out.push(item);
   }
   return out;
 }

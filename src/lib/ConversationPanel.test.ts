@@ -40,6 +40,7 @@ function conv(over: Partial<Conversation> = {}): Conversation {
   return {
     truncated: false,
     context: null,
+    events: [],
     turns: [
       {
         prompt: 'fix the bug',

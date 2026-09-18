@@ -594,15 +594,17 @@
                 {#each groups as g, j (j)}
                   {#if g.kind === 'text'}
                     <div class="text" data-testid="conv-text"><Markdown source={g.text} /></div>
-                  {:else if g.tools.length === 1}
+                  {:else if g.kind === 'tools' && g.tools.length === 1}
                     <div class="tool" class:err={g.tools[0].error} data-testid="conv-tool" data-error={g.tools[0].error || undefined} title={g.tools[0].error ? `Failed: ${g.tools[0].summary}` : g.tools[0].summary}>{g.tools[0].summary}</div>
-                  {:else}
+                  {:else if g.kind === 'tools'}
                     <details class="tools" class:has-err={g.tools.some((t) => t.error)} use:autoOpen={running && j === groups.length - 1} data-testid="conv-tools">
                       <summary>{toolGroupLabel(g.tools)}</summary>
                       {#each g.tools as line, k (k)}
                         <div class="tool" class:err={line.error} data-testid="conv-tool" data-error={line.error || undefined} title={line.error ? `Failed: ${line.summary}` : line.summary}>{line.summary}</div>
                       {/each}
                     </details>
+                  {:else}
+                    <!-- compact / command / interrupt: rendered starting Task 4 -->
                   {/if}
                 {/each}
                 {#if duration}

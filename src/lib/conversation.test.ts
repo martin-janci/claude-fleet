@@ -41,6 +41,7 @@ function conv(over: Partial<Conversation> = {}): Conversation {
   return {
     truncated: false,
     context: null,
+    events: [],
     turns: [
       {
         prompt: 'fix the bug',
@@ -173,6 +174,15 @@ describe('groupItems', () => {
       { kind: 'text', text: 'z' },
     ]);
     expect(groupItems([])).toEqual([]);
+  });
+
+  it('new item kinds are their own groups and break a tool run', () => {
+    const g = groupItems([
+      { kind: 'tool', summary: 'Bash(ls)' },
+      { kind: 'interrupt', during_tool: true },
+      { kind: 'tool', summary: 'Read(x)' },
+    ]);
+    expect(g.map((x) => x.kind)).toEqual(['tools', 'interrupt', 'tools']);
   });
 });
 
