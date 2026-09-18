@@ -586,7 +586,8 @@ pub fn resolve_args(
 
 /// [`resolve_args`] for a specific conversation of the row. `E_INVALID` when
 /// `claude_session_id` is not one of the row's conversations. The transcript
-/// path is that conversation's (falls back to the cwd search).
+/// path is that conversation's (falls back to the cwd search). The row need
+/// not have a current id for an earlier one to be read.
 pub fn resolve_args_for(
     store: &Mutex<Store>,
     row: &SessionRow,
@@ -595,22 +596,22 @@ pub fn resolve_args_for(
     max_chars: usize,
 ) -> Result<TranscriptArgs, IpcError> {
     crate::validate::claude_session_id(claude_session_id)?;
-    let mut args = resolve_args(store, row, turns, max_chars)?;
-    if args.claude_session_id == claude_session_id {
-        return Ok(args);
+    if row.claude_session_id.as_deref() == Some(claude_session_id) {
+        return resolve_args(store, row, turns, max_chars);
     }
-    let conv = {
-        let s = lock(store)?;
-        s.list_conversations(row.id, 500)?
-            .into_iter()
-            .find(|c| c.claude_session_id == claude_session_id)
-    };
-    let conv = conv.ok_or_else(|| {
-        IpcError::new(
-            codes::E_INVALID,
-            "claude_session_id is not a conversation of this session",
-        )
-    })?;
+    let conv = lock(store)?
+        .get_conversation(row.id, claude_session_id)?
+        .ok_or_else(|| {
+            IpcError::new(
+                codes::E_INVALID,
+                "claude_session_id is not a conversation of this session",
+            )
+        })?;
+    // Everything but the id and path comes from the row; `resolve_args`
+    // only needs an id to proceed.
+    let mut probe = row.clone();
+    probe.claude_session_id = Some(conv.claude_session_id.clone());
+    let mut args = resolve_args(store, &probe, turns, max_chars)?;
     args.claude_session_id = conv.claude_session_id;
     args.transcript_path = conv.transcript_path;
     Ok(args)
@@ -1501,6 +1502,47 @@ mod tests {
                 .code,
             "E_INVALID"
         );
+    }
+
+    #[test]
+    fn resolve_args_for_an_earlier_conversation_needs_no_current_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, mut row, _, pb) = two_conversations(dir.path(), 1, 2);
+        row.claude_session_id = None;
+        let a = resolve_args_for(&store, &row, CONV_B, 3, 500).unwrap();
+        assert_eq!(a.claude_session_id, CONV_B);
+        assert_eq!(a.transcript_path.as_deref(), Some(pb.as_str()));
+    }
+
+    #[test]
+    fn resolve_args_for_finds_a_conversation_older_than_the_newest_500() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, row, _, pb) = two_conversations(dir.path(), 1, 2);
+        {
+            let s = store.lock().unwrap();
+            // 500 conversations newer than B (A is already one of them).
+            for i in 0..500i64 {
+                s.conn_ref()
+                    .execute(
+                        "INSERT INTO conversations (session_id, claude_session_id, \
+                             started_at, start_source, ended_at) \
+                         VALUES (?1, ?2, ?3, 'clear', ?3)",
+                        rusqlite::params![
+                            row.id,
+                            format!("550e8400-e29b-41d4-a716-{i:012}"),
+                            4_000_000_000i64 + i
+                        ],
+                    )
+                    .unwrap();
+            }
+            assert!(!s
+                .list_conversations(row.id, 500)
+                .unwrap()
+                .iter()
+                .any(|c| c.claude_session_id == CONV_B));
+        }
+        let a = resolve_args_for(&store, &row, CONV_B, 3, 500).unwrap();
+        assert_eq!(a.transcript_path.as_deref(), Some(pb.as_str()));
     }
 
     #[tokio::test]

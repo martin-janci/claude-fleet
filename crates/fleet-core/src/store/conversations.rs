@@ -73,6 +73,32 @@ pub struct ConversationRow {
     pub current: bool,
 }
 
+/// Columns of [`ConversationRow`], in [`map_conversation`]'s order.
+const CONVERSATION_SELECT: &str =
+    "SELECT c.id, c.session_id, c.claude_session_id, c.transcript_path, c.started_at, \
+            c.ended_at, c.start_source, c.end_reason, c.model, c.first_prompt, c.turns, \
+            c.compactions, \
+            (c.claude_session_id IS s.claude_session_id AND c.ended_at IS NULL) \
+     FROM conversations c JOIN sessions s ON s.id = c.session_id";
+
+fn map_conversation(r: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationRow> {
+    Ok(ConversationRow {
+        id: r.get(0)?,
+        session_id: r.get(1)?,
+        claude_session_id: r.get(2)?,
+        transcript_path: r.get(3)?,
+        started_at: r.get(4)?,
+        ended_at: r.get(5)?,
+        start_source: r.get(6)?,
+        end_reason: r.get(7)?,
+        model: r.get(8)?,
+        first_prompt: r.get(9)?,
+        turns: r.get(10)?,
+        compactions: r.get(11)?,
+        current: r.get::<_, i64>(12)? != 0,
+    })
+}
+
 impl Store {
     /// Make `claude_session_id` the session's current conversation.
     ///
@@ -248,32 +274,30 @@ impl Store {
         session_id: i64,
         limit: i64,
     ) -> Result<Vec<ConversationRow>, IpcError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT c.id, c.session_id, c.claude_session_id, c.transcript_path, c.started_at, \
-                    c.ended_at, c.start_source, c.end_reason, c.model, c.first_prompt, c.turns, \
-                    c.compactions, \
-                    (c.claude_session_id IS s.claude_session_id AND c.ended_at IS NULL) \
-             FROM conversations c JOIN sessions s ON s.id = c.session_id \
-             WHERE c.session_id = ?1 ORDER BY c.started_at DESC, c.id DESC LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![session_id, limit], |r| {
-            Ok(ConversationRow {
-                id: r.get(0)?,
-                session_id: r.get(1)?,
-                claude_session_id: r.get(2)?,
-                transcript_path: r.get(3)?,
-                started_at: r.get(4)?,
-                ended_at: r.get(5)?,
-                start_source: r.get(6)?,
-                end_reason: r.get(7)?,
-                model: r.get(8)?,
-                first_prompt: r.get(9)?,
-                turns: r.get(10)?,
-                compactions: r.get(11)?,
-                current: r.get::<_, i64>(12)? != 0,
-            })
-        })?;
+        let mut stmt = self.conn.prepare(&format!(
+            "{CONVERSATION_SELECT} WHERE c.session_id = ?1 \
+             ORDER BY c.started_at DESC, c.id DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![session_id, limit], map_conversation)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// One conversation of the session by its Claude id, if it has one.
+    pub fn get_conversation(
+        &self,
+        session_id: i64,
+        claude_session_id: &str,
+    ) -> Result<Option<ConversationRow>, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "{CONVERSATION_SELECT} WHERE c.session_id = ?1 AND c.claude_session_id = ?2"
+                ),
+                rusqlite::params![session_id, claude_session_id],
+                map_conversation,
+            )
+            .optional()?)
     }
 
     /// Count one turn of the conversation.
