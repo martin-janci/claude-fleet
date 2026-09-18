@@ -202,8 +202,13 @@ impl Store {
                context_source=CASE WHEN excluded.context_pct IS NULL THEN context_source
                                    WHEN {fresh} AND NOT ({id_changes}) THEN context_source
                                    ELSE 'pane' END,
+               -- An unchanged footer value keeps its stamp: re-stamping it
+               -- every pass would make each no-op pass emit (BE-11).
                context_at=CASE WHEN excluded.context_pct IS NULL THEN context_at
                                WHEN {fresh} AND NOT ({id_changes}) THEN context_at
+                               WHEN context_source IS 'pane'
+                                    AND context_pct IS excluded.context_pct
+                                    AND NOT ({id_changes}) THEN context_at
                                ELSE ?19 END,
                -- stuck_kind is authoritative when the pane was observed this
                -- pass (?16): a NULL then CLEARS a stale flag. When the pane was
@@ -661,6 +666,26 @@ mod tests {
             evts.contains(&format!("project:updated:{pid}")),
             "first pass touches the project; got {evts:?}"
         );
+
+        // Pass 2 runs in a later second than pass 1 on every run: backdate
+        // the footer stamp so a pass that re-stamps an unchanged footer
+        // value fails deterministically, not only across a second boundary.
+        store
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET context_at = context_at - 5 WHERE tmux_name = 's1'",
+                [],
+            )
+            .unwrap();
+        let backdated: Option<i64> = store
+            .conn_ref()
+            .query_row(
+                "SELECT context_at FROM sessions WHERE tmux_name = 's1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(backdated.is_some(), "the footer value was stamped");
 
         // Pass 2: identical observation → only the host probe stamp moves.
         let sessions = vec![live_session("s1", pid, 10)];
