@@ -39,7 +39,8 @@ function session(over: Partial<SessionRow> = {}): SessionRow {
   } as SessionRow;
 }
 
-/** A `tool` ConvItem with the fields not under test defaulted. */
+/** A `tool` ConvItem with the fields not under test defaulted (a finished
+ *  call, so it does not take over the activity indicator's label). */
 function tool(summary: string, over: Partial<{ error: boolean; id: string | null; name: string; target: string | null; at: string | null; ended_at: string | null; done: boolean }> = {}) {
   return {
     kind: 'tool' as const,
@@ -50,7 +51,7 @@ function tool(summary: string, over: Partial<{ error: boolean; id: string | null
     target: null,
     at: null,
     ended_at: null,
-    done: false,
+    done: true,
     ...over,
   };
 }
@@ -65,7 +66,7 @@ function conv(over: Partial<Conversation> = {}): Conversation {
         prompt: 'fix the bug',
         at: '2026-09-13T10:00:00.000Z',
         ended_at: null,
-        items: [{ kind: 'text', text: 'looking into it' }, tool('Bash(command=ls -la)')],
+        items: [{ kind: 'text', text: 'looking into it' }, tool('Bash(command=ls -la)', { name: 'Bash', target: 'ls -la' })],
       },
     ],
     ...over,
@@ -109,7 +110,8 @@ describe('ConversationPanel', () => {
     await tick();
     expect(screen.getByTestId('conv-prompt').textContent).toContain('fix the bug');
     expect(screen.getByTestId('conv-text').textContent).toContain('looking into it');
-    expect(screen.getByTestId('conv-tool').textContent).toContain('Bash(command=ls -la)');
+    expect(screen.getByTestId('conv-tool').textContent).toContain('Run');
+    expect(screen.getByTestId('conv-tool').textContent).toContain('ls -la');
     expect(screen.getByText(/Older turns not shown/)).toBeTruthy();
   });
 
@@ -413,7 +415,7 @@ describe('ConversationPanel', () => {
                 tool('Bash(command=ls)'),
                 tool('Read(file_path=b)'),
                 { kind: 'text', text: 'between' },
-                tool('Edit(file_path=c)'),
+                tool('Edit(file_path=c)', { name: 'Edit', target: '/r/src/lib/c.ts' }),
               ],
             },
           ],
@@ -431,7 +433,8 @@ describe('ConversationPanel', () => {
     const all = screen.getAllByTestId('conv-tool');
     expect(all).toHaveLength(4);
     expect(all[3].closest('details')).toBeNull();
-    expect(all[3].textContent).toContain('Edit(file_path=c)');
+    expect(all[3].textContent).toContain('Edit');
+    expect(all[3].textContent).toContain('…/lib/c.ts');
   });
 
   it('clamps a long prompt with Show more / Show less', async () => {
@@ -1756,5 +1759,140 @@ describe('ConversationPanel final phase-2 review fixes', () => {
     const notice = screen.getByTestId('conv-switch-notice').textContent!;
     expect(notice).toContain('New conversation');
     expect(notice).not.toContain('(');
+  });
+});
+
+describe('ConversationPanel detail UX', () => {
+  it('tool groups render ToolLine rows', async () => {
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            {
+              prompt: 'q',
+              at: null,
+              ended_at: null,
+              items: [
+                tool('Read(/r/a/b/c.rs)', { id: 't1', name: 'Read', target: '/r/a/b/c.rs', done: true }),
+                tool('Bash(cargo test)', { id: 't2', name: 'Bash', target: 'cargo test', done: true, at: '2026-09-18T09:00:00Z', ended_at: '2026-09-18T09:00:12Z' }),
+                { kind: 'text', text: 'between' },
+                tool('Grep(foo)', { id: null, name: 'Grep', target: 'foo', done: true }),
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const group = screen.getByTestId('conv-tools');
+    expect(group.querySelector('summary')?.textContent).toContain('2 tool calls · Read, Bash');
+    const rows = screen.getAllByTestId('conv-tool');
+    expect(rows).toHaveLength(3);
+    expect(rows[0].tagName).toBe('BUTTON');
+    expect(rows[0].textContent).toContain('Read');
+    expect(rows[0].textContent).toContain('…/b/c.rs');
+    expect(rows[1].textContent).toContain('Run');
+    expect(rows[1].textContent).toContain('12s');
+    expect(rows[2].closest('details')).toBeNull();
+    expect(rows[2].tagName).toBe('DIV');
+    expect(rows[2].textContent).toContain('Search');
+  });
+
+  it('a subagent renders as a block', async () => {
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            {
+              prompt: 'q',
+              at: null,
+              ended_at: null,
+              items: [
+                {
+                  kind: 'subagent',
+                  id: 'toolu_9',
+                  name: 'Task',
+                  agent_type: 'Explore',
+                  description: 'Map the store',
+                  result: 'Found it.',
+                  error: false,
+                  at: '2026-09-18T09:00:00Z',
+                  ended_at: '2026-09-18T09:02:00Z',
+                  done: true,
+                },
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    const block = screen.getByTestId('conv-subagent');
+    expect(block.textContent).toContain('Explore');
+    expect(block.textContent).toContain('Map the store');
+    expect(block.textContent).toContain('2m 00s');
+    expect(block.textContent).toContain('Found it.');
+  });
+
+  it('the indicator shows what is running', async () => {
+    const at = new Date(Date.now() - 3_000).toISOString();
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            {
+              prompt: 'q',
+              at,
+              ended_at: null,
+              items: [
+                tool('Read(/a)', { id: 't1', name: 'Read', target: '/a', done: true, at, ended_at: at }),
+                tool('Bash(cargo test)', { id: 't2', name: 'Bash', target: 'cargo test', done: false, at }),
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+    await settle();
+    const ind = screen.getByTestId('conv-indicator');
+    expect(ind.textContent).toContain('Run cargo test');
+    expect(ind.textContent).toMatch(/Run cargo test · \d+s/);
+  });
+
+  it('the running timer ticks every second while something runs', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    vi.setSystemTime(Date.parse('2026-09-18T09:00:05Z'));
+    const running = conv({
+      turns: [
+        {
+          prompt: 'q',
+          at: '2026-09-18T09:00:00Z',
+          ended_at: null,
+          items: [tool('Bash(cargo test)', { id: 't2', name: 'Bash', target: 'cargo test', done: false, at: '2026-09-18T09:00:00Z' })],
+        },
+      ],
+    });
+    mockedConv.mockReturnValue(ok(running));
+    render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+    await settle();
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('Run cargo test · 5s');
+    vi.advanceTimersByTime(1_000);
+    await settle();
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('Run cargo test · 6s');
+    expect(screen.getByTestId('conv-tool').textContent).toContain('running 6s');
+  });
+
+  it('the indicator keeps the spinner label when nothing is running', async () => {
+    mockedAct.mockResolvedValue({ ok: true, value: { claude_status: 'working', current_activity: null, stuck_kind: null, waiting_for: null, spinner: 'Cooking… (3s)' } });
+    mockedConv.mockReturnValue(
+      ok(conv({ turns: [{ prompt: 'q', at: null, ended_at: null, items: [tool('Bash(ls)', { id: 't1', name: 'Bash', target: 'ls', done: true })] }] })),
+    );
+    render(ConversationPanel, { session: session({ claude_status: 'working', turn_seq: 1 }), visible: true });
+    await settle();
+    await settle();
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('Cooking… 3s');
   });
 });

@@ -18,6 +18,8 @@
   import { onTimelineEvent, onConversationsChanged } from './live_events';
   import type { SessionEvent } from './timeline';
   import ConversationHeader from './ConversationHeader.svelte';
+  import ToolLine from './ToolLine.svelte';
+  import SubagentBlock from './SubagentBlock.svelte';
   import {
     sessionConversation,
     listConversations,
@@ -41,6 +43,8 @@
     completeSlashCommand,
     sessionActivity,
     indicatorFor,
+    doingNow,
+    formatDuration,
     composerDrafts,
     rememberDraft,
     newItemCount,
@@ -407,6 +411,21 @@
     }),
   );
 
+  // What the running turn is doing right now (the current conversation only:
+  // an earlier one is read-only and never running).
+  const doing = $derived(viewing === null && indicator?.kind === 'working' ? doingNow(conv, true, nowMs) : null);
+  const indicatorLabel = $derived(
+    indicator?.kind === 'working'
+      ? doing
+        ? doing.sinceMs !== null
+          ? `${doing.label} · ${formatDuration(doing.sinceMs)}`
+          : doing.label
+        : indicator.label
+      : null,
+  );
+  // The conversation tool details are read from.
+  const detailCid = $derived(viewing ?? session.claude_session_id);
+
   const thread = $derived(
     conv ? buildThread(conv.turns, events, { blocked: viewing === null && indicator?.kind === 'blocked' }, conv.truncated) : [],
   );
@@ -452,6 +471,17 @@
   // SessionDetails.svelte's `nowSec` ticker).
   $effect(() => {
     const t = setInterval(() => (nowMs = Date.now()), 30_000);
+    return () => clearInterval(t);
+  });
+
+  // A running tool's timer needs a finer clock: tick every second while
+  // something is running, and stop as soon as nothing is. Keyed on a boolean
+  // so each tick (which yields a new `doing`) does not restart the interval.
+  const doingSomething = $derived(doing !== null);
+  $effect(() => {
+    if (!doingSomething) return;
+    untrack(() => (nowMs = Date.now()));
+    const t = setInterval(() => (nowMs = Date.now()), 1_000);
     return () => clearInterval(t);
   });
 
@@ -743,9 +773,9 @@
             {@const turn = row.turn}
             {@const i = row.index}
             {@const isLast = i === conv.turns.length - 1}
-            {@const running = isLast && viewing === null && indicator?.kind === 'working'}
+            {@const turnRunning = isLast && viewing === null && indicator?.kind === 'working'}
             {@const groups = groupItems(turn.items)}
-            {@const duration = running ? null : turnDuration(turn.at, turn.ended_at)}
+            {@const duration = turnRunning ? null : turnDuration(turn.at, turn.ended_at)}
             <section class="turn">
               {#if turn.prompt !== null}
                 {@const long = isLongPrompt(turn.prompt)}
@@ -771,13 +801,15 @@
                   {#if g.kind === 'text'}
                     <div class="text" data-testid="conv-text"><Markdown source={g.text} /></div>
                   {:else if g.kind === 'tools' && g.tools.length === 1}
-                    <div class="tool" class:err={g.tools[0].error} data-testid="conv-tool" data-error={g.tools[0].error || undefined} title={g.tools[0].error ? `Failed: ${g.tools[0].summary}` : g.tools[0].summary}>{g.tools[0].summary}</div>
+                    <ToolLine line={g.tools[0]} sessionId={session.id} claudeSessionId={detailCid} {nowMs} />
                   {:else if g.kind === 'tools'}
-                    <details class="tools" class:has-err={g.tools.some((t) => t.error)} use:autoOpen={running && j === groups.length - 1} data-testid="conv-tools">
+                    <details class="tools" class:has-err={g.tools.some((t) => t.error)} use:autoOpen={turnRunning && j === groups.length - 1} data-testid="conv-tools">
                       <summary>{toolGroupLabel(g.tools)}</summary>
-                      {#each g.tools as line, k (k)}
-                        <div class="tool" class:err={line.error} data-testid="conv-tool" data-error={line.error || undefined} title={line.error ? `Failed: ${line.summary}` : line.summary}>{line.summary}</div>
-                      {/each}
+                      <div class="tools-body">
+                        {#each g.tools as line, k (k)}
+                          <ToolLine {line} sessionId={session.id} claudeSessionId={detailCid} {nowMs} />
+                        {/each}
+                      </div>
                     </details>
                   {:else if g.kind === 'compact'}
                     <details class="compact" data-testid="conv-compact">
@@ -801,7 +833,7 @@
                   {:else if g.kind === 'interrupt'}
                     <div class="interrupt" data-testid="conv-interrupt">Interrupted{g.during_tool ? ' during a tool call' : ''}</div>
                   {:else if g.kind === 'subagent'}
-                    <!-- rendered in a later task -->
+                    <SubagentBlock item={g} {nowMs} />
                   {/if}
                 {/each}
                 {#if duration}
@@ -837,7 +869,7 @@
         {:else if indicator}
           <div class="indicator" data-testid="conv-indicator" data-kind={indicator.kind} role="status">
             <span class="pulse" aria-hidden="true"><i></i><i></i><i></i></span>
-            <span class="indicator-label">{indicator.kind === 'sent' ? 'Sent, waiting for Claude…' : indicator.label}</span>
+            <span class="indicator-label">{indicator.kind === 'sent' ? 'Sent, waiting for Claude…' : indicatorLabel}</span>
           </div>
         {/if}
         {/if}
@@ -1264,35 +1296,10 @@
   .text {
     margin: 0.35rem 0 0.6rem;
   }
-  .tool {
-    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 0.74rem;
-    line-height: 1.5;
-    color: var(--fg-muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    margin: 0.1rem 0;
-    padding-left: 1.1rem;
-    position: relative;
-  }
-  .tool::before {
-    content: '⚙';
-    position: absolute;
-    left: 0;
-    opacity: 0.6;
-  }
   .duration {
     margin-top: 0.3rem;
     color: var(--fg-muted);
     font-size: 0.7rem;
-  }
-  .tool.err {
-    color: #e64a4a;
-  }
-  .tool.err::before {
-    content: '✗';
-    opacity: 1;
   }
   .tools.has-err summary {
     color: #e64a4a;
@@ -1326,7 +1333,7 @@
   .tools summary:hover {
     color: var(--fg);
   }
-  .tools .tool {
+  .tools-body {
     margin-left: 1.1rem;
   }
   .viewing,

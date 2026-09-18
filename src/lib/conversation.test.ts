@@ -40,6 +40,12 @@ import {
   buildThread,
   lastEventLabel,
   mergeEvents,
+  toolVerb,
+  shortTarget,
+  formatDuration,
+  toolDurationMs,
+  doingNow,
+  editDiffLines,
   type Conversation,
   type ConversationSummary,
   type ConvTurn,
@@ -540,5 +546,44 @@ describe('lastEventLabel / mergeEvents / statusChip', () => {
   it('status chip prefers compacting', () => {
     expect(statusChip({ claude_status: 'working', current_activity: 'compacting' })).toBe('compacting');
     expect(statusChip({ claude_status: 'idle', current_activity: null })).toBe('idle');
+  });
+});
+
+describe('tool helpers', () => {
+  it('verbs', () => {
+    expect(toolVerb('Bash')).toBe('Run');
+    expect(toolVerb('MultiEdit')).toBe('Edit');
+    expect(toolVerb('mcp__claude-fleet__list_sessions')).toBe('claude-fleet · list_sessions');
+    expect(toolVerb('Whatever')).toBe('Whatever');
+  });
+  it('short targets', () => {
+    expect(shortTarget('/Users/m/p/claude-fleet/crates/fleet-core/src/store/reconcile.rs')).toBe('…/store/reconcile.rs');
+    expect(shortTarget('src/a.rs')).toBe('src/a.rs');
+    expect(shortTarget('cargo test -p fleet-core')).toBe('cargo test -p fleet-core');
+    expect(shortTarget(null)).toBeNull();
+  });
+  it('durations', () => {
+    expect(formatDuration(400)).toBe('0.4s');
+    expect(formatDuration(12_300)).toBe('12s');
+    expect(formatDuration(185_000)).toBe('3m 05s');
+    expect(toolDurationMs('2026-09-18T09:00:00Z', '2026-09-18T09:00:12Z', null)).toBe(12_000);
+    expect(toolDurationMs('2026-09-18T09:00:00Z', null, Date.parse('2026-09-18T09:00:05Z'))).toBe(5_000);
+    expect(toolDurationMs(null, null, 1)).toBeNull();
+  });
+  it('doing now is the last unfinished tool of the last turn while working', () => {
+    const t = (o: object) => ({ kind: 'tool', summary: 'Bash(x)', error: false, id: 'i', name: 'Bash', target: 'cargo test', at: '2026-09-18T09:00:00Z', ended_at: null, done: false, ...o });
+    const c = { turns: [{ prompt: 'p', at: null, ended_at: null, items: [t({ done: true, name: 'Read', target: '/a' }), t({})] }], truncated: false, context: null, events: [] } as Conversation;
+    expect(doingNow(c, true, Date.parse('2026-09-18T09:00:07Z'))).toEqual({ label: 'Run cargo test', sinceMs: 7_000 });
+    expect(doingNow(c, false, 0)).toBeNull();
+    const cut = { ...c, turns: [{ ...c.turns[0], items: [...c.turns[0].items, { kind: 'interrupt', during_tool: true }] }] } as Conversation;
+    expect(doingNow(cut, true, 0)).toBeNull();
+    const sub = { ...c, turns: [{ ...c.turns[0], items: [{ kind: 'subagent', id: 's', name: 'Task', agent_type: 'Explore', description: 'Map it', result: null, error: false, at: null, ended_at: null, done: false }] }] } as Conversation;
+    expect(doingNow(sub, true, 0)).toEqual({ label: 'Explore · Map it', sinceMs: null });
+  });
+  it('edit diff keeps shared context and marks changes', () => {
+    expect(editDiffLines('a\nb\nc', 'a\nB\nc')).toEqual([
+      { kind: 'ctx', text: 'a' }, { kind: 'del', text: 'b' }, { kind: 'add', text: 'B' }, { kind: 'ctx', text: 'c' },
+    ]);
+    expect(editDiffLines('', 'new')).toEqual([{ kind: 'add', text: 'new' }]);
   });
 });
