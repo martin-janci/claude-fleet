@@ -174,7 +174,8 @@ fn may_rebind(payload: &HookPayload) -> bool {
 ///    resume)` within the TTL) whose cwd agrees — `payload.cwd` is absent,
 ///    or the row's known cwd (worktree path, else project base path) is
 ///    absent, or both are equal after `canonical_str`. It matches when
-///    exactly one such row exists.
+///    exactly one such row exists, and never when some row already holds
+///    `payload.session_id`.
 ///
 /// Otherwise `None`: the hook is a no-op.
 fn resolve_hook_row(
@@ -198,6 +199,11 @@ fn resolve_hook_row(
         return Ok(None);
     };
     if !may_rebind {
+        return Ok(None);
+    }
+    // Step 2 abstained because several rows hold the id: never add a
+    // third holder through the awaiting mark.
+    if !s.sessions_by_claude_id(id)?.is_empty() {
         return Ok(None);
     }
     let matching: Vec<SessionRow> = s
@@ -1921,6 +1927,41 @@ mod tests {
         .unwrap();
         assert_eq!(claude_id(&store, a).as_deref(), Some(OLD));
         assert_eq!(claude_id(&store, b).as_deref(), Some(OLD));
+    }
+
+    #[test]
+    fn awaiting_rebind_never_makes_a_third_holder_of_a_shared_id() {
+        let store = make_store();
+        let a = pane_session(&store, "a", "%3");
+        let b = pane_session(&store, "b", "%4");
+        let c = pane_session(&store, "c", "%5");
+        {
+            let s = store.lock().unwrap();
+            // Two rows already hold NEW (step 2 abstains on them) ...
+            for id in [a, b] {
+                s.set_claude_session_id(id, NEW).unwrap();
+            }
+            // ... and a third row is awaiting a rebind.
+            s.mark_awaiting_rebind(c).unwrap();
+        }
+        let host = host_caller("local");
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("UserPromptSubmit", NEW),
+            &ctx(&host, None),
+        )
+        .unwrap();
+        assert_eq!(claude_id(&store, c).as_deref(), Some(OLD));
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .sessions_by_claude_id(NEW)
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]

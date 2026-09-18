@@ -5,6 +5,7 @@
 use super::*;
 use crate::ipc_error::codes;
 use crate::ipc_error::lock;
+use crate::store::StartSource;
 
 /// Number of pane lines captured per work session for the reconcile intel
 /// probe. Eight lines covers the REPL footer (status bar / context %) plus the
@@ -382,6 +383,66 @@ pub(crate) fn exec_for(host: &str, ssh: &Arc<SshClient>) -> Box<dyn TmuxExec> {
     }
 }
 
+/// A known row's stored values read before the reconcile write.
+struct Prior {
+    claude_status: Option<String>,
+    stuck_kind: Option<String>,
+    claude_session_id: Option<String>,
+}
+
+/// Fallback rebind (spec §1.4): after the reconcile write, open the
+/// conversation of a row that `claude agents` moved onto another id (no
+/// hooks, or an old CLI), or first showed carrying one (a new row, or one
+/// whose id was NULL). Opened as `unknown`; the upsert already cleared the
+/// stale transcript path. Best-effort: a failure is logged, never fatal.
+fn open_reconciled_conversation(
+    s: &Store,
+    host_alias: &str,
+    row: &SessionRow,
+    old_claude_id: Option<&str>,
+) {
+    let Some(new_id) = row.claude_session_id.as_deref() else {
+        return;
+    };
+    if old_claude_id == Some(new_id) {
+        return;
+    }
+    // Never bind one id to two rows: the cwd match in
+    // `claude_agents::find_for_session` can be ambiguous, and the hooks'
+    // pane binding will settle it. (The upsert refuses such an id too; this
+    // covers a holder that is not a tmux row of this pass.)
+    let shared = match s.sessions_by_claude_id(new_id) {
+        Ok(rows) => rows
+            .iter()
+            .any(|o| o.id != row.id && o.host_alias == host_alias && o.status != "ghost"),
+        Err(e) => {
+            tracing::warn!(host = %host_alias, session = %row.tmux_name, error = %e.message,
+                "[reconcile] claude id holder lookup failed");
+            return;
+        }
+    };
+    if shared {
+        tracing::debug!(host = %host_alias, session = %row.tmux_name, claude_session_id = %new_id,
+            "[reconcile] claude id already bound to another row; not rebinding");
+        return;
+    }
+    match s.rebind_conversation(row.id, new_id, StartSource::Unknown, None, None) {
+        Ok(_) => {
+            if let Err(e) = s.insert_session_event_for(
+                row.id,
+                Some(new_id),
+                "conversation_started",
+                Some(StartSource::Unknown.as_str()),
+            ) {
+                tracing::warn!(host = %host_alias, session = %row.tmux_name, error = %e.message,
+                    "[reconcile] session_event insert failed");
+            }
+        }
+        Err(e) => tracing::warn!(host = %host_alias, session = %row.tmux_name, error = %e.message,
+            "[reconcile] conversation rebind failed"),
+    }
+}
+
 /// Apply one host's probe result to the store. Extracted from the reconcile
 /// loop so a per-host write failure can be isolated (logged) without `?`
 /// aborting the whole multi-host reconcile. The write itself goes through the
@@ -430,8 +491,8 @@ pub(super) fn reconcile_write_one_host(
             // candidate that differs from the prior row does not mean the row
             // changed. `s` is the store guard held for this whole function, so
             // no other writer lands between this read, the write and the
-            // read-back.
-            let mut priors: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+            // read-back. `None` is a first sighting (no stored row yet).
+            let mut priors: Vec<(String, Option<Prior>)> = Vec::with_capacity(live.len());
             for sess in live {
                 keep.push(sess.name.clone());
                 let project_id =
@@ -470,10 +531,24 @@ pub(super) fn reconcile_write_one_host(
                     .or_else(|| pane.and_then(|p| p.derived_status).map(|s| s.to_string()));
                 let stuck_kind = pane.and_then(|p| p.stuck.map(|k| k.as_str().to_string()));
                 // Transition-detection: remember the PRIOR stored values (the
-                // upsert below overwrites them). A read failure or a first
-                // sighting just skips detection for this session.
-                if let Ok(Some(prior)) = s.get_session(&sess.name, &host.alias) {
-                    priors.push((sess.name.clone(), prior.claude_status, prior.stuck_kind));
+                // upsert below overwrites them). A first sighting skips the
+                // status/stuck detection but still opens its conversation; a
+                // read failure skips the session entirely.
+                match s.get_session(&sess.name, &host.alias) {
+                    Ok(prior) => priors.push((
+                        sess.name.clone(),
+                        prior.map(|p| Prior {
+                            claude_status: p.claude_status,
+                            stuck_kind: p.stuck_kind,
+                            claude_session_id: p.claude_session_id,
+                        }),
+                    )),
+                    Err(e) => tracing::warn!(
+                        host = %host.alias,
+                        session = %sess.name,
+                        error = %e,
+                        "[reconcile] prior row read failed"
+                    ),
                 }
                 sessions.push(ReconcileSession {
                     tmux_name: &sess.name,
@@ -495,6 +570,7 @@ pub(super) fn reconcile_write_one_host(
                     intel_observed: pane.is_some(),
                     ci_status: pr.and_then(|p| p.ci_status.clone()),
                     pr_observed: pr.is_some(),
+                    tmux_pane_id: sess.pane_id.clone(),
                 });
             }
             s.apply_host_reconcile(HostReconcile {
@@ -511,17 +587,26 @@ pub(super) fn reconcile_write_one_host(
             // record a transition only where the STORED value changed.
             // Append-only and best-effort — a failed insert is logged and
             // skipped, never blocking reconcile.
-            for (tmux_name, old_status, old_stuck) in &priors {
+            for (tmux_name, prior) in &priors {
                 let Ok(Some(row)) = s.get_session(tmux_name, &host.alias) else {
                     continue;
                 };
+                open_reconciled_conversation(
+                    s,
+                    &host.alias,
+                    &row,
+                    prior.as_ref().and_then(|p| p.claude_session_id.as_deref()),
+                );
+                let Some(prior) = prior else {
+                    continue;
+                };
                 let mut events: Vec<(&str, Option<&str>)> = Vec::new();
-                if row.claude_status != *old_status {
+                if row.claude_status != prior.claude_status {
                     events.push(("status_change", row.claude_status.as_deref()));
                 }
                 // A newly-set (or changed) stuck_kind is the alert-worthy
                 // event; clearing it back to None is not recorded.
-                if row.stuck_kind.is_some() && row.stuck_kind != *old_stuck {
+                if row.stuck_kind.is_some() && row.stuck_kind != prior.stuck_kind {
                     events.push(("stuck", row.stuck_kind.as_deref()));
                 }
                 for (kind, detail) in events {

@@ -542,6 +542,7 @@ mod tests {
                 intel_observed: true,
                 ci_status: None,
                 pr_observed: false,
+                tmux_pane_id: None,
             }],
             keep: &[name.to_string()],
         })

@@ -677,6 +677,8 @@ pub struct ReconcileSession<'a> {
     /// `true`, `pr_url` / `ci_status` are authoritative (a `None` clears a
     /// closed PR's stale link); when `false` the prior values are preserved.
     pub pr_observed: bool,
+    /// The session's active tmux pane (`%N`). `None` keeps the stored one.
+    pub tmux_pane_id: Option<String>,
 }
 
 /// All inputs for applying one host's probe result atomically. Consumed by

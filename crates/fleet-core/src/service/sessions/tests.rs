@@ -363,6 +363,7 @@ fn unmatched_bg_agents_selects_agents_with_no_tmux_session() {
         last_activity: 1,
         attached: false,
         path: std::path::PathBuf::from("/a"),
+        pane_id: None,
     }];
     let unmatched = unmatched_bg_agents(&live, &agents, true);
     let ids: Vec<&str> = unmatched
@@ -1367,6 +1368,7 @@ fn tmux_session(name: &str) -> crate::tmux::TmuxSession {
         last_activity: 1,
         attached: false,
         path: PathBuf::from("/tmp"),
+        pane_id: None,
     }
 }
 
@@ -2404,6 +2406,7 @@ fn reconcile_linking(
             last_activity: 1,
             attached: false,
             path: PathBuf::from(cwd),
+            pane_id: None,
         }]),
         agent_rows: Vec::new(),
         agent_mtimes: Some(std::collections::HashMap::new()),
@@ -3154,6 +3157,7 @@ fn repo_session(name: &str, path: &str) -> crate::tmux::TmuxSession {
         last_activity: 1,
         attached: false,
         path: PathBuf::from(path),
+        pane_id: None,
     }
 }
 

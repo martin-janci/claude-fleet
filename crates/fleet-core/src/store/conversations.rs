@@ -1,6 +1,7 @@
 //! Per-session conversation tracking (migration 034). `rebind_conversation`
-//! is the ONLY writer of `sessions.claude_session_id` outside reconcile's
-//! first sighting; see the spec's §1.3.
+//! is the ONLY writer of `sessions.claude_session_id` outside the reconcile
+//! upsert, which then opens the conversation through it (the fallback rebind,
+//! spec §1.4); see the spec's §1.3.
 
 use super::*;
 use crate::ipc_error::IpcError;
@@ -195,11 +196,12 @@ impl Store {
         Ok(())
     }
 
-    /// Rows on `host_alias` whose `awaiting_rebind_at` is within the TTL.
+    /// Live rows on `host_alias` whose `awaiting_rebind_at` is within the
+    /// TTL. A ghost row is excluded, as in `find_session_by_pane`.
     pub fn sessions_awaiting_rebind(&self, host_alias: &str) -> Result<Vec<SessionRow>, IpcError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {SESSION_COLUMNS} FROM sessions \
-             WHERE host_alias = ?1 AND awaiting_rebind_at >= ?2"
+             WHERE host_alias = ?1 AND awaiting_rebind_at >= ?2 AND status != 'ghost'"
         ))?;
         let rows = stmt.query_map(
             rusqlite::params![host_alias, now_unix() - AWAITING_REBIND_TTL_SECS],
@@ -399,6 +401,18 @@ mod tests {
         assert_eq!(convs[1].end_reason.as_deref(), Some("replaced"));
         assert!(convs[1].ended_at.is_some());
         assert!(bus.names().contains(&"session:conversations"));
+    }
+
+    #[test]
+    fn a_ghost_row_is_never_awaiting_a_rebind() {
+        let (s, _) = store_with_recorder();
+        let id = session(&s);
+        s.mark_awaiting_rebind(id).unwrap();
+        assert_eq!(s.sessions_awaiting_rebind("local").unwrap().len(), 1);
+        s.conn
+            .execute("UPDATE sessions SET status = 'ghost' WHERE id = ?1", [id])
+            .unwrap();
+        assert!(s.sessions_awaiting_rebind("local").unwrap().is_empty());
     }
 
     #[test]
