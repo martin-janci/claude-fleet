@@ -8,7 +8,9 @@
 //! token names. Nothing the client sends chooses it. A missing or unknown
 //! token is the layer's own `401`; the master token and a paired client's
 //! token both get `403`, because neither names a host and everything the hub
-//! sends down this socket is a command to run.
+//! sends down this socket is a command to run. A per-host token whose mode is
+//! `readonly` gets `403` too ([`READONLY_HOST`]): an agent receives every
+//! command the hub runs on its host, which is more than "readonly" promises.
 //!
 //! What the handler owns after the upgrade:
 //!
@@ -44,6 +46,7 @@
 //!   opens; it cannot make the hub parse one it did not ask for.
 
 use super::registry::{AgentHello, AgentRegistry, ConnId};
+use crate::mcp::auth::TokenMode;
 use crate::mcp::Caller;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Extension, State};
@@ -78,6 +81,11 @@ pub const NOT_ENABLED: &str = "agent connections are not enabled on this server"
 
 /// What a caller that is not a host is told.
 pub const NOT_A_HOST: &str = "an agent connection needs a per-host bearer token";
+
+/// What a host whose token is `readonly` is told.
+pub const READONLY_HOST: &str = "this host's token is readonly, and an agent receives every \
+command the hub runs on its host, secret-file uploads included; mint a full token for the \
+host (set its token mode to full) and restart the agent";
 
 /// The floor under [`Budgets::allowance`]: enough for a `hello`, a `pong`, an
 /// `upload`'s empty `result`, and a failed one's `stderr`. It is the same
@@ -219,6 +227,12 @@ pub(crate) async fn handle_agent(
         );
         return (StatusCode::FORBIDDEN, NOT_A_HOST).into_response();
     };
+    // A readonly token may observe the fleet; an agent is handed every
+    // command the hub runs on its host, secret-file uploads included.
+    if caller.mode == TokenMode::Readonly {
+        tracing::warn!(host = %alias, "[agent] refused an upgrade: readonly host token");
+        return (StatusCode::FORBIDDEN, READONLY_HOST).into_response();
+    }
     let limits = state.limits;
     // Started here, before the `101` goes out, so the hello deadline counts
     // from the upgrade and no beat after it can be missed.
@@ -611,6 +625,7 @@ mod tests {
     /// `/agent` route, over a real loopback socket.
     struct Hub {
         addr: SocketAddr,
+        store: Arc<Mutex<Store>>,
         registry: Arc<AgentRegistry>,
         beats: Arc<tokio::sync::watch::Sender<u64>>,
     }
@@ -649,7 +664,7 @@ mod tests {
     ) -> Hub {
         let beats = Arc::new(tokio::sync::watch::Sender::new(0));
         let state = state.with_manual_beats(Arc::clone(&beats));
-        let app = crate::mcp::test_app(store, MASTER, state);
+        let app = crate::mcp::test_app(Arc::clone(&store), MASTER, state);
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .unwrap();
@@ -665,6 +680,7 @@ mod tests {
         });
         Hub {
             addr,
+            store,
             registry,
             beats,
         }
@@ -690,6 +706,25 @@ mod tests {
         match tokio_tungstenite::client_async_with_config(req, tcp, Some(config)).await {
             Ok((ws, _)) => Ok(ws),
             Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => Err(resp.status().as_u16()),
+            Err(e) => panic!("unexpected dial failure: {e}"),
+        }
+    }
+
+    /// Dial `/agent` expecting a refusal: its status and its body.
+    async fn dial_refused(addr: SocketAddr, token: &str) -> (u16, String) {
+        let mut req = format!("ws://{addr}/agent").into_client_request().unwrap();
+        req.headers_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        match tokio_tungstenite::client_async(req, tcp).await {
+            Ok(_) => panic!("the upgrade was accepted"),
+            Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+                let body = resp.body().clone().unwrap_or_default();
+                (
+                    resp.status().as_u16(),
+                    String::from_utf8(body).expect("a text body"),
+                )
+            }
             Err(e) => panic!("unexpected dial failure: {e}"),
         }
     }
@@ -856,6 +891,37 @@ mod tests {
         let hub = hub().await;
         assert_eq!(dial(hub.addr, Some(MASTER)).await.unwrap_err(), 403);
         assert!(hub.registry.snapshot().is_empty());
+    }
+
+    /// A READONLY per-host token does name a host, but registering as its
+    /// agent means receiving every command the hub runs there, secret-file
+    /// uploads included: strictly more than "readonly" promises. Refused, and
+    /// the body says why and what to do instead.
+    #[tokio::test]
+    async fn a_readonly_host_token_cannot_open_an_agent_connection() {
+        let hub = hub().await;
+        // `laptop`'s token row already exists (see `hub_with`); flip it.
+        // The layer reads the mode per request, so no restart is needed.
+        let store = Arc::clone(&hub.store);
+        store
+            .lock()
+            .unwrap()
+            .set_host_token_mode("laptop", "readonly")
+            .unwrap();
+
+        let (status, body) = dial_refused(hub.addr, LAPTOP_TOKEN).await;
+        assert_eq!(status, 403);
+        assert_eq!(body, READONLY_HOST, "the body names the reason and the fix");
+        assert!(hub.registry.snapshot().is_empty());
+
+        // The same host with a full token registers, so it is the MODE that
+        // was refused, not the host.
+        store
+            .lock()
+            .unwrap()
+            .set_host_token_mode("laptop", "full")
+            .unwrap();
+        let _ws = connected(&hub, LAPTOP_TOKEN, "laptop").await;
     }
 
     /// A server that routes nothing (the desktop builds `SshClient::new()`)
