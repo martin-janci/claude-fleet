@@ -546,6 +546,21 @@ describe('ansi.Screen — DECSTBM scroll region', () => {
 });
 
 describe('ansi.rowToRuns', () => {
+  it('keeps Greek and Cyrillic in one run: the grid font covers them', () => {
+    // Pinning every cell of ordinary non-Latin prose would mean one DOM node
+    // per character; Menlo and the fallback stack draw these at one cell.
+    const cyr = new Screen(1, 8);
+    cyr.write('привет');
+    const runs = rowToRuns(cyr.cells[0]);
+    expect(runs).toHaveLength(1);
+    expect(runs[0].text).toBe('привет  ');
+    expect(runs[0].glyph).toBeUndefined();
+
+    const greek = new Screen(1, 6);
+    greek.write('αβγ');
+    expect(rowToRuns(greek.cells[0])).toHaveLength(1);
+  });
+
   it('groups adjacent cells with identical style into one run', () => {
     const s = new Screen(1, 6);
     s.write('\x1b[31mAB\x1b[0mCD');

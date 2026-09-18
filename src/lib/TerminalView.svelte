@@ -41,6 +41,11 @@
 
   let container: HTMLDivElement | undefined = $state(undefined);
   let measureCell: HTMLSpanElement | undefined = $state(undefined);
+  /** Glyphs in the metrics probe. One character's shrink-to-fit width carries
+   *  a sub-pixel rounding error, and that width now sizes every run box as
+   *  well as the overlays, so measure a run of them and divide. */
+  const MEASURE_CHARS = 20;
+  const MEASURE_SAMPLE = 'M'.repeat(MEASURE_CHARS);
   let screen: Screen | null = null;
   /** Bumped after every screen.write() so the reactive view recomputes. */
   let renderVersion = $state(0);
@@ -573,7 +578,7 @@
     if (cellWidth > 0 && cellHeight > 0) return;
     const rect = measureCell.getBoundingClientRect();
     // Fall back to a sensible default if measurement returns zero (jsdom).
-    cellWidth = rect.width > 0 ? rect.width : 7.8;
+    cellWidth = rect.width > 0 ? rect.width / MEASURE_CHARS : 7.8;
     cellHeight = rect.height > 0 ? rect.height : 16;
   }
 
@@ -1061,10 +1066,12 @@
       onfocus={focusInput}
       data-testid="terminal-host"
     >
-      <!-- Hidden 1ch×1lh probe used once to measure font metrics. We can't
-           rely on naive `font-size * 0.6` — system font metrics on macOS
-           drift slightly between Menlo and SF Mono. -->
-      <span class="measure" bind:this={measureCell} aria-hidden="true">M</span>
+      <!-- Hidden probe used once to measure font metrics. We can't rely on
+           naive `font-size * 0.6` — system font metrics on macOS drift
+           slightly between Menlo and SF Mono. It holds MEASURE_CHARS glyphs,
+           not one: the width is divided back down, so per-glyph rounding is
+           amortised instead of being multiplied across every run box. -->
+      <span class="measure" bind:this={measureCell} aria-hidden="true">{MEASURE_SAMPLE}</span>
       <!-- The real keyboard target. Invisible, one cell wide, parked on the
            cursor so WebKit anchors the IME candidate window and the
            press-and-hold accent popup where the text will land. Its own

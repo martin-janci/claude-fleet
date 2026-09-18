@@ -1697,7 +1697,10 @@ export interface Run {
 /** Can every code point of `ch` be drawn from the grid font itself, at its
  *  own one-cell advance? A deliberately conservative allowlist of what Menlo
  *  (and the other stacks we fall back to) cover: printable ASCII, Latin-1,
- *  Latin Extended-A/B, box drawing and block elements. Everything else —
+ *  Latin Extended-A/B, Greek, Cyrillic, box drawing and block elements.
+ *  Greek and Cyrillic matter because ordinary prose in those scripts would
+ *  otherwise become one pinned run — and one DOM node — per cell.
+ *  Everything else —
  *  Claude Code's ⏺ ⎿ ✻, dingbats, DEC scan lines, a cell carrying a
  *  combining mark — may come from a fallback font whose advance is not one
  *  cell. U+00AD SOFT HYPHEN is excluded too: browsers draw it with no
@@ -1707,6 +1710,8 @@ function fitsGridFont(ch: string): boolean {
     const c = ch.charCodeAt(i);
     if (c >= 0x20 && c <= 0x7e) continue;
     if (c >= 0xa0 && c <= 0x24f && c !== 0xad) continue;
+    if (c >= 0x370 && c <= 0x3ff) continue; // Greek and Coptic
+    if (c >= 0x400 && c <= 0x4ff) continue; // Cyrillic
     if (c >= 0x2500 && c <= 0x259f) continue;
     return false;
   }
