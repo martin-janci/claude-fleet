@@ -1229,6 +1229,22 @@ mod tests {
         }
     }
 
+    /// `alive` with a deadline. Teardown signals the child while the caller
+    /// waits, but reaping finishes on a detached thread once the inline budget
+    /// is spent (`PTY_REAP_INLINE`), and `kill -0` still succeeds for a zombie.
+    /// "Gone" is therefore eventually-true; how fast depends on the machine,
+    /// which is what made this flaky on the macOS runner.
+    fn died(pid: u32) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if !alive(pid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
     fn alive(pid: u32) -> bool {
         std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
@@ -1258,13 +1274,13 @@ mod tests {
         let _guard2 = KillOnDrop(pid2);
         // Single-PTY invariant: the first child is gone (killed + reaped) and
         // its buffer was cleared; the second is live with its own buffer.
-        assert!(!alive(pid1), "first attachment must be killed on re-open");
+        assert!(died(pid1), "first attachment must be killed on re-open");
         assert!(alive(pid2));
         assert!(sh1.buffer.lock().unwrap().bytes.is_empty());
         assert!(state.lock().unwrap().is_open());
 
         close_pty(&state);
-        assert!(!alive(pid2));
+        assert!(died(pid2));
         assert!(!state.lock().unwrap().is_open());
         assert_eq!(write_to(&state, "x").unwrap_err().code, "E_PTY_CLOSED");
     }
@@ -1286,6 +1302,6 @@ mod tests {
         assert_eq!(write_to(&state, "x").unwrap_err().code, "E_PTY_CLOSED");
         // ...the kill + reap happens here, off-lock.
         parts.teardown();
-        assert!(!alive(pid));
+        assert!(died(pid));
     }
 }
