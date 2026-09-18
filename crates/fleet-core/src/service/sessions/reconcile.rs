@@ -557,12 +557,27 @@ pub(super) fn reconcile_write_one_host(
             // STORED one (read before the write below overwrites it) — a
             // changed boot id or tmux server pid on an otherwise-reachable
             // host means every session on it was lost, not merely the ones
-            // absent from `keep` this pass.
-            let stored_identity = s.get_host_identity(&host.alias).unwrap_or_default();
+            // absent from `keep` this pass. Keep the read `Result` around
+            // (not just `.unwrap_or_default()`): a failed read must block
+            // the identity WRITE below too (see the comment there), not
+            // just fall back for the comparison.
+            let stored_identity_read = s.get_host_identity(&host.alias);
+            let stored_identity_read_ok = stored_identity_read.is_ok();
+            let stored_identity = stored_identity_read.unwrap_or_default();
             let verdict = mass_loss_verdict(&stored_identity, probe.identity.as_ref());
+            // `true` only once `mark_host_sessions_lost` is known to have
+            // actually marked at least one row — a verdict whose mark
+            // failed, or that had nothing left to mark (every affected row
+            // already ghost, or exempted by the BE-3 guard below), must not
+            // suppress the routine prune (fix 4) nor let the identity write
+            // below proceed as if the verdict's side effect had landed
+            // (fix 3).
+            let mut marked_any = false;
+            let mut mark_failed = false;
             if let Some(reason) = verdict {
-                match s.mark_host_sessions_lost(&host.alias, reason, &keep, now) {
+                match s.mark_host_sessions_lost(&host.alias, reason, &keep, now, probe.started_at) {
                     Ok(rows) => {
+                        marked_any = !rows.is_empty();
                         for row in &rows {
                             if let Err(e) = s.insert_session_event(row.id, "lost", Some(reason)) {
                                 tracing::warn!(
@@ -574,11 +589,14 @@ pub(super) fn reconcile_write_one_host(
                             }
                         }
                     }
-                    Err(e) => tracing::warn!(
-                        host = %host.alias,
-                        error = %e,
-                        "[reconcile] mark lost failed"
-                    ),
+                    Err(e) => {
+                        mark_failed = true;
+                        tracing::warn!(
+                            host = %host.alias,
+                            error = %e,
+                            "[reconcile] mark lost failed"
+                        );
+                    }
                 }
             }
             // Persist the observed identity AFTER computing the verdict
@@ -586,16 +604,26 @@ pub(super) fn reconcile_write_one_host(
             // make every future comparison compare the identity with
             // itself and the verdict would never fire again. Never write
             // when the probe could not tell (`None`): that would erase a
-            // known-good identity on a transient read failure.
-            if let Some(id) = &probe.identity {
-                if let Err(e) =
-                    s.set_host_identity(&host.alias, id.boot_id.as_deref(), id.tmux_server_pid)
-                {
-                    tracing::warn!(
-                        host = %host.alias,
-                        error = %e,
-                        "[reconcile] identity write failed"
-                    );
+            // known-good identity on a transient read failure. Also never
+            // write when the stored-identity READ above failed (writing
+            // now would silently consume a verdict opportunity the read
+            // failure hid — the comparison used `unwrap_or_default()`,
+            // which is not the same as "nothing changed"), or when a
+            // verdict fired but its `mark_host_sessions_lost` call failed
+            // (the identity would then move on with the loss never
+            // recorded, so the next pass sees a normal pass and never
+            // retries the mark).
+            if stored_identity_read_ok && !mark_failed {
+                if let Some(id) = &probe.identity {
+                    if let Err(e) =
+                        s.set_host_identity(&host.alias, id.boot_id.as_deref(), id.tmux_server_pid)
+                    {
+                        tracing::warn!(
+                            host = %host.alias,
+                            error = %e,
+                            "[reconcile] identity write failed"
+                        );
+                    }
                 }
             }
             let lost_ttl_raw = s
@@ -614,8 +642,10 @@ pub(super) fn reconcile_write_one_host(
                 lost_ttl_cutoff: read_lost_ttl_cutoff(lost_ttl_raw, now),
                 // A pass that just mass-marked this host's sessions lost
                 // must not immediately re-ghost (and restart the reap clock
-                // on) those very rows via the routine keep-set prune below.
-                skip_prune: verdict.is_some(),
+                // on) those very rows via the routine keep-set prune below —
+                // but only when something was actually marked; otherwise
+                // the prune is a normal no-op pass, per the plan's ruling.
+                skip_prune: marked_any,
             })?;
             // Task G: the write has committed — read each known row back and
             // record a transition only where the STORED value changed.

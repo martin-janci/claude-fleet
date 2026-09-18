@@ -6,7 +6,10 @@ use super::*;
 /// Translate `HostReconcile::probe_started_at` into the `last_reconciled_at`
 /// cutoff used by [`Store::ghost_and_clean`]: rows stamped at or after the
 /// probe start are protected, and `0` ("no guard") protects nothing.
-fn ghost_cutoff(probe_started_at: i64) -> i64 {
+/// `pub(super)`: also reused by [`Store::mark_host_sessions_lost`]
+/// (`store/sessions.rs`) for the identical BE-3 guard against the mass-loss
+/// verdict marking a row a NEWER reconcile pass already saw live.
+pub(super) fn ghost_cutoff(probe_started_at: i64) -> i64 {
     if probe_started_at <= 0 {
         i64::MAX
     } else {

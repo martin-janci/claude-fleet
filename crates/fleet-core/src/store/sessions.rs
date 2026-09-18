@@ -211,12 +211,23 @@ impl Store {
     /// Mirrors [`Self::ghost_and_clean_bg_sessions`]'s shape: its own
     /// `unchecked_transaction`, collect the affected rows, commit, and only
     /// THEN emit one `SessionUpdated` per row.
+    ///
+    /// `probe_started_at` is the BE-3 guard, identical to
+    /// [`Store::ghost_and_clean`]'s Phase 1: a row whose `last_reconciled_at`
+    /// is at or after this probe's start was reconciled by a NEWER pass
+    /// (e.g. `new_session`'s own single-host reconcile, which runs outside
+    /// the fleet-wide gate and can commit before an in-flight tick's stale
+    /// write lands) — its absence from this verdict's evidence is not
+    /// evidence it is lost, so it is left alone. `0` disables the guard
+    /// (every row eligible), exactly as [`super::reconcile::ghost_cutoff`]
+    /// defines for Phase 1; reused here rather than reimplemented.
     pub fn mark_host_sessions_lost(
         &self,
         host_alias: &str,
         reason: &str,
         keep_names: &[String],
         now: i64,
+        probe_started_at: i64,
     ) -> Result<Vec<SessionRow>, rusqlite::Error> {
         // A tmux restart does not kill `claude --bg` agents; a reboot does.
         let kind_filter = if reason == "tmux_server_gone" {
@@ -229,13 +240,15 @@ impl Store {
         } else {
             format!(" AND tmux_name NOT IN ({})", in_clause(keep_names.len()))
         };
+        let cutoff = super::reconcile::ghost_cutoff(probe_started_at);
         let tx = self.conn.unchecked_transaction()?;
         let sql = format!(
             "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2
-             WHERE host_alias=?3 AND status!='ghost' AND {kind_filter}{not_in}
+             WHERE host_alias=?3 AND status!='ghost' AND {kind_filter}
+               AND COALESCE(last_reconciled_at, 0) < ?4{not_in}
              RETURNING id"
         );
-        let head: Vec<&dyn rusqlite::ToSql> = vec![&now, &reason, &host_alias];
+        let head: Vec<&dyn rusqlite::ToSql> = vec![&now, &reason, &host_alias, &cutoff];
         let params = params_then(&head, keep_names);
         let ids: Vec<i64> = tx
             .prepare(&sql)?
@@ -1041,7 +1054,7 @@ mod tests {
             .unwrap();
 
         let rows = s
-            .mark_host_sessions_lost("h", "host_reboot", &["b".to_string()], 500)
+            .mark_host_sessions_lost("h", "host_reboot", &["b".to_string()], 500, 0)
             .unwrap();
         assert_eq!(rows.len(), 1);
 
@@ -1072,7 +1085,7 @@ mod tests {
             .upsert_bg_session("h", "bg:u1", None, "u1", Some("working"), 1, "bg")
             .unwrap();
 
-        s.mark_host_sessions_lost("h", "tmux_server_gone", &[], 500)
+        s.mark_host_sessions_lost("h", "tmux_server_gone", &[], 500, 0)
             .unwrap();
 
         assert_eq!(
@@ -1103,12 +1116,12 @@ mod tests {
             .unwrap();
 
         let first = s
-            .mark_host_sessions_lost("h", "host_reboot", &[], 500)
+            .mark_host_sessions_lost("h", "host_reboot", &[], 500, 0)
             .unwrap();
         assert_eq!(first.len(), 1);
 
         let second = s
-            .mark_host_sessions_lost("h", "tmux_server_gone", &[], 900)
+            .mark_host_sessions_lost("h", "tmux_server_gone", &[], 900, 0)
             .unwrap();
         assert!(
             second.is_empty(),
@@ -1140,7 +1153,7 @@ mod tests {
             .upsert_bg_session("h", "bg:u1", None, "u1", Some("working"), 1, "bg")
             .unwrap();
 
-        s.mark_host_sessions_lost("h", "host_reboot", &[], 500)
+        s.mark_host_sessions_lost("h", "host_reboot", &[], 500, 0)
             .unwrap();
 
         assert_eq!(
@@ -1692,7 +1705,7 @@ mod tests {
         let id = s
             .upsert_session("s1", "alpha", None, None, 1, 1, "running", None)
             .unwrap();
-        s.mark_host_sessions_lost("alpha", "host_reboot", &[], 999)
+        s.mark_host_sessions_lost("alpha", "host_reboot", &[], 999, 0)
             .unwrap();
         assert_eq!(
             lost_reason_of(&s, id),

@@ -3884,6 +3884,18 @@ async fn a_vanished_tmux_server_keeps_the_rows_lost_with_their_claude_ids() {
         assert_eq!(row.claude_session_id.as_deref(), Some("cid-x"));
     }
 
+    // Push "x"'s `last_reconciled_at` (the BE-3 guard `mark_host_sessions_lost`
+    // now shares with the routine ghost path) well into the past: two real
+    // passes inside one test can land in the same wall-clock second, which
+    // would otherwise make pass 2's `probe_started_at` collide with pass 1's
+    // stamp and spuriously exempt "x" from the mass-loss mark — a
+    // test-timing artifact, not something the guard is meant to catch.
+    store
+        .lock()
+        .unwrap()
+        .mark_sessions_reconciled("mefistos", &["x".to_string()], 1)
+        .unwrap();
+
     // Pass 2: identity {boot a, pid None} — the host answers (reachable),
     // but its tmux server is gone, so `list_sessions` truthfully reports no
     // sessions. `tmux_server_gone` must mark "x" lost instead of letting the
@@ -3970,6 +3982,13 @@ async fn a_changed_boot_id_marks_every_session_lost_as_a_reboot() {
             .expect("synthetic bg row exists after pass 1");
         (tmux_row.id, bg_row.id)
     };
+
+    // Same BE-3-guard timing fix as the tmux_server_gone test above.
+    store
+        .lock()
+        .unwrap()
+        .mark_sessions_reconciled("mefistos", &["y".to_string(), "bg:bg-1".to_string()], 1)
+        .unwrap();
 
     // Pass 2: the host comes back with a DIFFERENT boot id — a real reboot.
     // Nothing tmux-side or agent-side is live any more.
@@ -4113,6 +4132,12 @@ async fn a_mass_loss_verdict_survives_its_own_pass_with_the_ttl_exemption_disabl
             .status,
         "running"
     );
+    // BE-3-guard timing fix, same as the other mass-loss e2e tests.
+    store
+        .lock()
+        .unwrap()
+        .mark_sessions_reconciled("mefistos", &["w".to_string()], 1)
+        .unwrap();
 
     // Pass 2: tmux server gone ⇒ mark_host_sessions_lost ghosts "w" with
     // lost_reason='tmux_server_gone'. With the TTL exemption disabled,
@@ -4132,4 +4157,252 @@ async fn a_mass_loss_verdict_survives_its_own_pass_with_the_ttl_exemption_disabl
              even with the TTL exemption off",
         );
     assert_eq!(row.status, "ghost");
+}
+
+/// `read_lost_ttl_cutoff` in isolation. Mirrors `read_reconcile_interval_secs`'s
+/// established `settings::resolve` → parse pattern, so — same as that sibling
+/// reader — an unparseable raw string and a NEGATIVE raw string collapse to
+/// the same outcome: `settings::resolve`'s `Kind::Secs` validator parses as
+/// `u64`, so a negative string fails validation exactly like garbage does
+/// and both fall back to the registry default, never reaching the `<= 0`
+/// branch as a literal negative number. Only a value that PARSES successfully
+/// (`"0"` or a positive integer) can reach that branch; `"0"` is the only way
+/// to observe it in practice.
+#[test]
+fn read_lost_ttl_cutoff_resolves_like_the_reconcile_interval_reader() {
+    let now = 10_000_000i64;
+    // A normal positive value ⇒ Some(now - ttl).
+    assert_eq!(
+        read_lost_ttl_cutoff(Some("100".into()), now),
+        Some(now - 100)
+    );
+    // "0" is the documented "disabled" sentinel ⇒ None.
+    assert_eq!(read_lost_ttl_cutoff(Some("0".into()), now), None);
+    // Unparseable ⇒ the registry default.
+    assert_eq!(
+        read_lost_ttl_cutoff(Some("nonsense".into()), now),
+        Some(now - DEFAULT_LOST_TTL_SECS)
+    );
+    // Missing (no setting stored yet) ⇒ the registry default.
+    assert_eq!(
+        read_lost_ttl_cutoff(None, now),
+        Some(now - DEFAULT_LOST_TTL_SECS)
+    );
+    // A negative raw string fails `Kind::Secs`'s `u64` validation the same
+    // way garbage does, so `settings::resolve` substitutes the default
+    // BEFORE this function ever sees a negative number — it also resolves
+    // to the registry default, not `None`.
+    assert_eq!(
+        read_lost_ttl_cutoff(Some("-5".into()), now),
+        Some(now - DEFAULT_LOST_TTL_SECS)
+    );
+}
+
+/// BE-3 regression (finding 1): `mark_host_sessions_lost` must share the
+/// exact same "a newer probe already saw this row live" guard that
+/// `Store::ghost_and_clean`'s Phase 1 uses. Without it, a background tick's
+/// STALE probe (started before `new_session`'s own faster single-host
+/// reconcile landed) can mass-mark a session the fleet has already
+/// confirmed live again.
+#[tokio::test]
+async fn a_verdict_never_marks_a_row_a_newer_probe_already_saw_live() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    let host = {
+        let s = store.lock().unwrap();
+        s.upsert_host("mefistos").unwrap();
+        s.set_host_identity("mefistos", Some("a"), Some(1)).unwrap();
+        s.upsert_session("x", "mefistos", None, None, 1, 1, "running", None)
+            .unwrap();
+        // "x" was reconciled (by a NEWER, faster writer — e.g. `new_session`'s
+        // own single-host reconcile) at t=5000, strictly AFTER the stale
+        // probe below started.
+        s.mark_sessions_reconciled("mefistos", &["x".to_string()], 5000)
+            .unwrap();
+        s.list_hosts()
+            .unwrap()
+            .into_iter()
+            .find(|h| h.alias == "mefistos")
+            .unwrap()
+    };
+
+    // The stale probe STARTED at t=1000 (before "x" was reconciled above)
+    // and — being stale — saw no tmux server at all: a genuine
+    // tmux_server_gone verdict candidate, delivered late.
+    let probe = HostProbe {
+        host: host.clone(),
+        result: Ok(Vec::new()),
+        agent_rows: Vec::new(),
+        agent_mtimes: Some(std::collections::HashMap::new()),
+        intel: PaneIntelMap::new(),
+        account: None,
+        pr_info: PrInfoMap::new(),
+        identity: Some(crate::tmux::HostIdentity {
+            boot_id: Some("a".into()),
+            tmux_server_pid: None,
+        }),
+        started_at: 1000,
+    };
+    let mut s = store.lock().unwrap();
+    let projects = s.list_projects().unwrap();
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+
+    let row = s
+        .get_session("x", "mefistos")
+        .unwrap()
+        .expect("row still exists");
+    assert_eq!(
+        row.status, "running",
+        "a row a NEWER probe already saw live must not be marked lost by a stale verdict"
+    );
+    assert!(
+        s.list_session_events(row.id, 10)
+            .unwrap()
+            .iter()
+            .all(|e| e.kind != "lost"),
+        "no false 'lost' event may be recorded for it"
+    );
+}
+
+/// Ruling (finding 2): never write the observed identity when it is `None`.
+/// If that guard regressed and a transient unreadable read got stored as
+/// `(None, None)`, a REAL vanished-tmux-server pass right after it would
+/// compare `(None, None)` to the freshly observed identity and — per the
+/// `(None, None)` "not a verdict" rule — find nothing, silently falling back
+/// to the routine `'missing'` ghost-then-reap. This is the exact false
+/// negative the whole feature exists to prevent.
+#[tokio::test]
+async fn a_failed_identity_read_never_overwrites_the_stored_identity() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("mefistos").unwrap();
+
+    // Pass 1: identity {boot a, pid 1}; sessions "x" and "y" live.
+    let deps = identity_deps(
+        "mefistos",
+        vec![tmux_session("x"), tmux_session("y")],
+        Some(boot_a_pid(Some(1))),
+        vec![],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    store
+        .lock()
+        .unwrap()
+        .mark_sessions_reconciled("mefistos", &["x".to_string(), "y".to_string()], 1)
+        .unwrap();
+
+    // Pass 2: identity unreadable (`None`); "x" disappeared, "y" stays
+    // live. No verdict fires (mass_loss_verdict short-circuits on `None`),
+    // so "x" takes the routine 'missing' ghost path — and, the ruling under
+    // test, the stored identity (a, 1) must survive this pass untouched.
+    let deps = identity_deps("mefistos", vec![tmux_session("y")], None, vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.get_session("x", "mefistos").unwrap().unwrap().status,
+            "ghost",
+            "x takes the routine 'missing' path with no verdict"
+        );
+        assert_eq!(
+            s.get_session("y", "mefistos").unwrap().unwrap().status,
+            "running"
+        );
+    }
+    // BE-3-guard timing fix (pass 2's own reconcile just re-stamped "y").
+    store
+        .lock()
+        .unwrap()
+        .mark_sessions_reconciled("mefistos", &["y".to_string()], 1)
+        .unwrap();
+
+    // Pass 3: identity {boot a, pid None} — the tmux server is genuinely
+    // gone now. If pass 2 had wrongly stored (None, None), this pass would
+    // compare (None, None) to (a, None) and find NO verdict (a stored `None`
+    // pid never compares, and (None, None) is deliberately not a verdict
+    // either), so "y" would only take the routine 'missing' path with no
+    // 'lost' event. The stored (a, 1) surviving pass 2 is the only way pass
+    // 3 can produce a genuine tmux_server_gone verdict here.
+    let deps = identity_deps("mefistos", vec![], Some(boot_a_pid(None)), vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let s = store.lock().unwrap();
+    let y = s
+        .get_session("y", "mefistos")
+        .unwrap()
+        .expect("y row still exists");
+    let events = s.list_session_events(y.id, 10).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == "lost" && e.detail.as_deref() == Some("tmux_server_gone")),
+        "pass 3 must produce a genuine tmux_server_gone verdict, proving (a, 1) \
+         survived pass 2's unreadable identity; got {events:?}"
+    );
+}
+
+/// `skip_prune` only when the verdict actually marked something (finding 4):
+/// a verdict that fires but marks ZERO new rows (every affected row was
+/// already ghost) must not skip the routine prune pass — otherwise an
+/// unrelated, already-ghost `'missing'` row that is due for its one-cycle
+/// reap on this very pass gets an undeserved one-pass reprieve, purely as a
+/// side effect of a verdict elsewhere on the host having "fired" with
+/// nothing left to do.
+#[tokio::test]
+async fn skip_prune_does_not_delay_the_reap_of_an_unrelated_already_ghost_row() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("mefistos").unwrap();
+
+    // Pass 1: identity {boot a, pid 1}; one live session "old".
+    let deps = identity_deps(
+        "mefistos",
+        vec![tmux_session("old")],
+        Some(boot_a_pid(Some(1))),
+        vec![],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    store
+        .lock()
+        .unwrap()
+        .mark_sessions_reconciled("mefistos", &["old".to_string()], 1)
+        .unwrap();
+
+    // Pass 2: "old" disappears with the SAME identity ⇒ no verdict, routine
+    // 'missing' ghost (unrelated to Task 6's mass-loss machinery).
+    let deps = identity_deps("mefistos", vec![], Some(boot_a_pid(Some(1))), vec![]);
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert_eq!(
+        store
+            .lock()
+            .unwrap()
+            .get_session("old", "mefistos")
+            .unwrap()
+            .unwrap()
+            .status,
+        "ghost",
+        "pass 2 ghosts 'old' via the routine 'missing' path"
+    );
+
+    // Pass 3: the boot id changes (a genuine host_reboot verdict), but
+    // "old" is ALREADY ghost — `mark_host_sessions_lost`'s `status!='ghost'`
+    // filter means this verdict marks ZERO new rows. The routine prune's
+    // Phase 2 reap for "old" (ghosted last pass, `lost_reason='missing'`,
+    // never TTL-exempt) must still run THIS pass.
+    let deps = identity_deps(
+        "mefistos",
+        vec![],
+        Some(crate::tmux::HostIdentity {
+            boot_id: Some("b".into()),
+            tmux_server_pid: Some(2),
+        }),
+        vec![],
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    assert!(
+        store
+            .lock()
+            .unwrap()
+            .get_session("old", "mefistos")
+            .unwrap()
+            .is_none(),
+        "a verdict that marks nothing new must not delay the routine reap \
+         of an unrelated already-ghost row"
+    );
 }
