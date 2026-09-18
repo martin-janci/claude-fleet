@@ -1144,6 +1144,7 @@ mod tests {
             last_pinged_at: None,
             account_uuid: account.map(str::to_string),
             provisioned: true,
+            transport: "ssh".to_string(),
         }
     }
 

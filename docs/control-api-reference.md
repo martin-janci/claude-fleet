@@ -11,7 +11,7 @@ Auto-generated from the embedded MCP tool router. See [`control-api.md`](control
 
 Register a new SSH host. Probes it first; only persists the host if it is reachable. Returns the host row as JSON.
 
-Parameters: `alias`, `ssh_alias`
+Parameters: `alias`, `ssh_alias`, `transport`
 
 ### `apply_sync`
 

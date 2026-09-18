@@ -106,6 +106,18 @@ fn asset_inventory_has_managed(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 033: `hosts` already has its
+/// `transport` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
+/// See [`Migration`].
+fn hosts_has_transport(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'transport'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// Ordered schema migrations, `(version, sql)`. Versions are contiguous from
 /// 1 and every script must end by recording its own version with
 /// `INSERT OR IGNORE INTO schema_version (version) VALUES (N)` — the tests
@@ -216,6 +228,12 @@ const MIGRATIONS: &[Migration] = &[
     // `CREATE TABLE IF NOT EXISTS` plus two `CREATE UNIQUE INDEX IF NOT
     // EXISTS`, safe to re-run.
     Migration::plain(32, include_str!("../../migrations/032_client_tokens.sql")),
+    // `ALTER TABLE ... ADD COLUMN` fails if the column is already there.
+    Migration {
+        version: 33,
+        sql: include_str!("../../migrations/033_host_transport.sql"),
+        already_applied: Some(hosts_has_transport),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -1248,6 +1266,52 @@ mod tests {
             )
             .unwrap();
         assert_eq!(scanned_at, 7, "the inventory row survives a re-run");
+    }
+
+    /// 033 on a database stopped at 032 with a host row: `transport` is
+    /// added, defaulting to `ssh` for the existing row. Rolling the recorded
+    /// version back and migrating again (tests do this to simulate re-running
+    /// an already-applied migration) is a no-op that keeps a changed value
+    /// and does not re-add the column.
+    #[test]
+    fn migration_033_is_idempotent() {
+        let old = store_at_version(32);
+        old.conn
+            .execute_batch("INSERT INTO hosts (alias) VALUES ('h');")
+            .unwrap();
+        old.migrate().expect("033 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let transport: String = old
+            .conn
+            .query_row("SELECT transport FROM hosts WHERE alias='h'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(transport, "ssh", "a pre-033 row defaults to ssh");
+        old.conn
+            .execute("UPDATE hosts SET transport='agent' WHERE alias='h'", [])
+            .unwrap();
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 33;")
+            .unwrap();
+        old.migrate().expect("re-running 033 is safe");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let n: i64 = old
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'transport'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "re-running 033 does not duplicate the column");
+        let transport: String = old
+            .conn
+            .query_row("SELECT transport FROM hosts WHERE alias='h'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(transport, "agent", "the value survives a re-run");
     }
 
     #[test]

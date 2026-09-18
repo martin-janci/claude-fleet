@@ -36,6 +36,10 @@ pub struct AddHostArgs {
     pub alias: String,
     /// SSH config alias used to reach the host (from `~/.ssh/config`).
     pub ssh_alias: String,
+    /// `"ssh"` (the default) or `"agent"` — how the host is reached.
+    /// `Store::set_host_transport` rejects anything else.
+    #[serde(default)]
+    pub transport: Option<String>,
 }
 
 pub async fn add_host(
@@ -52,6 +56,11 @@ pub async fn add_host(
     {
         let s = lock(store)?;
         s.insert_host(&args.alias, Some(&args.ssh_alias))?;
+        // Validated (E_INVALID for anything but "ssh"/"agent") and persisted
+        // even for the default, so every host row leaves this call with an
+        // explicit transport rather than relying on the column default.
+        let transport = args.transport.as_deref().unwrap_or("ssh");
+        s.set_host_transport(&args.alias, transport)?;
         // Link account if probe found one
         if let Some(acc) = account
             .as_ref()
@@ -1063,6 +1072,7 @@ mod tests {
             AddHostArgs {
                 alias: "alpha".into(),
                 ssh_alias: "alpha.example".into(),
+                transport: None,
             },
             &store,
             &fake,
@@ -1074,6 +1084,7 @@ mod tests {
         assert_eq!(row.tmux_version.as_deref(), Some("3.4"));
         assert_eq!(row.claude_version.as_deref(), Some("2.1.144"));
         assert_eq!(row.account_uuid.as_deref(), Some("acc-1"));
+        assert_eq!(row.transport, "ssh", "the default transport");
         assert!(row.last_pinged_at.is_some());
         let accounts = store.lock().unwrap().list_accounts().unwrap();
         assert_eq!(accounts.len(), 1);
@@ -1090,6 +1101,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_host_persists_an_explicit_agent_transport() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let fake = fake_fleet();
+        let row = add_host(
+            AddHostArgs {
+                alias: "gamma".into(),
+                ssh_alias: "gamma.example".into(),
+                transport: Some("agent".into()),
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .expect("reachable host is added");
+        assert_eq!(row.transport, "agent");
+    }
+
+    #[tokio::test]
+    async fn add_host_rejects_an_unknown_transport() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let fake = fake_fleet();
+        let err = add_host(
+            AddHostArgs {
+                alias: "delta".into(),
+                ssh_alias: "delta.example".into(),
+                transport: Some("carrier-pigeon".into()),
+            },
+            &store,
+            &fake,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+    }
+
+    #[tokio::test]
     async fn add_host_unreachable_is_e_probe_and_persists_nothing() {
         let store = Mutex::new(Store::open_in_memory().unwrap());
         let fake = fake_fleet();
@@ -1098,6 +1145,7 @@ mod tests {
             AddHostArgs {
                 alias: "down".into(),
                 ssh_alias: "down.example".into(),
+                transport: None,
             },
             &store,
             &fake,
@@ -1295,6 +1343,7 @@ mod tests {
             AddHostArgs {
                 alias: "bare".into(),
                 ssh_alias: "bare.example".into(),
+                transport: None,
             },
             &store,
             &fake,

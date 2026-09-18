@@ -308,6 +308,30 @@ impl Store {
         self.emit_host(alias, |bus, row| bus.host_probed(row))
     }
 
+    /// Set a host's transport (migration 033): `"ssh"` (the default, reached
+    /// over SSH as today) or `"agent"` (reached through an outbound
+    /// fleet-agent connection). `E_INVALID` for any other value — an
+    /// unvalidated write here would silently strand every future command
+    /// against the host.
+    pub fn set_host_transport(
+        &self,
+        alias: &str,
+        transport: &str,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        if transport != "ssh" && transport != "agent" {
+            return Err(crate::ipc_error::IpcError::new(
+                codes::E_INVALID,
+                format!("unknown transport {transport:?}: must be \"ssh\" or \"agent\""),
+            ));
+        }
+        self.conn.execute(
+            "UPDATE hosts SET transport=?1 WHERE alias=?2",
+            rusqlite::params![transport, alias],
+        )?;
+        self.emit_host(alias, |bus, row| bus.host_probed(row))?;
+        Ok(())
+    }
+
     pub fn set_host_provisioned(
         &self,
         alias: &str,
@@ -612,6 +636,30 @@ mod tests {
                 .unwrap()
                 .hidden
         );
+    }
+
+    #[test]
+    fn fresh_host_row_defaults_to_ssh_transport() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        assert_eq!(s.get_host_row("local").unwrap().unwrap().transport, "ssh");
+        s.insert_host("h", Some("h")).unwrap();
+        assert_eq!(s.get_host_row("h").unwrap().unwrap().transport, "ssh");
+    }
+
+    #[test]
+    fn set_host_transport_round_trips_and_rejects_unknown_values() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        s.set_host_transport("h", "agent").unwrap();
+        assert_eq!(s.get_host_row("h").unwrap().unwrap().transport, "agent");
+        s.set_host_transport("h", "ssh").unwrap();
+        assert_eq!(s.get_host_row("h").unwrap().unwrap().transport, "ssh");
+
+        let err = s.set_host_transport("h", "carrier-pigeon").unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+        // The rejected write left the prior value untouched.
+        assert_eq!(s.get_host_row("h").unwrap().unwrap().transport, "ssh");
     }
 
     #[test]
