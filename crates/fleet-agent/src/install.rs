@@ -493,6 +493,40 @@ mod tests {
         assert!(!said.contains(TOKEN), "{said}");
     }
 
+    /// The system scope's layout, rendered into a directory the test owns:
+    /// root would create the config's directory for ANOTHER user, and that
+    /// user must be able to open the file through it.
+    #[test]
+    fn a_system_install_leaves_the_config_reachable_by_the_user_it_runs_as() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: no preconditions.
+        let me = unsafe { (libc::getuid(), libc::getgid()) };
+        let plan = Plan {
+            scope: Scope::System {
+                run_as: "alice".into(),
+            },
+            binary: PathBuf::from("/usr/local/bin/fleet-agent"),
+            layout: Layout {
+                unit_path: dir.path().join("systemd/system").join(UNIT_NAME),
+                config_path: dir.path().join("etc/fleet-agent/config.json"),
+            },
+            config: config(),
+            owner: Some(me),
+            start: false,
+        };
+        install(&plan, &mut Recorder::default(), &mut Vec::new()).unwrap();
+        let cfg_dir = plan.layout.config_path.parent().unwrap();
+        assert_eq!(
+            std::fs::metadata(cfg_dir).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "passable by the run-as user"
+        );
+        let file = std::fs::metadata(&plan.layout.config_path).unwrap();
+        assert_eq!(file.permissions().mode() & 0o777, 0o600);
+        assert_eq!((file.uid(), file.gid()), me, "the run-as user's file");
+    }
+
     #[test]
     fn install_without_start_writes_the_files_and_leaves_systemd_alone() {
         let dir = tempfile::tempdir().unwrap();

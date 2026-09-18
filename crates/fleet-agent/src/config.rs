@@ -122,9 +122,18 @@ pub fn write(path: &Path, config: &Config, owner: Option<(u32, u32)>) -> Result<
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
+            // Written for oneself (the user scope): private. Written by root
+            // for the run-as user (the system scope): root owns what it
+            // creates, so the directory must let that user through, or the
+            // agent can never open its own config. The file is 0600 and that
+            // user's either way; the directory only has to be passable.
+            builder.mode(if owner.is_some() { 0o755 } else { 0o700 });
         }
         builder.create(dir).map_err(io)?;
+    }
+    #[cfg(unix)]
+    if let Some((uid, gid)) = owner {
+        reachable_by(dir, uid, gid).map_err(ConfigError::Invalid)?;
     }
     let name = path
         .file_name()
@@ -150,6 +159,40 @@ pub fn write(path: &Path, config: &Config, owner: Option<(u32, u32)>) -> Result<
         let _ = std::fs::remove_file(&tmp);
     }
     result.map_err(io)
+}
+
+/// Can `uid`/`gid` search every directory on the way to `dir`? Checked before
+/// the token is written, so an install that would leave the agent unable to
+/// open its config fails instead of producing a unit that restarts forever.
+/// Supplementary groups are not consulted: a false alarm here costs a
+/// clearer path, a miss costs a crash-looping service.
+#[cfg(unix)]
+fn reachable_by(dir: &Path, uid: u32, gid: u32) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    if uid == 0 {
+        return Ok(());
+    }
+    for d in dir.ancestors().filter(|d| !d.as_os_str().is_empty()) {
+        let md = std::fs::metadata(d).map_err(|e| format!("{}: {e}", d.display()))?;
+        let mode = md.mode();
+        let search = if md.uid() == uid {
+            mode & 0o100
+        } else if md.gid() == gid {
+            mode & 0o010
+        } else {
+            mode & 0o001
+        };
+        if search == 0 {
+            return Err(format!(
+                "the agent's user (uid {uid}) cannot reach {}: {} is mode {:04o} and \
+                 not theirs. Choose another --config, or make that directory passable",
+                dir.display(),
+                d.display(),
+                mode & 0o7777
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -265,6 +308,61 @@ mod tests {
             Err(ConfigError::Exposed(_, mode)) => assert_eq!(mode, 0o640),
             other => panic!("expected Exposed, got {other:?}"),
         }
+    }
+
+    fn me() -> (u32, u32) {
+        // SAFETY: no preconditions.
+        unsafe { (libc::getuid(), libc::getgid()) }
+    }
+
+    /// The system scope: root writes the config for ANOTHER user. The file
+    /// is that user's and 0600, and the directory root creates for it must
+    /// let that user through — a root-owned 0700 directory left the agent
+    /// unable to open its own config, restarting every five seconds.
+    #[test]
+    fn a_directory_created_for_another_owner_lets_that_owner_reach_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("etc-fleet-agent/config.json");
+        write(&path, &cfg(), Some(me())).unwrap();
+        assert_eq!(mode_of(path.parent().unwrap()), 0o755);
+        assert_eq!(mode_of(&path), 0o600, "the file stays private");
+    }
+
+    /// A user's own config directory stays private.
+    #[test]
+    fn a_directory_created_for_oneself_stays_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fleet-agent/config.json");
+        write(&path, &cfg(), None).unwrap();
+        assert_eq!(mode_of(path.parent().unwrap()), 0o700);
+    }
+
+    /// An existing directory the owner cannot pass through is refused BEFORE
+    /// the token is written, naming the directory — rather than installing
+    /// an agent that can never read its config.
+    #[test]
+    fn a_config_its_owner_could_not_reach_is_refused_before_it_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = locked.join("config.json");
+        // Someone who is neither this directory's owner nor in its group.
+        let stranger = (me().0.wrapping_add(4242), me().1.wrapping_add(4242));
+        let err = write(&path, &cfg(), Some(stranger))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(locked.to_str().unwrap()) && err.contains("cannot reach"),
+            "{err}"
+        );
+        assert_eq!(
+            std::fs::read_dir(&locked).unwrap().count(),
+            0,
+            "nothing written"
+        );
+        // Its own owner is fine.
+        write(&path, &cfg(), Some(me())).unwrap();
     }
 
     #[test]
