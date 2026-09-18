@@ -249,8 +249,8 @@ mod tests {
     /// in-memory one (rather than a pure predicate unit test) to exercise
     /// the actual `list_inventory` -> filter -> `propose_from_installed`
     /// pipeline end to end. `asset_inventory` has no foreign key to
-    /// `hosts` (checked: `src-tauri/migrations/030_asset_catalog.sql` has
-    /// no `REFERENCES hosts`, and the existing `replace_host_inventory`
+    /// `hosts` (checked: `crates/fleet-core/migrations/030_asset_catalog.sql`
+    /// has no `REFERENCES hosts`, and the existing `replace_host_inventory`
     /// store tests write rows without an `upsert_host` call), so this test
     /// follows that existing pattern rather than adding one.
     #[test]

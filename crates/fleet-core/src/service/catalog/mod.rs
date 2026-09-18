@@ -333,6 +333,7 @@ pub fn resolve_preview(
     host_alias: &str,
     store: &Mutex<Store>,
 ) -> Result<resolve::Resolution, IpcError> {
+    crate::validate::host_alias(host_alias)?;
     require_host_exists(store, host_alias)?;
     with_catalog(|cat| sync::layers::resolve_for_host(store, cat, host_alias))
 }
@@ -395,6 +396,7 @@ pub fn set_host_layers(
     contexts: &[&str],
     store: &Mutex<Store>,
 ) -> Result<Vec<crate::store::HostLayerRow>, IpcError> {
+    crate::validate::host_alias(host_alias)?;
     require_host_exists(store, host_alias)?;
     check_no_name_collision(role, contexts)?;
     with_catalog(|cat| {
