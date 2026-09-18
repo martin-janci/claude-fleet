@@ -4,24 +4,25 @@
 use super::*;
 
 /// Build the tmux invocations that together send a prompt to a session:
-///   1. send-keys -t <name> -l <body>   (literal, no key-name translation;
+///   1. send-keys -t '=<name>:' -l <body>   (literal, no key-name translation;
 ///      a single trailing newline is stripped so internal newlines stay as
 ///      soft newlines and a stray trailing one can't pre-submit the body)
 ///   2. (when `submit`) a short settle so the REPL flushes the literal paste
-///   3. (when `submit`) send-keys -t <name> Enter   (one real Enter to submit)
+///   3. (when `submit`) send-keys -t '=<name>:' Enter   (one real Enter to submit)
+///
+/// The target is an EXACT pane target: a bare name lets tmux fall back to a
+/// prefix or pattern match, which would deliver the prompt to a different
+/// session whose name merely starts with this one.
 ///
 /// With `submit = false` the body is staged in the REPL but not submitted.
 pub fn build_send_commands(tmux_name: &str, prompt: &str, submit: bool) -> Vec<String> {
     let body = prompt.strip_suffix('\n').unwrap_or(prompt);
-    let mut cmds = vec![format!(
-        "tmux send-keys -t {} -l {}",
-        quote(tmux_name),
-        quote(body)
-    )];
+    let target = quote(&crate::tmux::exact_pane(tmux_name));
+    let mut cmds = vec![format!("tmux send-keys -t {target} -l {}", quote(body))];
     if submit {
         // settle so the REPL flushes the literal paste before the submit key
         cmds.push("sleep 0.15".to_string());
-        cmds.push(format!("tmux send-keys -t {} Enter", quote(tmux_name)));
+        cmds.push(format!("tmux send-keys -t {target} Enter"));
     }
     cmds
 }

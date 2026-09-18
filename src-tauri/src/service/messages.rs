@@ -331,9 +331,9 @@ mod tests {
         assert_eq!(cmds.len(), 3);
         assert_eq!(
             cmds[0],
-            "tmux send-keys -t 'beta' -l '[msg #7 from alpha@local]: it'\\''s done; $HOME `ok`'"
+            "tmux send-keys -t '=beta:' -l '[msg #7 from alpha@local]: it'\\''s done; $HOME `ok`'"
         );
-        assert_eq!(cmds[2], "tmux send-keys -t 'beta' Enter");
+        assert_eq!(cmds[2], "tmux send-keys -t '=beta:' Enter");
         // submit=false stages the text without pressing Enter.
         assert_eq!(build_send_commands("beta", &header, false).len(), 1);
     }

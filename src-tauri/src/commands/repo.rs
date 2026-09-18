@@ -48,7 +48,7 @@ pub fn repo_script(tmux_name: &str, body: &str) -> String {
          if [ ! -d \"$p\" ]; then printf '%s\\n' '{sentinel}' >&2; exit 3; fi\n\
          root=\"$(git -C \"$p\" rev-parse --show-toplevel)\"\n\
          {body}",
-        name = quote(tmux_name),
+        name = quote(&crate::tmux::exact_pane(tmux_name)),
         sentinel = NO_WORKTREE_SENTINEL,
     )
 }
@@ -125,7 +125,7 @@ mod tests {
     #[test]
     fn repo_script_embeds_quoted_name_and_body() {
         let s = repo_script("dev-foo", "git -C \"$root\" status");
-        assert!(s.contains("display-message -t 'dev-foo'"), "got: {s}");
+        assert!(s.contains("display-message -t '=dev-foo:'"), "got: {s}");
         assert!(s.contains("#{pane_current_path}"), "got: {s}");
         assert!(s.contains("rev-parse --show-toplevel"), "got: {s}");
         assert!(s.trim_end().ends_with("git -C \"$root\" status"));
