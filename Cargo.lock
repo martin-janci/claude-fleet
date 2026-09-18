@@ -675,6 +675,7 @@ version = "0.2.20"
 dependencies = [
  "directories",
  "fleet-core",
+ "libc",
  "portable-pty",
  "serde",
  "serde_json",

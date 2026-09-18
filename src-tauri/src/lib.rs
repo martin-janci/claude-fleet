@@ -345,9 +345,7 @@ pub fn run() {
                     }
                 }
                 if let Some(pty) = window.try_state::<Mutex<PtyState>>() {
-                    if let Ok(mut s) = pty.lock() {
-                        s.close();
-                    }
+                    pty::close_pty(pty.inner());
                 }
             }
         })

@@ -85,10 +85,36 @@ describe('terminal_keys.keyToBytes — xterm key table', () => {
     ['Alt+Enter', k('Enter', { altKey: true }), linux, `${ESC}\r`],
     ['Alt+Backspace', k('Backspace', { altKey: true }), linux, `${ESC}\x7f`],
     ['Ctrl+Alt+d', k('d', { ctrlKey: true, altKey: true }), linux, `${ESC}\x04`],
-    // macOS: Option composes `key`; recover the base letter from `code`
+    // macOS: a non-ASCII Option composition is Meta; recover the base from `code`
     ['Option+b on mac (key=∫, code=KeyB)', k('∫', { altKey: true, code: 'KeyB' }), mac, `${ESC}b`],
     ['Option+Shift+B on mac', k('ı', { altKey: true, shiftKey: true, code: 'KeyB' }), mac, `${ESC}B`],
     ['Option+1 on mac (key=¡, code=Digit1)', k('¡', { altKey: true, code: 'Digit1' }), mac, `${ESC}1`],
+    // …but an Option composition that IS printable ASCII is text (F8)
+    ['Option+` → ~ on mac', k('~', { altKey: true, code: 'Backquote' }), mac, '~'],
+    ['German Option+l → @', k('@', { altKey: true, code: 'KeyL' }), mac, '@'],
+    ['German Option+5 → [', k('[', { altKey: true, code: 'Digit5' }), mac, '['],
+    ['German Shift+Option+7 → \\', k('\\', { altKey: true, shiftKey: true, code: 'Digit7' }), mac, '\\'],
+    // Enter: Option/Shift+Enter insert a newline in Claude Code (ESC CR)
+    ['Shift+Enter', k('Enter', { shiftKey: true }), linux, `${ESC}\r`],
+    ['Option+Enter on mac', k('Enter', { altKey: true }), mac, `${ESC}\r`],
+    ['Ctrl+Enter stays a plain CR', k('Enter', { ctrlKey: true }), linux, '\r'],
+    // F13–F20 (tilde family, xterm codes 25/26/28/29/31/32/33/34)
+    ['F13', k('F13'), linux, `${ESC}[25~`],
+    ['F14', k('F14'), linux, `${ESC}[26~`],
+    ['F15', k('F15'), linux, `${ESC}[28~`],
+    ['F16', k('F16'), linux, `${ESC}[29~`],
+    ['F17', k('F17'), linux, `${ESC}[31~`],
+    ['F18', k('F18'), linux, `${ESC}[32~`],
+    ['F19', k('F19'), linux, `${ESC}[33~`],
+    ['F20', k('F20'), linux, `${ESC}[34~`],
+    ['Shift+F13', k('F13', { shiftKey: true }), linux, `${ESC}[25;2~`],
+    // AltGr on Windows/Linux arrives as Ctrl+Alt and composes text, not a chord
+    ['AltGr+v → @ on linux', k('@', { ctrlKey: true, altKey: true, code: 'KeyV' }), linux, '@'],
+    ['AltGr+7 → { on linux', k('{', { ctrlKey: true, altKey: true, code: 'Digit7' }), linux, '{'],
+    ['AltGr+a → ą on linux', k('ą', { ctrlKey: true, altKey: true, code: 'KeyA' }), linux, 'ą'],
+    ['Ctrl+Alt+2 (no composition) is still a chord', k('2', { ctrlKey: true, altKey: true, code: 'Digit2' }), linux, `${ESC}\x00`],
+    ['Ctrl+Alt+d (letter) is still a chord', k('d', { ctrlKey: true, altKey: true, code: 'KeyD' }), linux, `${ESC}\x04`],
+    ['Ctrl+Alt+@ on mac stays a chord', k('@', { ctrlKey: true, altKey: true, code: 'KeyV' }), mac, `${ESC}\x00`],
     // Not ours
     ['Cmd+c is an app chord', k('c', { metaKey: true }), mac, null],
     ['Cmd+Left is an app chord', k('ArrowLeft', { metaKey: true }), mac, null],
@@ -101,6 +127,35 @@ describe('terminal_keys.keyToBytes — xterm key table', () => {
 
   it.each(cases)('%s', (_name, ev, opts, expected) => {
     expect(keyToBytes(ev, opts)).toBe(expected);
+  });
+});
+
+// Slovak (and Czech) Mac layouts hide the whole programming punctuation set
+// behind Option. Before F8 each of these arrived as a Meta chord (ESC v was
+// Claude's "paste image", ESC b jumped a word back) and the character could
+// not be typed at all — the owner's call is "text first, Meta fallback".
+describe('terminal_keys — Slovak macOS Option layer sends text, not Meta', () => {
+  const slovak: Array<[string, string, string]> = [
+    // [code, composed key, expected bytes]
+    ['KeyV', '@', '@'],
+    ['Digit2', '@', '@'],
+    ['KeyF', '[', '['],
+    ['KeyG', ']', ']'],
+    ['KeyB', '{', '{'],
+    ['KeyN', '}', '}'],
+    ['KeyW', '|', '|'],
+    ['KeyQ', '\\', '\\'],
+    ['KeyX', '#', '#'],
+    ['Backquote', '~', '~'],
+  ];
+  it.each(slovak)('Option+%s composing %s', (code, key, expected) => {
+    expect(keyToBytes(k(key, { altKey: true, code }), mac)).toBe(expected);
+  });
+
+  it('still sends Meta for the US layout glyphs that are not ASCII', () => {
+    expect(keyToBytes(k('∫', { altKey: true, code: 'KeyB' }), mac)).toBe(`${ESC}b`);
+    expect(keyToBytes(k('ƒ', { altKey: true, code: 'KeyF' }), mac)).toBe(`${ESC}f`);
+    expect(keyToBytes(k('∂', { altKey: true, code: 'KeyD' }), mac)).toBe(`${ESC}d`);
   });
 });
 

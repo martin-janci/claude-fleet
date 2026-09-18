@@ -65,12 +65,79 @@ describe('createDrainLoop', () => {
     expect(gaps(t0, ticks)).toEqual([30, 60, 120, 240, 30, 60]);
   });
 
-  it('bumpDrain does not start a loop that is not running', async () => {
-    const { loop, ticks } = setup();
+  it('bumpDrain does not start a loop while the host is detached', async () => {
+    const { loop, ticks, detach } = setup();
+    detach();
     loop.bumpDrain();
     await vi.advanceTimersByTimeAsync(1000);
     expect(ticks).toEqual([]);
     expect(loop.pending()).toBe(false);
+  });
+
+  it('bumpDrain revives a loop that stopped rescheduling while attached', async () => {
+    let attached = true;
+    const ticks: number[] = [];
+    const loop = createDrainLoop({
+      drainOnce: async () => {
+        ticks.push(Date.now());
+        return false;
+      },
+      attached: () => attached,
+    });
+    loop.start();
+    // A tick that finishes while detached does not reschedule — the loop is
+    // dead even though the host is attached again a moment later.
+    attached = false;
+    await vi.advanceTimersByTimeAsync(30);
+    attached = true;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(ticks).toHaveLength(1);
+    expect(loop.pending()).toBe(false);
+
+    const t1 = Date.now();
+    loop.bumpDrain();
+    await vi.advanceTimersByTimeAsync(30);
+    expect(ticks).toHaveLength(2);
+    expect(ticks[1] - t1).toBe(30);
+  });
+
+  it('bumpDrain during an in-flight tick does not start a second one', async () => {
+    const ticks: number[] = [];
+    const waiting: Array<() => void> = [];
+    let inflight = 0;
+    let peak = 0;
+    const loop = createDrainLoop({
+      drainOnce: async () => {
+        ticks.push(Date.now());
+        inflight += 1;
+        peak = Math.max(peak, inflight);
+        await new Promise<void>((resolve) => waiting.push(resolve));
+        inflight -= 1;
+        return false;
+      },
+      attached: () => true,
+    });
+    loop.start();
+    await vi.advanceTimersByTimeAsync(DRAIN_MIN_MS);
+    expect(inflight).toBe(1);
+
+    // A keystroke (or a paste) lands while the pty_drain round-trip is still
+    // outstanding. The loop is not dead, so nothing new may be scheduled —
+    // two ticks sharing the screen would apply the PTY bytes out of order.
+    loop.bumpDrain();
+    await vi.advanceTimersByTimeAsync(DRAIN_MIN_MS + 5);
+    expect(peak).toBe(1);
+    expect(ticks).toHaveLength(1);
+
+    // The in-flight tick still owns the loop, and the bump is not lost: it
+    // comes back at the floor instead of doubling the idle delay.
+    waiting.shift()!();
+    await vi.advanceTimersByTimeAsync(0);
+    const t1 = Date.now();
+    await vi.advanceTimersByTimeAsync(DRAIN_MIN_MS);
+    expect(ticks).toHaveLength(2);
+    expect(ticks[1] - t1).toBe(DRAIN_MIN_MS);
+    waiting.shift()?.();
   });
 
   it('stop cancels the pending tick; start resumes at the floor', async () => {
@@ -113,6 +180,55 @@ describe('createDrainLoop', () => {
     expect(gaps(t0, ticks)).toEqual([30, 30]);
   });
 
+  it('keeps polling after a tick rejects', async () => {
+    const ticks: number[] = [];
+    let fail = true;
+    const loop = createDrainLoop({
+      drainOnce: async () => {
+        ticks.push(Date.now());
+        if (fail) throw new Error('parser blew up');
+        return true;
+      },
+      attached: () => true,
+    });
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const t0 = Date.now();
+      loop.start();
+      await vi.advanceTimersByTimeAsync(30);
+      // The failed tick counts as idle (no output) and the loop lives on.
+      expect(ticks).toHaveLength(1);
+      expect(loop.pending()).toBe(true);
+      await vi.advanceTimersByTimeAsync(60);
+      expect(gaps(t0, ticks)).toEqual([30, 60]);
+      // …and a later healthy tick snaps it back to the floor.
+      fail = false;
+      await vi.advanceTimersByTimeAsync(120 + 30);
+      expect(gaps(t0, ticks)).toEqual([30, 60, 120, 30]);
+      expect(errors).toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it('a tick that rejects while detached stops the loop, and bumpDrain cannot revive it', async () => {
+    const { loop, ticks, detach } = setup(() => {
+      throw new Error('boom');
+    });
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      loop.start();
+      detach();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(ticks).toHaveLength(1);
+      loop.bumpDrain();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(ticks).toHaveLength(1);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
   it('does not reschedule once the host is detached', async () => {
     const { loop, ticks, detach } = setup();
     loop.start();
@@ -120,5 +236,55 @@ describe('createDrainLoop', () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(ticks).toHaveLength(1);
     expect(loop.pending()).toBe(false);
+  });
+  it('a stale tick landing does not let bumpDrain start a second loop', async () => {
+    // Two attaches' ticks overlap: the first is still in flight when a restart
+    // claims the loop. When it finally lands it must not clear the loop's
+    // in-flight state, or a keystroke would run a second, concurrent drainOnce
+    // against the same screen (the backend hands out disjoint chunks).
+    let attached = true;
+    const resolvers: Array<(value: boolean) => void> = [];
+    const loop = createDrainLoop({
+      drainOnce: () => new Promise<boolean>((resolve) => resolvers.push(resolve)),
+      attached: () => attached,
+    });
+
+    loop.start();
+    await vi.advanceTimersByTimeAsync(DRAIN_MIN_MS);
+    expect(resolvers).toHaveLength(1); // tick A in flight
+
+    loop.stop();
+    loop.start();
+    await vi.advanceTimersByTimeAsync(DRAIN_MIN_MS);
+    expect(resolvers).toHaveLength(2); // tick B in flight, A still pending
+
+    resolvers[0](false); // the stale tick lands
+    await Promise.resolve();
+    loop.bumpDrain();
+    await vi.advanceTimersByTimeAsync(DRAIN_MIN_MS * 2);
+    expect(resolvers).toHaveLength(2); // no third tick while B is in flight
+
+    resolvers[1](false); // B lands and reschedules normally
+    await vi.advanceTimersByTimeAsync(DRAIN_MIN_MS);
+    expect(resolvers).toHaveLength(3);
+    attached = false;
+  });
+
+  it('reports a rejected tick through onError', async () => {
+    const errors: unknown[] = [];
+    let attached = true;
+    const loop = createDrainLoop({
+      drainOnce: async () => {
+        throw new Error('boom');
+      },
+      attached: () => attached,
+      onError: (e) => errors.push(e),
+    });
+
+    loop.start();
+    await vi.advanceTimersByTimeAsync(DRAIN_MIN_MS);
+    expect((errors[0] as Error).message).toBe('boom');
+    attached = false;
+    await vi.advanceTimersByTimeAsync(DRAIN_MAX_MS);
   });
 });
