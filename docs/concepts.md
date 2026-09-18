@@ -16,7 +16,7 @@ Each host has a **projects base**, the directory that holds its repositories, se
 
 ## Control API & tunnels
 
-An embedded MCP server (disabled by default, bound to `localhost`, protected by a bearer token, default port 4180) exposes the full fleet API so an AI assistant can drive sessions programmatically — creating sessions, sending prompts, reading output. When the control API is enabled, **reverse SSH tunnels** (`ssh -R`) forward that localhost port to each remote host's localhost, allowing remote agents to call back to the central server. Each tunnel is supervised: if the `ssh` process exits it restarts with capped exponential backoff. See [control-api.md](control-api.md) for the full tool reference.
+An embedded MCP server (disabled by default, bound to `localhost`, protected by a bearer token, default port 4180) exposes the full fleet API so an AI assistant can drive sessions programmatically — creating sessions, sending prompts, reading output. When the control API is enabled, **reverse SSH tunnels** (`ssh -R`) forward that localhost port to each remote host's localhost, allowing remote agents to call back to the central server. Each tunnel is supervised: if the `ssh` process exits it restarts with capped exponential backoff. The same fleet can instead be run headless as the `fleet-hub` daemon, with the control API always on and bound to a configurable address; a hub given a public URL is reached directly by every host, and reverse tunnels exist only for a hub left on loopback. See [control-api.md](control-api.md) for the full tool reference and [hub.md](hub.md) for the daemon.
 
 ## Asset catalog
 
@@ -26,10 +26,29 @@ Fleet loads the repo on the controller, renders every asset the way each
 harness expects it (Claude Code fully; Codex CLI for skills and MCP servers),
 scans hosts read-only for what is actually installed, and shows each asset
 as in sync, drifted, missing or unsupported per host. Assets found on a host
-but not in the catalog are listed as unmanaged and can be imported. This
-version never writes to hosts; sync and in-app editing are later iterations.
-The format and layout are specified in
-`docs/superpowers/specs/2026-09-14-asset-catalog-design.md`.
+but not in the catalog are listed as unmanaged and can be imported.
+
+**Sync** is plan-first: `plan_sync` scans the selected hosts and computes
+which assets to create, update, overwrite, adopt, or remove, returning a plan
+valid for 10 minutes. `apply_sync` applies the plan using compare-and-swap on
+every file against the scan-time hash, and creates `.fleet-bak-<time>-<pid>`
+backups before overwriting or removing files and keeps the three newest
+backups of each file. Config merges (JSON for Claude
+Code, TOML for Codex) are applied on the controller and written through the
+secure 0600 path; plugins are installed via `claude plugin install` on the
+host. A per-harness managed manifest (`~/.claude/.fleet-assets.json` and
+`~/.codex/.fleet-assets.json`) records what fleet installed, so only managed
+assets are ever removed. Secrets referenced as `${NAME}` in assets are resolved
+at apply time from the fleet database (global with per-host override) and never
+leave the controller. Secret values are stored in the fleet SQLite database in
+plaintext, the same as host tokens — there is no at-rest encryption layer.
+Codex support is experimental; TOML comments are not
+preserved during config merges, and config files containing TOML datetimes are
+rejected. The format and implementation are specified in
+`docs/superpowers/specs/2026-09-14-asset-catalog-design.md` and
+`docs/superpowers/specs/2026-09-14-asset-sync-design.md`.
+
+The **Assets** tab provides a graphical editor for authoring: create assets from templates, edit them in a form with a text editor for the body, lint before saving (errors block save, warnings do not), and every save auto-commits with a `catalog: create|update|delete <kind>/<name>` message; push to the upstream is explicit. **Open in session** hands an asset to an interactive fleet session whose working directory is the catalog repo; that session, like any other, edits the repo directly and commits with `catalog:` messages, which the app picks up on its next catalog load.
 
 ## The terminal
 

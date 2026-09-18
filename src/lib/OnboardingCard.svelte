@@ -2,7 +2,7 @@
   import { hosts } from './hosts';
   import { projects, refreshProjects } from './projects';
   import { sessions, hasNoPane } from './sessions';
-  import { mcpStatus, mcpConfigure, mcpClientConfig, provisionHosts, type McpStatus } from './mcp';
+  import { mcpStatus, mcpConfigure, mcpClientConfig, maskToken, provisionHosts, type McpStatus } from './mcp';
   import { copyText } from './clipboard';
   import {
     deriveSteps,
@@ -98,10 +98,6 @@
     } finally {
       busy = null;
     }
-  }
-
-  function maskToken(t: string): string {
-    return t.length > 4 ? '••••••••••••' + t.slice(-4) : '••••';
   }
 
   function dismiss() {

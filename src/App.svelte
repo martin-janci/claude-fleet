@@ -10,14 +10,14 @@
   import HostsView from './lib/HostsView.svelte';
   import ConversationPanel from './lib/ConversationPanel.svelte';
   import AssetsPanel from './lib/AssetsPanel.svelte';
-  import { loadProjects, bootstrapProjects, applyProjectEvents } from './lib/projects';
-  import { loadSessions, bootstrapSessions, applySessionEvents, sessions, hasNoPane } from './lib/sessions';
-  import { bootstrapHosts, applyHostEvents, hosts, hostFilter } from './lib/hosts';
-  import { bootstrapAccounts, applyAccountEvents, accounts } from './lib/accounts';
+  import { loadProjects, applyProjectEvents } from './lib/projects';
+  import { loadSessions, applySessionEvents, sessions, hasNoPane } from './lib/sessions';
+  import { loadHosts, applyHostEvents, hosts, hostFilter } from './lib/hosts';
+  import { loadAccounts, applyAccountEvents, accounts } from './lib/accounts';
   import { loadTasks, applyTaskEvents } from './lib/tasks';
   import { loadAccountUsage, applyAccountUsageEvents, accountUsage } from './lib/account_usage_store';
   import { footerUsage } from './lib/usage_glance';
-  import { mergeInventoryRow, clearInventoryFor, loadAssets } from './lib/assets';
+  import { mergeInventoryRow, clearInventoryFor, loadAssets, syncProgress, repoStatus } from './lib/assets';
   import { subscribeToRowEvents } from './lib/events';
   import Toasts from './lib/Toasts.svelte';
   import QuickSwitcher from './lib/QuickSwitcher.svelte';
@@ -32,10 +32,11 @@
     hostsChordLabel,
     hostsViewOpen,
     hostsViewRequest,
+    openPathRequest,
     requestNewSessionOnHost,
     settingsOpen,
   } from './lib/app_views';
-  import { detectMac } from './lib/terminal_keys';
+  import { detectMac, isEditable } from './lib/terminal_keys';
   import { loadSessionUi, saveSessionUi, DEFAULT_UI } from './lib/session_ui';
   import { readPref, writePref } from './lib/prefs';
   import WelcomeDialog from './lib/WelcomeDialog.svelte';
@@ -142,10 +143,10 @@
       push({ kind: 'error', code: 'E_IPC', message: `Health check failed: ${String(e)}` });
     }
     const [pr, sr, hr, ar] = await Promise.all([
-      bootstrapProjects(),
-      bootstrapSessions(),
-      bootstrapHosts(),
-      bootstrapAccounts(),
+      loadProjects(),
+      loadSessions(),
+      loadHosts(),
+      loadAccounts(),
     ]);
     const failures = [
       reportBootstrap('projects', pr),
@@ -177,7 +178,8 @@
       onAccountUsageEvents: applyAccountUsageEvents,
       onAssetInventoryUpdated: mergeInventoryRow,
       onAssetInventoryCleared: (p) => clearInventoryFor(p.host_alias, p.harness),
-      onCatalogLoaded: () => { void loadAssets(); },
+      onCatalogLoaded: () => { void loadAssets(); void repoStatus(); },
+      onSyncProgress: (p) => syncProgress.set(p),
     });
     // Tasks are secondary to the session list: load after the row
     // subscription is live so no `task:updated` is missed, and never block
@@ -344,6 +346,18 @@
     untrack(() => openHosts(req.host));
   });
 
+  // A path clicked in the Conversation tab: show Files for that session
+  // (FilesPanel picks the path up and clears the request).
+  $effect(() => {
+    const req = $openPathRequest;
+    if (!req) return;
+    untrack(() => {
+      // A pane-less row (bg / external) has no Files tab to hand this to.
+      if ($selectedSession?.id === req.sessionId && !selNoPane) showFiles();
+      else openPathRequest.set(null);
+    });
+  });
+
   function showTerminal() {
     filesMode = false;
     conversationMode = false;
@@ -399,15 +413,6 @@
     e.stopPropagation();
     if (chord === 'hosts') toggleHosts();
     else settingsOpen.set(true);
-  }
-
-  function isEditable(el: HTMLElement | null): boolean {
-    // The terminal's hidden IME proxy is a <textarea> (it has to be, or
-    // WebKit runs no input method on it — TerminalView, F9), but it IS the
-    // terminal: Esc there must close the overlay, not be left to a field.
-    if (el?.dataset.imeProxy !== undefined) return false;
-    const tag = el?.tagName;
-    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || !!el?.isContentEditable;
   }
 
   function onKeydown(e: KeyboardEvent) {
@@ -626,7 +631,7 @@
         {/if}
         {#if conversationMode && $selectedSession}
           <div class="view-slot overlay">
-            <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode} />
+            <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode} onOpenTerminal={showTerminal} />
           </div>
         {/if}
       {/if}
@@ -645,7 +650,7 @@
       {/if}
       {#if assetsMode}
         <div class="view-slot overlay" data-testid="assets-overlay">
-          <AssetsPanel />
+          <AssetsPanel visible={assetsMode} />
         </div>
       {/if}
     </div>

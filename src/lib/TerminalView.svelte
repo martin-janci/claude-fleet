@@ -288,7 +288,7 @@
       }
     } catch (e) {
       // Same rule for the error: it belongs to the pane that asked for it.
-      const message = `Upload failed: ${describeError(e)}`;
+      const message = `Upload failed: ${toIpcError(e).message}`;
       if (gen === openGeneration) openError = message;
       else push({ kind: 'error', message });
     } finally {
@@ -490,7 +490,7 @@
           // unreachable.
           scheduleAutoReconnect(target.tmux_name, target.host_alias);
         } else {
-          openError = `PTY error: ${describeError(e)}`;
+          openError = `PTY error: ${toIpcError(e).message}`;
         }
         return;
       }
@@ -927,12 +927,6 @@
     flushImeInput();
   }
 
-  function describeError(e: unknown): string {
-    if (e && typeof e === 'object' && 'message' in e) {
-      return String((e as { message: unknown }).message);
-    }
-    return String(e);
-  }
 
   onDestroy(() => {
     // Before closeTerm, so an open resuming from an await sees it at once.

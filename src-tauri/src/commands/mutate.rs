@@ -1,28 +1,16 @@
-//! Mutating git commands for the Files tab: checkout, branch create/delete,
-//! stage/commit, and remote sync. Reuses the shared plumbing in `repo.rs`.
-//! Branch names go through `validate::git_ref`, hashes through
-//! `validate::commit_hash`, paths through `validate::repo_rel_path`; every
-//! interpolated value is shell-quoted.
+//! Tauri commands for the mutating git operations of the Files tab. Thin
+//! wrappers over `service::repo_mutate`.
 
-use crate::commands::repo::{repo_err, repo_script, run_in_repo, session_target};
-use crate::ipc_error::IpcError;
-use crate::shell::quote;
-use crate::ssh::SshClient;
-use crate::store::Store;
-use serde::Deserialize;
+use fleet_core::ipc_error::IpcError;
+use fleet_core::service::repo::SessionIdArgs;
+use fleet_core::service::repo_mutate::{
+    self, CheckoutArgs, CheckoutCommitArgs, CommitCreateArgs, CreateBranchArgs, DeleteBranchArgs,
+    PushArgs, StageArgs,
+};
+use fleet_core::ssh::SshClient;
+use fleet_core::store::Store;
 use std::sync::{Arc, Mutex};
 use tauri::State;
-
-/// True when `git status --porcelain` output indicates a dirty worktree.
-fn is_dirty(porcelain: &[u8]) -> bool {
-    !String::from_utf8_lossy(porcelain).trim().is_empty()
-}
-
-#[derive(Deserialize)]
-pub struct CheckoutArgs {
-    pub session_id: i64,
-    pub branch: String,
-}
 
 /// Checkout a branch. Refuses (E_DIRTY) when the worktree has uncommitted
 /// changes — the agent may be mid-edit. Never `--force`.
@@ -32,32 +20,7 @@ pub async fn repo_checkout(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    crate::validate::git_ref(&args.branch)?;
-    let (host, name) = session_target(&store, args.session_id)?;
-    // Guard: check dirty first.
-    let status = repo_script(&name, "git -C \"$root\" status --porcelain");
-    let so = run_in_repo(&ssh, &host, &status).await?;
-    if !so.status.success() {
-        return Err(repo_err(&so));
-    }
-    if is_dirty(&so.stdout) {
-        return Err(IpcError::new(
-            "E_DIRTY",
-            "worktree has uncommitted changes — the agent may have work in progress",
-        ));
-    }
-    let body = format!("git -C \"$root\" checkout {}", quote(&args.branch));
-    let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
-    if !out.status.success() {
-        return Err(repo_err(&out));
-    }
-    Ok(())
-}
-
-#[derive(Deserialize)]
-pub struct CheckoutCommitArgs {
-    pub session_id: i64,
-    pub hash: String,
+    repo_mutate::repo_checkout(args, &store, &ssh).await
 }
 
 /// Checkout a commit (detached HEAD). Same dirty guard as `repo_checkout`.
@@ -67,33 +30,7 @@ pub async fn repo_checkout_commit(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    crate::validate::commit_hash(&args.hash)?;
-    let (host, name) = session_target(&store, args.session_id)?;
-    let status = repo_script(&name, "git -C \"$root\" status --porcelain");
-    let so = run_in_repo(&ssh, &host, &status).await?;
-    if !so.status.success() {
-        return Err(repo_err(&so));
-    }
-    if is_dirty(&so.stdout) {
-        return Err(IpcError::new(
-            "E_DIRTY",
-            "worktree has uncommitted changes — the agent may have work in progress",
-        ));
-    }
-    let body = format!("git -C \"$root\" checkout {}", quote(&args.hash));
-    let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
-    if !out.status.success() {
-        return Err(repo_err(&out));
-    }
-    Ok(())
-}
-
-#[derive(Deserialize)]
-pub struct CreateBranchArgs {
-    pub session_id: i64,
-    pub name: String,
-    pub start_point: Option<String>,
-    pub checkout: bool,
+    repo_mutate::repo_checkout_commit(args, &store, &ssh).await
 }
 
 /// Create a branch from HEAD or a start point (branch name or commit hash),
@@ -104,37 +41,7 @@ pub async fn repo_create_branch(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    crate::validate::git_ref(&args.name)?;
-    // A start point may be a ref or a hash — accept either, validated.
-    if let Some(sp) = &args.start_point {
-        if crate::validate::commit_hash(sp).is_err() {
-            crate::validate::git_ref(sp)?;
-        }
-    }
-    let (host, name) = session_target(&store, args.session_id)?;
-    let sp = args
-        .start_point
-        .as_ref()
-        .map(|s| format!(" {}", quote(s)))
-        .unwrap_or_default();
-    let verb = if args.checkout {
-        "checkout -b"
-    } else {
-        "branch"
-    };
-    let body = format!("git -C \"$root\" {verb} {}{sp}", quote(&args.name));
-    let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
-    if !out.status.success() {
-        return Err(repo_err(&out));
-    }
-    Ok(())
-}
-
-#[derive(Deserialize)]
-pub struct DeleteBranchArgs {
-    pub session_id: i64,
-    pub name: String,
-    pub force: bool,
+    repo_mutate::repo_create_branch(args, &store, &ssh).await
 }
 
 /// Delete a local branch (`-d`, or `-D` when `force`).
@@ -144,21 +51,7 @@ pub async fn repo_delete_branch(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    crate::validate::git_ref(&args.name)?;
-    let (host, name) = session_target(&store, args.session_id)?;
-    let flag = if args.force { "-D" } else { "-d" };
-    let body = format!("git -C \"$root\" branch {flag} {}", quote(&args.name));
-    let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
-    if !out.status.success() {
-        return Err(repo_err(&out));
-    }
-    Ok(())
-}
-
-#[derive(Deserialize)]
-pub struct StageArgs {
-    pub session_id: i64,
-    pub paths: Vec<String>,
+    repo_mutate::repo_delete_branch(args, &store, &ssh).await
 }
 
 /// Stage the given worktree paths (`git add --`).
@@ -168,20 +61,7 @@ pub async fn repo_stage(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    for p in &args.paths {
-        crate::validate::repo_rel_path(p)?;
-    }
-    if args.paths.is_empty() {
-        return Ok(());
-    }
-    let (host, name) = session_target(&store, args.session_id)?;
-    let quoted: Vec<String> = args.paths.iter().map(|p| quote(p)).collect();
-    let body = format!("git -C \"$root\" add -- {}", quoted.join(" "));
-    let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
-    if !out.status.success() {
-        return Err(repo_err(&out));
-    }
-    Ok(())
+    repo_mutate::repo_stage(args, &store, &ssh).await
 }
 
 /// Unstage the given paths (`git restore --staged --`).
@@ -191,27 +71,7 @@ pub async fn repo_unstage(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    for p in &args.paths {
-        crate::validate::repo_rel_path(p)?;
-    }
-    if args.paths.is_empty() {
-        return Ok(());
-    }
-    let (host, name) = session_target(&store, args.session_id)?;
-    let quoted: Vec<String> = args.paths.iter().map(|p| quote(p)).collect();
-    let body = format!("git -C \"$root\" restore --staged -- {}", quoted.join(" "));
-    let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
-    if !out.status.success() {
-        return Err(repo_err(&out));
-    }
-    Ok(())
-}
-
-#[derive(Deserialize)]
-pub struct CommitCreateArgs {
-    pub session_id: i64,
-    pub message: String,
-    pub amend: bool,
+    repo_mutate::repo_unstage(args, &store, &ssh).await
 }
 
 /// Commit the staged changes. An empty message is rejected.
@@ -221,25 +81,7 @@ pub async fn repo_commit_create(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    if args.message.trim().is_empty() {
-        return Err(IpcError::new(
-            "E_INVALID",
-            "commit message must not be empty",
-        ));
-    }
-    let (host, name) = session_target(&store, args.session_id)?;
-    let amend = if args.amend { " --amend" } else { "" };
-    let body = format!("git -C \"$root\" commit{amend} -m {}", quote(&args.message));
-    let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
-    if !out.status.success() {
-        return Err(repo_err(&out));
-    }
-    Ok(())
-}
-
-#[derive(Deserialize)]
-pub struct SessionIdArgs {
-    pub session_id: i64,
+    repo_mutate::repo_commit_create(args, &store, &ssh).await
 }
 
 /// `git fetch` (all remotes).
@@ -249,17 +91,7 @@ pub async fn repo_fetch(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    let (host, name) = session_target(&store, args.session_id)?;
-    let out = run_in_repo(
-        &ssh,
-        &host,
-        &repo_script(&name, "git -C \"$root\" fetch --all --prune"),
-    )
-    .await?;
-    if !out.status.success() {
-        return Err(repo_err(&out));
-    }
-    Ok(())
+    repo_mutate::repo_fetch(args, &store, &ssh).await
 }
 
 /// `git pull --ff-only` (refuse to create a merge commit silently).
@@ -269,23 +101,7 @@ pub async fn repo_pull(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    let (host, name) = session_target(&store, args.session_id)?;
-    let out = run_in_repo(
-        &ssh,
-        &host,
-        &repo_script(&name, "git -C \"$root\" pull --ff-only"),
-    )
-    .await?;
-    if !out.status.success() {
-        return Err(repo_err(&out));
-    }
-    Ok(())
-}
-
-#[derive(Deserialize)]
-pub struct PushArgs {
-    pub session_id: i64,
-    pub set_upstream: bool,
+    repo_mutate::repo_pull(args, &store, &ssh).await
 }
 
 /// `git push`; with `set_upstream`, push the current branch and set upstream.
@@ -295,29 +111,5 @@ pub async fn repo_push(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
-    let (host, name) = session_target(&store, args.session_id)?;
-    let body = if args.set_upstream {
-        "b=\"$(git -C \"$root\" rev-parse --abbrev-ref HEAD)\"; git -C \"$root\" push -u origin \"$b\""
-            .to_string()
-    } else {
-        "git -C \"$root\" push".to_string()
-    };
-    let out = run_in_repo(&ssh, &host, &repo_script(&name, &body)).await?;
-    if !out.status.success() {
-        return Err(repo_err(&out));
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn is_dirty_detects_changes() {
-        assert!(!is_dirty(b""));
-        assert!(!is_dirty(b"   \n"));
-        assert!(is_dirty(b" M src/x.rs\n"));
-        assert!(is_dirty(b"?? new.txt\n"));
-    }
+    repo_mutate::repo_push(args, &store, &ssh).await
 }

@@ -12,9 +12,6 @@ jobs:
       matrix:
         os: [macos-latest, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        working-directory: src-tauri
     steps:
       - uses: actions/checkout@v4
       # Tauri 2 Linux prerequisites (https://v2.tauri.app/start/prerequisites/)
@@ -34,10 +31,10 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+          workspaces: .
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
       # cargo-deny checks Cargo.lock, which is platform-independent, so it
       # runs on the Linux leg only. Runs from the repo root, where cargo-deny
       # picks up ./deny.toml on its own; no --config flag because cargo-deny
@@ -46,9 +43,23 @@ jobs:
         if: runner.os == 'Linux'
         with:
           tool: cargo-deny
-      - run: cargo deny --manifest-path src-tauri/Cargo.toml check
+      - run: cargo deny check
         if: runner.os == 'Linux'
-        working-directory: ${{ github.workspace }}
+
+  # The regression guard for the crate split: fleet-hub must build on a box
+  # with none of the Tauri system libraries. If this job fails with a
+  # gtk/webkit/pkg-config error, a Tauri dependency leaked into fleet-core.
+  hub-headless:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: hub-headless
+      - run: cargo build -p fleet-hub --locked
+      - run: cargo test -p fleet-core -p fleet-hub --locked
 
   frontend:
     strategy:

@@ -5,7 +5,7 @@ import type { AccountRow } from './accounts';
 import type { ProjectRow, WorktreeRow, ProjectEvent } from './projects';
 import type { TaskRow, TaskEvent } from './tasks';
 import type { AccountUsageSnapshot } from './account_usage_store';
-import type { AssetInventoryRow, CatalogSummary } from './assets';
+import type { AssetInventoryRow, CatalogSummary, SyncProgress } from './assets';
 
 /**
  * How long a flush waits for more events after the first one arrives. Tauri
@@ -46,6 +46,7 @@ export type RowEventHandlers = {
   onAssetInventoryUpdated?: (row: AssetInventoryRow) => void;
   onAssetInventoryCleared?: (payload: { host_alias: string; harness: string }) => void;
   onCatalogLoaded?: (summary: CatalogSummary) => void;
+  onSyncProgress?: (p: SyncProgress) => void;
   // ── batched handlers (one call per flush per store, events in order) ──
   // Prefer these for store wiring: the backend's reconcile tick emits one
   // `session:updated` per session, and delivering each one straight into
@@ -74,7 +75,8 @@ type Queued =
   | { name: 'account_usage:updated'; payload: AccountUsageSnapshot }
   | { name: 'asset_inventory:updated'; payload: AssetInventoryRow }
   | { name: 'asset_inventory:cleared'; payload: { host_alias: string; harness: string } }
-  | { name: 'catalog:loaded'; payload: CatalogSummary };
+  | { name: 'catalog:loaded'; payload: CatalogSummary }
+  | { name: 'sync:progress'; payload: SyncProgress };
 
 /**
  * Subscribe to every row-change event from the backend. Returns a single
@@ -166,6 +168,9 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
         case 'catalog:loaded':
           handlers.onCatalogLoaded?.(ev.payload);
           break;
+        case 'sync:progress':
+          handlers.onSyncProgress?.(ev.payload);
+          break;
       }
     }
     if (sessionEvents.length > 0) handlers.onSessionEvents?.(sessionEvents);
@@ -206,6 +211,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     assetInventoryUpdated: !!handlers.onAssetInventoryUpdated,
     assetInventoryCleared: !!handlers.onAssetInventoryCleared,
     catalogLoaded: !!handlers.onCatalogLoaded,
+    syncProgress: !!handlers.onSyncProgress,
   };
 
   const sub = <N extends Queued['name']>(
@@ -235,6 +241,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub('asset_inventory:updated', wanted.assetInventoryUpdated),
     sub('asset_inventory:cleared', wanted.assetInventoryCleared),
     sub('catalog:loaded', wanted.catalogLoaded),
+    sub('sync:progress', wanted.syncProgress),
   ]);
   return () => {
     disposed = true;

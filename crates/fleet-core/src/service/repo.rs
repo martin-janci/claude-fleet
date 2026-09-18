@@ -1,0 +1,241 @@
+//! Shared plumbing for the git-backed repo services (`repo_read`,
+//! `repo_mutate`) and their Tauri / MCP callers.
+//!
+//! Every operation resolves the session's worktree live: ask tmux for the
+//! session pane's cwd, then `git rev-parse --show-toplevel`. This is
+//! host-correct for remote sessions. Every interpolated value is shell-quoted
+//! (`shell::quote`); caller-supplied paths/refs/hashes are additionally
+//! validated.
+
+use crate::ipc_error::lock;
+use crate::ipc_error::{codes, IpcError};
+use crate::shell::quote;
+use crate::ssh::SshClient;
+use crate::store::Store;
+use serde::Deserialize;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+/// Per-call SSH timeout for git/file reads.
+pub const REPO_TIMEOUT_SECS: u64 = 10;
+/// Largest file body returned by `repo_file`. Larger files are truncated.
+pub const MAX_FILE_BYTES: usize = 512 * 1024;
+/// Largest diff returned by `repo_diff`/`repo_commit_diff`.
+pub const MAX_DIFF_BYTES: usize = 1024 * 1024;
+/// Largest worktree listing returned by `repo_tree`.
+pub const MAX_TREE_ENTRIES: usize = 20_000;
+
+/// Emitted on stderr by `repo_script` when the session's worktree directory no
+/// longer exists on disk (e.g. the git worktree was removed while the tmux
+/// session lives on). `repo_err` maps this to the `E_NO_WORKTREE` code so the
+/// frontend can show a clean "worktree gone" state instead of a raw git error.
+pub const NO_WORKTREE_SENTINEL: &str = "__CF_NO_WORKTREE__";
+
+// The one-field argument struct shared by every per-session repo call.
+// (A `//` comment, not `///`: a struct-level doc would become the schema's
+// top-level `description` once this is served as an MCP tool parameter.)
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "SessionIdParams")]
+pub struct SessionIdArgs {
+    /// Fleet session id (from list_sessions).
+    pub session_id: i64,
+}
+
+/// Resolve a session id to its `(host_alias, tmux_name)`, validating both.
+pub fn session_target(store: &Mutex<Store>, session_id: i64) -> Result<(String, String), IpcError> {
+    let s = lock(store)?;
+    let sess = s.get_session_by_id(session_id)?.ok_or_else(|| {
+        IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found"))
+    })?;
+    crate::validate::host_alias(&sess.host_alias)?;
+    crate::validate::tmux_name_addressable(&sess.tmux_name)?;
+    Ok((sess.host_alias, sess.tmux_name))
+}
+
+/// Wrap `body` in a script that first resolves the worktree root into `$root`.
+pub fn repo_script(tmux_name: &str, body: &str) -> String {
+    format!(
+        "set -e\n\
+         p=\"$(tmux display-message -t {name} -p '#{{pane_current_path}}')\"\n\
+         if [ ! -d \"$p\" ]; then printf '%s\\n' '{sentinel}' >&2; exit 3; fi\n\
+         root=\"$(git -C \"$p\" rev-parse --show-toplevel)\"\n\
+         {body}",
+        name = quote(&crate::tmux::exact_pane(tmux_name)),
+        sentinel = NO_WORKTREE_SENTINEL,
+    )
+}
+
+/// Run a script in the session's repo — locally via `bash -lc`, or remotely
+/// via the multiplexed SSH client.
+pub async fn run_in_repo(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    script: &str,
+) -> Result<std::process::Output, IpcError> {
+    crate::ssh::run_shell(
+        ssh.as_ref(),
+        host,
+        script,
+        Duration::from_secs(REPO_TIMEOUT_SECS),
+    )
+    .await
+}
+
+/// Turn a failed `Output` into an `E_REPO` error carrying stderr (or stdout).
+pub fn repo_err(out: &std::process::Output) -> IpcError {
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.contains(NO_WORKTREE_SENTINEL) {
+        return IpcError::new(codes::E_NO_WORKTREE, "worktree directory no longer exists");
+    }
+    let msg = if stderr.trim().is_empty() {
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    } else {
+        stderr.trim().to_string()
+    };
+    IpcError::new(
+        codes::E_REPO,
+        if msg.is_empty() {
+            "git command failed".to_string()
+        } else {
+            msg
+        },
+    )
+}
+
+/// Run `body` in the session's worktree root (`$root`) and fail with
+/// `repo_err` unless the command exits 0. This is `repo_script` +
+/// `run_in_repo` + the success check that every git call otherwise repeats;
+/// callers that must inspect a non-zero exit themselves use the pieces.
+pub async fn run_git(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    tmux_name: &str,
+    body: &str,
+) -> Result<std::process::Output, IpcError> {
+    let out = run_in_repo(ssh, host, &repo_script(tmux_name, body)).await?;
+    if !out.status.success() {
+        return Err(repo_err(&out));
+    }
+    Ok(out)
+}
+
+/// True when `git status --porcelain` output indicates a dirty worktree.
+fn is_dirty(porcelain: &[u8]) -> bool {
+    !String::from_utf8_lossy(porcelain).trim().is_empty()
+}
+
+/// Refuse (`E_DIRTY`) when the session's worktree has uncommitted changes —
+/// the agent may be mid-edit. Guards every checkout.
+pub async fn ensure_clean(
+    ssh: &Arc<SshClient>,
+    host: &str,
+    tmux_name: &str,
+) -> Result<(), IpcError> {
+    let so = run_git(ssh, host, tmux_name, "git -C \"$root\" status --porcelain").await?;
+    if is_dirty(&so.stdout) {
+        return Err(IpcError::new(
+            codes::E_DIRTY,
+            "worktree has uncommitted changes — the agent may have work in progress",
+        ));
+    }
+    Ok(())
+}
+
+/// Post-process raw diff bytes into a `(diff, binary, truncated)` triple,
+/// cutting on a UTF-8 boundary near `MAX_DIFF_BYTES`. Shared by `repo_diff`
+/// and `repo_commit_diff`.
+pub fn diff_from_bytes(raw: &[u8]) -> (String, bool, bool) {
+    let text = String::from_utf8_lossy(raw);
+    let binary = text.contains("Binary files ") || text.contains("GIT binary patch");
+    let truncated = raw.len() > MAX_DIFF_BYTES;
+    let diff = if binary {
+        String::new()
+    } else if truncated {
+        let mut end = MAX_DIFF_BYTES;
+        while end > 0 && (raw[end] & 0xC0) == 0x80 {
+            end -= 1;
+        }
+        String::from_utf8_lossy(&raw[..end]).into_owned()
+    } else {
+        text.into_owned()
+    };
+    (diff, binary, truncated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repo_script_embeds_quoted_name_and_body() {
+        let s = repo_script("dev-foo", "git -C \"$root\" status");
+        assert!(s.contains("display-message -t '=dev-foo:'"), "got: {s}");
+        assert!(s.contains("#{pane_current_path}"), "got: {s}");
+        assert!(s.contains("rev-parse --show-toplevel"), "got: {s}");
+        assert!(s.trim_end().ends_with("git -C \"$root\" status"));
+    }
+
+    #[test]
+    fn repo_script_guards_missing_worktree_dir() {
+        let s = repo_script("dev-foo", "true");
+        // The dir check must run before the git call, and emit the sentinel.
+        assert!(s.contains("[ ! -d \"$p\" ]"), "got: {s}");
+        assert!(s.contains(NO_WORKTREE_SENTINEL), "got: {s}");
+        let guard = s.find("[ ! -d").unwrap();
+        let revparse = s.find("rev-parse").unwrap();
+        assert!(guard < revparse, "dir guard must precede rev-parse: {s}");
+    }
+
+    // `repo_err` ignores the exit status entirely (it only reads stderr/stdout),
+    // so any ExitStatus works; build one via the unix extension since
+    // `ExitStatus` has no portable public constructor.
+    #[cfg(unix)]
+    fn output_with_stderr(stderr: &[u8]) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(256), // exit code 1
+            stdout: Vec::new(),
+            stderr: stderr.to_vec(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repo_err_maps_sentinel_to_no_worktree() {
+        let out = output_with_stderr(format!("{NO_WORKTREE_SENTINEL}\n").as_bytes());
+        assert_eq!(repo_err(&out).code, "E_NO_WORKTREE");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repo_err_keeps_generic_repo_errors() {
+        let out = output_with_stderr(b"fatal: not a git repository\n");
+        let e = repo_err(&out);
+        assert_eq!(e.code, "E_REPO");
+        assert!(e.message.contains("not a git repository"));
+    }
+
+    #[test]
+    fn is_dirty_detects_changes() {
+        assert!(!is_dirty(b""));
+        assert!(!is_dirty(b"   \n"));
+        assert!(is_dirty(b" M src/x.rs\n"));
+        assert!(is_dirty(b"?? new.txt\n"));
+    }
+
+    #[test]
+    fn diff_from_bytes_flags_binary() {
+        let (d, bin, trunc) = diff_from_bytes(b"Binary files a/x and b/x differ\n");
+        assert!(bin);
+        assert!(!trunc);
+        assert_eq!(d, "");
+    }
+
+    #[test]
+    fn diff_from_bytes_passes_text_through() {
+        let (d, bin, trunc) = diff_from_bytes(b"@@ -1 +1 @@\n-a\n+b\n");
+        assert!(!bin);
+        assert!(!trunc);
+        assert!(d.contains("+b"));
+    }
+}

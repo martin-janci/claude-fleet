@@ -9,9 +9,9 @@
 //! drag-drop event into [`UploadAllowList`] with a short TTL — are accepted.
 //! Anything else is `E_FORBIDDEN` (SEC-9).
 
-use crate::ipc_error::{codes, IpcError};
-use crate::shell::quote;
-use crate::ssh::SshClient;
+use fleet_core::ipc_error::{codes, IpcError};
+use fleet_core::shell::quote;
+use fleet_core::ssh::SshClient;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -114,8 +114,8 @@ pub async fn upload_to_session(
     ssh: State<'_, Arc<SshClient>>,
     allow: State<'_, Arc<UploadAllowList>>,
 ) -> Result<Vec<String>, IpcError> {
-    crate::validate::host_alias(&args.host_alias)?;
-    crate::validate::tmux_name_addressable(&args.session_name)?;
+    fleet_core::validate::host_alias(&args.host_alias)?;
+    fleet_core::validate::tmux_name_addressable(&args.session_name)?;
     if args.local_paths.is_empty() {
         return Ok(vec![]);
     }
@@ -144,7 +144,7 @@ pub async fn upload_to_session(
 
     // Resolve the staging dir (absolute, so the returned paths are pasteable).
     let home = if is_local {
-        std::env::var("HOME").map_err(|_| IpcError::new("E_UPLOAD", "HOME not set"))?
+        std::env::var("HOME").map_err(|_| IpcError::new(codes::E_UPLOAD, "HOME not set"))?
     } else {
         ssh.remote_home(&args.host_alias).await?
     };
@@ -154,11 +154,11 @@ pub async fn upload_to_session(
 
     if is_local {
         std::fs::create_dir_all(&dir)
-            .map_err(|e| IpcError::new("E_UPLOAD", format!("mkdir {dir}: {e}")))?;
+            .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("mkdir {dir}: {e}")))?;
         for (src, name) in args.local_paths.iter().zip(&names) {
             let dest = format!("{dir}/{name}");
             std::fs::copy(src, &dest)
-                .map_err(|e| IpcError::new("E_UPLOAD", format!("copy {src}: {e}")))?;
+                .map_err(|e| IpcError::new(codes::E_UPLOAD, format!("copy {src}: {e}")))?;
             remote_paths.push(dest);
         }
     } else {
@@ -167,7 +167,7 @@ pub async fn upload_to_session(
             .await?;
         if !mkdir.status.success() {
             return Err(IpcError::new(
-                "E_UPLOAD",
+                codes::E_UPLOAD,
                 format!(
                     "mkdir on {} failed: {}",
                     args.host_alias,

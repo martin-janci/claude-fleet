@@ -249,7 +249,33 @@ Frontend:
 ## Out of scope
 
 - Timeline events for bg / external rows (Conversation covers the need).
-- Markdown rendering, loading older turns, sending prompts from the tab.
+- Loading older turns.
+- ~~Markdown rendering, sending prompts from the tab.~~ Both landed later:
+  reply text renders as markdown, and a tmux-backed session gets a composer
+  under the thread (`send_prompt`, the same path as the Send-prompt dialog;
+  Enter sends, Shift+Enter breaks a line). The sent prompt shows as a pending
+  turn until a poll brings back a transcript carrying it. bg / external rows
+  stay read-only, with a note saying why.
+- Live indicator (later still): under the last turn the tab shows a pulsing
+  "Working…" row with the REPL's spinner text, "Sent, waiting for Claude…"
+  after a composer send, or an amber "Claude is waiting for you in the
+  terminal" banner with an Open terminal button when the pane shows a
+  dialog. Source: the row's `claude_status` (row events) laid under an
+  on-demand `session_activity` probe (one `capture-pane` of the tail run
+  through `pane_intel::analyze`, polled every 2 s only while something is
+  live). A quiet session (idle / completed / stopped / failed) re-reads the
+  transcript only every 15 s or when its `turn_seq` moves, instead of the
+  5 s cadence.
+- Ten follow-up iterations (2026-09-16, PRs #115–#124) layered on the
+  above: ✗ on tool calls whose result was an error; turn duration and an
+  open tool group on the running turn; per-session drafts and composer
+  focus; "↓ N new" while scrolled up; Load older (a `turns` argument on
+  `session_conversation`, clamped to 100 with a scaled read); a context
+  meter with Compact suggested from 70 %; two review rounds (multibyte
+  panic in `parse_trailing_number`, probe TTL and guards, slash sends,
+  Load older budget, Press Enter bookkeeping, spinner false positives);
+  ArrowUp prompt recall; file paths in replies opening the Files tab at a
+  line. User-facing summary: `docs/conversation-tab.md`.
 - The tmux-session cwd fallback in `find_for_session` can, in principle,
   bind a tmux row to an interactive session running elsewhere in the same
   directory; unchanged here.

@@ -1,4 +1,5 @@
-import { writable, derived } from 'svelte/store';
+import { derived } from 'svelte/store';
+import { createRowStore } from './row_store';
 import { invokeCmd, invokeCmdAbortable, type Result } from './result';
 
 export interface AccountRow {
@@ -28,7 +29,16 @@ export function accountLabel(a: AccountRow | null | undefined): string {
   return 'unknown account';
 }
 
-export const accounts = writable<AccountRow[]>([]);
+const rows = createRowStore<AccountRow, string>({ key: (a) => a.uuid });
+export const accounts = rows.store;
+
+/** "email (seat_tier)" — the one-line account label used in session
+ *  details and the prompt composer; '—' when there is no account. */
+export function accountEmailTier(a: AccountRow | null): string {
+  if (!a) return '—';
+  const email = a.email ?? a.uuid;
+  return a.seat_tier ? `${email} (${a.seat_tier})` : email;
+}
 
 /** O(1) uuid -> account lookup, derived once per `accounts` change. */
 export const accountByUuid = derived(accounts, ($a) => new Map($a.map((a) => [a.uuid, a])));
@@ -39,22 +49,8 @@ export async function loadAccounts(): Promise<Result<AccountRow[]>> {
   return r;
 }
 
-export async function bootstrapAccounts(): Promise<Result<AccountRow[]>> {
-  const r = await invokeCmd<AccountRow[]>('list_accounts');
-  if (r.ok) accounts.set(r.value);
-  return r;
-}
-
-function mergeInto(arr: AccountRow[], row: AccountRow): AccountRow[] {
-  const i = arr.findIndex((a) => a.uuid === row.uuid);
-  if (i === -1) return [...arr, row];
-  const next = arr.slice();
-  next[i] = row;
-  return next;
-}
-
-export function mergeAccount(row: AccountRow): void {
-  accounts.update((arr) => mergeInto(arr, row));
+function mergeAccount(row: AccountRow): void {
+  rows.merge(row);
 }
 
 /** Set (or, with `null`/empty/whitespace, clear) an account's nickname. */
@@ -68,9 +64,9 @@ export async function setAccountNickname(
 }
 
 /** Apply a burst of `account:upserted` rows in ONE store update. */
-export function applyAccountEvents(rows: readonly AccountRow[]): void {
-  if (rows.length === 0) return;
-  accounts.update((arr) => rows.reduce(mergeInto, arr));
+export function applyAccountEvents(rows_: readonly AccountRow[]): void {
+  if (rows_.length === 0) return;
+  accounts.update((arr) => rows_.reduce(rows.mergeInto, arr));
 }
 
 // No removeAccount — backend never deletes accounts in iter 4a.
@@ -88,10 +84,6 @@ export interface ProbePreview {
     organization_uuid: string | null;
     seat_tier: string | null;
   } | null;
-}
-
-export async function probeSshAlias(sshAlias: string): Promise<Result<ProbePreview>> {
-  return invokeCmd<ProbePreview>('probe_ssh_alias', { args: { ssh_alias: sshAlias } });
 }
 
 export async function probeSshAliasAbortable(

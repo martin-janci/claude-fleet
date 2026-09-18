@@ -5,8 +5,6 @@
     sessions,
     loadSessions,
     killSession,
-    renameSession,
-    setFriendlyName,
     recreateSession,
     purgeProject,
     showBgAgents,
@@ -17,7 +15,8 @@
   import { describePurge, purgeHostsForProject } from './purge';
   import { type ProjectRow } from './projects';
   import { selectedSession, selectSession } from './selection';
-  import { forgetSessionUi, migrateSessionUi } from './session_ui';
+  import { forgetSessionUi } from './session_ui';
+  import { applySessionRename, renameKeyHandler } from './session_rename';
   import { readPref, writePref } from './prefs';
   import { theme, cycleTheme } from './theme';
   import NewSessionDialog from './NewSessionDialog.svelte';
@@ -42,8 +41,8 @@
     type SessionPredicate,
   } from './sidebar_index';
   import {
-    attentionReason,
-    stuckSnapshot,
+    countNeedsYou,
+    needsYou,
     worstSeverityByProject,
   } from './attention';
   import { attentionIdleMinutes } from './notify';
@@ -129,13 +128,13 @@
   let pendingKill: SessionRow | null = $state(null);
   let pendingRecreate: SessionRow | null = $state(null);
 
-  // ── Triage (FE-3 / FE-4) ──
-  // "N stuck" counter doubles as a stuck-only filter; "needs attention" is
-  // the wider pill (stuck, safe-kill pending/failed, ghost, failed, idle >
-  // N min). Both are session-scoped (not persisted): a filter that hides
-  // healthy sessions should not survive a restart unnoticed.
-  let stuckOnly = $state(false);
-  let attentionOnly = $state(false);
+  // ── Triage (FE-3 / FE-4, now P13 / T1) ──
+  // One ranked queue. The "Needs you" pill counts and filters the rows that
+  // rank() places in a needs-you bucket: waiting on you, stuck, failed,
+  // done-unread, broken lifecycle, or idle > N min. Session-scoped (not
+  // persisted): a filter that hides healthy sessions should not survive a
+  // restart unnoticed.
+  let needsYouOnly = $state(false);
   // Coarse clock for the idle rule; a 30 s tick is plenty for a minutes-level
   // threshold and keeps the derived tree from re-running every second.
   let nowSec = $state(Math.floor(Date.now() / 1000));
@@ -145,12 +144,9 @@
   });
   const attentionOpts = $derived({ idleSecs: $attentionIdleMinutes * 60, now: nowSec });
   const rowPredicate = $derived.by((): SessionPredicate => {
-    if (stuckOnly) return (s) => s.stuck_kind !== null;
-    if (attentionOnly) {
-      const opts = attentionOpts;
-      return (s) => attentionReason(s, opts) !== null;
-    }
-    return null;
+    if (!needsYouOnly) return null;
+    const opts = attentionOpts;
+    return (s) => needsYou(s, opts);
   });
 
   // Multi-select for bulk Kill / Send prompt. Rows are toggled with
@@ -272,14 +268,10 @@
   const hostVisibleSessions = $derived(
     $sessions.filter((s) => sessionVisible(s, $hostFilter, $showBgAgents)),
   );
-  // Via stuckSnapshot (not a raw `stuck_kind !== null` filter) so an
-  // `external` row — read-only, excluded from every attention signal per
-  // spec §5 — never inflates the "N stuck" pill.
-  const stuckCount = $derived(stuckSnapshot(hostVisibleSessions).size);
-  const attentionCount = $derived.by(() => {
-    const opts = attentionOpts;
-    return hostVisibleSessions.filter((s) => attentionReason(s, opts) !== null).length;
-  });
+  // countNeedsYou() classifies each row, and classify() files an external
+  // (Outside fleet) row as working/idle, so a read-only row never inflates
+  // the pill (spec §5).
+  const needsYouTotal = $derived(countNeedsYou(hostVisibleSessions, attentionOpts));
   const severityByProject = $derived(worstSeverityByProject(hostVisibleSessions));
 
   // Only show projects that either match the filter directly OR have at least
@@ -496,50 +488,24 @@
 
   async function commitRename() {
     if (committingRename || !renaming) return;
-    const next = renameValue.trim();
-    if (renaming.mode === 'label') {
-      // Empty is meaningful here: it clears the label.
-      if (next === renaming.original.trim()) {
-        cancelRename();
-        return;
-      }
-      committingRename = true;
-      try {
-        const r = await setFriendlyName(renaming.host_alias, renaming.tmux_name, next);
-        if (!r.ok) {
-          renameError = r.error.message;
-          pushError(r.error, 'Label update failed');
-          return;
-        }
-        cancelRename();
-      } finally {
-        committingRename = false;
-      }
-      return;
-    }
-    if (!next || next === renaming.tmux_name) {
-      cancelRename();
-      return;
-    }
+    // Target the exact row that was double-clicked — host + old name from
+    // the pinned identity, never a lookup by name alone.
+    const target = renaming;
     committingRename = true;
     try {
-      // Target the exact row that was double-clicked — host + old name from
-      // the pinned identity, never a lookup by name alone.
-      const target = renaming;
-      const { host_alias: hostAlias, tmux_name: oldName } = target;
-      const r = await renameSession(hostAlias, oldName, next);
-      if (!r.ok) {
-        renameError = r.error.message;
-        pushError(r.error, 'Rename failed');
+      const outcome = await applySessionRename(
+        { ...target, friendly_name: target.mode === 'label' ? target.original : null },
+        target.mode,
+        renameValue,
+      );
+      if (outcome.kind === 'error') {
+        renameError = outcome.error.message;
         return;
       }
-      // Persisted UI state (pane widths, collapsed) is keyed by tmux name;
-      // bring it along to the new name so the user's layout sticks.
-      migrateSessionUi(r.value.host_alias, oldName, r.value.tmux_name);
       // If the renamed session was the selected one, follow the rename.
       const cur = $selectedSession;
-      if (cur && sameSession(cur, target)) {
-        selectSession(r.value, { follow: true });
+      if (outcome.kind === 'ok' && outcome.row && cur && sameSession(cur, target)) {
+        selectSession(outcome.row, { follow: true });
       }
       cancelRename();
     } finally {
@@ -547,15 +513,7 @@
     }
   }
 
-  function onRenameKey(e: KeyboardEvent) {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      void commitRename();
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      cancelRename();
-    }
-  }
+  const onRenameKey = renameKeyHandler(() => void commitRename(), cancelRename);
 
   function askKill(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
@@ -682,8 +640,7 @@
   <SidebarFilters
     bind:search
     bind:recency
-    bind:stuckOnly
-    bind:attentionOnly
+    bind:needsYouOnly
     {loading}
     {loadError}
     {onRefresh}
@@ -692,8 +649,7 @@
     showSettings={$settingsOpen}
     onOpenTasks={() => (showTasks = true)}
     onOpenSettings={() => settingsOpen.set(true)}
-    {stuckCount}
-    {attentionCount}
+    needsYouCount={needsYouTotal}
     {selectMode}
     {toggleSelectMode}
     selectedCount={selectedIds.size}

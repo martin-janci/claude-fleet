@@ -10,6 +10,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import SettingsDialog from './SettingsDialog.svelte';
 import { hosts } from './hosts';
+import { composerPresets, resetComposerPresets, DEFAULT_PRESETS } from './composer_presets';
 
 const sample = [
   { alias: 'local', ssh_alias: null, reachable: true, claude_version: '2.1.145', tmux_version: '3.5a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false },
@@ -451,5 +452,32 @@ describe('SettingsDialog projects (W5 G3)', () => {
     expect(screen.getByTestId('projects-preview-local')).toHaveTextContent('/srv/env/<repo>');
     // remote hosts never see the env var
     expect(screen.getByTestId('projects-preview-mefistos')).toHaveTextContent('~/projects/<repo>');
+  });
+
+  it('lists the composer presets and edits them in place', async () => {
+    resetComposerPresets();
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await tick();
+    const section = screen.getByTestId('composer-section');
+    expect(section.textContent).toContain('Conversation composer');
+    const labels = screen.getAllByTestId('preset-label') as HTMLInputElement[];
+    expect(labels).toHaveLength(DEFAULT_PRESETS.length);
+    expect(labels[0].value).toBe(DEFAULT_PRESETS[0].label);
+
+    await fireEvent.input(labels[0], { target: { value: 'Wipe' } });
+    expect(get(composerPresets)[0].label).toBe('Wipe');
+    const texts = screen.getAllByTestId('preset-text') as HTMLTextAreaElement[];
+    await fireEvent.input(texts[0], { target: { value: '/clear now' } });
+    expect(get(composerPresets)[0].text).toBe('/clear now');
+
+    await fireEvent.click(screen.getByTestId('preset-add'));
+    expect(get(composerPresets)).toHaveLength(DEFAULT_PRESETS.length + 1);
+    expect(screen.getAllByTestId('preset-label')).toHaveLength(DEFAULT_PRESETS.length + 1);
+
+    await fireEvent.click(screen.getAllByTestId('preset-remove')[0]);
+    expect(get(composerPresets)[0].label).toBe(DEFAULT_PRESETS[1].label);
+
+    await fireEvent.click(screen.getByTestId('preset-reset'));
+    expect(get(composerPresets)).toEqual(DEFAULT_PRESETS);
   });
 });

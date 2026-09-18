@@ -1,7 +1,7 @@
 //! Start the embedded MCP control API at launch when the user enabled it.
 
-use crate::store::Store;
-use crate::{cancel, mcp, ssh};
+use fleet_core::store::Store;
+use fleet_core::{cancel, mcp, ssh};
 use std::sync::Mutex;
 
 /// Read the MCP control-API settings and, if the user enabled it, start the
@@ -13,42 +13,32 @@ pub(crate) fn maybe_start_mcp(
     store: &std::sync::Arc<Mutex<Store>>,
     ssh: &std::sync::Arc<ssh::SshClient>,
     reg: &std::sync::Arc<cancel::CancellationRegistry>,
-    tunnels: &std::sync::Arc<crate::service::tunnel::TunnelSupervisor>,
+    tunnels: &std::sync::Arc<fleet_core::service::tunnel::TunnelSupervisor>,
     guards: &mcp::McpGuards,
 ) {
     use tauri::Manager;
-    let (enabled, port, token) = {
+    let (port, token) = {
         let Ok(s) = store.lock() else {
             return;
         };
-        let enabled = s
-            .get_setting(mcp::SETTING_ENABLED)
-            .ok()
-            .flatten()
-            .as_deref()
-            == Some("true");
-        let port = s
-            .get_setting(mcp::SETTING_PORT)
-            .ok()
-            .flatten()
-            .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(mcp::DEFAULT_PORT);
-        let token = s.get_setting(mcp::SETTING_TOKEN).ok().flatten();
-        (enabled, port, token)
-    };
-    if !enabled {
-        tracing::info!("control API disabled (mcp.enabled is not true)");
-        return;
-    }
-    // Ensure a token exists before the listener binds — never a tokenless API.
-    let token = match token {
-        Some(t) if !t.is_empty() => t,
-        _ => {
-            let fresh = mcp::generate_token();
-            if let Ok(s) = store.lock() {
-                let _ = s.set_setting(mcp::SETTING_TOKEN, &fresh);
+        let cfg = match mcp::settings::McpSettings::read(&s) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!("control API: cannot read settings: {e}");
+                return;
             }
-            fresh
+        };
+        if !cfg.enabled {
+            tracing::info!("control API disabled (mcp.enabled is not true)");
+            return;
+        }
+        // Ensure a token exists before the listener binds — never a tokenless API.
+        match mcp::settings::ensure_master_token(&s) {
+            Ok(token) => (cfg.port, token),
+            Err(e) => {
+                tracing::warn!("control API: cannot mint a master token: {e}");
+                return;
+            }
         }
     };
     let result = tauri::async_runtime::block_on(async {
@@ -58,12 +48,21 @@ pub(crate) fn maybe_start_mcp(
             std::sync::Arc::clone(reg),
             std::sync::Arc::clone(tunnels),
             guards.clone(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             port,
             token,
+            Vec::new(),
         )
         .await;
         if r.is_ok() {
-            if let Err(e) = crate::service::provision::reestablish_tunnels(store, tunnels, port) {
+            // The guard is dropped when the first closure returns, before
+            // `reestablish_tunnels` locks the store again.
+            let tunnels_up = fleet_core::ipc_error::lock(store)
+                .and_then(|s| fleet_core::service::hub::HubBase::read(&s))
+                .and_then(|base| {
+                    fleet_core::service::provision::reestablish_tunnels(store, tunnels, &base)
+                });
+            if let Err(e) = tunnels_up {
                 tracing::warn!("control API: reestablish_tunnels failed: {e}");
             }
         }

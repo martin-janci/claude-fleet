@@ -9,9 +9,10 @@
   // Keyboard: no type-ahead, stray letters do nothing, letters are ignored
   // while an input has focus, and no bound key is destructive — Rotate and
   // Remove are reachable only by Tab or pointer.
+  import { isEditable } from './terminal_keys';
   import { onMount } from 'svelte';
   import { hosts } from './hosts';
-  import { accounts } from './accounts';
+  import { accounts, accountByUuid } from './accounts';
   import { sessions } from './sessions';
   import {
     accountUsage,
@@ -92,7 +93,6 @@
   const groups = $derived(filterGroups(allGroups, filter));
   const ordered = $derived(groups.flatMap((g) => g.hosts));
   const newestClaude = $derived(newestClaudeVersion($hosts));
-  const accountByUuid = $derived(new Map($accounts.map((a) => [a.uuid, a])));
 
   const rowInfo = $derived.by(() => {
     const m = new Map<string, HostRowInfo>();
@@ -124,7 +124,7 @@
 
   const selectedHost = $derived($hosts.find((h) => h.alias === selectedAlias) ?? null);
   const selectedAccount = $derived(
-    selectedHost?.account_uuid ? (accountByUuid.get(selectedHost.account_uuid) ?? null) : null,
+    selectedHost?.account_uuid ? ($accountByUuid.get(selectedHost.account_uuid) ?? null) : null,
   );
   const selectedSessions = $derived(
     selectedHost
@@ -222,7 +222,7 @@
   }
 
   function startEdit(where: 'list' | 'detail', uuid: string | null | undefined) {
-    if (uuid && accountByUuid.has(uuid)) editing = { uuid, where };
+    if (uuid && $accountByUuid.has(uuid)) editing = { uuid, where };
   }
 
   function endEdit() {
@@ -230,12 +230,6 @@
     editing = null;
     if (where === 'detail') focusDetail();
     else focusList();
-  }
-
-  function isEditable(el: HTMLElement | null): boolean {
-    if (!el) return false;
-    const tag = el.tagName;
-    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
   }
 
   function onFilterKeydown(e: KeyboardEvent) {

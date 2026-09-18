@@ -46,12 +46,6 @@ export async function refreshProjects(): Promise<Result<ProjectTreeRow[]>> {
   return r;
 }
 
-export async function bootstrapProjects(): Promise<Result<ProjectTreeRow[]>> {
-  const r = await invokeCmd<ProjectTreeRow[]>('list_projects');
-  if (r.ok) projects.set(r.value);
-  return r;
-}
-
 export function mergeProject(row: ProjectTreeRow): void {
   projects.update((arr) => {
     const i = arr.findIndex((p) => p.project.id === row.project.id);
@@ -97,15 +91,7 @@ function removeWorktreeRow(arr: ProjectTreeRow[], id: number): ProjectTreeRow[] 
   });
 }
 
-export function mergeProjectFromEvent(row: ProjectRow): void {
-  projects.update((arr) => mergeProjectRow(arr, row));
-}
-
-export function mergeWorktree(row: WorktreeRow): void {
-  projects.update((arr) => mergeWorktreeRow(arr, row));
-}
-
-export function removeWorktree(id: number): void {
+function removeWorktree(id: number): void {
   projects.update((arr) => removeWorktreeRow(arr, id));
 }
 
@@ -127,26 +113,6 @@ export function applyProjectEvents(events: readonly ProjectEvent[]): void {
       else next = removeWorktreeRow(next, ev.id);
     }
     return next;
-  });
-}
-
-export interface WorktreeOccupant {
-  host_alias: string;
-  tmux_name: string;
-}
-
-export interface WorktreeOccupancy {
-  worktree: WorktreeRow;
-  occupants: WorktreeOccupant[];
-}
-
-/** List every worktree fleet knows about, each tagged with the alive Claude
- *  sessions currently using it. Pass `projectId` to scope to one project. */
-export async function listWorktreeOccupancy(
-  projectId: number | null = null,
-): Promise<Result<WorktreeOccupancy[]>> {
-  return invokeCmd<WorktreeOccupancy[]>('list_worktrees', {
-    args: { project_id: projectId },
   });
 }
 

@@ -1,23 +1,47 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import {
     catalog, catalogConfig, loadCatalogConfig, configureCatalog, loadCatalog, loadAssets, loadInventory, scanHosts,
-    type HostScanResult, type AssetInventoryRow,
+    planSync, lastSync, lastSyncRun,
+    commitPending, pushCatalog, repoStatus, repoStatusStore,
+    type HostScanResult, type AssetInventoryRow, type SyncPlan, type SyncRunSummary, type AssetKind,
   } from './assets';
   import { hosts } from './hosts';
   import AssetList from './AssetList.svelte';
   import AssetDetail from './AssetDetail.svelte';
   import ImportDialog from './ImportDialog.svelte';
+  import SyncPlanDialog from './SyncPlanDialog.svelte';
+  import SecretsPanel from './SecretsPanel.svelte';
+  import NewAssetDialog from './NewAssetDialog.svelte';
+  import LintAllDialog from './LintAllDialog.svelte';
+  import PromptDialog from './PromptDialog.svelte';
+  import { authorSessionOpened, clearAuthorSessionOpened } from './AuthorSessionDialog.svelte';
+
+  let { visible }: { visible: boolean } = $props();
 
   let setupPath = $state('~/agent-assets');
   let setupRemote = $state('');
-  let busy = $state<'' | 'setup' | 'pull' | 'scan'>('');
+  let busy = $state<'' | 'setup' | 'pull' | 'scan' | 'plan' | 'apply' | 'commit' | 'push'>('');
   let error = $state<string | null>(null);
   let scanResults = $state<HostScanResult[] | null>(null);
   let showProblems = $state(false);
   let showImport = $state(false);
   let filter = $state('');
   let selected = $state<{ kind: string; name: string } | null>(null);
+  let syncPlan = $state<SyncPlan | null>(null);
+  // The most recent plan computed (kept after the dialog closes) so the
+  // SecretsPanel can offer the names its blocked/missing-secret actions
+  // named, without recomputing a plan just to open it.
+  let lastPlan = $state<SyncPlan | null>(null);
+  let showSecrets = $state(false);
+  let showNewAsset = $state(false);
+  let showLintAll = $state(false);
+  let showCommitPrompt = $state(false);
+  // Set (once) to `<kind>::<name>` right before selecting a just-created
+  // asset, so the detail pane opens straight into edit mode for it. Never
+  // cleared: a later re-selection of the same asset re-opening the editor
+  // is a harmless edge case, not a bug worth the extra bookkeeping.
+  let pendingAutoEdit = $state('');
 
   async function refresh() {
     const [a, i] = await Promise.all([loadAssets(), loadInventory()]);
@@ -35,9 +59,34 @@
     await refresh();
   }
 
+  // Every authoring write (create/update/delete/resource/commit/push) goes
+  // through this: reload the asset list and refresh the dirty/ahead/behind
+  // status strip together, so the toolbar never shows a status stale
+  // relative to what's in the list.
+  async function afterWrite() {
+    await Promise.all([refresh(), repoStatus()]);
+  }
+
   onMount(async () => {
     const c = await loadCatalogConfig();
-    if (c.ok && c.value) await reload(false);
+    if (c.ok && c.value) {
+      await reload(false);
+      void repoStatus();
+    }
+    void lastSync();
+  });
+
+  // Tab-focus reload: a session delegated via "Open in session" edits the
+  // catalog repo directly, outside any authoring command, so nothing else
+  // tells this panel to refresh. When the Assets tab regains focus after
+  // one was opened, reload once and clear the flag.
+  let wasVisible = untrack(() => visible);
+  $effect(() => {
+    if (visible && !wasVisible && authorSessionOpened) {
+      clearAuthorSessionOpened();
+      void reload(false);
+    }
+    wasVisible = visible;
   });
 
   async function setup() {
@@ -65,7 +114,87 @@
     showImport = true;
   }
 
+  function onAssetCreated(kind: AssetKind, name: string) {
+    showNewAsset = false;
+    pendingAutoEdit = `${kind}::${name}`;
+    selected = { kind, name };
+    void afterWrite();
+  }
+
+  function onAssetDeleted() {
+    selected = null;
+    void afterWrite();
+  }
+
+  // `E_CATALOG_GIT` from the shared `git()` helper (repo.rs) carries git's
+  // own stderr in `error.details.stderr`, but the fixed message
+  // (`git <args>: failed`) says nothing about *why* — no upstream, an auth
+  // failure, non-fast-forward, all look identical without it. Append it,
+  // truncated to a sane length in case git dumped something huge.
+  const MAX_GIT_STDERR = 500;
+  function withGitStderr(err: { message: string; details?: unknown }): string {
+    const details = err.details as { stderr?: unknown } | undefined;
+    const stderr = typeof details?.stderr === 'string' ? details.stderr.trim() : '';
+    if (!stderr) return err.message;
+    const truncated = stderr.length > MAX_GIT_STDERR ? `${stderr.slice(0, MAX_GIT_STDERR)}…` : stderr;
+    return `${err.message}: ${truncated}`;
+  }
+
+  async function submitCommit(message: string) {
+    showCommitPrompt = false;
+    busy = 'commit'; error = null;
+    const r = await commitPending(message);
+    busy = '';
+    if (!r.ok) { error = withGitStderr(r.error); return; }
+    await afterWrite();
+  }
+
+  async function doPush() {
+    busy = 'push'; error = null;
+    const r = await pushCatalog();
+    busy = '';
+    if (!r.ok) { error = withGitStderr(r.error); return; }
+    await refresh();
+  }
+
+  function onLintAllSelect(kind: string, name: string) {
+    showLintAll = false;
+    selected = { kind, name };
+  }
+
+  async function requestSync(filter: { hostAlias?: string; kind?: string; name?: string }) {
+    busy = 'plan'; error = null;
+    const r = await planSync(filter);
+    busy = '';
+    if (!r.ok) { error = r.error.message; return; }
+    syncPlan = r.value;
+    lastPlan = r.value;
+  }
+
+  function onSyncApplied(summary: SyncRunSummary) {
+    // Keep the dialog mounted: it renders the per-action outcome badges and
+    // the "restart Claude on <host>" strip from this same `summary`, and it
+    // now disables its own Apply button and relabels Close to "Done" once
+    // `summary` is set. The user dismisses it explicitly.
+    lastSyncRun.set(summary);
+    void refresh();
+  }
+
+  function summarizeRun(run: SyncRunSummary): string {
+    const counts: Record<string, number> = {};
+    for (const h of run.hosts) counts[h.status] = (counts[h.status] ?? 0) + 1;
+    const parts = Object.entries(counts).map(([k, n]) => `${n} ${k}`);
+    return `${new Date(run.finished_at * 1000).toLocaleString()} — ${parts.join(', ') || 'no hosts'}`;
+  }
+
   const shortHead = $derived(($catalogConfig?.head_commit ?? '').slice(0, 7));
+  const secretNames = $derived(
+    lastPlan
+      ? Array.from(
+          new Set(lastPlan.hosts.flatMap((h) => h.actions.flatMap((a) => [...a.secrets, ...a.missing_secrets]))),
+        ).sort()
+      : [],
+  );
 </script>
 
 <div class="assets-panel">
@@ -85,11 +214,33 @@
       <button onclick={pull} disabled={busy !== ''}>{busy === 'pull' ? 'Pulling…' : 'Pull'}</button>
       <button onclick={scan} disabled={busy !== ''} data-testid="assets-scan">{busy === 'scan' ? 'Scanning…' : 'Scan hosts'}</button>
       <button onclick={() => (showImport = true)} disabled={busy !== ''}>Import from host</button>
+      <button onclick={() => requestSync({})} disabled={busy !== ''} data-testid="assets-sync">{busy === 'plan' ? 'Planning…' : 'Sync'}</button>
+      <button onclick={() => (showSecrets = true)} disabled={busy !== ''} data-testid="assets-secrets">Secrets</button>
+      <button onclick={() => (showNewAsset = true)} disabled={busy !== ''} data-testid="assets-new">New asset</button>
+      <button onclick={() => (showLintAll = true)} disabled={busy !== ''} data-testid="assets-lint-all">Lint all</button>
+      {#if $repoStatusStore && $repoStatusStore.dirty > 0}
+        <button onclick={() => (showCommitPrompt = true)} disabled={busy !== ''} data-testid="assets-commit-pending">{busy === 'commit' ? 'Committing…' : 'Commit pending'}</button>
+      {/if}
+      <button
+        onclick={doPush}
+        disabled={busy !== '' || !$repoStatusStore?.has_upstream}
+        data-testid="assets-push"
+        title={$repoStatusStore?.has_upstream ? '' : 'no upstream configured'}
+      >{busy === 'push' ? 'Pushing…' : `Push${$repoStatusStore?.ahead ? ` ↑${$repoStatusStore.ahead}` : ''}`}</button>
+      {#if $lastSyncRun}
+        <span class="last-sync" data-testid="assets-last-sync">{summarizeRun($lastSyncRun)}</span>
+      {/if}
       {#if $catalog && $catalog.problems.length > 0}
         <button class="badge" onclick={() => (showProblems = !showProblems)} data-testid="assets-problems">{$catalog.problems.length} problems</button>
       {/if}
       <input class="filter" placeholder="filter" bind:value={filter} />
     </div>
+    {#if $repoStatusStore}
+      <p class="repo-status" data-testid="assets-repo-status">
+        {$repoStatusStore.head.slice(0, 7)} · {$repoStatusStore.dirty} dirty
+        {#if $repoStatusStore.has_upstream}· ↑{$repoStatusStore.ahead ?? 0} ↓{$repoStatusStore.behind ?? 0}{:else}· no upstream{/if}
+      </p>
+    {/if}
     {#if error}<p class="error">{error}</p>{/if}
     {#if scanResults}
       <p class="scan-result" data-testid="assets-scan-result">{scanResults.map((r) => `${r.host}: ${r.status}${r.detail ? ` (${r.detail})` : ''}`).join(' · ')}</p>
@@ -107,7 +258,16 @@
       </div>
       <div class="right">
         {#if selected}
-          <AssetDetail kind={selected.kind} name={selected.name} hosts={$hosts} />
+          {#key `${selected.kind}::${selected.name}`}
+            <AssetDetail
+              kind={selected.kind}
+              name={selected.name}
+              hosts={$hosts}
+              onsync={requestSync}
+              ondeleted={onAssetDeleted}
+              startInEdit={pendingAutoEdit === `${selected.kind}::${selected.name}`}
+            />
+          {/key}
         {:else}
           <p class="muted empty">Select an asset.</p>
         {/if}
@@ -115,7 +275,35 @@
     </div>
   {/if}
   {#if showImport}
-    <ImportDialog onclose={() => (showImport = false)} ondone={() => { showImport = false; reload(false); }} />
+    <ImportDialog onclose={() => (showImport = false)} ondone={() => { showImport = false; reload(false); void repoStatus(); }} />
+  {/if}
+  {#if syncPlan}
+    <SyncPlanDialog
+      plan={syncPlan}
+      onclose={() => (syncPlan = null)}
+      onapplied={onSyncApplied}
+      onopensecrets={() => (showSecrets = true)}
+      onapplying={(a) => (busy = a ? 'apply' : '')}
+    />
+  {/if}
+  {#if showSecrets}
+    <SecretsPanel names={secretNames} onclose={() => (showSecrets = false)} />
+  {/if}
+  {#if showNewAsset}
+    <NewAssetDialog onclose={() => (showNewAsset = false)} onsaved={onAssetCreated} />
+  {/if}
+  {#if showLintAll}
+    <LintAllDialog onclose={() => (showLintAll = false)} onselect={onLintAllSelect} />
+  {/if}
+  {#if showCommitPrompt}
+    <PromptDialog
+      title="Commit pending changes"
+      label="Commit message"
+      initialValue="catalog: commit pending changes"
+      confirmLabel="Commit"
+      onsubmit={submitCommit}
+      oncancel={() => (showCommitPrompt = false)}
+    />
   {/if}
 </div>
 
@@ -127,6 +315,8 @@
   .path { color: var(--fg-muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .head { font-family: ui-monospace, monospace; color: var(--fg-muted); }
   .badge { color: #d97706; }
+  .last-sync { color: var(--fg-muted); font-size: 11px; white-space: nowrap; }
+  .repo-status { font-size: 11px; color: var(--fg-muted); margin: 0; padding: 2px 10px; font-family: ui-monospace, monospace; }
   .filter { margin-left: auto; width: 160px; }
   .body { display: grid; grid-template-columns: 300px 1fr; flex: 1; min-height: 0; }
   .left { border-right: 1px solid var(--border); min-height: 0; overflow: auto; }

@@ -24,9 +24,11 @@
     contextLevel,
     ciStatusColor,
     ciStatusLabel,
+    rank,
     stuckKindLabel,
     STUCK_COLOR,
   } from './attention';
+  import { attentionIdleMinutes } from './notify';
   import { pushError } from './toasts';
   import { rowElapsed, rowPrompt, timeAgo } from './session_status';
 
@@ -83,6 +85,9 @@
   const sessSelected = $derived($selectedSession?.id === sess.id);
   const ctxLevel = $derived(contextLevel(sess.context_pct));
   const elapsed = $derived(rowElapsed(sess, nowSec));
+  // The row's triage bucket (P13). Published as data-bucket because component
+  // CSS never reaches jsdom, so this is how tests assert a row's triage state.
+  const triage = $derived(rank(sess, { idleSecs: $attentionIdleMinutes * 60, now: nowSec }));
   const promptText = $derived(rowPrompt(sess));
   const primaryIsFriendly = $derived($showFriendlyNames && !!sess.friendly_name);
   const primaryName = $derived(primaryIsFriendly ? sess.friendly_name! : sess.tmux_name);
@@ -140,6 +145,7 @@
   data-testid="sess-row"
   data-session-id={sess.id}
   data-stuck={sess.stuck_kind ?? undefined}
+  data-bucket={triage.bucket}
   role="button"
   tabindex="0"
   ondblclick={(e) => sess.status !== 'ghost' && !readOnly && beginLabelEdit(sess, e)}

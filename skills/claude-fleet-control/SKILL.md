@@ -61,7 +61,8 @@ and is not derivable from `hostname`. Look it up:
 2. `whoami { tmux_name: "<#S>" }` — returns your fleet row (`session_id`,
    `host_alias`, …). `E_NOTFOUND`: fleet has not reconciled you yet (retry after
    `list_sessions`). `E_AMBIGUOUS`: the same name exists on several hosts — pick
-   yours from the error's `details.candidates` (`{ session_id, host_alias }`).
+   yours from the result's `structuredContent.details.candidates`
+   (`{ session_id, host_alias }`).
 3. `register_self { session_id }` (or the `host_alias` + `tmux_name` pair).
 
 The `fleet-friendly-name` skill uses the same lookup.
@@ -136,7 +137,11 @@ Step by step, when you need control between the steps:
 
 Sessions on hosts provisioned before the `UserPromptSubmit` hook only flip
 to `working` on the next reconcile pass; `turn_gt` still works there because
-the `Stop` hook is what bumps `turn_seq`.
+the `Stop` hook is what bumps `turn_seq`. On re-provisioned hosts `blocked`
+(permission prompt, elicitation, usage-limit wait) and `stopped` (Claude
+exited) are hook-driven and immediate; a turn that ended in an API error shows
+as `idle` with a `stop_failure` event in `session_history` — read it before
+re-sending.
 
 For coordination between sessions prefer the inbox over interrupting a peer:
 `send_message { from_session_id, to_session_id, body, kind?, deliver?,
@@ -253,7 +258,11 @@ installed — a host config gap, not something to retry.
 
 ## Recovering from MCP errors
 
-Errors come back as `E_<CODE>: message`. Three classes, three responses:
+A failed call comes back as a **tool result** with `isError: true`: the text
+is `E_<CODE>: message`, and `structuredContent` carries
+`{ code, message, details }` (candidates, `confirm_nonce`, …). Only an
+unknown tool name or arguments that do not match the schema are JSON-RPC
+errors. Three classes, three responses:
 
 - **Application errors** (`E_NOTFOUND`, `E_INVALID`, `E_VALIDATE`,
   `E_SELF_TARGET`, `E_BG_SESSION`, `E_HOST_OFFLINE`, `E_TMUX`, `E_LOCK`,
@@ -262,8 +271,10 @@ Errors come back as `E_<CODE>: message`. Three classes, three responses:
   `list_hosts`, `list_projects`, `list_worktrees`) before any retry.
   `E_NOTFOUND` on a session id means your id is stale (ghosted, recreated,
   renamed) — re-list, never loop the same id.
-- **Transient transport errors** (timeout, connection drop, 5xx): retry once
-  after a short wait, then re-sync. If it fails again, surface.
+- **Transient transport errors** (timeout, connection drop, 5xx) and the
+  server-side wall clock (`E_TIMEOUT`: 60 s for reads, 300 s for lifecycle /
+  provisioning, 660 s for bounded waits): retry once after a short wait, then
+  re-sync. If it fails again, surface.
 - **Destructive ops** (`kill_session`, `safe_kill_session`, `recreate_session`,
   `restart_session`, `delete_worktree`, `remove_host`, `dismiss_ghost_session`,
   `cancel_task`): never auto-retry — a timeout may still have succeeded

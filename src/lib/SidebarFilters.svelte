@@ -2,7 +2,7 @@
   import { sessions, showBgAgents, showFriendlyNames, showRowDetails } from './sessions';
   import { hosts, hostFilter } from './hosts';
   import { hintAnchor } from './hints';
-  import { accounts, type AccountRow } from './accounts';
+  import { accountByUuid } from './accounts';
   import { attentionIdleMinutes } from './notify';
   import Attention from './Attention.svelte';
   import { RECENCY_VALUES, type Recency } from './session_status';
@@ -10,8 +10,7 @@
   let {
     search = $bindable(),
     recency = $bindable(),
-    stuckOnly = $bindable(),
-    attentionOnly = $bindable(),
+    needsYouOnly = $bindable(),
     loading,
     loadError,
     onRefresh,
@@ -20,8 +19,7 @@
     showSettings,
     onOpenTasks,
     onOpenSettings,
-    stuckCount,
-    attentionCount,
+    needsYouCount,
     selectMode,
     toggleSelectMode,
     selectedCount,
@@ -31,8 +29,7 @@
   }: {
     search: string;
     recency: Recency;
-    stuckOnly: boolean;
-    attentionOnly: boolean;
+    needsYouOnly: boolean;
     loading: boolean;
     loadError: string | null;
     onRefresh: () => void;
@@ -41,8 +38,7 @@
     showSettings: boolean;
     onOpenTasks: () => void;
     onOpenSettings: () => void;
-    stuckCount: number;
-    attentionCount: number;
+    needsYouCount: number;
     selectMode: boolean;
     toggleSelectMode: () => void;
     selectedCount: number;
@@ -51,14 +47,9 @@
     clearSelected: () => void;
   } = $props();
 
-  // Lookup map for tooltips + components that resolve a host's account.
-  const accountByUuid = $derived(
-    new Map<string, AccountRow>($accounts.map((a) => [a.uuid, a])),
-  );
-
   function accountLabel(host: { account_uuid: string | null }): string {
     if (!host.account_uuid) return '';
-    const acc = accountByUuid.get(host.account_uuid);
+    const acc = $accountByUuid.get(host.account_uuid);
     if (!acc) return `\n${host.account_uuid}`;
     const email = acc.email ?? acc.uuid;
     return acc.seat_tier ? `\n${email} (${acc.seat_tier})` : `\n${email}`;
@@ -135,26 +126,19 @@
   </nav>
 
   <nav class="triage" aria-label="triage filter">
+    <!-- One triage pill (P13/P27): the ranked queue replaces the old
+         stuck-only and needs-attention pills, which ordered rows two
+         different ways. -->
     <button
-      class="pill stuck-pill"
-      class:active={stuckOnly}
-      class:hot={stuckCount > 0}
-      data-testid="stuck-filter"
-      aria-pressed={stuckOnly}
-      title={stuckOnly ? 'Show all sessions' : 'Show only stuck sessions'}
-      onclick={() => { stuckOnly = !stuckOnly; if (stuckOnly) attentionOnly = false; }}
+      class="pill triage-pill"
+      class:active={needsYouOnly}
+      class:hot={needsYouCount > 0}
+      data-testid="needs-you-filter"
+      aria-pressed={needsYouOnly}
+      title="Counts what is waiting on you now: blocked, stuck, failed, lost, safe-remove pending/failed. Toggling also shows sessions idle > {$attentionIdleMinutes} min."
+      onclick={() => (needsYouOnly = !needsYouOnly)}
     >
-      ⚠ {stuckCount} stuck
-    </button>
-    <button
-      class="pill"
-      class:active={attentionOnly}
-      data-testid="attention-filter"
-      aria-pressed={attentionOnly}
-      title="Stuck, safe-remove pending/failed, lost, failed, or idle > {$attentionIdleMinutes} min"
-      onclick={() => { attentionOnly = !attentionOnly; if (attentionOnly) stuckOnly = false; }}
-    >
-      needs attention ({attentionCount})
+      ⚠ Needs you ({needsYouCount})
     </button>
     <button
       class="pill"
@@ -265,8 +249,8 @@
   .recency { display: flex; gap: 0.25rem; }
   .bg-toggle { display: flex; gap: 0.25rem; }
   .triage { display: flex; gap: 0.25rem; flex-wrap: wrap; align-items: center; }
-  .stuck-pill.hot { color: #e64a4a; border-color: rgba(230, 74, 74, 0.5); }
-  .stuck-pill.active { background: rgba(230, 74, 74, 0.12); }
+  .triage-pill.hot { color: #e64a4a; border-color: rgba(230, 74, 74, 0.5); }
+  .triage-pill.active { background: rgba(230, 74, 74, 0.12); }
   .pill.danger { color: #e64a4a; }
   .pill.danger:hover { border-color: #e64a4a; }
   .bulk-bar {

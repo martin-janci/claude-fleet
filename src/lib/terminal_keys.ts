@@ -244,3 +244,15 @@ export function keyToBytes(ev: KeyLike, opts: KeyOpts): string | null {
 
   return key;
 }
+
+/** True when `el` is a text-entry control — a keystroke there belongs to the
+ *  field, not to a global shortcut. */
+export function isEditable(el: HTMLElement | null): boolean {
+  if (!el) return false;
+  // The terminal's hidden IME proxy is a <textarea> — WebKit runs no input
+  // method on anything else (TerminalView, F9) — but it is the terminal, not
+  // a field: Esc there must reach the app's overlays.
+  if (el.dataset.imeProxy !== undefined) return false;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+}

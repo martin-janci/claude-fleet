@@ -1,6 +1,7 @@
 <script lang="ts">
   import { importHost, type ImportReport } from './assets';
   import { hosts } from './hosts';
+  import Modal from './Modal.svelte';
 
   let { onclose, ondone }: { onclose: () => void; ondone: () => void } = $props();
 
@@ -19,9 +20,8 @@
   }
 </script>
 
-<div class="modal-backdrop" onclick={onclose} role="presentation">
-  <div class="dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-label="Import assets">
-    <h3>Import from host</h3>
+<Modal title="Import from host" {onclose} width="520px" testid="import-dialog">
+  <div class="dialog">
     <p class="muted">Reads the host's Claude config and writes new assets into the catalog working tree. Existing catalog assets are never overwritten. Nothing is committed.</p>
     <label>Host
       <select bind:value={hostAlias} data-testid="import-host">
@@ -43,12 +43,11 @@
       <button class="primary" onclick={() => run(false)} disabled={busy || !report?.dry_run} data-testid="import-confirm" title={report?.dry_run ? '' : 'Run a dry run first'}>Import</button>
     </div>
   </div>
-</div>
+</Modal>
 
 <style>
-  .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 50; }
-  .dialog { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px; width: 520px; max-height: 80vh; overflow: auto; }
-  h3 { margin: 0 0 6px; } h4 { margin: 10px 0 4px; font-size: 12px; }
+  .dialog { max-height: 70vh; overflow: auto; }
+  h4 { margin: 10px 0 4px; font-size: 12px; }
   .muted { color: var(--fg-muted); font-size: 12px; } .error { color: #dc2626; }
   .list { margin: 0; padding-left: 18px; font-size: 12px; max-height: 200px; overflow: auto; }
   .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
