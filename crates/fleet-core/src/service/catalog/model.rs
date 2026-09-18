@@ -551,12 +551,13 @@ pub fn is_valid_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-/// `install_as`'s constraint: non-empty after trimming, every character in
-/// `[A-Za-z0-9._-]`, and not `.` or `..` (both of which are meaningless or
-/// dangerous as a path segment).
+/// `install_as`'s constraint: non-empty, every character in `[A-Za-z0-9._-]`,
+/// and not `.` or `..` (both of which are meaningless or dangerous as a path
+/// segment). The charset is applied to the raw value and nothing is trimmed
+/// first, so surrounding whitespace is simply invalid — `install_name()`
+/// hands the raw value to the harnesses, and the two must agree.
 pub fn is_valid_install_name(s: &str) -> bool {
-    let trimmed = s.trim();
-    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+    if s.is_empty() || s == "." || s == ".." {
         return false;
     }
     s.chars()
@@ -949,6 +950,20 @@ version: "6.3.0"
             a.header.install_as = Some("foo_bar".to_string());
             let problems = a.validate();
             assert!(problems.is_empty(), "{:?}: {problems:?}", a.header.kind);
+        }
+    }
+
+    #[test]
+    fn is_valid_install_name_checks_the_raw_value() {
+        assert!(is_valid_install_name("foo_bar"));
+        assert!(is_valid_install_name("a.b"));
+        assert!(is_valid_install_name("-"));
+        // Nothing is trimmed away first: surrounding whitespace is simply
+        // invalid, because the charset is applied to the raw value.
+        for bad in [
+            "", " ", " foo", "foo ", " foo ", ".", "..", " . ", " .. ", "a/b",
+        ] {
+            assert!(!is_valid_install_name(bad), "{bad:?}");
         }
     }
 

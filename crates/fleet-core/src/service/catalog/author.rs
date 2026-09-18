@@ -317,14 +317,14 @@ pub fn secrets_example_names(root: &Path) -> Vec<String> {
 }
 
 /// Static lint for one asset. Errors block a save (`E_LINT`), warnings never
-/// do. The rule list is the spec's, exactly.
+/// do. The rule list is the spec's, exactly, plus the cross-asset
+/// install-name uniqueness rule below.
 ///
-/// `catalog` is part of the interface the commands and the UI are built
-/// against (and what a cross-asset rule would need); no rule in the spec's
-/// list consults it, so it is unused today.
+/// `catalog` is the catalog the asset lives in (or is about to join); it
+/// carries the other assets the uniqueness rule compares against.
 pub fn lint(
     asset: &Asset,
-    _catalog: &Catalog,
+    catalog: &Catalog,
     secrets_example: &[String],
     secrets_example_exists: bool,
 ) -> LintReport {
@@ -347,6 +347,32 @@ pub fn lint(
                 } else {
                     "body.md"
                 }
+            ),
+        );
+    }
+    // Two assets of the same kind that resolve to the same install name
+    // render to the same host path or config key: the planner emits two
+    // independent actions for it, both manifest entries end up listing that
+    // path, and deleting either asset then removes the other's installed
+    // copy. Comparing this asset's `install_name()` against every *other*
+    // same-kind asset's `install_name()` covers the collision in both
+    // directions (name vs install_as, install_as vs install_as). The asset
+    // being linted is matched by name, so linting an update against the
+    // catalog that still holds its previous revision does not self-collide.
+    let install_name = asset.install_name();
+    if let Some(other) = catalog.assets.iter().find(|a| {
+        a.kind() == kind && a.header.name != asset.header.name && a.install_name() == install_name
+    }) {
+        report.error(
+            if asset.header.install_as.is_some() {
+                "install_as"
+            } else {
+                "name"
+            },
+            format!(
+                "install name '{install_name}' is also used by {}/{}",
+                kind.as_str(),
+                other.header.name
             ),
         );
     }
@@ -1220,6 +1246,80 @@ mod tests {
         let mut a = clean_skill();
         a.header.install_as = Some("other_name".into());
         assert!(lint_of(&a).warnings.is_empty());
+    }
+
+    #[test]
+    fn lint_errors_when_two_assets_of_a_kind_share_an_install_name() {
+        let mut alpha = clean_skill();
+        alpha.header.name = "alpha".into();
+        alpha.header.install_as = Some("beta".into());
+        let mut beta = clean_skill();
+        beta.header.name = "beta".into();
+        let catalog = Catalog {
+            assets: vec![alpha.clone(), beta.clone()],
+            ..Default::default()
+        };
+
+        // alpha's install_as collides with beta's catalog name ...
+        let report = lint(&alpha, &catalog, &[], true);
+        assert_eq!(fields(&report.errors), vec!["install_as"]);
+        assert!(
+            report.errors[0]
+                .message
+                .contains("install name 'beta' is also used by skill/beta"),
+            "{:?}",
+            report.errors
+        );
+
+        // ... and the same collision is reported from beta's side.
+        let report = lint(&beta, &catalog, &[], true);
+        assert_eq!(fields(&report.errors), vec!["name"]);
+        assert!(
+            report.errors[0]
+                .message
+                .contains("install name 'beta' is also used by skill/alpha"),
+            "{:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn lint_allows_the_same_install_name_across_kinds() {
+        let mut skill = clean_skill();
+        skill.header.name = "alpha".into();
+        skill.header.install_as = Some("beta".into());
+        let agent = template(Kind::Agent, "beta");
+        let catalog = Catalog {
+            assets: vec![skill.clone(), agent.clone()],
+            ..Default::default()
+        };
+        assert!(
+            lint(&skill, &catalog, &[], true).errors.is_empty(),
+            "{:?}",
+            lint(&skill, &catalog, &[], true).errors
+        );
+        assert!(lint(&agent, &catalog, &[], true).errors.is_empty());
+    }
+
+    #[test]
+    fn lint_all_surfaces_a_pre_existing_install_name_collision() {
+        let root = tmp("lintdup");
+        let mut alpha = clean_skill();
+        alpha.header.name = "alpha".into();
+        alpha.header.install_as = Some("beta".into());
+        let mut beta = clean_skill();
+        beta.header.name = "beta".into();
+        let catalog = Catalog {
+            assets: vec![alpha, beta],
+            ..Default::default()
+        };
+        let all = lint_all(&catalog, &root);
+        assert_eq!(all.errors, 2, "{:?}", all.assets);
+        assert!(all.assets.iter().all(|a| a
+            .report
+            .errors
+            .iter()
+            .any(|e| e.message.contains("install name 'beta'"))));
     }
 
     #[test]
