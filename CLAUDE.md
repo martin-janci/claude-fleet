@@ -91,6 +91,11 @@ REGEN_DOCS=1 cargo test -p fleet-core reference_is_current
   the WKWebView setup. Only one PTY is attached at a time.
 - **Hub daemon** (`crates/fleet-hub`): the same core headless; `hub.*`
   settings, `HubBase` in `service/hub.rs`.
+- **Hub client mode** (`src-tauri/src/backend/`): a desktop paired with a hub
+  (Settings → Hub) resolves once at startup to a window onto that hub; every
+  command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is listed as
+  the same in both modes (`backend/tests_routing.rs`), under the rule *parity
+  or refusal* in `docs/hub.md`.
 
 ## Conventions
 

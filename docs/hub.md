@@ -510,7 +510,9 @@ fleet-hub pair --name laptop     # prints a code; it dies on first use
 The desktop pairs as an ordinary client — the hub cannot tell it from a phone
 and should not. It stores the client token in the OS keychain (macOS) or an
 owner-only 0600 file (elsewhere), never in `state.db` and never in a log
-line. Which fleet the app is a window onto is decided **once, at startup**, so
+line. Off macOS that file is *not* an OS secret store: anything running as
+your user can read it, so treat that machine's account as holding a fleet
+credential. Which fleet the app is a window onto is decided **once, at startup**, so
 pairing and Disconnect both take effect at the next launch; Settings says so
 rather than looking like nothing happened.
 
@@ -528,6 +530,14 @@ tried. For a lost laptop, revoke on the hub.
 
 ### What is different from standalone
 
+- **Live, from the hub.** The desktop follows the hub's `GET /events` and
+  re-emits every change as the same frontend event a local change would have
+  produced, so the window updates itself. When that stream drops it reconnects
+  with backoff, re-lists sessions, hosts, tasks and accounts once, and shows a
+  banner — "what you see may be out of date", the attempt number and the
+  reason — until it is back. A stream that goes silent (not even the hub's
+  15-second keep-alive) for about 40 seconds is treated as dead, which is what
+  a laptop that slept and woke on another network looks like.
 - **The fleet is the hub's.** No reconcile tick, no account-usage poll and no
   embedded control API in the desktop; two brains for one fleet is the failure
   this mode exists to prevent. The footer's version, database and schema are
@@ -552,7 +562,12 @@ tried. For a lost laptop, revoke on the hub.
   `ssh <host>` / `tmux attach -t <session>` line for the selected session
   instead of a dead pane.
 - **The asset catalog and the setup checklist** are about the machine that
-  owns the fleet, so they show the reason instead of their panels.
+  owns the fleet, so they show the reason instead of their panels. (The hub
+  does serve the catalog's asset list, `list_assets`, to any paired client;
+  what it does not serve is the configuration and git checkout the Assets
+  panel is built on.)
+- **A revoked or rotated token** comes back `E_UNAUTHORIZED` on every call;
+  the error says to pair again in Settings → Hub.
 
 ### Parity or refusal
 
@@ -570,6 +585,18 @@ automatic pre-attach check has no counterpart.
 
 Do not "fix" one of these refusals by wiring a lossy mapping. If a tool grows
 the missing parameters, route it then.
+
+### Known limitations
+
+- **The terminal works over SSH only.** A hub client has no in-app terminal;
+  attach from a shell with the command the terminal tab shows.
+- **Projects and worktrees are not re-listed on reconnect**, because their
+  list tools answer a different shape from their events. They refresh when
+  the window regains focus.
+- **Not yet run as an app.** At the time of writing this mode is verified by
+  its test suites only: the desktop has not been launched against a real hub,
+  and the macOS keychain path has not been compiled or run. Report anything
+  that does not match this page.
 
 ### Going back
 
