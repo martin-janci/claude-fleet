@@ -78,7 +78,7 @@ export interface AssetDetail {
   hosts: HostState[];
 }
 export interface HostScanResult { host: string; status: string; detail: string | null; rows: number }
-export interface ImportReport { created: [string, string][]; problems: Problem[]; flagged_secrets: string[]; dry_run: boolean }
+export interface ImportReport { created: [string, string][]; problems: Problem[]; warnings?: Problem[]; flagged_secrets: string[]; dry_run: boolean }
 
 export const catalogConfig = writable<CatalogConfigRow | null>(null);
 export const catalog = writable<AssetListing | null>(null);
