@@ -1170,18 +1170,18 @@ mod tests {
             // 4. Stop / WorktreeCreate hooks ($HOME is cached now).
             Script(remote_read_script(SETTINGS_JSON)),
         ]);
-        steps.extend(secret_write_steps(
-            CLAUDE_DIR,
-            SETTINGS_JSON,
-            &expected_settings(),
-            true,
-        ));
         // The SessionStart command hook's bearer-token headers file ($HOME
-        // is cached by now).
+        // is cached by now), written before the settings that reference it.
         steps.extend(secret_write_steps(
             CLAUDE_DIR,
             &headers_path(),
             &expected_headers(),
+            true,
+        ));
+        steps.extend(secret_write_steps(
+            CLAUDE_DIR,
+            SETTINGS_JSON,
+            &expected_settings(),
             true,
         ));
         steps
