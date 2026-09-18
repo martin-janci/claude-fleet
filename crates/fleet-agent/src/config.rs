@@ -157,6 +157,48 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    /// THE GATE on the config's 0600-at-creation rule. The final mode of a
+    /// file chmodded after its token was written is identical to one created
+    /// 0600, so no test that inspects the result can see the difference;
+    /// this one reads the source instead. Every file this module creates must
+    /// come from `create_private`, which passes the mode to the create call
+    /// itself, and nothing outside it may open, create, write or chmod a file.
+    #[test]
+    fn the_secret_file_is_only_ever_created_by_create_private() {
+        use crate::test_util::{fn_body, production};
+        let src = production(include_str!("config.rs"));
+        let helper = fn_body(src, "create_private");
+        assert!(
+            helper.contains("create_new(true)") && helper.contains(".mode(0o600)"),
+            "create_private must create exclusively AND pass 0600 to the create call"
+        );
+        assert!(
+            !helper.contains("set_permissions"),
+            "create_private must not chmod: the mode belongs to the create call"
+        );
+        let rest = src.replacen(helper, "", 1);
+        for forbidden in [
+            "File::create",
+            "File::options",
+            "OpenOptions",
+            "fs::write",
+            "fs::copy",
+            "set_permissions",
+            "Permissions::from_mode",
+            "libc::",
+        ] {
+            assert!(
+                !rest.contains(forbidden),
+                "config.rs uses `{forbidden}` outside create_private: route every \
+                 secret-bearing file through create_private"
+            );
+        }
+        assert!(
+            fn_body(src, "write").contains("create_private(&tmp)"),
+            "write() must create its temp file with create_private"
+        );
+    }
+
     fn cfg() -> Config {
         Config {
             hub: "https://hub.example".into(),

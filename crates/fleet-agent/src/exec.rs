@@ -536,6 +536,38 @@ mod tests {
         std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
     }
 
+    /// THE GATE on uploads, which carry secrets too (the hub uploads its
+    /// bearer token at 0600). A new file gets its mode in the open call, and
+    /// an existing one is narrowed BEFORE it is truncated or written — an
+    /// order no test of the final file can see, so the source is read.
+    #[test]
+    fn an_upload_sets_its_mode_before_a_byte_is_written() {
+        use crate::test_util::{fn_body, production};
+        let body = fn_body(production(include_str!("exec.rs")), "write_upload");
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("write_upload no longer does `{needle}`"))
+        };
+        assert!(
+            at("open.mode(mode)") < at(".open(path)"),
+            "the mode goes to the open call"
+        );
+        let chmod = at("file.set_permissions(");
+        assert!(
+            chmod < at("file.set_len(0)"),
+            "narrowed before it is truncated"
+        );
+        assert!(
+            chmod < at("file.write_all(bytes)"),
+            "narrowed before a byte is written"
+        );
+        assert_eq!(
+            body.matches("write_all").count(),
+            1,
+            "one write, after the chmod"
+        );
+    }
+
     #[test]
     fn an_upload_creates_parents_and_the_file_with_exactly_its_mode() {
         let dir = tempfile::tempdir().unwrap();

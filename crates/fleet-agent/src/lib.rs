@@ -54,4 +54,36 @@ pub(crate) mod test_util {
             Err(_) => true,
         }
     }
+
+    /// A source file's production code: everything before its test module.
+    pub fn production(src: &str) -> &str {
+        match src.find("#[cfg(test)]\nmod tests") {
+            Some(i) => &src[..i],
+            None => src,
+        }
+    }
+
+    /// The body of `fn name(`, braces included, found by brace matching.
+    /// Panics if there is no such function: a gate must not pass because it
+    /// looked at nothing.
+    pub fn fn_body<'a>(src: &'a str, name: &str) -> &'a str {
+        let start = src
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("no fn {name} in the scanned source"));
+        let open = start + src[start..].find('{').expect("a body");
+        let mut depth = 0usize;
+        for (i, c) in src[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &src[open..=open + i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced braces in fn {name}");
+    }
 }
