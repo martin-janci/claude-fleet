@@ -120,6 +120,12 @@ impl Endpoint {
         if host.is_empty() {
             return Err(not_a_hub());
         }
+        if !tls && !is_loopback(&host) {
+            return Err(format!(
+                "refusing the plain hub {hub}: --insecure is for a loopback test only, and \
+                 {host} is not loopback. Use https://"
+            ));
+        }
         let mut path = path.trim_end_matches('/').to_string();
         if !path.ends_with("/agent") {
             path.push_str("/agent");
@@ -139,6 +145,14 @@ impl Endpoint {
     pub fn is_tls(&self) -> bool {
         self.tls
     }
+}
+
+/// `localhost`, or an address in 127.0.0.0/8 or `::1`.
+fn is_loopback(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Why a dial did not produce a socket.
@@ -1214,6 +1228,29 @@ mod tests {
         assert_eq!(ep.url(), "ws://127.0.0.1:7777/agent");
         assert_eq!(ep.port, 7777);
         assert!(!ep.is_tls());
+    }
+
+    /// `--insecure` is for a loopback test, as the design reserves it: a
+    /// plain hub anywhere else would carry the token across a network.
+    #[test]
+    fn insecure_is_confined_to_loopback() {
+        for ok in [
+            "http://127.0.0.1:7777",
+            "ws://localhost",
+            "http://[::1]:9",
+            "ws://127.8.9.10",
+        ] {
+            assert!(Endpoint::parse(ok, true).is_ok(), "{ok}");
+        }
+        for far in [
+            "http://10.0.0.5",
+            "ws://hub.example",
+            "http://[fe80::1]:9",
+            "http://127.0.0.1.example",
+        ] {
+            let err = Endpoint::parse(far, true).unwrap_err();
+            assert!(err.contains("loopback"), "{far}: {err}");
+        }
     }
 
     #[test]
