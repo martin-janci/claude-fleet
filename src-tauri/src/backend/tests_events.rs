@@ -468,6 +468,63 @@ async fn a_hub_that_will_not_answer_backs_off_and_keeps_trying() {
     );
 }
 
+/// The failure a `Gap { delivered }` exists for: a hub that accepts the
+/// socket, answers 200 and closes straight away — a `/events` route whose bus
+/// has gone, or a proxy terminating the connection. `open` calls that a
+/// success.
+///
+/// Reset the backoff on it and the loop reconnects every second forever; and
+/// because every connection re-lists, each of those seconds costs four tool
+/// calls against a hub that is already unwell. So the wait must keep growing.
+#[tokio::test]
+async fn a_hub_that_accepts_and_delivers_nothing_does_not_reset_the_backoff() {
+    let (_, resync, delay, opens) = drive(vec![
+        Connection::Delivers(vec![]),
+        Connection::Delivers(vec![]),
+        Connection::Delivers(vec![]),
+    ])
+    .await;
+    assert_eq!(opens, 3);
+    assert_eq!(
+        resync.count(),
+        3,
+        "it did re-list each time — which is exactly why the wait must grow"
+    );
+    assert_eq!(
+        delay.waits()[..3],
+        [FIRST_BACKOFF, FIRST_BACKOFF * 2, FIRST_BACKOFF * 4],
+        "an empty connection is not a working connection, whatever the socket \
+         said"
+    );
+}
+
+/// And the other direction: one frame — even just `ready` — proves the route
+/// answered, so the next drop is retried promptly rather than after a minute
+/// of doubling.
+#[tokio::test]
+async fn a_single_frame_is_enough_to_call_a_connection_working() {
+    let (_, _, delay, _) = drive(vec![
+        Connection::Delivers(vec![]),
+        Connection::Delivers(vec![]),
+        Connection::Delivers(vec![frame(
+            READY_FRAME,
+            &json!({"version": "0.2.20", "now": 1, "kinds": ["session"]}),
+        )]),
+        Connection::Delivers(vec![]),
+    ])
+    .await;
+    assert_eq!(
+        delay.waits()[..4],
+        [
+            FIRST_BACKOFF,
+            FIRST_BACKOFF * 2,
+            FIRST_BACKOFF,
+            FIRST_BACKOFF * 2
+        ],
+        "the third connection delivered, so the wait after it starts over"
+    );
+}
+
 /// A hub that accepts a socket and drops it immediately must not become a
 /// one-second hot loop on a successful-but-useless connection.
 #[test]

@@ -152,7 +152,20 @@ enum StreamEnd {
     /// Anything else — EOF, a read error, or a `lagged` frame. All of them
     /// mean the same thing to a client: reconnect, and re-list, because the
     /// picture now has a hole of unknown size in it.
-    Gap,
+    Gap {
+        /// Did this connection carry a single frame before it ended?
+        ///
+        /// It decides whether the backoff resets, and the distinction is not
+        /// academic. A hub that accepts the socket, answers 200 and closes
+        /// straight away — a `/events` route whose bus has gone, a proxy that
+        /// terminates the connection — looks like a success to `open`. Reset
+        /// the backoff on that and the loop reconnects every second forever,
+        /// and because every connection re-lists, each of those seconds costs
+        /// four tool calls against a hub that is already unwell.
+        ///
+        /// The `ready` frame counts: the route really did answer.
+        delivered: bool,
+    },
 }
 
 /// What one frame decided.
@@ -208,13 +221,13 @@ impl EventBridge {
                     // sends from here on is applied on top of the re-listed
                     // rows rather than underneath them.
                     self.resync.resync().await;
-                    if self.pump(body).await == StreamEnd::Cancelled {
-                        return;
+                    match self.pump(body).await {
+                        StreamEnd::Cancelled => return,
+                        // A connection that carried nothing is not a working
+                        // connection, whatever the socket said.
+                        StreamEnd::Gap { delivered: false } => {}
+                        StreamEnd::Gap { delivered: true } => backoff = FIRST_BACKOFF,
                     }
-                    // Only a connection that actually delivered resets the
-                    // backoff; `pump` returning `Gap` after a real stream is
-                    // the normal case.
-                    backoff = FIRST_BACKOFF;
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -235,6 +248,7 @@ impl EventBridge {
     /// Read one connection to its end, emitting as it goes.
     async fn pump(&self, mut body: Box<dyn EventStreamBody>) -> StreamEnd {
         let mut decoder = SseDecoder::new();
+        let mut delivered = false;
         loop {
             let piece = tokio::select! {
                 _ = self.cancel.cancelled() => return StreamEnd::Cancelled,
@@ -244,19 +258,20 @@ impl EventBridge {
                 Ok(Some(text)) => text,
                 Ok(None) => {
                     tracing::info!("[hub events] the hub closed the event stream; reconnecting");
-                    return StreamEnd::Gap;
+                    return StreamEnd::Gap { delivered };
                 }
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
                         "[hub events] the event stream failed; reconnecting"
                     );
-                    return StreamEnd::Gap;
+                    return StreamEnd::Gap { delivered };
                 }
             };
             for frame in decoder.feed(&text) {
+                delivered = true;
                 if self.deliver(&frame.name, &frame.data) == Delivery::EndOfStream {
-                    return StreamEnd::Gap;
+                    return StreamEnd::Gap { delivered };
                 }
             }
         }
