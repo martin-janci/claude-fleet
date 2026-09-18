@@ -183,6 +183,30 @@ mod tests {
         assert_eq!(ssh.agent_route("beta").as_deref(), Some("beta"));
     }
 
+    /// An SSH host whose fleet alias happens to be an agent host's
+    /// `ssh_alias` is the SSH host: a call for it must not run on the agent's
+    /// machine. The exact alias names a row, whatever its transport.
+    #[test]
+    fn an_ssh_hosts_alias_is_never_captured_by_an_agent_hosts_ssh_alias() {
+        let (ssh, _reg, _store) = hub_client(&[
+            ("mefistos", Some("mefistos.example"), "ssh"),
+            ("laptop", Some("mefistos"), "agent"),
+        ]);
+        assert_eq!(ssh.agent_route("mefistos"), None, "mefistos is an SSH host");
+        assert_eq!(ssh.agent_route("laptop").as_deref(), Some("laptop"));
+    }
+
+    /// Two agent hosts claiming one `ssh_alias` is ambiguous: route neither
+    /// rather than pick one.
+    #[test]
+    fn an_ssh_alias_two_agent_hosts_share_routes_to_neither() {
+        let (ssh, _reg, _store) = hub_client(&[
+            ("a", Some("shared.example"), "agent"),
+            ("b", Some("shared.example"), "agent"),
+        ]);
+        assert_eq!(ssh.agent_route("shared.example"), None);
+    }
+
     /// The desktop's client. It is built with no registry at all, so every
     /// host resolves to SSH whatever any host row says — there is no `/agent`
     /// endpoint in the desktop for an agent to dial.

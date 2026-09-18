@@ -136,17 +136,33 @@ impl Store {
     /// argument. That is the fleet alias everywhere except `service::hosts`,
     /// which probes a host by its `ssh_alias`, so both columns are matched —
     /// and the *fleet alias* is what comes back, because that is the name an
-    /// agent registers under. An exact `alias` match outranks an `ssh_alias`
-    /// one, so a row that happens to name another host's alias as its
-    /// `ssh_alias` cannot divert that host's calls to its own agent.
+    /// agent registers under.
+    ///
+    /// A `key` that is some host's fleet alias names THAT host, whatever its
+    /// transport: an SSH host whose alias happens to be an agent host's
+    /// `ssh_alias` stays on SSH, and its commands never run on the agent's
+    /// machine. Only a key that is no host's alias is matched against the
+    /// agent hosts' `ssh_alias`, and only when exactly one claims it — two
+    /// agent hosts sharing an `ssh_alias` is an ambiguity, routed to neither.
     pub fn agent_host_alias(&self, key: &str) -> Result<Option<String>, rusqlite::Error> {
-        self.conn
-            .prepare_cached(
-                "SELECT alias FROM hosts WHERE transport='agent' AND (alias=?1 OR ssh_alias=?1) \
-                 ORDER BY (alias=?1) DESC LIMIT 1",
-            )?
+        let exact: Option<String> = self
+            .conn
+            .prepare_cached("SELECT transport FROM hosts WHERE alias=?1")?
             .query_row([key], |r| r.get(0))
-            .optional()
+            .optional()?;
+        if let Some(transport) = exact {
+            return Ok((transport == "agent").then(|| key.to_string()));
+        }
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT alias FROM hosts WHERE transport='agent' AND ssh_alias=?1 LIMIT 2",
+        )?;
+        let matches: Vec<String> = stmt
+            .query_map([key], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(match matches.as_slice() {
+            [only] => Some(only.clone()),
+            _ => None,
+        })
     }
 
     pub fn insert_host(&self, alias: &str, ssh_alias: Option<&str>) -> Result<(), rusqlite::Error> {
