@@ -118,18 +118,13 @@ pub async fn execute(req: ExecRequest, cancel: impl Future<Output = ()>) -> Exec
         }
         None => {
             // A child that had already exited when the deadline or the cancel
-            // arrived keeps its own code; only what it left behind is killed.
-            let finished = child.try_wait().ok().flatten();
+            // arrived still reports its own code: SIGKILL cannot change a
+            // zombie's status, and `wait` reaps the real one.
             kill_group(group);
-            match finished {
-                Some(status) => exit_code(status),
-                None => {
-                    let _ = child.start_kill();
-                    match child.wait().await {
-                        Ok(status) => exit_code(status),
-                        Err(_) => -9,
-                    }
-                }
+            let _ = child.start_kill();
+            match child.wait().await {
+                Ok(status) => exit_code(status),
+                Err(_) => -9,
             }
         }
     };
@@ -383,6 +378,56 @@ mod tests {
         assert!(out.stdout.is_empty());
     }
 
+    /// A child's stdin is /dev/null — never the agent's own. Under systemd
+    /// the two coincide, but `fleet-agent run` from a terminal would hand
+    /// children the TTY from a background process group, and a child that
+    /// read it would be stopped (SIGTTIN) until its timeout.
+    ///
+    /// Deterministic whatever stdin `cargo test` was given: the test re-runs
+    /// this binary, filtered to itself, with a PIPE on stdin, and the inner
+    /// run asserts what the child's fd 0 is.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_child_never_inherits_the_agent_s_stdin() {
+        const PROBE: &str = "FLEET_AGENT_STDIN_PROBE";
+        const NAME: &str = "exec::tests::a_child_never_inherits_the_agent_s_stdin";
+        if std::env::var_os(PROBE).is_some() {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let out = rt.block_on(execute(req(&["readlink", "/proc/self/fd/0"]), never()));
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "/dev/null");
+            return;
+        }
+        let mut inner = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env(PROBE, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write as _;
+        inner
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"the agent's own stdin\n")
+            .unwrap();
+        let out = inner.wait_with_output().unwrap();
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{said}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            said.contains("1 passed"),
+            "the inner run ran the probe: {said}"
+        );
+    }
+
     #[tokio::test]
     async fn the_child_starts_in_the_directory_it_is_given() {
         let dir = tempfile::tempdir().unwrap();
@@ -498,6 +543,54 @@ mod tests {
         r.timeout = Duration::from_secs(5);
         let out = execute(r, never()).await;
         assert_eq!(out.exit_code, -9);
+    }
+
+    /// A cancel that wins while the child has exited but is not yet reaped
+    /// still reports the child's own exit code. The cancel future holds this
+    /// single-threaded runtime until the child is a zombie, so the runtime
+    /// cannot reap it first: the cancel deterministically wins exactly that
+    /// window. (Found by the security review, which also showed an explicit
+    /// `try_wait` for this case was redundant: SIGKILL cannot change a
+    /// zombie's status, and `wait` reaps the real one.)
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_cancel_racing_an_exited_child_keeps_its_exit_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let script = format!("echo $$ > {}; exit 7", pidfile.display());
+        let cancel = async move {
+            let deadline = std::time::Instant::now() + PATIENCE;
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(&pidfile)
+                    .unwrap_or_default()
+                    .trim()
+                    .parse::<i32>()
+                {
+                    let stat =
+                        std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+                    if stat
+                        .rsplit(')')
+                        .next()
+                        .unwrap_or("")
+                        .trim_start()
+                        .starts_with('Z')
+                    {
+                        return;
+                    }
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the child never exited"
+                );
+                std::thread::yield_now();
+            }
+        };
+        assert_eq!(
+            execute(req(&["bash", "-c", &script]), cancel)
+                .await
+                .exit_code,
+            7
+        );
     }
 
     /// A child that exits while something it started still holds its stdout
