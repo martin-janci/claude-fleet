@@ -1608,10 +1608,13 @@ mod tests {
             .expect("stop returns once its children are gone");
         assert!(!alive(pid), "{pid} outlived the agent's stop");
 
-        // And nothing new starts once it is stopping.
+        // And nothing new starts once it is stopping: refused before a child
+        // is spawned, saying why — not spawned and killed at once, which
+        // would let a command start to act.
         send(&mut p.hub, &exec("late", &["true"], None)).await;
         let (code, _, err, ..) = result_for(&mut p.hub, "late").await;
-        assert_eq!(code, -9, "{}", String::from_utf8_lossy(&err));
+        assert_eq!(code, -9);
+        assert_eq!(String::from_utf8_lossy(&err), "the agent is stopping");
     }
 
     // ── reconnecting ───────────────────────────────────────────────────────
