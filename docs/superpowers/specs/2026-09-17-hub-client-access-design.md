@@ -176,8 +176,11 @@ for errors. It joins `READONLY_TOOLS` and the lifecycle deadline class, next to
 `session_transcript`, because it reads over SSH. The generated reference is
 regenerated in the same commit.
 
-`list_clients` joins `READONLY_TOOLS`; `revoke_client` joins `ADMIN_TOOLS`, the
-master-only set.
+`list_clients` and `revoke_client` both join `ADMIN_TOOLS`, the master-only set
+(as *Open questions* #1 decides: the whole client-credential surface is
+master-only, listing included — it names every paired device). `list_clients`
+also stays in `READONLY_TOOLS`, since it mutates nothing; the two lists answer
+different questions, who may call a tool and whether a readonly token may.
 
 ### 5. Built-in TLS
 

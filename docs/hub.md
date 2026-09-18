@@ -232,9 +232,10 @@ What a client may do:
   `wait_for_*`, …). Anything that sends, kills, deletes or writes answers
   `E_FORBIDDEN`.
 - **Neither mode reaches fleet admin.** `provision_hosts`, `add_host`,
-  `remove_host`, `hide_host`, `apply_sync`, `set_secret`, `pair_client` and
-  `revoke_client` are master-token only, so a paired phone can neither
-  re-provision the fleet nor pair a second device nor revoke your own client.
+  `remove_host`, `hide_host`, `apply_sync`, `set_secret`, `pair_client`,
+  `revoke_client` and `list_clients` are master-token only, so a paired phone
+  can neither re-provision the fleet nor pair a second device nor revoke your
+  own client — nor even enumerate the other devices you have paired.
 - A prompt typed on a phone always reaches an agent **marked** as untrusted
   input, naming the client it came from. `raw: true` is the master token's
   alone.

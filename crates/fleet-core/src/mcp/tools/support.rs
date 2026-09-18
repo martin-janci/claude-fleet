@@ -431,9 +431,10 @@ pub(super) fn apply_marker(
 }
 
 /// Fleet-admin gate: `provision_hosts` / `add_host` / `remove_host` /
-/// `hide_host` / `apply_sync` / `set_secret` are master-only, whatever the
-/// host token's mode — and whatever a paired client's mode, since
-/// [`Caller::is_master`] is false for a client too.
+/// `hide_host` / `apply_sync` / `set_secret` and the client-credential tools
+/// (`pair_client` / `revoke_client` / `list_clients`) are master-only,
+/// whatever the host token's mode — and whatever a paired client's mode,
+/// since [`Caller::is_master`] is false for a client too.
 pub(super) fn enforce_admin(caller: &Caller, tool: &str) -> Result<(), McpError> {
     if guard::is_admin_tool(tool) && !caller.is_master() {
         return Err(mcp_err(

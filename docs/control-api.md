@@ -233,7 +233,8 @@ Index by area (names only; see the reference for details):
 - **Paired clients** — `pair_client` (mint a single-use pairing code and the
   URL to show as a QR; master token only), `list_clients` (the paired devices
   and what each one's token may do — the stored token digest is never
-  returned), `revoke_client` (revoke one by name; master token only). A
+  returned; a read, but master token only, since it enumerates every paired
+  device), `revoke_client` (revoke one by name; master token only). A
   paired client is never the master, so every tool in this group — like the
   rest of fleet admin — stays out of a phone's reach. The `fleet-hub pair`,
   `fleet-hub client list` and `fleet-hub client revoke` commands are thin

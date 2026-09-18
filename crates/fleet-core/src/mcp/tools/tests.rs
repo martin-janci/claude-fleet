@@ -1179,11 +1179,12 @@ fn result_json(r: &CallToolResult) -> serde_json::Value {
 
 #[test]
 fn client_tools_sit_in_the_right_guard_lists() {
-    // A read: a readonly token (host or client) may list clients.
+    // Every client tool is fleet admin — master-token only. `list_clients`
+    // mutates nothing, so it is ALSO readonly: the two lists answer different
+    // questions (who may call it at all; whether a readonly token may).
+    assert!(guard::is_admin_tool("list_clients"));
     assert!(guard::is_readonly_tool("list_clients"));
-    assert!(!guard::is_admin_tool("list_clients"));
-    // Minting and revoking credentials is fleet admin: master-only, and
-    // therefore never readonly.
+    // Minting and revoking credentials is fleet admin AND mutating.
     for t in ["pair_client", "revoke_client"] {
         assert!(guard::is_admin_tool(t), "{t} must be master-only");
         assert!(!guard::is_readonly_tool(t), "{t} must be mutating");
@@ -1199,7 +1200,33 @@ fn client_tools_sit_in_the_right_guard_lists() {
             err.message
         );
     }
+    // The readonly gate alone would let a readonly token through — which is
+    // exactly why `list_clients` needs the admin gate as well.
     assert!(enforce_mode(&client_caller("kiosk", TokenMode::Readonly), "list_clients").is_ok());
+}
+
+/// Who holds a credential is fleet-admin knowledge: `list_clients` names
+/// every paired device, its mode, when it was paired and when it was last
+/// seen. A phone must not be able to enumerate the operator's other devices,
+/// and neither must a per-host token — so the admin gate, not just the
+/// readonly gate, stands in front of it.
+#[test]
+fn list_clients_is_master_only() {
+    for caller in [
+        client_caller("phone", TokenMode::Full),
+        client_caller("kiosk", TokenMode::Readonly),
+        host_caller("mefistos", TokenMode::Full),
+        host_caller("turanga", TokenMode::Readonly),
+    ] {
+        let err = enforce_admin(&caller, "list_clients").expect_err(&caller.label());
+        assert!(
+            err.message.starts_with("E_FORBIDDEN") && err.message.contains(&caller.label()),
+            "{}: {}",
+            caller.label(),
+            err.message
+        );
+    }
+    assert!(enforce_admin(&Caller::master(), "list_clients").is_ok());
 }
 
 #[tokio::test]

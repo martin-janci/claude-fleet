@@ -74,9 +74,13 @@ pub const READONLY_TOOLS: &[&str] = &[
     // the controller's catalog repo working tree and is therefore mutating.
     "list_assets",
     "scan_assets",
-    // Paired clients: listing them observes who holds a credential. The
-    // stored digest never leaves the hub (see `ClientSummary`), so this is a
-    // read like any other. Minting and revoking are admin — below.
+    // Paired clients: listing them observes who holds a credential and
+    // changes nothing, so it belongs here — but it is ALSO in
+    // [`ADMIN_TOOLS`], the only tool in both lists. The two answer different
+    // questions: `ADMIN_TOOLS` decides WHO may call it (the master alone),
+    // this list decides whether a *readonly* token may, and a read that
+    // mutates nothing must not be classed as a mutation just because it is
+    // master-only. Minting and revoking are admin and mutating — below.
     "list_clients",
 ];
 
@@ -113,6 +117,10 @@ pub fn needs_confirmation(name: &str) -> bool {
 /// new_session across hosts stay allowed by design), not fleet admin. A
 /// paired client token is refused these too, whatever its mode — it is never
 /// the master ([`crate::mcp::Caller::is_master`] is false for a client).
+///
+/// Being here is about WHO may call a tool, not about whether it writes:
+/// `list_clients` is master-only *and* read-only, so it appears in
+/// [`READONLY_TOOLS`] too.
 pub const ADMIN_TOOLS: &[&str] = &[
     "provision_hosts",
     "add_host",
@@ -131,6 +139,12 @@ pub const ADMIN_TOOLS: &[&str] = &[
     // phone or revoke the operator's own client.
     "pair_client",
     "revoke_client",
+    // Listing them is the same surface read from the other side: it names
+    // every paired device, its mode, when it was paired and when it was last
+    // seen. A phone must not be able to enumerate the operator's other
+    // devices, so the whole client group is master-only. It mutates nothing,
+    // so it stays in [`READONLY_TOOLS`] as well — see the note there.
+    "list_clients",
 ];
 
 pub fn is_admin_tool(name: &str) -> bool {
@@ -885,9 +899,10 @@ mod tests {
             assert!(is_admin_tool(t), "{t}");
             assert!(!is_readonly_tool(t), "{t}");
         }
-        // Listing them is an ordinary read.
+        // Listing them is master-only too — it enumerates every paired
+        // device — but it is a read, so it is the one tool in BOTH lists.
+        assert!(is_admin_tool("list_clients"));
         assert!(is_readonly_tool("list_clients"));
-        assert!(!is_admin_tool("list_clients"));
         for t in [
             "kill_session",
             "send_prompt",

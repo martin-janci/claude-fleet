@@ -226,7 +226,9 @@ impl FleetTools {
         token may do. The stored token digest is never returned — a client's \
         token exists in plaintext only in the one /pair response that minted \
         it. include_revoked also returns clients whose token was revoked \
-        (kept for the audit trail). Read-only. Returns JSON rows of \
+        (kept for the audit trail). Read-only, but master token only: the \
+        list names every paired device, so it is not a phone's to read. \
+        Returns JSON rows of \
         { id, name, mode, created_at, last_seen_at, revoked_at }.")]
     pub(super) async fn list_clients(
         &self,
