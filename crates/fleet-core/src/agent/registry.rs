@@ -59,13 +59,19 @@ struct Connection {
     /// recognised as revoking THIS connection. `None` for an owner that
     /// authenticated some other way (the in-process fake).
     credential: Option<String>,
+    /// Cancelled the moment this connection stops being the live one —
+    /// replaced, disconnected or evicted — so its owner can tear the socket
+    /// down even while its writer is stuck mid-send.
+    gone: tokio_util::sync::CancellationToken,
 }
 
 impl Connection {
     /// Wake every waiting caller with "the connection is gone". Dropping the
     /// senders is what the caller's `recv` sees; it maps to
-    /// `E_AGENT_OFFLINE`, not a hang until the wall clock.
+    /// `E_AGENT_OFFLINE`, not a hang until the wall clock. Also tells the
+    /// owner, through `gone`.
     fn abort_pending(&self) {
+        self.gone.cancel();
         self.pending.clear();
     }
 }
@@ -123,6 +129,7 @@ impl AgentRegistry {
             outbound,
             pending: DashMap::new(),
             credential,
+            gone: tokio_util::sync::CancellationToken::new(),
         });
         if let Some(previous) = self.conns.insert(alias.to_string(), conn) {
             previous.abort_pending();
@@ -158,6 +165,20 @@ impl AgentRegistry {
         }
         self.disconnect(alias, live.id);
         true
+    }
+
+    /// Fires when connection `conn` for `alias` stops being the live one. An
+    /// already-cancelled token when it has stopped already, so an owner that
+    /// asks late is told at once.
+    pub fn gone(&self, alias: &str, conn: ConnId) -> tokio_util::sync::CancellationToken {
+        match self.live(alias) {
+            Some(live) if live.id == conn => live.gone.clone(),
+            _ => {
+                let gone = tokio_util::sync::CancellationToken::new();
+                gone.cancel();
+                gone
+            }
+        }
     }
 
     /// Is an agent connected for this host?

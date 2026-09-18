@@ -76,8 +76,8 @@ impl HostRouter {
 /// Is `credential` — the SHA-256 of the token an agent connection
 /// authenticated with — still a token that may BE `alias`'s agent?
 ///
-/// Yes only while the host's token row still holds that exact token in
-/// `full` mode. A rotation replaces the token, `readonly` narrows it, and
+/// Yes only while the host is still on the agent transport and its token row
+/// still holds that exact token in `full` mode. A rotation replaces the token, `readonly` narrows it, and
 /// removing the host deletes the row; each one makes this false. A poisoned
 /// store answers no: when in doubt, a connection that receives every command
 /// for a host is cut off.
@@ -85,6 +85,10 @@ pub(crate) fn credential_is_current(store: &Mutex<Store>, alias: &str, credentia
     let Ok(s) = store.lock() else {
         return false;
     };
+    // Moving the host back to SSH revokes its agent too.
+    if s.agent_host_alias(alias).ok().flatten().as_deref() != Some(alias) {
+        return false;
+    }
     match s.get_host_token(alias) {
         Ok(Some(row)) => {
             row.mode == "full" && crate::mcp::auth::sha256_hex(&row.token) == credential

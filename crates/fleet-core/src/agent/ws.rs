@@ -24,12 +24,31 @@
 //! large frame to send: each blocked writing into a socket the other has
 //! stopped reading. The registry's channel is what decouples them.
 //!
-//! **The inbound budget is per request, not the global ceiling.** A frame may
-//! legitimately be [`MAX_FRAME_BYTES`] — ~267 MiB, because the transport has to
-//! carry a 200 MiB transcript — but only for a request that asked for output
-//! that large. Every other frame is decoded against the size the hub actually
-//! asked for ([`decode_agent_frame_within`]), refused if it is over, and the
-//! connection closed. See `Budgets`.
+//! **The inbound budget is per request, not the global ceiling** — but read
+//! what that buys before relying on it. A frame may legitimately be
+//! [`MAX_FRAME_BYTES`] (~267 MiB, because the transport has to carry a
+//! 200 MiB transcript), and every frame is decoded against the largest budget
+//! among the requests in flight ([`decode_agent_frame_within`]), refused if it
+//! is over, and the connection closed. See `Budgets`. **In practice that
+//! budget is usually the whole ceiling**: `AgentTransport::run` and
+//! `run_bounded` send no `cap_bytes` (only the transcript read needs the
+//! ceiling, but nothing tells them apart), and any uncapped call in flight —
+//! every reconcile tick has some — raises the allowance for every frame on the
+//! connection, a `pong` included. The budget stops a peer from spending the
+//! ceiling while only capped calls are in flight; it does not stop a connected
+//! agent that waits for an uncapped one.
+//!
+//! **How many connections, and for how long.** A connection is only accepted
+//! for a host on the agent transport, holding its current `full` token, and
+//! re-checked against the store on every heartbeat. At most
+//! [`MAX_CONNECTIONS_PER_HOST`] per host and [`MAX_CONNECTIONS`] in all, taken
+//! before the upgrade: each one can hold a ceiling-sized buffer, and
+//! tungstenite reserves the whole declared size as soon as it reads a frame's
+//! header. A write is bounded by `SEND_TIMEOUT` and a close by
+//! `CLOSE_TIMEOUT`, and a connection the registry lets go of is torn down
+//! at once even while its writer is stuck mid-send, so a peer that stops
+//! reading (or advertises a zero window and keeps acknowledging the probes)
+//! cannot hold a socket or its buffer indefinitely.
 //!
 //! Two layers, and what each one stops:
 //!
@@ -82,6 +101,32 @@ pub const NOT_ENABLED: &str = "agent connections are not enabled on this server"
 /// What a caller that is not a host is told.
 pub const NOT_A_HOST: &str = "an agent connection needs a per-host bearer token";
 
+/// What a host that is not on the agent transport is told.
+pub const NOT_AN_AGENT_HOST: &str = "this host is not an agent host: set its transport to agent \
+before connecting a fleet-agent for it";
+
+/// What an upgrade over the connection limits is told.
+pub const TOO_MANY: &str = "too many agent connections for this host";
+
+/// Connections one host may hold open at once, before and after `hello`.
+/// Two: a restarted agent dials while its old connection is still being
+/// noticed gone. Each can buffer one frame of up to
+/// [`MAX_FRAME_BYTES`] (~267 MiB) — tungstenite reserves the whole declared
+/// size on reading a frame's header — so an unbounded count multiplied that.
+pub const MAX_CONNECTIONS_PER_HOST: usize = 2;
+
+/// Connections the whole hub holds open at once, for every host together.
+pub const MAX_CONNECTIONS: usize = 64;
+
+/// How long one frame may take to write before the connection is given up
+/// on. Long enough for a ~267 MiB frame on a slow link; what it bounds is a
+/// peer that stops reading (or advertises a zero window and keeps
+/// acknowledging the probes), which otherwise held the writer forever.
+const SEND_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// How long closing the socket may take.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// What a host whose token is `readonly` is told.
 pub const READONLY_HOST: &str = "this host's token is readonly, and an agent receives every \
 command the hub runs on its host, secret-file uploads included; mint a full token for the \
@@ -107,7 +152,59 @@ pub struct AgentWsState {
     /// Where each live connection's token is re-checked, on every beat: the
     /// upgrade is the only other place it is looked at.
     store: Option<Arc<Mutex<Store>>>,
+    slots: Arc<Slots>,
     limits: Limits,
+}
+
+/// Open connections per host and in total, each held by a [`Slot`] for the
+/// life of its `serve`.
+#[derive(Default)]
+pub(crate) struct Slots {
+    held: Mutex<HashMap<String, usize>>,
+}
+
+impl Slots {
+    /// A slot for `alias`, or `None` over either limit.
+    fn take(self: &Arc<Self>, alias: &str) -> Option<Slot> {
+        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        let total: usize = held.values().sum();
+        if total >= MAX_CONNECTIONS {
+            return None;
+        }
+        let mine = held.entry(alias.to_string()).or_default();
+        if *mine >= MAX_CONNECTIONS_PER_HOST {
+            return None;
+        }
+        *mine += 1;
+        Some(Slot {
+            slots: Arc::clone(self),
+            alias: alias.to_string(),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn held(&self, alias: &str) -> usize {
+        let held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        held.get(alias).copied().unwrap_or(0)
+    }
+}
+
+/// One held connection; dropping it gives the slot back.
+struct Slot {
+    slots: Arc<Slots>,
+    alias: String,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut held = self.slots.held.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = held.get_mut(&self.alias) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                held.remove(&self.alias);
+            }
+        }
+    }
 }
 
 /// The per-connection settings, cloned into each connection's tasks.
@@ -188,6 +285,7 @@ impl AgentWsState {
         Self {
             registry,
             store,
+            slots: Arc::default(),
             limits: Limits {
                 beats: BeatSource::Every(HEARTBEAT),
                 frame_cap: MAX_FRAME_BYTES,
@@ -198,6 +296,12 @@ impl AgentWsState {
     /// A route with no registry: every upgrade gets [`NOT_ENABLED`].
     pub fn disabled() -> Self {
         Self::new(None)
+    }
+
+    /// The connection counts, for a test to watch a connection end.
+    #[cfg(test)]
+    pub(crate) fn slots(&self) -> Arc<Slots> {
+        Arc::clone(&self.slots)
     }
 
     /// Heartbeats fired by the test through `beats`, instead of by a clock.
@@ -250,11 +354,22 @@ pub(crate) async fn handle_agent(
     else {
         return (StatusCode::FORBIDDEN, NOT_A_HOST).into_response();
     };
+    // Every provisioned host holds a token for its hooks, SSH hosts
+    // included; only an agent host's may become an agent.
+    if !is_agent_host(&store, &alias) {
+        tracing::warn!(host = %alias, "[agent] refused an upgrade: not an agent host");
+        return (StatusCode::FORBIDDEN, NOT_AN_AGENT_HOST).into_response();
+    }
+    let Some(slot) = state.slots.take(&alias) else {
+        tracing::warn!(host = %alias, "[agent] refused an upgrade: too many connections");
+        return (StatusCode::TOO_MANY_REQUESTS, TOO_MANY).into_response();
+    };
     let session = Session {
         registry,
         store,
         alias,
         credential: crate::mcp::auth::sha256_hex(token),
+        _slot: slot,
     };
     let limits = state.limits;
     // Started here, before the `101` goes out, so the hello deadline counts
@@ -265,6 +380,16 @@ pub(crate) async fn handle_agent(
         .on_upgrade(move |socket| serve(socket, session, limits, hello_deadline))
 }
 
+/// Is `alias` a host on the agent transport?
+fn is_agent_host(store: &Mutex<Store>, alias: &str) -> bool {
+    store
+        .lock()
+        .ok()
+        .and_then(|s| s.agent_host_alias(alias).ok().flatten())
+        .as_deref()
+        == Some(alias)
+}
+
 /// Who a connection is, and what it must keep proving.
 struct Session {
     registry: Arc<AgentRegistry>,
@@ -272,6 +397,8 @@ struct Session {
     alias: String,
     /// SHA-256 of the host token the upgrade presented.
     credential: String,
+    /// Held until the connection ends.
+    _slot: Slot,
 }
 
 /// One connection, from the upgrade to the deregistration.
@@ -281,13 +408,14 @@ async fn serve(socket: WebSocket, session: Session, limits: Limits, hello_deadli
         store,
         alias,
         credential,
+        _slot,
     } = session;
     let (mut sink, mut stream) = socket.split();
     let hello = match first_hello(&mut stream, hello_deadline).await {
         Ok(h) => h,
         Err(why) => {
             tracing::warn!(host = %alias, why, "[agent] closing before registration");
-            let _ = sink.close().await;
+            let _ = tokio::time::timeout(CLOSE_TIMEOUT, sink.close()).await;
             return;
         }
     };
@@ -304,6 +432,9 @@ async fn serve(socket: WebSocket, session: Session, limits: Limits, hello_deadli
     // missed.
     let ticker = limits.beats.ticker();
     let conn_id = registry.connect_bound(&alias, hello, tx, credential.clone());
+    // Fires when this stops being the live connection, so the socket can be
+    // torn down even while the writer is stuck in a send.
+    let gone = registry.gone(&alias, conn_id);
     tracing::info!(host = %alias, conn = conn_id, "[agent] connected");
 
     let budgets = Arc::new(Mutex::new(Budgets::default()));
@@ -323,10 +454,13 @@ async fn serve(socket: WebSocket, session: Session, limits: Limits, hello_deadli
         credential: &credential,
     };
     // Whichever ends first ends the connection: the reader when the agent
-    // goes (or goes quiet), the writer when the registry lets go of it.
-    let writer_done = tokio::select! {
-        () = read_loop(&mut stream, who, &budgets, &ping_tx, ticker) => false,
-        _ = &mut writer => true,
+    // goes (or goes quiet), the writer when the registry lets go of it or a
+    // write times out, and `gone` when the registry lets go of it while the
+    // writer is stuck mid-send and cannot notice.
+    let end = tokio::select! {
+        () = read_loop(&mut stream, who, &budgets, &ping_tx, ticker) => End::Reader,
+        _ = &mut writer => End::Writer,
+        () = gone.cancelled() => End::Gone,
     };
 
     // Deregister first: it drops the registry's half of the channel, which is
@@ -335,10 +469,29 @@ async fn serve(socket: WebSocket, session: Session, limits: Limits, hello_deadli
     // replacement (`AgentRegistry::disconnect` checks the generation).
     registry.disconnect(&alias, conn_id);
     drop(ping_tx);
-    if !writer_done {
-        let _ = writer.await;
+    match end {
+        End::Writer => {}
+        // The writer may be blocked in a send nobody will ever finish:
+        // dropping it, with the read half below, closes the socket.
+        End::Gone => writer.abort(),
+        // The writer closes the socket itself, within its own timeouts.
+        End::Reader => {
+            if tokio::time::timeout(CLOSE_TIMEOUT, &mut writer)
+                .await
+                .is_err()
+            {
+                writer.abort();
+            }
+        }
     }
     tracing::info!(host = %alias, conn = conn_id, "[agent] disconnected");
+}
+
+/// What ended a connection's `serve`.
+enum End {
+    Reader,
+    Writer,
+    Gone,
 }
 
 /// Read frames until the agent identifies itself.
@@ -418,8 +571,20 @@ async fn write_loop(
         }
         match encode_hub_frame(&frame) {
             Ok(text) => {
-                if sink.send(Message::Text(text.into())).await.is_err() {
-                    break;
+                // Bounded: a peer that stops reading must not hold this task,
+                // and its buffers, for ever.
+                match tokio::time::timeout(SEND_TIMEOUT, sink.send(Message::Text(text.into())))
+                    .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => break,
+                    Err(_) => {
+                        tracing::warn!(
+                            host = %alias, conn = conn_id,
+                            "[agent] a write took over {}s; dropping", SEND_TIMEOUT.as_secs()
+                        );
+                        return;
+                    }
                 }
             }
             // Only reachable for a frame past MAX_FRAME_BYTES, which
@@ -432,7 +597,7 @@ async fn write_loop(
             ),
         }
     }
-    let _ = sink.close().await;
+    let _ = tokio::time::timeout(CLOSE_TIMEOUT, sink.close()).await;
 }
 
 /// A registered connection, as the read loop needs to know it.
@@ -671,6 +836,7 @@ mod tests {
     const MASTER: &str = "master-token";
     const LAPTOP_TOKEN: &str = "laptop-host-token";
     const DESK_TOKEN: &str = "desk-host-token";
+    const MEFISTOS_TOKEN: &str = "mefistos-ssh-host-token";
     const PHONE_TOKEN: &str = "phone-client-token";
 
     type Client = WebSocketStream<tokio::net::TcpStream>;
@@ -682,6 +848,7 @@ mod tests {
         store: Arc<Mutex<Store>>,
         registry: Arc<AgentRegistry>,
         beats: Arc<tokio::sync::watch::Sender<u64>>,
+        slots: Arc<Slots>,
     }
 
     impl Hub {
@@ -696,9 +863,14 @@ mod tests {
         {
             let s = store.lock().unwrap();
             s.upsert_host("laptop").unwrap();
+            s.set_host_transport("laptop", "agent").unwrap();
             s.upsert_host_token("laptop", LAPTOP_TOKEN).unwrap();
             s.upsert_host("desk").unwrap();
+            s.set_host_transport("desk", "agent").unwrap();
             s.upsert_host_token("desk", DESK_TOKEN).unwrap();
+            // An SSH host with a token, as every provisioned host has one.
+            s.upsert_host("mefistos").unwrap();
+            s.upsert_host_token("mefistos", MEFISTOS_TOKEN).unwrap();
             s.insert_client_token("phone", &crate::mcp::auth::sha256_hex(PHONE_TOKEN), "full")
                 .unwrap();
         }
@@ -718,6 +890,7 @@ mod tests {
     ) -> Hub {
         let beats = Arc::new(tokio::sync::watch::Sender::new(0));
         let state = state.with_manual_beats(Arc::clone(&beats));
+        let slots = state.slots();
         let app = crate::mcp::test_app(Arc::clone(&store), MASTER, state);
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -737,6 +910,7 @@ mod tests {
             store,
             registry,
             beats,
+            slots,
         }
     }
 
@@ -1050,6 +1224,73 @@ mod tests {
             None,
             "the socket closes with nothing sent down it"
         );
+    }
+
+    // ── bounded: which tokens, how many connections, how long a write ─────
+
+    /// Every provisioned host has a token for its hooks, SSH hosts included;
+    /// only an agent host's may become an agent.
+    #[tokio::test]
+    async fn a_host_on_the_ssh_transport_cannot_connect_an_agent() {
+        let hub = hub().await;
+        let (status, body) = dial_refused(hub.addr, MEFISTOS_TOKEN).await;
+        assert_eq!(status, 403);
+        assert_eq!(body, NOT_AN_AGENT_HOST);
+        assert!(hub.registry.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn moving_a_host_back_to_ssh_cuts_its_live_agent_off() {
+        a_change_cuts_the_live_agent_off(|s| s.set_host_transport("laptop", "ssh").unwrap()).await;
+    }
+
+    /// Each connection may buffer one ceiling-sized frame, and one reserved
+    /// by a 14-byte header costs that much, so the count is what bounds the
+    /// hub's memory. Refused before the upgrade, and given back when a
+    /// connection ends.
+    #[tokio::test]
+    async fn a_host_may_hold_only_a_few_connections_at_once() {
+        let hub = hub().await;
+        let first = dial(hub.addr, Some(LAPTOP_TOKEN)).await.expect("one");
+        let _second = dial(hub.addr, Some(LAPTOP_TOKEN)).await.expect("two");
+        let (status, body) = dial_refused(hub.addr, LAPTOP_TOKEN).await;
+        assert_eq!((status, body.as_str()), (429, TOO_MANY));
+        // Another host is not affected.
+        let _desk = dial(hub.addr, Some(DESK_TOKEN)).await.expect("desk");
+
+        drop(first);
+        wait_until("the first connection's slot is back", || {
+            hub.slots.held("laptop") == 1
+        })
+        .await;
+        dial(hub.addr, Some(LAPTOP_TOKEN))
+            .await
+            .expect("a slot is free again");
+    }
+
+    /// A replaced connection is torn down even while its writer is stuck
+    /// mid-send to a peer that stopped reading — the case that used to hold
+    /// its socket, and its buffer, for as long as the peer liked.
+    #[tokio::test]
+    async fn a_replaced_connection_is_torn_down_even_while_its_write_is_stuck() {
+        let hub = hub().await;
+        let _old = connected_as(&hub, LAPTOP_TOKEN, "laptop", "old").await;
+        // A frame far bigger than the loopback buffers, to a client that
+        // never reads: the writer blocks in `send`.
+        let big = HubFrame::Upload {
+            id: "stuck".into(),
+            path: "/tmp/x".into(),
+            mode: 0o600,
+            bytes_b64: "A".repeat(48 * 1024 * 1024),
+        };
+        let reg = Arc::clone(&hub.registry);
+        let _call =
+            crate::rt::spawn(async move { reg.request("laptop", big, PATIENCE * 10).await });
+        let _new = connected_as(&hub, LAPTOP_TOKEN, "laptop", "new").await;
+        wait_until("the replaced connection's session to end", || {
+            hub.slots.held("laptop") == 1
+        })
+        .await;
     }
 
     /// The other side of the same check: a beat with the token unchanged
