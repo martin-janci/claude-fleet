@@ -9,7 +9,7 @@ their own specs.
 ## Problem
 
 The catalog is all-or-nothing per host. `compute_host_plan`
-(`src-tauri/src/service/catalog/sync/plan.rs:296`) loops
+(`crates/fleet-core/src/service/catalog/sync/plan.rs:296`) loops
 `for asset in &catalog.assets` and plans **every** asset onto **every** host.
 `PlanFilter` carries a `host_alias`, but its `matches()` only tests `kind` and
 `name` — the alias selects which hosts to *visit*, never which assets belong
@@ -77,7 +77,7 @@ overrides:                    # field changes, deep-merged over the parent's
 
 **Keys are `<kind>/<name>`** — deliberately the same convention
 `Manifest::key` / `Manifest::split_key` already use
-(`src-tauri/src/service/catalog/sync/manifest.rs:44`), so one key spelling runs
+(`crates/fleet-core/src/service/catalog/sync/manifest.rs:44`), so one key spelling runs
 through layers, the manifest, the plan and the UI. `kind` is one of `skill`,
 `agent`, `hook`, `mcp_server`, `plugin_ref` (`Kind::as_str`).
 
@@ -172,7 +172,7 @@ connection or a running app.
 | layer definitions | catalog repo `layers/*.yaml` | portable, shareable, reviewable in a PR |
 | host → role + active contexts | fleet DB | that is per-installation state, not catalog content |
 
-### Migration `0NN_asset_layers.sql`
+### Migration `033_asset_layers.sql`
 
 ```sql
 CREATE TABLE host_layers (
@@ -190,12 +190,10 @@ CREATE UNIQUE INDEX idx_host_active_role
   ON host_layers(host_alias) WHERE axis = 'role' AND active = 1;
 ```
 
-Register it in the `MIGRATIONS` table in `src-tauri/src/store/schema.rs`.
+Register it in the `MIGRATIONS` table in `crates/fleet-core/src/store/schema.rs`.
 
-**Numbering:** the last migration on disk is `031_asset_sync.sql`. The
-host-reboot spec (`2026-09-17-host-reboot-session-survival-design.md`) also
-claims `032`. Whichever lands first takes it; the second must renumber. Do not
-assume `032` when implementing this.
+**Numbering:** the last migration on disk was `032_client_tokens.sql` (taken by
+feat/hub-client-access); asset layers landed as `033_asset_layers.sql`.
 
 ## Sync integration
 
@@ -205,7 +203,7 @@ host's role + active contexts, calls `resolve`, and hands the resulting
 
 **Removal falls out for free.** `Manifest::orphans` asks
 `catalog.find(kind, &name).is_none()`
-(`src-tauri/src/service/catalog/sync/manifest.rs:99`). An asset that leaves the
+(`crates/fleet-core/src/service/catalog/sync/manifest.rs:99`). An asset that leaves the
 effective set is therefore already an orphan and already planned as `Remove`.
 Switching a context off needs no new removal machinery.
 
@@ -270,7 +268,7 @@ These are new Tauri commands as well as MCP tools, so
 `docs/control-api-reference.md` must be regenerated or CI fails:
 
 ```bash
-REGEN_DOCS=1 cargo test --manifest-path src-tauri/Cargo.toml reference_is_current
+REGEN_DOCS=1 cargo test --workspace reference_is_current
 ```
 
 ## Testing
