@@ -903,6 +903,32 @@ async fn a_resync_emits_the_rows_it_re_listed_as_the_events_the_stores_apply() {
     );
 }
 
+/// The resync emits the hub's `list_tasks` rows as `task:updated`, so it
+/// inherits audit finding A unless the marker is removed where the rows are
+/// read: the Tasks panel would show the marker line after every reconnect.
+#[tokio::test]
+async fn a_resynced_task_carries_the_workers_words_not_the_hubs_marker() {
+    let marked = fleet_core::mcp::guard::mark_untrusted(
+        "shipped the fix",
+        &fleet_core::service::tasks::result_origin(11, Some(7), Some("trn")),
+    );
+    let tasks =
+        json!([{ "id": 11, "state": "done", "created_at": 1, "result": marked }]).to_string();
+    let (resync, seen, _) = resync_over(&[
+        ("list_sessions", "[]"),
+        ("list_hosts", "[]"),
+        ("list_tasks", &tasks),
+        ("list_accounts", "[]"),
+    ]);
+    resync.resync().await;
+    let events = seen.events();
+    let task = events
+        .iter()
+        .find(|(n, _)| *n == "task:updated")
+        .expect("the task is re-emitted");
+    assert_eq!(task.1["result"], json!("shipped the fix"), "{events:?}");
+}
+
 #[tokio::test]
 async fn the_first_resync_never_invents_a_removal() {
     let (resync, seen, _) = resync_over(&[

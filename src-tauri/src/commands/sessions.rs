@@ -222,7 +222,10 @@ pub fn dismiss_agent_session(
 ) -> Result<(), IpcError> {
     backend.local_only(
         "dismiss_agent_session",
-        "the hub exposes no tool for it; dismiss the agent from the hub",
+        "use Kill instead: the hub's kill_session removes an inactive \
+         agent from the list exactly as this would. It is not routed here \
+         because the two differ on a WORKING agent, which this refuses and \
+         kill_session stops",
     )?;
     bg_sessions::dismiss_agent_session(args, &store)
 }

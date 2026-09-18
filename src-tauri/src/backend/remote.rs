@@ -408,15 +408,28 @@ impl HubBackend {
         state: Option<String>,
         limit: Option<i64>,
     ) -> Result<Vec<TaskRow>, IpcError> {
-        self.call(
-            "list_tasks",
-            json!({
-                "requester_session_id": requester_session_id,
-                "state": state,
-                "limit": limit,
-            }),
-        )
-        .await
+        let mut rows: Vec<TaskRow> = self
+            .call(
+                "list_tasks",
+                json!({
+                    "requester_session_id": requester_session_id,
+                    "state": state,
+                    "limit": limit,
+                }),
+            )
+            .await?;
+        // The tool prefixes every result with the untrusted-content marker
+        // (`tasks::mark_task_result`), which is for an agent reading a tool
+        // answer. The local path hands the Tasks panel the worker's words
+        // as stored, so the hub's line comes off here — here rather than in
+        // the command, because the event bridge's resync reads through this
+        // too. `strip_marker` removes only a genuine first marker line.
+        for row in &mut rows {
+            if let Some(r) = row.result.as_mut() {
+                *r = fleet_core::mcp::guard::strip_marker(r).to_string();
+            }
+        }
+        Ok(rows)
     }
 
     /// `commands::sessions::session_history`.

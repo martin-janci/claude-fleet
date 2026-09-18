@@ -22,7 +22,7 @@ use super::*;
 use crate::backend::remote;
 use crate::commands;
 use fleet_core::events::NoopEventBus;
-use fleet_core::ipc_error::codes;
+use fleet_core::ipc_error::{codes, IpcError};
 use fleet_core::ssh::SshClient;
 use fleet_core::store::Store;
 use serde_json::{json, Value};
@@ -133,24 +133,41 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 const SESSION_PAYLOAD: &str = r#"{"id":42,"tmux_name":"from-the-hub","host_alias":"hetzner","created_at":1,"last_activity_at":2,"status":"running","kind":"tmux","turn_seq":0,"tags":[]}"#;
 const HOST_PAYLOAD: &str = r#"{"alias":"trn","reachable":true,"hidden":false,"provisioned":true}"#;
 const TASK_PAYLOAD: &str = r#"{"id":11,"state":"cancelled","created_at":1}"#;
+/// A complete `MoveReport`: all twelve fields are required on the wire, the
+/// last of them a whole `SessionRow` (the same one as [`SESSION_PAYLOAD`]).
+const MOVE_PAYLOAD: &str = r#"{"source_session_id":7,"target_session_id":43,"from_host":"trn","to_host":"hetzner","tmux_name":"demo","claude_session_id":"abc","branch":"main","target_cwd":"/w/demo","transcript_bytes":1024,"source_killed":true,"warnings":[],"target":{"id":43,"tmux_name":"demo","host_alias":"hetzner","created_at":1,"last_activity_at":2,"status":"running","kind":"tmux","turn_seq":0,"tags":[]}}"#;
 
 /// One row of the tables below: what to run, the tool it must name, and the
 /// arguments it must send.
+///
+/// The closure hands back the command's own `Result`, and `check` requires it
+/// to be `Ok`. It used to be discarded (`let _ = …`), which meant a payload
+/// that could not deserialise into the command's return type still passed —
+/// `move_session`'s case answered `"{}"` for a twelve-field `MoveReport` and
+/// was green. With the result thrown away, "the same shape the local path
+/// returns" was asserted by reading, not by test.
 type Case = (
     &'static str,
     Value,
     &'static str,
-    Box<dyn Fn(&FleetBackend, &Mutex<Store>, &Arc<SshClient>)>,
+    Box<dyn Fn(&FleetBackend, &Mutex<Store>, &Arc<SshClient>) -> Result<(), IpcError>>,
 );
 
 fn check(cases: Vec<Case>) {
     for (tool, want_args, payload, run) in cases {
         let fake = Fake::answering(payload);
         let (_dir, st) = store();
-        run(&remote_backend(&fake), &st, &ssh());
+        let got = run(&remote_backend(&fake), &st, &ssh());
         let (got_tool, got_args) = fake.only_call();
         assert_eq!(got_tool, tool, "wrong tool for {tool}");
         assert_eq!(got_args, want_args, "wrong arguments for {tool}");
+        if let Err(e) = got {
+            panic!(
+                "{tool}: the hub's answer did not come back as the command's return \
+                 type, so the frontend would get an error where the local path \
+                 returns a value: {e:?}"
+            );
+        }
     }
 }
 
@@ -174,12 +191,13 @@ fn every_routed_read_names_its_tool_and_arguments() {
             json!({ "summary": false, "force": true, "include_lost": true }),
             "[]",
             Box::new(|b, s, h| {
-                let _ = block_on(commands::sessions::routed::list_sessions(
+                block_on(commands::sessions::routed::list_sessions(
                     b,
                     Some(true),
                     s,
                     h,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -187,35 +205,32 @@ fn every_routed_read_names_its_tool_and_arguments() {
             json!({ "session_id": 7 }),
             "[]",
             Box::new(|b, s, _| {
-                let _ = block_on(commands::sessions::routed::related_sessions(
+                block_on(commands::sessions::routed::related_sessions(
                     b,
                     RelatedSessionsArgs { session_id: 7 },
                     s,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
             "list_hosts",
             json!({}),
             "[]",
-            Box::new(|b, s, _| {
-                let _ = block_on(commands::hosts::routed::list_hosts(b, s));
-            }),
+            Box::new(|b, s, _| block_on(commands::hosts::routed::list_hosts(b, s)).map(|_| ())),
         ),
         (
             "list_accounts",
             json!({}),
             "[]",
-            Box::new(|b, s, _| {
-                let _ = block_on(commands::hosts::routed::list_accounts(b, s));
-            }),
+            Box::new(|b, s, _| block_on(commands::hosts::routed::list_accounts(b, s)).map(|_| ())),
         ),
         (
             "list_projects",
             json!({ "summary": false }),
             "[]",
             Box::new(|b, s, _| {
-                let _ = block_on(commands::projects::routed::list_projects(b, s));
+                block_on(commands::projects::routed::list_projects(b, s)).map(|_| ())
             }),
         ),
         (
@@ -223,7 +238,7 @@ fn every_routed_read_names_its_tool_and_arguments() {
             json!({}),
             "[]",
             Box::new(|b, s, _| {
-                let _ = block_on(commands::projects::routed::refresh_projects(b, s));
+                block_on(commands::projects::routed::refresh_projects(b, s)).map(|_| ())
             }),
         ),
         (
@@ -231,13 +246,14 @@ fn every_routed_read_names_its_tool_and_arguments() {
             json!({ "project_id": 4 }),
             "[]",
             Box::new(|b, s, _| {
-                let _ = block_on(commands::worktrees::routed::list_worktrees(
+                block_on(commands::worktrees::routed::list_worktrees(
                     b,
                     ListWorktreesArgs {
                         project_id: Some(4),
                     },
                     s,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -245,13 +261,14 @@ fn every_routed_read_names_its_tool_and_arguments() {
             json!({ "requester_session_id": 2, "state": "running", "limit": 9 }),
             "[]",
             Box::new(|b, s, _| {
-                let _ = block_on(commands::tasks::routed::list_tasks(
+                block_on(commands::tasks::routed::list_tasks(
                     b,
                     Some(2),
                     Some("running".into()),
                     Some(9),
                     s,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -261,14 +278,15 @@ fn every_routed_read_names_its_tool_and_arguments() {
             json!({ "session_id": 7, "limit": 500 }),
             "[]",
             Box::new(|b, s, _| {
-                let _ = block_on(commands::sessions::routed::session_history(
+                block_on(commands::sessions::routed::session_history(
                     b,
                     commands::sessions::SessionHistoryArgs {
                         session_id: 7,
                         limit: Some(10_000),
                     },
                     s,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -276,7 +294,7 @@ fn every_routed_read_names_its_tool_and_arguments() {
             json!({ "session_id": 7, "turns": 5 }),
             r#"{"turns":[],"truncated":false}"#,
             Box::new(|b, s, h| {
-                let _ = block_on(commands::sessions::routed::session_conversation(
+                block_on(commands::sessions::routed::session_conversation(
                     b,
                     commands::sessions::SessionConversationArgs {
                         session_id: 7,
@@ -284,7 +302,8 @@ fn every_routed_read_names_its_tool_and_arguments() {
                     },
                     s,
                     h,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -292,7 +311,7 @@ fn every_routed_read_names_its_tool_and_arguments() {
             json!({ "session_id": 7, "all": true, "limit": 25, "skip": 50 }),
             "[]",
             Box::new(|b, s, h| {
-                let _ = block_on(commands::history::routed::repo_log(
+                block_on(commands::history::routed::repo_log(
                     b,
                     RepoLogArgs {
                         session_id: 7,
@@ -302,7 +321,8 @@ fn every_routed_read_names_its_tool_and_arguments() {
                     },
                     s,
                     h,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -310,12 +330,13 @@ fn every_routed_read_names_its_tool_and_arguments() {
             json!({ "session_id": 7 }),
             "[]",
             Box::new(|b, s, h| {
-                let _ = block_on(commands::history::routed::repo_branches(
+                block_on(commands::history::routed::repo_branches(
                     b,
                     SessionIdArgs { session_id: 7 },
                     s,
                     h,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -323,7 +344,7 @@ fn every_routed_read_names_its_tool_and_arguments() {
             json!({ "session_id": 7, "hash": "abc123" }),
             r#"{"hash":"abc123","subject":"s","body":"","author":"a","date":"d","files":[]}"#,
             Box::new(|b, s, h| {
-                let _ = block_on(commands::history::routed::repo_commit(
+                block_on(commands::history::routed::repo_commit(
                     b,
                     RepoCommitArgs {
                         session_id: 7,
@@ -331,7 +352,8 @@ fn every_routed_read_names_its_tool_and_arguments() {
                     },
                     s,
                     h,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -339,7 +361,7 @@ fn every_routed_read_names_its_tool_and_arguments() {
             json!({ "session_id": 7, "hash": "abc123", "path": "src/lib.rs" }),
             r#"{"path":"src/lib.rs","diff":"","binary":false,"truncated":false}"#,
             Box::new(|b, s, h| {
-                let _ = block_on(commands::history::routed::repo_commit_diff(
+                block_on(commands::history::routed::repo_commit_diff(
                     b,
                     RepoCommitDiffArgs {
                         session_id: 7,
@@ -348,7 +370,8 @@ fn every_routed_read_names_its_tool_and_arguments() {
                     },
                     s,
                     h,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -356,12 +379,13 @@ fn every_routed_read_names_its_tool_and_arguments() {
             json!({ "session_id": 7 }),
             "[]",
             Box::new(|b, s, h| {
-                let _ = block_on(commands::files::routed::repo_changes(
+                block_on(commands::files::routed::repo_changes(
                     b,
                     SessionIdArgs { session_id: 7 },
                     s,
                     h,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -369,12 +393,13 @@ fn every_routed_read_names_its_tool_and_arguments() {
             json!({ "session_id": 7 }),
             r#"{"entries":[],"truncated":false}"#,
             Box::new(|b, s, h| {
-                let _ = block_on(commands::files::routed::repo_tree(
+                block_on(commands::files::routed::repo_tree(
                     b,
                     SessionIdArgs { session_id: 7 },
                     s,
                     h,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -382,7 +407,7 @@ fn every_routed_read_names_its_tool_and_arguments() {
             json!({ "session_id": 7, "path": "src/lib.rs" }),
             r#"{"path":"src/lib.rs","content":"","truncated":false,"binary":false,"is_dir":false,"size":0}"#,
             Box::new(|b, s, h| {
-                let _ = block_on(commands::files::routed::repo_file(
+                block_on(commands::files::routed::repo_file(
                     b,
                     RepoFileArgs {
                         session_id: 7,
@@ -390,7 +415,8 @@ fn every_routed_read_names_its_tool_and_arguments() {
                     },
                     s,
                     h,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -398,7 +424,7 @@ fn every_routed_read_names_its_tool_and_arguments() {
             json!({ "session_id": 7, "path": "src/lib.rs" }),
             r#"{"path":"src/lib.rs","diff":"","binary":false,"truncated":false}"#,
             Box::new(|b, s, h| {
-                let _ = block_on(commands::files::routed::repo_diff(
+                block_on(commands::files::routed::repo_diff(
                     b,
                     RepoFileArgs {
                         session_id: 7,
@@ -406,7 +432,8 @@ fn every_routed_read_names_its_tool_and_arguments() {
                     },
                     s,
                     h,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
     ]);
@@ -433,7 +460,7 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
             json!({ "host_alias": "trn", "tmux_name": "demo", "prompt": "go", "submit": true }),
             r#"{"delivered":true}"#,
             Box::new(|b, s, h| {
-                let _ = block_on(commands::sessions::routed::send_prompt(
+                block_on(commands::sessions::routed::send_prompt(
                     b,
                     SendPromptArgs {
                         host_alias: "trn".into(),
@@ -443,7 +470,8 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
                     },
                     s,
                     h,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -451,7 +479,7 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
             json!({ "host_alias": "trn", "name": "demo", "force": true }),
             "7",
             Box::new(|b, s, h| {
-                let _ = block_on(commands::sessions::routed::kill_session(
+                block_on(commands::sessions::routed::kill_session(
                     b,
                     KillSessionArgs {
                         host_alias: "trn".into(),
@@ -460,7 +488,8 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
                     },
                     s,
                     h,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -468,7 +497,7 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
             json!({ "host_alias": "trn", "tmux_name": "demo" }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
-                let _ = block_on(commands::sessions::routed::safe_kill_session(
+                block_on(commands::sessions::routed::safe_kill_session(
                     b,
                     SafeKillSessionArgs {
                         host_alias: "trn".into(),
@@ -476,7 +505,8 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
                     },
                     s,
                     h,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -484,7 +514,7 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
             json!({ "host_alias": "trn", "old_name": "a", "new_name": "b" }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
-                let _ = block_on(commands::sessions::routed::rename_session(
+                block_on(commands::sessions::routed::rename_session(
                     b,
                     RenameSessionArgs {
                         host_alias: "trn".into(),
@@ -493,7 +523,8 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
                     },
                     s,
                     h,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -503,7 +534,7 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
             json!({ "host_alias": "trn", "tmux_name": "demo", "friendly_name": "the demo" }),
             SESSION_PAYLOAD,
             Box::new(|b, s, _| {
-                let _ = block_on(commands::sessions::routed::set_session_friendly_name(
+                block_on(commands::sessions::routed::set_session_friendly_name(
                     b,
                     SetFriendlyNameArgs {
                         host_alias: "trn".into(),
@@ -511,7 +542,8 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
                         friendly_name: "the demo".into(),
                     },
                     s,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -519,7 +551,7 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
             json!({ "host_alias": "trn", "name": "demo", "force": false }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
-                let _ = block_on(commands::sessions::routed::restart_session(
+                block_on(commands::sessions::routed::restart_session(
                     b,
                     RestartSessionArgs {
                         host_alias: "trn".into(),
@@ -528,7 +560,8 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
                     },
                     s,
                     h,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -536,7 +569,7 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
             json!({ "source_session_id": 7, "prompt": "review it" }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
-                let _ = block_on(commands::sessions::routed::spawn_review(
+                block_on(commands::sessions::routed::spawn_review(
                     b,
                     SpawnReviewArgs {
                         source_session_id: 7,
@@ -545,7 +578,8 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
                     },
                     s,
                     h,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -553,7 +587,7 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
             json!({ "session_id": 7, "force": false }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
-                let _ = block_on(commands::sessions::routed::recreate_session(
+                block_on(commands::sessions::routed::recreate_session(
                     b,
                     RecreateSessionArgs {
                         session_id: 7,
@@ -561,7 +595,8 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
                     },
                     s,
                     h,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -569,11 +604,12 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
             json!({ "session_id": 7 }),
             r#"{"dismissed":7}"#,
             Box::new(|b, s, _| {
-                let _ = block_on(commands::sessions::routed::dismiss_ghost_session(
+                block_on(commands::sessions::routed::dismiss_ghost_session(
                     b,
                     DismissGhostSessionArgs { session_id: 7 },
                     s,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -581,7 +617,7 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
             json!({ "host_alias": "trn", "name": "worker", "prompt": "go" }),
             r#"{"claude_session_id":"abc"}"#,
             Box::new(|b, s, h| {
-                let _ = block_on(commands::sessions::routed::new_bg_session(
+                block_on(commands::sessions::routed::new_bg_session(
                     b,
                     NewBgSessionArgs {
                         host_alias: "trn".into(),
@@ -590,7 +626,8 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
                     },
                     s,
                     h,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -598,7 +635,7 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
             json!({ "worktree_id": 3, "force": true }),
             "worktree deleted",
             Box::new(|b, s, h| {
-                let _ = block_on(commands::worktrees::routed::delete_worktree(
+                block_on(commands::worktrees::routed::delete_worktree(
                     b,
                     DeleteWorktreeArgs {
                         worktree_id: 3,
@@ -606,7 +643,8 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
                     },
                     s,
                     h,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -614,7 +652,7 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
             json!({ "task_id": 11 }),
             TASK_PAYLOAD,
             Box::new(|b, s, _| {
-                let _ = block_on(commands::tasks::routed::cancel_task(b, 11, s));
+                block_on(commands::tasks::routed::cancel_task(b, 11, s)).map(|_| ())
             }),
         ),
         (
@@ -622,7 +660,7 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
             json!({ "alias": "trn" }),
             HOST_PAYLOAD,
             Box::new(|b, s, h| {
-                let _ = block_on(commands::hosts::routed::probe_host(
+                block_on(commands::hosts::routed::probe_host(
                     b,
                     HostAliasArgs {
                         alias: "trn".into(),
@@ -630,15 +668,16 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
                     s,
                     h,
                     &fleet_core::cancel::CancellationRegistry::new(),
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
         (
             "move_session",
             json!({ "session_id": 7, "target_host_alias": "hetzner", "keep_source": false }),
-            "{}",
+            MOVE_PAYLOAD,
             Box::new(|b, s, h| {
-                let _ = block_on(commands::move_session::routed::move_session(
+                block_on(commands::move_session::routed::move_session(
                     b,
                     MoveSessionArgs {
                         session_id: 7,
@@ -647,7 +686,8 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
                     },
                     s,
                     h,
-                ));
+                ))
+                .map(|_| ())
             }),
         ),
     ]);
@@ -673,6 +713,42 @@ fn a_routed_read_answers_the_hub_and_not_the_local_database() {
     assert_eq!(rows[0].id, 42);
     assert_eq!(rows[0].tmux_name, "from-the-hub");
     assert_eq!(rows[0].host_alias, "hetzner");
+}
+
+/// Audit finding A: same tool, same arguments, same type — different text on
+/// screen. The hub's `list_tasks` passes every row through
+/// `tasks::mark_task_result`, which puts the untrusted-content marker line in
+/// front of the worker's result; that is right for an AGENT reading a tool
+/// answer, and wrong for a person reading the Tasks panel, which standalone
+/// shows the result exactly as the worker wrote it. Parity is about what the
+/// frontend receives, not only about what was sent.
+#[test]
+fn a_task_result_reads_the_same_as_standalone_without_the_hubs_marker() {
+    use fleet_core::mcp::guard::mark_untrusted;
+    use fleet_core::service::tasks::result_origin;
+    // A worker whose own text starts with a line that merely LOOKS like a
+    // marker must keep it: only the hub's line is removed.
+    for said in ["shipped the fix", "shipped the fix\nand a second line"] {
+        let marked = mark_untrusted(said, &result_origin(11, Some(7), Some("trn")));
+        let payload =
+            json!([{ "id": 11, "state": "done", "created_at": 1, "result": marked }]).to_string();
+        let fake = Fake::answering(&payload);
+        let (_dir, st) = store();
+        let rows = block_on(commands::tasks::routed::list_tasks(
+            &remote_backend(&fake),
+            None,
+            None,
+            None,
+            &st,
+        ))
+        .expect("the hub's tasks");
+        assert_eq!(
+            rows[0].result.as_deref(),
+            Some(said),
+            "standalone shows the worker's words; paired at a hub the same task \
+             must not read differently"
+        );
+    }
 }
 
 /// `force` is the sidebar's Refresh button. Standalone it reconciles here;
@@ -902,6 +978,78 @@ fn a_refusal_never_carries_the_token() {
         .unwrap_err();
     assert!(!format!("{err:?}").contains("cl_s3cret-token"), "{err:?}");
     assert!(!format!("{:?}", remote_backend(&fake)).contains("cl_s3cret-token"));
+}
+
+/// A refusal's reason is what the user acts on, so it has to be TRUE —
+/// `local_only`'s own doc says it "must tell the user where the operation
+/// does work". The audit found seven that were not:
+///
+/// - six asset commands said "the hub exposes no authoring tool" while the
+///   hub has a tool for each (`list_assets` is even read-only, served to any
+///   paired phone), and two of those are master-only, which is the real
+///   reason they refuse;
+/// - `dismiss_agent_session` said "the hub exposes no tool for it" while the
+///   routed `kill_session` dismisses an inactive agent exactly as it does.
+///
+/// Read from source, like `every_command_has_a_verdict`, because a
+/// `#[tauri::command]` cannot be called without a live `tauri::App`.
+#[test]
+fn a_refusal_that_has_a_hub_tool_names_it_rather_than_denying_it() {
+    fn reason(file: &str, name: &str) -> String {
+        let src = SOURCES
+            .iter()
+            .find(|(f, _)| *f == file)
+            .unwrap_or_else(|| panic!("{file} is not in SOURCES"))
+            .1;
+        let start = src
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("no fn {name} in {file}"));
+        let rest = &src[start..];
+        let body = &rest[..rest.find("#[tauri::command]").unwrap_or(rest.len())];
+        let call = &body[body.find("local_only(").expect("a local_only guard")..];
+        let call = &call[..call.find(")?").expect("the guard's end")];
+        call.replace("\\\n", " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+    const DENIALS: [&str; 2] = ["exposes no authoring tool", "exposes no tool"];
+
+    for (command, tool) in [
+        ("catalog_list_assets", "list_assets"),
+        ("assets_scan_hosts", "scan_assets"),
+        ("catalog_import_host", "import_assets"),
+        ("catalog_plan_sync", "plan_sync"),
+        ("catalog_apply_sync", "apply_sync"),
+        ("catalog_set_secret", "set_secret"),
+    ] {
+        let said = reason("commands/assets.rs", command);
+        for d in DENIALS {
+            assert!(
+                !said.contains(d),
+                "{command} denies a tool the hub has ({tool}): {said}"
+            );
+        }
+        assert!(
+            said.contains(tool),
+            "{command} must name the hub's {tool}: {said}"
+        );
+    }
+    // The two the hub keeps for its master: THAT is why they refuse.
+    for command in ["catalog_apply_sync", "catalog_set_secret"] {
+        let said = reason("commands/assets.rs", command);
+        assert!(said.contains("master"), "{command}: {said}");
+    }
+
+    let said = reason("commands/sessions.rs", "dismiss_agent_session");
+    for d in DENIALS {
+        assert!(!said.contains(d), "dismiss_agent_session: {said}");
+    }
+    assert!(
+        said.contains("kill_session"),
+        "the routed Kill does this for an inactive agent, and the user should \
+         be sent there: {said}"
+    );
 }
 
 // ── 4. nothing falls through unclassified ───────────────────────────────────

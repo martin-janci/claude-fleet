@@ -109,6 +109,16 @@ describe('hubBlock', () => {
   it('the terminal reason offers the shell command instead', () => {
     expect(hubBlock('terminal', remote)!.toLowerCase()).toContain('tmux attach');
   });
+
+  // The audit's finding H, the frontend half: the hub DOES serve the asset
+  // list (`list_assets`, read-only, open to any paired client). What it does
+  // not serve is the catalog's configuration and checkout, which the panel is
+  // built on — so that is the reason, and it must not deny a tool that exists.
+  it('the asset catalog reason does not deny the tool the hub has', () => {
+    const said = hubBlock('catalog_config', remote)!;
+    expect(said).not.toMatch(/no authoring tool|exposes no tool/);
+    expect(said).toContain('list_assets');
+  });
 });
 
 describe('hubNextStep', () => {

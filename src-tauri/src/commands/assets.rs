@@ -105,7 +105,7 @@ pub fn catalog_config(
     backend.local_only(
         "catalog_config",
         "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
+         fleet, and the hub has no tool for this; work on the catalog \
          there",
     )?;
     catalog::config(&store)
@@ -120,7 +120,7 @@ pub fn catalog_configure(
     backend.local_only(
         "catalog_configure",
         "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
+         fleet, and the hub has no tool for this; work on the catalog \
          there",
     )?;
     catalog::configure(args, &store)
@@ -135,7 +135,7 @@ pub fn catalog_load(
     backend.local_only(
         "catalog_load",
         "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
+         fleet, and the hub has no tool for this; work on the catalog \
          there",
     )?;
     catalog::load(args.pull, &store)
@@ -148,9 +148,11 @@ pub fn catalog_list_assets(
 ) -> Result<AssetListing, IpcError> {
     backend.local_only(
         "catalog_list_assets",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
-         there",
+        "the hub does serve this list (its read-only list_assets tool, \
+         open to any paired client), but the Assets panel is built on the \
+         catalog's configuration and git checkout, which only the machine \
+         that owns the fleet has; call list_assets on the hub, or browse the \
+         catalog on that machine",
     )?;
     catalog::list_assets(&store)
 }
@@ -164,7 +166,7 @@ pub fn catalog_get_asset(
     backend.local_only(
         "catalog_get_asset",
         "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
+         fleet, and the hub has no tool for this; work on the catalog \
          there",
     )?;
     if !catalog::model::is_valid_name(&args.name) {
@@ -184,9 +186,10 @@ pub fn catalog_import_host(
 ) -> Result<ImportReport, IpcError> {
     backend.local_only(
         "catalog_import_host",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
-         there",
+        "the hub has this as its import_assets tool, but the import \
+         lands in the catalog's git checkout, which only the machine that \
+         owns the fleet has; call import_assets on the hub, or import on \
+         that machine",
     )?;
     let token = {
         let s = lock(&store)?;
@@ -204,9 +207,10 @@ pub async fn assets_scan_hosts(
 ) -> Result<Vec<inventory::HostScanResult>, IpcError> {
     backend.local_only(
         "assets_scan_hosts",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
-         there",
+        "the hub has this as its scan_assets tool, but its result feeds \
+         an inventory panel built on the catalog checkout, which only the \
+         machine that owns the fleet has; call scan_assets on the hub, or \
+         scan from that machine",
     )?;
     inventory::scan_hosts(&store, &ssh, args.host_alias.as_deref()).await
 }
@@ -219,7 +223,7 @@ pub fn assets_inventory(
     backend.local_only(
         "assets_inventory",
         "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
+         fleet, and the hub has no tool for this; work on the catalog \
          there",
     )?;
     catalog::inventory(&store)
@@ -234,9 +238,10 @@ pub async fn catalog_plan_sync(
 ) -> Result<SyncPlan, IpcError> {
     backend.local_only(
         "catalog_plan_sync",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
-         there",
+        "the hub has this as its plan_sync tool, but the plan is shown \
+         in a sync panel built on the catalog checkout, which only the \
+         machine that owns the fleet has; call plan_sync on the hub, or \
+         plan on that machine",
     )?;
     sync::plan_sync(args, &store, &ssh).await
 }
@@ -251,9 +256,9 @@ pub async fn catalog_apply_sync(
 ) -> Result<SyncRunSummary, IpcError> {
     backend.local_only(
         "catalog_apply_sync",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
-         there",
+        "the hub's apply_sync is master-only: a paired client is never \
+         the fleet's administrator, and a sync writes to every host over \
+         SSH; run the sync on the hub",
     )?;
     sync::apply_sync(args, &store, &ssh, &reg).await
 }
@@ -266,7 +271,7 @@ pub fn catalog_last_sync(
     backend.local_only(
         "catalog_last_sync",
         "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
+         fleet, and the hub has no tool for this; work on the catalog \
          there",
     )?;
     sync::last_sync(&store)
@@ -280,7 +285,7 @@ pub fn catalog_list_secrets(
     backend.local_only(
         "catalog_list_secrets",
         "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
+         fleet, and the hub has no tool for this; work on the catalog \
          there",
     )?;
     let s = lock(&store)?;
@@ -295,9 +300,9 @@ pub fn catalog_set_secret(
 ) -> Result<(), IpcError> {
     backend.local_only(
         "catalog_set_secret",
-        "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
-         there",
+        "the hub's set_secret is master-only: a paired client is never \
+         the fleet's administrator, and the sync secrets belong to the \
+         machine that runs the sync; set it on the hub",
     )?;
     if !is_valid_secret_name(&args.name) {
         return Err(IpcError::new(
@@ -318,7 +323,7 @@ pub fn catalog_delete_secret(
     backend.local_only(
         "catalog_delete_secret",
         "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
+         fleet, and the hub has no tool for this; work on the catalog \
          there",
     )?;
     let s = lock(&store)?;
@@ -336,7 +341,7 @@ pub fn catalog_create_asset(
     backend.local_only(
         "catalog_create_asset",
         "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
+         fleet, and the hub has no tool for this; work on the catalog \
          there",
     )?;
     check_name(&args.name)?;
@@ -355,7 +360,7 @@ pub fn catalog_update_asset(
     backend.local_only(
         "catalog_update_asset",
         "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
+         fleet, and the hub has no tool for this; work on the catalog \
          there",
     )?;
     check_name(&args.asset.header.name)?;
@@ -374,7 +379,7 @@ pub fn catalog_delete_asset(
     backend.local_only(
         "catalog_delete_asset",
         "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
+         fleet, and the hub has no tool for this; work on the catalog \
          there",
     )?;
     check_name(&args.name)?;
@@ -390,7 +395,7 @@ pub fn catalog_add_resource(
     backend.local_only(
         "catalog_add_resource",
         "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
+         fleet, and the hub has no tool for this; work on the catalog \
          there",
     )?;
     check_name(&args.name)?;
@@ -410,7 +415,7 @@ pub fn catalog_remove_resource(
     backend.local_only(
         "catalog_remove_resource",
         "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
+         fleet, and the hub has no tool for this; work on the catalog \
          there",
     )?;
     check_name(&args.name)?;
@@ -427,7 +432,7 @@ pub fn catalog_lint_asset(
     backend.local_only(
         "catalog_lint_asset",
         "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
+         fleet, and the hub has no tool for this; work on the catalog \
          there",
     )?;
     check_name(&args.name)?;
@@ -442,7 +447,7 @@ pub fn catalog_lint_all(
     backend.local_only(
         "catalog_lint_all",
         "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
+         fleet, and the hub has no tool for this; work on the catalog \
          there",
     )?;
     author::lint_everything(&store)
@@ -457,7 +462,7 @@ pub fn catalog_commit_pending(
     backend.local_only(
         "catalog_commit_pending",
         "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
+         fleet, and the hub has no tool for this; work on the catalog \
          there",
     )?;
     author::commit_pending(args, &store)
@@ -471,7 +476,7 @@ pub fn catalog_push(
     backend.local_only(
         "catalog_push",
         "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
+         fleet, and the hub has no tool for this; work on the catalog \
          there",
     )?;
     author::push(&store)
@@ -485,7 +490,7 @@ pub fn catalog_repo_status(
     backend.local_only(
         "catalog_repo_status",
         "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
+         fleet, and the hub has no tool for this; work on the catalog \
          there",
     )?;
     author::repo_status(&store)
@@ -499,7 +504,7 @@ pub fn catalog_template(
     backend.local_only(
         "catalog_template",
         "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
+         fleet, and the hub has no tool for this; work on the catalog \
          there",
     )?;
     check_name(&args.name)?;
@@ -517,7 +522,7 @@ pub async fn catalog_spawn_author_session(
     backend.local_only(
         "catalog_spawn_author_session",
         "the asset catalog is a git checkout on the machine that owns the \
-         fleet, and the hub exposes no authoring tool; work on the catalog \
+         fleet, and the hub has no tool for this; work on the catalog \
          there",
     )?;
     if let Some(name) = args.name.as_deref() {

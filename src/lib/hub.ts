@@ -141,7 +141,7 @@ const REASONS = {
   tunnel_status: 'the tunnels belong to whichever process owns the fleet',
   mcp_status: 'this app runs no embedded control API while a hub owns the fleet',
   catalog_config:
-    'the asset catalog is a git checkout on the machine that owns the fleet, and the hub exposes no authoring tool',
+    'the asset catalog is a git checkout on the machine that owns the fleet; the hub serves its asset list to any paired client (list_assets), but not the configuration and checkout this panel is built on',
   get_fleet_settings:
     'these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not',
   list_account_usage:

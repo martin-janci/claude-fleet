@@ -68,8 +68,9 @@
     await Promise.all([refresh(), repoStatus()]);
   }
 
-  // The whole catalog is a git checkout on the machine that owns the fleet,
-  // and the hub exposes no authoring tool — every `catalog_*` command is
+  // The whole catalog is a git checkout on the machine that owns the fleet.
+  // The hub serves the asset list (`list_assets`) but not the configuration
+  // and checkout this panel is built on, so every `catalog_*` command is
   // guarded. `catalog_config` is one of the six this UI calls UNPROMPTED, so
   // without this opening the Assets tab raised an error where the panel
   // should be.
