@@ -95,10 +95,25 @@ impl Backend {
                     s.get_setting(CLIENT_NAME_KEY),
                 ),
                 Err(_) => {
+                    // The hub URL cannot be read, so we cannot know whether
+                    // this app was paired — except that a stored client token
+                    // is proof that it was. Falling back to standalone *while
+                    // paired* is the one failure the design says must never
+                    // happen quietly: this process would start managing hosts
+                    // the hub is also managing.
+                    let was_paired = matches!(tokens.get(), Ok(Some(_)));
                     return Resolution {
                         backend: Backend::Local,
-                        warning: Some("the settings store was poisoned; staying standalone".into()),
-                    }
+                        warning: Some(if was_paired {
+                            "the settings store was poisoned and this app WAS PAIRED with a hub \
+                             (a client token is stored); it is falling back to standalone, so it \
+                             may now manage hosts the hub also manages — restart it, and do not \
+                             leave it running"
+                                .into()
+                        } else {
+                            "the settings store was poisoned; staying standalone".into()
+                        }),
+                    };
                 }
             }
         };
@@ -175,6 +190,21 @@ impl Backend {
         matches!(self, Backend::Remote(_))
     }
 
+    /// Whether this process is the one brain of its fleet.
+    ///
+    /// Standalone it is, and it runs the reconcile tick, the account-usage
+    /// tick and the embedded MCP server. Pointed at a hub it is **not**, and
+    /// must run none of them: two reconcile passes over one fleet means two
+    /// sets of hooks fighting over which URL a host reports to, and two
+    /// databases drifting apart.
+    ///
+    /// This exists as a named predicate rather than an `if backend.is_remote()`
+    /// at each site so that the decision is one testable thing. Every one of
+    /// the three startup tasks is behind it in `lib.rs`.
+    pub fn owns_the_fleet(&self) -> bool {
+        matches!(self, Backend::Local)
+    }
+
     /// The remote configuration, or `None` when standalone.
     pub fn remote(&self) -> Option<&RemoteConfig> {
         match self {
@@ -184,10 +214,22 @@ impl Backend {
     }
 }
 
-/// Accept only an absolute `http`/`https` URL with a host, and return it
-/// without a trailing slash so callers can append `/mcp` or `/events`.
+/// Accept only an absolute `http`/`https` URL with a host, and return **just
+/// its scheme, host, port and path**, without a trailing slash, so callers can
+/// append `/mcp` or `/events`.
+///
+/// Userinfo, query and fragment are dropped rather than carried, for two
+/// independent reasons:
+///
+/// - **Credentials.** `https://user:sup3rsecret@hub` would otherwise survive
+///   into `base_url`, which is logged at info on startup and which
+///   `collect_diagnostics` folds into the blob a user sends to support. This
+///   value is a display string and a URL prefix; it is not an authentication
+///   channel (the bearer token is, and it lives in [`token_store`]).
+/// - **Correctness.** The result is concatenated with `/mcp`, so a surviving
+///   query turned `https://hub/?token=abc` into `https://hub/?token=abc/mcp`.
 fn normalise_base_url(raw: &str) -> Result<String, String> {
-    let parsed = url::Url::parse(raw).map_err(|e| e.to_string())?;
+    let mut parsed = url::Url::parse(raw).map_err(|e| e.to_string())?;
     match parsed.scheme() {
         "http" | "https" => {}
         other => return Err(format!("scheme {other} is not http or https")),
@@ -195,6 +237,12 @@ fn normalise_base_url(raw: &str) -> Result<String, String> {
     if parsed.host_str().is_none_or(|h| h.is_empty()) {
         return Err("no host".into());
     }
+    // Each returns `Err(())` only for a cannot-be-a-base URL; the host check
+    // above has already excluded those.
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
     Ok(parsed.as_str().trim_end_matches('/').to_string())
 }
 
@@ -308,6 +356,155 @@ mod tests {
             let text = format!("{:?}", resolved);
             assert!(!text.contains("s3cret-token"), "{text}");
         }
+    }
+
+    /// The review's SHOULD-FIX: `normalise_base_url` kept userinfo, query and
+    /// fragment, which failed in two separate ways.
+    ///
+    /// The credential one: `https://user:sup3rsecret@host` survived into
+    /// `base_url`, which `lib.rs` logs at info, and `collect_diagnostics`
+    /// bundles the log tail into the blob a user sends to support.
+    ///
+    /// The correctness one: the string is the base for `{base}/mcp`, so
+    /// `https://host/?token=abc` built `https://host/?token=abc/mcp`.
+    #[test]
+    fn normalising_a_hub_url_drops_credentials_query_and_fragment() {
+        let cases = [
+            (
+                "https://user:sup3rsecret@fleet.example.com",
+                "https://fleet.example.com",
+            ),
+            (
+                "https://user@fleet.example.com/",
+                "https://fleet.example.com",
+            ),
+            (
+                "https://fleet.example.com/?token=abc",
+                "https://fleet.example.com",
+            ),
+            (
+                "https://fleet.example.com/#frag",
+                "https://fleet.example.com",
+            ),
+            (
+                "https://u:p@fleet.example.com:8443/hub/?a=1#f",
+                "https://fleet.example.com:8443/hub",
+            ),
+            // Scheme, host, port and path all survive, and survive intact.
+            ("http://10.0.0.5:8787/base", "http://10.0.0.5:8787/base"),
+        ];
+        for (raw, want) in cases {
+            let got = normalise_base_url(raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
+            assert_eq!(got, want, "for {raw}");
+            assert!(!got.contains("sup3rsecret"), "for {raw}: {got}");
+            assert!(!got.contains('@'), "for {raw}: {got}");
+            assert!(!got.contains('?') && !got.contains('#'), "for {raw}: {got}");
+            // The whole point: appending the endpoint must be well formed.
+            assert!(
+                format!("{got}/mcp").ends_with("/mcp"),
+                "for {raw}: {got}/mcp"
+            );
+        }
+    }
+
+    /// A URL whose credentials are stripped must not resolve to a config that
+    /// still carries them anywhere.
+    #[test]
+    fn a_resolved_remote_never_carries_url_credentials() {
+        let (_dir, store) = store_with(&[(
+            REMOTE_URL_KEY,
+            "https://user:sup3rsecret@fleet.example.com/?token=abc",
+        )]);
+        let resolved = Backend::resolve_detail(&store, &InMemoryTokenStore::with_token("t"));
+        let cfg = resolved.backend.remote().expect("remote");
+        assert_eq!(cfg.base_url, "https://fleet.example.com");
+        assert!(!format!("{resolved:?}").contains("sup3rsecret"));
+    }
+
+    /// The review's SHOULD-FIX: nothing observed that remote mode starts none
+    /// of the three background tasks. A refactor hoisting a tick out of the
+    /// `else` branch would silently start a second reconcile loop against the
+    /// same fleet — the exact failure this sub-project exists to prevent.
+    /// `lib.rs` branches on this predicate, so this test guards it.
+    #[test]
+    fn only_a_standalone_app_owns_the_fleet() {
+        assert!(
+            Backend::Local.owns_the_fleet(),
+            "standalone must keep its tick, its usage poll and its own server"
+        );
+        assert!(
+            !Backend::Remote(RemoteConfig {
+                base_url: "https://fleet.example.com".into(),
+                token: "t".into(),
+                client_name: "laptop".into(),
+            })
+            .owns_the_fleet(),
+            "a hub client must start NO reconcile tick, NO usage tick and NO \
+             embedded MCP server — two hubs managing one fleet is the failure \
+             this whole mode exists to prevent"
+        );
+    }
+
+    /// A poisoned store mutex used to drop a *paired* app back to standalone
+    /// on a `warn!` that reads like routine noise. The design says that must
+    /// never happen quietly: the app would start managing hosts the hub also
+    /// manages. The setting cannot be read with the lock poisoned, but a
+    /// stored client token is proof this app was paired, so the warning says
+    /// so in those words.
+    #[test]
+    fn a_poisoned_store_says_loudly_that_a_paired_app_is_falling_back() {
+        let (_dir, store) = store_with(&[(REMOTE_URL_KEY, "https://fleet.example.com")]);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = store.lock().unwrap();
+            panic!("poison");
+        }));
+        assert!(store.lock().is_err(), "the mutex must really be poisoned");
+
+        let paired = Backend::resolve_detail(&store, &InMemoryTokenStore::with_token("cl_tok"));
+        assert_eq!(paired.backend, Backend::Local);
+        let warning = paired.warning.expect("a warning");
+        let said = warning.to_lowercase();
+        assert!(
+            said.contains("was paired") && said.contains("also manages"),
+            "a paired app must be told what just happened: {warning}"
+        );
+        assert!(!warning.contains("cl_tok"), "{warning}");
+
+        // An app that was never paired gets the plain message; there is no
+        // second fleet for it to collide with.
+        let never = Backend::resolve_detail(&store, &InMemoryTokenStore::empty());
+        let warning = never.warning.expect("a warning");
+        assert!(!warning.to_lowercase().contains("was paired"), "{warning}");
+    }
+
+    /// `RemoteConfig` must never gain `Serialize`: it would ride into a Tauri
+    /// command's return value, an event payload or a settings blob, and the
+    /// token with it. The `Debug` impl is hand-written for that reason, but a
+    /// `#[derive(Serialize)]` would bypass it entirely.
+    ///
+    /// Method resolution prefers an inherent method over a trait method, so
+    /// `Probe::<T>` answers `true` only while `T: Serialize`.
+    #[test]
+    fn remote_config_is_not_serializable() {
+        struct Probe<T>(std::marker::PhantomData<T>);
+        trait NotSerialize {
+            fn is_serialize(&self) -> bool {
+                false
+            }
+        }
+        impl<T> NotSerialize for Probe<T> {}
+        impl<T: serde::Serialize> Probe<T> {
+            fn is_serialize(&self) -> bool {
+                true
+            }
+        }
+        assert!(
+            !Probe::<RemoteConfig>(std::marker::PhantomData).is_serialize(),
+            "RemoteConfig gained Serialize — the client token can now reach \
+             the frontend, an event payload or a settings blob"
+        );
+        // The probe really does detect Serialize when it is there.
+        assert!(Probe::<String>(std::marker::PhantomData).is_serialize());
     }
 
     #[test]

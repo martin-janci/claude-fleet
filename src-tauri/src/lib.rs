@@ -172,8 +172,17 @@ pub fn run() {
             // reconciling and mutating the same fleet.
             let backend = Backend::resolve(&store, &OsTokenStore::new(data_dir.clone()));
             app.manage(backend.clone());
-            if let Some(cfg) = backend.remote() {
-                // Deliberately no token in this line.
+            // `owns_the_fleet()` rather than `!is_remote()`: the three tasks
+            // below are what "owning the fleet" MEANS, and a unit test pins
+            // the predicate (`backend::tests::only_a_standalone_app_owns_the_
+            // fleet`). Anything hoisted out of this `else` branch starts a
+            // second reconcile loop against a fleet the hub already manages.
+            if !backend.owns_the_fleet() {
+                // Deliberately no token in this line. `base_url` carries no
+                // userinfo either — `normalise_base_url` strips it, because
+                // this line is logged and `collect_diagnostics` ships the log
+                // tail to support.
+                let cfg = backend.remote().expect("not owning the fleet means remote");
                 tracing::info!(
                     hub = %cfg.base_url,
                     client = %cfg.client_name,

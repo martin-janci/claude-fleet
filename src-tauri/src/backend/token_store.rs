@@ -52,68 +52,53 @@ impl OsTokenStore {
     }
 }
 
+/// `errSecItemNotFound` — the keychain simply has no such entry, which for us
+/// means "not paired". Spelled out rather than pulled from
+/// `security-framework-sys` so this file needs only the safe crate.
+#[cfg(target_os = "macos")]
+const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+
+/// The macOS keychain, through the Security framework directly.
+///
+/// This used to shell out to `/usr/bin/security`, which put the token on a
+/// child process's **argv**. That is not the short-lived race the old comment
+/// claimed: EndpointSecurity `NOTIFY_EXEC`, OpenBSM audit and every EDR agent
+/// capture the full argv of every exec and ship it to a retained, off-box log,
+/// so the capture is guaranteed rather than lucky. Disconnect does not revoke
+/// (see [`TokenStore::clear`]), so a token leaked that way stays valid until
+/// an operator revokes it on the hub — which nobody will, because nobody knows.
+///
+/// The framework call passes the secret in process memory and execs nothing.
 #[cfg(target_os = "macos")]
 impl TokenStore for OsTokenStore {
     fn get(&self) -> Result<Option<String>, String> {
-        let out = std::process::Command::new("/usr/bin/security")
-            .args(["find-generic-password", "-s", SERVICE, "-a", ACCOUNT, "-w"])
-            .output()
-            .map_err(|e| format!("cannot run /usr/bin/security: {e}"))?;
-        if out.status.success() {
-            let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            return Ok(if token.is_empty() { None } else { Some(token) });
+        match security_framework::passwords::get_generic_password(SERVICE, ACCOUNT) {
+            Ok(bytes) => {
+                let token = String::from_utf8_lossy(&bytes).trim().to_string();
+                Ok(if token.is_empty() { None } else { Some(token) })
+            }
+            Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(None),
+            // `e` is an OSStatus and its message; neither can contain the
+            // secret, because the secret is never part of the query.
+            Err(e) => Err(format!("keychain lookup failed: {e}")),
         }
-        // 44 is `security`'s SecItemNotFound: simply not paired.
-        if out.status.code() == Some(44) {
-            return Ok(None);
-        }
-        Err(format!(
-            "keychain lookup failed (security exited {:?})",
-            out.status.code()
-        ))
     }
 
     fn set(&self, token: &str) -> Result<(), String> {
-        // `-w <token>` puts the secret on the argv, where `ps` can see it for
-        // the lifetime of this very short-lived child. `security` offers no
-        // stdin path for a non-interactive write, and the alternative — a
-        // temp file — trades one exposure for a worse one.
-        let out = std::process::Command::new("/usr/bin/security")
-            .args([
-                "add-generic-password",
-                "-U",
-                "-s",
-                SERVICE,
-                "-a",
-                ACCOUNT,
-                "-w",
-                token,
-            ])
-            .output()
-            .map_err(|e| format!("cannot run /usr/bin/security: {e}"))?;
-        if out.status.success() {
-            Ok(())
-        } else {
-            Err(format!(
-                "keychain write failed (security exited {:?})",
-                out.status.code()
-            ))
-        }
+        security_framework::passwords::set_generic_password(
+            SERVICE,
+            ACCOUNT,
+            token.trim().as_bytes(),
+        )
+        .map_err(|e| format!("keychain write failed: {e}"))
     }
 
     fn clear(&self) -> Result<(), String> {
-        let out = std::process::Command::new("/usr/bin/security")
-            .args(["delete-generic-password", "-s", SERVICE, "-a", ACCOUNT])
-            .output()
-            .map_err(|e| format!("cannot run /usr/bin/security: {e}"))?;
-        // Already gone is success.
-        if out.status.success() || out.status.code() == Some(44) {
-            Ok(())
-        } else {
-            Err(format!(
-                "keychain delete failed (security exited {:?})",
-                out.status.code()
-            ))
+        match security_framework::passwords::delete_generic_password(SERVICE, ACCOUNT) {
+            // Already gone is success: Disconnect may be pressed twice.
+            Ok(()) => Ok(()),
+            Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
+            Err(e) => Err(format!("keychain delete failed: {e}")),
         }
     }
 }
@@ -132,10 +117,31 @@ impl TokenStore for OsTokenStore {
     }
 
     fn set(&self, token: &str) -> Result<(), String> {
+        use std::io::Write;
         let path = self.fallback_path();
-        std::fs::write(&path, token)
+        // Owner-only **at creation**. `fs::write` then chmod left a window in
+        // which the file existed at 0644 (0666 & ~umask) holding a bearer
+        // credential for the whole fleet; any local user reading in that
+        // window wins. `mode` applies only when O_CREAT actually creates the
+        // file, so the chmod below still has to run for a file left behind by
+        // an older build or restored from a backup.
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts
+            .open(&path)
+            .map_err(|e| format!("cannot open the hub token file: {e}"))?;
+        // Trimmed on the way in as well as on the way out, so the bytes on
+        // disk are the token and nothing else — a token is pasted into
+        // Settings and arrives with whatever whitespace came with it.
+        f.write_all(token.trim().as_bytes())
             .map_err(|e| format!("cannot write the hub token file: {e}"))?;
-        // Same treatment `state.db` gets (SEC-11): owner-only.
+        // Same treatment `state.db` gets (SEC-11): owner-only. Still needed
+        // for the pre-existing-file case above.
         fleet_core::service::provision::set_private_mode(&path);
         Ok(())
     }
@@ -146,6 +152,113 @@ impl TokenStore for OsTokenStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(format!("cannot remove the hub token file: {e}")),
         }
+    }
+}
+
+/// The file-backed fallback, which is what this Linux box actually runs.
+///
+/// These are the tests the review asked for: nothing exercised `set` or
+/// `clear` before, which is exactly why the world-readable creation window
+/// survived Task 1.
+#[cfg(all(test, not(target_os = "macos")))]
+mod fallback_tests {
+    use super::*;
+
+    fn store() -> (tempfile::TempDir, OsTokenStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OsTokenStore::new(dir.path().to_path_buf());
+        (dir, store)
+    }
+
+    #[test]
+    fn an_unpaired_app_has_no_token() {
+        let (_dir, store) = store();
+        assert_eq!(store.get().unwrap(), None);
+    }
+
+    #[test]
+    fn a_token_round_trips_and_clear_forgets_it() {
+        let (_dir, store) = store();
+        store.set("cl_abc123").unwrap();
+        assert_eq!(store.get().unwrap().as_deref(), Some("cl_abc123"));
+        store.set("cl_replaced").unwrap();
+        assert_eq!(store.get().unwrap().as_deref(), Some("cl_replaced"));
+        store.clear().unwrap();
+        assert_eq!(store.get().unwrap(), None);
+        // Clearing twice is not an error — Disconnect may be pressed twice.
+        store.clear().unwrap();
+    }
+
+    /// Surrounding whitespace comes from a paste into Settings. `get` already
+    /// trimmed on the way out; trimming on the way in means the stored bytes
+    /// are the token and nothing else.
+    #[test]
+    fn a_pasted_token_is_trimmed_before_it_is_stored() {
+        let (_dir, store) = store();
+        store.set("  cl_abc123\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(store.fallback_path()).unwrap(),
+            "cl_abc123",
+            "the file must hold the token and nothing else"
+        );
+        assert_eq!(store.get().unwrap().as_deref(), Some("cl_abc123"));
+    }
+
+    /// The review's SHOULD-FIX: `fs::write` created the file at 0644 and
+    /// chmodded afterwards, leaving a window in which any local user could
+    /// read a bearer credential for the whole fleet.
+    #[cfg(unix)]
+    #[test]
+    fn the_token_file_is_never_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, store) = store();
+        store.set("cl_abc123").unwrap();
+        let mode = std::fs::metadata(store.fallback_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "mode was {mode:o}");
+    }
+
+    /// A file left behind by an older build (or by a restore) is tightened on
+    /// the next write: creation flags only apply when the file is created.
+    #[cfg(unix)]
+    #[test]
+    fn a_pre_existing_loose_file_is_tightened() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, store) = store();
+        let path = store.fallback_path();
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        store.set("cl_new").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "mode was {mode:o}");
+        assert_eq!(store.get().unwrap().as_deref(), Some("cl_new"));
+    }
+
+    /// A shorter token must not leave the tail of a longer one behind.
+    #[test]
+    fn replacing_a_token_truncates_the_file() {
+        let (_dir, store) = store();
+        store.set("cl_a_very_long_token_value").unwrap();
+        store.set("cl_short").unwrap();
+        assert_eq!(store.get().unwrap().as_deref(), Some("cl_short"));
+    }
+
+    /// The trait's contract: an implementation must never put the token into
+    /// its error text.
+    #[test]
+    fn an_unwritable_store_fails_without_naming_the_token() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the token file's name is taken by a directory:
+        // every write fails, deterministically and without a chmod dance.
+        std::fs::create_dir(dir.path().join(ACCOUNT)).unwrap();
+        let store = OsTokenStore::new(dir.path().to_path_buf());
+        let e = store.set("cl_s3cret").expect_err("a write must fail");
+        assert!(!e.contains("cl_s3cret"), "the error leaked the token: {e}");
     }
 }
 

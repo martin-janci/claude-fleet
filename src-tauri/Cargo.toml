@@ -47,5 +47,12 @@ url = "2"
 # via fleet-core).
 async-trait = "0.1"
 
+# The macOS keychain, so the client token never touches a child process's
+# argv (which EDR/EndpointSecurity capture and retain). macOS-only: Linux's
+# and Windows' dependency sets are untouched, which is what separates this
+# from the cross-platform `keyring` crate that was rejected at Task 1.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
 [dev-dependencies]
 tempfile = "3"
