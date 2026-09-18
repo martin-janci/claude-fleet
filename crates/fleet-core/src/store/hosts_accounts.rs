@@ -406,6 +406,41 @@ impl Store {
     pub fn get_host_row(&self, alias: &str) -> Result<Option<HostRow>, rusqlite::Error> {
         fetch_host(&self.conn, alias)
     }
+
+    // ---- host boot identity (migration 034) ----
+
+    /// The boot identity recorded by the last probe that could read it.
+    /// An unknown host, or one never probed, is `StoredIdentity::default()`
+    /// (both `None`) — "unknown", which never produces a mass-loss verdict.
+    pub fn get_host_identity(&self, alias: &str) -> rusqlite::Result<StoredIdentity> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT boot_id, tmux_server_pid FROM hosts WHERE alias = ?1",
+                rusqlite::params![alias],
+                |r| {
+                    Ok(StoredIdentity {
+                        boot_id: r.get(0)?,
+                        tmux_server_pid: r.get(1)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row.unwrap_or_default())
+    }
+
+    pub fn set_host_identity(
+        &self,
+        alias: &str,
+        boot_id: Option<&str>,
+        tmux_server_pid: Option<i64>,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE hosts SET boot_id = ?1, tmux_server_pid = ?2 WHERE alias = ?3",
+            rusqlite::params![boot_id, tmux_server_pid, alias],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -984,5 +1019,44 @@ mod tests {
         // edit, not folded into upsert_account's no-op detection.
         s.set_account_nickname("u1", Some("Home")).unwrap();
         assert_eq!(bus.take(), vec!["account:upserted:u1".to_string()]);
+    }
+
+    // ── host boot identity (migration 034) ──
+
+    #[test]
+    fn host_identity_round_trips_and_defaults_to_unknown() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("mefistos").unwrap();
+        assert_eq!(
+            s.get_host_identity("mefistos").unwrap(),
+            StoredIdentity::default()
+        );
+
+        s.set_host_identity("mefistos", Some("boot-a"), Some(4242))
+            .unwrap();
+        assert_eq!(
+            s.get_host_identity("mefistos").unwrap(),
+            StoredIdentity {
+                boot_id: Some("boot-a".into()),
+                tmux_server_pid: Some(4242)
+            }
+        );
+
+        // "No server" is stored as a NULL pid, distinct from a changed pid.
+        s.set_host_identity("mefistos", Some("boot-a"), None)
+            .unwrap();
+        assert_eq!(
+            s.get_host_identity("mefistos").unwrap().tmux_server_pid,
+            None
+        );
+    }
+
+    #[test]
+    fn host_identity_of_an_unknown_host_is_unknown_not_an_error() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(
+            s.get_host_identity("ghost").unwrap(),
+            StoredIdentity::default()
+        );
     }
 }

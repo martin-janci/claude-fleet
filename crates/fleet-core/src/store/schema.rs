@@ -106,6 +106,18 @@ fn asset_inventory_has_managed(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 034: `sessions` already has its
+/// `lost_reason` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
+/// See [`Migration`].
+fn sessions_has_lost_reason(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'lost_reason'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// Ordered schema migrations, `(version, sql)`. Versions are contiguous from
 /// 1 and every script must end by recording its own version with
 /// `INSERT OR IGNORE INTO schema_version (version) VALUES (N)` — the tests
@@ -219,6 +231,12 @@ const MIGRATIONS: &[Migration] = &[
     // `CREATE TABLE IF NOT EXISTS` + `CREATE UNIQUE INDEX IF NOT EXISTS`,
     // safe to re-run.
     Migration::plain(33, include_str!("../../migrations/033_asset_layers.sql")),
+    // `ALTER TABLE ... ADD COLUMN` fails if the column is already there.
+    Migration {
+        version: 34,
+        sql: include_str!("../../migrations/034_host_boot_identity.sql"),
+        already_applied: Some(sessions_has_lost_reason),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

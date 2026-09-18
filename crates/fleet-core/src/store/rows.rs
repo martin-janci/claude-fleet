@@ -409,6 +409,18 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
     })
 }
 
+/// A host's recorded boot identity (migration 034): the kernel boot id and
+/// tmux server pid from the last probe that could read them. Not part of
+/// [`HostRow`] — reached only through [`Store::get_host_identity`] and
+/// [`Store::set_host_identity`], since [`HostRow`] is serialised to the
+/// frontend and this identity is backend-only bookkeeping for the reboot
+/// safety net.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StoredIdentity {
+    pub boot_id: Option<String>,
+    pub tmux_server_pid: Option<i64>,
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct AccountRow {
     pub uuid: String,
