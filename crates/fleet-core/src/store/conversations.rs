@@ -186,6 +186,24 @@ impl Store {
         Ok(())
     }
 
+    /// Store a hook-validated transcript path on the session's conversation
+    /// row for `claude_session_id`, so an earlier conversation can be read
+    /// after the session has moved on. No event: `list_conversations` reads
+    /// it on demand.
+    pub fn set_conversation_transcript_path(
+        &self,
+        session_id: i64,
+        claude_session_id: &str,
+        path: &str,
+    ) -> Result<(), IpcError> {
+        self.conn.execute(
+            "UPDATE conversations SET transcript_path = ?3 \
+             WHERE session_id = ?1 AND claude_session_id = ?2",
+            rusqlite::params![session_id, claude_session_id, path],
+        )?;
+        Ok(())
+    }
+
     /// Stamp `last_hook_at` for a hook write that has no status write of
     /// its own (a SessionStart rebind). The reconcile upsert keys its
     /// in-flight guard on it: a pass that probed before this instant keeps

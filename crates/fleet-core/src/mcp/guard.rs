@@ -46,6 +46,7 @@ pub const READONLY_TOOLS: &[&str] = &[
     "list_worktrees",
     "capture_session",
     "session_history",
+    "session_conversations",
     "inbox",
     "peer_status",
     "peek_session",

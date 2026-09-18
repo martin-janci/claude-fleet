@@ -1046,7 +1046,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 71);
+    assert_eq!(served, 72);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 

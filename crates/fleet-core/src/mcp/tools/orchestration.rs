@@ -81,8 +81,11 @@ impl FleetTools {
         summary (flagged when that tool call failed). turns defaults to 10 and \
         is capped at 100; the character budget scales with it. Prefer this over \
         session_transcript when you want the shape of the exchange rather than \
-        one flat blob. Read-only. Errors: E_INVALID_STATE (no claude_session_id \
-        yet), E_NO_TRANSCRIPT (nothing written yet)."
+        one flat blob. Pass claude_session_id (from session_conversations) to \
+        read an earlier conversation of the session instead of the current one. \
+        Read-only. Errors: E_INVALID (claude_session_id is not one of the \
+        session's conversations), E_INVALID_STATE (no claude_session_id yet), \
+        E_NO_TRANSCRIPT (nothing written yet)."
     )]
     pub(super) async fn session_conversation(
         &self,
@@ -91,25 +94,24 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit(
             "session_conversation",
-            &format!("session_id={} turns={:?}", p.session_id, p.turns),
+            &format!(
+                "session_id={} turns={:?} claude_session_id={:?}",
+                p.session_id, p.turns, p.claude_session_id
+            ),
         );
         let row =
             self.resolve_target_row(&caller, Some(p.session_id), None, None, "the session")?;
         let (turns, max_chars) = transcript::conv_limits(p.turns);
-        let args =
-            transcript::resolve_args(&self.store, &row, turns, max_chars).map_err(to_mcp_err)?;
-        let claude_id = args.claude_session_id.clone();
-        let conv = transcript::fetch_conversation(args, &self.ssh)
-            .await
-            .map_err(to_mcp_err)?;
-        // Write the context size back so the row's meter is right
-        // immediately; only meaningful for the row's current conversation
-        // (no override arg yet — Task 7).
-        if let Some(v) = &conv.context {
-            if let Ok(s) = lock(&self.store) {
-                let _ = s.set_context(row.id, &claude_id, v.tokens, v.window, "transcript", None);
-            }
-        }
+        let conv = transcript::fetch_conversation_for_row(
+            &self.store,
+            &self.ssh,
+            &row,
+            p.claude_session_id.as_deref(),
+            turns,
+            max_chars,
+        )
+        .await
+        .map_err(to_mcp_err)?;
         ok_json(&conv)
     }
 

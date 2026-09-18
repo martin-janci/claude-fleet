@@ -481,10 +481,14 @@ pub fn task_max_age_secs(s: &Store) -> i64 {
 /// - its worker row is gone (killed / dismissed / GC'd);
 /// - its worker is lost (ghost);
 /// - its worker now runs a DIFFERENT Claude conversation than at dispatch
-///   (recreated onto a fresh session that never saw the prompt).
+///   (recreated onto a fresh session that never saw the prompt) — unless
+///   the worker switched conversations itself (`current_source` is `clear`,
+///   `resume`, `compact`, `startup` or `unknown`): the task stays open; only
+///   a fleet rebind (recreate / move) fails it.
 pub fn liveness_verdict(
     task: &TaskRow,
     worker: Option<&SessionRow>,
+    current_source: Option<&str>,
     now: i64,
     max_age_secs: i64,
 ) -> Option<String> {
@@ -507,7 +511,11 @@ pub fn liveness_verdict(
         return Some(format!("worker session {wid} was lost (ghost)"));
     }
     if let (Some(then), Some(now_id)) = (&task.worker_claude_session_id, &w.claude_session_id) {
-        if then != now_id {
+        let in_session_switch = matches!(
+            current_source,
+            Some("clear" | "resume" | "compact" | "startup" | "unknown")
+        );
+        if then != now_id && !in_session_switch {
             return Some(format!(
                 "worker session {wid} was recreated onto a new Claude conversation"
             ));
@@ -541,7 +549,11 @@ pub fn sweep_one(
         Some(w) => s.get_session_by_id(w)?,
         None => None,
     };
-    match liveness_verdict(task, worker.as_ref(), now, max_age_secs) {
+    let source = match task.worker_session_id {
+        Some(w) => s.current_conversation_source(w).ok().flatten(),
+        None => None,
+    };
+    match liveness_verdict(task, worker.as_ref(), source.as_deref(), now, max_age_secs) {
         Some(reason) => fail_task(s, task.id, &reason),
         None => Ok(None),
     }
@@ -715,6 +727,7 @@ async fn capture_worker_pane(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::StartSource;
 
     fn seed(s: &Store, host: &str, name: &str) -> i64 {
         s.upsert_host(host).unwrap();
@@ -1068,6 +1081,34 @@ mod tests {
         assert_eq!(s.get_task(t_fine.id).unwrap().unwrap().state, "queued");
         // A second sweep is a no-op.
         assert!(sweep_open_tasks(&s, now).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_clear_inside_the_worker_does_not_fail_its_task() {
+        let s = Store::open_in_memory().unwrap();
+        let id = seed(&s, "local", "w");
+        let t = create_task(&s, None, Some(id), "x").unwrap();
+        s.set_claude_session_id(id, "11111111-1111-1111-1111-111111111111")
+            .unwrap();
+        s.set_task_worker_claude_id(t.id, "11111111-1111-1111-1111-111111111111")
+            .unwrap();
+        let now = t.created_at + 10;
+        for (uuid, src) in [
+            ("22222222-2222-2222-2222-222222222222", StartSource::Clear),
+            ("33333333-3333-3333-3333-333333333333", StartSource::Resume),
+            ("44444444-4444-4444-4444-444444444444", StartSource::Compact),
+            ("55555555-5555-5555-5555-555555555555", StartSource::Startup),
+            ("66666666-6666-6666-6666-666666666666", StartSource::Unknown),
+        ] {
+            s.rebind_conversation(id, uuid, src, None, None).unwrap();
+            assert!(sweep_open_tasks(&s, now).unwrap().is_empty(), "{src:?}");
+        }
+        // A fleet recreate still fails it.
+        s.set_claude_session_id(id, "77777777-7777-7777-7777-777777777777")
+            .unwrap();
+        let failed = sweep_open_tasks(&s, now).unwrap();
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].error.as_deref().unwrap().contains("recreated"));
     }
 
     #[test]

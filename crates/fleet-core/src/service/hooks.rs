@@ -92,8 +92,8 @@ fn payload_transcript_path<'p>(
         .filter(|p| valid_transcript_path(p, claude_session_id))
 }
 
-/// Store the hook's transcript path on the row when it validates (and the
-/// id is still the row's current conversation).
+/// Store the hook's transcript path when it validates: on the row (while the
+/// id is still its current conversation) and on that conversation's row.
 fn remember_transcript_path(
     s: &Store,
     row_id: i64,
@@ -102,6 +102,7 @@ fn remember_transcript_path(
 ) {
     if let Some(p) = payload_transcript_path(payload, claude_session_id) {
         let _ = s.set_transcript_path_for_row(row_id, claude_session_id, p);
+        let _ = s.set_conversation_transcript_path(row_id, claude_session_id, p);
     }
 }
 
@@ -1499,6 +1500,10 @@ mod tests {
             s.session_transcript_path(id).unwrap().as_deref(),
             Some(good)
         );
+        // ...and on the conversation row, so an earlier conversation stays
+        // readable after the session moves on.
+        let convs = s.list_conversations(id, 10).unwrap();
+        assert_eq!(convs[0].transcript_path.as_deref(), Some(good));
         // The hook still counted as a turn.
         assert_eq!(s.get_session_by_id(id).unwrap().unwrap().turn_seq, 1);
     }

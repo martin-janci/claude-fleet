@@ -819,6 +819,18 @@ pub(super) fn bg_kill_action(
     })
 }
 
+/// Record a kill: the `killed` timeline event and the end of the row's
+/// current conversation (`end_reason = killed`). Best-effort, like every
+/// timeline write; the rows go with the session row (`ON DELETE CASCADE`).
+pub(crate) fn record_kill(s: &Store, id: i64, claude_session_id: Option<&str>) {
+    if let Err(e) = s.insert_session_event(id, "killed", None) {
+        tracing::warn!(session_id = id, error = %e, "[event] insert killed failed");
+    }
+    if let Some(cid) = claude_session_id {
+        let _ = s.close_conversation(id, cid, "killed");
+    }
+}
+
 pub async fn kill_session(
     args: KillSessionArgs,
     store: &Mutex<Store>,
@@ -864,9 +876,7 @@ pub async fn kill_session(
         match bg_kill_action(&kind, status, &agents, &sid)? {
             BgKillAction::Dismiss => {
                 let s = lock(store)?;
-                if let Err(e) = s.insert_session_event(id, "killed", None) {
-                    tracing::warn!(session_id = id, error = %e, "[event] insert killed failed");
-                }
+                record_kill(&s, id, Some(&sid));
                 // Records the dismissal and deletes the row, so there is
                 // nothing left for a reconcile pass to prune.
                 s.dismiss_agent(&args.host_alias, &sid, now_unix())?;
@@ -881,9 +891,7 @@ pub async fn kill_session(
             BgKillAction::Nothing => {}
         }
         if let Ok(s) = store.lock() {
-            if let Err(e) = s.insert_session_event(id, "killed", None) {
-                tracing::warn!(session_id = id, error = %e, "[event] insert killed failed");
-            }
+            record_kill(&s, id, Some(&sid));
         }
         reconcile_one_host(store, ssh, &args.host_alias).await?;
         return Ok(id);
@@ -892,9 +900,7 @@ pub async fn kill_session(
     tmux.kill_session(&args.name).await?;
     // Task G: record the kill before reconcile reaps the row. Best-effort.
     if let Ok(s) = store.lock() {
-        if let Err(e) = s.insert_session_event(id, "killed", None) {
-            tracing::warn!(session_id = id, error = %e, "[event] insert killed failed");
-        }
+        record_kill(&s, id, claude_sid.as_deref());
     }
     reconcile_one_host(store, ssh, &args.host_alias).await?;
     Ok(id)

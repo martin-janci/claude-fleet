@@ -50,12 +50,13 @@ the host's detail in the **Hosts** view (⌘I):
   fleet-admin set. Cross-host `send_prompt`, `kill_session`, `new_session`
   etc. remain allowed by design.
 - `readonly` — only tools that observe the fleet (`list_*`, `capture_session`,
-  `session_history`, `inbox`, `peer_status`, `session_transcript`,
-  `peek_session` (deprecated), `repo_*`, `get_clipboard`, `wait_for_session`,
-  `wait_for_task`, `list_tasks`, …). Anything that sends, kills, deletes,
-  provisions, dispatches, writes the clipboard, or writes a session row
-  (including `set_friendly_name`, so an agent on a `readonly` host cannot
-  set its sidebar label) returns `E_FORBIDDEN`.
+  `session_history`, `session_conversations`, `inbox`, `peer_status`,
+  `session_transcript`, `peek_session` (deprecated), `repo_*`,
+  `get_clipboard`, `wait_for_session`, `wait_for_task`, `list_tasks`, …).
+  Anything that sends, kills, deletes, provisions, dispatches, writes the
+  clipboard, or writes a session row (including `set_friendly_name`, so an
+  agent on a `readonly` host cannot set its sidebar label) returns
+  `E_FORBIDDEN`.
 
 The fleet-admin tools — `provision_hosts`, `add_host`, `remove_host`,
 `hide_host` — are **master-token only** in either mode: a token lifted from
@@ -206,7 +207,10 @@ Index by area (names only; see the reference for details):
   `capture_session`, `session_transcript` (the conversation of any session,
   including pane-less `bg:<uuid>` rows — track background runs with it),
   `peek_session` (`peek_session` is deprecated: use `session_transcript`),
-  `peer_status`, `session_history`, `send_message`, `inbox`. Rows with
+  `peer_status`, `session_history`, `session_conversations` (the Claude
+  conversations a session has run — `/clear`, `/resume`, compaction; pass a
+  `claude_session_id` from it to `session_conversation` to read an earlier
+  one), `send_message`, `inbox`. Rows with
   `kind: external` are interactive Claude sessions running outside tmux:
   fleet can read them (`session_transcript`) but not control them.
 - **Lifecycle & recovery** — `restart_session`, `recreate_session`,

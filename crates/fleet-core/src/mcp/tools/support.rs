@@ -946,6 +946,7 @@ pub(super) const QUICK_TOOLS: &[&str] = &[
     "send_message",
     "send_prompt",
     "session_history",
+    "session_conversations",
     "set_clipboard",
     "set_friendly_name",
     "set_session_tags",
