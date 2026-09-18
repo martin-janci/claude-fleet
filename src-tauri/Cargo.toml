@@ -43,6 +43,9 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 # Already in the lockfile via tauri; used to validate `hub.remote_url`.
 url = "2"
+# Object-safe async trait for the hub transport seam (already in the tree
+# via fleet-core).
+async-trait = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

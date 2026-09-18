@@ -15,6 +15,7 @@
 //! Nothing routes through [`Backend`] yet — this module only makes the choice
 //! and makes it observable.
 
+pub mod remote;
 pub mod token_store;
 
 use fleet_core::store::Store;

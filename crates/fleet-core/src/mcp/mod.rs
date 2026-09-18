@@ -15,6 +15,7 @@ mod listener;
 pub mod pairing;
 pub mod settings;
 mod tools;
+pub mod wire;
 
 use crate::cancel::CancellationRegistry;
 use crate::ssh::SshClient;

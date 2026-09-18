@@ -179,6 +179,16 @@ pub mod codes {
     /// with no value. The message lists the NAMES only, never a value. Set
     /// them (`catalog_set_secret`) or re-apply with `force_partial`.
     pub const E_SECRET_MISSING: &str = "E_SECRET_MISSING";
+    /// Remote (hub-client) mode: the hub answered `401`. The client token is
+    /// no longer accepted — the operator revoked it, or the hub was re-inited
+    /// with a fresh database. The desktop must send the user back to the Hub
+    /// settings to pair again; retrying cannot help.
+    pub const E_UNAUTHORIZED: &str = "E_UNAUTHORIZED";
+    /// Remote (hub-client) mode: the hub could not be reached or did not
+    /// answer usefully (connection refused, DNS, timeout, a proxy's 5xx). The
+    /// app shows the last snapshot and a banner; it never falls back to
+    /// managing the fleet itself, which would make two brains for one fleet.
+    pub const E_HUB_UNREACHABLE: &str = "E_HUB_UNREACHABLE";
 }
 
 #[derive(Debug, Serialize)]

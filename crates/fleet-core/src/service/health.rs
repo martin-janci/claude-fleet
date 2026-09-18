@@ -1,10 +1,11 @@
 use crate::service::usage;
 use crate::store::{HostRow, SessionRow, Store, UsageTotals};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct Health {
     pub version: String,
     pub db_ready: bool,

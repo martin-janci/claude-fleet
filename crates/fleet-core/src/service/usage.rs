@@ -780,7 +780,7 @@ pub fn day_string(day: i64) -> String {
 }
 
 /// Totals for one UTC day.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DayUsage {
     pub day: String,
     #[serde(flatten)]
