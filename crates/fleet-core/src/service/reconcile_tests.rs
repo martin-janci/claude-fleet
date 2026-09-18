@@ -569,6 +569,82 @@ async fn reconcile_records_the_pane_id_and_rebinds_on_an_agent_id_change() {
 }
 
 #[tokio::test]
+async fn a_pass_that_probed_before_a_hook_rebind_does_not_undo_it() {
+    let f = Fleet::new(&["alpha"]);
+    f.list("alpha", "work|1|2|0|/tmp/w|%3\n");
+    f.pane("alpha", "work", IDLE);
+    f.agents(
+        "alpha",
+        r#"[{"sessionId":"aaa","name":"work","cwd":"/tmp/w"}]"#,
+    );
+    f.pass().await;
+    let r = f.row("work", "alpha");
+    assert_eq!(r.claude_session_id.as_deref(), Some("aaa"));
+
+    // Pass 2 has read `claude agents` (still reporting `aaa`) and stalls on
+    // the pane capture while the /clear hooks land: SessionEnd(clear)
+    // closes `aaa`, SessionStart(clear) rebinds the row to `bbb` and stamps
+    // `last_hook_at`.
+    f.fake.on_host(
+        "alpha",
+        Match::script_contains("tmux capture-pane -t 'work'"),
+        Reply::Hang {
+            for_: Duration::from_millis(300),
+        },
+    );
+    f.fake.clear_calls();
+    let hook = async {
+        f.called("alpha", "capture-pane").await;
+        let s = f.store.lock().unwrap();
+        s.close_conversation(r.id, "aaa", "clear").unwrap();
+        s.rebind_conversation(
+            r.id,
+            "bbb",
+            crate::store::StartSource::Clear,
+            Some("/t/bbb.jsonl"),
+            None,
+        )
+        .unwrap();
+        s.record_hook_seen(r.id).unwrap();
+    };
+    tokio::join!(f.pass(), hook);
+
+    let row = f.row("work", "alpha");
+    assert_eq!(row.claude_session_id.as_deref(), Some("bbb"));
+    assert!(!row.context.context_stale, "the Clear reset stands");
+    assert_eq!(row.context_pct, Some(0.0));
+    assert_eq!(
+        f.store
+            .lock()
+            .unwrap()
+            .session_transcript_path(r.id)
+            .unwrap()
+            .as_deref(),
+        Some("/t/bbb.jsonl")
+    );
+    assert_eq!(
+        f.conversations(r.id),
+        vec![
+            ("bbb".to_string(), "clear".to_string(), None, true),
+            (
+                "aaa".to_string(),
+                "unknown".to_string(),
+                Some("clear".to_string()),
+                false
+            ),
+        ]
+    );
+    assert_eq!(
+        f.timeline(r.id)
+            .into_iter()
+            .filter(|e| *e == ev("conversation_started", Some("unknown")))
+            .count(),
+        1,
+        "only pass 1's first sighting"
+    );
+}
+
+#[tokio::test]
 async fn reconcile_opens_the_conversation_of_a_row_whose_id_was_null() {
     let f = Fleet::new(&["alpha"]);
     f.list("alpha", "work|1|2|0|/tmp/w|%3\n");

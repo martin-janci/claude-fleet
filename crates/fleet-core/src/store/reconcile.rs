@@ -136,10 +136,22 @@ impl Store {
                                       WHERE o.claude_session_id = ?9 AND o.host_alias = ?2 \
                                         AND o.tmux_name != ?1 AND o.status != 'ghost') \
                                   THEN NULL ELSE ?9 END";
-        // The pass moves the row onto another conversation. SET clauses see
-        // the OLD row, so this compares against the prior id.
-        const ID_CHANGES: &str = "excluded.claude_session_id IS NOT NULL \
-                                  AND excluded.claude_session_id IS NOT claude_session_id";
+        // The post-write claude_session_id. The MCP-1 in-flight guard
+        // applies to the id as to the status: a hook that landed at or after
+        // this probe STARTED (a SessionStart / UserPromptSubmit rebind, a
+        // SessionEnd(clear|resume)) owns the conversation binding (spec
+        // §1.3/§1.4), so a pass that read `claude agents` before it must not
+        // write the replaced id back.
+        const NEW_ID: &str = "CASE WHEN ?20 > 0 AND last_hook_at IS NOT NULL \
+                                        AND last_hook_at >= ?20 \
+                                   THEN claude_session_id \
+                                   ELSE COALESCE(excluded.claude_session_id, claude_session_id) END";
+        // The pass moves the row off a conversation it was bound to. SET
+        // clauses see the OLD row, so this compares against the prior id. A
+        // first sighting (prior id NULL) is not a change: nothing stored
+        // belonged to another conversation.
+        let id_changes =
+            format!("claude_session_id IS NOT NULL AND ({NEW_ID}) IS NOT claude_session_id");
         // A hook/transcript context value younger than 120 s outranks the
         // pane footer (spec §1.5) — unless it belongs to the conversation
         // this pass moves the row away from.
@@ -166,7 +178,7 @@ impl Store {
                worktree_key=COALESCE(excluded.worktree_key, worktree_key),
                status=CASE WHEN status='ghost' THEN 'running' ELSE status END,
                lost_at=NULL,
-               claude_session_id=COALESCE(excluded.claude_session_id, claude_session_id),
+               claude_session_id={new_id},
                -- A new conversation: the old transcript is not its transcript,
                -- and the old context size is not its size.
                transcript_path=CASE WHEN {id_changes} THEN NULL ELSE transcript_path END,
@@ -208,7 +220,8 @@ impl Store {
             new_status = NEW_STATUS,
             idle = idle_since_sql(NEW_STATUS, "?19"),
             guarded_id = GUARDED_ID,
-            id_changes = ID_CHANGES,
+            id_changes = id_changes,
+            new_id = NEW_ID,
             fresh = FRESH_CONTEXT,
         );
         tx.execute(
@@ -1494,5 +1507,91 @@ mod tests {
             Some("/t/b.jsonl")
         );
         assert_eq!(s.sessions_by_claude_id(ID_A).unwrap().len(), 1);
+    }
+
+    fn pass_with_id(s: &mut Store, name: &'static str, id: &str, started: i64) {
+        s.apply_host_reconcile(HostReconcile {
+            probe_started_at: started,
+            sessions: &[ReconcileSession {
+                tmux_name: name,
+                created_at: 1,
+                last_activity_at: 1,
+                claude_session_id: Some(id.into()),
+                ..Default::default()
+            }],
+            keep: &[name.to_string()],
+            ..empty_probe("local", 1)
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn an_id_change_marks_the_context_stale_but_a_first_sighting_does_not() {
+        let (mut s, _) = store_with_recorder();
+        s.upsert_host("local").unwrap();
+        let stale = |s: &Store, name: &str| {
+            s.get_session(name, "local")
+                .unwrap()
+                .unwrap()
+                .context
+                .context_stale
+        };
+        // First sighting of a new row carrying an id: nothing stored was
+        // stale, so nothing is marked.
+        pass_with_id(&mut s, "a", ID_A, 0);
+        assert!(!stale(&s, "a"));
+        // A real change: the stored size belongs to the old conversation.
+        let a = s.get_session("a", "local").unwrap().unwrap();
+        s.set_context(a.id, ID_A, 50_000, 200_000, "transcript", None)
+            .unwrap();
+        pass_with_id(&mut s, "a", "cccccccc-cccc-cccc-cccc-cccccccccccc", 0);
+        assert!(stale(&s, "a"));
+        // First sighting of an id on a row whose id was NULL: not stale
+        // either. (Each single-row pass ghosts the other row; fine here.)
+        reconcile_one(&mut s, "b", None, None, None);
+        pass_with_id(&mut s, "b", ID_B, 0);
+        assert!(!stale(&s, "b"));
+    }
+
+    #[test]
+    fn reconcile_never_undoes_a_hook_rebind_newer_than_its_probe() {
+        let (mut s, _) = store_with_recorder();
+        s.upsert_host("local").unwrap();
+        let row = reconcile_one(&mut s, "a", None, None, None);
+        s.rebind_conversation(row.id, ID_A, StartSource::Fleet, None, None)
+            .unwrap();
+        // /clear: the hook moves the row to B and stamps last_hook_at.
+        s.close_conversation(row.id, ID_A, "clear").unwrap();
+        s.rebind_conversation(row.id, ID_B, StartSource::Clear, Some("/t/b.jsonl"), None)
+            .unwrap();
+        s.record_hook_seen(row.id).unwrap();
+        let hook_at: i64 = s
+            .conn
+            .query_row(
+                "SELECT last_hook_at FROM sessions WHERE id=?1",
+                [row.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // A pass that probed before the hook still reports A.
+        pass_with_id(&mut s, "a", ID_A, hook_at - 1);
+        let after = s.get_session("a", "local").unwrap().unwrap();
+        assert_eq!(after.claude_session_id.as_deref(), Some(ID_B));
+        assert_eq!(
+            s.session_transcript_path(row.id).unwrap().as_deref(),
+            Some("/t/b.jsonl")
+        );
+        assert!(!after.context.context_stale);
+        assert_eq!(after.context_pct, Some(0.0));
+        // A pass that probed after the hook is authoritative again.
+        pass_with_id(&mut s, "a", ID_A, hook_at + 1);
+        assert_eq!(
+            s.get_session("a", "local")
+                .unwrap()
+                .unwrap()
+                .claude_session_id
+                .as_deref(),
+            Some(ID_A)
+        );
     }
 }

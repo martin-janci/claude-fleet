@@ -404,26 +404,10 @@ fn open_reconciled_conversation(
     let Some(new_id) = row.claude_session_id.as_deref() else {
         return;
     };
+    // The upsert is the one guard for "never bind one id to two rows" and
+    // for "never undo a newer hook rebind": it refuses such an id, so the
+    // stored id only differs from the prior one when this pass may own it.
     if old_claude_id == Some(new_id) {
-        return;
-    }
-    // Never bind one id to two rows: the cwd match in
-    // `claude_agents::find_for_session` can be ambiguous, and the hooks'
-    // pane binding will settle it. (The upsert refuses such an id too; this
-    // covers a holder that is not a tmux row of this pass.)
-    let shared = match s.sessions_by_claude_id(new_id) {
-        Ok(rows) => rows
-            .iter()
-            .any(|o| o.id != row.id && o.host_alias == host_alias && o.status != "ghost"),
-        Err(e) => {
-            tracing::warn!(host = %host_alias, session = %row.tmux_name, error = %e.message,
-                "[reconcile] claude id holder lookup failed");
-            return;
-        }
-    };
-    if shared {
-        tracing::debug!(host = %host_alias, session = %row.tmux_name, claude_session_id = %new_id,
-            "[reconcile] claude id already bound to another row; not rebinding");
         return;
     }
     match s.rebind_conversation(row.id, new_id, StartSource::Unknown, None, None) {

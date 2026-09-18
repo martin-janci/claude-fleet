@@ -285,6 +285,9 @@ fn resolve_and_rebind(
             hook_token(payload.model.as_deref()),
         )?
         .unwrap_or(row);
+    // The hook now owns this binding: a reconcile pass already in flight
+    // must not write the replaced id back (the upsert's in-flight guard).
+    s.record_hook_seen(rebound.id)?;
     best_effort_event_for(
         s,
         rebound.id,
@@ -1962,6 +1965,38 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    fn last_hook_at(store: &Arc<Mutex<Store>>, id: i64) -> Option<i64> {
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .query_row("SELECT last_hook_at FROM sessions WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn hook_rebinds_and_the_awaiting_mark_stamp_last_hook_at() {
+        // The reconcile in-flight guard keys on `last_hook_at`: a pass that
+        // probed before these hooks must not write the old id back.
+        let store = make_store();
+        let id = pane_session(&store, "s", "%3");
+        assert_eq!(last_hook_at(&store, id), None);
+        let host = host_caller("local");
+        let mut end = make_payload("SessionEnd", OLD);
+        end.reason = Some("clear".into());
+        apply_hook(&store, &make_ssh(), &end, &ctx(&host, None)).unwrap();
+        assert!(last_hook_at(&store, id).is_some());
+
+        let id2 = pane_session(&store, "t", "%4");
+        let mut start = make_payload("SessionStart", NEW);
+        start.source = Some("clear".into());
+        apply_hook(&store, &make_ssh(), &start, &ctx(&host, Some("%4"))).unwrap();
+        assert_eq!(claude_id(&store, id2).as_deref(), Some(NEW));
+        assert!(last_hook_at(&store, id2).is_some());
     }
 
     #[test]

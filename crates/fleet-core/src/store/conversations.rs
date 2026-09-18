@@ -186,11 +186,25 @@ impl Store {
         Ok(())
     }
 
+    /// Stamp `last_hook_at` for a hook write that has no status write of
+    /// its own (a SessionStart rebind). The reconcile upsert keys its
+    /// in-flight guard on it: a pass that probed before this instant keeps
+    /// the row's status AND its `claude_session_id`, so it cannot write back
+    /// the id the hook just replaced. No event: not a wire field.
+    pub fn record_hook_seen(&self, session_id: i64) -> Result<(), IpcError> {
+        self.conn.execute(
+            "UPDATE sessions SET last_hook_at = ?2 WHERE id = ?1",
+            rusqlite::params![session_id, now_unix()],
+        )?;
+        Ok(())
+    }
+
     /// SessionEnd(clear|resume): the next SessionStart / UserPromptSubmit
     /// from an unknown id in this row's cwd may rebind it (spec §1.2 step 3).
+    /// Stamps `last_hook_at` as well (see [`Self::record_hook_seen`]).
     pub fn mark_awaiting_rebind(&self, session_id: i64) -> Result<(), IpcError> {
         self.conn.execute(
-            "UPDATE sessions SET awaiting_rebind_at = ?2 WHERE id = ?1",
+            "UPDATE sessions SET awaiting_rebind_at = ?2, last_hook_at = ?2 WHERE id = ?1",
             rusqlite::params![session_id, now_unix()],
         )?;
         Ok(())
