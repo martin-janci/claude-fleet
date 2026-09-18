@@ -61,7 +61,18 @@ Pin the Gradle version in `gradle/wrapper/gradle-wrapper.properties` and check t
 
 - [ ] **Step 2: Write the build files**
 
-A version catalog holds Kotlin, AGP, Compose Multiplatform, Ktor, coroutines and serialization versions. `:shared` applies the KMP, Compose and serialization plugins with `androidTarget()`, `jvm()` (so `commonTest` runs on the JVM without a device), and the three iOS targets. `:androidApp` applies AGP with `compileSdk = 35`, `minSdk = 26`, `targetSdk = 35`.
+A version catalog holds Kotlin, AGP, Compose Multiplatform, Ktor, coroutines and serialization versions. `:shared` applies the KMP, Compose and serialization plugins with `androidTarget()`, `jvm()` (so `commonTest` runs on the JVM without a device), and the iOS targets. `:androidApp` applies AGP with `minSdk = 26`, `targetSdk = 35`.
+
+> **Amended 2026-09-18, after Task 1.** Two things in this step did not survive contact.
+> **The iOS targets are two, not three:** `iosArm64` and `iosSimulatorArm64`. Compose
+> Multiplatform 1.12 publishes no `iosX64` artifact — `runtime-uikitx64` stops at 1.10.3 —
+> so declaring it fails `./gradlew build` at the *commonMain* metadata transform, not merely
+> on an iOS task. `iosX64` is the Intel-Mac simulator alone, and `iosSimulatorArm64` covers
+> Apple Silicon, so the cost is that an Intel-Mac developer cannot run the simulator locally.
+> **`compileSdk` is 37, not 35**, forced by Compose 1.12's own androidx artifacts and by
+> `okhttp-android` 5.5 arriving through Ktor; 35 and 36 both fail AAR-metadata checks.
+> `minSdk` and `targetSdk` are unchanged. Task 8's CI image needs platform 37 and
+> build-tools 37.
 
 - [ ] **Step 3: One placeholder test, to prove the toolchain**
 
