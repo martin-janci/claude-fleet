@@ -216,6 +216,9 @@ const MIGRATIONS: &[Migration] = &[
     // `CREATE TABLE IF NOT EXISTS` plus two `CREATE UNIQUE INDEX IF NOT
     // EXISTS`, safe to re-run.
     Migration::plain(32, include_str!("../../migrations/032_client_tokens.sql")),
+    // `CREATE TABLE IF NOT EXISTS` + `CREATE UNIQUE INDEX IF NOT EXISTS`,
+    // safe to re-run.
+    Migration::plain(33, include_str!("../../migrations/033_asset_layers.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

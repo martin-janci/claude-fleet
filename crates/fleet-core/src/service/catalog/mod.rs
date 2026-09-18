@@ -8,8 +8,11 @@ pub mod author_session;
 pub mod harness;
 pub mod import;
 pub mod inventory;
+pub mod layer;
 pub mod model;
+pub mod propose;
 pub mod repo;
+pub mod resolve;
 pub mod sync;
 
 // The catalog's `IpcError::code` values live with every other code in
@@ -292,6 +295,122 @@ pub fn get_asset(kind: Kind, name: &str, store: &Mutex<Store>) -> Result<AssetDe
     })
 }
 
+/// The catalog's layer definitions plus every host's stored assignment.
+#[derive(Debug, Clone, Serialize)]
+pub struct LayerListing {
+    pub layers: Vec<layer::Layer>,
+    pub hosts: Vec<crate::store::HostLayerRow>,
+}
+
+pub fn list_layers(store: &Mutex<Store>) -> Result<LayerListing, IpcError> {
+    let hosts = lock(store)?.list_all_host_layers()?;
+    with_catalog(|cat| {
+        Ok(LayerListing {
+            layers: cat.layers.iter().cloned().collect(),
+            hosts,
+        })
+    })
+}
+
+/// `host_alias` must be a registered host. Without this check, a typo'd
+/// alias either trips the `host_layers` foreign key (`set_host_layers`) or —
+/// worse — silently resolves to the WHOLE catalog, since `resolve_for_host`
+/// treats "no assignment rows" as "no layering" for backward compatibility
+/// and cannot tell a nonexistent host from an unassigned one.
+fn require_host_exists(store: &Mutex<Store>, host_alias: &str) -> Result<(), IpcError> {
+    match lock(store)?.get_host_row(host_alias)? {
+        Some(_) => Ok(()),
+        None => Err(IpcError::new(
+            codes::E_NOTFOUND,
+            format!("host {host_alias} not found"),
+        )),
+    }
+}
+
+/// Compute the effective asset set for `host_alias`, with provenance.
+/// Nothing is written.
+pub fn resolve_preview(
+    host_alias: &str,
+    store: &Mutex<Store>,
+) -> Result<resolve::Resolution, IpcError> {
+    require_host_exists(store, host_alias)?;
+    with_catalog(|cat| sync::layers::resolve_for_host(store, cat, host_alias))
+}
+
+/// A layer named by `set_host_layers` must exist in the loaded catalog, and
+/// on the axis the caller is assigning it to (role vs. context). Without
+/// this, a bad name reaches `Store::set_host_layers` and surfaces as a raw
+/// SQLite constraint failure instead of a clear error; a name that exists
+/// but on the wrong axis would otherwise let the store and the catalog
+/// silently disagree about what a layer is.
+fn check_layer_axis(cat: &repo::Catalog, name: &str, want: layer::Axis) -> Result<(), IpcError> {
+    match cat.layers.get(name) {
+        None => Err(IpcError::new(
+            codes::E_INVALID,
+            format!("layer '{name}' is not defined in the loaded catalog"),
+        )),
+        Some(l) if l.axis != want => Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "layer '{name}' is a {} layer, not a {}",
+                l.axis.as_str(),
+                want.as_str()
+            ),
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
+/// `host_layers`'s primary key is `(host_alias, layer_name)`, so two rows
+/// for the same host can never share a layer name — a duplicate context, or
+/// a context that repeats the role, both hit that constraint. Catching it
+/// here gives the caller a clear `E_INVALID` naming the offending layer
+/// instead of a raw SQLite constraint violation from `Store::set_host_layers`.
+fn check_no_name_collision(role: Option<&str>, contexts: &[&str]) -> Result<(), IpcError> {
+    let mut seen: Vec<&str> = Vec::new();
+    for c in contexts {
+        if Some(*c) == role {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("layer '{c}' is assigned as both the role and a context"),
+            ));
+        }
+        if seen.contains(c) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("layer '{c}' is assigned as a context more than once"),
+            ));
+        }
+        seen.push(c);
+    }
+    Ok(())
+}
+
+/// Replace a host's layer assignment wholesale: one optional role plus
+/// contexts in application order. Edits fleet state only; catalog files are
+/// never written. Returns the host's new assignment.
+pub fn set_host_layers(
+    host_alias: &str,
+    role: Option<&str>,
+    contexts: &[&str],
+    store: &Mutex<Store>,
+) -> Result<Vec<crate::store::HostLayerRow>, IpcError> {
+    require_host_exists(store, host_alias)?;
+    check_no_name_collision(role, contexts)?;
+    with_catalog(|cat| {
+        if let Some(r) = role {
+            check_layer_axis(cat, r, layer::Axis::Role)?;
+        }
+        for c in contexts {
+            check_layer_axis(cat, c, layer::Axis::Context)?;
+        }
+        Ok(())
+    })?;
+    let s = lock(store)?;
+    s.set_host_layers(host_alias, role, contexts)?;
+    Ok(s.get_host_layers(host_alias)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,6 +443,74 @@ mod tests {
         git(&["add", "."]);
         git(&["commit", "-q", "-m", "init"]);
         root
+    }
+
+    /// Like `repo_with_one_skill`, plus a `core` role layer (member: `s`
+    /// only — NOT `other`), an `extra` context layer (no members), and a
+    /// second skill `other` that no layer ever names. `other` is what makes
+    /// the happy-path resolve test able to fail: with only one asset in the
+    /// catalog, a resolved count of 1 holds whether layering ran, was
+    /// ignored, or fell back to the whole catalog.
+    fn repo_with_layers(tag: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("fleet-catalog-svc-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("skills/s")).unwrap();
+        std::fs::create_dir_all(root.join("skills/other")).unwrap();
+        std::fs::create_dir_all(root.join("layers")).unwrap();
+        std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        std::fs::write(
+            root.join("skills/s/asset.yaml"),
+            "kind: skill\nname: s\ndescription: d\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("skills/s/body.md"), "b\n").unwrap();
+        std::fs::write(
+            root.join("skills/other/asset.yaml"),
+            "kind: skill\nname: other\ndescription: d\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("skills/other/body.md"), "b\n").unwrap();
+        std::fs::write(
+            root.join("layers/core.yaml"),
+            "kind: layer\nname: core\naxis: role\nmembers:\n  - skill/s\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("layers/extra.yaml"),
+            "kind: layer\nname: extra\naxis: context\n",
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        root
+    }
+
+    fn configured_store_with_layers(tag: &str) -> Mutex<Store> {
+        let root = repo_with_layers(tag);
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        store.lock().unwrap().upsert_host("local").unwrap();
+        configure(
+            ConfigureArgs {
+                repo_path: root.to_string_lossy().into(),
+                remote_url: None,
+            },
+            &store,
+        )
+        .unwrap();
+        load(false, &store).unwrap();
+        store
     }
 
     #[test]
@@ -499,5 +686,159 @@ mod tests {
             }],
             "an orphan is not a host state of a catalog asset"
         );
+    }
+
+    /// A typo'd `host_alias` must fail clearly, not as a raw SQLite
+    /// foreign-key violation: `host_layers.host_alias` references
+    /// `hosts(alias)` with `PRAGMA foreign_keys = ON`.
+    #[test]
+    fn set_host_layers_rejects_an_unknown_host() {
+        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let store = configured_store_with_layers("shl-unknown-host");
+
+        let err = set_host_layers("mefistso", Some("core"), &[], &store).unwrap_err();
+        assert_eq!(err.code, codes::E_NOTFOUND);
+        assert!(err.message.contains("mefistso"), "{}", err.message);
+    }
+
+    /// The mirror problem on the read side: `resolve_for_host` treats "no
+    /// assignment rows" as "no layering" for backward compatibility, so
+    /// without a host-existence check a typo'd host would silently resolve
+    /// to the WHOLE catalog instead of erroring — indistinguishable from an
+    /// unassigned but real host.
+    #[test]
+    fn resolve_preview_rejects_an_unknown_host() {
+        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let store = configured_store_with_layers("rp-unknown-host");
+
+        let err = resolve_preview("mefistso", &store).unwrap_err();
+        assert_eq!(err.code, codes::E_NOTFOUND);
+        assert!(err.message.contains("mefistso"), "{}", err.message);
+    }
+
+    /// A carry-forward from Task 4's review: `host_layers`'s primary key is
+    /// `(host_alias, layer_name)` with no `axis` column, which is safe only
+    /// because `set_host_layers` refuses a name the catalog does not define
+    /// before it ever reaches the store — otherwise a typo becomes a raw
+    /// SQLite error instead of a clear one.
+    #[test]
+    fn set_host_layers_rejects_a_layer_name_the_catalog_does_not_define() {
+        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let store = configured_store_with_layers("shl-unknown");
+
+        let err = set_host_layers("local", Some("ghost"), &[], &store).unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        assert!(err.message.contains("ghost"), "{}", err.message);
+
+        let err = set_host_layers("local", None, &["ghost"], &store).unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        assert!(err.message.contains("ghost"), "{}", err.message);
+
+        // Neither rejected call wrote anything.
+        assert!(store
+            .lock()
+            .unwrap()
+            .get_host_layers("local")
+            .unwrap()
+            .is_empty());
+    }
+
+    /// The other half of the Task 4 carry-forward: a name that exists but on
+    /// the wrong axis (a context passed as the role, or vice versa) must
+    /// also be refused with a diagnostic — the store has no `axis` column of
+    /// its own to catch this, so the catalog and the store could otherwise
+    /// silently disagree about what a layer is.
+    #[test]
+    fn set_host_layers_rejects_a_layer_on_the_wrong_axis() {
+        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let store = configured_store_with_layers("shl-axis");
+
+        // "extra" is a context layer; naming it as the role must fail.
+        let err = set_host_layers("local", Some("extra"), &[], &store).unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        assert!(err.message.contains("extra"), "{}", err.message);
+
+        // "core" is a role layer; naming it as a context must fail too.
+        let err = set_host_layers("local", None, &["core"], &store).unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        assert!(err.message.contains("core"), "{}", err.message);
+
+        assert!(store
+            .lock()
+            .unwrap()
+            .get_host_layers("local")
+            .unwrap()
+            .is_empty());
+    }
+
+    /// A carry-forward from my own Task 8 review: `host_layers`'s primary
+    /// key is `(host_alias, layer_name)`, so a context repeated twice would
+    /// otherwise hit that constraint on the second insert and surface as a
+    /// raw SQLite error instead of a clear one.
+    #[test]
+    fn set_host_layers_rejects_a_duplicate_context_name() {
+        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let store = configured_store_with_layers("shl-dup-ctx");
+
+        let err = set_host_layers("local", None, &["extra", "extra"], &store).unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        assert!(err.message.contains("extra"), "{}", err.message);
+
+        assert!(store
+            .lock()
+            .unwrap()
+            .get_host_layers("local")
+            .unwrap()
+            .is_empty());
+    }
+
+    /// Same primary-key collision, the other way round: a context that
+    /// names the same layer as the role.
+    #[test]
+    fn set_host_layers_rejects_a_context_that_repeats_the_role() {
+        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let store = configured_store_with_layers("shl-role-ctx-clash");
+
+        let err = set_host_layers("local", Some("core"), &["core"], &store).unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        assert!(err.message.contains("core"), "{}", err.message);
+
+        assert!(store
+            .lock()
+            .unwrap()
+            .get_host_layers("local")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn set_host_layers_accepts_a_valid_assignment_and_list_layers_reflects_it() {
+        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let store = configured_store_with_layers("shl-ok");
+
+        let rows = set_host_layers("local", Some("core"), &["extra"], &store).unwrap();
+        assert_eq!(rows.len(), 2);
+
+        let listing = list_layers(&store).unwrap();
+        assert_eq!(listing.layers.len(), 2);
+        assert_eq!(listing.hosts.len(), 2);
+
+        let resolved = resolve_preview("local", &store).unwrap();
+        // `other` is in the catalog but a member of no layer: its absence
+        // is what distinguishes "layering actually ran" from "layering was
+        // ignored" or "fell back to the whole catalog" — either of those
+        // would leave `other` in the resolved set.
+        let names: Vec<&str> = resolved
+            .catalog
+            .assets
+            .iter()
+            .map(|a| a.header.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["s"]);
+        assert!(
+            !names.contains(&"other"),
+            "'other' is not a member of any assigned layer"
+        );
+        assert_eq!(resolved.provenance["skill/s"].introduced_by, "core");
     }
 }

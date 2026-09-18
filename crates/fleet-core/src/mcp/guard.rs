@@ -82,6 +82,12 @@ pub const READONLY_TOOLS: &[&str] = &[
     // mutates nothing must not be classed as a mutation just because it is
     // master-only. Minting and revoking are admin and mutating — below.
     "list_clients",
+    // Asset catalog layers: `list_layers` reads layer definitions + host
+    // assignments, `resolve_preview` and `propose_layers` compute without
+    // writing anything. `set_host_layers` mutates fleet state and stays out.
+    "list_layers",
+    "resolve_preview",
+    "propose_layers",
 ];
 
 pub fn is_readonly_tool(name: &str) -> bool {
@@ -145,6 +151,11 @@ pub const ADMIN_TOOLS: &[&str] = &[
     // devices, so the whole client group is master-only. It mutates nothing,
     // so it stays in [`READONLY_TOOLS`] as well — see the note there.
     "list_clients",
+    // A host's layer assignment decides what the NEXT apply_sync writes to
+    // its filesystem; a per-host token on host A must not be able to
+    // change what host B resolves to, any more than it could call
+    // apply_sync or set_secret against B directly.
+    "set_host_layers",
 ];
 
 pub fn is_admin_tool(name: &str) -> bool {

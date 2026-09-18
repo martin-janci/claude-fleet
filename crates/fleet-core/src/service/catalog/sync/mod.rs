@@ -20,6 +20,7 @@
 //! tools) wire these in.
 
 pub mod apply;
+pub mod layers;
 pub mod manifest;
 pub mod plan;
 pub mod secrets;
@@ -180,6 +181,8 @@ pub async fn plan_sync(
         host_alias: args.host_alias.clone(),
         kind: args.kind,
         name: args.name.clone(),
+        // Set per host below, once its layer assignment is known.
+        layered: false,
     };
     // Only harnesses that can scan a host can be planned for: without a
     // snapshot there is nothing to diff the catalog against.
@@ -211,11 +214,43 @@ pub async fn plan_sync(
                 continue;
             }
         };
+        // Whether this host has ANY layer assignment at all, before
+        // resolving it: a host with no `host_layers` row must plan a dropped
+        // `plugin_ref` exactly as it did before layers existed (`Remove`),
+        // not the "reported, not removed" `Noop` that only makes sense once
+        // a host is actually opting into layered assignment.
+        let layered = {
+            let s = lock(store)?;
+            !s.get_host_layers(&h.alias)?.is_empty()
+        };
+        // Resolve the host's layers ONCE per host, before its harnesses are
+        // planned. The scan below still uses the FULL catalog: inventory is
+        // about the whole catalog's drift, while the PLAN is about what this
+        // host is supposed to have.
+        let resolved = match layers::resolve_for_host(store, &catalog, &h.alias) {
+            Ok(r) => r,
+            Err(e) => {
+                for harness in &scanning {
+                    host_plans.push(skipped_plan(&h.alias, harness.id(), &e.message));
+                }
+                continue;
+            }
+        };
+        let host_filter = PlanFilter {
+            layered,
+            ..filter.clone()
+        };
         for harness in &scanning {
             let harness = *harness;
             match scan_and_persist(store, ssh, &catalog, harness, &h.alias, &secrets).await {
                 Ok((snap, manifest)) => host_plans.push(plan::compute_host_plan(
-                    &catalog, harness, &h.alias, &snap, &manifest, &secrets, &filter,
+                    &resolved.catalog,
+                    harness,
+                    &h.alias,
+                    &snap,
+                    &manifest,
+                    &secrets,
+                    &host_filter,
                 )),
                 Err(e) => host_plans.push(skipped_plan(&h.alias, harness.id(), &e.message)),
             }
@@ -552,6 +587,29 @@ mod tests {
         ]
     }
 
+    /// Two skills ("s" and "t") plus a `core` role layer that names only
+    /// "s" as a member — "t" exists in the catalog but is not in any layer
+    /// the role chain reaches. Used to prove a resolved plan actually
+    /// restricts to the role while the scan/inventory still covers both.
+    fn two_skills_and_a_role_layer() -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "skills/s/asset.yaml",
+                "kind: skill\nname: s\ndescription: d\n".to_string(),
+            ),
+            ("skills/s/body.md", "b\n".to_string()),
+            (
+                "skills/t/asset.yaml",
+                "kind: skill\nname: t\ndescription: d\n".to_string(),
+            ),
+            ("skills/t/body.md", "b\n".to_string()),
+            (
+                "layers/core.yaml",
+                "kind: layer\nname: core\naxis: role\nmembers:\n  - skill/s\n".to_string(),
+            ),
+        ]
+    }
+
     /// A `planned` host plan carrying one `Create`. Deliberately not a
     /// `skipped_plan`: `apply_host` returns `skipped` for those all by
     /// itself, which would hide whether the cancellation branch ran.
@@ -708,6 +766,80 @@ mod tests {
             plan.hosts.iter().all(|h| h.host_alias == "local"),
             "{:?}",
             plan.hosts
+        );
+    }
+
+    /// The integration this whole task exists for: a host assigned a role
+    /// layer gets a PLAN restricted to that role's assets, while the
+    /// INVENTORY rows scan and persist stay against the FULL catalog.
+    ///
+    /// Neither half is provable from `layers::resolve_for_host`'s own unit
+    /// tests — those only ever see the pure `Resolution`, never the
+    /// `plan_sync` call site that decides which catalog goes to
+    /// `compute_host_plan` and which goes to `scan_and_persist`. This test
+    /// fails if `sync/mod.rs` ever reverts `&resolved.catalog` back to
+    /// `&catalog` at the `compute_host_plan` call (the feature silently
+    /// stops working — "t" would be planned again) and it fails just as
+    /// hard if the two arguments are ever "tidied" into the same resolved
+    /// catalog (inventory would stop reporting drift for the asset the
+    /// layer excludes).
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn plan_sync_plans_the_resolved_catalog_but_scans_the_full_one() {
+        let _lock = super::super::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        let repo_dir = tempfile::tempdir().unwrap();
+        let files = two_skills_and_a_role_layer();
+        load_catalog(
+            repo_dir.path(),
+            &files
+                .iter()
+                .map(|(a, b)| (*a, b.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        store
+            .lock()
+            .unwrap()
+            .set_host_layers("local", Some("core"), &[])
+            .unwrap();
+        let ssh = Arc::new(SshClient::new());
+
+        let plan = plan_sync(PlanArgs::default(), &store, &ssh).await.unwrap();
+
+        // (a) The PLAN only concerns "core"'s member: "t" is excluded from
+        // every harness's actions, while "s" (the role's own member) is
+        // still planned normally.
+        for host in &plan.hosts {
+            assert!(
+                host.actions.iter().all(|a| a.name != "t"),
+                "the resolved plan must not act on an asset the role \
+                 excludes: {:?}",
+                host.actions
+            );
+            assert!(
+                host.actions.iter().any(|a| a.name == "s"),
+                "the role's own member must still be planned: {:?}",
+                host.actions
+            );
+        }
+
+        // (b) The persisted INVENTORY still covers the FULL catalog,
+        // "t" included — inventory is about the whole catalog's drift, not
+        // what this host is supposed to have.
+        let rows = store.lock().unwrap().list_inventory().unwrap();
+        assert!(
+            rows.iter().any(|r| r.name == "t" && r.harness == "claude"),
+            "inventory must still report drift for an asset the layer \
+             excludes: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.name == "s" && r.harness == "claude"),
+            "{rows:?}"
         );
     }
 

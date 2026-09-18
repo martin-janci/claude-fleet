@@ -11,6 +11,7 @@ use std::sync::Arc;
 mod catalog;
 mod clients;
 mod hosts_accounts;
+mod layers;
 mod projects;
 mod reconcile;
 mod rows;
@@ -25,6 +26,7 @@ mod usage;
 pub use clients::{
     breaks_a_line, validate_client_mode, validate_client_name, CLIENT_MODES, LINE_SEPARATORS,
 };
+pub use layers::HostLayerRow;
 pub use rows::*;
 
 pub struct Store {
