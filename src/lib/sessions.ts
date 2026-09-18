@@ -95,6 +95,21 @@ export interface SessionRow {
   usage_model?: string | null;
   /** Unix secs the usage totals last changed. */
   usage_updated_at?: number | null;
+  // Current-conversation context (migration 034), flattened on the wire.
+  /** Model of the current conversation (SessionStart / transcript). */
+  model: string | null;
+  /** Prompt size of the latest request: input + cache read + cache write. */
+  context_tokens: number | null;
+  /** Context window of `model` (200 000 or 1 000 000). */
+  context_window: number | null;
+  /** Who wrote the context value last. */
+  context_source: 'transcript' | 'hook' | 'pane' | null;
+  /** Unix secs of the last context write. */
+  context_at: number | null;
+  /** True after a compaction or resume until the next usage line. */
+  context_stale: boolean;
+  /** tmux pane id (`%17`) reconcile last saw for this row. */
+  tmux_pane_id: string | null;
 }
 
 type UsageFields = Partial<

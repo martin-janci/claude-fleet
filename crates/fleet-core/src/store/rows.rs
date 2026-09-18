@@ -160,6 +160,9 @@ pub struct SessionRow {
     /// wire as the `usage_*` fields.
     #[serde(flatten)]
     pub usage: SessionUsage,
+    /// Current-conversation context (migration 034), flattened on the wire.
+    #[serde(flatten)]
+    pub context: SessionContext,
 }
 
 /// The `sessions` column list every `SessionRow` read shares, in the order
@@ -175,7 +178,8 @@ pub(super) const SESSION_COLUMNS: &str =
      idle_since, stuck_since, last_playbook_at, last_prompt, started_at, last_turn_at, ci_status, \
      turn_seq, last_stop_at, parent_session_id, tags, \
      usage_input_tokens, usage_output_tokens, usage_cache_write_tokens, usage_cache_read_tokens, \
-     usage_cost_micros, usage_model, usage_updated_at";
+     usage_cost_micros, usage_model, usage_updated_at, \
+     model, context_tokens, context_window, context_source, context_at, context_stale, tmux_pane_id";
 
 /// Decode the `sessions.tags` JSON column. NULL, empty, or malformed text
 /// (never written by us, but a hand-edited DB is possible) reads as no tags
@@ -246,6 +250,15 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
             usage_model: row.get(42)?,
             usage_updated_at: row.get(43)?,
         },
+        context: SessionContext {
+            model: row.get(44)?,
+            context_tokens: row.get(45)?,
+            context_window: row.get(46)?,
+            context_source: row.get(47)?,
+            context_at: row.get(48)?,
+            context_stale: row.get::<_, i64>(49)? != 0,
+            tmux_pane_id: row.get(50)?,
+        },
     })
 }
 
@@ -275,6 +288,26 @@ impl SessionUsage {
             cost_micros: self.usage_cost_micros,
         }
     }
+}
+
+/// Current-conversation state (migration 034). Flattened into `SessionRow`
+/// on the wire, so the field names are the wire names.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct SessionContext {
+    /// Model of the current conversation (SessionStart / transcript).
+    pub model: Option<String>,
+    /// Prompt size of the latest request: input + cache read + cache write.
+    pub context_tokens: Option<i64>,
+    /// Context window of `model` (200 000 or 1 000 000).
+    pub context_window: Option<i64>,
+    /// `transcript` | `hook` | `pane`: who wrote the context value last.
+    pub context_source: Option<String>,
+    /// Unix secs of the last context write.
+    pub context_at: Option<i64>,
+    /// True after a compaction or resume until the next usage line.
+    pub context_stale: bool,
+    /// tmux pane id (`%17`) reconcile last saw for this row.
+    pub tmux_pane_id: Option<String>,
 }
 
 /// Token counts plus estimated cost (micro-USD): the unit of every usage
@@ -456,6 +489,9 @@ pub struct SessionEvent {
     pub at: i64,
     pub kind: String,
     pub detail: Option<String>,
+    /// The conversation this event belongs to (migration 034); `None` for
+    /// events not tied to one (ops, reconcile transitions).
+    pub claude_session_id: Option<String>,
 }
 
 /// One per-host control-API bearer token (migration 018). `mode` is `full`

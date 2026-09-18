@@ -354,6 +354,7 @@ mod tests {
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),
+            context: Default::default(),
         }
     }
 

@@ -106,6 +106,17 @@ fn asset_inventory_has_managed(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 034: `sessions` already has its
+/// `tmux_pane_id` column, and `ALTER TABLE ... ADD COLUMN` would fail again.
+fn sessions_has_tmux_pane_id(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'tmux_pane_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// Ordered schema migrations, `(version, sql)`. Versions are contiguous from
 /// 1 and every script must end by recording its own version with
 /// `INSERT OR IGNORE INTO schema_version (version) VALUES (N)` — the tests
@@ -219,6 +230,12 @@ const MIGRATIONS: &[Migration] = &[
     // `CREATE TABLE IF NOT EXISTS` + `CREATE UNIQUE INDEX IF NOT EXISTS`,
     // safe to re-run.
     Migration::plain(33, include_str!("../../migrations/033_asset_layers.sql")),
+    // `ALTER TABLE ... ADD COLUMN` fails if the column is already there.
+    Migration {
+        version: 34,
+        sql: include_str!("../../migrations/034_conversations.sql"),
+        already_applied: Some(sessions_has_tmux_pane_id),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -388,6 +405,7 @@ mod tests {
         "catalog_secrets_host",
         "sync_runs",
         "client_tokens",
+        "conversations",
     ];
 
     #[test]
@@ -481,6 +499,54 @@ mod tests {
         store.migrate().expect("second migrate");
         assert!(!store.has_table("handoffs").unwrap());
         assert!(!session_columns(&store).contains(&"frozen_scrollback".to_string()));
+    }
+
+    /// Migration 034 backfills exactly one open `conversations` row (matching
+    /// `sessions.claude_session_id`) per session bound to a conversation at
+    /// upgrade time, stamped `start_source = 'unknown'` at the session's
+    /// `created_at`.
+    #[test]
+    fn migration_034_backfills_one_open_conversation_per_bound_session() {
+        let conn = Connection::open_in_memory().unwrap();
+        for &Migration { version, sql, .. } in MIGRATIONS.iter().filter(|m| m.version <= 33) {
+            let _ = version;
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute("INSERT INTO hosts (alias) VALUES ('local')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status, claude_session_id)
+             VALUES ('s', 'local', 7, 7, 'running', '11111111-1111-1111-1111-111111111111')",
+            [],
+        )
+        .unwrap();
+        let store = Store {
+            conn,
+            bus: Arc::new(NoopEventBus),
+        };
+        store.migrate().unwrap();
+        let (n, src, started): (i64, String, i64) = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*), start_source, started_at FROM conversations",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((n, src.as_str(), started), (1, "unknown", 7));
+    }
+
+    /// A freshly created session row carries `SessionContext::default()` —
+    /// every context_* column is NULL / false until a hook writes one.
+    #[test]
+    fn session_row_carries_context_defaults() {
+        let store = Store::open_in_memory().expect("store");
+        store.upsert_host("local").unwrap();
+        store
+            .upsert_session("s", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        let row = store.get_session("s", "local").unwrap().unwrap();
+        assert_eq!(row.context, SessionContext::default());
     }
 
     #[test]

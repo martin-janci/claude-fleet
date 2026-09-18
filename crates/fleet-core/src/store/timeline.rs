@@ -43,7 +43,7 @@ impl Store {
         limit: i64,
     ) -> Result<Vec<SessionEvent>, crate::ipc_error::IpcError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, session_id, at, kind, detail FROM session_events \
+            "SELECT id, session_id, at, kind, detail, claude_session_id FROM session_events \
                  WHERE session_id = ?1 ORDER BY at DESC, id DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map(rusqlite::params![session_id, limit], |row| {
@@ -53,6 +53,7 @@ impl Store {
                 at: row.get(2)?,
                 kind: row.get(3)?,
                 detail: row.get(4)?,
+                claude_session_id: row.get(5)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
