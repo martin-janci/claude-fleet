@@ -135,13 +135,33 @@ function isPrintableAscii(s: string): boolean {
   return s.length === 1 && s >= ' ' && s <= '~';
 }
 
+/** US-layout base characters for the punctuation keys. AltGr symbols live on
+ *  these as often as on letters and digits — German `\` is AltGr+Minus, Slovak
+ *  `~` is AltGr+Plus — so leaving them out made those keys send a C0 byte. */
+const PUNCT_CODE_BASE: Record<string, string> = {
+  Minus: '-',
+  Equal: '=',
+  BracketLeft: '[',
+  BracketRight: ']',
+  Backslash: '\\',
+  IntlBackslash: '\\',
+  IntlRo: '\\',
+  IntlYen: '\\',
+  Semicolon: ';',
+  Quote: "'",
+  Backquote: '`',
+  Comma: ',',
+  Period: '.',
+  Slash: '/',
+};
+
 /** The unshifted character the physical key carries, or null when `code`
- *  doesn't name a letter/digit key we can reason about. */
+ *  doesn't name a key we can reason about. */
 function codeBase(ev: KeyLike): string | null {
   const code = ev.code ?? '';
   if (/^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase();
   if (/^Digit[0-9]$/.test(code)) return code.slice(5);
-  return null;
+  return PUNCT_CODE_BASE[code] ?? null;
 }
 
 /** Windows/Linux browsers report AltGr as Ctrl+Alt. When the layout composed
@@ -150,6 +170,10 @@ function codeBase(ev: KeyLike): string | null {
  *  Ctrl chord. ASCII letters are excluded so Ctrl+Alt+d stays `ESC ^D`. */
 function isAltGrText(ev: KeyLike): boolean {
   if (ev.key.length !== 1 || /^[A-Za-z]$/.test(ev.key)) return false;
+  // With Shift held, a key legitimately produces a different glyph (Ctrl+Alt+
+  // Shift+3 is `#` on US), so the difference proves nothing. AltGr layouts
+  // put their symbols on the unshifted key, so nothing real is lost.
+  if (ev.shiftKey) return false;
   const base = codeBase(ev);
   return base !== null && base !== ev.key.toLowerCase();
 }

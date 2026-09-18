@@ -201,7 +201,16 @@
     writePty,
     focusInput,
   });
-  const { onWheel, onMousedown } = mouse;
+  const { onWheel } = mouse;
+
+  /** Mouse presses focus the proxy through the controller; note the modality
+   *  first so the focus handler knows this was not keyboard navigation. */
+  function onMousedown(e: MouseEvent) {
+    pointerFocusPending = true;
+    // Only the focus this press causes may consume the flag.
+    queueMicrotask(() => (pointerFocusPending = false));
+    mouse.onMousedown(e);
+  }
 
   function onContextMenu(e: MouseEvent) {
     if (!ptyOpen) return;
@@ -835,6 +844,29 @@
   /** Move keyboard focus to the IME proxy. Everything that used to focus the
    *  grid goes through here (its own onfocus included), so an input method
    *  always has an editable element to attach to. */
+  /** Whether the current focus arrived from the keyboard. `:focus-visible`
+   *  can't tell us: a UA always matches it on a focused text control, so the
+   *  ring would appear on every click once focus moved to the proxy. */
+  let keyboardFocus = $state(false);
+  let pointerFocusPending = false;
+
+  function onProxyFocus() {
+    focused = true;
+    keyboardFocus = !pointerFocusPending;
+    pointerFocusPending = false;
+  }
+
+  /** A composition the browser never ends (focus pulled away mid-preedit)
+   *  would otherwise leave `composing` true, and onKeydown swallows every
+   *  keystroke while it is. */
+  function onProxyBlur() {
+    focused = false;
+    keyboardFocus = false;
+    composing = false;
+    compositionJustEnded = false;
+    if (imeInput) imeInput.value = '';
+  }
+
   function focusInput() {
     (imeInput ?? container)?.focus({ preventScroll: true });
   }
@@ -881,6 +913,17 @@
    *  keydown produces no input event. */
   function onImeInput(e: Event) {
     if (composing || (e as InputEvent).isComposing) return;
+    const type = (e as InputEvent).inputType;
+    if (type === 'insertFromPaste' || type === 'insertFromDrop') {
+      // The macOS Edit ▸ Paste menu item and a drop onto the proxy land here,
+      // not in our Cmd+V handler. Route them through the paste path so the
+      // text is sanitised and bracketed like every other paste.
+      const el = imeInput;
+      const text = el ? el.value : '';
+      if (el) el.value = '';
+      if (text && ptyOpen) sendPaste(text);
+      return;
+    }
     flushImeInput();
   }
 
@@ -1051,19 +1094,27 @@
          actually holds the caret. keydown stays here so it catches the
          proxy's keystrokes as they bubble. We render lines as block <div>s
          with monospace spans for each style run. -->
+    <!-- role=application, not textbox: a terminal passes keystrokes straight
+         through, and unlike textbox it may contain the focusable proxy.
+         tabindex=-1 keeps the grid programmatically focusable (the mouse
+         controller focuses it) while the proxy stays the single tab stop, so
+         Tab and Shift+Tab move past the terminal instead of inside it. -->
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions
+         The handlers belong here: the grid is the terminal surface, and the
+         rule does not know that `application` delegates keys to the widget. -->
     <div
       class="grid"
+      class:kb-focus={focused && keyboardFocus}
       style:--cell-w={cellWidth > 0 ? `${cellWidth}px` : null}
       bind:this={container}
-      tabindex="0"
-      role="textbox"
+      tabindex="-1"
+      role="application"
       aria-label="Terminal"
-      aria-multiline="true"
+      onfocus={focusInput}
       onkeydown={onKeydown}
       onwheel={onWheel}
       onmousedown={onMousedown}
       oncontextmenu={onContextMenu}
-      onfocus={focusInput}
       data-testid="terminal-host"
     >
       <!-- Hidden probe used once to measure font metrics. We can't rely on
@@ -1089,8 +1140,8 @@
         oncompositionstart={onCompositionStart}
         oncompositionend={onCompositionEnd}
         oninput={onImeInput}
-        onfocus={() => (focused = true)}
-        onblur={() => (focused = false)}
+        onfocus={onProxyFocus}
+        onblur={onProxyBlur}
         data-ime-proxy="true"
         data-testid="terminal-ime"
       ></textarea>
@@ -1276,12 +1327,9 @@
     /* Show focus ring subtly so the user knows where keyboard input lands. */
     outline: none;
   }
-  .grid:focus-visible {
-    box-shadow: inset 0 0 0 1px var(--accent, #4f8fff);
-  }
-  /* Focus lives on the proxy, so the ring has to follow it. Kept as its own
-     rule: where `:has()` is unsupported only this one is dropped. */
-  .grid:has(.ime-proxy:focus-visible) {
+  /* Keyboard focus only: the proxy is a text control, and a UA matches
+     :focus-visible on those even for a plain mouse click. */
+  .grid.kb-focus {
     box-shadow: inset 0 0 0 1px var(--accent, #4f8fff);
   }
   /* Invisible, but NOT display:none / visibility:hidden and not off-screen —
