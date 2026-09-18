@@ -45,6 +45,7 @@ import {
   formatDuration,
   toolDurationMs,
   doingNow,
+  hasPendingCall,
   editDiffLines,
   type Conversation,
   type ConversationSummary,
@@ -585,5 +586,20 @@ describe('tool helpers', () => {
       { kind: 'ctx', text: 'a' }, { kind: 'del', text: 'b' }, { kind: 'add', text: 'B' }, { kind: 'ctx', text: 'c' },
     ]);
     expect(editDiffLines('', 'new')).toEqual([{ kind: 'add', text: 'new' }]);
+  });
+});
+
+describe('hasPendingCall', () => {
+  const toolItem = (done: boolean) => ({
+    kind: 'tool' as const, summary: 'Bash(ls)', error: false, id: 't', name: 'Bash', target: 'ls', at: null, ended_at: null, done,
+  });
+  const c = (items: unknown[]): Conversation =>
+    ({ truncated: false, context: null, events: [], turns: [{ prompt: 'q', at: null, ended_at: null, items }] }) as unknown as Conversation;
+  it('is true only while the last turn has an unfinished call', () => {
+    expect(hasPendingCall(null)).toBe(false);
+    expect(hasPendingCall(c([{ kind: 'text', text: 'x' }]))).toBe(false);
+    expect(hasPendingCall(c([toolItem(true)]))).toBe(false);
+    expect(hasPendingCall(c([toolItem(false), { kind: 'text', text: 'x' }]))).toBe(true);
+    expect(hasPendingCall(c([{ kind: 'subagent', id: 's', name: 'Task', agent_type: null, description: null, result: null, error: false, at: null, ended_at: null, done: false }]))).toBe(true);
   });
 });

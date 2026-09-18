@@ -1879,6 +1879,36 @@ mod tests {
     }
 
     #[test]
+    fn a_subagent_result_is_capped_at_1500_chars_in_the_poll_payload() {
+        let long = "é".repeat(SUBAGENT_RESULT_MAX_CHARS + 500);
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T09:00:00Z",
+                "toolu_9",
+                "Task",
+                serde_json::json!({"description":"Long"}),
+            ),
+            tool_result(
+                "2026-09-18T09:01:00Z",
+                "toolu_9",
+                serde_json::json!([{"type":"text","text": long}]),
+                false,
+            ),
+        ]));
+        assert_eq!(SUBAGENT_RESULT_MAX_CHARS, 1_500);
+        let ConvItem::Subagent {
+            result: Some(r), ..
+        } = &t[0].items[0]
+        else {
+            panic!("{:?}", t[0].items[0]);
+        };
+        assert_eq!(r.chars().count(), 1_501);
+        assert!(r.ends_with('…'));
+        assert!(r.starts_with(&"é".repeat(1_500)));
+    }
+
+    #[test]
     fn tool_target_prefers_what_the_tool_touched() {
         let j = |v: serde_json::Value| Some(v);
         assert_eq!(

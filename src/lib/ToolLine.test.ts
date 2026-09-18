@@ -163,11 +163,46 @@ describe('ToolLine', () => {
     await fireEvent.click(screen.getByTestId('conv-tool'));
     await settle();
     const btn = screen.getByTestId('conv-copy');
-    expect(btn.getAttribute('aria-label')).toBe('Copy');
+    expect(btn.getAttribute('aria-label')).toBe('Copy result');
     await fireEvent.click(btn);
     await settle();
     expect(mockedCopy).toHaveBeenCalledWith(long);
     expect(screen.getByTestId('conv-copy').textContent).toContain('Copied');
+    expect(screen.getByTestId('conv-copy').getAttribute('title')).toBe('Copied');
+  });
+
+  it('copying a result capped by the backend says it was truncated', async () => {
+    mockedCopy.mockResolvedValue(true);
+    const capped = 'ž'.repeat(8_000) + '…';
+    mockedDetail.mockResolvedValue({ ok: true, value: detail({ result: capped }) });
+    render(ToolLine, { line: line(), sessionId: 1, claudeSessionId: null, nowMs: 0, live: false });
+    await fireEvent.click(screen.getByTestId('conv-tool'));
+    await settle();
+    await fireEvent.click(screen.getByTestId('conv-copy'));
+    await settle();
+    expect(mockedCopy).toHaveBeenCalledWith(capped);
+    expect(screen.getByTestId('conv-copy').getAttribute('title')).toBe('Copied (truncated at 8 000 chars)');
+  });
+
+  it('a row moved to another call drops the in-flight fetch and starts collapsed', async () => {
+    let resolve!: (v: unknown) => void;
+    mockedDetail.mockReturnValueOnce(new Promise((r) => (resolve = r)));
+    const { rerender } = render(ToolLine, { line: line(), sessionId: 1, claudeSessionId: 'c1', nowMs: 0, live: false });
+    await fireEvent.click(screen.getByTestId('conv-tool'));
+    await settle();
+    expect(screen.getByText('Loading…')).toBeTruthy();
+    await rerender({ line: line({ id: 'toolu_2' }), sessionId: 1, claudeSessionId: 'c1', nowMs: 0, live: false });
+    await settle();
+    expect(screen.getByTestId('conv-tool').getAttribute('aria-expanded')).toBe('false');
+    resolve({ ok: true, value: detail({ result: 'stale result' }) });
+    await settle();
+    expect(screen.queryByTestId('conv-tool-detail')).toBeNull();
+    // Expanding again reads the new call, not a cached old one.
+    mockedDetail.mockResolvedValueOnce({ ok: true, value: detail({ id: 'toolu_2', result: 'fresh result' }) });
+    await fireEvent.click(screen.getByTestId('conv-tool'));
+    await settle();
+    expect(mockedDetail).toHaveBeenLastCalledWith(1, 'toolu_2', 'c1');
+    expect(screen.getByTestId('conv-tool-result').textContent).toBe('fresh result');
   });
 
   it('a long result is clamped to 20 lines with Show all', async () => {

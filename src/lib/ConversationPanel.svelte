@@ -1,3 +1,9 @@
+<script module lang="ts">
+  // Per-instance suffix for the find highlight names, so two panels never
+  // paint into (or clear) each other's highlights.
+  let panelSeq = 0;
+</script>
+
 <script lang="ts">
   // Conversation tab: transcript view backed by `session_conversation`
   // (spec §6). Reuses the Files-overlay mechanism at the call site, so a
@@ -47,6 +53,7 @@
     sessionActivity,
     indicatorFor,
     doingNow,
+    hasPendingCall,
     formatDuration,
     composerDrafts,
     rememberDraft,
@@ -76,6 +83,10 @@
   }: { session: SessionRow; visible: boolean; onOpenTerminal?: () => void; isMac?: boolean } = $props();
 
   let conv = $state<Conversation | null>(null);
+  // The conversation `conv` was read from (the id the fetch named). Tool
+  // details are read from it, not from the row's id at click time: the row
+  // can move on (/clear, /resume) before a reload replaces the view.
+  let convCid = $state<string | null>(null);
   let errorCode = $state<string | null>(null);
   let errorMsg = $state<string | null>(null);
   let loading = $state(false);
@@ -168,6 +179,9 @@
     const id = session.id;
     if (!session.claude_session_id) return;
     if (opts.poll && (inFlight.get(id) ?? 0) > 0) return;
+    // Name the conversation explicitly (the current one too): the backend's
+    // row may already have moved on to a newer id this row has not seen yet.
+    const cid = viewing ?? session.claude_session_id;
     const mine = ++seq;
     loading = conv === null;
     const fetchedTurnSeq = session.turn_seq;
@@ -175,7 +189,7 @@
     inFlight.set(id, (inFlight.get(id) ?? 0) + 1);
     let r: Awaited<ReturnType<typeof sessionConversation>>;
     try {
-      r = await sessionConversation(id, turnsWanted, viewing ?? undefined);
+      r = await sessionConversation(id, turnsWanted, cid);
     } finally {
       const left = (inFlight.get(id) ?? 1) - 1;
       if (left > 0) inFlight.set(id, left);
@@ -192,6 +206,7 @@
       lastFetchTurnSeq = fetchedTurnSeq;
       errorCode = null;
       errorMsg = null;
+      convCid = cid;
       if (!sameConversation(conv, r.value)) {
         // Older turns prepended by Load older are history, not news.
         if (!pinned && !opts.older) unseen += newItemCount(conv, r.value);
@@ -227,6 +242,7 @@
   function resetView() {
     seq++;
     conv = null;
+    convCid = null;
     pushed = [];
     errorCode = null;
     errorMsg = null;
@@ -236,6 +252,10 @@
     turnsWanted = undefined;
     loadingOlder = false;
     turnsOpen = false;
+    findOpen = false;
+    findQuery = '';
+    findIndex = 0;
+    clearHighlights();
   }
 
   /** resetView plus the send and probe state of the current conversation;
@@ -433,8 +453,8 @@
   // conversation while the indicator shows anything (working, blocked on a
   // prompt in the terminal, or just sent): an unfinished tool call there is
   // pending, not dead, so it keeps its running clock.
-  // The conversation tool details are read from.
-  const detailCid = $derived(viewing ?? session.claude_session_id);
+  // The conversation tool details are read from: the one on screen.
+  const detailCid = $derived(convCid);
 
   const thread = $derived(
     conv ? buildThread(conv.turns, events, { blocked: viewing === null && indicator?.kind === 'blocked' }, conv.truncated) : [],
@@ -523,8 +543,20 @@
   // Paint the query inside the matching rows with the CSS Custom Highlight
   // API where it exists; elsewhere (jsdom, older engines) the row outline
   // is the only highlight.
-  const HL_ALL = 'conv-find';
-  const HL_CURRENT = 'conv-find-current';
+  const hlSuffix = ++panelSeq;
+  const HL_ALL = `conv-find-${hlSuffix}`;
+  const HL_CURRENT = `conv-find-current-${hlSuffix}`;
+  // `::highlight()` names cannot be dynamic in the component's stylesheet:
+  // each panel adds (and on unmount removes) the two rules for its own names.
+  $effect(() => {
+    const el = document.createElement('style');
+    el.dataset.convFind = String(hlSuffix);
+    el.textContent =
+      `::highlight(${HL_ALL}) { background-color: color-mix(in srgb, #e6a23c 35%, transparent); }\n` +
+      `::highlight(${HL_CURRENT}) { background-color: color-mix(in srgb, #e6a23c 75%, transparent); color: var(--bg); }`;
+    document.head.appendChild(el);
+    return () => el.remove();
+  });
   const HL_MAX_RANGES = 2_000;
   function highlightRegistry(): { set(n: string, h: unknown): void; delete(n: string): void } | null {
     try {
@@ -557,10 +589,11 @@
         const key = el.dataset.rowKey ?? '';
         if (!keys.has(key)) continue;
         // Only the conversation's own text: not button labels (Copy, Show
-        // more, a tool row's chrome), times or other controls.
+        // more, a tool row's chrome), times, other controls or hidden
+        // chrome (a lone call's group summary).
         const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
           acceptNode: (n) =>
-            n.parentElement?.closest('button, time, input, textarea, select, [role="button"]')
+            n.parentElement?.closest('button, time, input, textarea, select, [role="button"], [aria-hidden="true"]')
               ? NodeFilter.FILTER_REJECT
               : NodeFilter.FILTER_ACCEPT,
         });
@@ -656,7 +689,11 @@
   // A running tool's timer needs a finer clock: tick every second while
   // something is running, and stop as soon as nothing is. Keyed on a boolean
   // so each tick (which yields a new `doing`) does not restart the interval.
-  const doingSomething = $derived(doing !== null);
+  // That covers a call pending while Claude waits on the terminal (blocked)
+  // or a prompt was just sent, not only while the doing-now label shows.
+  const doingSomething = $derived(
+    doing !== null || (viewing === null && indicator !== null && hasPendingCall(conv)),
+  );
   $effect(() => {
     if (!doingSomething) return;
     untrack(() => (nowMs = Date.now()));
@@ -886,13 +923,15 @@
   /** Open a tool group when it becomes the running turn's last group; never
    *  close one, and never re-open one the user closed while it stays the
    *  running group, so manual toggles survive transcript refreshes. */
-  function autoOpen(node: HTMLDetailsElement, on: boolean) {
-    if (on) node.open = true;
-    let prev = on;
+  function autoOpen(node: HTMLDetailsElement, arg: { on: boolean; single: boolean }) {
+    // A lone call has no group to fold: always open. When a second call
+    // joins, the group stays open (the user was looking at that line).
+    if (arg.on || arg.single) node.open = true;
+    let prev = arg.on;
     return {
-      update(next: boolean) {
-        if (next && !prev) node.open = true;
-        prev = next;
+      update(next: { on: boolean; single: boolean }) {
+        if ((next.on && !prev) || next.single) node.open = true;
+        prev = next.on;
       },
     };
   }
@@ -1026,7 +1065,7 @@
                   <div class="prompt-head">
                     <span class="who">You</span>
                     <span class="head-right">
-                      <span class="copy-slot"><CopyButton text={turn.prompt} /></span>
+                      <span class="copy-slot"><CopyButton text={turn.prompt} label="Copy prompt" /></span>
                       {#if turn.at}
                         <time datetime={turn.at} title={new Date(turn.at).toLocaleString()}
                           >{relativeTime(turn.at, nowMs)}</time
@@ -1047,13 +1086,22 @@
                   {#if g.kind === 'text'}
                     <div class="text" data-testid="conv-text">
                       <Markdown source={g.text} />
-                      <span class="copy-slot text-copy"><CopyButton text={g.text} /></span>
+                      <span class="copy-slot text-copy"><CopyButton text={g.text} label="Copy reply" /></span>
                     </div>
-                  {:else if g.kind === 'tools' && g.tools.length === 1}
-                    <ToolLine line={g.tools[0]} sessionId={session.id} claudeSessionId={detailCid} {nowMs} live={turnLive} />
                   {:else if g.kind === 'tools'}
-                    <details class="tools" class:has-err={g.tools.some((t) => t.error)} use:autoOpen={turnRunning && j === groups.length - 1} data-testid="conv-tools">
-                      <summary>{toolGroupLabel(g.tools)}</summary>
+                    <!-- One structure for a lone call and a folded group, so a
+                         line keeps its component (open detail, cache) when a
+                         second call joins it. A lone call's group is always
+                         open with its summary hidden. -->
+                    {@const single = g.tools.length === 1}
+                    <details
+                      class="tools"
+                      class:single
+                      class:has-err={g.tools.some((t) => t.error)}
+                      use:autoOpen={{ on: turnRunning && j === groups.length - 1, single }}
+                      data-testid={single ? undefined : 'conv-tools'}
+                    >
+                      <summary aria-hidden={single || undefined} tabindex={single ? -1 : undefined}>{toolGroupLabel(g.tools)}</summary>
                       <div class="tools-body">
                         {#each g.tools as line, k (k)}
                           <ToolLine {line} sessionId={session.id} claudeSessionId={detailCid} {nowMs} live={turnLive} />
@@ -1345,13 +1393,6 @@
   }
   [data-current-match] {
     outline: 2px solid var(--accent);
-  }
-  :global(::highlight(conv-find)) {
-    background-color: color-mix(in srgb, #e6a23c 35%, transparent);
-  }
-  :global(::highlight(conv-find-current)) {
-    background-color: color-mix(in srgb, #e6a23c 75%, transparent);
-    color: var(--bg);
   }
   .copy-slot {
     opacity: 0;
@@ -1725,6 +1766,15 @@
   }
   .tools-body {
     margin-left: 1.1rem;
+  }
+  .tools.single {
+    margin: 0;
+  }
+  .tools.single summary {
+    display: none;
+  }
+  .tools.single .tools-body {
+    margin-left: 0;
   }
   .viewing,
   .switch-notice {

@@ -105,6 +105,12 @@
     if (open && (detail === null || (detail.result === null && line.done))) void fetchDetail();
   }
 
+  /** `session_tool_detail` caps a result at this many chars plus "…". */
+  const RESULT_CAP_CHARS = 8_000;
+  const resultCapped = $derived(
+    detail?.result != null && detail.result.endsWith('…') && [...detail.result].length === RESULT_CAP_CHARS + 1,
+  );
+
   const diff = $derived(detail?.edit ? editDiffLines(detail.edit.old, detail.edit.new) : []);
   const shownDiff = $derived(fullDiff ? diff : diff.slice(0, DIFF_MAX_LINES));
   const resultLines = $derived(detail?.result != null ? detail.result.split('\n') : []);
@@ -167,7 +173,11 @@
         {#if detail.result !== null}
           <div class="result-wrap">
             <pre class="result" data-testid="conv-tool-result" data-error={detail.is_error || undefined}>{shownResult}</pre>
-            <div class="copy-slot"><CopyButton text={detail.result} /></div>
+            <div class="copy-slot"><CopyButton
+                text={detail.result}
+                label="Copy result"
+                copiedNote={resultCapped ? 'truncated at 8 000 chars' : null}
+              /></div>
           </div>
           {#if longResult}
             <button type="button" class="linkish" onclick={() => (fullResult = !fullResult)}>{fullResult ? 'Show less' : 'Show all'}</button>

@@ -347,6 +347,13 @@ export function doingNow(conv: Conversation | null, working: boolean, nowMs: num
   return null;
 }
 
+/** The last turn has a tool call or subagent still waiting for its result.
+ *  Only a live turn's pending call has a running clock (see ToolLine). */
+export function hasPendingCall(conv: Conversation | null): boolean {
+  if (!conv || conv.turns.length === 0) return false;
+  return conv.turns[conv.turns.length - 1].items.some((it) => (it.kind === 'tool' || it.kind === 'subagent') && !it.done);
+}
+
 export interface DiffLine {
   kind: 'del' | 'add' | 'ctx';
   text: string;
