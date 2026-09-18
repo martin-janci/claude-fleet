@@ -94,7 +94,11 @@ pub(crate) fn credential_is_current(store: &Mutex<Store>, alias: &str, credentia
     }
     match s.get_host_token(alias) {
         Ok(Some(row)) => {
-            row.mode == "full" && crate::mcp::auth::sha256_hex(&row.token) == credential
+            row.mode == "full"
+                && crate::mcp::auth::constant_time_eq(
+                    crate::mcp::auth::sha256_hex(&row.token).as_bytes(),
+                    credential.as_bytes(),
+                )
         }
         _ => false,
     }
