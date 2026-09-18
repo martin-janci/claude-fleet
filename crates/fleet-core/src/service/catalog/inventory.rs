@@ -461,10 +461,24 @@ pub fn compute_states(
             managed: true,
         });
     }
+    // Both the catalog name and the install name (when `install_as` is set,
+    // they differ) count as "this asset" here: a stray host directory that
+    // happens to collide with the catalog name (e.g. both `foo_bar/` and
+    // `foo-bar/` present while the catalog asset is `foo-bar` with
+    // `install_as: foo_bar`) cannot be surfaced as its own `unmanaged` row,
+    // because the inventory table's primary key is (host, harness, kind,
+    // name) and that name is always the catalog name — a second row keyed
+    // identically to the catalog row would collide in `replace_host_inventory`
+    // and silently roll back the whole host refresh.
     let install_names: std::collections::BTreeSet<(Kind, String)> = catalog
         .assets
         .iter()
-        .map(|a| (a.kind(), a.install_name().to_string()))
+        .flat_map(|a| {
+            [
+                (a.kind(), a.install_name().to_string()),
+                (a.kind(), a.header.name.clone()),
+            ]
+        })
         .collect();
     for (kind, name) in harness.installed(snap) {
         if !install_names.contains(&(kind, name.clone()))
@@ -720,6 +734,59 @@ mod tests {
             rows.iter().find(|r| r.name == "foo_bar").unwrap().state,
             "unmanaged"
         );
+    }
+
+    /// A host with both the install-name directory (`foo_bar/`, what the
+    /// catalog actually renders) and a stray directory matching the catalog
+    /// name (`foo-bar/`) must still yield exactly one inventory row keyed
+    /// `foo-bar` — never a second `unmanaged` row for the same (kind, name),
+    /// which would collide with the catalog row on the inventory table's
+    /// primary key and silently roll back the whole host refresh (see
+    /// `Store::replace_host_inventory`).
+    #[test]
+    fn name_and_install_as_both_installed_yield_one_row() {
+        let mut cat = Catalog::default();
+        let mut skill = Asset::from_yaml(
+            None,
+            "kind: skill\nname: foo-bar\ndescription: d\ninstall_as: foo_bar\n",
+        )
+        .unwrap();
+        skill.body = "b\n".into();
+        cat.assets.push(skill.clone());
+
+        let claude = Claude;
+        let skill_plan = claude.render(&skill).unwrap();
+        let skill_hash = crate::service::catalog::model::sha256_hex(&skill_plan.files[0].bytes);
+        let mut snap = HostSnapshot::default();
+        snap.files.insert(
+            "~/.claude/skills/foo_bar/SKILL.md".into(),
+            skill_hash.clone(),
+        );
+        snap.files
+            .insert("~/.claude/skills/foo-bar/SKILL.md".into(), skill_hash);
+
+        let rows = compute_states(
+            &cat,
+            &claude,
+            "local",
+            &snap,
+            &Manifest::default(),
+            &empty(),
+            1,
+        );
+        let foo_bar_rows: Vec<_> = rows.iter().filter(|r| r.name == "foo-bar").collect();
+        assert_eq!(foo_bar_rows.len(), 1, "{rows:?}");
+        assert_eq!(foo_bar_rows[0].state, "in_sync");
+        assert!(!rows.iter().any(|r| r.name == "foo_bar"), "{rows:?}");
+
+        let mut seen = std::collections::BTreeSet::new();
+        for r in &rows {
+            assert!(
+                seen.insert((r.kind.clone(), r.name.clone())),
+                "duplicate (kind, name) in inventory rows: {:?} / {rows:?}",
+                (r.kind.clone(), r.name.clone())
+            );
+        }
     }
 
     /// Regression test: an `AppendUnique` (hook) merge's `json_path` points
