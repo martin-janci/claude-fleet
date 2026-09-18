@@ -102,8 +102,11 @@ pub struct Action {
     pub secrets: Vec<String>,
     /// `${NAME}`s the asset references that did not resolve.
     pub missing_secrets: Vec<String>,
-    /// The substituted plan to write. `None` for `Remove`/`Noop`/`Blocked`
-    /// and for the plugin ops (which shell out to the harness CLI).
+    /// The substituted plan to write. `None` for `Remove`/`Noop`/`Blocked`.
+    /// Plugin install/update/adopt actions carry it too, although the
+    /// harness CLI does the installing: the applier hashes its rendered
+    /// merge into the manifest entry so a later plan can tell whether the
+    /// catalog pin changed since fleet last applied it.
     #[serde(skip)]
     pub plan: Option<SecretPlan>,
     /// path → hash the scan saw (`None` = the scan did not see the file).
