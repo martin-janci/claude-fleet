@@ -75,7 +75,7 @@ use axum::response::{IntoResponse, Response};
 use fleet_proto::{
     decode_agent_frame_within, encode_hub_frame, AgentFrame, HubFrame, MAX_FRAME_BYTES,
 };
-use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -250,21 +250,31 @@ impl BeatSource {
     /// A ticker whose first beat is one interval from now.
     fn ticker(&self) -> Ticker {
         match self {
-            BeatSource::Every(every) => {
-                let mut i = tokio::time::interval_at(Instant::now() + *every, *every);
-                // A beat missed while a large frame was being decoded is
-                // caught up on the next one, not replayed in a tight loop.
-                i.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                Ticker::Every(i)
-            }
+            BeatSource::Every(every) => Ticker::Every {
+                next: Instant::now() + *every,
+                every: *every,
+            },
             #[cfg(test)]
             BeatSource::Manual(tx) => Ticker::Manual(tx.subscribe()),
         }
     }
 }
 
+/// A connection's heartbeat.
+///
+/// **Judged two ways, and the second is the one that matters under load.**
+/// `tick` waits for the next beat, for a loop that is idle. `due` answers at
+/// once, without waiting and without spending the task's cooperative budget,
+/// whether a beat has come due, and the loops ask it at the top of EVERY
+/// iteration. A `select!` alone decides a beat by which arm wins, and a peer
+/// whose frames never run out made the socket win every time: the hello
+/// deadline never fired, and neither did the token re-check that cuts off a
+/// rotated connection (the re-review's NEW-2).
 enum Ticker {
-    Every(tokio::time::Interval),
+    Every {
+        next: Instant,
+        every: Duration,
+    },
     #[cfg(test)]
     Manual(tokio::sync::watch::Receiver<u64>),
 }
@@ -272,14 +282,39 @@ enum Ticker {
 impl Ticker {
     async fn tick(&mut self) {
         match self {
-            Ticker::Every(i) => {
-                i.tick().await;
+            Ticker::Every { next, every } => {
+                tokio::time::sleep_until(*next).await;
+                // A beat missed while a large frame was being decoded is
+                // caught up on the next one, not replayed in a tight loop.
+                *next = Instant::now() + *every;
             }
             #[cfg(test)]
             Ticker::Manual(rx) => {
                 if rx.changed().await.is_err() {
                     std::future::pending::<()>().await;
                 }
+            }
+        }
+    }
+
+    /// Has a beat come due? Consumes it if so. Never waits.
+    fn due(&mut self) -> bool {
+        match self {
+            Ticker::Every { next, every } => {
+                let now = Instant::now();
+                if now < *next {
+                    return false;
+                }
+                *next = now + *every;
+                true
+            }
+            #[cfg(test)]
+            Ticker::Manual(rx) => {
+                if !rx.has_changed().unwrap_or(false) {
+                    return false;
+                }
+                rx.borrow_and_update();
+                true
             }
         }
     }
@@ -524,14 +559,20 @@ enum End {
 /// connection open, without ever appearing in the registry where an operator
 /// could see it.
 async fn first_hello(
-    stream: &mut SplitStream<WebSocket>,
+    stream: &mut (impl futures_util::Stream<Item = Result<Message, axum::Error>> + Unpin),
     mut deadline: Ticker,
 ) -> Result<AgentHello, String> {
+    const LATE: &str = "no hello within one heartbeat";
     loop {
+        // Judged before every read, not only when the deadline wins the
+        // select: see `Ticker`.
+        if deadline.due() {
+            return Err(LATE.into());
+        }
         let msg = tokio::select! {
             biased;
             msg = stream.next() => msg,
-            () = deadline.tick() => return Err("no hello within one heartbeat".into()),
+            () = deadline.tick() => return Err(LATE.into()),
         };
         match msg {
             // The `hello` carries three short strings; nothing about it needs
@@ -636,7 +677,7 @@ struct Registered<'a> {
 /// Read frames and hand them to the registry, pinging an idle agent and
 /// dropping one that has gone quiet.
 async fn read_loop(
-    stream: &mut SplitStream<WebSocket>,
+    stream: &mut (impl futures_util::Stream<Item = Result<Message, axum::Error>> + Unpin),
     who: Registered<'_>,
     budgets: &Mutex<Budgets>,
     pings: &mpsc::UnboundedSender<HubFrame>,
@@ -654,14 +695,20 @@ async fn read_loop(
     let mut missed = 0;
     let mut heard = false;
     loop {
+        // A beat that has come due is taken first, before any read, however
+        // many frames are waiting: see `Ticker`. Otherwise wait for either.
         // The futures are dropped at the end of this `let`, which is what
         // releases `stream` for the branches below. `biased`: a frame that is
         // already waiting is read before a beat is judged, so an answer that
         // raced its beat still counts.
-        let step = tokio::select! {
-            biased;
-            msg = stream.next() => Step::Incoming(msg),
-            () = ticker.tick() => Step::Beat,
+        let step = if ticker.due() {
+            Step::Beat
+        } else {
+            tokio::select! {
+                biased;
+                msg = stream.next() => Step::Incoming(msg),
+                () = ticker.tick() => Step::Beat,
+            }
         };
         match step {
             Step::Beat => {
@@ -1566,6 +1613,200 @@ mod tests {
         hub.beat();
         assert!(closed_by_hub(&mut ws).await, "the hub must hang up");
         assert!(!hub.registry.connected("laptop"));
+    }
+
+    /// Flood `ws` with `frame` (already framed, masked with a zero key) as
+    /// fast as the socket takes it, and drain what the hub writes back so it
+    /// never blocks on us. The flood ends when the hub hangs up, or when the
+    /// returned handle is aborted.
+    fn flood(ws: Client, frame: Vec<u8>, repeats: usize) -> tokio::task::JoinHandle<()> {
+        let burst: Vec<u8> = frame
+            .iter()
+            .copied()
+            .cycle()
+            .take(frame.len() * repeats)
+            .collect();
+        let (mut rd, mut wr) = ws.into_inner().into_split();
+        crate::rt::spawn(async move {
+            let drain = crate::rt::spawn(async move {
+                let mut b = vec![0u8; 65536];
+                while tokio::io::AsyncReadExt::read(&mut rd, &mut b)
+                    .await
+                    .is_ok_and(|n| n > 0)
+                {}
+            });
+            while wr.write_all(&burst).await.is_ok() {}
+            drain.abort();
+        })
+    }
+
+    /// One `pong` protocol frame, as raw client bytes.
+    fn raw_pong_frame() -> Vec<u8> {
+        let body = encode_agent_frame(&AgentFrame::Pong { id: "x".into() }).unwrap();
+        let mut one = frame_header(body.len() as u64);
+        one.extend_from_slice(body.as_bytes());
+        one
+    }
+
+    /// Fire beats until `cond` holds, yielding between them; `false` if it
+    /// never did within [`PATIENCE`].
+    async fn beat_until(hub: &Hub, mut cond: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + PATIENCE;
+        while Instant::now() < deadline {
+            if cond() {
+                return true;
+            }
+            hub.beat();
+            tokio::task::yield_now().await;
+        }
+        cond()
+    }
+
+    /// NEW-2 (re-review): a connection that never stops sending must not
+    /// starve its own heartbeat. The beat is where a rotation reaches a live
+    /// connection that nothing is routed to, so a flood that always wins the
+    /// read loop's `select!` kept a revoked agent registered indefinitely.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_flooding_agent_is_still_cut_off_by_a_rotation() {
+        let hub = hub().await;
+        let ws = connected(&hub, LAPTOP_TOKEN, "laptop").await;
+        let flooder = flood(ws, raw_pong_frame(), 4096);
+        hub.store
+            .lock()
+            .unwrap()
+            .upsert_host_token("laptop", "rotated-token")
+            .unwrap();
+        let cut = beat_until(&hub, || !hub.registry.connected("laptop")).await;
+        flooder.abort();
+        assert!(
+            cut,
+            "a flooding connection on a rotated token is still registered"
+        );
+    }
+
+    /// NEW-2 (re-review): before its `hello`, a connection that floods
+    /// WebSocket control frames must still meet its one-beat deadline, or two
+    /// of them hold both of the host's slots and the reinstalled agent, on
+    /// the NEW token, is turned away with 429.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pre_hello_flooders_cannot_lock_the_reinstalled_agent_out() {
+        let hub = hub().await;
+        // A WebSocket pong control frame, masked with a zero key, no payload.
+        let pong = vec![0x8A, 0x80, 0, 0, 0, 0];
+        let mut flooders = Vec::new();
+        for _ in 0..MAX_CONNECTIONS_PER_HOST {
+            let ws = dial(hub.addr, Some(LAPTOP_TOKEN)).await.expect("upgrade");
+            flooders.push(flood(ws, pong.clone(), 65536));
+        }
+        hub.store
+            .lock()
+            .unwrap()
+            .upsert_host_token("laptop", "rotated-token")
+            .unwrap();
+        let freed = beat_until(&hub, || hub.slots.held("laptop") == 0).await;
+        let legit = dial(hub.addr, Some("rotated-token")).await.err();
+        for f in &flooders {
+            f.abort();
+        }
+        assert!(
+            freed,
+            "the flooders still hold {} slot(s)",
+            hub.slots.held("laptop")
+        );
+        assert_eq!(legit, None, "the reinstalled agent was refused");
+    }
+
+    /// A stream that is never empty, like a socket under a flood: every poll
+    /// has `msg` ready, except that it spends the task's cooperative budget
+    /// the way a real socket read does, so it yields now and then and a
+    /// select over it can be starved exactly as the socket starved it.
+    fn endless(
+        msg: Message,
+    ) -> impl futures_util::Stream<Item = Result<Message, axum::Error>> + Unpin {
+        Box::pin(futures_util::stream::unfold((), move |()| {
+            let msg = msg.clone();
+            async move {
+                tokio::task::consume_budget().await;
+                Some((Ok(msg), ()))
+            }
+        }))
+    }
+
+    fn manual_beats() -> (Arc<tokio::sync::watch::Sender<u64>>, Ticker) {
+        let tx = Arc::new(tokio::sync::watch::Sender::new(0));
+        let ticker = BeatSource::Manual(Arc::clone(&tx)).ticker();
+        (tx, ticker)
+    }
+
+    /// NEW-2, deterministically: the hello deadline holds against a peer
+    /// whose frames never run out. With the beat judged only when it wins the
+    /// `select!`, a stream that is always ready meant it never did.
+    #[tokio::test]
+    async fn the_hello_deadline_holds_against_an_endless_stream() {
+        let (beats, deadline) = manual_beats();
+        let mut stream = endless(Message::Pong(Default::default()));
+        let hello = crate::rt::spawn(async move { first_hello(&mut stream, deadline).await });
+        beats.send_modify(|n| *n += 1);
+        let ended = tokio::time::timeout(PATIENCE, hello).await;
+        let why = ended
+            .expect("first_hello never noticed its deadline under a flood")
+            .unwrap()
+            .expect_err("no hello was ever sent");
+        assert!(why.contains("no hello"), "{why}");
+    }
+
+    /// NEW-2, deterministically: the token re-check on the beat runs even
+    /// while frames never stop arriving — and, as the control, a current
+    /// token under the same flood is pinged, not dropped.
+    #[tokio::test]
+    async fn the_beat_rechecks_the_token_against_an_endless_stream() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("laptop").unwrap();
+            s.set_host_transport("laptop", "agent").unwrap();
+            s.upsert_host_token("laptop", LAPTOP_TOKEN).unwrap();
+        }
+        let registry = AgentRegistry::new();
+        let (beats, ticker) = manual_beats();
+        let (ping_tx, mut ping_rx) = mpsc::unbounded_channel();
+        let pong = encode_agent_frame(&AgentFrame::Pong { id: "x".into() }).unwrap();
+        let loop_ = {
+            let (store, registry) = (Arc::clone(&store), Arc::clone(&registry));
+            crate::rt::spawn(async move {
+                let mut stream = endless(Message::Text(pong.into()));
+                let budgets = Mutex::new(Budgets::default());
+                let credential = crate::mcp::auth::sha256_hex(LAPTOP_TOKEN);
+                let who = Registered {
+                    registry: &registry,
+                    store: &store,
+                    alias: "laptop",
+                    conn_id: 1,
+                    credential: &credential,
+                };
+                read_loop(&mut stream, who, &budgets, &ping_tx, ticker).await;
+            })
+        };
+        // The control: the token is current, so a beat pings and the loop
+        // goes on.
+        beats.send_modify(|n| *n += 1);
+        let ping = tokio::time::timeout(PATIENCE, ping_rx.recv()).await;
+        assert!(
+            matches!(ping, Ok(Some(HubFrame::Ping { .. }))),
+            "a beat under a flood must still ping: {ping:?}"
+        );
+        assert!(!loop_.is_finished(), "a current token is not dropped");
+        store
+            .lock()
+            .unwrap()
+            .upsert_host_token("laptop", "rotated-token")
+            .unwrap();
+        beats.send_modify(|n| *n += 1);
+        let ended = tokio::time::timeout(PATIENCE, loop_).await;
+        assert!(
+            ended.is_ok(),
+            "the read loop never re-checked the rotated token under a flood"
+        );
     }
 
     /// The production beat is a real interval at [`HEARTBEAT`], the design's
